@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ene_plugin_ipc::{
-    BuiltinKind, EmbedRequest, EmbedResult, HostConn, ListModelsRequest, ListModelsResult,
-    LlmGenerateRequest, LlmGeneration, ProviderFaces, SttRequest, SttResult, ToolCall, TtsAudio,
-    TtsRequest,
+    BuiltinKind, EmbedRequest, EmbedResult, HostConn, InstallAssetRequest, InstallAssetResult,
+    InstallStatusRequest, InstallStatusResult, ListAssetsResult, ListModelsRequest,
+    ListModelsResult, LlmGenerateRequest, LlmGeneration, ProviderFaces, SetActiveAssetRequest,
+    SetActiveAssetResult, SttRequest, SttResult, ToolCall, TtsAudio, TtsRequest,
 };
 use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for};
 use parking_lot::Mutex;
@@ -25,6 +26,11 @@ use crate::profile::{
     missing_requires, waiting_fiber,
 };
 use crate::spawn::{SpawnOpts, SpawnedPlugin, discover_plugin_executable_in, spawn_plugin};
+
+#[cfg(windows)]
+type PluginStream = tokio::net::TcpStream;
+#[cfg(unix)]
+type PluginStream = tokio::net::UnixStream;
 
 /// Profile row (manifest subset used at W1).
 #[derive(Debug, Clone)]
@@ -76,7 +82,7 @@ pub struct Supervisor {
 }
 
 struct PluginSession {
-    conn: tokio::sync::Mutex<HostConn<tokio::net::UnixStream>>,
+    conn: tokio::sync::Mutex<HostConn<PluginStream>>,
 }
 
 struct PluginInvoker {
@@ -468,6 +474,16 @@ impl Supervisor {
         fiber.requires.clone_from(&row.requires);
         fiber.sandbox_required = row.sandbox_required;
         fiber.state = FiberState::Loading;
+        let mut config = row.config.clone();
+        {
+            let mut broker = self.inner.broker.lock();
+            config = crate::gguf_sidecar::inject_gguf_sidecar(
+                &row.plugin,
+                &config,
+                fiber.uid,
+                &mut broker,
+            )?;
+        }
         let spawned = match spawn_plugin(SpawnOpts {
             binary,
             plugin_id: &plugin_id,
@@ -476,7 +492,7 @@ impl Supervisor {
             sandbox_required: row.sandbox_required,
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row.row_id),
             workspace: &self.inner.workspace,
-            config: &row.config,
+            config: &config,
             max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
             allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
         })
@@ -727,11 +743,47 @@ impl Supervisor {
         self.probe_list_models(plugin, request).await
     }
 
-    async fn probe_list_models(
+    pub async fn list_assets(&self, plugin: &str) -> Result<ListAssetsResult, SupervisorError> {
+        let (mut child, mut conn) = self.spawn_probe(plugin, &json!({})).await?;
+        let listed = timeout(Duration::from_secs(30), conn.list_assets()).await;
+        self.finish_probe(&mut child, &mut conn, listed).await
+    }
+
+    pub async fn install_asset(
         &self,
         plugin: &str,
-        request: ListModelsRequest,
-    ) -> Result<ListModelsResult, SupervisorError> {
+        request: InstallAssetRequest,
+    ) -> Result<InstallAssetResult, SupervisorError> {
+        let (mut child, mut conn) = self.spawn_probe(plugin, &json!({})).await?;
+        let listed = timeout(Duration::from_secs(30), conn.install_asset(request)).await;
+        self.finish_probe(&mut child, &mut conn, listed).await
+    }
+
+    pub async fn install_asset_status(
+        &self,
+        plugin: &str,
+        request: InstallStatusRequest,
+    ) -> Result<InstallStatusResult, SupervisorError> {
+        let (mut child, mut conn) = self.spawn_probe(plugin, &json!({})).await?;
+        let listed = timeout(Duration::from_secs(30), conn.install_status(request)).await;
+        self.finish_probe(&mut child, &mut conn, listed).await
+    }
+
+    pub async fn set_active_asset(
+        &self,
+        plugin: &str,
+        request: SetActiveAssetRequest,
+    ) -> Result<SetActiveAssetResult, SupervisorError> {
+        let (mut child, mut conn) = self.spawn_probe(plugin, &json!({})).await?;
+        let listed = timeout(Duration::from_secs(30), conn.set_active_asset(request)).await;
+        self.finish_probe(&mut child, &mut conn, listed).await
+    }
+
+    async fn spawn_probe(
+        &self,
+        plugin: &str,
+        config: &Value,
+    ) -> Result<(Child, HostConn<PluginStream>), SupervisorError> {
         let plugin_id = resolve_plugin_id(plugin)
             .ok_or_else(|| SupervisorError::UnknownPlugin(plugin.to_owned()))?;
         let binary = self
@@ -739,7 +791,6 @@ impl Supervisor {
             .ok_or_else(|| SupervisorError::Spawn(format!("provider binary missing: {plugin}")))?;
         let digest = crate::spawn::file_digest(&binary)?;
         let row_id = format!("probe-{}", Uuid::now_v7());
-        let config = json!({ "base_url": request.base_url });
         let mut spawned = spawn_plugin(SpawnOpts {
             binary: &binary,
             plugin_id: &plugin_id,
@@ -748,20 +799,38 @@ impl Supervisor {
             sandbox_required: false,
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row_id),
             workspace: &self.inner.workspace,
-            config: &config,
+            config,
             max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
             allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
         })
         .await?;
-        let (mut child, mut conn) = spawned.take()?;
-        let listed = timeout(Duration::from_secs(10), conn.list_models(request)).await;
+        spawned.take()
+    }
+
+    async fn finish_probe<T>(
+        &self,
+        child: &mut Child,
+        conn: &mut HostConn<PluginStream>,
+        listed: Result<Result<T, ene_plugin_ipc::IpcError>, tokio::time::error::Elapsed>,
+    ) -> Result<T, SupervisorError> {
         drop(timeout(Duration::from_secs(2), conn.drain()).await);
-        terminate_child(&mut child);
+        terminate_child(child);
         match listed {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(err)) => Err(err.into()),
-            Err(_) => Err(SupervisorError::Spawn("list_models timeout".to_owned())),
+            Err(_) => Err(SupervisorError::Spawn("provider probe timeout".to_owned())),
         }
+    }
+
+    async fn probe_list_models(
+        &self,
+        plugin: &str,
+        request: ListModelsRequest,
+    ) -> Result<ListModelsResult, SupervisorError> {
+        let config = json!({ "base_url": request.base_url });
+        let (mut child, mut conn) = self.spawn_probe(plugin, &config).await?;
+        let listed = timeout(Duration::from_secs(30), conn.list_models(request)).await;
+        self.finish_probe(&mut child, &mut conn, listed).await
     }
 
     fn provider_session(

@@ -944,6 +944,168 @@ pub async fn list_provider_models(
     }
 }
 
+pub async fn list_provider_assets(
+    State(state): State<AppState>,
+    Json(body): Json<ene_api::ListProviderAssetsRequest>,
+) -> Result<Json<ene_api::ListProviderAssetsResponse>, ApiReject> {
+    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+        return Err(bad_request("invalid_message", "unknown plugin"));
+    }
+    match state.core.supervisor().list_assets(&body.plugin).await {
+        Ok(result) => Ok(Json(map_assets_list(result))),
+        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+            Err(bad_request("invalid_message", "unknown plugin"))
+        }
+        Err(err) => Ok(Json(ene_api::ListProviderAssetsResponse {
+            assets: Vec::new(),
+            error: Some(err.to_string()),
+        })),
+    }
+}
+
+pub async fn install_provider_asset(
+    State(state): State<AppState>,
+    Json(body): Json<ene_api::InstallProviderAssetRequest>,
+) -> Result<Json<ene_api::InstallProviderAssetResponse>, ApiReject> {
+    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+        return Err(bad_request("invalid_message", "unknown plugin"));
+    }
+    let request = ene_plugin_ipc::InstallAssetRequest {
+        asset_id: body.asset_id,
+        version: body.version,
+    };
+    match state
+        .core
+        .supervisor()
+        .install_asset(&body.plugin, request)
+        .await
+    {
+        Ok(result) => Ok(Json(ene_api::InstallProviderAssetResponse {
+            job_id: result.job_id,
+            error: result.error,
+        })),
+        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+            Err(bad_request("invalid_message", "unknown plugin"))
+        }
+        Err(err) => Ok(Json(ene_api::InstallProviderAssetResponse {
+            job_id: String::new(),
+            error: Some(err.to_string()),
+        })),
+    }
+}
+
+pub async fn provider_asset_install_status(
+    State(state): State<AppState>,
+    Json(body): Json<ene_api::ProviderAssetInstallStatusRequest>,
+) -> Result<Json<ene_api::ProviderAssetInstallStatusResponse>, ApiReject> {
+    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+        return Err(bad_request("invalid_message", "unknown plugin"));
+    }
+    let request = ene_plugin_ipc::InstallStatusRequest {
+        job_id: body.job_id,
+    };
+    match state
+        .core
+        .supervisor()
+        .install_asset_status(&body.plugin, request)
+        .await
+    {
+        Ok(result) => Ok(Json(map_install_status(result))),
+        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+            Err(bad_request("invalid_message", "unknown plugin"))
+        }
+        Err(err) => Ok(Json(ene_api::ProviderAssetInstallStatusResponse {
+            error: Some(err.to_string()),
+            ..ene_api::ProviderAssetInstallStatusResponse::default()
+        })),
+    }
+}
+
+pub async fn set_active_provider_asset(
+    State(state): State<AppState>,
+    Json(body): Json<ene_api::SetActiveProviderAssetRequest>,
+) -> Result<Json<ene_api::SetActiveProviderAssetResponse>, ApiReject> {
+    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+        return Err(bad_request("invalid_message", "unknown plugin"));
+    }
+    let request = ene_plugin_ipc::SetActiveAssetRequest {
+        asset_id: body.asset_id,
+        version: body.version,
+    };
+    match state
+        .core
+        .supervisor()
+        .set_active_asset(&body.plugin, request)
+        .await
+    {
+        Ok(result) => Ok(Json(ene_api::SetActiveProviderAssetResponse {
+            error: result.error,
+        })),
+        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+            Err(bad_request("invalid_message", "unknown plugin"))
+        }
+        Err(err) => Ok(Json(ene_api::SetActiveProviderAssetResponse {
+            error: Some(err.to_string()),
+        })),
+    }
+}
+
+fn map_assets_list(
+    result: ene_plugin_ipc::ListAssetsResult,
+) -> ene_api::ListProviderAssetsResponse {
+    ene_api::ListProviderAssetsResponse {
+        assets: result
+            .assets
+            .into_iter()
+            .map(|asset| ene_api::ProviderAssetView {
+                id: asset.id,
+                kind: asset.kind,
+                label: asset.label,
+                description: asset.description,
+                recommended: asset.recommended,
+                installed: asset.installed,
+                active: asset.active,
+                active_version: asset.active_version,
+                local_path: asset.local_path,
+                versions: asset
+                    .versions
+                    .into_iter()
+                    .map(|version| ene_api::ProviderAssetVersionView {
+                        version: version.version,
+                        size_bytes: version.size_bytes,
+                        recommended: version.recommended,
+                        installed: version.installed,
+                    })
+                    .collect(),
+                seams: asset.seams,
+            })
+            .collect(),
+        error: result.error,
+    }
+}
+
+fn map_install_status(
+    result: ene_plugin_ipc::InstallStatusResult,
+) -> ene_api::ProviderAssetInstallStatusResponse {
+    ene_api::ProviderAssetInstallStatusResponse {
+        phase: result.phase.map(|phase| match phase {
+            ene_plugin_ipc::InstallPhase::Pending => ene_api::ProviderAssetInstallPhase::Pending,
+            ene_plugin_ipc::InstallPhase::Downloading => {
+                ene_api::ProviderAssetInstallPhase::Downloading
+            }
+            ene_plugin_ipc::InstallPhase::Verifying => {
+                ene_api::ProviderAssetInstallPhase::Verifying
+            }
+            ene_plugin_ipc::InstallPhase::Done => ene_api::ProviderAssetInstallPhase::Done,
+            ene_plugin_ipc::InstallPhase::Failed => ene_api::ProviderAssetInstallPhase::Failed,
+        }),
+        received: result.received,
+        total: result.total,
+        local_path: result.local_path,
+        error: result.error,
+    }
+}
+
 pub async fn get_mcp(State(state): State<AppState>) -> Json<McpDocument> {
     Json(mcp_document(&state.core.mcp_servers()))
 }

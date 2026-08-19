@@ -5,6 +5,7 @@ use crate::core_session::CoreSession;
 use super::components::section_card;
 use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
+use super::provider_assets::render_sidecar_section;
 use super::provider_form::{
     catalog_from_settings, provider_description, provider_display_group, provider_display_name,
 };
@@ -27,6 +28,7 @@ pub fn render(
     if !input.core_settings.started() {
         input.core_settings.start(ai.fetch_core_settings());
     }
+    input.provider_assets.poll();
     let catalog = catalog_from_settings(
         input
             .core_settings
@@ -49,6 +51,9 @@ pub fn render(
                     ui.label(desc);
                 }
                 ui.weak(plugin.seams.join(" · "));
+                if plugin.local {
+                    render_sidecar_section(ui, &mut input.provider_assets, ai, &plugin.id);
+                }
             }
         },
     );

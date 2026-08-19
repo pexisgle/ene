@@ -31,9 +31,9 @@ at boot; PATCH `/api/v1/settings` never writes them into JSON). Plugin ids are
 (`GET /api/v1/settings` → `effective.providers`). Desktop does not keep a
 parallel allowlist.
 
-Local GGUF chat uses `provider.gguf` (`local: true`) with `model_path`.
-When `server_path` is empty, the sidecar resolves `llama-server` from
-configuration, CAS, `PATH`, or the bundled plugins directory. Cloud chat
+Local GGUF chat uses `provider.gguf` (`local: true`). Install weights and
+`llama-server` from the AI or Engines pages (`provider.assets`). Optional
+`model_path` / `server_path` override catalog installs. Cloud chat
 uses any installed LLM plugin (API key in the vault).
 
 Embeddings are optional on their own `ai.tasks.embedding` fiber: unset, local

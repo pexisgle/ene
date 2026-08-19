@@ -5,10 +5,11 @@ use crate::frame::{MAX_FRAME_BYTES, read_frame, write_frame};
 use crate::host::negotiate;
 use crate::protocol::{CORE_VERSION, HelloAck, HostHello, Message, ProtoId, VersionRange};
 use crate::provider::{
-    EmbedRequest, EmbedResult, ListModelsRequest, ListModelsResult, LlmGenerateRequest,
-    LlmGeneration, PROVIDER_EMBED_VERSION, PROVIDER_LLM_VERSION, PROVIDER_MODELS_VERSION,
-    PROVIDER_STT_VERSION, PROVIDER_TTS_VERSION, ProviderFaces, SttRequest, SttResult, TtsAudio,
-    TtsRequest,
+    EmbedRequest, EmbedResult, InstallAssetRequest, InstallAssetResult, InstallStatusRequest,
+    InstallStatusResult, ListAssetsResult, ListModelsRequest, ListModelsResult, LlmGenerateRequest,
+    LlmGeneration, PROVIDER_ASSETS_VERSION, PROVIDER_EMBED_VERSION, PROVIDER_LLM_VERSION,
+    PROVIDER_MODELS_VERSION, PROVIDER_STT_VERSION, PROVIDER_TTS_VERSION, ProviderFaces,
+    SetActiveAssetRequest, SetActiveAssetResult, SttRequest, SttResult, TtsAudio, TtsRequest,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -62,6 +63,24 @@ pub trait ModelsHandler: Send + Sync {
     async fn list_models(&self, request: ListModelsRequest) -> Result<ListModelsResult, IpcError>;
 }
 
+/// Optional `provider.assets` face for catalogued sidecars and weights.
+#[async_trait]
+pub trait AssetsHandler: Send + Sync {
+    async fn list_assets(&self) -> Result<ListAssetsResult, IpcError>;
+    async fn install_asset(
+        &self,
+        request: InstallAssetRequest,
+    ) -> Result<InstallAssetResult, IpcError>;
+    async fn install_status(
+        &self,
+        request: InstallStatusRequest,
+    ) -> Result<InstallStatusResult, IpcError>;
+    async fn set_active(
+        &self,
+        request: SetActiveAssetRequest,
+    ) -> Result<SetActiveAssetResult, IpcError>;
+}
+
 /// Provider faces implemented by one plugin process.
 #[derive(Clone, Default)]
 pub struct ProviderHandlers {
@@ -70,6 +89,7 @@ pub struct ProviderHandlers {
     pub tts: Option<Arc<dyn TtsHandler>>,
     pub stt: Option<Arc<dyn SttHandler>>,
     pub models: Option<Arc<dyn ModelsHandler>>,
+    pub assets: Option<Arc<dyn AssetsHandler>>,
 }
 
 fn offered_faces(hello: &HostHello, handlers: &ProviderHandlers) -> Option<ProviderFaces> {
@@ -82,6 +102,7 @@ fn offered_faces(hello: &HostHello, handlers: &ProviderHandlers) -> Option<Provi
         tts: handlers.tts.as_ref().map(|_| PROVIDER_TTS_VERSION),
         stt: handlers.stt.as_ref().map(|_| PROVIDER_STT_VERSION),
         models: handlers.models.as_ref().map(|_| PROVIDER_MODELS_VERSION),
+        assets: handlers.assets.as_ref().map(|_| PROVIDER_ASSETS_VERSION),
         vad: None,
     };
     (!faces.is_empty()).then_some(faces)
@@ -162,6 +183,42 @@ where
                 write_msg(
                     &mut stream,
                     &Message::ProviderModels { id, body: reply },
+                    max_frame,
+                )
+                .await?;
+            }
+            Message::ProviderListAssets { id } => {
+                let reply = dispatch_assets_list(handlers.assets.as_ref()).await;
+                write_msg(
+                    &mut stream,
+                    &Message::ProviderAssets { id, body: reply },
+                    max_frame,
+                )
+                .await?;
+            }
+            Message::ProviderInstallAsset { id, body } => {
+                let reply = dispatch_assets_install(handlers.assets.as_ref(), body).await;
+                write_msg(
+                    &mut stream,
+                    &Message::ProviderInstallAssetAck { id, body: reply },
+                    max_frame,
+                )
+                .await?;
+            }
+            Message::ProviderInstallStatus { id, body } => {
+                let reply = dispatch_assets_install_status(handlers.assets.as_ref(), body).await;
+                write_msg(
+                    &mut stream,
+                    &Message::ProviderInstallStatusResult { id, body: reply },
+                    max_frame,
+                )
+                .await?;
+            }
+            Message::ProviderSetActiveAsset { id, body } => {
+                let reply = dispatch_assets_set_active(handlers.assets.as_ref(), body).await;
+                write_msg(
+                    &mut stream,
+                    &Message::ProviderSetActiveAssetResult { id, body: reply },
                     max_frame,
                 )
                 .await?;
@@ -254,6 +311,80 @@ async fn dispatch_models(
     }
 }
 
+async fn dispatch_assets_list(handler: Option<&Arc<dyn AssetsHandler>>) -> ListAssetsResult {
+    match handler {
+        Some(handler) => handler
+            .list_assets()
+            .await
+            .unwrap_or_else(|err| ListAssetsResult {
+                assets: Vec::new(),
+                error: Some(err.to_string()),
+            }),
+        None => ListAssetsResult::default(),
+    }
+}
+
+async fn dispatch_assets_install(
+    handler: Option<&Arc<dyn AssetsHandler>>,
+    body: InstallAssetRequest,
+) -> InstallAssetResult {
+    match handler {
+        Some(handler) => {
+            handler
+                .install_asset(body)
+                .await
+                .unwrap_or_else(|err| InstallAssetResult {
+                    job_id: String::new(),
+                    error: Some(err.to_string()),
+                })
+        }
+        None => InstallAssetResult {
+            job_id: String::new(),
+            error: Some("assets disabled".to_owned()),
+        },
+    }
+}
+
+async fn dispatch_assets_install_status(
+    handler: Option<&Arc<dyn AssetsHandler>>,
+    body: InstallStatusRequest,
+) -> InstallStatusResult {
+    match handler {
+        Some(handler) => {
+            handler
+                .install_status(body)
+                .await
+                .unwrap_or_else(|err| InstallStatusResult {
+                    error: Some(err.to_string()),
+                    ..InstallStatusResult::default()
+                })
+        }
+        None => InstallStatusResult {
+            error: Some("assets disabled".to_owned()),
+            ..InstallStatusResult::default()
+        },
+    }
+}
+
+async fn dispatch_assets_set_active(
+    handler: Option<&Arc<dyn AssetsHandler>>,
+    body: SetActiveAssetRequest,
+) -> SetActiveAssetResult {
+    match handler {
+        Some(handler) => {
+            handler
+                .set_active(body)
+                .await
+                .unwrap_or_else(|err| SetActiveAssetResult {
+                    error: Some(err.to_string()),
+                })
+        }
+        None => SetActiveAssetResult {
+            error: Some("assets disabled".to_owned()),
+        },
+    }
+}
+
 async fn expect_hello<S: AsyncRead + Unpin>(stream: &mut S) -> Result<HostHello, IpcError> {
     let bytes = read_frame(stream, MAX_FRAME_BYTES).await?;
     match Message::decode(&bytes)? {
@@ -319,12 +450,17 @@ pub async fn serve_provider_from_env(
         let stream = tokio::net::UnixStream::connect(&path).await?;
         serve_provider(stream, identity, handlers).await
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let stream = tokio::net::TcpStream::connect(&path).await?;
+        serve_provider(stream, identity, handlers).await
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, identity, handlers);
         Err(IpcError::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "plugin IPC requires Unix domain sockets",
+            "plugin IPC requires Unix domain sockets or Windows TCP",
         )))
     }
 }

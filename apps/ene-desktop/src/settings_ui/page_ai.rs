@@ -8,8 +8,8 @@ use crate::settings::CharacterSettings;
 
 use super::components::{section_card, section_card_collapsible};
 use super::draft::SettingsDraft;
-use super::gguf_catalog::{self, CatalogEntry, WeightKind};
 use super::input::SettingsInputState;
+use super::provider_assets::{render_sidecar_hint, render_weight_picker};
 use super::provider_form::{
     ProviderInfo, catalog_from_settings, catalog_plugin, cloud_model_combo, default_cloud_model,
     ids_with_seam, local_plugin, plugin_combo_with_empty, plugin_needs_key, provider_description,
@@ -22,6 +22,12 @@ use serde_json::{Value, json};
 
 const LEGACY_LOCAL_PLUGIN: &str = "provider.openai_compat";
 const GGUF_PLUGIN: &str = "provider.gguf";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WeightKind {
+    Chat,
+    Embedding,
+}
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -50,26 +56,15 @@ pub fn render(
             .and_then(|result| result.as_ref().ok()),
     );
 
-    input.gguf_download.poll();
+    input.provider_assets.poll();
     input.cloud_models.poll();
-    if let Some((id, path, task)) = input.gguf_download.completed_path.take()
-        && let Some(entry) = gguf_catalog::entry_by_id(&id)
-    {
-        let path = path.display().to_string();
-        match entry.kind {
-            WeightKind::Chat => {
-                apply_local(draft, &task, gguf_plugin(&catalog), entry.id, &path);
-                entry.id.clone_into(&mut input.local_catalog_id);
-            }
-            WeightKind::Embedding => {
-                apply_local(draft, "embedding", gguf_plugin(&catalog), entry.id, &path);
-                entry.id.clone_into(&mut input.embed_catalog_id);
-            }
+    if let Some((id, path, task)) = input.provider_assets.completed_path.take() {
+        apply_local(draft, &task, gguf_plugin(&catalog), &id, &path);
+        if task == "embedding" {
+            id.clone_into(&mut input.embed_catalog_id);
+        } else {
+            id.clone_into(&mut input.local_catalog_id);
         }
-    }
-
-    if input.llama_server_on_path.is_none() {
-        input.llama_server_on_path = Some(gguf_catalog::binary_on_path("llama-server"));
     }
 
     section_card(
@@ -247,9 +242,13 @@ fn seed_gguf_picker(
     catalog_id: &mut String,
     kind: WeightKind,
 ) {
+    let default_id = match kind {
+        WeightKind::Chat => "gemma-4-e2b",
+        WeightKind::Embedding => "jina-v5-small",
+    };
     let Some(binding) = binding else {
         if catalog_id.is_empty() {
-            recommended(kind).id.clone_into(catalog_id);
+            catalog_id.clone_from(&default_id.to_owned());
         }
         return;
     };
@@ -259,18 +258,16 @@ fn seed_gguf_picker(
         .filter(|path| !path.is_empty())
     {
         path.clone_into(custom_path);
-        let matched = match kind {
-            WeightKind::Chat => gguf_catalog::chat_entries()
-                .find(|entry| gguf_catalog::catalog_dest(entry).to_string_lossy() == path),
-            WeightKind::Embedding => gguf_catalog::embed_entries()
-                .find(|entry| gguf_catalog::catalog_dest(entry).to_string_lossy() == path),
-        };
-        if let Some(entry) = matched {
-            entry.id.clone_into(catalog_id);
-        }
+    }
+    if let Some(model) = binding
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty())
+    {
+        model.clone_into(catalog_id);
     }
     if catalog_id.is_empty() {
-        recommended(kind).id.clone_into(catalog_id);
+        catalog_id.clone_from(&default_id.to_owned());
     }
 }
 
@@ -291,28 +288,6 @@ fn plugin_id(binding: &Value) -> String {
 
 fn gguf_plugin(catalog: &[ProviderInfo]) -> &str {
     local_plugin(catalog, "seam.llm").map_or(GGUF_PLUGIN, |plugin| plugin.id.as_str())
-}
-
-fn recommended(kind: WeightKind) -> &'static CatalogEntry {
-    match kind {
-        WeightKind::Chat => gguf_catalog::recommended_chat(),
-        WeightKind::Embedding => gguf_catalog::recommended_embedding(),
-    }
-}
-
-fn for_each_catalog_entry(kind: WeightKind, mut visit: impl FnMut(&'static CatalogEntry)) {
-    match kind {
-        WeightKind::Chat => {
-            for entry in gguf_catalog::chat_entries() {
-                visit(entry);
-            }
-        }
-        WeightKind::Embedding => {
-            for entry in gguf_catalog::embed_entries() {
-                visit(entry);
-            }
-        }
-    }
 }
 
 fn render_task_plugin(
@@ -428,21 +403,22 @@ fn bind_local_if_ready(
         WeightKind::Chat => input.local_custom_path.trim(),
         WeightKind::Embedding => input.embed_custom_path.trim(),
     };
-    let entry = gguf_catalog::entry_by_id(catalog_id).unwrap_or_else(|| recommended(kind));
-    if gguf_catalog::is_downloaded(entry) {
-        apply_local(
-            draft,
-            task,
-            plugin,
-            entry.id,
-            &gguf_catalog::catalog_dest(entry).display().to_string(),
-        );
-    } else if !custom_path.is_empty() {
+    if !custom_path.is_empty() {
         let model = Path::new(custom_path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("local-gguf");
         apply_local(draft, task, plugin, model, custom_path);
+    } else if !catalog_id.is_empty() {
+        write_binding(
+            draft,
+            task,
+            json!({
+                "plugin": plugin,
+                "model": catalog_id,
+                "model_path": "",
+            }),
+        );
     } else {
         write_binding(
             draft,
@@ -481,95 +457,30 @@ fn render_gguf(
     kind: WeightKind,
     plugin: &str,
 ) {
-    if input.llama_server_on_path != Some(true) {
-        ui.weak(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "ai-llama-server-missing"
-        ));
-    }
+    render_sidecar_hint(ui, &input.provider_assets);
 
     ui.label(i18n_embed_fl::fl!(
         crate::i18n::loader(),
         "ai-local-catalog-label"
     ));
-    let catalog_id = match kind {
-        WeightKind::Chat => input.local_catalog_id.as_str(),
-        WeightKind::Embedding => input.embed_catalog_id.as_str(),
+    let seam = match kind {
+        WeightKind::Chat => "seam.llm",
+        WeightKind::Embedding => "seam.embed",
     };
-    let selected = gguf_catalog::entry_by_id(catalog_id).unwrap_or_else(|| recommended(kind));
-    let selected_label = catalog_label(selected);
-    egui::ComboBox::from_id_salt(format!("ai-gguf-catalog-{task}"))
-        .selected_text(selected_label)
-        .show_ui(ui, |ui| {
-            for_each_catalog_entry(kind, |entry| {
-                let label = catalog_label(entry);
-                let current = match kind {
-                    WeightKind::Chat => input.local_catalog_id.as_str(),
-                    WeightKind::Embedding => input.embed_catalog_id.as_str(),
-                };
-                if ui.selectable_label(current == entry.id, label).clicked() {
-                    match kind {
-                        WeightKind::Chat => entry.id.clone_into(&mut input.local_catalog_id),
-                        WeightKind::Embedding => entry.id.clone_into(&mut input.embed_catalog_id),
-                    }
-                }
-            });
-        });
-
     let catalog_id = match kind {
-        WeightKind::Chat => input.local_catalog_id.as_str(),
-        WeightKind::Embedding => input.embed_catalog_id.as_str(),
+        WeightKind::Chat => &mut input.local_catalog_id,
+        WeightKind::Embedding => &mut input.embed_catalog_id,
     };
-    let entry = gguf_catalog::entry_by_id(catalog_id).unwrap_or_else(|| recommended(kind));
-    let downloaded = gguf_catalog::is_downloaded(entry);
-    ui.horizontal(|ui| {
-        if downloaded {
-            if ui
-                .button(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-local-use"))
-                .clicked()
-            {
-                apply_local(
-                    draft,
-                    task,
-                    plugin,
-                    entry.id,
-                    &gguf_catalog::catalog_dest(entry).display().to_string(),
-                );
-            }
-        } else {
-            let busy =
-                input.gguf_download.busy() && input.gguf_download.entry_id() == Some(entry.id);
-            let label = if busy {
-                i18n_embed_fl::fl!(crate::i18n::loader(), "ai-local-downloading")
-            } else {
-                i18n_embed_fl::fl!(crate::i18n::loader(), "ai-local-download")
-            };
-            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
-                input.gguf_download.start(ai.runtime_handle(), entry, task);
-            }
-        }
-    });
-
-    if input.gguf_download.busy() && input.gguf_download.entry_id() == Some(entry.id) {
-        let snap = input.gguf_download.progress_snapshot();
-        let fraction = snap
-            .total
-            .filter(|total| *total > 0)
-            .map_or(0.0, |total| snap.received as f32 / total as f32);
-        ui.add(egui::ProgressBar::new(fraction.clamp(0.0, 1.0)).show_percentage());
-        if let Some(total) = snap.total {
-            ui.weak(format!(
-                "{} / {}",
-                format_bytes(snap.received),
-                format_bytes(total)
-            ));
-        } else {
-            ui.weak(format_bytes(snap.received));
-        }
-    }
-    if let Some(err) = &input.gguf_download.last_error {
-        ui.colored_label(egui::Color32::from_rgb(0xff, 0x8a, 0x65), err);
-    }
+    render_weight_picker(
+        ui,
+        &mut input.provider_assets,
+        ai,
+        draft,
+        plugin,
+        task,
+        seam,
+        catalog_id,
+    );
 
     ui.add_space(6.0);
     ui.label(i18n_embed_fl::fl!(
@@ -595,34 +506,6 @@ fn render_gguf(
                 .unwrap_or("local-gguf");
             apply_local(draft, task, plugin, model, path);
         }
-    }
-}
-
-fn catalog_label(entry: &CatalogEntry) -> String {
-    if entry.recommended {
-        i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "ai-catalog-recommended",
-            name = entry.id
-        )
-    } else {
-        i18n_embed_fl::fl!(crate::i18n::loader(), "ai-catalog-smarter", name = entry.id)
-    }
-}
-
-fn format_bytes(n: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    let n = n as f64;
-    if n >= GIB {
-        format!("{:.2} GiB", n / GIB)
-    } else if n >= MIB {
-        format!("{:.1} MiB", n / MIB)
-    } else if n >= KIB {
-        format!("{:.0} KiB", n / KIB)
-    } else {
-        format!("{n:.0} B")
     }
 }
 

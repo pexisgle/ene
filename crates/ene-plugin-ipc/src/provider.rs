@@ -17,6 +17,8 @@ pub const PROVIDER_TTS_VERSION: u32 = 1;
 pub const PROVIDER_STT_VERSION: u32 = 1;
 /// `provider.list_models` version.
 pub const PROVIDER_MODELS_VERSION: u32 = 1;
+/// `provider.assets` version.
+pub const PROVIDER_ASSETS_VERSION: u32 = 1;
 
 /// Negotiated provider modalities. Absent faces are disabled, not fatal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -32,6 +34,8 @@ pub struct ProviderFaces {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vad: Option<u32>,
 }
 
@@ -43,6 +47,7 @@ impl ProviderFaces {
             && self.tts.is_none()
             && self.stt.is_none()
             && self.models.is_none()
+            && self.assets.is_none()
             && self.vad.is_none()
     }
 }
@@ -252,6 +257,114 @@ pub struct ListModelsRequest {
 pub struct ListModelsResult {
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One installable version row on `assets.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetVersionView {
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub recommended: bool,
+    #[serde(default)]
+    pub installed: bool,
+}
+
+/// One catalog row on `assets.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetView {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default)]
+    pub recommended: bool,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<AssetVersionView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seams: Vec<String>,
+}
+
+/// `assets.list` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ListAssetsResult {
+    #[serde(default)]
+    pub assets: Vec<AssetView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `assets.install` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallAssetRequest {
+    pub asset_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// `assets.install` acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallAssetResult {
+    pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Install job phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallPhase {
+    Pending,
+    Downloading,
+    Verifying,
+    Done,
+    Failed,
+}
+
+/// `assets.install_status` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallStatusRequest {
+    pub job_id: String,
+}
+
+/// `assets.install_status` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InstallStatusResult {
+    #[serde(default)]
+    pub phase: Option<InstallPhase>,
+    #[serde(default)]
+    pub received: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `assets.set_active` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetActiveAssetRequest {
+    pub asset_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// `assets.set_active` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SetActiveAssetResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

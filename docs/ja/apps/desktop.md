@@ -4,8 +4,13 @@
 キャラクターオーバーレイを描き、チャットは **表層**、詳細は **別窓**です。
 
 ```sh
+cargo build -p ene-daemon -p ene-desktop
 cargo run -p ene-desktop
 ```
+
+最初のビルドは、デスクトップがローカルの `ene-core` を自動起動するために
+必要です。ネイティブ Windows でも stable MSVC Rust ツールチェーン、Visual
+Studio C++ Build Tools、Windows SDK を入れた PowerShell から同じコマンドを使います。
 
 | 窓 | 深さ | 内容 |
 |---|---|---|
@@ -36,8 +41,9 @@ beat sync、コア寿命）と、適用した他セクション（AI、mind、pl
 ローカル GGUF 埋め込みは会話とは別の `llama-server` サイドカーです。
 OpenAI 互換と Anthropic のモデルコンボは `POST /api/v1/providers/models`
 （プロバイダ IPC `list_models`）から更新します。一覧が空か失敗したときは
-用意してある一覧に戻します。ローカル GGUF はおすすめカタログとファイル選択
-のままです。
+用意してある一覧に戻します。ローカル GGUF の重みは汎用のプロバイダーアセット UI
+（`POST /api/v1/providers/assets/*`）からインストールでき、カスタムパスも任意で
+使えます。
 
 分類・能動発話は **その他（上級者）** にあります。会話モデルと同じプラグイン
 選びです。未指定なら会話モデルの値を継承します。TTS/STT は `seam.tts` /

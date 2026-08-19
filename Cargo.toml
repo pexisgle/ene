@@ -96,6 +96,7 @@ ene-session = { path = "crates/ene-session" }
 ene-kernel = { path = "crates/ene-kernel" }
 ene-daemon = { path = "apps/ene-core" }
 ene-plugin-ipc = { path = "crates/ene-plugin-ipc" }
+ene-provider-assets = { path = "crates/ene-provider-assets" }
 ene-registry = { path = "crates/ene-registry" }
 ene-fiber = { path = "crates/ene-fiber" }
 ene-plane = { path = "crates/ene-plane" }

@@ -1,15 +1,17 @@
-//! Local GGUF via `llama-server` (`provider.gguf`).
+//! Local GGUF via host-managed `llama-server` (`provider.gguf`).
 //!
-//! Starts a loopback sidecar and maps host-canonical messages onto `/v1`
-//! chat completions and embeddings.
+//! The host spawns the loopback sidecar and injects `sidecar_base_url`; this
+//! plugin maps host-canonical messages onto `/v1` chat completions and embeddings.
 
-#![cfg_attr(test, expect(clippy::expect_used, reason = "tests fail fast"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
 
+mod assets;
 mod client;
 mod sidecar;
 
 use std::sync::Arc;
 
+use assets::GgufAssets;
 use client::Gguf;
 use ene_plugin_ipc::{PluginIdentity, ProviderHandlers, serve_provider_from_env};
 use tracing_subscriber::EnvFilter;
@@ -29,10 +31,12 @@ async fn main() {
         }
     };
     let provider = Arc::new(Gguf::new());
+    let assets = Arc::new(GgufAssets::new());
     let handlers = ProviderHandlers {
         llm: Some(provider.clone()),
         embed: Some(provider.clone()),
         models: Some(provider),
+        assets: Some(assets),
         ..ProviderHandlers::default()
     };
     if let Err(err) = serve_provider_from_env(identity(), handlers).await {

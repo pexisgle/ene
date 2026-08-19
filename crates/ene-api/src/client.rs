@@ -2,11 +2,14 @@ use crate::error::ApiError;
 use crate::types::{
     AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
     CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
-    ExclusiveSnapshot, Health, HistoryResponse, JobView, ListProviderModelsRequest,
-    ListProviderModelsResponse, ListenRequest, McpDocument, MemoryPatch, MemoryView,
-    MessageRequest, Page, PluginView, Problem, QueuedCancel, ResourceKind, RestoreRequest,
-    ScheduleView, SendMessageResponse, SessionPatch, SessionView, SoulPatch, SoulView, SpanView,
-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    ExclusiveSnapshot, Health, HistoryResponse, InstallProviderAssetRequest,
+    InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
+    ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument, MemoryPatch,
+    MemoryView, MessageRequest, Page, PluginView, Problem, ProviderAssetInstallStatusRequest,
+    ProviderAssetInstallStatusResponse, QueuedCancel, ResourceKind, RestoreRequest, ScheduleView,
+    SendMessageResponse, SessionPatch, SessionView, SetActiveProviderAssetRequest,
+    SetActiveProviderAssetResponse, SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView,
+    ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -382,6 +385,50 @@ impl ApiClient {
     ) -> Result<ListProviderModelsResponse, ApiError> {
         self.send_json(
             self.request(Method::POST, "/api/v1/providers/models")
+                .json(req),
+        )
+        .await
+    }
+
+    pub async fn list_provider_assets(
+        &self,
+        req: &ListProviderAssetsRequest,
+    ) -> Result<ListProviderAssetsResponse, ApiError> {
+        self.send_json(
+            self.request(Method::POST, "/api/v1/providers/assets/list")
+                .json(req),
+        )
+        .await
+    }
+
+    pub async fn install_provider_asset(
+        &self,
+        req: &InstallProviderAssetRequest,
+    ) -> Result<InstallProviderAssetResponse, ApiError> {
+        self.send_json(
+            self.request(Method::POST, "/api/v1/providers/assets/install")
+                .json(req),
+        )
+        .await
+    }
+
+    pub async fn provider_asset_install_status(
+        &self,
+        req: &ProviderAssetInstallStatusRequest,
+    ) -> Result<ProviderAssetInstallStatusResponse, ApiError> {
+        self.send_json(
+            self.request(Method::POST, "/api/v1/providers/assets/install/status")
+                .json(req),
+        )
+        .await
+    }
+
+    pub async fn set_active_provider_asset(
+        &self,
+        req: &SetActiveProviderAssetRequest,
+    ) -> Result<SetActiveProviderAssetResponse, ApiError> {
+        self.send_json(
+            self.request(Method::POST, "/api/v1/providers/assets/set_active")
                 .json(req),
         )
         .await

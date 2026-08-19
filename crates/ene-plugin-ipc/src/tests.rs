@@ -1,12 +1,14 @@
 use crate::{
-    CORE_VERSION, HostConn, HostHello, IpcError, ListModelsRequest, ListModelsResult,
-    LlmGenerateRequest, LlmGeneration, LlmHandler, LlmMessage, LlmRole, ModelsHandler,
-    PluginIdentity, ProtoId, ProtocolRanges, ProviderAuth, ProviderHandlers, ToolCall, ToolHandler,
+    AssetView, AssetsHandler, CORE_VERSION, HostConn, HostHello, InstallAssetRequest,
+    InstallAssetResult, InstallStatusRequest, InstallStatusResult, IpcError, ListAssetsResult,
+    ListModelsRequest, ListModelsResult, LlmGenerateRequest, LlmGeneration, LlmHandler, LlmMessage,
+    LlmRole, ModelsHandler, PluginIdentity, ProtoId, ProtocolRanges, ProviderAuth,
+    ProviderHandlers, SetActiveAssetRequest, SetActiveAssetResult, ToolCall, ToolHandler,
     ToolSpecWire, VersionRange, serve_plugin, serve_provider,
 };
 use async_trait::async_trait;
 use serde_json::json;
-use tokio::net::UnixStream;
+use tokio::io::DuplexStream;
 
 struct EchoHandler;
 
@@ -75,13 +77,13 @@ fn hello() -> HostHello {
     }
 }
 
-fn spawn_echo_plugin(plugin_side: UnixStream) -> tokio::task::JoinHandle<Result<(), IpcError>> {
+fn spawn_echo_plugin(plugin_side: DuplexStream) -> tokio::task::JoinHandle<Result<(), IpcError>> {
     tokio::spawn(async move { serve_plugin(plugin_side, EchoHandler).await })
 }
 
 #[tokio::test]
 async fn ping_and_tool_call_roundtrip() {
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let plugin = spawn_echo_plugin(plugin_side);
     let mut host = HostConn::handshake(
         host_side,
@@ -111,7 +113,7 @@ async fn ping_and_tool_call_roundtrip() {
 
 #[tokio::test]
 async fn tool_face_disabled_when_manifest_omits_it() {
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let plugin = spawn_echo_plugin(plugin_side);
     let mut hello = hello();
     hello.declared_protocols = vec![ProtoId::Core];
@@ -140,7 +142,7 @@ async fn core_range_mismatch_rejects() {
         max_frame_bytes: 0,
         allow_unverified: false,
     };
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let plugin = spawn_echo_plugin(plugin_side);
     let err = HostConn::handshake(
         host_side,
@@ -159,7 +161,7 @@ async fn core_range_mismatch_rejects() {
 
 #[tokio::test]
 async fn spawn_token_mismatch_rejects() {
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let plugin = spawn_echo_plugin(plugin_side);
     let err = HostConn::handshake(
         host_side,
@@ -175,7 +177,7 @@ async fn spawn_token_mismatch_rejects() {
 
 #[tokio::test]
 async fn digest_mismatch_rejects_unless_allow_unverified() {
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let plugin = spawn_echo_plugin(plugin_side);
     let mut denied = hello();
     denied.expected_digest = "sha256:other".to_owned();
@@ -193,7 +195,7 @@ async fn digest_mismatch_rejects_unless_allow_unverified() {
     ));
     drop(plugin);
 
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let plugin = spawn_echo_plugin(plugin_side);
     let mut allowed = hello();
     allowed.expected_digest = "sha256:other".to_owned();
@@ -221,7 +223,7 @@ fn record_baseline(name: &str, body: impl AsRef<[u8]>) {
 
 #[tokio::test]
 async fn ipc_baseline_ping_is_measurable() {
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let plugin = spawn_echo_plugin(plugin_side);
     let mut host = HostConn::handshake(
         host_side,
@@ -292,7 +294,7 @@ impl LlmHandler for FakeLlm {
 
 #[tokio::test]
 async fn llm_generate_roundtrip_without_tool_face() {
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let identity = PluginIdentity {
         plugin_id: "provider.test".to_owned(),
         plugin_name: "test".to_owned(),
@@ -367,7 +369,7 @@ impl ModelsHandler for FakeModels {
 
 #[tokio::test]
 async fn list_models_roundtrip() {
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let identity = PluginIdentity {
         plugin_id: "provider.test".to_owned(),
         plugin_name: "test".to_owned(),
@@ -419,7 +421,7 @@ async fn list_models_roundtrip() {
 
 #[tokio::test]
 async fn list_models_without_face_keeps_connection() {
-    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
     let identity = PluginIdentity {
         plugin_id: "provider.test".to_owned(),
         plugin_name: "test".to_owned(),
@@ -464,6 +466,99 @@ async fn list_models_without_face_keeps_connection() {
         .await
         .unwrap();
     assert!(listed.models.is_empty());
+    host.drain().await.unwrap();
+    plugin.await.unwrap().unwrap();
+}
+
+struct FakeAssets;
+
+#[async_trait]
+impl AssetsHandler for FakeAssets {
+    async fn list_assets(&self) -> Result<ListAssetsResult, IpcError> {
+        Ok(ListAssetsResult {
+            assets: vec![AssetView {
+                id: "llama-server".to_owned(),
+                kind: "sidecar".to_owned(),
+                label: "llama-server".to_owned(),
+                description: String::new(),
+                recommended: true,
+                installed: false,
+                active: false,
+                active_version: None,
+                local_path: None,
+                versions: Vec::new(),
+                seams: Vec::new(),
+            }],
+            error: None,
+        })
+    }
+
+    async fn install_asset(
+        &self,
+        _request: InstallAssetRequest,
+    ) -> Result<InstallAssetResult, IpcError> {
+        Ok(InstallAssetResult {
+            job_id: "job-1".to_owned(),
+            error: None,
+        })
+    }
+
+    async fn install_status(
+        &self,
+        _request: InstallStatusRequest,
+    ) -> Result<InstallStatusResult, IpcError> {
+        Ok(InstallStatusResult::default())
+    }
+
+    async fn set_active(
+        &self,
+        _request: SetActiveAssetRequest,
+    ) -> Result<SetActiveAssetResult, IpcError> {
+        Ok(SetActiveAssetResult { error: None })
+    }
+}
+
+#[tokio::test]
+async fn list_assets_roundtrip() {
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
+    let identity = PluginIdentity {
+        plugin_id: "provider.test".to_owned(),
+        plugin_name: "test".to_owned(),
+        digest: "sha256:test".to_owned(),
+        spawn_token: Some(SPAWN_TOKEN.to_owned()),
+    };
+    let handlers = ProviderHandlers {
+        assets: Some(std::sync::Arc::new(FakeAssets)),
+        ..ProviderHandlers::default()
+    };
+    let plugin = tokio::spawn(async move { serve_provider(plugin_side, identity, handlers).await });
+    let hello = HostHello {
+        host_name: "ene-core".to_owned(),
+        host_version: "0.1.0".to_owned(),
+        protocols: ProtocolRanges::host_supported(),
+        expected_digest: "sha256:test".to_owned(),
+        declared_protocols: vec![ProtoId::Core, ProtoId::Provider],
+        max_frame_bytes: 0,
+        allow_unverified: false,
+    };
+    let mut host = HostConn::handshake(
+        host_side,
+        hello,
+        &[ProtoId::Core, ProtoId::Provider],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        host.negotiated()
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.assets),
+        Some(1)
+    );
+    let listed = host.list_assets().await.unwrap();
+    assert_eq!(listed.assets.len(), 1);
+    assert_eq!(listed.assets[0].id, "llama-server");
     host.drain().await.unwrap();
     plugin.await.unwrap().unwrap();
 }

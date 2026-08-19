@@ -27,7 +27,7 @@ plugin binary with different GGUFs.
 
 | Plugin | Modalities |
 |---|---|
-| `provider.gguf` | Local GGUF LLM and embeddings (`plugins/provider/gguf`). Set `model_path`; `llama-server` is resolved from `PATH` or the bundle when `server_path` is empty. |
+| `provider.gguf` | Local GGUF LLM and embeddings (`plugins/provider/gguf`). Weights and `llama-server` are installed via `provider.assets` (AI / Engines pages). Optional `server_path` / `model_path` override catalog installs. |
 | `provider.openai_compat` | Cloud LLM, embeddings, TTS, STT (`/v1` chat+audio). Optional `base_url` for OpenRouter and other hosts. |
 | `provider.anthropic` | LLM (Messages API) |
 | `provider.elevenlabs` | TTS |
@@ -35,9 +35,10 @@ plugin binary with different GGUFs.
 | `provider.edge_tts` | TTS (Edge Neural Voice) |
 
 Native in-process engines (llama.cpp, whisper.cpp, Kokoro ONNX) are not in this
-tree. Local GGUF chat and embeddings use `provider.gguf` (`ene-provider-gguf`)
-with `model_path`; each task's sidecar starts `llama-server` on loopback and
-talks `/v1`. Sidecar helpers also live in `templates/sidecar`.
+tree. Local GGUF chat and embeddings use `provider.gguf` (`ene-provider-gguf`).
+The plugin owns the static catalog; the host stores verified artifacts under
+`data_dir/plugins/provider.gguf/assets/` and spawns `llama-server` on loopback
+via `ene-fiber`. Sidecar helpers also live in `templates/sidecar`.
 
 MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
 injected as a context source. MCP `prompts/list` become `SKILL.md` files under
@@ -61,7 +62,23 @@ page or `PATCH /api/v1/settings` with `{"plugins":{"profile":"minimal"}}`.
 Remote inventory (OpenAI-compatible `/models`, Anthropic `v1/models`) is a
 provider RPC (`list_models`). Core exposes it as `POST /api/v1/providers/models`
 (plugin, task, draft base URL, typed key; empty key uses the vault). Desktop
-does not call vendor HTTP. Local GGUF files stay on the host catalog and file
-picker; plugins never download weights. `provider.gguf` lists sidecar
-`/v1/models` only when llama-server is already up. TTS plugins that have not
-implemented the RPC keep free-text model fields.
+does not call vendor HTTP. Local GGUF weights and sidecars use the generic
+`provider.assets` flow (`POST /api/v1/providers/assets/*`). `provider.gguf`
+lists sidecar `/v1/models` only when llama-server is already up. TTS plugins
+that have not implemented the RPC keep free-text model fields.
+
+## `provider.assets`
+
+Provider plugins may expose an `assets` face (`PROVIDER_ASSETS_VERSION = 1`):
+
+| Method | Role |
+|---|---|
+| `assets.list` | Catalog rows plus install state (`installed`, `active`, `local_path`, versions) |
+| `assets.install` | Start an async install job (`job_id`) |
+| `assets.install_status` | Progress (`phase`, `received`, `total`, `error`) |
+| `assets.set_active` | Switch the active version (sidecars) |
+
+Kinds are extensible strings (`sidecar`, `weight`, …). Desktop renders any
+plugin that negotiates `assets`; `ene-core` proxies the same contract over HTTP.
+Catalog URLs are allowlisted inside the plugin; downloads are verified with
+SHA-256 via `ene-provider-assets`.

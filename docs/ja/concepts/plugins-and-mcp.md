@@ -27,7 +27,7 @@ MCP サーバーはベンダーしません。手書きの `mcp.json` の各行�
 
 | プラグイン | モダリティ |
 |---|---|
-| `provider.gguf` | ローカル GGUF の LLM と埋め込み（`plugins/provider/gguf`）。`model_path` を指定。`server_path` が空なら `PATH` または同梱から `llama-server` を解決。 |
+| `provider.gguf` | ローカル GGUF の LLM と埋め込み（`plugins/provider/gguf`）。重みと `llama-server` は `provider.assets`（AI / Engines）からインストール。任意で `server_path` / `model_path` で上書き。 |
 | `provider.openai_compat` | クラウドの LLM、埋め込み、TTS、STT（`/v1` chat+audio）。OpenRouter などは任意の `base_url`。 |
 | `provider.anthropic` | LLM（Messages API） |
 | `provider.elevenlabs` | TTS |
@@ -37,8 +37,9 @@ MCP サーバーはベンダーしません。手書きの `mcp.json` の各行�
 API キーは vault に置き、`settings.json` には書きません。ネイティブの
 プロセス内エンジン（llama.cpp、whisper.cpp、Kokoro ONNX）はこのツリーには
 ありません。ローカル GGUF の会話と埋め込みは `provider.gguf`
-（`ene-provider-gguf`）に `model_path` を付けます。タスクごとのサイドカーが
-`llama-server` をループバックで起動し `/v1` で話します。Sidecar 補助は
+（`ene-provider-gguf`）です。プラグインが静的カタログを所有し、ホストが
+`data_dir/plugins/provider.gguf/assets/` に検証済みアーティファクトを置き、
+`ene-fiber` 経由で `llama-server` をループバック起動します。Sidecar 補助は
 `templates/sidecar` にもあります。
 
 MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショットされ、
@@ -64,7 +65,24 @@ MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショッ
 リモートの在庫（OpenAI 互換 `/models`、Anthropic `v1/models`）はプロバイダ RPC
 （`list_models`）です。コアは `POST /api/v1/providers/models` で出します
 （plugin、task、下書きの base URL、入力中のキー。空なら vault）。
-デスクトップはベンダ HTTP を呼びません。ローカル GGUF ファイルはホストの
-カタログとファイル選択のままです。プラグインは重みをダウンロードしません。
+デスクトップはベンダ HTTP を呼びません。ローカル GGUF の重みとサイドカーは
+汎用の `provider.assets`（`POST /api/v1/providers/assets/*`）で扱います。
 `provider.gguf` の一覧は llama-server が既に居るときだけサイドカーの
 `/v1/models` です。RPC 未実装の TTS はテキスト入力のままです。
+
+## `provider.assets`
+
+プロバイダプラグインは `assets` フェース（`PROVIDER_ASSETS_VERSION = 1`）を
+公開できます。
+
+| メソッド | 役割 |
+|---|---|
+| `assets.list` | カタログ行とインストール状態 |
+| `assets.install` | 非同期インストール開始（`job_id`） |
+| `assets.install_status` | 進捗 |
+| `assets.set_active` | 使用中バージョンの切替（サイドカー） |
+
+種別は拡張可能な文字列（`sidecar`、`weight` など）。`assets` を交渉した
+プラグインはデスクトップが同じ UI を描画し、`ene-core` が HTTP で中継します。
+カタログ URL はプラグイン内で許可リスト化され、`ene-provider-assets` が
+SHA-256 で検証します。

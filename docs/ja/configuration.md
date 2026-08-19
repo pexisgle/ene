@@ -30,9 +30,9 @@
 `provider.*` です（`GET /api/v1/settings` の `effective.providers`）。
 デスクトップは別の許可リストを持ちません。
 
-ローカル GGUF 会話は `provider.gguf`（`local: true`）に `model_path` を付けます。
-`server_path` が空なら、サイドカーは設定パス → CAS → `PATH` →
-同梱 plugins ディレクトリの順で `llama-server` を解決します。クラウド会話は
+ローカル GGUF 会話は `provider.gguf`（`local: true`）です。重みと
+`llama-server` は AI / Engines の `provider.assets` からインストールします。
+任意で `model_path` / `server_path` がカタログを上書きします。クラウド会話は
 インストール済みの LLM プラグイン（API キーは vault）です。
 
 埋め込みは任意で、独自の `ai.tasks.embedding` ファイバーです。未設定、

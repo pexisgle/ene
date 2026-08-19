@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{
-    EmbedRequest, EmbedResult, ListModelsRequest, ListModelsResult, LlmChunk, LlmGenerateRequest,
-    LlmGeneration, ProviderFaces, SttRequest, SttResult, TtsAudio, TtsRequest,
+    EmbedRequest, EmbedResult, InstallAssetRequest, InstallAssetResult, InstallStatusRequest,
+    InstallStatusResult, ListAssetsResult, ListModelsRequest, ListModelsResult, LlmChunk,
+    LlmGenerateRequest, LlmGeneration, ProviderFaces, SetActiveAssetRequest, SetActiveAssetResult,
+    SttRequest, SttResult, TtsAudio, TtsRequest,
 };
 
 /// Current `core` subprotocol version.
@@ -163,31 +165,127 @@ pub struct ToolResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Message {
-    Hello { body: HostHello },
-    HelloAck { body: HelloAck },
-    HelloReject { body: HelloReject },
-    Ping { id: u64 },
-    Pong { id: u64 },
-    ToolList { id: u64 },
-    ToolSpec { id: u64, tools: Vec<ToolSpecWire> },
-    ToolCall { id: u64, body: ToolCall },
-    ToolResult { id: u64, body: ToolResult },
-    ToolCancel { id: u64, call_id: String },
-    Shutdown { id: u64 },
-    Drain { id: u64 },
-    DrainAck { id: u64 },
-    Log { fields: serde_json::Value },
-    LlmGenerate { id: u64, body: LlmGenerateRequest },
-    LlmChunk { id: u64, body: LlmChunk },
-    LlmDone { id: u64, body: LlmGeneration },
-    EmbedEncode { id: u64, body: EmbedRequest },
-    EmbedResult { id: u64, body: EmbedResult },
-    TtsSynthesize { id: u64, body: TtsRequest },
-    TtsResult { id: u64, body: TtsAudio },
-    SttTranscribe { id: u64, body: SttRequest },
-    SttResult { id: u64, body: SttResult },
-    ProviderListModels { id: u64, body: ListModelsRequest },
-    ProviderModels { id: u64, body: ListModelsResult },
+    Hello {
+        body: HostHello,
+    },
+    HelloAck {
+        body: HelloAck,
+    },
+    HelloReject {
+        body: HelloReject,
+    },
+    Ping {
+        id: u64,
+    },
+    Pong {
+        id: u64,
+    },
+    ToolList {
+        id: u64,
+    },
+    ToolSpec {
+        id: u64,
+        tools: Vec<ToolSpecWire>,
+    },
+    ToolCall {
+        id: u64,
+        body: ToolCall,
+    },
+    ToolResult {
+        id: u64,
+        body: ToolResult,
+    },
+    ToolCancel {
+        id: u64,
+        call_id: String,
+    },
+    Shutdown {
+        id: u64,
+    },
+    Drain {
+        id: u64,
+    },
+    DrainAck {
+        id: u64,
+    },
+    Log {
+        fields: serde_json::Value,
+    },
+    LlmGenerate {
+        id: u64,
+        body: LlmGenerateRequest,
+    },
+    LlmChunk {
+        id: u64,
+        body: LlmChunk,
+    },
+    LlmDone {
+        id: u64,
+        body: LlmGeneration,
+    },
+    EmbedEncode {
+        id: u64,
+        body: EmbedRequest,
+    },
+    EmbedResult {
+        id: u64,
+        body: EmbedResult,
+    },
+    TtsSynthesize {
+        id: u64,
+        body: TtsRequest,
+    },
+    TtsResult {
+        id: u64,
+        body: TtsAudio,
+    },
+    SttTranscribe {
+        id: u64,
+        body: SttRequest,
+    },
+    SttResult {
+        id: u64,
+        body: SttResult,
+    },
+    ProviderListModels {
+        id: u64,
+        body: ListModelsRequest,
+    },
+    ProviderModels {
+        id: u64,
+        body: ListModelsResult,
+    },
+    ProviderListAssets {
+        id: u64,
+    },
+    ProviderAssets {
+        id: u64,
+        body: ListAssetsResult,
+    },
+    ProviderInstallAsset {
+        id: u64,
+        body: InstallAssetRequest,
+    },
+    ProviderInstallAssetAck {
+        id: u64,
+        body: InstallAssetResult,
+    },
+    ProviderInstallStatus {
+        id: u64,
+        body: InstallStatusRequest,
+    },
+    ProviderInstallStatusResult {
+        id: u64,
+        body: InstallStatusResult,
+    },
+    ProviderSetActiveAsset {
+        id: u64,
+        body: SetActiveAssetRequest,
+    },
+    ProviderSetActiveAssetResult {
+        id: u64,
+        body: SetActiveAssetResult,
+    },
 }
 
 impl Message {
@@ -227,6 +325,14 @@ impl Message {
             Self::SttResult { .. } => "stt_result",
             Self::ProviderListModels { .. } => "provider_list_models",
             Self::ProviderModels { .. } => "provider_models",
+            Self::ProviderListAssets { .. } => "provider_list_assets",
+            Self::ProviderAssets { .. } => "provider_assets",
+            Self::ProviderInstallAsset { .. } => "provider_install_asset",
+            Self::ProviderInstallAssetAck { .. } => "provider_install_asset_ack",
+            Self::ProviderInstallStatus { .. } => "provider_install_status",
+            Self::ProviderInstallStatusResult { .. } => "provider_install_status_result",
+            Self::ProviderSetActiveAsset { .. } => "provider_set_active_asset",
+            Self::ProviderSetActiveAssetResult { .. } => "provider_set_active_asset_result",
         }
     }
 }

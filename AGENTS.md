@@ -10,14 +10,15 @@ for compatibility's sake; prefer clean changes over legacy shims.
 
 ## Build environment
 
-Native deps (Vulkan, ALSA, OpenSSL, libclang, mold) come from the checked-in Nix flake.
-Run everything from the repo root. If `direnv` is active, plain `cargo` works; otherwise
-prefix with `nix develop --command` (this is what CI does).
+Linux native dependencies (Vulkan, ALSA, OpenSSL, libclang, mold) come from the checked-in
+Nix flake. Run Linux builds from the repo root. If `direnv` is active, plain `cargo` works;
+otherwise prefix with `nix develop --command` (this is what CI does).
 
-**Platform support**: Linux is the only supported dev/CI platform (all CI jobs run on
-`ubuntu-latest`). Windows is produced by cross-compiling from Linux to the
-`x86_64-pc-windows-gnu` target via the flake's mingw toolchain — there is no native Windows
-dev shell. macOS is not a supported target.
+**Platform support**: Linux and native Windows are supported development platforms. Linux CI
+runs on `ubuntu-latest`; native Windows CI runs on `windows-latest`. Windows development uses
+the stable MSVC Rust toolchain, the Visual Studio C++ workload, and the Windows SDK. The
+flake's `x86_64-pc-windows-gnu` cross target remains available for Linux-side Windows builds.
+macOS is not a supported target.
 
 ## Commands
 
@@ -167,9 +168,14 @@ embedding can share a plugin with different GGUFs. Local GGUF is
 plugins, or unset).
 
 Sidecar pattern: provider plugins that run a local engine as a child process follow
-`templates/sidecar` — spawn on a loopback port, health-poll with a timeout, kill on
-`Drop`/config change, and resolve the binary as config path → bundled plugins dir →
-`PATH`. Plugins must never download binaries from arbitrary URLs.
+`templates/sidecar` — the host spawns the sidecar on a loopback port via
+`ene-fiber` (`broker.spawn_sidecar`), health-polls with a timeout, and kills on
+fiber unload. Provider plugins declare sidecar and weight catalogs via the
+`provider.assets` IPC face (`list` / `install` / `install_status` / `set_active`);
+`ene-provider-assets` stores verified artifacts under
+`data_dir/plugins/<plugin_id>/assets/`. The desktop and `ene-core` HTTP API proxy
+those calls — they do not hard-code per-plugin catalogs. Plugins must never
+download from arbitrary URLs (catalog URLs only).
 
 IPC lives in `crates/ene-plugin-ipc` (split `core` / `tool` subprotocols, length-prefixed
 MessagePack frames). `id` is required on every request/response. Prefer adding

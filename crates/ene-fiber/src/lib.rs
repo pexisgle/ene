@@ -8,6 +8,7 @@
 
 mod broker;
 mod fiber;
+mod gguf_sidecar;
 mod profile;
 mod providers;
 mod sidecar;

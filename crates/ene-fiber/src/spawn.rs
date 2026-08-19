@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use ene_plugin_ipc::{HostConn, HostHello, ProtoId, ProtocolRanges};
 use ene_sandbox::SandboxSpec;
+#[cfg(windows)]
+use tokio::net::TcpListener;
+#[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::time::timeout;
 use uuid::Uuid;
@@ -13,15 +16,23 @@ use crate::supervisor::SupervisorError;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(windows)]
+type PluginListener = TcpListener;
+#[cfg(unix)]
+type PluginListener = UnixListener;
+
+#[cfg(windows)]
+type PluginStream = tokio::net::TcpStream;
+#[cfg(unix)]
+type PluginStream = tokio::net::UnixStream;
+
 pub(crate) struct SpawnedPlugin {
     child: Option<Child>,
-    conn: Option<HostConn<tokio::net::UnixStream>>,
+    conn: Option<HostConn<PluginStream>>,
 }
 
 impl SpawnedPlugin {
-    pub(crate) fn take(
-        &mut self,
-    ) -> Result<(Child, HostConn<tokio::net::UnixStream>), SupervisorError> {
+    pub(crate) fn take(&mut self) -> Result<(Child, HostConn<PluginStream>), SupervisorError> {
         let child = self
             .child
             .take()
@@ -59,6 +70,7 @@ pub(crate) struct SpawnOpts<'a> {
 /// cannot hit `SUN_LEN` (108). Workspace and `TMPDIR` paths are often longer
 /// than that once `probe-<uuid>.sock` is appended, especially when
 /// `assets_dir` is still `target/debug/../../assets`.
+#[cfg(unix)]
 pub(crate) fn plugin_ipc_socket_path(row_id: &str) -> PathBuf {
     let key = format!("{}:{row_id}", std::process::id());
     let hex = format!("{}", blake3::hash(key.as_bytes()).to_hex());
@@ -77,24 +89,23 @@ pub fn file_digest(path: &Path) -> Result<String, SupervisorError> {
 }
 
 pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, SupervisorError> {
-    let socket_path = plugin_ipc_socket_path(opts.row_id);
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-    let listener = UnixListener::bind(&socket_path)?;
+    let (listener, endpoint, socket_path) = bind_plugin_listener(opts.row_id).await?;
     std::fs::create_dir_all(opts.temp_dir)?;
     let spawn_token = Uuid::now_v7().to_string();
     let sandbox = sandbox_for(&opts, &socket_path)?;
     let mut command = plugin_command(
         opts.binary,
-        &socket_path,
+        &endpoint,
         opts.temp_dir,
         &spawn_token,
         opts.workspace,
         opts.config,
+    );
+    tracing::debug!(
+        plugin = opts.plugin_id,
+        binary = %opts.binary.display(),
+        endpoint,
+        "spawning plugin"
     );
     apply_sandbox(&mut command, sandbox.as_ref())?;
     let mut child = command
@@ -108,10 +119,14 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
             return Err(err.into());
         }
         Err(_) => {
+            let state = match child.try_wait()? {
+                Some(status) => format!("plugin exited with {status}"),
+                None => "plugin process is still running".to_owned(),
+            };
             terminate_child(&mut child);
-            return Err(SupervisorError::Spawn(
-                "hello timeout waiting for plugin connect".to_owned(),
-            ));
+            return Err(SupervisorError::Spawn(format!(
+                "hello timeout waiting for plugin connect ({state})"
+            )));
         }
     };
     if child.try_wait()?.is_some() {
@@ -157,9 +172,34 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
     })
 }
 
+async fn bind_plugin_listener(
+    _row_id: &str,
+) -> Result<(PluginListener, String, PathBuf), SupervisorError> {
+    #[cfg(unix)]
+    {
+        let socket_path = plugin_ipc_socket_path(_row_id);
+        if let Some(parent) = socket_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if socket_path.exists() {
+            std::fs::remove_file(&socket_path)?;
+        }
+        let listener = UnixListener::bind(&socket_path)?;
+        let endpoint = socket_path.to_string_lossy().into_owned();
+        Ok((listener, endpoint, socket_path))
+    }
+    #[cfg(windows)]
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = listener.local_addr()?.to_string();
+        let socket_path = PathBuf::from(&endpoint);
+        Ok((listener, endpoint, socket_path))
+    }
+}
+
 fn plugin_command(
     binary: &Path,
-    socket_path: &Path,
+    endpoint: &str,
     temp_dir: &Path,
     spawn_token: &str,
     workspace: &Path,
@@ -175,6 +215,15 @@ fn plugin_command(
     cmd.env_clear();
     for key in [
         "PATH",
+        "SystemRoot",
+        "SystemDrive",
+        "WINDIR",
+        "COMSPEC",
+        "PROGRAMDATA",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "LOCALAPPDATA",
         "HOME",
         "LANG",
         "TZ",
@@ -200,7 +249,7 @@ fn plugin_command(
             cmd.env(key, val);
         }
     }
-    cmd.env("ENE_PLUGIN_SOCKET", socket_path);
+    cmd.env("ENE_PLUGIN_SOCKET", endpoint);
     cmd.env("ENE_PLUGIN_SPAWN_TOKEN", spawn_token);
     cmd.env("ENE_WORKSPACE", workspace);
     cmd.env("TMPDIR", temp_dir);
@@ -259,6 +308,7 @@ fn sandbox_for(
     }
     Ok(Some(build_spec(
         opts.binary,
+        opts.plugin_id,
         socket_path,
         opts.temp_dir,
         opts.workspace,
@@ -272,6 +322,7 @@ fn plugin_isolates_network(plugin_id: &str) -> bool {
 
 fn build_spec(
     binary: &Path,
+    plugin_id: &str,
     socket_path: &Path,
     temp_dir: &Path,
     workspace: &Path,
@@ -299,6 +350,14 @@ fn build_spec(
     if let Some(parent) = binary.parent() {
         allowed_read.push(parent.to_path_buf());
     }
+    if plugin_id.starts_with("provider.") {
+        allowed_read.push(
+            ene_config::data_dir()
+                .join("plugins")
+                .join(plugin_id)
+                .join("assets"),
+        );
+    }
     SandboxSpec {
         allowed_read_paths: allowed_read,
         allowed_write_paths: allowed_write,
@@ -312,6 +371,13 @@ fn build_spec(
     }
 }
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the shared sandbox setup returns platform-specific errors"
+    )
+)]
 fn apply_sandbox(command: &mut Command, spec: Option<&SandboxSpec>) -> Result<(), SupervisorError> {
     let Some(spec) = spec else {
         return Ok(());
@@ -403,12 +469,27 @@ fn plugin_candidates(stem: &str, home: Option<&Path>) -> Vec<PathBuf> {
 
 #[must_use]
 pub(crate) fn exe_plugin_candidates(dir: &Path, stem: &str) -> Vec<PathBuf> {
-    vec![dir.join(stem), dir.join("plugins").join(stem)]
+    #[cfg(windows)]
+    {
+        let exe = format!("{stem}.exe");
+        vec![
+            dir.join(stem),
+            dir.join(&exe),
+            dir.join("plugins").join(stem),
+            dir.join("plugins").join(exe),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![dir.join(stem), dir.join("plugins").join(stem)]
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{plugin_ipc_socket_path, plugin_isolates_network};
+    #[cfg(unix)]
+    use super::plugin_ipc_socket_path;
+    use super::plugin_isolates_network;
 
     #[test]
     fn web_plugin_keeps_host_network() {
@@ -417,6 +498,7 @@ mod tests {
         assert!(plugin_isolates_network("tool.exec"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn plugin_ipc_socket_path_fits_sun_len() {
         let path = plugin_ipc_socket_path("probe-019c4e2a-1234-7890-abcd-ef0123456789");

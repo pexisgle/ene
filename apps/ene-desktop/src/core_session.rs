@@ -407,6 +407,64 @@ impl CoreSession {
         })
     }
 
+    pub fn fetch_provider_assets(
+        &self,
+        plugin: String,
+    ) -> oneshot::Receiver<Result<Vec<ene_api::ProviderAssetView>, String>> {
+        let client = self.client.clone();
+        self.spawn_fetch(async move {
+            let listed = client
+                .list_provider_assets(&ene_api::ListProviderAssetsRequest { plugin })
+                .await
+                .map_err(|err| err.to_string())?;
+            if let Some(error) = listed.error.filter(|_| listed.assets.is_empty()) {
+                Err(error)
+            } else {
+                Ok(listed.assets)
+            }
+        })
+    }
+
+    pub fn install_provider_asset(
+        &self,
+        plugin: String,
+        asset_id: String,
+        version: Option<String>,
+    ) -> oneshot::Receiver<Result<ene_api::ProviderAssetInstallStatusResponse, String>> {
+        let client = self.client.clone();
+        self.spawn_fetch(async move {
+            let started = client
+                .install_provider_asset(&ene_api::InstallProviderAssetRequest {
+                    plugin: plugin.clone(),
+                    asset_id,
+                    version,
+                })
+                .await
+                .map_err(|err| err.to_string())?;
+            if let Some(error) = started.error.filter(|_| started.job_id.is_empty()) {
+                return Err(error);
+            }
+            for _ in 0..600 {
+                let status = client
+                    .provider_asset_install_status(&ene_api::ProviderAssetInstallStatusRequest {
+                        plugin: plugin.clone(),
+                        job_id: started.job_id.clone(),
+                    })
+                    .await
+                    .map_err(|err| err.to_string())?;
+                if matches!(
+                    status.phase,
+                    Some(ene_api::ProviderAssetInstallPhase::Done)
+                        | Some(ene_api::ProviderAssetInstallPhase::Failed)
+                ) {
+                    return Ok(status);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err("install timed out".to_owned())
+        })
+    }
+
     pub fn fetch_health(&self) -> oneshot::Receiver<Result<String, String>> {
         let client = self.client.clone();
         self.spawn_fetch(async move {

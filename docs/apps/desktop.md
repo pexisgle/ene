@@ -5,8 +5,14 @@ the character overlay with `ene-vrm`, keeps chat on the **surface** depth,
 and opens a **separate detail window**.
 
 ```sh
+cargo build -p ene-daemon -p ene-desktop
 cargo run -p ene-desktop
 ```
+
+The build step is required for the desktop's automatic local-core startup.
+Native Windows development uses the same commands from PowerShell after
+installing the stable MSVC Rust toolchain, Visual Studio C++ Build Tools, and
+the Windows SDK.
 
 | Window | Depth | Contents |
 |---|---|---|
@@ -36,8 +42,9 @@ Embeddings are a separate optional picker of plugins that declare `seam.embed`
 (or unset). A local GGUF embedding uses its own `llama-server` sidecar.
 OpenAI-compatible and Anthropic model combos refresh through
 `POST /api/v1/providers/models` (provider `list_models` IPC). Preset ids stay
-as a fallback when the list is empty or the request fails. Local GGUF still
-uses the curated catalog and a custom file path — not that RPC.
+as a fallback when the list is empty or the request fails. Local GGUF weights
+install through the generic provider assets UI (`POST /api/v1/providers/assets/*`);
+a custom file path remains available as an override.
 
 Classifier and proactive routing live under **Advanced**. They use the same
 plugin picker as chat. Leave a task unset to inherit the conversation model.

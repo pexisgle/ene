@@ -132,6 +132,7 @@ impl CoreDaemon {
         bind: SocketAddr,
         model: Arc<dyn ConversationModel>,
     ) -> Result<ServerHandle, CoreError> {
+        #[cfg(test)]
         self.apply_plugin_profile().await;
         let listener = tokio::net::TcpListener::bind(bind)
             .await
@@ -181,12 +182,25 @@ impl CoreDaemon {
             });
             drop(serve.await);
         });
+        #[cfg(not(test))]
+        let profile_task = {
+            let core = Arc::clone(&self);
+            tokio::spawn(async move {
+                core.apply_plugin_profile().await;
+            })
+        };
         tracing::info!(%addr, "http/ws listening");
+        #[cfg(not(test))]
+        let mut background = vec![report_task, proactive_task];
+        #[cfg(test)]
+        let background = vec![report_task, proactive_task];
+        #[cfg(not(test))]
+        background.push(profile_task);
         Ok(ServerHandle {
             addr,
             shutdown: Some(tx),
             join: Some(join),
-            background: vec![report_task, proactive_task],
+            background,
             supervisor: self.supervisor(),
             host: self.host(),
             core: Arc::clone(&self),
@@ -263,6 +277,22 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/v1/providers/models",
             post(routes::list_provider_models),
+        )
+        .route(
+            "/api/v1/providers/assets/list",
+            post(routes::list_provider_assets),
+        )
+        .route(
+            "/api/v1/providers/assets/install",
+            post(routes::install_provider_asset),
+        )
+        .route(
+            "/api/v1/providers/assets/install/status",
+            post(routes::provider_asset_install_status),
+        )
+        .route(
+            "/api/v1/providers/assets/set_active",
+            post(routes::set_active_provider_asset),
         )
         .route("/api/v1/mcp", get(routes::get_mcp).put(routes::put_mcp))
         .route("/api/v1/approvals", get(routes::list_approvals))

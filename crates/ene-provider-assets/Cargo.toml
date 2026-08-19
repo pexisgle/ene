@@ -1,0 +1,27 @@
+[package]
+name = "ene-provider-assets"
+version.workspace = true
+edition.workspace = true
+description = "Shared catalog, manifest, and verified download helpers for provider plugins"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ene-config = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync"] }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

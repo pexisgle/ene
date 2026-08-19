@@ -432,3 +432,112 @@ pub struct ListProviderModelsResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+/// `POST /api/v1/providers/assets/list` body.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListProviderAssetsRequest {
+    pub plugin: String,
+}
+
+/// One installable version row on the assets list.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderAssetVersionView {
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub recommended: bool,
+    #[serde(default)]
+    pub installed: bool,
+}
+
+/// One catalog row from `provider.assets`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderAssetView {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub recommended: bool,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default)]
+    pub versions: Vec<ProviderAssetVersionView>,
+    #[serde(default)]
+    pub seams: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListProviderAssetsResponse {
+    #[serde(default)]
+    pub assets: Vec<ProviderAssetView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallProviderAssetRequest {
+    pub plugin: String,
+    pub asset_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallProviderAssetResponse {
+    pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderAssetInstallStatusRequest {
+    pub plugin: String,
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAssetInstallPhase {
+    Pending,
+    Downloading,
+    Verifying,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderAssetInstallStatusResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<ProviderAssetInstallPhase>,
+    #[serde(default)]
+    pub received: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SetActiveProviderAssetRequest {
+    pub plugin: String,
+    pub asset_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SetActiveProviderAssetResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}

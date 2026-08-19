@@ -2193,7 +2193,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "ene-config",
  "ene-plugin-ipc",
+ "ene-provider-assets",
  "ene-registry",
  "ene-sandbox",
  "parking_lot",
@@ -2317,6 +2319,7 @@ dependencies = [
  "ene-config",
  "hex",
  "parking_lot",
+ "rand 0.10.2",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2359,6 +2362,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-provider-assets"
+version = "0.1.0"
+dependencies = [
+ "ene-config",
+ "hex",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "zip",
+]
+
+[[package]]
 name = "ene-provider-edge-tts"
 version = "0.1.0"
 dependencies = [
@@ -2398,12 +2419,15 @@ dependencies = [
  "blake3",
  "ene-config",
  "ene-plugin-ipc",
+ "ene-provider-assets",
+ "parking_lot",
  "reqwest",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

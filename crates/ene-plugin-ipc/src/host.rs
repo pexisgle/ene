@@ -5,8 +5,10 @@ use crate::protocol::{
     ToolSpecWire, VersionRange,
 };
 use crate::provider::{
-    EmbedRequest, EmbedResult, ListModelsRequest, ListModelsResult, LlmGenerateRequest,
-    LlmGeneration, ProviderFaces, SttRequest, SttResult, TtsAudio, TtsRequest,
+    EmbedRequest, EmbedResult, InstallAssetRequest, InstallAssetResult, InstallStatusRequest,
+    InstallStatusResult, ListAssetsResult, ListModelsRequest, ListModelsResult, LlmGenerateRequest,
+    LlmGeneration, ProviderFaces, SetActiveAssetRequest, SetActiveAssetResult, SttRequest,
+    SttResult, TtsAudio, TtsRequest,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -204,6 +206,90 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
         }
     }
 
+    pub async fn list_assets(&mut self) -> Result<ListAssetsResult, IpcError> {
+        if self
+            .negotiated
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.assets)
+            .is_none()
+        {
+            return Ok(ListAssetsResult::default());
+        }
+        let id = self.alloc();
+        self.send(&Message::ProviderListAssets { id }).await?;
+        match self.recv().await? {
+            Message::ProviderAssets { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    pub async fn install_asset(
+        &mut self,
+        request: InstallAssetRequest,
+    ) -> Result<InstallAssetResult, IpcError> {
+        if self
+            .negotiated
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.assets)
+            .is_none()
+        {
+            return Err(IpcError::Unexpected("assets disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::ProviderInstallAsset { id, body: request })
+            .await?;
+        match self.recv().await? {
+            Message::ProviderInstallAssetAck { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    pub async fn install_status(
+        &mut self,
+        request: InstallStatusRequest,
+    ) -> Result<InstallStatusResult, IpcError> {
+        if self
+            .negotiated
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.assets)
+            .is_none()
+        {
+            return Err(IpcError::Unexpected("assets disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::ProviderInstallStatus { id, body: request })
+            .await?;
+        match self.recv().await? {
+            Message::ProviderInstallStatusResult { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    pub async fn set_active_asset(
+        &mut self,
+        request: SetActiveAssetRequest,
+    ) -> Result<SetActiveAssetResult, IpcError> {
+        if self
+            .negotiated
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.assets)
+            .is_none()
+        {
+            return Err(IpcError::Unexpected("assets disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::ProviderSetActiveAsset { id, body: request })
+            .await?;
+        match self.recv().await? {
+            Message::ProviderSetActiveAssetResult { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
     pub async fn drain(&mut self) -> Result<(), IpcError> {
         let id = self.alloc();
         self.send(&Message::Drain { id }).await?;
@@ -287,6 +373,7 @@ fn negotiate_faces(
         tts: pick(offered.tts),
         stt: pick(offered.stt),
         models: pick(offered.models),
+        assets: pick(offered.assets),
         vad: pick(offered.vad),
     };
     (!faces.is_empty()).then_some(faces)

@@ -193,12 +193,17 @@ pub async fn serve_from_env<H: ToolHandler>(handler: H) -> Result<(), IpcError> 
         let stream = tokio::net::UnixStream::connect(&path).await?;
         serve_plugin(stream, handler).await
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let stream = tokio::net::TcpStream::connect(&path).await?;
+        serve_plugin(stream, handler).await
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, handler);
         Err(IpcError::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "plugin IPC requires Unix domain sockets",
+            "plugin IPC requires Unix domain sockets or Windows TCP",
         )))
     }
 }

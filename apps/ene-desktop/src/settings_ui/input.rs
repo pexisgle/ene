@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::settings::CharacterSettings;
 use crate::settings_ui::cloud_models::CloudModelListUi;
-use crate::settings_ui::gguf_catalog::GgufDownloadUi;
+use crate::settings_ui::provider_assets::ProviderAssetsUi;
 
 /// Dynamic `ListConfigOptions` results: dotted field path → (label, value)
 /// choices.
@@ -136,9 +136,8 @@ pub struct SettingsInputState {
     pub embed_catalog_id: String,
     /// Custom embedding `.gguf` path from the file picker.
     pub embed_custom_path: String,
-    pub gguf_download: GgufDownloadUi,
+    pub provider_assets: ProviderAssetsUi,
     pub cloud_models: CloudModelListUi,
-    pub llama_server_on_path: Option<bool>,
     /// Enumerated input device names for the microphone picker.
     pub mic_devices: Vec<String>,
     pub health: AsyncData<Result<String, String>>,
