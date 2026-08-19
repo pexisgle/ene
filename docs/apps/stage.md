@@ -1,12 +1,13 @@
 # Stage user guide
 
-`ene-stage` is the product GUI. It starts `ene-core` when needed, draws the
-character overlay with `ene-vrm`, keeps chat on the **surface** depth, and
-opens a **separate detail window** for settings, memory, character management,
-jobs, and internals.
+`ene-stage` is the product GUI for the new harness core. It starts `ene-core`
+when needed, draws companions with `ene-vrm` into a **transparent wgpu overlay**,
+keeps chat on the **surface** WebSocket, and opens a **separate detail window**
+for Home, Companion, Conversation, Voice, Memory, Work, Connections, System, and
+the session log.
 
 ```sh
-cargo build -p ene-daemon -p ene-stage
+cargo build -p ene-core -p ene-stage
 cargo run -p ene-stage
 ```
 
@@ -17,29 +18,40 @@ SDK.
 
 | Window | Depth | Contents |
 |---|---|---|
-| Character overlay + chat | `surface` | Companion and speech. No inner / thinking / tool args |
-| Detail (F1 / tray) | `detail` | Settings, memory, character, jobs/plugins, session log (including inner), thinking, tools, PAD |
-| Spotlight (Alt+Space) | local | Quick actions: open detail tabs, toggle mic, quit |
+| Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles chrome/click-through, Esc quits |
+| Chat (F2) | `surface` | Prompt / Steer / Follow-up, approvals (Allow / Always / Deny), ask-user, mic PCM relay |
+| Caption | `surface` | Streamed speech |
+| Spotlight (Alt+Space) | local | Jump to detail sections, mic, quit |
+| Detail (F1 Home/Companion, F4 Log) | `detail` | Settings IA, inner/thinking/tool/PAD log. Not linked from chat |
 
-Stage does not use a WebView. UI is egui; VRM is wgpu. The process talks to the
-daemon only through `ene-api` (`client_id = stage`). It does not link
-`ene-daemon`, `ene-companion`, or other daemon crates.
+Stage does not use a WebView. Overlay drawing is wgpu; chrome windows are egui
+on winit. The process talks to the core only through `ene-api`
+(`client_id = stage`). It does not link `ene-core`, `ene-companion`, or
+`ene-card`.
 
-Local `desktop.*` keys (theme, language, mic, captions, beat sync, core
-lifetime, overlay placement) and core sections (AI, plugins, …) are persisted
-into the shared `settings.json`. Debug builds use the source-tree `assets/`
-folder as the data directory; release builds use the OS data directory and
-never read repository `assets/`. API keys stay in the vault. Attach to an
+Characters are `.enechar` packages. `GET /characters` is install inventory;
+playable companions are souls (`GET /souls` / `GET /stage` occupants).
+`body_ref` is a body UUID. Stage imports the bundled Alicia VRM as
+`char.alicia@1.0.0` and activates it over HTTP (`soul_from_install`). CCv3/PNG/CHARX
+are conversion inputs only — there is no CCv3 editor.
+
+Local `desktop.*` keys (theme, language, mic, captions, beat sync, graphics
+quality, core lifetime, overlay placement) stay on the client. Core PATCH keys
+are `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins`.
+Plugin enablement is `plugins.profile` (`desktop` / `minimal` / `headless`),
+not a `plugins.list` map. API keys stay in the vault. Attach to an
 already-running core with `ENE_API_URL` / `ENE_API_TOKEN`.
 
 Core lifetime defaults to `desktop.core_lifetime = app` (stop the child core
 when stage exits). Set `detached` to leave the core running.
 
-Chat starts **unconfigured**. Open the detail **Settings** tab and bind a chat
-provider from installed plugins (`seam.llm`), including `provider.gguf` for
-local GGUF. Provider asset install (GGUF weights / sidecar engines) lives under
-the **Plugins** tab. TTS/STT pickers use plugins that declare `seam.tts` /
-`seam.stt`.
+Chat starts **unconfigured**. Open Detail → Conversation and bind
+`ai.tasks.chat` from installed plugins. Engines and GGUF weights live under
+Connections → provider assets. TTS/STT are `ai.tasks.tts` / `ai.tasks.stt`.
 
-Audio device relay, approval popups, tray, and OS notifications are stage's
-client-side jobs; the daemon owns policy and the live bus.
+VAD/ASR/TTS belong to core. Stage relays microphone PCM on
+`POST /sessions/{id}/listen` and plays `audio.chunk`. Barge-in is core
+`voice.state`, not client RMS. Stage claims speaker/notify exclusive by default.
+
+Audio device relay, approval popups, tray, and OS notifications (`notify.hint`)
+are stage's client-side jobs; the core owns policy and the live bus.

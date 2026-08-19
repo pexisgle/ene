@@ -10,7 +10,7 @@
 |---|---|---|
 | `ene-daemon` | `apps/ene-core`（バイナリ `ene-core`） | コアデーモン: データディレクトリのロック、HTTP/WS API、session + kernel + companion + work + plane + fiber |
 | `ene-ctl` | `apps/ene-ctl` | 同一 HTTP/WS API の CLI クライアント |
-| `ene-stage` | `apps/ene-stage` | 製品 GUI: キャラクターオーバーレイ、チャット、詳細（設定/記憶/キャラ/ジョブ）、トレイ。表層 + 別窓の詳細画面 |
+| `ene-stage` | `apps/ene-stage` | 製品 GUI: wgpu オーバーレイ、チャット、8セクションの詳細、トレイ。表層 + 詳細の 2 本のソケット |
 
 ## ライブラリクレート
 

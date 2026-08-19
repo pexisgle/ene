@@ -11,7 +11,7 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 |---|---|---|
 | `ene-daemon` | `apps/ene-core` (binary `ene-core`) | Core daemon: data-dir lock, HTTP/WS API, session + kernel + companion + work + plane + fiber |
 | `ene-ctl` | `apps/ene-ctl` | CLI client for the same HTTP/WS API |
-| `ene-stage` | `apps/ene-stage` | Product GUI: character overlay, chat, detail (settings/memory/character/jobs), tray; surface + separate detail window |
+| `ene-stage` | `apps/ene-stage` | Product GUI: wgpu overlay, chat, 8-section detail, tray; surface + detail sockets |
 
 ## Library crates
 
