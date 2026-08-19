@@ -7,7 +7,7 @@ responding / speaking / interrupting）、エネルギー VAD、リップシン�
 viseme を持ちます。TTS / STT は `ai.tasks.tts` / `ai.tasks.stt` で
 プロバイダプラグイン（`provider.openai_compat`、`provider.elevenlabs`、
 `provider.voicevox`、`provider.edge_tts`）に結びます。音声はプロバイダ
-副プロトコル上の `f32` PCM です。マイクと再生デバイスは desktop が持ちます。
+副プロトコル上の `f32` PCM です。マイクと再生デバイスは stage が持ちます。
 ポリシーとライブバスはデーモンのままです。排他資源（マイク）は API で請求します。
 
 リップシンクは PCM エネルギーを `ene-vrm` と同じ viseme ターゲットへ
@@ -16,7 +16,7 @@ viseme を持ちます。TTS / STT は `ai.tasks.tts` / `ai.tasks.stt` で
 
 ## パフォーマンスコマンド
 
-desktop が消費するのは `ene-body::PerformanceCommand` です:
+stage が消費するのは `ene-body::PerformanceCommand` です:
 
 | コマンド | 意味 |
 |---|---|
@@ -30,7 +30,7 @@ desktop が消費するのは `ene-body::PerformanceCommand` です:
 
 ## アバター（VRM）
 
-`ene-desktop`（任意のデバッグクライアント `ene-stage` も含む）は `ene-vrm`（wgpu）で **VRM 1.0** を描画します:
+`ene-stage` は `ene-vrm`（wgpu）で **VRM 1.0** を描画します:
 
 - **モデル読み込み** — キャラクターパッケージの `.vrm`
 - **モーション** — ブレンドレイヤー付き VRMA

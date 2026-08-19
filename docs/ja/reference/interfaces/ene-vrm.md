@@ -31,7 +31,7 @@ desktop アバター向けの独立した VRM 1.0 ローダー兼 wgpu レンダ
 ## 依存関係
 
 - 依存: 内部なし（wgpu・gltf・glam・image など）。
-- 利用: `ene-desktop` と `ene-stage`。
+- 利用: `ene-stage`。
 
 ## リファクタリングの注目点
 

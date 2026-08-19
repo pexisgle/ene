@@ -35,21 +35,21 @@ cargo run -p ene-ctl -- --help
 `ene-core` を起動した場合は `--url` と `--token`（または `ENE_API_URL` /
 `ENE_API_TOKEN`）を合わせてください。
 
-## 4. desktop を動かす
+## 4. stage を動かす
 
 ```sh
-cargo run -p ene-desktop
+cargo run -p ene-stage
 ```
 
-desktop は必要なら `ene-core` を子プロセスとして起動し、表層にキャラクターと
-チャットを出し、詳細は別窓（F4 / トレイ）です。`ene-stage` は同一 API の
-任意のデバッグクライアントです。
+stage は必要なら `ene-core` を子プロセスとして起動し、表層にキャラクターと
+チャットを出し、詳細は別窓（F1 / トレイ）で設定・記憶・キャラ・ジョブ・
+内部ログを扱います。
 
-チャットに既定モデルはありません。最初のメッセージの前に **AI** ページで選びます。
-ページはホストカタログの **インストール済みプロバイダプラグイン**（`seam.llm`）
-を出します。`provider.gguf`（このパソコン、ローカル GGUF）、OpenAI 互換、
-Anthropic、足したプラグインが並びます。ローカル側はおすすめ Gemma の
-ダウンロードか自分の `.gguf`。クラウドはモデル名と vault の API キーです。
+チャットに既定モデルはありません。最初のメッセージの前に詳細の **Settings**
+タブで選びます。ホストカタログの **インストール済みプロバイダプラグイン**
+（`seam.llm`）を束縛します。`provider.gguf`（このパソコン、ローカル GGUF）、
+OpenAI 互換、Anthropic、足したプラグインが使えます。ローカル側はおすすめ
+Gemma のダウンロードか自分の `.gguf`。クラウドはモデル名と vault の API キーです。
 
 埋め込みは任意です。未設定、ローカル GGUF（`provider.gguf`、おすすめ Jina）、
 またはクラウドの埋め込みプラグイン。分類・能動発話が未指定なら会話モデルの

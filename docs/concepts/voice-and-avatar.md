@@ -6,7 +6,7 @@
 responding / speaking / interrupting), energy VAD, and lip-sync visemes.
 TTS and STT bind through `ai.tasks.tts` / `ai.tasks.stt` to provider plugins
 (`provider.openai_compat`, `provider.elevenlabs`, `provider.voicevox`,
-`provider.edge_tts`). PCM is `f32` on the provider subprotocol. Desktop owns
+`provider.edge_tts`). PCM is `f32` on the provider subprotocol. Stage owns
 the microphone and playback devices. The daemon still owns policy and the live
 bus; exclusive resources (mic) are claimed through the API.
 
@@ -16,7 +16,7 @@ performance commands.
 
 ## Performance commands
 
-`ene-body::PerformanceCommand` is what desktop consumes:
+`ene-body::PerformanceCommand` is what stage consumes:
 
 | Command | Meaning |
 |---|---|
@@ -30,8 +30,7 @@ Cues are rate-limited so the avatar does not flicker.
 
 ## The avatar (VRM)
 
-`ene-desktop` (and the optional `ene-stage` debug client) render **VRM 1.0**
-with `ene-vrm` (wgpu):
+`ene-stage` renders **VRM 1.0** with `ene-vrm` (wgpu):
 
 - **Model loading** — `.vrm` from the character package
 - **Motions** — VRMA clips with blending layers

@@ -57,7 +57,7 @@ jobs:
               -p ene-sandbox -p ene-vrm
           - name: apps
             packages: >-
-              -p ene-daemon -p ene-ctl -p ene-desktop -p ene-stage
+              -p ene-daemon -p ene-ctl -p ene-stage
           - name: plugins
             packages: >-
               -p ene-harness-fs -p ene-harness-exec -p ene-harness-web

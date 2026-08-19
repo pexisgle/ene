@@ -173,9 +173,6 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-[profile.dev.package.rapier3d]
-opt-level = 2
-
 [profile.dev.package.sha2]
 opt-level = 2
 

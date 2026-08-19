@@ -20,7 +20,6 @@ use crate::core::spawn::{attach_or_spawn_core, StageCore, StageSpawnError};
 use crate::detail::{self, DetailUiState};
 use crate::i18n;
 use crate::settings::{load_desktop_settings, save_desktop_settings, DesktopSettings};
-use crate::shell::hotkeys::HotkeyError;
 use crate::shell::tray::TrayError;
 use crate::shell::{show_notification, HotkeyManager, ShellAction, ShellError, TrayAction, TrayManager};
 use crate::surface::{self, SurfaceAction, SurfaceUiState};
@@ -67,11 +66,10 @@ pub fn run() -> Result<(), AppError> {
 
     let hotkeys = match HotkeyManager::new() {
         Ok(hotkeys) => Some(hotkeys),
-        Err(HotkeyError::Manager(err)) => {
+        Err(err) => {
             tracing::warn!(error = %err, "global hotkeys unavailable");
             None
         }
-        Err(err) => return Err(ShellError::Hotkeys(err).into()),
     };
 
     let local_settings = settings.clone();
@@ -114,8 +112,32 @@ pub fn run() -> Result<(), AppError> {
         viewport = viewport.with_always_on_top();
     }
 
+    let mut create_new = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    create_new.device_descriptor = std::sync::Arc::new(|adapter| {
+        let mut base = if adapter.get_info().backend == wgpu::Backend::Gl {
+            wgpu::Limits::downlevel_webgl2_defaults()
+        } else {
+            wgpu::Limits::default()
+        };
+        // VRM MToon pipelines need five bind groups; lavapipe/Vulkan usually allow ≥8.
+        base.max_bind_groups = adapter.limits().max_bind_groups.max(5);
+        base.max_texture_dimension_2d = base.max_texture_dimension_2d.max(8192);
+        wgpu::DeviceDescriptor {
+            label: Some("ene-stage"),
+            required_limits: base,
+            ..Default::default()
+        }
+    });
+
+    let wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
+        wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(create_new),
+        ..Default::default()
+    };
+
     let native_options = eframe::NativeOptions {
         viewport,
+        wgpu_options,
+        depth_buffer: 32,
         ..Default::default()
     };
 

@@ -10,8 +10,7 @@ Ene は **コンパニオン型ハーネス**です。コアデーモンは1プ�
 ## プロセスモデル
 
 ```text
-ene-desktop ─┐
-ene-stage   ─┤
+ene-stage   ─┐
 ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core (ene-daemon)
 Web         ─┘                              │
                                             ├── ene-session / ene-kernel
@@ -33,8 +32,7 @@ Web         ─┘                              │
 進捗はコンパニオンの発話として返ります。
 
 表示の深さは `surface` か `detail` です。何を送るかはサーバが決めます。
-desktop のキャラクターとチャットは surface、別窓の詳細画面は detail です。
-`ene-stage` は同じ分割のデバッグクライアントです。
+stage のキャラクターとチャットは surface、別窓の詳細画面は detail です。
 
 ## 次に読むもの
 

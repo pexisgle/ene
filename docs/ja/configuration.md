@@ -10,13 +10,12 @@
 デーモンはデータディレクトリの `settings.json` を読み、その後
 `ENE_CORE__SERVER__*` などの環境変数を重ねます。`ene-ctl` と `ene-stage` は
 `--url` / `--token`（または `ENE_API_URL` / `ENE_API_TOKEN`）で起動済みコアへ
-接続します。`ene-desktop` も同じ環境変数があれば接続し、無いときは
-`ene-core` を起動します。
+接続します。これらの環境変数が無いとき、`ene-stage` は `ene-core` を起動します。
 
 データディレクトリは `ENE_DATA_DIR` があればそれです。無ければデバッグビルドは
 リポジトリの `assets/` を設定・DB・vault・workspace の根にし、OS のデータ
 ディレクトリには書きません。リリースは OS のデータディレクトリだけを使い、
-リポジトリの `assets/` は読みません。デスクトップの適用とコアの PATCH は同じ
+リポジトリの `assets/` は読みません。stage の適用とコアの PATCH は同じ
 `settings.json` に書きます。`GET /api/v1/settings` の `effective` はライブ
 メモリが正で、ディスクの `overlay` は AI / mind / plugins のライブ値を
 上書きしません。API キーは vault のままです。

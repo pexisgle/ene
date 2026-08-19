@@ -34,23 +34,22 @@ cargo run -p ene-ctl -- core start
 cargo run -p ene-ctl -- --help
 ```
 
-`ene-ctl` uses the same HTTP/WS API as desktop, stage, and Web. Point `--url`
+`ene-ctl` uses the same HTTP/WS API as stage and Web. Point `--url`
 and `--token` (or `ENE_API_URL` / `ENE_API_TOKEN`) at an already-running
 `ene-core` if you started it yourself.
 
-## 4. Run the desktop client
+## 4. Run the stage client
 
 ```sh
-cargo run -p ene-desktop
+cargo run -p ene-stage
 ```
 
-Desktop starts `ene-core` as a child when needed, shows the character overlay
-and chat on the surface depth, and opens a separate detail window (F4 / tray)
-for logs and internals. `ene-stage` is an optional debug client for the same
-API.
+Stage starts `ene-core` as a child when needed, shows the character overlay
+and chat on the surface depth, and opens a separate detail window (F1 / tray)
+for settings, memory, character, jobs, and internals.
 
-Chat has no default model — pick one on the **AI** page before your first
-message. The page lists **installed provider plugins** from the host catalog
+Chat has no default model — pick one in the detail **Settings** tab before
+your first message. Bind an **installed provider plugin** from the host catalog
 (`seam.llm`): `provider.gguf` (This computer, local GGUF), OpenAI-compatible,
 Anthropic, and any plugin you add. Download a recommended Gemma GGUF or pick
 your own `.gguf` on the local plugin; cloud plugins take a model name and a

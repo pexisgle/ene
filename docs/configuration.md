@@ -11,13 +11,13 @@ commit that directory).
 The daemon reads `settings.json` from the data directory, then overlays
 `ENE_CORE__SERVER__*` and related env keys at boot. `ene-ctl` and `ene-stage`
 take `--url` / `--token` (or `ENE_API_URL` / `ENE_API_TOKEN`) to reach an
-already-running core. `ene-desktop` does the same when those env vars are set;
-otherwise it spawns `ene-core`.
+already-running core. When those env vars are unset, `ene-stage` spawns
+`ene-core`.
 
 The data directory is `ENE_DATA_DIR` when set. Otherwise debug builds use the
 source-tree `assets/` folder for settings, databases, vault, and workspace,
 and never write the OS data directory. Release builds use the OS data
-directory and never read the repository `assets/` folder. Desktop Apply and
+directory and never read the repository `assets/` folder. Stage Apply and
 core PATCH write the same `settings.json`. `GET /api/v1/settings` returns live
 memory as `effective`; the on-disk file is `overlay` and does not replace live
 AI, mind, or plugin bindings. API keys stay in the vault.

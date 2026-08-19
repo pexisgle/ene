@@ -10,8 +10,7 @@ This page describes the code that is in the tree today.
 ## Process model
 
 ```text
-ene-desktop ─┐
-ene-stage   ─┤
+ene-stage   ─┐
 ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core (ene-daemon)
 Web         ─┘                              │
                                             ├── ene-session / ene-kernel
@@ -35,9 +34,8 @@ Each companion has a **surface soul** (the dialogue lane) and a **back harness**
 work is delegated; progress comes back as companion speech, not a progress bar.
 
 Display depth is `surface` or `detail`. The server decides what a connection
-receives. Desktop's character overlay and chat are surface; the separate
-detail window is detail. `ene-stage` is a smaller debug client with the same
-split.
+receives. Stage's character overlay and chat are surface; the separate detail
+window is detail.
 
 ## Where to read next
 

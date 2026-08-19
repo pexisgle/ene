@@ -32,6 +32,7 @@ pub enum HotkeyError {
 }
 
 impl HotkeyManager {
+    /// Best-effort registration: skips hotkeys that are already taken.
     pub fn new() -> Result<Self, HotkeyError> {
         let manager =
             GlobalHotKeyManager::new().map_err(|err| HotkeyError::Manager(err.to_string()))?;
@@ -41,20 +42,15 @@ impl HotkeyManager {
         let spotlight_id = spotlight.id();
         let detail_id = detail.id();
         let chat_id = chat.id();
-        manager
-            .register(spotlight)
-            .map_err(|err| HotkeyError::Register {
-                label: "Alt+Space",
-                detail: err.to_string(),
-            })?;
-        manager.register(detail).map_err(|err| HotkeyError::Register {
-            label: "F1",
-            detail: err.to_string(),
-        })?;
-        manager.register(chat).map_err(|err| HotkeyError::Register {
-            label: "F2",
-            detail: err.to_string(),
-        })?;
+        if let Err(err) = manager.register(spotlight) {
+            tracing::warn!(error = %err, "could not register Alt+Space hotkey");
+        }
+        if let Err(err) = manager.register(detail) {
+            tracing::warn!(error = %err, "could not register F1 hotkey");
+        }
+        if let Err(err) = manager.register(chat) {
+            tracing::warn!(error = %err, "could not register F2 hotkey");
+        }
         Ok(Self {
             manager,
             spotlight_id,

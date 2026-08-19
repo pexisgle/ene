@@ -21,7 +21,7 @@ The finished-product definition is
 
 | Section | What it covers |
 |---|---|
-| [Quickstart](quickstart.md) | Build, configure, and run `ene-ctl` / `ene-desktop` |
+| [Quickstart](quickstart.md) | Build, configure, and run `ene-ctl` / `ene-stage` |
 | [Configuration](configuration.md) | `settings.json`, environment variables, file locations |
 | [Concepts](concepts/architecture.md) | How Ene works: process model, cards, memory, plugins |
 | [Apps](apps/cli.md) | User guides for the CLI and desktop |

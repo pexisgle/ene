@@ -32,7 +32,7 @@ Deliberately imports no cognitive, memory, or runtime types.
 ## Dependencies
 
 - Depends on: nothing internal (wgpu, gltf, glam, image, …).
-- Used by: `ene-desktop` and `ene-stage`.
+- Used by: `ene-stage`.
 
 ## Refactoring notes
 
