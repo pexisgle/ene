@@ -5,6 +5,7 @@
 //! `&mut CharacterSettings` and the `Arc<CoreSession>`.
 pub mod apply;
 pub mod artifact_card;
+pub mod cloud_models;
 pub mod components;
 pub mod draft;
 pub mod gguf_catalog;
@@ -793,7 +794,7 @@ impl SettingsUi {
             self.applying = false;
             let original = self.apply_original.take().unwrap_or_default();
             match apply::finish_finalize(settings, &mut self.draft, result, original) {
-                Ok(outcome) => self.handle_apply_outcome(settings, outcome),
+                Ok(outcome) => self.handle_apply_outcome(settings, ai, outcome),
                 Err(error) => {
                     self.apply_feedback = Some(ApplyFeedback {
                         revision: self.draft.revision(),
@@ -807,7 +808,12 @@ impl SettingsUi {
         }
     }
 
-    fn handle_apply_outcome(&mut self, settings: &CharacterSettings, outcome: apply::ApplyOutcome) {
+    fn handle_apply_outcome(
+        &mut self,
+        settings: &CharacterSettings,
+        ai: &Arc<CoreSession>,
+        outcome: apply::ApplyOutcome,
+    ) {
         // A committed secret never stays in a UI text buffer, even when it
         // was typed this session.
         self.input.ai_api_key.clear();
@@ -826,7 +832,11 @@ impl SettingsUi {
                 )),
             });
         } else {
+            let previous = self.draft.editing().clone();
             self.draft.resync(settings.config());
+            self.draft.keep_core_extras(&previous);
+            self.input.ai_pickers_seeded = false;
+            self.input.core_settings.restart(ai.fetch_core_settings());
             self.apply_feedback = Some(ApplyFeedback {
                 revision: outcome.revision,
                 ok: outcome.ok(),
@@ -839,6 +849,7 @@ impl SettingsUi {
 
     pub fn discard_pending(&mut self, settings: &CharacterSettings) {
         self.draft.resync(settings.config());
+        self.input.ai_pickers_seeded = false;
         self.apply_feedback = None;
     }
 

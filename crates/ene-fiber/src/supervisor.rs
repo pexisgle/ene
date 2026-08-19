@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ene_plugin_ipc::{
-    BuiltinKind, EmbedRequest, EmbedResult, HostConn, LlmGenerateRequest, LlmGeneration,
-    ProviderFaces, SttRequest, SttResult, ToolCall, TtsAudio, TtsRequest,
+    BuiltinKind, EmbedRequest, EmbedResult, HostConn, ListModelsRequest, ListModelsResult,
+    LlmGenerateRequest, LlmGeneration, ProviderFaces, SttRequest, SttResult, ToolCall, TtsAudio,
+    TtsRequest,
 };
 use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for};
 use parking_lot::Mutex;
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::time::timeout;
 use uuid::Uuid;
@@ -471,7 +472,6 @@ impl Supervisor {
             binary,
             plugin_id: &plugin_id,
             digest: &digest,
-            socket_dir: &self.inner.workspace.join("sockets"),
             row_id: &row.row_id,
             sandbox_required: row.sandbox_required,
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row.row_id),
@@ -712,6 +712,56 @@ impl Supervisor {
         let session = self.provider_session(plugin, "seam.stt")?;
         let mut conn = session.conn.lock().await;
         conn.transcribe(request).await.map_err(Into::into)
+    }
+
+    /// Vendor model ids for a provider plugin.
+    ///
+    /// Always a one-shot spawn with `base_url` only. Listing on a live
+    /// generation fiber sends a new RPC that older plugin processes cannot
+    /// decode, which closes the socket and takes down chat.
+    pub async fn list_models(
+        &self,
+        plugin: &str,
+        request: ListModelsRequest,
+    ) -> Result<ListModelsResult, SupervisorError> {
+        self.probe_list_models(plugin, request).await
+    }
+
+    async fn probe_list_models(
+        &self,
+        plugin: &str,
+        request: ListModelsRequest,
+    ) -> Result<ListModelsResult, SupervisorError> {
+        let plugin_id = resolve_plugin_id(plugin)
+            .ok_or_else(|| SupervisorError::UnknownPlugin(plugin.to_owned()))?;
+        let binary = self
+            .discover(plugin)
+            .ok_or_else(|| SupervisorError::Spawn(format!("provider binary missing: {plugin}")))?;
+        let digest = crate::spawn::file_digest(&binary)?;
+        let row_id = format!("probe-{}", Uuid::now_v7());
+        let config = json!({ "base_url": request.base_url });
+        let mut spawned = spawn_plugin(SpawnOpts {
+            binary: &binary,
+            plugin_id: &plugin_id,
+            digest: &digest,
+            row_id: &row_id,
+            sandbox_required: false,
+            temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row_id),
+            workspace: &self.inner.workspace,
+            config: &config,
+            max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
+            allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
+        })
+        .await?;
+        let (mut child, mut conn) = spawned.take()?;
+        let listed = timeout(Duration::from_secs(10), conn.list_models(request)).await;
+        drop(timeout(Duration::from_secs(2), conn.drain()).await);
+        terminate_child(&mut child);
+        match listed {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(err)) => Err(err.into()),
+            Err(_) => Err(SupervisorError::Spawn("list_models timeout".to_owned())),
+        }
     }
 
     fn provider_session(

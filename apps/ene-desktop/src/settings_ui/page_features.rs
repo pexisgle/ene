@@ -20,10 +20,9 @@ pub fn render(
         input.core_settings.start(ai.fetch_core_settings());
     }
     if let Some(Ok(settings)) = &input.core_settings.data
-        && draft.editing().section_value("mind").is_none()
         && let Some(mind) = settings.pointer("/effective/mind")
     {
-        draft.seed_core_section("mind", mind.clone());
+        draft.seed_core_if_clean("mind", mind.clone());
     }
     ui.add_space(6.0);
     section_card(

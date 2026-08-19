@@ -22,9 +22,7 @@ async fn main() {
         .init();
 
     let args = Args::parse();
-    let data_dir = args
-        .data_dir
-        .unwrap_or_else(ene_config::paths::app_data_dir);
+    let data_dir = args.data_dir.unwrap_or_else(ene_config::paths::data_dir);
     match CoreDaemon::boot(BootOptions::new(data_dir)).await {
         Ok(core) => {
             let core = Arc::new(core);

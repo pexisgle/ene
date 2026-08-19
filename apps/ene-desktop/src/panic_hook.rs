@@ -36,7 +36,7 @@ fn log_hint() -> String {
 }
 
 fn log_dir() -> PathBuf {
-    ene_config::app_data_dir()
+    ene_config::data_dir()
 }
 
 #[expect(

@@ -60,3 +60,11 @@ MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショッ
 プロファイル名ではありません。プロファイルの変更は
 プラグインページ、または `PATCH /api/v1/settings` の
 `{"plugins":{"profile":"minimal"}}` です。
+
+リモートの在庫（OpenAI 互換 `/models`、Anthropic `v1/models`）はプロバイダ RPC
+（`list_models`）です。コアは `POST /api/v1/providers/models` で出します
+（plugin、task、下書きの base URL、入力中のキー。空なら vault）。
+デスクトップはベンダ HTTP を呼びません。ローカル GGUF ファイルはホストの
+カタログとファイル選択のままです。プラグインは重みをダウンロードしません。
+`provider.gguf` の一覧は llama-server が既に居るときだけサイドカーの
+`/v1/models` です。RPC 未実装の TTS はテキスト入力のままです。

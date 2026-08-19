@@ -1,6 +1,7 @@
 use crate::{
     Broker, BrokerError, CircuitBreakerConfig, Effect, FiberState, FiberUid, ProfileRow,
-    SidecarRequest, Supervisor, confine_path, discover_plugin_script, manifest_digest,
+    SidecarRequest, Supervisor, SupervisorError, confine_path, discover_plugin_script,
+    manifest_digest,
 };
 use ene_registry::{Layer, ToolRegistry};
 use serde_json::json;
@@ -502,4 +503,65 @@ fn discover_plugin_executable_in_searches_home() {
     std::fs::write(&binary, b"#!/bin/true\n").unwrap();
     let found = crate::spawn::discover_plugin_executable_in("tool.utility", Some(dir.path()));
     assert_eq!(found.as_deref(), Some(binary.as_path()));
+}
+
+#[tokio::test]
+async fn list_models_unknown_kind_is_unknown_plugin() {
+    let (_dir, sup) = supervisor();
+    let err = sup
+        .list_models(
+            "not-a-plugin",
+            ene_plugin_ipc::ListModelsRequest {
+                seam: "seam.llm".to_owned(),
+                base_url: String::new(),
+                auth: ene_plugin_ipc::ProviderAuth::default(),
+            },
+        )
+        .await
+        .expect_err("unknown");
+    assert!(matches!(err, SupervisorError::UnknownPlugin(_)));
+}
+
+#[tokio::test]
+async fn list_models_probe_without_binary_is_spawn_error() {
+    let (_dir, sup) = supervisor();
+    let err = sup
+        .list_models(
+            "provider.no_such_vendor",
+            ene_plugin_ipc::ListModelsRequest {
+                seam: "seam.llm".to_owned(),
+                base_url: String::new(),
+                auth: ene_plugin_ipc::ProviderAuth::default(),
+            },
+        )
+        .await
+        .expect_err("missing");
+    assert!(
+        matches!(&err, SupervisorError::Spawn(msg) if msg.contains("missing")),
+        "expected spawn error containing missing, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn list_models_probe_does_not_peer_close() {
+    let (_dir, sup) = supervisor();
+    if sup.discover("provider.openai_compat").is_none() {
+        return;
+    }
+    let listed = sup
+        .list_models(
+            "provider.openai_compat",
+            ene_plugin_ipc::ListModelsRequest {
+                seam: "seam.llm".to_owned(),
+                base_url: "http://127.0.0.1:1".to_owned(),
+                auth: ene_plugin_ipc::ProviderAuth::default(),
+            },
+        )
+        .await;
+    if let Err(err) = listed {
+        assert!(
+            !err.to_string().contains("peer closed"),
+            "probe IPC must stay up: {err}"
+        );
+    }
 }

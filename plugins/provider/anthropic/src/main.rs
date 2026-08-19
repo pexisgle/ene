@@ -19,7 +19,8 @@ async fn main() {
         .init();
     let provider = Arc::new(Anthropic::new());
     let handlers = ProviderHandlers {
-        llm: Some(provider),
+        llm: Some(provider.clone()),
+        models: Some(provider),
         ..ProviderHandlers::default()
     };
     if let Err(err) = serve_provider_from_env(identity(), handlers).await {

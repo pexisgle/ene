@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ene_plugin_ipc::{
-    EmbedHandler, EmbedRequest, EmbedResult, IpcError, LlmGenerateRequest, LlmGeneration,
-    LlmHandler, LlmMessage, LlmRole, LlmToolCall, SttHandler, SttRequest, SttResult, TtsAudio,
-    TtsHandler, TtsRequest,
+    EmbedHandler, EmbedRequest, EmbedResult, IpcError, ListModelsRequest, ListModelsResult,
+    LlmGenerateRequest, LlmGeneration, LlmHandler, LlmMessage, LlmRole, LlmToolCall, ModelsHandler,
+    SttHandler, SttRequest, SttResult, TtsAudio, TtsHandler, TtsRequest,
 };
 use serde_json::{Value, json};
 
@@ -153,9 +153,37 @@ impl SttHandler for OpenAiCompat {
     }
 }
 
+#[async_trait]
+impl ModelsHandler for OpenAiCompat {
+    async fn list_models(&self, request: ListModelsRequest) -> Result<ListModelsResult, IpcError> {
+        let url = format!("{}/models", effective_base(&request.base_url));
+        let value = self.get_json(&url, &request.auth.api_key).await?;
+        Ok(ListModelsResult {
+            models: select_for_seam(parse_model_ids(&value), &request.seam),
+            error: None,
+        })
+    }
+}
+
 impl OpenAiCompat {
     async fn post_json(&self, url: &str, api_key: &str, body: Value) -> Result<Value, IpcError> {
         let response = attach_vendor_headers(self.http.post(url).json(&body), api_key)
+            .send()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(IpcError::Call(format_http_error(status, &body)));
+        }
+        response
+            .json()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))
+    }
+
+    async fn get_json(&self, url: &str, api_key: &str) -> Result<Value, IpcError> {
+        let response = attach_vendor_headers(self.http.get(url), api_key)
             .send()
             .await
             .map_err(|err| IpcError::Call(err.to_string()))?;
@@ -238,6 +266,76 @@ fn effective_model(request: &str, fallback: &str) -> String {
         fallback.to_owned()
     } else {
         request.to_owned()
+    }
+}
+
+fn parse_model_ids(value: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_ids(
+        value
+            .get("data")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice),
+        &mut ids,
+    );
+    if ids.is_empty() {
+        collect_ids(
+            value
+                .get("models")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+            &mut ids,
+        );
+    }
+    ids
+}
+
+fn collect_ids(rows: Option<&[Value]>, ids: &mut Vec<String>) {
+    let Some(rows) = rows else {
+        return;
+    };
+    for row in rows {
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| row.as_str())
+            .unwrap_or("")
+            .trim();
+        if !id.is_empty() {
+            ids.push(id.to_owned());
+        }
+    }
+}
+
+fn select_for_seam(ids: Vec<String>, seam: &str) -> Vec<String> {
+    let filtered: Vec<String> = ids
+        .iter()
+        .filter(|id| model_matches_seam(id, seam))
+        .cloned()
+        .collect();
+    let mut chosen = if filtered.is_empty() { ids } else { filtered };
+    chosen.sort();
+    chosen.dedup();
+    chosen.truncate(500);
+    chosen
+}
+
+fn model_matches_seam(id: &str, seam: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    match seam {
+        "seam.embed" => id.contains("embed"),
+        "seam.tts" => id.contains("tts"),
+        "seam.stt" => id.contains("whisper") || id.contains("transcribe"),
+        _ => {
+            !(id.contains("embed")
+                || id.contains("tts")
+                || id.contains("whisper")
+                || id.contains("transcribe")
+                || id.contains("dall-e")
+                || id.contains("dall_e")
+                || id.contains("sora")
+                || id.contains("moderation"))
+        }
     }
 }
 
@@ -471,6 +569,31 @@ mod tests {
         assert_eq!(generation.model_id, "gpt-test");
         assert_eq!(generation.input_tokens, 3);
         assert!(generation.inner.is_empty());
+    }
+
+    #[test]
+    fn filters_openai_catalog_by_seam() {
+        let ids = parse_model_ids(&json!({
+            "data": [
+                { "id": "gpt-4.1-mini" },
+                { "id": "text-embedding-3-small" },
+                { "id": "gpt-4o-mini-tts" },
+                { "id": "whisper-1" }
+            ]
+        }));
+        assert_eq!(
+            select_for_seam(ids.clone(), "seam.llm"),
+            vec!["gpt-4.1-mini"]
+        );
+        assert_eq!(
+            select_for_seam(ids.clone(), "seam.embed"),
+            vec!["text-embedding-3-small"]
+        );
+        assert_eq!(
+            select_for_seam(ids.clone(), "seam.tts"),
+            vec!["gpt-4o-mini-tts"]
+        );
+        assert_eq!(select_for_seam(ids, "seam.stt"), vec!["whisper-1"]);
     }
 
     #[test]

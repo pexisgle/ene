@@ -5,9 +5,10 @@ use crate::frame::{MAX_FRAME_BYTES, read_frame, write_frame};
 use crate::host::negotiate;
 use crate::protocol::{CORE_VERSION, HelloAck, HostHello, Message, ProtoId, VersionRange};
 use crate::provider::{
-    EmbedRequest, EmbedResult, LlmGenerateRequest, LlmGeneration, PROVIDER_EMBED_VERSION,
-    PROVIDER_LLM_VERSION, PROVIDER_STT_VERSION, PROVIDER_TTS_VERSION, ProviderFaces, SttRequest,
-    SttResult, TtsAudio, TtsRequest,
+    EmbedRequest, EmbedResult, ListModelsRequest, ListModelsResult, LlmGenerateRequest,
+    LlmGeneration, PROVIDER_EMBED_VERSION, PROVIDER_LLM_VERSION, PROVIDER_MODELS_VERSION,
+    PROVIDER_STT_VERSION, PROVIDER_TTS_VERSION, ProviderFaces, SttRequest, SttResult, TtsAudio,
+    TtsRequest,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -55,6 +56,12 @@ pub trait SttHandler: Send + Sync {
     async fn transcribe(&self, request: SttRequest) -> Result<SttResult, IpcError>;
 }
 
+/// Optional `provider.list_models` face. Missing handler yields an empty list.
+#[async_trait]
+pub trait ModelsHandler: Send + Sync {
+    async fn list_models(&self, request: ListModelsRequest) -> Result<ListModelsResult, IpcError>;
+}
+
 /// Provider faces implemented by one plugin process.
 #[derive(Clone, Default)]
 pub struct ProviderHandlers {
@@ -62,6 +69,7 @@ pub struct ProviderHandlers {
     pub embed: Option<Arc<dyn EmbedHandler>>,
     pub tts: Option<Arc<dyn TtsHandler>>,
     pub stt: Option<Arc<dyn SttHandler>>,
+    pub models: Option<Arc<dyn ModelsHandler>>,
 }
 
 fn offered_faces(hello: &HostHello, handlers: &ProviderHandlers) -> Option<ProviderFaces> {
@@ -73,6 +81,7 @@ fn offered_faces(hello: &HostHello, handlers: &ProviderHandlers) -> Option<Provi
         embed: handlers.embed.as_ref().map(|_| PROVIDER_EMBED_VERSION),
         tts: handlers.tts.as_ref().map(|_| PROVIDER_TTS_VERSION),
         stt: handlers.stt.as_ref().map(|_| PROVIDER_STT_VERSION),
+        models: handlers.models.as_ref().map(|_| PROVIDER_MODELS_VERSION),
         vad: None,
     };
     (!faces.is_empty()).then_some(faces)
@@ -148,6 +157,15 @@ where
                 )
                 .await?;
             }
+            Message::ProviderListModels { id, body } => {
+                let reply = dispatch_models(handlers.models.as_ref(), body).await;
+                write_msg(
+                    &mut stream,
+                    &Message::ProviderModels { id, body: reply },
+                    max_frame,
+                )
+                .await?;
+            }
             Message::Drain { id } | Message::Shutdown { id } => {
                 write_msg(&mut stream, &Message::DrainAck { id }, max_frame).await?;
                 return Ok(());
@@ -217,6 +235,22 @@ async fn dispatch_stt(handler: Option<&Arc<dyn SttHandler>>, body: SttRequest) -
         None => SttResult {
             text: "stt disabled".to_owned(),
         },
+    }
+}
+
+async fn dispatch_models(
+    handler: Option<&Arc<dyn ModelsHandler>>,
+    body: ListModelsRequest,
+) -> ListModelsResult {
+    match handler {
+        Some(handler) => handler
+            .list_models(body)
+            .await
+            .unwrap_or_else(|err| ListModelsResult {
+                models: Vec::new(),
+                error: Some(err.to_string()),
+            }),
+        None => ListModelsResult::default(),
     }
 }
 

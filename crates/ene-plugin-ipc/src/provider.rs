@@ -15,6 +15,8 @@ pub const PROVIDER_EMBED_VERSION: u32 = 1;
 pub const PROVIDER_TTS_VERSION: u32 = 1;
 /// `provider.stt` version.
 pub const PROVIDER_STT_VERSION: u32 = 1;
+/// `provider.list_models` version.
+pub const PROVIDER_MODELS_VERSION: u32 = 1;
 
 /// Negotiated provider modalities. Absent faces are disabled, not fatal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -28,6 +30,8 @@ pub struct ProviderFaces {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stt: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vad: Option<u32>,
 }
 
@@ -38,6 +42,7 @@ impl ProviderFaces {
             && self.embed.is_none()
             && self.tts.is_none()
             && self.stt.is_none()
+            && self.models.is_none()
             && self.vad.is_none()
     }
 }
@@ -230,4 +235,23 @@ pub struct SttRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SttResult {
     pub text: String,
+}
+
+/// `provider.list_models` request. `seam` is `seam.llm` / `seam.embed` / `seam.tts` / `seam.stt`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListModelsRequest {
+    pub seam: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub auth: ProviderAuth,
+}
+
+/// `provider.list_models` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ListModelsResult {
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

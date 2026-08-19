@@ -11,9 +11,15 @@
 `ENE_CORE__SERVER__*` などの環境変数を重ねます。`ene-ctl` と `ene-stage` は
 `--url` / `--token`（または `ENE_API_URL` / `ENE_API_TOKEN`）で起動済みコアへ
 接続します。`ene-desktop` も同じ環境変数があれば接続し、無いときは
-`ene-core` を起動します。加えてローカルの `desktop.*`（グラフィックス、
-テーマ、言語、マイク、オーバーレイ、コア寿命）はデスクトップ自身の
-`settings.json` に保存します。
+`ene-core` を起動します。
+
+データディレクトリは `ENE_DATA_DIR` があればそれです。無ければデバッグビルドは
+リポジトリの `assets/` を設定・DB・vault・workspace の根にし、OS のデータ
+ディレクトリには書きません。リリースは OS のデータディレクトリだけを使い、
+リポジトリの `assets/` は読みません。デスクトップの適用とコアの PATCH は同じ
+`settings.json` に書きます。`GET /api/v1/settings` の `effective` はライブ
+メモリが正で、ディスクの `overlay` は AI / mind / plugins のライブ値を
+上書きしません。API キーは vault のままです。
 
 会話・分類・埋め込み・TTS・STT は `ai.tasks.<task>`（`plugin`、`model`、
 `model_path`、`base_url`、`voice`、`max_tokens`）でバインドします。チャットは
@@ -31,7 +37,7 @@
 
 埋め込みは任意で、独自の `ai.tasks.embedding` ファイバーです。未設定、
 ローカル GGUF（`provider.gguf`、おすすめ Jina）、または `seam.embed` の
-クラウドプラグイン。classifier が空ならチャットのバインドを再利用します。
+クラウドプラグイン。分類・能動発話が未指定なら会話モデルの値を継承します。
 TTS・STT が空なら無効のままです。
 
 プラグイン起動は `plugins.profile`（`desktop` / `minimal` / `headless`）です。
@@ -47,7 +53,3 @@ TTS・STT が空なら無効のままです。
 
 MCP サーバーは手書きの `mcp.json` であり、設定キーではありません。
 [プラグインと MCP](concepts/plugins-and-mcp.md) を見てください。
-
-デバッグビルドの同梱アセットはリポジトリの `assets/` から解決します。
-実行時データ（`sessions.db`、`api.token`、`vault.bin`、workspace）は
-設定ファイルの隣ではなく、データディレクトリに置きます。

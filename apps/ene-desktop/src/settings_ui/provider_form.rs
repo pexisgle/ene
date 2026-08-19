@@ -134,14 +134,6 @@ pub fn local_plugin<'a>(catalog: &'a [ProviderInfo], seam: &str) -> Option<&'a P
         .find(|plugin| plugin.local && plugin.has_seam(seam))
 }
 
-#[must_use]
-pub fn plugins_with_seam<'a>(catalog: &'a [ProviderInfo], seam: &str) -> Vec<&'a ProviderInfo> {
-    catalog
-        .iter()
-        .filter(|plugin| plugin.has_seam(seam))
-        .collect()
-}
-
 fn provider_i18n_id(kind: &str) -> Option<&'static str> {
     let key = kind.strip_prefix("provider.").unwrap_or(kind);
     BUILTIN_PROVIDER_I18N_IDS
@@ -257,30 +249,154 @@ fn text_field(ui: &mut egui::Ui, label: &str, binding: &mut Value, key: &str) ->
     }
 }
 
-/// Combo box of bundled provider ids, grouped Local / Cloud.
-///
-/// When `allow_empty` is true, the first choice clears the plugin id so
-/// advanced tasks can stay unset (same as chat / unused).
-pub fn plugin_combo(ui: &mut egui::Ui, id_salt: &str, plugin: &mut String, plugins: &[String]) {
-    plugin_combo_with_empty(ui, id_salt, plugin, plugins, false);
+const OPENAI_CHAT_MODELS: &[&str] = &[
+    "gpt-4.1-mini",
+    "gpt-4.1",
+    "gpt-4o-mini",
+    "gpt-4o",
+    "o4-mini",
+];
+
+const OPENAI_EMBED_MODELS: &[&str] = &["text-embedding-3-small", "text-embedding-3-large"];
+
+const OPENAI_TTS_MODELS: &[&str] = &["gpt-4o-mini-tts", "gpt-4o-tts", "tts-1", "tts-1-hd"];
+
+const OPENAI_STT_MODELS: &[&str] = &["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe"];
+
+const CLAUDE_MODELS: &[&str] = &[
+    "claude-sonnet-4-5",
+    "claude-opus-4-5",
+    "claude-haiku-4-5",
+    "claude-sonnet-4-20250514",
+    "claude-opus-4-20250514",
+    "claude-haiku-4-5-20251001",
+];
+
+fn plugin_kind(plugin: &str) -> &str {
+    plugin.strip_prefix("provider.").unwrap_or(plugin)
 }
 
+/// Known model ids for a catalog plugin + task. Empty for plugins without a list.
+#[must_use]
+pub fn cloud_model_presets(plugin: &str, task: &str) -> &'static [&'static str] {
+    match (plugin_kind(plugin), task) {
+        ("anthropic", _) => CLAUDE_MODELS,
+        ("openai_compat", "embedding") => OPENAI_EMBED_MODELS,
+        ("openai_compat", "tts") => OPENAI_TTS_MODELS,
+        ("openai_compat", "stt") => OPENAI_STT_MODELS,
+        ("openai_compat", _) => OPENAI_CHAT_MODELS,
+        _ => &[],
+    }
+}
+
+#[must_use]
+pub fn default_cloud_model(plugin: &str, task: &str) -> &'static str {
+    cloud_model_presets(plugin, task)
+        .first()
+        .copied()
+        .unwrap_or("")
+}
+
+/// Extra rows for [`cloud_model_combo`]: live `/models` ids, if any.
+#[derive(Clone, Copy, Debug)]
+pub struct CloudModelComboState<'a> {
+    pub live: &'a [String],
+    pub loading: bool,
+    pub error: Option<&'a str>,
+}
+
+/// Combo of known cloud models, matching the plugin picker.
+///
+/// OpenAI-compatible hosts also get a free-form id for other `/v1` endpoints.
+/// Returns whether `model` changed.
+pub fn cloud_model_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    plugin: &str,
+    task: &str,
+    model: &mut String,
+    remote: CloudModelComboState<'_>,
+) -> bool {
+    let presets = cloud_model_presets(plugin, task);
+    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-model-label"));
+    if presets.is_empty() && remote.live.is_empty() {
+        return ui
+            .add(egui::TextEdit::singleline(model).desired_width(f32::INFINITY))
+            .changed();
+    }
+
+    let fallback: Vec<String> = presets.iter().map(|name| (*name).to_owned()).collect();
+    let rows = if remote.live.is_empty() {
+        fallback.as_slice()
+    } else {
+        remote.live
+    };
+
+    let mut changed = false;
+    let selected = if model.is_empty() {
+        "—"
+    } else {
+        model.as_str()
+    };
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(selected.to_owned())
+        .show_ui(ui, |ui| {
+            for id in rows {
+                if ui.selectable_label(model.as_str() == id, id).clicked() && model.as_str() != id {
+                    id.clone_into(model);
+                    changed = true;
+                }
+            }
+        });
+    if remote.loading {
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "ai-model-loading"
+        ));
+    }
+    if let Some(error) = remote.error {
+        ui.colored_label(
+            egui::Color32::from_rgb(0xff, 0x8a, 0x65),
+            i18n_embed_fl::fl!(crate::i18n::loader(), "ai-model-list-error", error = error),
+        );
+    }
+
+    if plugin_kind(plugin) == "openai_compat" {
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "ai-model-custom-hint"
+        ));
+        changed |= ui
+            .add(egui::TextEdit::singleline(model).desired_width(f32::INFINITY))
+            .changed();
+    }
+    changed
+}
+
+/// Combo box of bundled provider ids, grouped Local / Cloud.
+pub fn plugin_combo(ui: &mut egui::Ui, id_salt: &str, plugin: &mut String, plugins: &[String]) {
+    plugin_combo_with_empty(ui, id_salt, plugin, plugins, None);
+}
+
+/// `empty_choice` is the first row that clears the plugin id (`None` hides it).
 pub fn plugin_combo_with_empty(
     ui: &mut egui::Ui,
     id_salt: &str,
     plugin: &mut String,
     plugins: &[String],
-    allow_empty: bool,
+    empty_choice: Option<&str>,
 ) {
-    let selected = if plugin.is_empty() && allow_empty {
-        "—".to_owned()
+    let selected = if plugin.is_empty() {
+        empty_choice.unwrap_or("—").to_owned()
     } else {
         provider_display_name(plugin)
     };
     egui::ComboBox::from_id_salt(id_salt)
         .selected_text(selected)
         .show_ui(ui, |ui| {
-            if allow_empty && ui.selectable_label(plugin.is_empty(), "—").clicked() {
+            if let Some(label) = empty_choice
+                && ui.selectable_label(plugin.is_empty(), label).clicked()
+            {
                 plugin.clear();
             }
             let mut last_group = String::new();
@@ -301,4 +417,28 @@ pub fn plugin_combo_with_empty(
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cloud_model_presets, default_cloud_model};
+
+    #[test]
+    fn openai_and_anthropic_expose_selectable_lists() {
+        assert!(cloud_model_presets("provider.openai_compat", "chat").contains(&"gpt-4.1-mini"));
+        assert!(
+            cloud_model_presets("provider.openai_compat", "embedding")
+                .contains(&"text-embedding-3-small")
+        );
+        assert!(cloud_model_presets("provider.anthropic", "chat").contains(&"claude-sonnet-4-5"));
+        assert_eq!(
+            default_cloud_model("provider.openai_compat", "chat"),
+            "gpt-4.1-mini"
+        );
+        assert_eq!(
+            default_cloud_model("provider.anthropic", "classifier"),
+            "claude-sonnet-4-5"
+        );
+        assert!(cloud_model_presets("provider.gguf", "chat").is_empty());
+    }
 }

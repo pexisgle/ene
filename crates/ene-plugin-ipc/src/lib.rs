@@ -15,8 +15,8 @@ mod protocol;
 mod provider;
 
 pub use dispatch::{
-    EmbedHandler, LlmHandler, PluginIdentity, ProviderHandlers, SttHandler, TtsHandler,
-    serve_provider, serve_provider_from_env,
+    EmbedHandler, LlmHandler, ModelsHandler, PluginIdentity, ProviderHandlers, SttHandler,
+    TtsHandler, serve_provider, serve_provider_from_env,
 };
 pub use error::IpcError;
 pub use frame::{MAX_FRAME_BYTES, frame_limit, read_frame, write_frame};
@@ -27,10 +27,11 @@ pub use protocol::{
     ToolResult, ToolSpecWire, VersionRange,
 };
 pub use provider::{
-    EmbedRequest, EmbedResult, LlmChunk, LlmGenerateRequest, LlmGeneration, LlmImage, LlmInnerLine,
-    LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, PROVIDER_EMBED_VERSION, PROVIDER_LLM_VERSION,
-    PROVIDER_STT_VERSION, PROVIDER_TTS_VERSION, PROVIDER_VERSION, ProviderAuth, ProviderFaces,
-    SttRequest, SttResult, TtsAudio, TtsRequest,
+    EmbedRequest, EmbedResult, ListModelsRequest, ListModelsResult, LlmChunk, LlmGenerateRequest,
+    LlmGeneration, LlmImage, LlmInnerLine, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema,
+    PROVIDER_EMBED_VERSION, PROVIDER_LLM_VERSION, PROVIDER_MODELS_VERSION, PROVIDER_STT_VERSION,
+    PROVIDER_TTS_VERSION, PROVIDER_VERSION, ProviderAuth, ProviderFaces, SttRequest, SttResult,
+    TtsAudio, TtsRequest,
 };
 
 #[cfg(test)]

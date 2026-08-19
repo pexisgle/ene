@@ -56,10 +56,7 @@ pub fn env_api_config() -> Option<(String, String)> {
 }
 
 pub fn desktop_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ENE_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-    ene_config::paths::app_data_dir()
+    ene_config::paths::data_dir()
 }
 
 fn core_bin_name() -> &'static str {

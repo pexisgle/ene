@@ -5,11 +5,32 @@ const APP_ID: &str = "dev.pexisgle.ene";
 pub const IS_DEV_BUILD: bool = cfg!(debug_assertions);
 
 /// OS-standard user data directory (`~/.local/share` on Linux, `%APPDATA%` on Windows).
+///
+/// Release fallback for [`assets_dir`] only. Runtime code should call
+/// [`data_dir`] so debug builds stay in source-tree `assets/` and never
+/// touch this path.
 pub fn app_data_dir() -> PathBuf {
     directories::ProjectDirs::from("dev", "pexisgle", "ene").map_or_else(
         || PathBuf::from(APP_ID),
         |proj_dirs| proj_dirs.data_dir().to_path_buf(),
     )
+}
+
+/// Runtime root for `settings.json`, databases, vault, and workspace.
+///
+/// `ENE_DATA_DIR` overrides when set. Otherwise this is [`assets_dir`]:
+/// debug builds use source-tree `assets/`; release builds use
+/// [`app_data_dir`].
+#[must_use]
+pub fn data_dir() -> PathBuf {
+    resolve_data_dir(std::env::var("ENE_DATA_DIR").ok().as_deref(), assets_dir())
+}
+
+fn resolve_data_dir(ene_data_dir: Option<&str>, assets: &Path) -> PathBuf {
+    match ene_data_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => assets.to_path_buf(),
+    }
 }
 
 fn resolve_assets_dir_impl() -> PathBuf {
@@ -24,14 +45,14 @@ fn resolve_assets_dir_impl() -> PathBuf {
             PathBuf::from("assets"),
         ];
         if let Some(path) = candidates.into_iter().find(|c| c.is_dir()) {
-            return path;
+            return path.canonicalize().unwrap_or(path);
         }
     }
     app_data_dir()
 }
 
-/// In debug builds the source-tree `assets/` is used; in release builds
-/// the app data directory is returned.
+/// Debug: source-tree `assets/`. Release: [`app_data_dir`] (never the
+/// repository `assets/` folder).
 ///
 /// Returns a `&'static Path` to avoid cloning the cached `PathBuf` on every call.
 pub fn assets_dir() -> &'static std::path::Path {
@@ -44,7 +65,7 @@ pub fn models_dir() -> PathBuf {
 }
 
 pub fn config_file_path() -> PathBuf {
-    assets_dir().join("settings.json")
+    data_dir().join("settings.json")
 }
 
 /// Runtime prompt pack for a language within an explicit base assets directory
@@ -104,7 +125,7 @@ pub fn builtin_tools_dir() -> PathBuf {
 }
 
 pub fn user_tools_dir() -> PathBuf {
-    app_data_dir().join("tools")
+    data_dir().join("tools")
 }
 
 pub fn tool_socket_dir() -> PathBuf {
@@ -128,7 +149,7 @@ pub fn builtin_plugins_dir() -> PathBuf {
 }
 
 pub fn user_plugins_dir() -> PathBuf {
-    app_data_dir().join("plugins")
+    data_dir().join("plugins")
 }
 
 pub fn plugin_socket_dir() -> PathBuf {
@@ -170,6 +191,49 @@ pub fn character_dir_in(base: &Path, character_name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_file_path_is_under_data_dir() {
+        assert_eq!(config_file_path(), data_dir().join("settings.json"));
+    }
+
+    #[test]
+    fn user_plugin_and_tool_dirs_are_under_data_dir() {
+        let root = data_dir();
+        assert_eq!(user_plugins_dir(), root.join("plugins"));
+        assert_eq!(user_tools_dir(), root.join("tools"));
+    }
+
+    #[test]
+    fn resolve_data_dir_prefers_override_then_assets() {
+        let assets = Path::new("/repo/assets");
+        assert_eq!(
+            resolve_data_dir(None, assets),
+            PathBuf::from("/repo/assets")
+        );
+        assert_eq!(
+            resolve_data_dir(Some("/tmp/ene-data"), assets),
+            PathBuf::from("/tmp/ene-data")
+        );
+    }
+
+    #[test]
+    fn canonicalize_drops_dotdot_from_debug_assets_join() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let assets = tmp.path().join("assets");
+        std::fs::create_dir(&assets).expect("assets dir");
+        let nested = tmp.path().join("target").join("debug");
+        std::fs::create_dir_all(&nested).expect("target/debug");
+        let joined = nested.join("../../assets");
+        assert!(
+            joined.to_string_lossy().contains(".."),
+            "join should keep .. components: {}",
+            joined.display()
+        );
+        let canon = joined.canonicalize().expect("canonicalize joined");
+        assert_eq!(canon, assets.canonicalize().expect("canonicalize assets"));
+        assert!(!canon.to_string_lossy().contains(".."));
+    }
 
     #[test]
     fn short_temp_dir_is_used_as_is() {

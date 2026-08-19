@@ -1441,3 +1441,100 @@ async fn mcp_document_round_trips_through_http() {
     assert_eq!(listed[0].command.as_deref(), Some("__ene_missing_mcp__"));
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn list_provider_models_rejects_unknown_plugin_and_task() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let unknown_plugin = client
+        .list_provider_models(&ene_api::ListProviderModelsRequest {
+            plugin: "provider.not_in_catalog".into(),
+            task: "chat".into(),
+            ..ene_api::ListProviderModelsRequest::default()
+        })
+        .await
+        .expect_err("plugin");
+    assert_eq!(unknown_plugin.error_class(), "invalid_message");
+    let unknown_task = client
+        .list_provider_models(&ene_api::ListProviderModelsRequest {
+            plugin: "provider.openai_compat".into(),
+            task: "not-a-task".into(),
+            ..ene_api::ListProviderModelsRequest::default()
+        })
+        .await
+        .expect_err("task");
+    assert_eq!(unknown_task.error_class(), "invalid_message");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn get_settings_effective_ai_ignores_stub_disk_overlay() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"ai":{"tasks":{"chat":{"plugin":"provider.openai_compat","model":"live-model"}}}}"#,
+    )
+    .unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    let server = core
+        .clone()
+        .serve_with(Arc::new(EchoModel) as Arc<dyn ConversationModel>)
+        .await
+        .unwrap();
+    let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
+    let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "desktop");
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"mind":{"language":"ja"},"ai":{"tasks":{"chat":{"plugin":"","model":""}}}}"#,
+    )
+    .unwrap();
+    let settings = client.settings().await.unwrap();
+    assert_eq!(
+        settings.pointer("/effective/ai/tasks/chat/plugin"),
+        Some(&serde_json::json!("provider.openai_compat"))
+    );
+    assert_eq!(
+        settings.pointer("/effective/ai/tasks/chat/model"),
+        Some(&serde_json::json!("live-model"))
+    );
+    assert_eq!(
+        settings.pointer("/overlay/ai/tasks/chat/plugin"),
+        Some(&serde_json::json!(""))
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn patch_settings_writes_data_dir_settings_json() {
+    let dir = TempDir::new().unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    let server = core
+        .clone()
+        .serve_with(Arc::new(EchoModel) as Arc<dyn ConversationModel>)
+        .await
+        .unwrap();
+    let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
+    let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "desktop");
+    client
+        .patch_settings(&serde_json::json!({
+            "ai": { "tasks": { "chat": { "plugin": "provider.gguf", "model": "local" } } }
+        }))
+        .await
+        .unwrap();
+    let path = core.data_dir().join("settings.json");
+    assert!(path.is_file());
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved.pointer("/ai/tasks/chat/plugin"),
+        Some(&serde_json::json!("provider.gguf"))
+    );
+    server.shutdown().await;
+}

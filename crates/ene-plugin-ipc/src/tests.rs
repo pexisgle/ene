@@ -1,7 +1,8 @@
 use crate::{
-    CORE_VERSION, HostConn, HostHello, IpcError, LlmGenerateRequest, LlmGeneration, LlmHandler,
-    LlmMessage, LlmRole, PluginIdentity, ProtoId, ProtocolRanges, ProviderAuth, ProviderHandlers,
-    ToolCall, ToolHandler, ToolSpecWire, VersionRange, serve_plugin, serve_provider,
+    CORE_VERSION, HostConn, HostHello, IpcError, ListModelsRequest, ListModelsResult,
+    LlmGenerateRequest, LlmGeneration, LlmHandler, LlmMessage, LlmRole, ModelsHandler,
+    PluginIdentity, ProtoId, ProtocolRanges, ProviderAuth, ProviderHandlers, ToolCall, ToolHandler,
+    ToolSpecWire, VersionRange, serve_plugin, serve_provider,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -348,6 +349,121 @@ async fn llm_generate_roundtrip_without_tool_face() {
         .unwrap();
     assert_eq!(result.text, "llm:ping");
     assert_eq!(result.model_id, "test-model");
+    host.drain().await.unwrap();
+    plugin.await.unwrap().unwrap();
+}
+
+struct FakeModels;
+
+#[async_trait]
+impl ModelsHandler for FakeModels {
+    async fn list_models(&self, request: ListModelsRequest) -> Result<ListModelsResult, IpcError> {
+        Ok(ListModelsResult {
+            models: vec![format!("{}:listed", request.seam)],
+            error: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn list_models_roundtrip() {
+    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let identity = PluginIdentity {
+        plugin_id: "provider.test".to_owned(),
+        plugin_name: "test".to_owned(),
+        digest: "sha256:test".to_owned(),
+        spawn_token: Some(SPAWN_TOKEN.to_owned()),
+    };
+    let handlers = ProviderHandlers {
+        llm: Some(std::sync::Arc::new(FakeLlm)),
+        models: Some(std::sync::Arc::new(FakeModels)),
+        ..ProviderHandlers::default()
+    };
+    let plugin = tokio::spawn(async move { serve_provider(plugin_side, identity, handlers).await });
+    let hello = HostHello {
+        host_name: "ene-core".to_owned(),
+        host_version: "0.1.0".to_owned(),
+        protocols: ProtocolRanges::host_supported(),
+        expected_digest: "sha256:test".to_owned(),
+        declared_protocols: vec![ProtoId::Core, ProtoId::Provider],
+        max_frame_bytes: 0,
+        allow_unverified: false,
+    };
+    let mut host = HostConn::handshake(
+        host_side,
+        hello,
+        &[ProtoId::Core, ProtoId::Provider],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        host.negotiated()
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.models),
+        Some(1)
+    );
+    let listed = host
+        .list_models(ListModelsRequest {
+            seam: "seam.llm".to_owned(),
+            base_url: String::new(),
+            auth: ProviderAuth::default(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.models, vec!["seam.llm:listed".to_owned()]);
+    host.drain().await.unwrap();
+    plugin.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn list_models_without_face_keeps_connection() {
+    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let identity = PluginIdentity {
+        plugin_id: "provider.test".to_owned(),
+        plugin_name: "test".to_owned(),
+        digest: "sha256:test".to_owned(),
+        spawn_token: Some(SPAWN_TOKEN.to_owned()),
+    };
+    let handlers = ProviderHandlers {
+        llm: Some(std::sync::Arc::new(FakeLlm)),
+        ..ProviderHandlers::default()
+    };
+    let plugin = tokio::spawn(async move { serve_provider(plugin_side, identity, handlers).await });
+    let hello = HostHello {
+        host_name: "ene-core".to_owned(),
+        host_version: "0.1.0".to_owned(),
+        protocols: ProtocolRanges::host_supported(),
+        expected_digest: "sha256:test".to_owned(),
+        declared_protocols: vec![ProtoId::Core, ProtoId::Provider],
+        max_frame_bytes: 0,
+        allow_unverified: false,
+    };
+    let mut host = HostConn::handshake(
+        host_side,
+        hello,
+        &[ProtoId::Core, ProtoId::Provider],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap();
+    assert!(
+        host.negotiated()
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.models)
+            .is_none()
+    );
+    let listed = host
+        .list_models(ListModelsRequest {
+            seam: "seam.llm".to_owned(),
+            base_url: String::new(),
+            auth: ProviderAuth::default(),
+        })
+        .await
+        .unwrap();
+    assert!(listed.models.is_empty());
     host.drain().await.unwrap();
     plugin.await.unwrap().unwrap();
 }

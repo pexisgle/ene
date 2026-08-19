@@ -6,7 +6,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use ene_plugin_ipc::{
-    IpcError, LlmGenerateRequest, LlmGeneration, LlmHandler, LlmMessage, LlmRole, LlmToolCall,
+    IpcError, ListModelsRequest, ListModelsResult, LlmGenerateRequest, LlmGeneration, LlmHandler,
+    LlmMessage, LlmRole, LlmToolCall, ModelsHandler,
 };
 
 const DEFAULT_BASE: &str = "https://api.anthropic.com";
@@ -61,17 +62,7 @@ impl LlmHandler for Anthropic {
             );
         }
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-api-key",
-            HeaderValue::from_str(&key).map_err(|err| IpcError::Call(err.to_string()))?,
-        );
-        headers.insert(
-            "anthropic-version",
-            HeaderValue::from_static(ANTHROPIC_VERSION),
-        );
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
+        let headers = auth_headers(&key)?;
         let url = format!("{}/v1/messages", effective_base(&request.base_url));
         let response = self
             .http
@@ -91,6 +82,113 @@ impl LlmHandler for Anthropic {
         }
         parse_messages(&text)
     }
+}
+
+#[async_trait]
+impl ModelsHandler for Anthropic {
+    async fn list_models(&self, request: ListModelsRequest) -> Result<ListModelsResult, IpcError> {
+        let key = if request.auth.api_key.is_empty() {
+            env_api_key()
+        } else {
+            request.auth.api_key.clone()
+        };
+        let headers = auth_headers(&key)?;
+        let url = models_url(&request.base_url);
+        let response = self
+            .http
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))?;
+        if !status.is_success() {
+            return Err(IpcError::Call(format!("Anthropic HTTP {status}: {text}")));
+        }
+        Ok(ListModelsResult {
+            models: select_for_seam(parse_model_ids(&text)?, &request.seam),
+            error: None,
+        })
+    }
+}
+
+fn auth_headers(api_key: &str) -> Result<HeaderMap, IpcError> {
+    let mut headers = HeaderMap::new();
+    if !api_key.is_empty() {
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(api_key).map_err(|err| IpcError::Call(err.to_string()))?,
+        );
+    }
+    headers.insert(
+        "anthropic-version",
+        HeaderValue::from_static(ANTHROPIC_VERSION),
+    );
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(headers)
+}
+
+fn models_url(request_base: &str) -> String {
+    let base = effective_base(request_base);
+    if base.ends_with("/v1") {
+        format!("{base}/models?limit=200")
+    } else {
+        format!("{base}/v1/models?limit=200")
+    }
+}
+
+fn parse_model_ids(body: &str) -> Result<Vec<String>, IpcError> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|err| IpcError::Call(format!("decode: {err}")))?;
+    let mut ids = Vec::new();
+    collect_ids(
+        value
+            .get("data")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice),
+        &mut ids,
+    );
+    if ids.is_empty() {
+        collect_ids(
+            value
+                .get("models")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+            &mut ids,
+        );
+    }
+    Ok(ids)
+}
+
+fn collect_ids(rows: Option<&[Value]>, ids: &mut Vec<String>) {
+    let Some(rows) = rows else {
+        return;
+    };
+    for row in rows {
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| row.as_str())
+            .unwrap_or("")
+            .trim();
+        if !id.is_empty() {
+            ids.push(id.to_owned());
+        }
+    }
+}
+
+fn select_for_seam(mut ids: Vec<String>, seam: &str) -> Vec<String> {
+    if seam != "seam.llm" {
+        return Vec::new();
+    }
+    ids.sort();
+    ids.dedup();
+    ids.truncate(500);
+    ids
 }
 
 fn env_api_key() -> String {
@@ -314,5 +412,27 @@ mod tests {
         .expect("parse");
         assert_eq!(parsed.tool_calls.len(), 1);
         assert_eq!(parsed.tool_calls[0].name, "utility.hash");
+    }
+
+    #[test]
+    fn models_url_uses_v1() {
+        assert_eq!(
+            models_url(""),
+            "https://api.anthropic.com/v1/models?limit=200"
+        );
+        assert_eq!(
+            models_url("https://api.anthropic.com/v1/"),
+            "https://api.anthropic.com/v1/models?limit=200"
+        );
+    }
+
+    #[test]
+    fn parses_anthropic_model_list() {
+        let ids = parse_model_ids(r#"{"data":[{"id":"claude-sonnet-4-5"}]}"#).expect("parse");
+        assert_eq!(
+            select_for_seam(ids.clone(), "seam.llm"),
+            vec!["claude-sonnet-4-5"]
+        );
+        assert!(select_for_seam(ids, "seam.embed").is_empty());
     }
 }

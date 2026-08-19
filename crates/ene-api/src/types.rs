@@ -412,3 +412,23 @@ pub struct SplitSessionResponse {
     pub previous: SessionView,
     pub session: SessionView,
 }
+
+/// `POST /api/v1/providers/models` body. `api_key` is never a query param.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListProviderModelsRequest {
+    pub plugin: String,
+    pub task: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+/// Vendor model ids from a provider plugin (`list_models` IPC).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListProviderModelsResponse {
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}

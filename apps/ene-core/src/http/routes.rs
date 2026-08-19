@@ -9,11 +9,12 @@ use base64::Engine;
 use ene_api::{
     AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
     CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
-    ExclusiveSnapshot, Health, HistoryResponse, JobView, McpDocument, McpServerView, MemoryPatch,
-    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page, PluginView,
-    QueuedCancel, ResourceKind, RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch,
-    SessionView, SettingsPatch, SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView,
-    ToolTestRequest, ToolView, UsageView,
+    ExclusiveSnapshot, Health, HistoryResponse, JobView, ListProviderModelsRequest,
+    ListProviderModelsResponse, McpDocument, McpServerView, MemoryPatch, MemoryView, MessageMode,
+    MessageRequest, MessageResponse, OccupantView, Page, PluginView, QueuedCancel, ResourceKind,
+    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView, SettingsPatch,
+    SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView,
+    UsageView,
 };
 use ene_companion::{JournalAction, MemoryId, MemoryScope, export_dir, install_archive};
 use ene_kernel::{DisplayDepth, HarnessSettings};
@@ -903,6 +904,46 @@ pub async fn restart_plugin(
     }))
 }
 
+pub async fn list_provider_models(
+    State(state): State<AppState>,
+    Json(body): Json<ListProviderModelsRequest>,
+) -> Result<Json<ListProviderModelsResponse>, ApiReject> {
+    let seam = ene_fiber::task_seam(&body.task)
+        .ok_or_else(|| bad_request("invalid_message", "unknown task"))?;
+    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+        return Err(bad_request("invalid_message", "unknown plugin"));
+    }
+    let api_key = if body.api_key.is_empty() {
+        state.core.secret_for(&body.task)
+    } else {
+        body.api_key
+    };
+    tracing::debug!(plugin = %body.plugin, task = %body.task, "list_models");
+    let request = ene_plugin_ipc::ListModelsRequest {
+        seam: seam.to_owned(),
+        base_url: body.base_url,
+        auth: ene_plugin_ipc::ProviderAuth { api_key },
+    };
+    match state
+        .core
+        .supervisor()
+        .list_models(&body.plugin, request)
+        .await
+    {
+        Ok(result) => Ok(Json(ListProviderModelsResponse {
+            models: result.models,
+            error: result.error,
+        })),
+        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+            Err(bad_request("invalid_message", "unknown plugin"))
+        }
+        Err(err) => Ok(Json(ListProviderModelsResponse {
+            models: Vec::new(),
+            error: Some(err.to_string()),
+        })),
+    }
+}
+
 pub async fn get_mcp(State(state): State<AppState>) -> Json<McpDocument> {
     Json(mcp_document(&state.core.mcp_servers()))
 }
@@ -1105,15 +1146,17 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
         "ai_tts_key_set": state.core.task_key_set("tts"),
         "ai_stt_key_set": state.core.task_key_set("stt"),
     });
-    let mut overlay = json!({});
-    let settings_path = state.core.data_dir().join("settings.json");
-    if settings_path.exists()
-        && let Ok(raw) = fs::read_to_string(&settings_path)
-        && let Ok(file) = serde_json::from_str::<Value>(&raw)
-    {
-        overlay = file;
-        deep_merge_objects(effective.as_object_mut(), overlay.as_object());
-    }
+    let overlay = {
+        let settings_path = state.core.data_dir().join("settings.json");
+        if settings_path.exists()
+            && let Ok(raw) = fs::read_to_string(&settings_path)
+            && let Ok(file) = serde_json::from_str::<Value>(&raw)
+        {
+            file
+        } else {
+            json!({})
+        }
+    };
     attach_provider_catalog(&mut effective, state.core.data_dir(), &plugins);
     Json(json!({ "overlay": overlay, "effective": effective }))
 }
@@ -1227,7 +1270,9 @@ pub async fn patch_settings(
             binding.remove("api_key");
         }
     }
-    fs::write(&settings_path, current.to_string())
+    let body = serde_json::to_string_pretty(&current)
+        .map_err(|err| bad_request("fault", &err.to_string()))?;
+    ene_config::config::atomic_write(&settings_path, &body)
         .map_err(|err| bad_request("fault", &err.to_string()))?;
     let mut profile_dirty = false;
     if let Some(ai_value) = current.get("ai") {

@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ene_api::{
     ApiClient, ApprovalView, CreateScheduleRequest, CreateSessionRequest, HistoryResponse, JobView,
-    McpDocument, MemoryPatch, MemoryView, MessageMode, MessageRequest, PluginView, ScheduleView,
-    SessionPatch, SessionView, SoulView,
+    ListProviderModelsRequest, McpDocument, MemoryPatch, MemoryView, MessageMode, MessageRequest,
+    PluginView, ScheduleView, SessionPatch, SessionView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -375,6 +375,36 @@ impl CoreSession {
     pub fn fetch_core_settings(&self) -> oneshot::Receiver<Result<Value, String>> {
         let client = self.client.clone();
         self.spawn_fetch(async move { client.settings().await.map_err(|err| err.to_string()) })
+    }
+
+    pub fn fetch_provider_models(
+        &self,
+        plugin: String,
+        task: String,
+        base_url: String,
+        api_key: String,
+    ) -> oneshot::Receiver<Result<Vec<String>, String>> {
+        let client = self.client.clone();
+        self.spawn_fetch(async move {
+            let listed = client
+                .list_provider_models(&ListProviderModelsRequest {
+                    plugin,
+                    task,
+                    base_url,
+                    api_key,
+                })
+                .await
+                .map_err(|err| err.to_string())?;
+            if listed.models.is_empty() {
+                if let Some(error) = listed.error {
+                    Err(error)
+                } else {
+                    Ok(Vec::new())
+                }
+            } else {
+                Ok(listed.models)
+            }
+        })
     }
 
     pub fn fetch_health(&self) -> oneshot::Receiver<Result<String, String>> {

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{
-    EmbedRequest, EmbedResult, LlmChunk, LlmGenerateRequest, LlmGeneration, ProviderFaces,
-    SttRequest, SttResult, TtsAudio, TtsRequest,
+    EmbedRequest, EmbedResult, ListModelsRequest, ListModelsResult, LlmChunk, LlmGenerateRequest,
+    LlmGeneration, ProviderFaces, SttRequest, SttResult, TtsAudio, TtsRequest,
 };
 
 /// Current `core` subprotocol version.
@@ -186,6 +186,8 @@ pub enum Message {
     TtsResult { id: u64, body: TtsAudio },
     SttTranscribe { id: u64, body: SttRequest },
     SttResult { id: u64, body: SttResult },
+    ProviderListModels { id: u64, body: ListModelsRequest },
+    ProviderModels { id: u64, body: ListModelsResult },
 }
 
 impl Message {
@@ -223,6 +225,8 @@ impl Message {
             Self::TtsResult { .. } => "tts_result",
             Self::SttTranscribe { .. } => "stt_transcribe",
             Self::SttResult { .. } => "stt_result",
+            Self::ProviderListModels { .. } => "provider_list_models",
+            Self::ProviderModels { .. } => "provider_models",
         }
     }
 }

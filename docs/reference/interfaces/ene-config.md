@@ -13,7 +13,7 @@ defining crate. Character card containers live in
 |---|---|
 | `config` | `EneConfig`, loaders (`load_config`, `load_full_config`, `get_global_config`), `ConfigStore`, `register_config_schema`, `write_schemas`, `HasConfigKey`, `ConfigTarget` |
 | `migration` | `CURRENT_CONFIG_VERSION`, `apply_migrations`, `register_migration`, `MigrationFn` |
-| `paths` | `assets_dir`, `app_data_dir`, `config_file_path`, `models_dir`, socket dirs, `IS_DEV_BUILD` |
+| `paths` | `assets_dir`, `data_dir`, `app_data_dir`, `config_file_path`, `models_dir`, socket dirs, `IS_DEV_BUILD` |
 | `prompts` / `patterns` | `PromptLibrary`, `PatternLibrary`, `SUPPORTED_LANGUAGES`, `resolve_system_language`, `substitute` |
 | `resources` / `store` | `ensure_resource_dirs`; `ConfigStore` (dirty tracking, auto-save) |
 | `user_persona` | `UserPersona` (structured persona expanded by the `{{user_persona}}` CBS macro) |

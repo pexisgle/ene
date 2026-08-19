@@ -12,7 +12,7 @@
 |---|---|
 | `config` | `EneConfig`・ローダー（`load_config`・`load_full_config`・`get_global_config`）・`ConfigStore`・`register_config_schema`・`write_schemas`・`HasConfigKey`・`ConfigTarget` |
 | `migration` | `CURRENT_CONFIG_VERSION`・`apply_migrations`・`register_migration`・`MigrationFn` |
-| `paths` | `assets_dir`・`app_data_dir`・`config_file_path`・`models_dir`・ソケットディレクトリ・`IS_DEV_BUILD` |
+| `paths` | `assets_dir`・`data_dir`・`app_data_dir`・`config_file_path`・`models_dir`・ソケットディレクトリ・`IS_DEV_BUILD` |
 | `prompts` / `patterns` | `PromptLibrary`・`PatternLibrary`・`SUPPORTED_LANGUAGES`・`resolve_system_language`・`substitute` |
 | `resources` / `store` | `ensure_resource_dirs`・`ConfigStore`（ダーティ追跡・自動保存） |
 | `user_persona` | `UserPersona`（`{{user_persona}}` CBS マクロが展開する構造化ペルソナ） |

@@ -11,12 +11,12 @@ pub use error::ApiError;
 pub use types::{
     AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
     CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
-    ExclusiveSnapshot, Health, HistoryResponse, IdempotentMessage, JobView, ListenRequest,
-    McpDocument, McpServerView, MemoryPatch, MemoryView, MessageMode, MessageRequest,
-    MessageResponse, OccupantView, Page, PluginView, Problem, QueuedCancel, ResourceKind,
-    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView, SettingsPatch,
-    SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView,
-    UsageView,
+    ExclusiveSnapshot, Health, HistoryResponse, IdempotentMessage, JobView,
+    ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument,
+    McpServerView, MemoryPatch, MemoryView, MessageMode, MessageRequest, MessageResponse,
+    OccupantView, Page, PluginView, Problem, QueuedCancel, ResourceKind, RestoreRequest,
+    ScheduleView, SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 
 /// `OpenAPI` 3.1 document. Served at `GET /api/v1/openapi.json`.

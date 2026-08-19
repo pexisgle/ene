@@ -2,10 +2,11 @@ use crate::error::ApiError;
 use crate::types::{
     AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
     CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
-    ExclusiveSnapshot, Health, HistoryResponse, JobView, ListenRequest, McpDocument, MemoryPatch,
-    MemoryView, MessageRequest, Page, PluginView, Problem, QueuedCancel, ResourceKind,
-    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView, SoulPatch,
-    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    ExclusiveSnapshot, Health, HistoryResponse, JobView, ListProviderModelsRequest,
+    ListProviderModelsResponse, ListenRequest, McpDocument, MemoryPatch, MemoryView,
+    MessageRequest, Page, PluginView, Problem, QueuedCancel, ResourceKind, RestoreRequest,
+    ScheduleView, SendMessageResponse, SessionPatch, SessionView, SoulPatch, SoulView, SpanView,
+    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -373,6 +374,17 @@ impl ApiClient {
     pub async fn list_plugins(&self) -> Result<Page<PluginView>, ApiError> {
         self.send_json(self.request(Method::GET, "/api/v1/plugins"))
             .await
+    }
+
+    pub async fn list_provider_models(
+        &self,
+        req: &ListProviderModelsRequest,
+    ) -> Result<ListProviderModelsResponse, ApiError> {
+        self.send_json(
+            self.request(Method::POST, "/api/v1/providers/models")
+                .json(req),
+        )
+        .await
     }
 
     pub async fn restart_plugin(&self, id: &str) -> Result<PluginView, ApiError> {

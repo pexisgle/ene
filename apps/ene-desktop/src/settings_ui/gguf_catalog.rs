@@ -146,7 +146,8 @@ pub struct GgufDownloadUi {
     receiver: Option<oneshot::Receiver<Result<PathBuf, String>>>,
     pub last_error: Option<String>,
     /// Set when a download completes so the page can apply the binding once.
-    pub completed_path: Option<(String, PathBuf)>,
+    pub completed_path: Option<(String, PathBuf, String)>,
+    apply_task: Option<String>,
 }
 
 impl GgufDownloadUi {
@@ -165,7 +166,7 @@ impl GgufDownloadUi {
         *self.progress.lock()
     }
 
-    pub fn start(&mut self, runtime: &tokio::runtime::Handle, entry: &CatalogEntry) {
+    pub fn start(&mut self, runtime: &tokio::runtime::Handle, entry: &CatalogEntry, task: &str) {
         if self.busy() {
             return;
         }
@@ -175,6 +176,7 @@ impl GgufDownloadUi {
         }
         self.last_error = None;
         self.completed_path = None;
+        self.apply_task = Some(task.to_owned());
         self.entry_id = Some(entry.id.to_owned());
         self.progress = Arc::new(Mutex::new(DownloadProgress::default()));
         let progress = Arc::clone(&self.progress);
@@ -194,7 +196,8 @@ impl GgufDownloadUi {
         match receiver.try_recv() {
             Ok(Ok(path)) => {
                 let id = self.entry_id.clone().unwrap_or_default();
-                self.completed_path = Some((id, path));
+                let task = self.apply_task.clone().unwrap_or_else(|| "chat".to_owned());
+                self.completed_path = Some((id, path, task));
                 self.receiver = None;
             }
             Ok(Err(err)) => {

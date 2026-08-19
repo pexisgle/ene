@@ -60,6 +60,7 @@
     "/tools/{name}/test": { "post": { "summary": "Dev invoke", "responses": { "200": { "description": "result" } } } },
     "/plugins": { "get": { "summary": "Plugin fibers", "responses": { "200": { "description": "page" } } } },
     "/plugins/{id}/restart": { "post": { "summary": "Disable then activate row", "responses": { "200": { "description": "plugin" } } } },
+    "/providers/models": { "post": { "summary": "List vendor model ids through a one-shot provider IPC probe", "responses": { "200": { "description": "models" }, "400": { "description": "unknown plugin or task" } } } },
     "/mcp": {
       "get": { "summary": "Handwritten MCP servers (mcp.json)", "responses": { "200": { "description": "document" } } },
       "put": { "summary": "Replace handwritten MCP servers and apply profile rows", "responses": { "200": { "description": "document" } } }

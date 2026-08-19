@@ -57,7 +57,7 @@ your own `.gguf` on the local plugin; cloud plugins take a model name and a
 vault API key.
 
 Embeddings are optional: unset, local GGUF (`provider.gguf`, recommended Jina),
-or a cloud embed plugin. An empty classifier falls back to the chat binding.
+or a cloud embed plugin. Empty classifier and proactive tasks inherit chat.
 
 ## 5. Tests
 

@@ -31,7 +31,8 @@ async fn main() {
     let provider = Arc::new(Gguf::new());
     let handlers = ProviderHandlers {
         llm: Some(provider.clone()),
-        embed: Some(provider),
+        embed: Some(provider.clone()),
+        models: Some(provider),
         ..ProviderHandlers::default()
     };
     if let Err(err) = serve_provider_from_env(identity(), handlers).await {

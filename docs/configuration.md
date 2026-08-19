@@ -12,9 +12,15 @@ The daemon reads `settings.json` from the data directory, then overlays
 `ENE_CORE__SERVER__*` and related env keys at boot. `ene-ctl` and `ene-stage`
 take `--url` / `--token` (or `ENE_API_URL` / `ENE_API_TOKEN`) to reach an
 already-running core. `ene-desktop` does the same when those env vars are set;
-otherwise it spawns `ene-core` and also persists a local `desktop.*` section
-(graphics, theme, language, mic, overlays, core lifetime) in its own
-`settings.json`.
+otherwise it spawns `ene-core`.
+
+The data directory is `ENE_DATA_DIR` when set. Otherwise debug builds use the
+source-tree `assets/` folder for settings, databases, vault, and workspace,
+and never write the OS data directory. Release builds use the OS data
+directory and never read the repository `assets/` folder. Desktop Apply and
+core PATCH write the same `settings.json`. `GET /api/v1/settings` returns live
+memory as `effective`; the on-disk file is `overlay` and does not replace live
+AI, mind, or plugin bindings. API keys stay in the vault.
 
 Conversation, classifier, embedding, TTS, and STT bind through `ai.tasks.<task>`
 (`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`). Chat
@@ -32,8 +38,8 @@ uses any installed LLM plugin (API key in the vault).
 
 Embeddings are optional on their own `ai.tasks.embedding` fiber: unset, local
 GGUF (recommended Jina on `provider.gguf`), or a cloud plugin that declares
-`seam.embed`. An empty classifier task reuses the chat binding. Empty TTS and
-STT tasks stay disabled.
+`seam.embed`. Empty classifier and proactive tasks inherit the chat binding.
+Empty TTS and STT tasks stay disabled.
 
 Plugin launch is `plugins.profile` (`desktop`, `minimal`, or `headless`), not a
 per-plugin enable map. Related keys:
@@ -48,7 +54,3 @@ per-plugin enable map. Related keys:
 
 MCP servers are handwritten `mcp.json` rows, not settings keys. See
 [Plugins & MCP](concepts/plugins-and-mcp.md).
-
-Debug builds still resolve some bundled assets from the repository `assets/`
-folder. Runtime data (`sessions.db`, `api.token`, `vault.bin`, workspace)
-lives under the data directory, not next to the settings file.

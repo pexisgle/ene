@@ -260,6 +260,10 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/tools/{name}/test", post(routes::test_tool))
         .route("/api/v1/plugins", get(routes::list_plugins))
         .route("/api/v1/plugins/{id}/restart", post(routes::restart_plugin))
+        .route(
+            "/api/v1/providers/models",
+            post(routes::list_provider_models),
+        )
         .route("/api/v1/mcp", get(routes::get_mcp).put(routes::put_mcp))
         .route("/api/v1/approvals", get(routes::list_approvals))
         .route(

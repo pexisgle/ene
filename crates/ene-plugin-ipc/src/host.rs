@@ -5,8 +5,8 @@ use crate::protocol::{
     ToolSpecWire, VersionRange,
 };
 use crate::provider::{
-    EmbedRequest, EmbedResult, LlmGenerateRequest, LlmGeneration, ProviderFaces, SttRequest,
-    SttResult, TtsAudio, TtsRequest,
+    EmbedRequest, EmbedResult, ListModelsRequest, ListModelsResult, LlmGenerateRequest,
+    LlmGeneration, ProviderFaces, SttRequest, SttResult, TtsAudio, TtsRequest,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -182,6 +182,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
         }
     }
 
+    pub async fn list_models(
+        &mut self,
+        request: ListModelsRequest,
+    ) -> Result<ListModelsResult, IpcError> {
+        if self
+            .negotiated
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.models)
+            .is_none()
+        {
+            return Ok(ListModelsResult::default());
+        }
+        let id = self.alloc();
+        self.send(&Message::ProviderListModels { id, body: request })
+            .await?;
+        match self.recv().await? {
+            Message::ProviderModels { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
     pub async fn drain(&mut self) -> Result<(), IpcError> {
         let id = self.alloc();
         self.send(&Message::Drain { id }).await?;
@@ -264,6 +286,7 @@ fn negotiate_faces(
         embed: pick(offered.embed),
         tts: pick(offered.tts),
         stt: pick(offered.stt),
+        models: pick(offered.models),
         vad: pick(offered.vad),
     };
     (!faces.is_empty()).then_some(faces)

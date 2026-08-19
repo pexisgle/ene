@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ene_plugin_ipc::{
-    EmbedHandler, EmbedRequest, EmbedResult, IpcError, LlmGenerateRequest, LlmGeneration,
-    LlmHandler, LlmMessage, LlmRole, LlmToolCall,
+    EmbedHandler, EmbedRequest, EmbedResult, IpcError, ListModelsRequest, ListModelsResult,
+    LlmGenerateRequest, LlmGeneration, LlmHandler, LlmMessage, LlmRole, LlmToolCall, ModelsHandler,
 };
 use serde_json::{Value, json};
 
@@ -86,6 +86,21 @@ impl EmbedHandler for Gguf {
     }
 }
 
+#[async_trait]
+impl ModelsHandler for Gguf {
+    async fn list_models(&self, _request: ListModelsRequest) -> Result<ListModelsResult, IpcError> {
+        let Some(base) = crate::sidecar::managed_base() else {
+            return Ok(ListModelsResult::default());
+        };
+        let url = format!("{base}/models");
+        let value = self.get_json(&url).await?;
+        Ok(ListModelsResult {
+            models: parse_model_ids(&value),
+            error: None,
+        })
+    }
+}
+
 impl Gguf {
     async fn post_json(&self, url: &str, body: Value) -> Result<Value, IpcError> {
         let response = self
@@ -104,6 +119,65 @@ impl Gguf {
             .json()
             .await
             .map_err(|err| IpcError::Call(err.to_string()))
+    }
+
+    async fn get_json(&self, url: &str) -> Result<Value, IpcError> {
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(IpcError::Call(format_http_error(status, &body)));
+        }
+        response
+            .json()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))
+    }
+}
+
+fn parse_model_ids(value: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_ids(
+        value
+            .get("data")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice),
+        &mut ids,
+    );
+    if ids.is_empty() {
+        collect_ids(
+            value
+                .get("models")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+            &mut ids,
+        );
+    }
+    ids.sort();
+    ids.dedup();
+    ids.truncate(500);
+    ids
+}
+
+fn collect_ids(rows: Option<&[Value]>, ids: &mut Vec<String>) {
+    let Some(rows) = rows else {
+        return;
+    };
+    for row in rows {
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| row.as_str())
+            .unwrap_or("")
+            .trim();
+        if !id.is_empty() {
+            ids.push(id.to_owned());
+        }
     }
 }
 
@@ -324,5 +398,13 @@ mod tests {
     fn sidecar_base_errors_when_not_started() {
         let err = sidecar_base().expect_err("no sidecar");
         assert!(err.to_string().contains("sidecar"));
+    }
+
+    #[test]
+    fn parses_openai_compat_model_list() {
+        let ids = parse_model_ids(&json!({
+            "data": [{ "id": "local-gguf" }, { "id": "local-gguf" }]
+        }));
+        assert_eq!(ids, vec!["local-gguf"]);
     }
 }

@@ -7,8 +7,8 @@ use super::components::{section_card, toggle_row};
 use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
 use super::provider_form::{
-    ProviderInfo, catalog_from_settings, ids_with_seam, plugin_combo, plugin_needs_key,
-    provider_description, sidecar_fields,
+    ProviderInfo, catalog_from_settings, cloud_model_combo, ids_with_seam, plugin_combo,
+    plugin_needs_key, provider_description, sidecar_fields,
 };
 use serde_json::{Value, json};
 
@@ -21,14 +21,14 @@ pub fn render(
     world: &mut bevy_ecs::world::World,
 ) {
     input.core_settings.poll();
+    input.cloud_models.poll();
     if !input.core_settings.started() {
         input.core_settings.start(ai.fetch_core_settings());
     }
     if let Some(Ok(core)) = &input.core_settings.data
-        && draft.editing().section_value("ai").is_none()
         && let Some(ai_value) = core.pointer("/effective/ai")
     {
-        draft.seed_core_section("ai", ai_value.clone());
+        draft.seed_core_if_clean("ai", ai_value.clone());
         input.ai_tts_key_set = core
             .pointer("/effective/ai_tts_key_set")
             .and_then(Value::as_bool)
@@ -56,6 +56,7 @@ pub fn render(
                 ui,
                 draft,
                 input,
+                ai,
                 "tts",
                 &ids_with_seam(&catalog, "seam.tts"),
                 &catalog,
@@ -71,6 +72,7 @@ pub fn render(
                 ui,
                 draft,
                 input,
+                ai,
                 "stt",
                 &ids_with_seam(&catalog, "seam.stt"),
                 &catalog,
@@ -156,6 +158,7 @@ fn render_audio_binding(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,
     input: &mut SettingsInputState,
+    ai: &Arc<CoreSession>,
     task: &str,
     plugins: &[String],
     catalog: &[ProviderInfo],
@@ -189,17 +192,6 @@ fn render_audio_binding(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-model-label"));
-    let model_changed = ui
-        .add(egui::TextEdit::singleline(&mut model).desired_width(f32::INFINITY))
-        .changed();
-    if task == "tts" {
-        ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-voice-label"));
-    }
-    let voice_changed = task == "tts"
-        && ui
-            .add(egui::TextEdit::singleline(&mut voice).desired_width(f32::INFINITY))
-            .changed();
     ui.label(i18n_embed_fl::fl!(
         crate::i18n::loader(),
         "ai-base-url-label"
@@ -207,7 +199,6 @@ fn render_audio_binding(
     let url_changed = ui
         .add(egui::TextEdit::singleline(&mut base_url).desired_width(f32::INFINITY))
         .changed();
-    let sidecar_changed = sidecar_fields(ui, &mut binding, catalog);
     let mut key_changed = false;
     if plugin_needs_key(catalog, &plugin) {
         ui.label(i18n_embed_fl::fl!(
@@ -230,6 +221,28 @@ fn render_audio_binding(
             )
             .changed();
     }
+    let key = if task == "tts" {
+        input.ai_tts_key.clone()
+    } else {
+        input.ai_stt_key.clone()
+    };
+    input.cloud_models.sync(ai, task, &plugin, &base_url, &key);
+    let model_changed = cloud_model_combo(
+        ui,
+        &format!("voice-{task}-model"),
+        &plugin,
+        task,
+        &mut model,
+        input.cloud_models.combo_state(task),
+    );
+    if task == "tts" {
+        ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-voice-label"));
+    }
+    let voice_changed = task == "tts"
+        && ui
+            .add(egui::TextEdit::singleline(&mut voice).desired_width(f32::INFINITY))
+            .changed();
+    let sidecar_changed = sidecar_fields(ui, &mut binding, catalog);
     if plugin != binding.get("plugin").and_then(Value::as_str).unwrap_or("")
         || model_changed
         || voice_changed
@@ -237,6 +250,9 @@ fn render_audio_binding(
         || sidecar_changed
         || key_changed
     {
+        if input.core_settings.data.is_none() {
+            return;
+        }
         binding["plugin"] = json!(plugin);
         binding["model"] = json!(model);
         binding["base_url"] = json!(base_url);
@@ -248,11 +264,11 @@ fn render_audio_binding(
         } else if !input.ai_stt_key.is_empty() {
             binding["api_key"] = json!(input.ai_stt_key.clone());
         }
-        let mut ai = draft
+        let mut ai_section = draft
             .editing()
             .section_value("ai")
             .unwrap_or_else(|| json!({ "tasks": {} }));
-        ai["tasks"][task] = binding;
-        draft.set_section_value("ai", ai);
+        ai_section["tasks"][task] = binding;
+        draft.set_section_value("ai", ai_section);
     }
 }

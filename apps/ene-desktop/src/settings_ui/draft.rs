@@ -243,6 +243,24 @@ impl SettingsDraft {
         drop(self.persisted.set_section_value(key, value));
     }
 
+    /// Desktop disk only stores `desktop.*` (plus a possible stub like
+    /// `mind.language`). Overlay live core JSON unless the user has already
+    /// edited this section.
+    pub fn seed_core_if_clean(&mut self, key: &str, value: serde_json::Value) {
+        if self.section_is_dirty(key) {
+            return;
+        }
+        self.seed_core_section(key, value);
+    }
+
+    #[must_use]
+    pub fn section_is_dirty(&self, key: &str) -> bool {
+        let prefix = format!("{key}.");
+        self.dirty_paths
+            .iter()
+            .any(|path| path == key || path.starts_with(&prefix))
+    }
+
     fn touch(&mut self, path: String) {
         self.dirty_paths.insert(path);
         self.revision = self.revision.saturating_add(1);
@@ -297,6 +315,17 @@ impl SettingsDraft {
         self.validation.clear();
         self.secrets
             .retain(|_, state| *state == SecretState::Unchanged);
+    }
+
+    /// Re-seeds core JSON that `resync` dropped because desktop disk config
+    /// only stores `desktop.*`.
+    pub fn keep_core_extras(&mut self, previous: &EneConfig) {
+        for (key, value) in &previous.extra {
+            if key == "desktop" {
+                continue;
+            }
+            self.seed_core_section(key, value.clone());
+        }
     }
 
     /// Refreshes only the persisted baseline, keeping pending edits intact.
@@ -442,6 +471,43 @@ fn redact_config_for_draft(config: &EneConfig) -> EneConfig {
         redact_value(key, value);
     }
     redacted
+}
+
+/// Drop secret leaves so the desktop settings file never stores vault values.
+#[must_use]
+pub(crate) fn without_secrets(config: &EneConfig) -> EneConfig {
+    let mut stripped = config.clone();
+    for (key, value) in &mut stripped.extra {
+        strip_secret_leaves(key, value);
+    }
+    stripped
+}
+
+fn strip_secret_leaves(key: &str, value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if is_secret_key_name(key) {
+                object.remove("inline");
+                return;
+            }
+            object.retain(|child, child_val| {
+                if is_secret_key_name(child) && !child_val.is_object() {
+                    return false;
+                }
+                strip_secret_leaves(child, child_val);
+                true
+            });
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_secret_leaves(key, item);
+            }
+        }
+        serde_json::Value::String(string) if *string == SECRET_PLACEHOLDER => {
+            string.clear();
+        }
+        _ => {}
+    }
 }
 
 fn redact_value(key: &str, value: &mut serde_json::Value) {
@@ -880,6 +946,23 @@ mod tests {
     }
 
     #[test]
+    fn without_secrets_drops_api_keys() {
+        let stripped = without_secrets(&config_with_real_secrets());
+        let text = serde_json::to_string(&stripped).expect("serializes");
+        assert!(
+            !text.contains("sk-stored-inline"),
+            "persistable settings must not keep the vault value"
+        );
+        assert_eq!(
+            stripped
+                .get_path("ai.tasks.chat.plugin")
+                .and_then(|value| value.as_str().map(str::to_owned)),
+            Some("provider.openai_compat".to_owned())
+        );
+        assert!(stripped.get_path("ai.tasks.chat.api_key").is_none());
+    }
+
+    #[test]
     fn seed_core_section_does_not_dirty() {
         let mut d = draft();
         d.seed_core_section(
@@ -892,6 +975,73 @@ mod tests {
                 .section_value("ai")
                 .and_then(|value| value.pointer("/tasks/chat/plugin").cloned()),
             Some(json!("provider.openai_compat"))
+        );
+    }
+
+    #[test]
+    fn keep_core_extras_survives_desktop_resync() {
+        let mut d = draft();
+        d.seed_core_section(
+            "ai",
+            json!({"tasks": {"chat": {"plugin": "provider.gguf"}}}),
+        );
+        let previous = d.editing().clone();
+        d.resync(EneConfig::default());
+        assert!(d.editing().section_value("ai").is_none());
+        d.keep_core_extras(&previous);
+        assert_eq!(
+            d.editing()
+                .section_value("ai")
+                .and_then(|value| value.pointer("/tasks/chat/plugin").cloned()),
+            Some(json!("provider.gguf"))
+        );
+        assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn seed_core_if_clean_replaces_desktop_stub() {
+        let mut d = draft();
+        d.seed_core_section("mind", json!({"language": "ja"}));
+        d.seed_core_section("ai", json!({"tasks": {"chat": {"plugin": ""}}}));
+        d.seed_core_if_clean(
+            "mind",
+            json!({"language": "ja", "proactive": {"enabled": true}}),
+        );
+        d.seed_core_if_clean(
+            "ai",
+            json!({"tasks": {"chat": {"plugin": "provider.gguf", "model": "gemma-4-e2b"}}}),
+        );
+        assert!(!d.is_dirty());
+        assert_eq!(
+            d.editing()
+                .section_value("mind")
+                .and_then(|value| value.pointer("/proactive/enabled").cloned()),
+            Some(json!(true))
+        );
+        assert_eq!(
+            d.editing()
+                .section_value("ai")
+                .and_then(|value| value.pointer("/tasks/chat/plugin").cloned()),
+            Some(json!("provider.gguf"))
+        );
+    }
+
+    #[test]
+    fn seed_core_if_clean_keeps_dirty_edits() {
+        let mut d = draft();
+        d.set_section_value(
+            "ai",
+            json!({"tasks": {"chat": {"plugin": "provider.anthropic"}}}),
+        );
+        d.seed_core_if_clean(
+            "ai",
+            json!({"tasks": {"chat": {"plugin": "provider.gguf"}}}),
+        );
+        assert_eq!(
+            d.editing()
+                .section_value("ai")
+                .and_then(|value| value.pointer("/tasks/chat/plugin").cloned()),
+            Some(json!("provider.anthropic"))
         );
     }
 }

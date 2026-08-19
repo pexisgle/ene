@@ -112,11 +112,8 @@ pub fn render(
 }
 
 fn seed_draft_once(draft: &mut SettingsDraft, settings: &Value) {
-    if draft.editing().section_value("plugins").is_some() {
-        return;
-    }
     if let Some(plugins) = settings.pointer("/effective/plugins") {
-        draft.seed_core_section("plugins", plugins.clone());
+        draft.seed_core_if_clean("plugins", plugins.clone());
     }
 }
 

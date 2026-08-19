@@ -171,12 +171,11 @@ fn remove_nested(extra: &mut indexmap::IndexMap<String, serde_json::Value>, keys
     current.remove(keys[keys.len() - 1]);
 }
 
-/// Desktop process persists only `desktop.*` plus declared top-level fields.
+/// JSON layer written to the shared `settings.json` (`data_dir()/settings.json`).
+/// Core sections stay so a restart can reload them; secret leaves are dropped.
 #[must_use]
-pub fn local_config(proposed: &ene_config::EneConfig) -> ene_config::EneConfig {
-    let mut local = proposed.clone();
-    local.extra.retain(|key, _| key == "desktop");
-    local
+pub fn persistable_config(proposed: &ene_config::EneConfig) -> ene_config::EneConfig {
+    super::draft::without_secrets(proposed)
 }
 
 /// Top-level extra keys other than `desktop` that the draft dirtied.
@@ -214,7 +213,7 @@ pub(crate) fn begin_finalize(
     ai: &CoreSession,
     proposed: ene_config::EneConfig,
 ) -> Result<tokio::sync::oneshot::Receiver<Result<BTreeSet<String>, String>>, ApplyError> {
-    settings.set_config(local_config(&proposed));
+    settings.set_config(persistable_config(&proposed));
     if let Err(error) = settings.save() {
         return Err(ApplyError::Persist(error.to_string()));
     }
@@ -386,16 +385,27 @@ mod tests {
         drop(config.set_section_value("desktop", json!({"language": "en", "theme": "dark"})));
         drop(config.set_section_value(
             "ai",
-            json!({"tasks": {"chat": {"plugin": "provider.openai_compat"}}}),
+            json!({"tasks": {"chat": {"plugin": "provider.openai_compat", "api_key": "sk-secret"}}}),
         ));
         config
     }
 
     #[test]
-    fn local_config_keeps_only_desktop_extra() {
-        let local = local_config(&config_with_sections());
-        assert!(local.extra.contains_key("desktop"));
-        assert!(!local.extra.contains_key("ai"));
+    fn persistable_config_keeps_core_sections_and_drops_keys() {
+        let persisted = persistable_config(&config_with_sections());
+        assert!(persisted.extra.contains_key("desktop"));
+        assert_eq!(
+            persisted
+                .section_value("ai")
+                .and_then(|value| value.pointer("/tasks/chat/plugin").cloned()),
+            Some(json!("provider.openai_compat"))
+        );
+        assert!(
+            persisted
+                .section_value("ai")
+                .and_then(|value| value.pointer("/tasks/chat/api_key").cloned())
+                .is_none()
+        );
     }
 
     #[test]

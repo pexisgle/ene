@@ -46,7 +46,6 @@ pub(crate) struct SpawnOpts<'a> {
     pub binary: &'a Path,
     pub plugin_id: &'a str,
     pub digest: &'a str,
-    pub socket_dir: &'a Path,
     pub row_id: &'a str,
     pub sandbox_required: bool,
     pub temp_dir: &'a Path,
@@ -54,6 +53,17 @@ pub(crate) struct SpawnOpts<'a> {
     pub config: &'a serde_json::Value,
     pub max_frame_bytes: u32,
     pub allow_unverified: bool,
+}
+
+/// Plugin IPC socket path. Always a short `/tmp/ene-<hash>.sock` so bind
+/// cannot hit `SUN_LEN` (108). Workspace and `TMPDIR` paths are often longer
+/// than that once `probe-<uuid>.sock` is appended, especially when
+/// `assets_dir` is still `target/debug/../../assets`.
+pub(crate) fn plugin_ipc_socket_path(row_id: &str) -> PathBuf {
+    let key = format!("{}:{row_id}", std::process::id());
+    let hex = format!("{}", blake3::hash(key.as_bytes()).to_hex());
+    let name = format!("ene-{}.sock", hex.get(..16).unwrap_or(hex.as_str()));
+    PathBuf::from("/tmp").join(name)
 }
 
 /// BLAKE3 digest of a plugin binary or script file (`blake3:<hex>`).
@@ -67,20 +77,17 @@ pub fn file_digest(path: &Path) -> Result<String, SupervisorError> {
 }
 
 pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, SupervisorError> {
-    std::fs::create_dir_all(opts.socket_dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(opts.socket_dir, std::fs::Permissions::from_mode(0o700))?;
+    let socket_path = plugin_ipc_socket_path(opts.row_id);
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    std::fs::create_dir_all(opts.temp_dir)?;
-    let socket_path = opts.socket_dir.join(format!("{}.sock", opts.row_id));
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)?;
     }
     let listener = UnixListener::bind(&socket_path)?;
+    std::fs::create_dir_all(opts.temp_dir)?;
     let spawn_token = Uuid::now_v7().to_string();
-    let sandbox = sandbox_for(&opts)?;
+    let sandbox = sandbox_for(&opts, &socket_path)?;
     let mut command = plugin_command(
         opts.binary,
         &socket_path,
@@ -240,7 +247,10 @@ fn terminate_child(child: &mut Child) {
     drop(child.wait());
 }
 
-fn sandbox_for(opts: &SpawnOpts<'_>) -> Result<Option<SandboxSpec>, SupervisorError> {
+fn sandbox_for(
+    opts: &SpawnOpts<'_>,
+    socket_path: &Path,
+) -> Result<Option<SandboxSpec>, SupervisorError> {
     if !opts.sandbox_required {
         return Ok(None);
     }
@@ -249,7 +259,7 @@ fn sandbox_for(opts: &SpawnOpts<'_>) -> Result<Option<SandboxSpec>, SupervisorEr
     }
     Ok(Some(build_spec(
         opts.binary,
-        opts.socket_dir,
+        socket_path,
         opts.temp_dir,
         opts.workspace,
         opts.sandbox_required && plugin_isolates_network(opts.plugin_id),
@@ -262,7 +272,7 @@ fn plugin_isolates_network(plugin_id: &str) -> bool {
 
 fn build_spec(
     binary: &Path,
-    socket_dir: &Path,
+    socket_path: &Path,
     temp_dir: &Path,
     workspace: &Path,
     sandbox_required: bool,
@@ -277,9 +287,9 @@ fn build_spec(
             allowed_read.extend(std::env::split_paths(&path));
         }
     }
-    allowed_read.push(socket_dir.to_path_buf());
+    allowed_read.push(socket_path.to_path_buf());
     allowed_read.push(temp_dir.to_path_buf());
-    allowed_write.push(socket_dir.to_path_buf());
+    allowed_write.push(socket_path.to_path_buf());
     allowed_write.push(temp_dir.to_path_buf());
     let workspace = workspace
         .canonicalize()
@@ -398,12 +408,47 @@ pub(crate) fn exe_plugin_candidates(dir: &Path, stem: &str) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::plugin_isolates_network;
+    use super::{plugin_ipc_socket_path, plugin_isolates_network};
 
     #[test]
     fn web_plugin_keeps_host_network() {
         assert!(!plugin_isolates_network("tool.web"));
         assert!(plugin_isolates_network("tool.fs"));
         assert!(plugin_isolates_network("tool.exec"));
+    }
+
+    #[test]
+    fn plugin_ipc_socket_path_fits_sun_len() {
+        let path = plugin_ipc_socket_path("probe-019c4e2a-1234-7890-abcd-ef0123456789");
+        assert!(
+            path.as_os_str().len() < 40,
+            "unix socket path too long: {} ({} bytes)",
+            path.display(),
+            path.as_os_str().len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unnormalized_assets_workspace_socket_exceeds_sun_len() {
+        let path = std::path::Path::new("/home/pexisgle/dev/Ene/target/debug")
+            .join("../../assets/workspace/sockets")
+            .join("probe-019c4e2a-1234-7890-abcd-ef0123456789.sock");
+        assert!(
+            path.as_os_str().len() >= 108,
+            "unnormalized debug assets socket must exceed SUN_LEN: {} ({} bytes)",
+            path.display(),
+            path.as_os_str().len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_ipc_socket_binds() {
+        let path = plugin_ipc_socket_path("sun-len-bind-test");
+        drop(std::fs::remove_file(&path));
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        drop(listener);
+        drop(std::fs::remove_file(&path));
     }
 }

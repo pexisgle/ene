@@ -57,3 +57,11 @@ unrelated rows stay up.
 Providers come from the host catalog and are spawned when bound in
 `ai.tasks.*`, not from the profile name. Change the profile from the Plugins
 page or `PATCH /api/v1/settings` with `{"plugins":{"profile":"minimal"}}`.
+
+Remote inventory (OpenAI-compatible `/models`, Anthropic `v1/models`) is a
+provider RPC (`list_models`). Core exposes it as `POST /api/v1/providers/models`
+(plugin, task, draft base URL, typed key; empty key uses the vault). Desktop
+does not call vendor HTTP. Local GGUF files stay on the host catalog and file
+picker; plugins never download weights. `provider.gguf` lists sidecar
+`/v1/models` only when llama-server is already up. TTS plugins that have not
+implemented the RPC keep free-text model fields.

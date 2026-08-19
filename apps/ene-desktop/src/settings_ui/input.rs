@@ -9,6 +9,7 @@ use ene_api::{ApprovalView, MemoryView, PluginView, ScheduleView, SessionView};
 use serde_json::Value;
 
 use crate::settings::CharacterSettings;
+use crate::settings_ui::cloud_models::CloudModelListUi;
 use crate::settings_ui::gguf_catalog::GgufDownloadUi;
 
 /// Dynamic `ListConfigOptions` results: dotted field path → (label, value)
@@ -136,6 +137,7 @@ pub struct SettingsInputState {
     /// Custom embedding `.gguf` path from the file picker.
     pub embed_custom_path: String,
     pub gguf_download: GgufDownloadUi,
+    pub cloud_models: CloudModelListUi,
     pub llama_server_on_path: Option<bool>,
     /// Enumerated input device names for the microphone picker.
     pub mic_devices: Vec<String>,
@@ -152,6 +154,8 @@ pub struct SettingsInputState {
     pub mcp: AsyncData<Result<ene_api::McpDocument, String>>,
     pub mcp_json: String,
     pub mcp_status: Option<String>,
+    /// GGUF combo / key flags were filled from the current core settings fetch.
+    pub ai_pickers_seeded: bool,
 }
 
 impl SettingsInputState {
@@ -178,6 +182,8 @@ impl SettingsInputState {
         self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
         self.ai_user_name.clone_from(&settings.config().user_name);
         self.ai_api_key.clear();
+        self.ai_pickers_seeded = false;
+        self.core_settings = AsyncData::new();
     }
 }
 

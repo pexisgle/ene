@@ -37,9 +37,6 @@ impl SeamedClassify {
         if !specific.is_unconfigured() {
             return specific.clone();
         }
-        if !ai.tasks.classifier.is_unconfigured() {
-            return ai.tasks.classifier.clone();
-        }
         ai.tasks.chat.clone()
     }
 
