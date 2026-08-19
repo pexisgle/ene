@@ -85,6 +85,20 @@ jobs:
       - name: Build docs
         run: cargo doc --workspace --no-deps
 
+  windows-native:
+    name: Native Windows check
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Lint native Windows applications
+        run: cargo clippy -p ene-daemon -p ene-desktop -p ene-stage --all-targets -- -D warnings
+      - name: Test Windows-compatible libraries
+        run: cargo test -p ene-config -p ene-plane -p ene-fiber
+
   # Keep the two newest rust-cache generations per job, run after the
   # caching jobs save theirs.
   cache-prune:

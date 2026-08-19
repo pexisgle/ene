@@ -20,7 +20,7 @@
 //! be initialized, the child is never exec'd and the spawn fails.
 
 #![cfg_attr(
-    test,
+    all(test, target_os = "linux"),
     expect(
         clippy::expect_used,
         reason = "unit tests use expect for concise assertions"

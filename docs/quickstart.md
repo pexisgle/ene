@@ -5,13 +5,14 @@ Build-environment details live in the repository's `AGENTS.md`.
 
 ## 1. Requirements
 
-- **Linux** is the only supported development and CI platform. Windows is
-  cross-compiled from Linux; macOS is not supported.
-- **Rust ≥ 1.85** (the workspace uses edition 2024). CI uses the stable
-  toolchain.
-- Native dependencies: Vulkan, ALSA, OpenSSL, `libclang`, `mold`, and
-  Wayland/X11 development packages. The checked-in Nix flake provides all of
-  them:
+- **Linux and native Windows** are supported development platforms. macOS is
+  not supported.
+- **Rust ≥ 1.85** (the workspace uses edition 2024). Use the stable toolchain.
+- On Linux, native dependencies are Vulkan, ALSA, OpenSSL, `libclang`, `mold`,
+  and Wayland/X11 development packages. The checked-in Nix flake provides them.
+- On Windows, install the stable MSVC Rust toolchain, Visual Studio 2022
+  Build Tools with **Desktop development with C++**, and the Windows 10/11
+  SDK. The desktop uses DX12 and WASAPI on Windows.
 
 ```sh
 nix develop --command cargo build --workspace
@@ -21,9 +22,18 @@ If `direnv` is active in the repository, plain `cargo` works directly.
 
 ## 2. Build
 
+Linux builds can use the workspace commands directly:
+
 ```sh
 cargo build --workspace
 cargo build -p ene-ctl
+```
+
+For native Windows desktop development, build the daemon alongside the client
+so `ene-desktop` can start `ene-core` from `target/debug`:
+
+```powershell
+cargo build -p ene-daemon -p ene-desktop
 ```
 
 ## 3. Run the CLI
@@ -43,6 +53,10 @@ and `--token` (or `ENE_API_URL` / `ENE_API_TOKEN`) at an already-running
 ```sh
 cargo run -p ene-desktop
 ```
+
+On native Windows, run the same command from PowerShell after building both
+`ene-daemon` and `ene-desktop` as shown above. Set `ENE_CORE_BIN` if the daemon
+binary is stored outside `target/debug`.
 
 Desktop starts `ene-core` as a child when needed, shows the character overlay
 and chat on the surface depth, and opens a separate detail window (F4 / tray)

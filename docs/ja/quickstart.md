@@ -5,11 +5,13 @@
 
 ## 1. 要件
 
-- **Linux** だけが開発・CI の対象です。Windows は Linux からのクロスコンパイル、
-  macOS は非対応です。
-- **Rust ≥ 1.85**（edition 2024）。CI は stable です。
-- ネイティブ依存: Vulkan、ALSA、OpenSSL、`libclang`、`mold`、Wayland/X11。
-  checked-in の Nix flake が全部出します。
+- **Linux とネイティブ Windows** を開発対象にします。macOS は非対応です。
+- **Rust ≥ 1.85**（edition 2024）。stable ツールチェーンを使います。
+- Linux のネイティブ依存は Vulkan、ALSA、OpenSSL、`libclang`、`mold`、
+  Wayland/X11 です。checked-in の Nix flake が提供します。
+- Windows では stable MSVC Rust ツールチェーン、Visual Studio 2022 Build Tools の
+  **Desktop development with C++**、Windows 10/11 SDK を入れます。デスクトップは
+  Windows では DX12 と WASAPI を使います。
 
 ```sh
 nix develop --command cargo build --workspace
@@ -19,9 +21,18 @@ nix develop --command cargo build --workspace
 
 ## 2. ビルド
 
+Linux ではワークスペースのコマンドをそのまま使えます。
+
 ```sh
 cargo build --workspace
 cargo build -p ene-ctl
+```
+
+ネイティブ Windows でデスクトップを開発するときは、`target/debug` の
+`ene-core` をデスクトップから起動できるよう、両方をビルドします。
+
+```powershell
+cargo build -p ene-daemon -p ene-desktop
 ```
 
 ## 3. CLI を動かす
@@ -40,6 +51,10 @@ cargo run -p ene-ctl -- --help
 ```sh
 cargo run -p ene-desktop
 ```
+
+ネイティブ Windows では、上記の両方のビルドを PowerShell で実行してから
+同じコマンドを使います。デーモンを `target/debug` 外に置く場合は
+`ENE_CORE_BIN` を設定してください。
 
 desktop は必要なら `ene-core` を子プロセスとして起動し、表層にキャラクターと
 チャットを出し、詳細は別窓（F4 / トレイ）です。`ene-stage` は同一 API の

@@ -241,6 +241,7 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/tmp/dev.pexisgle.ene.plugins"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn long_temp_dir_falls_back_to_short_socket_path() {
         let long = Path::new("/home/someone/.local/state/very/long/temp/path");

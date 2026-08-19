@@ -12,6 +12,7 @@ use crate::event::ai::{
     BeatPulse, CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
 };
 use crate::event::chat::OpenChat;
+#[cfg(target_os = "linux")]
 use crate::event::lifecycle::TickGtk;
 use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};

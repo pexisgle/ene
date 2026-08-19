@@ -95,9 +95,19 @@ pub fn ene_core_binary() -> Option<PathBuf> {
         .find_map(|dir| binary_in_dir(&dir))
 }
 
-pub fn wait_for_api_json(path: &Path) -> Result<Value, String> {
+fn wait_for_api_json_inner(path: &Path, mut child: Option<&mut Child>) -> Result<Value, String> {
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
+        if let Some(child) = child.as_mut()
+            && let Some(status) = child
+                .try_wait()
+                .map_err(|err| format!("failed to poll ene-core: {err}"))?
+        {
+            return Err(format!(
+                "ene-core exited with {status} before the API became ready (api.json at {})",
+                path.display()
+            ));
+        }
         if let Ok(text) = std::fs::read_to_string(path)
             && let Ok(mut value) = serde_json::from_str::<Value>(&text)
             && url_ready(&value)
@@ -234,12 +244,30 @@ pub fn resolve_connection(
         }
     }
 
-    let child = spawn_core(&data_dir)?;
-    let ready = wait_for_api_json(&ready_path)?;
-    let (url, token) = connection_from_ready(&ready)?;
+    let mut child = spawn_core(&data_dir)?;
+    let ready = match wait_for_api_json_inner(&ready_path, Some(&mut child)) {
+        Ok(ready) => ready,
+        Err(err) => {
+            terminate_child(&mut child);
+            return Err(err);
+        }
+    };
+    let (url, token) = match connection_from_ready(&ready) {
+        Ok(connection) => connection,
+        Err(err) => {
+            terminate_child(&mut child);
+            return Err(err);
+        }
+    };
     let client = ene_api::ApiClient::new(url.clone(), token.clone(), "desktop");
-    runtime
-        .block_on(health_reachable(&client, HEALTH_TIMEOUT))
-        .map_err(|err| format!("ene-core health check failed: {err}"))?;
+    if let Err(err) = runtime.block_on(health_reachable(&client, HEALTH_TIMEOUT)) {
+        terminate_child(&mut child);
+        return Err(format!("ene-core health check failed: {err}"));
+    }
     Ok((url, token, CoreChild::spawned(child, kill_on_drop)))
+}
+
+fn terminate_child(child: &mut Child) {
+    drop(child.kill());
+    drop(child.wait());
 }
