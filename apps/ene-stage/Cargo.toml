@@ -54,7 +54,6 @@ cpal = { workspace = true, optional = true }
 rodio = { workspace = true, optional = true, features = ["playback"] }
 rustfft = { workspace = true, optional = true }
 notify-rust = "4"
-pollster = "1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18.2"
