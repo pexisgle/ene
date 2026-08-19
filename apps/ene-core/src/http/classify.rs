@@ -34,10 +34,10 @@ impl SeamedClassify {
             ClassifyTask::ProactiveDecision | ClassifyTask::ScreenSummary => &ai.tasks.proactive,
             _ => &ai.tasks.classifier,
         };
-        if !specific.uses_echo() {
+        if !specific.is_unconfigured() {
             return specific.clone();
         }
-        if !ai.tasks.classifier.uses_echo() {
+        if !ai.tasks.classifier.is_unconfigured() {
             return ai.tasks.classifier.clone();
         }
         ai.tasks.chat.clone()
@@ -62,8 +62,10 @@ impl ClassifyModel for SeamedClassify {
     ) -> Result<String, CompanionError> {
         let core = self.core()?;
         let binding = Self::binding_for(&core, task);
-        if binding.uses_echo() {
-            return Err(CompanionError::Classify("classifier is echo".to_owned()));
+        if binding.is_unconfigured() {
+            return Err(CompanionError::Classify(
+                "classifier is not configured".to_owned(),
+            ));
         }
         let request = LlmGenerateRequest {
             messages: vec![
@@ -122,8 +124,10 @@ impl SeamedClassify {
         let core = self.core()?;
         let task = ClassifyTask::ScreenSummary;
         let binding = Self::binding_for(&core, task);
-        if binding.uses_echo() {
-            return Err(CompanionError::Classify("classifier is echo".to_owned()));
+        if binding.is_unconfigured() {
+            return Err(CompanionError::Classify(
+                "classifier is not configured".to_owned(),
+            ));
         }
         let request = LlmGenerateRequest {
             messages: vec![
@@ -241,13 +245,13 @@ async fn embed_memory(
     let binding = {
         let guard = core.ai();
         let ai = guard.lock();
-        if ai.tasks.embedding.uses_echo() {
+        if ai.tasks.embedding.is_unconfigured() {
             ai.tasks.chat.clone()
         } else {
             ai.tasks.embedding.clone()
         }
     };
-    if binding.uses_echo() {
+    if binding.is_unconfigured() {
         return Ok(());
     }
     let result = core

@@ -1387,7 +1387,7 @@ mod tests {
         assert!(config.get_path("ai.local_models").is_none());
         assert_eq!(
             config.get_path("ai.tasks.chat.plugin"),
-            Some(serde_json::json!("echo"))
+            Some(serde_json::json!(""))
         );
 
         let on_disk: serde_json::Value =

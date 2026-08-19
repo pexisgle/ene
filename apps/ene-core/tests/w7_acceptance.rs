@@ -1,4 +1,4 @@
-//! W7: spawn the `ene-core` binary (`EchoModel` / offline) and record `minimal` baselines.
+//! W7: spawn the `ene-core` binary and record `minimal` baselines.
 
 #![expect(
     clippy::unwrap_used,
@@ -133,15 +133,15 @@ async fn spawned_core_offline_conversation_and_rss() {
         .await
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut saw_assistant = false;
+    let mut saw_unconfigured_failure = false;
     while Instant::now() < deadline {
         let history = client.history(&session.id, "surface").await.unwrap();
-        if history
+        if let Some(message) = history
             .messages
             .iter()
-            .any(|message| message.role == "assistant")
+            .find(|message| message.role == "assistant")
         {
-            saw_assistant = true;
+            saw_unconfigured_failure = message.text.contains("not configured");
             assert!(
                 history
                     .messages
@@ -152,13 +152,17 @@ async fn spawned_core_offline_conversation_and_rss() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(saw_assistant, "offline EchoModel conversation failed");
+    assert!(
+        saw_unconfigured_failure,
+        "unconfigured chat must fail clearly without Echo replies"
+    );
     let detail = client.history(&session.id, "detail").await.unwrap();
     assert!(
-        detail
+        !detail
             .messages
             .iter()
-            .any(|message| message.role == "inner")
+            .any(|message| message.role == "inner"),
+        "unconfigured chat must not emit inner channel output"
     );
     if std::fs::create_dir_all("/opt/cursor/artifacts").is_ok() {
         std::fs::write(

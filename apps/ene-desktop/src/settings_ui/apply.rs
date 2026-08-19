@@ -384,7 +384,10 @@ mod tests {
     fn config_with_sections() -> ene_config::EneConfig {
         let mut config = ene_config::EneConfig::default();
         drop(config.set_section_value("desktop", json!({"language": "en", "theme": "dark"})));
-        drop(config.set_section_value("ai", json!({"tasks": {"chat": {"plugin": "echo"}}})));
+        drop(config.set_section_value(
+            "ai",
+            json!({"tasks": {"chat": {"plugin": "provider.openai_compat"}}}),
+        ));
         config
     }
 

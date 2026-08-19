@@ -197,5 +197,6 @@ image (apt) instead of the flake and are baked into the VM; the startup script o
   and forces a full (~10+ min) workspace rebuild.
 - **Stage (`ene-stage`)** runs headless via **software Vulkan (lavapipe)**: launch with
   `DISPLAY=:1 WGPU_BACKEND=vulkan`; it also needs `libxkbcommon-x11`.
-- **Live chat without a provider plugin is Echo-only.** Out-of-the-box conversation uses
-  the in-process Echo model until a conversation provider is wired.
+- **Chat requires a configured model.** There is no out-of-the-box dummy
+  conversation provider; bind `ai.tasks.chat` on the AI page (local GGUF via
+  `provider.openai_compat`, or a cloud provider) before sending a message.

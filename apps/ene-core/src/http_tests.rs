@@ -1293,7 +1293,11 @@ async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
             .await
             .unwrap(),
     );
-    let server = core.clone().serve().await.unwrap();
+    let server = core
+        .clone()
+        .serve_with(Arc::new(EchoModel) as Arc<dyn ConversationModel>)
+        .await
+        .unwrap();
     let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
     let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "desktop");
     let soul_id = first_soul_id(&client).await;
@@ -1329,8 +1333,8 @@ async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
             "ai": {
                 "tasks": {
                     "chat": {
-                        "plugin": "echo",
-                        "model": "echo",
+                        "plugin": "provider.openai_compat",
+                        "model": "gpt-test",
                         "api_key": "sk-must-not-persist"
                     }
                 }
@@ -1347,7 +1351,7 @@ async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
     let settings = client.settings().await.unwrap();
     assert_eq!(
         settings.pointer("/effective/ai/tasks/chat/plugin"),
-        Some(&serde_json::json!("echo"))
+        Some(&serde_json::json!("provider.openai_compat"))
     );
     assert_eq!(settings.get("ai_chat_key_set"), None);
     assert_eq!(

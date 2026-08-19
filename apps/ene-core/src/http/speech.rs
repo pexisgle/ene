@@ -37,7 +37,7 @@ impl SpeechPresenter for PluginSpeech {
             return;
         };
         let binding = Self::tts_binding(&core);
-        if binding.uses_echo() {
+        if binding.is_unconfigured() {
             return;
         }
         let request = TtsRequest {

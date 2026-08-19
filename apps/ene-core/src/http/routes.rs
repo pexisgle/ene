@@ -365,7 +365,7 @@ pub async fn listen(
 ) -> Result<Json<SendMessageResponse>, ApiReject> {
     let session = parse_session(&id)?;
     let binding = state.core.ai().lock().tasks.stt.clone();
-    if binding.uses_echo() {
+    if binding.is_unconfigured() {
         return Ok(Json(SendMessageResponse {
             turn_id: None,
             entry_id: None,

@@ -49,9 +49,19 @@ and chat on the surface depth, and opens a separate detail window (F4 / tray)
 for logs and internals. `ene-stage` is an optional debug client for the same
 API.
 
-Default chat is Echo (`ai.tasks.chat.plugin = echo`). Bind
-`provider.openai_compat` or `provider.anthropic` on the AI page (or via
-`ENE_AI__TASKS__CHAT__PLUGIN`) for live models. Keys go to the vault.
+Chat has no default model — pick one on the **AI** page before your first
+message:
+
+- **This computer** — a recommended Gemma GGUF (downloaded into the models
+  directory) or your own `.gguf` file. The host runs `llama-server` from
+  `PATH` or the bundled plugins directory and binds
+  `ai.tasks.chat.plugin = provider.openai_compat` with `model_path`.
+- **ChatGPT-compatible** — `provider.openai_compat` with an API key in the
+  vault (base URL under Advanced).
+- **Claude** — `provider.anthropic` with an API key in the vault.
+
+Classifier, embedding, TTS, and STT stay off until you set them. An empty
+classifier falls back to the chat binding.
 
 ## 5. Tests
 

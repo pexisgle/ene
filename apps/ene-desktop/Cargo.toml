@@ -30,7 +30,8 @@ ene-api = { workspace = true }
 ene-config = { workspace = true }
 ene-card = { workspace = true }
 ene-vrm = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+reqwest = { workspace = true, features = ["rustls"] }
 parking_lot = { workspace = true }
 png = "0.18"
 image = { workspace = true, features = ["png"] }

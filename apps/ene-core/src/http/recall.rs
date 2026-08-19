@@ -22,7 +22,7 @@ impl RecallPrefetch {
     fn embed_binding(core: &CoreDaemon) -> TaskBinding {
         let guard = core.ai();
         let ai = guard.lock();
-        if ai.tasks.embedding.uses_echo() {
+        if ai.tasks.embedding.is_unconfigured() {
             ai.tasks.chat.clone()
         } else {
             ai.tasks.embedding.clone()
@@ -98,7 +98,7 @@ fn mcp_context_lines(workspace: &std::path::Path) -> Vec<(String, String)> {
 
 async fn embed_query(core: &CoreDaemon, text: &str) -> Option<Vec<f32>> {
     let binding = RecallPrefetch::embed_binding(core);
-    if binding.uses_echo() {
+    if binding.is_unconfigured() {
         return None;
     }
     let result = core

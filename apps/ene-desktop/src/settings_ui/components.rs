@@ -67,7 +67,7 @@ fn focus_accent(ui: &Ui) -> Color32 {
     }
 }
 
-pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 54] = [
+pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 52] = [
     ("character-model", "section-character-model"),
     ("character-transform", "section-character-transform"),
     ("character-expressions", "section-character-expressions"),
@@ -84,10 +84,8 @@ pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 54] = [
     ("graphics-quality", "section-graphics-quality"),
     ("graphics-language", "section-graphics-language"),
     ("graphics-theme", "section-graphics-theme"),
-    ("ai-chat", "section-ai-chat"),
-    ("ai-classifier", "section-ai-classifier"),
-    ("ai-proactive", "section-ai-proactive"),
-    ("ai-embedding", "section-ai-embedding"),
+    ("ai-conversation", "section-ai-conversation"),
+    ("ai-advanced", "section-ai-advanced"),
     ("voice-tts", "audio-tts-section"),
     ("voice-stt", "audio-stt-section"),
     ("voice-mic", "audio-mic-section"),
@@ -464,7 +462,7 @@ mod tests {
             "character-model",
             "editor-lorebook",
             "graphics-theme",
-            "ai-chat",
+            "ai-conversation",
             "voice-tts",
             "memory-commitments",
             "ledger-browse",

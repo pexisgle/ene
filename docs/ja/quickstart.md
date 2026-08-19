@@ -45,9 +45,18 @@ desktop は必要なら `ene-core` を子プロセスとして起動し、表層
 チャットを出し、詳細は別窓（F4 / トレイ）です。`ene-stage` は同一 API の
 任意のデバッグクライアントです。
 
-既定のチャットは Echo（`ai.tasks.chat.plugin = echo`）です。ライブモデルは
-AI ページ（または `ENE_AI__TASKS__CHAT__PLUGIN`）で
-`provider.openai_compat` か `provider.anthropic` を結びます。キーはボールトへ入ります。
+チャットに既定モデルはありません。最初のメッセージの前に **AI** ページで選びます。
+
+- **このパソコン** — おすすめの Gemma GGUF（モデルディレクトリへ自動ダウンロード）
+  か、自分の `.gguf` ファイル。ホストが `PATH` または同梱 plugins ディレクトリの
+  `llama-server` を起動し、`ai.tasks.chat.plugin = provider.openai_compat` と
+  `model_path` を書きます。
+- **ChatGPT 系** — vault に API キーを入れた `provider.openai_compat`
+  （Base URL は「詳しく」）。
+- **Claude** — vault に API キーを入れた `provider.anthropic`。
+
+分類・埋め込み・TTS・STT は設定するまでオフです。classifier が空なら
+チャットのバインドにフォールバックします。
 
 ## 5. テスト
 

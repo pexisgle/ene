@@ -930,16 +930,32 @@ pub(crate) fn editable_combo(
 /// opens the platform file dialog and replaces the buffer with the chosen
 /// path; the text editor remains usable for manual entry.
 pub(crate) fn path_row(ui: &mut egui::Ui, path: &mut String, text_width: f32) -> bool {
+    path_row_filtered(ui, path, text_width, None)
+}
+
+/// Like [`path_row`], with an optional `(label, extensions)` filter for the
+/// native file dialog (e.g. `("GGUF", &["gguf"])`).
+pub(crate) fn path_row_filtered(
+    ui: &mut egui::Ui,
+    path: &mut String,
+    text_width: f32,
+    filter: Option<(&str, &[&str])>,
+) -> bool {
     let mut changed = ui
         .add(egui::TextEdit::singleline(path).desired_width(text_width))
         .changed();
     if ui
         .button(i18n_embed_fl::fl!(crate::i18n::loader(), "settings-browse"))
         .clicked()
-        && let Some(picked) = rfd::FileDialog::new().pick_file()
     {
-        path.clone_from(&picked.display().to_string());
-        changed = true;
+        let mut dialog = rfd::FileDialog::new();
+        if let Some((name, extensions)) = filter {
+            dialog = dialog.add_filter(name, extensions);
+        }
+        if let Some(picked) = dialog.pick_file() {
+            path.clone_from(&picked.display().to_string());
+            changed = true;
+        }
     }
     changed
 }

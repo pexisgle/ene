@@ -110,7 +110,7 @@ fn provider_rows(ai: &AiSettings, home: &Path) -> Vec<ProfileRow> {
         &ai.tasks.tts,
         &ai.tasks.stt,
     ] {
-        if binding.uses_echo() || !binding.plugin.starts_with("provider.") {
+        if binding.is_unconfigured() || !binding.plugin.starts_with("provider.") {
             continue;
         }
         if !seen.insert(binding.plugin.clone()) {

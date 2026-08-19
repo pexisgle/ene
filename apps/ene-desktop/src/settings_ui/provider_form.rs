@@ -3,7 +3,6 @@
 use serde_json::{Value, json};
 
 pub(crate) const BUILTIN_PROVIDER_I18N_IDS: &[(&str, &str)] = &[
-    ("echo", "echo"),
     ("openai_compat", "openai-compat"),
     ("anthropic", "anthropic"),
     ("elevenlabs", "elevenlabs"),
@@ -11,19 +10,18 @@ pub(crate) const BUILTIN_PROVIDER_I18N_IDS: &[(&str, &str)] = &[
     ("edge_tts", "edge-tts"),
 ];
 
-pub(crate) const CHAT_PLUGINS: &[&str] = &["echo", "provider.openai_compat", "provider.anthropic"];
+pub(crate) const CHAT_PLUGINS: &[&str] = &["provider.openai_compat", "provider.anthropic"];
 
-pub(crate) const EMBED_PLUGINS: &[&str] = &["echo", "provider.openai_compat"];
+pub(crate) const EMBED_PLUGINS: &[&str] = &["provider.openai_compat"];
 
 pub(crate) const AUDIO_PLUGINS: &[&str] = &[
-    "echo",
     "provider.voicevox",
     "provider.openai_compat",
     "provider.elevenlabs",
     "provider.edge_tts",
 ];
 
-pub(crate) const STT_PLUGINS: &[&str] = &["echo", "provider.openai_compat"];
+pub(crate) const STT_PLUGINS: &[&str] = &["provider.openai_compat"];
 
 fn provider_i18n_id(kind: &str) -> Option<&'static str> {
     let key = kind.strip_prefix("provider.").unwrap_or(kind);
@@ -52,12 +50,11 @@ pub fn provider_description(kind: &str) -> Option<String> {
     provider_i18n_id(kind).map(|i18n_id| fl(&format!("provider-selector-{i18n_id}-desc")))
 }
 
-/// Localized provider group (Host / Local / Cloud).
+/// Localized provider group (Local / Cloud).
 #[must_use]
 pub fn provider_display_group(kind: &str) -> Option<String> {
     let key = kind.strip_prefix("provider.").unwrap_or(kind);
     match key {
-        "echo" => Some(fl("provider-selector-group-host")),
         "voicevox" => Some(fl("provider-selector-group-local")),
         _ => Some(fl("provider-selector-group-cloud")),
     }
@@ -142,11 +139,32 @@ fn text_field(ui: &mut egui::Ui, label: &str, binding: &mut Value, key: &str) ->
     }
 }
 
-/// Combo box of bundled provider ids, grouped Host / Local / Cloud.
+/// Combo box of bundled provider ids, grouped Local / Cloud.
+///
+/// When `allow_empty` is true, the first choice clears the plugin id so
+/// advanced tasks can stay unset (same as chat / unused).
 pub fn plugin_combo(ui: &mut egui::Ui, id_salt: &str, plugin: &mut String, plugins: &[&str]) {
+    plugin_combo_with_empty(ui, id_salt, plugin, plugins, false);
+}
+
+pub fn plugin_combo_with_empty(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    plugin: &mut String,
+    plugins: &[&str],
+    allow_empty: bool,
+) {
+    let selected = if plugin.is_empty() && allow_empty {
+        "—".to_owned()
+    } else {
+        provider_display_name(plugin)
+    };
     egui::ComboBox::from_id_salt(id_salt)
-        .selected_text(provider_display_name(plugin))
+        .selected_text(selected)
         .show_ui(ui, |ui| {
+            if allow_empty && ui.selectable_label(plugin.is_empty(), "—").clicked() {
+                plugin.clear();
+            }
             let mut last_group = String::new();
             for candidate in plugins {
                 let group = provider_display_group(candidate).unwrap_or_default();

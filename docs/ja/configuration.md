@@ -16,10 +16,20 @@
 `settings.json` に保存します。
 
 会話・分類・埋め込み・TTS・STT は `ai.tasks.<task>`（`plugin`、`model`、
-`base_url`、`voice`、`max_tokens`）でバインドします。API キーは vault 秘密です
-（起動時は `ENE_AI__TASKS__<TASK>__API_KEY`。PATCH `/api/v1/settings` は JSON に
-書きません）。プラグイン id は `echo` または [プラグイン一覧](concepts/plugins-and-mcp.md)
-の `provider.*` です。
+`model_path`、`base_url`、`voice`、`max_tokens`）でバインドします。チャットは
+未設定のまま起動するので、最初のメッセージの前に `ai.tasks.chat.plugin` を
+`provider.*` に設定してください。API キーは vault 秘密です（起動時は
+`ENE_AI__TASKS__<TASK>__API_KEY`。PATCH `/api/v1/settings` は JSON に
+書きません）。プラグイン id は [プラグイン一覧](concepts/plugins-and-mcp.md) の
+`provider.*` です。
+
+ローカル GGUF 会話は `model_path` を指定した `provider.openai_compat` です。
+`server_path` が空なら、サイドカーは設定パス → CAS → `PATH` → 同梱 plugins
+ディレクトリの順で `llama-server` を解決します。クラウド会話は同じプラグインに
+vault の API キー、または Claude 用の `provider.anthropic` です。
+
+classifier が空ならチャットのバインドを再利用します。埋め込み・TTS・STT が
+空なら無効のままです。
 
 プラグイン起動は `plugins.profile`（`desktop` / `minimal` / `headless`）です。
 プラグインごとの有効マップはありません。

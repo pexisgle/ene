@@ -2163,6 +2163,7 @@ dependencies = [
  "pollster 1.0.1",
  "rapier3d",
  "regex",
+ "reqwest",
  "rfd",
  "rodio",
  "rust-embed",
@@ -2395,6 +2396,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "ene-config",
  "ene-plugin-ipc",
  "reqwest",
  "serde",

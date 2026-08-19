@@ -38,6 +38,7 @@
 //! (`ai.local_models`, `ai.ort_dylib_path`). Provider binding is
 //! `ai.tasks.*`; MCP rows live in `mcp.json`. Values are not copied into a
 //! new home. Steps 1–7 are the same drop so any older document reaches 8.
+//! Version 9 clears legacy `plugin: "echo"` task bindings.
 
 use crate::error::EneConfigError;
 use std::collections::HashMap;
@@ -49,7 +50,7 @@ use std::sync::OnceLock;
 /// one whose `version` exceeds it is rejected (see
 /// [`EneConfigError::ConfigVersionTooNew`]). Bump this whenever you register a
 /// new migration step.
-pub const CURRENT_CONFIG_VERSION: u32 = 8;
+pub const CURRENT_CONFIG_VERSION: u32 = 9;
 
 const VERSION_KEY: &str = "version";
 
@@ -282,6 +283,39 @@ pub(crate) fn migrate_drop_legacy_plugin_list(
     Ok(())
 }
 
+/// Clears legacy echo plugin bindings from every `ai.tasks.*` row.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "MigrationFn is Result so every step shares the same signature"
+)]
+pub(crate) fn migrate_clear_echo_bindings(
+    doc: &mut serde_json::Value,
+) -> Result<(), EneConfigError> {
+    let Some(tasks) = doc
+        .get_mut("ai")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|ai| ai.get_mut("tasks"))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    for task in tasks.values_mut() {
+        let Some(obj) = task.as_object_mut() else {
+            continue;
+        };
+        if obj.get("plugin").and_then(serde_json::Value::as_str) == Some("echo") {
+            obj.insert(
+                "plugin".to_owned(),
+                serde_json::Value::String(String::new()),
+            );
+        }
+        if obj.get("model").and_then(serde_json::Value::as_str) == Some("echo") {
+            obj.insert("model".to_owned(), serde_json::Value::String(String::new()));
+        }
+    }
+    Ok(())
+}
+
 /// Registers drop steps for every version below [`CURRENT_CONFIG_VERSION`].
 const _: () = {
     /// # Safety
@@ -289,8 +323,8 @@ const _: () = {
     /// Called by `ctor` before `main`. Only safe registration code
     /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
     #[ene_config::ctor(unsafe, crate_path = ene_config)]
-    fn register_drop_legacy_plugin_list() {
-        for from in 1..CURRENT_CONFIG_VERSION {
+    fn register_config_migrations() {
+        for from in 1..8 {
             if let Err(err) = register_migration(from, migrate_drop_legacy_plugin_list) {
                 tracing::error!(
                     component = "Config",
@@ -299,6 +333,14 @@ const _: () = {
                     "failed to register settings.json migration"
                 );
             }
+        }
+        if let Err(err) = register_migration(8, migrate_clear_echo_bindings) {
+            tracing::error!(
+                component = "Config",
+                error = %err,
+                from = 8,
+                "failed to register settings.json migration"
+            );
         }
     }
 };
@@ -520,6 +562,32 @@ pub(crate) mod tests {
         assert_eq!(
             doc.pointer("/ai/tasks/chat/plugin"),
             Some(&serde_json::json!("echo"))
+        );
+    }
+
+    #[test]
+    fn clear_echo_bindings_on_version_nine() {
+        let mut doc = serde_json::json!({
+            "version": 8,
+            "ai": {
+                "tasks": {
+                    "chat": { "plugin": "echo", "model": "echo" },
+                    "classifier": { "plugin": "provider.openai_compat", "model": "gpt-4" }
+                }
+            }
+        });
+        migrate_clear_echo_bindings(&mut doc).expect("clear succeeds");
+        assert_eq!(
+            doc.pointer("/ai/tasks/chat/plugin"),
+            Some(&serde_json::json!(""))
+        );
+        assert_eq!(
+            doc.pointer("/ai/tasks/chat/model"),
+            Some(&serde_json::json!(""))
+        );
+        assert_eq!(
+            doc.pointer("/ai/tasks/classifier/plugin"),
+            Some(&serde_json::json!("provider.openai_compat"))
         );
     }
 }

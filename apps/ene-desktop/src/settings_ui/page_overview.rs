@@ -42,8 +42,8 @@ pub fn render(
         .and_then(|settings| settings.pointer("/effective/ai/tasks/chat/model"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    let echo = plugin.is_empty() || plugin == "echo";
-    let chat_title = if echo {
+    let unconfigured = plugin.is_empty() || plugin == "echo";
+    let chat_title = if unconfigured {
         i18n_embed_fl::fl!(crate::i18n::loader(), "overview-needs-config")
     } else {
         i18n_embed_fl::fl!(crate::i18n::loader(), "overview-chat-provider")
@@ -56,10 +56,10 @@ pub fn render(
     };
 
     components::section_card(ui, "overview-needs-config", &chat_title, |ui| {
-        if echo {
+        if unconfigured {
             ui.weak(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
-                "overview-echo-hint"
+                "overview-no-model-hint"
             ));
         } else {
             let model = if model.is_empty() { "—" } else { model };

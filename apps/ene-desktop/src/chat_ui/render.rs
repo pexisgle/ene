@@ -15,6 +15,7 @@ pub struct ChatUi {
     settings_rx: Option<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>>,
     chat_plugin: String,
     chat_model: String,
+    chat_binding_ready: bool,
 }
 
 impl ChatUi {
@@ -57,7 +58,8 @@ impl ChatUi {
 
         let available = ui.available_size();
         let input_height = 88.0;
-        let caption = chat_binding_caption(&self.chat_plugin, &self.chat_model);
+        let caption =
+            chat_binding_caption(&self.chat_plugin, &self.chat_model, self.chat_binding_ready);
         if !caption.is_empty() {
             ui.weak(&caption);
             ui.add_space(4.0);
@@ -224,6 +226,7 @@ impl ChatUi {
                 {
                     model.clone_into(&mut self.chat_model);
                 }
+                self.chat_binding_ready = true;
                 self.settings_rx = None;
             }
             Ok(Err(_)) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
@@ -234,12 +237,12 @@ impl ChatUi {
     }
 }
 
-fn chat_binding_caption(plugin: &str, model: &str) -> String {
-    if plugin.is_empty() {
+fn chat_binding_caption(plugin: &str, model: &str, ready: bool) -> String {
+    if !ready {
         return String::new();
     }
-    if plugin == "echo" {
-        return i18n_embed_fl::fl!(crate::i18n::loader(), "chat-provider-echo");
+    if plugin.is_empty() || plugin == "echo" {
+        return i18n_embed_fl::fl!(crate::i18n::loader(), "chat-provider-unconfigured");
     }
     let model = if model.is_empty() { "—" } else { model };
     i18n_embed_fl::fl!(
@@ -383,18 +386,20 @@ mod tests {
 
     #[test]
     fn caption_is_empty_until_settings_arrive() {
-        assert!(chat_binding_caption("", "gpt").is_empty());
+        assert!(chat_binding_caption("", "gpt", false).is_empty());
     }
 
     #[test]
-    fn caption_warns_when_chat_is_echo() {
-        let caption = chat_binding_caption("echo", "echo");
-        assert!(caption.contains("Echo"));
+    fn caption_warns_when_chat_is_unconfigured() {
+        let caption = chat_binding_caption("", "", true);
+        assert!(!caption.is_empty());
+        let legacy = chat_binding_caption("echo", "echo", true);
+        assert!(!legacy.is_empty());
     }
 
     #[test]
     fn caption_shows_plugin_and_model() {
-        let caption = chat_binding_caption("provider.openai_compat", "openai/gpt-4o-mini");
+        let caption = chat_binding_caption("provider.openai_compat", "openai/gpt-4o-mini", true);
         assert!(caption.contains("provider.openai_compat"));
         assert!(caption.contains("openai/gpt-4o-mini"));
     }

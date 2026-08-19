@@ -17,10 +17,19 @@ otherwise it spawns `ene-core` and also persists a local `desktop.*` section
 `settings.json`.
 
 Conversation, classifier, embedding, TTS, and STT bind through `ai.tasks.<task>`
-(`plugin`, `model`, `base_url`, `voice`, `max_tokens`). API keys are vault
-secrets (`ENE_AI__TASKS__<TASK>__API_KEY` at boot; PATCH `/api/v1/settings`
-never writes them into JSON). Plugin ids are `echo` or `provider.*` names
-from the [plugin catalog](concepts/plugins-and-mcp.md).
+(`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`). Chat
+starts unconfigured — set `ai.tasks.chat.plugin` to a `provider.*` id before
+the first message. API keys are vault secrets (`ENE_AI__TASKS__<TASK>__API_KEY`
+at boot; PATCH `/api/v1/settings` never writes them into JSON). Plugin ids are
+`provider.*` names from the [plugin catalog](concepts/plugins-and-mcp.md).
+
+Local GGUF chat uses `provider.openai_compat` with `model_path` pointing at
+the file. When `server_path` is empty, the sidecar resolves `llama-server`
+from configuration, CAS, `PATH`, or the bundled plugins directory. Cloud chat
+uses the same plugin with a vault API key, or `provider.anthropic` for Claude.
+
+An empty classifier task reuses the chat binding. Empty embedding, TTS, and STT
+tasks stay disabled.
 
 Plugin launch is `plugins.profile` (`desktop`, `minimal`, or `headless`), not a
 per-plugin enable map. Related keys:

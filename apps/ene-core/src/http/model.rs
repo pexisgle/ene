@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ene_kernel::{
-    ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, ToolCall,
+    ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, ToolCall,
 };
 use ene_plugin_ipc::{
     LlmGenerateRequest, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
@@ -12,19 +12,15 @@ use ene_session::{InnerAspect, ProjectedMessage, Role};
 
 use crate::CoreDaemon;
 
-/// Dialogue model that binds `ai.tasks.chat` to a provider plugin or Echo.
+/// Dialogue model that binds `ai.tasks.chat` to a configured provider plugin.
 pub struct SeamedModel {
     core: Arc<CoreDaemon>,
-    echo: EchoModel,
 }
 
 impl SeamedModel {
     #[must_use]
     pub fn new(core: Arc<CoreDaemon>) -> Self {
-        Self {
-            core,
-            echo: EchoModel,
-        }
+        Self { core }
     }
 
     fn chat_binding(&self) -> TaskBinding {
@@ -36,8 +32,10 @@ impl SeamedModel {
 impl ConversationModel for SeamedModel {
     async fn generate(&self, request: ModelRequest) -> Result<ModelGeneration, KernelError> {
         let binding = self.chat_binding();
-        if binding.uses_echo() {
-            return self.echo.generate(request).await;
+        if binding.is_unconfigured() {
+            return Err(KernelError::Model(
+                "chat model is not configured".to_owned(),
+            ));
         }
         let llm_request = map_request(
             &request,

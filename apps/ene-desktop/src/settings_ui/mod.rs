@@ -7,6 +7,7 @@ pub mod apply;
 pub mod artifact_card;
 pub mod components;
 pub mod draft;
+pub mod gguf_catalog;
 pub mod input;
 pub mod page_accessibility;
 pub mod page_advanced;
@@ -227,11 +228,13 @@ impl PageKind {
                     "model",
                     "models",
                     "anthropic",
-                    "echo",
+                    "claude",
+                    "gguf",
+                    "local",
                     "classifier",
                     "proactive",
                 ],
-                sections: &["ai-chat", "ai-classifier", "ai-proactive", "ai-embedding"],
+                sections: &["ai-conversation", "ai-advanced"],
                 section_aliases: &[],
             },
             PageKind::Voice => &PageMeta {

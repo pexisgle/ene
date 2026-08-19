@@ -1,17 +1,24 @@
 {
-  "ai": {
-    "tasks": {
-      "chat": { "plugin": "echo", "model": "echo" },
-      "classifier": { "plugin": "echo", "model": "echo" },
-      "embedding": { "plugin": "echo", "model": "echo" },
-      "proactive": { "plugin": "echo", "model": "echo" },
-      "tts": { "plugin": "echo", "model": "echo" },
-      "stt": { "plugin": "echo", "model": "echo" }
-    }
-  },
+  "$schema": "./schema/settings.schema.json",
   "mind": {
-    "proactive": {
-      "enabled": false
-    }
+    "language": "ja"
+  },
+  "version": 9,
+  "desktop": {
+    "graphics": {
+      "quality": "medium"
+    },
+    "language": "ja",
+    "theme": "system",
+    "mic_device": null,
+    "spotlight_enabled": false,
+    "caption_enabled": false,
+    "caption_position": null,
+    "caption_pinned": null,
+    "beat_sync": {
+      "enabled": false,
+      "device": null
+    },
+    "core_lifetime": "app"
   }
 }

@@ -106,7 +106,7 @@ impl Drop for ServerHandle {
 }
 
 impl CoreDaemon {
-    /// Bind HTTP/WS using `ai.tasks.chat` (Echo when unset).
+    /// Bind HTTP/WS using `ai.tasks.chat` (requires a configured provider).
     pub async fn serve(self: Arc<Self>) -> Result<ServerHandle, CoreError> {
         let model = Arc::new(model::SeamedModel::new(Arc::clone(&self)));
         self.serve_with(model as Arc<dyn ConversationModel>).await

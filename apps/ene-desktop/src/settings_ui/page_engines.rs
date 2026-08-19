@@ -29,11 +29,7 @@ pub fn render(
         &i18n_embed_fl::fl!(crate::i18n::loader(), "engines-list"),
         |ui| {
             for (kind, _) in BUILTIN_PROVIDER_I18N_IDS {
-                let plugin = if *kind == "echo" {
-                    (*kind).to_owned()
-                } else {
-                    format!("provider.{kind}")
-                };
+                let plugin = format!("provider.{kind}");
                 ui.separator();
                 ui.strong(provider_display_name(&plugin));
                 if let Some(group) = provider_display_group(&plugin) {

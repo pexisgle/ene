@@ -141,11 +141,11 @@ fn render_audio_binding(
         .editing()
         .section_value("ai")
         .and_then(|ai| ai.pointer(&format!("/tasks/{task}")).cloned())
-        .unwrap_or_else(|| json!({ "plugin": "echo", "model": "echo" }));
+        .unwrap_or_else(|| json!({ "plugin": "", "model": "" }));
     let mut plugin = binding
         .get("plugin")
         .and_then(Value::as_str)
-        .unwrap_or("echo")
+        .unwrap_or("")
         .to_owned();
     plugin_combo(ui, &format!("voice-{task}-plugin"), &mut plugin, plugins);
     if let Some(desc) = provider_description(&plugin) {

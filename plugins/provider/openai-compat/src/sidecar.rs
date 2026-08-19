@@ -25,7 +25,7 @@ pub fn managed_base() -> Option<&'static str> {
     BASE.get().map(String::as_str)
 }
 
-/// Spawn a loopback engine when `server_path` or `cas_path` is set.
+/// Spawn a loopback engine when `server_path`, `cas_path`, or `model_path` is set.
 ///
 /// # Errors
 ///
@@ -36,7 +36,7 @@ pub fn maybe_start() -> Result<Option<SidecarGuard>, String> {
 
 pub(crate) fn maybe_start_with(url_suffix: &str) -> Result<Option<SidecarGuard>, String> {
     let cfg = SidecarCfg::from_env();
-    if cfg.server_path.trim().is_empty() && cfg.cas_path.trim().is_empty() {
+    if !should_manage_sidecar(&cfg) {
         return Ok(None);
     }
     let binary = resolve(&cfg)?;
@@ -119,6 +119,20 @@ impl SidecarCfg {
     }
 }
 
+fn should_manage_sidecar(cfg: &SidecarCfg) -> bool {
+    !cfg.server_path.trim().is_empty()
+        || !cfg.cas_path.trim().is_empty()
+        || !cfg.model_path.trim().is_empty()
+}
+
+fn default_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    }
+}
+
 fn string_field(value: &Value, key: &str) -> String {
     value
         .get(key)
@@ -145,7 +159,27 @@ fn resolve(cfg: &SidecarCfg) -> Result<PathBuf, String> {
         }
         return Err(format!("sidecar binary missing: {trimmed}"));
     }
+    if !cfg.model_path.trim().is_empty() {
+        return resolve_default_binary();
+    }
     Err("sidecar server_path is empty".to_owned())
+}
+
+fn resolve_default_binary() -> Result<PathBuf, String> {
+    let name = default_binary_name();
+    deny_remote(name)?;
+    let path = PathBuf::from(name);
+    if path.is_file() {
+        return Ok(path);
+    }
+    if let Some(found) = search_path(name) {
+        return Ok(found);
+    }
+    let bundled = ene_config::builtin_plugins_dir().join(name);
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+    Err(format!("sidecar binary missing: {name}"))
 }
 
 fn deny_remote(raw: &str) -> Result<(), String> {
@@ -254,5 +288,89 @@ mod tests {
             timeout_secs: 1,
         };
         assert_eq!(resolve(&cfg).expect("path"), binary);
+    }
+
+    #[test]
+    fn manages_sidecar_when_only_model_path_is_set() {
+        let cfg = SidecarCfg {
+            server_path: String::new(),
+            cas_path: String::new(),
+            model_path: "/models/x.gguf".into(),
+            server_args: Vec::new(),
+            timeout_secs: 1,
+        };
+        assert!(should_manage_sidecar(&cfg));
+    }
+
+    #[test]
+    fn resolve_model_path_defaults_to_path_search() {
+        let dir = tempfile::TempDir::new().expect("temp");
+        let binary = dir.path().join(default_binary_name());
+        std::fs::write(&binary, b"x").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        let original = std::env::var_os("PATH");
+        // SAFETY: test runs serially and restores PATH before returning.
+        unsafe {
+            std::env::set_var("PATH", dir.path());
+        }
+        let cfg = SidecarCfg {
+            server_path: String::new(),
+            cas_path: String::new(),
+            model_path: "/models/x.gguf".into(),
+            server_args: Vec::new(),
+            timeout_secs: 1,
+        };
+        let resolved = resolve(&cfg).expect("resolve from PATH");
+        assert_eq!(resolved, binary);
+        match original {
+            Some(path) => unsafe {
+                std::env::set_var("PATH", path);
+            },
+            None => unsafe {
+                std::env::remove_var("PATH");
+            },
+        }
+    }
+
+    #[test]
+    fn resolve_model_path_falls_back_to_bundled_plugins_dir() {
+        let bundled_dir = ene_config::builtin_plugins_dir();
+        std::fs::create_dir_all(&bundled_dir).expect("bundled dir");
+        let binary = bundled_dir.join(default_binary_name());
+        let created = !binary.is_file();
+        if created {
+            std::fs::write(&binary, b"x").expect("write bundled");
+        }
+        let obscure = tempfile::TempDir::new().expect("temp");
+        let original = std::env::var_os("PATH");
+        // SAFETY: test runs serially and restores PATH before returning.
+        unsafe {
+            std::env::set_var("PATH", obscure.path());
+        }
+        let cfg = SidecarCfg {
+            server_path: String::new(),
+            cas_path: String::new(),
+            model_path: "/models/x.gguf".into(),
+            server_args: Vec::new(),
+            timeout_secs: 1,
+        };
+        let resolved = resolve(&cfg).expect("resolve from bundled dir");
+        assert_eq!(resolved, binary);
+        match original {
+            Some(path) => unsafe {
+                std::env::set_var("PATH", path);
+            },
+            None => unsafe {
+                std::env::remove_var("PATH");
+            },
+        }
+        if created {
+            std::fs::remove_file(binary).ok();
+        }
     }
 }

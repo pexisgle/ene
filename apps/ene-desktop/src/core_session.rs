@@ -270,6 +270,12 @@ impl CoreSession {
         Ok(self.block_on(async move { client.settings_schema().await })??)
     }
 
+    /// Tokio handle used for host-side background work (e.g. GGUF download).
+    #[must_use]
+    pub fn runtime_handle(&self) -> &tokio::runtime::Handle {
+        &self.runtime
+    }
+
     pub fn spawn_fetch<T: Send + 'static>(
         &self,
         fut: impl std::future::Future<Output = T> + Send + 'static,

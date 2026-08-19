@@ -25,6 +25,18 @@ data-dir `settings.json`. Attach to an already-running core with `ENE_API_URL`
 
 `ene-stage` remains an optional debug client for the same API.
 
-Default chat is Echo (`ai.tasks.chat.plugin = echo`). Bind a provider plugin
-on the AI page for live models. Audio device relay and approval popups are
-the desktop's client-side jobs; the daemon still owns policy and the live bus.
+Chat starts **unconfigured**. The surface prompts you to open the **AI** page
+and pick one of three paths:
+
+| Choice | What desktop configures |
+|---|---|
+| **This computer** | Recommended Gemma GGUF download or a `.gguf` file; `provider.openai_compat` with `model_path`; `llama-server` on `PATH` or bundled |
+| **ChatGPT-compatible** | `provider.openai_compat`, model name, vault API key |
+| **Claude** | `provider.anthropic`, model name, vault API key |
+
+Classifier, proactive routing, and embeddings live under **Advanced**. Leave
+classifier empty to reuse chat; leave embedding or audio tasks empty to keep
+them off.
+
+Audio device relay and approval popups are the desktop's client-side jobs;
+the daemon still owns policy and the live bus.

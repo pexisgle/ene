@@ -509,7 +509,7 @@ pub(crate) fn config_with_real_secrets() -> EneConfig {
         serde_json::json!({
             "tasks": {
                 "chat": {
-                    "plugin": "echo",
+                    "plugin": "provider.openai_compat",
                     "api_key": "sk-stored-inline"
                 }
             }
@@ -867,7 +867,7 @@ mod tests {
                 .editing()
                 .get_path("ai.tasks.chat.plugin")
                 .and_then(|value| value.as_str().map(str::to_owned)),
-            Some("echo".to_owned())
+            Some("provider.openai_compat".to_owned())
         );
         assert_eq!(
             draft
@@ -882,13 +882,16 @@ mod tests {
     #[test]
     fn seed_core_section_does_not_dirty() {
         let mut d = draft();
-        d.seed_core_section("ai", json!({"tasks": {"chat": {"plugin": "echo"}}}));
+        d.seed_core_section(
+            "ai",
+            json!({"tasks": {"chat": {"plugin": "provider.openai_compat"}}}),
+        );
         assert!(!d.is_dirty());
         assert_eq!(
             d.editing()
                 .section_value("ai")
                 .and_then(|value| value.pointer("/tasks/chat/plugin").cloned()),
-            Some(json!("echo"))
+            Some(json!("provider.openai_compat"))
         );
     }
 }
