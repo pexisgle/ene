@@ -16,11 +16,19 @@ MCP サーバーはベンダーしません。手書きの `mcp.json` の各行�
 代表的なサーバーを選ぶマーケット UI は後継マイルストーンです。
 
 プロバイダプラグインは `plugins/provider/` にあり、`provider` 副プロトコルを話します。
-`ai.tasks.<task>.plugin` でバインドします。
+ホストカタログ（`ene_fiber::PROVIDER_PLUGINS`）が唯一の一覧です。デスクトップの
+選択、Engines、`ai.tasks.*` はすべてそれ（`effective.providers`）を読みます。
+プロバイダを足すのは、バイナリと seams / `local` / `needs_key` 付きのカタログ行を
+足すことであり、UI 側の第二の許可リストではありません。
+
+`ai.tasks.<task>.plugin` でカタログ id を結びます。設定したタスクごとに
+ファイバー（`row_id = ai.tasks.<task>`）が立つので、会話と埋め込みが同じ
+バイナリでも別 GGUF を持てます。
 
 | プラグイン | モダリティ |
 |---|---|
-| `provider.openai_compat` | LLM、埋め込み、TTS、STT（`/v1` chat+audio）。ローカル GGUF は `model_path` を指定。`server_path` が空なら `PATH` または同梱から `llama-server` を解決。`server_path` でバイナリを上書き可能。 |
+| `provider.gguf` | ローカル GGUF の LLM と埋め込み（`plugins/provider/gguf`）。`model_path` を指定。`server_path` が空なら `PATH` または同梱から `llama-server` を解決。 |
+| `provider.openai_compat` | クラウドの LLM、埋め込み、TTS、STT（`/v1` chat+audio）。OpenRouter などは任意の `base_url`。 |
 | `provider.anthropic` | LLM（Messages API） |
 | `provider.elevenlabs` | TTS |
 | `provider.voicevox` | TTS。ユーザー起動エンジン、または `server_path` サイドカー |
@@ -28,9 +36,10 @@ MCP サーバーはベンダーしません。手書きの `mcp.json` の各行�
 
 API キーは vault に置き、`settings.json` には書きません。ネイティブの
 プロセス内エンジン（llama.cpp、whisper.cpp、Kokoro ONNX）はこのツリーには
-ありません。ローカル GGUF 会話は `model_path` を指定した
-`provider.openai_compat` です。サイドカーが `llama-server` をループバックで
-起動し `/v1` で話します。Sidecar 補助は `templates/sidecar` にもあります。
+ありません。ローカル GGUF の会話と埋め込みは `provider.gguf`
+（`ene-provider-gguf`）に `model_path` を付けます。タスクごとのサイドカーが
+`llama-server` をループバックで起動し `/v1` で話します。Sidecar 補助は
+`templates/sidecar` にもあります。
 
 MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショットされ、
 コンテキスト源として注入されます。`prompts/list` は data-dir の skills 配下の
@@ -47,6 +56,7 @@ MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショッ
 | `minimal` | `tool.utility` | なし |
 | `headless` | `tool.utility`、`tool.fs`、`tool.exec`、`tool.web` | 手書き `mcp.json` |
 
-プロバイダはプロファイル名ではなく `ai.tasks.*` から載ります。プロファイルの変更は
+プロバイダはホストカタログから来て、`ai.tasks.*` に結んだとき起動します。
+プロファイル名ではありません。プロファイルの変更は
 プラグインページ、または `PATCH /api/v1/settings` の
 `{"plugins":{"profile":"minimal"}}` です。

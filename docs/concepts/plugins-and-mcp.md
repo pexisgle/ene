@@ -15,21 +15,29 @@ same pipeline as in-tree tools. The Connectors page edits that document. A
 marketplace picker for popular servers is a successor milestone.
 
 Provider plugins live under `plugins/provider/` and speak the `provider`
-subprotocol. Bind them with `ai.tasks.<task>.plugin`:
+subprotocol. The host catalog (`ene_fiber::PROVIDER_PLUGINS`) is the single
+list: desktop pickers, Engines, and `ai.tasks.*` all read it (via
+`effective.providers`). Adding a provider is adding a plugin binary plus a
+catalog row with its seams, `local`, and `needs_key` — not a second allowlist
+in the UI.
+
+Bind a catalog id with `ai.tasks.<task>.plugin`. Each configured task gets its
+own fiber (`row_id = ai.tasks.<task>`) so chat and embedding can share a
+plugin binary with different GGUFs.
 
 | Plugin | Modalities |
 |---|---|
-| `provider.openai_compat` | LLM, embeddings, TTS, STT (`/v1` chat+audio). Local GGUF: set `model_path`; `llama-server` is resolved from `PATH` or the bundle when `server_path` is empty. Optional `server_path` overrides the binary. |
+| `provider.gguf` | Local GGUF LLM and embeddings (`plugins/provider/gguf`). Set `model_path`; `llama-server` is resolved from `PATH` or the bundle when `server_path` is empty. |
+| `provider.openai_compat` | Cloud LLM, embeddings, TTS, STT (`/v1` chat+audio). Optional `base_url` for OpenRouter and other hosts. |
 | `provider.anthropic` | LLM (Messages API) |
 | `provider.elevenlabs` | TTS |
 | `provider.voicevox` | TTS. User-run engine, or `server_path` sidecar |
 | `provider.edge_tts` | TTS (Edge Neural Voice) |
 
-API keys are stored in the vault, not in `settings.json`. Native in-process
-engines (llama.cpp, whisper.cpp, Kokoro ONNX) are not in this tree. Local GGUF
-chat uses `provider.openai_compat` with `model_path` set to the file; the
-sidecar starts `llama-server` on loopback and talks `/v1`. Sidecar helpers also
-live in `templates/sidecar`.
+Native in-process engines (llama.cpp, whisper.cpp, Kokoro ONNX) are not in this
+tree. Local GGUF chat and embeddings use `provider.gguf` (`ene-provider-gguf`)
+with `model_path`; each task's sidecar starts `llama-server` on loopback and
+talks `/v1`. Sidecar helpers also live in `templates/sidecar`.
 
 MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
 injected as a context source. MCP `prompts/list` become `SKILL.md` files under
@@ -46,6 +54,6 @@ unrelated rows stay up.
 | `minimal` | `tool.utility` | none |
 | `headless` | `tool.utility`, `tool.fs`, `tool.exec`, `tool.web` | handwritten `mcp.json` rows |
 
-Providers still come from `ai.tasks.*`, not from the profile name. Change the
-profile from the Plugins page or `PATCH /api/v1/settings` with
-`{"plugins":{"profile":"minimal"}}`.
+Providers come from the host catalog and are spawned when bound in
+`ai.tasks.*`, not from the profile name. Change the profile from the Plugins
+page or `PATCH /api/v1/settings` with `{"plugins":{"profile":"minimal"}}`.

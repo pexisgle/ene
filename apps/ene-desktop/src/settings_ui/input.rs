@@ -11,14 +11,6 @@ use serde_json::Value;
 use crate::settings::CharacterSettings;
 use crate::settings_ui::gguf_catalog::GgufDownloadUi;
 
-/// Conversation-model choice on the AI page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChatMode {
-    Local,
-    OpenAiCompat,
-    Claude,
-}
-
 /// Dynamic `ListConfigOptions` results: dotted field path → (label, value)
 /// choices.
 pub type PluginOptionsMap = BTreeMap<String, Vec<(String, String)>>;
@@ -135,12 +127,14 @@ pub struct SettingsInputState {
     pub ai_validation_message: Option<String>,
     pub tts_provider: String,
     pub stt_provider: String,
-    /// Sticky conversation-mode choice on the AI page.
-    pub chat_mode: Option<ChatMode>,
-    /// Selected curated GGUF id (`gemma-4-e2b`, …).
+    /// Selected curated chat GGUF id (`gemma-4-e2b`, …).
     pub local_catalog_id: String,
-    /// Custom `.gguf` path from the file picker.
+    /// Custom chat `.gguf` path from the file picker.
     pub local_custom_path: String,
+    /// Selected curated embedding GGUF id (`jina-v5-small`, …).
+    pub embed_catalog_id: String,
+    /// Custom embedding `.gguf` path from the file picker.
+    pub embed_custom_path: String,
     pub gguf_download: GgufDownloadUi,
     pub llama_server_on_path: Option<bool>,
     /// Enumerated input device names for the microphone picker.
@@ -167,6 +161,7 @@ impl SettingsInputState {
             ai_embedding_model: String::new(),
             ai_embedding_dimensions: "1536".to_string(),
             local_catalog_id: "gemma-4-e2b".to_string(),
+            embed_catalog_id: "jina-v5-small".to_string(),
             ..Self::default()
         }
     }

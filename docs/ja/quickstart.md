@@ -46,17 +46,14 @@ desktop は必要なら `ene-core` を子プロセスとして起動し、表層
 任意のデバッグクライアントです。
 
 チャットに既定モデルはありません。最初のメッセージの前に **AI** ページで選びます。
+ページはホストカタログの **インストール済みプロバイダプラグイン**（`seam.llm`）
+を出します。`provider.gguf`（このパソコン、ローカル GGUF）、OpenAI 互換、
+Anthropic、足したプラグインが並びます。ローカル側はおすすめ Gemma の
+ダウンロードか自分の `.gguf`。クラウドはモデル名と vault の API キーです。
 
-- **このパソコン** — おすすめの Gemma GGUF（モデルディレクトリへ自動ダウンロード）
-  か、自分の `.gguf` ファイル。ホストが `PATH` または同梱 plugins ディレクトリの
-  `llama-server` を起動し、`ai.tasks.chat.plugin = provider.openai_compat` と
-  `model_path` を書きます。
-- **ChatGPT 系** — vault に API キーを入れた `provider.openai_compat`
-  （Base URL は「詳しく」）。
-- **Claude** — vault に API キーを入れた `provider.anthropic`。
-
-分類・埋め込み・TTS・STT は設定するまでオフです。classifier が空なら
-チャットのバインドにフォールバックします。
+埋め込みは任意です。未設定、ローカル GGUF（`provider.gguf`、おすすめ Jina）、
+またはクラウドの埋め込みプラグイン。classifier が空ならチャットのバインドに
+フォールバックします。
 
 ## 5. テスト
 

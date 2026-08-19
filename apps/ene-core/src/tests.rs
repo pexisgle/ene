@@ -138,6 +138,7 @@ async fn disabling_one_fiber_does_not_restart_the_core() {
         plugin: "tool.utility".to_owned(),
         requires: Vec::new(),
         capabilities: Vec::new(),
+        seams: Vec::new(),
         sandbox_required: false,
         config: serde_json::Value::Null,
     })
@@ -148,6 +149,7 @@ async fn disabling_one_fiber_does_not_restart_the_core() {
             plugin: "tool.web".to_owned(),
             requires: Vec::new(),
             capabilities: Vec::new(),
+            seams: Vec::new(),
             sandbox_required: false,
             config: serde_json::Value::Null,
         })
@@ -257,6 +259,7 @@ async fn dummy_plugin_and_harness_tools_share_registry() {
             plugin: "tool.dummy".to_owned(),
             requires: Vec::new(),
             capabilities: Vec::new(),
+            seams: Vec::new(),
             sandbox_required: false,
             config: serde_json::Value::Null,
         },

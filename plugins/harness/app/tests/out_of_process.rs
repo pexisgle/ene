@@ -21,6 +21,7 @@ async fn app_screenshot_registers_on_surface() {
         plugin: "tool.app".to_owned(),
         requires: Vec::new(),
         capabilities: Vec::new(),
+        seams: Vec::new(),
         sandbox_required: false,
         config: serde_json::Value::Null,
     };

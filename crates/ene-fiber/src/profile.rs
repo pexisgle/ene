@@ -158,6 +158,7 @@ mod tests {
             plugin: plugin.to_owned(),
             requires: requires.iter().map(|s| (*s).to_owned()).collect(),
             capabilities: Vec::new(),
+            seams: Vec::new(),
             sandbox_required: false,
             config: serde_json::Value::Null,
         }

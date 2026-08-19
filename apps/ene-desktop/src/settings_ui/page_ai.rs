@@ -1,4 +1,4 @@
-//! AI & Models page: pick This computer / `ChatGPT` / Claude.
+//! AI & Models page: pick a provider plugin from the host catalog.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,11 +8,12 @@ use crate::settings::CharacterSettings;
 
 use super::components::{section_card, section_card_collapsible};
 use super::draft::SettingsDraft;
-use super::gguf_catalog::{self, CatalogEntry};
-use super::input::{ChatMode, SettingsInputState};
+use super::gguf_catalog::{self, CatalogEntry, WeightKind};
+use super::input::SettingsInputState;
 use super::provider_form::{
-    CHAT_PLUGINS, EMBED_PLUGINS, plugin_combo_with_empty, plugin_needs_key, provider_description,
-    sidecar_fields,
+    ProviderInfo, catalog_from_settings, catalog_plugin, ids_with_seam, local_plugin,
+    plugin_combo_with_empty, plugin_needs_key, plugins_with_seam, provider_description,
+    provider_display_name, sidecar_fields,
 };
 use super::widgets::{editable_combo, path_row_filtered};
 use bevy_ecs::entity::Entity;
@@ -33,6 +34,11 @@ const CLAUDE_MODELS: &[&str] = &[
     "claude-haiku-4-5-20251001",
 ];
 
+const OPENAI_EMBED_MODELS: &[&str] = &["text-embedding-3-small", "text-embedding-3-large"];
+
+const LEGACY_LOCAL_PLUGIN: &str = "provider.openai_compat";
+const GGUF_PLUGIN: &str = "provider.gguf";
+
 pub fn render(
     ui: &mut egui::Ui,
     _settings: &mut CharacterSettings,
@@ -52,19 +58,34 @@ pub fn render(
         seed_draft_once(draft, &settings, input);
     }
 
+    let catalog = catalog_from_settings(
+        input
+            .core_settings
+            .data
+            .as_ref()
+            .and_then(|result| result.as_ref().ok()),
+    );
+
     input.gguf_download.poll();
-    if let Some((id, path)) = input.gguf_download.completed_path.take() {
-        apply_local_binding(draft, &id, &path.display().to_string());
-        input.chat_mode = Some(ChatMode::Local);
-        input.local_catalog_id.clone_from(&id);
+    if let Some((id, path)) = input.gguf_download.completed_path.take()
+        && let Some(entry) = gguf_catalog::entry_by_id(&id)
+    {
+        let path = path.display().to_string();
+        match entry.kind {
+            WeightKind::Chat => {
+                apply_local(draft, "chat", gguf_plugin(&catalog), entry.id, &path);
+                entry.id.clone_into(&mut input.local_catalog_id);
+            }
+            WeightKind::Embedding => {
+                apply_local(draft, "embedding", gguf_plugin(&catalog), entry.id, &path);
+                entry.id.clone_into(&mut input.embed_catalog_id);
+            }
+        }
     }
 
     if input.llama_server_on_path.is_none() {
         input.llama_server_on_path = Some(gguf_catalog::binary_on_path("llama-server"));
     }
-
-    let binding = current_binding(draft, "chat");
-    let mode = input.chat_mode.unwrap_or_else(|| detect_mode(&binding));
 
     section_card(
         ui,
@@ -75,33 +96,62 @@ pub fn render(
                 crate::i18n::loader(),
                 "ai-conversation-hint"
             ));
-            ui.horizontal(|ui| {
-                let modes = [
-                    (
-                        ChatMode::Local,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "ai-mode-local"),
-                    ),
-                    (
-                        ChatMode::OpenAiCompat,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "ai-mode-openai"),
-                    ),
-                    (
-                        ChatMode::Claude,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "ai-mode-claude"),
-                    ),
-                ];
-                for (candidate, label) in &modes {
-                    if ui.selectable_label(mode == *candidate, label).clicked() {
-                        input.chat_mode = Some(*candidate);
-                        on_mode_selected(draft, input, *candidate);
-                    }
-                }
-            });
+            let chat = current_binding(draft, "chat");
+            let selected = plugin_id(&chat);
+            if let Some(plugin) = render_plugin_row(
+                ui,
+                &plugins_with_seam(&catalog, "seam.llm"),
+                &selected,
+                false,
+            ) {
+                on_chat_plugin_selected(draft, input, &catalog, &plugin);
+            }
             ui.add_space(8.0);
-            match mode {
-                ChatMode::Local => render_local(ui, draft, input, ai),
-                ChatMode::OpenAiCompat => render_openai(ui, draft, input),
-                ChatMode::Claude => render_claude(ui, draft, input),
+            let chat = current_binding(draft, "chat");
+            let selected = plugin_id(&chat);
+            match catalog_plugin(&catalog, &selected) {
+                Some(info) if info.local => {
+                    render_gguf(ui, draft, input, ai, "chat", WeightKind::Chat, &info.id);
+                }
+                Some(info) => render_remote(ui, draft, input, "chat", &info.id, &catalog),
+                None => {}
+            }
+        },
+    );
+
+    section_card(
+        ui,
+        "ai-embedding",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "section-ai-embedding"),
+        |ui| {
+            ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-embed-hint"));
+            let embedding = current_binding(draft, "embedding");
+            let selected = plugin_id(&embedding);
+            if let Some(plugin) = render_plugin_row(
+                ui,
+                &plugins_with_seam(&catalog, "seam.embed"),
+                &selected,
+                true,
+            ) {
+                on_embed_plugin_selected(draft, input, &catalog, &plugin);
+            }
+            ui.add_space(8.0);
+            let embedding = current_binding(draft, "embedding");
+            let selected = plugin_id(&embedding);
+            match catalog_plugin(&catalog, &selected) {
+                Some(info) if info.local => {
+                    render_gguf(
+                        ui,
+                        draft,
+                        input,
+                        ai,
+                        "embedding",
+                        WeightKind::Embedding,
+                        &info.id,
+                    );
+                }
+                Some(info) => render_remote(ui, draft, input, "embedding", &info.id, &catalog),
+                None => {}
             }
         },
     );
@@ -125,7 +175,14 @@ pub fn render(
                 crate::i18n::loader(),
                 "ai-advanced-same-as-chat"
             ));
-            render_binding(ui, draft, input, "classifier", CHAT_PLUGINS);
+            render_binding(
+                ui,
+                draft,
+                input,
+                "classifier",
+                &ids_with_seam(&catalog, "seam.llm"),
+                &catalog,
+            );
             ui.separator();
             ui.strong(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
@@ -135,24 +192,21 @@ pub fn render(
                 crate::i18n::loader(),
                 "ai-advanced-same-as-chat"
             ));
-            render_binding(ui, draft, input, "proactive", CHAT_PLUGINS);
-            ui.separator();
-            ui.strong(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "section-ai-embedding"
-            ));
-            ui.weak(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "ai-advanced-embedding-unused"
-            ));
-            render_binding(ui, draft, input, "embedding", EMBED_PLUGINS);
+            render_binding(
+                ui,
+                draft,
+                input,
+                "proactive",
+                &ids_with_seam(&catalog, "seam.llm"),
+                &catalog,
+            );
             ui.separator();
             ui.strong(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
                 "ai-sidecar-heading"
             ));
             let mut chat = current_binding(draft, "chat");
-            if sidecar_fields(ui, &mut chat) {
+            if sidecar_fields(ui, &mut chat, &catalog) {
                 write_binding(draft, "chat", chat);
             }
         },
@@ -164,7 +218,10 @@ fn seed_draft_once(draft: &mut SettingsDraft, settings: &Value, input: &mut Sett
         return;
     }
     if let Some(ai) = settings.pointer("/effective/ai") {
-        draft.seed_core_section("ai", ai.clone());
+        let mut ai = ai.clone();
+        remap_legacy_local(ai.pointer_mut("/tasks/chat"));
+        remap_legacy_local(ai.pointer_mut("/tasks/embedding"));
+        draft.seed_core_section("ai", ai);
     }
     input.ai_api_key.clear();
     input.ai_classifier_key.clear();
@@ -175,24 +232,60 @@ fn seed_draft_once(draft: &mut SettingsDraft, settings: &Value, input: &mut Sett
     input.ai_embedding_key_set = flag(settings, "ai_embedding_key_set");
     input.ai_proactive_key_set = flag(settings, "ai_proactive_key_set");
 
-    let chat = settings
-        .pointer("/effective/ai/tasks/chat")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    input.chat_mode = Some(detect_mode(&chat));
-    if let Some(path) = chat.get("model_path").and_then(Value::as_str) {
-        path.clone_into(&mut input.local_custom_path);
-        if let Some(entry) = gguf_catalog::CATALOG
-            .iter()
-            .find(|entry| gguf_catalog::catalog_dest(entry).to_string_lossy() == path)
-        {
-            entry.id.clone_into(&mut input.local_catalog_id);
+    seed_gguf_picker(
+        settings.pointer("/effective/ai/tasks/chat"),
+        &mut input.local_custom_path,
+        &mut input.local_catalog_id,
+        WeightKind::Chat,
+    );
+    seed_gguf_picker(
+        settings.pointer("/effective/ai/tasks/embedding"),
+        &mut input.embed_custom_path,
+        &mut input.embed_catalog_id,
+        WeightKind::Embedding,
+    );
+}
+
+fn remap_legacy_local(binding: Option<&mut Value>) {
+    let Some(binding) = binding else {
+        return;
+    };
+    let plugin = binding.get("plugin").and_then(Value::as_str).unwrap_or("");
+    let has_path = binding
+        .get("model_path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| !path.is_empty());
+    if plugin == LEGACY_LOCAL_PLUGIN && has_path {
+        binding["plugin"] = json!(GGUF_PLUGIN);
+    }
+}
+
+fn seed_gguf_picker(
+    binding: Option<&Value>,
+    custom_path: &mut String,
+    catalog_id: &mut String,
+    kind: WeightKind,
+) {
+    let Some(binding) = binding else {
+        if catalog_id.is_empty() {
+            recommended(kind).id.clone_into(catalog_id);
+        }
+        return;
+    };
+    if let Some(path) = binding.get("model_path").and_then(Value::as_str) {
+        path.clone_into(custom_path);
+        let matched = match kind {
+            WeightKind::Chat => gguf_catalog::chat_entries()
+                .find(|entry| gguf_catalog::catalog_dest(entry).to_string_lossy() == path),
+            WeightKind::Embedding => gguf_catalog::embed_entries()
+                .find(|entry| gguf_catalog::catalog_dest(entry).to_string_lossy() == path),
+        };
+        if let Some(entry) = matched {
+            entry.id.clone_into(catalog_id);
         }
     }
-    if input.local_catalog_id.is_empty() {
-        gguf_catalog::recommended_entry()
-            .id
-            .clone_into(&mut input.local_catalog_id);
+    if catalog_id.is_empty() {
+        recommended(kind).id.clone_into(catalog_id);
     }
 }
 
@@ -203,76 +296,180 @@ fn flag(settings: &Value, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn detect_mode(binding: &Value) -> ChatMode {
-    let plugin = binding.get("plugin").and_then(Value::as_str).unwrap_or("");
-    let model_path = binding
-        .get("model_path")
+fn plugin_id(binding: &Value) -> String {
+    binding
+        .get("plugin")
         .and_then(Value::as_str)
-        .unwrap_or("");
-    match plugin {
-        "provider.anthropic" => ChatMode::Claude,
-        "provider.openai_compat" if !model_path.is_empty() => ChatMode::Local,
-        "provider.openai_compat" => ChatMode::OpenAiCompat,
-        _ => ChatMode::Local,
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn gguf_plugin(catalog: &[ProviderInfo]) -> &str {
+    local_plugin(catalog, "seam.llm").map_or(GGUF_PLUGIN, |plugin| plugin.id.as_str())
+}
+
+fn recommended(kind: WeightKind) -> &'static CatalogEntry {
+    match kind {
+        WeightKind::Chat => gguf_catalog::recommended_chat(),
+        WeightKind::Embedding => gguf_catalog::recommended_embedding(),
     }
 }
 
-fn on_mode_selected(draft: &mut SettingsDraft, input: &mut SettingsInputState, mode: ChatMode) {
-    match mode {
-        ChatMode::Local => {
-            let entry = gguf_catalog::entry_by_id(&input.local_catalog_id)
-                .unwrap_or_else(gguf_catalog::recommended_entry);
-            if gguf_catalog::is_downloaded(entry) {
-                apply_local_binding(
-                    draft,
-                    entry.id,
-                    &gguf_catalog::catalog_dest(entry).display().to_string(),
-                );
-            } else if !input.local_custom_path.trim().is_empty() {
-                let path = input.local_custom_path.trim();
-                let model = Path::new(path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("local-gguf");
-                apply_local_binding(draft, model, path);
+fn for_each_catalog_entry(kind: WeightKind, mut visit: impl FnMut(&'static CatalogEntry)) {
+    match kind {
+        WeightKind::Chat => {
+            for entry in gguf_catalog::chat_entries() {
+                visit(entry);
             }
         }
-        ChatMode::OpenAiCompat => {
-            let mut binding = current_binding(draft, "chat");
-            binding["plugin"] = json!("provider.openai_compat");
-            if let Some(map) = binding.as_object_mut() {
-                map.remove("model_path");
+        WeightKind::Embedding => {
+            for entry in gguf_catalog::embed_entries() {
+                visit(entry);
             }
-            if binding
-                .get("model")
-                .and_then(Value::as_str)
-                .is_none_or(|m| m.is_empty() || m.starts_with("gemma-"))
-            {
-                binding["model"] = json!(OPENAI_MODELS[0]);
-            }
-            write_binding(draft, "chat", binding);
-        }
-        ChatMode::Claude => {
-            let mut binding = json!({
-                "plugin": "provider.anthropic",
-                "model": CLAUDE_MODELS[0],
-            });
-            let prev = current_binding(draft, "chat");
-            if let Some(model) = prev.get("model").and_then(Value::as_str)
-                && model.starts_with("claude-")
-            {
-                binding["model"] = json!(model);
-            }
-            write_binding(draft, "chat", binding);
         }
     }
 }
 
-fn render_local(
+fn render_plugin_row(
+    ui: &mut egui::Ui,
+    plugins: &[&ProviderInfo],
+    selected: &str,
+    allow_empty: bool,
+) -> Option<String> {
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        if allow_empty
+            && ui
+                .selectable_label(
+                    selected.is_empty(),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "ai-provider-unset"),
+                )
+                .clicked()
+        {
+            clicked = Some(String::new());
+        }
+        for plugin in plugins {
+            if ui
+                .selectable_label(selected == plugin.id, provider_display_name(&plugin.id))
+                .clicked()
+            {
+                clicked = Some(plugin.id.clone());
+            }
+        }
+    });
+    clicked
+}
+
+fn on_chat_plugin_selected(
+    draft: &mut SettingsDraft,
+    input: &mut SettingsInputState,
+    catalog: &[ProviderInfo],
+    plugin: &str,
+) {
+    let Some(info) = catalog_plugin(catalog, plugin) else {
+        return;
+    };
+    if info.local {
+        bind_local_if_ready(draft, input, "chat", WeightKind::Chat, plugin);
+    } else {
+        bind_remote(draft, "chat", plugin);
+    }
+}
+
+fn on_embed_plugin_selected(
+    draft: &mut SettingsDraft,
+    input: &mut SettingsInputState,
+    catalog: &[ProviderInfo],
+    plugin: &str,
+) {
+    if plugin.is_empty() {
+        write_binding(draft, "embedding", json!({ "plugin": "", "model": "" }));
+        return;
+    }
+    let Some(info) = catalog_plugin(catalog, plugin) else {
+        return;
+    };
+    if info.local {
+        bind_local_if_ready(draft, input, "embedding", WeightKind::Embedding, plugin);
+    } else {
+        bind_remote(draft, "embedding", plugin);
+    }
+}
+
+fn bind_local_if_ready(
+    draft: &mut SettingsDraft,
+    input: &SettingsInputState,
+    task: &str,
+    kind: WeightKind,
+    plugin: &str,
+) {
+    let catalog_id = match kind {
+        WeightKind::Chat => input.local_catalog_id.as_str(),
+        WeightKind::Embedding => input.embed_catalog_id.as_str(),
+    };
+    let custom_path = match kind {
+        WeightKind::Chat => input.local_custom_path.trim(),
+        WeightKind::Embedding => input.embed_custom_path.trim(),
+    };
+    let entry = gguf_catalog::entry_by_id(catalog_id).unwrap_or_else(|| recommended(kind));
+    if gguf_catalog::is_downloaded(entry) {
+        apply_local(
+            draft,
+            task,
+            plugin,
+            entry.id,
+            &gguf_catalog::catalog_dest(entry).display().to_string(),
+        );
+    } else if !custom_path.is_empty() {
+        let model = Path::new(custom_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("local-gguf");
+        apply_local(draft, task, plugin, model, custom_path);
+    } else {
+        write_binding(
+            draft,
+            task,
+            json!({
+                "plugin": plugin,
+                "model": "",
+                "model_path": "",
+            }),
+        );
+    }
+}
+
+fn bind_remote(draft: &mut SettingsDraft, task: &str, plugin: &str) {
+    let mut binding = current_binding(draft, task);
+    binding["plugin"] = json!(plugin);
+    if let Some(map) = binding.as_object_mut() {
+        map.remove("model_path");
+    }
+    if binding
+        .get("model")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        binding["model"] = json!(default_cloud_model(plugin, task));
+    }
+    write_binding(draft, task, binding);
+}
+
+fn default_cloud_model(plugin: &str, task: &str) -> &'static str {
+    cloud_model_presets(plugin, task)
+        .first()
+        .copied()
+        .unwrap_or("")
+}
+
+fn render_gguf(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,
     input: &mut SettingsInputState,
     ai: &Arc<CoreSession>,
+    task: &str,
+    kind: WeightKind,
+    plugin: &str,
 ) {
     if input.llama_server_on_path != Some(true) {
         ui.weak(i18n_embed_fl::fl!(
@@ -285,25 +482,35 @@ fn render_local(
         crate::i18n::loader(),
         "ai-local-catalog-label"
     ));
-    let selected = gguf_catalog::entry_by_id(&input.local_catalog_id)
-        .unwrap_or_else(gguf_catalog::recommended_entry);
+    let catalog_id = match kind {
+        WeightKind::Chat => input.local_catalog_id.as_str(),
+        WeightKind::Embedding => input.embed_catalog_id.as_str(),
+    };
+    let selected = gguf_catalog::entry_by_id(catalog_id).unwrap_or_else(|| recommended(kind));
     let selected_label = catalog_label(selected);
-    egui::ComboBox::from_id_salt("ai-local-catalog")
+    egui::ComboBox::from_id_salt(format!("ai-gguf-catalog-{task}"))
         .selected_text(selected_label)
         .show_ui(ui, |ui| {
-            for entry in gguf_catalog::CATALOG {
+            for_each_catalog_entry(kind, |entry| {
                 let label = catalog_label(entry);
-                if ui
-                    .selectable_label(input.local_catalog_id == entry.id, label)
-                    .clicked()
-                {
-                    entry.id.clone_into(&mut input.local_catalog_id);
+                let current = match kind {
+                    WeightKind::Chat => input.local_catalog_id.as_str(),
+                    WeightKind::Embedding => input.embed_catalog_id.as_str(),
+                };
+                if ui.selectable_label(current == entry.id, label).clicked() {
+                    match kind {
+                        WeightKind::Chat => entry.id.clone_into(&mut input.local_catalog_id),
+                        WeightKind::Embedding => entry.id.clone_into(&mut input.embed_catalog_id),
+                    }
                 }
-            }
+            });
         });
 
-    let entry = gguf_catalog::entry_by_id(&input.local_catalog_id)
-        .unwrap_or_else(gguf_catalog::recommended_entry);
+    let catalog_id = match kind {
+        WeightKind::Chat => input.local_catalog_id.as_str(),
+        WeightKind::Embedding => input.embed_catalog_id.as_str(),
+    };
+    let entry = gguf_catalog::entry_by_id(catalog_id).unwrap_or_else(|| recommended(kind));
     let downloaded = gguf_catalog::is_downloaded(entry);
     ui.horizontal(|ui| {
         if downloaded {
@@ -311,8 +518,10 @@ fn render_local(
                 .button(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-local-use"))
                 .clicked()
             {
-                apply_local_binding(
+                apply_local(
                     draft,
+                    task,
+                    plugin,
                     entry.id,
                     &gguf_catalog::catalog_dest(entry).display().to_string(),
                 );
@@ -358,19 +567,23 @@ fn render_local(
         "ai-local-custom-label"
     ));
     let filter_name = i18n_embed_fl::fl!(crate::i18n::loader(), "ai-gguf-filter");
+    let custom_path = match kind {
+        WeightKind::Chat => &mut input.local_custom_path,
+        WeightKind::Embedding => &mut input.embed_custom_path,
+    };
     if path_row_filtered(
         ui,
-        &mut input.local_custom_path,
+        custom_path,
         f32::INFINITY,
         Some((filter_name.as_str(), &["gguf"])),
     ) {
-        let path = input.local_custom_path.trim();
+        let path = custom_path.trim();
         if !path.is_empty() {
             let model = Path::new(path)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("local-gguf");
-            apply_local_binding(draft, model, path);
+            apply_local(draft, task, plugin, model, path);
         }
     }
 }
@@ -403,86 +616,93 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
-fn render_openai(ui: &mut egui::Ui, draft: &mut SettingsDraft, input: &mut SettingsInputState) {
-    let mut binding = current_binding(draft, "chat");
-    binding["plugin"] = json!("provider.openai_compat");
-    if let Some(map) = binding.as_object_mut() {
-        map.remove("model_path");
-    }
+fn render_remote(
+    ui: &mut egui::Ui,
+    draft: &mut SettingsDraft,
+    input: &mut SettingsInputState,
+    task: &str,
+    plugin: &str,
+    catalog: &[ProviderInfo],
+) {
+    let mut binding = current_binding(draft, task);
+    binding["plugin"] = json!(plugin);
 
     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-model-label"));
+    let presets = cloud_model_presets(plugin, task);
     let mut model = binding
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or(OPENAI_MODELS[0])
+        .unwrap_or(presets.first().copied().unwrap_or(""))
         .to_owned();
-    let choices: Vec<(String, String)> = OPENAI_MODELS
+    let choices: Vec<(String, String)> = presets
         .iter()
-        .map(|m| ((*m).to_owned(), (*m).to_owned()))
+        .map(|name| ((*name).to_owned(), (*name).to_owned()))
         .collect();
-    let combo = editable_combo(ui, "ai-openai-model", &mut model, &choices, f32::INFINITY);
+    let combo = editable_combo(
+        ui,
+        &format!("ai-cloud-model-{task}-{plugin}"),
+        &mut model,
+        &choices,
+        f32::INFINITY,
+    );
     if combo.commit_requested() {
         binding["model"] = json!(model);
-        write_binding(draft, "chat", binding.clone());
+        write_binding(draft, task, binding.clone());
     }
 
-    render_api_key(ui, draft, input, "chat", &mut binding);
+    render_api_key(ui, draft, input, task, &mut binding, catalog);
 
-    egui::CollapsingHeader::new(i18n_embed_fl::fl!(
-        crate::i18n::loader(),
-        "ai-openai-advanced"
-    ))
-    .id_salt("ai-openai-advanced")
-    .default_open(false)
-    .show(ui, |ui| {
-        let mut base_url = binding
-            .get("base_url")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        ui.label(i18n_embed_fl::fl!(
+    if plugin.contains("openai_compat") {
+        egui::CollapsingHeader::new(i18n_embed_fl::fl!(
             crate::i18n::loader(),
-            "ai-base-url-label"
-        ));
-        if ui
-            .add(egui::TextEdit::singleline(&mut base_url).desired_width(f32::INFINITY))
-            .changed()
-        {
-            binding["base_url"] = json!(base_url);
-            write_binding(draft, "chat", binding.clone());
-        }
-        ui.weak(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "ai-openai-compat-base-url-hint"
-        ));
-    });
+            "ai-openai-advanced"
+        ))
+        .id_salt(format!("ai-openai-advanced-{task}"))
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut base_url = binding
+                .get("base_url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "ai-base-url-label"
+            ));
+            if ui
+                .add(egui::TextEdit::singleline(&mut base_url).desired_width(f32::INFINITY))
+                .changed()
+            {
+                binding["base_url"] = json!(base_url);
+                write_binding(draft, task, binding.clone());
+            }
+            ui.weak(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "ai-openai-compat-base-url-hint"
+            ));
+        });
+    }
 }
 
-fn render_claude(ui: &mut egui::Ui, draft: &mut SettingsDraft, input: &mut SettingsInputState) {
-    let mut binding = current_binding(draft, "chat");
-    binding["plugin"] = json!("provider.anthropic");
-    if let Some(map) = binding.as_object_mut() {
-        map.remove("model_path");
-        map.remove("base_url");
+fn cloud_model_presets(plugin: &str, task: &str) -> &'static [&'static str] {
+    match (plugin.strip_prefix("provider.").unwrap_or(plugin), task) {
+        ("anthropic", _) => CLAUDE_MODELS,
+        ("openai_compat", "embedding") => OPENAI_EMBED_MODELS,
+        ("openai_compat", _) => OPENAI_MODELS,
+        _ => &[],
     }
+}
 
-    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-model-label"));
-    let mut model = binding
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(CLAUDE_MODELS[0])
-        .to_owned();
-    let choices: Vec<(String, String)> = CLAUDE_MODELS
-        .iter()
-        .map(|m| ((*m).to_owned(), (*m).to_owned()))
-        .collect();
-    let combo = editable_combo(ui, "ai-claude-model", &mut model, &choices, f32::INFINITY);
-    if combo.commit_requested() {
-        binding["model"] = json!(model);
-        write_binding(draft, "chat", binding.clone());
-    }
-
-    render_api_key(ui, draft, input, "chat", &mut binding);
+fn apply_local(draft: &mut SettingsDraft, task: &str, plugin: &str, model: &str, model_path: &str) {
+    write_binding(
+        draft,
+        task,
+        json!({
+            "plugin": plugin,
+            "model": model,
+            "model_path": model_path,
+        }),
+    );
 }
 
 fn render_api_key(
@@ -491,9 +711,10 @@ fn render_api_key(
     input: &mut SettingsInputState,
     task: &str,
     binding: &mut Value,
+    catalog: &[ProviderInfo],
 ) {
     let plugin = binding.get("plugin").and_then(Value::as_str).unwrap_or("");
-    if !plugin_needs_key(plugin) {
+    if !plugin_needs_key(catalog, plugin) {
         return;
     }
     ui.label(i18n_embed_fl::fl!(
@@ -518,24 +739,13 @@ fn render_api_key(
     }
 }
 
-fn apply_local_binding(draft: &mut SettingsDraft, model: &str, model_path: &str) {
-    write_binding(
-        draft,
-        "chat",
-        json!({
-            "plugin": "provider.openai_compat",
-            "model": model,
-            "model_path": model_path,
-        }),
-    );
-}
-
 fn render_binding(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,
     input: &mut SettingsInputState,
     task: &str,
-    plugins: &[&str],
+    plugins: &[String],
+    catalog: &[ProviderInfo],
 ) {
     let mut binding = current_binding(draft, task);
     let mut plugin = binding
@@ -583,7 +793,7 @@ fn render_binding(
         write_binding(draft, task, binding.clone());
     }
 
-    render_api_key(ui, draft, input, task, &mut binding);
+    render_api_key(ui, draft, input, task, &mut binding, catalog);
 }
 
 fn task_key_buffer<'a>(input: &'a mut SettingsInputState, task: &str) -> (&'a mut String, bool) {

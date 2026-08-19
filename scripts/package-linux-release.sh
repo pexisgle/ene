@@ -21,6 +21,7 @@ PLUGINS=(
   ene-harness-app
   ene-harness-mcp
   ene-provider-openai-compat
+  ene-provider-gguf
   ene-provider-anthropic
   ene-provider-elevenlabs
   ene-provider-voicevox

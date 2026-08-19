@@ -1,4 +1,4 @@
-//! Curated GGUF catalog and host-side HTTPS download for local chat.
+//! Curated GGUF catalog and host-side HTTPS download for local weights.
 //!
 //! Plugins must never download weights; the desktop host owns this path.
 
@@ -9,13 +9,21 @@ use parking_lot::Mutex;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
+/// Chat vs embedding GGUF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeightKind {
+    Chat,
+    Embedding,
+}
+
 /// One curated GGUF offered on the AI page.
 #[derive(Clone, Copy, Debug)]
 pub struct CatalogEntry {
-    /// Value written to `ai.tasks.chat.model`.
+    /// Value written to `ai.tasks.*.model`.
     pub id: &'static str,
     pub filename: &'static str,
     pub url: &'static str,
+    pub kind: WeightKind,
     pub recommended: bool,
 }
 
@@ -25,13 +33,22 @@ pub const CATALOG: &[CatalogEntry] = &[
         id: "gemma-4-e2b",
         filename: "gemma-4-E2B-it-Q4_0.gguf",
         url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+        kind: WeightKind::Chat,
         recommended: true,
     },
     CatalogEntry {
         id: "gemma-4-e4b",
         filename: "gemma-4-E4B-it-Q4_0.gguf",
         url: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
+        kind: WeightKind::Chat,
         recommended: false,
+    },
+    CatalogEntry {
+        id: "jina-v5-small",
+        filename: "v5-small-retrieval-F16.gguf",
+        url: "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+        kind: WeightKind::Embedding,
+        recommended: true,
     },
 ];
 
@@ -41,11 +58,36 @@ pub fn entry_by_id(id: &str) -> Option<&'static CatalogEntry> {
 }
 
 #[must_use]
-pub fn recommended_entry() -> &'static CatalogEntry {
+pub fn recommended_chat() -> &'static CatalogEntry {
     CATALOG
         .iter()
-        .find(|entry| entry.recommended)
+        .find(|entry| entry.kind == WeightKind::Chat && entry.recommended)
         .unwrap_or(&CATALOG[0])
+}
+
+#[must_use]
+pub fn recommended_embedding() -> &'static CatalogEntry {
+    CATALOG
+        .iter()
+        .find(|entry| entry.kind == WeightKind::Embedding && entry.recommended)
+        .or_else(|| {
+            CATALOG
+                .iter()
+                .find(|entry| entry.kind == WeightKind::Embedding)
+        })
+        .unwrap_or(&CATALOG[0])
+}
+
+pub fn chat_entries() -> impl Iterator<Item = &'static CatalogEntry> {
+    CATALOG
+        .iter()
+        .filter(|entry| entry.kind == WeightKind::Chat)
+}
+
+pub fn embed_entries() -> impl Iterator<Item = &'static CatalogEntry> {
+    CATALOG
+        .iter()
+        .filter(|entry| entry.kind == WeightKind::Embedding)
 }
 
 #[must_use]
@@ -252,7 +294,13 @@ mod tests {
     }
 
     #[test]
-    fn recommended_is_e2b() {
-        assert_eq!(recommended_entry().id, "gemma-4-e2b");
+    fn recommended_chat_is_e2b() {
+        assert_eq!(recommended_chat().id, "gemma-4-e2b");
+    }
+
+    #[test]
+    fn recommended_embedding_is_jina() {
+        assert_eq!(recommended_embedding().id, "jina-v5-small");
+        assert_eq!(recommended_embedding().kind, WeightKind::Embedding);
     }
 }

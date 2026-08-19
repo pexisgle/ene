@@ -3,18 +3,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ene_plugin_ipc::{
     EmbedHandler, EmbedRequest, EmbedResult, IpcError, LlmGenerateRequest, LlmGeneration,
-    LlmHandler, LlmMessage, LlmRole, LlmToolCall, SttHandler, SttRequest, SttResult, TtsAudio,
-    TtsHandler, TtsRequest,
+    LlmHandler, LlmMessage, LlmRole, LlmToolCall,
 };
 use serde_json::{Value, json};
 
-const DEFAULT_BASE: &str = "https://api.openai.com/v1";
-
-pub struct OpenAiCompat {
+pub struct Gguf {
     http: reqwest::Client,
 }
 
-impl OpenAiCompat {
+impl Gguf {
     pub fn new() -> Self {
         Self {
             http: reqwest::Client::builder()
@@ -26,11 +23,11 @@ impl OpenAiCompat {
 }
 
 #[async_trait]
-impl LlmHandler for OpenAiCompat {
+impl LlmHandler for Gguf {
     async fn generate(&self, request: LlmGenerateRequest) -> Result<LlmGeneration, IpcError> {
-        let url = format!("{}/chat/completions", effective_base(&request.base_url));
+        let url = format!("{}/chat/completions", sidecar_base()?);
         let mut body = json!({
-            "model": effective_model(&request.model, "gpt-4.1-mini"),
+            "model": effective_model(&request.model),
             "messages": map_messages(&request.messages),
         });
         if let Some(max) = request.max_tokens {
@@ -52,20 +49,20 @@ impl LlmHandler for OpenAiCompat {
                     .collect::<Vec<_>>()
             );
         }
-        let response = self.post_json(&url, &request.auth.api_key, body).await?;
+        let response = self.post_json(&url, body).await?;
         Ok(parse_chat(&response))
     }
 }
 
 #[async_trait]
-impl EmbedHandler for OpenAiCompat {
+impl EmbedHandler for Gguf {
     async fn encode(&self, request: EmbedRequest) -> Result<EmbedResult, IpcError> {
-        let url = format!("{}/embeddings", effective_base(&request.base_url));
+        let url = format!("{}/embeddings", sidecar_base()?);
         let body = json!({
-            "model": effective_model(&request.model, "text-embedding-3-small"),
+            "model": effective_model(&request.model),
             "input": request.texts,
         });
-        let response = self.post_json(&url, &request.auth.api_key, body).await?;
+        let response = self.post_json(&url, body).await?;
         let vectors = response
             .get("data")
             .and_then(Value::as_array)
@@ -89,73 +86,12 @@ impl EmbedHandler for OpenAiCompat {
     }
 }
 
-#[async_trait]
-impl TtsHandler for OpenAiCompat {
-    async fn synthesize(&self, request: TtsRequest) -> Result<TtsAudio, IpcError> {
-        let url = format!("{}/audio/speech", effective_base(&request.base_url));
-        let voice = if request.voice.is_empty() {
-            "alloy"
-        } else {
-            request.voice.as_str()
-        };
-        let body = json!({
-            "model": effective_model(&request.model, "gpt-4o-mini-tts"),
-            "voice": voice,
-            "input": request.text,
-            "response_format": "pcm",
-        });
-        let bytes = self.post_bytes(&url, &request.auth.api_key, body).await?;
-        Ok(TtsAudio {
-            pcm: pcm16le_to_f32(&bytes),
-            sample_rate: 24_000,
-        })
-    }
-}
-
-#[async_trait]
-impl SttHandler for OpenAiCompat {
-    async fn transcribe(&self, request: SttRequest) -> Result<SttResult, IpcError> {
-        let url = format!("{}/audio/transcriptions", effective_base(&request.base_url));
-        let wav = encode_wav(&request.pcm, request.sample_rate);
-        let mut form = reqwest::multipart::Form::new()
-            .text("model", effective_model(&request.model, "whisper-1"))
-            .part(
-                "file",
-                reqwest::multipart::Part::bytes(wav)
-                    .file_name("audio.wav")
-                    .mime_str("audio/wav")
-                    .map_err(|err| IpcError::Call(err.to_string()))?,
-            );
-        if let Some(language) = request.language.clone() {
-            form = form.text("language", language);
-        }
-        let response = attach_vendor_headers(self.http.post(&url), &request.auth.api_key)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|err| IpcError::Call(err.to_string()))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(IpcError::Call(format!("{status}: {body}")));
-        }
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|err| IpcError::Call(err.to_string()))?;
-        Ok(SttResult {
-            text: value
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-        })
-    }
-}
-
-impl OpenAiCompat {
-    async fn post_json(&self, url: &str, api_key: &str, body: Value) -> Result<Value, IpcError> {
-        let response = attach_vendor_headers(self.http.post(url).json(&body), api_key)
+impl Gguf {
+    async fn post_json(&self, url: &str, body: Value) -> Result<Value, IpcError> {
+        let response = self
+            .http
+            .post(url)
+            .json(&body)
             .send()
             .await
             .map_err(|err| IpcError::Call(err.to_string()))?;
@@ -169,23 +105,12 @@ impl OpenAiCompat {
             .await
             .map_err(|err| IpcError::Call(err.to_string()))
     }
+}
 
-    async fn post_bytes(&self, url: &str, api_key: &str, body: Value) -> Result<Vec<u8>, IpcError> {
-        let response = attach_vendor_headers(self.http.post(url).json(&body), api_key)
-            .send()
-            .await
-            .map_err(|err| IpcError::Call(err.to_string()))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(IpcError::Call(format_http_error(status, &body)));
-        }
-        response
-            .bytes()
-            .await
-            .map(|bytes| bytes.to_vec())
-            .map_err(|err| IpcError::Call(err.to_string()))
-    }
+fn sidecar_base() -> Result<String, IpcError> {
+    crate::sidecar::managed_base()
+        .map(str::to_owned)
+        .ok_or_else(|| IpcError::Call("llama-server sidecar is not running".to_owned()))
 }
 
 fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
@@ -208,34 +133,9 @@ fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
     }
 }
 
-fn attach_vendor_headers(
-    mut http: reqwest::RequestBuilder,
-    api_key: &str,
-) -> reqwest::RequestBuilder {
-    if !api_key.is_empty() {
-        http = http.bearer_auth(api_key);
-    }
-    http.header(reqwest::header::REFERER, "https://ene.local")
-        .header("X-Title", "ene")
-}
-
-fn effective_base(request: &str) -> String {
-    if !request.is_empty() {
-        return request.trim_end_matches('/').to_owned();
-    }
-    if let Ok(raw) = std::env::var("ENE_PROVIDER_CONFIG")
-        && let Ok(value) = serde_json::from_str::<Value>(&raw)
-        && let Some(url) = value.get("base_url").and_then(Value::as_str)
-        && !url.is_empty()
-    {
-        return url.trim_end_matches('/').to_owned();
-    }
-    DEFAULT_BASE.to_owned()
-}
-
-fn effective_model(request: &str, fallback: &str) -> String {
+fn effective_model(request: &str) -> String {
     if request.is_empty() || request == "echo" {
-        fallback.to_owned()
+        "local-gguf".to_owned()
     } else {
         request.to_owned()
     }
@@ -386,62 +286,9 @@ fn u64_to_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-fn pcm16le_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(2)
-        .map(|chunk| {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-            f32::from(sample) / 32768.0
-        })
-        .collect()
-}
-
-fn encode_wav(pcm: &[f32], sample_rate: u32) -> Vec<u8> {
-    let rate = sample_rate.max(1);
-    let data: Vec<u8> = pcm
-        .iter()
-        .flat_map(|sample| {
-            let clamped = sample.clamp(-1.0, 1.0);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "PCM sample is clamped to i16 range"
-            )]
-            let int = (clamped * 32767.0) as i16;
-            int.to_le_bytes()
-        })
-        .collect();
-    let mut out = Vec::with_capacity(44 + data.len());
-    out.extend_from_slice(b"RIFF");
-    let data_len = u32::try_from(data.len()).unwrap_or(u32::MAX);
-    out.extend_from_slice(&(36_u32.saturating_add(data_len)).to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16_u32.to_le_bytes());
-    out.extend_from_slice(&1_u16.to_le_bytes());
-    out.extend_from_slice(&1_u16.to_le_bytes());
-    out.extend_from_slice(&rate.to_le_bytes());
-    out.extend_from_slice(&(rate * 2).to_le_bytes());
-    out.extend_from_slice(&2_u16.to_le_bytes());
-    out.extend_from_slice(&16_u16.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_le_bytes());
-    out.extend_from_slice(&data);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extracts_openrouter_error_message() {
-        let body = r#"{"error":{"message":"Invalid 'tools[0].function.name'","code":400}}"#;
-        let formatted = format_http_error(reqwest::StatusCode::BAD_REQUEST, body);
-        assert_eq!(
-            formatted,
-            "400 Bad Request: Invalid 'tools[0].function.name'"
-        );
-    }
 
     #[test]
     fn maps_user_message_role() {
@@ -460,7 +307,7 @@ mod tests {
     #[test]
     fn parses_chat_completion() {
         let generation = parse_chat(&json!({
-            "model": "gpt-test",
+            "model": "gemma-4-e2b",
             "choices": [{
                 "finish_reason": "stop",
                 "message": { "role": "assistant", "content": "hello there" }
@@ -468,15 +315,14 @@ mod tests {
             "usage": { "prompt_tokens": 3, "completion_tokens": 2 }
         }));
         assert_eq!(generation.text, "hello there");
-        assert_eq!(generation.model_id, "gpt-test");
+        assert_eq!(generation.model_id, "gemma-4-e2b");
         assert_eq!(generation.input_tokens, 3);
         assert!(generation.inner.is_empty());
     }
 
     #[test]
-    fn wav_has_riff_header() {
-        let wav = encode_wav(&[0.0, 0.5], 16_000);
-        assert_eq!(&wav[..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
+    fn sidecar_base_errors_when_not_started() {
+        let err = sidecar_base().expect_err("no sidecar");
+        assert!(err.to_string().contains("sidecar"));
     }
 }

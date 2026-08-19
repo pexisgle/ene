@@ -25,18 +25,16 @@ data-dir `settings.json`. Attach to an already-running core with `ENE_API_URL`
 
 `ene-stage` remains an optional debug client for the same API.
 
-Chat starts **unconfigured**. The surface prompts you to open the **AI** page
-and pick one of three paths:
+Chat starts **unconfigured**. The surface prompts you to open the **AI** page.
+Choices come from **installed provider plugins** (the host catalog), not a
+hardcoded vendor list. Each catalog plugin that declares `seam.llm` is a
+button — including `provider.gguf` (This computer, local GGUF).
 
-| Choice | What desktop configures |
-|---|---|
-| **This computer** | Recommended Gemma GGUF download or a `.gguf` file; `provider.openai_compat` with `model_path`; `llama-server` on `PATH` or bundled |
-| **ChatGPT-compatible** | `provider.openai_compat`, model name, vault API key |
-| **Claude** | `provider.anthropic`, model name, vault API key |
+Embeddings are a separate optional picker of plugins that declare `seam.embed`
+(or unset). A local GGUF embedding uses its own `llama-server` sidecar.
 
-Classifier, proactive routing, and embeddings live under **Advanced**. Leave
-classifier empty to reuse chat; leave embedding or audio tasks empty to keep
-them off.
+Classifier and proactive routing live under **Advanced**. Leave classifier empty
+to reuse chat. TTS/STT pickers list plugins that declare `seam.tts` / `seam.stt`.
 
 Audio device relay and approval popups are the desktop's client-side jobs;
 the daemon still owns policy and the live bus.

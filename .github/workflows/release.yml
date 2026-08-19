@@ -43,6 +43,7 @@ jobs:
             -p ene-harness-app \
             -p ene-harness-mcp \
             -p ene-provider-openai-compat \
+            -p ene-provider-gguf \
             -p ene-provider-anthropic \
             -p ene-provider-elevenlabs \
             -p ene-provider-voicevox \

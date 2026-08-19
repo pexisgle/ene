@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use ene_fiber::{ProfileRow, discover_plugin_executable_in};
-use ene_kernel::{AiSettings, PluginProfileKind, PluginSettings};
+use ene_fiber::{ProfileRow, discover_plugin_executable_in, provider_plugin, task_seam};
+use ene_kernel::{AiSettings, PluginProfileKind, PluginSettings, TaskBinding};
 use ene_work::{McpServer, WorkError, WorkStore};
 use serde::{Deserialize, Serialize};
 
@@ -94,50 +94,57 @@ fn harness_row(plugin: &str, home: &Path) -> ProfileRow {
         plugin: plugin.to_owned(),
         requires: Vec::new(),
         capabilities: Vec::new(),
+        seams: Vec::new(),
         sandbox_required: needs_sandbox && binary.is_some(),
         config: serde_json::Value::Null,
     }
 }
 
 fn provider_rows(ai: &AiSettings, home: &Path) -> Vec<ProfileRow> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut rows = Vec::new();
-    for binding in [
-        &ai.tasks.chat,
-        &ai.tasks.classifier,
-        &ai.tasks.embedding,
-        &ai.tasks.proactive,
-        &ai.tasks.tts,
-        &ai.tasks.stt,
-    ] {
-        if binding.is_unconfigured() || !binding.plugin.starts_with("provider.") {
-            continue;
+    [
+        ("chat", &ai.tasks.chat),
+        ("classifier", &ai.tasks.classifier),
+        ("embedding", &ai.tasks.embedding),
+        ("proactive", &ai.tasks.proactive),
+        ("tts", &ai.tasks.tts),
+        ("stt", &ai.tasks.stt),
+    ]
+    .into_iter()
+    .filter_map(|(task, binding)| {
+        let row = provider_row(task, binding)?;
+        if discover_plugin_executable_in(&row.plugin, Some(home)).is_none() {
+            tracing::warn!(plugin = %row.plugin, "provider binary missing; skipping");
+            return None;
         }
-        if !seen.insert(binding.plugin.clone()) {
-            continue;
-        }
-        if discover_plugin_executable_in(&binding.plugin, Some(home)).is_none() {
-            tracing::warn!(plugin = %binding.plugin, "provider binary missing; skipping");
-            continue;
-        }
-        rows.push(ProfileRow {
-            row_id: binding.plugin.clone(),
-            plugin: binding.plugin.clone(),
-            requires: Vec::new(),
-            capabilities: Vec::new(),
-            sandbox_required: false,
-            config: serde_json::json!({
-                "base_url": binding.base_url,
-                "model": binding.model,
-                "server_path": binding.server_path,
-                "cas_path": binding.cas_path,
-                "model_path": binding.model_path,
-                "server_args": binding.server_args,
-                "startup_timeout_secs": binding.startup_timeout_secs,
-            }),
-        });
+        Some(row)
+    })
+    .collect()
+}
+
+fn provider_row(task: &str, binding: &TaskBinding) -> Option<ProfileRow> {
+    if binding.is_unconfigured() || !binding.plugin.starts_with("provider.") {
+        return None;
     }
-    rows
+    let seam = task_seam(task)
+        .or_else(|| provider_plugin(&binding.plugin).and_then(|meta| meta.seams.first().copied()))
+        .unwrap_or("seam.llm");
+    Some(ProfileRow {
+        row_id: format!("ai.tasks.{task}"),
+        plugin: binding.plugin.clone(),
+        requires: Vec::new(),
+        capabilities: Vec::new(),
+        seams: vec![seam.to_owned()],
+        sandbox_required: false,
+        config: serde_json::json!({
+            "base_url": binding.base_url,
+            "model": binding.model,
+            "server_path": binding.server_path,
+            "cas_path": binding.cas_path,
+            "model_path": binding.model_path,
+            "server_args": binding.server_args,
+            "startup_timeout_secs": binding.startup_timeout_secs,
+        }),
+    })
 }
 
 fn mcp_rows(data_dir: &Path, servers: &[McpServer], home: &Path) -> Vec<ProfileRow> {
@@ -174,6 +181,7 @@ fn mcp_row(data_dir: &Path, server: &McpServer) -> Option<ProfileRow> {
         plugin,
         requires: Vec::new(),
         capabilities: Vec::new(),
+        seams: Vec::new(),
         sandbox_required: false,
         config: serde_json::json!({
             "server": server.id,
@@ -200,6 +208,7 @@ pub fn valid_mcp_id(id: &str) -> bool {
 mod tests {
     use super::*;
     use ene_kernel::PluginSettings;
+    use serde_json::Value;
     use std::path::Path;
 
     #[test]
@@ -253,5 +262,42 @@ mod tests {
             custom.resolved_home(Path::new("/tmp/ene-data")),
             Path::new("/opt/ene-plugins")
         );
+    }
+
+    #[test]
+    fn chat_and_embedding_get_separate_provider_rows() {
+        let chat = TaskBinding {
+            plugin: "provider.gguf".to_owned(),
+            model: "gemma-4-e2b".to_owned(),
+            model_path: "/models/chat.gguf".to_owned(),
+            ..TaskBinding::default()
+        };
+        let embedding = TaskBinding {
+            plugin: "provider.gguf".to_owned(),
+            model: "jina-v5-small".to_owned(),
+            model_path: "/models/embed.gguf".to_owned(),
+            ..TaskBinding::default()
+        };
+        let chat_row = super::provider_row("chat", &chat).expect("chat row");
+        let embed_row = super::provider_row("embedding", &embedding).expect("embed row");
+        assert_eq!(chat_row.row_id, "ai.tasks.chat");
+        assert_eq!(embed_row.row_id, "ai.tasks.embedding");
+        assert_eq!(chat_row.plugin, embed_row.plugin);
+        assert_eq!(chat_row.seams, vec!["seam.llm".to_owned()]);
+        assert_eq!(embed_row.seams, vec!["seam.embed".to_owned()]);
+        assert_eq!(
+            chat_row.config.get("model_path").and_then(Value::as_str),
+            Some("/models/chat.gguf")
+        );
+        assert_eq!(
+            embed_row.config.get("model_path").and_then(Value::as_str),
+            Some("/models/embed.gguf")
+        );
+    }
+
+    #[test]
+    fn unconfigured_task_does_not_spawn_a_provider() {
+        assert!(super::provider_row("chat", &TaskBinding::default()).is_none());
+        assert!(super::provider_row("chat", &TaskBinding::echo()).is_none());
     }
 }

@@ -21,15 +21,19 @@ Conversation, classifier, embedding, TTS, and STT bind through `ai.tasks.<task>`
 starts unconfigured — set `ai.tasks.chat.plugin` to a `provider.*` id before
 the first message. API keys are vault secrets (`ENE_AI__TASKS__<TASK>__API_KEY`
 at boot; PATCH `/api/v1/settings` never writes them into JSON). Plugin ids are
-`provider.*` names from the [plugin catalog](concepts/plugins-and-mcp.md).
+`provider.*` names from the [plugin catalog](concepts/plugins-and-mcp.md)
+(`GET /api/v1/settings` → `effective.providers`). Desktop does not keep a
+parallel allowlist.
 
-Local GGUF chat uses `provider.openai_compat` with `model_path` pointing at
-the file. When `server_path` is empty, the sidecar resolves `llama-server`
-from configuration, CAS, `PATH`, or the bundled plugins directory. Cloud chat
-uses the same plugin with a vault API key, or `provider.anthropic` for Claude.
+Local GGUF chat uses `provider.gguf` (`local: true`) with `model_path`.
+When `server_path` is empty, the sidecar resolves `llama-server` from
+configuration, CAS, `PATH`, or the bundled plugins directory. Cloud chat
+uses any installed LLM plugin (API key in the vault).
 
-An empty classifier task reuses the chat binding. Empty embedding, TTS, and STT
-tasks stay disabled.
+Embeddings are optional on their own `ai.tasks.embedding` fiber: unset, local
+GGUF (recommended Jina on `provider.gguf`), or a cloud plugin that declares
+`seam.embed`. An empty classifier task reuses the chat binding. Empty TTS and
+STT tasks stay disabled.
 
 Plugin launch is `plugins.profile` (`desktop`, `minimal`, or `headless`), not a
 per-plugin enable map. Related keys:

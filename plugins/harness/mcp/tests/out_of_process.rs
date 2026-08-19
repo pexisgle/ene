@@ -86,8 +86,27 @@ while True:
     path
 }
 
+fn python3_bin() -> Option<PathBuf> {
+    let output = std::process::Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
 #[tokio::test]
 async fn handwritten_stdio_mcp_registers_and_runs() {
+    if python3_bin().is_none() {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let script = fixture_script(dir.path());
     let sup = Supervisor::new(dir.path().to_path_buf(), Arc::new(ToolRegistry::new()));
@@ -96,6 +115,7 @@ async fn handwritten_stdio_mcp_registers_and_runs() {
         plugin: "mcp.fixture".to_owned(),
         requires: Vec::new(),
         capabilities: Vec::new(),
+        seams: Vec::new(),
         sandbox_required: false,
         config: json!({
             "server": "fixture",

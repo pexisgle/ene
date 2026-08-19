@@ -158,6 +158,14 @@ logic directly.
 One plugin per native runtime. `llama.cpp`, `whisper.cpp`, and ONNX Runtime each get their
 own plugin binary — never bundle two native runtimes into one.
 
+Provider plugins: add a binary under `plugins/provider/` **and** a row in
+`ene_fiber::PROVIDER_PLUGINS` (id, seams, `local`, `needs_key`). Desktop pickers
+read `GET /api/v1/settings` → `effective.providers` from that table — do not add
+a parallel UI allowlist. Each `ai.tasks.*` binding gets its own fiber so chat and
+embedding can share a plugin with different GGUFs. Local GGUF is
+`plugins/provider/gguf` (`provider.gguf`). Embeddings are optional (`seam.embed`
+plugins, or unset).
+
 Sidecar pattern: provider plugins that run a local engine as a child process follow
 `templates/sidecar` — spawn on a loopback port, health-poll with a timeout, kill on
 `Drop`/config change, and resolve the binary as config path → bundled plugins dir →
@@ -197,6 +205,7 @@ image (apt) instead of the flake and are baked into the VM; the startup script o
   and forces a full (~10+ min) workspace rebuild.
 - **Stage (`ene-stage`)** runs headless via **software Vulkan (lavapipe)**: launch with
   `DISPLAY=:1 WGPU_BACKEND=vulkan`; it also needs `libxkbcommon-x11`.
-- **Chat requires a configured model.** There is no out-of-the-box dummy
-  conversation provider; bind `ai.tasks.chat` on the AI page (local GGUF via
-  `provider.openai_compat`, or a cloud provider) before sending a message.
+- **Chat requires a configured model.** Bind `ai.tasks.chat` from the AI page
+  (installed provider plugins from the host catalog, including local GGUF on
+  `provider.gguf`) before sending a message. Embeddings are a separate optional
+  task.

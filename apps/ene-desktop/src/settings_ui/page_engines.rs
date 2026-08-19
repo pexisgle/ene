@@ -6,7 +6,7 @@ use super::components::section_card;
 use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
 use super::provider_form::{
-    BUILTIN_PROVIDER_I18N_IDS, provider_description, provider_display_group, provider_display_name,
+    catalog_from_settings, provider_description, provider_display_group, provider_display_name,
 };
 
 pub fn render(
@@ -23,21 +23,32 @@ pub fn render(
     if !input.plugins.started() {
         input.plugins.start(ai.fetch_plugins());
     }
+    input.core_settings.poll();
+    if !input.core_settings.started() {
+        input.core_settings.start(ai.fetch_core_settings());
+    }
+    let catalog = catalog_from_settings(
+        input
+            .core_settings
+            .data
+            .as_ref()
+            .and_then(|result| result.as_ref().ok()),
+    );
     section_card(
         ui,
         "engines-list",
         &i18n_embed_fl::fl!(crate::i18n::loader(), "engines-list"),
         |ui| {
-            for (kind, _) in BUILTIN_PROVIDER_I18N_IDS {
-                let plugin = format!("provider.{kind}");
+            for plugin in &catalog {
                 ui.separator();
-                ui.strong(provider_display_name(&plugin));
-                if let Some(group) = provider_display_group(&plugin) {
+                ui.strong(provider_display_name(&plugin.id));
+                if let Some(group) = provider_display_group(&plugin.id) {
                     ui.weak(group);
                 }
-                if let Some(desc) = provider_description(&plugin) {
+                if let Some(desc) = provider_description(&plugin.id) {
                     ui.label(desc);
                 }
+                ui.weak(plugin.seams.join(" · "));
             }
         },
     );

@@ -1,4 +1,4 @@
-//! Managed llama-server (or any `/v1` HTTP engine) spawned by this plugin.
+//! Managed `llama-server` spawned by `provider.gguf`.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;

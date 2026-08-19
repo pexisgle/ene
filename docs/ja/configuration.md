@@ -21,15 +21,18 @@
 `provider.*` に設定してください。API キーは vault 秘密です（起動時は
 `ENE_AI__TASKS__<TASK>__API_KEY`。PATCH `/api/v1/settings` は JSON に
 書きません）。プラグイン id は [プラグイン一覧](concepts/plugins-and-mcp.md) の
-`provider.*` です。
+`provider.*` です（`GET /api/v1/settings` の `effective.providers`）。
+デスクトップは別の許可リストを持ちません。
 
-ローカル GGUF 会話は `model_path` を指定した `provider.openai_compat` です。
-`server_path` が空なら、サイドカーは設定パス → CAS → `PATH` → 同梱 plugins
-ディレクトリの順で `llama-server` を解決します。クラウド会話は同じプラグインに
-vault の API キー、または Claude 用の `provider.anthropic` です。
+ローカル GGUF 会話は `provider.gguf`（`local: true`）に `model_path` を付けます。
+`server_path` が空なら、サイドカーは設定パス → CAS → `PATH` →
+同梱 plugins ディレクトリの順で `llama-server` を解決します。クラウド会話は
+インストール済みの LLM プラグイン（API キーは vault）です。
 
-classifier が空ならチャットのバインドを再利用します。埋め込み・TTS・STT が
-空なら無効のままです。
+埋め込みは任意で、独自の `ai.tasks.embedding` ファイバーです。未設定、
+ローカル GGUF（`provider.gguf`、おすすめ Jina）、または `seam.embed` の
+クラウドプラグイン。classifier が空ならチャットのバインドを再利用します。
+TTS・STT が空なら無効のままです。
 
 プラグイン起動は `plugins.profile`（`desktop` / `minimal` / `headless`）です。
 プラグインごとの有効マップはありません。

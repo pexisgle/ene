@@ -7,8 +7,8 @@ use super::components::{section_card, toggle_row};
 use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
 use super::provider_form::{
-    AUDIO_PLUGINS, STT_PLUGINS, plugin_combo, plugin_needs_key, provider_description,
-    sidecar_fields,
+    ProviderInfo, catalog_from_settings, ids_with_seam, plugin_combo, plugin_needs_key,
+    provider_description, sidecar_fields,
 };
 use serde_json::{Value, json};
 
@@ -39,12 +39,27 @@ pub fn render(
             .unwrap_or(false);
     }
 
+    let catalog = catalog_from_settings(
+        input
+            .core_settings
+            .data
+            .as_ref()
+            .and_then(|r| r.as_ref().ok()),
+    );
+
     section_card(
         ui,
         "voice-tts",
         &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-section"),
         |ui| {
-            render_audio_binding(ui, draft, input, "tts", AUDIO_PLUGINS);
+            render_audio_binding(
+                ui,
+                draft,
+                input,
+                "tts",
+                &ids_with_seam(&catalog, "seam.tts"),
+                &catalog,
+            );
         },
     );
     section_card(
@@ -52,7 +67,14 @@ pub fn render(
         "voice-stt",
         &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-section"),
         |ui| {
-            render_audio_binding(ui, draft, input, "stt", STT_PLUGINS);
+            render_audio_binding(
+                ui,
+                draft,
+                input,
+                "stt",
+                &ids_with_seam(&catalog, "seam.stt"),
+                &catalog,
+            );
         },
     );
     section_card(
@@ -135,7 +157,8 @@ fn render_audio_binding(
     draft: &mut SettingsDraft,
     input: &mut SettingsInputState,
     task: &str,
-    plugins: &[&str],
+    plugins: &[String],
+    catalog: &[ProviderInfo],
 ) {
     let mut binding = draft
         .editing()
@@ -184,9 +207,9 @@ fn render_audio_binding(
     let url_changed = ui
         .add(egui::TextEdit::singleline(&mut base_url).desired_width(f32::INFINITY))
         .changed();
-    let sidecar_changed = sidecar_fields(ui, &mut binding);
+    let sidecar_changed = sidecar_fields(ui, &mut binding, catalog);
     let mut key_changed = false;
-    if plugin_needs_key(&plugin) {
+    if plugin_needs_key(catalog, &plugin) {
         ui.label(i18n_embed_fl::fl!(
             crate::i18n::loader(),
             "ai-api-key-label"

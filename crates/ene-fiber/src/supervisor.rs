@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ene_plugin_ipc::{
     BuiltinKind, EmbedRequest, EmbedResult, HostConn, LlmGenerateRequest, LlmGeneration,
-    SttRequest, SttResult, ToolCall, TtsAudio, TtsRequest,
+    ProviderFaces, SttRequest, SttResult, ToolCall, TtsAudio, TtsRequest,
 };
 use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for};
 use parking_lot::Mutex;
@@ -32,6 +32,9 @@ pub struct ProfileRow {
     pub plugin: String,
     pub requires: Vec<String>,
     pub capabilities: Vec<String>,
+    /// When non-empty, only these seams are bound from negotiated faces
+    /// (`seam.llm`, `seam.embed`, …). Empty keeps every negotiated face.
+    pub seams: Vec<String>,
     pub sandbox_required: bool,
     pub config: Value,
 }
@@ -566,26 +569,7 @@ impl Supervisor {
             }
         }
         if let Some(faces) = faces {
-            if faces.llm.is_some() {
-                fiber.push_effect(Effect::BindSeam {
-                    name: "llm".to_owned(),
-                });
-            }
-            if faces.embed.is_some() {
-                fiber.push_effect(Effect::BindSeam {
-                    name: "embed".to_owned(),
-                });
-            }
-            if faces.tts.is_some() {
-                fiber.push_effect(Effect::BindSeam {
-                    name: "tts".to_owned(),
-                });
-            }
-            if faces.stt.is_some() {
-                fiber.push_effect(Effect::BindSeam {
-                    name: "stt".to_owned(),
-                });
-            }
+            bind_negotiated_seams(fiber, &faces, &row.seams);
         }
         {
             let mut broker = self.inner.broker.lock();
@@ -798,6 +782,30 @@ fn finish_active(fiber: &mut Fiber) {
         .collect();
     fiber.state = FiberState::Active;
     fiber.wait_reason = None;
+}
+
+fn bind_negotiated_seams(fiber: &mut Fiber, faces: &ProviderFaces, allowed: &[String]) {
+    let allow = |seam: &str| allowed.is_empty() || allowed.iter().any(|key| key == seam);
+    if faces.llm.is_some() && allow("seam.llm") {
+        fiber.push_effect(Effect::BindSeam {
+            name: "llm".to_owned(),
+        });
+    }
+    if faces.embed.is_some() && allow("seam.embed") {
+        fiber.push_effect(Effect::BindSeam {
+            name: "embed".to_owned(),
+        });
+    }
+    if faces.tts.is_some() && allow("seam.tts") {
+        fiber.push_effect(Effect::BindSeam {
+            name: "tts".to_owned(),
+        });
+    }
+    if faces.stt.is_some() && allow("seam.stt") {
+        fiber.push_effect(Effect::BindSeam {
+            name: "stt".to_owned(),
+        });
+    }
 }
 
 fn terminate_child(child: &mut Child) {

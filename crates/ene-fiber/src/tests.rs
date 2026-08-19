@@ -21,6 +21,7 @@ fn row(id: &str, plugin: &str, caps: &[&str]) -> ProfileRow {
         plugin: plugin.to_owned(),
         requires: Vec::new(),
         capabilities: caps.iter().map(|s| (*s).to_owned()).collect(),
+        seams: Vec::new(),
         sandbox_required: false,
         config: serde_json::Value::Null,
     }
@@ -32,6 +33,7 @@ fn row_with_requires(id: &str, plugin: &str, requires: &[&str]) -> ProfileRow {
         plugin: plugin.to_owned(),
         requires: requires.iter().map(|s| (*s).to_owned()).collect(),
         capabilities: Vec::new(),
+        seams: Vec::new(),
         sandbox_required: false,
         config: serde_json::Value::Null,
     }

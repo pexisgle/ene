@@ -18,6 +18,7 @@ fn row(id: &str) -> ProfileRow {
         plugin: "tool.utility".to_owned(),
         requires: Vec::new(),
         capabilities: Vec::new(),
+        seams: Vec::new(),
         sandbox_required: false,
         config: serde_json::Value::Null,
     }
@@ -36,7 +37,11 @@ async fn out_of_process_utility_registers_and_runs() {
         .execute("utility.hash", json!({"text": "hi"}), Layer::Surface)
         .await
         .unwrap();
-    assert!(value.get("blake3").is_some());
+    assert!(value.get("hex").is_some());
+    assert_eq!(
+        value.get("algorithm").and_then(serde_json::Value::as_str),
+        Some("blake3")
+    );
     sup.unload("r-util").await;
     assert!(!sup.surface_has_tool("utility.hash"));
     assert!(sup.fiber("r-util").is_none());
@@ -61,7 +66,11 @@ async fn process_survives_os_sandbox_when_supported() {
         .execute("utility.hash", json!({"text": "sandboxed"}), Layer::Surface)
         .await
         .unwrap();
-    assert!(value.get("blake3").is_some());
+    assert!(value.get("hex").is_some());
+    assert_eq!(
+        value.get("algorithm").and_then(serde_json::Value::as_str),
+        Some("blake3")
+    );
     sup.unload("r-sandboxed").await;
 }
 

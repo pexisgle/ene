@@ -50,18 +50,14 @@ for logs and internals. `ene-stage` is an optional debug client for the same
 API.
 
 Chat has no default model — pick one on the **AI** page before your first
-message:
+message. The page lists **installed provider plugins** from the host catalog
+(`seam.llm`): `provider.gguf` (This computer, local GGUF), OpenAI-compatible,
+Anthropic, and any plugin you add. Download a recommended Gemma GGUF or pick
+your own `.gguf` on the local plugin; cloud plugins take a model name and a
+vault API key.
 
-- **This computer** — a recommended Gemma GGUF (downloaded into the models
-  directory) or your own `.gguf` file. The host runs `llama-server` from
-  `PATH` or the bundled plugins directory and binds
-  `ai.tasks.chat.plugin = provider.openai_compat` with `model_path`.
-- **ChatGPT-compatible** — `provider.openai_compat` with an API key in the
-  vault (base URL under Advanced).
-- **Claude** — `provider.anthropic` with an API key in the vault.
-
-Classifier, embedding, TTS, and STT stay off until you set them. An empty
-classifier falls back to the chat binding.
+Embeddings are optional: unset, local GGUF (`provider.gguf`, recommended Jina),
+or a cloud embed plugin. An empty classifier falls back to the chat binding.
 
 ## 5. Tests
 

@@ -1114,7 +1114,22 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
         overlay = file;
         deep_merge_objects(effective.as_object_mut(), overlay.as_object());
     }
+    attach_provider_catalog(&mut effective, state.core.data_dir(), &plugins);
     Json(json!({ "overlay": overlay, "effective": effective }))
+}
+
+fn attach_provider_catalog(
+    effective: &mut Value,
+    data_dir: &std::path::Path,
+    plugins: &ene_kernel::PluginSettings,
+) {
+    let home = plugins.resolved_home(data_dir);
+    if let Some(map) = effective.as_object_mut() {
+        map.insert(
+            "providers".to_owned(),
+            Value::Array(ene_fiber::provider_catalog(Some(&home))),
+        );
+    }
 }
 
 pub async fn patch_settings(

@@ -1,13 +1,16 @@
-//! OpenAI-compatible HTTP provider (`provider.openai_compat`).
+//! Local GGUF via `llama-server` (`provider.gguf`).
 //!
-//! Speaks the provider subprotocol and maps host-canonical messages onto
-//! remote `/v1` chat, embeddings, TTS, and STT. Local GGUF is `provider.gguf`.
+//! Starts a loopback sidecar and maps host-canonical messages onto `/v1`
+//! chat completions and embeddings.
+
+#![cfg_attr(test, expect(clippy::expect_used, reason = "tests fail fast"))]
 
 mod client;
+mod sidecar;
 
 use std::sync::Arc;
 
-use client::OpenAiCompat;
+use client::Gguf;
 use ene_plugin_ipc::{PluginIdentity, ProviderHandlers, serve_provider_from_env};
 use tracing_subscriber::EnvFilter;
 
@@ -18,23 +21,31 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    let provider = Arc::new(OpenAiCompat::new());
+    let sidecar = match sidecar::maybe_start() {
+        Ok(guard) => guard,
+        Err(err) => {
+            tracing::error!(error = %err, plugin = "provider.gguf", "sidecar");
+            std::process::exit(1);
+        }
+    };
+    let provider = Arc::new(Gguf::new());
     let handlers = ProviderHandlers {
         llm: Some(provider.clone()),
-        embed: Some(provider.clone()),
-        tts: Some(provider.clone()),
-        stt: Some(provider),
+        embed: Some(provider),
+        ..ProviderHandlers::default()
     };
     if let Err(err) = serve_provider_from_env(identity(), handlers).await {
-        tracing::error!(error = %err, plugin = "provider.openai_compat", "fatal");
+        tracing::error!(error = %err, plugin = "provider.gguf", "fatal");
+        drop(sidecar);
         std::process::exit(1);
     }
+    drop(sidecar);
 }
 
 fn identity() -> PluginIdentity {
     PluginIdentity {
-        plugin_id: "provider.openai_compat".to_owned(),
-        plugin_name: "openai_compat".to_owned(),
+        plugin_id: "provider.gguf".to_owned(),
+        plugin_name: "gguf".to_owned(),
         digest: exe_digest(),
         spawn_token: None,
     }

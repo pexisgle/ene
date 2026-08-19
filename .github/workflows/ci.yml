@@ -64,7 +64,7 @@ jobs:
               -p ene-harness-utility -p ene-harness-app -p ene-harness-mcp
               -p ene-provider-openai-compat -p ene-provider-anthropic
               -p ene-provider-elevenlabs -p ene-provider-voicevox
-              -p ene-provider-edge-tts
+              -p ene-provider-edge-tts -p ene-provider-gguf
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
