@@ -55,7 +55,7 @@ use std::path::Path;
 use glam::{Quat, Vec3};
 
 use crate::error::{VrmError, VrmResult};
-use crate::humanoid::canonicalize_bone_name;
+use crate::humanoid::{HumanoidBoneRegistry, canonicalize_bone_name};
 
 /// Interpolation mode for keyframe sampling. Mirrors the glTF
 /// `sampler.interpolation` enum.
@@ -195,9 +195,9 @@ pub struct VrmaAsset {
 #[derive(Clone, Debug, Default)]
 pub struct VrmaFrame {
     /// Bone rotation deltas, keyed by canonical bone name.
-    /// These are **retargeted** local rotations ready to apply.
+    /// These are **retargeted** dest-local rotations ready to apply.
     pub bone_rotations: HashMap<String, Quat>,
-    /// Hips translation (world-space delta from rest).
+    /// Dest **local** hips translation (absolute glTF local, not a world delta).
     pub hips_translation: Option<Vec3>,
     /// Expression weights, keyed by expression name. Clamped to `[0, 1]`.
     pub expression_weights: HashMap<String, f32>,
@@ -554,6 +554,94 @@ pub fn evaluate_clip(clip: &VrmaClip, t: f32) -> VrmaFrame {
     }
 
     frame
+}
+
+/// Destination rest pose slices used by [`evaluate_retargeted`].
+#[derive(Clone, Copy, Debug)]
+pub struct DestRestPose<'a> {
+    pub local_rotations: &'a [Quat],
+    pub world_rotations: &'a [Quat],
+    pub local_positions: &'a [Vec3],
+    pub world_positions: &'a [Vec3],
+}
+
+/// Evaluate a VRMA clip and retarget onto a destination humanoid rest pose.
+///
+/// Rotations use the VRM `NormalizedLocalRotation` formula. Hips translation
+/// uses `dst_rest_local + (src_pose - src_rest_local) * (dst_global_y / src_global_y)`.
+#[must_use]
+pub fn evaluate_retargeted(
+    asset: &VrmaAsset,
+    clip: &VrmaClip,
+    t: f32,
+    dest_humanoid: &HumanoidBoneRegistry,
+    dest: DestRestPose<'_>,
+) -> VrmaFrame {
+    let raw = evaluate_clip(clip, t);
+    let mut frame = VrmaFrame {
+        bone_rotations: HashMap::new(),
+        hips_translation: None,
+        expression_weights: raw.expression_weights,
+        look_at_yaw_pitch: raw.look_at_yaw_pitch,
+    };
+    for (name, src_pose) in &raw.bone_rotations {
+        let Some(dst_entry) = dest_humanoid.by_name(name) else {
+            continue;
+        };
+        let Some(&src_node) = asset.properties.humanoid_bones.get(name) else {
+            frame.bone_rotations.insert(name.clone(), *src_pose);
+            continue;
+        };
+        let Some(src_rest_local) = asset.node_rest_rotations.get(src_node).copied() else {
+            frame.bone_rotations.insert(name.clone(), *src_pose);
+            continue;
+        };
+        let Some(src_rest_world) = asset.node_world_rest_rotations.get(src_node).copied() else {
+            frame.bone_rotations.insert(name.clone(), *src_pose);
+            continue;
+        };
+        let Some(dst_rest_local) = dest.local_rotations.get(dst_entry.node).copied() else {
+            continue;
+        };
+        let Some(dst_rest_world) = dest.world_rotations.get(dst_entry.node).copied() else {
+            continue;
+        };
+        let dst_pose = retarget_rotation(
+            *src_pose,
+            src_rest_local,
+            src_rest_world,
+            dst_rest_local,
+            dst_rest_world,
+        );
+        frame.bone_rotations.insert(name.clone(), dst_pose);
+    }
+    if let Some(src_pose) = raw.hips_translation {
+        frame.hips_translation = retarget_hips_to_dest(asset, dest_humanoid, dest, src_pose);
+    }
+    frame
+}
+
+fn retarget_hips_to_dest(
+    asset: &VrmaAsset,
+    dest_humanoid: &HumanoidBoneRegistry,
+    dest: DestRestPose<'_>,
+    src_pose: Vec3,
+) -> Option<Vec3> {
+    let hips = dest_humanoid.hips()?;
+    let dst_rest_local = *dest.local_positions.get(hips.node)?;
+    let dst_rest_world_y = dest.world_positions.get(hips.node)?.y;
+    let Some(&src_node) = asset.properties.humanoid_bones.get("hips") else {
+        return Some(dst_rest_local);
+    };
+    let src_rest_local = *asset.node_rest_positions.get(src_node)?;
+    let src_rest_world_y = asset.node_world_rest_positions.get(src_node)?.y;
+    Some(retarget_hips_translation(
+        src_pose,
+        src_rest_local,
+        src_rest_world_y,
+        dst_rest_local,
+        dst_rest_world_y,
+    ))
 }
 
 /// Load a `.vrma` file from disk and parse it into a [`VrmaAsset`].
@@ -1198,5 +1286,164 @@ mod tests {
             interpolation: Interpolation::Linear,
         };
         assert_eq!(s.keyframe_count(), 3);
+    }
+
+    #[test]
+    fn evaluate_retargeted_hips_are_dest_local_not_world_additive() {
+        use crate::humanoid::{BoneRestTransform, HumanoidBoneEntry, VrmBone};
+        let rest = Vec3::new(0.0, 0.9, 0.0);
+        let sample = Vec3::new(0.0, 0.95, 0.0);
+        let mut bones = HashMap::new();
+        bones.insert("hips".to_owned(), 0);
+        let asset = VrmaAsset {
+            properties: VrmaProperties {
+                humanoid_bones: bones,
+                ..VrmaProperties::default()
+            },
+            clips: Vec::new(),
+            node_rest_rotations: vec![Quat::IDENTITY],
+            node_rest_positions: vec![rest],
+            node_world_rest_rotations: vec![Quat::IDENTITY],
+            node_world_rest_positions: vec![rest],
+            node_parents: vec![-1],
+        };
+        let clip = VrmaClip {
+            name: "idle".into(),
+            duration: 1.0,
+            bone_channels: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "hips".into(),
+                    BoneChannel {
+                        bone_name: "hips".into(),
+                        rotation: Sampler {
+                            times: vec![0.0],
+                            values: vec![Quat::IDENTITY],
+                            interpolation: Interpolation::Step,
+                        },
+                        translation: Some(Sampler {
+                            times: vec![0.0],
+                            values: vec![sample],
+                            interpolation: Interpolation::Step,
+                        }),
+                    },
+                );
+                m
+            },
+            expression_channels: HashMap::new(),
+            look_at_channel: None,
+        };
+        let mut dest_humanoid = HumanoidBoneRegistry::new();
+        dest_humanoid.insert(
+            VrmBone("hips".into()),
+            HumanoidBoneEntry {
+                node: 0,
+                joint: Some(0),
+                rest: BoneRestTransform {
+                    translation: rest,
+                    rotation: Quat::IDENTITY,
+                },
+            },
+        );
+        let local_rot = [Quat::IDENTITY];
+        let world_rot = [Quat::IDENTITY];
+        let local_pos = [rest];
+        let world_pos = [rest];
+        let frame = evaluate_retargeted(
+            &asset,
+            &clip,
+            0.0,
+            &dest_humanoid,
+            DestRestPose {
+                local_rotations: &local_rot,
+                world_rotations: &world_rot,
+                local_positions: &local_pos,
+                world_positions: &world_pos,
+            },
+        );
+        let hips = frame.hips_translation.expect("hips");
+        assert!(
+            (hips - sample).length() < 1e-5,
+            "expected dest local {sample:?}, got {hips:?} (must not be ~1.85)"
+        );
+        assert!(hips.y < 1.2, "hips y {hips:?} looks world-additive");
+    }
+
+    #[test]
+    fn evaluate_retargeted_y_only_does_not_shift_x() {
+        use crate::humanoid::{BoneRestTransform, HumanoidBoneEntry, VrmBone};
+        let rest = Vec3::new(0.1, 0.9, 0.0);
+        let sample = Vec3::new(0.1, 0.95, 0.0);
+        let mut bones = HashMap::new();
+        bones.insert("hips".to_owned(), 0);
+        let asset = VrmaAsset {
+            properties: VrmaProperties {
+                humanoid_bones: bones,
+                ..VrmaProperties::default()
+            },
+            clips: Vec::new(),
+            node_rest_rotations: vec![Quat::IDENTITY],
+            node_rest_positions: vec![rest],
+            node_world_rest_rotations: vec![Quat::IDENTITY],
+            node_world_rest_positions: vec![rest],
+            node_parents: vec![-1],
+        };
+        let clip = VrmaClip {
+            name: "idle".into(),
+            duration: 1.0,
+            bone_channels: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "hips".into(),
+                    BoneChannel {
+                        bone_name: "hips".into(),
+                        rotation: Sampler {
+                            times: vec![0.0],
+                            values: vec![Quat::IDENTITY],
+                            interpolation: Interpolation::Step,
+                        },
+                        translation: Some(Sampler {
+                            times: vec![0.0],
+                            values: vec![sample],
+                            interpolation: Interpolation::Step,
+                        }),
+                    },
+                );
+                m
+            },
+            expression_channels: HashMap::new(),
+            look_at_channel: None,
+        };
+        let mut dest_humanoid = HumanoidBoneRegistry::new();
+        dest_humanoid.insert(
+            VrmBone("hips".into()),
+            HumanoidBoneEntry {
+                node: 0,
+                joint: Some(0),
+                rest: BoneRestTransform {
+                    translation: rest,
+                    rotation: Quat::IDENTITY,
+                },
+            },
+        );
+        let local_rot = [Quat::IDENTITY];
+        let world_rot = [Quat::IDENTITY];
+        let local_pos = [rest];
+        let world_pos = [rest];
+        let frame = evaluate_retargeted(
+            &asset,
+            &clip,
+            0.0,
+            &dest_humanoid,
+            DestRestPose {
+                local_rotations: &local_rot,
+                world_rotations: &world_rot,
+                local_positions: &local_pos,
+                world_positions: &world_pos,
+            },
+        );
+        let hips = frame.hips_translation.expect("hips");
+        assert!((hips.x - 0.1).abs() < 1e-5, "x shifted: {hips:?}");
+        assert!((hips.y - 0.95).abs() < 1e-5, "y wrong: {hips:?}");
     }
 }

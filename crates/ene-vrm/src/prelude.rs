@@ -14,7 +14,10 @@
 //! `docs/reference/api/ene-vrm.md` ("Supported API" vs "Internal").
 
 #[doc(no_inline)]
-pub use crate::animation::{VrmaAsset, VrmaClip, VrmaFrame, VrmaPlayer, evaluate_clip, load_vrma};
+pub use crate::animation::{
+    DestRestPose, VrmaAsset, VrmaClip, VrmaFrame, VrmaPlayer, evaluate_clip, evaluate_retargeted,
+    load_vrma,
+};
 #[doc(no_inline)]
 pub use crate::error::{VrmError, VrmResult};
 #[doc(no_inline)]

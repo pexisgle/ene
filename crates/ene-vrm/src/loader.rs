@@ -769,6 +769,8 @@ fn load_node_hierarchy(gltf: &gltf::Gltf) -> NodeHierarchy {
         rest_local_rotations,
         rest_local_positions,
         parents,
+        rest_world_rotations: world_rotations.clone(),
+        rest_world_positions: world_positions.clone(),
         world_rotations,
         world_positions,
     }

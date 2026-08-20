@@ -14,8 +14,7 @@ use ene_vrm::expression::ExpressionName;
 use ene_vrm::look_at::{LookAtEvaluator, LookAtOutput};
 use ene_vrm::minimal::write_glb;
 use ene_vrm::prelude::{
-    VisemeWeights, VrmModel, VrmRenderer, VrmaAsset, VrmaFrame, VrmaPlayer, evaluate_clip,
-    load_vrm, load_vrma,
+    VisemeWeights, VrmModel, VrmRenderer, VrmaAsset, VrmaFrame, VrmaPlayer, load_vrm, load_vrma,
 };
 use ene_vrm::spring_bone::SpringBoneSimulator;
 
@@ -81,8 +80,21 @@ impl CompanionAvatar {
 
     pub fn load_motions(&mut self, dir: &Path) {
         self.motions = discover_motions(dir);
-        // Rest-pose auto-fit uses the T-pose AABB. Auto-playing a VRMA with
-        // hips/root motion throws the fitted model off the overlay.
+        let idle = self
+            .motions
+            .iter()
+            .position(|(name, _)| name.eq_ignore_ascii_case("idle"))
+            .or_else(|| {
+                self.motions
+                    .iter()
+                    .position(|(name, _)| name.to_ascii_uppercase().contains("VRMA_01"))
+            });
+        if let Some(idx) = idle {
+            self.motion_idx = idx;
+            self.load_motion_at(idx);
+        } else if !self.motions.is_empty() {
+            self.load_motion_at(0);
+        }
     }
 
     #[must_use]
@@ -107,6 +119,23 @@ impl CompanionAvatar {
         self.load_motion_at(self.motion_idx);
     }
 
+    fn reset_pose_and_springs(&mut self) {
+        self.model
+            .nodes
+            .local_rotations
+            .copy_from_slice(&self.model.nodes.rest_local_rotations);
+        self.model
+            .nodes
+            .local_positions
+            .copy_from_slice(&self.model.nodes.rest_local_positions);
+        self.model.nodes.compute_world_transforms();
+        self.springs = self.model.spring_bones.as_ref().map(|props| {
+            let (pos, rot, parent_rot, local_rot) = node_maps(&self.model.nodes);
+            SpringBoneSimulator::new(props, &pos, &rot, &parent_rot, &local_rot)
+        });
+        self.last_hips = None;
+    }
+
     fn load_motion_at(&mut self, idx: usize) {
         let Some((_, path)) = self.motions.get(idx).cloned() else {
             return;
@@ -114,6 +143,7 @@ impl CompanionAvatar {
         match load_vrma(&path) {
             Ok(asset) => {
                 tracing::info!(path = %path.display(), "loaded VRMA");
+                self.reset_pose_and_springs();
                 self.vrma = Some(asset);
                 self.player = VrmaPlayer {
                     playing: true,
@@ -276,7 +306,24 @@ impl CompanionAvatar {
         };
         let duration = clip.duration.max(0.001);
         self.player.advance(dt, duration);
-        evaluate_clip(clip, self.player.time)
+        let mut frame = self.model.evaluate_vrma(asset, clip, self.player.time);
+        if let Some(hips) = frame.hips_translation.as_mut() {
+            let rest_xz = self
+                .model
+                .humanoid
+                .hips()
+                .and_then(|entry| {
+                    self.model
+                        .nodes
+                        .rest_local_positions
+                        .get(entry.node)
+                        .copied()
+                })
+                .unwrap_or(Vec3::ZERO);
+            hips.x = rest_xz.x;
+            hips.z = rest_xz.z;
+        }
+        frame
     }
 
     fn eval_look_at(&self) -> Option<LookAtOutput> {

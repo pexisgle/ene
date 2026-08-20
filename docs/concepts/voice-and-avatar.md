@@ -40,3 +40,21 @@ Cues are rate-limited so the avatar does not flicker.
 
 The supported rendering API is documented in
 [ene-vrm API reference](../reference/api/ene-vrm.md).
+
+## VRMA playback
+
+Stage auto-plays an idle clip when motions are present: a file named `idle`,
+else a name containing `VRMA_01`, else the first discovered `.vrma`. Changing
+clips resets the rest pose and spring bones.
+
+`ene-vrm` samples VRMA with `evaluate_retargeted`: NormalizedLocalRotation
+(NLR) onto the destination humanoid rest pose, and hips translation as
+destination **local** glTF:
+
+`dst_rest_local + (src_pose - src_rest_local) * (dst_global_y / src_global_y)`.
+
+VRMA translation channels are absolute local values, not world deltas. Adding
+them onto rest world Y doubles hips height and clips the model. The overlay
+then locks hips **XZ** to the destination rest (keeps Y) so walk cycles stay
+on screen. Look-at still applies after VRMA. VRoid models already face `+Z`;
+there is no 180° Y camera flip.

@@ -40,3 +40,22 @@ stage が消費するのは `ene-body::PerformanceCommand` です:
 
 対応する描画 API は
 [ene-vrm API リファレンス](../reference/api/ene-vrm.md) です。
+
+## VRMA 再生
+
+モーションがあるとき、stage はアイドルクリップを自動再生します。名前が
+`idle` のもの、なければ名前に `VRMA_01` を含むもの、それもなければ最初の
+`.vrma` です。クリップを切り替えるとレストポーズとスプリングボーンを
+リセットします。
+
+`ene-vrm` は `evaluate_retargeted` で VRMA をサンプリングします。回転は
+NormalizedLocalRotation（NLR）で行き先ヒューマノイドのレストへ写し、ヒップ
+平行移動は行き先の **ローカル** glTF 値です:
+
+`dst_rest_local + (src_pose - src_rest_local) * (dst_global_y / src_global_y)`。
+
+VRMA の translation チャネルは絶対ローカル値であり、ワールド差分ではありません。
+レストのワールド Y に足すとヒップ高さが倍になり、モデルがクリップします。
+オーバーレイはヒップの **XZ** を行き先レストに固定し（Y は維持）、歩行が画面内に
+収まるようにします。Look-at は VRMA の後に適用します。VRoid モデルはもともと
+`+Z` 向きなので、カメラの Y 180° 反転はしません。

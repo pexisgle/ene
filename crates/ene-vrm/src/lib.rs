@@ -75,8 +75,8 @@ pub mod viseme;
 
 pub use animation::{
     BoneChannel, ExpressionChannel, Interpolation, LookAtChannel, RepeatMode, Sampler, VrmaAsset,
-    VrmaClip, VrmaFrame, VrmaPlayer, VrmaProperties, evaluate_clip, load_vrma, quat_to_yaw_pitch,
-    retarget_hips_translation, retarget_rotation,
+    VrmaClip, VrmaFrame, VrmaPlayer, VrmaProperties, evaluate_clip, evaluate_retargeted, load_vrma,
+    quat_to_yaw_pitch, retarget_hips_translation, retarget_rotation,
 };
 pub use beat_sync::BeatSway;
 pub use camera::{
