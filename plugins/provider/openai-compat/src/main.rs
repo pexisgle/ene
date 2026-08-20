@@ -25,6 +25,7 @@ async fn main() {
         tts: Some(provider.clone()),
         stt: Some(provider.clone()),
         models: Some(provider),
+        ..ProviderHandlers::default()
     };
     if let Err(err) = serve_provider_from_env(identity(), handlers).await {
         tracing::error!(error = %err, plugin = "provider.openai_compat", "fatal");
