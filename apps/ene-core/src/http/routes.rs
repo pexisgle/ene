@@ -21,7 +21,7 @@ use ene_companion::{
     install_archive, looks_like_package_zip, soul_from_install,
 };
 use ene_kernel::{DisplayDepth, HarnessSettings};
-use ene_plane::PopupDecision;
+use ene_plane::{ApprovalMode, PopupDecision};
 use ene_registry::Layer;
 use ene_session::{
     Block, EventKind, EventPayload, NewEvent, NewSession, SessionCreatedBy, SessionEndReason,
@@ -1549,6 +1549,14 @@ pub async fn patch_settings(
     if profile_dirty {
         state.core.apply_plugin_profile().await;
     }
+    if let Some(mode) = current
+        .pointer("/approval/mode")
+        .and_then(Value::as_str)
+        .and_then(ApprovalMode::parse)
+        && let Err(err) = state.core.plane().set_mode(mode)
+    {
+        tracing::warn!(error = %err, "failed to apply approval.mode");
+    }
     if let Some(mind_value) = current.get("mind")
         && let Ok(mind) = serde_json::from_value::<ene_companion::MindSettings>(mind_value.clone())
     {
@@ -1704,7 +1712,21 @@ pub async fn exclusive_claim(
     }
     state.events.emit(
         DisplayDepth::Surface,
-        json!({ "type": "notify.hint", "resource": resource, "client_id": client_id }),
+        json!({
+            "type": "exclusive.held",
+            "resource": resource,
+            "client_id": client_id
+        }),
+    );
+    state.events.emit(
+        DisplayDepth::Surface,
+        json!({
+            "type": "notify.hint",
+            "title": format!("{resource} claimed"),
+            "body": client_id,
+            "resource": resource,
+            "client_id": client_id
+        }),
     );
     Ok(Json(snap))
 }
@@ -2098,6 +2120,16 @@ pub(crate) fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
     for report in reports {
         if report.speech.is_empty() {
             continue;
+        }
+        if report.inner_intent.as_deref() == Some("ask_user") {
+            state.events.emit(
+                DisplayDepth::Surface,
+                json!({
+                    "type": "question.asked",
+                    "id": report.soul_id.to_string(),
+                    "prompt": report.speech,
+                }),
+            );
         }
         state.events.emit(
             DisplayDepth::Surface,

@@ -436,12 +436,9 @@ impl DelegationHost {
         self.require_known(id)?;
         self.store
             .mailbox_push(id, "child_to_parent", "question", prompt)?;
-        Ok(Self::speak(
-            self.soul_id_of(id)?,
-            prompt.to_owned(),
-            "ask_user",
-            true,
-        ))
+        let report = Self::speak(self.soul_id_of(id)?, prompt.to_owned(), "ask_user", true);
+        self.publish_report(&report);
+        Ok(report)
     }
 
     pub fn open_questions(&self, id: DelegationId) -> Result<Vec<OpenQuestion>, WorkError> {

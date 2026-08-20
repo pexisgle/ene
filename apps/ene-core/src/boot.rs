@@ -364,6 +364,11 @@ impl CoreDaemon {
     }
 
     pub fn replace_plugins(&self, plugins: PluginSettings) {
+        if let Some(mode) = ApprovalMode::parse(&plugins.policy.approval_mode)
+            && let Err(err) = self.plane.set_mode(mode)
+        {
+            tracing::warn!(error = %err, "failed to apply live approval mode");
+        }
         *self.plugins.lock() = plugins;
     }
 

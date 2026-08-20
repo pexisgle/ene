@@ -25,7 +25,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
 use ene_api::SendMessageResponse;
-use ene_kernel::ConversationModel;
+use ene_kernel::{ConversationModel, DisplayDepth};
 use ene_plane::PendingPopup;
 use parking_lot::Mutex;
 use serde_json::json;
@@ -146,6 +146,20 @@ impl CoreDaemon {
         let (report_tx, mut report_rx) = mpsc::unbounded_channel();
         self.host().set_report_sink(report_tx);
         let events = CoreBus::new(self.settings().server.ws_send_buffer);
+        {
+            let bus = events.clone();
+            self.popup().set_on_ask(Arc::new(move |view| {
+                bus.emit(
+                    DisplayDepth::Surface,
+                    json!({
+                        "type": "approval.requested",
+                        "id": view.id,
+                        "tool": view.tool,
+                        "target": view.target,
+                    }),
+                );
+            }));
+        }
         self.set_speech(Arc::new(speech::PluginSpeech::new(&self, events.clone())));
         let classify = Arc::new(classify::SeamedClassify::new(&self));
         self.set_prefetch(Arc::new(recall::RecallPrefetch::new(&self)));

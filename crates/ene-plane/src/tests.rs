@@ -1,7 +1,7 @@
 use crate::{
     AiJudgement, ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, AuthzRequest,
-    PolicyDecision, PolicyFile, PolicyRule, PopupDecision, PopupSettings, Risk, ScriptedAi,
-    ScriptedPopup, Sensitivity, Vault,
+    PolicyDecision, PolicyFile, PolicyRule, PopupDecision, PopupSettings, PopupSink, Risk,
+    ScriptedAi, ScriptedPopup, Sensitivity, Vault,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -288,4 +288,29 @@ async fn pending_popup_timeout_drops_stale_entry() {
         .unwrap_err();
     assert!(matches!(err, crate::PlaneError::Denied { .. }));
     assert!(popup.list().is_empty());
+}
+
+#[tokio::test]
+async fn pending_popup_notifies_on_ask() {
+    let popup = Arc::new(crate::PendingPopup::new());
+    let seen = Arc::new(std::sync::Mutex::new(None::<String>));
+    let seen_cb = Arc::clone(&seen);
+    popup.set_on_ask(Arc::new(move |view| {
+        *seen_cb.lock().unwrap() = Some(view.tool.clone());
+    }));
+    let request = req("fs.write", &["fs.write"], Sensitivity::None, true);
+    let waiting = Arc::clone(&popup);
+    let task = tokio::spawn(async move { waiting.as_ref().ask(&request).await });
+    let mut listed = None;
+    for _ in 0..50 {
+        if let Some(item) = popup.list().into_iter().next() {
+            listed = Some(item);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let listed = listed.unwrap();
+    assert_eq!(seen.lock().unwrap().as_deref(), Some("fs.write"));
+    popup.respond(&listed.id, PopupDecision::Allow).unwrap();
+    assert_eq!(task.await.unwrap(), PopupDecision::Allow);
 }

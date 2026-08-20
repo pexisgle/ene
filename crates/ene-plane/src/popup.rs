@@ -94,10 +94,14 @@ struct PendingSlot {
     tx: Option<oneshot::Sender<PopupDecision>>,
 }
 
+/// Callback fired when a popup is inserted (core bus, tests).
+pub type AskCallback = Arc<dyn Fn(&PendingApproval) + Send + Sync>;
+
 /// First-writer popup sink: every client sees the ask; the first `respond` wins.
 pub struct PendingPopup {
     inner: Mutex<HashMap<String, PendingSlot>>,
     resolved: Mutex<HashSet<String>>,
+    on_ask: Mutex<Option<AskCallback>>,
 }
 
 impl PendingPopup {
@@ -106,6 +110,19 @@ impl PendingPopup {
         Self {
             inner: Mutex::new(HashMap::new()),
             resolved: Mutex::new(HashSet::new()),
+            on_ask: Mutex::new(None),
+        }
+    }
+
+    /// Notify listeners (HTTP/WS bus) when a popup is inserted.
+    pub fn set_on_ask(&self, callback: AskCallback) {
+        *self.on_ask.lock() = Some(callback);
+    }
+
+    fn fire_on_ask(&self, view: &PendingApproval) {
+        let callback = self.on_ask.lock().clone();
+        if let Some(callback) = callback {
+            callback(view);
         }
     }
 
@@ -158,9 +175,14 @@ impl PopupSink for PendingPopup {
             target: req.target.clone(),
             side_effects: req.side_effects.clone(),
         };
-        self.inner
-            .lock()
-            .insert(id.clone(), PendingSlot { view, tx: Some(tx) });
+        self.inner.lock().insert(
+            id.clone(),
+            PendingSlot {
+                view: view.clone(),
+                tx: Some(tx),
+            },
+        );
+        self.fire_on_ask(&view);
         let outcome = match rx.await {
             Ok(decision) => decision,
             Err(_) => PopupDecision::Deny,
@@ -179,9 +201,14 @@ impl PopupSink for PendingPopup {
             target: req.target.clone(),
             side_effects: req.side_effects.clone(),
         };
-        self.inner
-            .lock()
-            .insert(id.clone(), PendingSlot { view, tx: Some(tx) });
+        self.inner.lock().insert(
+            id.clone(),
+            PendingSlot {
+                view: view.clone(),
+                tx: Some(tx),
+            },
+        );
+        self.fire_on_ask(&view);
         let decision = if let Ok(Ok(decision)) = tokio::time::timeout(timeout, rx).await {
             decision
         } else {
