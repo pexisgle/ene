@@ -980,14 +980,20 @@ async fn run_turn(ctx: TurnCtx) {
     let store = Arc::clone(&ctx.store);
     let live = ctx.live.clone();
     let session = ctx.session;
+    let cancelled = Arc::clone(&ctx.cancelled);
     let result = run_turn_inner(ctx).await;
     match result {
         Ok(()) => {
             drop(done.send(TurnFinish { turn }));
         }
         Err(err) => {
-            warn!(error = %err, %turn, "turn failed");
-            drop(commit_turn_failure(&store, &live, session, turn, &err).await);
+            if cancelled.load(Ordering::SeqCst) {
+                warn!(error = %err, %turn, "turn cancelled");
+                drop(commit_turn_interrupted(&store, &live, session, turn).await);
+            } else {
+                warn!(error = %err, %turn, "turn failed");
+                drop(commit_turn_failure(&store, &live, session, turn, &err).await);
+            }
             drop(done.send(TurnFinish { turn }));
         }
     }
@@ -1422,6 +1428,50 @@ async fn finish_interrupted(ctx: &TurnCtx, step_index: u32) -> Result<(), Kernel
         DisplayDepth::Surface,
         LiveEvent::TurnEnded {
             turn_id: ctx.turn,
+            outcome: "interrupted".to_owned(),
+        },
+    );
+    Ok(())
+}
+
+async fn commit_turn_interrupted(
+    store: &SessionStore,
+    live: &LiveBus,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), KernelError> {
+    store
+        .commit(Transaction {
+            entries: vec![
+                NewEvent::new(
+                    session,
+                    EventKind::StepEnd,
+                    EventPayload::StepEnd {
+                        v: v1(),
+                        turn_id: turn,
+                        step_index: 0,
+                        outcome: StepOutcome::Error,
+                        finish_reason: Some("interrupted".to_owned()),
+                    },
+                ),
+                NewEvent::new(
+                    session,
+                    EventKind::TurnEnd,
+                    EventPayload::TurnEnd {
+                        v: v1(),
+                        turn_id: turn,
+                        outcome: TurnOutcome::Interrupted,
+                        error_class: None,
+                    },
+                ),
+            ],
+            usage: Vec::new(),
+        })
+        .await?;
+    live.emit(
+        DisplayDepth::Surface,
+        LiveEvent::TurnEnded {
+            turn_id: turn,
             outcome: "interrupted".to_owned(),
         },
     );

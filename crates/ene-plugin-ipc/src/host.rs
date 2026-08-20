@@ -122,6 +122,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
             match self.recv().await? {
                 Message::LlmChunk { id: got, .. } if got == id => {}
                 Message::LlmDone { id: got, body } if got == id => return Ok(body),
+                Message::LlmDone { .. } => {
+                    tracing::debug!("ignoring stray llm_done after cancel or id mismatch");
+                }
                 other => return Err(IpcError::Unexpected(other.kind_name().to_owned())),
             }
         }

@@ -804,6 +804,87 @@ async fn abort_after_generate_does_not_write_assistant_closure() {
 }
 
 #[tokio::test]
+async fn abort_during_generate_error_does_not_write_llm_done_failure() {
+    struct CancelErrModel {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+    #[async_trait]
+    impl ConversationModel for CancelErrModel {
+        async fn generate(&self, _: ModelRequest) -> Result<ModelGeneration, KernelError> {
+            self.entered.notify_waiters();
+            self.release.notified().await;
+            Err(KernelError::Model("unexpected message llm_done".to_owned()))
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(CancelErrModel {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }),
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        router: None,
+    });
+    let wait_enter = entered.notified();
+    let turn = lane.prompt("race").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), wait_enter)
+        .await
+        .expect("model generate");
+    lane.abort().await.unwrap();
+    release.notify_one();
+    lane.wait_for_idle().await.unwrap();
+    let events = store.load_events(session, 0).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::AssistantMessage))
+    );
+    assert!(!events.iter().any(|e| match &e.payload {
+        EventPayload::AssistantMessage { blocks, .. } => blocks.iter().any(|block| {
+            block
+                .as_text()
+                .is_some_and(|text| text.contains("llm_done"))
+        }),
+        _ => false,
+    }));
+    assert!(events.iter().any(|e| matches!(
+        e.payload,
+        EventPayload::TurnEnd {
+            outcome: TurnOutcome::Interrupted,
+            turn_id,
+            ..
+        } if turn_id == turn
+    )));
+}
+
+#[tokio::test]
 async fn duplicate_abort_is_idempotent() {
     let dir = TempDir::new().unwrap();
     let store = Arc::new(
