@@ -9,13 +9,12 @@
 
 assets/models/
 
-# Local GGUF model directory (used by the local_embedding example)
-/models/
-
-# Runtime database files
-**/memory.db*
-**/undo.db**
-**/todo.db*
+# Runtime data files (WAL/SHM included)
+**/sessions.db*
+**/companions.db*
+**/audit.db*
+**/vault.bin
+api.token
 
 # Pre-migration settings backups (created automatically by ene-config)
 settings.json.v*.bak
