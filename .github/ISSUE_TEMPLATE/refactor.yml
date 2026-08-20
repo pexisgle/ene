@@ -17,18 +17,16 @@ body:
       description: 対象のクレート・領域を選択してください。
       multiple: true
       options:
-        - core (ene-runtime / ene-mind / ene-store)
-        - memory (メモリ・記憶システム)
-        - provider (ene-ai / ene-ai-local / LLMプロバイダー)
-        - tool-system (ene-plugin-host / ene-plugin-*)
-        - connector (外部サービス連携)
-        - embedding (ene-rag / 埋め込み・RAG検索)
-        - voice (音声入出力・STT/TTS)
+        - core (ene-session / ene-kernel / ene-daemon)
+        - companion (ene-companion / 記憶・感情)
+        - work (ene-work / 委譲・ジョブ)
+        - plugin (ene-fiber / ene-plugin-ipc / harness)
+        - plane (ene-plane / 承認・監査)
         - avatar (ene-vrm / アバター)
-        - desktop (ene-desktop)
-        - cli (ene-cli)
+        - stage (ene-stage)
+        - cli (ene-ctl)
         - config (ene-config)
-        - security (セキュリティ・パーミッション)
+        - security (サンドボックス・承認)
         - infra (インフラ・基盤)
     validations:
       required: true

@@ -1,0 +1,25 @@
+[package]
+name = "ene-kernel"
+version.workspace = true
+edition.workspace = true
+description = "Harness kernel: dialogue lane, context assembly, visibility, observability"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+ene-config = { workspace = true }
+ene-session = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

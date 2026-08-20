@@ -1,0 +1,1225 @@
+use crate::host::{
+    DelegationHost, StartDelegation, SurfaceCallKind, UpgradeRequest, question_timed_out,
+    should_upgrade_steps, surface_call_kind,
+};
+use crate::mcp::{McpProfile, McpTool, ScriptedMcp, register_mcp_tools};
+use crate::router::WorkSurfaceRouter;
+use crate::schedule::{QuietWindow, catch_up_missed, fire_due, reminder_report};
+use crate::skill::{catalog, install_skill_dir, load_skill, parse_skill_md};
+use crate::store::WorkStore;
+use crate::tools::{register_work_tools, surface_shows_delegate};
+use crate::types::{
+    ArtifactKind, DelegationMode, JobStatus, NewSchedule, ScheduleAction, UpgradeReason,
+};
+use crate::vision::{observe_screen, register_screenshot_tool, screenshot_is_job_or_surface};
+use async_trait::async_trait;
+use chrono::{Duration, TimeZone, Utc};
+use ene_companion::{WorldStateMemory, WorldStateSettings};
+use ene_kernel::{
+    ConversationModel, DisplayDepth, EventKind, HarnessSettings, KernelError, LaneHandle,
+    LaneOptions, MindSettings, ModelGeneration, ModelRequest, SurfaceRouter, SurfaceToolOutcome,
+    ToolCall,
+};
+use ene_plane::Sensitivity;
+use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
+use ene_session::{
+    NewSession, SessionCreatedBy, SessionKind, SessionStore, SoulId, derive_messages,
+};
+use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration as StdDuration;
+use tempfile::TempDir;
+
+struct SpyInvoke {
+    hit: Arc<AtomicBool>,
+}
+
+struct CaptureInvoke {
+    last: parking_lot::Mutex<Option<Value>>,
+}
+
+#[async_trait]
+impl ToolInvoke for SpyInvoke {
+    async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
+        self.hit.store(true, Ordering::SeqCst);
+        Ok(json!({ "ok": true }))
+    }
+}
+
+#[async_trait]
+impl ToolInvoke for CaptureInvoke {
+    async fn invoke(&self, _name: &str, args: Value) -> Result<Value, String> {
+        *self.last.lock() = Some(args);
+        Ok(json!({ "ok": true }))
+    }
+}
+
+struct SequenceModel {
+    remaining: parking_lot::Mutex<Vec<ModelGeneration>>,
+}
+
+#[async_trait]
+impl ConversationModel for SequenceModel {
+    async fn generate(&self, _request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        let mut remaining = self.remaining.lock();
+        remaining.pop().map_or_else(
+            || {
+                Ok(ModelGeneration {
+                    text: "all done".to_owned(),
+                    ..ModelGeneration::default()
+                })
+            },
+            Ok,
+        )
+    }
+}
+
+fn fs_write_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "fs.write".to_owned(),
+        description: "Write a file".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: vec!["fs.write".to_owned()],
+        source: ToolSource::Harness {
+            name: "fs".to_owned(),
+        },
+        timeout_ms: Some(1_000),
+        sensitivity: Sensitivity::None,
+    }
+}
+
+fn utility_time_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "utility.time".to_owned(),
+        description: "Current UTC time".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: Vec::new(),
+        source: ToolSource::Harness {
+            name: "utility".to_owned(),
+        },
+        timeout_ms: Some(1_000),
+        sensitivity: Sensitivity::None,
+    }
+}
+
+fn open_work() -> (TempDir, Arc<WorkStore>, Arc<DelegationHost>, SoulId) {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+    ));
+    (dir, store, host, SoulId::new())
+}
+
+fn public_start(host: &DelegationHost, soul: SoulId, goal: &str) -> crate::types::Job {
+    host.start(StartDelegation {
+        soul_id: soul,
+        goal: goal.to_owned(),
+        mode: DelegationMode::Public,
+        title: Some(goal.to_owned()),
+        brief: None,
+        plan: None,
+        created_from_turn: None,
+        depth: 0,
+        parent_id: None,
+    })
+    .unwrap()
+}
+
+#[test]
+fn job_workspace_is_not_the_data_dir() {
+    let (dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "notes");
+    let root = crate::workspace_root(dir.path());
+    assert_eq!(root, dir.path().join("workspace"));
+    assert_ne!(root, dir.path());
+    assert!(std::path::Path::new(&job.workspace_dir).starts_with(&root));
+}
+
+#[tokio::test]
+async fn surface_fs_write_upgrades_without_invoking() {
+    let (_dir, store, host, soul) = open_work();
+    let registry = ToolRegistry::new();
+    let hit = Arc::new(AtomicBool::new(false));
+    registry.register_with(
+        fs_write_def(),
+        Arc::new(SpyInvoke {
+            hit: Arc::clone(&hit),
+        }),
+    );
+    registry.register(utility_time_def());
+    assert_eq!(
+        surface_call_kind(&registry, "fs.write"),
+        SurfaceCallKind::Upgrade
+    );
+    assert_eq!(
+        surface_call_kind(&registry, "utility.time"),
+        SurfaceCallKind::Run
+    );
+    let err = registry
+        .execute(
+            "fs.write",
+            json!({"path":"/tmp/x","text":"no"}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ene_registry::PipelineError::NotOnSurface(_)));
+    let job = host
+        .auto_upgrade(UpgradeRequest {
+            soul_id: soul,
+            goal: "write the file".into(),
+            reason: UpgradeReason::SideEffectTool,
+            steps_so_far: String::new(),
+            brief: Some("so far: (nothing yet). next tool requested: fs.write".into()),
+            created_from_turn: None,
+        })
+        .unwrap();
+    assert!(!hit.load(Ordering::SeqCst));
+    assert_eq!(job.mode, DelegationMode::Public);
+    assert_eq!(store.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn empty_side_effect_tool_runs_on_surface_router() {
+    let (_dir, _store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register(utility_time_def());
+    let router = WorkSurfaceRouter::new(host, Arc::clone(&registry), soul, 4);
+    let outcome = router.on_tool("utility.time", json!({}), 0).await.unwrap();
+    assert!(matches!(outcome, SurfaceToolOutcome::Result(_)));
+}
+
+#[tokio::test]
+async fn surface_router_upgrades_fs_write_without_spy() {
+    let (_dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    let hit = Arc::new(AtomicBool::new(false));
+    registry.register_with(
+        fs_write_def(),
+        Arc::new(SpyInvoke {
+            hit: Arc::clone(&hit),
+        }),
+    );
+    let router = WorkSurfaceRouter::new(host, registry, soul, 4);
+    let outcome = router
+        .on_tool("fs.write", json!({"path":"a","text":"b"}), 0)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SurfaceToolOutcome::Delegated { .. }));
+    assert!(!hit.load(Ordering::SeqCst));
+    assert_eq!(store.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn step_budget_upgrades_even_for_empty_side_effects() {
+    let (_dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register(utility_time_def());
+    let router = WorkSurfaceRouter::new(host, registry, soul, 2);
+    assert!(should_upgrade_steps(1, 2));
+    let outcome = router.on_tool("utility.time", json!({}), 1).await.unwrap();
+    assert!(matches!(outcome, SurfaceToolOutcome::Delegated { .. }));
+    assert_eq!(store.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn lane_prompt_still_works_while_job_running() {
+    let dir = TempDir::new().unwrap();
+    let work = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&work),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let job = public_start(&host, soul, "research");
+    work.set_status(job.id, JobStatus::Running, None).unwrap();
+    let sessions = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let session = sessions
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&sessions),
+        session,
+        soul,
+        model: Arc::new(ene_kernel::EchoModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        router: None,
+    });
+    lane.prompt("hello while working").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let still = work.get_job(job.id).unwrap().unwrap();
+    assert_eq!(still.status, JobStatus::Running);
+    let history = lane.project(DisplayDepth::Surface).unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|m| m.text().contains("hello while working"))
+    );
+}
+
+#[tokio::test]
+async fn lane_auto_upgrade_does_not_execute_fs_write() {
+    let dir = TempDir::new().unwrap();
+    let work = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&work),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let registry = Arc::new(ToolRegistry::new());
+    let hit = Arc::new(AtomicBool::new(false));
+    registry.register_with(
+        fs_write_def(),
+        Arc::new(SpyInvoke {
+            hit: Arc::clone(&hit),
+        }),
+    );
+    let router = Arc::new(WorkSurfaceRouter::new(
+        Arc::clone(&host),
+        Arc::clone(&registry),
+        soul,
+        4,
+    ));
+    let sessions = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let session = sessions
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let model = Arc::new(SequenceModel {
+        remaining: parking_lot::Mutex::new(vec![ModelGeneration {
+            tool_calls: vec![ToolCall {
+                name: "fs.write".into(),
+                arguments: json!({"path":"x","text":"y"}),
+            }],
+            ..ModelGeneration::default()
+        }]),
+    });
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: sessions,
+        session,
+        soul,
+        model,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        router: Some(router as Arc<dyn SurfaceRouter>),
+    });
+    lane.prompt("please write a file").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    assert!(!hit.load(Ordering::SeqCst));
+    assert_eq!(work.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[test]
+fn job_persists_and_recover_does_not_resume() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("companions.db");
+    let soul = SoulId::new();
+    let id;
+    {
+        let store = Arc::new(WorkStore::open(&path).unwrap());
+        let host = DelegationHost::new(Arc::clone(&store), dir.path().to_path_buf());
+        let job = public_start(&host, soul, "long task");
+        store.set_status(job.id, JobStatus::Running, None).unwrap();
+        id = job.id;
+    }
+    let store = Arc::new(WorkStore::open(&path).unwrap());
+    let host = DelegationHost::new(Arc::clone(&store), dir.path().to_path_buf());
+    let reports = host.recover_interrupted().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].speech.contains("long task"));
+    assert!(reports[0].speech.contains("stopped"));
+    let job = store.get_job(id).unwrap().unwrap();
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert!(host.recover_interrupted().unwrap().is_empty());
+}
+
+#[test]
+fn progress_and_complete_are_companion_speech() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "draft");
+    let progress = host.progress(job.id, Some(0.4), "outlining").unwrap();
+    assert!(progress.speech.contains("outlining"));
+    assert!(!progress.starts_conversation);
+    let done = host.complete(job.id, "the outline is ready").unwrap();
+    assert!(done.speech.contains("the outline is ready"));
+    assert!(done.starts_conversation);
+    assert!(matches!(
+        host.cancel(job.id),
+        Err(crate::WorkError::AlreadyCompleted)
+    ));
+}
+
+#[test]
+fn cancel_of_cancelled_is_idempotent_error() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "x");
+    assert_eq!(host.cancel(job.id).unwrap(), JobStatus::Cancelled);
+    assert!(matches!(
+        host.cancel(job.id),
+        Err(crate::WorkError::Cancelled)
+    ));
+}
+
+#[test]
+fn internal_delegation_has_no_job_row() {
+    let (_dir, store, host, soul) = open_work();
+    let job = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "secret lookup".into(),
+            mode: DelegationMode::Internal,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+        })
+        .unwrap();
+    assert!(store.get_job(job.id).unwrap().is_none());
+    assert!(store.list_jobs(soul).unwrap().is_empty());
+    assert!(!store.mailbox(job.id).unwrap().is_empty());
+}
+
+#[test]
+fn schedule_remind_fires_and_quiet_hours_defer() {
+    let (_dir, store, _host, soul) = open_work();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 3, 0, 0).unwrap();
+    let remind = store
+        .insert_schedule(&NewSchedule {
+            soul_id: soul,
+            name: "tea".into(),
+            spec: "* * * * * *".into(),
+            timezone: "UTC".into(),
+            action: ScheduleAction::Remind,
+            action_ref: Some("drink tea".into()),
+            important: false,
+        })
+        .unwrap();
+    store
+        .defer_next_fire(&remind.id, now - Duration::minutes(1))
+        .unwrap();
+    let quiet = QuietWindow {
+        enabled: true,
+        start_hour: 0,
+        end_hour: 24,
+        timezone: "UTC".into(),
+    };
+    assert!(fire_due(&store, now, &quiet).unwrap().is_empty());
+    let important = store
+        .insert_schedule(&NewSchedule {
+            soul_id: soul,
+            name: "meds".into(),
+            spec: "* * * * * *".into(),
+            timezone: "UTC".into(),
+            action: ScheduleAction::Remind,
+            action_ref: Some("take meds".into()),
+            important: true,
+        })
+        .unwrap();
+    store
+        .defer_next_fire(&important.id, now - Duration::minutes(1))
+        .unwrap();
+    let fired = fire_due(&store, now, &quiet).unwrap();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].schedule.name, "meds");
+    assert!(
+        reminder_report(&fired[0].schedule)
+            .speech
+            .contains("take meds")
+    );
+}
+
+#[test]
+fn missed_job_schedule_does_not_run() {
+    let (_dir, store, _host, soul) = open_work();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 0).unwrap();
+    let job_sched = store
+        .insert_schedule(&NewSchedule {
+            soul_id: soul,
+            name: "nightly".into(),
+            spec: "0 0 * * * *".into(),
+            timezone: "UTC".into(),
+            action: ScheduleAction::Job,
+            action_ref: None,
+            important: false,
+        })
+        .unwrap();
+    let past = now - Duration::hours(2);
+    store.defer_next_fire(&job_sched.id, past).unwrap();
+    assert!(catch_up_missed(&store, now).unwrap().is_empty());
+    let updated = store.get_schedule(&job_sched.id).unwrap().unwrap();
+    assert_ne!(
+        updated.next_fire.as_deref(),
+        Some(past.to_rfc3339().as_str())
+    );
+}
+
+#[test]
+fn missed_remind_fires_once() {
+    let (_dir, store, _host, soul) = open_work();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 0).unwrap();
+    let remind = store
+        .insert_schedule(&NewSchedule {
+            soul_id: soul,
+            name: "call".into(),
+            spec: "* * * * * *".into(),
+            timezone: "UTC".into(),
+            action: ScheduleAction::Remind,
+            action_ref: Some("call mom".into()),
+            important: false,
+        })
+        .unwrap();
+    store
+        .defer_next_fire(&remind.id, now - Duration::minutes(5))
+        .unwrap();
+    let fired = catch_up_missed(&store, now).unwrap();
+    assert_eq!(fired.len(), 1);
+    assert!(fired[0].missed);
+}
+
+#[test]
+fn skill_install_and_load() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: travel\ndescription: plan a trip\n---\n\n# Travel\npack light\n",
+    )
+    .unwrap();
+    let home = dir.path().join("skills");
+    let installed = install_skill_dir(&home, &src).unwrap();
+    assert_eq!(installed.meta.name, "travel");
+    let loaded = load_skill(&home, "travel").unwrap();
+    assert!(loaded.body.contains("pack light"));
+    assert_eq!(catalog(&home, &["travel".into()]).unwrap().len(), 1);
+    assert!(matches!(
+        load_skill(&home, "missing"),
+        Err(crate::WorkError::UnknownSkill(_))
+    ));
+    assert!(parse_skill_md("not a skill").is_err());
+}
+
+#[tokio::test]
+async fn mcp_handwritten_tools_execute_through_registry() {
+    let registry = ToolRegistry::new();
+    let invoke: Arc<dyn ToolInvoke> = Arc::new(ScriptedMcp::new([(
+        "mcp:git.status".into(),
+        json!({"clean": true}),
+    )]));
+    register_mcp_tools(
+        &registry,
+        &McpProfile {
+            server: "git".into(),
+            transport: "stdio".into(),
+            command: Some("git-mcp".into()),
+            url: None,
+        },
+        vec![McpTool {
+            name: "status".into(),
+            description: "git status".into(),
+            parameters: json!({"type":"object"}),
+            side_effects: Vec::new(),
+        }],
+        &invoke,
+    );
+    let value = registry
+        .execute("mcp:git.status", json!({}), Layer::Job)
+        .await
+        .unwrap();
+    assert_eq!(value["clean"], json!(true));
+}
+
+#[test]
+fn screenshot_is_surface_and_high_sensitivity() {
+    let registry = ToolRegistry::new();
+    register_screenshot_tool(
+        &registry,
+        Arc::new(ScriptedMcp::new([(
+            "app.screenshot".into(),
+            json!({"ok": true}),
+        )])),
+    );
+    assert!(screenshot_is_job_or_surface(&registry));
+    let def = registry.get("app.screenshot").unwrap();
+    assert!(def.side_effects.is_empty());
+    assert_eq!(def.sensitivity, Sensitivity::High);
+}
+
+#[tokio::test]
+async fn observe_screen_does_not_enter_session_history() {
+    let dir = TempDir::new().unwrap();
+    let sessions = SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+        .await
+        .unwrap();
+    let soul = SoulId::new();
+    let session = sessions
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let mut memory = WorldStateMemory::default();
+    let snap = observe_screen(
+        &mut memory,
+        &WorldStateSettings {
+            enabled: true,
+            ..WorldStateSettings::default()
+        },
+        "secret pixels",
+        12,
+    );
+    assert!(!format!("{snap:?}").contains("secret pixels"));
+    let events = sessions.load_events(session, 0).unwrap();
+    let history = derive_messages(&events, ene_session::ProjectOptions::model_visible(8));
+    let text = history
+        .messages
+        .iter()
+        .map(ene_session::ProjectedMessage::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("secret pixels"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::UserMessage))
+    );
+}
+
+#[tokio::test]
+async fn artifact_register_and_deliver() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let job = public_start(&host, soul, "notes");
+    host.present_plan(job.id, "1. write notes\n2. register artifact")
+        .unwrap();
+    host.approve_plan(job.id).unwrap();
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        audit,
+        ene_plane::ScriptedPopup::deny_all(),
+        None,
+    ));
+    plane.set_policy(ene_plane::PolicyFile {
+        rules: vec![ene_plane::PolicyRule {
+            tool: "artifact.register".to_owned(),
+            scope: None,
+            decision: ene_plane::PolicyDecision::Allow,
+        }],
+    });
+    registry.set_plane(plane);
+    let workspace = crate::workspace_root(dir.path());
+    std::fs::create_dir_all(&workspace).unwrap();
+    registry.set_workspace(&workspace);
+    assert!(surface_shows_delegate(&registry));
+    let file = workspace.join("out.md");
+    std::fs::write(&file, "# hi").unwrap();
+    let registered = registry
+        .execute(
+            "artifact.register",
+            json!({
+                "soul_id": soul.to_string(),
+                "job_id": job.id.to_string(),
+                "kind": "markdown",
+                "title": "notes",
+                "path": file.to_string_lossy(),
+            }),
+            Layer::Job,
+        )
+        .await
+        .unwrap();
+    let art_id = registered["id"].as_str().unwrap();
+    store.deliver(art_id).unwrap();
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 1);
+    assert!(arts[0].delivered);
+    assert!(ArtifactKind::try_parse("docx").is_err());
+}
+
+#[tokio::test]
+async fn artifact_register_rejects_path_outside_workspace() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let job = public_start(&host, soul, "notes");
+    host.present_plan(job.id, "1. write notes").unwrap();
+    host.approve_plan(job.id).unwrap();
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        audit,
+        ene_plane::ScriptedPopup::deny_all(),
+        None,
+    ));
+    plane.set_policy(ene_plane::PolicyFile {
+        rules: vec![ene_plane::PolicyRule {
+            tool: "artifact.register".to_owned(),
+            scope: None,
+            decision: ene_plane::PolicyDecision::Allow,
+        }],
+    });
+    registry.set_plane(plane);
+    let outside = dir.path().join("secret.txt");
+    std::fs::write(&outside, "token").unwrap();
+    let err = registry
+        .execute(
+            "artifact.register",
+            json!({
+                "soul_id": soul.to_string(),
+                "job_id": job.id.to_string(),
+                "kind": "markdown",
+                "title": "leak",
+                "path": outside.to_string_lossy(),
+            }),
+            Layer::Job,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("escapes workspace"));
+}
+
+#[tokio::test]
+async fn artifact_register_requires_job_id() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, host, dir.path().join("skills"));
+    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        audit,
+        ene_plane::ScriptedPopup::deny_all(),
+        None,
+    ));
+    plane.set_policy(ene_plane::PolicyFile {
+        rules: vec![ene_plane::PolicyRule {
+            tool: "artifact.register".to_owned(),
+            scope: None,
+            decision: ene_plane::PolicyDecision::Allow,
+        }],
+    });
+    registry.set_plane(plane);
+    let workspace = crate::workspace_root(dir.path());
+    std::fs::create_dir_all(&workspace).unwrap();
+    let file = workspace.join("out.md");
+    std::fs::write(&file, "# hi").unwrap();
+    let err = registry
+        .execute(
+            "artifact.register",
+            json!({
+                "soul_id": soul.to_string(),
+                "kind": "markdown",
+                "title": "notes",
+                "path": file.to_string_lossy(),
+            }),
+            Layer::Job,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("missing job_id"));
+}
+
+#[test]
+fn question_timeout_is_24h() {
+    let asked = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 1).unwrap();
+    assert!(question_timed_out(asked, now, StdDuration::from_hours(24)));
+    assert!(!question_timed_out(
+        asked,
+        Utc.with_ymd_and_hms(2026, 8, 17, 11, 0, 0).unwrap(),
+        StdDuration::from_hours(24)
+    ));
+}
+
+#[test]
+fn work_tools_cover_delegate_surface() {
+    let (_dir, _store, host, _soul) = open_work();
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, host, PathBuf::from("/tmp/skills"));
+    let names: Vec<String> = registry
+        .schemas(Layer::Surface)
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert!(names.iter().any(|n| n == "delegate.start"));
+    assert!(names.iter().any(|n| n == "delegate.approve_plan"));
+    assert!(names.iter().any(|n| n == "skill.load"));
+    assert!(!names.iter().any(|n| n == "delegation.send"));
+    assert!(!names.iter().any(|n| n == "artifact.register"));
+}
+
+#[test]
+fn grandchild_delegation_respects_depth_guard() {
+    let (_dir, _store, host, soul) = open_work();
+    let parent = public_start(&host, soul, "parent task");
+    let child = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "child work".into(),
+            mode: DelegationMode::Public,
+            title: Some("child".into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 1,
+            parent_id: Some(parent.id),
+        })
+        .unwrap();
+    let grandchild = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "grandchild work".into(),
+            mode: DelegationMode::Public,
+            title: Some("grandchild".into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 2,
+            parent_id: Some(child.id),
+        })
+        .unwrap();
+    assert_eq!(grandchild.goal, "grandchild work");
+    assert!(matches!(
+        host.start(StartDelegation {
+            soul_id: soul,
+            goal: "too deep".into(),
+            mode: DelegationMode::Public,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 3,
+            parent_id: Some(grandchild.id),
+        }),
+        Err(crate::WorkError::DepthExceeded)
+    ));
+}
+
+#[test]
+fn internal_child_cannot_spawn_public_grandchild() {
+    let (_dir, _store, host, soul) = open_work();
+    let internal = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "secret parent".into(),
+            mode: DelegationMode::Internal,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+        })
+        .unwrap();
+    assert!(matches!(
+        host.start(StartDelegation {
+            soul_id: soul,
+            goal: "leak".into(),
+            mode: DelegationMode::Public,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 1,
+            parent_id: Some(internal.id),
+        }),
+        Err(crate::WorkError::SecrecyViolation)
+    ));
+    let grandchild = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "still secret".into(),
+            mode: DelegationMode::Internal,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 1,
+            parent_id: Some(internal.id),
+        })
+        .unwrap();
+    assert_eq!(grandchild.mode, DelegationMode::Internal);
+}
+
+#[test]
+fn combined_child_questions_merge_and_route_answers() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "research");
+    host.question(job.id, "which city?").unwrap();
+    host.question(job.id, "how many days?").unwrap();
+    let combined = host.combine_pending_questions(job.id).unwrap();
+    assert!(combined.speech.contains("which city?"));
+    assert!(combined.speech.contains("how many days?"));
+    assert_eq!(combined.questions.len(), 2);
+    host.apply_combined_answers(&combined, &["Tokyo".into(), "3".into()])
+        .unwrap();
+    assert!(host.open_questions(job.id).unwrap().is_empty());
+    let mailbox = host.store().mailbox(job.id).unwrap();
+    assert!(
+        mailbox
+            .iter()
+            .any(|(_, kind, body)| kind == "answer" && body == "Tokyo")
+    );
+    assert!(
+        mailbox
+            .iter()
+            .any(|(_, kind, body)| kind == "answer" && body == "3")
+    );
+}
+
+#[test]
+fn question_timeout_proceeds_with_assumption() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "planning");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    let asked = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+    store
+        .mailbox_push_at(
+            job.id,
+            "child_to_parent",
+            "question",
+            "which airline?",
+            &asked.to_rfc3339(),
+        )
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 1).unwrap();
+    let reports = host
+        .resolve_question_timeouts(now, Some(StdDuration::from_hours(24)))
+        .unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].speech.contains("timeout"));
+    assert!(!reports[0].starts_conversation);
+    let mailbox = store.mailbox(job.id).unwrap();
+    assert!(mailbox.iter().any(|(_, kind, _)| kind == "assumption"));
+}
+
+#[test]
+fn spill_huge_tool_output_keeps_brief_bounded() {
+    let dir = TempDir::new().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let huge = "x".repeat(10_000);
+    let spilled = crate::spill_tool_output(
+        &huge,
+        &workspace,
+        crate::DEFAULT_SOFT_LIMIT_BYTES,
+        crate::DEFAULT_HARD_LIMIT_BYTES,
+    )
+    .unwrap();
+    assert!(spilled.spilled);
+    assert!(spilled.inline.len() < huge.len());
+    assert!(spilled.spill_path.is_some());
+    let bounded = crate::bound_brief(&huge, &workspace, 500).unwrap();
+    assert!(bounded.len() < huge.len());
+}
+
+#[test]
+fn bookmark_workflow_delivers_markdown_artifact() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "travel notes");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    host.present_plan(job.id, "1. write markdown\n2. deliver")
+        .unwrap();
+    host.approve_plan(job.id).unwrap();
+    let (artifact, report) = crate::deliver_bookmark_workflow(
+        &host,
+        soul,
+        job.id,
+        "Tokyo trip",
+        &[crate::BookmarkSection {
+            heading: "Highlights".into(),
+            body: "Shibuya crossing".into(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(artifact.kind, ArtifactKind::Markdown);
+    assert!(artifact.delivered);
+    assert!(report.speech.contains("bookmark ready"));
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 1);
+    let content = std::fs::read_to_string(&artifact.path).unwrap();
+    assert!(content.contains("# Tokyo trip"));
+    assert!(content.contains("Shibuya crossing"));
+}
+
+#[test]
+fn deliver_bookmark_workflow_requires_plan_approval() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "report");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    assert!(matches!(
+        crate::deliver_bookmark_workflow(
+            &host,
+            soul,
+            job.id,
+            "Draft",
+            &[crate::BookmarkSection {
+                heading: "Body".into(),
+                body: "content".into(),
+            }],
+        ),
+        Err(crate::WorkError::PlanNotApproved)
+    ));
+    host.present_plan(job.id, "1. write\n2. ship").unwrap();
+    assert!(matches!(
+        crate::deliver_bookmark_workflow(
+            &host,
+            soul,
+            job.id,
+            "Draft",
+            &[crate::BookmarkSection {
+                heading: "Body".into(),
+                body: "content".into(),
+            }],
+        ),
+        Err(crate::WorkError::PlanNotApproved)
+    ));
+    host.approve_plan(job.id).unwrap();
+    crate::deliver_bookmark_workflow(
+        &host,
+        soul,
+        job.id,
+        "Draft",
+        &[crate::BookmarkSection {
+            heading: "Body".into(),
+            body: "content".into(),
+        }],
+    )
+    .unwrap();
+}
+
+#[test]
+fn surface_message_and_cancel_while_running() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "long task");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    host.message(job.id, "user added context").unwrap();
+    host.instruct(job.id, "please prioritize speed").unwrap();
+    assert_eq!(host.cancel(job.id).unwrap(), JobStatus::Cancelled);
+    let mailbox = store.mailbox(job.id).unwrap();
+    assert!(mailbox.iter().any(|(_, kind, _)| kind == "message"));
+    assert!(mailbox.iter().any(|(_, kind, _)| kind == "task"));
+}
+
+#[test]
+fn completion_waits_for_user_speech_gap() {
+    let (_dir, _store, host, soul) = open_work();
+    drop(host.mark_user_speaking(true));
+    let job = public_start(&host, soul, "report");
+    let queued = host.complete(job.id, "all findings collected").unwrap();
+    assert!(!queued.starts_conversation);
+    assert_eq!(queued.inner_intent.as_deref(), Some("complete_queued"));
+    let drained = host.mark_user_speaking(false);
+    assert_eq!(drained.len(), 1);
+    assert!(drained[0].speech.contains("all findings collected"));
+}
+
+#[tokio::test]
+async fn complete_publishes_when_user_is_not_speaking() {
+    let (_dir, _store, host, soul) = open_work();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    host.set_report_sink(tx);
+    let job = public_start(&host, soul, "report");
+    let report = host.complete(job.id, "all findings collected").unwrap();
+    assert!(report.speech.contains("all findings collected"));
+    let published = rx.recv().await.unwrap();
+    assert_eq!(published.soul_id, soul);
+    assert!(published.speech.contains("all findings collected"));
+}
+
+#[tokio::test]
+async fn queued_complete_publishes_on_speech_gap() {
+    let (_dir, _store, host, soul) = open_work();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    host.set_report_sink(tx);
+    drop(host.mark_user_speaking(true));
+    let job = public_start(&host, soul, "report");
+    let queued = host.complete(job.id, "all findings collected").unwrap();
+    assert_eq!(queued.inner_intent.as_deref(), Some("complete_queued"));
+    assert!(
+        rx.try_recv().is_err(),
+        "queued complete must not publish yet"
+    );
+    drop(host.mark_user_speaking(false));
+    let published = rx.recv().await.unwrap();
+    assert_eq!(published.soul_id, soul);
+    assert!(published.speech.contains("all findings collected"));
+}
+
+#[tokio::test]
+async fn surface_router_overwrites_foreign_soul_id() {
+    let (_dir, _store, host, soul) = open_work();
+    let foreign = SoulId::new();
+    let registry = Arc::new(ToolRegistry::new());
+    let capture = Arc::new(CaptureInvoke {
+        last: parking_lot::Mutex::new(None),
+    });
+    registry.register_with(
+        utility_time_def(),
+        Arc::clone(&capture) as Arc<dyn ToolInvoke>,
+    );
+    let router = WorkSurfaceRouter::new(host, registry, soul, 4);
+    router
+        .on_tool("utility.time", json!({ "soul_id": foreign.to_string() }), 0)
+        .await
+        .unwrap();
+    let args = capture.last.lock().clone().unwrap();
+    assert_eq!(args["soul_id"], json!(soul.to_string()));
+}
+
+#[test]
+fn interrupt_recovery_and_tool_failure_use_different_wording() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "cleanup");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    let fail = host.fail(job.id, "disk full").unwrap();
+    assert!(fail.speech.contains("the task failed"));
+    assert!(!fail.speech.contains("stopped"));
+    let running = public_start(&host, soul, "another");
+    store
+        .set_status(running.id, JobStatus::Running, None)
+        .unwrap();
+    let reports = host.recover_interrupted().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].speech.contains("stopped"));
+    assert!(!reports[0].speech.contains("the task failed"));
+}
+
+#[test]
+fn user_facing_strings_say_task_not_job() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "cleanup");
+    let fail = host.fail(job.id, "disk full").unwrap();
+    assert!(fail.speech.contains("the task failed"));
+    assert!(!fail.speech.contains("the job failed"));
+    let running = public_start(&host, soul, "another");
+    store
+        .set_status(running.id, JobStatus::Running, None)
+        .unwrap();
+    let reports = host.recover_interrupted().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].speech.contains("the task"));
+    assert!(!reports[0].speech.contains("the job"));
+}
+
+#[tokio::test]
+async fn mutating_work_waits_for_plan_approval() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "rewrite docs");
+    assert!(!host.mutating_work_allowed(job.id).unwrap());
+    assert!(matches!(
+        host.require_mutating_allowed(job.id),
+        Err(crate::WorkError::PlanNotApproved)
+    ));
+    let presented = host
+        .present_plan(job.id, "1. edit README\n2. run tests")
+        .unwrap();
+    assert!(presented.speech.contains("here's the plan"));
+    assert!(!host.mutating_work_allowed(job.id).unwrap());
+    host.answer(job.id, "please plan_approved thanks").unwrap();
+    assert!(!host.mutating_work_allowed(job.id).unwrap());
+    host.approve_plan(job.id).unwrap();
+    host.require_mutating_allowed(job.id).unwrap();
+
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, Arc::clone(&host), PathBuf::from("/tmp/skills"));
+    let names: Vec<String> = registry
+        .schemas(ene_registry::Layer::Surface)
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert!(names.iter().any(|n| n == "delegate.approve_plan"));
+}
+
+#[test]
+fn mcp_store_round_trips_args() {
+    let dir = TempDir::new().unwrap();
+    let store = WorkStore::open(dir.path().join("companions.db")).unwrap();
+    store
+        .replace_mcp(&[crate::McpServer {
+            id: "git".into(),
+            transport: "stdio".into(),
+            command: Some("npx".into()),
+            args: vec!["-y".into(), "git-mcp".into()],
+            url: None,
+            enabled: true,
+        }])
+        .unwrap();
+    let listed = store.list_mcp().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "git");
+    assert_eq!(listed[0].args, vec!["-y".to_owned(), "git-mcp".to_owned()]);
+    store.replace_mcp(&[]).unwrap();
+    assert!(store.list_mcp().unwrap().is_empty());
+}

@@ -1,0 +1,74 @@
+[package]
+name = "ene-stage"
+version.workspace = true
+edition.workspace = true
+description = "Product stage client: companion overlay, chat, detail, tray; talks to ene-core via ene-api"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-stage"
+path = "src/main.rs"
+
+[lib]
+name = "ene_stage"
+path = "src/lib.rs"
+
+[features]
+default = ["voice"]
+voice = ["dep:cpal", "dep:rodio", "dep:rustfft"]
+
+[dependencies]
+egui = "0.35"
+egui-wgpu = "0.35"
+egui-winit = "0.35"
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11"] }
+ene-api = { workspace = true }
+ene-config = { workspace = true }
+ene-ctl = { path = "../ene-ctl" }
+ene-vrm = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+parking_lot = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+wgpu = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+chrono = { workspace = true }
+rfd = { workspace = true }
+global-hotkey = { workspace = true }
+crossbeam-channel = { workspace = true }
+indexmap = { workspace = true }
+image = { workspace = true, features = ["png"] }
+tray-icon = { version = "0.24", default-features = false }
+rust-embed = "8.11"
+fluent-bundle = { workspace = true }
+i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
+i18n-embed-fl = "0.10"
+unic-langid = "0.9"
+cpal = { workspace = true, optional = true }
+rodio = { workspace = true, optional = true, features = ["playback"] }
+rustfft = { workspace = true, optional = true }
+notify-rust = "4"
+zip = { workspace = true, features = ["deflate"] }
+base64 = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18.2"
+tray-icon = { version = "0.24", default-features = false, features = ["gtk"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+fluent-syntax = { workspace = true }

@@ -343,10 +343,9 @@ fn file_stem(path: &str) -> String {
 
 /// Loads a [`CharacterCardV3`] from a resolved path (or bare character name).
 ///
-/// Host apps (`ene-cli`, `ene-desktop`) load the card via this helper (or their
-/// own I/O) and pass it to [`ene_runtime::EneHandle::open`] — the runtime does
-/// not perform character-card file I/O on the product path. JSON, CHARX
-/// (zip), and PNG (ccv3/chara chunk) cards are all accepted.
+/// Host apps (`ene-ctl`, `ene-stage`) load the card via this helper (or their
+/// own I/O). The daemon does not perform character-card file I/O on the product
+/// path. JSON, CHARX (zip), and PNG (ccv3/chara chunk) cards are all accepted.
 ///
 /// # Errors
 ///

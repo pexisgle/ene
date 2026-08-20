@@ -1,81 +1,60 @@
 # Voice & avatar
 
-## Voice pipeline
+## Voice
 
-The voice pipeline has three stages, each backed by a provider plugin:
+`ene-body` owns duplex voice state (idle / listening / thinking /
+responding / speaking / interrupting), energy VAD, and lip-sync visemes.
+TTS and STT bind through `ai.tasks.tts` / `ai.tasks.stt` to provider plugins
+(`provider.openai_compat`, `provider.elevenlabs`, `provider.voicevox`,
+`provider.edge_tts`). PCM is `f32` on the provider subprotocol. Stage owns
+the microphone and playback devices. The daemon still owns policy and the live
+bus; exclusive resources (mic) are claimed through the API.
 
-| Stage | Built-in providers | Config |
-|---|---|---|
-| **STT** (speech → text) | `whisper` (local whisper.cpp) | `ai.stt.provider` |
-| **TTS** (text → speech) | `kokoro` (local ONNX), `edge-tts`, `elevenlabs`, `openai-tts`, `voicevox` | `ai.tts.provider` |
-| **VAD** (voice activity) | `onnx` (Silero), `none` | `ai.vad.provider` |
+Lip-sync maps PCM energy to the same viseme targets `ene-vrm` expects.
+Affect in `ene-companion` picks expression cues that `ene-body` queues as
+performance commands.
 
-`ai.tts` / `ai.stt` select the provider only. Provider-owned values (`model`,
-`voice`, `speed`, `language`, model paths, engine mode) live in
-`plugins.list.<provider>.config` — the schema each provider plugin advertises,
-rendered by the Voice settings page. For example, the Kokoro voice is
-`plugins.list.kokoro.config.voice`, and the VOICEVOX speaker is
-`plugins.list.voicevox.config.speaker_id` (with `mode`/`server_path` for
-managed engines).
+## Performance commands
 
-The desktop app captures microphone audio (cpal), feeds it through the
-chosen STT provider, and plays TTS audio chunks (rodio) that stream back
-over the runtime's audio channel. Audio providers resolve through the same
-plugin host registry as LLM providers.
+`ene-body::PerformanceCommand` is what stage consumes:
 
-Speech affects the avatar in real time:
-
-- **Visemes** — audio is analyzed into mouth-shape weights for lip-sync.
-- **Emotions** — the current affect state picks expressions (smile,
-  surprise, …).
-- **Beat sync** — with a beat-sync device configured, avatar motion pulses
-  to the music's BPM.
-
-## Performance cues
-
-During a turn, the mind's output arbiter emits **performance cues**:
-
-| Cue kind | Meaning |
+| Command | Meaning |
 |---|---|
-| `expression` | Blend-shape expression to show |
-| `motion` | Motion clip to play (with layer + intensity) |
-| `lookat` | Where the avatar should look |
-| `cancel` | Stop the current performance |
+| `Expression` | Blend-shape expression |
+| `Motion` | Motion clip (layer + intensity) |
+| `LookAt` | Gaze target |
+| `LipSync` | Mouth weights for the current audio frame |
+| `Posture` / vitality | Idle autonomy |
 
-Each cue carries a source (`affect` — from the emotion engine, or `llm` —
-requested by the model). Cues are validated before presentation
-(expressions must exist on the model, motions must exist in the catalog)
-and rate-limited/hysteresis-controlled so the avatar does not flicker
-between states.
+Cues are rate-limited so the avatar does not flicker.
 
 ## The avatar (VRM)
 
-The desktop app renders **VRM 1.0** models with `ene-vrm`, a standalone
-wgpu renderer:
+`ene-stage` renders **VRM 1.0** with `ene-vrm` (wgpu):
 
-- **Model loading** — `.vrm` files from the card's `assets` (or a CLI
-  argument), including humanoid bones, expressions, spring bones, node
-  constraints, look-at settings, and MToon materials.
-- **Motions** — VRMA animation clips (idle, wave, …) with blending layers
-  and retargeting.
-- **Expressions** — VRM blend shapes composed with procedural overrides
-  (blink, gaze, mouth).
-- **Look-at** — the avatar tracks the cursor within configured ranges.
-- **Spring bones & physics** — hair/cloth simulation, plus scene physics
-  for drag interactions.
+- **Model loading** — `.vrm` from the character package
+- **Motions** — VRMA clips with blending layers
+- **Expressions** — VRM blend shapes plus procedural blink / gaze / mouth
+- **Look-at** — cursor tracking within configured ranges
+- **Spring bones** — hair / cloth
 
 The supported rendering API is documented in
 [ene-vrm API reference](../reference/api/ene-vrm.md).
 
-## Desktop voice/avatar settings
+## VRMA playback
 
-- Settings → Voice: TTS/STT/VAD selection, model/voice pickers, speed.
-- Settings → Graphics: quality preset (affects render resolution).
-- Settings → Character: default expression/motion, look-at strength,
-  position, scale.
-- `desktop.caption_enabled` — caption overlay for spoken lines;
-  `desktop.beat_sync` — music input for beat-synced motion.
+Stage auto-plays an idle clip when motions are present: a file named `idle`,
+else a name containing `VRMA_01`, else the first discovered `.vrma`. Changing
+clips resets the rest pose and spring bones.
 
-Building without the native audio stack is possible with
-`--no-default-features` (voice disabled; the audio module compiles to inert
-stubs).
+`ene-vrm` samples VRMA with `evaluate_retargeted`: NormalizedLocalRotation
+(NLR) onto the destination humanoid rest pose, and hips translation as
+destination **local** glTF:
+
+`dst_rest_local + (src_pose - src_rest_local) * (dst_global_y / src_global_y)`.
+
+VRMA translation channels are absolute local values, not world deltas. Adding
+them onto rest world Y doubles hips height and clips the model. The overlay
+then locks hips **XZ** to the destination rest (keeps Y) so walk cycles stay
+on screen. Look-at still applies after VRMA. VRoid models already face `+Z`;
+there is no 180° Y camera flip.

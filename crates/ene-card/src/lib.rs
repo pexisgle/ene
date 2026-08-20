@@ -32,7 +32,7 @@ pub mod locale;
 
 mod card_io;
 
-pub use card_import::{ImportedCharacter, import_character_file};
+pub use card_import::{ImportedCharacter, import_character_file, load_card_from_bytes};
 pub use card_io::{
     generate_character_card_schema_json, generate_character_schema_json, save_character_card,
     write_character_schemas,

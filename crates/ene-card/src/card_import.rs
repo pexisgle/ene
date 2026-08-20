@@ -125,7 +125,7 @@ fn read_card_file(path: &Path) -> Result<Vec<u8>, EneConfigError> {
 }
 
 /// Parses card bytes by magic: PNG signature, zip signature, else JSON.
-pub(crate) fn load_card_from_bytes(bytes: &[u8]) -> Result<CharacterCardV3, EneConfigError> {
+pub fn load_card_from_bytes(bytes: &[u8]) -> Result<CharacterCardV3, EneConfigError> {
     parse_card_bytes(bytes, None)
 }
 

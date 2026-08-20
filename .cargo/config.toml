@@ -2,10 +2,9 @@
 frequency = "never"
 
 [env]
-# The bundled SQLite (libsqlite3-sys) is compiled without the math-extension
-# by default; the memory store's natural-decay UPDATE uses `exp()`. The flake
-# shell sets the same flag; keeping it here makes plain `cargo test` builds
-# behave identically.
+# Bundled rusqlite compiles SQLite without the math extension by default.
+# Keep the flag so SQL that uses `exp()` (and similar) works in plain
+# `cargo test` the same way it does inside the Nix shell.
 LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_MATH_FUNCTIONS"
 
 [build]
@@ -15,11 +14,4 @@ rustc-wrapper = "sccache"
 linker = "clang"
 rustflags = [
     "-C", "link-arg=-fuse-ld=mold",
-    # `ene-desktop` enables `ene-ai/voice` by default, which pulls in both
-    # `whisper-rs-sys` and `llama-cpp-sys-4`. Each vendors its own ggml copy,
-    # causing duplicate-symbol link errors. Cargo's feature unification during
-    # `--workspace` builds propagates the voice feature to all crates that
-    # depend on `ene-ai`, so the flag must live here (target-scoped).
-    # Harmless when no duplicates exist.
-    "-C", "link-arg=-Wl,--allow-multiple-definition",
 ]

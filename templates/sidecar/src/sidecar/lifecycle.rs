@@ -166,7 +166,7 @@ pub fn random_api_key() -> String {
 
 /// Per-process work directory for presets and scratch files.
 pub fn sidecar_work_dir() -> PathBuf {
-    ene_config::app_data_dir()
+    ene_config::data_dir()
         .join("sidecar-work")
         .join("__SIDECAR_NAME__")
 }

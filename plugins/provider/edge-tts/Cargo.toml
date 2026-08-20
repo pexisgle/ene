@@ -1,36 +1,29 @@
 [package]
-name = "ene-plugin-edge-tts"
+name = "ene-provider-edge-tts"
 version.workspace = true
 edition.workspace = true
-description = "Microsoft Edge Neural Voice (Edge-TTS) provider plugin: free, keyless TTS over the unified plugin IPC"
+description = "Microsoft Edge Neural Voice TTS provider plugin"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "ene-provider-edge-tts"
+path = "src/main.rs"
+
 [dependencies]
-hound = { workspace = true }
-ene-plugin-broker = { workspace = true }
-ene-plugin-proto = { workspace = true }
-ene-plugin = { workspace = true }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true }
+ene-plugin-ipc = { workspace = true }
+futures = { workspace = true }
 hex = { workspace = true }
-nanomp3 = { workspace = true }
-parking_lot = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 sha2 = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }
+tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-uuid = { workspace = true, features = ["v4"] }
-
-[dev-dependencies]
-futures = { workspace = true }
-http = { workspace = true }
-tempfile = { workspace = true }
-tokio-tungstenite = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

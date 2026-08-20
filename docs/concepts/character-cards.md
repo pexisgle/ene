@@ -16,9 +16,9 @@ under `assets/characters/<name>/`:
 | PNG card | A PNG whose text chunks (`ccv3` for V3, `chara` for V2) embed the card JSON | Imported as a folder; the PNG is kept as `avatar.png` |
 | CHARX | A ZIP archive containing card JSON + assets (VRM, VRMA, images) | Extracted entry-by-entry into a folder |
 
-Import never overwrites an existing character folder. The CLI `/import
-<path>` command and the `ene` non-interactive import (see the
-[CLI guide](../apps/cli.md)) both accept PNG and CHARX files. Plain JSON
+Import never overwrites an existing character folder. `ene-card` accepts PNG
+and CHARX. There is no `ene-ctl import` command yet — drop a folder under
+`assets/characters/<name>/`, or call `ene_card` from a host. Plain JSON
 files are not imported — they belong directly in a character folder.
 
 Import sizes are validated (per-entry and total archive caps) so a hostile
@@ -33,7 +33,7 @@ The core `data` object (from the V3 spec):
 | `name`, `nickname` | Character names; `nickname` wins when set |
 | `description`, `personality`, `scenario` | Who/what/where — compiled into the identity kernel |
 | `system_prompt`, `post_history_instructions` | System instructions; PHI is appended after history |
-| `first_mes`, `alternate_greetings` | Opening messages (`/greeting` switches them) |
+| `first_mes`, `alternate_greetings` | Opening messages |
 | `mes_example` | Example dialogue shown on the first turn |
 | `character_book` | The lorebook (see below) |
 | `authors_note`, `authors_note_depth` | Persistent instruction injected at a depth in history |
@@ -120,11 +120,12 @@ A card can ship localized variants:
   containing only the localized fields.
 - PNG cards: an `extensions.ene.locales` bag embedded in the card.
 
-The active locale is chosen from the app language / `character_settings.json`
-`language` override, and the diff is layered over the base card.
+The active locale is chosen from the stage language /
+`character_settings.json` `language` override, and the diff is layered over
+the base card.
 
 ## Per-character presentation
 
-`character_settings.json` next to the card controls the desktop scene:
+`character_settings.json` next to the card can store stage presentation:
 model position/scale, look-at strength, default motion, default expression,
-and card language. See [Configuration](../configuration.md#per-character-settings-character_settingsjson).
+and card language. See [Character editor](../guides/character-editor.md).

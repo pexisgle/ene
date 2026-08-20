@@ -1,170 +1,110 @@
 # Plugins & MCP
 
-Ene's abilities are not compiled into the host. Tools (filesystem, web,
-calendar, …) and AI providers (OpenAI, Anthropic, local GGUF models, TTS
-voices, …) are **separate plugin binaries** that the host spawns and talks
-to over IPC. External MCP servers plug in the same way.
+Tools are **out-of-process binaries**. The host (`ene-fiber`) spawns them,
+negotiates split `core` / `tool` / `provider` subprotocols (`ene-plugin-ipc`),
+and registers tools in `ene-registry`. Harness functions that touch companion
+state stay in-process and still go through the same registry pipeline.
 
-## Why out-of-process
+Built-in tools live under `plugins/harness/`: `fs`, `exec`, `web`, `utility`,
+`app`. `exec` is not part of `fs`. See [Built-in tools](../guides/tools/builtin-tools.md)
+and [Write a tool](../guides/tools/write-a-tool.md).
 
-- **Isolation** — a plugin that crashes, hangs, or misbehaves cannot take
-  the host down; the supervisor restarts it.
-- **Sandboxing** — plugins declare their resource needs, and the host
-  enforces admission control.
-- **One runtime per native stack** — llama.cpp, whisper.cpp, and ONNX
-  Runtime each live in their own binary so no user pays the build cost of
-  runtimes they do not use.
+MCP servers are not vendored. Each handwritten `mcp.json` row becomes a
+`mcp.<id>` fiber running `ene-harness-mcp` (stdio or Streamable HTTP) on the
+same pipeline as in-tree tools. The Connectors page edits that document. A
+marketplace picker for popular servers is a successor milestone.
 
-## Two kinds of plugins
+Provider plugins live under `plugins/provider/` and speak the `provider`
+subprotocol. The host catalog (`ene_fiber::PROVIDER_PLUGINS`) is the single
+list: desktop pickers, Engines, and `ai.tasks.*` all read it (via
+`effective.providers`). Adding a provider is adding a plugin binary plus a
+catalog row with its seams, `local`, and `needs_key` — not a second allowlist
+in the UI.
 
-### Tool plugins (`plugins/tool/*`)
+Bind a catalog id with `ai.tasks.<task>.plugin`. Each configured task gets its
+own fiber (`row_id = ai.tasks.<task>`) so chat and embedding can share a
+plugin binary with different GGUFs.
 
-Provide named actions the character can call during a turn: `fs.read`,
-`web.search`, `utility.timer_start`, … Each action declares its JSON
-arguments, a summary/description for the model, keywords for retrieval,
-side effects, and whether it runs in the background.
-
-Built-in tool plugins:
-
-| Plugin | Actions (namespace) |
+| Plugin | Modalities |
 |---|---|
-| `app` | window/monitor listing, screenshots, typing, mouse/keyboard control |
-| `browser` | Chrome automation: navigate, click, type, screenshot, extract |
-| `calc` | expression evaluation, unit/currency/color conversion |
-| `calendar` | calendar accounts, events, free-slot search (stateful, approval-gated) |
-| `counter` | stateful counter example (used as the reference sample) |
-| `fs` | read/write/edit/delete, glob/grep search, patch, shell, undo |
-| `geo` | location, weather, timezone, sun position |
-| `git` | status, diff, log, branch, remote, blame |
-| `homeassistant` | Home Assistant state and control |
-| `random` | random numbers, UUIDs, picks, colors |
-| `utility` | notifications, todo list, time, system info, timers, questions |
-| `web` | fetch URLs, web search (Brave/Exa/Tavily/DuckDuckGo/arXiv) |
+| `provider.gguf` | Local GGUF LLM and embeddings (`plugins/provider/gguf`). GGUF weights use the plugin catalog; `llama-server` is installed from the host GitHub catalog (`provider.assets`, Engines page). Optional `server_path` / `model_path` override installs. |
+| `provider.openai_compat` | Cloud LLM, embeddings, TTS, STT (`/v1` chat+audio). Optional `base_url` for OpenRouter and other hosts. |
+| `provider.anthropic` | LLM (Messages API) |
+| `provider.elevenlabs` | TTS |
+| `provider.voicevox` | TTS. Host-managed VOICEVOX Engine (VVPP CPU) via `provider.assets`, or user-run engine / `server_path` |
+| `provider.edge_tts` | TTS (Edge Neural Voice) |
 
-### Provider plugins (`plugins/provider/*`)
+Native in-process engines (llama.cpp, whisper.cpp, Kokoro ONNX) are not in this
+tree. Local GGUF chat and embeddings use `provider.gguf` (`ene-provider-gguf`).
+The plugin owns the static weight catalog; the host fetches `llama-server`
+releases from GitHub, stores verified artifacts under
+`data_dir/plugins/provider.gguf/assets/`, and spawns `llama-server` on loopback
+via `ene-fiber`. Sidecar helpers also live in `templates/sidecar`.
 
-Provide models and voice engines:
+MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
+injected as a context source. MCP `prompts/list` become `SKILL.md` files under
+the data-dir skills home.
 
-| Plugin | Kind | Provides |
+## Launch profiles
+
+`plugins.profile` chooses the harness tree. `apply_profile` reconciles fibers;
+unrelated rows stay up.
+
+| Profile | Harness plugins | MCP |
 |---|---|---|
-| `openai` | `openai` | LLM chat (SSE streaming, vision, structured output), embeddings |
-| `anthropic` | `anthropic` | LLM chat via the Messages API |
-| `local-llm` | `local` | GGUF chat + embeddings through llama.cpp (`llm/chat@1`, `embed@1`, `gguf-runner@1`) |
-| `llama-server` | `llama-server` | GGUF chat through a llama.cpp sidecar server |
-| `onnx` | `silero` | VAD (Silero ONNX) |
-| `whisper` | `whisper` | STT (whisper.cpp) |
-| `kokoro` | `kokoro` | Local TTS (Kokoro ONNX) |
-| `edge-tts` | `edge-tts` | Cloud TTS (Microsoft Edge) |
-| `elevenlabs` | `elevenlabs` | Cloud TTS (ElevenLabs REST, broker-mediated) |
-| `openai-tts` | `openai_tts` | Cloud TTS (OpenAI) |
-| `voicevox` | `voicevox` | TTS via a VOICEVOX / Aivis Speech engine (external or managed sidecar mode) |
+| `desktop` (default) | `tool.utility`, `tool.fs`, `tool.exec`, `tool.web`, `tool.app` | handwritten `mcp.json` rows |
+| `minimal` | `tool.utility` | none |
+| `headless` | `tool.utility`, `tool.fs`, `tool.exec`, `tool.web` | handwritten `mcp.json` rows |
 
-## Lifecycle of a plugin
+Providers come from the host catalog and are spawned when bound in
+`ai.tasks.*`, not from the profile name. Change the profile from the Plugins
+page or `PATCH /api/v1/settings` with `{"plugins":{"profile":"minimal"}}`.
 
-```text
-discover → spawn → handshake → register capabilities → health probe
-              ▲                                      │
-              └────────── restart (circuit breaker) ◀┘
-```
+Remote inventory (OpenAI-compatible `/models`, Anthropic `v1/models`) is a
+provider RPC (`list_models`). Core exposes it as `POST /api/v1/providers/models`
+(plugin, task, draft base URL, typed key; empty key uses the vault). Desktop
+does not call vendor HTTP. Local GGUF weights and sidecars use the generic
+`provider.assets` flow (`POST /api/v1/providers/assets/*`). `provider.gguf`
+lists sidecar `/v1/models` only when llama-server is already up. TTS plugins
+that have not implemented the RPC keep free-text model fields.
 
-1. **Discovery** — plugin binaries are found in the built-in and user
-   plugin directories, filtered by `plugins.list.<name>` / `tools.list`.
-2. **Spawn + handshake** — the host launches the binary and negotiates the
-   IPC protocol version over stdio (length-prefixed frames, JSON handshake,
-   MessagePack after v6; see
-   [Plugin IPC protocol](../reference/plugin-ipc.md)).
-3. **Capability registration** — the plugin advertises its tools and
-   provider specs. Declared `requires`/`provides` capability strings are
-   validated; a plugin whose hard requirements are unmet is disabled.
-4. **Health & supervision** — the host probes provider reachability through
-   the plugin itself (a minimal chat ping), watches liveness, and restarts
-   with backoff while a circuit breaker trips after repeated failures.
+## `provider.assets`
 
-## Capability mediation
+Provider plugins may expose an `assets` face (`PROVIDER_ASSETS_VERSION = 1`):
 
-Plugins can declare capabilities they provide to *other* plugins
-(`provides = "gguf-runner@1"`) and capabilities they need
-(`requires = "gguf-runner@1"`). The host mediates the calls: the caller's
-declared `requires` authorize the request, the host resolves the provider
-from the capability registry, and the call is forwarded over the
-provider's IPC connection.
+| Method | Role |
+|---|---|
+| `assets.list` | Catalog rows plus install state (`installed`, `active`, `local_path`, versions) |
+| `assets.install` | Start an async install job (`job_id`) |
+| `assets.install_status` | Progress (`phase`, `received`, `total`, `error`) |
+| `assets.set_active` | Switch the active version (sidecars) |
 
-## Host services over IPC
+Kinds are extensible strings (`sidecar`, `weight`, …). Desktop renders any
+plugin that negotiates `assets`; `ene-core` proxies the same contract over HTTP
+(`POST /api/v1/providers/assets/*`, including `refresh_catalog`).
 
-The host exposes multiplexed **passenger services** on one shared socket:
+**Host-managed catalogs.** Sidecar engines for `provider.gguf` (`llama-server`)
+and `provider.voicevox` (`voicevox-engine`) are listed and installed by the host
+(`ene-fiber` + `ene-provider-assets`), not from static plugin source. At startup
+(and on manual refresh) the host fetches GitHub Releases for
+`ggml-org/llama.cpp` and `VOICEVOX/voicevox_engine`, caches JSON under
+`data_dir/catalog-cache/`, and merges install state from each plugin's
+`manifest.json`. Install keys are `{release_tag}/{variant_id}` (for example
+`b4282/avx2`, `0.25.2/cpu`, `0.25.2/directml`). The Engines UI picks release and
+backend variant before download. VOICEVOX CUDA/NVIDIA packages split across
+`.vvppp` / `.7z.001` multipart archives are not installed by the host yet.
 
-- **`db`** — stateful plugins perform typed CRUD against the host's
-  `memory.db` through `ene-plugin-db` (prefix-isolated tables per plugin,
-  authenticated by token).
-- **`capability`** — the capability-mediation channel described above.
+**Plugin-owned catalogs.** GGUF weight files remain static Hugging Face URLs
+inside `provider.gguf`; the plugin probe still serves `assets.list` for weights
+while the host overrides sidecar rows.
 
-## MCP servers
+**Downloads.** The host validates URLs against fixed GitHub (and Hugging Face for
+weights) prefixes, streams artifacts to disk, verifies SHA-256 when GitHub
+provides a digest, and records local digests after first install. VVPP CPU
+packages extract as a full zip tree; llama-server zips extract the full archive
+(Windows bundles ship `ggml.dll` and related libraries beside the executable).
+CUDA builds also pull matching `cudart-*` companion zips into the same directory.
 
-Model Context Protocol servers are external processes or HTTP endpoints
-that expose tools. Configure them under `tools.mcp_servers`:
-
-```json
-{
-  "tools": {
-    "mcp_servers": [
-      {
-        "name": "my-server",
-        "enabled": true,
-        "transport": { "type": "stdio", "command": "npx", "args": ["-y", "some-mcp-server"] },
-        "env_passthrough": ["MY_API_KEY"]
-      }
-    ]
-  }
-}
-```
-
-Transports: `stdio` (child process) and `http` (streamable HTTP). For
-security, the child inherits **no** environment variables except the ones
-listed in `env_passthrough`. See the
-[MCP servers guide](../guides/tools/mcp-servers.md).
-
-## Permissions and safety
-
-- Tool actions declare their side effects; the host asks for approval
-  before destructive operations (`PermissionRequired` event). You can
-  allow once, allow for the session, or deny; standing grants are listed
-  and revocable (`/permissions`, desktop permissions page).
-- Tool arguments and results are redacted before they reach logs or event
-  streams.
-- The filesystem tool sandbox restricts paths; shell execution is a
-  separate, permission-gated action.
-- Plugin configuration values are redacted at the host boundary.
-
-## Writing plugins
-
-- [Write a tool guide](../guides/tools/write-a-tool.md) — step-by-step for
-  a new tool plugin.
-- [Tool SDK reference](../reference/tools/sdk.md) — `ToolAction` and
-  provider traits.
-- [Derive macros reference](../reference/tools/derive-macro.md) —
-  attribute reference.
-- [Plugin IPC protocol](../reference/plugin-ipc.md) — the wire format.
-
-## Sandbox, broker, and approvals
-
-Plugins never touch the OS directly. The host applies an OS sandbox
-(Landlock + seccomp + rlimits on Linux, Job Object on Windows), mediates
-every operation through the broker channel (`file`, `network`, `process`,
-`credential`, `artifact`, `platform`), and gates requests with a two-layer
-approval model (signed manifest → global/per-plugin policy). Downloads of
-executable artifacts come only from a signed catalog with CAS verification.
-See [Sandbox, broker & approvals](sandbox-and-approvals.md) for the full
-model, including the settings UI, the audit log, and the SSRF guard.
-
-## FAQ
-
-**Can I write a plugin in another language?** The protocol is just framed
-JSON/MessagePack over stdio, but the in-repo plugins are Rust binaries
-built on `ene-plugin`. The template and SDK assume Rust.
-
-**How do I disable a tool I don't want?** `tools.list.<name>.enable =
-false` (or `plugins.list.<name>.enable = false` for provider plugins).
-
-**What happens if a plugin crashes mid-turn?** The turn fails with an
-error event; the supervisor restarts the plugin. Stateful data is
-persisted in `memory.db` via the `db` passenger, not in the plugin process.
+**Sidecar injection.** After install, `ene-fiber` injects `sidecar_base_url` for
+`provider.gguf` and `cas_path` for `provider.voicevox` when those fields are not
+already set in settings.

@@ -1,167 +1,111 @@
 # プラグインと MCP
 
-Ene の能力はホストにコンパイルされていません。ツール（ファイルシステム・
-web・カレンダー・…）と AI プロバイダー（OpenAI・Anthropic・ローカル GGUF
-モデル・音声・…）は**別々のプラグインバイナリ**で、ホストが起動して IPC
-で通信します。外部 MCP サーバーも同じ仕組みで接続されます。
+ツールは **アウトプロセスのバイナリ**です。ホスト (`ene-fiber`) が spawn し、
+分割された `core` / `tool` / `provider` 副プロトコル (`ene-plugin-ipc`) を交渉し、
+仕様を `ene-registry` に載せます。コンパニオン状態に触るハーネス機能は
+ホスト内のまま、同じレジストリパイプラインを通ります。
 
-## なぜプロセス外なのか
+同梱ツールは `plugins/harness/` にあります: `fs`、`exec`、`web`、`utility`、
+`app`。
+`exec` は `fs` に含めません。[同梱ツール](../guides/tools/builtin-tools.md) と
+[ツールを書く](../guides/tools/write-a-tool.md) を見てください。
 
-- **隔離** — プラグインがクラッシュ・ハング・暴走してもホストは落ちません。
-  スーパーバイザーが再起動します。
-- **サンドボックス** — プラグインはリソース要求を宣言し、ホストが受付制御
-  を実施します。
-- **ネイティブランタイムは 1 プラグインに 1 つ** — llama.cpp・whisper.cpp・
-  ONNX Runtime はそれぞれ別バイナリなので、使わないランタイムのビルドコストを
-  誰も払いません。
+MCP サーバーはベンダーしません。手書きの `mcp.json` の各行は `ene-harness-mcp`
+（stdio または Streamable HTTP）の `mcp.<id>` ファイバーになり、内製ツールと
+同じパイプラインに載ります。コネクターページがそのドキュメントを編集します。
+代表的なサーバーを選ぶマーケット UI は後継マイルストーンです。
 
-## 2 種類のプラグイン
+プロバイダプラグインは `plugins/provider/` にあり、`provider` 副プロトコルを話します。
+ホストカタログ（`ene_fiber::PROVIDER_PLUGINS`）が唯一の一覧です。デスクトップの
+選択、Engines、`ai.tasks.*` はすべてそれ（`effective.providers`）を読みます。
+プロバイダを足すのは、バイナリと seams / `local` / `needs_key` 付きのカタログ行を
+足すことであり、UI 側の第二の許可リストではありません。
 
-### ツールプラグイン（`plugins/tool/*`）
+`ai.tasks.<task>.plugin` でカタログ id を結びます。設定したタスクごとに
+ファイバー（`row_id = ai.tasks.<task>`）が立つので、会話と埋め込みが同じ
+バイナリでも別 GGUF を持てます。
 
-ターン中にキャラクターが呼べる名前付きアクションを提供します:
-`fs.read`・`web.search`・`utility.timer_start` など。各アクションは JSON
-引数・モデル向けの概要/説明・検索キーワード・副作用・バックグラウンド実行の
-可否を宣言します。
-
-同梱ツールプラグイン:
-
-| プラグイン | アクション（名前空間） |
+| プラグイン | モダリティ |
 |---|---|
-| `app` | ウィンドウ/モニター一覧・スクリーンショット・タイピング・マウス/キーボード操作 |
-| `browser` | Chrome 自動操作: 移動・クリック・入力・スクリーンショット・抽出 |
-| `calc` | 式評価・単位/通貨/色変換 |
-| `calendar` | カレンダーアカウント・イベント・空き時間検索（状態保持・承認ゲート付き） |
-| `counter` | 状態保持カウンターのサンプル（参照実装） |
-| `fs` | 読み書き・編集・削除・glob/grep 検索・パッチ・シェル・undo |
-| `geo` | 位置・天気・タイムゾーン・太陽位置 |
-| `git` | status・diff・log・branch・remote・blame |
-| `homeassistant` | Home Assistant の状態と制御 |
-| `random` | 乱数・UUID・選択・色 |
-| `utility` | 通知・TODO リスト・時刻・システム情報・タイマー・質問 |
-| `web` | URL 取得・Web 検索（Brave/Exa/Tavily/DuckDuckGo/arXiv） |
+| `provider.gguf` | ローカル GGUF の LLM と埋め込み（`plugins/provider/gguf`）。GGUF 重みはプラグインの静的カタログ、`llama-server` はホストの GitHub カタログ（`provider.assets`、Engines ページ）からインストール。任意で `server_path` / `model_path` で上書き。 |
+| `provider.openai_compat` | クラウドの LLM、埋め込み、TTS、STT（`/v1` chat+audio）。OpenRouter などは任意の `base_url`。 |
+| `provider.anthropic` | LLM（Messages API） |
+| `provider.elevenlabs` | TTS |
+| `provider.voicevox` | TTS。ホスト管理の VOICEVOX Engine（VVPP CPU、`provider.assets`）、またはユーザー起動エンジン / `server_path` |
+| `provider.edge_tts` | TTS（Edge Neural Voice） |
 
-### プロバイダープラグイン（`plugins/provider/*`）
+API キーは vault に置き、`settings.json` には書きません。ネイティブの
+プロセス内エンジン（llama.cpp、whisper.cpp、Kokoro ONNX）はこのツリーには
+ありません。ローカル GGUF の会話と埋め込みは `provider.gguf`
+（`ene-provider-gguf`）です。プラグインが GGUF 重みの静的カタログを所有し、ホストが
+GitHub から `llama-server` リリースを取得し、
+`data_dir/plugins/provider.gguf/assets/` に検証済みアーティファクトを置き、
+`ene-fiber` 経由で `llama-server` をループバック起動します。Sidecar 補助は
+`templates/sidecar` にもあります。
 
-モデルと音声エンジンを提供します:
+MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショットされ、
+コンテキスト源として注入されます。`prompts/list` は data-dir の skills 配下の
+`SKILL.md` になります。
 
-| プラグイン | kind | 提供内容 |
+## 起動プロファイル
+
+`plugins.profile` がハーネスの起動ツリーを選びます。`apply_profile` がファイバーを
+差分 reconcile し、無関係な行は動かしません。
+
+| プロファイル | ハーネスプラグイン | MCP |
 |---|---|---|
-| `openai` | `openai` | LLM チャット（SSE ストリーミング・ビジョン・構造化出力）、埋め込み |
-| `anthropic` | `anthropic` | Messages API による LLM チャット |
-| `local-llm` | `local` | llama.cpp による GGUF チャット+埋め込み（`llm/chat@1`・`embed@1`・`gguf-runner@1`） |
-| `llama-server` | `llama-server` | llama.cpp サイドカーサーバーによる GGUF チャット |
-| `onnx` | `silero` | VAD（Silero ONNX） |
-| `whisper` | `whisper` | STT（whisper.cpp） |
-| `kokoro` | `kokoro` | ローカル TTS（Kokoro ONNX） |
-| `edge-tts` | `edge-tts` | クラウド TTS（Microsoft Edge） |
-| `elevenlabs` | `elevenlabs` | クラウド TTS（ElevenLabs REST、Broker 経由） |
-| `openai-tts` | `openai_tts` | クラウド TTS（OpenAI） |
-| `voicevox` | `voicevox` | VOICEVOX / Aivis Speech エンジンによる TTS（外部・managed サイドカーモード） |
+| `desktop`（既定） | `tool.utility`、`tool.fs`、`tool.exec`、`tool.web`、`tool.app` | 手書き `mcp.json` |
+| `minimal` | `tool.utility` | なし |
+| `headless` | `tool.utility`、`tool.fs`、`tool.exec`、`tool.web` | 手書き `mcp.json` |
 
-## プラグインのライフサイクル
+プロバイダはホストカタログから来て、`ai.tasks.*` に結んだとき起動します。
+プロファイル名ではありません。プロファイルの変更は
+プラグインページ、または `PATCH /api/v1/settings` の
+`{"plugins":{"profile":"minimal"}}` です。
 
-```text
-発見 → 起動 → ハンドシェイク → capability 登録 → ヘルスプローブ
-              ▲                                      │
-              └────────── 再起動（サーキットブレーカー） ◀┘
-```
+リモートの在庫（OpenAI 互換 `/models`、Anthropic `v1/models`）はプロバイダ RPC
+（`list_models`）です。コアは `POST /api/v1/providers/models` で出します
+（plugin、task、下書きの base URL、入力中のキー。空なら vault）。
+デスクトップはベンダ HTTP を呼びません。ローカル GGUF の重みとサイドカーは
+汎用の `provider.assets`（`POST /api/v1/providers/assets/*`）で扱います。
+`provider.gguf` の一覧は llama-server が既に居るときだけサイドカーの
+`/v1/models` です。RPC 未実装の TTS はテキスト入力のままです。
 
-1. **発見** — 組み込み・ユーザープラグインディレクトリからバイナリを探し、
-   `plugins.list.<name>` / `tools.list` で絞り込みます。
-2. **起動 + ハンドシェイク** — ホストがバイナリを起動し、stdio 上で IPC
-   プロトコルバージョンをネゴシエーションします（長さプレフィックス付き
-   フレーム、JSON ハンドシェイク、v6 以降は MessagePack。
-   [プラグイン IPC プロトコル](../reference/plugin-ipc.md)参照）。
-3. **capability 登録** — プラグインはツールとプロバイダー仕様を宣言します。
-   `requires`/`provides` の capability 文字列は検証され、ハード要件が
-   満たされないプラグインは無効化されます。
-4. **ヘルスと監視** — ホストはプラグイン自身を通してプロバイダー到達性を
-   プローブ（最小チャット ping）し、生存を監視し、連続失敗時はバックオフ
-   付きで再起動します（サーキットブレーカー）。
+## `provider.assets`
 
-## Capability 仲介
+プロバイダプラグインは `assets` フェース（`PROVIDER_ASSETS_VERSION = 1`）を
+公開できます。
 
-プラグインは他のプラグインへ提供する capability
-（`provides = "gguf-runner@1"`）と、自分が必要とする capability
-（`requires = "gguf-runner@1"`）を宣言できます。ホストが呼び出しを仲介します。
-呼び出し側の宣言済み `requires` がリクエストを許可し、ホストが capability
-レジストリからプロバイダーを解決し、プロバイダーの IPC 接続へ転送します。
+| メソッド | 役割 |
+|---|---|
+| `assets.list` | カタログ行とインストール状態 |
+| `assets.install` | 非同期インストール開始（`job_id`） |
+| `assets.install_status` | 進捗 |
+| `assets.set_active` | 使用中バージョンの切替（サイドカー） |
 
-## IPC 上のホストサービス
+種別は拡張可能な文字列（`sidecar`、`weight` など）。`assets` を交渉した
+プラグインはデスクトップが同じ UI を描画し、`ene-core` が HTTP で中継します
+（`POST /api/v1/providers/assets/*`、`refresh_catalog` で手動更新）。
 
-ホストは共有ソケット上に多重化された**パッセンジャーサービス**を公開します:
+**ホスト管理カタログ。** `provider.gguf` の `llama-server` と
+`provider.voicevox` の `voicevox-engine` は、プラグインの静的ソースではなく
+ホスト（`ene-fiber` + `ene-provider-assets`）が一覧・インストールします。起動時
+（および手動更新時）に `ggml-org/llama.cpp` と `VOICEVOX/voicevox_engine` の
+GitHub Releases を取得し、`data_dir/catalog-cache/` に JSON をキャッシュ、各
+プラグインの `manifest.json` とマージします。インストールキーは
+`{release_tag}/{variant_id}`（例: `b4282/avx2`、`0.25.2/cpu`、`0.25.2/directml`）。Engines UI で
+リリースとバックエンドバリアントを選んでからダウンロードします。VOICEVOX の
+CUDA/NVIDIA 向け `.vvppp` / `.7z.001` 分割パッケージは現状ホストでは未対応です。
 
-- **`db`** — 状態保持プラグインは `ene-plugin-db` を通してホストの
-  `memory.db` に対して型付き CRUD を実行します（プラグインごとにテーブルを
-  プレフィックス分離、トークン認証）。
-- **`capability`** — 上記の capability 仲介チャネル。
+**プラグイン所有カタログ。** GGUF 重みは `provider.gguf` 内の静的 Hugging Face
+URL のままです。重みはプラグイン probe の `assets.list`、サイドカー行はホストが
+上書きします。
 
-## MCP サーバー
+**ダウンロード。** ホストが GitHub（重みは Hugging Face）の固定プレフィックスで
+URL を検証し、ディスクへストリーミング、GitHub が digest を返せば SHA-256 検証、
+初回インストール後はローカル digest を記録します。VVPP CPU は zip ツリー全体を展開、
+llama-server は zip 全体を展開（Windows では `ggml.dll` 等が実行ファイルと同じ
+ディレクトリに必要）。CUDA は `cudart-*` コンパニオン zip も同ディレクトリに展開します。
 
-Model Context Protocol サーバーは、ツールを公開する外部プロセスまたは
-HTTP エンドポイントです。`tools.mcp_servers` に設定します:
-
-```json
-{
-  "tools": {
-    "mcp_servers": [
-      {
-        "name": "my-server",
-        "enabled": true,
-        "transport": { "type": "stdio", "command": "npx", "args": ["-y", "some-mcp-server"] },
-        "env_passthrough": ["MY_API_KEY"]
-      }
-    ]
-  }
-}
-```
-
-トランスポートは `stdio`（子プロセス）と `http`（ストリーミング HTTP）。
-セキュリティ上、子プロセスは `env_passthrough` に列挙した環境変数**以外**
-を一切継承しません。[MCP サーバーガイド](../guides/tools/mcp-servers.md)参照。
-
-## 権限と安全性
-
-- ツールアクションは副作用を宣言し、ホストは破壊的操作の前に承認を求めます
-  （`PermissionRequired` イベント）。一度だけ・セッション中・永続のいずれかで
-  許可でき、付与済み権限は一覧表示・失効できます（`/permissions`・デスクトップ
-  の権限ページ）。
-- ツール引数と結果はログやイベントストリームに到達する前にリダクションされます。
-- ファイルシステムツールのサンドボックスはパスを制限し、シェル実行は別の
-  権限ゲート付きアクションです。
-- プラグイン設定値はホスト境界でリダクションされます。
-
-## プラグインの作成
-
-- [ツールを書くガイド](../guides/tools/write-a-tool.md) — 新規ツール
-  プラグインの手順。
-- [ツール SDK リファレンス](../reference/tools/sdk.md) — `ToolAction` と
-  プロバイダートレイト。
-- [derive マクロリファレンス](../reference/tools/derive-macro.md) —
-  属性リファレンス。
-- [プラグイン IPC プロトコル](../reference/plugin-ipc.md) — ワイヤ形式。
-
-## サンドボックス・Broker・承認
-
-プラグインは OS に直接触れません。ホストが OS サンドボックス(Linux は
-Landlock + seccomp + rlimits、Windows は Job Object)を適用し、すべての操作を
-Broker チャネル(`file`・`network`・`process`・`credential`・`artifact`・
-`platform`)で仲介し、二層の承認モデル(署名 manifest → 全体/プラグイン別
-ポリシー)で要求をゲートします。実行可能 Artifact のダウンロードは署名付き
-Catalog と CAS 検証からのみ可能です。詳細は
-[サンドボックス・Broker・承認](sandbox-and-approvals.md)を参照してください
-(設定 UI・監査ログ・SSRF ガードを含みます)。
-
-## FAQ
-
-**別言語でプラグインを書けますか？** プロトコル自体は stdio 上のフレーム化
-JSON/MessagePack ですが、リポジトリ内のプラグインは `ene-plugin` 上に
-構築された Rust バイナリです。テンプレートと SDK は Rust 前提です。
-
-**使わないツールはどう無効化しますか？** `tools.list.<name>.enable = false`
-（プロバイダープラグインは `plugins.list.<name>.enable = false`）。
-
-**ターン中にプラグインがクラッシュしたら？** ターンはエラーイベントで
-終了し、スーパーバイザーがプラグインを再起動します。状態データはプラグイン
-プロセスではなく `db` パッセンジャー経由で `memory.db` に永続化されます。
+**サイドカー注入。** インストール後、設定に未設定なら `ene-fiber` が
+`provider.gguf` に `sidecar_base_url`、`provider.voicevox` に `cas_path` を注入します。

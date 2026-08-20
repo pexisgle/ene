@@ -1,39 +1,49 @@
-//! # ene-plugin-anthropic
-//!
-//! Anthropic Claude plugin binary for the ene unified plugin system.
-//!
-//! Exposes the Anthropic Messages API as an LLM provider over the plugin IPC
-//! protocol (v3), supporting both SSE streaming and non-streaming chat
-//! completions with tool use and vision inputs. All HTTP traffic is
-//! mediated by the host's network broker (SSRF guard, origin approval,
-//! credential injection).
+//! Anthropic Messages API as `provider.anthropic` (LLM face only).
 
-mod broker;
-mod convert;
-mod plugin;
+#![cfg_attr(test, expect(clippy::expect_used, reason = "tests fail fast"))]
 
-use plugin::AnthropicPlugin;
+mod client;
+
+use std::sync::Arc;
+
+use client::Anthropic;
+use ene_plugin_ipc::{PluginIdentity, ProviderHandlers, serve_provider_from_env};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
-        .with_writer(std::io::stderr)
         .init();
-
-    if let Err(e) = ene_plugin::run_plugin_server(ene_plugin::PluginDispatch::new(
-        None,
-        Some(std::sync::Arc::new(AnthropicPlugin)),
-        None,
-        None,
-        None,
-    ))
-    .await
-    {
-        tracing::error!(component = "ene-plugin-anthropic", error = %e, "Fatal error");
+    let provider = Arc::new(Anthropic::new());
+    let handlers = ProviderHandlers {
+        llm: Some(provider.clone()),
+        models: Some(provider),
+        ..ProviderHandlers::default()
+    };
+    if let Err(err) = serve_provider_from_env(identity(), handlers).await {
+        tracing::error!(error = %err, plugin = "provider.anthropic", "fatal");
         std::process::exit(1);
     }
+}
+
+fn identity() -> PluginIdentity {
+    PluginIdentity {
+        plugin_id: "provider.anthropic".to_owned(),
+        plugin_name: "anthropic".to_owned(),
+        digest: exe_digest(),
+        spawn_token: None,
+    }
+}
+
+fn exe_digest() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
+        .map_or_else(
+            || "blake3:unknown".to_owned(),
+            |bytes| format!("blake3:{}", blake3::hash(&bytes).to_hex()),
+        )
 }

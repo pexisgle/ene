@@ -1,0 +1,22 @@
+[package]
+name = "ene-harness-exec"
+version.workspace = true
+edition.workspace = true
+description = "Harness exec plugin: process execution, separate from fs (D-24)"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-harness-exec"
+path = "src/main.rs"
+
+[dependencies]
+ene-plugin-ipc = { workspace = true }
+ene-registry = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[lints]
+workspace = true

@@ -65,6 +65,7 @@ pub enum ConfigTarget {
     Character,
 }
 
+#[derive(Clone)]
 pub struct SchemaEntry {
     pub schema: schemars::Schema,
     pub target: ConfigTarget,
@@ -111,22 +112,6 @@ pub fn register_config_schema<T: JsonSchema + HasConfigKey>(
             schema,
             target,
             parent_key: parent_key.map(String::from),
-        },
-    );
-}
-
-#[doc(hidden)]
-pub fn register_tool_schema<T: JsonSchema>(tool_name: &str) {
-    let schema_gen = schemars::SchemaGenerator::default();
-    let schema = schema_gen.into_root_schema_for::<T>();
-    let registry = SCHEMA_REGISTRY.get_or_init(|| parking_lot::Mutex::new(HashMap::new()));
-    let mut reg = registry.lock();
-    reg.insert(
-        tool_name.to_string(),
-        SchemaEntry {
-            schema,
-            target: ConfigTarget::Settings,
-            parent_key: Some("tools_map".to_string()),
         },
     );
 }
@@ -258,7 +243,7 @@ impl EneConfig {
     /// Only the section's *declared* fields are written; unknown *immediate
     /// child* keys already present at the section path are preserved.
     /// The merge is one level deep: declared fields that are themselves objects
-    /// (e.g. `plugins.list`, `ai.tasks`) are replaced wholesale, so unknown
+    /// (e.g. `plugins.policy`, `ai.tasks`) are replaced wholesale, so unknown
     /// keys nested *beneath* them do not survive. This replaces the previous
     /// whole-subtree replacement, which silently wiped nested sibling sections
     /// such as `tools.rag` when writing `ToolRuntimeConfig`.
@@ -691,16 +676,25 @@ fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String
     Ok(serde_json::to_string_pretty(&merged)?)
 }
 
+fn snapshot_schema_registry() -> Vec<(String, SchemaEntry)> {
+    let Some(registry) = SCHEMA_REGISTRY.get() else {
+        return Vec::new();
+    };
+    registry
+        .lock()
+        .iter()
+        .map(|(key, entry)| (key.clone(), entry.clone()))
+        .collect()
+}
+
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
     let root_schema = schema_gen.into_root_schema_for::<EneConfig>();
     let mut root_val = serde_json::to_value(&root_schema)?;
+    let entries = snapshot_schema_registry();
 
-    if let Some(registry) = SCHEMA_REGISTRY.get()
-        && let Some(root_obj) = root_val.as_object_mut()
-    {
-        let reg = registry.lock();
-        for entry in reg.values() {
+    if let Some(root_obj) = root_val.as_object_mut() {
+        for (_, entry) in &entries {
             if entry.target != ConfigTarget::Settings {
                 continue;
             }
@@ -725,84 +719,16 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
             }
         }
 
-        for (key, entry) in reg.iter() {
+        for (key, entry) in &entries {
             if entry.target != ConfigTarget::Settings {
                 continue;
             }
             let entry_val = serde_json::to_value(&entry.schema)?;
 
-            if let Some(parent_key) = &entry.parent_key {
-                if parent_key == "tools_map" {
-                    let tool_config_def = if root_obj.contains_key("definitions") {
-                        root_obj
-                            .get_mut("definitions")
-                            .and_then(|d| d.get_mut("ToolConfig"))
-                    } else {
-                        root_obj
-                            .get_mut("$defs")
-                            .and_then(|d| d.get_mut("ToolConfig"))
-                    };
-                    if let Some(tool_config_def) = tool_config_def
-                        && let Some(props) = tool_config_def
-                            .get_mut("properties")
-                            .and_then(|p| p.as_object_mut())
-                    {
-                        let map_key = if props.contains_key("list") {
-                            "list"
-                        } else if props.contains_key("tools") {
-                            "tools"
-                        } else {
-                            ""
-                        };
-                        if !map_key.is_empty()
-                            && let Some(tools_prop) = props.get_mut(map_key)
-                            && let Some(tools_obj) = tools_prop.as_object_mut()
-                            && let Some(properties) = tools_obj
-                                .entry("properties".to_string())
-                                .or_insert_with(|| serde_json::json!({}))
-                                .as_object_mut()
-                        {
-                            let mut clean_entry = entry_val.clone();
-                            if let Some(obj) = clean_entry.as_object_mut() {
-                                obj.remove("definitions");
-                                obj.remove("$schema");
-                            }
-                            properties.insert(
-                                key.clone(),
-                                serde_json::json!({
-                                    "allOf": [
-                                        { "$ref": "#/definitions/ToolEntry" },
-                                        clean_entry
-                                    ]
-                                }),
-                            );
-                        }
-                    }
-                } else if parent_key == "tools" {
-                    // Nested under `tools.*` (e.g. `tools.rag`), sibling of `list`.
-                    let tool_config_def = if root_obj.contains_key("definitions") {
-                        root_obj
-                            .get_mut("definitions")
-                            .and_then(|d| d.get_mut("ToolConfig"))
-                    } else {
-                        root_obj
-                            .get_mut("$defs")
-                            .and_then(|d| d.get_mut("ToolConfig"))
-                    };
-                    if let Some(tool_config_def) = tool_config_def
-                        && let Some(properties) = tool_config_def
-                            .get_mut("properties")
-                            .and_then(|p| p.as_object_mut())
-                    {
-                        let mut clean_entry = entry_val.clone();
-                        if let Some(obj) = clean_entry.as_object_mut() {
-                            obj.remove("definitions");
-                            obj.remove("$schema");
-                        }
-                        properties.insert(key.clone(), clean_entry);
-                    }
-                }
-            } else if let Some(properties) = root_obj
+            if entry.parent_key.is_some() {
+                continue;
+            }
+            if let Some(properties) = root_obj
                 .entry("properties".to_string())
                 .or_insert_with(|| serde_json::json!({}))
                 .as_object_mut()
@@ -1422,56 +1348,58 @@ mod tests {
         });
     }
 
-    /// End-to-end for the real v1→v2 step: a version-1 `settings.json` holding
-    /// the relocated keys is migrated to version 2 on load, persisted, and the
-    /// plugin-owned settings land under `plugins.list.*`.
+    /// End-to-end: a version-7 `settings.json` with `plugins.list` is migrated
+    /// to the current version on load, and the retired map is dropped rather
+    /// than rewritten into a new home.
     #[test]
-    fn load_migrates_v1_relocated_settings_to_v2() {
-        crate::migration::tests::with_test_version(2, || {
-            crate::migration::register_migration(1, crate::migration::migrate_v1_to_v2)
-                .expect("registration below current version succeeds");
-
-            let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
-            let path = tmp.path().join("settings.json");
-            let v1 = r#"{
-                "version": 1,
-                "ai": {
-                    "local_models": {
-                        "gemma-4-e4b": {
-                            "mmproj_url": "https://cdn.example/mmproj.gguf",
-                            "acceleration": "auto"
+    fn load_strips_plugins_list_on_migrate() {
+        let _guard = migration_guard();
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        let v7 = r#"{
+                "version": 7,
+                "plugins": {
+                    "list": {
+                        "llama-cpp": {
+                            "enable": true,
+                            "config": { "mmproj_url": "https://cdn.example/mmproj.gguf" }
                         }
-                    },
+                    }
+                },
+                "ai": {
+                    "local_models": { "gemma-4-e4b": { "url": "https://cdn.example/model.gguf" } },
                     "ort_dylib_path": "/opt/onnx/libonnxruntime.so",
-                    "tts": { "voices_path": "/data/voices.bin" }
+                    "tasks": { "chat": { "plugin": "echo" } }
                 }
             }"#;
-            std::fs::write(&path, v1).expect("write old-version settings fixture");
+        std::fs::write(&path, v7).expect("write old-version settings fixture");
 
-            let config = load_full_config_from(&path).expect("old-version config loads");
-            assert_eq!(config.version, 2, "loaded config carries the new version");
-            assert_eq!(
-                config.get_path("plugins.list.llama-cpp.config.mmproj_url"),
-                Some(serde_json::json!("https://cdn.example/mmproj.gguf"))
-            );
-            assert_eq!(
-                config.get_path("plugins.list.onnx.config.ort_dylib_path"),
-                Some(serde_json::json!("/opt/onnx/libonnxruntime.so"))
-            );
+        let config = load_full_config_from(&path).expect("old-version config loads");
+        assert_eq!(
+            config.version,
+            crate::migration::CURRENT_CONFIG_VERSION,
+            "loaded config carries the new version"
+        );
+        assert!(
+            config.get_path("plugins.list").is_none(),
+            "retired plugins.list must not survive load"
+        );
+        assert!(config.get_path("ai.local_models").is_none());
+        assert_eq!(
+            config.get_path("ai.tasks.chat.plugin"),
+            Some(serde_json::json!(""))
+        );
 
-            let on_disk: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).expect("read back"))
-                    .expect("persisted JSON is valid");
-            assert_eq!(
-                on_disk.get("version"),
-                Some(&serde_json::json!(2)),
-                "migrated version must be persisted to disk"
-            );
-            assert!(
-                on_disk.pointer("/ai/ort_dylib_path").is_none(),
-                "old ai.ort_dylib_path must be gone from disk"
-            );
-        });
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read back"))
+                .expect("persisted JSON is valid");
+        assert_eq!(
+            on_disk.get("version"),
+            Some(&serde_json::json!(crate::migration::CURRENT_CONFIG_VERSION)),
+            "migrated version must be persisted to disk"
+        );
+        assert!(on_disk.pointer("/plugins/list").is_none());
+        assert!(on_disk.pointer("/ai/ort_dylib_path").is_none());
     }
 
     #[test]
@@ -1793,11 +1721,7 @@ mod tests {
     /// pulling in another workspace crate (whose `define_config!` impl would
     /// be for a different copy of the `HasConfigKey` trait).
     ///
-    /// Modelled on the real `ToolRuntimeConfig` (`tools`, owned by
-    /// `ene-runtime`), which sits at the same path as the nested
-    /// `ToolRagConfig` (`tools.rag`, owned by `ene-tool-rag`). Writing
-    /// `tools` must not wipe the sibling `tools.rag` subtree — the exact
-    /// regression the merge change fixes.
+    /// Writing `tools` must not wipe a sibling `tools.rag` subtree.
     #[derive(serde::Serialize, serde::Deserialize, Default)]
     struct TestSection {
         enabled: bool,
@@ -1841,76 +1765,53 @@ mod tests {
         );
     }
 
-    /// Host-opaque `plugins.list.<name>.config` / `.profiles` blobs are stored
-    /// and restored verbatim through a load → save → load round-trip, so the
-    /// host never drops plugin-owned settings (including keys it does not
-    /// understand) when persisting.
+    /// `plugins.profile` (and nested `plugins.policy`) round-trip through
+    /// load → save → load. The retired `plugins.list` map is not preserved.
     #[test]
-    fn plugins_list_config_and_profiles_round_trip_verbatim() {
+    fn plugins_profile_round_trips() {
         let _guard = migration_guard();
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(
             &path,
-            r#"{
-                "plugins": {
-                    "list": {
-                        "llama-cpp": {
-                            "enable": true,
-                            "config": {
-                                "mmproj_url": "https://cdn.example/mmproj.gguf",
-                                "future_field": {"nested": [1, 2, 3]}
-                            },
-                            "profiles": {
-                                "default": {"voices_path": "/data/voices.bin"}
-                            }
-                        }
-                    }
-                }
-            }"#,
+            format!(
+                r#"{{
+                "version": {},
+                "plugins": {{
+                    "profile": "minimal",
+                    "policy": {{ "allow_unverified": true }}
+                }}
+            }}"#,
+                crate::migration::CURRENT_CONFIG_VERSION
+            ),
         )
         .expect("seed settings");
 
-        let config = extract_layered_config(&path).expect("load");
-        // A genuine mutation elsewhere must still trigger a save and the
-        // three-way merge must preserve the plugin blobs untouched.
-        let mut config = config;
+        let mut config = extract_layered_config(&path).expect("load");
         config.user_name = "ChangedByUser".to_string();
 
         let json = serialize_json_layer(&config, &path).expect("serialize");
         let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(
-            saved.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
-            Some(&serde_json::json!("https://cdn.example/mmproj.gguf")),
-            "nested config key must survive the save"
+            saved.pointer("/plugins/profile"),
+            Some(&serde_json::json!("minimal"))
         );
         assert_eq!(
-            saved.pointer("/plugins/list/llama-cpp/config/future_field"),
-            Some(&serde_json::json!({"nested": [1, 2, 3]})),
-            "unknown nested config keys must survive the save"
+            saved.pointer("/plugins/policy/allow_unverified"),
+            Some(&serde_json::json!(true))
         );
-        assert_eq!(
-            saved.pointer("/plugins/list/llama-cpp/profiles/default/voices_path"),
-            Some(&serde_json::json!("/data/voices.bin")),
-            "profiles must survive the save"
-        );
+        assert!(saved.pointer("/plugins/list").is_none());
 
         let reloaded = extract_layered_config(&path).expect("reload");
         assert_eq!(
-            reloaded.get_path("plugins.list.llama-cpp.config.future_field"),
-            Some(serde_json::json!({"nested": [1, 2, 3]}))
-        );
-        assert_eq!(
-            reloaded.get_path("plugins.list.llama-cpp.profiles.default.voices_path"),
-            Some(serde_json::json!("/data/voices.bin"))
+            reloaded.get_path("plugins.profile"),
+            Some(serde_json::json!("minimal"))
         );
     }
 
-    /// The `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>` env override path
-    /// (single plugin-config key) must keep resolving into the nested
-    /// `plugins.list.<name>.config` blob.
+    /// `ENE_PLUGINS__PROFILE` overlays the launch profile.
     #[test]
-    fn plugins_list_config_env_override_resolves_nested_key() {
+    fn plugins_profile_env_override_resolves() {
         let _guard = migration_guard();
         let _guard = ENV_LOCK
             .lock()
@@ -1919,26 +1820,26 @@ mod tests {
         let path = tmp.path().join("settings.json");
         std::fs::write(
             &path,
-            r#"{"plugins": {"list": {"anthropic": {"enable": true}}}}"#,
+            format!(
+                r#"{{"version": {}, "plugins": {{"profile": "desktop"}}}}"#,
+                crate::migration::CURRENT_CONFIG_VERSION
+            ),
         )
         .expect("seed settings");
 
         // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
-            std::env::set_var(
-                "ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY",
-                "sk-env-override",
-            );
+            std::env::set_var("ENE_PLUGINS__PROFILE", "headless");
         }
         let config = extract_layered_config(&path).expect("load");
         unsafe {
-            std::env::remove_var("ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY");
+            std::env::remove_var("ENE_PLUGINS__PROFILE");
         }
 
         assert_eq!(
-            config.get_path("plugins.list.anthropic.config.api_key"),
-            Some(serde_json::json!("sk-env-override")),
-            "env override must land inside the nested config blob"
+            config.get_path("plugins.profile"),
+            Some(serde_json::json!("headless")),
+            "env override must land on plugins.profile"
         );
     }
 

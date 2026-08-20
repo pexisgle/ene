@@ -12,7 +12,7 @@
 |---|---|
 | `config` | `EneConfig`・ローダー（`load_config`・`load_full_config`・`get_global_config`）・`ConfigStore`・`register_config_schema`・`write_schemas`・`HasConfigKey`・`ConfigTarget` |
 | `migration` | `CURRENT_CONFIG_VERSION`・`apply_migrations`・`register_migration`・`MigrationFn` |
-| `paths` | `assets_dir`・`app_data_dir`・`config_file_path`・`models_dir`・ソケットディレクトリ・`IS_DEV_BUILD` |
+| `paths` | `assets_dir`・`data_dir`・`app_data_dir`・`config_file_path`・`models_dir`・ソケットディレクトリ・`IS_DEV_BUILD` |
 | `prompts` / `patterns` | `PromptLibrary`・`PatternLibrary`・`SUPPORTED_LANGUAGES`・`resolve_system_language`・`substitute` |
 | `resources` / `store` | `ensure_resource_dirs`・`ConfigStore`（ダーティ追跡・自動保存） |
 | `user_persona` | `UserPersona`（`{{user_persona}}` CBS マクロが展開する構造化ペルソナ） |
@@ -23,15 +23,13 @@
 | マクロ | 目的 |
 |---|---|
 | `define_config!` | 設定セクション構造体と JSON スキーマ・登録を宣言（settings / character / ネストの各バリアント） |
-| `define_tool_config!` | `tools.list.<tool>` 配下のツール設定スキーマを宣言 |
 | `define_label_enum!` | 一貫した `label()` API を持つラベル付き enum を宣言 |
 
 ## 依存関係
 
 - 依存: 内部なし。
 - 利用: 全クレート・アプリ（設定セクションは所有クレート側に定義。例:
-  `ene-ai::AiConfig`・`ene-mind::MindConfig`・`ene-store::StoreConfig`・
-  `ene-plugin-host::PluginConfig`・`apps/ene-desktop`）。
+  `ene-session`、`ene-kernel`、`ene-companion`、`ene-plane`）。
 
 ## リファクタリングの注目点
 

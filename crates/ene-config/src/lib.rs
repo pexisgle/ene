@@ -35,8 +35,8 @@ pub mod user_persona;
 pub use config::{
     ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_schema_json,
     get_global_config, get_global_section, load_config, load_config_from, load_full_config,
-    load_full_config_from, register_config_schema, register_runtime_schema, register_tool_schema,
-    save_full_config, update_global_config, update_section, write_schemas,
+    load_full_config_from, register_config_schema, register_runtime_schema, save_full_config,
+    update_global_config, update_section, write_schemas,
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;
@@ -44,7 +44,7 @@ pub use migration::{CURRENT_CONFIG_VERSION, MigrationFn, apply_migrations, regis
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_plugins_dir, builtin_tools_dir,
     character_card_schema_file_path, character_schema_file_path, character_settings_path,
-    config_file_path, models_dir, pattern_pack_path, plugin_socket_dir, prompt_pack_path,
+    config_file_path, data_dir, models_dir, pattern_pack_path, plugin_socket_dir, prompt_pack_path,
     schema_file_path, tool_socket_dir, user_plugins_dir, user_tools_dir,
 };
 pub use patterns::PatternLibrary;
@@ -58,9 +58,9 @@ pub use user_persona::UserPersona;
 
 pub use ctor::ctor;
 // The `ctor` proc-macro emits `<crate_path>::__support::ctor_parse!`, so the
-// `define_config!`/`define_tool_config!` macros can redirect their generated
-// constructor at this crate (via `crate_path = $crate`) instead of leaking a
-// hard `::ctor` dependency into every downstream caller.
+// `define_config!` macro can redirect its generated constructor at this crate
+// (via `crate_path = $crate`) instead of leaking a hard `::ctor` dependency
+// into every downstream caller.
 #[doc(hidden)]
 pub use ctor::__support;
 pub use schemars;
@@ -241,52 +241,6 @@ macro_rules! define_config {
                     <$parent as $crate::HasConfigKey>::TARGET,
                     Some(<$parent as $crate::HasConfigKey>::KEY),
                 );
-            }
-        };
-    };
-}
-
-#[macro_export]
-macro_rules! define_tool_config {
-    (
-        $tool_name:expr,
-        $(#[$meta:meta])*
-        pub struct $name:ident {
-            $(
-                $(#[$field_meta:meta])*
-                pub $field:ident : $type:ty $( = $default:expr )?
-            ),* $(,)?
-        }
-    ) => {
-        #[derive(Debug, Clone, $crate::serde::Serialize, $crate::serde::Deserialize, $crate::schemars::JsonSchema)]
-        #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
-        #[schemars(crate = "::ene_config::schemars")]
-        $(#[$meta])*
-        pub struct $name {
-            $(
-                $(#[$field_meta])*
-                pub $field : $type,
-            )*
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self {
-                    $(
-                        $field : $crate::__field_default!($type $(, $default)?),
-                    )*
-                }
-            }
-        }
-
-        const _: () = {
-            /// # Safety
-            ///
-            /// Called by `ctor` before `main`. Only safe registration code
-            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
-            #[$crate::ctor(unsafe, crate_path = $crate)]
-            fn register() {
-                $crate::register_tool_schema::<$name>($tool_name);
             }
         };
     };

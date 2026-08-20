@@ -3,80 +3,52 @@
 ## Turns
 
 A **turn** is one unit of conversation: a user message (or a proactive /
-scheduled trigger) plus everything the system does in response.
+scheduled / delegated trigger) plus everything the daemon does in response.
+Every turn has a `TurnId`. The dialogue lane lives in `ene-kernel`.
 
-### Turn identity and concurrency
-
-- Every turn has a `TurnId`.
-- `EneHandle::run` returns immediately with the `TurnId`; streaming events
-  arrive on the event bus.
-- Turn execution is **single-flight**: if another turn is still running,
-  `run` fails with `RunError::Busy`. `cancel(&turn_id)` aborts the active
-  turn (`CancelError::TurnMismatch` if the id is stale).
+Clients start a turn with `POST /api/v1/sessions/{id}/messages` (`prompt`,
+`steer`, or `follow_up`). The kernel returns a `TurnId` and streams on the
+live bus. A second `prompt` while a turn is running fails with `lane_busy`.
+`steer` queues a correction without cutting generation; `abort` cancels the
+running turn; `compact` compresses history.
 
 ### Turn origins
 
 | Origin | Trigger |
 |---|---|
-| `user` | A message you send |
-| `proactive` | The companion decides to speak on its own (proactive pipeline) |
-| `scheduled` | A persistent schedule fired (see [Schedules](../guides/schedules.md)) |
+| `user` | A message from a client |
+| `proactive` | The companion decides to speak (`ene-companion`) |
+| `scheduled` | A persistent schedule fired (`ene-work`) |
+| `delegation` | A back-harness job reporting in |
+| `subagent` | A nested work turn |
 
 ### What happens inside a turn
 
-1. `before_turn` — affect decay, recall planning + hybrid search,
-   character/lorebook sync, prefetch of prompt data.
-2. Prompt packet composition — sectioned system prompt + budgeted history.
-3. LLM streaming — text deltas, tool calls, performance cues.
-4. Mid-turn tools — permission-gated execution, user-input prompts when a
-   tool asks a question.
-5. Finalize — affect proposal, session state update.
-6. History commit + `Terminal` event; background memory extraction follows.
+1. Recall and affect tick in `ene-companion`.
+2. The kernel composes the model-visible prompt from the session log.
+3. The configured conversation model streams text through its bound `provider.*`
+   plugin.
+4. Surface-eligible tools run through `ene-registry` / `ene-plane`.
+5. Events are committed to `ene-session` (model-visible equals logged).
+6. Live events go out at `surface` or `detail` depth.
 
-The full pipeline is described in
-[Cognitive runtime](../reference/architecture/cognitive-runtime.md).
+Signatures live in rustdoc for `ene-kernel` and `ene-session`.
 
 ## Events
 
-The runtime exposes **three separate channels** so traffic classes cannot
-starve each other:
+The daemon exposes HTTP plus a WebSocket live bus. `ene-kernel::LiveEvent`
+is depth-filtered on the server: `surface` gets speech, `detail` also gets
+inner / thinking / tool args. Stage's main window is surface; the separate
+detail window (and `ene-ctl --verbose`) is detail.
 
-| Channel | Contents | Consumption |
-|---|---|---|
-| Chat bus | `EneEvent`: turn lifecycle, text deltas, tool calls/results, permission requests, performance cues, beat pulse | broadcast, via `subscribe()` |
-| Lifecycle bus | `LifecycleEvent`: status changes, pending-candidate notifications, background-tool completion | broadcast, via `subscribe_lifecycle()` |
-| Audio stream | `AudioChunk` (TTS audio for playback) | single consumer, via `take_audio_stream()` |
-
-All chat/lifecycle events have stable JSON mirrors (`PublicChatEvent`,
-`PublicLifecycleEvent`) for external clients — see
-[API v1](../reference/architecture/api-v1.md).
+Conversation history is the append-only log in `sessions.db`, not a
+client-side buffer.
 
 ## Sessions
 
-A **session** is a contiguous conversation with one character, identified
-by a `SessionId`. Sessions exist so history, memory provenance, and
-summaries stay organized.
+A **session** is a contiguous conversation with one soul, identified by a
+`SessionId`. `ene-ctl` can list, show, create, fork, export, compact, search,
+split, and end sessions against the HTTP API.
 
-- A session ends when it is explicitly split, when the idle timeout
-  (`mind.session.session_timeout_minutes`) elapses, or when the topic
-  boundary detector decides the conversation changed enough.
-- When a session ends, the conversation is **summarized** and the summary
-  becomes part of the character's context for future sessions.
-- Sessions can be listed, exported (versioned, redacted JSON), imported,
-  searched, archived, and unarchived — via the CLI `/session` command or
-  the API v1 session methods.
-
-## Context compression
-
-When history would overflow the model's context window, the runtime
-compresses it: older messages are summarized into a rolling "active scene
-summary" while recent messages stay verbatim. The event bus emits
-`context_compressed` so clients can show what happened. Compression is
-triggered proactively (with a configurable wait) so a turn does not stall
-mid-stream waiting for it.
-
-## Undo
-
-The actor keeps an undo stack for state-changing operations (permission
-grants, memory edits, schedule changes). `EneHandle::undo` /
-`/undo` reverts the most recent operation and reports what was undone.
+Idle end and topic-boundary split are server-side. Compaction writes a
+summary into the log so later turns stay in budget.

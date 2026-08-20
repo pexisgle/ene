@@ -220,6 +220,10 @@ pub struct NodeHierarchy {
     /// Per-node world translation. Same lifecycle as
     /// `world_rotations`.
     pub world_positions: Vec<Vec3>,
+    /// World rotation at rest, captured at load. Used for NLR retargeting.
+    pub rest_world_rotations: Vec<Quat>,
+    /// World translation at rest, captured at load. Used for hips height scaling.
+    pub rest_world_positions: Vec<Vec3>,
 }
 
 impl NodeHierarchy {
@@ -475,11 +479,10 @@ impl VrmModel {
     ///    without humanoid metadata.
     /// 4. **Walk the hierarchy**: `nodes.compute_world_transforms()`
     ///    fills `world_rotations` / `world_positions`.
-    /// 5. **Hips translation**: if the frame carries an
-    ///    `hips_translation` and the humanoid registry has a
-    ///    `hips` entry, add the translation to
-    ///    `nodes.world_positions[hips_node]` and re-walk
-    ///    descendants.
+    /// 5. **Hips translation**: if the frame carries a dest **local**
+    ///    `hips_translation`, write it to `local_positions[hips]`
+    ///    *before* the world walk. VRMA translation channels are
+    ///    absolute local glTF values, not world deltas.
     /// 6. **Build the palette**: for every skeleton joint
     ///    `j`, palette\[j\] = `joint_world * inverse_bind[j]`,
     ///    where `joint_world` uses the glTF node index from
@@ -491,16 +494,10 @@ impl VrmModel {
     ///    per-joint palette becomes identity, so the bind
     ///    mesh renders unchanged.
     ///
-    /// **Retargeting note**: the VRMA's `bone_rotations` are
-    /// local rotations in the *source* skeleton frame. The
-    /// spec assumes a humanoid source whose rest pose matches
-    /// the target's rest pose (A-pose or T-pose depending on
-    /// the source). For Alicia and the bundled VRMAs the
-    /// rest poses match and the source local rotation is
-    /// applied directly. Full pose-difference retargeting via
-    /// [`retarget_rotation`] is left for a follow-up; the
-    /// helper is re-exported so the runtime can use it once
-    /// the per-frame rest-pose comparison is available.
+    /// **Retargeting**: callers should pass dest-local rotations and
+    /// hips from [`crate::animation::evaluate_retargeted`]. Raw
+    /// [`crate::animation::evaluate_clip`] samples are source-local
+    /// and will double hips height if added onto rest world Y.
     ///
     /// **`LookAt` semantics**: `look_at` is the
     /// [`LookAtBoneOutput`] of the current frame, or `None`
@@ -589,10 +586,8 @@ impl VrmModel {
     ///
     /// Call after mutating [`NodeHierarchy::local_rotations`]
     /// post-pose (e.g. spring bones) so the same-frame mesh
-    /// reflects those rotations. `hips_translation` is the
-    /// same rest-relative hips delta [`update_skin_palette`]
-    /// would have applied — pass it again after a local-only
-    /// recompute so locomotion is preserved.
+    /// reflects those rotations. `hips_translation` is dest
+    /// **local** hips translation (not a world delta).
     pub fn rebuild_skin_palette(&mut self, hips_translation: Option<Vec3>) -> &[Mat4] {
         let joint_count = self.skeleton.joint_count();
         if joint_count == 0 || self.nodes.is_empty() {
@@ -600,19 +595,14 @@ impl VrmModel {
             return &self.skin_palette;
         }
 
-        self.nodes.compute_world_transforms();
-
-        // Hips translation (post-walk): add the delta to the
-        // hips node's world position and cascade through every
-        // descendant. We only re-walk descendants of hips to
-        // avoid re-doing the full tree — the cascade is
-        // O(subtree).
-        if let Some(hips_delta) = hips_translation
+        if let Some(hips_local) = hips_translation
             && let Some(hips_entry) = self.humanoid.hips()
+            && hips_entry.node < self.nodes.local_positions.len()
         {
-            self.nodes.world_positions[hips_entry.node] += hips_delta;
-            self.cascade_hips_descendants(hips_entry.node);
+            self.nodes.local_positions[hips_entry.node] = hips_local;
         }
+
+        self.nodes.compute_world_transforms();
 
         // Build the palette. The standard glTF skinning
         // identity is `joint_world * inverse_bind[j]`, which
@@ -646,34 +636,26 @@ impl VrmModel {
         &self.skin_palette
     }
 
-    /// Cascade a hips translation to every descendant of
-    /// `hips_node` in O(n) using a topological walk (parents
-    /// before children), avoiding the O(n × h) per-node
-    /// ancestor-chain walk.
-    fn cascade_hips_descendants(&mut self, hips_node: usize) {
-        let n = self.nodes.local_rotations.len();
-        // `in_subtree[i]` marks nodes reachable from the hips.
-        // glTF guarantees parents appear before children, so a
-        // single forward pass propagates the flag correctly.
-        let mut in_subtree = vec![false; n];
-        in_subtree[hips_node] = true;
-        for i in 0..n {
-            let p = self.nodes.parents[i];
-            if p >= 0 && in_subtree[p as usize] {
-                in_subtree[i] = true;
-            }
-        }
-        for (i, &in_sub) in in_subtree.iter().enumerate() {
-            if i == hips_node || !in_sub {
-                continue;
-            }
-            let p = self.nodes.parents[i] as usize;
-            self.nodes.world_rotations[i] =
-                self.nodes.world_rotations[p] * self.nodes.local_rotations[i];
-            self.nodes.world_positions[i] = self.nodes.world_rotations[p]
-                * self.nodes.local_positions[i]
-                + self.nodes.world_positions[p];
-        }
+    /// Sample a VRMA clip with NLR retargeting onto this model's rest pose.
+    #[must_use]
+    pub fn evaluate_vrma(
+        &self,
+        asset: &crate::animation::VrmaAsset,
+        clip: &crate::animation::VrmaClip,
+        t: f32,
+    ) -> VrmaFrame {
+        crate::animation::evaluate_retargeted(
+            asset,
+            clip,
+            t,
+            &self.humanoid,
+            crate::animation::DestRestPose {
+                local_rotations: &self.nodes.rest_local_rotations,
+                world_rotations: &self.nodes.rest_world_rotations,
+                local_positions: &self.nodes.rest_local_positions,
+                world_positions: &self.nodes.rest_world_positions,
+            },
+        )
     }
 }
 
@@ -769,6 +751,8 @@ mod tests {
             parents: vec![-1],
             world_rotations: vec![Quat::IDENTITY],
             world_positions: vec![Vec3::ZERO],
+            rest_world_rotations: vec![rot],
+            rest_world_positions: vec![pos],
         }
     }
 
@@ -788,6 +772,8 @@ mod tests {
             parents: Vec::with_capacity(nodes.len()),
             world_rotations: Vec::with_capacity(nodes.len()),
             world_positions: Vec::with_capacity(nodes.len()),
+            rest_world_rotations: Vec::with_capacity(nodes.len()),
+            rest_world_positions: Vec::with_capacity(nodes.len()),
         };
         for (r, p, parent) in nodes {
             h.local_rotations.push(*r);
@@ -797,7 +783,12 @@ mod tests {
             h.parents.push(*parent);
             h.world_rotations.push(Quat::IDENTITY);
             h.world_positions.push(Vec3::ZERO);
+            h.rest_world_rotations.push(Quat::IDENTITY);
+            h.rest_world_positions.push(Vec3::ZERO);
         }
+        h.compute_world_transforms();
+        h.rest_world_rotations.clone_from(&h.world_rotations);
+        h.rest_world_positions.clone_from(&h.world_positions);
         h
     }
 
@@ -1073,6 +1064,55 @@ mod tests {
         assert!(
             (transformed - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5,
             "expected +X to rotate to -Z, got {transformed:?}"
+        );
+    }
+
+    #[test]
+    fn update_skin_palette_hips_local_does_not_double_rest_height() {
+        let mut humanoid = HumanoidBoneRegistry::new();
+        humanoid.insert(
+            VrmBone("hips".into()),
+            HumanoidBoneEntry {
+                node: 0,
+                joint: Some(0),
+                rest: BoneRestTransform::default(),
+            },
+        );
+        let rest = Vec3::new(0.0, 0.9, 0.0);
+        let sample = Vec3::new(0.0, 0.95, 0.0);
+        let model = VrmModel::new(
+            Vec::new(),
+            Skeleton {
+                inverse_bind: vec![Mat4::IDENTITY],
+                bind_matrices: vec![Mat4::IDENTITY],
+                joint_to_node: vec![0],
+            },
+            [-1.0, -1.0, -1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            1.0,
+            ExpressionLayer::default(),
+            humanoid,
+            single_node_hierarchy(Quat::IDENTITY, rest),
+            None,
+            Vec::new(),
+            NodeConstraintRegistry::default(),
+            None,
+        );
+        let frame = VrmaFrame {
+            hips_translation: Some(sample),
+            ..Default::default()
+        };
+        let (owned, palette) = model_palette(model, &frame);
+        let p0 = palette[0].transform_point3(Vec3::ZERO);
+        assert!(
+            (p0 - sample).length() < 1e-5,
+            "expected world hips {sample:?}, got {p0:?}"
+        );
+        assert!(
+            (owned.nodes.local_positions[0] - sample).length() < 1e-5,
+            "hips must be applied as local, got {:?}",
+            owned.nodes.local_positions[0]
         );
     }
 

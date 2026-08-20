@@ -26,5 +26,25 @@ assets/schema/settings.schema.json
 assets/schema/character_settings.schema.json
 assets/schema/character.schema.json
 
+# Debug runtime (data dir == source-tree assets/). Never commit.
+assets/sessions.db*
+assets/companions.db*
+assets/audit.db*
+assets/vault.bin
+assets/vault.key
+assets/api.json
+assets/api.token
+assets/ene-core.lock
+assets/ene-core.pid
+assets/workspace/
+assets/backups/
+assets/imports/
+assets/skills/
+assets/plugins/
+assets/tools/
+assets/mcp.json
+assets/sidecar-work/
+assets/catalog-cache/
+
 # mdBook generated output
 **/book/

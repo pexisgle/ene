@@ -1,363 +1,162 @@
-//! VOICEVOX-compatible HTTP client: the 2-step `audio_query` →
-//! `synthesis` flow and the `/version` health probe.
-//!
-//! Both VOICEVOX and Aivis Speech serialize `AudioQuery` with camelCase
-//! field names; Aivis adds `tempoDynamicsScale`. The query response is
-//! round-tripped with unknown fields preserved, so a future engine extension
-//! survives the plugin untouched.
-
-use std::sync::OnceLock;
 use std::time::Duration;
 
-use ene_plugin::PluginError;
-use futures::StreamExt;
-use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use async_trait::async_trait;
+use ene_plugin_ipc::{IpcError, TtsAudio, TtsHandler, TtsRequest};
+use serde_json::{Value, json};
 
-use crate::config::VoicevoxConfig;
+const DEFAULT_BASE: &str = "http://127.0.0.1:50021";
 
-/// Shared HTTP client with a conservative connect timeout; per-request
-/// overall timeouts are applied at the call site (health probes need a much
-/// shorter bound than synthesis).
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-fn http_client() -> Result<&'static reqwest::Client, PluginError> {
-    if let Some(client) = HTTP_CLIENT.get() {
-        return Ok(client);
-    }
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|e| PluginError::provider(format!("failed to build HTTP client: {e}")))?;
-    // A racing task may have initialized first; either client is equivalent.
-    drop(HTTP_CLIENT.set(client));
-    HTTP_CLIENT
-        .get()
-        .ok_or_else(|| PluginError::provider("HTTP client initialization failed"))
+pub struct Voicevox {
+    http: reqwest::Client,
 }
 
-/// Per-request timeout for the two synthesis steps.
-const SYNTHESIS_TIMEOUT: Duration = Duration::from_mins(1);
-/// Per-probe timeout for `GET /version` health checks.
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
-/// Cap on any engine response body. 24 kHz s16 mono audio is ~2.9 MB per
-/// minute, so 32 MiB covers very long utterances while bounding the memory
-/// a misbehaving engine can make the plugin allocate.
-///
-/// The host rejects WAV payloads above `ene-plugin-host`'s `MAX_WAV_BYTES`
-/// (32 MiB), so a larger response would fail at the host anyway.
-const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
-
-/// Engine-reported synthesis parameters, round-tripped between the two API
-/// steps with the configured scale overrides applied.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AudioQuery {
-    /// Phoneme/accent structure computed by the engine. Opaque here: the
-    /// plugin only carries it between `audio_query` and `synthesis`.
-    pub accent_phrases: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub speed_scale: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pitch_scale: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub intonation_scale: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub volume_scale: Option<f32>,
-    /// Aivis Speech extension: only emitted when configured off-default,
-    /// because VOICEVOX rejects unknown fields.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tempo_dynamics_scale: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_sampling_rate: Option<u32>,
-    /// Unknown engine fields (e.g. `prePhonemeLength`, `kana`) survive the
-    /// round-trip untouched.
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
-impl AudioQuery {
-    /// Applies the configured scale and sampling overrides to a query
-    /// returned by `audio_query`.
-    ///
-    /// The four standard scales are always overridden by the config. The
-    /// Aivis extension fields are only overridden when explicitly
-    /// configured: engine-returned values survive at config defaults, so an
-    /// Aivis preset's `outputSamplingRate` / `tempoDynamicsScale` round-trip
-    /// (VOICEVOX never returns them, so it still never sees them).
-    #[must_use]
-    pub fn with_overrides(mut self, config: &VoicevoxConfig) -> Self {
-        self.speed_scale = Some(config.speed_scale);
-        self.pitch_scale = Some(config.pitch_scale);
-        self.intonation_scale = Some(config.intonation_scale);
-        self.volume_scale = Some(config.volume_scale);
-        if (config.tempo_dynamics_scale - 1.0).abs() > f32::EPSILON {
-            self.tempo_dynamics_scale = Some(config.tempo_dynamics_scale);
+impl Voicevox {
+    pub fn new() -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_mins(1))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
-        if let Some(rate) = config.output_sampling_rate {
-            self.output_sampling_rate = Some(rate);
+    }
+}
+
+#[async_trait]
+impl TtsHandler for Voicevox {
+    async fn synthesize(&self, request: TtsRequest) -> Result<TtsAudio, IpcError> {
+        let base = effective_base(&request.base_url);
+        let speaker = speaker_id(&request.voice);
+        let query_url = format!(
+            "{base}/audio_query?text={}&speaker={speaker}",
+            urlencode(&request.text)
+        );
+        let query = self
+            .http
+            .post(&query_url)
+            .send()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))?;
+        if !query.status().is_success() {
+            let status = query.status();
+            let body = query.text().await.unwrap_or_default();
+            return Err(IpcError::Call(format!("audio_query {status}: {body}")));
         }
-        self
+        let mut audio_query: Value = query
+            .json()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))?;
+        if let Some(object) = audio_query.as_object_mut() {
+            object.insert("speedScale".to_owned(), json!(1.0));
+        }
+        let synth_url = format!("{base}/synthesis?speaker={speaker}");
+        let response = self
+            .http
+            .post(&synth_url)
+            .json(&audio_query)
+            .send()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(IpcError::Call(format!("synthesis {status}: {body}")));
+        }
+        let wav = response
+            .bytes()
+            .await
+            .map_err(|err| IpcError::Call(err.to_string()))?;
+        decode_wav(&wav)
     }
 }
 
-pub async fn engine_reachable(config: &VoicevoxConfig) -> bool {
-    let Ok(client) = http_client() else {
-        return false;
-    };
-    let Ok(response) = client
-        .get(format!(
-            "{}/version",
-            config.server_url.trim_end_matches('/')
-        ))
-        .timeout(HEALTH_TIMEOUT)
-        .send()
-        .await
-    else {
-        return false;
-    };
-    response.status().is_success()
-}
-
-/// One speaker (character) as reported by the engine's `/speakers` endpoint,
-/// with its selectable styles.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Speaker {
-    /// Character name, used as the option group label.
-    pub name: String,
-    /// Voice styles belonging to this character.
-    pub styles: Vec<Style>,
-}
-
-/// One selectable style within a [`Speaker`].
-#[derive(Debug, Clone, Deserialize)]
-pub struct Style {
-    /// Style name (e.g. "ノーマル").
-    pub name: String,
-    /// Style id, written into `speaker_id`.
-    pub id: u64,
-}
-
-/// Fetches the engine's speaker list for the settings UI.
-///
-/// Uses the same short health-probe timeout as [`engine_reachable`] so a
-/// down engine answers quickly with an error instead of hanging the settings
-/// page. Never spawns a managed engine — listing speakers is a read-only
-/// query against whatever is already running.
-///
-/// # Errors
-///
-/// Returns a provider error when the engine is unreachable or the response
-/// is not the documented `/speakers` shape.
-pub async fn fetch_speakers(config: &VoicevoxConfig) -> Result<Vec<Speaker>, PluginError> {
-    let client = http_client()?;
-    let url = format!("{}/speakers", config.server_url.trim_end_matches('/'));
-    let response = client
-        .get(&url)
-        .timeout(HEALTH_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| PluginError::provider(format!("GET {url} failed: {e}")))?;
-    parse_json_response(response, "/speakers").await
-}
-
-/// Runs the 2-step synthesis flow and returns the WAV bytes.
-///
-/// # Errors
-///
-/// Returns a provider error when either HTTP step fails (network error,
-/// non-success status, or an unparseable `AudioQuery` response).
-pub async fn synthesize(
-    config: &VoicevoxConfig,
-    text: &str,
-    speaker: u64,
-) -> Result<Vec<u8>, PluginError> {
-    let client = http_client()?;
-    let base = config.server_url.trim_end_matches('/');
-
-    let query_url = reqwest::Url::parse_with_params(
-        &format!("{base}/audio_query"),
-        &[("text", text), ("speaker", &speaker.to_string())],
-    )
-    .map_err(|e| PluginError::provider(format!("invalid audio_query URL: {e}")))?;
-    let query_response = client
-        .post(query_url)
-        .timeout(SYNTHESIS_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| PluginError::provider(format!("audio_query request failed: {e}")))?;
-    let query: AudioQuery = parse_json_response(query_response, "/audio_query").await?;
-    let query = query.with_overrides(config);
-
-    let synthesis_url = reqwest::Url::parse_with_params(
-        &format!("{base}/synthesis"),
-        &[("speaker", &speaker.to_string())],
-    )
-    .map_err(|e| PluginError::provider(format!("invalid synthesis URL: {e}")))?;
-    let body = serde_json::to_vec(&query)
-        .map_err(|e| PluginError::provider(format!("failed to serialize AudioQuery: {e}")))?;
-    let synthesis_response = client
-        .post(synthesis_url)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .timeout(SYNTHESIS_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| PluginError::provider(format!("synthesis request failed: {e}")))?;
-    let (status, bytes) = read_response_bounded(synthesis_response, "/synthesis").await?;
-    if !status.is_success() {
-        return Err(non_success(status, "/synthesis", &bytes));
+fn effective_base(request: &str) -> String {
+    if let Some(base) = crate::sidecar::managed_base() {
+        return base.to_owned();
     }
-    Ok(bytes)
-}
-
-async fn parse_json_response<T: for<'de> Deserialize<'de>>(
-    response: reqwest::Response,
-    endpoint: &str,
-) -> Result<T, PluginError> {
-    let (status, bytes) = read_response_bounded(response, endpoint).await?;
-    if !status.is_success() {
-        return Err(non_success(status, endpoint, &bytes));
+    if !request.is_empty() {
+        return request.trim_end_matches('/').to_owned();
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|e| PluginError::provider(format!("invalid JSON from {endpoint}: {e}")))
-}
-
-/// Reads a response body into memory, rejecting payloads over
-/// [`MAX_RESPONSE_BYTES`] (checked against `Content-Length` upfront and
-/// against the accumulated stream while reading, so a lying or chunked
-/// engine cannot OOM the plugin).
-async fn read_response_bounded(
-    response: reqwest::Response,
-    endpoint: &str,
-) -> Result<(reqwest::StatusCode, Vec<u8>), PluginError> {
-    let status = response.status();
-    if let Some(length) = response.content_length()
-        && length > MAX_RESPONSE_BYTES as u64
+    if let Ok(raw) = std::env::var("ENE_PROVIDER_CONFIG")
+        && let Ok(value) = serde_json::from_str::<Value>(&raw)
+        && let Some(url) = value.get("base_url").and_then(Value::as_str)
+        && !url.is_empty()
     {
-        return Err(PluginError::provider(format!(
-            "{endpoint} response too large: {length} bytes exceeds the \
-             {MAX_RESPONSE_BYTES}-byte limit"
-        )));
+        return url.trim_end_matches('/').to_owned();
     }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            PluginError::provider(format!("failed to read {endpoint} response: {e}"))
-        })?;
-        body.extend_from_slice(&chunk);
-        if body.len() > MAX_RESPONSE_BYTES {
-            return Err(PluginError::provider(format!(
-                "{endpoint} response exceeds the {MAX_RESPONSE_BYTES}-byte limit"
-            )));
-        }
-    }
-    Ok((status, body))
+    DEFAULT_BASE.to_owned()
 }
 
-fn non_success(status: StatusCode, endpoint: &str, body: &[u8]) -> PluginError {
-    let detail = String::from_utf8_lossy(body);
-    let detail = detail.chars().take(300).collect::<String>();
-    PluginError::provider(format!(
-        "voicevox {endpoint} failed with HTTP {status}: {detail}"
-    ))
+fn speaker_id(voice: &str) -> u32 {
+    voice.parse().unwrap_or(1)
+}
+
+fn urlencode(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(*byte));
+            }
+            other => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                out.push('%');
+                out.push(char::from(HEX[usize::from(other >> 4)]));
+                out.push(char::from(HEX[usize::from(other & 0x0f)]));
+            }
+        }
+    }
+    out
+}
+
+fn decode_wav(bytes: &[u8]) -> Result<TtsAudio, IpcError> {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(IpcError::Call("engine did not return WAV".to_owned()));
+    }
+    let sample_rate = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+    let bits = u16::from_le_bytes([bytes[34], bytes[35]]);
+    let data_offset = find_data_chunk(bytes).unwrap_or(44);
+    let pcm_bytes = bytes.get(data_offset..).unwrap_or(&[]);
+    let pcm = if bits == 16 {
+        pcm_bytes
+            .chunks_exact(2)
+            .map(|chunk| f32::from(i16::from_le_bytes([chunk[0], chunk[1]])) / 32768.0)
+            .collect()
+    } else {
+        return Err(IpcError::Call(format!("unsupported WAV bits={bits}")));
+    };
+    Ok(TtsAudio {
+        pcm,
+        sample_rate: sample_rate.max(1),
+    })
+}
+
+fn find_data_chunk(bytes: &[u8]) -> Option<usize> {
+    let mut offset = 12_usize;
+    while offset + 8 <= bytes.len() {
+        let id = bytes.get(offset..offset + 4)?;
+        let size = u32::from_le_bytes(bytes.get(offset + 4..offset + 8)?.try_into().ok()?);
+        let start = offset.checked_add(8)?;
+        if id == b"data" {
+            return Some(start);
+        }
+        offset = start.checked_add(usize::try_from(size).ok()?)?;
+    }
+    None
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "unit tests use expect/unwrap for concise assertions"
-)]
 mod tests {
     use super::*;
-    use crate::mock_engine::EXAMPLE_AUDIO_QUERY;
-    use serde_json::json;
 
-    fn test_config() -> VoicevoxConfig {
-        VoicevoxConfig {
-            speed_scale: 1.5,
-            pitch_scale: 0.05,
-            intonation_scale: 0.8,
-            volume_scale: 0.9,
-            tempo_dynamics_scale: 1.2,
-            output_sampling_rate: Some(48_000),
-            ..VoicevoxConfig::default()
-        }
+    #[test]
+    fn encodes_query_text() {
+        assert_eq!(urlencode("a b"), "a%20b");
+        assert_eq!(urlencode("日本語"), "%E6%97%A5%E6%9C%AC%E8%AA%9E");
     }
 
     #[test]
-    fn parses_engine_query_with_camel_case_fields() {
-        let query: AudioQuery =
-            serde_json::from_str(EXAMPLE_AUDIO_QUERY).expect("example query parses");
-        assert_eq!(query.speed_scale, Some(1.2));
-        assert_eq!(query.output_sampling_rate, Some(24_000));
-        assert!(query.extra.contains_key("prePhonemeLength"));
-        assert!(query.extra.contains_key("kana"));
-    }
-
-    #[test]
-    fn applies_configured_overrides_and_preserves_unknown_fields() {
-        let query: AudioQuery =
-            serde_json::from_str(EXAMPLE_AUDIO_QUERY).expect("example query parses");
-        let overridden = query.with_overrides(&test_config());
-        assert_eq!(overridden.speed_scale, Some(1.5));
-        assert_eq!(overridden.pitch_scale, Some(0.05));
-        assert_eq!(overridden.intonation_scale, Some(0.8));
-        assert_eq!(overridden.volume_scale, Some(0.9));
-        assert_eq!(overridden.tempo_dynamics_scale, Some(1.2));
-        assert_eq!(overridden.output_sampling_rate, Some(48_000));
-        let serialized = serde_json::to_value(&overridden).expect("serializes");
-        assert_eq!(serialized["accentPhrases"][0]["moras"][0]["vowel"], "o");
-        assert!((serialized["prePhonemeLength"].as_f64().expect("number") - 0.1).abs() < 1e-6);
-        assert_eq!(serialized["kana"], "コ");
-        assert!((serialized["tempoDynamicsScale"].as_f64().expect("number") - 1.2).abs() < 1e-6);
-    }
-
-    #[test]
-    fn preserves_engine_returned_aivis_extensions_at_defaults() {
-        let query: AudioQuery =
-            serde_json::from_str(EXAMPLE_AUDIO_QUERY).expect("example query parses");
-        let config = VoicevoxConfig {
-            tempo_dynamics_scale: 1.0,
-            output_sampling_rate: None,
-            ..VoicevoxConfig::default()
-        };
-        let serialized = serde_json::to_value(query.with_overrides(&config)).expect("serializes");
-        // The engine returned `outputSamplingRate`; with no config override
-        // it must round-trip instead of being erased.
-        assert_eq!(serialized["outputSamplingRate"], 24_000);
-        // The example engine never returns `tempoDynamicsScale` (it is a
-        // VOICEVOX-shaped response), so it stays absent.
-        assert!(serialized.get("tempoDynamicsScale").is_none());
-        assert!((serialized["speedScale"].as_f64().expect("number") - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn config_overrides_engine_returned_aivis_extensions() {
-        let query: AudioQuery = serde_json::from_value(json!({
-            "accentPhrases": [],
-            "outputSamplingRate": 48000,
-            "tempoDynamicsScale": 1.5
-        }))
-        .expect("aivis query parses");
-        let config = VoicevoxConfig {
-            tempo_dynamics_scale: 0.8,
-            output_sampling_rate: Some(24_000),
-            ..VoicevoxConfig::default()
-        };
-        let serialized = serde_json::to_value(query.with_overrides(&config)).expect("serializes");
-        assert_eq!(serialized["outputSamplingRate"], 24_000);
-        let tempo = serialized["tempoDynamicsScale"]
-            .as_f64()
-            .expect("tempo is a number");
-        assert!((tempo - 0.8).abs() < 1e-6, "tempo={tempo}");
-    }
-
-    #[test]
-    fn missing_accent_phrases_is_an_error() {
-        let err: Result<AudioQuery, _> = serde_json::from_value(json!({"speedScale": 1.0}));
-        assert!(err.is_err());
+    fn speaker_defaults_to_one() {
+        assert_eq!(speaker_id(""), 1);
+        assert_eq!(speaker_id("3"), 3);
     }
 }

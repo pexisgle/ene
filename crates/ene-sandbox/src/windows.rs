@@ -35,12 +35,12 @@ struct LargeInteger {
 
 #[repr(C)]
 struct IoCounters {
-    read_operation_count: u64,
-    write_operation_count: u64,
-    other_operation_count: u64,
-    read_transfer_count: u64,
-    write_transfer_count: u64,
-    other_transfer_count: u64,
+    read_operations: u64,
+    write_operations: u64,
+    other_operations: u64,
+    read_transfers: u64,
+    write_transfers: u64,
+    other_transfers: u64,
 }
 
 #[repr(C)]
@@ -200,12 +200,12 @@ fn create_job(spec: &SandboxSpec) -> Result<Handle, SandboxError> {
             scheduling_class: 0,
         },
         io_info: IoCounters {
-            read_operation_count: 0,
-            write_operation_count: 0,
-            other_operation_count: 0,
-            read_transfer_count: 0,
-            write_transfer_count: 0,
-            other_transfer_count: 0,
+            read_operations: 0,
+            write_operations: 0,
+            other_operations: 0,
+            read_transfers: 0,
+            write_transfers: 0,
+            other_transfers: 0,
         },
         process_memory_limit: 0,
         job_memory_limit: 0,
@@ -235,7 +235,7 @@ fn create_job(spec: &SandboxSpec) -> Result<Handle, SandboxError> {
         SetInformationJobObject(
             job,
             JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-            (&mut info as *mut ExtendedLimitInformation).cast(),
+            (&raw mut info).cast(),
             std::mem::size_of::<ExtendedLimitInformation>() as u32,
         )
     } == 0
@@ -259,11 +259,13 @@ fn primary_thread_id(process: Handle) -> Result<u32, SandboxError> {
         return Err(win_error("CreateToolhelp32Snapshot"));
     }
     let pid = process_id(process)?;
-    let mut entry = ThreadEntry32::default();
-    entry.size = std::mem::size_of::<ThreadEntry32>() as u32;
+    let mut entry = ThreadEntry32 {
+        size: std::mem::size_of::<ThreadEntry32>() as u32,
+        ..ThreadEntry32::default()
+    };
     // SAFETY: Thread32First/Next iterate the snapshot; the entry is valid
     // for the iteration.
-    let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    let mut found = unsafe { Thread32First(snapshot, &raw mut entry) } != 0;
     while found {
         if entry.owner_process_id == pid {
             // SAFETY: closing the snapshot handle.
@@ -272,7 +274,7 @@ fn primary_thread_id(process: Handle) -> Result<u32, SandboxError> {
             }
             return Ok(entry.thread_id);
         }
-        found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        found = unsafe { Thread32Next(snapshot, &raw mut entry) } != 0;
     }
     // SAFETY: closing the snapshot handle.
     unsafe {

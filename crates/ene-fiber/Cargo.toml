@@ -1,0 +1,31 @@
+[package]
+name = "ene-fiber"
+version.workspace = true
+edition.workspace = true
+description = "Plugin fiber composition: reversible effects, profile reconcile, broker grants"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+ene-plugin-ipc = { workspace = true }
+ene-provider-assets = { workspace = true }
+ene-registry = { workspace = true }
+ene-config = { workspace = true }
+ene-sandbox = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

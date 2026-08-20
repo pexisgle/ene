@@ -1,42 +1,64 @@
-//! # ene-plugin-voicevox
+//! `VOICEVOX`-compatible engine TTS (`provider.voicevox`).
 //!
-//! VOICEVOX / Aivis Speech-compatible TTS provider plugin for the ene
-//! unified plugin system. Talks to a local VOICEVOX-compatible engine over
-//! its HTTP API (2-step `audio_query` → `synthesis` flow) and optionally
-//! spawns and supervises the engine binary itself (managed mode).
+//! Talks HTTP to a user-run engine (`VOICEVOX` :50021, Aivis Speech :10101)
+//! or to a sidecar spawned from `server_path`.
 
+#![cfg_attr(test, expect(clippy::expect_used, reason = "tests fail fast"))]
+
+mod assets;
 mod client;
-mod config;
-mod engine;
-mod plugin;
+mod sidecar;
 
-#[cfg(test)]
-mod mock_engine;
-#[cfg(test)]
-mod tests;
+use std::sync::Arc;
 
-use plugin::VoicevoxPlugin;
+use client::Voicevox;
+use ene_plugin_ipc::{PluginIdentity, ProviderHandlers, serve_provider_from_env};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
-        .with_writer(std::io::stderr)
         .init();
-
-    if let Err(e) = ene_plugin::run_plugin_server(ene_plugin::PluginDispatch::new(
-        None,
-        None,
-        None,
-        Some(std::sync::Arc::new(VoicevoxPlugin::default())),
-        None,
-    ))
-    .await
-    {
-        tracing::error!(component = "ene-plugin-voicevox", error = %e, "Fatal error");
+    let sidecar = match sidecar::maybe_start() {
+        Ok(guard) => guard,
+        Err(err) => {
+            tracing::error!(error = %err, plugin = "provider.voicevox", "sidecar");
+            std::process::exit(1);
+        }
+    };
+    let provider = Arc::new(Voicevox::new());
+    let assets = Arc::new(assets::VoicevoxAssets);
+    let handlers = ProviderHandlers {
+        tts: Some(provider),
+        assets: Some(assets),
+        ..ProviderHandlers::default()
+    };
+    if let Err(err) = serve_provider_from_env(identity(), handlers).await {
+        tracing::error!(error = %err, plugin = "provider.voicevox", "fatal");
+        drop(sidecar);
         std::process::exit(1);
     }
+    drop(sidecar);
+}
+
+fn identity() -> PluginIdentity {
+    PluginIdentity {
+        plugin_id: "provider.voicevox".to_owned(),
+        plugin_name: "voicevox".to_owned(),
+        digest: exe_digest(),
+        spawn_token: None,
+    }
+}
+
+fn exe_digest() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
+        .map_or_else(
+            || "blake3:unknown".to_owned(),
+            |bytes| format!("blake3:{}", blake3::hash(&bytes).to_hex()),
+        )
 }

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>ene web</title>
+  <style>
+    :root { color-scheme: light dark; font-family: sans-serif; }
+    body { margin: 0; display: grid; grid-template-columns: 1fr 1fr; min-height: 100vh; }
+    section { padding: 1rem; border-right: 1px solid #8884; display: flex; flex-direction: column; gap: .5rem; }
+    h1 { font-size: 1.1rem; margin: 0; }
+    #soul-picker { display: flex; gap: .5rem; flex-wrap: wrap; }
+    #soul-picker button { font: inherit; padding: .35rem .6rem; cursor: pointer; }
+    #soul-picker button.active { font-weight: bold; outline: 2px solid currentColor; }
+    #surface-log, #detail-log { flex: 1; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 13px; }
+    form { display: flex; gap: .5rem; }
+    input, button { font: inherit; }
+    input { flex: 1; }
+    .hint { color: #888; font-size: 12px; margin: 0; }
+    .meta { font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <section>
+    <h1>Surface</h1>
+    <div id="soul-picker" aria-label="Companion picker"></div>
+    <p class="meta" id="session-label"></p>
+    <p class="hint">Speech only. Inner / thinking never appear here.</p>
+    <div id="surface-log"></div>
+    <form id="chat">
+      <input id="text" placeholder="Say something" autocomplete="off"/>
+      <button>Send</button>
+    </form>
+  </section>
+  <section>
+    <h1>Detail</h1>
+    <p class="hint">history?depth=detail, memories, tasks, PAD (read-only on Web).</p>
+    <div id="detail-log"></div>
+  </section>
+  <script>
+    const token = prompt("API token") || "";
+    const clientId = "web";
+    const sessions = new Map();
+    let companions = [];
+    let selectedSoulId = null;
+    let surfaceSock = null;
+    let detailSock = null;
+    const headers = () => ({
+      "Authorization": "Bearer " + token,
+      "Content-Type": "application/json",
+      "X-Client-Id": clientId,
+    });
+    const surface = document.getElementById("surface-log");
+    const detail = document.getElementById("detail-log");
+    const sessionLabel = document.getElementById("session-label");
+    const soulPicker = document.getElementById("soul-picker");
+    const log = (el, line) => { el.textContent += line + "\n"; el.scrollTop = el.scrollHeight; };
+    const clear = (el) => { el.textContent = ""; };
+
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      const body = await res.json();
+      if (!res.ok) throw body;
+      return body;
+    }
+
+    function orderedSoulIds(stage, soulsPage) {
+      const ids = stage.occupants.map((occupant) => occupant.soul_id);
+      for (const soul of soulsPage.items) {
+        if (!ids.includes(soul.id)) ids.push(soul.id);
+      }
+      return ids.slice(0, 2);
+    }
+
+    function companionLabel(soulId, soulsPage) {
+      const soul = soulsPage.items.find((item) => item.id === soulId);
+      if (!soul) return soulId.slice(0, 8);
+      return soul.display_name || soul.character_ref || soul.mood_label || soulId.slice(0, 8);
+    }
+
+    async function ensureSession(soulId) {
+      if (sessions.has(soulId)) return sessions.get(soulId);
+      const listed = await api("/api/v1/sessions?soul_id=" + soulId, { headers: headers() });
+      if (listed.items.length) {
+        sessions.set(soulId, listed.items[0].id);
+        return listed.items[0].id;
+      }
+      const created = await api("/api/v1/sessions", {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ soul_id: soulId }),
+      });
+      sessions.set(soulId, created.id);
+      return created.id;
+    }
+
+    function renderSoulPicker(soulsPage) {
+      soulPicker.replaceChildren();
+      for (const companion of companions) {
+        const soul = soulsPage.items.find((item) => item.id === companion.id);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = companion.label + (soul ? " (" + soul.mood_label + ")" : "");
+        button.classList.toggle("active", companion.id === selectedSoulId);
+        button.onclick = () => selectSoul(companion.id, soulsPage).catch((err) => log(surface, "error " + JSON.stringify(err)));
+        soulPicker.appendChild(button);
+      }
+    }
+
+    function closeSockets() {
+      if (surfaceSock) {
+        surfaceSock.onclose = null;
+        surfaceSock.close();
+        surfaceSock = null;
+      }
+      if (detailSock) {
+        detailSock.onclose = null;
+        detailSock.close();
+        detailSock = null;
+      }
+    }
+
+    function connectSockets(sessionId) {
+      closeSockets();
+      surfaceSock = openSocket("surface", sessionId, (msg) => {
+        if (msg.type === "inner.message" || msg.type === "thinking.delta") return;
+        log(surface, JSON.stringify(msg));
+      });
+      detailSock = openSocket("detail", sessionId, (msg) => {
+        log(detail, JSON.stringify(msg));
+      });
+    }
+
+    function openSocket(depth, sessionId, onMessage) {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const protocols = token ? ["bearer." + token] : [];
+      const q = new URLSearchParams({ depth, client_id: clientId });
+      if (sessionId) q.set("session_id", sessionId);
+      if (token) q.set("access_token", token);
+      const sock = new WebSocket(`${proto}://${location.host}/api/v1/events?` + q, protocols);
+      sock.onmessage = (ev) => onMessage(JSON.parse(ev.data));
+      return sock;
+    }
+
+    async function loadSurfaceHistory(sessionId) {
+      const history = await api("/api/v1/sessions/" + sessionId + "/history?depth=surface", { headers: headers() });
+      for (const message of history.messages) {
+        log(surface, message.role + ": " + message.text);
+      }
+    }
+
+    async function loadDetailPane(soulId, sessionId) {
+      const [history, memories, jobs, affect] = await Promise.all([
+        api("/api/v1/sessions/" + sessionId + "/history?depth=detail", { headers: headers() }),
+        api("/api/v1/souls/" + soulId + "/memories", { headers: headers() }),
+        api("/api/v1/jobs?soul_id=" + soulId, { headers: headers() }),
+        api("/api/v1/souls/" + soulId + "/affect", { headers: headers() }),
+      ]);
+      log(detail, "--- history (depth=detail) ---");
+      for (const message of history.messages) {
+        log(detail, message.role + ": " + message.text);
+      }
+      log(detail, "memories " + JSON.stringify(memories.items));
+      log(detail, "tasks " + JSON.stringify(jobs.items));
+      log(detail, "pad " + JSON.stringify(affect));
+    }
+
+    async function selectSoul(soulId, soulsPage) {
+      selectedSoulId = soulId;
+      renderSoulPicker(soulsPage);
+      clear(surface);
+      clear(detail);
+      const sessionId = await ensureSession(soulId);
+      sessionLabel.textContent = "session " + sessionId;
+      await loadSurfaceHistory(sessionId);
+      await loadDetailPane(soulId, sessionId);
+      connectSockets(sessionId);
+    }
+
+    (async () => {
+      const [soulsPage, stage] = await Promise.all([
+        api("/api/v1/souls", { headers: headers() }),
+        api("/api/v1/stage", { headers: headers() }),
+      ]);
+      const soulIds = orderedSoulIds(stage, soulsPage);
+      if (!soulIds.length) {
+        log(surface, "error: no companions available — import a character first");
+        return;
+      }
+      companions = soulIds.map((id) => ({ id, label: companionLabel(id, soulsPage) }));
+      for (const companion of companions) {
+        await ensureSession(companion.id);
+      }
+      await selectSoul(companions[0].id, soulsPage);
+    })().catch((err) => log(surface, "error " + JSON.stringify(err)));
+
+    document.getElementById("chat").onsubmit = async (e) => {
+      e.preventDefault();
+      const text = document.getElementById("text").value;
+      document.getElementById("text").value = "";
+      const sessionId = sessions.get(selectedSoulId);
+      if (!sessionId || !text) return;
+      await api("/api/v1/sessions/" + sessionId + "/messages", {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ text, mode: "prompt" }),
+      });
+    };
+  </script>
+</body>
+</html>

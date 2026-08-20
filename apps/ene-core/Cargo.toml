@@ -1,0 +1,55 @@
+[package]
+name = "ene-daemon"
+version.workspace = true
+edition.workspace = true
+description = "Core daemon (ene-core): session store, dialogue lane, exclusive data-dir lock"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ene_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ene-core"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
+chrono = { workspace = true }
+clap = { workspace = true }
+ene-api = { workspace = true }
+ene-body = { workspace = true }
+ene-companion = { workspace = true }
+ene-config = { workspace = true }
+ene-fiber = { workspace = true }
+ene-kernel = { workspace = true }
+ene-plane = { workspace = true }
+ene-plugin-ipc = { workspace = true }
+ene-registry = { workspace = true }
+ene-session = { workspace = true }
+ene-work = { workspace = true }
+fs2 = { workspace = true }
+parking_lot = { workspace = true }
+rusqlite = { workspace = true, features = ["backup"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
+cargo-husky = { workspace = true }
+ene-api = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

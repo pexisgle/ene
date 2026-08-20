@@ -1,0 +1,97 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ene-core API",
+    "version": "1.0.0",
+    "description": "HTTP + WebSocket surface of the dialogue lane. Same contract for desktop, CLI, and Web."
+  },
+  "servers": [{ "url": "/api/v1" }],
+  "components": {
+    "securitySchemes": {
+      "bearer": { "type": "http", "scheme": "bearer" }
+    }
+  },
+  "security": [{ "bearer": [] }],
+  "paths": {
+    "/health": { "get": { "summary": "Liveness", "security": [], "responses": { "200": { "description": "ok" } } } },
+    "/openapi.json": { "get": { "summary": "This document", "responses": { "200": { "description": "OpenAPI" } } } },
+    "/souls": { "get": { "summary": "List souls", "responses": { "200": { "description": "page" } } } },
+    "/souls/{id}": { "get": { "summary": "Get soul", "responses": { "200": { "description": "soul" } } } },
+    "/souls/{id}/body": { "patch": { "summary": "Hot-swap body binding", "responses": { "200": { "description": "soul" } } } },
+    "/souls/{id}/affect": { "get": { "summary": "PAD affect (detail)", "responses": { "200": { "description": "affect" } } } },
+    "/souls/{id}/memories": { "get": { "summary": "List memories (scope filter)", "responses": { "200": { "description": "page" } } } },
+    "/sessions": {
+      "get": { "summary": "List sessions (q= surface text search)", "responses": { "200": { "description": "page" } } },
+      "post": { "summary": "Create session", "responses": { "200": { "description": "session" } } }
+    },
+    "/sessions/{id}": {
+      "get": { "summary": "Session summary (no last_result in v1.0)", "responses": { "200": { "description": "session" } } },
+      "patch": { "summary": "Title / archive", "responses": { "200": { "description": "session" } } }
+    },
+    "/sessions/{id}/fork": { "post": { "summary": "Fork at current seq", "responses": { "200": { "description": "session" } } } },
+    "/sessions/{id}/split": { "post": { "summary": "Explicit split: end current, open a new session for the same soul", "responses": { "200": { "description": "split" } } } },
+    "/sessions/{id}/end": { "post": { "summary": "End session (explicit or idle_timeout)", "responses": { "200": { "description": "session" } } } },
+    "/sessions/{id}/barge-in": { "post": { "summary": "Abort the running turn (voice barge-in)", "responses": { "200": { "description": "ok" } } } },
+    "/sessions/{id}/listen": { "post": { "summary": "Transcribe PCM through ai.tasks.stt and prompt if non-empty", "responses": { "200": { "description": "accepted or empty" } } } },
+    "/sessions/{id}/export": { "post": { "summary": "JSON export", "responses": { "200": { "description": "export" } } } },
+    "/sessions/{id}/messages": { "post": { "summary": "prompt | steer | follow_up", "responses": { "200": { "description": "accepted" }, "409": { "description": "lane_busy" } } } },
+    "/sessions/{id}/history": { "get": { "summary": "Projected history", "parameters": [{ "name": "depth", "in": "query", "schema": { "enum": ["surface", "detail"] } }], "responses": { "200": { "description": "history" } } } },
+    "/sessions/{id}/queued/{entry_id}": { "delete": { "summary": "cancel_queued (not_found is success)", "responses": { "200": { "description": "result" } } } },
+    "/sessions/{id}/compact": { "post": { "summary": "Manual compaction", "responses": { "200": { "description": "entry" } } } },
+    "/turns/{id}/cancel": { "post": { "summary": "abort running turn", "responses": { "200": { "description": "ok" } } } },
+    "/jobs": { "get": { "summary": "List tasks", "responses": { "200": { "description": "page" } } } },
+    "/jobs/{id}": { "get": { "summary": "Task detail", "responses": { "200": { "description": "job" } } } },
+    "/jobs/{id}/cancel": { "post": { "summary": "Cancel task", "responses": { "200": { "description": "job" } } } },
+    "/schedules": {
+      "get": { "summary": "List schedules", "responses": { "200": { "description": "page" } } },
+      "post": { "summary": "Create schedule", "responses": { "200": { "description": "schedule" } } }
+    },
+    "/schedules/{id}": {
+      "patch": { "summary": "Enable/disable", "responses": { "200": { "description": "schedule" } } },
+      "delete": { "summary": "Delete", "responses": { "200": { "description": "ok" } } }
+    },
+    "/artifacts": { "get": { "summary": "List artifacts", "responses": { "200": { "description": "page" } } } },
+    "/artifacts/{id}/content": { "get": { "summary": "Artifact bytes/text", "responses": { "200": { "description": "content" } } } },
+    "/memories/{id}": {
+      "patch": { "summary": "Edit memory (desktop)", "responses": { "200": { "description": "memory" } } },
+      "delete": { "summary": "Forget memory (desktop)", "responses": { "200": { "description": "ok" } } }
+    },
+    "/tools": { "get": { "summary": "Tool surface", "responses": { "200": { "description": "page" } } } },
+    "/tools/{name}/test": { "post": { "summary": "Dev invoke", "responses": { "200": { "description": "result" } } } },
+    "/plugins": { "get": { "summary": "Plugin fibers", "responses": { "200": { "description": "page" } } } },
+    "/plugins/{id}/restart": { "post": { "summary": "Disable then activate row", "responses": { "200": { "description": "plugin" } } } },
+    "/providers/models": { "post": { "summary": "List vendor model ids through a one-shot provider IPC probe", "responses": { "200": { "description": "models" }, "400": { "description": "unknown plugin or task" } } } },
+    "/mcp": {
+      "get": { "summary": "Handwritten MCP servers (mcp.json)", "responses": { "200": { "description": "document" } } },
+      "put": { "summary": "Replace handwritten MCP servers and apply profile rows", "responses": { "200": { "description": "document" } } }
+    },
+    "/approvals": { "get": { "summary": "Pending popups", "responses": { "200": { "description": "page" } } } },
+    "/approvals/{id}/respond": { "post": { "summary": "First writer wins", "responses": { "200": { "description": "ok" }, "409": { "description": "already_resolved" } } } },
+    "/characters": { "get": { "summary": "Installed packages", "responses": { "200": { "description": "page" } } } },
+    "/characters/import": { "post": { "summary": "Import archive from local path", "responses": { "200": { "description": "character" } } } },
+    "/characters/{id}/export": { "get": { "summary": "Export path", "responses": { "200": { "description": "path" } } } },
+    "/settings": {
+      "get": { "summary": "Current settings JSON", "responses": { "200": { "description": "settings" } } },
+      "patch": { "summary": "Merge settings.json", "responses": { "200": { "description": "settings" } } }
+    },
+    "/settings/schema": { "get": { "summary": "Generated JSON Schema", "responses": { "200": { "description": "schema" } } } },
+    "/audit": { "get": { "summary": "Audit hash chain", "responses": { "200": { "description": "records" } } } },
+    "/usage": { "get": { "summary": "Usage ledger totals", "responses": { "200": { "description": "usage" } } } },
+    "/diag/spans": { "get": { "summary": "Local span ring (no content)", "responses": { "200": { "description": "page" } } } },
+    "/backup": { "post": { "summary": "SQLite online backup", "responses": { "200": { "description": "backup" } } } },
+    "/restore": { "post": { "summary": "Restore a backup generation", "responses": { "200": { "description": "ok" } } } },
+    "/exclusive": { "get": { "summary": "Exclusive resource owners", "responses": { "200": { "description": "snapshot" } } } },
+    "/exclusive/{resource}": {
+      "post": { "summary": "Claim mic|speaker|notify", "responses": { "200": { "description": "snapshot" }, "409": { "description": "busy" } } },
+      "delete": { "summary": "Release", "responses": { "200": { "description": "snapshot" } } }
+    },
+    "/stage": { "get": { "summary": "Stage occupants", "responses": { "200": { "description": "stage" } } } },
+    "/events": {
+      "get": {
+        "summary": "WebSocket event stream",
+        "description": "Query: depth=surface|detail, client_id, session_id, cursor, access_token. Two connections for two depths.",
+        "responses": { "101": { "description": "upgrade" } }
+      }
+    }
+  }
+}

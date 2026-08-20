@@ -1,0 +1,33 @@
+[package]
+name = "ene-ctl"
+version.workspace = true
+edition.workspace = true
+description = "CLI client for ene-core (same HTTP/WS API as desktop and Web)"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-ctl"
+path = "src/main.rs"
+
+[lib]
+name = "ene_ctl"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["env"] }
+ene-api = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "process", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+ene-daemon = { path = "../ene-core" }
+ene-session = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

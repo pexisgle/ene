@@ -4,10 +4,9 @@
 //! merge this struct into `crate::config` (or re-export it from there) when
 //! scaffolding a new sidecar provider.
 //!
-//! The host delivers the two inputs separately: `set_config` receives the
-//! `plugins.list.<name>.config` blob (this `SidecarConfig`), while
-//! `set_profiles` receives the per-model profile map ([`SidecarProfiles`]).
-//! Combine both before writing engine presets.
+//! The host delivers the two inputs separately: `ENE_PROVIDER_CONFIG` carries
+//! this `SidecarConfig` JSON, while `set_profiles` receives the per-model
+//! profile map ([`SidecarProfiles`]). Combine both before writing engine presets.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -17,8 +16,7 @@ use serde::Deserialize;
 /// Default sidecar startup timeout when `startup_timeout_secs` is omitted.
 pub const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 60;
 
-/// Host-delivered sidecar configuration
-/// (`plugins.list.__SIDECAR_NAME__.config`).
+/// Host-delivered sidecar configuration (`ENE_PROVIDER_CONFIG`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub struct SidecarConfig {

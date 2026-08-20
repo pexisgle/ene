@@ -1,0 +1,30 @@
+[package]
+name = "ene-harness-app"
+version.workspace = true
+edition.workspace = true
+description = "Harness app plugin: screenshot, windows, clipboard, input (P-602)"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-harness-app"
+path = "src/main.rs"
+
+[dependencies]
+ene-plugin-ipc = { workspace = true }
+ene-registry = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+ene-fiber = { workspace = true }
+ene-registry = { workspace = true }
+ene-plane = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+
+[lints]
+workspace = true

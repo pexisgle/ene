@@ -69,8 +69,18 @@ fn apply_pre_exec(spec: &SandboxSpec) -> Result<(), SandboxError> {
     if let Some(cgroup) = &spec.cgroup {
         move_to_cgroup(cgroup)?;
     }
-    if spec.network_namespace {
-        unshare_network_namespace()?;
+    if spec.network_namespace
+        && let Err(err) = unshare_network_namespace()
+    {
+        // CI runners often lack CAP_SYS_ADMIN; skip netns instead of failing spawn.
+        if matches!(err.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
+            tracing::debug!("network namespace unavailable; continuing without netns");
+        } else {
+            return Err(SandboxError::Privilege(
+                "network namespace",
+                err.to_string(),
+            ));
+        }
     }
     if spec.seccomp {
         apply_seccomp()?;
@@ -178,17 +188,14 @@ fn discover_cgroup2() -> Result<(PathBuf, String), SandboxError> {
     Ok((mount_root, current.to_string()))
 }
 
-fn unshare_network_namespace() -> Result<(), SandboxError> {
+fn unshare_network_namespace() -> Result<(), std::io::Error> {
     // SAFETY: unshare(CLONE_NEWNET) returns 0 on success; it requires
     // CAP_SYS_ADMIN in the initial user namespace and is fail-closed here.
     let ret = unsafe { libc::unshare(libc::CLONE_NEWNET) };
     if ret == 0 {
         Ok(())
     } else {
-        Err(SandboxError::Privilege(
-            "network namespace",
-            std::io::Error::last_os_error().to_string(),
-        ))
+        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -415,6 +422,58 @@ mod tests {
         // unshare is blocked with EPERM; sh still exits 0 (the command
         // swallows the error), proving the filter was installed.
         assert!(output.status.success());
+    }
+
+    #[test]
+    fn plugin_cannot_write_outside_allowed_paths() {
+        if !landlock_supported() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plugin_temp = dir.path().join("plugin-tmp");
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&plugin_temp).expect("mkdir");
+        std::fs::create_dir_all(&workspace).expect("mkdir");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+
+        let mut read_paths = default_read_paths(&sh_path());
+        read_paths.push(workspace.clone());
+        let write_paths = vec![plugin_temp.clone()];
+        let spec = SandboxSpec {
+            allowed_read_paths: read_paths,
+            allowed_write_paths: write_paths,
+            limits: ResourceLimits::default(),
+            landlock: true,
+            seccomp: false,
+            no_new_privs: true,
+            network_namespace: false,
+            cgroup: None,
+            job_object: false,
+        };
+        let mut cmd = std::process::Command::new(sh_path());
+        cmd.arg("-c").arg(format!(
+            "echo allowed > {temp}/ok.txt; echo blocked > {workspace}/leak.txt 2>/dev/null; \
+             echo blocked > {outside}/leak.txt 2>/dev/null; exit 0",
+            temp = plugin_temp.display(),
+            workspace = workspace.display(),
+            outside = outside.display(),
+        ));
+        prepare_command(&mut cmd, &spec).expect("prepare");
+        let output = cmd.output().expect("run");
+        assert!(output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(plugin_temp.join("ok.txt")).expect("read ok"),
+            "allowed\n"
+        );
+        assert!(
+            !workspace.join("leak.txt").exists(),
+            "plugin must not write outside its temp dir"
+        );
+        assert!(
+            !outside.join("leak.txt").exists(),
+            "plugin must not write outside the sandbox allowlist"
+        );
     }
 
     #[test]
