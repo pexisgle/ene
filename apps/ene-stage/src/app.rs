@@ -58,7 +58,7 @@ pub fn run() -> Result<(), AppError> {
         let (client, core) = attach_or_spawn_core(&settings).await?;
         let client = Arc::new(client);
         let session = StageSession::bootstrap(Arc::clone(&client)).await?;
-        let feeds = spawn_event_feeds(&client, session.session_id());
+        let feeds = spawn_event_feeds(&rt_handle, &client, session.session_id());
         Ok::<_, StageSpawnError>((client, core, session, feeds))
     })?;
 
@@ -911,7 +911,7 @@ impl StageApp {
             self.surface.status = err.to_string();
             return;
         }
-        self.feeds = spawn_event_feeds(&self.client, self.session.session_id());
+        self.feeds = spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
         self.surface.history = self.session.history();
         self.reload_avatar();
     }

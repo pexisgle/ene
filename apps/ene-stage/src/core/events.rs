@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use ene_api::ApiClient;
 use serde_json::Value;
+use tokio::runtime::Handle;
 use tracing::warn;
 
 /// Live events from a single WebSocket depth.
@@ -75,16 +76,18 @@ pub struct EventFeeds {
 }
 
 /// Spawn one socket per depth. Overlay/chat must only read `surface`.
-pub fn spawn_event_feeds(client: &Arc<ApiClient>, session_id: &str) -> EventFeeds {
+pub fn spawn_event_feeds(rt: &Handle, client: &Arc<ApiClient>, session_id: &str) -> EventFeeds {
     let (surface_tx, surface_rx) = crossbeam_channel::unbounded();
     let (detail_tx, detail_rx) = crossbeam_channel::unbounded();
     spawn_depth(
+        rt,
         Arc::clone(client),
         session_id.to_owned(),
         "surface",
         surface_tx,
     );
     spawn_depth(
+        rt,
         Arc::clone(client),
         session_id.to_owned(),
         "detail",
@@ -97,12 +100,13 @@ pub fn spawn_event_feeds(client: &Arc<ApiClient>, session_id: &str) -> EventFeed
 }
 
 fn spawn_depth(
+    rt: &Handle,
     client: Arc<ApiClient>,
     session_id: String,
     depth: &'static str,
     tx: crossbeam_channel::Sender<LiveEvent>,
 ) {
-    tokio::spawn(async move {
+    rt.spawn(async move {
         event_socket_loop(&client, depth, &session_id, &tx).await;
     });
 }
