@@ -175,12 +175,23 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
     })
 }
 
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::unused_async,
+        reason = "Windows awaits TcpListener::bind; Unix bind is sync"
+    )
+)]
 async fn bind_plugin_listener(
-    _row_id: &str,
+    #[cfg_attr(
+        windows,
+        expect(unused_variables, reason = "Windows binds an ephemeral TCP port")
+    )]
+    row_id: &str,
 ) -> Result<(PluginListener, String, PathBuf), SupervisorError> {
     #[cfg(unix)]
     {
-        let socket_path = plugin_ipc_socket_path(_row_id);
+        let socket_path = plugin_ipc_socket_path(row_id);
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
