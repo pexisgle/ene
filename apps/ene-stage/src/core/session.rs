@@ -393,13 +393,50 @@ fn find_alicia_package(packages: &[CharacterView]) -> Option<&CharacterView> {
 pub fn occupant_with_avatar(occupants: &[OccupantView]) -> Option<OccupantView> {
     occupants
         .iter()
-        .find(|occupant| {
-            occupant
-                .avatar_path
-                .as_ref()
-                .is_some_and(|path| !path.is_empty())
-        })
+        .find(|occupant| occupant_has_avatar(occupant))
         .cloned()
+}
+
+#[must_use]
+pub fn occupant_has_avatar(occupant: &OccupantView) -> bool {
+    occupant
+        .avatar_path
+        .as_ref()
+        .is_some_and(|path| !path.is_empty())
+}
+
+#[must_use]
+pub fn occupant_label(occupant: &OccupantView) -> String {
+    occupant
+        .package_id
+        .as_deref()
+        .and_then(|id| id.split('@').next())
+        .map(|id| id.trim_start_matches("char.").to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| occupant.soul_id.clone())
+}
+
+#[must_use]
+pub fn next_avatar_occupant(
+    occupants: &[OccupantView],
+    current_soul: &str,
+    delta: i32,
+) -> Option<OccupantView> {
+    let avatars: Vec<OccupantView> = occupants
+        .iter()
+        .filter(|occupant| occupant_has_avatar(occupant))
+        .cloned()
+        .collect();
+    if avatars.is_empty() {
+        return None;
+    }
+    let current = avatars
+        .iter()
+        .position(|item| item.soul_id == current_soul)
+        .unwrap_or(0);
+    let len = i32::try_from(avatars.len()).unwrap_or(1);
+    let next = (i32::try_from(current).unwrap_or(0) + delta).rem_euclid(len);
+    avatars.get(usize::try_from(next).unwrap_or(0)).cloned()
 }
 
 #[must_use]
@@ -487,6 +524,26 @@ mod tests {
         let picked = pick_avatar_occupant(&occupants).expect("occupant");
         assert_eq!(picked.soul_id, "alicia");
         assert!(occupant_with_avatar(&occupants[..1]).is_none());
+        let cycled = next_avatar_occupant(&occupants, "text", 1).expect("avatar");
+        assert_eq!(cycled.soul_id, "alicia");
+        assert_eq!(occupant_label(&cycled), "alicia");
+        assert!(next_avatar_occupant(&occupants[..1], "text", 1).is_none());
+        let with_other = vec![
+            occupants[0].clone(),
+            occupants[1].clone(),
+            OccupantView {
+                soul_id: "other".into(),
+                body_id: Some("body2".into()),
+                package_id: Some("char.other@1.0.0".into()),
+                avatar_path: Some("/data/other.vrm".into()),
+            },
+        ];
+        assert_eq!(
+            next_avatar_occupant(&with_other, "alicia", 1)
+                .expect("next")
+                .soul_id,
+            "other"
+        );
     }
 
     #[test]

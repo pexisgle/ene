@@ -70,15 +70,22 @@ impl ChromeWindow {
                 .create_window(attrs)
                 .map_err(|err| GpuError::Surface(err.to_string()))?,
         );
-        if kind == ChromeKind::Caption
-            && let Some(monitor) = window.current_monitor()
-        {
-            let screen = monitor.size();
-            let x = screen.width.saturating_sub(inner.width) / 2;
-            let y = screen
-                .height
-                .saturating_sub(inner.height.saturating_add(96));
-            window.set_outer_position(PhysicalPosition::new(x, y));
+        if let Some(monitor) = window.current_monitor() {
+            match kind {
+                ChromeKind::Caption => {
+                    let screen = monitor.size();
+                    let x = screen.width.saturating_sub(inner.width) / 2;
+                    let y = screen
+                        .height
+                        .saturating_sub(inner.height.saturating_add(96));
+                    window.set_outer_position(PhysicalPosition::new(x, y));
+                }
+                ChromeKind::Chat => {
+                    let origin = monitor.position();
+                    window.set_outer_position(PhysicalPosition::new(origin.x + 24, origin.y + 80));
+                }
+                ChromeKind::Detail | ChromeKind::Spotlight => {}
+            }
         }
         let surface = gpu.create_surface(Arc::clone(&window))?;
         let format = gpu.surface_format(&surface);
@@ -119,6 +126,11 @@ impl ChromeWindow {
     #[must_use]
     pub fn id(&self) -> WindowId {
         self.window.id()
+    }
+
+    #[must_use]
+    pub fn wants_keyboard_input(&self) -> bool {
+        self.egui_ctx.egui_wants_keyboard_input()
     }
 
     pub fn on_window_event(&mut self, event: &WindowEvent) -> bool {

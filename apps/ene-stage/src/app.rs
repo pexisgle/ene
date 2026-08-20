@@ -350,19 +350,22 @@ impl StageApp {
             AsyncOutcome::RestartPlugin { result, .. }
             | AsyncOutcome::SetActiveProviderAsset { result, .. } => {
                 if let Err(err) = result {
-                    self.detail.core_status = err;
+                    self.detail.connections_status = err;
                 }
             }
             AsyncOutcome::ListProviderAssets(result) => match result {
-                Ok(items) => self.detail.provider_assets = items,
-                Err(err) => self.detail.core_status = err,
+                Ok(items) => {
+                    self.detail.provider_assets = items;
+                    self.detail.connections_status.clear();
+                }
+                Err(err) => self.detail.connections_status = err,
             },
             AsyncOutcome::InstallProviderAsset { asset_id, result } => match result {
                 Ok(job_id) => {
                     self.detail.provider_install_jobs.insert(asset_id, job_id);
-                    self.detail.core_status = i18n::fl("plugins-asset-install-started");
+                    self.detail.connections_status = i18n::fl("plugins-asset-install-started");
                 }
-                Err(err) => self.detail.core_status = err,
+                Err(err) => self.detail.connections_status = err,
             },
             AsyncOutcome::ProviderAssetInstallStatus { asset_id, result } => match result {
                 Ok(status) => {
@@ -370,15 +373,19 @@ impl StageApp {
                         self.detail.provider_install_jobs.remove(&asset_id);
                     } else if status.phase == Some(ene_api::ProviderAssetInstallPhase::Failed) {
                         self.detail.provider_install_jobs.remove(&asset_id);
-                        self.detail.core_status = status
+                        self.detail.connections_status = status
                             .error
                             .unwrap_or_else(|| i18n::fl("plugins-asset-install-failed"));
                     }
                 }
-                Err(err) => self.detail.core_status = err,
+                Err(err) => self.detail.connections_status = err,
             },
             AsyncOutcome::ListProviderModels(result) => match result {
-                Ok(items) => self.detail.provider_models = items,
+                Ok((items, error)) => {
+                    self.detail.provider_models = items;
+                    self.detail.core_status =
+                        detail::list_models_status(&self.detail.provider_models, error.as_deref());
+                }
                 Err(err) => self.detail.core_status = err,
             },
             AsyncOutcome::LoadMcp(result) => match result {
@@ -988,18 +995,16 @@ impl StageApp {
 
     fn cycle_occupant(&mut self, delta: i32) {
         let occupants = self.session.occupants();
-        if occupants.is_empty() {
-            return;
-        }
-        let current = occupants
-            .iter()
-            .position(|item| item.soul_id == self.session.soul_id())
-            .unwrap_or(0);
-        let len = i32::try_from(occupants.len()).unwrap_or(1);
-        let next = (i32::try_from(current).unwrap_or(0) + delta).rem_euclid(len);
-        let Some(occupant) = occupants.get(usize::try_from(next).unwrap_or(0)).cloned() else {
+        let Some(occupant) =
+            crate::core::session::next_avatar_occupant(occupants, self.session.soul_id(), delta)
+        else {
+            self.surface.status = i18n::fl("overlay-no-avatar");
             return;
         };
+        if occupant.soul_id == self.session.soul_id() {
+            return;
+        }
+        let label = crate::core::session::occupant_label(&occupant);
         if let Err(err) = self
             .runtime
             .block_on(self.session.retarget_soul(&occupant.soul_id))
@@ -1010,6 +1015,13 @@ impl StageApp {
         self.feeds = spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
         self.surface.history = self.session.history();
         self.reload_avatar();
+        if self
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.avatar.is_some())
+        {
+            self.surface.status = format!("{}: {label}", i18n::fl("overlay-showing"));
+        }
     }
 
     fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
@@ -1091,10 +1103,6 @@ impl StageApp {
     fn handle_overlay_key(&mut self, event_loop: &ActiveEventLoop, key: &Key) {
         match key {
             Key::Named(NamedKey::Escape) => self.surface.quit = true,
-            Key::Named(NamedKey::Space) => {
-                self.toggle_overlay_chrome();
-                self.raise_chrome();
-            }
             Key::Named(NamedKey::F1) => self.open_detail(event_loop, DetailTab::Companion),
             Key::Named(NamedKey::F2) => {
                 self.surface.chat_open = true;
@@ -1104,6 +1112,16 @@ impl StageApp {
                 tracing::info!("collider overlay is a stub in this client");
             }
             Key::Named(NamedKey::F4) => self.open_detail(event_loop, DetailTab::Log),
+            _ => self.handle_overlay_shortcut(key),
+        }
+    }
+
+    fn handle_overlay_shortcut(&mut self, key: &Key) {
+        match key {
+            Key::Named(NamedKey::Space) => {
+                self.toggle_overlay_chrome();
+                self.raise_chrome();
+            }
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("a") => self.cycle_occupant(-1),
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("d") => self.cycle_occupant(1),
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("w") => {
@@ -1381,6 +1399,7 @@ impl ApplicationHandler for StageApp {
         let mut close_detail = false;
         let mut close_caption = false;
         let mut close_spotlight = false;
+        let mut overlay_from_chrome = None;
         if let Some(chat) = self.chat.as_mut()
             && chat.id() == id
         {
@@ -1390,6 +1409,7 @@ impl ApplicationHandler for StageApp {
             {
                 chat.resize(gpu, *size);
             }
+            overlay_from_chrome = Some(chat.wants_keyboard_input());
             close_chat = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(detail) = self.detail_win.as_mut()
@@ -1401,6 +1421,7 @@ impl ApplicationHandler for StageApp {
             {
                 detail.resize(gpu, *size);
             }
+            overlay_from_chrome = Some(detail.wants_keyboard_input());
             close_detail = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(caption) = self.caption.as_mut()
@@ -1414,6 +1435,14 @@ impl ApplicationHandler for StageApp {
         {
             spotlight.on_window_event(&event);
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
+        }
+        if let Some(false) = overlay_from_chrome
+            && let WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } = &event
+            && key_event.state == ElementState::Pressed
+        {
+            self.handle_overlay_shortcut(&key_event.logical_key);
         }
         if close_chat {
             self.chat = None;

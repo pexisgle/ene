@@ -54,7 +54,7 @@ pub enum AsyncOutcome {
         asset_id: String,
         result: Result<(), String>,
     },
-    ListProviderModels(Result<Vec<String>, String>),
+    ListProviderModels(Result<(Vec<String>, Option<String>), String>),
     LoadMcp(Result<String, String>),
     SaveMcp(Result<(), String>),
     MicClaim(Result<bool, String>),

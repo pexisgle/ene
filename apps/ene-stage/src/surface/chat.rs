@@ -1,5 +1,6 @@
 //! Chat panel for the surface viewport.
 
+use crate::detail::DetailTab;
 use crate::i18n;
 use crate::surface::{SurfaceAction, SurfaceUiState};
 use ene_api::MessageMode;
@@ -19,26 +20,54 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
                 state.push_action(SurfaceAction::ToggleMic);
             }
             ui.add_enabled_ui(state.turn_active, |ui| {
-                if ui.button(i18n::fl("chat-barge-in")).clicked() {
+                if ui
+                    .button(i18n::fl("chat-barge-in"))
+                    .on_hover_text(i18n::fl("chat-barge-in-hint"))
+                    .clicked()
+                {
                     state.push_action(SurfaceAction::BargeIn);
                 }
-                if ui.button(i18n::fl("chat-cancel")).clicked() {
+                if ui
+                    .button(i18n::fl("chat-cancel"))
+                    .on_hover_text(i18n::fl("chat-cancel-hint"))
+                    .clicked()
+                {
                     state.push_action(SurfaceAction::CancelTurn);
                 }
             });
+            if ui
+                .button(i18n::fl("chat-open-detail"))
+                .on_hover_text(i18n::fl("chat-open-detail-hint"))
+                .clicked()
+            {
+                state.push_action(SurfaceAction::OpenDetail(DetailTab::Home));
+            }
             ui.label(&state.status);
         });
         ui.horizontal(|ui| {
             ui.label(i18n::fl("chat-mode"));
-            for (mode, label) in [
-                (MessageMode::Prompt, i18n::fl("chat-mode-prompt")),
-                (MessageMode::Steer, i18n::fl("chat-mode-steer")),
-                (MessageMode::FollowUp, i18n::fl("chat-mode-follow-up")),
+            for (mode, label, hint) in [
+                (
+                    MessageMode::Prompt,
+                    i18n::fl("chat-mode-prompt"),
+                    i18n::fl("chat-mode-prompt-hint"),
+                ),
+                (
+                    MessageMode::Steer,
+                    i18n::fl("chat-mode-steer"),
+                    i18n::fl("chat-mode-steer-hint"),
+                ),
+                (
+                    MessageMode::FollowUp,
+                    i18n::fl("chat-mode-follow-up"),
+                    i18n::fl("chat-mode-follow-up-hint"),
+                ),
             ] {
                 let enabled = mode == MessageMode::Prompt || state.turn_active;
                 ui.add_enabled_ui(enabled, |ui| {
                     if ui
                         .selectable_label(state.message_mode == mode, label)
+                        .on_hover_text(hint)
                         .clicked()
                     {
                         state.message_mode = mode;
@@ -53,6 +82,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
                 ));
             }
         });
+        ui.label(i18n::fl("chat-overlay-hint"));
         if !state.exclusive_notice.is_empty() {
             ui.colored_label(egui::Color32::YELLOW, &state.exclusive_notice);
         }

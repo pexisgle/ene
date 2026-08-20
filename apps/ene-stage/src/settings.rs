@@ -20,7 +20,7 @@ ene_config::define_config!(
         pub always_on_top: bool = true,
         pub transparent_overlay: bool = true,
         pub model_scale: f32 = 1.0,
-        pub character_x: f32 = 0.5,
+        pub character_x: f32 = 0.78,
         pub character_y: f32 = 0.5,
         pub look_at_strength: f32 = 0.6,
         pub overlay_click_through: bool = true,

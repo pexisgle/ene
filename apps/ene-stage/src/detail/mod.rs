@@ -151,6 +151,7 @@ pub struct DetailUiState {
     pub stt_plugin: String,
     pub plugins_profile: String,
     pub core_status: String,
+    pub connections_status: String,
     pub health: String,
     pub unconfigured: Vec<String>,
     pub memories: Vec<MemoryView>,
@@ -251,6 +252,85 @@ fn nested_string(value: &Value, path: &[&str]) -> String {
     current.as_str().unwrap_or("").to_owned()
 }
 
+#[must_use]
+pub fn is_provider_plugin_id(id: &str) -> bool {
+    id.starts_with("provider.") && id.len() > "provider.".len()
+}
+
+#[must_use]
+pub fn default_provider_assets_plugin(chat_plugin: &str, plugins: &[PluginView]) -> String {
+    if is_provider_plugin_id(chat_plugin) {
+        return chat_plugin.to_owned();
+    }
+    plugins
+        .iter()
+        .find(|plugin| is_provider_plugin_id(&plugin.plugin))
+        .map(|plugin| plugin.plugin.clone())
+        .unwrap_or_default()
+}
+
+#[must_use]
+pub fn blocking_unconfigured(tasks: &[String]) -> Vec<&str> {
+    tasks
+        .iter()
+        .map(String::as_str)
+        .filter(|task| *task == "chat")
+        .collect()
+}
+
+#[must_use]
+pub fn optional_unconfigured(tasks: &[String]) -> Vec<&str> {
+    tasks
+        .iter()
+        .map(String::as_str)
+        .filter(|task| *task != "chat")
+        .collect()
+}
+
+#[must_use]
+pub fn list_models_status(models: &[String], error: Option<&str>) -> String {
+    if let Some(err) = error.filter(|text| !text.is_empty()) {
+        return err.to_owned();
+    }
+    if models.is_empty() {
+        i18n::fl("settings-list-models-empty")
+    } else {
+        String::new()
+    }
+}
+
+pub fn sync_search_tab(state: &mut DetailUiState) {
+    if state.search.is_empty() || state.tab.matches_search(&state.search) {
+        return;
+    }
+    if let Some(tab) = DetailTab::ALL
+        .into_iter()
+        .find(|tab| tab.matches_search(&state.search))
+    {
+        state.tab = tab;
+    }
+}
+
+#[must_use]
+fn search_has_match(query: &str) -> bool {
+    query.is_empty() || DetailTab::ALL.iter().any(|tab| tab.matches_search(query))
+}
+
+fn provider_plugin_ids(state: &DetailUiState) -> Vec<String> {
+    let mut ids: Vec<String> = state
+        .plugins
+        .iter()
+        .map(|plugin| plugin.plugin.clone())
+        .filter(|id| is_provider_plugin_id(id))
+        .collect();
+    if is_provider_plugin_id(&state.chat_plugin) && !ids.iter().any(|id| id == &state.chat_plugin) {
+        ids.push(state.chat_plugin.clone());
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
@@ -264,6 +344,7 @@ pub fn show(
         ui.label(i18n::fl("detail-search"));
         ui.text_edit_singleline(&mut state.search);
     });
+    sync_search_tab(state);
     ui.horizontal_wrapped(|ui| {
         for tab in DetailTab::ALL {
             let label = tab.label();
@@ -276,7 +357,11 @@ pub fn show(
         }
     });
     ui.separator();
-    if !state.core_status.is_empty() {
+    if !search_has_match(&state.search) {
+        ui.label(i18n::fl("detail-search-empty"));
+        return;
+    }
+    if state.tab != DetailTab::Home && !state.core_status.is_empty() {
         ui.label(&state.core_status);
     }
     match state.tab {
@@ -324,42 +409,31 @@ fn show_home(
         i18n::fl("home-fibers"),
         state.plugins.len()
     ));
-    if state.unconfigured.iter().any(|task| task == "chat") {
+    ui.label(i18n::fl("home-fibers-hint"));
+    let required = blocking_unconfigured(&state.unconfigured);
+    let optional = optional_unconfigured(&state.unconfigured);
+    if required.contains(&"chat") {
         ui.colored_label(egui::Color32::YELLOW, i18n::fl("home-next-chat"));
         if ui.button(i18n::fl("detail-tab-conversation")).clicked() {
             state.tab = DetailTab::Conversation;
         }
-    }
-    let optional: Vec<&str> = state
-        .unconfigured
-        .iter()
-        .map(String::as_str)
-        .filter(|task| *task == "stt" || *task == "tts")
-        .collect();
-    let required: Vec<&str> = state
-        .unconfigured
-        .iter()
-        .map(String::as_str)
-        .filter(|task| *task != "stt" && *task != "tts")
-        .collect();
-    if required.is_empty() && optional.is_empty() {
-        ui.label(i18n::fl("home-configured"));
     } else {
-        if !required.is_empty() {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                format!("{}: {}", i18n::fl("home-unconfigured"), required.join(", ")),
-            );
+        ui.label(i18n::fl("home-configured"));
+    }
+    if !optional.is_empty() {
+        ui.label(format!(
+            "{}: {}",
+            i18n::fl("home-optional-tasks"),
+            optional.join(", ")
+        ));
+        if optional
+            .iter()
+            .any(|task| *task == "classifier" || *task == "embedding" || *task == "proactive")
+        {
+            ui.label(i18n::fl("home-optional-internal"));
         }
-        if !optional.is_empty() {
-            ui.label(format!(
-                "{}: {}",
-                i18n::fl("home-optional-tasks"),
-                optional.join(", ")
-            ));
-            if optional.contains(&"stt") {
-                ui.label(i18n::fl("home-optional-voice"));
-            }
+        if optional.iter().any(|task| *task == "stt" || *task == "tts") {
+            ui.label(i18n::fl("home-optional-voice"));
         }
     }
     ui.horizontal(|ui| {
@@ -422,62 +496,18 @@ fn show_companion(
     }
     ui.heading(i18n::fl("detail-tab-companion"));
     if let Some(soul) = &state.soul {
-        ui.label(format!("{}: {}", i18n::fl("character-soul"), soul.id));
-        ui.label(format!(
-            "{}: {}",
-            i18n::fl("character-display"),
-            soul.display_name
-        ));
-        ui.label(format!(
-            "{}: {}",
-            i18n::fl("character-package"),
-            soul.package_id.as_deref().unwrap_or("—")
-        ));
-        ui.label(format!(
-            "{}: {}",
-            i18n::fl("character-avatar"),
-            soul.avatar_path
-                .clone()
-                .unwrap_or_else(|| i18n::fl("character-text-only"))
-        ));
-        ui.label(format!(
-            "{}: {}",
-            i18n::fl("character-body-id"),
-            soul.body_ref.as_deref().unwrap_or("none")
-        ));
-    }
-    ui.label(i18n::fl("character-occupants"));
-    for occupant in &state.occupants {
-        ui.label(format!(
-            "{}  body={}  avatar={}",
-            occupant.soul_id,
-            occupant.body_id.as_deref().unwrap_or("none"),
-            occupant.avatar_path.as_deref().unwrap_or("—")
-        ));
-    }
-    ui.horizontal(|ui| {
-        ui.label(i18n::fl("character-body-id"));
-        ui.text_edit_singleline(&mut state.body_ref_draft);
-        if ui.button(i18n::fl("character-apply-body")).clicked() {
-            let body_ref = state.body_ref_draft.clone();
-            let soul_id = soul_id.to_owned();
-            let client = Arc::clone(client);
-            spawn_async(rt, async_results, async move {
-                AsyncOutcome::PatchBody(
-                    client
-                        .patch_soul_body(
-                            &soul_id,
-                            &ene_api::SoulPatch {
-                                body_ref: Some(body_ref),
-                            },
-                        )
-                        .await
-                        .map_err(|e| e.to_string()),
-                )
-            });
+        let name = if soul.display_name.is_empty() {
+            soul.id.as_str()
+        } else {
+            soul.display_name.as_str()
+        };
+        ui.heading(name);
+        if soul.id == soul_id {
+            ui.label(i18n::fl("character-active"));
         }
-    });
-    ui.label(i18n::fl("character-body-uuid-hint"));
+    } else {
+        ui.label(soul_id);
+    }
     if ui.button(i18n::fl("character-import")).clicked()
         && let Some(path) = rfd::FileDialog::new()
             .add_filter("enechar", &["enechar", "zip", "png", "charx"])
@@ -533,6 +563,60 @@ fn show_companion(
             });
         }
     }
+    ui.collapsing(i18n::fl("character-advanced"), |ui| {
+        if let Some(soul) = &state.soul {
+            ui.label(format!("{}: {}", i18n::fl("character-soul"), soul.id));
+            ui.label(format!(
+                "{}: {}",
+                i18n::fl("character-package"),
+                soul.package_id.as_deref().unwrap_or("—")
+            ));
+            ui.label(format!(
+                "{}: {}",
+                i18n::fl("character-avatar"),
+                soul.avatar_path
+                    .clone()
+                    .unwrap_or_else(|| i18n::fl("character-text-only"))
+            ));
+            ui.label(format!(
+                "{}: {}",
+                i18n::fl("character-body-id"),
+                soul.body_ref.as_deref().unwrap_or("none")
+            ));
+        }
+        ui.label(i18n::fl("character-occupants"));
+        for occupant in &state.occupants {
+            ui.label(format!(
+                "{}  body={}  avatar={}",
+                occupant.soul_id,
+                occupant.body_id.as_deref().unwrap_or("none"),
+                occupant.avatar_path.as_deref().unwrap_or("—")
+            ));
+        }
+        ui.horizontal(|ui| {
+            ui.label(i18n::fl("character-body-id"));
+            ui.text_edit_singleline(&mut state.body_ref_draft);
+            if ui.button(i18n::fl("character-apply-body")).clicked() {
+                let body_ref = state.body_ref_draft.clone();
+                let soul_id = soul_id.to_owned();
+                let client = Arc::clone(client);
+                spawn_async(rt, async_results, async move {
+                    AsyncOutcome::PatchBody(
+                        client
+                            .patch_soul_body(
+                                &soul_id,
+                                &ene_api::SoulPatch {
+                                    body_ref: Some(body_ref),
+                                },
+                            )
+                            .await
+                            .map_err(|e| e.to_string()),
+                    )
+                });
+            }
+        });
+        ui.label(i18n::fl("character-body-uuid-hint"));
+    });
     ui.separator();
     egui::ScrollArea::vertical()
         .max_height(240.0)
@@ -614,7 +698,7 @@ fn show_conversation(
                         api_key: String::new(),
                     })
                     .await
-                    .map(|r| r.models)
+                    .map(|r| (r.models, r.error))
                     .map_err(|e| e.to_string());
                 AsyncOutcome::ListProviderModels(result)
             });
@@ -1028,14 +1112,15 @@ fn show_provider_assets(
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
-    if state.provider_assets_plugin.is_empty() {
-        if let Some(plugin) = state.plugins.first() {
-            state.provider_assets_plugin = plugin.plugin.clone();
-        } else if !state.chat_plugin.is_empty() {
-            state.provider_assets_plugin.clone_from(&state.chat_plugin);
+    if !is_provider_plugin_id(&state.provider_assets_plugin) {
+        let next = default_provider_assets_plugin(&state.chat_plugin, &state.plugins);
+        if state.provider_assets_plugin != next {
+            state.provider_assets_plugin = next;
+            state.loaded.provider_assets = false;
+            state.provider_assets.clear();
         }
     }
-    if !state.provider_assets_plugin.is_empty() && !state.loaded.provider_assets {
+    if is_provider_plugin_id(&state.provider_assets_plugin) && !state.loaded.provider_assets {
         state.loaded.provider_assets = true;
         let plugin = state.provider_assets_plugin.clone();
         let client = Arc::clone(client);
@@ -1050,10 +1135,31 @@ fn show_provider_assets(
         });
     }
     ui.heading(i18n::fl("plugins-assets"));
+    if !state.connections_status.is_empty() {
+        ui.colored_label(egui::Color32::YELLOW, &state.connections_status);
+    }
+    let ids = provider_plugin_ids(state);
+    if ids.is_empty() {
+        ui.label(i18n::fl("plugins-assets-need-provider"));
+        return;
+    }
     ui.horizontal(|ui| {
         ui.label(i18n::fl("plugins-assets-plugin"));
-        ui.text_edit_singleline(&mut state.provider_assets_plugin);
-        if ui.button(i18n::fl("plugins-assets-load")).clicked() {
+        let previous = state.provider_assets_plugin.clone();
+        egui::ComboBox::from_id_salt("provider-assets-plugin")
+            .selected_text(&previous)
+            .show_ui(ui, |ui| {
+                for id in &ids {
+                    ui.selectable_value(&mut state.provider_assets_plugin, id.clone(), id);
+                }
+            });
+        if state.provider_assets_plugin != previous {
+            state.loaded.provider_assets = false;
+            state.provider_assets.clear();
+        }
+        if ui.button(i18n::fl("plugins-assets-load")).clicked()
+            && is_provider_plugin_id(&state.provider_assets_plugin)
+        {
             state.loaded.provider_assets = false;
         }
     });
@@ -1176,7 +1282,8 @@ fn show_system_inner(
             ui.checkbox(&mut local_settings.always_on_top, "");
             ui.end_row();
             ui.label(i18n::fl("settings-click-through"));
-            ui.checkbox(&mut local_settings.overlay_click_through, "");
+            ui.checkbox(&mut local_settings.overlay_click_through, "")
+                .on_hover_text(i18n::fl("settings-click-through-hint"));
             ui.end_row();
             ui.label(i18n::fl("settings-model-scale"));
             ui.add(egui::Slider::new(
@@ -1461,6 +1568,8 @@ mod tests {
         assert!(!state.unconfigured.iter().any(|task| task == "chat"));
         assert!(state.unconfigured.iter().any(|task| task == "classifier"));
         assert!(state.unconfigured.iter().any(|task| task == "stt"));
+        assert!(blocking_unconfigured(&state.unconfigured).is_empty());
+        assert!(optional_unconfigured(&state.unconfigured).contains(&"classifier"));
     }
 
     #[test]
@@ -1468,5 +1577,59 @@ mod tests {
         assert!(DetailTab::System.matches_search("backup"));
         assert!(DetailTab::System.matches_search("restore"));
         assert!(!DetailTab::Home.matches_search("backup"));
+    }
+
+    #[test]
+    fn search_vo_switches_from_home_to_voice() {
+        let mut state = DetailUiState {
+            tab: DetailTab::Home,
+            search: "vo".to_owned(),
+            ..DetailUiState::default()
+        };
+        sync_search_tab(&mut state);
+        assert_eq!(state.tab, DetailTab::Voice);
+        assert!(!DetailTab::Home.matches_search("vo"));
+    }
+
+    #[test]
+    fn default_provider_assets_skips_tool_plugins() {
+        let plugins = vec![
+            PluginView {
+                row_id: "1".into(),
+                plugin: "tool.utility".into(),
+                state: "ready".into(),
+                wait_reason: None,
+            },
+            PluginView {
+                row_id: "2".into(),
+                plugin: "provider.openai_compat".into(),
+                state: "ready".into(),
+                wait_reason: None,
+            },
+        ];
+        assert_eq!(
+            default_provider_assets_plugin("echo", &plugins),
+            "provider.openai_compat"
+        );
+        assert_eq!(
+            default_provider_assets_plugin("provider.gguf", &plugins),
+            "provider.gguf"
+        );
+        assert!(!is_provider_plugin_id("tool.utility"));
+        assert!(!is_provider_plugin_id("provider."));
+        assert!(is_provider_plugin_id("provider.openai_compat"));
+    }
+
+    #[test]
+    fn list_models_status_prefers_error_then_empty_hint() {
+        assert_eq!(
+            list_models_status(&[], Some("unauthorized")),
+            "unauthorized"
+        );
+        assert_eq!(
+            list_models_status(&[], None),
+            i18n::fl("settings-list-models-empty")
+        );
+        assert!(list_models_status(&["gpt".into()], None).is_empty());
     }
 }
