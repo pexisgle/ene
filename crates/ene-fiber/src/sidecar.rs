@@ -117,7 +117,23 @@ fn sidecar_command(binary: &Path, args: &[String]) -> Command {
     }
     cmd.args(args);
     cmd.env_clear();
-    for key in ["PATH", "HOME", "LANG", "TMPDIR"] {
+    // Keep the same host env surface as plugin spawn: Windows needs SystemRoot
+    // (and friends) or interpreters like python exit before binding the port.
+    for key in [
+        "PATH",
+        "SystemRoot",
+        "SystemDrive",
+        "WINDIR",
+        "COMSPEC",
+        "PROGRAMDATA",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "HOME",
+        "LANG",
+        "TMPDIR",
+    ] {
         if let Ok(val) = std::env::var(key) {
             cmd.env(key, val);
         }
