@@ -51,9 +51,11 @@ class MsgPack:
       if length <= 15:
         out.append(0x90 | length)
       elif length <= 0xFFFF:
-        out.extend([0xDC]) + bytearray(struct.pack(">H", length))
+        out.extend([0xDC])
+        out.extend(bytearray(struct.pack(">H", length)))
       else:
-        out.extend([0xDD]) + bytearray(struct.pack(">I", length))
+        out.extend([0xDD])
+        out.extend(bytearray(struct.pack(">I", length)))
       for item in value:
         out.extend(MsgPack._pack(item))
       return out
@@ -63,9 +65,11 @@ class MsgPack:
       if length <= 15:
         out.append(0x80 | length)
       elif length <= 0xFFFF:
-        out.extend([0xDE]) + bytearray(struct.pack(">H", length))
+        out.extend([0xDE])
+        out.extend(bytearray(struct.pack(">H", length)))
       else:
-        out.extend([0xDF]) + bytearray(struct.pack(">I", length))
+        out.extend([0xDF])
+        out.extend(bytearray(struct.pack(">I", length)))
       for key, item in value.items():
         out.extend(MsgPack._pack(str(key)))
         out.extend(MsgPack._pack(item))
@@ -217,8 +221,13 @@ def serve() -> None:
   socket_path = os.environ.get("ENE_PLUGIN_SOCKET")
   if not socket_path:
     raise RuntimeError("ENE_PLUGIN_SOCKET is not set")
-  sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-  sock.connect(socket_path)
+  if os.name == "nt":
+    host, port = socket_path.rsplit(":", 1)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((host, int(port)))
+  else:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(socket_path)
   try:
     hello = MsgPack.unpack(read_frame(sock))
     if hello.get("kind") != "hello":

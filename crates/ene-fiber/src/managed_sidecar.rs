@@ -25,11 +25,7 @@ pub fn sidecar_binary_name() -> &'static str {
 #[must_use]
 #[expect(dead_code, reason = "reserved for manifest fallback naming")]
 pub fn voicevox_binary_name() -> &'static str {
-    if cfg!(windows) {
-        "run.exe"
-    } else {
-        "run"
-    }
+    if cfg!(windows) { "run.exe" } else { "run" }
 }
 
 /// Inject managed sidecar config for host-catalog provider plugins.
@@ -105,7 +101,9 @@ fn inject_gguf_sidecar(
     let id = broker
         .spawn_sidecar(uid, &request)
         .map_err(|err| map_broker_err(&err))?;
-    let health = broker.sidecar_health(uid, id).map_err(|err| map_broker_err(&err))?;
+    let health = broker
+        .sidecar_health(uid, id)
+        .map_err(|err| map_broker_err(&err))?;
     if !health.alive {
         let _ignored = broker.kill_sidecar(uid, id);
         return Err(SupervisorError::Spawn(

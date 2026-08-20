@@ -24,8 +24,9 @@ ene は、ローカルで動く AI コンパニオン型エージェントハー
 - `assets/` — サンプルキャラクターやアセット
 
 ## 前提条件
-- Rust（ツールチェーンは `rust-toolchain.toml` を参照）。
-- ネイティブ依存は checked-in の Nix flake（Vulkan、ALSA、OpenSSL、mold など）。
+- Rust（stable。ツールチェーンは `rust-toolchain.toml` を参照）。
+- Linux のネイティブ依存は checked-in の Nix flake（Vulkan、ALSA、OpenSSL、mold など）。
+- Windows は stable MSVC Rust、Visual Studio C++ Build Tools、Windows SDK が必要です。
 
 ## ビルド
 

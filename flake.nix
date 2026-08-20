@@ -33,9 +33,10 @@
 
         isLinux = lib.strings.hasInfix "linux" system;
 
-        # Shared shell for local/dev (`default`) and a slim variant (`ci`)
-        # without Windows cross, Chromium, sccache, and git-cliff. GitHub
-        # Actions provisions these dependencies via apt, not this shell.
+        # Shared shell for Linux local/dev (`default`) and a slim variant (`ci`)
+        # without Windows cross, Chromium, sccache, and git-cliff. Native Windows
+        # development uses the MSVC toolchain instead of this shell. GitHub Actions
+        # provisions Linux dependencies via apt, not this shell.
         mkEneShell =
           {
             withCrossWindows ? false,
@@ -133,8 +134,7 @@
                       export SCCACHE_DIR="$HOME/.cache/sccache"
                     ''
                   else
-                    # .cargo/config.toml sets build.rustc-wrapper = "sccache";
-                    # clear it so CI does not require the binary on PATH.
+                    # Clear an inherited wrapper so CI does not require sccache on PATH.
                     ''
                       export CARGO_BUILD_RUSTC_WRAPPER=""
                       unset RUSTC_WRAPPER

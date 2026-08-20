@@ -44,6 +44,7 @@ assets/plugins/
 assets/tools/
 assets/mcp.json
 assets/sidecar-work/
+assets/catalog-cache/
 
 # mdBook generated output
 **/book/

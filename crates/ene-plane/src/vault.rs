@@ -1,8 +1,8 @@
 use blake3::Hash;
 use parking_lot::Mutex;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -164,7 +164,7 @@ fn read_or_create_keyfile(path: &Path) -> Result<Vec<u8>, VaultError> {
         std::fs::create_dir_all(parent)?;
     }
     let mut bytes = [0_u8; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    rand::rng().fill_bytes(&mut bytes);
     write_secret_file(path, &bytes)?;
     Ok(bytes.to_vec())
 }
@@ -175,6 +175,7 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
     }
     #[cfg(unix)]
     {
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -199,17 +200,17 @@ fn derive_stream_key(passphrase: &[u8], salt: &[u8; SALT_LEN]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn random_bytes(len: usize) -> Result<Vec<u8>, VaultError> {
+fn random_bytes(len: usize) -> Vec<u8> {
     let mut buf = vec![0_u8; len];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
-    Ok(buf)
+    rand::rng().fill_bytes(&mut buf);
+    buf
 }
 
 fn seal(passphrase: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, VaultError> {
-    let salt: [u8; SALT_LEN] = random_bytes(SALT_LEN)?
+    let salt: [u8; SALT_LEN] = random_bytes(SALT_LEN)
         .try_into()
         .map_err(|_| VaultError::Codec("invalid salt length".to_owned()))?;
-    let nonce: [u8; NONCE_LEN] = random_bytes(NONCE_LEN)?
+    let nonce: [u8; NONCE_LEN] = random_bytes(NONCE_LEN)
         .try_into()
         .map_err(|_| VaultError::Codec("invalid nonce length".to_owned()))?;
     let mut stream_key = derive_stream_key(passphrase, &salt);

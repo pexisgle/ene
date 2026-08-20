@@ -1347,6 +1347,25 @@ mod tests {
         // The shipped packs under assets/lang/ are generated from the same
         // source files as the embedded fallback; keep them in lockstep so the
         // fallback never silently diverges from what ships.
+        fn normalize_line_endings(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::String(text) => *text = text.replace("\r\n", "\n"),
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        normalize_line_endings(value);
+                    }
+                }
+                serde_json::Value::Object(values) => {
+                    for value in values.values_mut() {
+                        normalize_line_endings(value);
+                    }
+                }
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_) => {}
+            }
+        }
+
         for lang in SUPPORTED_LANGUAGES {
             let asset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../assets/lang")
@@ -1354,11 +1373,13 @@ mod tests {
                 .join("prompts.json");
             let asset_json = std::fs::read_to_string(&asset_path)
                 .expect("shipped runtime pack must exist and be readable");
-            let asset: serde_json::Value =
+            let mut asset: serde_json::Value =
                 serde_json::from_str(&asset_json).expect("parse asset pack");
             let embedded = PromptLibrary::built_in(lang);
-            let embedded_value =
+            let mut embedded_value =
                 serde_json::to_value(&embedded.data).expect("serialize embedded pack");
+            normalize_line_endings(&mut asset);
+            normalize_line_endings(&mut embedded_value);
             assert_eq!(
                 asset, embedded_value,
                 "assets/lang/{lang}/prompts.json diverged from the embedded fallback; \
