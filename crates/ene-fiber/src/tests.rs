@@ -426,13 +426,17 @@ fn sidecar_binary_resolves_config_then_cas_then_bundled_and_rejects_urls() {
 }
 
 const LOOPBACK_PY: &str = r"
-import socket, sys, time
+import socket, sys
 port = int(sys.argv[1])
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(('127.0.0.1', port))
-sock.listen(1)
-time.sleep(3600)
+# Accept health probes: listen-only + backlog=1 fills after the first
+# connect on Windows, so a second tcp_open reports not alive.
+sock.listen(16)
+while True:
+    conn, _ = sock.accept()
+    conn.close()
 ";
 
 fn python3_bin() -> Option<PathBuf> {
