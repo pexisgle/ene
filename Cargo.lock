@@ -1707,6 +1707,7 @@ dependencies = [
  "ene-config",
  "hex",
  "parking_lot",
+ "rand 0.10.2",
  "rusqlite",
  "serde",
  "serde_json",
