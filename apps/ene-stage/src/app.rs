@@ -224,9 +224,8 @@ impl StageApp {
                 }
             }
             AsyncOutcome::Approval(result) => {
-                if result.is_ok() {
-                    self.surface.pending_approval = None;
-                } else if let Err(err) = result {
+                self.surface.pending_approval = None;
+                if let Err(err) = result {
                     self.surface.status = err;
                 }
             }
@@ -466,7 +465,7 @@ impl StageApp {
                 });
                 self.surface.chat_open = true;
             }
-            (_, None) => {}
+            (_, None) => self.surface.pending_approval = None,
         }
     }
 
@@ -867,6 +866,7 @@ impl StageApp {
             return;
         };
         let Some(path) = self.session.avatar_path().cloned() else {
+            overlay.avatar = None;
             tracing::info!("no avatar_path; overlay stays empty (text-only)");
             return;
         };
