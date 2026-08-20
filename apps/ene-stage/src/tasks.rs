@@ -66,5 +66,6 @@ pub enum AsyncOutcome {
     Restore(Result<(), String>),
     DiagSpans(Result<Vec<ene_api::SpanView>, String>),
     LoadSchema(Result<String, String>),
+    ListApprovals(Result<Vec<ene_api::ApprovalView>, String>),
     ReloadAvatar,
 }

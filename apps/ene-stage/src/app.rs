@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ene_api::MessageMode;
 use ene_vrm::viseme::VisemeAnalyzer;
@@ -106,6 +106,8 @@ pub fn run() -> Result<(), AppError> {
         spotlight: None,
         last_cursor: None,
         last_tick: Instant::now(),
+        last_approval_poll: Instant::now(),
+        approval_poll_inflight: false,
     };
     app.surface.character_pos = [app.settings.character_x, app.settings.character_y];
     app.surface.history = app.session.history();
@@ -151,6 +153,8 @@ struct StageApp {
     spotlight: Option<ChromeWindow>,
     last_cursor: Option<LogicalPosition<f32>>,
     last_tick: Instant,
+    last_approval_poll: Instant,
+    approval_poll_inflight: bool,
 }
 
 impl StageApp {
@@ -434,8 +438,56 @@ impl StageApp {
                 Ok(json) => self.detail.schema_json = json,
                 Err(err) => self.detail.core_status = err,
             },
+            AsyncOutcome::ListApprovals(result) => {
+                self.approval_poll_inflight = false;
+                match result {
+                    Ok(items) => self.apply_listed_approvals(&items),
+                    Err(err) => tracing::debug!(error = %err, "approval poll failed"),
+                }
+            }
             AsyncOutcome::ReloadAvatar => self.reload_avatar(),
         }
+    }
+
+    fn apply_listed_approvals(&mut self, items: &[ene_api::ApprovalView]) {
+        match (
+            self.surface
+                .pending_approval
+                .as_ref()
+                .map(|item| item.id.as_str()),
+            items.first(),
+        ) {
+            (Some(id), Some(item)) if id == item.id => {}
+            (_, Some(item)) => {
+                self.surface.pending_approval = Some(surface::PendingApproval {
+                    id: item.id.clone(),
+                    tool: item.tool.clone(),
+                    target: item.target.clone(),
+                });
+                self.surface.chat_open = true;
+            }
+            (_, None) => {}
+        }
+    }
+
+    fn poll_pending_approvals(&mut self) {
+        if self.approval_poll_inflight
+            || self.last_approval_poll.elapsed() < Duration::from_millis(400)
+        {
+            return;
+        }
+        self.last_approval_poll = Instant::now();
+        self.approval_poll_inflight = true;
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::ListApprovals(
+                client
+                    .list_approvals()
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
+        });
     }
 
     fn request_memories(&self) {
@@ -1009,12 +1061,18 @@ impl StageApp {
         } else {
             None
         };
+        let scale = self.local_settings.model_scale;
+        let pos = self.surface.character_pos;
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
+        if let Some(avatar) = overlay.avatar.as_mut() {
+            avatar.model_scale = scale;
+            avatar.world_offset = [(pos[0] - 0.5) * 0.8, (0.5 - pos[1]) * 0.8, 0.0];
+        }
         if let Err(err) = overlay.tick_and_render(gpu, look, Some(visemes)) {
             match err {
                 OverlayError::Surface(_) => {
@@ -1178,7 +1236,31 @@ impl ApplicationHandler for StageApp {
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     if let Some(overlay) = self.overlay.as_ref() {
-                        self.last_cursor = Some(position.to_logical(overlay.window.scale_factor()));
+                        let scale = overlay.window.scale_factor();
+                        self.last_cursor = Some(position.to_logical(scale));
+                        if self.surface.dragging_character {
+                            let size = overlay.window.inner_size().to_logical::<f32>(scale);
+                            let logical = position.to_logical::<f32>(scale);
+                            let width = size.width.max(1.0);
+                            let height = size.height.max(1.0);
+                            self.surface.character_pos = [
+                                (logical.x / width).clamp(0.05, 0.95),
+                                (logical.y / height).clamp(0.05, 0.95),
+                            ];
+                        }
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    if self
+                        .overlay
+                        .as_ref()
+                        .is_some_and(|overlay| !overlay.click_through)
+                    {
+                        self.surface.dragging_character = true;
                     }
                 }
                 WindowEvent::MouseInput {
@@ -1186,6 +1268,7 @@ impl ApplicationHandler for StageApp {
                     button: MouseButton::Left,
                     ..
                 } => {
+                    self.surface.dragging_character = false;
                     self.surface.push_action(SurfaceAction::PersistCharacterPos);
                 }
                 WindowEvent::KeyboardInput { event, .. }
@@ -1256,6 +1339,7 @@ impl ApplicationHandler for StageApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
         self.drain_async_results();
+        self.poll_pending_approvals();
         self.drain_surface_events();
         self.drain_detail_events();
         self.poll_shell(event_loop);
