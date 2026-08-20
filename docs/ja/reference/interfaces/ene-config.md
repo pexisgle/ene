@@ -2,9 +2,9 @@
 
 ## 役割
 
-設定の一元管理・スキーマ生成・パス解決。各クレートの設定セクションは
-ここでマクロにより*定義*されますが、*所有*は定義元クレートです。
-キャラクターカードコンテナは [`ene-card`](ene-card.md) にあります。
+設定の一元管理・スキーマ生成・パス解決。設定セクションはここでマクロにより
+*宣言*され、*所有*は定義元クレートです。キャラクターパッケージは
+[`ene-card`](ene-card.md) / `ene-companion` にあります。
 
 ## 公開モジュール
 
@@ -22,25 +22,21 @@
 
 | マクロ | 目的 |
 |---|---|
-| `define_config!` | 設定セクション構造体と JSON スキーマ・登録を宣言（settings / character / ネストの各バリアント） |
+| `define_config!` | 設定セクション構造体（`core`、`harness`、`mind`、`body`、`voice`、`store`、`approval`、`characters` など）と JSON スキーマ・登録を宣言（settings / character / ネストの各バリアント） |
 | `define_label_enum!` | 一貫した `label()` API を持つラベル付き enum を宣言 |
+
+プラグインのプロファイル行はファイバー状態（`ene-fiber`）であり、
+`define_config!` セクションではありません。
 
 ## 依存関係
 
 - 依存: 内部なし。
-- 利用: 全クレート・アプリ（設定セクションは所有クレート側に定義。例:
-  `ene-session`、`ene-kernel`、`ene-companion`、`ene-plane`）。
+- 利用: 全クレート・アプリ（セクションは所有クレート側に定義）。
 
 ## リファクタリングの注目点
 
-- **設定の追加** = 所有クレートに新しい `define_config!`。スキーマレジストリ
-  が起動時に自動で拾います。
+- **設定の追加** = 所有クレートに新しい `define_config!`。
 - **設定の削除/リネーム** = `ene-config::migration` にマイグレーションを追加
   （`CURRENT_CONFIG_VERSION` を更新）し、ドキュメントも更新。
-- `EneConfig` は未知のトップレベルキーを保存時に保持します（ラウンドトリップ
-  安全）。設定面を再構成するときはこの挙動を保ってください。
-- `assets/schema/` の生成 JSON スキーマはビルド生成物（gitignore 済み）。
-  手編集しないでください。
-- `UserPersona` は設定レベルの型（`EneConfig.user_persona`）であり、カード
-  コンテナ型ではありません。ここに残り、それを消費する CBS マクロ機構は
-  `ene-card` にあります。
+- `EneConfig` は未知のトップレベルキーを保存時に保持します。
+- `assets/schema/` の生成 JSON スキーマは gitignore 済みです。

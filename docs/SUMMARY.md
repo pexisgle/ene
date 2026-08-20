@@ -7,7 +7,7 @@
 # Concepts
 
 - [Architecture](concepts/architecture.md)
-- [Character cards](concepts/character-cards.md)
+- [Character packages](concepts/character-cards.md)
 - [Memory](concepts/memory.md)
 - [Turns & sessions](concepts/turns-and-sessions.md)
 - [Plugins & MCP](concepts/plugins-and-mcp.md)

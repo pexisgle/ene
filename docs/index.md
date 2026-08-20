@@ -23,8 +23,8 @@ The finished-product definition is
 |---|---|
 | [Quickstart](quickstart.md) | Build, configure, and run `ene-ctl` / `ene-stage` |
 | [Configuration](configuration.md) | `settings.json`, environment variables, file locations |
-| [Concepts](concepts/architecture.md) | How Ene works: process model, cards, memory, plugins |
-| [Apps](apps/cli.md) | User guides for the CLI and desktop |
+| [Concepts](concepts/architecture.md) | How Ene works: process model, packages, memory, plugins |
+| [Apps](apps/cli.md) | User guides for the CLI and stage |
 | [Guides](guides/character-editor.md) | Task-oriented how-tos |
 | [Reference](reference/crates.md) | Crate map and rendering API |
 

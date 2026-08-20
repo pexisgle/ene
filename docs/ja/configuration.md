@@ -3,14 +3,12 @@
 設定の優先順位は defaults → JSON → `ENE_` 環境変数です。
 ネストしたキーは `__` で区切ります（例: `ENE_CORE__SERVER__BIND`）。
 
-キーは所有側の `define_config!`（`ene-session`、`ene-kernel`、
-`ene-companion`、`ene-body`、`ene-plane` など）に足します。スキーマは起動時に
-`assets/schema/` へ再生成されます（gitignored — コミットしない）。
-
 デーモンはデータディレクトリの `settings.json` を読み、その後
-`ENE_CORE__SERVER__*` などの環境変数を重ねます。`ene-ctl` と `ene-stage` は
-`--url` / `--token`（または `ENE_API_URL` / `ENE_API_TOKEN`）で起動済みコアへ
-接続します。これらの環境変数が無いとき、`ene-stage` は `ene-core` を起動します。
+`ENE_CORE__SERVER__*` などの環境変数を重ねます。リポジトリの
+`assets/settings.json` は開発用サンプルであり、実行時ファイルではありません。
+`ene-ctl` と `ene-stage` は `--url` / `--token`（または `ENE_API_URL` /
+`ENE_API_TOKEN`）で起動済みコアへ接続します。これらの環境変数が無いとき、
+`ene-stage` は `ene-core` を起動します。
 
 データディレクトリは `ENE_DATA_DIR` があればそれです。無ければデバッグビルドは
 リポジトリの `assets/` を設定・DB・vault・workspace の根にし、OS のデータ
@@ -19,6 +17,20 @@
 `settings.json` に書きます。`GET /api/v1/settings` の `effective` はライブ
 メモリが正で、ディスクの `overlay` は AI / mind / plugins のライブ値を
 上書きしません。API キーは vault のままです。
+
+キーは所有側の `define_config!` に足します。スキーマは `assets/schema/` へ
+再生成されます（gitignored — コミットしない）。
+
+| セクション | 所有 | 代表キー |
+|---|---|---|
+| `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
+| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*` |
+| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` |
+| `characters` | `ene-companion` | `home_dir`, `import_v3` |
+| `body` | `ene-body` | `render.*`, `autonomy.*` |
+| `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
+| `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs` |
+| `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
 会話・分類・埋め込み・TTS・STT は `ai.tasks.<task>`（`plugin`、`model`、
 `model_path`、`base_url`、`voice`、`max_tokens`）でバインドします。チャットは
@@ -40,7 +52,7 @@
 TTS・STT が空なら無効のままです。
 
 プラグイン起動は `plugins.profile`（`desktop` / `minimal` / `headless`）です。
-プラグインごとの有効マップはありません。
+プラグインごとの有効マップ（`plugins.list`）はありません。
 
 | キー | 役割 |
 |---|---|

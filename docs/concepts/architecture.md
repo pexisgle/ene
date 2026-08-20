@@ -43,5 +43,5 @@ window is detail.
 |---|---|
 | Crate map and dependency rules | [Crate reference](../reference/crates.md) |
 | Plugin IPC | rustdoc for `ene-plugin-ipc` |
-| Character cards | [Character cards](character-cards.md) |
+| Character packages | [Character packages](character-cards.md) |
 | Design decisions | [`plans/harness-redesign/decisions.md`](../../plans/harness-redesign/decisions.md) |

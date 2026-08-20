@@ -50,5 +50,5 @@ surface、別窓の詳細画面（と `ene-ctl --verbose`）は detail です。
 `ene-ctl` は HTTP API に対して一覧・表示・作成・fork・エクスポート・compact・
 検索・分割・終了ができます。
 
-アイドル終了とトピック境界での分割はサーバ側です。compaction は要約をログに
+アイドル終了と明示的な分割はサーバ側です。compaction は要約をログに
 書き、以降のターンが予算内に収まるようにします。
