@@ -352,15 +352,17 @@ impl SessionHandle {
 
 /// Import or activate Alicia so a stage occupant exposes `avatar_path`.
 pub async fn ensure_alicia(client: &ApiClient) -> Result<Option<OccupantView>, ApiError> {
-    if let Some(occupant) = pick_avatar_occupant(&client.stage().await?.occupants) {
+    if let Some(occupant) = occupant_with_avatar(&client.stage().await?.occupants) {
         return Ok(Some(occupant));
     }
     let packages = client.list_characters().await?.items;
     if let Some(pkg) = find_alicia_package(&packages) {
+        tracing::info!(id = %pkg.id, "activating installed Alicia package");
         let _ = client.activate_character(&pkg.id).await?;
     } else {
         match bundle::pack_bundled_alicia() {
             Ok(bytes) => {
+                tracing::info!(bytes = bytes.len(), "importing bundled Alicia .enechar");
                 let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
                 let imported = client.import_character_archive_b64(&encoded).await?;
                 if imported.soul_id.is_none() {
@@ -369,11 +371,11 @@ pub async fn ensure_alicia(client: &ApiClient) -> Result<Option<OccupantView>, A
             }
             Err(err) => {
                 tracing::warn!(error = %err, "bundled Alicia package unavailable");
-                return Ok(pick_avatar_occupant(&client.stage().await?.occupants));
+                return Ok(occupant_with_avatar(&client.stage().await?.occupants));
             }
         }
     }
-    Ok(pick_avatar_occupant(&client.stage().await?.occupants))
+    Ok(occupant_with_avatar(&client.stage().await?.occupants))
 }
 
 fn find_alicia_package(packages: &[CharacterView]) -> Option<&CharacterView> {
@@ -384,7 +386,7 @@ fn find_alicia_package(packages: &[CharacterView]) -> Option<&CharacterView> {
 }
 
 #[must_use]
-pub fn pick_avatar_occupant(occupants: &[OccupantView]) -> Option<OccupantView> {
+pub fn occupant_with_avatar(occupants: &[OccupantView]) -> Option<OccupantView> {
     occupants
         .iter()
         .find(|occupant| {
@@ -394,7 +396,11 @@ pub fn pick_avatar_occupant(occupants: &[OccupantView]) -> Option<OccupantView> 
                 .is_some_and(|path| !path.is_empty())
         })
         .cloned()
-        .or_else(|| occupants.first().cloned())
+}
+
+#[must_use]
+pub fn pick_avatar_occupant(occupants: &[OccupantView]) -> Option<OccupantView> {
+    occupant_with_avatar(occupants).or_else(|| occupants.first().cloned())
 }
 
 async fn resolve_stage(
@@ -476,6 +482,7 @@ mod tests {
         ];
         let picked = pick_avatar_occupant(&occupants).expect("occupant");
         assert_eq!(picked.soul_id, "alicia");
+        assert!(occupant_with_avatar(&occupants[..1]).is_none());
     }
 
     #[test]

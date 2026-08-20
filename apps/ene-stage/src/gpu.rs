@@ -34,8 +34,8 @@ impl GpuContext {
             })
             .await
             .map_err(|_| GpuError::Adapter)?;
-        let mut limits = wgpu::Limits::default();
-        limits.max_bind_groups = limits.max_bind_groups.max(6);
+        let mut limits = wgpu::Limits::default().using_resolution(adapter.limits());
+        limits.max_bind_groups = adapter.limits().max_bind_groups.max(8);
         let desc = wgpu::DeviceDescriptor {
             label: Some("ene-stage"),
             required_features: wgpu::Features::empty(),

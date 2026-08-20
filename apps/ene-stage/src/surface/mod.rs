@@ -74,7 +74,7 @@ impl Default for SurfaceUiState {
             voice_state: String::new(),
             exclusive_notice: String::new(),
             quit: false,
-            character_pos: [0.7, 0.15],
+            character_pos: [0.5, 0.5],
             dragging_character: false,
             pending_actions: Vec::new(),
             message_mode: MessageMode::Prompt,

@@ -450,19 +450,23 @@ fn show_conversation(
     );
     if ui.button(i18n::fl("settings-list-models")).clicked() {
         let plugin = state.chat_plugin.clone();
-        let client = Arc::clone(client);
-        spawn_async(rt, async_results, async move {
-            let result = client
-                .list_provider_models(&ene_api::ListProviderModelsRequest {
-                    plugin,
-                    task: "chat".to_owned(),
-                    ..ene_api::ListProviderModelsRequest::default()
-                })
-                .await
-                .map(|r| r.models)
-                .map_err(|e| e.to_string());
-            AsyncOutcome::ListProviderModels(result)
-        });
+        if plugin.is_empty() {
+            state.core_status = i18n::fl("settings-patch-hint");
+        } else {
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                let result = client
+                    .list_provider_models(&ene_api::ListProviderModelsRequest {
+                        plugin,
+                        task: "chat".to_owned(),
+                        ..ene_api::ListProviderModelsRequest::default()
+                    })
+                    .await
+                    .map(|r| r.models)
+                    .map_err(|e| e.to_string());
+                AsyncOutcome::ListProviderModels(result)
+            });
+        }
     }
     for model in &state.provider_models {
         if ui

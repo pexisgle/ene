@@ -823,8 +823,8 @@ impl StageApp {
                 if let Some(avatar) = overlay.avatar.as_mut() {
                     avatar.model_scale = self.local_settings.model_scale;
                     avatar.world_offset = [
-                        (self.local_settings.character_x - 0.5) * 2.0,
-                        (0.5 - self.local_settings.character_y) * 2.0,
+                        (self.local_settings.character_x - 0.5) * 0.8,
+                        (0.5 - self.local_settings.character_y) * 0.8,
                         0.0,
                     ];
                 }

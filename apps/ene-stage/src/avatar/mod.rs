@@ -81,9 +81,8 @@ impl CompanionAvatar {
 
     pub fn load_motions(&mut self, dir: &Path) {
         self.motions = discover_motions(dir);
-        if !self.motions.is_empty() {
-            self.load_motion_at(0);
-        }
+        // Rest-pose auto-fit uses the T-pose AABB. Auto-playing a VRMA with
+        // hips/root motion throws the fitted model off the overlay.
     }
 
     #[must_use]
