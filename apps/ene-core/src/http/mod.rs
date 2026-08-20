@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::os::unix::fs::OpenOptionsExt;
 
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
@@ -330,6 +330,8 @@ fn router(state: AppState) -> Router {
             post(routes::exclusive_claim).delete(routes::exclusive_release),
         )
         .route("/api/v1/events", get(ws::events))
+        // Axum's default is 2MiB; character zip import allows 32MiB (bundled Alicia is ~8MiB).
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state)
 }
