@@ -38,7 +38,7 @@ impl GgufAssets {
         }
     }
 
-    fn build_list(&self) -> ListAssetsResult {
+    fn build_list() -> ListAssetsResult {
         let manifest = Manifest::load(PLUGIN_ID);
         let platform = current_platform();
         let assets = CATALOG
@@ -115,7 +115,7 @@ impl Default for GgufAssets {
 #[async_trait]
 impl AssetsHandler for GgufAssets {
     async fn list_assets(&self) -> Result<ListAssetsResult, IpcError> {
-        Ok(self.build_list())
+        Ok(Self::build_list())
     }
 
     async fn install_asset(

@@ -17,15 +17,12 @@ pub fn managed_base() -> Option<&'static str> {
 }
 
 /// Read `sidecar_base_url` from `ENE_PROVIDER_CONFIG` (host-spawned sidecar).
-///
-/// # Errors
-///
-/// Returns when the host did not inject a loopback base URL.
-pub fn maybe_start() -> Result<Option<SidecarGuard>, String> {
+#[must_use]
+pub fn maybe_start() -> Option<SidecarGuard> {
     maybe_start_with("/v1")
 }
 
-pub(crate) fn maybe_start_with(url_suffix: &str) -> Result<Option<SidecarGuard>, String> {
+pub(crate) fn maybe_start_with(url_suffix: &str) -> Option<SidecarGuard> {
     let raw = std::env::var("ENE_PROVIDER_CONFIG")
         .ok()
         .and_then(|encoded| serde_json::from_str::<serde_json::Value>(&encoded).ok())
@@ -36,15 +33,13 @@ pub(crate) fn maybe_start_with(url_suffix: &str) -> Result<Option<SidecarGuard>,
                 .map(str::to_owned)
         })
         .filter(|url| !url.trim().is_empty());
-    let Some(mut base) = raw else {
-        return Ok(None);
-    };
+    let mut base = raw?;
     let suffix = url_suffix.trim_end_matches('/');
     if !base.ends_with(suffix) {
         base = format!("{}{suffix}", base.trim_end_matches('/'));
     }
     drop(BASE.set(base));
-    Ok(Some(SidecarGuard))
+    Some(SidecarGuard)
 }
 
 #[cfg(test)]

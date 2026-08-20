@@ -235,6 +235,7 @@ mod tests {
         assert!(!canon.to_string_lossy().contains(".."));
     }
 
+    #[cfg(unix)]
     #[test]
     fn short_temp_dir_is_used_as_is() {
         let dir = socket_dir_for(Path::new("/tmp"));

@@ -70,6 +70,9 @@ pub(crate) struct SpawnOpts<'a> {
 /// cannot hit `SUN_LEN` (108). Workspace and `TMPDIR` paths are often longer
 /// than that once `probe-<uuid>.sock` is appended, especially when
 /// `assets_dir` is still `target/debug/../../assets`.
+///
+/// The hash is `pid:row_id`, so concurrent spawns in one process must use
+/// distinct row ids or they race on the same path.
 #[cfg(unix)]
 pub(crate) fn plugin_ipc_socket_path(row_id: &str) -> PathBuf {
     let key = format!("{}:{row_id}", std::process::id());
@@ -172,17 +175,30 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
     })
 }
 
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::unused_async,
+        reason = "Windows awaits TcpListener::bind; Unix bind is sync"
+    )
+)]
 async fn bind_plugin_listener(
-    _row_id: &str,
+    #[cfg_attr(
+        windows,
+        expect(unused_variables, reason = "Windows binds an ephemeral TCP port")
+    )]
+    row_id: &str,
 ) -> Result<(PluginListener, String, PathBuf), SupervisorError> {
     #[cfg(unix)]
     {
-        let socket_path = plugin_ipc_socket_path(_row_id);
+        let socket_path = plugin_ipc_socket_path(row_id);
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        if socket_path.exists() {
-            std::fs::remove_file(&socket_path)?;
+        if let Err(err) = std::fs::remove_file(&socket_path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(err.into());
         }
         let listener = UnixListener::bind(&socket_path)?;
         let endpoint = socket_path.to_string_lossy().into_owned();
@@ -521,6 +537,15 @@ mod tests {
             "unnormalized debug assets socket must exceed SUN_LEN: {} ({} bytes)",
             path.display(),
             path.as_os_str().len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_ipc_socket_path_differs_by_row_id() {
+        assert_ne!(
+            plugin_ipc_socket_path("r-dummy-exec"),
+            plugin_ipc_socket_path("r-dummy-handshake")
         );
     }
 
