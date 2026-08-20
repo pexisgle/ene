@@ -32,9 +32,6 @@
   },
   "split": {
     "reason_timeout": "[一時停止から{minutes}分が経過したためセッションを終了しました]",
-    "reason_topic": "[話題の変化によりセッションを終了しました (類似度: {similarity})]",
-    "reason_context": "[コンテキスト制限のためセッションを終了しました]",
-    "reason_composite": "[セッションを終了しました — 分割スコア: {score}]",
     "reason_manual": "[手動でセッションを終了しました]"
   },
   "extractor": {
