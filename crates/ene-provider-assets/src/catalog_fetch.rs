@@ -207,7 +207,9 @@ enum ArtifactExtract {
 
 impl ArtifactExtract {
     fn into_catalog(self) -> crate::runtime_catalog::ExtractMode {
-        crate::runtime_catalog::ExtractMode::ZipTree
+        match self {
+            Self::ZipTree => crate::runtime_catalog::ExtractMode::ZipTree,
+        }
     }
 }
 

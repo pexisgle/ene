@@ -12,7 +12,8 @@ for compatibility's sake; prefer clean changes over legacy shims.
 
 Linux native dependencies (Vulkan, ALSA, OpenSSL, libclang, mold) come from the checked-in
 Nix flake. Run Linux builds from the repo root. If `direnv` is active, plain `cargo` works;
-otherwise prefix with `nix develop --command` (this is what CI does).
+otherwise prefix with `nix develop --command`. GitHub Actions Linux jobs install the same
+native deps with apt (`.github/actions/rust-build-env`) rather than entering the Nix shell.
 
 **Platform support**: Linux and native Windows are supported development platforms. Linux CI
 runs on `ubuntu-latest`; native Windows CI runs on `windows-latest`. Windows development uses

@@ -1,7 +1,8 @@
+#[cfg(target_os = "linux")]
+use crate::Effect;
 use crate::{
-    Broker, BrokerError, CircuitBreakerConfig, Effect, FiberState, FiberUid, ProfileRow,
-    SidecarRequest, Supervisor, SupervisorError, confine_path, discover_plugin_script,
-    manifest_digest,
+    Broker, BrokerError, CircuitBreakerConfig, FiberState, FiberUid, ProfileRow, SidecarRequest,
+    Supervisor, SupervisorError, confine_path, discover_plugin_script, manifest_digest,
 };
 use ene_registry::{Layer, ToolRegistry};
 use serde_json::json;
@@ -184,14 +185,14 @@ async fn circuit_breaker_opens_after_spawn_failures() {
         Arc::new(ToolRegistry::new()),
         CircuitBreakerConfig { max_failures: 3 },
     );
-    let row = row("r-dummy", "tool.dummy", &[]);
+    let row = row("r-dummy-circuit", "tool.dummy", &[]);
     let bad = dir.path().join("bad-plugin.py");
     std::fs::write(&bad, b"not a plugin").unwrap();
     for _ in 0..3 {
         drop(sup.activate_process(&row, &bad).await);
     }
-    assert_eq!(sup.failure_count("r-dummy"), 3);
-    assert!(sup.circuit_open("r-dummy"));
+    assert_eq!(sup.failure_count("r-dummy-circuit"), 3);
+    assert!(sup.circuit_open("r-dummy-circuit"));
     assert!(!sup.surface_has_tool("dummy.ping"));
     let err = sup.activate_process(&row, &bad).await.unwrap_err();
     assert!(matches!(
@@ -231,7 +232,7 @@ async fn python_dummy_registers_in_registry_and_executes() {
     }
     let (_dir, sup) = supervisor();
     let path = dummy_plugin_path();
-    let row = row("r-dummy", "tool.dummy", &[]);
+    let row = row("r-dummy-exec", "tool.dummy", &[]);
     let uid = sup.activate_process(&row, &path).await.unwrap();
     assert!(!uid.to_string().is_empty());
     assert!(sup.surface_has_tool("dummy.ping"));
@@ -248,7 +249,7 @@ async fn python_dummy_registers_in_registry_and_executes() {
         .await
         .unwrap();
     assert_eq!(value.get("pong").and_then(|v| v.as_str()), Some("hi"));
-    sup.unload("r-dummy").await;
+    sup.unload("r-dummy-exec").await;
     assert!(!sup.surface_has_tool("dummy.ping"));
 }
 
@@ -258,7 +259,7 @@ async fn dummy_plugin_handshake_without_provider_subprotocol() {
         return;
     }
     let path = dummy_plugin_path();
-    let row = row("r-dummy", "tool.dummy", &[]);
+    let row = row("r-dummy-handshake", "tool.dummy", &[]);
     let (_dir, sup) = supervisor();
     sup.activate_process(&row, &path)
         .await
@@ -266,6 +267,7 @@ async fn dummy_plugin_handshake_without_provider_subprotocol() {
     assert!(sup.surface_has_tool("dummy.ping"));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn dropping_supervisor_kills_spawned_plugin() {
     if python3_bin().is_none() {
@@ -274,10 +276,10 @@ async fn dropping_supervisor_kills_spawned_plugin() {
     let dir = TempDir::new().unwrap();
     let sup = Supervisor::new(dir.path().to_path_buf(), Arc::new(ToolRegistry::new()));
     let path = dummy_plugin_path();
-    let row = row("r-dummy", "tool.dummy", &[]);
+    let row = row("r-dummy-drop", "tool.dummy", &[]);
     sup.activate_process(&row, &path).await.unwrap();
     let pid = sup
-        .fiber("r-dummy")
+        .fiber("r-dummy-drop")
         .unwrap()
         .dispose
         .iter()

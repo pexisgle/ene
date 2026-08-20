@@ -9,6 +9,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_RUSTC_WRAPPER: ""
 
 jobs:
   release:
@@ -20,9 +21,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/nix-installer-action@v22
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: nixbuild/nix-quick-install-action@v30
       - uses: Swatinem/rust-cache@v2
         with:
           cmd-format: "nix develop --command {0}"

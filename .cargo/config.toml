@@ -7,9 +7,6 @@ frequency = "never"
 # `cargo test` the same way it does inside the Nix shell.
 LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_MATH_FUNCTIONS"
 
-[build]
-rustc-wrapper = "sccache"
-
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = [

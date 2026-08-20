@@ -3,7 +3,7 @@
 //! The host spawns the loopback sidecar and injects `sidecar_base_url`; this
 //! plugin maps host-canonical messages onto `/v1` chat completions and embeddings.
 
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "tests fail fast"))]
 
 mod assets;
 mod client;
@@ -23,13 +23,7 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    let sidecar = match sidecar::maybe_start() {
-        Ok(guard) => guard,
-        Err(err) => {
-            tracing::error!(error = %err, plugin = "provider.gguf", "sidecar");
-            std::process::exit(1);
-        }
-    };
+    let sidecar = sidecar::maybe_start();
     let provider = Arc::new(Gguf::new());
     let assets = Arc::new(GgufAssets::new());
     let handlers = ProviderHandlers {
