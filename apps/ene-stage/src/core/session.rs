@@ -59,6 +59,10 @@ impl StageSession {
         self.turn_id.lock().clone()
     }
 
+    pub fn clear_turn(&self) {
+        *self.turn_id.lock() = None;
+    }
+
     #[must_use]
     pub fn history(&self) -> HistoryResponse {
         self.history.lock().clone()

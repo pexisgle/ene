@@ -79,10 +79,19 @@ impl OverlayWindow {
         }
     }
 
+    /// Chrome on (decorations visible) always hit-tests so Allow/Detail work.
+    /// Chrome off restores the saved click-through preference.
+    pub fn apply_click_through(&mut self, preferred: bool) {
+        self.set_click_through(self.transparent && preferred);
+    }
+
     pub fn toggle_chrome(&mut self) {
         self.transparent = !self.transparent;
+        let inner = self.window.inner_size();
         self.window.set_decorations(!self.transparent);
-        self.set_click_through(self.transparent);
+        if self.window.request_inner_size(inner).is_none() {
+            tracing::debug!("overlay inner-size request deferred until the next scale event");
+        }
     }
 
     pub fn load_avatar(

@@ -92,11 +92,7 @@ pub fn stage_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ENE_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    if cfg!(debug_assertions) {
-        ene_config::paths::assets_dir().to_path_buf()
-    } else {
-        ene_config::paths::app_data_dir()
-    }
+    ene_config::paths::app_data_dir()
 }
 
 async fn try_env_attach() -> Result<Option<ApiClient>, StageSpawnError> {
@@ -203,5 +199,17 @@ mod tests {
         assert_eq!(stage_data_dir(), dir.path());
         // SAFETY: paired with set_var above in the same test.
         unsafe { std::env::remove_var("ENE_DATA_DIR") };
+    }
+
+    #[test]
+    fn stage_data_dir_default_is_not_repo_assets() {
+        // SAFETY: test runs single-threaded under cargo test mutex.
+        unsafe { std::env::remove_var("ENE_DATA_DIR") };
+        let dir = stage_data_dir();
+        assert_eq!(dir, ene_config::paths::app_data_dir());
+        let repo_assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        if let (Ok(got), Ok(assets)) = (dir.canonicalize(), repo_assets.canonicalize()) {
+            assert_ne!(got, assets);
+        }
     }
 }

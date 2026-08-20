@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use ene_api::{ExclusiveSnapshot, ResourceKind};
 use parking_lot::Mutex;
 
@@ -9,16 +11,20 @@ pub struct ExclusiveHub {
     mic: Mutex<Option<String>>,
     speaker: Mutex<Option<String>>,
     notify: Mutex<Option<String>>,
-    last_used: bool,
+    last_used: AtomicBool,
 }
 
 impl ExclusiveHub {
     #[must_use]
     pub fn new(last_used: bool) -> Self {
         Self {
-            last_used,
+            last_used: AtomicBool::new(last_used),
             ..Self::default()
         }
+    }
+
+    pub fn set_last_used(&self, last_used: bool) {
+        self.last_used.store(last_used, Ordering::SeqCst);
     }
 
     #[must_use]
@@ -42,7 +48,7 @@ impl ExclusiveHub {
         };
         if let Some(owner) = slot.as_ref()
             && owner != client_id
-            && !self.last_used
+            && !self.last_used.load(Ordering::SeqCst)
         {
             return Err(conflict(
                 "resource_busy",
@@ -89,5 +95,20 @@ impl ExclusiveHub {
         ] {
             drop(self.release(kind, client_id));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_used_patch_allows_steal() {
+        let hub = ExclusiveHub::new(false);
+        hub.claim(ResourceKind::Mic, "stage").expect("first claim");
+        assert!(hub.claim(ResourceKind::Mic, "other").is_err());
+        hub.set_last_used(true);
+        let snap = hub.claim(ResourceKind::Mic, "other").expect("steal");
+        assert_eq!(snap.mic.as_deref(), Some("other"));
     }
 }

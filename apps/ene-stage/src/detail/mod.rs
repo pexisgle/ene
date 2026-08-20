@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use ene_api::{
     ApiClient, CharacterView, JobView, MemoryView, OccupantView, PluginView, ProviderAssetView,
     ScheduleView, SoulView,
@@ -56,6 +57,62 @@ impl DetailTab {
             Self::Log => i18n::fl("detail-tab-log"),
         }
     }
+
+    #[must_use]
+    pub fn keywords(self) -> &'static [&'static str] {
+        match self {
+            Self::Home => &["home", "status", "health", "ready", "chat"],
+            Self::Companion => &[
+                "character",
+                "export",
+                "avatar",
+                "body",
+                "occupant",
+                "alicia",
+                "persona",
+            ],
+            Self::Conversation => &[
+                "chat",
+                "model",
+                "api",
+                "key",
+                "base_url",
+                "openai",
+                "provider",
+                "credentials",
+            ],
+            Self::Voice => &["tts", "stt", "mic", "caption", "spotlight", "voice"],
+            Self::Memory => &["recall", "pending", "memory"],
+            Self::Work => &[
+                "job", "fork", "compact", "export", "session", "schedule", "work",
+            ],
+            Self::Connections => &["plugin", "mcp", "fiber", "profile", "asset"],
+            Self::System => &[
+                "backup",
+                "restore",
+                "reload",
+                "json",
+                "settings",
+                "schema",
+                "click-through",
+                "data",
+            ],
+            Self::Log => &["thinking", "tool", "session", "log"],
+        }
+    }
+
+    #[must_use]
+    pub fn matches_search(self, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let q = query.to_ascii_lowercase();
+        self.label().to_ascii_lowercase().contains(&q)
+            || self
+                .keywords()
+                .iter()
+                .any(|word| word.contains(&q) || q.contains(*word))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +141,9 @@ pub struct DetailUiState {
     pub core_patch_text: String,
     pub chat_plugin: String,
     pub chat_model: String,
+    pub chat_base_url: String,
+    pub chat_api_key: String,
+    pub ai_chat_key_set: bool,
     pub classifier_plugin: String,
     pub embedding_plugin: String,
     pub proactive_plugin: String,
@@ -111,6 +171,10 @@ pub struct DetailUiState {
     pub usage_text: String,
     pub spans_text: String,
     pub save_local_pending: bool,
+    pub restore_id: String,
+    pub restore_confirm: bool,
+    pub session_id: String,
+    pub open_spotlight: bool,
     loaded: DetailLoaded,
 }
 
@@ -136,6 +200,10 @@ impl DetailUiState {
             self.log.drain(0..drain);
         }
     }
+
+    pub fn invalidate_settings(&mut self) {
+        self.loaded.settings = false;
+    }
 }
 
 pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
@@ -145,6 +213,11 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
     let effective = value.get("effective").unwrap_or(&value);
     state.chat_plugin = nested_string(effective, &["ai", "tasks", "chat", "plugin"]);
     state.chat_model = nested_string(effective, &["ai", "tasks", "chat", "model"]);
+    state.chat_base_url = nested_string(effective, &["ai", "tasks", "chat", "base_url"]);
+    state.ai_chat_key_set = effective
+        .get("ai_chat_key_set")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     state.classifier_plugin = nested_string(effective, &["ai", "tasks", "classifier", "plugin"]);
     state.embedding_plugin = nested_string(effective, &["ai", "tasks", "embedding", "plugin"]);
     state.proactive_plugin = nested_string(effective, &["ai", "tasks", "proactive", "plugin"]);
@@ -194,11 +267,7 @@ pub fn show(
     ui.horizontal_wrapped(|ui| {
         for tab in DetailTab::ALL {
             let label = tab.label();
-            if !state.search.is_empty()
-                && !label
-                    .to_ascii_lowercase()
-                    .contains(&state.search.to_ascii_lowercase())
-            {
+            if !tab.matches_search(&state.search) {
                 continue;
             }
             if ui.selectable_label(state.tab == tab, label).clicked() {
@@ -255,17 +324,43 @@ fn show_home(
         i18n::fl("home-fibers"),
         state.plugins.len()
     ));
-    if state.unconfigured.is_empty() {
+    if state.unconfigured.iter().any(|task| task == "chat") {
+        ui.colored_label(egui::Color32::YELLOW, i18n::fl("home-next-chat"));
+        if ui.button(i18n::fl("detail-tab-conversation")).clicked() {
+            state.tab = DetailTab::Conversation;
+        }
+    }
+    let optional: Vec<&str> = state
+        .unconfigured
+        .iter()
+        .map(String::as_str)
+        .filter(|task| *task == "stt" || *task == "tts")
+        .collect();
+    let required: Vec<&str> = state
+        .unconfigured
+        .iter()
+        .map(String::as_str)
+        .filter(|task| *task != "stt" && *task != "tts")
+        .collect();
+    if required.is_empty() && optional.is_empty() {
         ui.label(i18n::fl("home-configured"));
     } else {
-        ui.colored_label(
-            egui::Color32::YELLOW,
-            format!(
+        if !required.is_empty() {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!("{}: {}", i18n::fl("home-unconfigured"), required.join(", ")),
+            );
+        }
+        if !optional.is_empty() {
+            ui.label(format!(
                 "{}: {}",
-                i18n::fl("home-unconfigured"),
-                state.unconfigured.join(", ")
-            ),
-        );
+                i18n::fl("home-optional-tasks"),
+                optional.join(", ")
+            ));
+            if optional.contains(&"stt") {
+                ui.label(i18n::fl("home-optional-voice"));
+            }
+        }
     }
     ui.horizontal(|ui| {
         if ui.button(i18n::fl("detail-tab-companion")).clicked() {
@@ -280,6 +375,10 @@ fn show_home(
     });
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "companion tab owns import/export/activate"
+)]
 fn show_companion(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
@@ -395,6 +494,45 @@ fn show_companion(
             )
         });
     }
+    if ui.button(i18n::fl("character-export")).clicked() {
+        let package = state
+            .soul
+            .as_ref()
+            .and_then(|soul| soul.package_id.clone())
+            .unwrap_or_default();
+        let id = package
+            .split_once('@')
+            .map(|(pkg, _)| pkg.to_owned())
+            .unwrap_or(package);
+        if id.is_empty() {
+            state.core_status = i18n::fl("character-export");
+        } else if let Some(path) = rfd::FileDialog::new()
+            .add_filter("enechar", &["enechar", "zip"])
+            .save_file()
+        {
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::ExportCharacter(
+                    async {
+                        let value = client
+                            .export_character(&id)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let b64 = value
+                            .get("archive_b64")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "export missing archive_b64".to_owned())?;
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .map_err(|e| e.to_string())?;
+                        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+                        Ok(())
+                    }
+                    .await,
+                )
+            });
+        }
+    }
     ui.separator();
     egui::ScrollArea::vertical()
         .max_height(240.0)
@@ -435,6 +573,18 @@ fn show_conversation(
     task_row(ui, i18n::fl("settings-chat-model"), &mut state.chat_model);
     task_row(
         ui,
+        i18n::fl("settings-chat-base-url"),
+        &mut state.chat_base_url,
+    );
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-chat-api-key"));
+        ui.add(egui::TextEdit::singleline(&mut state.chat_api_key).password(true));
+    });
+    if state.ai_chat_key_set {
+        ui.label(i18n::fl("settings-chat-key-set"));
+    }
+    task_row(
+        ui,
         i18n::fl("settings-classifier-plugin"),
         &mut state.classifier_plugin,
     );
@@ -453,13 +603,15 @@ fn show_conversation(
         if plugin.is_empty() {
             state.core_status = i18n::fl("settings-patch-hint");
         } else {
+            let base_url = state.chat_base_url.clone();
             let client = Arc::clone(client);
             spawn_async(rt, async_results, async move {
                 let result = client
                     .list_provider_models(&ene_api::ListProviderModelsRequest {
                         plugin,
                         task: "chat".to_owned(),
-                        ..ene_api::ListProviderModelsRequest::default()
+                        base_url,
+                        api_key: String::new(),
                     })
                     .await
                     .map(|r| r.models)
@@ -505,6 +657,9 @@ fn show_voice(
         &mut local_settings.spotlight_enabled,
         i18n::fl("settings-spotlight"),
     );
+    if ui.button(i18n::fl("settings-open-spotlight")).clicked() {
+        state.open_spotlight = true;
+    }
     ui.horizontal(|ui| {
         ui.label(i18n::fl("settings-caption-position"));
         ui.text_edit_singleline(&mut local_settings.caption_position);
@@ -558,6 +713,9 @@ fn show_memory(
         state.loaded.memory = false;
     }
     ui.heading(i18n::fl("memory-candidates"));
+    if state.pending_memories.is_empty() {
+        ui.label(i18n::fl("memory-pending-empty"));
+    }
     for memory in &state.pending_memories {
         ui.group(|ui| {
             ui.label(format!(
@@ -576,6 +734,9 @@ fn show_memory(
         });
     }
     ui.heading(i18n::fl("detail-tab-memory"));
+    if state.memories.is_empty() {
+        ui.label(i18n::fl("memory-empty"));
+    }
     egui::ScrollArea::vertical().show(ui, |ui| {
         for memory in &state.memories {
             ui.group(|ui| {
@@ -620,6 +781,10 @@ fn resolve_memory(
     });
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "work tab owns jobs, schedules, and session actions"
+)]
 fn show_work(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
@@ -646,7 +811,61 @@ fn show_work(
     if ui.button(i18n::fl("jobs-refresh")).clicked() {
         state.loaded.jobs = false;
     }
+    ui.horizontal(|ui| {
+        if ui.button(i18n::fl("jobs-fork")).clicked() {
+            let session_id = state.session_id.clone();
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::ForkSession(
+                    client
+                        .fork_session(&session_id)
+                        .await
+                        .map(|s| s.id)
+                        .map_err(|e| e.to_string()),
+                )
+            });
+        }
+        if ui.button(i18n::fl("jobs-compact")).clicked() {
+            let session_id = state.session_id.clone();
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::CompactSession(
+                    client
+                        .compact(&session_id)
+                        .await
+                        .map(|r| r.entry_id.to_string())
+                        .map_err(|e| e.to_string()),
+                )
+            });
+        }
+        if ui.button(i18n::fl("jobs-export")).clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("json", &["json"])
+                .save_file()
+        {
+            let session_id = state.session_id.clone();
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::ExportSession(
+                    async {
+                        let value = client
+                            .export_session(&session_id)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let pretty =
+                            serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+                        std::fs::write(&path, pretty).map_err(|e| e.to_string())?;
+                        Ok(())
+                    }
+                    .await,
+                )
+            });
+        }
+    });
     ui.heading(i18n::fl("jobs-active"));
+    if state.jobs.is_empty() {
+        ui.label(i18n::fl("jobs-empty"));
+    }
     for job in &state.jobs {
         ui.horizontal(|ui| {
             ui.label(format!("{} [{}] {}", job.title, job.status, job.id));
@@ -904,6 +1123,23 @@ fn show_system(
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     ensure_settings(state, client, rt, async_results);
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        show_system_inner(ui, state, local_settings, client, rt, async_results);
+    });
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "system tab stacks local settings, backup, and JSON"
+)]
+fn show_system_inner(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    local_settings: &mut DesktopSettings,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
     ui.heading(i18n::fl("settings-local"));
     egui::Grid::new("stage-local-settings")
         .num_columns(2)
@@ -938,6 +1174,9 @@ fn show_system(
             ui.end_row();
             ui.label(i18n::fl("settings-always-on-top"));
             ui.checkbox(&mut local_settings.always_on_top, "");
+            ui.end_row();
+            ui.label(i18n::fl("settings-click-through"));
+            ui.checkbox(&mut local_settings.overlay_click_through, "");
             ui.end_row();
             ui.label(i18n::fl("settings-model-scale"));
             ui.add(egui::Slider::new(
@@ -975,7 +1214,7 @@ fn show_system(
                     client
                         .backup()
                         .await
-                        .map(|b| b.path)
+                        .map(|b| (b.id, b.path))
                         .map_err(|e| e.to_string()),
                 )
             });
@@ -1011,6 +1250,38 @@ fn show_system(
             });
         }
     });
+    ui.label(i18n::fl("system-reload-hint"));
+    ui.horizontal(|ui| {
+        if ui.button(i18n::fl("settings-reload-core")).clicked() {
+            state.loaded.settings = false;
+            ensure_settings(state, client, rt, async_results);
+        }
+        ui.label(i18n::fl("system-restore-id"));
+        ui.text_edit_singleline(&mut state.restore_id);
+        ui.checkbox(
+            &mut state.restore_confirm,
+            i18n::fl("system-restore-confirm"),
+        );
+        if ui
+            .add_enabled(
+                state.restore_confirm && !state.restore_id.is_empty(),
+                egui::Button::new(i18n::fl("system-restore")),
+            )
+            .clicked()
+        {
+            let id = state.restore_id.clone();
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::Restore(
+                    client
+                        .restore(&ene_api::RestoreRequest { id })
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
+                )
+            });
+        }
+    });
     if !state.usage_text.is_empty() {
         ui.label(&state.usage_text);
     }
@@ -1031,10 +1302,6 @@ fn show_system(
             .hint_text(i18n::fl("settings-patch-hint")),
     );
     ui.horizontal(|ui| {
-        if ui.button(i18n::fl("settings-reload-core")).clicked() {
-            state.loaded.settings = false;
-            ensure_settings(state, client, rt, async_results);
-        }
         if ui.button(i18n::fl("settings-apply-patch")).clicked() {
             let text = state.core_patch_text.clone();
             let client = Arc::clone(client);
@@ -1110,15 +1377,29 @@ fn ensure_settings(
 }
 
 fn apply_ai_patch(
-    state: &DetailUiState,
+    state: &mut DetailUiState,
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
+    let mut chat = serde_json::json!({
+        "plugin": state.chat_plugin,
+        "model": state.chat_model,
+        "base_url": state.chat_base_url,
+    });
+    if !state.chat_api_key.is_empty()
+        && let Some(obj) = chat.as_object_mut()
+    {
+        obj.insert(
+            "api_key".to_owned(),
+            Value::String(state.chat_api_key.clone()),
+        );
+        state.chat_api_key.clear();
+    }
     let patch = serde_json::json!({
         "ai": {
             "tasks": {
-                "chat": { "plugin": state.chat_plugin, "model": state.chat_model },
+                "chat": chat,
                 "classifier": { "plugin": state.classifier_plugin },
                 "embedding": { "plugin": state.embedding_plugin },
                 "proactive": { "plugin": state.proactive_plugin },
@@ -1162,20 +1443,30 @@ mod tests {
             "effective": {
                 "ai": {
                     "tasks": {
-                        "chat": { "plugin": "openai", "model": "gpt" },
+                        "chat": { "plugin": "openai", "model": "gpt", "base_url": "https://example.invalid/v1" },
                         "classifier": { "plugin": "echo" }
                     }
                 },
-                "plugins": { "profile": "desktop" }
+                "plugins": { "profile": "desktop" },
+                "ai_chat_key_set": true
             }
         }"#;
         let mut state = DetailUiState::default();
         parse_core_fields(json, &mut state);
         assert_eq!(state.chat_plugin, "openai");
         assert_eq!(state.chat_model, "gpt");
+        assert_eq!(state.chat_base_url, "https://example.invalid/v1");
+        assert!(state.ai_chat_key_set);
         assert_eq!(state.plugins_profile, "desktop");
         assert!(!state.unconfigured.iter().any(|task| task == "chat"));
         assert!(state.unconfigured.iter().any(|task| task == "classifier"));
         assert!(state.unconfigured.iter().any(|task| task == "stt"));
+    }
+
+    #[test]
+    fn backup_keyword_keeps_system_tab_visible() {
+        assert!(DetailTab::System.matches_search("backup"));
+        assert!(DetailTab::System.matches_search("restore"));
+        assert!(!DetailTab::Home.matches_search("backup"));
     }
 }

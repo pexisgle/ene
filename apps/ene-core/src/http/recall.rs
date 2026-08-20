@@ -41,7 +41,11 @@ impl TurnPrefetch for RecallPrefetch {
         let Some(core) = self.core.upgrade() else {
             return Vec::new();
         };
-        let mut out = mcp_context_lines(&core.workspace_dir());
+        let mut out = Vec::new();
+        if let Some(persona) = persona_line(&core, soul) {
+            out.push(persona);
+        }
+        out.extend(mcp_context_lines(&core.workspace_dir()));
         if user_text.trim().is_empty() {
             return out;
         }
@@ -69,6 +73,25 @@ impl TurnPrefetch for RecallPrefetch {
             format!("Recalled memories:\n{body}"),
         ));
         out
+    }
+}
+
+fn persona_line(core: &CoreDaemon, soul: SoulId) -> Option<(String, String)> {
+    let store = core.companions();
+    let row = store.get_soul(soul).ok().flatten()?;
+    let (id, version) = row.character_ref.split_once('@')?;
+    let path = store.package_path(id, version).ok().flatten()?;
+    let text = persona_from_package(std::path::Path::new(&path))?;
+    Some(("companion.persona".to_owned(), text))
+}
+
+fn persona_from_package(package_dir: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(package_dir.join("soul/persona.md")).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_owned())
     }
 }
 
@@ -117,4 +140,23 @@ async fn embed_query(core: &CoreDaemon, text: &str) -> Option<Vec<f32>> {
         .await
         .ok()?;
     result.vectors.into_iter().next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::persona_from_package;
+
+    #[test]
+    fn persona_from_package_reads_alicia_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("soul")).unwrap();
+        std::fs::write(
+            dir.path().join("soul/persona.md"),
+            "You are Alicia, a desktop companion.\n",
+        )
+        .unwrap();
+        let text = persona_from_package(dir.path()).expect("persona");
+        assert!(text.contains("Alicia"));
+        assert!(!text.contains("Ene"));
+    }
 }

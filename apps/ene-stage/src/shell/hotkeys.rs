@@ -1,5 +1,7 @@
 //! Global hotkeys for stage window actions.
 
+use std::time::{Duration, Instant};
+
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use thiserror::Error;
@@ -17,8 +19,10 @@ pub enum ShellAction {
 
 /// Registers Alt+Space, F1, F2, F4 and polls for events.
 pub struct HotkeyManager {
-    #[expect(dead_code, reason = "must outlive registered hotkeys")]
     manager: GlobalHotKeyManager,
+    spotlight: HotKey,
+    spotlight_ok: bool,
+    spotlight_retry_at: Instant,
     spotlight_id: u32,
     detail_id: u32,
     chat_id: u32,
@@ -46,8 +50,9 @@ impl HotkeyManager {
         let detail_id = detail.id();
         let chat_id = chat.id();
         let log_id = log.id();
-        if let Err(err) = manager.register(spotlight) {
-            tracing::warn!(error = %err, "could not register Alt+Space hotkey");
+        let spotlight_ok = manager.register(spotlight).is_ok();
+        if !spotlight_ok {
+            tracing::warn!("could not register Alt+Space hotkey; will retry");
         }
         if let Err(err) = manager.register(detail) {
             tracing::warn!(error = %err, "could not register F1 hotkey");
@@ -60,6 +65,9 @@ impl HotkeyManager {
         }
         Ok(Self {
             manager,
+            spotlight,
+            spotlight_ok,
+            spotlight_retry_at: Instant::now(),
             spotlight_id,
             detail_id,
             chat_id,
@@ -67,7 +75,23 @@ impl HotkeyManager {
         })
     }
 
-    pub fn poll(&self) -> Option<ShellAction> {
+    fn retry_spotlight(&mut self) {
+        if self.spotlight_ok {
+            return;
+        }
+        let now = Instant::now();
+        if now.saturating_duration_since(self.spotlight_retry_at) < Duration::from_secs(2) {
+            return;
+        }
+        self.spotlight_retry_at = now;
+        if self.manager.register(self.spotlight).is_ok() {
+            self.spotlight_ok = true;
+            tracing::info!("registered Alt+Space hotkey on retry");
+        }
+    }
+
+    pub fn poll(&mut self) -> Option<ShellAction> {
+        self.retry_spotlight();
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state != HotKeyState::Pressed {
                 continue;

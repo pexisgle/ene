@@ -52,6 +52,7 @@ pub struct SurfaceUiState {
     pub dragging_character: bool,
     pub pending_actions: Vec<SurfaceAction>,
     pub message_mode: MessageMode,
+    pub turn_active: bool,
 }
 
 impl Default for SurfaceUiState {
@@ -78,6 +79,7 @@ impl Default for SurfaceUiState {
             dragging_character: false,
             pending_actions: Vec::new(),
             message_mode: MessageMode::Prompt,
+            turn_active: false,
         }
     }
 }

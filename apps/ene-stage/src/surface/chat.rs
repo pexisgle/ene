@@ -18,12 +18,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
             if ui.button(mic_label).clicked() {
                 state.push_action(SurfaceAction::ToggleMic);
             }
-            if ui.button(i18n::fl("chat-barge-in")).clicked() {
-                state.push_action(SurfaceAction::BargeIn);
-            }
-            if ui.button(i18n::fl("chat-cancel")).clicked() {
-                state.push_action(SurfaceAction::CancelTurn);
-            }
+            ui.add_enabled_ui(state.turn_active, |ui| {
+                if ui.button(i18n::fl("chat-barge-in")).clicked() {
+                    state.push_action(SurfaceAction::BargeIn);
+                }
+                if ui.button(i18n::fl("chat-cancel")).clicked() {
+                    state.push_action(SurfaceAction::CancelTurn);
+                }
+            });
             ui.label(&state.status);
         });
         ui.horizontal(|ui| {
@@ -33,12 +35,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
                 (MessageMode::Steer, i18n::fl("chat-mode-steer")),
                 (MessageMode::FollowUp, i18n::fl("chat-mode-follow-up")),
             ] {
-                if ui
-                    .selectable_label(state.message_mode == mode, label)
-                    .clicked()
-                {
-                    state.message_mode = mode;
-                }
+                let enabled = mode == MessageMode::Prompt || state.turn_active;
+                ui.add_enabled_ui(enabled, |ui| {
+                    if ui
+                        .selectable_label(state.message_mode == mode, label)
+                        .clicked()
+                    {
+                        state.message_mode = mode;
+                    }
+                });
             }
             if !state.voice_state.is_empty() {
                 ui.label(format!(
@@ -68,6 +73,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 for message in &state.history.messages {
+                    if message.role != "user" && message.role != "assistant" {
+                        continue;
+                    }
                     ui.label(format!("{}: {}", message.role, message.text));
                 }
                 if !state.streaming_text.is_empty() {

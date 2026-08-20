@@ -1563,6 +1563,12 @@ pub async fn patch_settings(
         state.core.replace_mind(mind);
     }
     drop(state.core.plane().audit().append("settings", &current));
+    if let Some(policy) = current
+        .pointer("/core/clients/audio_active_policy")
+        .and_then(Value::as_str)
+    {
+        state.exclusive.set_last_used(policy == "last_used");
+    }
     Ok(Json(current))
 }
 

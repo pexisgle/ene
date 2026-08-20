@@ -23,6 +23,7 @@ ene_config::define_config!(
         pub character_x: f32 = 0.5,
         pub character_y: f32 = 0.5,
         pub look_at_strength: f32 = 0.6,
+        pub overlay_click_through: bool = true,
     }
 );
 

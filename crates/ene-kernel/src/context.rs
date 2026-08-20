@@ -25,7 +25,10 @@ impl ContextRegistry {
                 },
                 ContextSource {
                     key: "identity_kernel".to_owned(),
-                    renderer: Box::new(|| "You are a local companion named Ene.".to_owned()),
+                    renderer: Box::new(|| {
+                        "You are a local desktop companion. Stay in character using the companion persona from context."
+                            .to_owned()
+                    }),
                 },
             ],
         }
@@ -76,4 +79,20 @@ pub fn format_recovery_note(reports: &[RecoveryReport]) -> Option<String> {
          Unclaimed inbox items were closed as abandoned_interrupt ({abandoned} item(s)). \
          Do not continue the interrupted work unless the user asks."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ContextRegistry;
+
+    #[test]
+    fn identity_kernel_does_not_hardcode_ene() {
+        let assembled = ContextRegistry::new().assemble();
+        let identity = assembled
+            .iter()
+            .find(|(key, _)| key == "identity_kernel")
+            .map_or("", |(_, text)| text.as_str());
+        assert!(!identity.contains("Ene"));
+        assert!(identity.contains("companion"));
+    }
 }

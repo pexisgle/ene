@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use egui::ViewportId;
 use egui_wgpu::{Renderer, RendererOptions, ScreenDescriptor};
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
@@ -46,6 +46,12 @@ pub struct ChromeWindow {
 }
 
 impl ChromeWindow {
+    pub fn raise(&self) {
+        self.window
+            .set_window_level(winit::window::WindowLevel::AlwaysOnTop);
+        self.window.focus_window();
+    }
+
     pub fn create(
         event_loop: &ActiveEventLoop,
         gpu: &GpuContext,
@@ -58,18 +64,22 @@ impl ChromeWindow {
             .with_inner_size(inner)
             .with_decorations(decorations)
             .with_transparent(kind == ChromeKind::Caption || kind == ChromeKind::Spotlight)
-            .with_window_level(
-                if kind == ChromeKind::Caption || kind == ChromeKind::Spotlight {
-                    winit::window::WindowLevel::AlwaysOnTop
-                } else {
-                    winit::window::WindowLevel::Normal
-                },
-            );
+            .with_window_level(winit::window::WindowLevel::AlwaysOnTop);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
                 .map_err(|err| GpuError::Surface(err.to_string()))?,
         );
+        if kind == ChromeKind::Caption
+            && let Some(monitor) = window.current_monitor()
+        {
+            let screen = monitor.size();
+            let x = screen.width.saturating_sub(inner.width) / 2;
+            let y = screen
+                .height
+                .saturating_sub(inner.height.saturating_add(96));
+            window.set_outer_position(PhysicalPosition::new(x, y));
+        }
         let surface = gpu.create_surface(Arc::clone(&window))?;
         let format = gpu.surface_format(&surface);
         let alpha = gpu::pick_alpha_mode(&surface, &gpu.adapter);

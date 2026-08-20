@@ -62,7 +62,8 @@ source = "persona.md"
     );
     files.insert(
         "soul/persona.md".to_owned(),
-        b"You are Alicia, a warm companion. Speak naturally.\n".to_vec(),
+        b"You are Alicia, a desktop companion. Keep responses relatively short and sweet, suitable for displaying on a screen overlay.\n"
+            .to_vec(),
     );
     files.insert(
         "body/body.toml".to_owned(),
@@ -135,6 +136,7 @@ pub fn motions_dir_for_package(package_path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn pack_alicia_from_missing_dir_errors() {
@@ -160,6 +162,13 @@ mod tests {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         assert!(zip.by_name("manifest.toml").is_ok());
         assert!(zip.by_name("soul/soul.toml").is_ok());
+        let mut persona = String::new();
+        zip.by_name("soul/persona.md")
+            .unwrap()
+            .read_to_string(&mut persona)
+            .unwrap();
+        assert!(persona.contains("You are Alicia, a desktop companion"));
+        assert!(!persona.contains("Ene"));
         assert!(zip.by_name("body/body.toml").is_ok());
         assert!(zip.by_name("body/avatar/model.vrm").is_ok());
         assert!(zip.by_name("body/motions/VRMA_01.vrma").is_ok());

@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const HOST_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_SCREENSHOT_BYTES: usize = 512 * 1024;
 
 pub(super) fn specs() -> Vec<ToolSpecWire> {
     vec![
@@ -84,17 +86,50 @@ fn screenshot() -> Result<Value, String> {
 }
 
 fn capture_png() -> Result<Vec<u8>, String> {
-    if let Ok(bytes) = stdout_bytes("grim", &["-"])
-        && looks_like_png(&bytes)
-    {
+    let candidates: &[&[&str]] = &[
+        &["grim", "-s", "0.5", "-"],
+        &["grim", "-"],
+        &["import", "-window", "root", "-resize", "50%", "png:-"],
+        &["import", "-window", "root", "png:-"],
+    ];
+    let mut last_err = "no screenshot backend (need grim or ImageMagick import)".to_owned();
+    for args in candidates {
+        match stdout_bytes_timeout(args[0], &args[1..], SCREENSHOT_TIMEOUT) {
+            Ok(bytes) if looks_like_png(&bytes) => {
+                return cap_png(bytes);
+            }
+            Ok(_) => last_err = format!("{} produced a non-PNG screenshot", args[0]),
+            Err(err) => last_err = err,
+        }
+    }
+    Err(last_err)
+}
+
+fn cap_png(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if bytes.len() <= MAX_SCREENSHOT_BYTES {
         return Ok(bytes);
     }
-    if let Ok(bytes) = stdout_bytes("import", &["-window", "root", "png:-"])
-        && looks_like_png(&bytes)
+    if let Ok(shrunk) = pipe_bytes(
+        "convert",
+        &["png:-", "-resize", "50%", "png:-"],
+        &bytes,
+        SCREENSHOT_TIMEOUT,
+    ) && looks_like_png(&shrunk)
+        && shrunk.len() <= MAX_SCREENSHOT_BYTES
     {
-        return Ok(bytes);
+        return Ok(shrunk);
     }
-    Err("no screenshot backend (need grim or ImageMagick import)".to_owned())
+    if let Ok(shrunk) = pipe_bytes(
+        "convert",
+        &["png:-", "-resize", "25%", "png:-"],
+        &bytes,
+        SCREENSHOT_TIMEOUT,
+    ) && looks_like_png(&shrunk)
+        && shrunk.len() <= MAX_SCREENSHOT_BYTES
+    {
+        return Ok(shrunk);
+    }
+    Err("screenshot exceeded size cap after shrink".to_owned())
 }
 
 fn looks_like_png(bytes: &[u8]) -> bool {
@@ -175,11 +210,11 @@ fn key(combo: &str) -> Result<Value, String> {
 }
 
 fn stdout_text(bin: &str, args: &[&str]) -> Result<String, String> {
-    let bytes = stdout_bytes(bin, args)?;
+    let bytes = stdout_bytes_timeout(bin, args, HOST_COMMAND_TIMEOUT)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn stdout_bytes(bin: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+fn stdout_bytes_timeout(bin: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8>, String> {
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
@@ -195,7 +230,40 @@ fn stdout_bytes(bin: &str, args: &[&str]) -> Result<Vec<u8>, String> {
         let mut buf = Vec::new();
         stdout.read_to_end(&mut buf).map(|_| buf)
     });
-    let waited = wait_child(&mut child, bin);
+    let waited = wait_child(&mut child, bin, timeout);
+    let buf = reader
+        .join()
+        .map_err(|_| format!("{bin} stdout reader panicked"))?
+        .map_err(|err| err.to_string())?;
+    waited?;
+    Ok(buf)
+}
+
+fn pipe_bytes(
+    bin: &str,
+    args: &[&str],
+    input: &[u8],
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input).map_err(|err| err.to_string())?;
+    }
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{bin} has no stdout"))?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).map(|_| buf)
+    });
+    let waited = wait_child(&mut child, bin, timeout);
     let buf = reader
         .join()
         .map_err(|_| format!("{bin} stdout reader panicked"))?
@@ -217,7 +285,7 @@ fn stdin_text(bin: &str, args: &[&str], text: &str) -> Result<(), String> {
             .write_all(text.as_bytes())
             .map_err(|err| err.to_string())?;
     }
-    wait_child(&mut child, bin)
+    wait_child(&mut child, bin, HOST_COMMAND_TIMEOUT)
 }
 
 fn run(bin: &str, args: &[&str]) -> Result<(), String> {
@@ -228,11 +296,11 @@ fn run(bin: &str, args: &[&str]) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|err| err.to_string())?;
-    wait_child(&mut child, bin)
+    wait_child(&mut child, bin, HOST_COMMAND_TIMEOUT)
 }
 
-fn wait_child(child: &mut std::process::Child, bin: &str) -> Result<(), String> {
-    let deadline = Instant::now() + HOST_COMMAND_TIMEOUT;
+fn wait_child(child: &mut std::process::Child, bin: &str, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),

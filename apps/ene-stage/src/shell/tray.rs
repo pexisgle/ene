@@ -103,7 +103,7 @@ fn build_menu() -> Result<Menu, TrayError> {
 }
 
 fn build_icon() -> Result<Icon, TrayError> {
-    let size = 16u32;
+    let size = 32u32;
     let mut rgba = vec![0_u8; (size * size * 4) as usize];
     for y in 0..size {
         for x in 0..size {

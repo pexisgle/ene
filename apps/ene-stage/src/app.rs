@@ -257,12 +257,26 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::ApplyCoreSettings(result) => {
-                self.detail.core_status = match result {
-                    Ok(()) => i18n::fl("settings-applied"),
-                    Err(err) => err,
-                };
-            }
+            AsyncOutcome::ApplyCoreSettings(result) => match result {
+                Ok(()) => {
+                    self.detail.core_status = i18n::fl("settings-applied");
+                    self.detail.invalidate_settings();
+                    let client = Arc::clone(&self.client);
+                    self.spawn(async move {
+                        AsyncOutcome::LoadCoreSettings(
+                            client
+                                .settings()
+                                .await
+                                .map(|v| {
+                                    serde_json::to_string_pretty(&v)
+                                        .unwrap_or_else(|_| v.to_string())
+                                })
+                                .map_err(|e| e.to_string()),
+                        )
+                    });
+                }
+                Err(err) => self.detail.core_status = err,
+            },
             AsyncOutcome::ListMemories(result) => match result {
                 Ok(items) => self.detail.memories = items,
                 Err(err) => self.detail.core_status = err,
@@ -411,12 +425,13 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::Backup(result) => {
-                self.detail.core_status = match result {
-                    Ok(path) => format!("{}: {path}", i18n::fl("system-backup")),
-                    Err(err) => err,
-                };
-            }
+            AsyncOutcome::Backup(result) => match result {
+                Ok((id, path)) => {
+                    self.detail.restore_id.clone_from(&id);
+                    self.detail.core_status = format!("{}: {path}", i18n::fl("system-backup"));
+                }
+                Err(err) => self.detail.core_status = err,
+            },
             AsyncOutcome::Restore(result) => {
                 self.detail.core_status = match result {
                     Ok(()) => i18n::fl("system-restore-done"),
@@ -445,6 +460,30 @@ impl StageApp {
                 }
             }
             AsyncOutcome::ReloadAvatar => self.reload_avatar(),
+            AsyncOutcome::ExportCharacter(result) => {
+                self.detail.core_status = match result {
+                    Ok(()) => i18n::fl("character-exported"),
+                    Err(err) => err,
+                };
+            }
+            AsyncOutcome::ForkSession(result) => {
+                self.detail.core_status = match result {
+                    Ok(id) => format!("{}: {id}", i18n::fl("jobs-forked")),
+                    Err(err) => err,
+                };
+            }
+            AsyncOutcome::CompactSession(result) => {
+                self.detail.core_status = match result {
+                    Ok(id) => format!("{}: {id}", i18n::fl("jobs-compacted")),
+                    Err(err) => err,
+                };
+            }
+            AsyncOutcome::ExportSession(result) => {
+                self.detail.core_status = match result {
+                    Ok(()) => i18n::fl("jobs-exported"),
+                    Err(err) => err,
+                };
+            }
         }
     }
 
@@ -569,6 +608,19 @@ impl StageApp {
         if text.is_empty() {
             return;
         }
+        if self.detail.chat_plugin.is_empty() || self.detail.chat_plugin == "echo" {
+            self.surface.status = i18n::fl("chat-unconfigured");
+            return;
+        }
+        if !self.surface.turn_active
+            && matches!(
+                self.surface.message_mode,
+                MessageMode::FollowUp | MessageMode::Steer
+            )
+        {
+            self.surface.status = i18n::fl("chat-no-active-turn");
+            return;
+        }
         let session = self.session.clone_handle();
         let mode = self.surface.message_mode;
         self.spawn(async move {
@@ -577,7 +629,7 @@ impl StageApp {
                     .send(&text, mode)
                     .await
                     .map(|_| ())
-                    .map_err(|err| err.to_string()),
+                    .map_err(|err| map_turn_err(err.to_string())),
             )
         });
     }
@@ -604,6 +656,10 @@ impl StageApp {
     }
 
     fn barge_in(&mut self) {
+        if !self.surface.turn_active {
+            self.surface.status = i18n::fl("chat-no-active-turn");
+            return;
+        }
         let session = self.session.clone_handle();
         self.spawn(async move {
             AsyncOutcome::BargeIn(
@@ -611,12 +667,16 @@ impl StageApp {
                     .barge_in()
                     .await
                     .map(|_| ())
-                    .map_err(|e| e.to_string()),
+                    .map_err(|e| map_turn_err(e.to_string())),
             )
         });
     }
 
     fn cancel_turn(&mut self) {
+        if !self.surface.turn_active {
+            self.surface.status = i18n::fl("chat-no-active-turn");
+            return;
+        }
         let session = self.session.clone_handle();
         self.spawn(async move {
             AsyncOutcome::CancelTurn(
@@ -624,7 +684,7 @@ impl StageApp {
                     .cancel_turn()
                     .await
                     .map(|_| ())
-                    .map_err(|e| e.to_string()),
+                    .map_err(|e| map_turn_err(e.to_string())),
             )
         });
     }
@@ -650,11 +710,46 @@ impl StageApp {
         let settings = self.local_settings.clone();
         self.settings = settings.clone();
         i18n::select_language(&settings.language);
+        if let Some(overlay) = self.overlay.as_mut()
+            && overlay.transparent
+        {
+            overlay.set_click_through(settings.overlay_click_through);
+        }
         self.spawn(async move {
             AsyncOutcome::SaveLocalSettings(
                 save_desktop_settings(&settings).map_err(|err| err.to_string()),
             )
         });
+    }
+
+    fn toggle_overlay_chrome(&mut self) {
+        let preferred = self.local_settings.overlay_click_through;
+        let size = {
+            let Some(overlay) = self.overlay.as_mut() else {
+                return;
+            };
+            overlay.toggle_chrome();
+            overlay.apply_click_through(preferred);
+            overlay.window.inner_size()
+        };
+        let gpu = self.gpu.as_ref();
+        if let (Some(gpu), Some(overlay)) = (gpu, self.overlay.as_mut()) {
+            overlay.resize(gpu, size);
+        }
+    }
+
+    fn raise_chrome(&self) {
+        for win in [
+            self.chat.as_ref(),
+            self.detail_win.as_ref(),
+            self.caption.as_ref(),
+            self.spotlight.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            win.raise();
+        }
     }
 
     fn poll_shell(&mut self, event_loop: &ActiveEventLoop) {
@@ -687,7 +782,7 @@ impl StageApp {
                 TrayAction::Quit => self.surface.quit = true,
             }
         }
-        if let Some(hotkeys) = self.hotkeys.as_ref()
+        if let Some(hotkeys) = self.hotkeys.as_mut()
             && let Some(action) = hotkeys.poll()
         {
             match action {
@@ -752,6 +847,7 @@ impl StageApp {
                 }
                 LiveEvent::SessionEvent { kind, text } => {
                     if kind == "turn/end" || kind.ends_with("/end") {
+                        self.session.clear_turn();
                         self.request_history_refresh();
                         self.surface.streaming_text.clear();
                     }
@@ -880,7 +976,7 @@ impl StageApp {
                         0.0,
                     ];
                 }
-                self.surface.status = format!("{} ({})", i18n::fl("status-ready"), path.display());
+                self.surface.status = i18n::fl("status-ready");
                 tracing::info!(path = %path.display(), "loaded overlay VRM");
             }
             Err(err) => {
@@ -965,7 +1061,7 @@ impl StageApp {
             event_loop,
             gpu,
             ChromeKind::Caption,
-            PhysicalSize::new(640, 120),
+            PhysicalSize::new(720, 160),
             false,
         ) {
             Ok(win) => self.caption = Some(win),
@@ -996,9 +1092,8 @@ impl StageApp {
         match key {
             Key::Named(NamedKey::Escape) => self.surface.quit = true,
             Key::Named(NamedKey::Space) => {
-                if let Some(overlay) = self.overlay.as_mut() {
-                    overlay.toggle_chrome();
-                }
+                self.toggle_overlay_chrome();
+                self.raise_chrome();
             }
             Key::Named(NamedKey::F1) => self.open_detail(event_loop, DetailTab::Companion),
             Key::Named(NamedKey::F2) => {
@@ -1118,6 +1213,7 @@ impl StageApp {
             let rt = self.rt_handle.clone();
             let results = Arc::clone(&self.async_results);
             let soul_id = self.session.soul_id().to_owned();
+            self.session.session_id().clone_into(&mut detail.session_id);
             let paint = detail_win.paint(gpu, |ui| {
                 ui.ctx().set_visuals(theme_visuals(&local.theme));
                 detail::show(
@@ -1208,7 +1304,7 @@ impl ApplicationHandler for StageApp {
         };
         match OverlayWindow::create(window, &gpu, self.settings.transparent_overlay) {
             Ok(mut overlay) => {
-                overlay.set_click_through(overlay.click_through);
+                overlay.apply_click_through(self.local_settings.overlay_click_through);
                 self.overlay = Some(overlay);
             }
             Err(err) => {
@@ -1345,14 +1441,28 @@ impl ApplicationHandler for StageApp {
         self.poll_shell(event_loop);
         self.poll_audio();
         self.process_surface_actions(event_loop);
+        self.surface.turn_active = self.session.turn_id().is_some();
         if self.surface.history.messages.is_empty() {
             self.surface.history = self.session.history();
         }
         self.tick_overlay();
         self.paint_chrome(event_loop);
+        if self.detail.open_spotlight {
+            self.detail.open_spotlight = false;
+            self.surface.spotlight_open = true;
+            self.ensure_spotlight(event_loop);
+        }
         if self.surface.quit {
             event_loop.exit();
         }
+    }
+}
+
+fn map_turn_err(err: String) -> String {
+    if err.contains("no_active_operation") || err.contains("no active turn") {
+        i18n::fl("chat-no-active-turn")
+    } else {
+        err
     }
 }
 
