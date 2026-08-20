@@ -103,16 +103,55 @@ impl DetailTab {
 
     #[must_use]
     pub fn matches_search(self, query: &str) -> bool {
+        self.search_rank(query).is_some()
+    }
+
+    /// Lower is a better match. `None` means the tab should be hidden.
+    #[must_use]
+    pub fn search_rank(self, query: &str) -> Option<u8> {
         if query.is_empty() {
-            return true;
+            return Some(0);
         }
         let q = query.to_ascii_lowercase();
-        self.label().to_ascii_lowercase().contains(&q)
-            || self
-                .keywords()
-                .iter()
-                .any(|word| word.contains(&q) || q.contains(*word))
+        let label = self.label().to_ascii_lowercase();
+        if label.starts_with(&q) {
+            return Some(1);
+        }
+        if label.contains(&q) {
+            return Some(2);
+        }
+        if self
+            .keywords()
+            .iter()
+            .any(|word| *word == q || word.starts_with(&q))
+        {
+            return Some(3);
+        }
+        if self
+            .keywords()
+            .iter()
+            .any(|word| word.contains(&q) || q.contains(*word))
+        {
+            return Some(4);
+        }
+        None
     }
+}
+
+fn best_search_tab(query: &str) -> Option<DetailTab> {
+    DetailTab::ALL
+        .into_iter()
+        .filter_map(|tab| tab.search_rank(query).map(|rank| (rank, tab)))
+        .min_by_key(|(rank, tab)| {
+            (
+                *rank,
+                DetailTab::ALL
+                    .iter()
+                    .position(|item| *item == *tab)
+                    .unwrap_or(DetailTab::ALL.len()),
+            )
+        })
+        .map(|(_, tab)| tab)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,14 +339,11 @@ pub fn list_models_status(models: &[String], error: Option<&str>) -> String {
 }
 
 pub fn sync_search_tab(state: &mut DetailUiState) {
-    if state.search.is_empty() || state.tab.matches_search(&state.search) {
+    if state.search.is_empty() {
         return;
     }
-    if let Some(tab) = DetailTab::ALL
-        .into_iter()
-        .find(|tab| tab.matches_search(&state.search))
-    {
-        state.tab = tab;
+    if let Some(best) = best_search_tab(&state.search) {
+        state.tab = best;
     }
 }
 
@@ -1589,6 +1625,18 @@ mod tests {
         sync_search_tab(&mut state);
         assert_eq!(state.tab, DetailTab::Voice);
         assert!(!DetailTab::Home.matches_search("vo"));
+        assert!(
+            DetailTab::Voice
+                .search_rank("vo")
+                .is_some_and(|rank| rank < 4)
+        );
+        let mut from_conversation = DetailUiState {
+            tab: DetailTab::Conversation,
+            search: "vo".to_owned(),
+            ..DetailUiState::default()
+        };
+        sync_search_tab(&mut from_conversation);
+        assert_eq!(from_conversation.tab, DetailTab::Voice);
     }
 
     #[test]
