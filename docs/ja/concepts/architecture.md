@@ -40,5 +40,5 @@ stage のキャラクターとチャットは surface、別窓の詳細画面は
 |---|---|
 | クレート地図と依存規則 | [クレートリファレンス](../reference/crates.md) |
 | プラグイン IPC | `ene-plugin-ipc` の rustdoc |
-| キャラクターカード | [キャラクターカード](character-cards.md) |
+| キャラクターパッケージ | [キャラクターパッケージ](character-cards.md) |
 | 設計決定 | [`plans/harness-redesign/decisions.md`](../../plans/harness-redesign/decisions.md) |

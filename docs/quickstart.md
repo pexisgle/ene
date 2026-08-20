@@ -80,3 +80,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Always pass `--workspace` or `-p <package>`: default-members is `ene-ctl` only.
+
+The repository `assets/settings.json` is a development sample. `ene-core`
+reads `settings.json` from the data directory (defaults apply when a key is
+omitted).

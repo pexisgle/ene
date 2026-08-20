@@ -2,10 +2,9 @@
 
 ## Role
 
-Centralized configuration, schema generation, and path resolution. Every
-crate's settings sections are *defined* here via macros but *owned* by the
-defining crate. Character card containers live in
-[`ene-card`](ene-card.md).
+Centralized configuration, schema generation, and path resolution. Settings
+sections are *declared* here via macros and *owned* by the defining crate.
+Character packages live in [`ene-card`](ene-card.md) / `ene-companion`.
 
 ## Public modules
 
@@ -23,25 +22,21 @@ defining crate. Character card containers live in
 
 | Macro | Purpose |
 |---|---|
-| `define_config!` | Declares a settings section struct, its JSON schema, and its registration (settings / character / nested variants) |
+| `define_config!` | Declares a settings section struct (`core`, `harness`, `mind`, `body`, `voice`, `store`, `approval`, `characters`, …), its JSON schema, and its registration (settings / character / nested variants) |
 | `define_label_enum!` | Declares a labeled enum with a consistent `label()` API |
+
+Plugin profile rows are fiber state (`ene-fiber`), not a `define_config!`
+section.
 
 ## Dependencies
 
 - Depends on: nothing internal.
-- Used by: every crate and app (config sections live in the owning crate,
-  e.g. `ene-session`, `ene-kernel`, `ene-companion`, `ene-plane`).
+- Used by: every crate and app (sections live in the owning crate).
 
 ## Refactoring notes
 
-- **Adding a setting** = a new `define_config!` in the *owning* crate; the
-  schema registry picks it up automatically at startup.
-- **Removing/renaming a setting** = a settings migration in
-  `ene-config::migration` (bump `CURRENT_CONFIG_VERSION`) plus doc updates.
-- `EneConfig` keeps unknown top-level keys on save (round-trip safety) —
-  preserve that behaviour when restructuring the config surface.
-- The generated JSON Schemas under `assets/schema/` are build artifacts
-  (gitignored); never hand-edit them.
-- `UserPersona` is a settings-level type (`EneConfig.user_persona`), not a
-  card container type; it stays here while the CBS macro machinery that
-  consumes it lives in `ene-card`.
+- **Adding a setting** = a new `define_config!` in the *owning* crate.
+- **Removing/renaming a setting** = a migration in `ene-config::migration`
+  (bump `CURRENT_CONFIG_VERSION`) plus doc updates.
+- `EneConfig` keeps unknown top-level keys on save.
+- Generated JSON Schemas under `assets/schema/` are gitignored.

@@ -3,16 +3,12 @@
 Ene loads settings as defaults → JSON → `ENE_` environment variables.
 `__` separates nested keys (for example `ENE_CORE__SERVER__BIND`).
 
-Add keys at the owning `define_config!` invocation (`ene-session`,
-`ene-kernel`, `ene-companion`, `ene-body`, `ene-plane`, and others). Schemas
-are regenerated at config init into `assets/schema/` (gitignored — do not
-commit that directory).
-
 The daemon reads `settings.json` from the data directory, then overlays
-`ENE_CORE__SERVER__*` and related env keys at boot. `ene-ctl` and `ene-stage`
-take `--url` / `--token` (or `ENE_API_URL` / `ENE_API_TOKEN`) to reach an
-already-running core. When those env vars are unset, `ene-stage` spawns
-`ene-core`.
+`ENE_CORE__SERVER__*` and related env keys at boot. The repository file
+`assets/settings.json` is a development sample, not the runtime file.
+`ene-ctl` and `ene-stage` take `--url` / `--token` (or `ENE_API_URL` /
+`ENE_API_TOKEN`) to reach an already-running core. When those env vars are
+unset, `ene-stage` spawns `ene-core`.
 
 The data directory is `ENE_DATA_DIR` when set. Otherwise debug builds use the
 source-tree `assets/` folder for settings, databases, vault, and workspace,
@@ -21,6 +17,20 @@ directory and never read the repository `assets/` folder. Stage Apply and
 core PATCH write the same `settings.json`. `GET /api/v1/settings` returns live
 memory as `effective`; the on-disk file is `overlay` and does not replace live
 AI, mind, or plugin bindings. API keys stay in the vault.
+
+Add keys at the owning `define_config!` invocation. Schemas regenerate into
+`assets/schema/` (gitignored — do not commit that directory).
+
+| Section | Owner | Typical keys |
+|---|---|---|
+| `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
+| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*` |
+| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` |
+| `characters` | `ene-companion` | `home_dir`, `import_v3` |
+| `body` | `ene-body` | `render.*`, `autonomy.*` |
+| `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
+| `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs` |
+| `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
 Conversation, classifier, embedding, TTS, and STT bind through `ai.tasks.<task>`
 (`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`). Chat
@@ -42,7 +52,7 @@ GGUF (recommended Jina on `provider.gguf`), or a cloud plugin that declares
 Empty TTS and STT tasks stay disabled.
 
 Plugin launch is `plugins.profile` (`desktop`, `minimal`, or `headless`), not a
-per-plugin enable map. Related keys:
+per-plugin enable map (`plugins.list` is gone). Related keys:
 
 | Key | Role |
 |---|---|

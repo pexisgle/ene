@@ -7,7 +7,7 @@ title = "Ene ドキュメント"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/pexisgle/Ene"
+git-repository-url = "https://github.com/pexisgle/ene"
 additional-js = ["mermaid.js", "katex.js"]
 
 [output.html.search]

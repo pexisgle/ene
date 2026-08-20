@@ -1,55 +1,39 @@
 # Character editor
 
-There is no in-process Settings form. Edit the card files, then let the
-daemon reload the character package.
+There is no in-process Settings form. Edit the package or V3 fixture, then
+let the daemon reload.
 
-## 1. The card file
+## 1. Motions and expressions
 
-The card is `character.json` (V3 spec + `extensions.ene`). See
-[Character cards](../concepts/character-cards.md) for the field reference.
-
-Useful edits:
-
-- **Add a motion** — put the `.vrma` file in the character folder, then
-  add a `motion_catalog` entry referencing it:
+Canonical packages use soul/body files under
+`<data_dir>/characters/<id>@<version>/`. The V3 sample
+`assets/characters/Alicia/character.json` uses `extensions.ene`:
 
 ```json
 {
   "extensions": {
     "ene": {
       "motion_catalog": {
-        "entries": [
-          { "name": "wave", "file": "wave.vrma", "layer": "overlay" }
+        "motions": [
+          { "name": "wave", "path": "motions/wave.vrma" }
         ]
-      }
-    }
-  }
-}
-```
-
-- **Add an expression** — define a blend-shape expression with a target
-  name from the VRM model:
-
-```json
-{
-  "extensions": {
-    "ene": {
+      },
       "expressions": [
-        { "name": "smile", "target": "happy", "weight": 0.8 }
+        { "name": "smile", "vrm": { "happy": 0.8 }, "enabled": true }
       ]
     }
   }
 }
 ```
 
-- **Localize the card** — add `character.ja.json` (or
-  `character.en.json`) next to the card with only the translated fields.
+Put `.vrma` files next to the card and reference them with `path`.
+`vrm` maps blend-shape names on the model. Localize with
+`character.ja.json` beside the card.
 
 ## 2. Per-character presentation
 
-`character_settings.json` next to the card can store stage presentation
-(position, scale, look-at, default motion / expression, language). Stage
-reads that file; `ene-core` does not own a second copy.
+`character_settings.json` can store stage placement (position, scale,
+look-at, default motion / expression, language). Stage reads that file.
 
 ```json
 {
@@ -62,16 +46,15 @@ reads that file; `ene-core` does not own a second copy.
 }
 ```
 
-`default_motion` must match `extensions.ene.motion_catalog`;
-`default_expression` must match `extensions.ene.expressions` (or a VRM
-built-in such as `neutral`).
+`default_motion` must match `motion_catalog.motions`; `default_expression`
+must match `expressions` (or a VRM built-in such as `neutral`).
 
-## 3. Import a card from elsewhere
+## 3. Import
 
-`ene-card` loads PNG (ccv3/chara chunks) and CHARX (zip). Import never
-overwrites an existing character folder. There is no `ene-ctl import`
-command yet — place a folder under `assets/characters/<name>/` or call
-`ene_card` from a host.
+`ene-card` / `POST /api/v1/characters/import` load PNG (ccv3/chara) and
+CHARX. Import writes a package under the data directory and never
+overwrites an existing install. The Alicia folder is a V3 fixture for
+local editing, not the install path.
 
 `character.schema.json` in `assets/schema/` (regenerated at config init)
 validates card JSON in editors.

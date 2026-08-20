@@ -50,5 +50,5 @@ A **session** is a contiguous conversation with one soul, identified by a
 `SessionId`. `ene-ctl` can list, show, create, fork, export, compact, search,
 split, and end sessions against the HTTP API.
 
-Idle end and topic-boundary split are server-side. Compaction writes a
-summary into the log so later turns stay in budget.
+Idle end and explicit split are server-side. Compaction writes a summary
+into the log so later turns stay in budget.

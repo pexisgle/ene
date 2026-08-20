@@ -22,8 +22,8 @@ Ene は Rust で書かれた **ローカル AI コンパニオン型ハーネス
 |---|---|
 | [クイックスタート](quickstart.md) | `ene-ctl` / `ene-stage` のビルドと起動 |
 | [設定](configuration.md) | `settings.json`、環境変数、ファイル位置 |
-| [コンセプト](concepts/architecture.md) | プロセスモデル、カード、記憶、プラグイン |
-| [アプリ](apps/cli.md) | CLI と desktop のユーザーガイド |
+| [コンセプト](concepts/architecture.md) | プロセスモデル、パッケージ、記憶、プラグイン |
+| [アプリ](apps/cli.md) | CLI と stage のユーザーガイド |
 | [ガイド](guides/character-editor.md) | 作業別の手順 |
 | [リファレンス](reference/crates.md) | クレート地図と描画 API |
 

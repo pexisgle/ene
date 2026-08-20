@@ -1,55 +1,38 @@
 # キャラクターエディタ
 
-プロセス内の設定フォームはありません。カードファイルを編集し、デーモンに
-キャラクターパッケージを再読込させます。
+プロセス内の設定フォームはありません。パッケージまたは V3 フィクスチャを
+編集し、デーモンに再読込させます。
 
-## 1. カードファイル
+## 1. モーションと表情
 
-カードは `character.json`（V3 規格 + `extensions.ene`）です。フィールドは
-[キャラクターカード](../concepts/character-cards.md) を参照してください。
-
-よく使う編集:
-
-- **モーションを追加** — `.vrma` をキャラクターフォルダに置き、それを参照
-  する `motion_catalog` エントリを追加します:
+正規パッケージは `<data_dir>/characters/<id>@<version>/` に置きます。
+V3 サンプル `assets/characters/Alicia/character.json` は `extensions.ene`
+を使います:
 
 ```json
 {
   "extensions": {
     "ene": {
       "motion_catalog": {
-        "entries": [
-          { "name": "wave", "file": "wave.vrma", "layer": "overlay" }
+        "motions": [
+          { "name": "wave", "path": "motions/wave.vrma" }
         ]
-      }
-    }
-  }
-}
-```
-
-- **表情を追加** — VRM モデルのターゲット名でブレンドシェイプ表情を定義
-  します:
-
-```json
-{
-  "extensions": {
-    "ene": {
+      },
       "expressions": [
-        { "name": "smile", "target": "happy", "weight": 0.8 }
+        { "name": "smile", "vrm": { "happy": 0.8 }, "enabled": true }
       ]
     }
   }
 }
 ```
 
-- **カードをローカライズ** — 翻訳したフィールドだけを含む
-  `character.ja.json`（または `character.en.json`）をカードの隣に置きます。
+`.vrma` はカードの隣に置き、`path` で参照します。`vrm` はモデル上の
+ブレンドシェイプ名です。翻訳は `character.ja.json` を隣に置きます。
 
 ## 2. キャラクターごとの表示
 
-カードの隣の `character_settings.json` に stage の表示（位置、スケール、
-視線、デフォルトモーション / 表情、言語）を置けます。読むのは stage です。
-`ene-core` は第二のコピーを持ちません。
+`character_settings.json` に stage の配置（位置、スケール、視線、既定
+モーション / 表情、言語）を置けます。読むのは stage です。
 
 ```json
 {
@@ -62,16 +45,15 @@
 }
 ```
 
-`default_motion` は `extensions.ene.motion_catalog` と、
-`default_expression` は `extensions.ene.expressions`（または VRM 組み込みの
-`neutral` など）と一致する必要があります。
+`default_motion` は `motion_catalog.motions` と、`default_expression` は
+`expressions`（または VRM 組み込みの `neutral` など）と一致する必要があります。
 
-## 3. 他からカードを取り込む
+## 3. インポート
 
-`ene-card` は PNG（ccv3/chara チャンク）と CHARX（zip）を読みます。
-インポートは既存フォルダを上書きしません。`ene-ctl import` はまだありません。
-`assets/characters/<name>/` にフォルダを置くか、ホストから `ene_card` を
-呼んでください。
+`ene-card` / `POST /api/v1/characters/import` は PNG（ccv3/chara）と CHARX
+を読みます。インポート先はデータディレクトリで、既存インストールは
+上書きしません。Alicia フォルダはローカル編集用の V3 フィクスチャであり、
+インストール先ではありません。
 
 `assets/schema/` の `character.schema.json`（設定初期化時に再生成）で
 エディタのカード JSON を検証できます。

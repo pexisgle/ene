@@ -285,13 +285,10 @@ impl SummarizerPrompts {
     }
 }
 
-/// Prompt templates for session split reasons.
+/// Prompt templates for session end reasons (idle timeout or explicit split).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SplitPrompts {
     pub reason_timeout: String,
-    pub reason_topic: String,
-    pub reason_context: String,
-    pub reason_composite: String,
     pub reason_manual: String,
 }
 
@@ -640,14 +637,6 @@ impl ProactivePrompts {
 impl SplitPrompts {
     pub fn render_reason_timeout(&self, minutes: &str) -> String {
         substitute(&self.reason_timeout, &[("minutes", minutes)])
-    }
-
-    pub fn render_reason_topic(&self, similarity: &str) -> String {
-        substitute(&self.reason_topic, &[("similarity", similarity)])
-    }
-
-    pub fn render_reason_composite(&self, score: &str) -> String {
-        substitute(&self.reason_composite, &[("score", score)])
     }
 }
 
@@ -1367,10 +1356,12 @@ mod tests {
         }
 
         for lang in SUPPORTED_LANGUAGES {
-            let asset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../assets/lang")
-                .join(lang)
-                .join("prompts.json");
+            let assets_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+            if std::env::var("ENE_DUMP_PROMPT_PACKS").as_deref() == Ok("1") {
+                write_pack(&assets_root, lang);
+                continue;
+            }
+            let asset_path = assets_root.join("lang").join(lang).join("prompts.json");
             let asset_json = std::fs::read_to_string(&asset_path)
                 .expect("shipped runtime pack must exist and be readable");
             let mut asset: serde_json::Value =

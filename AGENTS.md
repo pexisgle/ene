@@ -140,8 +140,9 @@ User-facing docs are bilingual: every change under `docs/` needs the matching fi
 ## Configuration
 
 Precedence is defaults → JSON → `ENE_` env vars, with `__` separating nested keys
-(e.g. `ENE_CORE__SERVER__BIND`). Add settings at the owning `define_config!` invocation,
-which often lives outside `ene-config` (`ene-session`, `ene-kernel`, `ene-companion`,
+(e.g. `ENE_CORE__SERVER__BIND`). Public sections: `core.*`, `harness.*`, `mind.*`,
+`characters.*`, `body.*`, `voice.*`, `store.*`, `approval.*`. Add settings at the
+owning `define_config!` invocation (`ene-session`, `ene-kernel`, `ene-companion`,
 `ene-body`, `ene-plane`). Schemas regenerate automatically at config init —
 `assets/schema/*` is gitignored; never hand-edit or commit it.
 
@@ -192,8 +193,8 @@ MessagePack frames). `id` is required on every request/response. Prefer adding
 - `cargo-husky` installs a pre-commit hook that runs `cargo fmt --all` (whole tree, not just
   staged files) and re-stages formatted files. Inspect the resulting diff. Never use
   `--no-verify` to get past a failing check.
-- Never commit or log secrets, `.env`, `memory.db*`, `undo.db*`, `todo.db*`, model weights,
-  or anything under `assets/models/`.
+- Never commit or log secrets, `.env`, `sessions.db*`, `companions.db*`,
+  `audit.db*`, `vault.bin`, model weights, or anything under `assets/models/`.
 - Report the failing package and root cause rather than relaxing a lint. Don't claim a check
   passed that you didn't run.
 

@@ -79,3 +79,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 必ず `--workspace` か `-p <package>` を付けてください。default-members は
 `ene-ctl` だけです。
+
+リポジトリの `assets/settings.json` は開発用サンプルです。`ene-core` が読む
+のはデータディレクトリの `settings.json` で、省略したキーは既定値になります。

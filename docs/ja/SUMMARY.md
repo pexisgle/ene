@@ -7,7 +7,7 @@
 # コンセプト
 
 - [アーキテクチャ](concepts/architecture.md)
-- [キャラクターカード](concepts/character-cards.md)
+- [キャラクターパッケージ](concepts/character-cards.md)
 - [メモリ](concepts/memory.md)
 - [ターンとセッション](concepts/turns-and-sessions.md)
 - [プラグインと MCP](concepts/plugins-and-mcp.md)
