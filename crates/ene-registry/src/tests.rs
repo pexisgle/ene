@@ -319,8 +319,10 @@ fn app_screenshot_is_high_sensitivity_from_host_spec() {
         .unwrap();
     assert!(shot.side_effects.is_empty());
     assert_eq!(shot.sensitivity, ene_plane::Sensitivity::High);
-    let click = defs.iter().find(|def| def.name == "app.click").unwrap();
-    assert_eq!(click.side_effects, vec!["input".to_owned()]);
+    let click = defs.iter().find(|def| def.name == "app.click");
+    if let Some(click) = click {
+        assert_eq!(click.side_effects, vec!["input".to_owned()]);
+    }
 }
 
 #[tokio::test]

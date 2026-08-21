@@ -106,14 +106,14 @@ WebView は使いません。[PR #794](https://github.com/pexisgle/ene/pull/794)
 
 | 旧 action | 現行 | Status | 注記 |
 |---|---|---|---|
-| `screenshot` / `capture_window` | `app.screenshot` | Current / Missing | CLI 順送り（grim / ImageMagick / …）。portal 優先と capability 検出は [#800](https://github.com/pexisgle/ene/issues/800) |
-| `list_windows` | `app.window_list` | Current / Missing | wmctrl / hyprctl / sway。同じ capability 表は [#800](https://github.com/pexisgle/ene/issues/800) |
+| `screenshot` / `capture_window` | `app.screenshot` | Current | Wayland は portal 優先、CLI フォールバック、Windows は GDI。capture JSON に size/scale/permission。[App プラットフォーム表](../guides/tools/app-platform.md) |
+| `list_windows` | `app.window_list` | Current | wmctrl / hyprctl / sway。GNOME/KDE Wayland は `app.capabilities` で unsupported |
 | `get_active_window` | `app.active_window` | Current | 能動観測ソース（画面観測が有効なとき） |
-| `list_monitors` | — | Missing | capture の scale/size [#800](https://github.com/pexisgle/ene/issues/800) |
-| `clipboard_read` / `write` | `app.clipboard_get` / `app.clipboard_set` | Current / Missing | native 優先、CLI は明示フォールバック [#800](https://github.com/pexisgle/ene/issues/800) |
-| `mouse_click` / `type_text` / `press_key` / `key_combo` | `app.click` / `app.type` / `app.key` | Current | `side_effects: ["input"]`。表層スキーマには出ない |
-| `mouse_move` / `drag` / `scroll` / `focus_window` | — | Dropped / プラットフォーム限定 | 保証できない GNOME/KDE Wayland 入力は公開しない（[#800](https://github.com/pexisgle/ene/issues/800)） |
-| portal セッション寿命 | — | Missing | 許可待ち / 拒否 / 取消 / 非対応 [#800](https://github.com/pexisgle/ene/issues/800) |
+| `list_monitors` | `app.list_monitors` | Current | compositor がレイアウトを出すとき capture の scale/size と揃える |
+| `clipboard_read` / `write` | `app.clipboard_get` / `app.clipboard_set` | Current | native（`arboard`）優先。CLI フォールバックは payload で明示 |
+| `mouse_click` / `type_text` / `press_key` / `key_combo` | `app.click` / `app.type` / `app.key` | Current | X11/Windows のみ公開。`side_effects: ["input"]`。表層スキーマには出ない |
+| `mouse_move` / `drag` / `scroll` / `focus_window` | — | Dropped / プラットフォーム限定 | GNOME/KDE Wayland 入力は公開しない |
+| portal セッション寿命 | `app.screenshot` の `code` | Current | `waiting` / `denied` / `cancelled` / `unsupported` / `unavailable` |
 
 ### `utility` / `calc` / `random`（再分類、D-25）
 

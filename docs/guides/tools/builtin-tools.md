@@ -9,7 +9,7 @@ third-party tool. `ene-core` always applies these profile rows:
 | `fs` | `ene-tool-fs` | Read / write / edit / list / search / patch / undo in the workspace. No shell. Search is literal unless `regex` is set. `fs.undo` only reverts writes from the same job (`job_id` or `ENE_JOB_ID`). Unified diffs match hunk context, not only line numbers. |
 | `exec` | `ene-tool-exec` | Process execution by program name (separate from `fs`). Timeouts send SIGTERM, then SIGKILL, and return captured output when the process exits. |
 | `web` | `ene-tool-web` | HTTPS fetch (size-capped, SSRF blocked) and public search (DuckDuckGo answers, HTML fallback when the instant API is empty) |
-| `app` | `ene-tool-app` | Screenshot (grim, ImageMagick, gnome-screenshot, spectacle, scrot), windows (wmctrl / hyprctl / sway), clipboard, pointer/keyboard |
+| `app` | `ene-tool-app` | Screenshot (XDG portal on Wayland, CLI fallback, GDI on Windows), monitors, windows where the compositor allows, native clipboard, X11/Windows input only |
 
 `fs.write`, `fs.edit`, `exec`, and input-mutating `app.*` tools are not on the
 surface schema. The registry filters by empty `side_effects`, not by a name

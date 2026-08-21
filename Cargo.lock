@@ -2366,12 +2366,15 @@ dependencies = [
 name = "ene-registry"
 version = "0.1.0"
 dependencies = [
+ "arboard",
+ "ashpd 0.13.13",
  "async-trait",
  "base64 0.23.1",
  "blake3",
  "chrono",
  "ene-plane",
  "ene-plugin-ipc",
+ "image",
  "parking_lot",
  "regex",
  "reqwest",
@@ -2385,6 +2388,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2471,16 +2475,20 @@ dependencies = [
 name = "ene-tool-app"
 version = "0.1.0"
 dependencies = [
+ "arboard",
+ "ashpd 0.13.13",
  "base64 0.23.1",
  "ene-fiber",
  "ene-plane",
  "ene-plugin-ipc",
  "ene-registry",
+ "image",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

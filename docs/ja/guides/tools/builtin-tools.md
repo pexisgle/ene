@@ -9,7 +9,7 @@
 | `fs` | `ene-tool-fs` | ワークスペース内の read / write / edit / list / search / patch / undo。シェルは持たない。search は既定でリテラル、`regex` で正規表現。`fs.undo` は同じジョブ（`job_id` または `ENE_JOB_ID`）が書いたものだけ戻す。unified diff は行番号だけでなく hunk の文脈を照合する。 |
 | `exec` | `ene-tool-exec` | プログラム名でのプロセス実行（`fs` から分離）。タイムアウトは SIGTERM のあと SIGKILL。終了すればキャプチャした出力を返す。 |
 | `web` | `ene-tool-web` | HTTPS fetch（サイズ上限、SSRF 禁止）と公開検索（DuckDuckGo Instant Answer、空なら HTML フォールバック） |
-| `app` | `ene-tool-app` | スクリーンショット（grim、ImageMagick、gnome-screenshot、spectacle、scrot）、ウィンドウ（wmctrl / hyprctl / sway）、クリップボード、ポインタ / キーボード |
+| `app` | `ene-tool-app` | スクリーンショット（Wayland は XDG portal 優先、CLI フォールバック、Windows は GDI）、モニタ、compositor が許す範囲のウィンドウ、native clipboard、入力は X11/Windows のみ |
 
 `fs.write`、`fs.edit`、`exec`、入力を変える `app.*` は表層スキーマに出ません。
 レジストリは名前のホワイトリストではなく空の `side_effects` でフィルタします。

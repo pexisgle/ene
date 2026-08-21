@@ -80,6 +80,8 @@ directories = "6"
 hex = "0.4"
 sha2 = "0.11"
 rand = "0.10"
+arboard = "3.6"
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screenshot"] }
 rayon = "1.12"
 regex = "1"
 tempfile = "3"
