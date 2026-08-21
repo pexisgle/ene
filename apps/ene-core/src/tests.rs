@@ -318,3 +318,34 @@ async fn boot_reports_interrupted_job_without_resume() {
     let jobs = core.work().list_jobs(soul).unwrap();
     assert_eq!(jobs[0].status, ene_work::JobStatus::Interrupted);
 }
+
+#[tokio::test]
+async fn plugin_config_survives_daemon_restart() {
+    let dir = TempDir::new().unwrap();
+    {
+        let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap();
+        crate::plugin_profile::persist_applied_plugin_config(
+            core.data_dir(),
+            core.vault(),
+            "tool.fs",
+            &json!({"mode": "strict", "api_key": "sk-live"}),
+            &["api_key".to_owned()],
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("plugin-config.json")).unwrap();
+        assert!(raw.contains("strict"));
+        assert!(!raw.contains("sk-live"));
+    }
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    core.apply_plugin_profile().await;
+    let row = core
+        .supervisor()
+        .profile_row("tool.fs")
+        .expect("tool.fs row after profile apply");
+    assert_eq!(row.config["mode"], "strict");
+    assert_eq!(row.config["api_key"], "sk-live");
+}

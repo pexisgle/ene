@@ -1074,6 +1074,16 @@ pub async fn put_plugin_config(
     if state.core.supervisor().profile_row(&id).is_none() {
         return Err(not_found("plugin row not found"));
     }
+    let schema = state
+        .core
+        .supervisor()
+        .plugin_config_schema(&id)
+        .await
+        .map_err(|err| conflict("plugin_config", &err.to_string()))?;
+    let mut secret_keys = schema.secret_keys;
+    if secret_keys.is_empty() {
+        secret_keys = ene_plugin_ipc::secret_keys_from_schema(&schema.schema);
+    }
     let validated = state
         .core
         .supervisor()
@@ -1090,9 +1100,19 @@ pub async fn put_plugin_config(
     let result = state
         .core
         .supervisor()
-        .plugin_config_apply(&id, body.values)
+        .plugin_config_apply(&id, body.values.clone())
         .await
         .map_err(|err| conflict("plugin_config", &err.to_string()))?;
+    if result.ok {
+        crate::plugin_profile::persist_applied_plugin_config(
+            state.core.data_dir(),
+            state.core.vault(),
+            &id,
+            &body.values,
+            &secret_keys,
+        )
+        .map_err(|err| conflict("plugin_config", &err.to_string()))?;
+    }
     Ok(Json(PluginConfigValidateView {
         ok: result.ok,
         errors: map_plugin_config_errors(result.errors),

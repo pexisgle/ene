@@ -1,9 +1,14 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use ene_fiber::{ProfileRow, discover_plugin_executable_in, provider_plugin, task_seam};
 use ene_kernel::{AiSettings, PluginProfileKind, PluginSettings, TaskBinding};
+use ene_plane::Vault;
 use ene_work::{McpServer, WorkError, WorkStore};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+use crate::CoreError;
 
 #[must_use]
 pub(crate) fn task_row_id(task: &str) -> String {
@@ -81,6 +86,159 @@ fn load_mcp_json(path: &Path) -> Result<Vec<McpServer>, WorkError> {
     let file: McpFile =
         serde_json::from_str(&raw).map_err(|err| WorkError::Codec(err.to_string()))?;
     Ok(file.servers)
+}
+
+const PLUGIN_CONFIG_FILE: &str = "plugin-config.json";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PluginConfigFile {
+    #[serde(default)]
+    rows: HashMap<String, PersistedPluginConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PersistedPluginConfig {
+    #[serde(default)]
+    values: Value,
+    #[serde(default)]
+    secret_keys: Vec<String>,
+}
+
+fn plugin_config_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join(PLUGIN_CONFIG_FILE)
+}
+
+fn vault_plugin_key(row_id: &str, field: &str) -> String {
+    format!("plugin.config.{row_id}.{field}")
+}
+
+fn load_plugin_config_file(data_dir: &Path) -> Result<PluginConfigFile, CoreError> {
+    let path = plugin_config_path(data_dir);
+    if !path.exists() {
+        return Ok(PluginConfigFile::default());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    serde_json::from_str(&raw).map_err(|err| {
+        CoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    })
+}
+
+fn save_plugin_config_file(data_dir: &Path, file: &PluginConfigFile) -> Result<(), CoreError> {
+    let body = serde_json::to_string_pretty(file)
+        .map_err(|err| CoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
+    ene_config::config::atomic_write(&plugin_config_path(data_dir), &body)
+        .map_err(|err| CoreError::Io(std::io::Error::other(err.to_string())))?;
+    Ok(())
+}
+
+/// Overlay durable per-row settings (JSON + vault secrets) onto collected rows.
+pub(crate) fn overlay_persisted_config(rows: &mut [ProfileRow], data_dir: &Path, vault: &Vault) {
+    let file = match load_plugin_config_file(data_dir) {
+        Ok(file) => file,
+        Err(err) => {
+            tracing::warn!(error = %err, "plugin-config.json unreadable");
+            return;
+        }
+    };
+    for row in rows {
+        let Some(persisted) = file.rows.get(&row.row_id) else {
+            continue;
+        };
+        row.config = merge_config(row.config.clone(), &persisted.values);
+        inject_secrets(&mut row.config, &row.row_id, &persisted.secret_keys, vault);
+    }
+}
+
+/// Persist applied settings. Secret fields go to the vault, never the JSON file.
+pub(crate) fn persist_applied_plugin_config(
+    data_dir: &Path,
+    vault: &Vault,
+    row_id: &str,
+    values: &Value,
+    secret_keys: &[String],
+) -> Result<(), CoreError> {
+    let mut public = values.clone();
+    for key in secret_keys {
+        let Some(secret) = take_path(&mut public, key) else {
+            continue;
+        };
+        let Some(text) = secret.as_str().filter(|text| !text.is_empty()) else {
+            continue;
+        };
+        drop(vault.put(&vault_plugin_key(row_id, key), text.as_bytes())?);
+    }
+    if !public.is_object() {
+        public = json!({});
+    }
+    let mut file = load_plugin_config_file(data_dir)?;
+    file.rows.insert(
+        row_id.to_owned(),
+        PersistedPluginConfig {
+            values: public,
+            secret_keys: secret_keys.to_vec(),
+        },
+    );
+    save_plugin_config_file(data_dir, &file)
+}
+
+fn merge_config(base: Value, overlay: &Value) -> Value {
+    let Value::Object(src) = overlay else {
+        return base;
+    };
+    let mut dst = match base {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    for (key, value) in src {
+        dst.insert(key.clone(), value.clone());
+    }
+    Value::Object(dst)
+}
+
+fn inject_secrets(config: &mut Value, row_id: &str, secret_keys: &[String], vault: &Vault) {
+    for key in secret_keys {
+        let Ok(bytes) = vault.export(&vault_plugin_key(row_id, key)) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        set_path(config, key, Value::String(text));
+    }
+}
+
+fn take_path(value: &mut Value, path: &str) -> Option<Value> {
+    let mut parts = path.split('.').peekable();
+    let mut current = value;
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            return current.as_object_mut()?.remove(part);
+        }
+        current = current.as_object_mut()?.get_mut(part)?;
+    }
+    None
+}
+
+fn set_path(value: &mut Value, path: &str, inserted: Value) {
+    if !value.is_object() {
+        *value = json!({});
+    }
+    let mut parts = path.split('.').peekable();
+    let mut current = value;
+    while let Some(part) = parts.next() {
+        let Some(obj) = current.as_object_mut() else {
+            return;
+        };
+        if parts.peek().is_none() {
+            obj.insert(part.to_owned(), inserted);
+            return;
+        }
+        let next = obj.entry(part.to_owned()).or_insert_with(|| json!({}));
+        if !next.is_object() {
+            *next = json!({});
+        }
+        current = next;
+    }
 }
 
 fn harness_rows(kind: PluginProfileKind, home: &Path) -> Vec<ProfileRow> {
@@ -215,7 +373,7 @@ pub fn valid_mcp_id(id: &str) -> bool {
 mod tests {
     use super::*;
     use ene_kernel::PluginSettings;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use std::path::Path;
 
     #[test]
@@ -306,5 +464,61 @@ mod tests {
     fn unconfigured_task_does_not_spawn_a_provider() {
         assert!(super::provider_row("chat", &TaskBinding::default()).is_none());
         assert!(super::provider_row("chat", &TaskBinding::echo()).is_none());
+    }
+
+    #[test]
+    fn persist_strips_secrets_and_overlay_restores_them() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = Vault::open_or_create_keyfile(
+            dir.path().join("vault.bin"),
+            dir.path().join("vault.key"),
+        )
+        .unwrap();
+        persist_applied_plugin_config(
+            dir.path(),
+            &vault,
+            "tool.fs",
+            &json!({
+                "model": "fast",
+                "api_key": "sk-live",
+                "nested": { "token": "nested-secret", "keep": true }
+            }),
+            &["api_key".to_owned(), "nested.token".to_owned()],
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("plugin-config.json")).unwrap();
+        assert!(raw.contains("fast"));
+        assert!(raw.contains("keep"));
+        assert!(!raw.contains("sk-live"));
+        assert!(!raw.contains("nested-secret"));
+
+        let mut rows = vec![ProfileRow {
+            row_id: "tool.fs".to_owned(),
+            plugin: "tool.fs".to_owned(),
+            requires: Vec::new(),
+            capabilities: Vec::new(),
+            seams: Vec::new(),
+            sandbox_required: false,
+            config: Value::Null,
+        }];
+        overlay_persisted_config(&mut rows, dir.path(), &vault);
+        assert_eq!(rows[0].config["model"], "fast");
+        assert_eq!(rows[0].config["api_key"], "sk-live");
+        assert_eq!(rows[0].config["nested"]["token"], "nested-secret");
+        assert_eq!(rows[0].config["nested"]["keep"], json!(true));
+
+        persist_applied_plugin_config(
+            dir.path(),
+            &vault,
+            "tool.fs",
+            &json!({ "model": "faster" }),
+            &["api_key".to_owned(), "nested.token".to_owned()],
+        )
+        .unwrap();
+        rows[0].config = Value::Null;
+        overlay_persisted_config(&mut rows, dir.path(), &vault);
+        assert_eq!(rows[0].config["model"], "faster");
+        assert_eq!(rows[0].config["api_key"], "sk-live");
+        assert_eq!(rows[0].config["nested"]["token"], "nested-secret");
     }
 }

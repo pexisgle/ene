@@ -100,8 +100,11 @@ redact したオブジェクトだけが出ます。`GET /api/v1/plugins/{id}/co
 schema と redact 済みの現在値です。検証は `POST .../config/validate`、
 適用は `PUT .../config`。dynamic options（`POST .../config/options`）は
 列挙に失敗すると手入力へ縮退します（`fallback: true`）。適用失敗時は
-直前の有効な `ProfileRow.config` を保持します。Stage の Connections は
-同じ文書を選択中のファイバーへ出します。
+直前の有効な `ProfileRow.config` を保持します。適用が成功すると、秘密ではない
+値は `plugin-config.json`（row id キー）へ、秘密フィールドは vault の
+`plugin.config.{row_id}.{field}` へ残します。`apply_plugin_profile` が
+収集した行へこれらを重ねるので、デーモン再起動後も設定が残ります。Stage の
+Connections は同じ文書を選択中のファイバーへ出します。
 
 ## `provider.assets`
 

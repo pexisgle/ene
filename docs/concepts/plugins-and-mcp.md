@@ -98,8 +98,11 @@ objects. `GET /api/v1/plugins/{id}/config` returns schema plus redacted
 current values. Validate and apply are `POST .../config/validate` and
 `PUT .../config`. Dynamic options (`POST .../config/options`) degrade to
 free-text (`fallback: true`) when enumeration fails. Apply failure keeps the
-previous effective `ProfileRow.config`. Stage Connections loads the same
-document for the selected fiber.
+previous effective `ProfileRow.config`. Successful apply persists non-secret
+values in `plugin-config.json` (keyed by row id) and secret fields in the
+vault as `plugin.config.{row_id}.{field}`. `apply_plugin_profile` overlays
+those values onto collected rows so settings survive a daemon restart. Stage
+Connections loads the same document for the selected fiber.
 
 ## `provider.assets`
 
