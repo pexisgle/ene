@@ -1285,23 +1285,22 @@ impl StageApp {
                 tracing::debug!(error = %err, "caption paint failed");
             }
         }
-        if let Some(spotlight) = self.spotlight.as_mut() {
-            let mut action = None;
-            if let Err(err) = spotlight.paint(gpu, None, |ui| {
-                action = surface::show_spotlight(ui.ctx(), &mut self.surface);
-            }) {
-                tracing::debug!(error = %err, "spotlight paint failed");
-            }
-            if let Some(action) = action {
-                match action {
-                    SpotlightAction::OpenDetail(tab) => self.open_detail(event_loop, tab),
-                    SpotlightAction::ToggleMic => self.toggle_mic(),
-                    SpotlightAction::Quit => self.surface.quit = true,
-                    SpotlightAction::Close => {
-                        self.surface.spotlight_open = false;
-                        self.spotlight = None;
-                    }
-                }
+        let mut spotlight_action = None;
+        if let Some(spotlight) = self.spotlight.as_mut()
+            && let Err(err) = spotlight.paint(gpu, None, |ui| {
+                spotlight_action = surface::show_spotlight(ui.ctx(), &mut self.surface);
+            })
+        {
+            tracing::debug!(error = %err, "spotlight paint failed");
+        }
+        if let Some(action) = spotlight_action {
+            self.surface.spotlight_open = false;
+            self.spotlight = None;
+            match action {
+                SpotlightAction::OpenDetail(tab) => self.open_detail(event_loop, tab),
+                SpotlightAction::ToggleMic => self.toggle_mic(),
+                SpotlightAction::Quit => self.surface.quit = true,
+                SpotlightAction::Close => {}
             }
         }
     }

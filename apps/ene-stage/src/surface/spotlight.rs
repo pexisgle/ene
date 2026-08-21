@@ -11,6 +11,16 @@ pub enum SpotlightAction {
     Close,
 }
 
+impl SpotlightAction {
+    /// Quick commands leave the destination in front; the palette must not stay open.
+    #[must_use]
+    pub const fn dismisses_palette(self) -> bool {
+        match self {
+            Self::OpenDetail(_) | Self::ToggleMic | Self::Quit | Self::Close => true,
+        }
+    }
+}
+
 pub fn show(ctx: &egui::Context) -> Option<SpotlightAction> {
     let mut action = None;
     egui::Window::new(i18n::fl("spotlight-title"))
@@ -36,4 +46,19 @@ pub fn show(ctx: &egui::Context) -> Option<SpotlightAction> {
             }
         });
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_quick_command_dismisses_the_palette() {
+        for tab in DetailTab::ALL {
+            assert!(SpotlightAction::OpenDetail(tab).dismisses_palette());
+        }
+        assert!(SpotlightAction::ToggleMic.dismisses_palette());
+        assert!(SpotlightAction::Quit.dismisses_palette());
+        assert!(SpotlightAction::Close.dismisses_palette());
+    }
 }
