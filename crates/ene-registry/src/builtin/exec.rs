@@ -56,19 +56,77 @@ pub(super) fn execute(args: &Value) -> Result<Value, String> {
         drop(tx.send(child.wait_with_output()));
     });
     match rx.recv_timeout(Duration::from_millis(timeout_ms.max(1))) {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            Ok(json!({
-                "exit_code": output.status.code().unwrap_or(1),
-                "stdout": stdout,
-                "stderr": stderr,
-            }))
-        }
+        Ok(Ok(output)) => Ok(output_value(&output, false)),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => finish_timeout(pid, &rx),
+    }
+}
+
+fn finish_timeout(
+    pid: u32,
+    rx: &std::sync::mpsc::Receiver<std::io::Result<std::process::Output>>,
+) -> Result<Value, String> {
+    signal(pid, "TERM");
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(output)) => Ok(output_value(&output, true)),
         Ok(Err(err)) => Err(err.to_string()),
         Err(_) => {
-            drop(Command::new("kill").args(["-9", &pid.to_string()]).status());
-            Err("exec timed out".to_owned())
+            signal(pid, "KILL");
+            match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(Ok(output)) => Ok(output_value(&output, true)),
+                Ok(Err(err)) => Err(err.to_string()),
+                Err(_) => Err("exec timed out".to_owned()),
+            }
         }
+    }
+}
+
+fn output_value(output: &std::process::Output, timed_out: bool) -> Value {
+    json!({
+        "timed_out": timed_out,
+        "exit_code": output.status.code(),
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+    })
+}
+
+fn signal(pid: u32, kind: &str) {
+    let pid = pid.to_string();
+    #[cfg(unix)]
+    {
+        let flag = if kind == "TERM" { "-TERM" } else { "-KILL" };
+        drop(Command::new("kill").args([flag, &pid]).status());
+    }
+    #[cfg(not(unix))]
+    {
+        let mut args = vec!["/PID", pid.as_str(), "/T"];
+        if kind != "TERM" {
+            args.push("/F");
+        }
+        drop(Command::new("taskkill").args(args).status());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::execute;
+    use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_sends_term_and_returns_partial() {
+        let value = execute(&json!({
+            "command": "sleep",
+            "args": ["30"],
+            "timeout_ms": 200
+        }))
+        .unwrap();
+        assert_eq!(value["timed_out"], json!(true));
+    }
+
+    #[test]
+    fn rejects_path_command() {
+        let err = execute(&json!({"command": "/bin/echo"})).unwrap_err();
+        assert!(err.contains("program name"));
     }
 }

@@ -16,7 +16,7 @@ pub(super) fn specs() -> Vec<ToolSpecWire> {
         ),
         spec(
             "web.search",
-            "Search the public web (DuckDuckGo instant answers)",
+            "Search the public web (DuckDuckGo answers, HTML fallback)",
             json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}),
             Vec::new(),
         ),
@@ -31,6 +31,8 @@ pub(super) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     }
 }
 
+const MAX_FETCH_CHARS: usize = 512 * 1024;
+
 fn fetch(raw: &str) -> Result<Value, String> {
     let url = deny_ssrf(raw)?;
     // reqwest::blocking owns a tokio runtime; construct, send, and drop it off
@@ -44,7 +46,10 @@ fn fetch(raw: &str) -> Result<Value, String> {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_owned();
-        let body = response.text().map_err(|err| err.to_string())?;
+        let mut body = response.text().map_err(|err| err.to_string())?;
+        if body.len() > MAX_FETCH_CHARS {
+            body.truncate(MAX_FETCH_CHARS);
+        }
         Ok((status, content_type, body))
     })?;
     let text = if content_type.contains("html") {
@@ -109,7 +114,101 @@ fn search(query: &str) -> Result<Value, String> {
             }
         }
     }
+    if results.is_empty()
+        && let Ok(html_rows) = search_html(query)
+    {
+        results = html_rows;
+    }
     Ok(json!({ "results": results }))
+}
+
+fn search_html(query: &str) -> Result<Vec<Value>, String> {
+    let mut url = deny_ssrf("https://html.duckduckgo.com/html/")?;
+    url.query_pairs_mut().append_pair("q", query);
+    let html: String = off_runtime(move || {
+        let response = http().get(url).send().map_err(|err| err.to_string())?;
+        let mut body = response.text().map_err(|err| err.to_string())?;
+        if body.len() > MAX_FETCH_CHARS {
+            body.truncate(MAX_FETCH_CHARS);
+        }
+        Ok(body)
+    })?;
+    Ok(parse_ddg_html(&html))
+}
+
+fn parse_ddg_html(html: &str) -> Vec<Value> {
+    let mut results = Vec::new();
+    let mut rest = html;
+    while results.len() < 8 {
+        let Some(idx) = rest.find("result__a") else {
+            break;
+        };
+        rest = &rest[idx..];
+        let Some(href_at) = rest.find("href=\"") else {
+            break;
+        };
+        let after_href = &rest[href_at + 6..];
+        let Some(quote) = after_href.find('"') else {
+            break;
+        };
+        let href = decode_ddg_href(&after_href[..quote]);
+        let Some(gt) = after_href.find('>') else {
+            break;
+        };
+        let after_gt = &after_href[gt + 1..];
+        let Some(lt) = after_gt.find('<') else {
+            break;
+        };
+        let title = strip_tags(&after_gt[..lt]);
+        if !title.is_empty() && !href.is_empty() {
+            results.push(json!({
+                "title": title,
+                "url": href,
+                "snippet": "",
+            }));
+        }
+        rest = after_gt.get(lt + 1..).unwrap_or("");
+    }
+    results
+}
+
+fn decode_ddg_href(href: &str) -> String {
+    let raw = href
+        .split("uddg=")
+        .nth(1)
+        .and_then(|tail| tail.split('&').next())
+        .unwrap_or(href);
+    let decoded = percent_decode(raw);
+    if decoded.starts_with("//") {
+        format!("https:{decoded}")
+    } else if decoded.starts_with("http://") || decoded.starts_with("https://") {
+        decoded
+    } else if href.starts_with("//") {
+        format!("https:{href}")
+    } else {
+        decoded
+    }
+}
+
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%'
+            && let Some(h1) = bytes.get(idx + 1)
+            && let Some(h2) = bytes.get(idx + 2)
+            && let Ok(hex) = std::str::from_utf8(&[*h1, *h2])
+            && let Ok(value) = u8::from_str_radix(hex, 16)
+        {
+            out.push(value);
+            idx += 3;
+            continue;
+        }
+        out.push(bytes[idx]);
+        idx += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn off_runtime<T: Send>(work: impl FnOnce() -> Result<T, String> + Send) -> Result<T, String> {
@@ -127,6 +226,7 @@ fn http() -> &'static reqwest::blocking::Client {
         drop(rustls::crypto::ring::default_provider().install_default());
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
+            .user_agent("ene-web/0.1")
             .redirect(reqwest::redirect::Policy::limited(4))
             .build()
             .unwrap_or_else(|_| reqwest::blocking::Client::new())
@@ -188,4 +288,30 @@ fn collapse_ws(text: &str) -> String {
         }
     }
     out.trim().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_ddg_href, parse_ddg_html};
+
+    #[test]
+    fn parse_ddg_html_reads_result_links() {
+        let html = r#"
+            <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.invalid%2Ftokyo">Tokyo</a>
+            <a class="result__a" href="https://example.invalid/other">Other</a>
+        "#;
+        let rows = parse_ddg_html(html);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["title"], "Tokyo");
+        assert_eq!(rows[0]["url"], "https://example.invalid/tokyo");
+        assert_eq!(rows[1]["url"], "https://example.invalid/other");
+    }
+
+    #[test]
+    fn decode_ddg_href_unwraps_uddg() {
+        assert_eq!(
+            decode_ddg_href("//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.invalid%2Fx&rut=1"),
+            "https://example.invalid/x"
+        );
+    }
 }

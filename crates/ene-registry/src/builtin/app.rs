@@ -92,7 +92,7 @@ fn capture_png() -> Result<Vec<u8>, String> {
         &["import", "-window", "root", "-resize", "50%", "png:-"],
         &["import", "-window", "root", "png:-"],
     ];
-    let mut last_err = "no screenshot backend (need grim or ImageMagick import)".to_owned();
+    let mut last_err = "no screenshot backend (need grim, ImageMagick import, gnome-screenshot, spectacle, or scrot)".to_owned();
     for args in candidates {
         match stdout_bytes_timeout(args[0], &args[1..], SCREENSHOT_TIMEOUT) {
             Ok(bytes) if looks_like_png(&bytes) => {
@@ -102,7 +102,42 @@ fn capture_png() -> Result<Vec<u8>, String> {
             Err(err) => last_err = err,
         }
     }
+    if let Ok(bytes) = capture_png_file() {
+        return cap_png(bytes);
+    }
     Err(last_err)
+}
+
+fn capture_png_file() -> Result<Vec<u8>, String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    let tmp = std::env::temp_dir().join(format!("ene-shot-{}-{stamp}.png", std::process::id()));
+    let path = tmp.to_string_lossy().into_owned();
+    let backends = [
+        vec!["gnome-screenshot".to_owned(), "-f".to_owned(), path.clone()],
+        vec![
+            "spectacle".to_owned(),
+            "-b".to_owned(),
+            "-n".to_owned(),
+            "-o".to_owned(),
+            path.clone(),
+        ],
+        vec!["scrot".to_owned(), "-o".to_owned(), path.clone()],
+    ];
+    for args in backends {
+        let bin = args[0].as_str();
+        let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+        if run(bin, &rest).is_ok()
+            && let Ok(bytes) = std::fs::read(&tmp)
+            && looks_like_png(&bytes)
+        {
+            drop(std::fs::remove_file(&tmp));
+            return Ok(bytes);
+        }
+        drop(std::fs::remove_file(&tmp));
+    }
+    Err("file screenshot backends failed".to_owned())
 }
 
 fn cap_png(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -138,28 +173,98 @@ fn looks_like_png(bytes: &[u8]) -> bool {
 
 fn window_list() -> Result<Value, String> {
     if let Ok(text) = stdout_text("wmctrl", &["-l"]) {
-        let windows: Vec<Value> = text
-            .lines()
-            .filter_map(|line| {
-                let mut parts = line.splitn(4, ' ');
-                let id = parts.next()?;
-                let _desk = parts.next()?;
-                let host = parts.next()?;
-                let title = parts.next().unwrap_or("").trim();
-                Some(json!({ "id": id, "host": host, "title": title }))
-            })
-            .collect();
-        return Ok(json!({ "windows": windows }));
+        return Ok(json!({ "windows": parse_wmctrl(&text), "backend": "wmctrl" }));
     }
-    Err("window list needs wmctrl".to_owned())
+    if let Ok(text) = stdout_text("hyprctl", &["clients"]) {
+        let windows = parse_hypr_clients(&text);
+        if !windows.is_empty() {
+            return Ok(json!({ "windows": windows, "backend": "hyprctl" }));
+        }
+    }
+    if let Ok(text) = stdout_text("swaymsg", &["-t", "get_tree"])
+        && let Ok(tree) = serde_json::from_str::<Value>(&text)
+    {
+        let mut windows = Vec::new();
+        collect_sway_windows(&tree, &mut windows);
+        if !windows.is_empty() {
+            return Ok(json!({ "windows": windows, "backend": "swaymsg" }));
+        }
+    }
+    Err("window list needs wmctrl, hyprctl, or swaymsg".to_owned())
+}
+
+fn parse_wmctrl(text: &str) -> Vec<Value> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let id = parts.next()?;
+            let _desk = parts.next()?;
+            let host = parts.next()?;
+            let title = parts.collect::<Vec<_>>().join(" ");
+            Some(json!({ "id": id, "host": host, "title": title }))
+        })
+        .collect()
+}
+
+fn parse_hypr_clients(text: &str) -> Vec<Value> {
+    let mut windows = Vec::new();
+    let mut id = String::new();
+    let mut title = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Window ") {
+            if !id.is_empty() {
+                windows.push(json!({ "id": id, "host": "", "title": title }));
+            }
+            rest.split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .clone_into(&mut id);
+            title.clear();
+        } else if let Some(rest) = line.strip_prefix("title:") {
+            rest.trim().clone_into(&mut title);
+        }
+    }
+    if !id.is_empty() {
+        windows.push(json!({ "id": id, "host": "", "title": title }));
+    }
+    windows
+}
+
+fn collect_sway_windows(node: &Value, out: &mut Vec<Value>) {
+    let focused_con = node.get("type").and_then(Value::as_str) == Some("con")
+        || node.get("type").and_then(Value::as_str) == Some("floating_con");
+    if focused_con
+        && let Some(name) = node.get("name").and_then(Value::as_str)
+        && !name.is_empty()
+    {
+        let id = node.get("id").cloned().unwrap_or(json!(null));
+        out.push(json!({ "id": id, "host": "", "title": name }));
+    }
+    for key in ["nodes", "floating_nodes"] {
+        if let Some(children) = node.get(key).and_then(Value::as_array) {
+            for child in children {
+                collect_sway_windows(child, out);
+            }
+        }
+    }
 }
 
 fn active_window() -> Result<Value, String> {
     if let Ok(id) = stdout_text("xdotool", &["getactivewindow"]) {
         let title = stdout_text("xdotool", &["getwindowname", id.trim()]).unwrap_or_default();
-        return Ok(json!({ "id": id.trim(), "title": title.trim() }));
+        return Ok(json!({ "id": id.trim(), "title": title.trim(), "backend": "xdotool" }));
     }
-    Err("active window needs xdotool".to_owned())
+    if let Ok(text) = stdout_text("hyprctl", &["activewindow"]) {
+        let title = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("title:"))
+            .map_or("", str::trim);
+        if !title.is_empty() {
+            return Ok(json!({ "id": "", "title": title, "backend": "hyprctl" }));
+        }
+    }
+    Err("active window needs xdotool or hyprctl".to_owned())
 }
 
 fn clipboard_get() -> Result<Value, String> {
@@ -313,5 +418,49 @@ fn wait_child(child: &mut std::process::Child, bin: &str, timeout: Duration) -> 
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(err) => return Err(err.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_sway_windows, parse_hypr_clients, parse_wmctrl};
+    use serde_json::json;
+
+    #[test]
+    fn parse_wmctrl_splits_id_host_title() {
+        let rows = parse_wmctrl("0x123  0 host Terminal title here\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "0x123");
+        assert_eq!(rows[0]["title"], "Terminal title here");
+    }
+
+    #[test]
+    fn parse_hypr_clients_reads_window_blocks() {
+        let text =
+            "Window abcd -> mapped: 1\n\ttitle: Code\nWindow efgh -> mapped: 1\n\ttitle: Browser\n";
+        let rows = parse_hypr_clients(text);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"], "abcd");
+        assert_eq!(rows[0]["title"], "Code");
+        assert_eq!(rows[1]["title"], "Browser");
+    }
+
+    #[test]
+    fn collect_sway_windows_walks_tree() {
+        let tree = json!({
+            "type": "root",
+            "name": "root",
+            "nodes": [{
+                "type": "con",
+                "id": 7,
+                "name": "Firefox",
+                "floating_nodes": []
+            }]
+        });
+        let mut out = Vec::new();
+        collect_sway_windows(&tree, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["title"], "Firefox");
+        assert_eq!(out[0]["id"], json!(7));
     }
 }
