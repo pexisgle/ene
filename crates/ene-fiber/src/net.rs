@@ -88,12 +88,11 @@ pub(crate) fn get_inject(raw: &str, authorization: Option<&str>) -> Result<Value
         return stub(url.as_str());
     }
     let authorization = authorization.map(str::to_owned);
-    let origin_host = url.host_str().map(str::to_owned);
     #[cfg(test)]
     if HOP_STUB.with(|cell| cell.borrow().is_some()) {
-        return fetch_follow(&url, origin_host.as_deref(), authorization.as_deref());
+        return fetch_follow(&url, authorization.as_deref());
     }
-    off_runtime(move || fetch_follow(&url, origin_host.as_deref(), authorization.as_deref()))
+    off_runtime(move || fetch_follow(&url, authorization.as_deref()))
 }
 
 pub(crate) fn deny_ssrf(raw: &str) -> Result<Url, BrokerError> {
@@ -145,17 +144,20 @@ struct HopResponse {
     body: Vec<u8>,
 }
 
-fn fetch_follow(
-    start: &Url,
-    origin_host: Option<&str>,
-    authorization: Option<&str>,
-) -> Result<Value, BrokerError> {
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn fetch_follow(start: &Url, authorization: Option<&str>) -> Result<Value, BrokerError> {
     let mut current = start.clone();
     let mut hops = 0_usize;
     loop {
         deny_ssrf(current.as_str())?;
-        let same_origin = origin_host.is_some_and(|host| current.host_str() == Some(host));
-        let hop_auth = same_origin.then_some(authorization).flatten();
+        let hop_auth = same_origin(start, &current)
+            .then_some(authorization)
+            .flatten();
         let hop = perform_hop(&current, hop_auth)?;
         if (300..400).contains(&hop.status) {
             hops = hops.saturating_add(1);
@@ -587,6 +589,116 @@ mod tests {
                 .unwrap();
                 assert_eq!(value["text"], "ok");
                 assert_eq!(HOPS.with(|hops| hops.load(Ordering::SeqCst)), 2);
+            },
+        );
+    }
+
+    #[test]
+    fn redirect_drops_authorization_on_scheme_change() {
+        thread_local! {
+            static HOPS: AtomicUsize = const { AtomicUsize::new(0) };
+        }
+        HOPS.with(|hops| hops.store(0, Ordering::SeqCst));
+        with_hop_stub(
+            |_url, auth| {
+                let n = HOPS.with(|hops| hops.fetch_add(1, Ordering::SeqCst));
+                if n == 0 {
+                    assert_eq!(auth, Some("Bearer super-secret-token"));
+                    return Ok(HopResponse {
+                        status: 302,
+                        location: Some("http://example.invalid/next".to_owned()),
+                        content_type: String::new(),
+                        body: Vec::new(),
+                    });
+                }
+                assert_eq!(auth, None);
+                Ok(HopResponse {
+                    status: 200,
+                    location: None,
+                    content_type: "text/plain".to_owned(),
+                    body: b"ok".to_vec(),
+                })
+            },
+            || {
+                let value = get_inject(
+                    "https://example.invalid/",
+                    Some("Bearer super-secret-token"),
+                )
+                .unwrap();
+                assert_eq!(value["text"], "ok");
+            },
+        );
+    }
+
+    #[test]
+    fn redirect_drops_authorization_on_port_change() {
+        thread_local! {
+            static HOPS: AtomicUsize = const { AtomicUsize::new(0) };
+        }
+        HOPS.with(|hops| hops.store(0, Ordering::SeqCst));
+        with_hop_stub(
+            |_url, auth| {
+                let n = HOPS.with(|hops| hops.fetch_add(1, Ordering::SeqCst));
+                if n == 0 {
+                    assert_eq!(auth, Some("Bearer super-secret-token"));
+                    return Ok(HopResponse {
+                        status: 302,
+                        location: Some("https://example.invalid:8443/next".to_owned()),
+                        content_type: String::new(),
+                        body: Vec::new(),
+                    });
+                }
+                assert_eq!(auth, None);
+                Ok(HopResponse {
+                    status: 200,
+                    location: None,
+                    content_type: "text/plain".to_owned(),
+                    body: b"ok".to_vec(),
+                })
+            },
+            || {
+                let value = get_inject(
+                    "https://example.invalid/",
+                    Some("Bearer super-secret-token"),
+                )
+                .unwrap();
+                assert_eq!(value["text"], "ok");
+            },
+        );
+    }
+
+    #[test]
+    fn redirect_keeps_authorization_on_same_origin() {
+        thread_local! {
+            static HOPS: AtomicUsize = const { AtomicUsize::new(0) };
+        }
+        HOPS.with(|hops| hops.store(0, Ordering::SeqCst));
+        with_hop_stub(
+            |_url, auth| {
+                let n = HOPS.with(|hops| hops.fetch_add(1, Ordering::SeqCst));
+                assert_eq!(auth, Some("Bearer super-secret-token"));
+                if n == 0 {
+                    return Ok(HopResponse {
+                        status: 302,
+                        location: Some("/next".to_owned()),
+                        content_type: String::new(),
+                        body: Vec::new(),
+                    });
+                }
+                Ok(HopResponse {
+                    status: 200,
+                    location: None,
+                    content_type: "text/plain".to_owned(),
+                    body: b"ok".to_vec(),
+                })
+            },
+            || {
+                let value = get_inject(
+                    "https://example.invalid/start",
+                    Some("Bearer super-secret-token"),
+                )
+                .unwrap();
+                assert_eq!(value["text"], "ok");
             },
         );
     }
