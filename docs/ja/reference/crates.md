@@ -11,7 +11,7 @@
 | `ene-daemon` | `apps/ene-core`（バイナリ `ene-core`） | コアデーモン: データディレクトリのロック、HTTP/WS API、session + kernel + companion + work + plane + fiber |
 | `ene-stage` | `apps/ene-stage` | 製品 GUI: wgpu オーバーレイ、チャット、9 セクションの詳細、トレイ。表層 + 詳細の 2 本のソケット（`client_id = stage`） |
 | `ene-ctl` | `apps/ene-ctl` | 同一 HTTP/WS API の CLI クライアント |
-| `ene-desktop` | `apps/ene-desktop` | 再設計前の旧 GUI（#794 で復元）。同一 API。伸ばさない |
+| `ene-desktop` | `apps/ene-desktop` | 凍結した再設計前 GUI（#794 で復元）。機能追加なし。stage が代替できたと判断したら削除 |
 
 ## ライブラリクレート
 

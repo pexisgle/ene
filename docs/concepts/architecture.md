@@ -24,8 +24,8 @@ Web         ─┘                              │
   the kernel.
 - **Clients are peers** on the public API. Exclusive resources (mic, approval
   response) are mediated by the daemon. `ene-stage` is the product GUI;
-  `ene-desktop` is the legacy GUI of the same API — see
-  [Product boundaries](product-boundaries.md).
+  `ene-desktop` is frozen legacy of the same API and is deleted when stage
+  is judged to replace it — see [Product boundaries](product-boundaries.md).
 - **Tools are out of process.** Built-in tools (`fs`, `exec`, `web`, `utility`,
   `app`) use the same IPC as a third-party tool would. Harness functions that
   touch companion state stay in-process and go through `ene-registry`.

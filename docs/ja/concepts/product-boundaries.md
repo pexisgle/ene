@@ -14,10 +14,13 @@ v1.0 の追跡は [#717](https://github.com/pexisgle/ene/issues/717)
 - **コードとクレート境界が勝つ。** 復元された UI 文言より先に見る。
 - **製品 GUI は `ene-stage`。** 伸ばす対象は stage。`ene-desktop` との
   feature parity は要求しない。
-- **`ene-desktop` は再設計前の GUI** で、
-  [PR #794](https://github.com/pexisgle/ene/pull/794) が復元した。
-  参照と第二ピアとして残し、製品機能は足さない。現行 API と境界が
-  今も求めるものだけ stage へ移植する。
+- **`ene-desktop` は凍結したレガシー。**
+  [PR #794](https://github.com/pexisgle/ene/pull/794) が、stage を伸ばすあいだ
+  旧 UX を失わないために復元した。機能追加はしない。第二の製品にしない。
+  stage が、今も製品として要る desktop の能力を代替できたと判断したら
+  **`ene-desktop` を削除する。** その判断までは参照用にツリーへ残す。
+- desktop の能力を stage へ移植するのは、現行 API と境界が今も求めるときに
+  限る。desktop にあること自体がその判断ではない。
 - **MCP に委ねた領域は MCP のまま。** git / browser / calendar /
   Home Assistant / geo 向けにホスト固有の OAuth や API クライアントを
   再導入しない（[D-23](../../../plans/harness-redesign/tools/capabilities.md)）。
@@ -45,17 +48,18 @@ v1.0 の追跡は [#717](https://github.com/pexisgle/ene/issues/717)
 | クライアント | 製品 status | 所有 | 所有しない | 検証 |
 |---|---|---|---|---|
 | `ene-stage` | **製品 GUI**（`client_id = stage`） | ローカル `ene-core` の起動/停止、wgpu オーバーレイ、表層チャット、9 セクションの詳細 IA（Home / Companion / Conversation / Voice / Memory / Work / Connections / System / Log）、トレイ・字幕・スポットライト・ホットキー、音声中継、承認ポップアップ、`notify.hint` | カーネル、コンパニオン永続化、承認ポリシー、ボールト、プラグイン監督。CCv3 アプリ内エディタ、旧 desktop の観測パイプライン | 製品経路: オーバーレイ、Conversation の束縛、設定適用、承認、排他資源。Linux と native Windows CI は `-p ene-stage` |
-| `ene-desktop` | **旧 GUI**（`client_id = desktop`） | 再設計前の 18 ページ設定/管理 IA、CCv3 エディタ、#794 で復元したオーバーレイ/トレイ | 製品機能の追加。v1.0 E2E の主クライアントであること | 排他資源の第二ピアと旧 UX のカタログ。伸ばさない。Linux CI は `-p ene-desktop`。native Windows clippy の対象は今のところ stage |
+| `ene-desktop` | **凍結した旧 GUI**（`client_id = desktop`） | 再設計前の 18 ページ設定/管理 IA、CCv3 エディタ、#794 で復元したオーバーレイ/トレイ | 機能追加。出荷クライアントであり続けること。v1.0 E2E の必須クライアントであること | 削除までの旧 UX カタログ。機能は足さない。Linux CI はまだ `-p ene-desktop`。native Windows clippy の対象は今のところ stage。stage が代替できたと判断したらクレートを削除する |
 | `ene-ctl` | CLI | テキスト対話、セッション/ツール/プラグイン/ジョブ/記憶/スケジュール/コア制御、詳細深さの `ene debug` | オーバーレイ、OS 通知、マイク/スピーカー | 配線上 stage ができること。`cargo test` の default member |
 | Web（`apps/ene-core/web`） | LAN / トンネル | 表層チャットと読み取り専用の詳細（内面、thinking、ツール、PAD、記憶、ジョブ） | 設定変更、記憶削除、キャラ管理、VRM | テキスト経路と D-31。詳細 UX はまだログ寄り（[#717](https://github.com/pexisgle/ene/issues/717)） |
 | モバイル | Post-v1.0（M1） | — | — | ツリーに無い |
 
 `ene-stage` と `ene-desktop` は同じ API を話し、どちらも egui + wgpu で、
 WebView は使いません。[PR #794](https://github.com/pexisgle/ene/pull/794)
-は旧 desktop を復元して UX を失わないためですが、**製品の席は
-`ene-stage`** です。計画文書の `desktop(stage)` はその役割の名前で、
-埋めるのは stage を伸ばすことです。desktop は、移植するか明示的に
-捨てるまでツリーに残る旧 GUI です。
+は stage を伸ばすあいだ旧 UX を失わないために desktop を復元しましたが、
+**製品の席は `ene-stage`** です。計画文書の `desktop(stage)` はその役割の
+名前です。desktop は凍結のみ。stage が、製品として要る desktop の能力を
+代替できたと判断したら `apps/ene-desktop` を削除します。排他資源の第二
+クライアントは CLI か Web で足り、そのために desktop を残しません。
 
 ## 2. ツール移行
 
@@ -147,7 +151,7 @@ v1.0 の接続は手書き `mcp.json` 行で、同じレジストリパイプラ
 [PR #794](https://github.com/pexisgle/ene/pull/794) で復元した **旧 GUI**
 の一覧です。製品作業は、現行 API が今も求めるものだけ `ene-stage`
 （またはコア）へ移植します。desktop が既に `ene-api` を話していても、
-出荷 UI を desktop のままにする理由にはしません。
+クレートを残す理由にはしません。
 
 ### 設定・管理ページ
 
@@ -156,7 +160,7 @@ v1.0 の接続は手書き `mcp.json` 行で、同じレジストリパイプラ
 | Overview | health / needs-config | Home | Home が薄いなら stage で伸ばす |
 | General（グラフィックス、アクセシビリティ、言語、テーマ、字幕、ホットキー） | ローカル `desktop.*` | System + Voice（字幕） | stage にテーマ/言語/字幕/オーバーレイはある。アクセシビリティやホットキーの深さは移植するまで desktop |
 | Character | occupants / bodies は HTTP、配置はローカル | Companion | 両方に Current |
-| Character editor（CCv3） | ローカル `character.json` を `ene-card` で I/O | なし | desktop に残す。v1.0 はパッケージインポート（`P-803`）であり、アプリ内 CCv3 エディタではない |
+| Character editor（CCv3） | ローカル `character.json` を `ene-card` で I/O | なし | 移植しない。v1.0 はパッケージインポート（`P-803`）。desktop を残す理由にしない |
 | AI / Voice / Engines | `GET/PATCH /settings`、`providers`、`provider.assets` | Conversation、Voice、Connections | stage に Current。desktop にだけ残る操作があれば stage へ |
 | Features（能動発話のトグル） | `mind.proactive.*` の PATCH | System / Conversation | 残りのトグルは stage へ。観測パイプラインはコアの [#805](https://github.com/pexisgle/ene/issues/805) |
 | Memory 設定 + Memories 台帳 | Memory HTTP | Memory | 一覧/編集/削除は stage で Current。補助 LLM の scope は [#717](https://github.com/pexisgle/ene/issues/717) |
@@ -240,8 +244,8 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | `exec.pty`、デスクトップペット、カメラ、Live2D、モバイル | features.md の後継 ID | 形式が支える。v1.0 ではない |
 | MCP 領域向けホスト OAuth / サービス API クライアント | — | 非目標（D-23） |
 | ツリー内の git/browser/calendar/HA/geo/counter | — | Dropped |
-| stage 上での desktop 機能対比 | — | 非目標。選んだ UX を stage へ移植し、desktop は伸ばさない |
-| `ene-desktop` を製品 GUI として出荷し続ける | — | 非目標 |
+| stage 上での desktop 機能対比 | — | 非目標。選んだ UX を stage へ移植し、desktop は凍結 |
+| `ene-desktop` を出荷し続ける | — | 非目標。stage が製品として要る能力を代替できたと判断したら削除 |
 
 ### Epic #796
 

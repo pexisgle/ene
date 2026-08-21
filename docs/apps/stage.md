@@ -6,9 +6,10 @@ on the **surface** WebSocket, and opens a **separate detail window** for
 Home, Companion, Conversation, Voice, Memory, Work, Connections, System, and
 the session log.
 
-`ene-desktop` is the pre-redesign GUI restored as a legacy client. Grow
-stage; do not require feature parity with desktop. Roles are recorded in
-[Product boundaries](../concepts/product-boundaries.md).
+`ene-desktop` is frozen pre-redesign GUI. Do not add features there; do
+not require feature parity. When stage is judged to replace the
+product-relevant desktop capabilities, delete desktop. Roles are recorded
+in [Product boundaries](../concepts/product-boundaries.md).
 
 ```sh
 cargo build -p ene-core -p ene-stage

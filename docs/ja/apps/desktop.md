@@ -1,9 +1,10 @@
 # Desktop ユーザーガイド
 
-`ene-desktop` は再設計前の GUI で、PR #794 が旧クライアントとして復元したものです。
-製品 GUI は `ene-stage` です。伸ばすのはそちらで、このツリーへ製品機能は足しません。
-必要なら `ene-core` を起動し、`ene-vrm` でキャラクターオーバーレイを描き、
-チャットは **表層**、詳細は **別窓**です。
+`ene-desktop` は凍結した再設計前の GUI で、PR #794 が復元したものです。
+機能追加はしません。製品 GUI は `ene-stage` です。伸ばすのはそちらです。
+stage が、製品として要る desktop の能力を代替できたと判断したらこの
+クレートは削除します。それまでは必要なら `ene-core` を起動し、`ene-vrm` で
+キャラクターオーバーレイを描き、チャットは **表層**、詳細は **別窓**です。
 
 ```sh
 cargo build -p ene-daemon -p ene-desktop
@@ -32,8 +33,8 @@ beat sync、コア寿命）と、適用した他セクション（AI、mind、pl
 同じファイルを読み、PATCH します。起動済みコアへは `ENE_API_URL` /
 `ENE_API_TOKEN` で接続します。
 
-`ene-stage` が同一 API の製品 GUI です。desktop との機能対比は要求せず、
-製品作業はこちらへは入りません。クライアント / ツール / セキュリティの
+`ene-stage` が同一 API の製品 GUI です。こちらへ機能追加はしません。
+stage が、製品として要る能力を代替できたと判断したら desktop は削除します。
 判断表は [製品境界](../concepts/product-boundaries.md) です。
 
 チャットは **未設定** のまま起動します。表層から AI ページを開きます。

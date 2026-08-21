@@ -16,11 +16,14 @@ widen that definition.
 - **Code and crate boundaries win** over restored UI copy.
 - **`ene-stage` is the product GUI.** Grow it. Do not require feature
   parity with `ene-desktop`.
-- **`ene-desktop` is the pre-redesign GUI** restored in
-  [PR #794](https://github.com/pexisgle/ene/pull/794). Keep it as a
-  reference and a second peer; do not add product features there.
-  Port a desktop capability into stage only when the current API and
-  architecture still want it.
+- **`ene-desktop` is frozen legacy.** Restored in
+  [PR #794](https://github.com/pexisgle/ene/pull/794) so old UX is not
+  lost while stage grows. Do not add features. Do not treat it as a
+  second product. When stage is judged to cover the product capabilities
+  that still matter, **delete `ene-desktop`**. Until that judgment,
+  it stays in-tree only as a reference.
+- Port a desktop capability into stage only when the current API and
+  architecture still want it. Existence on desktop is not that judgment.
 - **MCP-owned domains stay MCP.** Do not reintroduce host-owned OAuth or
   service-specific API clients for git, browser, calendar, Home Assistant,
   or geo ([D-23](../../plans/harness-redesign/tools/capabilities.md)).
@@ -49,7 +52,7 @@ notify) are mediated by `ene-core`.
 | Client | Product status | Owns | Does not own | Verification |
 |---|---|---|---|---|
 | `ene-stage` | **Product GUI** (`client_id = stage`) | Start/stop local `ene-core`; wgpu overlay + visemes; surface chat; 9-section detail IA (Home, Companion, Conversation, Voice, Memory, Work, Connections, System, Log); tray, captions, spotlight, hotkeys; audio device relay; approval popups; `notify.hint` | Kernel, companion persistence, approval policy, vault, plugin supervision; CCv3 in-app editor; restored desktop observation | Product path: overlay, Conversation bind, settings apply, approvals, exclusive resources. Linux and native Windows CI cover `-p ene-stage`. |
-| `ene-desktop` | **Legacy GUI** (`client_id = desktop`) | Pre-redesign 18-page settings/management IA, CCv3 editor, overlay/tray helpers restored in #794 | Product feature work; being the v1.0 E2E client | Second peer for exclusive-resource tests and a catalogue of old UX. Do not grow it. Linux CI tests `-p ene-desktop`; native Windows clippy currently targets stage, not desktop. |
+| `ene-desktop` | **Frozen legacy GUI** (`client_id = desktop`) | Pre-redesign 18-page settings/management IA, CCv3 editor, overlay/tray helpers restored in #794 | Feature work; remaining the shipping client; being required for v1.0 E2E | Catalogue of old UX until removal. Do not add features. Linux CI still tests `-p ene-desktop`; native Windows clippy currently targets stage. Delete the crate when stage is judged to replace it. |
 | `ene-ctl` | CLI | Text chat, session/tool/plugin/job/memory/schedule/core control, `ene debug` at detail depth | Overlay, OS notify, mic/speaker | Anything on the wire that stage can do. Default `cargo test` member. |
 | Web (`apps/ene-core/web`) | LAN / tunnel client | Surface chat + read-only detail (inner, thinking, tools, PAD, memories, jobs) | Settings mutation, memory delete, character admin, VRM | Text path + D-31 (no settings/memory writes). Detail UX is still log-like ([#717](https://github.com/pexisgle/ene/issues/717)). |
 | Mobile | Post-v1.0 (M1) | — | — | Not in tree |
@@ -57,10 +60,12 @@ notify) are mediated by `ene-core`.
 `ene-stage` and `ene-desktop` both speak the same API, both draw with
 egui + wgpu, and neither uses a WebView.
 [PR #794](https://github.com/pexisgle/ene/pull/794) restored the old
-desktop binary so that UX is not lost, but **the product seat is
-`ene-stage`**. Plans say `desktop(stage)` for that role; grow stage to
-fill it. Desktop stays in-tree as the old GUI until its useful pieces
-have been ported or explicitly dropped.
+desktop binary so that UX is not lost while stage grows, but **the
+product seat is `ene-stage`**. Plans say `desktop(stage)` for that role.
+Desktop is freeze-only. When stage is judged to substitute for the
+product-relevant desktop capabilities, remove `apps/ene-desktop`. A
+second connected client for exclusive resources is CLI or Web; do not
+keep desktop around for that.
 
 ## 2. Tool migration
 
@@ -152,8 +157,8 @@ pipeline. A catalog picker is post-v1.0
 Restored in [PR #794](https://github.com/pexisgle/ene/pull/794). These
 rows describe the **old GUI**. Product work ports a capability into
 `ene-stage` (or into core) when the current API still wants it. A desktop
-page that already talks to `ene-api` is *available on the legacy client*,
-not a reason to keep shipping desktop.
+page that already talks to `ene-api` is *available on the frozen client*,
+not a reason to keep the crate.
 
 ### Settings and management pages
 
@@ -162,7 +167,7 @@ not a reason to keep shipping desktop.
 | Overview | Health / needs-config | Home | Grow on stage if Home is thinner |
 | General (graphics, accessibility, language, theme, captions, hotkeys) | Local `desktop.*` | System + Voice (captions) | Stage already has theme/language/captions/overlay. Accessibility/hotkey depth stays on desktop until ported |
 | Character | Occupants / bodies over HTTP; local placement | Companion | Current on both |
-| Character editor (CCv3) | Local `character.json` via `ene-card` | None | Stay on desktop. v1.0 is package import (`P-803`), not an in-app CCv3 editor |
+| Character editor (CCv3) | Local `character.json` via `ene-card` | None | Do not port. v1.0 is package import (`P-803`). Not a reason to keep desktop |
 | AI / Voice / Engines | `GET/PATCH /settings`, `providers`, `provider.assets` | Conversation, Voice, Connections | Current on stage; grow stage if a desktop control is still missing |
 | Features (proactive toggles) | `mind.proactive.*` PATCH | System / Conversation | Port remaining toggles to stage. Observation pipeline: [#805](https://github.com/pexisgle/ene/issues/805) in core |
 | Memory config + Memories ledger | Memory HTTP | Memory | Current on stage for list/edit/delete; auxiliary LLM scope remains [#717](https://github.com/pexisgle/ene/issues/717) |
@@ -245,8 +250,8 @@ Closing a child issue does not close [#717](https://github.com/pexisgle/ene/issu
 | `exec.pty`, desktop-pet mode, camera, Live2D, mobile | features.md successor IDs | Form-compatible, not v1.0 |
 | Host OAuth / service API clients for MCP domains | — | Non-goal (D-23) |
 | In-tree git/browser/calendar/HA/geo/counter | — | Dropped |
-| Desktop feature parity on stage | — | Non-goal. Port selected UX into stage; do not grow desktop |
-| Keep shipping `ene-desktop` as the product GUI | — | Non-goal |
+| Desktop feature parity on stage | — | Non-goal. Port selected UX into stage; freeze desktop |
+| Keep shipping `ene-desktop` | — | Non-goal. Delete it once stage is judged to replace the product-relevant capabilities |
 
 ### Epic #796
 

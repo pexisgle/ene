@@ -5,8 +5,9 @@
 WebSocket、Home / Companion / Conversation / Voice / Memory / Work /
 Connections / System とセッションログは **別窓の詳細** に出します。
 
-`ene-desktop` は再設計前の GUI を復元した旧クライアントです。伸ばすのは
-stage で、desktop との機能対比は要求しません。役割は
+`ene-desktop` は凍結した再設計前の GUI です。機能追加はせず、機能対比も
+要求しません。stage が、製品として要る desktop の能力を代替できたと
+判断したら desktop を削除します。役割は
 [製品境界](../concepts/product-boundaries.md) にあります。
 
 ```sh

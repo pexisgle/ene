@@ -4,7 +4,8 @@ Ene is a **local AI companion harness** written in Rust. Companions live on
 your device, speak and listen, remember, and run tools under an approval
 plane. A core daemon (`ene-core`) owns that state; desktop, CLI, stage, and Web
 are clients of the same API. `ene-stage` is the product GUI; `ene-desktop` is
-the legacy GUI. See [Product boundaries](concepts/product-boundaries.md).
+frozen legacy and is deleted when stage is judged to replace it. See
+[Product boundaries](concepts/product-boundaries.md).
 
 The finished-product definition is
 [`plans/harness-redesign/`](../plans/harness-redesign/README.md).
