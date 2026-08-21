@@ -6,7 +6,7 @@
 | プラグイン | バイナリ | 役割 |
 |---|---|---|
 | `utility` | `ene-tool-utility` | ハッシュ、時刻、system_info、計算（単位と為替テーブル）、乱数、テキスト |
-| `fs` | `ene-tool-fs` | ワークスペース内の read / write / edit / list / search / patch / undo。シェルは持たない。search は既定でリテラル、`regex` で正規表現。`fs.undo` は同じジョブ（`job_id` または `ENE_JOB_ID`）が書いたものだけ戻す。unified diff は行番号だけでなく hunk の文脈を照合する。 |
+| `fs` | `ene-tool-fs` | ワークスペース内の read / write / edit / list / search / patch / undo。シェルは持たない。search は既定でリテラル、`regex` で正規表現。`fs.read` は `text` と生バイトの blake3 `hash` を返す。`fs.write` / `fs.edit` / `fs.patch` は任意の `expected_hash` を受け付け、不一致時は stale-precondition エラーでファイルを変更しない。書き込みは同一ディレクトリの一時ファイルから rename する原子置換で、同一パスへの操作は直列化される。edit は完全一致のみ。`replace_all` なしで複数一致はあいまいさエラー。改行（CRLF/LF）、UTF-8 BOM、末尾改行を保持する。`fs.undo` は同じジョブ（`job_id` または `ENE_JOB_ID`）が書いたものだけ戻す。秘密らしいパス名と 1 MiB 超の本体は undo ジャーナルに保存しない。unified diff は行番号だけでなく hunk の文脈を照合する。 |
 | `exec` | `ene-tool-exec` | プログラム名でのプロセス実行（`fs` から分離）。タイムアウトは SIGTERM のあと SIGKILL。終了すればキャプチャした出力を返す。 |
 | `web` | `ene-tool-web` | HTTPS fetch（サイズ上限、SSRF 禁止）と公開検索（DuckDuckGo Instant Answer、空なら HTML フォールバック） |
 | `app` | `ene-tool-app` | スクリーンショット（grim、ImageMagick、gnome-screenshot、spectacle、scrot）、ウィンドウ（wmctrl / hyprctl / sway）、クリップボード、ポインタ / キーボード |
