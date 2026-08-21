@@ -118,9 +118,8 @@ fn load_plugin_config_file(data_dir: &Path) -> Result<PluginConfigFile, CoreErro
         return Ok(PluginConfigFile::default());
     }
     let raw = std::fs::read_to_string(&path)?;
-    serde_json::from_str(&raw).map_err(|err| {
-        CoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
-    })
+    serde_json::from_str(&raw)
+        .map_err(|err| CoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))
 }
 
 fn save_plugin_config_file(data_dir: &Path, file: &PluginConfigFile) -> Result<(), CoreError> {
