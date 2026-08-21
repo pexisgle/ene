@@ -15,7 +15,7 @@ fn format_line(message: &ProjectedMessage) -> Option<String> {
         Role::User => "user",
         Role::Assistant => "assistant",
         Role::System => "system",
-        Role::Thinking | Role::Inner | Role::Tool => return None,
+        Role::Thinking | Role::Inner | Role::Tool | Role::Status => return None,
     };
     let text = message.text();
     if text.trim().is_empty() {

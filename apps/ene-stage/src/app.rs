@@ -236,6 +236,18 @@ impl StageApp {
             }
             AsyncOutcome::RefreshHistory(result) => match result {
                 Ok(history) => {
+                    if let Some(message) = history
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == "status")
+                    {
+                        let mapped = map_turn_err(&message.text);
+                        if auth_failure(&mapped) || auth_failure(&message.text) {
+                            self.detail.core_status = i18n::fl("chat-auth-failed");
+                        }
+                        mapped.clone_into(&mut self.surface.status);
+                    }
                     self.session.replace_history(history.clone());
                     self.surface.history = history;
                     self.surface.streaming_text.clear();

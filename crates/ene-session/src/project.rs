@@ -1,6 +1,6 @@
 use crate::block::Block;
 use crate::error::SessionError;
-use crate::event::{EventKind, EventPayload, LoggedEvent};
+use crate::event::{EventKind, EventPayload, LoggedEvent, TurnOutcome};
 use crate::ids::TurnId;
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +82,7 @@ pub enum Role {
     Thinking,
     Inner,
     Tool,
+    Status,
 }
 
 /// One reconstructed history item.
@@ -124,6 +125,7 @@ pub struct ProjectOptions {
     pub apply_redaction: bool,
     pub include_tool_args: bool,
     pub self_reference_window: u32,
+    pub include_turn_failures: bool,
 }
 
 impl ProjectOptions {
@@ -135,6 +137,7 @@ impl ProjectOptions {
             apply_redaction: true,
             include_tool_args: depth.include_tool_args(),
             self_reference_window,
+            include_turn_failures: true,
         }
     }
 
@@ -146,6 +149,7 @@ impl ProjectOptions {
             apply_redaction: true,
             include_tool_args: true,
             self_reference_window,
+            include_turn_failures: false,
         }
     }
 }
@@ -249,6 +253,31 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
                     tool_args: None,
                     tool_call_id: None,
                 });
+            }
+            EventKind::TurnEnd if options.include_turn_failures => {
+                if let EventPayload::TurnEnd {
+                    outcome: TurnOutcome::Failed,
+                    turn_id,
+                    error_detail,
+                    error_class,
+                    ..
+                } = &event.payload
+                {
+                    let text = error_detail
+                        .clone()
+                        .or_else(|| error_class.clone())
+                        .unwrap_or_else(|| "turn failed".to_owned());
+                    messages.push(ProjectedMessage {
+                        seq: event.seq,
+                        role: Role::Status,
+                        blocks: vec![Block::text(text)],
+                        turn_id: Some(*turn_id),
+                        step_index: None,
+                        tool_name: None,
+                        tool_args: None,
+                        tool_call_id: None,
+                    });
+                }
             }
             EventKind::ToolCall => {
                 if let EventPayload::ToolCall {

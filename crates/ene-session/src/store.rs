@@ -871,6 +871,7 @@ fn recover_conn(conn: &mut Connection) -> Result<Vec<RecoveryReport>, SessionErr
                         turn_id: turn.turn_id,
                         outcome: TurnOutcome::Interrupted,
                         error_class: None,
+                        error_detail: None,
                     },
                 ),
                 &ts,

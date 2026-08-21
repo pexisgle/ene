@@ -49,7 +49,8 @@ detail window (and `ene-ctl --verbose`) is detail.
 
 Conversation history is the append-only log in `sessions.db`, not a
 client-side buffer. A provider failure ends the turn as `failed` and is not
-written as assistant speech.
+written as assistant speech. History projects that failure as a `status`
+message so reconnects still see the error.
 
 ## Sessions
 

@@ -115,7 +115,7 @@ fn fold_messages(history: &[ProjectedMessage]) -> Vec<LlmMessage> {
     let mut pending_calls: Vec<LlmToolCall> = Vec::new();
     for item in history {
         match item.role {
-            Role::Thinking | Role::Inner => {}
+            Role::Thinking | Role::Inner | Role::Status => {}
             Role::Tool if item.tool_args.is_some() => {
                 pending_calls.push(LlmToolCall {
                     id: item

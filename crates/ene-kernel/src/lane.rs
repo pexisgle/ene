@@ -1227,6 +1227,7 @@ async fn finish_speech(
             turn_id: ctx.turn,
             outcome: TurnOutcome::Completed,
             error_class: None,
+            error_detail: None,
         },
     ));
     let provider = usage_provider(&generation.model_id);
@@ -1417,6 +1418,7 @@ async fn finish_interrupted(ctx: &TurnCtx, step_index: u32) -> Result<(), Kernel
                         turn_id: ctx.turn,
                         outcome: TurnOutcome::Interrupted,
                         error_class: None,
+                        error_detail: None,
                     },
                 ),
             ],
@@ -1462,6 +1464,7 @@ async fn commit_turn_interrupted(
                         turn_id: turn,
                         outcome: TurnOutcome::Interrupted,
                         error_class: None,
+                        error_detail: None,
                     },
                 ),
             ],
@@ -1509,6 +1512,7 @@ async fn commit_turn_failure(
                         turn_id: turn,
                         outcome: TurnOutcome::Failed,
                         error_class: Some(err.error_class().to_owned()),
+                        error_detail: Some(detail.clone()),
                     },
                 ),
             ],

@@ -106,6 +106,7 @@ fn history_markdown(history: &ProjectedHistory) -> String {
             crate::project::Role::Thinking => "Thinking",
             crate::project::Role::Inner => "Inner",
             crate::project::Role::Tool => "Tool",
+            crate::project::Role::Status => "Status",
         };
         out.push_str("## ");
         out.push_str(role);
