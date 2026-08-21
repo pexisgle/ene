@@ -825,6 +825,7 @@ async fn shared_hooks_register_from_host_before_spawn() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: Some(hooks),
         router: None,
     });
