@@ -131,12 +131,24 @@ impl ToolRegistry {
         args: Value,
         layer: Layer,
     ) -> Result<Value, PipelineError> {
-        self.execute_inner(name, args, layer, false).await
+        self.execute_inner(name, args, layer, false, None).await
+    }
+
+    /// Same as [`Self::execute`], confining filesystem tools to `workspace`.
+    pub async fn execute_in_workspace(
+        &self,
+        name: &str,
+        args: Value,
+        layer: Layer,
+        workspace: &Path,
+    ) -> Result<Value, PipelineError> {
+        self.execute_inner(name, args, layer, false, Some(workspace.to_path_buf()))
+            .await
     }
 
     /// Host-initiated call (continuous observation). Enabling the setting is consent.
     pub async fn execute_host(&self, name: &str, args: Value) -> Result<Value, PipelineError> {
-        self.execute_inner(name, args, Layer::Job, true).await
+        self.execute_inner(name, args, Layer::Job, true, None).await
     }
 
     async fn execute_inner(
@@ -145,6 +157,7 @@ impl ToolRegistry {
         mut args: Value,
         layer: Layer,
         host: bool,
+        workspace_override: Option<PathBuf>,
     ) -> Result<Value, PipelineError> {
         let (def, invoke) = {
             let tools = self.tools.lock();
@@ -156,7 +169,7 @@ impl ToolRegistry {
         if !host && layer == Layer::Surface && !def.surface_visible() {
             return Err(PipelineError::NotOnSurface(name.to_owned()));
         }
-        let workspace = self.workspace.lock().clone();
+        let workspace = workspace_override.or_else(|| self.workspace.lock().clone());
         let path = args.get("path").and_then(Value::as_str).unwrap_or("");
         let in_workspace = path_in_workspace(workspace.as_deref(), path);
         if !host {

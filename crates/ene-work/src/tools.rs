@@ -371,14 +371,10 @@ fn send_from_child(host: &DelegationHost, args: &Value) -> Result<Value, String>
             Ok(json!({ "speech": report.speech }))
         }
         "complete" => {
-            host.require_mutating_allowed(id)
-                .map_err(|err| err.to_string())?;
             let report = host.complete(id, body).map_err(|err| err.to_string())?;
             Ok(json!({ "speech": report.speech }))
         }
         "failed" => {
-            host.require_mutating_allowed(id)
-                .map_err(|err| err.to_string())?;
             let report = host.fail(id, body).map_err(|err| err.to_string())?;
             Ok(json!({ "speech": report.speech }))
         }

@@ -215,6 +215,7 @@ pub struct AiTasks {
     pub tts: TaskBinding,
     pub stt: TaskBinding,
     pub approve: TaskBinding,
+    pub job: TaskBinding,
 }
 
 /// One `ai.tasks.*` row. `plugin` is a `provider.*` id when configured.

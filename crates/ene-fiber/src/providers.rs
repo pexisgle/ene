@@ -76,7 +76,7 @@ pub fn provider_plugin(id: &str) -> Option<&'static ProviderPlugin> {
 #[must_use]
 pub fn task_seam(task: &str) -> Option<&'static str> {
     match task {
-        "chat" | "classifier" | "proactive" | "approve" => Some("seam.llm"),
+        "chat" | "classifier" | "proactive" | "approve" | "job" => Some("seam.llm"),
         "embedding" => Some("seam.embed"),
         "tts" => Some("seam.tts"),
         "stt" => Some("seam.stt"),
@@ -130,6 +130,7 @@ mod tests {
         assert_eq!(task_seam("embedding"), Some("seam.embed"));
         assert_eq!(task_seam("tts"), Some("seam.tts"));
         assert_eq!(task_seam("approve"), Some("seam.llm"));
+        assert_eq!(task_seam("job"), Some("seam.llm"));
         assert_eq!(task_seam("unknown"), None);
     }
 }

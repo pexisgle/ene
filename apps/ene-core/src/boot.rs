@@ -13,9 +13,9 @@ use ene_companion::{
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{
-    AiSettings, ConversationModel, CoreSettings, LaneHandle, LaneOptions, LoopHooks,
-    PluginSettings, SpeechPresenter, SurfaceRouter, TaskBinding, TurnFinalizer, TurnPrefetch,
-    format_recovery_note,
+    AiSettings, ConversationModel, CoreSettings, HarnessSettings, LaneHandle, LaneOptions,
+    LoopHooks, PluginSettings, SpeechPresenter, SurfaceRouter, TaskBinding, TurnFinalizer,
+    TurnPrefetch, format_recovery_note,
 };
 use ene_plane::{
     ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink,
@@ -107,6 +107,8 @@ pub struct CoreDaemon {
     tts_secret: Arc<parking_lot::Mutex<String>>,
     stt_secret: Arc<parking_lot::Mutex<String>>,
     approve_secret: Arc<parking_lot::Mutex<String>>,
+    job_secret: Arc<parking_lot::Mutex<String>>,
+    job_model: parking_lot::Mutex<Option<Arc<dyn ConversationModel>>>,
     speech: parking_lot::Mutex<Option<Arc<dyn SpeechPresenter>>>,
     finalizer: parking_lot::Mutex<Option<Arc<dyn ene_kernel::TurnFinalizer>>>,
     prefetch: parking_lot::Mutex<Option<Arc<dyn TurnPrefetch>>>,
@@ -205,6 +207,7 @@ impl CoreDaemon {
         let stt_secret = load_named_secret(&vault, "ENE_AI__TASKS__STT__API_KEY", "ai.stt");
         let approve_secret =
             load_named_secret(&vault, "ENE_AI__TASKS__APPROVE__API_KEY", "ai.approve");
+        let job_secret = load_named_secret(&vault, "ENE_AI__TASKS__JOB__API_KEY", "ai.job");
         Ok(Self {
             data_dir: opts.data_dir,
             _lock: lock,
@@ -230,6 +233,8 @@ impl CoreDaemon {
             tts_secret: Arc::new(parking_lot::Mutex::new(tts_secret)),
             stt_secret: Arc::new(parking_lot::Mutex::new(stt_secret)),
             approve_secret: Arc::new(parking_lot::Mutex::new(approve_secret)),
+            job_secret: Arc::new(parking_lot::Mutex::new(job_secret)),
+            job_model: parking_lot::Mutex::new(None),
             speech: parking_lot::Mutex::new(None),
             finalizer: parking_lot::Mutex::new(None),
             prefetch: parking_lot::Mutex::new(None),
@@ -274,6 +279,7 @@ impl CoreDaemon {
             "tts" => self.tts_secret.lock().clone(),
             "stt" => self.stt_secret.lock().clone(),
             "approve" => self.approve_secret.lock().clone(),
+            "job" => self.job_secret.lock().clone(),
             "chat" => self.chat_secret.lock().clone(),
             _ => String::new(),
         };
@@ -293,6 +299,7 @@ impl CoreDaemon {
             "tts" => self.tts_secret.lock().clone(),
             "stt" => self.stt_secret.lock().clone(),
             "approve" => self.approve_secret.lock().clone(),
+            "job" => self.job_secret.lock().clone(),
             _ => self.chat_secret.lock().clone(),
         };
         !named.is_empty()
@@ -308,6 +315,15 @@ impl CoreDaemon {
 
     pub fn set_prefetch(&self, prefetch: Arc<dyn TurnPrefetch>) {
         *self.prefetch.lock() = Some(prefetch);
+    }
+
+    pub fn set_job_model(&self, model: Arc<dyn ConversationModel>) {
+        *self.job_model.lock() = Some(model);
+    }
+
+    #[must_use]
+    pub fn job_model(&self) -> Option<Arc<dyn ConversationModel>> {
+        self.job_model.lock().clone()
     }
 
     pub fn clear_turn_seams(&self) {
@@ -373,6 +389,7 @@ impl CoreDaemon {
         store_secret(&self.tts_secret, secrets.tts);
         store_secret(&self.stt_secret, secrets.stt);
         store_secret(&self.approve_secret, secrets.approve);
+        store_secret(&self.job_secret, secrets.job);
     }
 
     pub fn replace_plugins(&self, plugins: PluginSettings) {
@@ -583,7 +600,7 @@ impl CoreDaemon {
         session: SessionId,
         model: Arc<dyn ConversationModel>,
     ) -> LaneHandle {
-        let harness = ene_kernel::HarnessSettings::default();
+        let harness = HarnessSettings::default();
         let router = Arc::new(WorkSurfaceRouter::new(
             Arc::clone(&self.host),
             self.supervisor.registry(),
@@ -728,6 +745,18 @@ fn load_mind_settings(data_dir: &Path) -> CompanionMind {
     CompanionMind::default()
 }
 
+pub(crate) fn load_harness_settings(data_dir: &Path) -> HarnessSettings {
+    let path = data_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(harness) = file.get("harness")
+        && let Ok(overlay) = serde_json::from_value::<HarnessSettings>(harness.clone())
+    {
+        return overlay;
+    }
+    HarnessSettings::default()
+}
+
 fn apply_ai_env(settings: &mut AiSettings) {
     apply_task_env("ENE_AI__TASKS__CHAT", &mut settings.tasks.chat);
     apply_task_env("ENE_AI__TASKS__CLASSIFIER", &mut settings.tasks.classifier);
@@ -736,6 +765,7 @@ fn apply_ai_env(settings: &mut AiSettings) {
     apply_task_env("ENE_AI__TASKS__TTS", &mut settings.tasks.tts);
     apply_task_env("ENE_AI__TASKS__STT", &mut settings.tasks.stt);
     apply_task_env("ENE_AI__TASKS__APPROVE", &mut settings.tasks.approve);
+    apply_task_env("ENE_AI__TASKS__JOB", &mut settings.tasks.job);
 }
 
 fn apply_plugin_env(settings: &mut PluginSettings) {
@@ -816,6 +846,7 @@ pub struct TaskSecrets {
     pub tts: Option<String>,
     pub stt: Option<String>,
     pub approve: Option<String>,
+    pub job: Option<String>,
 }
 
 fn store_secret(slot: &parking_lot::Mutex<String>, value: Option<String>) {
@@ -841,6 +872,7 @@ pub(crate) fn overlay_ai(live: &mut AiSettings, incoming: &serde_json::Value) {
     overlay_task(&mut live.tasks.tts, incoming.pointer("/tasks/tts"));
     overlay_task(&mut live.tasks.stt, incoming.pointer("/tasks/stt"));
     overlay_task(&mut live.tasks.approve, incoming.pointer("/tasks/approve"));
+    overlay_task(&mut live.tasks.job, incoming.pointer("/tasks/job"));
 }
 
 pub(crate) fn overlay_plugins(live: &mut PluginSettings, incoming: &serde_json::Value) {

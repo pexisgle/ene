@@ -34,6 +34,8 @@ pub enum WorkError {
     SecrecyViolation,
     #[error("mutating work needs an approved plan")]
     PlanNotApproved,
+    #[error("job lane: {0}")]
+    JobLane(String),
     #[error("unsupported artifact kind {0}")]
     UnsupportedArtifact(String),
 }

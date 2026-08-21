@@ -371,6 +371,34 @@ async fn fs_list_and_edit_stay_in_workspace() {
     );
 }
 
+#[tokio::test]
+async fn execute_in_workspace_ignores_registry_root() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let global = dir.path().join("global");
+    let job = dir.path().join("job");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&job).unwrap();
+    std::fs::write(global.join("secret.txt"), "nope").unwrap();
+    std::fs::write(job.join("only.txt"), "ok").unwrap();
+    let registry = ToolRegistry::new();
+    registry.set_workspace(&global);
+    for def in crate::builtins::definitions_for(BuiltinKind::Fs) {
+        registry.register(def);
+    }
+    let listed = registry
+        .execute_in_workspace("fs.list", json!({}), Layer::Job, &job)
+        .await
+        .unwrap();
+    let names: Vec<&str> = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row.get("name").and_then(Value::as_str))
+        .collect();
+    assert!(names.contains(&"only.txt"));
+    assert!(!names.contains(&"secret.txt"));
+}
+
 #[test]
 fn bundled_plugin_mains_own_logic_without_builtin_kind() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
