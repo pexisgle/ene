@@ -7,6 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 
+#[cfg(windows)]
+use std::os::windows::net::TcpListenerExt;
 #[cfg(unix)]
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -42,14 +44,7 @@ impl BrokerServer {
     /// # Errors
     ///
     /// Returns an I/O error when the listener cannot be bound.
-    #[cfg_attr(
-        unix,
-        expect(
-            clippy::unused_async,
-            reason = "Windows binds an ephemeral TCP port; Unix bind is synchronous"
-        )
-    )]
-    pub async fn bind(
+    pub fn bind(
         broker: Arc<parking_lot::Mutex<Broker>>,
         uid: FiberUid,
         row_id: &str,
@@ -78,10 +73,15 @@ impl BrokerServer {
         }
         #[cfg(windows)]
         {
-            let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+            listener.set_nonblocking(true)?;
             let endpoint = listener.local_addr()?.to_string();
             let token = token.to_owned();
             let task = tokio::spawn(async move {
+                let Ok(listener) = TcpListener::from_std(listener) else {
+                    tracing::warn!("broker ipc stopped");
+                    return;
+                };
                 if let Err(err) = accept_loop_windows(broker, uid, listener, token).await {
                     tracing::warn!(error = %err, "broker ipc stopped");
                 }

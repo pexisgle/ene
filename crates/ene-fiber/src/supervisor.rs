@@ -595,15 +595,12 @@ impl Supervisor {
         }
         let spawn_token = Uuid::now_v7().to_string();
         let broker_server = if plugin_kind(&row.plugin).is_some() {
-            Some(
-                crate::broker_ipc::BrokerServer::bind(
-                    Arc::clone(&self.inner.broker),
-                    fiber.uid,
-                    &row.row_id,
-                    &spawn_token,
-                )
-                .await?,
-            )
+            Some(crate::broker_ipc::BrokerServer::bind(
+                Arc::clone(&self.inner.broker),
+                fiber.uid,
+                &row.row_id,
+                &spawn_token,
+            )?)
         } else {
             None
         };

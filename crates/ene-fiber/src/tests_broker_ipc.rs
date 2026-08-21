@@ -17,7 +17,6 @@ async fn broker_client_round_trips_fs_read_and_denies_undeclared_ops() {
         "r-broker-roundtrip",
         "test-token",
     )
-    .await
     .unwrap();
     let path = server.endpoint().to_owned();
 
@@ -67,7 +66,6 @@ async fn broker_client_rejects_bad_hello() {
         "r-broker-bad-token",
         "expected-token",
     )
-    .await
     .unwrap();
     let mut client = BrokerClient::from_path(server.endpoint()).await.unwrap();
 
