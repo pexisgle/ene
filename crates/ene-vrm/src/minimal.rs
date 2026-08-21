@@ -151,6 +151,44 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    #[test]
+    fn shipped_alicia_vrm_parses_and_loads() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/characters/Alicia/AliciaSolid.vrm");
+        assert!(
+            path.is_file(),
+            "shipped AliciaSolid.vrm is required for VRM acceptance"
+        );
+        let bytes = std::fs::read(&path).expect("read AliciaSolid.vrm");
+        let gltf = gltf::Gltf::from_slice(&bytes).expect("AliciaSolid.vrm should be valid glTF");
+        assert!(
+            gltf.document
+                .extensions_used()
+                .any(|extension| extension == "VRMC_vrm"),
+            "shipped Alicia VRM should declare VRMC_vrm"
+        );
+        assert!(
+            gltf.document.meshes().count() > 1,
+            "Alicia is a multi-mesh VRM, not the single-quad fixture"
+        );
+
+        let Some((device, queue)) = try_create_wgpu_device() else {
+            return;
+        };
+        let model = load_vrm(&path, &device, &queue).expect("AliciaSolid.vrm should load on wgpu");
+        assert!(
+            model.meshes.len() > 1,
+            "loader must keep every Alicia mesh, not only meshes[0]"
+        );
+        let _renderer = crate::renderer::VrmRenderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            None,
+            &model,
+        );
+    }
+
     fn try_create_wgpu_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {

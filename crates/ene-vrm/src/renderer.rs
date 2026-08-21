@@ -895,7 +895,8 @@ impl VrmRenderer {
     /// `queue` is used to upload the camera, model, and morph
     /// uniforms before the render pass; the encoder is
     /// responsible for the rest. `transparent` controls the
-    /// clear color.
+    /// clear color when `clear` is true. Subsequent bodies in the
+    /// same overlay frame use `clear = false` so they composite.
     pub fn render(
         &self,
         queue: &wgpu::Queue,
@@ -906,6 +907,7 @@ impl VrmRenderer {
         camera: &OrthographicCamera,
         model_uniform: &ModelUniform,
         transparent: bool,
+        clear: bool,
     ) {
         // `OrthographicCamera::uniform` is infallible by construction: it
         // only builds a view-proj matrix from already-validated fields and
@@ -932,13 +934,23 @@ impl VrmRenderer {
             }
         };
 
+        let color_load = if clear {
+            wgpu::LoadOp::Clear(clear_color)
+        } else {
+            wgpu::LoadOp::Load
+        };
+        let depth_load = if clear {
+            wgpu::LoadOp::Clear(1.0)
+        } else {
+            wgpu::LoadOp::Load
+        };
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("vrm.pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear_color),
+                    load: color_load,
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
@@ -946,7 +958,7 @@ impl VrmRenderer {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: depth_load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,

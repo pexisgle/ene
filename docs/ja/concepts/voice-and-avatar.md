@@ -45,6 +45,9 @@ stage が消費するのは `ene-body::PerformanceCommand` です:
 - **表情** — VRM ブレンドシェイプ + 手続き的なまばたき / 視線 / 口
 - **Look-at** — 設定範囲内でカーソルを追う
 - **スプリングボーン** — 髪 / 布
+- **同時表示** — オーバーレイは `body.render.max_concurrent` 体まで合成します
+  （既定 2）。ビセームはアクティブなソウルへ。A/D はチャットの対象を付け替え、
+  もう一方の体はアンロードしません。
 
 対応する描画 API は
 [ene-vrm API リファレンス](../reference/api/ene-vrm.md) です。

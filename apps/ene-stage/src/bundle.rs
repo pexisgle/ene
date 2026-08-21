@@ -20,11 +20,20 @@ pub enum BundleError {
 
 /// Build an Ene character archive from the repo-shipped Alicia body assets.
 pub fn pack_bundled_alicia() -> Result<Vec<u8>, BundleError> {
+    pack_bundled_named("char.alicia", "Alicia")
+}
+
+/// Same Alicia mesh under a second package id so two occupants can render.
+pub fn pack_bundled_named(id: &str, display_name: &str) -> Result<Vec<u8>, BundleError> {
     let root = ene_config::paths::assets_dir().join("characters/Alicia");
-    pack_alicia_from(&root)
+    pack_named_from(&root, id, display_name)
 }
 
 pub fn pack_alicia_from(root: &Path) -> Result<Vec<u8>, BundleError> {
+    pack_named_from(root, "char.alicia", "Alicia")
+}
+
+pub fn pack_named_from(root: &Path, id: &str, display_name: &str) -> Result<Vec<u8>, BundleError> {
     let vrm = root.join("AliciaSolid.vrm");
     if !vrm.is_file() {
         return Err(BundleError::Missing(vrm.display().to_string()));
@@ -32,12 +41,13 @@ pub fn pack_alicia_from(root: &Path) -> Result<Vec<u8>, BundleError> {
     let mut files = BTreeMap::new();
     files.insert(
         "manifest.toml".to_owned(),
-        br#"[package]
+        format!(
+            r#"[package]
 kind = "character"
-id = "char.alicia"
+id = "{id}"
 version = "1.0.0"
 format_version = 1
-display_name = "Alicia"
+display_name = "{display_name}"
 
 [contents]
 soul = "embedded"
@@ -46,19 +56,22 @@ body = "embedded"
 [integrity]
 digest = ""
 "#
-        .to_vec(),
+        )
+        .into_bytes(),
     );
     files.insert(
         "soul/soul.toml".to_owned(),
-        br#"[identity]
-name = "Alicia"
+        format!(
+            r#"[identity]
+name = "{display_name}"
 role = "companion"
 locale_default = "en-US"
 
 [persona]
 source = "persona.md"
 "#
-        .to_vec(),
+        )
+        .into_bytes(),
     );
     files.insert(
         "soul/persona.md".to_owned(),
@@ -172,5 +185,20 @@ mod tests {
         assert!(zip.by_name("body/body.toml").is_ok());
         assert!(zip.by_name("body/avatar/model.vrm").is_ok());
         assert!(zip.by_name("body/motions/VRMA_01.vrma").is_ok());
+    }
+
+    #[test]
+    fn pack_named_from_uses_requested_id() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("AliciaSolid.vrm"), b"vrm-bytes").unwrap();
+        let bytes = pack_named_from(dir.path(), "char.alicia-b", "Alicia B").expect("pack");
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut manifest = String::new();
+        zip.by_name("manifest.toml")
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        assert!(manifest.contains("id = \"char.alicia-b\""));
+        assert!(manifest.contains("display_name = \"Alicia B\""));
     }
 }

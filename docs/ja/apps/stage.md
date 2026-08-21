@@ -16,7 +16,7 @@ PowerShell から同じコマンドを使います。
 
 | ウィンドウ | 深さ | 内容 |
 |---|---|---|
-| キャラクターオーバーレイ（wgpu） | `surface` | VRM、VRMA、スプリング、視線、ビセーム。Space で枠。クリック透過はシステム → オーバーレイのクリック透過（既定オン）。Esc で終了。A/D で体、W/S でモーション。F3 でスプリングボーンのコライダーをワイヤーフレーム表示する。入力欄にフォーカスがなければチャット/詳細からも同じショートカットが届く。 |
+| キャラクターオーバーレイ（wgpu） | `surface` | VRM、VRMA、スプリング、視線、ビセーム。Space で枠。クリック透過はシステム → オーバーレイのクリック透過（既定オン）。Esc で終了。VRM 体は同時に最大2体（`body.render.max_concurrent`、既定 2）。A/D はチャットが対象にするソウルを切り替え、両方はオーバーレイに残る。W/S でアクティブな体のモーション。F3 でスプリングボーンのコライダーをワイヤーフレーム表示する。入力欄にフォーカスがなければチャット/詳細からも同じショートカットが届く。 |
 | チャット（F2） | `surface` | Prompt / Steer / Follow-up（ホバーで意味）、承認（許可 / 常に許可 / 拒否）、ask-user、マイク PCM 中継、詳細ボタン（トレイと同じ）。ステータスは独立した行で折り返し、狭い窓でも設定エラーが読める。 |
 | キャプション | `surface` | 発話の字幕。音声タブの Caption position（`top` / `bottom` / `left` / `right`）で位置を決め、Pin caption でドラッグを止めます。プロバイダ / HTTP エラーはチャットのステータス行（折り返し）に留め、字幕には出さない。ターン終了でオーバーレイは閉じる。長い発話はオーバーレイ内で折り返す。 |
 | スポットライト（Alt+Space） | ローカル | 詳細セクションへジャンプ、マイク、終了。コマンドを選ぶとパレットは閉じます。OS が Alt+Space を掴んでいるときは音声 → スポットライトを開く |
@@ -28,8 +28,9 @@ Stage は WebView を使いません。オーバーレイは wgpu、操作窓は
 
 キャラクターは `.enechar` パッケージです。`GET /characters` はインストール在庫、
 対話相手はソウル（`GET /souls` / `GET /stage` の occupants）です。`body_ref` は
-ボディ UUID です。Stage は同梱 Alicia VRM を `char.alicia@1.0.0` として
-インポートし、HTTP 経由で soul 化します。CCv3 / PNG / CHARX は変換入力だけで、
+ボディ UUID です。Stage は同梱 Alicia VRM を `char.alicia@1.0.0` と
+`char.alicia-b@1.0.0` としてインポートし、2体を同時に描けるようにしてから
+HTTP 経由で soul 化します。CCv3 / PNG / CHARX は変換入力だけで、
 CCv3 エディタはありません。Companion の書き出しと Work のセッション書き出しは、
 ドキュメントまたはダウンロードで、拡張子付きの名前（`.enechar` / `.json`）を
 提案する保存ダイアログを開きます。
@@ -70,3 +71,22 @@ PCM を中継し、`audio.chunk` を再生します。割り込みの正はコ�
 
 音声デバイス中継・承認ポップアップ・トレイ・OS 通知（`notify.hint`）は
 stage 側の仕事で、ポリシーとライブバスはコアが所有します。
+
+## 2体のコンパニオン
+
+コア起動はソウルを2つ seed します。Stage は同梱 Alicia VRM
+（`assets/characters/Alicia/AliciaSolid.vrm`）を別パッケージ ID で2回入れ、
+オーバーレイに2体を描きます。ソウルごとにセッションは分かれ、履歴は漏れません。
+A/D はもう一方のソウルへチャットを付け替え、メッシュはアンロードしません。
+
+### 自動と手動
+
+CI と Cloud Agent はソフトウェア Vulkan（lavapipe）です:
+`DISPLAY=:1 WGPU_BACKEND=vulkan`。自動で見るのは次です。
+
+- `ene-vrm` が同梱 Alicia VRM をパースし、wgpu アダプタがあれば GPU ロードする
+- HTTP: 2ソウルのセッション隔離、Alicia インポートで `avatar_path` が付く
+- オーバーレイ配置が2スロットを離す。`ene-stage` は minimal GLB fixture を書く
+
+手動: `ene-stage` を起動し、オーバーレイに VRM が2体いることと、A/D で
+それぞれと話せることを確認します。その GUI 手順は CI には含まれません。

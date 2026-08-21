@@ -50,7 +50,8 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-104 | `ene-session::surface_projection_hides_inner_and_thinking`; `ene-kernel::surface_live_subscription_does_not_receive_inner`; `ene-daemon::surface_ws_never_sees_inner` | store / HTTP | はい(表層非露出) |
 | P-105 | `ene-companion::proactive_gate_fail_closed_without_llm`; `proactive_speaks_when_gates_pass`; `proactive_disabled_never_invokes_llm`; `tendency_does_not_pierce_gates` | Scripted | いいえ(ゲート機構は実コード) |
 | P-106 | `ene-body::autonomy_tick_does_not_require_a_turn` | store | はい(描画なし tick) |
-| P-107 | `ene-daemon::http_tests::boot_seeds_two_souls_and_session_ops` | HTTP(occupant seed) | いいえ(stage 2体 E2E 未観測) |
+| P-107 | `boot_seeds_two_souls_and_session_ops`; `two_souls_keep_isolated_sessions_and_stage_occupants`; overlay 2-slot layout | HTTP / stage | 部分(セッション隔離と2スロット。GUI E2E は手動) |
+
 | P-108 | `ene-session::session_end_and_surface_search`; `boot_seeds_two_souls_and_session_ops` (split / end / search) | store / HTTP | はい |
 | P-109 | `ene-session::fork_copies_prefix_and_leaves_source_intact`; `fork_leaves_original_session_intact` | store / HTTP | はい |
 | P-110 | `ene-daemon::http_tests::export_default_omits_inner` | HTTP | はい |
@@ -74,11 +75,11 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-305 | `runtime_persists_affect_across_turns` | store | はい(永続化) |
 | P-306 | `schedule_remind_fires_and_quiet_hours_defer`; `proactive_gate_fail_closed_without_llm` | store / Scripted | 部分(スケジュールははい) |
 | P-307 | `commands_never_include_pad_numbers`; `boot_seeds_two_souls_and_session_ops` (`/affect`) | store / HTTP | はい(PAD 非露出) |
-| P-401 | `package_install_and_soul_creation`; `soul_and_body_packages_compose` | store | 部分(I/O ははい。stage 表示はいいえ) |
+| P-401 | `package_install_and_soul_creation`; `soul_and_body_packages_compose`; `import_shipped_alicia_vrm_exposes_parseable_avatar` | store / HTTP | 部分(I/O とはい。stage GUI 表示は手動) |
 | P-402 | `hot_swap_drops_pending_cues`; `unknown_emotion_falls_back_with_warning` | store | はい |
-| P-403 | `ene-vrm::minimal_glb_parses_as_vrm`; `minimal_glb_loads_with_wgpu`; `ene-stage::default_minimal_vrm_writes_parseable_glb` | fixture | いいえ(正規 VRM 未観測) |
+| P-403 | `ene-vrm::minimal_glb_parses_as_vrm`; `minimal_glb_loads_with_wgpu`; `shipped_alicia_vrm_parses_and_loads`; `ene-stage::default_minimal_vrm_writes_parseable_glb` | Alicia / fixture | 部分(同梱 Alicia のパース/wgpu。GUI は手動) |
 | P-404 | `lipsync_from_tone_has_amplitude`; `emotion_always_emits_expression_even_without_body`; `autonomy_tick_does_not_require_a_turn` | Scripted | いいえ |
-| P-405 | `stage_caps_concurrent_rendered_bodies`; `boot_seeds_two_souls_and_session_ops` | store / HTTP | いいえ(2体 stage E2E 未観測) |
+| P-405 | `stage_caps_concurrent_rendered_bodies`; `boot_seeds_two_souls_and_session_ops`; `two_souls_keep_isolated_sessions_and_stage_occupants`; `overlay_slot_offsets_place_two_bodies_apart` | store / HTTP / overlay | 部分(2スロット配置。GUI E2E は手動) |
 | P-406 | `hot_swap_drops_pending_cues` | store | はい |
 | P-407 | `boot_stage_maps_emotion_without_a_rendered_body`; `emotion_always_emits_expression_even_without_body` | HTTP / store | はい(描画なしレーン) |
 | P-501 | `turn_roundtrip_projects_history`; `seq_is_monotonic_without_gaps` | store | はい |
