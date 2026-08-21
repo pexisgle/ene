@@ -87,6 +87,7 @@ struct SupervisorInner {
     allow_unverified: AtomicBool,
     loop_hooks: Mutex<Option<LoopHooks>>,
     waterfall_guards: Mutex<HashMap<String, Vec<WaterfallGuard<HookEvent>>>>,
+    #[cfg(unix)]
     broker_servers: Mutex<HashMap<String, crate::broker_ipc::BrokerServer>>,
 }
 
@@ -248,6 +249,7 @@ impl Supervisor {
                 allow_unverified: AtomicBool::new(false),
                 loop_hooks: Mutex::new(None),
                 waterfall_guards: Mutex::new(HashMap::new()),
+                #[cfg(unix)]
                 broker_servers: Mutex::new(HashMap::new()),
             }),
         }
@@ -590,12 +592,19 @@ impl Supervisor {
                 &mut broker,
             )?;
         }
-        let broker_server = if plugin_kind(&row.plugin).is_some() {
-            Some(crate::broker_ipc::BrokerServer::bind(
-                Arc::clone(&self.inner.broker),
-                fiber.uid,
-                &row.row_id,
-            )?)
+        let broker_server = if cfg!(unix) && plugin_kind(&row.plugin).is_some() {
+            #[cfg(unix)]
+            {
+                Some(crate::broker_ipc::BrokerServer::bind(
+                    Arc::clone(&self.inner.broker),
+                    fiber.uid,
+                    &row.row_id,
+                )?)
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
         } else {
             None
         };
