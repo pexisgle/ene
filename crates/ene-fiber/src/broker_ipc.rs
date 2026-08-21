@@ -132,6 +132,7 @@ async fn accept_loop_windows(
 ) -> Result<(), BrokerIpcError> {
     while let Ok((stream, _)) = listener.accept().await {
         let broker = Arc::clone(&broker);
+        let token = token.clone();
         tokio::spawn(async move {
             if let Err(err) = serve_connection(stream, broker, uid, &token).await {
                 tracing::debug!(error = %err, "broker connection closed");
