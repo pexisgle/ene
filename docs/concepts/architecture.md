@@ -16,7 +16,7 @@ Web         ─┘                              │
                                             ├── ene-session / ene-kernel
                                             ├── ene-companion / ene-body / ene-work
                                             ├── ene-plane (approval + audit + vault)
-                                            └── ene-fiber ──► plugins/harness/*
+                                            └── ene-fiber ──► plugins/tool/*
 ```
 
 - **One host.** Table-stakes state lives in `ene-core`. Clients do not embed

@@ -1,7 +1,7 @@
 # MCP サーバー
 
 [Model Context Protocol](https://modelcontextprotocol.io) サーバーはベンダーしません。
-手書きの各行は `mcp.<id>` ファイバーになり、`ene-harness-mcp` が
+手書きの各行は `mcp.<id>` ファイバーになり、`ene-tool-mcp` が
 `mcp:<id>.<tool>` として内製ツールと同じ `ene-registry` パイプラインに載せます。
 
 `<data-dir>/mcp.json` を書くか、**コネクター**（JSON エディタと

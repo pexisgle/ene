@@ -1,14 +1,14 @@
 [package]
-name = "ene-harness-exec"
+name = "ene-tool-web"
 version.workspace = true
 edition.workspace = true
-description = "Harness exec plugin: process execution, separate from fs (D-24)"
+description = "Web tool plugin: fetch via host broker"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "ene-harness-exec"
+name = "ene-tool-web"
 path = "src/main.rs"
 
 [dependencies]

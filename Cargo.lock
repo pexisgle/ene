@@ -1597,91 +1597,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-harness-app"
-version = "0.1.0"
-dependencies = [
- "ene-fiber",
- "ene-plane",
- "ene-plugin-ipc",
- "ene-registry",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ene-harness-exec"
-version = "0.1.0"
-dependencies = [
- "ene-plugin-ipc",
- "ene-registry",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ene-harness-fs"
-version = "0.1.0"
-dependencies = [
- "ene-fiber",
- "ene-plugin-ipc",
- "ene-registry",
- "ene-sandbox",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ene-harness-mcp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "ene-fiber",
- "ene-plugin-ipc",
- "ene-registry",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ene-harness-utility"
-version = "0.1.0"
-dependencies = [
- "ene-fiber",
- "ene-plugin-ipc",
- "ene-registry",
- "ene-sandbox",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ene-harness-web"
-version = "0.1.0"
-dependencies = [
- "ene-plugin-ipc",
- "ene-registry",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "ene-kernel"
 version = "0.1.0"
 dependencies = [
@@ -1952,6 +1867,91 @@ dependencies = [
  "windows-sys 0.61.2",
  "winit",
  "zip",
+]
+
+[[package]]
+name = "ene-tool-app"
+version = "0.1.0"
+dependencies = [
+ "ene-fiber",
+ "ene-plane",
+ "ene-plugin-ipc",
+ "ene-registry",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-tool-exec"
+version = "0.1.0"
+dependencies = [
+ "ene-plugin-ipc",
+ "ene-registry",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-tool-fs"
+version = "0.1.0"
+dependencies = [
+ "ene-fiber",
+ "ene-plugin-ipc",
+ "ene-registry",
+ "ene-sandbox",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-tool-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "ene-fiber",
+ "ene-plugin-ipc",
+ "ene-registry",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-tool-utility"
+version = "0.1.0"
+dependencies = [
+ "ene-fiber",
+ "ene-plugin-ipc",
+ "ene-registry",
+ "ene-sandbox",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-tool-web"
+version = "0.1.0"
+dependencies = [
+ "ene-plugin-ipc",
+ "ene-registry",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

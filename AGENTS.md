@@ -148,12 +148,12 @@ owning `define_config!` invocation (`ene-session`, `ene-kernel`, `ene-companion`
 
 ## Plugins and IPC
 
-New tools are separate lightweight binaries: `cargo new --bin plugins/harness/<name>`.
-Serve via `ene_registry::run_plugin(BuiltinKind::…)` (see `plugins/harness/fs/src/main.rs`).
+New tools are separate lightweight binaries: `cargo new --bin plugins/tool/<name>`.
+Serve via `ene_registry::run_plugin(BuiltinKind::…)` (see `plugins/tool/fs/src/main.rs`).
 Use namespaced `<namespace>.<action>` names and declare side effects. Verify through
 `ene-ctl` and update both `docs/concepts/plugins-and-mcp.md` and its `docs/ja/` counterpart.
 
-Plugin crates are **binary-only** — no `[lib]` target (see `plugins/harness/fs`). Size is
+Plugin crates are **binary-only** — no `[lib]` target (see `plugins/tool/fs`). Size is
 not a reason to add one: `#[cfg(test)]` modules run normally in a bin crate. Add `[lib]`
 only when an integration test under `tests/` or another workspace crate must link the
 logic directly.

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_ene-harness-mcp"))
+    PathBuf::from(env!("CARGO_BIN_EXE_ene-tool-mcp"))
 }
 
 fn fixture_script(dir: &std::path::Path) -> PathBuf {

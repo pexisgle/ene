@@ -420,13 +420,13 @@ pub fn discover_plugin_executable(plugin: &str) -> Option<PathBuf> {
 #[must_use]
 pub fn discover_plugin_executable_in(plugin: &str, home: Option<&Path>) -> Option<PathBuf> {
     match plugin {
-        "tool.utility" => discover_plugin_bin_in("ene-harness-utility", home),
-        "tool.fs" => discover_plugin_bin_in("ene-harness-fs", home),
-        "tool.exec" => discover_plugin_bin_in("ene-harness-exec", home),
-        "tool.web" => discover_plugin_bin_in("ene-harness-web", home),
-        "tool.app" => discover_plugin_bin_in("ene-harness-app", home),
+        "tool.utility" => discover_plugin_bin_in("ene-tool-utility", home),
+        "tool.fs" => discover_plugin_bin_in("ene-tool-fs", home),
+        "tool.exec" => discover_plugin_bin_in("ene-tool-exec", home),
+        "tool.web" => discover_plugin_bin_in("ene-tool-web", home),
+        "tool.app" => discover_plugin_bin_in("ene-tool-app", home),
         "tool.dummy" => discover_plugin_script("plugin.py"),
-        other if other.starts_with("mcp.") => discover_plugin_bin_in("ene-harness-mcp", home),
+        other if other.starts_with("mcp.") => discover_plugin_bin_in("ene-tool-mcp", home),
         other => crate::providers::provider_plugin(other)
             .and_then(|meta| discover_plugin_bin_in(meta.bin, home)),
     }

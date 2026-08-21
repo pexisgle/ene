@@ -36,12 +36,12 @@ jobs:
             -p ene-daemon \
             -p ene-ctl \
             -p ene-stage \
-            -p ene-harness-fs \
-            -p ene-harness-exec \
-            -p ene-harness-web \
-            -p ene-harness-utility \
-            -p ene-harness-app \
-            -p ene-harness-mcp \
+            -p ene-tool-fs \
+            -p ene-tool-exec \
+            -p ene-tool-web \
+            -p ene-tool-utility \
+            -p ene-tool-app \
+            -p ene-tool-mcp \
             -p ene-provider-openai-compat \
             -p ene-provider-gguf \
             -p ene-provider-anthropic \

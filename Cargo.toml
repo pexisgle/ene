@@ -2,7 +2,7 @@
 members = [
     "crates/*",
     "apps/*",
-    "plugins/harness/*",
+    "plugins/tool/*",
     "plugins/provider/*",
 ]
 # Python IPC fixture (not a Cargo package).

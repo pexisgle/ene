@@ -1,14 +1,14 @@
 # Write a tool
 
-Harness tools are out-of-process binaries under `plugins/harness/<name>`.
+Tool plugins are out-of-process binaries under `plugins/tool/<name>`.
 They speak the split IPC in `ene-plugin-ipc` and register through
 `ene_registry::run_plugin`.
 
 ```sh
-cargo new --bin plugins/harness/my-tool
+cargo new --bin plugins/tool/my-tool
 ```
 
-Copy `plugins/harness/fs` as the template: a `[[bin]]` only, no `[lib]`,
+Copy `plugins/tool/fs` as the template: a `[[bin]]` only, no `[lib]`,
 `ene-plugin-ipc` + `ene-registry`, and a `main` that calls
 `ene_registry::run_plugin`. Use namespaced action names
 (`my_tool.echo`) and declare `side_effects`. Empty `side_effects` is what
