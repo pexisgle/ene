@@ -60,6 +60,12 @@
     "/tools/{name}/test": { "post": { "summary": "Dev invoke", "responses": { "200": { "description": "result" } } } },
     "/plugins": { "get": { "summary": "Plugin fibers", "responses": { "200": { "description": "page" } } } },
     "/plugins/{id}/restart": { "post": { "summary": "Disable then activate row", "responses": { "200": { "description": "plugin" } } } },
+    "/plugins/{id}/config": {
+      "get": { "summary": "Plugin JSON Schema and redacted current values", "responses": { "200": { "description": "config" }, "404": { "description": "unknown row" } } },
+      "put": { "summary": "Validate then apply plugin settings; failure keeps the previous config", "responses": { "200": { "description": "apply result" } } }
+    },
+    "/plugins/{id}/config/validate": { "post": { "summary": "Validate candidate plugin settings without applying", "responses": { "200": { "description": "validation" } } } },
+    "/plugins/{id}/config/options": { "post": { "summary": "Dynamic options for one field; fallback is free-text", "responses": { "200": { "description": "options" } } } },
     "/providers/models": { "post": { "summary": "List vendor model ids through a one-shot provider IPC probe", "responses": { "200": { "description": "models" }, "400": { "description": "unknown plugin or task" } } } },
     "/mcp": {
       "get": { "summary": "Handwritten MCP servers (mcp.json)", "responses": { "200": { "description": "document" } } },

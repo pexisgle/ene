@@ -131,6 +131,9 @@ pub struct HelloAck {
     pub protocols: Negotiated,
     #[serde(default)]
     pub spawn_token: String,
+    /// When false the host never sends config RPCs; default handlers are unused.
+    #[serde(default)]
+    pub has_config: bool,
 }
 
 /// Fatal handshake rejection (core overlap failed or digest mismatch).
@@ -426,6 +429,37 @@ pub enum Message {
     FlowControl {
         body: FlowControl,
     },
+    PluginConfigSchema {
+        id: u64,
+    },
+    PluginConfigSchemaResult {
+        id: u64,
+        body: crate::config::PluginConfigSchema,
+    },
+    PluginConfigValidate {
+        id: u64,
+        values: serde_json::Value,
+    },
+    PluginConfigValidateResult {
+        id: u64,
+        body: crate::config::PluginConfigValidateResult,
+    },
+    PluginConfigOptions {
+        id: u64,
+        field: String,
+    },
+    PluginConfigOptionsResult {
+        id: u64,
+        body: crate::config::PluginConfigOptionsResult,
+    },
+    PluginConfigApply {
+        id: u64,
+        values: serde_json::Value,
+    },
+    PluginConfigApplyResult {
+        id: u64,
+        body: crate::config::PluginConfigApplyResult,
+    },
 }
 
 impl Message {
@@ -484,6 +518,14 @@ impl Message {
             Self::StreamOpen { .. } => "stream_open",
             Self::StreamOpened { .. } => "stream_opened",
             Self::FlowControl { .. } => "flow_control",
+            Self::PluginConfigSchema { .. } => "plugin_config_schema",
+            Self::PluginConfigSchemaResult { .. } => "plugin_config_schema_result",
+            Self::PluginConfigValidate { .. } => "plugin_config_validate",
+            Self::PluginConfigValidateResult { .. } => "plugin_config_validate_result",
+            Self::PluginConfigOptions { .. } => "plugin_config_options",
+            Self::PluginConfigOptionsResult { .. } => "plugin_config_options_result",
+            Self::PluginConfigApply { .. } => "plugin_config_apply",
+            Self::PluginConfigApplyResult { .. } => "plugin_config_apply_result",
         }
     }
 }

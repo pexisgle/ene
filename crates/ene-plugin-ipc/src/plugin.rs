@@ -24,6 +24,35 @@ pub trait ToolHandler: Send + Sync {
         std::env::var("ENE_PLUGIN_SPAWN_TOKEN")
             .map_err(|_| "ENE_PLUGIN_SPAWN_TOKEN is not set".to_owned())
     }
+
+    fn has_config(&self) -> bool {
+        false
+    }
+
+    async fn config_schema(&self) -> Result<crate::PluginConfigSchema, IpcError> {
+        Ok(crate::PluginConfigSchema::default())
+    }
+
+    async fn config_validate(
+        &self,
+        _values: serde_json::Value,
+    ) -> Result<crate::PluginConfigValidateResult, IpcError> {
+        Ok(crate::PluginConfigValidateResult::ok())
+    }
+
+    async fn config_options(
+        &self,
+        _field: &str,
+    ) -> Result<crate::PluginConfigOptionsResult, IpcError> {
+        Ok(crate::PluginConfigOptionsResult::unsupported())
+    }
+
+    async fn config_apply(
+        &self,
+        _values: serde_json::Value,
+    ) -> Result<crate::PluginConfigApplyResult, IpcError> {
+        Ok(crate::PluginConfigApplyResult::ok(false))
+    }
 }
 
 /// Which bundled tool set a harness plugin binary serves.
@@ -162,6 +191,63 @@ where
                 write_msg(&mut stream, &Message::CapabilityReleased { id }, max_frame).await?;
             }
             Message::FlowControl { .. } | Message::Log { .. } => {}
+            Message::PluginConfigSchema { id } => {
+                let body = handler.config_schema().await.unwrap_or_default();
+                write_msg(
+                    &mut stream,
+                    &Message::PluginConfigSchemaResult { id, body },
+                    max_frame,
+                )
+                .await?;
+            }
+            Message::PluginConfigValidate { id, values } => {
+                let body = handler.config_validate(values).await.unwrap_or_else(|_| {
+                    crate::PluginConfigValidateResult {
+                        ok: false,
+                        errors: vec![crate::PluginConfigError {
+                            path: String::new(),
+                            message: "validation failed".to_owned(),
+                        }],
+                        restart_required: false,
+                    }
+                });
+                write_msg(
+                    &mut stream,
+                    &Message::PluginConfigValidateResult { id, body },
+                    max_frame,
+                )
+                .await?;
+            }
+            Message::PluginConfigOptions { id, field } => {
+                let body = handler
+                    .config_options(&field)
+                    .await
+                    .unwrap_or_else(|_| crate::PluginConfigOptionsResult::unsupported());
+                write_msg(
+                    &mut stream,
+                    &Message::PluginConfigOptionsResult { id, body },
+                    max_frame,
+                )
+                .await?;
+            }
+            Message::PluginConfigApply { id, values } => {
+                let body = handler.config_apply(values).await.unwrap_or_else(|_| {
+                    crate::PluginConfigApplyResult {
+                        ok: false,
+                        errors: vec![crate::PluginConfigError {
+                            path: String::new(),
+                            message: "apply failed".to_owned(),
+                        }],
+                        restart_required: false,
+                    }
+                });
+                write_msg(
+                    &mut stream,
+                    &Message::PluginConfigApplyResult { id, body },
+                    max_frame,
+                )
+                .await?;
+            }
             other => return Err(IpcError::Unexpected(other.kind_name().to_owned())),
         }
     }
@@ -206,6 +292,7 @@ fn build_ack<H: ToolHandler>(hello: &HostHello, handler: &H) -> Result<HelloAck,
         manifest_digest: handler.digest().to_owned(),
         protocols: negotiated,
         spawn_token,
+        has_config: handler.has_config(),
     })
 }
 

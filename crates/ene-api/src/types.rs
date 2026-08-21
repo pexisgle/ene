@@ -268,6 +268,60 @@ pub struct PluginView {
     pub wait_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfigView {
+    pub row_id: String,
+    pub plugin: String,
+    pub has_config: bool,
+    pub schema: serde_json::Value,
+    pub values: serde_json::Value,
+    #[serde(default)]
+    pub secret_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginConfigValues {
+    #[serde(default)]
+    pub values: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginConfigField {
+    #[serde(default)]
+    pub field: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfigErrorView {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfigValidateView {
+    pub ok: bool,
+    #[serde(default)]
+    pub errors: Vec<PluginConfigErrorView>,
+    #[serde(default)]
+    pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfigOptionsView {
+    #[serde(default)]
+    pub options: Vec<PluginConfigOptionView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub fallback: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfigOptionView {
+    pub id: String,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerView {
     pub id: String,

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, CharacterView, JobView, MemoryView, OccupantView, PluginView, ProviderAssetView,
-    ScheduleView, SoulView,
+    ApiClient, CharacterView, JobView, MemoryView, OccupantView, PluginConfigField,
+    PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -212,6 +212,13 @@ pub struct DetailUiState {
     pub provider_model_filter: String,
     pub mcp_json: String,
     pub mcp_servers: Vec<ene_api::McpServerView>,
+    pub plugin_config_id: String,
+    pub plugin_config_has: bool,
+    pub plugin_config_schema: String,
+    pub plugin_config_values: String,
+    pub plugin_config_secrets: Vec<String>,
+    pub plugin_config_options_field: String,
+    pub plugin_config_options: String,
     pub schema_json: String,
     pub usage_text: String,
     pub spans_text: String,
@@ -1434,11 +1441,164 @@ fn show_connections(
                     }
                 });
             }
+            if ui.button(i18n::fl("plugins-config")).clicked() {
+                let id = plugin.row_id.clone();
+                let client = Arc::clone(client);
+                spawn_async(rt, async_results, async move {
+                    AsyncOutcome::LoadPluginConfig(
+                        client.plugin_config(&id).await.map_err(|e| e.to_string()),
+                    )
+                });
+            }
         });
     }
+    show_plugin_config(ui, state, client, rt, async_results);
     show_provider_assets(ui, state, client, rt, async_results);
     ui.separator();
     show_mcp_form(ui, state, client, rt, async_results);
+}
+
+fn show_plugin_config(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    if state.plugin_config_id.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.heading(i18n::fl("plugins-config-heading"));
+    ui.label(format!(
+        "{} — {}",
+        state.plugin_config_id,
+        if state.plugin_config_has {
+            i18n::fl("plugins-config-declared")
+        } else {
+            i18n::fl("plugins-config-none")
+        }
+    ));
+    if !state.plugin_config_secrets.is_empty() {
+        ui.weak(format!(
+            "{} {}",
+            i18n::fl("plugins-config-secrets"),
+            state.plugin_config_secrets.join(", ")
+        ));
+    }
+    ui.collapsing(i18n::fl("plugins-config-schema"), |ui| {
+        ui.add(
+            egui::TextEdit::multiline(&mut state.plugin_config_schema)
+                .desired_width(f32::INFINITY)
+                .desired_rows(6),
+        );
+    });
+    ui.label(i18n::fl("plugins-config-values"));
+    ui.add(
+        egui::TextEdit::multiline(&mut state.plugin_config_values)
+            .desired_width(f32::INFINITY)
+            .desired_rows(6),
+    );
+    ui.horizontal(|ui| {
+        if ui.button(i18n::fl("plugins-config-validate")).clicked() {
+            spawn_plugin_config_values(
+                state,
+                client,
+                rt,
+                async_results,
+                PluginConfigAction::Validate,
+            );
+        }
+        if ui.button(i18n::fl("plugins-config-apply")).clicked() {
+            spawn_plugin_config_values(state, client, rt, async_results, PluginConfigAction::Apply);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("plugins-config-options-field"));
+        ui.text_edit_singleline(&mut state.plugin_config_options_field);
+        if ui.button(i18n::fl("plugins-config-options")).clicked() {
+            let id = state.plugin_config_id.clone();
+            let field = state.plugin_config_options_field.clone();
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::PluginConfigOptions(
+                    client
+                        .plugin_config_options(&id, &PluginConfigField { field })
+                        .await
+                        .map_err(|e| e.to_string()),
+                )
+            });
+        }
+    });
+    if !state.plugin_config_options.is_empty() {
+        ui.weak(&state.plugin_config_options);
+    }
+}
+
+enum PluginConfigAction {
+    Validate,
+    Apply,
+}
+
+fn spawn_plugin_config_values(
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+    action: PluginConfigAction,
+) {
+    let values = match serde_json::from_str::<serde_json::Value>(&state.plugin_config_values) {
+        Ok(values) => values,
+        Err(err) => {
+            state.connections_status = err.to_string();
+            return;
+        }
+    };
+    let id = state.plugin_config_id.clone();
+    let client = Arc::clone(client);
+    spawn_async(rt, async_results, async move {
+        let body = PluginConfigValues { values };
+        match action {
+            PluginConfigAction::Validate => AsyncOutcome::ValidatePluginConfig(
+                client
+                    .validate_plugin_config(&id, &body)
+                    .await
+                    .map_err(|e| e.to_string()),
+            ),
+            PluginConfigAction::Apply => AsyncOutcome::ApplyPluginConfig(
+                client
+                    .apply_plugin_config(&id, &body)
+                    .await
+                    .map_err(|e| e.to_string()),
+            ),
+        }
+    });
+}
+
+pub fn apply_plugin_config_view(state: &mut DetailUiState, view: PluginConfigView) {
+    view.row_id.clone_into(&mut state.plugin_config_id);
+    state.plugin_config_has = view.has_config;
+    state.plugin_config_secrets = view.secret_keys;
+    state.plugin_config_schema =
+        serde_json::to_string_pretty(&view.schema).unwrap_or_else(|_| view.schema.to_string());
+    state.plugin_config_values =
+        serde_json::to_string_pretty(&view.values).unwrap_or_else(|_| view.values.to_string());
+}
+
+pub fn plugin_config_status(view: &ene_api::PluginConfigValidateView) -> String {
+    if view.ok {
+        if view.restart_required {
+            i18n::fl("plugins-config-restart")
+        } else {
+            i18n::fl("plugins-config-ok")
+        }
+    } else {
+        view.errors
+            .iter()
+            .map(|err| format!("{}: {}", err.path, err.message))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 fn show_mcp_form(
@@ -2504,5 +2664,35 @@ mod tests {
             mcp_args_text(&spaced.args),
             "-y\nC:\\Users\\Jane Doe\\workspace\n--verbose"
         );
+    }
+
+    #[test]
+    fn plugin_config_view_fills_editor_without_secret_values() {
+        let mut state = DetailUiState::default();
+        apply_plugin_config_view(
+            &mut state,
+            PluginConfigView {
+                row_id: "r-demo".to_owned(),
+                plugin: "tool.demo".to_owned(),
+                has_config: true,
+                schema: serde_json::json!({"type":"object"}),
+                values: serde_json::json!({"model":"ok"}),
+                secret_keys: vec!["api_key".to_owned()],
+            },
+        );
+        assert_eq!(state.plugin_config_id, "r-demo");
+        assert!(state.plugin_config_has);
+        assert!(state.plugin_config_values.contains("ok"));
+        assert!(!state.plugin_config_values.contains("sk-"));
+        assert_eq!(state.plugin_config_secrets, vec!["api_key".to_owned()]);
+        let failed = ene_api::PluginConfigValidateView {
+            ok: false,
+            errors: vec![ene_api::PluginConfigErrorView {
+                path: "model".to_owned(),
+                message: "unknown".to_owned(),
+            }],
+            restart_required: false,
+        };
+        assert!(plugin_config_status(&failed).contains("model"));
     }
 }

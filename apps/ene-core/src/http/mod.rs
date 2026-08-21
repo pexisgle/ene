@@ -349,6 +349,18 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/plugins", get(routes::list_plugins))
         .route("/api/v1/plugins/{id}/restart", post(routes::restart_plugin))
         .route(
+            "/api/v1/plugins/{id}/config",
+            get(routes::get_plugin_config).put(routes::put_plugin_config),
+        )
+        .route(
+            "/api/v1/plugins/{id}/config/validate",
+            post(routes::validate_plugin_config),
+        )
+        .route(
+            "/api/v1/plugins/{id}/config/options",
+            post(routes::plugin_config_options),
+        )
+        .route(
             "/api/v1/providers/models",
             post(routes::list_provider_models),
         )
