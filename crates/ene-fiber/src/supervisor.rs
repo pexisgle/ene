@@ -152,6 +152,7 @@ pub enum SupervisorError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Ipc(#[from] ene_plugin_ipc::IpcError),
+    #[cfg(unix)]
     #[error("broker ipc: {0}")]
     BrokerIpc(#[from] crate::BrokerIpcError),
 }
@@ -592,7 +593,7 @@ impl Supervisor {
                 &mut broker,
             )?;
         }
-        let broker_server = if cfg!(unix) && plugin_kind(&row.plugin).is_some() {
+        let broker_server = if plugin_kind(&row.plugin).is_some() {
             #[cfg(unix)]
             {
                 Some(crate::broker_ipc::BrokerServer::bind(
