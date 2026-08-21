@@ -28,6 +28,7 @@ pub enum LiveEvent {
     TurnEnded {
         turn_id: TurnId,
         outcome: String,
+        error: Option<String>,
     },
 }
 

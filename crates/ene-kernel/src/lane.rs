@@ -1227,6 +1227,7 @@ async fn finish_speech(
             turn_id: ctx.turn,
             outcome: TurnOutcome::Completed,
             error_class: None,
+            error_detail: None,
         },
     ));
     let provider = usage_provider(&generation.model_id);
@@ -1290,6 +1291,7 @@ async fn finish_speech(
         LiveEvent::TurnEnded {
             turn_id: ctx.turn,
             outcome: "completed".to_owned(),
+            error: None,
         },
     );
     spawn_finalize(ctx, &speech_for_live);
@@ -1416,6 +1418,7 @@ async fn finish_interrupted(ctx: &TurnCtx, step_index: u32) -> Result<(), Kernel
                         turn_id: ctx.turn,
                         outcome: TurnOutcome::Interrupted,
                         error_class: None,
+                        error_detail: None,
                     },
                 ),
             ],
@@ -1427,6 +1430,7 @@ async fn finish_interrupted(ctx: &TurnCtx, step_index: u32) -> Result<(), Kernel
         LiveEvent::TurnEnded {
             turn_id: ctx.turn,
             outcome: "interrupted".to_owned(),
+            error: None,
         },
     );
     Ok(())
@@ -1460,6 +1464,7 @@ async fn commit_turn_interrupted(
                         turn_id: turn,
                         outcome: TurnOutcome::Interrupted,
                         error_class: None,
+                        error_detail: None,
                     },
                 ),
             ],
@@ -1471,6 +1476,7 @@ async fn commit_turn_interrupted(
         LiveEvent::TurnEnded {
             turn_id: turn,
             outcome: "interrupted".to_owned(),
+            error: None,
         },
     );
     Ok(())
@@ -1483,25 +1489,10 @@ async fn commit_turn_failure(
     turn: TurnId,
     err: &KernelError,
 ) -> Result<(), KernelError> {
-    let speech = format!(
-        "The chat provider failed: {}",
-        truncate_chars(&err.to_string(), 400)
-    );
+    let detail = truncate_chars(&err.to_string(), 400);
     store
         .commit(Transaction {
             entries: vec![
-                NewEvent::new(
-                    session,
-                    EventKind::AssistantMessage,
-                    EventPayload::AssistantMessage {
-                        v: v1(),
-                        turn_id: turn,
-                        step_index: 0,
-                        blocks: vec![Block::text(&speech)],
-                        finish_reason: "error".to_owned(),
-                        token_count: None,
-                    },
-                ),
                 NewEvent::new(
                     session,
                     EventKind::StepEnd,
@@ -1521,6 +1512,7 @@ async fn commit_turn_failure(
                         turn_id: turn,
                         outcome: TurnOutcome::Failed,
                         error_class: Some(err.error_class().to_owned()),
+                        error_detail: Some(detail.clone()),
                     },
                 ),
             ],
@@ -1529,16 +1521,10 @@ async fn commit_turn_failure(
         .await?;
     live.emit(
         DisplayDepth::Surface,
-        LiveEvent::TextDelta {
-            turn_id: turn,
-            text: speech,
-        },
-    );
-    live.emit(
-        DisplayDepth::Surface,
         LiveEvent::TurnEnded {
             turn_id: turn,
             outcome: "failed".to_owned(),
+            error: Some(detail),
         },
     );
     Ok(())

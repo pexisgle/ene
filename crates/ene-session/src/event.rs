@@ -339,6 +339,8 @@ pub enum EventPayload {
         turn_id: TurnId,
         outcome: TurnOutcome,
         error_class: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_detail: Option<String>,
     },
     StepStart {
         v: u32,

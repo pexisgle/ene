@@ -84,6 +84,7 @@ async fn turn_roundtrip_projects_history() {
                         turn_id: turn,
                         outcome: TurnOutcome::Completed,
                         error_class: None,
+                        error_detail: None,
                     },
                 ),
             ],
@@ -100,6 +101,55 @@ async fn turn_roundtrip_projects_history() {
         .collect();
     assert!(texts.iter().any(|t| t == "hello"));
     assert!(texts.iter().any(|t| t == "hi there"));
+}
+
+#[tokio::test]
+async fn failed_turn_projects_status_not_assistant() {
+    let (_dir, store) = open_tmp().await;
+    let (_soul, session) = mk_session(&store).await;
+    let turn = TurnId::new();
+    store
+        .commit(Transaction {
+            entries: vec![
+                text_user(session, turn, "hello"),
+                NewEvent::new(
+                    session,
+                    EventKind::TurnEnd,
+                    EventPayload::TurnEnd {
+                        v: v1(),
+                        turn_id: turn,
+                        outcome: TurnOutcome::Failed,
+                        error_class: Some("model".to_owned()),
+                        error_detail: Some("chat model is not configured".to_owned()),
+                    },
+                ),
+            ],
+            usage: vec![],
+        })
+        .await
+        .unwrap();
+    let events = store.load_events(session, 0).unwrap();
+    let surface = derive_messages(&events, ProjectOptions::for_depth(DisplayDepth::Surface, 8));
+    assert!(
+        surface
+            .messages
+            .iter()
+            .any(|message| message.role == crate::Role::Status
+                && message.text().contains("not configured"))
+    );
+    assert!(
+        surface
+            .messages
+            .iter()
+            .all(|message| message.role != crate::Role::Assistant)
+    );
+    let for_model = derive_messages(&events, ProjectOptions::model_visible(8));
+    assert!(
+        for_model
+            .messages
+            .iter()
+            .all(|message| message.role != crate::Role::Status)
+    );
 }
 
 #[tokio::test]

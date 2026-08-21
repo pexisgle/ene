@@ -236,6 +236,18 @@ impl StageApp {
             }
             AsyncOutcome::RefreshHistory(result) => match result {
                 Ok(history) => {
+                    if let Some(message) = history
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == "status")
+                    {
+                        let mapped = map_turn_err(&message.text);
+                        if auth_failure(&mapped) || auth_failure(&message.text) {
+                            self.detail.core_status = i18n::fl("chat-auth-failed");
+                        }
+                        mapped.clone_into(&mut self.surface.status);
+                    }
                     self.session.replace_history(history.clone());
                     self.surface.history = history;
                     self.surface.streaming_text.clear();
@@ -253,7 +265,13 @@ impl StageApp {
                     self.detail.core_settings_text.clone_from(&json);
                     self.detail.core_patch_text.clear();
                     detail::parse_core_fields(&json, &mut self.detail);
-                    self.detail.core_status = i18n::fl("settings-loaded");
+                    self.detail.core_status = if detail::chat_setup_gap(&self.detail)
+                        == Some(detail::ChatSetupGap::ApiKey)
+                    {
+                        i18n::fl("settings-chat-key-required")
+                    } else {
+                        i18n::fl("settings-loaded")
+                    };
                 }
                 Err(err) => self.detail.core_status = err,
             },
@@ -616,8 +634,8 @@ impl StageApp {
         if text.is_empty() {
             return;
         }
-        if self.detail.chat_plugin.is_empty() || self.detail.chat_plugin == "echo" {
-            self.surface.status = i18n::fl("chat-unconfigured");
+        if let Some(gap) = detail::chat_setup_gap(&self.detail) {
+            self.surface.status = detail::chat_setup_status(gap);
             return;
         }
         if !self.surface.turn_active
@@ -637,7 +655,7 @@ impl StageApp {
                     .send(&text, mode)
                     .await
                     .map(|_| ())
-                    .map_err(|err| map_turn_err(err.to_string())),
+                    .map_err(|err| map_turn_err(&err.to_string())),
             )
         });
     }
@@ -675,7 +693,7 @@ impl StageApp {
                     .barge_in()
                     .await
                     .map(|_| ())
-                    .map_err(|e| map_turn_err(e.to_string())),
+                    .map_err(|e| map_turn_err(&e.to_string())),
             )
         });
     }
@@ -692,7 +710,7 @@ impl StageApp {
                     .cancel_turn()
                     .await
                     .map(|_| ())
-                    .map_err(|e| map_turn_err(e.to_string())),
+                    .map_err(|e| map_turn_err(&e.to_string())),
             )
         });
     }
@@ -874,6 +892,13 @@ impl StageApp {
                         self.request_history_refresh();
                         self.surface.on_turn_ended();
                         self.sync_caption_window();
+                        if !text.is_empty() {
+                            let mapped = map_turn_err(&text);
+                            if auth_failure(&mapped) || auth_failure(&text) {
+                                self.detail.core_status = i18n::fl("chat-auth-failed");
+                            }
+                            mapped.clone_into(&mut self.surface.status);
+                        }
                     }
                     tracing::debug!(kind, text, "surface session event");
                 }
@@ -1517,10 +1542,19 @@ impl ApplicationHandler for StageApp {
     }
 }
 
-fn map_turn_err(err: String) -> String {
+fn auth_failure(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("401 unauthorized")
+        || lower.contains("403 forbidden")
+        || lower.contains("no cookie auth")
+}
+
+fn map_turn_err(err: &str) -> String {
     if err.contains("no_active_operation") || err.contains("no active turn") {
         i18n::fl("chat-no-active-turn")
+    } else if auth_failure(err) {
+        i18n::fl("chat-auth-failed")
     } else {
-        err
+        err.to_owned()
     }
 }

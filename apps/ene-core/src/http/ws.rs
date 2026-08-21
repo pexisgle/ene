@@ -236,11 +236,22 @@ fn live_to_json(event: &LiveEvent) -> Value {
             "name": name,
             "args": args,
         }),
-        LiveEvent::TurnEnded { turn_id, outcome } => json!({
-            "type": "session.event",
-            "kind": "turn/end",
-            "turn_id": turn_id.to_string(),
-            "outcome": outcome,
-        }),
+        LiveEvent::TurnEnded {
+            turn_id,
+            outcome,
+            error,
+        } => {
+            let mut payload = json!({
+                "type": "session.event",
+                "kind": "turn/end",
+                "turn_id": turn_id.to_string(),
+                "outcome": outcome,
+            });
+            if let Some(error) = error {
+                payload["error"] = json!(error);
+                payload["text"] = json!(error);
+            }
+            payload
+        }
     }
 }

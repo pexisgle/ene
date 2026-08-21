@@ -108,17 +108,29 @@ async fn ctl_client_lists_tools_and_debug_spans() {
         .await
         .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_user = false;
     while std::time::Instant::now() < deadline {
         let history = client.history(&session.id, "surface").await.unwrap();
         if history
             .messages
             .iter()
-            .any(|message| message.role == "assistant")
+            .any(|message| message.role == "user")
         {
+            saw_user = true;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let history = client.history(&session.id, "surface").await.unwrap();
+            assert!(
+                history
+                    .messages
+                    .iter()
+                    .all(|message| message.role != "assistant"),
+                "unconfigured chat must not emit Echo assistant replies"
+            );
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert!(saw_user, "ctl chat never persisted the user line");
     let found = ene_ctl::session::search_sessions(&client, "pineapple")
         .await
         .unwrap();
@@ -217,17 +229,26 @@ async fn cli_binary_starts_core_and_runs_session_ops() {
     assert!(chat.status.success());
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_user = false;
     let mut saw_assistant = false;
     while std::time::Instant::now() < deadline {
         let log = run(&["debug", "log", session_id.as_str()]);
         let out = String::from_utf8_lossy(&log.stdout);
-        if out.contains("assistant") {
-            saw_assistant = true;
+        if out.contains("user") {
+            saw_user = true;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let log = run(&["debug", "log", session_id.as_str()]);
+            let out = String::from_utf8_lossy(&log.stdout);
+            saw_assistant = out.contains("assistant");
             break;
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
-    assert!(saw_assistant, "CLI chat never produced an assistant line");
+    assert!(saw_user, "CLI chat never produced a user line");
+    assert!(
+        !saw_assistant,
+        "unconfigured CLI chat must not emit an Echo assistant line"
+    );
 
     let search = run(&["session", "search", session_id.as_str()]);
     assert!(search.status.success());
