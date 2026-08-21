@@ -25,7 +25,7 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 | `ene-work` | Delegation, jobs (job-lane runner), schedules, skills (catalog/active context, bookmark workflow), MCP bindings | companion, kernel, plane, registry, session |
 | `ene-plane` | Approval plane, hash-chained audit log, credential vault | config |
 | `ene-fiber` | Plugin fiber composition: reversible effects, profile reconcile, sandbox spawn | plugin-ipc, registry, sandbox, kernel |
-| `ene-registry` | Unified tool registry: side_effects filter, deny-by-default pipeline | plugin-ipc, plane |
+| `ene-registry` | Unified tool registry: side_effects filter, deny-by-default pipeline, lexical tool discovery index | plugin-ipc, plane |
 | `ene-plugin-ipc` | Split plugin IPC: length-prefixed MessagePack frames for core and tool subprotocols | (nothing internal) |
 | `ene-api` | HTTP/WS types, OpenAPI document, typed Rust client | (nothing internal) |
 | `ene-card` | Character Card V3 / PNG / CHARX import | config |

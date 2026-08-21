@@ -220,6 +220,9 @@ fn harness(
         },
         timeout_ms: Some(5_000),
         sensitivity: Sensitivity::None,
+        category: String::new(),
+        keywords: Vec::new(),
+        examples: Vec::new(),
     }
 }
 

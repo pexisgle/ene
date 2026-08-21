@@ -14,6 +14,12 @@ Built-in tools live under `plugins/tool/`: `fs`, `exec`, `web`, `utility`,
 a third-party plugin. `exec` is not part of `fs`. See [Built-in tools](../guides/tools/builtin-tools.md)
 and [Write a tool](../guides/tools/write-a-tool.md).
 
+Tool specs may carry optional discovery metadata (`category`, `keywords`,
+`examples`) on the wire. `ene-registry` indexes every registered tool — bundled
+plugins, MCP rows, and harness tools share the same path — and exposes lexical
+`search_tools(query, limit)` for host-side discovery without embeddings.
+Plugin unload drops matching index rows.
+
 MCP servers are not vendored. Each handwritten `mcp.json` row becomes a
 `mcp.<id>` fiber running `ene-tool-mcp` (stdio or Streamable HTTP) on the
 same pipeline as in-tree tools. Process acceptance is a stdio server that

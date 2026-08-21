@@ -147,6 +147,15 @@ pub struct ToolSpecWire {
     pub parameters: serde_json::Value,
     pub output: serde_json::Value,
     pub side_effects: Vec<String>,
+    /// Implementation-agnostic grouping label for discovery.
+    #[serde(default)]
+    pub category: String,
+    /// Extra search terms beyond name and description.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// Example invocations or use cases for discovery.
+    #[serde(default)]
+    pub examples: Vec<String>,
 }
 
 /// Tool call request body.

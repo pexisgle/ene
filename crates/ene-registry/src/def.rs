@@ -12,7 +12,7 @@ pub enum ToolSource {
 }
 
 /// One registered tool. Host-only fields never appear in `schemas()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
@@ -22,6 +22,9 @@ pub struct ToolDefinition {
     pub source: ToolSource,
     pub timeout_ms: Option<u32>,
     pub sensitivity: Sensitivity,
+    pub category: String,
+    pub keywords: Vec<String>,
+    pub examples: Vec<String>,
 }
 
 impl ToolDefinition {
@@ -37,6 +40,9 @@ impl ToolDefinition {
                 source,
                 timeout_ms: None,
                 sensitivity: crate::builtins::host_sensitivity(&spec.name),
+                category: host.category,
+                keywords: host.keywords,
+                examples: host.examples,
             };
         }
         let side_effects = spec.side_effects;
@@ -54,6 +60,9 @@ impl ToolDefinition {
             source,
             timeout_ms: None,
             sensitivity,
+            category: spec.category,
+            keywords: spec.keywords,
+            examples: spec.examples,
         }
     }
 

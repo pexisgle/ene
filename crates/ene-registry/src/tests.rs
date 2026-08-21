@@ -157,6 +157,9 @@ fn harness_tool_uses_the_same_pipeline() {
         },
         timeout_ms: None,
         sensitivity: ene_plane::Sensitivity::None,
+        category: String::new(),
+        keywords: Vec::new(),
+        examples: Vec::new(),
     });
     let surface = registry.schemas(Layer::Surface);
     assert_eq!(surface[0]["name"], "memory.recall");
@@ -190,6 +193,9 @@ async fn plane_denies_side_effects_and_sensitive_reads() {
         },
         timeout_ms: None,
         sensitivity: ene_plane::Sensitivity::High,
+        category: String::new(),
+        keywords: Vec::new(),
+        examples: Vec::new(),
     });
     let denied = registry
         .execute("fs.write", json!({"path":"/tmp/x","text":"no"}), Layer::Job)
@@ -236,6 +242,9 @@ fn unknown_plugin_empty_side_effects_are_medium_sensitivity() {
         parameters: json!({"type":"object"}),
         output: json!({"type":"object"}),
         side_effects: Vec::new(),
+        category: String::new(),
+        keywords: Vec::new(),
+        examples: Vec::new(),
     };
     let def = ToolDefinition::from_wire(
         spec,
@@ -419,4 +428,150 @@ fn bundled_plugin_mains_own_logic_without_builtin_kind() {
             "{name} logic.rs"
         );
     }
+}
+
+fn register_bundled_fs_utility(registry: &ToolRegistry) {
+    for kind in [BuiltinKind::Fs, BuiltinKind::Utility] {
+        for def in crate::builtins::definitions_for(kind) {
+            registry.register(def);
+        }
+    }
+}
+
+#[test]
+fn search_tools_ranks_keyword_match_first() {
+    let registry = ToolRegistry::new();
+    register_bundled_fs_utility(&registry);
+    let hits = registry.search_tools("grep", 8);
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0].tool.name, "fs.search");
+    assert!(hits[0].score > 0);
+}
+
+#[test]
+fn search_tools_works_without_embeddings() {
+    let registry = ToolRegistry::new();
+    register_bundled_fs_utility(&registry);
+    let hits = registry.search_tools("hash", 4);
+    assert!(hits.iter().any(|hit| hit.tool.name == "utility.hash"));
+}
+
+#[test]
+fn search_tools_unregister_removes_plugin_tools() {
+    let registry = ToolRegistry::new();
+    register_bundled_fs_utility(&registry);
+    registry.unregister_plugin("tool.fs");
+    let hits = registry.search_tools("grep", 8);
+    assert!(hits.iter().all(|hit| !hit.tool.name.starts_with("fs.")));
+    assert!(
+        registry
+            .search_tools("hash", 4)
+            .iter()
+            .any(|hit| hit.tool.name == "utility.hash")
+    );
+}
+
+#[test]
+fn search_tools_tie_breaks_by_name() {
+    let registry = ToolRegistry::new();
+    registry.register(ToolDefinition {
+        name: "aaa.match".to_owned(),
+        description: "alpha tool".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: Vec::new(),
+        source: ToolSource::Harness {
+            name: "test".to_owned(),
+        },
+        timeout_ms: None,
+        sensitivity: ene_plane::Sensitivity::None,
+        category: "test".to_owned(),
+        keywords: vec!["needle".to_owned()],
+        examples: Vec::new(),
+    });
+    registry.register(ToolDefinition {
+        name: "zzz.match".to_owned(),
+        description: "omega tool".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: Vec::new(),
+        source: ToolSource::Harness {
+            name: "test".to_owned(),
+        },
+        timeout_ms: None,
+        sensitivity: ene_plane::Sensitivity::None,
+        category: "test".to_owned(),
+        keywords: vec!["needle".to_owned()],
+        examples: Vec::new(),
+    });
+    let hits = registry.search_tools("needle", 8);
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].score, hits[1].score);
+    assert_eq!(hits[0].tool.name, "aaa.match");
+    assert_eq!(hits[1].tool.name, "zzz.match");
+}
+
+#[test]
+fn search_tools_respects_limit() {
+    let registry = ToolRegistry::new();
+    register_bundled_fs_utility(&registry);
+    let hits = registry.search_tools("", 3);
+    assert_eq!(hits.len(), 3);
+}
+
+#[test]
+fn search_tools_empty_query_is_name_sorted() {
+    let registry = ToolRegistry::new();
+    register_bundled_fs_utility(&registry);
+    let hits = registry.search_tools("", 16);
+    let names: Vec<&str> = hits.iter().map(|hit| hit.tool.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted);
+    assert!(hits.iter().all(|hit| hit.score == 0));
+}
+
+#[test]
+fn search_tools_truncates_huge_metadata() {
+    let registry = ToolRegistry::new();
+    registry.register(ToolDefinition {
+        name: "huge.meta".to_owned(),
+        description: "metadata cap".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: Vec::new(),
+        source: ToolSource::Harness {
+            name: "test".to_owned(),
+        },
+        timeout_ms: None,
+        sensitivity: ene_plane::Sensitivity::None,
+        category: "x".repeat(256),
+        keywords: vec!["x".repeat(256); 64],
+        examples: vec!["y".repeat(512); 16],
+    });
+    let hits = registry.search_tools("huge", 1);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].tool.name, "huge.meta");
+}
+
+#[test]
+fn search_tools_finds_mcp_tool_definition() {
+    let registry = ToolRegistry::new();
+    registry.register(ToolDefinition {
+        name: "mcp:git.status".to_owned(),
+        description: "Git working tree status".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: Vec::new(),
+        source: ToolSource::Mcp {
+            server: "git".to_owned(),
+        },
+        timeout_ms: None,
+        sensitivity: ene_plane::Sensitivity::None,
+        category: "vcs".to_owned(),
+        keywords: vec!["git".to_owned(), "status".to_owned()],
+        examples: vec!["git status".to_owned()],
+    });
+    let hits = registry.search_tools("git status", 4);
+    assert_eq!(hits[0].tool.name, "mcp:git.status");
 }

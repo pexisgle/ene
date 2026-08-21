@@ -15,6 +15,11 @@ tool IPC を話します。
 `exec` は `fs` に含めません。[同梱ツール](../guides/tools/builtin-tools.md) と
 [ツールを書く](../guides/tools/write-a-tool.md) を見てください。
 
+仕様には任意の discovery メタデータ（`category`、`keywords`、`examples`）を
+載せられます。`ene-registry` は登録されたすべてのツール（同梱プラグイン、MCP、
+ハーネス）を同じ経路で索引し、埋め込みなしの字句検索 `search_tools(query, limit)`
+をホスト向けに提供します。プラグイン unload で該当行は索引から外れます。
+
 MCP サーバーはベンダーしません。手書きの `mcp.json` の各行は `ene-tool-mcp`
 （stdio または Streamable HTTP）の `mcp.<id>` ファイバーになり、内製ツールと
 同じパイプラインに載ります。プロセス受入は実 `git` を呼ぶ stdio サーバー
