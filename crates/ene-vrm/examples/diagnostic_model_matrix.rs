@@ -83,9 +83,9 @@ fn main() {
     ];
     let max_extent = extent.iter().copied().fold(0.0f32, f32::max);
     let center = [
-        (bb_min[0] + bb_max[0]) * 0.5,
-        (bb_min[1] + bb_max[1]) * 0.5,
-        (bb_min[2] + bb_max[2]) * 0.5,
+        f32::midpoint(bb_min[0], bb_max[0]),
+        f32::midpoint(bb_min[1], bb_max[1]),
+        f32::midpoint(bb_min[2], bb_max[2]),
     ];
     const TARGET_MODEL_SIZE: f32 = 1.5;
     let normalize_scale = if max_extent > 0.0001 {
