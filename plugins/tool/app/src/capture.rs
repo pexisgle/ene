@@ -6,6 +6,7 @@ use std::time::Duration;
 
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SCREENSHOT_BYTES: usize = 512 * 1024;
+#[cfg(target_os = "linux")]
 const PORTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) fn screenshot() -> Result<Value, String> {
