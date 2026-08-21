@@ -30,6 +30,7 @@
 - [ツールを書く](guides/tools/write-a-tool.md)
 - [MCP サーバー](guides/tools/mcp-servers.md)
 - [同梱ツール](guides/tools/builtin-tools.md)
+- [App プラットフォーム表](guides/tools/app-platform.md)
 
 # リファレンス
 

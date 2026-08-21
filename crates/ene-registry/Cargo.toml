@@ -15,6 +15,7 @@ chrono = { workspace = true }
 ene-plugin-ipc = { workspace = true }
 ene-plane = { workspace = true }
 parking_lot = { workspace = true }
+arboard = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
 rustls = { workspace = true }
@@ -25,6 +26,14 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time", "fs"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+image = { workspace = true, features = ["png"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

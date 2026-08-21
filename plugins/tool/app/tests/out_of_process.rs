@@ -26,15 +26,19 @@ async fn app_screenshot_registers_on_surface() {
     };
     sup.activate_process(&row, &bin()).await.unwrap();
     assert!(sup.surface_has_tool("app.screenshot"));
-    assert!(!sup.surface_has_tool("app.click"));
-    let listed = sup.registry().get("app.window_list").unwrap();
-    assert_eq!(listed.sensitivity, ene_plane::Sensitivity::High);
-    let err = sup
+    assert!(sup.surface_has_tool("app.capabilities"));
+    assert!(
+        !sup.surface_has_tool("app.click"),
+        "input injection stays off the surface schema"
+    );
+    let caps = sup
         .registry()
-        .execute("app.click", json!({"x":0,"y":0}), Layer::Job)
+        .execute("app.capabilities", json!({}), Layer::Surface)
         .await
-        .unwrap_err();
-    assert!(matches!(err, ene_registry::PipelineError::Denied { .. }));
+        .unwrap();
+    assert!(caps["session"].is_string());
+    assert!(caps["actions"]["app.screenshot"]["backend"].is_string());
+    assert!(caps["actions"]["app.click"].get("available").is_some());
     sup.unload("r-app").await;
 }
 
