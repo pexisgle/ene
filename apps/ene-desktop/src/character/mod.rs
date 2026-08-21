@@ -509,6 +509,7 @@ impl CharacterRenderer {
                 &self.camera,
                 model_uniform,
                 transparent,
+                true,
             );
             post.render(device, queue, &mut encoder, view);
         } else {
@@ -521,6 +522,7 @@ impl CharacterRenderer {
                 &self.camera,
                 model_uniform,
                 transparent,
+                true,
             );
         }
         queue.submit(std::iter::once(encoder.finish()));
