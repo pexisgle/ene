@@ -9,14 +9,16 @@ extern crate self as ene_registry;
 mod builtin;
 mod builtins;
 mod def;
+mod discovery;
 mod pipeline;
 
-pub use builtin::{arg_str, spec};
+pub use builtin::{arg_str, spec, spec_with_discovery};
 pub use builtins::{
     BuiltinExecutor, builtin_digest, builtin_specs, definitions_for, file_digest, host_sensitivity,
     host_spec_for, run_plugin, run_tool_plugin,
 };
 pub use def::{Layer, ToolDefinition, ToolSource};
+pub use discovery::ToolHit;
 pub use pipeline::{BuiltinInvoker, PipelineError, ToolInvoke, ToolRegistry, confine_tool_path};
 
 #[cfg(test)]

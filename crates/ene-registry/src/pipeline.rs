@@ -1,5 +1,6 @@
 use crate::BuiltinExecutor;
 use crate::def::{Layer, ToolDefinition, ToolSource};
+use crate::discovery::{IndexedTool, ToolHit, lexical_score};
 use async_trait::async_trait;
 use ene_plane::{ApprovalPlane, AuthzRequest};
 use parking_lot::Mutex;
@@ -52,6 +53,7 @@ pub enum PipelineError {
 /// In-memory registry. Fiber unload removes rows by plugin id.
 pub struct ToolRegistry {
     tools: Mutex<HashMap<String, Registered>>,
+    index: Mutex<HashMap<String, IndexedTool>>,
     plane: Mutex<Option<Arc<ApprovalPlane>>>,
     workspace: Mutex<Option<PathBuf>>,
 }
@@ -61,6 +63,7 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: Mutex::new(HashMap::new()),
+            index: Mutex::new(HashMap::new()),
             plane: Mutex::new(None),
             workspace: Mutex::new(None),
         }
@@ -84,14 +87,34 @@ impl ToolRegistry {
     }
 
     pub fn register_with(&self, def: ToolDefinition, invoke: Arc<dyn ToolInvoke>) {
+        let name = def.name.clone();
+        let indexed = IndexedTool::from_definition(&def);
         self.tools
             .lock()
-            .insert(def.name.clone(), Registered { def, invoke });
+            .insert(name.clone(), Registered { def, invoke });
+        self.index.lock().insert(name, indexed);
     }
 
     /// Inverse of register for one plugin source (I-46).
     pub fn unregister_source(&self, source: &ToolSource) {
-        self.tools.lock().retain(|_, row| &row.def.source != source);
+        let mut tools = self.tools.lock();
+        let removed: Vec<String> = tools
+            .iter()
+            .filter_map(|(name, row)| (&row.def.source == source).then_some(name.clone()))
+            .collect();
+        tools.retain(|_, row| &row.def.source != source);
+        drop(tools);
+        let mut index = self.index.lock();
+        for name in removed {
+            index.remove(&name);
+        }
+    }
+
+    /// Drop every tool registered by one plugin id.
+    pub fn unregister_plugin(&self, plugin_id: &str) {
+        self.unregister_source(&ToolSource::Plugin {
+            plugin_id: plugin_id.to_owned(),
+        });
     }
 
     #[must_use]
@@ -106,6 +129,38 @@ impl ToolRegistry {
         let mut defs: Vec<ToolDefinition> = tools.values().map(|row| row.def.clone()).collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
+    }
+
+    /// Lexical tool discovery. Empty query returns a name-sorted prefix.
+    #[must_use]
+    pub fn search_tools(&self, query: &str, limit: usize) -> Vec<ToolHit> {
+        let tools = self.tools.lock();
+        let index = self.index.lock();
+        let mut hits: Vec<ToolHit> = tools
+            .values()
+            .map(|row| {
+                let indexed = index
+                    .get(&row.def.name)
+                    .map_or_else(|| IndexedTool::from_definition(&row.def), Clone::clone);
+                let score = lexical_score(query, &indexed);
+                ToolHit {
+                    tool: row.def.clone(),
+                    score,
+                }
+            })
+            .collect();
+        if query.trim().is_empty() {
+            hits.sort_by(|left, right| left.tool.name.cmp(&right.tool.name));
+        } else {
+            hits.sort_by(|left, right| {
+                right
+                    .score
+                    .cmp(&left.score)
+                    .then_with(|| left.tool.name.cmp(&right.tool.name))
+            });
+        }
+        hits.truncate(limit);
+        hits
     }
 
     /// Model-visible schemas for a layer. Host-only fields are excluded.

@@ -72,6 +72,9 @@ pub fn register_memory_tools(
             },
             timeout_ms: Some(5_000),
             sensitivity: Sensitivity::None,
+            category: String::new(),
+            keywords: Vec::new(),
+            examples: Vec::new(),
         },
         Arc::clone(&invoker) as Arc<dyn ToolInvoke>,
     );
@@ -96,6 +99,9 @@ pub fn register_memory_tools(
             },
             timeout_ms: Some(5_000),
             sensitivity: Sensitivity::High,
+            category: String::new(),
+            keywords: Vec::new(),
+            examples: Vec::new(),
         },
         invoker as Arc<dyn ToolInvoke>,
     );

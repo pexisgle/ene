@@ -70,6 +70,9 @@ pub fn register_mcp_tools(
                 },
                 timeout_ms: Some(30_000),
                 sensitivity: Sensitivity::None,
+                category: String::new(),
+                keywords: Vec::new(),
+                examples: Vec::new(),
             },
             Arc::clone(invoke),
         );

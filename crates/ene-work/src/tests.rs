@@ -122,6 +122,9 @@ fn fs_write_def() -> ToolDefinition {
         },
         timeout_ms: Some(1_000),
         sensitivity: Sensitivity::None,
+        category: String::new(),
+        keywords: Vec::new(),
+        examples: Vec::new(),
     }
 }
 
@@ -137,6 +140,9 @@ fn utility_time_def() -> ToolDefinition {
         },
         timeout_ms: Some(1_000),
         sensitivity: Sensitivity::None,
+        category: String::new(),
+        keywords: Vec::new(),
+        examples: Vec::new(),
     }
 }
 
@@ -480,6 +486,9 @@ async fn job_router_confines_fs_to_job_workspace() {
             },
             timeout_ms: Some(1_000),
             sensitivity: Sensitivity::None,
+            category: String::new(),
+            keywords: Vec::new(),
+            examples: Vec::new(),
         },
         Arc::clone(&capture) as Arc<dyn ToolInvoke>,
     );
@@ -853,6 +862,9 @@ async fn bookmark_job_searches_and_applies_matching_skill() {
             },
             timeout_ms: Some(1_000),
             sensitivity: Sensitivity::None,
+            category: String::new(),
+            keywords: Vec::new(),
+            examples: Vec::new(),
         },
         Arc::new(SearchInvoke) as Arc<dyn ToolInvoke>,
     );

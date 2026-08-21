@@ -34,6 +34,9 @@ impl ToolHandler for EchoHandler {
             parameters: json!({"type":"object"}),
             output: json!({"type":"object"}),
             side_effects: Vec::new(),
+            category: String::new(),
+            keywords: Vec::new(),
+            examples: Vec::new(),
         }]
     }
     async fn call(
@@ -561,4 +564,22 @@ async fn list_assets_roundtrip() {
     assert_eq!(listed.assets[0].id, "llama-server");
     host.drain().await.unwrap();
     plugin.await.unwrap().unwrap();
+}
+
+#[test]
+fn tool_spec_wire_discovery_defaults_roundtrip() {
+    let minimal = r#"{"name":"x","description":"d","parameters":{},"output":{},"side_effects":[]}"#;
+    let decoded: ToolSpecWire = serde_json::from_str(minimal).unwrap();
+    assert!(decoded.category.is_empty());
+    assert!(decoded.keywords.is_empty());
+    assert!(decoded.examples.is_empty());
+    let encoded = serde_json::to_string(&decoded).unwrap();
+    let again: ToolSpecWire = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, again);
+
+    let full = r#"{"name":"x","description":"d","parameters":{},"output":{},"side_effects":[],"category":"fs","keywords":["read"],"examples":["read README"]}"#;
+    let rich: ToolSpecWire = serde_json::from_str(full).unwrap();
+    assert_eq!(rich.category, "fs");
+    assert_eq!(rich.keywords, vec!["read".to_owned()]);
+    assert_eq!(rich.examples, vec!["read README".to_owned()]);
 }

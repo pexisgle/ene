@@ -29,6 +29,9 @@ pub fn register_screenshot_tool(registry: &ToolRegistry, invoke: Arc<dyn ToolInv
             },
             timeout_ms: Some(5_000),
             sensitivity: Sensitivity::High,
+            category: String::new(),
+            keywords: Vec::new(),
+            examples: Vec::new(),
         },
         invoke,
     );
