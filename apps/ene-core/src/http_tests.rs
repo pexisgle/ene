@@ -1,9 +1,11 @@
 use crate::{BootOptions, CoreDaemon};
 use async_trait::async_trait;
 use base64::Engine;
+use chrono::TimeZone;
 use ene_api::{
-    ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
-    MessageMode, MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
+    AnswerJobRequest, ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest,
+    HistoryResponse, MessageMode, MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch,
+    ToolTestRequest,
 };
 use ene_companion::{
     CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, ScriptedClassify,
@@ -712,6 +714,145 @@ async fn job_runner_completes_queued_work_on_its_own_lane() {
             .any(|(direction, kind, _)| direction == "child_to_parent" && kind == "complete"),
         "runner must complete via the job lane, got {mail:?}"
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn job_question_answer_reaches_mailbox() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let mut surface = client.events("surface", Some(&session.id)).await.unwrap();
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a city");
+    let report = core.host().question(job.id, "which city?").unwrap();
+    assert_eq!(report.job_id, Some(job.id));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut asked = None;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, surface.recv_json()).await {
+            Ok(Ok(Some(value))) if value["type"] == "question.asked" => {
+                asked = Some(value);
+                break;
+            }
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    let asked = asked.expect("live bus must emit question.asked");
+    assert_eq!(asked["id"], job.id.to_string());
+    assert_eq!(asked["prompt"], "which city?");
+    assert_eq!(asked["questions"][0], "which city?");
+    client
+        .answer_job(
+            &job.id.to_string(),
+            &AnswerJobRequest {
+                text: "Tokyo".into(),
+                answers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let mail = core.work().mailbox(job.id).unwrap();
+    assert!(
+        mail.iter().any(|(direction, kind, body)| {
+            direction == "parent_to_child" && kind == "answer" && body == "Tokyo"
+        }),
+        "answer must land on the job mailbox, got {mail:?}"
+    );
+    assert!(core.host().open_questions(job.id).unwrap().is_empty());
+    let sid = SessionId::from_str(&session.id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let events = loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        let answered = events
+            .iter()
+            .any(|event| matches!(&event.payload, EventPayload::DelegationAnswer { .. }));
+        if answered {
+            break events;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session log missing delegation answer"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let question_id = events
+        .iter()
+        .find_map(|event| {
+            if let EventPayload::DelegationQuestion { question_id, .. } = event.payload {
+                Some(question_id)
+            } else {
+                None
+            }
+        })
+        .expect("session log must record delegation question");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::UserMessage { blocks, .. }
+                    if blocks.iter().any(|block| block.as_text() == Some("Tokyo"))
+            )
+        }),
+        "session log must record user answer text: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::DelegationAnswer {
+                    question_id: answer_qid,
+                    delegation_id,
+                    ..
+                } if *answer_qid == question_id && *delegation_id == job.id
+            )
+        }),
+        "delegation answer must correlate question_id: {events:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn job_question_timeout_loop_writes_assumption() {
+    let (_dir, _client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "pick an airline");
+    core.work()
+        .set_status(job.id, ene_work::JobStatus::Running, None)
+        .unwrap();
+    let asked = chrono::Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+    core.work()
+        .mailbox_push_at(
+            job.id,
+            "child_to_parent",
+            "question",
+            "which airline?",
+            &asked.to_rfc3339(),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let mail = core.work().mailbox(job.id).unwrap();
+        if mail
+            .iter()
+            .any(|(_, kind, body)| kind == "assumption" && body.contains("timeout"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon timeout loop did not write an assumption, mailbox={mail:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     server.shutdown().await;
 }
 

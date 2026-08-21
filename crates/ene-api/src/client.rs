@@ -1,8 +1,8 @@
 use crate::error::ApiError;
 use crate::types::{
-    AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
-    CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
-    ExclusiveSnapshot, Health, HistoryResponse, InstallProviderAssetRequest,
+    AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
+    ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
+    EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse, InstallProviderAssetRequest,
     InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
     ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument, MemoryPatch,
     MemoryView, MessageRequest, Page, PluginConfigField, PluginConfigOptionsView,
@@ -302,6 +302,14 @@ impl ApiClient {
     pub async fn cancel_job(&self, id: &str) -> Result<JobView, ApiError> {
         self.send_json(self.request(Method::POST, &format!("/api/v1/jobs/{id}/cancel")))
             .await
+    }
+
+    pub async fn answer_job(&self, id: &str, req: &AnswerJobRequest) -> Result<JobView, ApiError> {
+        self.send_json(
+            self.request(Method::POST, &format!("/api/v1/jobs/{id}/answer"))
+                .json(req),
+        )
+        .await
     }
 
     pub async fn list_schedules(&self) -> Result<Page<ScheduleView>, ApiError> {

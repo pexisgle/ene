@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ene_api::{
-    ApiClient, ApprovalView, CreateScheduleRequest, CreateSessionRequest, HistoryResponse, JobView,
-    ListProviderModelsRequest, McpDocument, MemoryPatch, MemoryView, MessageMode, MessageRequest,
-    PluginView, ScheduleView, SessionPatch, SessionView, SoulView,
+    AnswerJobRequest, ApiClient, ApprovalView, CreateScheduleRequest, CreateSessionRequest,
+    HistoryResponse, JobView, ListProviderModelsRequest, McpDocument, MemoryPatch, MemoryView,
+    MessageMode, MessageRequest, PluginView, ScheduleView, SessionPatch, SessionView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -235,10 +235,27 @@ impl CoreSession {
         });
     }
 
-    pub fn answer_user_input(&self, _request_id: String, text: String) {
-        if !text.is_empty() {
-            self.run(text);
+    pub fn answer_user_input(&self, request_id: String, answers: Vec<String>) {
+        if request_id.is_empty() || answers.iter().all(|answer| answer.trim().is_empty()) {
+            return;
         }
+        let client = self.client.clone();
+        self.runtime.spawn(async move {
+            let req = if answers.len() == 1 {
+                AnswerJobRequest {
+                    text: answers[0].clone(),
+                    answers: Vec::new(),
+                }
+            } else {
+                AnswerJobRequest {
+                    text: String::new(),
+                    answers,
+                }
+            };
+            if let Err(err) = client.answer_job(&request_id, &req).await {
+                tracing::warn!(error = %err, "answer_job failed");
+            }
+        });
     }
 
     pub fn history_blocking(&self) -> Result<Vec<HistoryEntry>, CoreSessionError> {
@@ -930,6 +947,7 @@ fn dispatch_surface(
                 drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(speech.to_owned()))));
             }
         }
+        "question.asked" => dispatch_question_asked(value, event_tx),
         "audio.chunk" => {
             if let Some(sender) = audio_tx
                 && let Some(pcm) = value.get("pcm").and_then(Value::as_array)
@@ -991,40 +1009,47 @@ fn dispatch_session_event(
                 result,
             })));
         }
-        "question/asked" => {
-            let request_id = value
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            let title = value
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            let questions = value
-                .get("questions")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if request_id.is_empty() && title.is_empty() && questions.is_empty() {
-                return;
-            }
-            drop(
-                event_tx.send(AppEvent::Ai(AiStreamUpdate::UserInputRequired {
-                    request_id,
-                    prompt: crate::settings::UserInputPrompt { title, questions },
-                })),
-            );
-        }
+        "question/asked" => dispatch_question_asked(value, event_tx),
         _ => {}
     }
+}
+
+fn dispatch_question_asked(value: &Value, event_tx: &AppEventSender) {
+    let request_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let title = value
+        .get("title")
+        .or_else(|| value.get("prompt"))
+        .or_else(|| value.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let mut questions = value
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if questions.is_empty() && !title.is_empty() {
+        questions.push(title.clone());
+    }
+    if request_id.is_empty() && title.is_empty() && questions.is_empty() {
+        return;
+    }
+    drop(
+        event_tx.send(AppEvent::Ai(AiStreamUpdate::UserInputRequired {
+            request_id,
+            prompt: crate::settings::UserInputPrompt { title, questions },
+        })),
+    );
 }
 
 fn expression_cues_from_audio(value: &Value) -> Vec<crate::audio::ExpressionCue> {
@@ -1093,6 +1118,21 @@ mod tests {
             events.first(),
             Some(AppEvent::Ai(AiStreamUpdate::UserInputRequired { request_id, prompt }))
                 if request_id == "q1" && prompt.questions.len() == 2
+        ));
+    }
+
+    #[test]
+    fn maps_live_question_asked() {
+        let events = dispatch(json!({
+            "type": "question.asked",
+            "id": "job-1",
+            "prompt": "which city?",
+            "questions": ["which city?"]
+        }));
+        assert!(matches!(
+            events.first(),
+            Some(AppEvent::Ai(AiStreamUpdate::UserInputRequired { request_id, prompt }))
+                if request_id == "job-1" && prompt.questions == ["which city?".to_owned()]
         ));
     }
 }

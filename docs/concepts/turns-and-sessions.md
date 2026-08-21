@@ -89,6 +89,16 @@ client-side buffer. A provider failure ends the turn as `failed` and is not
 written as assistant speech. History projects that failure as a `status`
 message so reconnects still see the error.
 
+Ask-user from a running job is a **live** `question.asked` event (`id` is the
+job / delegation id, `prompt` / `text` is the speech, `questions` is the
+combined list). Stage, desktop, and Web all listen for that name. Answer with
+`POST /api/v1/jobs/{id}/answer` (`{ "text" }` or `{ "answers": ["…"] }`) so
+the reply lands on the job mailbox (`host.answer`), not the dialogue lane.
+Several open questions on one job are merged with `combine_pending_questions`
+before emit; a single `text` answers every still-open question on that job.
+Unanswered questions older than `question_timeout_hours` (default 24h) are
+closed by a daemon tick that writes an `assumption` mailbox note.
+
 ## Sessions
 
 A **session** is a contiguous conversation with one soul, identified by a

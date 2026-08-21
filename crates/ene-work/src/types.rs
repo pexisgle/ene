@@ -221,6 +221,8 @@ impl UpgradeReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompanionReport {
     pub soul_id: SoulId,
+    /// Job that produced this report. Absent on schedule reminders.
+    pub job_id: Option<ene_session::DelegationId>,
     pub speech: String,
     pub inner_intent: Option<String>,
     /// Progress companion speech does not open a surface conversation turn.

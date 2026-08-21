@@ -156,12 +156,14 @@ impl DelegationHost {
 
     fn deliver_or_queue(&self, report: CompanionReport, queued_intent: &str) -> CompanionReport {
         let soul_id = report.soul_id;
+        let job_id = report.job_id;
         if let Some(delivered) = self.speech_gate.offer(report) {
             self.publish_report(&delivered);
             delivered
         } else {
             CompanionReport {
                 soul_id,
+                job_id,
                 speech: String::new(),
                 inner_intent: Some(queued_intent.to_owned()),
                 starts_conversation: false,
@@ -171,12 +173,14 @@ impl DelegationHost {
 
     fn speak(
         soul_id: SoulId,
+        job_id: Option<DelegationId>,
         speech: String,
         intent: &str,
         starts_conversation: bool,
     ) -> CompanionReport {
         CompanionReport {
             soul_id,
+            job_id,
             speech,
             inner_intent: Some(intent.to_owned()),
             starts_conversation,
@@ -291,6 +295,7 @@ impl DelegationHost {
             .mailbox_push(id, "child_to_parent", "question", &format!("plan:\n{plan}"))?;
         Ok(Self::speak(
             self.soul_id_of(id)?,
+            Some(id),
             format!("here's the plan: {plan}"),
             "ask_plan",
             true,
@@ -365,6 +370,7 @@ impl DelegationHost {
             .mailbox_push(id, "child_to_parent", "progress", note)?;
         Ok(Self::speak(
             self.soul_id_of(id)?,
+            Some(id),
             format!("still working: {note}"),
             "progress",
             false,
@@ -387,6 +393,7 @@ impl DelegationHost {
         Ok(self.deliver_or_queue(
             Self::speak(
                 self.soul_id_of(id)?,
+                Some(id),
                 format!("done — {summary}"),
                 "complete",
                 true,
@@ -406,6 +413,7 @@ impl DelegationHost {
         Ok(self.deliver_or_queue(
             Self::speak(
                 self.soul_id_of(id)?,
+                Some(id),
                 format!("the task failed: {summary}"),
                 "failed",
                 true,
@@ -448,6 +456,7 @@ impl DelegationHost {
                 };
                 CompanionReport {
                     soul_id: job.soul_id,
+                    job_id: Some(job.id),
                     speech,
                     inner_intent: Some("interrupted".into()),
                     starts_conversation: true,
@@ -460,7 +469,13 @@ impl DelegationHost {
         self.require_known(id)?;
         self.store
             .mailbox_push(id, "child_to_parent", "question", prompt)?;
-        let report = Self::speak(self.soul_id_of(id)?, prompt.to_owned(), "ask_user", true);
+        let report = Self::speak(
+            self.soul_id_of(id)?,
+            Some(id),
+            prompt.to_owned(),
+            "ask_user",
+            true,
+        );
         self.publish_report(&report);
         Ok(report)
     }

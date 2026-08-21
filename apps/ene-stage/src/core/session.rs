@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, ApiError, CharacterView, ClaimResourceRequest, CreateSessionRequest,
-    HistoryResponse, ListenRequest, MessageMode, MessageRequest, OccupantView, ResourceKind,
-    SendMessageResponse, SoulPatch, SoulView,
+    AnswerJobRequest, ApiClient, ApiError, CharacterView, ClaimResourceRequest,
+    CreateSessionRequest, HistoryResponse, ListenRequest, MessageMode, MessageRequest,
+    OccupantView, ResourceKind, SendMessageResponse, SoulPatch, SoulView,
 };
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -299,6 +299,19 @@ impl SessionHandle {
             *self.turn_id.lock() = Some(turn_id);
         }
         Ok(response)
+    }
+
+    pub async fn answer_job(&self, job_id: &str, text: &str) -> Result<(), ApiError> {
+        self.client
+            .answer_job(
+                job_id,
+                &AnswerJobRequest {
+                    text: text.to_owned(),
+                    answers: Vec::new(),
+                },
+            )
+            .await
+            .map(|_| ())
     }
 
     pub async fn barge_in(&self) -> Result<serde_json::Value, ApiError> {

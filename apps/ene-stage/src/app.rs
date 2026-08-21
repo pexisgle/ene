@@ -702,13 +702,13 @@ impl StageApp {
         } else {
             self.surface.chat_draft.trim().to_owned()
         };
+        self.surface.chat_draft.clear();
         let session = self.session.clone_handle();
         self.spawn(async move {
             AsyncOutcome::SendMessage(
                 session
-                    .send(&text, MessageMode::FollowUp)
+                    .answer_job(&question.id, &text)
                     .await
-                    .map(|_| ())
                     .map_err(|err| err.to_string()),
             )
         });

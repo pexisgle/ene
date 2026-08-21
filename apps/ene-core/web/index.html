@@ -55,6 +55,7 @@
     let selectedSoulId = null;
     let surfaceSock = null;
     let detailSock = null;
+    let pendingQuestion = null;
     const headers = () => ({
       "Authorization": "Bearer " + token,
       "Content-Type": "application/json",
@@ -165,6 +166,11 @@
       if (msg.type === "inner.message" || (msg.type && msg.type.startsWith("thinking.")) || (msg.type && msg.type.startsWith("tool."))) {
         return "";
       }
+      if (msg.type === "question.asked") {
+        pendingQuestion = msg;
+        const prompt = msg.prompt || msg.text || "";
+        return prompt ? "question: " + prompt : "";
+      }
       if (msg.type === "text.delta" || msg.type === "session.event") return msg.text || "";
       if (msg.type === "job.report") return msg.speech || msg.text || "";
       if (msg.role && msg.text) return msg.role + ": " + msg.text;
@@ -187,6 +193,9 @@
       }
       if (type === "affect.state" || type === "pad.update") {
         return { role: "PAD", cls: "pad", text: padLine(msg) };
+      }
+      if (type === "question.asked") {
+        return { role: "question", cls: "", text: msg.prompt || msg.text || msg.id || "" };
       }
       if (type === "job.report" || type === "job.progress") {
         return { role: "job", cls: "tool", text: msg.speech || msg.text || ((msg.title || msg.id || "job") + " " + (msg.progress_note || msg.status || "")) };
@@ -344,6 +353,16 @@
       document.getElementById("text").value = "";
       const sessionId = sessions.get(selectedSoulId);
       if (!sessionId || !text) return;
+      if (pendingQuestion && pendingQuestion.id) {
+        const jobId = pendingQuestion.id;
+        pendingQuestion = null;
+        await api("/api/v1/jobs/" + jobId + "/answer", {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ text }),
+        });
+        return;
+      }
       await api("/api/v1/sessions/" + sessionId + "/messages", {
         method: "POST",
         headers: headers(),
