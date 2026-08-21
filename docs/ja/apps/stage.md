@@ -30,7 +30,9 @@ Stage は WebView を使いません。オーバーレイは wgpu、操作窓は
 対話相手はソウル（`GET /souls` / `GET /stage` の occupants）です。`body_ref` は
 ボディ UUID です。Stage は同梱 Alicia VRM を `char.alicia@1.0.0` として
 インポートし、HTTP 経由で soul 化します。CCv3 / PNG / CHARX は変換入力だけで、
-CCv3 エディタはありません。
+CCv3 エディタはありません。Companion の書き出しと Work のセッション書き出しは、
+ドキュメントまたはダウンロードで、拡張子付きの名前（`.enechar` / `.json`）を
+提案する保存ダイアログを開きます。
 
 ローカルの `desktop.*`（テーマ、言語、マイク、キャプション、ビート同期、画質、
 コア寿命、オーバーレイ配置）はクライアント側です。コアの PATCH キーは

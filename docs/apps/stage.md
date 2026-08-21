@@ -33,7 +33,9 @@ Characters are `.enechar` packages. `GET /characters` is install inventory;
 playable companions are souls (`GET /souls` / `GET /stage` occupants).
 `body_ref` is a body UUID. Stage imports the bundled Alicia VRM as
 `char.alicia@1.0.0` and activates it over HTTP (`soul_from_install`). CCv3/PNG/CHARX
-are conversion inputs only — there is no CCv3 editor.
+are conversion inputs only — there is no CCv3 editor. Companion export and Work
+session export open a save dialog in Documents or Downloads with a typed file name
+(`.enechar` / `.json`).
 
 Local `desktop.*` keys (theme, language, mic, captions, beat sync, graphics
 quality, core lifetime, overlay placement) stay on the client. Core PATCH keys

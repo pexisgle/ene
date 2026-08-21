@@ -1,6 +1,7 @@
 //! Detail window: eight new-core IA sections plus a session log.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -566,22 +567,30 @@ fn show_companion(
             .as_ref()
             .and_then(|soul| soul.package_id.clone())
             .unwrap_or_default();
+        let display = state
+            .soul
+            .as_ref()
+            .map(|soul| soul.display_name.as_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("");
         let id = package
             .split_once('@')
             .map(|(pkg, _)| pkg.to_owned())
             .unwrap_or(package);
-        if id.is_empty() {
-            state.core_status = i18n::fl("character-export");
-        } else if let Some(path) = rfd::FileDialog::new()
-            .add_filter("enechar", &["enechar", "zip"])
-            .save_file()
-        {
+        let stem = if id.is_empty() { display } else { id.as_str() };
+        let file_name = character_export_filename(stem);
+        if let Some(path) = export_save_dialog(&file_name, "enechar", &["enechar", "zip"]) {
+            let export_id = if id.is_empty() {
+                soul_id.to_owned()
+            } else {
+                id
+            };
             let client = Arc::clone(client);
             spawn_async(rt, async_results, async move {
                 AsyncOutcome::ExportCharacter(
                     async {
                         let value = client
-                            .export_character(&id)
+                            .export_character(&export_id)
                             .await
                             .map_err(|e| e.to_string())?;
                         let b64 = value
@@ -599,6 +608,7 @@ fn show_companion(
             });
         }
     }
+    ui.label(i18n::fl("character-export-hint"));
     ui.collapsing(i18n::fl("character-advanced"), |ui| {
         if let Some(soul) = &state.soul {
             ui.label(format!("{}: {}", i18n::fl("character-soul"), soul.id));
@@ -959,9 +969,11 @@ fn show_work(
             });
         }
         if ui.button(i18n::fl("jobs-export")).clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("json", &["json"])
-                .save_file()
+            && let Some(path) = export_save_dialog(
+                &session_export_filename(&state.session_id),
+                "json",
+                &["json"],
+            )
         {
             let session_id = state.session_id.clone();
             let client = Arc::clone(client);
@@ -982,6 +994,7 @@ fn show_work(
             });
         }
     });
+    ui.label(i18n::fl("jobs-export-hint"));
     ui.heading(i18n::fl("jobs-active"));
     if state.jobs.is_empty() {
         ui.label(i18n::fl("jobs-empty"));
@@ -1490,6 +1503,76 @@ fn show_log(ui: &mut egui::Ui, state: &DetailUiState) {
     });
 }
 
+#[must_use]
+pub fn safe_export_stem(name: &str) -> String {
+    let mut stem = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            stem.push(ch);
+        } else if !stem.is_empty() && !stem.ends_with('_') {
+            stem.push('_');
+        }
+    }
+    let stem = stem.trim_matches('_');
+    if stem.is_empty() {
+        "export".to_owned()
+    } else {
+        stem.chars().take(64).collect()
+    }
+}
+
+#[must_use]
+pub fn character_export_filename(package_or_name: &str) -> String {
+    format!("{}.enechar", safe_export_stem(package_or_name))
+}
+
+#[must_use]
+pub fn session_export_filename(session_id: &str) -> String {
+    format!("{}.json", safe_export_stem(session_id))
+}
+
+#[must_use]
+pub fn default_export_dir() -> PathBuf {
+    default_export_dir_from_env(
+        std::env::var_os("XDG_DOCUMENTS_DIR"),
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
+    )
+}
+
+#[must_use]
+pub fn default_export_dir_from_env(
+    xdg_documents: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    if let Some(docs) = xdg_documents {
+        let path = PathBuf::from(docs);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+    if let Some(home) = home {
+        let home = PathBuf::from(home);
+        for name in ["Documents", "Downloads"] {
+            let candidate = home.join(name);
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+        if !home.as_os_str().is_empty() {
+            return home;
+        }
+    }
+    std::env::temp_dir()
+}
+
+fn export_save_dialog(file_name: &str, filter_name: &str, extensions: &[&str]) -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_directory(default_export_dir())
+        .set_file_name(file_name)
+        .add_filter(filter_name, extensions)
+        .save_file()
+}
+
 fn task_row(ui: &mut egui::Ui, label: String, value: &mut String) {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -1679,5 +1762,17 @@ mod tests {
             i18n::fl("settings-list-models-empty")
         );
         assert!(list_models_status(&["gpt".into()], None).is_empty());
+    }
+
+    #[test]
+    fn export_names_are_safe_and_typed() {
+        assert_eq!(
+            character_export_filename("char.alicia@1.0.0"),
+            "char_alicia_1_0_0.enechar"
+        );
+        assert_eq!(session_export_filename(""), "export.json");
+        assert_eq!(safe_export_stem("???"), "export");
+        let dir = default_export_dir_from_env(Some("/tmp/ene-docs".into()), None);
+        assert_eq!(dir, PathBuf::from("/tmp/ene-docs"));
     }
 }
