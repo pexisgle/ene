@@ -28,7 +28,7 @@ pub use config::{
     HarnessSettings, MindSettings, PluginIpcSettings, PluginPolicySettings, PluginProfileKind,
     PluginSettings, ServerSettings, TaskBinding,
 };
-pub use context::{ContextRegistry, format_recovery_note};
+pub use context::{ContextRegistry, SOURCE_ORDER, canonicalize_source_key, format_recovery_note};
 pub use error::{CancelQueued, KernelError, RunOutcome};
 pub use inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
 pub use lane::{LaneHandle, LaneOptions};

@@ -466,7 +466,7 @@ impl CompanionStore {
         now: &str,
         weights: RecallWeights,
     ) -> Result<Vec<RecalledMemory>, CompanionError> {
-        self.recall_ranked(soul_id, query, budget, now, weights, None)
+        self.recall_ranked(soul_id, query, budget, now, weights, None, false)
     }
 
     /// Recall with an optional query embedding (cosine on `memories.embedding`).
@@ -478,17 +478,28 @@ impl CompanionStore {
         now: &str,
         weights: RecallWeights,
         query_vec: Option<&[f32]>,
+        exclude_standing: bool,
     ) -> Result<Vec<RecalledMemory>, CompanionError> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
+        let sql = if exclude_standing {
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
                     superseded_by, expires_at, forgotten, embedding
              FROM memories
              WHERE forgotten = 0 AND superseded_by IS NULL
                AND (scope = 'shared' OR soul_id = ?1)
-               AND (expires_at IS NULL OR expires_at > ?2)",
-        )?;
+               AND (expires_at IS NULL OR expires_at > ?2)
+               AND kind NOT IN ('preference', 'user_profile', 'commitment')"
+        } else {
+            "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
+                    source, source_seq, created_at, last_access, access_count,
+                    superseded_by, expires_at, forgotten, embedding
+             FROM memories
+             WHERE forgotten = 0 AND superseded_by IS NULL
+               AND (scope = 'shared' OR soul_id = ?1)
+               AND (expires_at IS NULL OR expires_at > ?2)"
+        };
+        let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(params![soul_id.to_string(), now], |row| {
             let mem = row_to_memory(row)?;
             let blob: Option<Vec<u8>> = row.get(16)?;
@@ -569,32 +580,46 @@ impl CompanionStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT title, content FROM memories
              WHERE forgotten = 0 AND superseded_by IS NULL
                AND kind IN ('preference', 'user_profile')
                AND (scope = 'shared' OR soul_id = ?1)
-             ORDER BY last_access DESC LIMIT ?2",
+               AND (expires_at IS NULL OR expires_at > ?2)
+             ORDER BY last_access DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![soul_id.to_string(), limit as i64], |row| {
-            let title: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            Ok((title, content))
-        })?;
-        let mut notes = Vec::new();
-        for row in rows {
-            let (title, content) = row?;
-            if title.trim().is_empty() && content.trim().is_empty() {
-                continue;
-            }
-            notes.push(if content.trim().is_empty() {
-                title
-            } else {
-                format!("{title}: {content}")
-            });
+        collect_titled_notes(
+            stmt.query_map(params![soul_id.to_string(), now, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?,
+        )
+    }
+
+    pub fn open_commitments(
+        &self,
+        soul_id: SoulId,
+        limit: usize,
+    ) -> Result<Vec<String>, CompanionError> {
+        if limit == 0 {
+            return Ok(Vec::new());
         }
-        Ok(notes)
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT title, content FROM memories
+             WHERE forgotten = 0 AND superseded_by IS NULL
+               AND kind = 'commitment'
+               AND (scope = 'shared' OR soul_id = ?1)
+               AND (expires_at IS NULL OR expires_at > ?2)
+             ORDER BY last_access DESC LIMIT ?3",
+        )?;
+        collect_titled_notes(
+            stmt.query_map(params![soul_id.to_string(), now, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?,
+        )
     }
 
     pub fn decay_salience(&self, kind: MemoryKind, factor: f32) -> Result<(), CompanionError> {
@@ -849,6 +874,32 @@ fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
         expires_at: row.get(14)?,
         forgotten: row.get::<_, i32>(15)? != 0,
     })
+}
+
+fn collect_titled_notes(
+    rows: rusqlite::MappedRows<
+        '_,
+        impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, String)>,
+    >,
+) -> Result<Vec<String>, CompanionError> {
+    let mut notes = Vec::new();
+    for row in rows {
+        let (title, content) = row?;
+        if let Some(note) = titled_note(&title, &content) {
+            notes.push(note);
+        }
+    }
+    Ok(notes)
+}
+
+fn titled_note(title: &str, content: &str) -> Option<String> {
+    if title.trim().is_empty() && content.trim().is_empty() {
+        None
+    } else if content.trim().is_empty() {
+        Some(title.to_owned())
+    } else {
+        Some(format!("{title}: {content}"))
+    }
 }
 
 fn sql_id(idx: usize, err: impl std::fmt::Display) -> rusqlite::Error {

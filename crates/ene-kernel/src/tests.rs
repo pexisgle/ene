@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use crate::{
     CancelQueued, ConversationModel, DisplayDepth, EchoModel, EmitBus, EventKind, EventPayload,
     HarnessSettings, KernelError, LaneHandle, LaneOptions, LiveEvent, LoopHooks, MindSettings,
-    ModelGeneration, ModelRequest, ProjectOptions, TurnId, Waterfall, derive_messages,
-    hash_model_visible, hash_projected, spans_leak_content,
+    ModelGeneration, ModelRequest, ProjectOptions, TurnId, TurnPrefetch, Waterfall,
+    derive_messages, hash_model_visible, hash_projected, spans_leak_content,
 };
 use async_trait::async_trait;
 use ene_session::{
@@ -1115,4 +1115,106 @@ async fn next_run_works_when_lane_is_idle() {
     lane.wait_for_idle().await.unwrap();
     let history = lane.project(DisplayDepth::Surface).unwrap();
     assert!(history.messages.iter().any(|m| m.text() == "scheduled"));
+}
+
+struct ScriptedPrefetch;
+
+#[async_trait]
+impl TurnPrefetch for ScriptedPrefetch {
+    async fn lines(
+        &self,
+        _soul: SoulId,
+        _session: ene_session::SessionId,
+        _user_text: &str,
+    ) -> Vec<(String, String)> {
+        vec![
+            ("companion.persona".to_owned(), "You are Alicia.".to_owned()),
+            (
+                "character_state".to_owned(),
+                "mood=calm energy=steady".to_owned(),
+            ),
+            (
+                "companion.recall".to_owned(),
+                "- picnic: planned".to_owned(),
+            ),
+            (
+                "skills.active".to_owned(),
+                "- research: look things up".to_owned(),
+            ),
+        ]
+    }
+}
+
+#[tokio::test]
+async fn prefetch_lines_are_assembled_in_registry_order() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(EchoModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: Some(Arc::new(ScriptedPrefetch) as Arc<dyn TurnPrefetch>),
+        hooks: None,
+        router: None,
+    });
+    lane.prompt("hello").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let keys: Vec<String> = store
+        .load_events(session, 0)
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.payload {
+            EventPayload::ContextSystemMessage { source_key, .. } => Some(source_key),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            "platform_contract".to_owned(),
+            "identity_kernel".to_owned(),
+            "character_state".to_owned(),
+            "memory.semantic".to_owned(),
+            "skills.active".to_owned(),
+        ]
+    );
+    let identity = store
+        .load_events(session, 0)
+        .unwrap()
+        .into_iter()
+        .find_map(|event| match event.payload {
+            EventPayload::ContextSystemMessage {
+                source_key, blocks, ..
+            } if source_key == "identity_kernel" => Some(
+                blocks
+                    .iter()
+                    .filter_map(ene_session::Block::as_text)
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(identity, "You are Alicia.");
 }

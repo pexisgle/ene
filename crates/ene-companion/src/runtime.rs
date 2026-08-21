@@ -119,6 +119,25 @@ impl CompanionRuntime {
         query: &str,
         query_vec: Option<&[f32]>,
     ) -> Result<Vec<crate::memory::RecalledMemory>, CompanionError> {
+        self.recall_ranked_filtered(soul_id, query, query_vec, false)
+    }
+
+    pub fn recall_for_turn(
+        &self,
+        soul_id: SoulId,
+        query: &str,
+        query_vec: Option<&[f32]>,
+    ) -> Result<Vec<crate::memory::RecalledMemory>, CompanionError> {
+        self.recall_ranked_filtered(soul_id, query, query_vec, true)
+    }
+
+    fn recall_ranked_filtered(
+        &self,
+        soul_id: SoulId,
+        query: &str,
+        query_vec: Option<&[f32]>,
+        exclude_standing: bool,
+    ) -> Result<Vec<crate::memory::RecalledMemory>, CompanionError> {
         let settings = self.settings.lock().clone();
         let mut weights = recall_weights(&settings.recall);
         if query_vec.is_some() && weights.embedding <= 0.0 {
@@ -131,6 +150,7 @@ impl CompanionRuntime {
             &Utc::now().to_rfc3339(),
             weights,
             query_vec,
+            exclude_standing,
         )
     }
 

@@ -41,7 +41,10 @@ and salience. When an embedding query vector is present (a bound
 `ai.tasks.embedding` or chat-task fallback), cosine against
 `memories.embedding` is added to the same ranker. Unconfigured embedding
 keeps lexical recall: a query with no overlapping tokens returns no hits
-even if vectors were stored earlier. Reading a memory bumps `access_count`.
+even if vectors were stored earlier. Hits land on
+`ene-kernel::ContextRegistry` as `memory.semantic`. Standing profile and
+preference notes are `memory.user_profile`; open (unexpired) commitments
+are `memory.commitments`. Reading a memory bumps `access_count`.
 
 ## Forgetting
 

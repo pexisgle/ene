@@ -47,8 +47,9 @@ releases from GitHub, stores verified artifacts under
 via `ene-fiber`. Sidecar helpers also live in `templates/sidecar`.
 
 MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
-injected as a context source. MCP `prompts/list` become `SKILL.md` files under
-the data-dir skills home.
+injected as the `mcp.resources` context source. MCP `prompts/list` become
+`SKILL.md` files under the data-dir skills home (`skills.active` on the
+surface lane).
 
 ## Launch profiles
 

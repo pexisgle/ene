@@ -605,6 +605,164 @@ async fn http_forget_memory_is_audited() {
 }
 
 #[tokio::test]
+async fn turn_logs_context_sources_from_registry() {
+    let (dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul = ene_session::SoulId::from_str(&souls.items[0].id).unwrap();
+    core.companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "picnic".into(),
+            content: "we planned a picnic".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    core.companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Shared,
+            kind: MemoryKind::UserProfile,
+            title: "name".into(),
+            content: "the user's name is Ada".into(),
+            confidence: 0.9,
+            salience: 0.9,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    core.companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "call".into(),
+            content: "call Ada on Friday".into(),
+            confidence: 0.8,
+            salience: 0.7,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    let skill_dir = dir.path().join("skills/research");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: research\ndescription: Investigate a topic\n---\nLook things up.\n",
+    )
+    .unwrap();
+    let mcp_dir = core.workspace_dir().join("mcp-context");
+    std::fs::create_dir_all(&mcp_dir).unwrap();
+    std::fs::write(mcp_dir.join("notes.md"), "MCP note: picnic weather.\n").unwrap();
+    core.work()
+        .insert_job(&ene_work::NewJob {
+            id: None,
+            soul_id: soul,
+            title: "bookmark picnic".into(),
+            goal: "summarize picnic research".into(),
+            mode: ene_work::DelegationMode::Public,
+            workspace_dir: core.workspace_dir().display().to_string(),
+            created_from_turn: None,
+            plan: None,
+            brief: None,
+        })
+        .unwrap();
+
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: souls.items[0].id.clone(),
+            title: Some("context assembly".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "remind me about the picnic".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+
+    let sid = ene_session::SessionId::from_str(&session.id).unwrap();
+    let mut texts = std::collections::BTreeMap::<String, String>::new();
+    let mut keys = Vec::new();
+    for event in core.store().load_events(sid, 0).unwrap() {
+        if let EventPayload::ContextSystemMessage {
+            source_key, blocks, ..
+        } = event.payload
+        {
+            let text = blocks
+                .iter()
+                .filter_map(ene_session::Block::as_text)
+                .collect::<Vec<_>>()
+                .join("");
+            keys.push(source_key.clone());
+            texts.insert(source_key, text);
+        }
+    }
+    let platform = keys
+        .iter()
+        .position(|k| k == "platform_contract")
+        .expect("platform_contract");
+    let identity = keys
+        .iter()
+        .position(|k| k == "identity_kernel")
+        .expect("identity_kernel");
+    let affect = keys
+        .iter()
+        .position(|k| k == "character_state")
+        .expect("character_state");
+    let semantic = keys
+        .iter()
+        .position(|k| k == "memory.semantic")
+        .expect("memory.semantic");
+    let profile = keys
+        .iter()
+        .position(|k| k == "memory.user_profile")
+        .expect("memory.user_profile");
+    let commits = keys
+        .iter()
+        .position(|k| k == "memory.commitments")
+        .expect("memory.commitments");
+    let skills = keys
+        .iter()
+        .position(|k| k == "skills.active")
+        .expect("skills.active");
+    let mcp = keys
+        .iter()
+        .position(|k| k == "mcp.resources")
+        .expect("mcp.resources");
+    let jobs = keys
+        .iter()
+        .position(|k| k == "delegation.active")
+        .expect("delegation.active");
+    assert!(platform < identity && identity < affect);
+    assert!(affect < semantic && semantic < profile && profile < commits);
+    assert!(commits < skills && skills < mcp && mcp < jobs);
+    assert!(texts["memory.semantic"].contains("picnic"));
+    assert!(texts["memory.user_profile"].contains("Ada"));
+    assert!(texts["memory.commitments"].contains("Friday"));
+    assert!(texts["skills.active"].contains("research"));
+    assert!(texts["mcp.resources"].contains("picnic weather"));
+    assert!(texts["delegation.active"].contains("bookmark picnic"));
+    assert!(texts["character_state"].contains("mood="));
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn serve_binds_seamed_approve_model() {
     let (_dir, _client, core, server) = boot_server().await;
     assert!(

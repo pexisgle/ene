@@ -122,6 +122,7 @@ fn recall_without_query_vector_stays_lexical() {
             &now,
             crate::store::RecallWeights::default(),
             None,
+            false,
         )
         .unwrap();
     assert!(
@@ -159,6 +160,7 @@ fn recall_with_query_vector_ranks_embedded_neighbor() {
             &Utc::now().to_rfc3339(),
             crate::store::RecallWeights::default(),
             Some(&[1.0, 0.0]),
+            false,
         )
         .unwrap();
     assert_eq!(hits.len(), 1, "{hits:?}");
@@ -238,6 +240,46 @@ fn shared_pool_is_usable_by_another_soul_as_own_knowledge() {
         )
         .unwrap();
     assert!(private.is_empty());
+}
+
+#[test]
+fn open_commitments_omit_expired_rows() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "open".into(),
+            content: "still due".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "stale".into(),
+            content: "already passed".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2000-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    let notes = store.open_commitments(soul.id, 8).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].contains("still due"));
+    assert!(!notes.iter().any(|note| note.contains("already passed")));
 }
 
 #[test]
