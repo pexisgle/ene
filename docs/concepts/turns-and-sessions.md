@@ -29,6 +29,8 @@ running turn; `compact` compresses history.
 3. The configured conversation model streams text through its bound `provider.*`
    plugin.
 4. Surface-eligible tools run through `ene-registry` / `ene-plane`.
+   `delegate.start` returns immediately; `ene-work` opens a **job lane**
+   (`origin: delegation`) that uses job-layer tools and `delegation.send`.
 5. Events are committed to `ene-session` (model-visible equals logged).
 6. Live events go out at `surface` or `detail` depth.
 

@@ -20,7 +20,7 @@ use ene_companion::{
     JournalAction, MemoryId, MemoryScope, avatar_path_for_install, export_dir, import_v3,
     install_archive, looks_like_package_zip, soul_from_install,
 };
-use ene_kernel::{DisplayDepth, HarnessSettings};
+use ene_kernel::DisplayDepth;
 use ene_plane::{ApprovalMode, PopupDecision};
 use ene_registry::Layer;
 use ene_session::{
@@ -1389,7 +1389,7 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
     let plugins = state.core.plugins().lock().clone();
     let mut effective = json!({
         "core": core,
-        "harness": HarnessSettings::default(),
+        "harness": crate::boot::load_harness_settings(state.core.data_dir()),
         "approval": { "mode": format!("{:?}", state.core.plane().mode()).to_ascii_lowercase() },
         "ai": ai,
         "plugins": plugins,
@@ -1401,6 +1401,7 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
         "ai_tts_key_set": state.core.task_key_set("tts"),
         "ai_stt_key_set": state.core.task_key_set("stt"),
         "ai_approve_key_set": state.core.task_key_set("approve"),
+        "ai_job_key_set": state.core.task_key_set("job"),
     });
     let overlay = {
         let settings_path = state.core.data_dir().join("settings.json");
@@ -1504,6 +1505,13 @@ pub async fn patch_settings(
         "ai.approve",
         &mut secrets.approve,
     )?;
+    take_task_secret(
+        &state,
+        &patch.fields,
+        "/ai/tasks/job/api_key",
+        "ai.job",
+        &mut secrets.job,
+    )?;
     let settings_path = state.core.data_dir().join("settings.json");
     let mut current = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)
@@ -1533,6 +1541,7 @@ pub async fn patch_settings(
         "tts",
         "stt",
         "approve",
+        "job",
     ] {
         if let Some(binding) = current
             .pointer_mut(&format!("/ai/tasks/{task}"))

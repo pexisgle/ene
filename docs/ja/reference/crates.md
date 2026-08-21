@@ -20,7 +20,7 @@
 | `ene-kernel` | 対話レーン: prompt / steer / follow_up / abort / compact、可視性、可観測性 | config, session |
 | `ene-companion` | soul・感情・記憶・内面・能動発話・キャラパッケージ | card, config, plane, registry, session |
 | `ene-body` | パフォーマンスキュー、感情→表情、全二重音声 | config, session |
-| `ene-work` | 委譲、ジョブ、スケジュール、skill、MCP | companion, kernel, plane, registry, session |
+| `ene-work` | 委譲、ジョブ（ジョブレーンのランナー）、スケジュール、skill、MCP | companion, kernel, plane, registry, session |
 | `ene-plane` | 承認 plane、hash chain 監査、資格情報ボールト | config |
 | `ene-fiber` | プラグインファイバー合成: 巻き戻し可能な effect、プロファイル reconcile、サンドボックス spawn | plugin-ipc, registry, sandbox, kernel |
 | `ene-registry` | 統一ツールレジストリ: side_effects フィルタ、deny-by-default パイプライン | plugin-ipc, plane |

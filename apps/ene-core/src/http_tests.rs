@@ -33,6 +33,15 @@ async fn first_soul_id(client: &ApiClient) -> String {
         .clone()
 }
 
+struct ParkingJobModel;
+
+#[async_trait]
+impl ConversationModel for ParkingJobModel {
+    async fn generate(&self, _: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        std::future::pending().await
+    }
+}
+
 async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHandle) {
     let dir = TempDir::new().unwrap();
     let core = Arc::new(
@@ -40,6 +49,7 @@ async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHan
             .await
             .unwrap(),
     );
+    core.set_job_model(Arc::new(ParkingJobModel));
     let server = core
         .clone()
         .serve_at(
@@ -522,6 +532,34 @@ async fn restore_rejects_active_jobs() {
         .await
         .unwrap_err();
     assert_eq!(err.error_class(), "job_busy");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn job_runner_completes_queued_work_on_its_own_lane() {
+    let (_dir, _client, core, server) = boot_server().await;
+    core.set_job_model(Arc::new(EchoModel));
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a quiet cafe");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let current = core.work().get_job(job.id).unwrap().unwrap();
+        if current.status == ene_work::JobStatus::Completed {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "job stayed {:?}, expected completed",
+            current.status
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mail = core.work().mailbox(job.id).unwrap();
+    assert!(
+        mail.iter()
+            .any(|(direction, kind, _)| direction == "child_to_parent" && kind == "complete"),
+        "runner must complete via the job lane, got {mail:?}"
+    );
     server.shutdown().await;
 }
 

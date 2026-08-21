@@ -114,6 +114,7 @@ fn provider_rows(ai: &AiSettings, home: &Path) -> Vec<ProfileRow> {
         ("tts", &ai.tasks.tts),
         ("stt", &ai.tasks.stt),
         ("approve", &ai.tasks.approve),
+        ("job", &ai.tasks.job),
     ]
     .into_iter()
     .filter_map(|(task, binding)| {

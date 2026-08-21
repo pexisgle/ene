@@ -6,9 +6,10 @@ use crate::types::UpgradeReason;
 use async_trait::async_trait;
 use ene_kernel::{KernelError, SurfaceRouter, SurfaceToolOutcome};
 use ene_registry::{Layer, ToolRegistry};
-use ene_session::SoulId;
+use ene_session::{DelegationId, SoulId};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Dialogue-lane router: empty-`side_effects` tools run; anything else upgrades.
@@ -94,9 +95,133 @@ impl SurfaceRouter for WorkSurfaceRouter {
     }
 }
 
+/// Job-lane router: side-effect tools run here (plan-gated). Never upgrades.
+pub struct JobLayerRouter {
+    host: Arc<DelegationHost>,
+    registry: Arc<ToolRegistry>,
+    soul: SoulId,
+    job_id: DelegationId,
+    workspace_dir: PathBuf,
+}
+
+impl JobLayerRouter {
+    #[must_use]
+    pub fn new(
+        host: Arc<DelegationHost>,
+        registry: Arc<ToolRegistry>,
+        soul: SoulId,
+        job_id: DelegationId,
+        workspace_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            host,
+            registry,
+            soul,
+            job_id,
+            workspace_dir: workspace_dir.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl SurfaceRouter for JobLayerRouter {
+    async fn on_tool(
+        &self,
+        name: &str,
+        args: Value,
+        _step: u32,
+    ) -> Result<SurfaceToolOutcome, KernelError> {
+        let Some(def) = self.registry.get(name) else {
+            return Err(KernelError::Tool(format!("unknown tool {name}")));
+        };
+        if needs_plan(name, &def.side_effects) {
+            self.host
+                .require_mutating_allowed(self.job_id)
+                .map_err(|err| KernelError::Tool(err.to_string()))?;
+        }
+        let value = self
+            .registry
+            .execute_in_workspace(
+                name,
+                bind_job_arg(args, self.soul, self.job_id, name),
+                Layer::Job,
+                &self.workspace_dir,
+            )
+            .await
+            .map_err(|err| KernelError::Tool(err.to_string()))?;
+        Ok(SurfaceToolOutcome::Result(value))
+    }
+}
+
+fn needs_plan(name: &str, side_effects: &[String]) -> bool {
+    !side_effects.is_empty()
+        && !name.starts_with("delegate.")
+        && name != "delegation.send"
+        && name != "job.plan_write"
+}
+
 fn bind_soul_arg(mut args: Value, soul: SoulId) -> Value {
     if let Some(object) = args.as_object_mut() {
         object.insert("soul_id".to_owned(), json!(soul.to_string()));
     }
     args
+}
+
+fn bind_job_arg(mut args: Value, soul: SoulId, job_id: DelegationId, name: &str) -> Value {
+    if let Some(object) = args.as_object_mut() {
+        object.insert("soul_id".to_owned(), json!(soul.to_string()));
+        if name == "delegate.start" {
+            object
+                .entry("parent_id")
+                .or_insert_with(|| json!(job_id.to_string()));
+        } else if name != "skill.load" {
+            object.insert("id".to_owned(), json!(job_id.to_string()));
+        }
+        if name == "artifact.register" {
+            object.insert("job_id".to_owned(), json!(job_id.to_string()));
+        }
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_job_arg_overwrites_model_supplied_id() {
+        let soul = SoulId::new();
+        let job = DelegationId::new();
+        let foreign = DelegationId::new();
+        let bound = bind_job_arg(
+            json!({"id": foreign.to_string(), "kind": "complete"}),
+            soul,
+            job,
+            "delegation.send",
+        );
+        assert_eq!(bound["id"], json!(job.to_string()));
+        assert_eq!(bound["soul_id"], json!(soul.to_string()));
+        let plan = bind_job_arg(
+            json!({"id": foreign.to_string(), "plan": "steps"}),
+            soul,
+            job,
+            "job.plan_write",
+        );
+        assert_eq!(plan["id"], json!(job.to_string()));
+        let artifact = bind_job_arg(
+            json!({"job_id": foreign.to_string()}),
+            soul,
+            job,
+            "artifact.register",
+        );
+        assert_eq!(artifact["job_id"], json!(job.to_string()));
+    }
+
+    #[test]
+    fn bind_job_arg_leaves_skill_load_id() {
+        let soul = SoulId::new();
+        let job = DelegationId::new();
+        let bound = bind_job_arg(json!({"id": "research"}), soul, job, "skill.load");
+        assert_eq!(bound["id"], json!("research"));
+    }
 }

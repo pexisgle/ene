@@ -8,6 +8,7 @@ mod host;
 mod mcp;
 mod questions;
 mod router;
+mod runner;
 mod schedule;
 mod skill;
 mod speech_gate;
@@ -27,6 +28,7 @@ pub use host::{
 pub use mcp::{McpProfile, McpServer, McpTool, ScriptedMcp, register_mcp_tools};
 pub use questions::{combine_questions, route_combined_answers};
 pub use router::WorkSurfaceRouter;
+pub use runner::{JobDrive, drive_job};
 pub use schedule::{FiredSchedule, QuietWindow, catch_up_missed, fire_due, reminder_report};
 pub use skill::{
     InstalledSkill, SkillMeta, catalog, install_skill_dir, load_skill, parse_skill_md,

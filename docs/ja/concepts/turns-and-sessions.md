@@ -30,6 +30,8 @@
 3. 設定済みの会話モデルが、結び付けた `provider.*` プラグイン経由でテキストを
    ストリーム。
 4. 表層向けツールは `ene-registry` / `ene-plane` を通る。
+   `delegate.start` はすぐに戻り、`ene-work` が **ジョブレーン**
+   （`origin: delegation`）を開き、作業ツールと `delegation.send` を使います。
 5. イベントは `ene-session` にコミット（モデル可視 = ログ）。
 6. ライブイベントは `surface` または `detail` の深さで送出。
 
