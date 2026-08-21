@@ -147,4 +147,3 @@ fn defer_past_quiet(now: DateTime<Utc>, quiet: &QuietWindow) -> DateTime<Utc> {
             dt.with_timezone(&Utc)
         })
 }
-
