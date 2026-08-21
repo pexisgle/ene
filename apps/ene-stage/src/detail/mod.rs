@@ -244,6 +244,12 @@ impl DetailUiState {
     pub fn invalidate_settings(&mut self) {
         self.loaded.settings = false;
     }
+
+    /// Explicit navigation wins over the search box; otherwise search re-selects the tab every frame.
+    pub fn select_tab(&mut self, tab: DetailTab) {
+        self.tab = tab;
+        self.search.clear();
+    }
 }
 
 pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
@@ -388,7 +394,7 @@ pub fn show(
                 continue;
             }
             if ui.selectable_label(state.tab == tab, label).clicked() {
-                state.tab = tab;
+                state.select_tab(tab);
             }
         }
     });
@@ -446,16 +452,16 @@ fn show_home(
         state.plugins.len()
     ));
     ui.label(i18n::fl("home-fibers-hint"));
-    let required = blocking_unconfigured(&state.unconfigured);
-    let optional = optional_unconfigured(&state.unconfigured);
-    if required.contains(&"chat") {
+    let chat_unconfigured = blocking_unconfigured(&state.unconfigured).contains(&"chat");
+    if chat_unconfigured {
         ui.colored_label(egui::Color32::YELLOW, i18n::fl("home-next-chat"));
         if ui.button(i18n::fl("detail-tab-conversation")).clicked() {
-            state.tab = DetailTab::Conversation;
+            state.select_tab(DetailTab::Conversation);
         }
     } else {
         ui.label(i18n::fl("home-configured"));
     }
+    let optional = optional_unconfigured(&state.unconfigured);
     if !optional.is_empty() {
         ui.label(format!(
             "{}: {}",
@@ -474,13 +480,13 @@ fn show_home(
     }
     ui.horizontal(|ui| {
         if ui.button(i18n::fl("detail-tab-companion")).clicked() {
-            state.tab = DetailTab::Companion;
+            state.select_tab(DetailTab::Companion);
         }
         if ui.button(i18n::fl("detail-tab-conversation")).clicked() {
-            state.tab = DetailTab::Conversation;
+            state.select_tab(DetailTab::Conversation);
         }
         if ui.button(i18n::fl("detail-tab-voice")).clicked() {
-            state.tab = DetailTab::Voice;
+            state.select_tab(DetailTab::Voice);
         }
     });
 }
@@ -1669,6 +1675,21 @@ mod tests {
         };
         sync_search_tab(&mut from_conversation);
         assert_eq!(from_conversation.tab, DetailTab::Voice);
+    }
+
+    #[test]
+    fn explicit_tab_click_clears_search_so_home_cannot_trap_navigation() {
+        let mut state = DetailUiState {
+            tab: DetailTab::Home,
+            search: "home".to_owned(),
+            ..DetailUiState::default()
+        };
+        sync_search_tab(&mut state);
+        assert_eq!(state.tab, DetailTab::Home);
+        state.select_tab(DetailTab::Conversation);
+        sync_search_tab(&mut state);
+        assert_eq!(state.tab, DetailTab::Conversation);
+        assert!(state.search.is_empty());
     }
 
     #[test]

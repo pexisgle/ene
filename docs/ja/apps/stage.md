@@ -20,7 +20,7 @@ PowerShell から同じコマンドを使います。
 | チャット（F2） | `surface` | Prompt / Steer / Follow-up（ホバーで意味）、承認（許可 / 常に許可 / 拒否）、ask-user、マイク PCM 中継、詳細ボタン（トレイと同じ） |
 | キャプション | `surface` | ストリームされた発話。音声タブの Caption position（`top` / `bottom` / `left` / `right`）で位置を決め、Pin caption でドラッグを止めます。 |
 | スポットライト（Alt+Space） | ローカル | 詳細セクションへジャンプ、マイク、終了。OS が Alt+Space を掴んでいるときは音声 → スポットライトを開く |
-| 詳細（トレイまたはチャット → 詳細。F1 はコンパニオン、F4 はログ） | `detail` | 設定 IA、内面 / thinking / ツール / PAD のログ |
+| 詳細（トレイまたはチャット → 詳細。F1 はコンパニオン、F4 はログ） | `detail` | 設定 IA、内面 / thinking / ツール / PAD のログ。検索はセクションを絞り、タブやホームのショートカット、スポットライト、F1/F4 を押すとフィルタを消すので、今のタブに固定されません。 |
 
 Stage は WebView を使いません。オーバーレイは wgpu、操作窓は winit 上の egui
 です。コアとは `ene-api` のみで話し（`client_id = stage`）、`ene-core` や
