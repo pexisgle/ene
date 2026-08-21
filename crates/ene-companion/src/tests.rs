@@ -24,7 +24,7 @@ use crate::proactive::{
 use crate::runtime::CompanionRuntime;
 use crate::soul::NewSoul;
 use crate::store::CompanionStore;
-use crate::tools::{register_memory_tools, surface_hides_write_shared};
+use crate::tools::{QueryEmbed, register_memory_tools, surface_hides_write_shared};
 use crate::{CompanionError, EmotionReport, VOCABULARY};
 use chrono::{Duration, Utc};
 use ene_registry::{Layer, ToolRegistry};
@@ -781,7 +781,7 @@ async fn memory_tools_surface_omits_write_shared() {
         }],
     });
     registry.set_plane(Arc::clone(&plane));
-    register_memory_tools(&registry, Arc::new(store));
+    register_memory_tools(&registry, Arc::new(store), None);
     assert!(surface_hides_write_shared(&registry));
     registry
         .execute(
@@ -811,6 +811,55 @@ async fn memory_tools_surface_omits_write_shared() {
     assert!(records.iter().any(
         |row| row.kind == "approval" && row.payload.to_string().contains("memory.write_shared")
     ));
+}
+
+struct FixedEmbed(Vec<f32>);
+
+#[async_trait::async_trait]
+impl QueryEmbed for FixedEmbed {
+    async fn embed_query(&self, _text: &str) -> Option<Vec<f32>> {
+        Some(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn memory_recall_tool_is_hybrid_when_embedder_bound() {
+    let dir = TempDir::new().unwrap();
+    let store = CompanionStore::open(dir.path().join("companions.db")).unwrap();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let near = insert_episodic(&store, soul.id, "apple pie", "baked dessert");
+    let far = insert_episodic(&store, soul.id, "zebra stripes", "black and white");
+    store.set_embedding(near.id, &[1.0, 0.0]).unwrap();
+    store.set_embedding(far.id, &[0.0, 1.0]).unwrap();
+    let store = Arc::new(store);
+
+    let lexical = ToolRegistry::new();
+    register_memory_tools(&lexical, Arc::clone(&store), None);
+    let empty = lexical
+        .execute(
+            "memory.recall",
+            serde_json::json!({ "query": "xyzzy", "soul_id": soul.id.to_string() }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty["memories"].as_array().map(Vec::len), Some(0));
+
+    let hybrid = ToolRegistry::new();
+    register_memory_tools(&hybrid, store, Some(Arc::new(FixedEmbed(vec![1.0, 0.0]))));
+    let hits = hybrid
+        .execute(
+            "memory.recall",
+            serde_json::json!({ "query": "xyzzy", "soul_id": soul.id.to_string() }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    let blob = hits["memories"].to_string();
+    assert!(blob.contains("apple pie"), "{blob}");
+    assert!(!blob.contains("zebra"), "{blob}");
 }
 
 #[test]

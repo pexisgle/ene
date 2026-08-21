@@ -60,7 +60,7 @@ pub use proactive::{
 pub use runtime::CompanionRuntime;
 pub use soul::{NewSoul, Soul};
 pub use store::CompanionStore;
-pub use tools::{register_memory_tools, surface_hides_write_shared};
+pub use tools::{QueryEmbed, SlotQueryEmbed, register_memory_tools, surface_hides_write_shared};
 
 pub use ene_session::SoulId;
 

@@ -189,6 +189,8 @@ impl CoreDaemon {
         self.plane()
             .set_ai(Arc::new(approve::SeamedApprove::new(&self)));
         self.set_prefetch(Arc::new(recall::RecallPrefetch::new(&self)));
+        self.memory_embed()
+            .bind(Arc::new(recall::SeamedQueryEmbed::new(&self)));
         self.set_finalizer(Arc::new(classify::MemoryFinalizer::new(
             &self,
             Arc::clone(&classify),

@@ -57,7 +57,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-112 | `ene-work::observe_screen_from_png_does_not_enter_session_history`; `tool_path_returns_png_and_placeholder_is_unavailable`; `world_state_does_not_store_screen_summary` | process / host API | 部分(PNG観測。ツール結果は画像ブロック未配線) |
 | P-201 | `ene-companion::memory_survives_reopen` | store | はい(永続化。抽出は正規表現) |
 | P-202 | `ene-companion::extract_names_as_shared_and_arbitrates` | Scripted / 正規表現 | いいえ |
-| P-203 | `memory_survives_reopen` (recall); `shared_pool_is_usable_by_another_soul_as_own_knowledge` | store(語彙スコア) | いいえ(埋め込みハイブリッド未観測) |
+| P-203 | `recall_without_query_vector_stays_lexical`; `recall_with_query_vector_ranks_embedded_neighbor`; `runtime_hybrid_recall_matches_store_when_vector_present`; `memory_recall_tool_is_hybrid_when_embedder_bound`; `hybrid_recall_falls_back_without_embedding_and_ranks_with_vector` | store / tool / HTTP | 部分(スタブベクトル。本番 embed provider は未観測) |
 | P-204 | `extract_names_as_shared_and_arbitrates`; `classifier_scope_defaults_private_when_missing` | Scripted | いいえ |
 | P-205 | `extract_names_as_shared_and_arbitrates` (arbitrate) | Scripted | いいえ |
 | P-206 | `decay_surfaces_low_salience_forgetting_candidates` | store | はい(減衰候補) |

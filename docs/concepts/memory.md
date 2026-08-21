@@ -39,7 +39,9 @@ candidates wait in the pending queue. Resolve them through
 Each turn, recall in `ene-companion` scores title/content overlap, recency,
 and salience. When an embedding query vector is present (a bound
 `ai.tasks.embedding` or chat-task fallback), cosine against
-`memories.embedding` is added to the same ranker. Unconfigured embedding
+`memories.embedding` is added to the same ranker. Auto-recall
+(`RecallPrefetch`) and the surface tool `memory.recall` share that path.
+Unconfigured embedding
 keeps lexical recall: a query with no overlapping tokens returns no hits
 even if vectors were stored earlier. Hits land on
 `ene-kernel::ContextRegistry` as `memory.semantic`. Standing profile and

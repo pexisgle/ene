@@ -9,7 +9,8 @@ use ene_body::{
     VoiceSettings,
 };
 use ene_companion::{
-    CompanionRuntime, CompanionStore, MindSettings as CompanionMind, NewSoul, register_memory_tools,
+    CompanionRuntime, CompanionStore, MindSettings as CompanionMind, NewSoul, QueryEmbed,
+    SlotQueryEmbed, register_memory_tools,
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{
@@ -115,6 +116,7 @@ pub struct CoreDaemon {
     loop_hooks: LoopHooks,
     mind: parking_lot::Mutex<CompanionMind>,
     last_proactive: parking_lot::Mutex<HashMap<SessionId, Instant>>,
+    memory_embed: Arc<SlotQueryEmbed>,
 }
 
 impl CoreDaemon {
@@ -166,7 +168,12 @@ impl CoreDaemon {
             opts.data_dir.join("vault.key"),
         )?;
         let companions = Arc::new(CompanionStore::open(opts.data_dir.join("companions.db"))?);
-        register_memory_tools(&registry, Arc::clone(&companions));
+        let memory_embed = Arc::new(SlotQueryEmbed::default());
+        register_memory_tools(
+            &registry,
+            Arc::clone(&companions),
+            Some(Arc::clone(&memory_embed) as Arc<dyn QueryEmbed>),
+        );
         let work = Arc::new(WorkStore::open(opts.data_dir.join("companions.db"))?);
         let host = Arc::new(DelegationHost::new(
             Arc::clone(&work),
@@ -241,6 +248,7 @@ impl CoreDaemon {
             loop_hooks,
             mind: parking_lot::Mutex::new(mind),
             last_proactive: parking_lot::Mutex::new(HashMap::new()),
+            memory_embed,
         })
     }
 
@@ -439,6 +447,11 @@ impl CoreDaemon {
     #[must_use]
     pub fn companion(&self) -> Arc<CompanionRuntime> {
         Arc::clone(&self.companion)
+    }
+
+    #[must_use]
+    pub fn memory_embed(&self) -> Arc<SlotQueryEmbed> {
+        Arc::clone(&self.memory_embed)
     }
 
     #[must_use]
