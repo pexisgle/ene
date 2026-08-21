@@ -32,6 +32,12 @@ running turn; `compact` compresses history.
 5. Events are committed to `ene-session` (model-visible equals logged).
 6. Live events go out at `surface` or `detail` depth.
 
+Before generation, `agent/pre-step` runs as a waterfall on the shared
+`LoopHooks` chain. The host and `ene-fiber` subscribe with a guard that
+unregisters on fiber unload. A listener that skips `next` can rewrite or
+stop the turn. `emit` buses notify only. Out-of-process plugins do not get
+a raw intercept IPC — that would let a tool skip approval or quiet hours.
+
 Signatures live in rustdoc for `ene-kernel` and `ene-session`.
 
 ## Events

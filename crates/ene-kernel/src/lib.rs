@@ -36,7 +36,7 @@ pub use model::{ConversationModel, EchoModel, ModelGeneration, ModelRequest, Too
 pub use observe::{ObserveHandle, Span, SpanGuard, SpanRing, spans_leak_content};
 pub use router::{SurfaceRouter, SurfaceToolOutcome};
 pub use speech::{SpeechPresenter, TurnFinalizer, TurnPrefetch};
-pub use waterfall::{EmitBus, HookEvent, LoopHooks, Waterfall, WaterfallNext};
+pub use waterfall::{EmitBus, HookEvent, LoopHooks, Waterfall, WaterfallGuard, WaterfallNext};
 
 pub use ene_session::{
     DisplayDepth, EventKind, EventPayload, ProjectOptions, ProjectedHistory, RecoveryReport,

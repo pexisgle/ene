@@ -130,6 +130,8 @@ pub struct LaneOptions {
     pub finalizer: Option<Arc<dyn TurnFinalizer>>,
     /// Optional recall / companion context logged as `context/system_message`.
     pub prefetch: Option<Arc<dyn TurnPrefetch>>,
+    /// Shared waterfall points. `None` uses a lane-private chain.
+    pub hooks: Option<LoopHooks>,
 }
 
 /// Handle to the single dialogue lane.
@@ -148,7 +150,7 @@ impl LaneHandle {
     #[must_use]
     pub fn spawn(opts: LaneOptions) -> Self {
         let live = LiveBus::new();
-        let hooks = LoopHooks::new();
+        let hooks = opts.hooks.unwrap_or_default();
         let observe = ObserveHandle::new(256);
         let store = Arc::clone(&opts.store);
         let session = opts.session;
@@ -200,7 +202,8 @@ impl LaneHandle {
         self.live.subscribe(depth)
     }
 
-    /// Kernel-owned waterfall hooks (P-1007). Fibers cannot register here.
+    /// Kernel waterfall hooks (`agent/pre-step`, `agent/request`). Shared when
+    /// the lane was opened with a host-owned chain.
     #[must_use]
     pub fn hooks(&self) -> LoopHooks {
         self.hooks.clone()

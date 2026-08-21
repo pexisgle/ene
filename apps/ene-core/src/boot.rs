@@ -13,8 +13,9 @@ use ene_companion::{
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{
-    AiSettings, ConversationModel, CoreSettings, LaneHandle, LaneOptions, PluginSettings,
-    SpeechPresenter, SurfaceRouter, TaskBinding, TurnFinalizer, TurnPrefetch, format_recovery_note,
+    AiSettings, ConversationModel, CoreSettings, LaneHandle, LaneOptions, LoopHooks,
+    PluginSettings, SpeechPresenter, SurfaceRouter, TaskBinding, TurnFinalizer, TurnPrefetch,
+    format_recovery_note,
 };
 use ene_plane::{
     ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink,
@@ -108,6 +109,7 @@ pub struct CoreDaemon {
     speech: parking_lot::Mutex<Option<Arc<dyn SpeechPresenter>>>,
     finalizer: parking_lot::Mutex<Option<Arc<dyn ene_kernel::TurnFinalizer>>>,
     prefetch: parking_lot::Mutex<Option<Arc<dyn TurnPrefetch>>>,
+    loop_hooks: LoopHooks,
     mind: parking_lot::Mutex<CompanionMind>,
     last_proactive: parking_lot::Mutex<HashMap<SessionId, Instant>>,
 }
@@ -183,6 +185,8 @@ impl CoreDaemon {
             BodySettings::default(),
         ));
         let supervisor = Arc::new(Supervisor::new(workspace, registry));
+        let loop_hooks = LoopHooks::new();
+        supervisor.set_loop_hooks(loop_hooks.clone());
         #[cfg(test)]
         supervisor.set_prefer_in_process_builtins(true);
         seed_default_occupants(&companions, &stage)?;
@@ -225,6 +229,7 @@ impl CoreDaemon {
             speech: parking_lot::Mutex::new(None),
             finalizer: parking_lot::Mutex::new(None),
             prefetch: parking_lot::Mutex::new(None),
+            loop_hooks,
             mind: parking_lot::Mutex::new(mind),
             last_proactive: parking_lot::Mutex::new(HashMap::new()),
         })
@@ -385,6 +390,11 @@ impl CoreDaemon {
     #[must_use]
     pub fn supervisor(&self) -> Arc<Supervisor> {
         Arc::clone(&self.supervisor)
+    }
+
+    #[must_use]
+    pub fn loop_hooks(&self) -> LoopHooks {
+        self.loop_hooks.clone()
     }
 
     #[must_use]
@@ -585,6 +595,7 @@ impl CoreDaemon {
             speech: self.speech.lock().clone(),
             finalizer: self.finalizer.lock().clone(),
             prefetch: self.prefetch.lock().clone(),
+            hooks: Some(self.loop_hooks.clone()),
         })
     }
 }

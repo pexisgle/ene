@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::{
     CancelQueued, ConversationModel, DisplayDepth, EchoModel, EmitBus, EventKind, EventPayload,
-    HarnessSettings, KernelError, LaneHandle, LaneOptions, LiveEvent, MindSettings,
+    HarnessSettings, KernelError, LaneHandle, LaneOptions, LiveEvent, LoopHooks, MindSettings,
     ModelGeneration, ModelRequest, ProjectOptions, TurnId, Waterfall, derive_messages,
     hash_model_visible, hash_projected, spans_leak_content,
 };
@@ -123,6 +123,7 @@ async fn open_lane() -> (TempDir, Arc<SessionStore>, LaneHandle, Arc<RecordingMo
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     (dir, store, lane, model)
@@ -165,6 +166,7 @@ async fn provider_failure_writes_assistant_error() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     lane.prompt("hello").await.unwrap();
@@ -308,6 +310,7 @@ async fn prompt_while_busy_returns_lane_busy() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     let first = lane.prompt("one").await.unwrap();
@@ -351,6 +354,7 @@ async fn abort_does_not_write_assistant_closure() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     let turn = lane.prompt("hold").await.unwrap();
@@ -459,6 +463,7 @@ async fn crash_recovery_is_reported_and_not_resumed() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     lane.prompt("what happened").await.unwrap();
@@ -589,22 +594,29 @@ async fn voice_and_text_share_one_session_log() {
 #[test]
 fn waterfall_rewrites_by_calling_next_and_emit_cannot() {
     let chain = Waterfall::new();
-    chain.listen(|mut n, next| {
+    let _outer = chain.listen(|mut n, next| {
         n += 10;
         let mut out = next(n);
         out += 1;
         out
     });
-    chain.listen(|mut n, next| {
+    let _inner = chain.listen(|mut n, next| {
         n *= 2;
         next(n)
     });
     assert_eq!(chain.run(3), 27);
 
     let intercepted = Waterfall::new();
-    intercepted.listen(|_n, _next| 99);
-    intercepted.listen(|_, next| next(1));
+    let _stop = intercepted.listen(|_n, _next| 99);
+    let _later = intercepted.listen(|_, next| next(1));
     assert_eq!(intercepted.run(0), 99);
+
+    let dropped = Waterfall::new();
+    {
+        let _guard = dropped.listen(|_n, _next| 7);
+        assert_eq!(dropped.run(0), 7);
+    }
+    assert_eq!(dropped.run(0), 0);
 
     let bus = EmitBus::new();
     let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -620,7 +632,7 @@ fn waterfall_rewrites_by_calling_next_and_emit_cannot() {
 #[tokio::test]
 async fn waterfall_pre_step_can_stop_the_model() {
     let (_dir, _store, lane, model) = open_lane().await;
-    lane.hooks().pre_step.listen(|mut event, _next| {
+    let _block = lane.hooks().pre_step.listen(|mut event, _next| {
         event.proceed = false;
         event.note = "blocked by waterfall".into();
         event
@@ -636,6 +648,61 @@ async fn waterfall_pre_step_can_stop_the_model() {
         .collect();
     assert!(texts.iter().any(|t| t == "hello"));
     assert!(texts.iter().any(|t| t.contains("blocked by waterfall")));
+}
+
+#[tokio::test]
+async fn shared_hooks_register_from_host_before_spawn() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let hooks = LoopHooks::new();
+    let _fiber = hooks.pre_step.listen(|mut event, _next| {
+        event.proceed = false;
+        event.note = "blocked by fiber".into();
+        event
+    });
+    let model = Arc::new(RecordingModel {
+        inner: EchoModel,
+        last: Mutex::new(None),
+    });
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::clone(&model) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        hooks: Some(hooks),
+        router: None,
+    });
+    lane.prompt("hello").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    assert!(model.last.lock().is_none());
+    let history = lane.project(DisplayDepth::Surface).unwrap();
+    let texts: Vec<String> = history
+        .messages
+        .iter()
+        .map(ene_session::ProjectedMessage::text)
+        .collect();
+    assert!(texts.iter().any(|t| t.contains("blocked by fiber")));
 }
 
 #[tokio::test]
@@ -668,6 +735,7 @@ async fn inner_only_model_does_not_leak_on_surface() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     let mut surface = lane.subscribe(DisplayDepth::Surface);
@@ -777,6 +845,7 @@ async fn abort_after_generate_does_not_write_assistant_closure() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     let wait_enter = done.notified();
@@ -850,6 +919,7 @@ async fn abort_during_generate_error_does_not_write_llm_done_failure() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     let wait_enter = entered.notified();
@@ -917,6 +987,7 @@ async fn duplicate_abort_is_idempotent() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     lane.prompt("hold").await.unwrap();
@@ -961,6 +1032,7 @@ async fn follow_up_queues_fifo_and_next_run_works_when_idle() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     lane.prompt("first").await.unwrap();

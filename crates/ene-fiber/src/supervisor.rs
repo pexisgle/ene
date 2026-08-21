@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ene_kernel::{HookEvent, LoopHooks, WaterfallGuard, WaterfallNext};
 use ene_plugin_ipc::{
     BuiltinKind, EmbedRequest, EmbedResult, HostConn, InstallAssetRequest, InstallAssetResult,
     InstallPhase, InstallStatusRequest, InstallStatusResult, ListAssetsResult, ListModelsRequest,
@@ -84,6 +85,8 @@ struct SupervisorInner {
     plugin_home: Mutex<PathBuf>,
     max_frame_bytes: AtomicU32,
     allow_unverified: AtomicBool,
+    loop_hooks: Mutex<Option<LoopHooks>>,
+    waterfall_guards: Mutex<HashMap<String, Vec<WaterfallGuard<HookEvent>>>>,
 }
 
 /// Fiber supervisor. Reconcile is per-row; the core process is not restarted.
@@ -139,6 +142,10 @@ pub enum SupervisorError {
     Spawn(String),
     #[error("circuit open for row {0}")]
     CircuitOpen(String),
+    #[error("loop hooks are not bound")]
+    HooksNotBound,
+    #[error("unknown fiber {0}")]
+    UnknownFiber(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -179,6 +186,7 @@ impl SupervisorInner {
         failed.dispose.clear();
         failed.wait_reason = Some("circuit open".to_owned());
         self.fibers.lock().insert(row_id.to_owned(), failed);
+        self.drop_waterfall(row_id);
     }
 
     fn rollback_loading(&self, fiber: &Fiber) {
@@ -190,6 +198,14 @@ impl SupervisorInner {
             terminate_child(&mut child);
         }
         self.sessions.lock().remove(&fiber.row_id);
+        self.drop_waterfall(&fiber.row_id);
+    }
+
+    fn drop_waterfall(&self, row_id: &str) {
+        let Some(mut guards) = self.waterfall_guards.lock().remove(row_id) else {
+            return;
+        };
+        while guards.pop().is_some() {}
     }
 }
 
@@ -227,6 +243,8 @@ impl Supervisor {
                 plugin_home: Mutex::new(PathBuf::new()),
                 max_frame_bytes: AtomicU32::new(1_048_576),
                 allow_unverified: AtomicBool::new(false),
+                loop_hooks: Mutex::new(None),
+                waterfall_guards: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -245,6 +263,69 @@ impl Supervisor {
         self.inner
             .allow_unverified
             .store(allow_unverified, Ordering::Relaxed);
+    }
+
+    /// Share the dialogue-lane waterfall so a fiber can subscribe.
+    pub fn set_loop_hooks(&self, hooks: LoopHooks) {
+        *self.inner.loop_hooks.lock() = Some(hooks);
+    }
+
+    /// Register `agent/pre-step`. The guard is dropped LIFO on unload.
+    pub fn listen_pre_step<F>(&self, row_id: &str, listener: F) -> Result<(), SupervisorError>
+    where
+        F: Fn(HookEvent, WaterfallNext<HookEvent>) -> HookEvent + Send + Sync + 'static,
+    {
+        self.listen_waterfall(
+            row_id,
+            "agent/pre-step",
+            |hooks, listener| hooks.pre_step.listen(listener),
+            listener,
+        )
+    }
+
+    /// Register `agent/request`. The guard is dropped LIFO on unload.
+    pub fn listen_request<F>(&self, row_id: &str, listener: F) -> Result<(), SupervisorError>
+    where
+        F: Fn(HookEvent, WaterfallNext<HookEvent>) -> HookEvent + Send + Sync + 'static,
+    {
+        self.listen_waterfall(
+            row_id,
+            "agent/request",
+            |hooks, listener| hooks.request.listen(listener),
+            listener,
+        )
+    }
+
+    fn listen_waterfall<F>(
+        &self,
+        row_id: &str,
+        point: &str,
+        subscribe: impl FnOnce(&LoopHooks, F) -> WaterfallGuard<HookEvent>,
+        listener: F,
+    ) -> Result<(), SupervisorError>
+    where
+        F: Fn(HookEvent, WaterfallNext<HookEvent>) -> HookEvent + Send + Sync + 'static,
+    {
+        let Some(hooks) = self.inner.loop_hooks.lock().clone() else {
+            return Err(SupervisorError::HooksNotBound);
+        };
+        {
+            let mut fibers = self.inner.fibers.lock();
+            let fiber = fibers
+                .get_mut(row_id)
+                .ok_or_else(|| SupervisorError::UnknownFiber(row_id.to_owned()))?;
+            fiber.push_effect(Effect::ListenWaterfall {
+                point: point.to_owned(),
+            });
+        }
+        let guard = subscribe(&hooks, listener);
+        self.inner
+            .waterfall_guards
+            .lock()
+            .entry(row_id.to_owned())
+            .or_default()
+            .push(guard);
+        Ok(())
     }
 
     #[must_use]
@@ -647,6 +728,7 @@ impl Supervisor {
             plugin_id: fiber.plugin.clone(),
         });
         self.inner.broker.lock().revoke_all(fiber.uid);
+        self.inner.drop_waterfall(row_id);
         fiber.dispose.clear();
         fiber.state = FiberState::Inactive;
         self.inner.failure_counts.lock().remove(row_id);
@@ -1020,7 +1102,7 @@ fn finish_active(fiber: &mut Fiber) {
             Effect::RegisterTool { name } => Some(format!("tool.{name}")),
             Effect::BrokerGrant { op } => Some(format!("broker.{op}")),
             Effect::BindSeam { name } => Some(format!("seam.{name}")),
-            Effect::SpawnProcess { .. } => None,
+            Effect::SpawnProcess { .. } | Effect::ListenWaterfall { .. } => None,
         })
         .collect();
     fiber.state = FiberState::Active;

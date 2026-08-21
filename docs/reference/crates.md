@@ -23,7 +23,7 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 | `ene-body` | Performance queue, emotion-to-expression mapping, duplex voice | config, session |
 | `ene-work` | Delegation, jobs, schedules, skills, MCP bindings | companion, kernel, plane, registry, session |
 | `ene-plane` | Approval plane, hash-chained audit log, credential vault | config |
-| `ene-fiber` | Plugin fiber composition: reversible effects, profile reconcile, sandbox spawn | plugin-ipc, registry, sandbox |
+| `ene-fiber` | Plugin fiber composition: reversible effects, profile reconcile, sandbox spawn | plugin-ipc, registry, sandbox, kernel |
 | `ene-registry` | Unified tool registry: side_effects filter, deny-by-default pipeline | plugin-ipc, plane |
 | `ene-plugin-ipc` | Split plugin IPC: length-prefixed MessagePack frames for core and tool subprotocols | (nothing internal) |
 | `ene-api` | HTTP/WS types, OpenAPI document, typed Rust client | (nothing internal) |
@@ -37,6 +37,7 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 ```text
 ene-session     ↛ kernel, companion, work, daemon
 ene-kernel      ↛ companion, work, fiber, daemon
+ene-fiber       → kernel (shared `LoopHooks` only; kernel still ↛ fiber)
 ene-companion   ↛ daemon, fiber
 ene-plugin-ipc  ↛ business logic
 ene-card        → ene-config only (never the reverse)

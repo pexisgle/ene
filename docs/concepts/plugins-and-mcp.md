@@ -5,6 +5,10 @@ negotiates split `core` / `tool` / `provider` subprotocols (`ene-plugin-ipc`),
 and registers tools in `ene-registry`. Harness functions that touch companion
 state stay in-process and still go through the same registry pipeline.
 
+The plugin supervisor can subscribe to kernel waterfall points
+(`agent/pre-step`, `agent/request`) as a reversible host effect. Unload
+drops the listener LIFO. Third-party tool IPC cannot register those hooks.
+
 Built-in tools live under `plugins/harness/`: `fs`, `exec`, `web`, `utility`,
 `app`. `exec` is not part of `fs`. See [Built-in tools](../guides/tools/builtin-tools.md)
 and [Write a tool](../guides/tools/write-a-tool.md).

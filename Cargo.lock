@@ -1582,6 +1582,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "ene-config",
+ "ene-kernel",
  "ene-plugin-ipc",
  "ene-provider-assets",
  "ene-registry",

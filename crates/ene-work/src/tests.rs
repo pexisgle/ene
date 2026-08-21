@@ -265,6 +265,7 @@ async fn lane_prompt_still_works_while_job_running() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: None,
     });
     lane.prompt("hello while working").await.unwrap();
@@ -338,6 +339,7 @@ async fn lane_auto_upgrade_does_not_execute_fs_write() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        hooks: None,
         router: Some(router as Arc<dyn SurfaceRouter>),
     });
     lane.prompt("please write a file").await.unwrap();
