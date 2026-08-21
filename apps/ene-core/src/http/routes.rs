@@ -391,7 +391,7 @@ pub async fn listen(
         .core
         .supervisor()
         .transcribe(
-            &binding.plugin,
+            &crate::plugin_profile::task_row_id("stt"),
             ene_plugin_ipc::SttRequest {
                 pcm: req.pcm,
                 sample_rate: req.sample_rate.max(1),

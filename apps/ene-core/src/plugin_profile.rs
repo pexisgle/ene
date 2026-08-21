@@ -5,6 +5,11 @@ use ene_kernel::{AiSettings, PluginProfileKind, PluginSettings, TaskBinding};
 use ene_work::{McpServer, WorkError, WorkStore};
 use serde::{Deserialize, Serialize};
 
+#[must_use]
+pub(crate) fn task_row_id(task: &str) -> String {
+    format!("ai.tasks.{task}")
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct McpFile {
     #[serde(default)]

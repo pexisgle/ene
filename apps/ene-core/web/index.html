@@ -68,6 +68,15 @@
     const log = (el, line) => { el.textContent += line + "\n"; el.scrollTop = el.scrollHeight; };
     const clear = (el) => { el.replaceChildren(); };
 
+    function problemText(err) {
+      if (err == null) return "unknown error";
+      if (typeof err !== "object") return String(err);
+      const parts = [err.title, err.detail, err.error_class].filter(Boolean);
+      if (parts.length) return parts.join(" — ");
+      if (err.message) return String(err.message);
+      try { return JSON.stringify(err); } catch { return String(err); }
+    }
+
     async function api(path, opts) {
       const res = await fetch(path, opts);
       const body = await res.json();
@@ -134,7 +143,7 @@
         button.type = "button";
         button.textContent = companion.label + (soul ? " (" + soul.mood_label + ")" : "");
         button.classList.toggle("active", companion.id === selectedSoulId);
-        button.onclick = () => selectSoul(companion.id, soulsPage).catch((err) => log(surface, "error " + String(err && err.message || err)));
+        button.onclick = () => selectSoul(companion.id, soulsPage).catch((err) => log(surface, "error " + problemText(err)));
         soulPicker.appendChild(button);
       }
     }
@@ -157,6 +166,7 @@
         return "";
       }
       if (msg.type === "text.delta" || msg.type === "session.event") return msg.text || "";
+      if (msg.type === "job.report") return msg.speech || msg.text || "";
       if (msg.role && msg.text) return msg.role + ": " + msg.text;
       return msg.text || "";
     }
@@ -178,8 +188,8 @@
       if (type === "affect.state" || type === "pad.update") {
         return { role: "PAD", cls: "pad", text: padLine(msg) };
       }
-      if (type === "job.progress") {
-        return { role: "job", cls: "tool", text: (msg.title || msg.id || "job") + " " + (msg.progress_note || msg.status || "") };
+      if (type === "job.report" || type === "job.progress") {
+        return { role: "job", cls: "tool", text: msg.speech || msg.text || ((msg.title || msg.id || "job") + " " + (msg.progress_note || msg.status || "")) };
       }
       return { role: type, cls: "", text: msg.text || msg.kind || "" };
     }
@@ -326,7 +336,7 @@
         await ensureSession(companion.id);
       }
       await selectSoul(companions[0].id, soulsPage);
-    })().catch((err) => log(surface, "error " + String(err && err.message || err)));
+    })().catch((err) => log(surface, "error " + problemText(err)));
 
     document.getElementById("chat").onsubmit = async (e) => {
       e.preventDefault();

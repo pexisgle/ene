@@ -201,6 +201,12 @@ fn exec_is_higher_risk_than_workspace_fs_write() {
 }
 
 #[test]
+fn desktop_input_is_high_risk() {
+    let click = req("app.click", &["input"], Sensitivity::None, true);
+    assert_eq!(Risk::classify(&click), Risk::High);
+}
+
+#[test]
 fn risk_screenshot_is_medium_with_empty_side_effects() {
     let classified = req("app.screenshot", &[], Sensitivity::High, true);
     assert_eq!(Risk::classify(&classified), Risk::Medium);

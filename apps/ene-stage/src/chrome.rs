@@ -237,9 +237,6 @@ fn fill_opaque_panel(ui: &mut egui::Ui, kind: ChromeKind) {
 }
 
 /// Map `desktop.theme` onto egui's light/dark/system preference.
-///
-/// Chrome windows used to keep a dark wgpu clear while switching only widget
-/// text color, which made light theme unreadable.
 pub fn apply_theme(ctx: &egui::Context, theme: &str) {
     match theme {
         "light" => ctx.set_theme(egui::Theme::Light),

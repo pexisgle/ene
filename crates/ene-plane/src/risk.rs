@@ -41,8 +41,7 @@ impl Risk {
 fn is_high(req: &AuthzRequest) -> bool {
     req.tool.starts_with("exec.")
         || req.tool.contains("cred.export")
-        || req
-            .side_effects
-            .iter()
-            .any(|effect| effect == "exec" || effect == "send" || effect == "cred.export")
+        || req.side_effects.iter().any(|effect| {
+            effect == "exec" || effect == "send" || effect == "cred.export" || effect == "input"
+        })
 }

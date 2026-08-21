@@ -17,15 +17,11 @@ fn format_line(message: &ProjectedMessage) -> Option<String> {
         Role::System => "system",
         Role::Thinking | Role::Inner | Role::Tool => return None,
     };
-    let text = collapse_ws(&message.text());
-    if text.is_empty() {
+    let text = message.text();
+    if text.trim().is_empty() {
         return None;
     }
     Some(format!("- {role}: {text}"))
-}
-
-fn collapse_ws(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn stitch_head_and_tail(lines: &[String], max_chars: usize) -> String {
@@ -63,18 +59,7 @@ fn shorten_line(line: &str, budget: usize) -> String {
     if line.chars().count() <= budget {
         return line.to_owned();
     }
-    let Some((prefix, body)) = line.split_once(": ") else {
-        return take_chars(line, budget);
-    };
-    let sentence = body
-        .split_once(['.', '?', '!'])
-        .map_or(body, |(head, _)| head.trim());
-    let candidate = format!("{prefix}: {sentence}");
-    if candidate.chars().count() <= budget {
-        candidate
-    } else {
-        take_chars(&candidate, budget)
-    }
+    take_chars(line, budget)
 }
 
 fn take_chars(text: &str, max_chars: usize) -> String {
@@ -149,5 +134,25 @@ mod tests {
         assert!(summary.contains("visible"));
         assert!(!summary.contains("hidden inner body"));
         assert!(!summary.contains("fs.read"));
+    }
+
+    #[test]
+    fn under_budget_keeps_indented_content() {
+        let summary = summarize_history(
+            &[msg(Role::Assistant, "def foo():\n    return 1\n")],
+            MAX_SUMMARY_CHARS,
+        );
+        assert!(summary.contains("    return 1"));
+    }
+
+    #[test]
+    fn over_budget_keeps_past_a_short_opener() {
+        let body = format!("Sure. {}", "results ".repeat(40));
+        let summary = summarize_history(&[msg(Role::Assistant, &body)], 80);
+        assert!(
+            summary.contains("Sure.") && summary.contains("resul"),
+            "short opener ate the budget: {summary}"
+        );
+        assert!(summary.chars().count() <= 80);
     }
 }

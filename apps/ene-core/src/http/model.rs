@@ -46,7 +46,7 @@ impl ConversationModel for SeamedModel {
         let generation = self
             .core
             .supervisor()
-            .generate_llm(&binding.plugin, llm_request)
+            .generate_llm(&crate::plugin_profile::task_row_id("chat"), llm_request)
             .await
             .map_err(|err| KernelError::Model(err.to_string()))?;
         if generation.finish_reason == "error" {

@@ -40,6 +40,22 @@ impl SeamedClassify {
         ai.tasks.chat.clone()
     }
 
+    fn row_id_for(core: &CoreDaemon, task: ClassifyTask) -> String {
+        let guard = core.ai();
+        let ai = guard.lock();
+        let (name, specific) = match task {
+            ClassifyTask::ProactiveDecision | ClassifyTask::ScreenSummary => {
+                ("proactive", &ai.tasks.proactive)
+            }
+            _ => ("classifier", &ai.tasks.classifier),
+        };
+        if specific.is_unconfigured() {
+            crate::plugin_profile::task_row_id("chat")
+        } else {
+            crate::plugin_profile::task_row_id(name)
+        }
+    }
+
     fn secret_for(core: &CoreDaemon, task: ClassifyTask) -> String {
         match task {
             ClassifyTask::ProactiveDecision | ClassifyTask::ScreenSummary => {
@@ -96,7 +112,7 @@ impl ClassifyModel for SeamedClassify {
         };
         let generation = core
             .supervisor()
-            .generate_llm(&binding.plugin, request)
+            .generate_llm(&Self::row_id_for(&core, task), request)
             .await
             .map_err(|err| CompanionError::Classify(err.to_string()))?;
         if generation.finish_reason == "error" {
@@ -161,7 +177,7 @@ impl SeamedClassify {
         };
         let generation = core
             .supervisor()
-            .generate_llm(&binding.plugin, request)
+            .generate_llm(&Self::row_id_for(&core, task), request)
             .await
             .map_err(|err| CompanionError::Classify(err.to_string()))?;
         if generation.finish_reason == "error" {
@@ -239,13 +255,19 @@ async fn embed_memory(
     id: ene_companion::MemoryId,
     text: &str,
 ) -> Result<(), String> {
-    let binding = {
+    let (binding, row_id) = {
         let guard = core.ai();
         let ai = guard.lock();
         if ai.tasks.embedding.is_unconfigured() {
-            ai.tasks.chat.clone()
+            (
+                ai.tasks.chat.clone(),
+                crate::plugin_profile::task_row_id("chat"),
+            )
         } else {
-            ai.tasks.embedding.clone()
+            (
+                ai.tasks.embedding.clone(),
+                crate::plugin_profile::task_row_id("embedding"),
+            )
         }
     };
     if binding.is_unconfigured() {
@@ -254,7 +276,7 @@ async fn embed_memory(
     let result = core
         .supervisor()
         .embed(
-            &binding.plugin,
+            &row_id,
             ene_plugin_ipc::EmbedRequest {
                 texts: vec![text.to_owned()],
                 model: binding.model,

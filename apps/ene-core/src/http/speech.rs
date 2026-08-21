@@ -51,7 +51,7 @@ impl SpeechPresenter for PluginSpeech {
         };
         match core
             .supervisor()
-            .synthesize_tts(&binding.plugin, request)
+            .synthesize_tts(&crate::plugin_profile::task_row_id("tts"), request)
             .await
         {
             Ok(audio) => emit_pcm(&self.events, &audio.pcm, audio.sample_rate),

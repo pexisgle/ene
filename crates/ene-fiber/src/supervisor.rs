@@ -319,12 +319,19 @@ impl Supervisor {
             });
         }
         let guard = subscribe(&hooks, listener);
-        self.inner
-            .waterfall_guards
-            .lock()
-            .entry(row_id.to_owned())
-            .or_default()
-            .push(guard);
+        {
+            let fibers = self.inner.fibers.lock();
+            if !fibers.contains_key(row_id) {
+                drop(guard);
+                return Err(SupervisorError::UnknownFiber(row_id.to_owned()));
+            }
+            self.inner
+                .waterfall_guards
+                .lock()
+                .entry(row_id.to_owned())
+                .or_default()
+                .push(guard);
+        }
         Ok(())
     }
 
@@ -716,6 +723,7 @@ impl Supervisor {
             return;
         };
         fiber.state = FiberState::Unloading;
+        self.inner.drop_waterfall(row_id);
         let session = self.inner.sessions.lock().remove(row_id);
         if let Some(session) = session {
             let drain = async { session.conn.lock().await.drain().await };
@@ -728,7 +736,6 @@ impl Supervisor {
             plugin_id: fiber.plugin.clone(),
         });
         self.inner.broker.lock().revoke_all(fiber.uid);
-        self.inner.drop_waterfall(row_id);
         fiber.dispose.clear();
         fiber.state = FiberState::Inactive;
         self.inner.failure_counts.lock().remove(row_id);
@@ -785,43 +792,43 @@ impl Supervisor {
             .any(|schema| schema.get("name").and_then(|v| v.as_str()) == Some(name))
     }
 
-    /// First active plugin bound to `seam.llm` matching `plugin`, or any llm seam.
+    /// Active fiber `row_id` for a provider task (`ai.tasks.chat`, …).
     pub async fn generate_llm(
         &self,
-        plugin: &str,
+        row_id: &str,
         request: LlmGenerateRequest,
     ) -> Result<LlmGeneration, SupervisorError> {
-        let session = self.provider_session(plugin, "seam.llm")?;
+        let session = self.session_by_row(row_id)?;
         let mut conn = session.conn.lock().await;
         conn.generate_llm(request).await.map_err(Into::into)
     }
 
     pub async fn embed(
         &self,
-        plugin: &str,
+        row_id: &str,
         request: EmbedRequest,
     ) -> Result<EmbedResult, SupervisorError> {
-        let session = self.provider_session(plugin, "seam.embed")?;
+        let session = self.session_by_row(row_id)?;
         let mut conn = session.conn.lock().await;
         conn.embed(request).await.map_err(Into::into)
     }
 
     pub async fn synthesize_tts(
         &self,
-        plugin: &str,
+        row_id: &str,
         request: TtsRequest,
     ) -> Result<TtsAudio, SupervisorError> {
-        let session = self.provider_session(plugin, "seam.tts")?;
+        let session = self.session_by_row(row_id)?;
         let mut conn = session.conn.lock().await;
         conn.synthesize_tts(request).await.map_err(Into::into)
     }
 
     pub async fn transcribe(
         &self,
-        plugin: &str,
+        row_id: &str,
         request: SttRequest,
     ) -> Result<SttResult, SupervisorError> {
-        let session = self.provider_session(plugin, "seam.stt")?;
+        let session = self.session_by_row(row_id)?;
         let mut conn = session.conn.lock().await;
         conn.transcribe(request).await.map_err(Into::into)
     }
@@ -1039,29 +1046,22 @@ impl Supervisor {
         self.finish_probe(&mut child, &mut conn, listed).await
     }
 
-    fn provider_session(
-        &self,
-        plugin: &str,
-        seam: &str,
-    ) -> Result<Arc<PluginSession>, SupervisorError> {
-        let row_id = self
+    fn session_by_row(&self, row_id: &str) -> Result<Arc<PluginSession>, SupervisorError> {
+        let active = self
             .inner
             .fibers
             .lock()
-            .values()
-            .find(|fiber| {
-                fiber.state == FiberState::Active
-                    && fiber.plugin == plugin
-                    && fiber.provides.iter().any(|key| key == seam)
-            })
-            .map(|fiber| fiber.row_id.clone())
-            .ok_or_else(|| SupervisorError::ProviderUnavailable(plugin.to_owned()))?;
+            .get(row_id)
+            .is_some_and(|fiber| fiber.state == FiberState::Active);
+        if !active {
+            return Err(SupervisorError::ProviderUnavailable(row_id.to_owned()));
+        }
         self.inner
             .sessions
             .lock()
-            .get(&row_id)
+            .get(row_id)
             .cloned()
-            .ok_or_else(|| SupervisorError::ProviderUnavailable(plugin.to_owned()))
+            .ok_or_else(|| SupervisorError::ProviderUnavailable(row_id.to_owned()))
     }
 }
 
