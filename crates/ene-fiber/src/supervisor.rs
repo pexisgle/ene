@@ -87,7 +87,6 @@ struct SupervisorInner {
     allow_unverified: AtomicBool,
     loop_hooks: Mutex<Option<LoopHooks>>,
     waterfall_guards: Mutex<HashMap<String, Vec<WaterfallGuard<HookEvent>>>>,
-    #[cfg(unix)]
     broker_servers: Mutex<HashMap<String, crate::broker_ipc::BrokerServer>>,
 }
 
@@ -152,7 +151,6 @@ pub enum SupervisorError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Ipc(#[from] ene_plugin_ipc::IpcError),
-    #[cfg(unix)]
     #[error("broker ipc: {0}")]
     BrokerIpc(#[from] crate::BrokerIpcError),
 }
@@ -250,7 +248,6 @@ impl Supervisor {
                 allow_unverified: AtomicBool::new(false),
                 loop_hooks: Mutex::new(None),
                 waterfall_guards: Mutex::new(HashMap::new()),
-                #[cfg(unix)]
                 broker_servers: Mutex::new(HashMap::new()),
             }),
         }
