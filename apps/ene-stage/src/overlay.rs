@@ -108,6 +108,13 @@ impl OverlayWindow {
         }
     }
 
+    pub fn reset_visemes(&mut self) {
+        let silence = ene_vrm::VisemeWeights::default();
+        for slot in &mut self.slots {
+            slot.avatar.apply_viseme(silence);
+        }
+    }
+
     pub fn resize(&mut self, gpu: &GpuContext, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;

@@ -74,8 +74,11 @@ and GGUF weights live under Connections → provider assets. TTS/STT are
 `ai.tasks.tts` / `ai.tasks.stt`.
 
 VAD/ASR/TTS belong to core. Stage relays microphone PCM on
-`POST /sessions/{id}/listen` and plays `audio.chunk`. Barge-in is core
-`voice.state`, not client RMS. Stage claims speaker/notify exclusive by default.
+`POST /sessions/{id}/listen` and plays `audio.chunk`. Barge-in is decided in
+core (`voice.state` plus an `audio.chunk` with `abort: true`). Stage stops the
+playback sink and resets visemes when that abort chunk arrives; it does not use
+client RMS as the source of truth. Stage claims speaker/notify exclusive by
+default.
 
 Audio device relay, approval popups, tray, and OS notifications (`notify.hint`)
 are stage's client-side jobs; the core owns policy and the live bus.

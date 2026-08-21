@@ -46,7 +46,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 |---|---|---|---|
 | P-101 | `ene-kernel::text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `ene-daemon::http_tests::three_clients_share_one_core`; `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat` | Echo（機構） / ToolCalling / Seamed fail-closed | いいえ(実モデル応答は未観測) |
 | P-102 | `ene-body::barge_in_stops_playback_after_min_speech`; `self_voice_during_playback_is_ignored`; `idle_speech_becomes_transcript` | Scripted | いいえ |
-| P-103 | `ene-kernel::abort_does_not_write_assistant_closure`; `boot_seeds_two_souls_and_session_ops` (barge-in API) | Echo / HTTP | いいえ(本番音声未配線) |
+| P-103 | `ene-kernel::abort_does_not_write_assistant_closure`; `boot_seeds_two_souls_and_session_ops` (barge-in API); `ene-stage::parses_audio_chunk_abort`; `ene-stage::stop_clears_recent_playback_pcm` | Echo / HTTP / stage | 部分(stage が `audio.chunk` abort で sink 停止と viseme reset。0.5s 手動は本番 TTS 未配線) |
 | P-104 | `ene-session::surface_projection_hides_inner_and_thinking`; `ene-kernel::surface_live_subscription_does_not_receive_inner`; `ene-daemon::surface_ws_never_sees_inner` | store / HTTP | はい(表層非露出) |
 | P-105 | `ene-companion::proactive_gate_fail_closed_without_llm`; `proactive_speaks_when_gates_pass`; `proactive_disabled_never_invokes_llm`; `tendency_does_not_pierce_gates` | Scripted | いいえ(ゲート機構は実コード) |
 | P-106 | `ene-body::autonomy_tick_does_not_require_a_turn` | store | はい(描画なし tick) |

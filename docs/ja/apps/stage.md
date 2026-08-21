@@ -70,9 +70,10 @@ JSON の取り込み / 書き出しは詳細用に折りたたみます。既に
 TTS/STT は `ai.tasks.tts` / `ai.tasks.stt` です。
 
 VAD/ASR/TTS はコアが持ちます。Stage は `POST /sessions/{id}/listen` でマイク
-PCM を中継し、`audio.chunk` を再生します。割り込みの正はコアの `voice.state`
-であり、クライアントの RMS ではありません。Stage は既定で speaker / notify
-の排他を取得します。
+PCM を中継し、`audio.chunk` を再生します。割り込みの判定はコア
+（`voice.state` と `abort: true` の `audio.chunk`）が持ちます。Stage はその
+abort チャンクで再生シンクを止め、viseme をリセットします。正はクライアント
+の RMS ではありません。Stage は既定で speaker / notify の排他を取得します。
 
 音声デバイス中継・承認ポップアップ・トレイ・OS 通知（`notify.hint`）は
 stage 側の仕事で、ポリシーとライブバスはコアが所有します。

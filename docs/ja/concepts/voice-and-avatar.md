@@ -9,8 +9,9 @@ viseme を持ちます。本番は `VoiceRuntime::live` で起動し、VAD・割
 その状態機械へマイク PCM を入れ、発話が閉じたら設定済みの `ai.tasks.stt`
 へ送ります。プラグイン TTS の PCM も同じ機械に入るので、リップシンクと
 割り込みは再生中の音声を見ます。surface バスは `voice.state`（`state` と、
-割り込み中は `barge_in`）を出します。テストは in-process の ASR 二重化に
-`VoiceRuntime::scripted` を組み立てて構いません。
+割り込み中は `barge_in`）と、再生シンクを即停止するための空の
+`audio.chunk`（`abort: true` / `is_final: true`）を出します。テストは
+in-process の ASR 二重化に `VoiceRuntime::scripted` を組み立てて構いません。
 
 TTS / STT は `ai.tasks.tts` / `ai.tasks.stt` で
 プロバイダプラグイン（`provider.openai_compat`、`provider.elevenlabs`、

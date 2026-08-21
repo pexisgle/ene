@@ -55,6 +55,14 @@ impl AudioHub {
         }
     }
 
+    /// Stop playback and clear the viseme PCM buffer (no-op without `voice`).
+    pub fn stop(&mut self) {
+        #[cfg(feature = "voice")]
+        {
+            self.playback.stop();
+        }
+    }
+
     /// Recent playback PCM for lip-sync analysis.
     #[must_use]
     pub fn playback_pcm(&self) -> Vec<f32> {
@@ -166,6 +174,8 @@ impl AudioPlayback {
         Ok(())
     }
 
+    pub fn stop(&mut self) {}
+
     #[must_use]
     pub fn recent_pcm(&self) -> Vec<f32> {
         Vec::new()
@@ -185,4 +195,20 @@ pub enum AudioError {
     Device(String),
     #[error("playback failed: {0}")]
     Playback(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_clears_recent_playback_pcm() {
+        let mut hub = AudioHub::new();
+        hub.play_pcm(&[0.25, -0.5, 0.75], 16_000)
+            .expect("enqueue pcm");
+        #[cfg(feature = "voice")]
+        assert!(!hub.playback_pcm().is_empty());
+        hub.stop();
+        assert!(hub.playback_pcm().is_empty());
+    }
 }

@@ -928,8 +928,15 @@ impl StageApp {
                         }
                     }
                 }
-                LiveEvent::AudioChunk { pcm, sample_rate } => {
-                    if let Err(err) = self.audio.play_pcm(&pcm, sample_rate) {
+                LiveEvent::AudioChunk {
+                    pcm,
+                    sample_rate,
+                    abort,
+                    ..
+                } => {
+                    if abort {
+                        self.abort_audio_playback();
+                    } else if let Err(err) = self.audio.play_pcm(&pcm, sample_rate) {
                         tracing::debug!(error = %err, "audio playback failed");
                     }
                 }
@@ -1191,6 +1198,14 @@ impl StageApp {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn abort_audio_playback(&mut self) {
+        self.audio.stop();
+        self.viseme.reset();
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.reset_visemes();
         }
     }
 
