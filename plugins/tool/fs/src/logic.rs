@@ -4,6 +4,7 @@ use ene_registry::{arg_str, spec};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -714,15 +715,39 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     let suffix = TEMP_SUFFIX.fetch_add(1, Ordering::Relaxed);
     let temp_path = parent.join(format!(".ene-write-{}-{suffix}.tmp", std::process::id()));
-    std::fs::write(&temp_path, bytes).map_err(|err| err.to_string())?;
-    match std::fs::rename(&temp_path, path) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            drop(std::fs::remove_file(&temp_path));
-            Err(err.to_string())
-        }
+    let result = write_temp_then_rename(path, &temp_path, bytes);
+    if result.is_err() {
+        drop(std::fs::remove_file(&temp_path));
     }
+    result
 }
+
+fn write_temp_then_rename(path: &Path, temp_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = std::fs::File::create(temp_path).map_err(|err| err.to_string())?;
+    file.write_all(bytes).map_err(|err| err.to_string())?;
+    preserve_permissions(path, &file);
+    drop(file);
+    std::fs::rename(temp_path, path).map_err(|err| err.to_string())
+}
+
+/// Copies mode bits from an existing `src` onto the temp file before rename.
+///
+/// A missing source (first write) or any metadata error is ignored so the temp
+/// file keeps the default mode. Without this, replacing an executable via
+/// rename would drop `+x` (and other Unix mode bits).
+#[cfg(unix)]
+fn preserve_permissions(src: &Path, dst: &std::fs::File) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let Ok(meta) = std::fs::metadata(src) else {
+        return;
+    };
+    let perms = std::fs::Permissions::from_mode(meta.mode() & 0o7777);
+    drop(dst.set_permissions(perms));
+}
+
+#[cfg(not(unix))]
+fn preserve_permissions(_src: &Path, _dst: &std::fs::File) {}
 
 fn job_key(args: &Value) -> String {
     explicit_job_key(args).unwrap_or_else(unique_job_key)
@@ -981,6 +1006,35 @@ mod tests {
                 }),
             )?;
             assert_eq!(fs::read_to_string(&path).unwrap(), "after");
+            Ok(())
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_edit_preserves_executable_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("tool.sh");
+        fs::write(&path, "#!/bin/sh\necho before\n").unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+
+        with_workspace(&dir, || {
+            execute(
+                "fs.edit",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "old": "before",
+                    "new": "after",
+                    "job_id": "mode-job",
+                }),
+            )?;
+            assert_eq!(fs::read_to_string(&path).unwrap(), "#!/bin/sh\necho after\n");
+            let mode = fs::metadata(&path).unwrap().mode() & 0o7777;
+            assert_eq!(mode, 0o755, "executable mode must survive atomic replace");
             Ok(())
         });
     }
