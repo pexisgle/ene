@@ -31,7 +31,8 @@ Web         ─┘                              │
 
 Each companion has a **surface soul** (the dialogue lane) and a **back harness**
 (jobs, delegation, schedules). Users speak only to the surface. Complicated
-work is delegated; progress comes back as companion speech, not a progress bar.
+work is delegated; a job lane runs the model with tools, and progress comes
+back as companion speech, not a progress bar.
 
 Display depth is `surface` or `detail`. The server decides what a connection
 receives. Stage's character overlay and chat are surface; the separate detail

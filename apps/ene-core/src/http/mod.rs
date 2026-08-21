@@ -25,7 +25,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
 use ene_api::SendMessageResponse;
-use ene_kernel::{ConversationModel, DisplayDepth};
+use ene_kernel::{ConversationModel, DisplayDepth, EchoModel, HarnessSettings};
 use ene_plane::PendingPopup;
 use parking_lot::Mutex;
 use serde_json::json;
@@ -68,6 +68,7 @@ impl ServerHandle {
             handle.abort();
         }
         self.host.clear_report_sink();
+        self.host.clear_job_wake();
     }
 
     /// Ask the server to stop, unload plugins, and wait for the accept loop.
@@ -106,6 +107,26 @@ impl Drop for ServerHandle {
 }
 
 impl CoreDaemon {
+    fn job_conversation_model(self: &Arc<Self>) -> Arc<dyn ConversationModel> {
+        if let Some(model) = self.job_model() {
+            return model;
+        }
+        let binding = {
+            let guard = self.ai();
+            let ai = guard.lock();
+            if ai.tasks.job.is_unconfigured() {
+                ai.tasks.chat.clone()
+            } else {
+                ai.tasks.job.clone()
+            }
+        };
+        if binding.is_unconfigured() {
+            Arc::new(EchoModel)
+        } else {
+            Arc::new(model::SeamedModel::job(Arc::clone(self)))
+        }
+    }
+
     /// Bind HTTP/WS using `ai.tasks.chat` (requires a configured provider).
     pub async fn serve(self: Arc<Self>) -> Result<ServerHandle, CoreError> {
         let model = Arc::new(model::SeamedModel::new(Arc::clone(&self)));
@@ -145,6 +166,8 @@ impl CoreDaemon {
         let last_used = self.settings().clients.audio_active_policy == "last_used";
         let (report_tx, mut report_rx) = mpsc::unbounded_channel();
         self.host().set_report_sink(report_tx);
+        let (job_tx, mut job_rx) = mpsc::unbounded_channel();
+        self.host().set_job_wake(job_tx);
         let events = CoreBus::new(self.settings().server.ws_send_buffer);
         {
             let bus = events.clone();
@@ -188,6 +211,30 @@ impl CoreDaemon {
         let proactive_task = tokio::spawn(async move {
             proactive::run_loop(proactive_state, classify).await;
         });
+        let job_core = Arc::clone(&self);
+        let job_task = tokio::spawn(async move {
+            while let Some(job) = job_rx.recv().await {
+                let core = Arc::clone(&job_core);
+                tokio::spawn(async move {
+                    let harness = HarnessSettings::default();
+                    let wall = std::time::Duration::from_secs(u64::from(
+                        harness.delegation.wall_timeout_secs,
+                    ));
+                    let drive = ene_work::JobDrive {
+                        host: core.host(),
+                        registry: core.supervisor().registry(),
+                        sessions: core.store(),
+                        model: core.job_conversation_model(),
+                        job,
+                        step_budget: harness.delegation.step_budget.max(1),
+                        wall,
+                    };
+                    if let Err(err) = ene_work::drive_job(drive).await {
+                        tracing::warn!(error = %err, "job runner failed");
+                    }
+                });
+            }
+        });
         let app = router(state.clone());
         let (tx, rx) = oneshot::channel::<()>();
         let join = tokio::spawn(async move {
@@ -205,9 +252,9 @@ impl CoreDaemon {
         };
         tracing::info!(%addr, "http/ws listening");
         #[cfg(not(test))]
-        let mut background = vec![report_task, proactive_task];
+        let mut background = vec![report_task, proactive_task, job_task];
         #[cfg(test)]
-        let background = vec![report_task, proactive_task];
+        let background = vec![report_task, proactive_task, job_task];
         #[cfg(not(test))]
         background.push(profile_task);
         Ok(ServerHandle {

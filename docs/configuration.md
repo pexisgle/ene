@@ -32,10 +32,12 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 | `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs` |
 | `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
-Conversation, classifier, embedding, TTS, and STT bind through `ai.tasks.<task>`
+Conversation, classifier, embedding, TTS, STT, and job bind through
+`ai.tasks.<task>`
 (`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`). Chat
 starts unconfigured — set `ai.tasks.chat.plugin` to a `provider.*` id before
-the first message. API keys are vault secrets (`ENE_AI__TASKS__<TASK>__API_KEY`
+the first message. Back-harness jobs use `ai.tasks.job` (chat fallback, or
+the echo model when neither is bound) on a lane independent of dialogue. API keys are vault secrets (`ENE_AI__TASKS__<TASK>__API_KEY`
 at boot; PATCH `/api/v1/settings` never writes them into JSON). Plugin ids are
 `provider.*` names from the [plugin catalog](concepts/plugins-and-mcp.md)
 (`GET /api/v1/settings` → `effective.providers`). Desktop does not keep a

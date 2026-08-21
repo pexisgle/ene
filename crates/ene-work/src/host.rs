@@ -30,6 +30,7 @@ pub struct DelegationHost {
     settings: WorkDelegationSettings,
     speech_gate: Arc<SpeechGate>,
     report_tx: Mutex<Option<mpsc::UnboundedSender<CompanionReport>>>,
+    job_wake: Mutex<Option<mpsc::UnboundedSender<Job>>>,
 }
 
 impl DelegationHost {
@@ -68,6 +69,7 @@ impl DelegationHost {
             settings,
             speech_gate: Arc::new(SpeechGate::new()),
             report_tx: Mutex::new(None),
+            job_wake: Mutex::new(None),
         }
     }
 
@@ -79,6 +81,22 @@ impl DelegationHost {
     /// Close the live-bus channel so the HTTP report task can exit.
     pub fn clear_report_sink(&self) {
         self.report_tx.lock().take();
+    }
+
+    /// Wake the job runner when a delegation is accepted. Missing receiver is a no-op.
+    pub fn set_job_wake(&self, tx: mpsc::UnboundedSender<Job>) {
+        *self.job_wake.lock() = Some(tx);
+    }
+
+    /// Drop the runner channel so serve shutdown can exit.
+    pub fn clear_job_wake(&self) {
+        self.job_wake.lock().take();
+    }
+
+    fn wake_job(&self, job: &Job) {
+        if let Some(tx) = self.job_wake.lock().as_ref() {
+            drop(tx.send(job.clone()));
+        }
     }
 
     #[must_use]
@@ -237,6 +255,7 @@ impl DelegationHost {
         self.store.record_meta(job.id, mode, depth)?;
         self.store
             .mailbox_push(job.id, "parent_to_child", "task", &job.goal)?;
+        self.wake_job(&job);
         Ok(job)
     }
 

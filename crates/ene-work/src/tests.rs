@@ -4,6 +4,7 @@ use crate::host::{
 };
 use crate::mcp::{McpProfile, McpTool, ScriptedMcp, register_mcp_tools};
 use crate::router::WorkSurfaceRouter;
+use crate::runner::{JobDrive, drive_job};
 use crate::schedule::{QuietWindow, catch_up_missed, fire_due, reminder_report};
 use crate::skill::{catalog, install_skill_dir, load_skill, parse_skill_md};
 use crate::store::WorkStore;
@@ -16,12 +17,12 @@ use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};
 use ene_companion::{WorldStateMemory, WorldStateSettings};
 use ene_kernel::{
-    ConversationModel, DisplayDepth, EventKind, HarnessSettings, KernelError, LaneHandle,
-    LaneOptions, MindSettings, ModelGeneration, ModelRequest, SurfaceRouter, SurfaceToolOutcome,
-    ToolCall,
+    ConversationModel, DisplayDepth, EchoModel, EventKind, HarnessSettings, KernelError,
+    LaneHandle, LaneOptions, MindSettings, ModelGeneration, ModelRequest, SurfaceRouter,
+    SurfaceToolOutcome, ToolCall,
 };
 use ene_plane::Sensitivity;
-use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
+use ene_registry::{BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use ene_session::{
     NewSession, SessionCreatedBy, SessionKind, SessionStore, SoulId, derive_messages,
 };
@@ -45,6 +46,18 @@ impl ToolInvoke for SpyInvoke {
     async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
         self.hit.store(true, Ordering::SeqCst);
         Ok(json!({ "ok": true }))
+    }
+}
+
+struct CountingInvoke {
+    hit: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl ToolInvoke for CountingInvoke {
+    async fn invoke(&self, name: &str, args: Value) -> Result<Value, String> {
+        self.hit.store(true, Ordering::SeqCst);
+        BuiltinInvoker.invoke(name, args).await
     }
 }
 
@@ -344,6 +357,135 @@ async fn lane_auto_upgrade_does_not_execute_fs_write() {
     lane.wait_for_idle().await.unwrap();
     assert!(!hit.load(Ordering::SeqCst));
     assert_eq!(work.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn drive_job_runs_echo_model_to_completion() {
+    let dir = TempDir::new().unwrap();
+    let work = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&work),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let job = public_start(&host, soul, "summarize notes");
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    registry.register(utility_time_def());
+    let sessions = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    drive_job(JobDrive {
+        host: Arc::clone(&host),
+        registry,
+        sessions,
+        model: Arc::new(EchoModel) as Arc<dyn ConversationModel>,
+        job: job.clone(),
+        step_budget: 8,
+        wall: StdDuration::from_secs(10),
+    })
+    .await
+    .unwrap();
+    let done = work.get_job(job.id).unwrap().unwrap();
+    assert_eq!(done.status, JobStatus::Completed);
+    let mail = work.mailbox(job.id).unwrap();
+    assert!(
+        mail.iter()
+            .any(|(dir, kind, _)| dir == "child_to_parent" && kind == "complete"),
+        "job lane must send a complete mailbox row, got {mail:?}"
+    );
+}
+
+#[tokio::test]
+async fn drive_job_executes_tools_and_delegation_send() {
+    let dir = TempDir::new().unwrap();
+    let work = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&work),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let job = public_start(&host, soul, "look up the time");
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        audit,
+        ene_plane::ScriptedPopup::deny_all(),
+        None,
+    ));
+    plane.set_mode(ene_plane::ApprovalMode::Auto).unwrap();
+    registry.set_plane(plane);
+    let hit = Arc::new(AtomicBool::new(false));
+    registry.register_with(
+        utility_time_def(),
+        Arc::new(CountingInvoke {
+            hit: Arc::clone(&hit),
+        }),
+    );
+    let sessions = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let model = Arc::new(SequenceModel {
+        remaining: parking_lot::Mutex::new(vec![
+            ModelGeneration {
+                tool_calls: vec![ToolCall {
+                    name: "delegation.send".into(),
+                    arguments: json!({"kind":"complete","body":"got the time"}),
+                }],
+                ..ModelGeneration::default()
+            },
+            ModelGeneration {
+                tool_calls: vec![ToolCall {
+                    name: "delegation.send".into(),
+                    arguments: json!({"kind":"progress","body":"checking the clock"}),
+                }],
+                ..ModelGeneration::default()
+            },
+            ModelGeneration {
+                tool_calls: vec![ToolCall {
+                    name: "utility.time".into(),
+                    arguments: json!({}),
+                }],
+                ..ModelGeneration::default()
+            },
+        ]),
+    });
+    drive_job(JobDrive {
+        host: Arc::clone(&host),
+        registry,
+        sessions,
+        model: model as Arc<dyn ConversationModel>,
+        job: job.clone(),
+        step_budget: 8,
+        wall: StdDuration::from_secs(10),
+    })
+    .await
+    .unwrap();
+    assert!(
+        hit.load(Ordering::SeqCst),
+        "job model must run utility.time"
+    );
+    let done = work.get_job(job.id).unwrap().unwrap();
+    assert_eq!(done.status, JobStatus::Completed);
+    let mail = work.mailbox(job.id).unwrap();
+    assert!(
+        mail.iter().any(|(dir, kind, body)| dir == "child_to_parent"
+            && kind == "progress"
+            && body.contains("clock")),
+        "expected progress send, got {mail:?}"
+    );
+    assert!(
+        mail.iter().any(|(dir, kind, body)| dir == "child_to_parent"
+            && kind == "complete"
+            && body.contains("got the time")),
+        "expected complete send, got {mail:?}"
+    );
 }
 
 #[test]

@@ -9,9 +9,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use ene_session::{
-    Block, ClientId, InnerAspect, NewEvent, NewSession, SessionCreatedBy, SessionKind,
-    SessionStore, SoulId, Transaction, TurnOrigin, TurnOutcome, TurnTrigger, abandoned_inbox,
-    open_turns, unclaimed_inbox, v1,
+    Block, ClientId, DelegationId, InnerAspect, NewEvent, NewSession, SessionCreatedBy,
+    SessionKind, SessionStore, SoulId, Transaction, TurnOrigin, TurnOutcome, TurnTrigger,
+    abandoned_inbox, open_turns, unclaimed_inbox, v1,
 };
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -212,6 +212,32 @@ async fn text_turn_is_logged_and_projected() {
         live.iter()
             .any(|event| matches!(event, LiveEvent::TextDelta { .. }))
     );
+}
+
+#[tokio::test]
+async fn prompt_job_logs_delegation_origin_and_lane() {
+    let (_dir, store, lane, _model) = open_lane().await;
+    let job_id = DelegationId::new();
+    lane.prompt_job("research the itinerary", job_id)
+        .await
+        .unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let events = store.load_events(lane.session_id(), 0).unwrap();
+    let start = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::TurnStart {
+                origin,
+                delegation_id,
+                lane,
+                ..
+            } => Some((*origin, *delegation_id, lane.clone())),
+            _ => None,
+        })
+        .expect("turn/start");
+    assert_eq!(start.0, TurnOrigin::Delegation);
+    assert_eq!(start.1, Some(job_id));
+    assert_eq!(start.2, format!("delegation:{job_id}"));
 }
 
 #[tokio::test]

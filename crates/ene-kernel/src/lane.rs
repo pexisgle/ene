@@ -30,6 +30,8 @@ enum LaneCmd {
     Prompt {
         text: String,
         modality: String,
+        origin: TurnOrigin,
+        delegation_id: Option<DelegationId>,
         reply: oneshot::Sender<Result<TurnId, KernelError>>,
     },
     Steer {
@@ -238,6 +240,24 @@ impl LaneHandle {
         self.ask(|reply| LaneCmd::Prompt {
             text: text.into(),
             modality: normalize_input_modality(&modality.into()),
+            origin: TurnOrigin::User,
+            delegation_id: None,
+            reply,
+        })
+        .await
+    }
+
+    /// Start a back-harness job turn (`origin: delegation`). Independent of the dialogue lane.
+    pub async fn prompt_job(
+        &self,
+        text: impl Into<String>,
+        delegation_id: DelegationId,
+    ) -> Result<TurnId, KernelError> {
+        self.ask(|reply| LaneCmd::Prompt {
+            text: text.into(),
+            modality: "text".to_owned(),
+            origin: TurnOrigin::Delegation,
+            delegation_id: Some(delegation_id),
             reply,
         })
         .await
@@ -303,11 +323,16 @@ impl LaneHandle {
 
     /// Wait until no turn is running and no queued wake remains.
     pub async fn wait_for_idle(&self) -> Result<(), KernelError> {
+        self.wait_until_idle(Duration::from_secs(30)).await
+    }
+
+    /// [`Self::wait_for_idle`] with an explicit timeout (job lanes use the wall budget).
+    pub async fn wait_until_idle(&self, timeout: Duration) -> Result<(), KernelError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(LaneCmd::WaitIdle { reply })
             .map_err(|_| KernelError::ShuttingDown)?;
-        tokio::time::timeout(Duration::from_secs(30), rx)
+        tokio::time::timeout(timeout, rx)
             .await
             .map_err(|_| KernelError::ShuttingDown)?
             .map_err(|_| KernelError::ShuttingDown)?
@@ -352,9 +377,11 @@ async fn dispatch_cmd(
         LaneCmd::Prompt {
             text,
             modality,
+            origin,
+            delegation_id,
             reply,
         } => {
-            let result = start_prompt(state, text, modality, done_tx).await;
+            let result = start_prompt(state, text, modality, origin, delegation_id, done_tx).await;
             drop(reply.send(result));
         }
         LaneCmd::Steer { text, reply } => {
@@ -472,6 +499,8 @@ async fn start_prompt(
     state: &mut LaneState,
     text: String,
     modality: String,
+    origin: TurnOrigin,
+    delegation_id: Option<DelegationId>,
     done_tx: &mpsc::UnboundedSender<TurnFinish>,
 ) -> Result<TurnId, KernelError> {
     if let Some(running) = &state.running {
@@ -479,6 +508,15 @@ async fn start_prompt(
     }
     let text = validate_text(&text)?;
     let turn = TurnId::new();
+    let lane = match delegation_id {
+        Some(id) => LaneId::Delegation(id).as_str(),
+        None => LaneId::Dialogue.as_str(),
+    };
+    let source = if origin == TurnOrigin::Delegation {
+        InboxSource::Delegation
+    } else {
+        InboxSource::User
+    };
     let entries = vec![
         NewEvent::new(
             state.session,
@@ -496,9 +534,9 @@ async fn start_prompt(
             EventKind::InboxEnqueued,
             EventPayload::InboxEnqueued {
                 v: v1(),
-                lane: LaneId::Dialogue.as_str(),
+                lane,
                 class: InboxClass::Wake,
-                source: InboxSource::User,
+                source,
                 ref_seq: None,
             },
         ),
@@ -516,7 +554,8 @@ async fn start_prompt(
         state,
         TurnSpawn {
             turn,
-            origin: TurnOrigin::User,
+            origin,
+            delegation_id,
             claim_seq: Some(enqueue_seq),
             inject,
             proactive_hint: None,
@@ -556,6 +595,7 @@ async fn start_follow_turn(
         TurnSpawn {
             turn,
             origin: TurnOrigin::User,
+            delegation_id: None,
             claim_seq: Some(wake.seq),
             inject,
             proactive_hint: None,
@@ -581,6 +621,7 @@ async fn start_proactive_turn(
         TurnSpawn {
             turn,
             origin: TurnOrigin::Proactive,
+            delegation_id: None,
             claim_seq: None,
             inject: None,
             proactive_hint: Some(hint),
@@ -594,6 +635,7 @@ async fn start_proactive_turn(
 struct TurnSpawn {
     turn: TurnId,
     origin: TurnOrigin,
+    delegation_id: Option<DelegationId>,
     claim_seq: Option<u64>,
     inject: Option<QueuedInject>,
     proactive_hint: Option<String>,
@@ -607,20 +649,27 @@ async fn spawn_turn(
     let cancel = Arc::new(Notify::new());
     let cancelled = Arc::new(AtomicBool::new(false));
     let inject_text = spawn.inject.as_ref().map(|item| item.text.clone());
+    let lane = match spawn.delegation_id {
+        Some(id) => LaneId::Delegation(id).as_str(),
+        None => LaneId::Dialogue.as_str(),
+    };
+    let trigger = match spawn.origin {
+        TurnOrigin::Proactive => TurnTrigger::Timer,
+        TurnOrigin::Delegation | TurnOrigin::Subagent | TurnOrigin::Scheduled => {
+            TurnTrigger::System
+        }
+        TurnOrigin::User => TurnTrigger::Text,
+    };
     let mut begin = vec![NewEvent::new(
         state.session,
         EventKind::TurnStart,
         EventPayload::TurnStart {
             v: v1(),
             turn_id: spawn.turn,
-            lane: LaneId::Dialogue.as_str(),
+            lane,
             origin: spawn.origin,
-            delegation_id: None,
-            trigger: if spawn.origin == TurnOrigin::Proactive {
-                TurnTrigger::Timer
-            } else {
-                TurnTrigger::Text
-            },
+            delegation_id: spawn.delegation_id,
+            trigger,
         },
     )];
     if let Some(seq) = spawn.claim_seq {

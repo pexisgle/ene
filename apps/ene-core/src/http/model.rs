@@ -12,36 +12,62 @@ use ene_session::{InnerAspect, ProjectedMessage, Role};
 
 use crate::CoreDaemon;
 
-/// Dialogue model that binds `ai.tasks.chat` to a configured provider plugin.
+/// Dialogue / job model that binds `ai.tasks.<task>` to a configured provider plugin.
 pub struct SeamedModel {
     core: Arc<CoreDaemon>,
+    task: &'static str,
 }
 
 impl SeamedModel {
     #[must_use]
     pub fn new(core: Arc<CoreDaemon>) -> Self {
-        Self { core }
+        Self { core, task: "chat" }
     }
 
-    fn chat_binding(&self) -> TaskBinding {
-        self.core.ai().lock().tasks.chat.clone()
+    #[must_use]
+    pub fn job(core: Arc<CoreDaemon>) -> Self {
+        Self { core, task: "job" }
+    }
+
+    fn binding(&self) -> TaskBinding {
+        let guard = self.core.ai();
+        let ai = guard.lock();
+        let specific = match self.task {
+            "job" => &ai.tasks.job,
+            _ => &ai.tasks.chat,
+        };
+        if specific.is_unconfigured() {
+            ai.tasks.chat.clone()
+        } else {
+            specific.clone()
+        }
+    }
+
+    fn layer(&self) -> Layer {
+        if self.task == "job" {
+            Layer::Job
+        } else {
+            Layer::Surface
+        }
     }
 }
 
 #[async_trait]
 impl ConversationModel for SeamedModel {
     async fn generate(&self, request: ModelRequest) -> Result<ModelGeneration, KernelError> {
-        let binding = self.chat_binding();
+        let binding = self.binding();
         if binding.is_unconfigured() {
-            return Err(KernelError::Model(
-                "chat model is not configured".to_owned(),
-            ));
+            return Err(KernelError::Model(format!(
+                "{} model is not configured",
+                self.task
+            )));
         }
         let llm_request = map_request(
             &request,
             &binding,
-            &self.core.secret_for("chat"),
+            &self.core.secret_for(self.task),
             &self.core,
+            self.layer(),
         );
         let generation = self
             .core
@@ -65,10 +91,11 @@ fn map_request(
     binding: &TaskBinding,
     api_key: &str,
     core: &CoreDaemon,
+    layer: Layer,
 ) -> LlmGenerateRequest {
     LlmGenerateRequest {
         messages: fold_messages(&request.messages),
-        tools: tool_schemas(core),
+        tools: tool_schemas(core, layer),
         model: binding.model.clone(),
         max_tokens: binding.max_tokens,
         base_url: binding.base_url.clone(),
@@ -88,10 +115,10 @@ fn from_vendor_tool_name(name: &str) -> String {
     name.replace("__", ".")
 }
 
-fn tool_schemas(core: &CoreDaemon) -> Vec<LlmToolSchema> {
+fn tool_schemas(core: &CoreDaemon, layer: Layer) -> Vec<LlmToolSchema> {
     core.supervisor()
         .registry()
-        .schemas(Layer::Surface)
+        .schemas(layer)
         .into_iter()
         .filter_map(|schema| {
             Some(LlmToolSchema {
