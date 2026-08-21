@@ -29,6 +29,11 @@
 2. カーネルがセッションログからモデル可視プロンプトを構成。
    インストール済み skill は `skills.catalog` として System Context に載る。
    依頼に合う `SKILL.md` 本文は `skills.active` として注入される。
+   一致した `ene.emotion_note` は affect 分類の入力に前置され、発動ブロック
+   には `Tone:` 行として載る。有効 skill の `ene.proactive_hint` は能動発話
+   判定の `user_instructions` に渡る。
+   `PATCH /api/v1/souls/{id}/skills`（または `ene-ctl soul skills`）が soul
+   の許可リストを更新する。空リストは導入済み skill すべてが対象、という意味。
 3. 設定済みの会話モデルが、結び付けた `provider.*` プラグイン経由でテキストを
    ストリーム。
 4. 表層向けツールは `ene-registry` / `ene-plane` を通る。
@@ -60,7 +65,7 @@
 | `memory.semantic` | この発話に対するランク付き想起 |
 | `memory.user_profile` | 常設のプロフィール / 好み |
 | `memory.commitments` | 期限切れでない約束 |
-| `skills.catalog` | 導入済みスキルの名前と説明 |
+| `skills.catalog` | 導入済みスキルの名前と説明（soul の許可リストで絞る） |
 | `skills.active` | この発話に合う `SKILL.md` 本文 |
 | `mcp.resources` | `<workspace>/mcp-context/` のスナップショット |
 | `inner_recent` | 直近のモデル可視な内面 |

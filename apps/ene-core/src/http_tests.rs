@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use ene_api::{
     ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
-    MessageMode, MessageRequest, ResourceKind, RestoreRequest,
+    MessageMode, MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
 };
 use ene_companion::{
     CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, content_digest,
@@ -14,7 +14,7 @@ use ene_kernel::{
     ToolCallingModel, spans_leak_content,
 };
 use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
-use ene_session::{EventPayload, SessionId, TurnOutcome};
+use ene_session::{EventKind, EventPayload, SessionId, TurnOutcome};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -68,19 +68,24 @@ async fn boot_server_with(
 }
 
 async fn wait_assistant(client: &ApiClient, session: &str) -> HistoryResponse {
+    wait_assistant_count(client, session, 1).await
+}
+
+async fn wait_assistant_count(client: &ApiClient, session: &str, n: usize) -> HistoryResponse {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let history = client.history(session, "surface").await.unwrap();
-        if history
+        let assistants = history
             .messages
             .iter()
-            .any(|message| message.role == "assistant")
-        {
+            .filter(|message| message.role == "assistant")
+            .count();
+        if assistants >= n {
             return history;
         }
         assert!(
             Instant::now() < deadline,
-            "assistant message did not land in surface history"
+            "expected {n} assistant messages, have {assistants}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -127,6 +132,39 @@ fn record_metric(name: &str, body: impl AsRef<[u8]>) {
         return;
     }
     std::fs::write(dir.join(name), body).ok();
+}
+
+fn write_travel_skill(data_dir: &std::path::Path) {
+    let skill_dir = data_dir.join("skills/travel");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: travel\ndescription: 旅行の計画・しおり作成を支援する\nene.proactive_hint: Offer a morning briefing\nene.emotion_note: keep it light\n---\n\n# Travel\npack light\n",
+    )
+    .unwrap();
+}
+
+fn last_turn_context(core: &CoreDaemon, session: SessionId) -> BTreeMap<String, String> {
+    let events = core.store().load_events(session, 0).unwrap();
+    let start = events
+        .iter()
+        .rposition(|event| event.kind == EventKind::TurnStart)
+        .expect("turn start");
+    let mut texts = BTreeMap::new();
+    for event in &events[start..] {
+        if let EventPayload::ContextSystemMessage {
+            source_key, blocks, ..
+        } = &event.payload
+        {
+            let text = blocks
+                .iter()
+                .filter_map(ene_session::Block::as_text)
+                .collect::<Vec<_>>()
+                .join("");
+            texts.insert(source_key.clone(), text);
+        }
+    }
+    texts
 }
 
 #[tokio::test]
@@ -880,6 +918,135 @@ async fn turn_logs_context_sources_from_registry() {
     assert!(identity < semantic && semantic < mcp);
     assert!(texts["memory.semantic"].contains("picnic"));
     assert!(texts["mcp.resources"].contains("picnic weather"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn matching_skill_body_is_injected_as_skills_active() {
+    let (dir, client, core, server) = boot_server().await;
+    write_travel_skill(dir.path());
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: Some("skills active".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "東京を調べてしおりにまとめて".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    let sid = SessionId::from_str(&session.id).unwrap();
+    let matched = last_turn_context(&core, sid);
+    assert!(
+        matched["skills.catalog"].contains("travel"),
+        "{:?}",
+        matched.get("skills.catalog")
+    );
+    assert!(
+        matched["skills.active"].contains("pack light"),
+        "{:?}",
+        matched.get("skills.active")
+    );
+    assert!(matched["skills.active"].contains("Tone: keep it light"));
+
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hash this file".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant_count(&client, &session.id, 2).await;
+    let unmatched = last_turn_context(&core, sid);
+    assert!(unmatched["skills.catalog"].contains("travel"));
+    assert!(
+        !unmatched.contains_key("skills.active"),
+        "non-matching query must not inject a skill body: {:?}",
+        unmatched.get("skills.active")
+    );
+
+    let loaded = client
+        .test_tool(
+            "skill.load",
+            &ToolTestRequest {
+                arguments: serde_json::json!({ "name": "travel" }),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded["name"], "travel");
+    assert!(
+        loaded["body"].as_str().unwrap().contains("pack light"),
+        "{loaded}"
+    );
+
+    let patched = client
+        .patch_soul_skills(
+            &soul_id,
+            &SoulSkillsPatch {
+                skill_refs: vec!["nope".into()],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(patched.skill_refs, vec!["nope"]);
+    assert_eq!(
+        client.get_soul(&soul_id).await.unwrap().skill_refs,
+        vec!["nope"]
+    );
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "東京を調べてしおりにまとめて".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant_count(&client, &session.id, 3).await;
+    let filtered = last_turn_context(&core, sid);
+    assert!(
+        !filtered.contains_key("skills.active"),
+        "allowlist must hide unmatched installed skills: {:?}",
+        filtered.get("skills.active")
+    );
+    assert!(
+        !filtered
+            .get("skills.catalog")
+            .is_some_and(|text| text.contains("travel")),
+        "allowlist must hide travel from the catalog: {:?}",
+        filtered.get("skills.catalog")
+    );
+
+    let opened = client
+        .patch_soul_skills(
+            &soul_id,
+            &SoulSkillsPatch {
+                skill_refs: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(opened.skill_refs.is_empty());
     server.shutdown().await;
 }
 

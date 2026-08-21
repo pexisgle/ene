@@ -596,7 +596,7 @@ async fn runtime_blends_classifier_affect_and_fail_closes() {
         r#"{"valence":0.85,"arousal":0.2,"irritation":0.0,"affinity":0.4,"confidence":0.9}"#,
     ]);
     runtime
-        .on_user_turn(soul.id, "the weather is fine", &[], Some(&classify))
+        .on_user_turn(soul.id, "the weather is fine", &[], &[], Some(&classify))
         .await
         .unwrap();
     let after = runtime.soul(soul.id).unwrap();
@@ -606,6 +606,7 @@ async fn runtime_blends_classifier_affect_and_fail_closes() {
         .on_user_turn(
             soul.id,
             "still talking",
+            &[],
             &[],
             Some(&ScriptedClassify::silent()),
         )
@@ -972,6 +973,7 @@ async fn runtime_persists_affect_across_turns() {
         .on_user_turn(
             soul.id,
             "thank you so much",
+            &[],
             &[(InnerAspect::Emotion, "emotion: happy(0.8)".into())],
             None,
         )
@@ -980,6 +982,36 @@ async fn runtime_persists_affect_across_turns() {
     let after = runtime.soul(soul.id).unwrap();
     assert!(after.affect.valence > soul.affect.valence);
     assert_eq!(after.affect.mood_label, "happy");
+}
+
+#[tokio::test]
+async fn runtime_forwards_tone_notes_to_affect_classifier() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    store.set_skill_refs(soul.id, &["travel".into()]).unwrap();
+    assert_eq!(
+        store.get_soul(soul.id).unwrap().unwrap().skill_refs,
+        vec!["travel"]
+    );
+    let runtime = CompanionRuntime::new(Arc::new(store), MindSettings::default());
+    let classify = ScriptedClassify::new([
+        r#"{"valence":0.2,"arousal":0.1,"irritation":0.0,"affinity":0.2,"confidence":0.8}"#,
+    ]);
+    runtime
+        .on_user_turn(
+            soul.id,
+            "plan a trip",
+            &["keep it light".into()],
+            &[],
+            Some(&classify),
+        )
+        .await
+        .unwrap();
+    let input = classify.last_input().expect("classifier ran");
+    assert!(input.contains("keep it light"), "{input}");
+    assert!(input.contains("plan a trip"), "{input}");
 }
 
 fn sample_char_files() -> BTreeMap<String, Vec<u8>> {

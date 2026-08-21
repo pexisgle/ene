@@ -58,10 +58,19 @@ impl TurnPrefetch for RecallPrefetch {
         let Some(core) = self.core.upgrade() else {
             return Vec::new();
         };
+        let enabled = core.soul_skill_refs(soul);
+        let skills_home = core.data_dir().join("skills");
         if !user_text.trim().is_empty() {
+            let tone_notes = ene_work::skill_emotion_notes(&skills_home, &enabled, user_text);
             match core
                 .companion()
-                .on_user_turn(soul, user_text, &[], Some(self.classify.as_ref()))
+                .on_user_turn(
+                    soul,
+                    user_text,
+                    &tone_notes,
+                    &[],
+                    Some(self.classify.as_ref()),
+                )
                 .await
             {
                 Ok(Some(pres)) => {
@@ -85,9 +94,21 @@ impl TurnPrefetch for RecallPrefetch {
             out.push(persona);
         }
         out.extend(mcp_context_lines(&core.workspace_dir()));
+        let catalog = ene_work::skill_catalog_blocks(&skills_home, &enabled);
+        if catalog.is_empty() {
+            // Empty still upserts: spawn-time extra_context would otherwise keep a stale catalog.
+            out.push(("skills.catalog".to_owned(), String::new()));
+        } else {
+            out.extend(catalog);
+        }
         if user_text.trim().is_empty() {
             return out;
         }
+        out.extend(ene_work::skill_active_blocks(
+            &skills_home,
+            &enabled,
+            user_text,
+        ));
         let query_vec = embed_query(&core, user_text).await;
         let hits = match core
             .companion()

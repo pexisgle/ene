@@ -22,7 +22,8 @@ pub use types::{
     RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse, ResourceKind,
     RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView,
     SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SettingsPatch, SoulPatch,
-    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest,
+    ToolView, UsageView,
 };
 
 /// `OpenAPI` 3.1 document. Served at `GET /api/v1/openapi.json`.

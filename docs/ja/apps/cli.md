@@ -21,3 +21,8 @@ cargo run -p ene-ctl -- core status
 記録した PID にシグナルを送ります。
 
 desktop 専用 API はありません。stage が線上でできることは `ene-ctl` でもできます。
+
+| コマンド | 意味 |
+|---|---|
+| `soul list` / `soul show <id>` | soul 一覧 / 詳細 |
+| `soul skills <id> [names…]` | soul の skill 許可リストを置き換える（`PATCH /souls/{id}/skills`）。名前を省略すると導入済みすべてが対象 |

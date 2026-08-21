@@ -66,6 +66,9 @@ MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
 injected as the `mcp.resources` context source. MCP `prompts/list` become
 `SKILL.md` files under the data-dir skills home. The dialogue lane loads that
 catalog as `skills.catalog` and injects matching bodies as `skills.active`.
+`ene.proactive_hint` / `ene.emotion_note` frontmatter feed proactive
+decisions and affect classification. Each soul has a skill allowlist
+(`PATCH /api/v1/souls/{id}/skills`; empty means all installed skills).
 `workflow.bookmark` on the job layer researches a theme and delivers Markdown.
 
 ## Launch profiles

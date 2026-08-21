@@ -40,6 +40,7 @@ pub trait ClassifyModel: Send + Sync {
 #[derive(Debug, Default)]
 pub struct ScriptedClassify {
     replies: Mutex<VecDeque<String>>,
+    last_input: Mutex<Option<String>>,
 }
 
 impl ScriptedClassify {
@@ -47,12 +48,18 @@ impl ScriptedClassify {
     pub fn new(replies: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             replies: Mutex::new(replies.into_iter().map(Into::into).collect()),
+            last_input: Mutex::new(None),
         }
     }
 
     #[must_use]
     pub fn silent() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn last_input(&self) -> Option<String> {
+        self.last_input.lock().clone()
     }
 }
 
@@ -61,8 +68,9 @@ impl ClassifyModel for ScriptedClassify {
     async fn complete_json(
         &self,
         _task: ClassifyTask,
-        _input: &str,
+        input: &str,
     ) -> Result<String, CompanionError> {
+        *self.last_input.lock() = Some(input.to_owned());
         self.replies
             .lock()
             .pop_front()

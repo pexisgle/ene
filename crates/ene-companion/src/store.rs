@@ -232,6 +232,20 @@ impl CompanionStore {
         Ok(())
     }
 
+    /// Replace the soul's skill allowlist. An empty list means every installed skill.
+    pub fn set_skill_refs(&self, id: SoulId, refs: &[String]) -> Result<(), CompanionError> {
+        let encoded =
+            serde_json::to_string(refs).map_err(|err| CompanionError::codec(err.to_string()))?;
+        let n = self.conn.lock().execute(
+            "UPDATE souls SET skill_refs = ?1, updated_at = ?2 WHERE id = ?3",
+            params![encoded, Utc::now().to_rfc3339(), id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(CompanionError::UnknownSoul(id.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn insert_memory(&self, new: NewMemory) -> Result<MemoryRecord, CompanionError> {
         let id = MemoryId::new();
         let now = Utc::now().to_rfc3339();

@@ -66,6 +66,9 @@ MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショッ
 `mcp.resources` コンテキスト源として注入されます。`prompts/list` は data-dir の
 skills 配下の `SKILL.md` になります。対話レーンはそのカタログを
 `skills.catalog` として載せ、依頼に合う本文を `skills.active` として注入します。
+`ene.proactive_hint` / `ene.emotion_note` の frontmatter は能動発話判定と
+感情分類へ渡ります。soul ごとに許可リストがあり
+（`PATCH /api/v1/souls/{id}/skills`。空は導入済みすべて）、
 ジョブ層の `workflow.bookmark` はテーマを調べて Markdown を交付します。
 
 ## 起動プロファイル

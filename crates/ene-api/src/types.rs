@@ -69,12 +69,21 @@ pub struct SoulView {
     /// Absolute path to a VRM (or other avatar file) inside the package.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_path: Option<String>,
+    /// Enabled skill names. Empty means every installed skill is eligible.
+    #[serde(default)]
+    pub skill_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SoulPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SoulSkillsPatch {
+    #[serde(default)]
+    pub skill_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -228,7 +228,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 - モデルを埋めず raw pixel を残さない観測:
   [#805](https://github.com/pexisgle/ene/issues/805)（`P-112`）。
 - `done.md` の未チェック（実プロバイダ会話、本番 ASR/TTS、ジョブランナーの
-  発話、skill 注入、GUI E2E）は #717 のまま。
+  発話、GUI E2E）は #717 のまま。
 
 ### Post-v1.0（#717 を止めない）
 

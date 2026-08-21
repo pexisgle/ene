@@ -120,7 +120,10 @@ async fn tick(state: &AppState, classify: &SeamedClassify) {
         None,
         None,
         &[],
-        &[],
+        &ene_work::skill_proactive_hints(
+            &state.core.data_dir().join("skills"),
+            &state.core.soul_skill_refs(meta.soul_id),
+        ),
         suppression,
         evaluate_quiet_hours(&mind.proactive.quiet_hours, now),
         None,

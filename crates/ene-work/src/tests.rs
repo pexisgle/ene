@@ -8,7 +8,7 @@ use crate::runner::{JobDrive, drive_job};
 use crate::schedule::{QuietWindow, catch_up_missed, fire_due, reminder_report};
 use crate::skill::{
     catalog, install_skill_dir, load_skill, match_skills, parse_skill_md, read_skill_file,
-    skill_catalog_blocks,
+    skill_active_blocks, skill_catalog_blocks, skill_emotion_notes, skill_proactive_hints,
 };
 use crate::store::WorkStore;
 use crate::tools::{register_work_tools, surface_shows_delegate};
@@ -818,13 +818,51 @@ fn matching_skill_enters_catalog_and_active_context() {
     let matched = match_skills(&home, &[], "東京を調べてしおりにまとめて").unwrap();
     assert_eq!(matched.len(), 1);
     assert_eq!(matched[0].name, "travel");
+    let active = skill_active_blocks(&home, &[], "東京を調べてしおりにまとめて");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].0, "skills.active");
+    assert!(active[0].1.contains("pack light"));
     let hash = match_skills(&home, &[], "hash this file").unwrap();
     assert!(hash.is_empty());
+    assert!(skill_active_blocks(&home, &[], "hash this file").is_empty());
     let checklist = read_skill_file(&home, "travel", "references/checklist.md").unwrap();
     assert!(checklist.contains("passport"));
     assert!(read_skill_file(&home, "travel", "../escape.md").is_err());
     assert!(read_skill_file(&home, "/etc", "passwd").is_err());
     assert!(read_skill_file(&home, "..", "SKILL.md").is_err());
+}
+
+#[test]
+fn ene_frontmatter_feeds_proactive_and_emotion_helpers() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: travel\ndescription: 旅行の計画・しおり作成を支援する\nene.proactive_hint: Offer a morning briefing\nene.emotion_note: keep it light\n---\n\n# Travel\npack light\n",
+    )
+    .unwrap();
+    let home = dir.path().join("skills");
+    install_skill_dir(&home, &src).unwrap();
+    let loaded = load_skill(&home, "travel").unwrap();
+    assert_eq!(
+        loaded.proactive_hint.as_deref(),
+        Some("Offer a morning briefing")
+    );
+    assert_eq!(loaded.emotion_note.as_deref(), Some("keep it light"));
+    assert_eq!(
+        skill_proactive_hints(&home, &[]),
+        vec!["Offer a morning briefing"]
+    );
+    assert_eq!(
+        skill_emotion_notes(&home, &[], "東京を調べてしおりにまとめて"),
+        vec!["keep it light"]
+    );
+    assert!(skill_emotion_notes(&home, &[], "hash this file").is_empty());
+    let active = skill_active_blocks(&home, &[], "東京を調べてしおりにまとめて");
+    assert!(active[0].1.contains("Tone: keep it light"));
+    assert!(active[0].1.contains("pack light"));
+    assert!(skill_proactive_hints(&home, &["other".into()]).is_empty());
 }
 
 #[tokio::test]
