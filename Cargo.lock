@@ -2499,6 +2499,8 @@ dependencies = [
 name = "ene-tool-fs"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
+ "blake3",
  "ene-fiber",
  "ene-plugin-ipc",
  "ene-registry",
