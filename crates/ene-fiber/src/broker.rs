@@ -25,6 +25,12 @@ pub enum BrokerError {
     SidecarUnhealthy,
     #[error("sidecar not owned by fiber {uid}")]
     SidecarNotOwned { uid: String },
+    #[error("invalid url: {0}")]
+    InvalidUrl(String),
+    #[error("ssrf: {0}")]
+    Ssrf(String),
+    #[error("fetch failed: {0}")]
+    Fetch(String),
 }
 
 /// One grant tracked as a fiber effect.
@@ -187,12 +193,9 @@ impl Broker {
         std::fs::write(resolved, text).map_err(BrokerError::from)
     }
 
-    pub fn net_fetch(&self, uid: FiberUid, _url: &str) -> Result<Value, BrokerError> {
+    pub fn net_fetch(&self, uid: FiberUid, url: &str) -> Result<Value, BrokerError> {
         self.require(uid, "net.fetch")?;
-        Err(BrokerError::Denied {
-            uid: uid.to_string(),
-            op: "net.fetch".to_owned(),
-        })
+        crate::net::get(url)
     }
 
     /// Resolve a sidecar binary without spawning it.

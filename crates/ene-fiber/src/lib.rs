@@ -10,6 +10,7 @@ mod assets_host;
 mod broker;
 mod fiber;
 mod managed_sidecar;
+mod net;
 mod profile;
 mod providers;
 mod sidecar;

@@ -136,7 +136,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-806 | `package_rejects_unknown_format_and_bad_digest`; `manifest_digest_matches_python_plugin_contract` | store / process | はい |
 | P-808 | `package_rejects_unknown_format_and_bad_digest` | store | はい |
 | P-901 | `process_survives_os_sandbox_when_supported` | process | はい(Landlock 対応時) |
-| P-902 | `undeclared_broker_op_is_denied` | store | いいえ(`net.fetch` は grant 後も Denied) |
+| P-902 | `undeclared_broker_op_is_denied`; `net_fetch_runs_after_grant` | store | 部分(未宣言は Denied。grant 後の `net.fetch` は SSRF 付きでホスト代行) |
 | P-903 | `policy_allows_workspace_write`; `implicit_side_effect_without_popup_is_denied` | store | はい |
 | P-904 | `ai_judgement_reason_is_audited` | Scripted | いいえ(本番 `ApproveModel = None`) |
 | P-905 | `approval_first_writer_wins` | HTTP | はい |

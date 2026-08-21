@@ -586,3 +586,52 @@ async fn list_models_probe_does_not_peer_close() {
         );
     }
 }
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the net fetch stub signature"
+)]
+fn stub_net_fetch_ok(_: &str) -> Result<serde_json::Value, BrokerError> {
+    Ok(json!({
+        "status": 200,
+        "content_type": "text/plain",
+        "text": "ok",
+    }))
+}
+
+#[test]
+fn net_fetch_without_grant_is_denied() {
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    assert!(matches!(
+        broker.net_fetch(uid, "https://example.invalid/v1"),
+        Err(BrokerError::Denied { .. })
+    ));
+}
+
+#[test]
+fn net_fetch_blocks_loopback_after_grant() {
+    let dir = TempDir::new().unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    broker.grant(uid, "net.fetch");
+    assert!(matches!(
+        broker.net_fetch(uid, "http://127.0.0.1/secret"),
+        Err(BrokerError::Ssrf(_))
+    ));
+}
+
+#[test]
+fn net_fetch_runs_after_grant() {
+    let dir = TempDir::new().unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    broker.grant(uid, "net.fetch");
+    let value = crate::net::with_fetch_stub(stub_net_fetch_ok, || {
+        broker.net_fetch(uid, "https://example.invalid/v1")
+    })
+    .unwrap();
+    assert_eq!(value["status"], 200);
+    assert_eq!(value["text"], "ok");
+}
