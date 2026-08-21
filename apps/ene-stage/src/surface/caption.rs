@@ -3,15 +3,31 @@
 use crate::i18n;
 use crate::surface::SurfaceUiState;
 
+/// True when `text` is spoken reply content, not a provider or HTTP error body.
+#[must_use]
+pub(crate) fn is_speech_caption(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("the chat provider failed") {
+        return false;
+    }
+    if lower.starts_with("error:") || lower.starts_with("error ") {
+        return false;
+    }
+    if lower.contains("401 unauthorized") || lower.contains("403 forbidden") {
+        return false;
+    }
+    true
+}
+
 pub fn show(ctx: &egui::Context, state: &SurfaceUiState, font_size: f32) {
-    if state.caption.is_empty() && state.streaming_text.is_empty() {
+    let text = speech_text(state);
+    if text.is_empty() {
         return;
     }
-    let text = if state.caption.is_empty() {
-        state.streaming_text.as_str()
-    } else {
-        state.caption.as_str()
-    };
     let max_width = (ctx.content_rect().width() * 0.72).clamp(240.0, 720.0);
     egui::Window::new(i18n::fl("caption-title"))
         .id(egui::Id::new("stage-caption"))
@@ -32,4 +48,32 @@ pub fn show(ctx: &egui::Context, state: &SurfaceUiState, font_size: f32) {
                 .wrap(),
             );
         });
+}
+
+fn speech_text(state: &SurfaceUiState) -> &str {
+    let candidate = if state.caption.is_empty() {
+        state.streaming_text.as_str()
+    } else {
+        state.caption.as_str()
+    };
+    if is_speech_caption(candidate) {
+        candidate
+    } else {
+        ""
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_speech_caption;
+
+    #[test]
+    fn provider_errors_are_not_speech() {
+        assert!(!is_speech_caption(
+            "The chat provider failed: 401 Unauthorized"
+        ));
+        assert!(!is_speech_caption("401 Unauthorized"));
+        assert!(!is_speech_caption("error: model not found"));
+        assert!(is_speech_caption("Hello from the companion."));
+    }
 }

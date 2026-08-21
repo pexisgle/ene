@@ -378,4 +378,18 @@ mod tests {
             parse_detail_event(&json!({"type": "affect.state", "mood_label": "calm"})).is_some()
         );
     }
+
+    #[test]
+    fn surface_keeps_turn_end_session_event() {
+        let event = parse_surface_event(&json!({
+            "type": "session.event",
+            "kind": "turn/end",
+            "text": ""
+        }))
+        .expect("event");
+        assert!(matches!(
+            event,
+            LiveEvent::SessionEvent { kind, .. } if kind == "turn/end"
+        ));
+    }
 }
