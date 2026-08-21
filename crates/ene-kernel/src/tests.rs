@@ -558,6 +558,29 @@ async fn compact_keeps_original_rows() {
 }
 
 #[tokio::test]
+async fn compact_summary_keeps_recent_points() {
+    let (_dir, store, lane, _model) = open_lane().await;
+    let topic = format!("{} start-topic", "alpha ".repeat(80));
+    lane.prompt(&topic).await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    lane.prompt("later-point-omega").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    lane.compact().await.unwrap();
+    let events = store.load_events(lane.session_id(), 0).unwrap();
+    let summary = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::SessionSummary { summary, .. } => Some(summary.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        summary.contains("later-point-omega"),
+        "prefix chop would drop the latest point: {summary}"
+    );
+}
+
+#[tokio::test]
 async fn voice_and_text_share_one_session_log() {
     let (_dir, store, lane, _model) = open_lane().await;
     lane.prompt("typed hello").await.unwrap();

@@ -10,6 +10,7 @@
 )]
 #![deny(unsafe_code)]
 
+mod compact;
 mod config;
 mod context;
 mod error;
