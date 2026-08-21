@@ -462,6 +462,7 @@ fn build_ack(
         manifest_digest: identity.digest.clone(),
         protocols: negotiated,
         spawn_token,
+        has_config: false,
     })
 }
 

@@ -833,6 +833,103 @@ impl Supervisor {
         conn.transcribe(request).await.map_err(Into::into)
     }
 
+    /// Plugin settings schema, with secret keys filled from schema metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError`] when the fiber is missing or IPC fails.
+    pub async fn plugin_config_schema(
+        &self,
+        row_id: &str,
+    ) -> Result<ene_plugin_ipc::PluginConfigSchema, SupervisorError> {
+        let Ok(session) = self.session_by_row(row_id) else {
+            return Ok(ene_plugin_ipc::PluginConfigSchema::default());
+        };
+        let mut conn = session.conn.lock().await;
+        let mut schema = conn.config_schema().await?;
+        schema.schema = ene_plugin_ipc::scrub_schema_secrets(&schema.schema);
+        if schema.secret_keys.is_empty() {
+            schema.secret_keys = ene_plugin_ipc::secret_keys_from_schema(&schema.schema);
+        }
+        Ok(schema)
+    }
+
+    /// Validate candidate settings. Does not mutate the last-good config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError`] when the fiber is missing or IPC fails.
+    pub async fn plugin_config_validate(
+        &self,
+        row_id: &str,
+        values: Value,
+    ) -> Result<ene_plugin_ipc::PluginConfigValidateResult, SupervisorError> {
+        let session = self.session_by_row(row_id)?;
+        let mut conn = session.conn.lock().await;
+        conn.config_validate(values).await.map_err(Into::into)
+    }
+
+    /// Dynamic options for one field. Enumeration failure degrades to fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError`] when the fiber is missing or IPC fails.
+    pub async fn plugin_config_options(
+        &self,
+        row_id: &str,
+        field: &str,
+    ) -> Result<ene_plugin_ipc::PluginConfigOptionsResult, SupervisorError> {
+        let session = self.session_by_row(row_id)?;
+        let mut conn = session.conn.lock().await;
+        match conn.config_options(field).await {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(ene_plugin_ipc::PluginConfigOptionsResult::unsupported()),
+        }
+    }
+
+    /// Apply settings after validate. On failure the previous ProfileRow.config stays.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError`] when the fiber is missing or IPC fails.
+    pub async fn plugin_config_apply(
+        &self,
+        row_id: &str,
+        values: Value,
+    ) -> Result<ene_plugin_ipc::PluginConfigApplyResult, SupervisorError> {
+        let previous = self
+            .inner
+            .profile_rows
+            .lock()
+            .get(row_id)
+            .map(|row| row.config.clone())
+            .unwrap_or_default();
+        let session = self.session_by_row(row_id)?;
+        let mut conn = session.conn.lock().await;
+        let result = conn.config_apply(values.clone()).await?;
+        drop(conn);
+        commit_applied_config(
+            &self.inner.profile_rows,
+            row_id,
+            values,
+            result.ok,
+            previous,
+        );
+        Ok(result)
+    }
+
+    /// Redacted current settings for API/UI. Secrets never leave this method.
+    #[must_use]
+    pub fn plugin_config_values(&self, row_id: &str, schema: &Value) -> Value {
+        let values = self
+            .inner
+            .profile_rows
+            .lock()
+            .get(row_id)
+            .map_or_else(|| json!({}), |row| row.config.clone());
+        ene_plugin_ipc::redact_config_values(schema, &values)
+    }
+
     /// Vendor model ids for a provider plugin.
     ///
     /// Always a one-shot spawn with `base_url` only. Listing on a live
@@ -1062,6 +1159,18 @@ impl Supervisor {
             .get(row_id)
             .cloned()
             .ok_or_else(|| SupervisorError::ProviderUnavailable(row_id.to_owned()))
+    }
+}
+
+pub(crate) fn commit_applied_config(
+    rows: &Mutex<HashMap<String, ProfileRow>>,
+    row_id: &str,
+    values: Value,
+    ok: bool,
+    previous: Value,
+) {
+    if let Some(row) = rows.lock().get_mut(row_id) {
+        row.config = if ok { values } else { previous };
     }
 }
 

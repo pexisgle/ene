@@ -15,13 +15,14 @@ pub use types::{
     InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
     ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument,
     McpServerView, MemoryPatch, MemoryView, MessageMode, MessageRequest, MessageResponse,
-    OccupantView, Page, PluginView, Problem, ProviderAssetInstallPhase,
-    ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse,
-    ProviderAssetVersionView, ProviderAssetView, QueuedCancel, RefreshProviderAssetsCatalogRequest,
-    RefreshProviderAssetsCatalogResponse, ResourceKind, RestoreRequest, ScheduleView,
-    SendMessageResponse, SessionPatch, SessionView, SetActiveProviderAssetRequest,
-    SetActiveProviderAssetResponse, SettingsPatch, SoulPatch, SoulView, SpanView,
-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    OccupantView, Page, PluginConfigErrorView, PluginConfigField, PluginConfigOptionView,
+    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
+    PluginView, Problem, ProviderAssetInstallPhase, ProviderAssetInstallStatusRequest,
+    ProviderAssetInstallStatusResponse, ProviderAssetVersionView, ProviderAssetView, QueuedCancel,
+    RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse, ResourceKind,
+    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView,
+    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SettingsPatch, SoulPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 
 /// `OpenAPI` 3.1 document. Served at `GET /api/v1/openapi.json`.

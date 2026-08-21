@@ -5,12 +5,13 @@ use crate::types::{
     ExclusiveSnapshot, Health, HistoryResponse, InstallProviderAssetRequest,
     InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
     ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument, MemoryPatch,
-    MemoryView, MessageRequest, Page, PluginView, Problem, ProviderAssetInstallStatusRequest,
-    ProviderAssetInstallStatusResponse, QueuedCancel, RefreshProviderAssetsCatalogRequest,
-    RefreshProviderAssetsCatalogResponse, ResourceKind, RestoreRequest, ScheduleView,
-    SendMessageResponse, SessionPatch, SessionView, SetActiveProviderAssetRequest,
-    SetActiveProviderAssetResponse, SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView,
-    ToolTestRequest, ToolView, UsageView,
+    MemoryView, MessageRequest, Page, PluginConfigField, PluginConfigOptionsView,
+    PluginConfigValidateView, PluginConfigValues, PluginConfigView, PluginView, Problem,
+    ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse, QueuedCancel,
+    RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse, ResourceKind,
+    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView,
+    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulView, SpanView,
+    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -472,6 +473,53 @@ impl ApiClient {
     pub async fn restart_plugin(&self, id: &str) -> Result<PluginView, ApiError> {
         self.send_json(self.request(Method::POST, &format!("/api/v1/plugins/{id}/restart")))
             .await
+    }
+
+    pub async fn plugin_config(&self, id: &str) -> Result<PluginConfigView, ApiError> {
+        self.send_json(self.request(Method::GET, &format!("/api/v1/plugins/{id}/config")))
+            .await
+    }
+
+    pub async fn validate_plugin_config(
+        &self,
+        id: &str,
+        body: &PluginConfigValues,
+    ) -> Result<PluginConfigValidateView, ApiError> {
+        self.send_json(
+            self.request(
+                Method::POST,
+                &format!("/api/v1/plugins/{id}/config/validate"),
+            )
+            .json(body),
+        )
+        .await
+    }
+
+    pub async fn plugin_config_options(
+        &self,
+        id: &str,
+        body: &PluginConfigField,
+    ) -> Result<PluginConfigOptionsView, ApiError> {
+        self.send_json(
+            self.request(
+                Method::POST,
+                &format!("/api/v1/plugins/{id}/config/options"),
+            )
+            .json(body),
+        )
+        .await
+    }
+
+    pub async fn apply_plugin_config(
+        &self,
+        id: &str,
+        body: &PluginConfigValues,
+    ) -> Result<PluginConfigValidateView, ApiError> {
+        self.send_json(
+            self.request(Method::PUT, &format!("/api/v1/plugins/{id}/config"))
+                .json(body),
+        )
+        .await
     }
 
     pub async fn mcp(&self) -> Result<McpDocument, ApiError> {

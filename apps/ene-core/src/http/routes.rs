@@ -11,10 +11,11 @@ use ene_api::{
     CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
     ExclusiveSnapshot, Health, HistoryResponse, JobView, ListProviderModelsRequest,
     ListProviderModelsResponse, McpDocument, McpServerView, MemoryPatch, MemoryView, MessageMode,
-    MessageRequest, MessageResponse, OccupantView, Page, PluginView, QueuedCancel, ResourceKind,
-    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView, SettingsPatch,
-    SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView,
-    UsageView,
+    MessageRequest, MessageResponse, OccupantView, Page, PluginConfigErrorView, PluginConfigField,
+    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
+    PluginView, QueuedCancel, ResourceKind, RestoreRequest, ScheduleView, SendMessageResponse,
+    SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulView, SpanView, SplitSessionResponse,
+    StageView, ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
@@ -966,6 +967,136 @@ pub async fn restart_plugin(
         plugin: updated.plugin,
         state: updated.state.as_str().to_owned(),
         wait_reason: updated.wait_reason,
+    }))
+}
+
+fn map_plugin_config_errors(
+    errors: Vec<ene_plugin_ipc::PluginConfigError>,
+) -> Vec<PluginConfigErrorView> {
+    errors
+        .into_iter()
+        .map(|err| PluginConfigErrorView {
+            path: err.path,
+            message: err.message,
+        })
+        .collect()
+}
+
+pub async fn get_plugin_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<PluginConfigView>, ApiReject> {
+    let row = state
+        .core
+        .supervisor()
+        .profile_row(&id)
+        .ok_or_else(|| not_found("plugin row not found"))?;
+    let schema = state
+        .core
+        .supervisor()
+        .plugin_config_schema(&id)
+        .await
+        .map_err(|err| conflict("plugin_config", &err.to_string()))?;
+    let values = if schema.has_config {
+        state
+            .core
+            .supervisor()
+            .plugin_config_values(&id, &schema.schema)
+    } else {
+        json!({})
+    };
+    Ok(Json(PluginConfigView {
+        row_id: row.row_id,
+        plugin: row.plugin,
+        has_config: schema.has_config,
+        schema: schema.schema,
+        values,
+        secret_keys: schema.secret_keys,
+    }))
+}
+
+pub async fn validate_plugin_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PluginConfigValues>,
+) -> Result<Json<PluginConfigValidateView>, ApiReject> {
+    if state.core.supervisor().profile_row(&id).is_none() {
+        return Err(not_found("plugin row not found"));
+    }
+    let result = state
+        .core
+        .supervisor()
+        .plugin_config_validate(&id, body.values)
+        .await
+        .map_err(|err| conflict("plugin_config", &err.to_string()))?;
+    Ok(Json(PluginConfigValidateView {
+        ok: result.ok,
+        errors: map_plugin_config_errors(result.errors),
+        restart_required: result.restart_required,
+    }))
+}
+
+pub async fn plugin_config_options(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PluginConfigField>,
+) -> Result<Json<PluginConfigOptionsView>, ApiReject> {
+    if state.core.supervisor().profile_row(&id).is_none() {
+        return Err(not_found("plugin row not found"));
+    }
+    let result = state
+        .core
+        .supervisor()
+        .plugin_config_options(&id, &body.field)
+        .await
+        .map_err(|err| conflict("plugin_config", &err.to_string()))?;
+    Ok(Json(PluginConfigOptionsView {
+        options: result
+            .options
+            .into_iter()
+            .map(|opt| ene_api::PluginConfigOptionView {
+                id: opt.id,
+                label: opt.label,
+            })
+            .collect(),
+        error: result.error,
+        fallback: result.fallback,
+    }))
+}
+
+pub async fn put_plugin_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<PluginConfigValues>,
+) -> Result<Json<PluginConfigValidateView>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    if state.core.supervisor().profile_row(&id).is_none() {
+        return Err(not_found("plugin row not found"));
+    }
+    let validated = state
+        .core
+        .supervisor()
+        .plugin_config_validate(&id, body.values.clone())
+        .await
+        .map_err(|err| conflict("plugin_config", &err.to_string()))?;
+    if !validated.ok {
+        return Ok(Json(PluginConfigValidateView {
+            ok: false,
+            errors: map_plugin_config_errors(validated.errors),
+            restart_required: false,
+        }));
+    }
+    let result = state
+        .core
+        .supervisor()
+        .plugin_config_apply(&id, body.values)
+        .await
+        .map_err(|err| conflict("plugin_config", &err.to_string()))?;
+    Ok(Json(PluginConfigValidateView {
+        ok: result.ok,
+        errors: map_plugin_config_errors(result.errors),
+        restart_required: result.restart_required,
     }))
 }
 

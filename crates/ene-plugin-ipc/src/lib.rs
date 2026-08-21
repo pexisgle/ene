@@ -19,6 +19,7 @@
 mod bulk;
 #[cfg(not(unix))]
 mod bulk;
+mod config;
 mod dispatch;
 mod error;
 mod frame;
@@ -31,6 +32,11 @@ mod provider;
 pub use bulk::should_spill;
 #[cfg(unix)]
 pub use bulk::{recv_fds, send_fds, should_spill};
+pub use config::{
+    PluginConfigApplyResult, PluginConfigError, PluginConfigOption, PluginConfigOptionsResult,
+    PluginConfigSchema, PluginConfigValidateResult, redact_config_values, scrub_schema_secrets,
+    secret_keys_from_schema,
+};
 pub use dispatch::{
     AssetsHandler, EmbedHandler, LlmHandler, ModelsHandler, PluginIdentity, ProviderHandlers,
     SttHandler, TtsHandler, serve_provider, serve_provider_from_env,
@@ -61,3 +67,5 @@ mod tests;
 mod tests_asset_version;
 #[cfg(test)]
 mod tests_capability;
+#[cfg(test)]
+mod tests_config;

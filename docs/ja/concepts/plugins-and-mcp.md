@@ -87,6 +87,22 @@ skills 配下の `SKILL.md` になります。対話レーンはそのカタロ�
 `provider.gguf` の一覧は llama-server が既に居るときだけサイドカーの
 `/v1/models` です。RPC 未実装の TTS はテキスト入力のままです。
 
+## プラグイン設定
+
+プラグインは JSON Schema の宣言、候補値の validation、dynamic options、
+適用を tool IPC で出せます。`HelloAck.has_config` の既定は false なので、
+設定を持たないプラグインは追加実装なしで動きます。ホストはそれらの
+プラグインへ config RPC を送りません。
+
+秘密フィールド（`x-ene-secret`、`writeOnly`、`format: password`）は
+schema 上の名前だけです。値は vault 側にあり、API / UI / ログには
+redact したオブジェクトだけが出ます。`GET /api/v1/plugins/{id}/config` が
+schema と redact 済みの現在値です。検証は `POST .../config/validate`、
+適用は `PUT .../config`。dynamic options（`POST .../config/options`）は
+列挙に失敗すると手入力へ縮退します（`fallback: true`）。適用失敗時は
+直前の有効な `ProfileRow.config` を保持します。Stage の Connections は
+同じ文書を選択中のファイバーへ出します。
+
 ## `provider.assets`
 
 プロバイダプラグインは `assets` フェース（`PROVIDER_ASSETS_VERSION = 1`）を

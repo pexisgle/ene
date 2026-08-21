@@ -85,6 +85,22 @@ does not call vendor HTTP. Local GGUF weights and sidecars use the generic
 lists sidecar `/v1/models` only when llama-server is already up. TTS plugins
 that have not implemented the RPC keep free-text model fields.
 
+## Plugin config
+
+Plugins may declare a JSON Schema, validate candidate values, list dynamic
+options, and apply settings over the tool IPC. `HelloAck.has_config` defaults
+to false, so existing plugins need no extra code. The host never sends config
+RPCs to those plugins.
+
+Secret fields (`x-ene-secret`, `writeOnly`, or `format: password`) are names
+only in schema metadata. Values are vault-side; API, UI, and logs see redacted
+objects. `GET /api/v1/plugins/{id}/config` returns schema plus redacted
+current values. Validate and apply are `POST .../config/validate` and
+`PUT .../config`. Dynamic options (`POST .../config/options`) degrade to
+free-text (`fallback: true`) when enumeration fails. Apply failure keeps the
+previous effective `ProfileRow.config`. Stage Connections loads the same
+document for the selected fiber.
+
 ## `provider.assets`
 
 Provider plugins may expose an `assets` face (`PROVIDER_ASSETS_VERSION = 1`):

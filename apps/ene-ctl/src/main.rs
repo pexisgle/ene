@@ -167,6 +167,7 @@ enum ToolCmd {
 enum PluginCmd {
     List,
     Restart { id: String },
+    Config { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -301,6 +302,7 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
         Cmd::Plugin { op } => match op {
             PluginCmd::List => print_json(&client.list_plugins().await?)?,
             PluginCmd::Restart { id } => print_json(&client.restart_plugin(id).await?)?,
+            PluginCmd::Config { id } => print_json(&client.plugin_config(id).await?)?,
         },
         Cmd::Usage { session } => print_json(&client.usage(session.as_deref()).await?)?,
         Cmd::Debug { op } => match op {
