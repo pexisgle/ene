@@ -605,6 +605,56 @@ async fn http_forget_memory_is_audited() {
 }
 
 #[tokio::test]
+async fn hybrid_recall_falls_back_without_embedding_and_ranks_with_vector() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul = ene_session::SoulId::from_str(&souls.items[0].id).unwrap();
+    let near = core
+        .companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "apple pie".into(),
+            content: "baked dessert".into(),
+            confidence: 0.9,
+            salience: 0.5,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    core.companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "zebra stripes".into(),
+            content: "black and white".into(),
+            confidence: 0.9,
+            salience: 0.5,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    core.companions()
+        .set_embedding(near.id, &[1.0, 0.0])
+        .unwrap();
+    let lexical = core.companion().recall(soul, "xyzzy").unwrap();
+    assert!(
+        lexical.is_empty(),
+        "unconfigured embedding query must stay lexical: {lexical:?}"
+    );
+    let hybrid = core
+        .companion()
+        .recall_ranked(soul, "xyzzy", Some(&[1.0, 0.0]))
+        .unwrap();
+    assert_eq!(hybrid[0].title, "apple pie");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn export_default_omits_inner() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;

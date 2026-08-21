@@ -499,14 +499,14 @@ impl CompanionStore {
         for row in rows {
             let (mem, blob) = row?;
             let lex = lexical_score(&q, &mem.title, &mem.content);
-            if query_vec.is_none() && !q.is_empty() && lex <= 0.0 {
-                continue;
-            }
-            let recency = recency_score(&mem.last_access, now);
             let embed = match (query_vec, blob.as_deref()) {
                 (Some(query), Some(bytes)) => cosine(query, &decode_f32_slice(bytes)),
                 _ => 0.0,
             };
+            if !q.is_empty() && lex <= 0.0 && embed <= 0.0 {
+                continue;
+            }
+            let recency = recency_score(&mem.last_access, now);
             let score = weights.lexical * lex
                 + weights.recency * recency
                 + weights.salience * mem.salience
@@ -780,7 +780,7 @@ impl Default for RecallWeights {
             lexical: 0.5,
             recency: 0.25,
             salience: 0.25,
-            embedding: 0.0,
+            embedding: 0.35,
             mmr_lambda: 0.7,
         }
     }
@@ -928,4 +928,16 @@ fn cosine(left: &[f32], right: &[f32]) -> f32 {
 
 fn titles_too_close(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+#[cfg(test)]
+mod ranking_tests {
+    use super::cosine;
+
+    #[test]
+    fn cosine_is_one_for_parallel_and_zero_for_orthogonal() {
+        assert!((cosine(&[1.0, 0.0], &[2.0, 0.0]) - 1.0).abs() < 1e-5);
+        assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-5);
+        assert!(cosine(&[1.0], &[1.0, 0.0]).abs() < 1e-5);
+    }
 }
