@@ -640,7 +640,11 @@ fn is_secret_path(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
         return false;
     };
-    name == ".env" || name == "vault.bin" || name.ends_with(".pem") || name.ends_with(".key")
+    if name == ".env" || name == "vault.bin" {
+        return true;
+    }
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pem") || ext.eq_ignore_ascii_case("key"))
 }
 
 fn journal_path(job_id: &str) -> Result<PathBuf, String> {
@@ -653,7 +657,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
-fn optional_hash<'a>(args: &'a Value) -> Option<&'a str> {
+fn optional_hash(args: &Value) -> Option<&str> {
     args.get("expected_hash")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
@@ -761,7 +765,15 @@ fn workspace() -> Result<PathBuf, String> {
 #[cfg(test)]
 static TEST_WORKSPACE: parking_lot::Mutex<Option<PathBuf>> = parking_lot::Mutex::new(None);
 
+#[cfg(test)]
+static TEST_WORKSPACE_GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(root) = TEST_WORKSPACE.lock().clone() {
+        return ene_registry::confine_tool_path(&root, Path::new(path), create_parent)
+            .map_err(|err| err.to_string());
+    }
     let Ok(workspace) = std::env::var("ENE_WORKSPACE") else {
         return Ok(PathBuf::from(path));
     };
@@ -772,14 +784,15 @@ fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Needle, TEST_WORKSPACE, apply_edit, apply_unified_diff, execute, hash_bytes, job_key,
-        journal_path,
+        Needle, TEST_WORKSPACE, TEST_WORKSPACE_GATE, apply_edit, apply_unified_diff, execute,
+        hash_bytes, job_key, journal_path,
     };
     use serde_json::json;
     use std::fs;
     use std::thread;
 
     fn with_workspace(dir: &tempfile::TempDir, action: impl FnOnce() -> Result<(), String>) {
+        let _gate = TEST_WORKSPACE_GATE.lock();
         *TEST_WORKSPACE.lock() = Some(dir.path().to_path_buf());
         let result = action();
         *TEST_WORKSPACE.lock() = None;
@@ -914,6 +927,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("shared.txt");
         fs::write(&path, "seed").unwrap();
+        let _gate = TEST_WORKSPACE_GATE.lock();
         *TEST_WORKSPACE.lock() = Some(dir.path().to_path_buf());
         thread::scope(|scope| {
             scope.spawn(|| {
@@ -921,7 +935,7 @@ mod tests {
                     execute(
                         "fs.write",
                         &json!({
-                            "path": path.to_string_lossy(),
+                            "path": "shared.txt",
                             "text": format!("left-{idx}"),
                             "job_id": "left",
                         }),
@@ -934,7 +948,7 @@ mod tests {
                     execute(
                         "fs.write",
                         &json!({
-                            "path": path.to_string_lossy(),
+                            "path": "shared.txt",
                             "text": format!("right-{idx}"),
                             "job_id": "right",
                         }),
@@ -1085,12 +1099,11 @@ mod tests {
     fn search_literal_does_not_compile_regex() {
         let dir = tempfile::TempDir::new().unwrap();
         fs::write(dir.path().join("a.txt"), "cost is $5+\n").unwrap();
-        let found = execute(
-            "fs.search",
-            &json!({"path": dir.path().join("a.txt").to_string_lossy(), "query": "$5+"}),
-        )
-        .unwrap();
-        assert_eq!(found["matches"].as_array().unwrap().len(), 1);
+        with_workspace(&dir, || {
+            let found = execute("fs.search", &json!({"path": "a.txt", "query": "$5+"}))?;
+            assert_eq!(found["matches"].as_array().unwrap().len(), 1);
+            Ok(())
+        });
     }
 
     #[test]
