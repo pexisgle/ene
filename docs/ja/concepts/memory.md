@@ -32,9 +32,12 @@
 
 ## メモリの想起
 
-各ターン、`ene-companion` の想起は title/content（FTS）に salience・新しさ・
-アクセス回数を足して検索します。結果はカーネルのプロンプトへ入ります。
-読んだメモリは `access_count` が上がります。
+各ターン、`ene-companion` の想起は title/content の重なり・新しさ・salience を
+スコアします。埋め込みのクエリベクトルがあるとき（`ai.tasks.embedding` または
+chat タスクのフォールバック）は、`memories.embedding` との cosine を同じ
+ランカーに足します。埋め込みが未設定なら語彙想起のままです。トークンが重ならない
+クエリは、以前にベクトルを保存していてもヒットしません。読んだメモリは
+`access_count` が上がります。
 
 ## 忘却
 

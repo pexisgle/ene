@@ -81,6 +81,109 @@ fn memory_survives_reopen() {
     assert!(hits[0].as_own_knowledge().contains("planned a trip"));
 }
 
+fn insert_episodic(
+    store: &CompanionStore,
+    soul_id: ene_session::SoulId,
+    title: &str,
+    content: &str,
+) -> crate::MemoryRecord {
+    store
+        .insert_memory(NewMemory {
+            soul_id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: title.into(),
+            content: content.into(),
+            confidence: 0.9,
+            salience: 0.5,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn recall_without_query_vector_stays_lexical() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let near = insert_episodic(&store, soul.id, "apple pie", "baked dessert");
+    let far = insert_episodic(&store, soul.id, "zebra stripes", "black and white");
+    store.set_embedding(near.id, &[1.0, 0.0]).unwrap();
+    store.set_embedding(far.id, &[0.0, 1.0]).unwrap();
+    let now = Utc::now().to_rfc3339();
+    let hits = store
+        .recall_ranked(
+            soul.id,
+            "xyzzy",
+            8,
+            &now,
+            crate::store::RecallWeights::default(),
+            None,
+        )
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "unconfigured embedding must not surface unrelated rows: {hits:?}"
+    );
+    let lexical = store
+        .recall(
+            soul.id,
+            "zebra",
+            8,
+            &now,
+            crate::store::RecallWeights::default(),
+        )
+        .unwrap();
+    assert_eq!(lexical.len(), 1);
+    assert_eq!(lexical[0].title, "zebra stripes");
+}
+
+#[test]
+fn recall_with_query_vector_ranks_embedded_neighbor() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let near = insert_episodic(&store, soul.id, "apple pie", "baked dessert");
+    let far = insert_episodic(&store, soul.id, "zebra stripes", "black and white");
+    store.set_embedding(near.id, &[1.0, 0.0]).unwrap();
+    store.set_embedding(far.id, &[0.0, 1.0]).unwrap();
+    let hits = store
+        .recall_ranked(
+            soul.id,
+            "xyzzy",
+            8,
+            &Utc::now().to_rfc3339(),
+            crate::store::RecallWeights::default(),
+            Some(&[1.0, 0.0]),
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].title, "apple pie");
+    assert!(hits[0].score > 0.3);
+}
+
+#[test]
+fn runtime_hybrid_recall_matches_store_when_vector_present() {
+    let (_dir, store) = open_store();
+    let store = Arc::new(store);
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let near = insert_episodic(store.as_ref(), soul.id, "apple pie", "baked dessert");
+    store.set_embedding(near.id, &[1.0, 0.0]).unwrap();
+    let runtime = CompanionRuntime::new(Arc::clone(&store), MindSettings::default());
+    let empty = runtime.recall(soul.id, "xyzzy").unwrap();
+    assert!(empty.is_empty());
+    let hits = runtime
+        .recall_ranked(soul.id, "xyzzy", Some(&[1.0, 0.0]))
+        .unwrap();
+    assert_eq!(hits[0].title, "apple pie");
+}
+
 #[test]
 fn shared_pool_is_usable_by_another_soul_as_own_knowledge() {
     let (_dir, store) = open_store();
