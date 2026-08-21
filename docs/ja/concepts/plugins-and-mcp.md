@@ -42,8 +42,8 @@ MCP サーバーはベンダーしません。手書きの `mcp.json` の各行�
 
 | プラグイン | モダリティ |
 |---|---|
-| `provider.gguf` | ローカル GGUF の LLM と埋め込み（`plugins/provider/gguf`）。GGUF 重みはプラグインの静的カタログ、`llama-server` はホストの GitHub カタログ（`provider.assets`、Engines ページ）からインストール。任意で `server_path` / `model_path` で上書き。 |
-| `provider.openai_compat` | クラウドの LLM、埋め込み、TTS、STT（`/v1` chat+audio）。OpenRouter などは任意の `base_url`。 |
+| `provider.gguf` | ローカル GGUF の LLM と埋め込み（`plugins/provider/gguf`）。GGUF 重みはプラグインの静的カタログ、`llama-server` はホストの GitHub カタログ（`provider.assets`、Engines ページ）からインストール。任意で `server_path` / `model_path` で上書き。チャット補完は SSE トークンを `LlmChunk` に載せる。 |
+| `provider.openai_compat` | クラウドの LLM、埋め込み、TTS、STT（`/v1` chat+audio）。OpenRouter などは任意の `base_url`。チャット補完は SSE トークンを `LlmChunk` に載せ、ストリーム失敗時は一括生成へフォールバックする。 |
 | `provider.anthropic` | LLM（Messages API） |
 | `provider.elevenlabs` | TTS |
 | `provider.voicevox` | TTS。ホスト管理の VOICEVOX Engine（VVPP CPU、`provider.assets`）、またはユーザー起動エンジン / `server_path` |

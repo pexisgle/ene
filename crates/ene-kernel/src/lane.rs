@@ -14,7 +14,7 @@ use crate::context::{ContextRegistry, format_recovery_note};
 use crate::error::{CancelQueued, KernelError};
 use crate::inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
 use crate::live::{LiveBus, LiveEvent, LiveSubscription};
-use crate::model::{ConversationModel, ModelGeneration, ModelRequest};
+use crate::model::{ConversationModel, ModelGeneration, ModelRequest, TextDeltaSink};
 use crate::observe::ObserveHandle;
 use crate::router::{SurfaceRouter, SurfaceToolOutcome};
 use crate::speech::{SpeechPresenter, TurnFinalizer, TurnPrefetch};
@@ -1125,6 +1125,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                 },
                 step_index,
                 None,
+                StreamedLive::NONE,
             )
             .await?;
             span.end();
@@ -1141,6 +1142,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                 },
                 step_index.saturating_sub(1),
                 None,
+                StreamedLive::NONE,
             )
             .await?;
             span.end();
@@ -1175,19 +1177,26 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                 },
                 step_index,
                 None,
+                StreamedLive::NONE,
             )
             .await?;
             span.end();
             return Ok(());
         }
 
+        let mut sink = TurnDeltaSink {
+            live: &ctx.live,
+            turn: ctx.turn,
+            streamed_text: false,
+            streamed_thinking: false,
+        };
         let generation = tokio::select! {
             () = ctx.cancel.notified() => {
                 finish_interrupted(&ctx, step_index).await?;
                 span.end();
                 return Ok(());
             }
-            result = ctx.model.generate(request) => result?,
+            result = ctx.model.generate_streaming(request, &mut sink) => result?,
         };
 
         if ctx.cancelled.load(Ordering::SeqCst) {
@@ -1196,13 +1205,17 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             return Ok(());
         }
 
+        let streamed = StreamedLive {
+            text: sink.streamed_text,
+            thinking: sink.streamed_thinking,
+        };
         let Some(call) = generation.tool_calls.first() else {
-            finish_speech(&ctx, &generation, step_index, None).await?;
+            finish_speech(&ctx, &generation, step_index, None, streamed).await?;
             span.end();
             return Ok(());
         };
         let Some(router) = ctx.router.as_ref() else {
-            finish_speech(&ctx, &generation, step_index, None).await?;
+            finish_speech(&ctx, &generation, step_index, None, streamed).await?;
             span.end();
             return Ok(());
         };
@@ -1222,7 +1235,14 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                     finish_reason: "delegated".to_owned(),
                     ..generation
                 };
-                finish_speech(&ctx, &generation, step_index, Some(job_id)).await?;
+                finish_speech(
+                    &ctx,
+                    &generation,
+                    step_index,
+                    Some(job_id),
+                    StreamedLive::NONE,
+                )
+                .await?;
                 span.end();
                 return Ok(());
             }
@@ -1243,11 +1263,61 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
     }
 }
 
+struct StreamedLive {
+    text: bool,
+    thinking: bool,
+}
+
+impl StreamedLive {
+    const NONE: Self = Self {
+        text: false,
+        thinking: false,
+    };
+}
+
+struct TurnDeltaSink<'a> {
+    live: &'a LiveBus,
+    turn: TurnId,
+    streamed_text: bool,
+    streamed_thinking: bool,
+}
+
+impl TextDeltaSink for TurnDeltaSink<'_> {
+    fn on_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.streamed_text = true;
+        self.live.emit(
+            DisplayDepth::Surface,
+            LiveEvent::TextDelta {
+                turn_id: self.turn,
+                text: text.to_owned(),
+            },
+        );
+    }
+
+    fn on_thinking(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.streamed_thinking = true;
+        self.live.emit(
+            DisplayDepth::Detail,
+            LiveEvent::ThinkingDelta {
+                turn_id: self.turn,
+                text: text.to_owned(),
+            },
+        );
+    }
+}
+
 async fn finish_speech(
     ctx: &TurnCtx,
     generation: &ModelGeneration,
     step_index: u32,
     delegated_job: Option<String>,
+    streamed: StreamedLive,
 ) -> Result<(), KernelError> {
     if ctx.cancelled.load(Ordering::SeqCst) {
         return finish_interrupted(ctx, step_index).await;
@@ -1365,13 +1435,15 @@ async fn finish_speech(
         })
         .await?;
 
-    ctx.live.emit(
-        DisplayDepth::Surface,
-        LiveEvent::TextDelta {
-            turn_id: ctx.turn,
-            text: speech_for_live.clone(),
-        },
-    );
+    if !streamed.text {
+        ctx.live.emit(
+            DisplayDepth::Surface,
+            LiveEvent::TextDelta {
+                turn_id: ctx.turn,
+                text: speech_for_live.clone(),
+            },
+        );
+    }
     if let Some((_, text)) = inner.first() {
         ctx.live.emit(
             DisplayDepth::Detail,
@@ -1381,7 +1453,9 @@ async fn finish_speech(
             },
         );
     }
-    if let Some(thinking) = generation.thinking.clone() {
+    if !streamed.thinking
+        && let Some(thinking) = generation.thinking.clone()
+    {
         ctx.live.emit(
             DisplayDepth::Detail,
             LiveEvent::ThinkingDelta {

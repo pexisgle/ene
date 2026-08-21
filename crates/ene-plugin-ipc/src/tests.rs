@@ -1,10 +1,10 @@
 use crate::{
     AssetView, AssetsHandler, CORE_VERSION, HostConn, HostHello, InstallAssetRequest,
     InstallAssetResult, InstallStatusRequest, InstallStatusResult, IpcError, ListAssetsResult,
-    ListModelsRequest, ListModelsResult, LlmGenerateRequest, LlmGeneration, LlmHandler, LlmMessage,
-    LlmRole, ModelsHandler, PluginIdentity, ProtoId, ProtocolRanges, ProviderAuth,
-    ProviderHandlers, SetActiveAssetRequest, SetActiveAssetResult, ToolCall, ToolHandler,
-    ToolSpecWire, VersionRange, serve_plugin, serve_provider,
+    ListModelsRequest, ListModelsResult, LlmChunk, LlmGenerateRequest, LlmGeneration, LlmHandler,
+    LlmMessage, LlmRole, LlmStreamSink, ModelsHandler, PluginIdentity, ProtoId, ProtocolRanges,
+    ProviderAuth, ProviderHandlers, SetActiveAssetRequest, SetActiveAssetResult, ToolCall,
+    ToolHandler, ToolSpecWire, VersionRange, serve_plugin, serve_provider,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -356,6 +356,128 @@ async fn llm_generate_roundtrip_without_tool_face() {
         .unwrap();
     assert_eq!(result.text, "llm:ping");
     assert_eq!(result.model_id, "test-model");
+    host.drain().await.unwrap();
+    plugin.await.unwrap().unwrap();
+}
+
+struct FakeStreamLlm;
+
+#[async_trait]
+impl LlmHandler for FakeStreamLlm {
+    async fn generate(&self, request: LlmGenerateRequest) -> Result<LlmGeneration, IpcError> {
+        FakeLlm.generate(request).await
+    }
+
+    async fn generate_stream(
+        &self,
+        request: LlmGenerateRequest,
+        sink: &mut dyn LlmStreamSink,
+    ) -> Result<LlmGeneration, IpcError> {
+        sink.on_text("hel").await?;
+        sink.on_text("lo").await?;
+        Ok(LlmGeneration {
+            text: "hello".to_owned(),
+            model_id: request.model,
+            finish_reason: "stop".to_owned(),
+            ..LlmGeneration::default()
+        })
+    }
+}
+
+fn sample_llm_request(text: &str) -> LlmGenerateRequest {
+    LlmGenerateRequest {
+        messages: vec![LlmMessage {
+            role: LlmRole::User,
+            text: text.to_owned(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            images: Vec::new(),
+        }],
+        tools: Vec::new(),
+        model: "test-model".to_owned(),
+        max_tokens: None,
+        base_url: String::new(),
+        auth: ProviderAuth::default(),
+    }
+}
+
+async fn handshake_llm_host(host_side: DuplexStream) -> HostConn<DuplexStream> {
+    let hello = HostHello {
+        host_name: "ene-core".to_owned(),
+        host_version: "0.1.0".to_owned(),
+        protocols: ProtocolRanges::host_supported(),
+        expected_digest: "sha256:test".to_owned(),
+        declared_protocols: vec![ProtoId::Core, ProtoId::Provider],
+        max_frame_bytes: 0,
+        allow_unverified: false,
+    };
+    HostConn::handshake(
+        host_side,
+        hello,
+        &[ProtoId::Core, ProtoId::Provider],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn llm_generate_stream_forwards_chunks_then_done() {
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
+    let identity = PluginIdentity {
+        plugin_id: "provider.test".to_owned(),
+        plugin_name: "test".to_owned(),
+        digest: "sha256:test".to_owned(),
+        spawn_token: Some(SPAWN_TOKEN.to_owned()),
+    };
+    let handlers = ProviderHandlers {
+        llm: Some(std::sync::Arc::new(FakeStreamLlm)),
+        ..ProviderHandlers::default()
+    };
+    let plugin = tokio::spawn(async move { serve_provider(plugin_side, identity, handlers).await });
+    let mut host = handshake_llm_host(host_side).await;
+    let mut chunks = Vec::new();
+    let result = host
+        .generate_llm_streaming(sample_llm_request("ping"), |chunk| chunks.push(chunk))
+        .await
+        .unwrap();
+    assert_eq!(
+        chunks,
+        vec![
+            LlmChunk {
+                text: "hel".to_owned(),
+                thinking: None,
+            },
+            LlmChunk {
+                text: "lo".to_owned(),
+                thinking: None,
+            },
+        ]
+    );
+    assert_eq!(result.text, "hello");
+    assert_eq!(result.model_id, "test-model");
+    host.drain().await.unwrap();
+    plugin.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn llm_generate_one_shot_still_succeeds_when_plugin_streams() {
+    let (host_side, plugin_side) = tokio::io::duplex(1024);
+    let identity = PluginIdentity {
+        plugin_id: "provider.test".to_owned(),
+        plugin_name: "test".to_owned(),
+        digest: "sha256:test".to_owned(),
+        spawn_token: Some(SPAWN_TOKEN.to_owned()),
+    };
+    let handlers = ProviderHandlers {
+        llm: Some(std::sync::Arc::new(FakeStreamLlm)),
+        ..ProviderHandlers::default()
+    };
+    let plugin = tokio::spawn(async move { serve_provider(plugin_side, identity, handlers).await });
+    let mut host = handshake_llm_host(host_side).await;
+    let result = host.generate_llm(sample_llm_request("ping")).await.unwrap();
+    assert_eq!(result.text, "hello");
     host.drain().await.unwrap();
     plugin.await.unwrap().unwrap();
 }

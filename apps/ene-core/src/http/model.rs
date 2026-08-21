@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ene_kernel::{
-    ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, ToolCall,
+    ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, TextDeltaSink,
+    ToolCall,
 };
 use ene_plugin_ipc::{
     LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
@@ -68,6 +69,24 @@ impl SeamedModel {
 #[async_trait]
 impl ConversationModel for SeamedModel {
     async fn generate(&self, request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        self.generate_on_fiber(request, None).await
+    }
+
+    async fn generate_streaming(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TextDeltaSink,
+    ) -> Result<ModelGeneration, KernelError> {
+        self.generate_on_fiber(request, Some(sink)).await
+    }
+}
+
+impl SeamedModel {
+    async fn generate_on_fiber(
+        &self,
+        request: ModelRequest,
+        sink: Option<&mut dyn TextDeltaSink>,
+    ) -> Result<ModelGeneration, KernelError> {
         let binding = self.binding();
         if binding.is_unconfigured() {
             return Err(KernelError::Model(format!(
@@ -82,15 +101,26 @@ impl ConversationModel for SeamedModel {
             &self.core,
             self.layer(),
         );
-        let generation = self
-            .core
-            .supervisor()
-            .generate_llm(
-                &crate::plugin_profile::task_row_id(self.fiber_task()),
-                llm_request,
-            )
-            .await
-            .map_err(|err| KernelError::Model(err.to_string()))?;
+        let row_id = crate::plugin_profile::task_row_id(self.fiber_task());
+        let generation = if let Some(sink) = sink {
+            self.core
+                .supervisor()
+                .generate_llm_streaming(&row_id, llm_request, |chunk| {
+                    if !chunk.text.is_empty() {
+                        sink.on_text(&chunk.text);
+                    }
+                    if let Some(thinking) = chunk.thinking.as_deref() {
+                        sink.on_thinking(thinking);
+                    }
+                })
+                .await
+        } else {
+            self.core
+                .supervisor()
+                .generate_llm(&row_id, llm_request)
+                .await
+        }
+        .map_err(|err| KernelError::Model(err.to_string()))?;
         if generation.finish_reason == "error" {
             return Err(KernelError::Model(if generation.model_id.is_empty() {
                 "provider failed".to_owned()

@@ -3,8 +3,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ene_plugin_ipc::{
     EmbedHandler, EmbedRequest, EmbedResult, IpcError, ListModelsRequest, ListModelsResult,
-    LlmGenerateRequest, LlmGeneration, LlmHandler, LlmMessage, LlmRole, LlmToolCall, ModelsHandler,
-    SttHandler, SttRequest, SttResult, TtsAudio, TtsHandler, TtsRequest,
+    LlmGenerateRequest, LlmGeneration, LlmHandler, LlmMessage, LlmRole, LlmStreamSink, LlmToolCall,
+    ModelsHandler, SttHandler, SttRequest, SttResult, TtsAudio, TtsHandler, TtsRequest,
 };
 use serde_json::{Value, json};
 
@@ -29,31 +29,23 @@ impl OpenAiCompat {
 impl LlmHandler for OpenAiCompat {
     async fn generate(&self, request: LlmGenerateRequest) -> Result<LlmGeneration, IpcError> {
         let url = format!("{}/chat/completions", effective_base(&request.base_url));
-        let mut body = json!({
-            "model": effective_model(&request.model, "gpt-4.1-mini"),
-            "messages": map_messages(&request.messages),
-        });
-        if let Some(max) = request.max_tokens {
-            body["max_tokens"] = json!(max);
-        }
-        if !request.tools.is_empty() {
-            body["tools"] = json!(
-                request
-                    .tools
-                    .iter()
-                    .map(|tool| json!({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters,
-                        }
-                    }))
-                    .collect::<Vec<_>>()
-            );
-        }
+        let body = chat_body(&request);
         let response = self.post_json(&url, &request.auth.api_key, body).await?;
         Ok(parse_chat(&response))
+    }
+
+    async fn generate_stream(
+        &self,
+        request: LlmGenerateRequest,
+        sink: &mut dyn LlmStreamSink,
+    ) -> Result<LlmGeneration, IpcError> {
+        match self.stream_chat(&request).await {
+            Ok(response) => crate::stream::consume_chat_sse(response, sink).await,
+            Err(err) => {
+                tracing::debug!(error = %err, "chat stream unavailable; using one-shot");
+                self.generate(request).await
+            }
+        }
     }
 }
 
@@ -167,6 +159,26 @@ impl ModelsHandler for OpenAiCompat {
 }
 
 impl OpenAiCompat {
+    async fn stream_chat(
+        &self,
+        request: &LlmGenerateRequest,
+    ) -> Result<reqwest::Response, IpcError> {
+        let url = format!("{}/chat/completions", effective_base(&request.base_url));
+        let mut body = chat_body(request);
+        body["stream"] = json!(true);
+        let response =
+            attach_vendor_headers(self.http.post(&url).json(&body), &request.auth.api_key)
+                .send()
+                .await
+                .map_err(|err| IpcError::Call(err.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(IpcError::Call(format_http_error(status, &body)));
+        }
+        Ok(response)
+    }
+
     async fn post_json(&self, url: &str, api_key: &str, body: Value) -> Result<Value, IpcError> {
         let response = attach_vendor_headers(self.http.post(url).json(&body), api_key)
             .send()
@@ -215,6 +227,33 @@ impl OpenAiCompat {
             .map(|bytes| bytes.to_vec())
             .map_err(|err| IpcError::Call(err.to_string()))
     }
+}
+
+fn chat_body(request: &LlmGenerateRequest) -> Value {
+    let mut body = json!({
+        "model": effective_model(&request.model, "gpt-4.1-mini"),
+        "messages": map_messages(&request.messages),
+    });
+    if let Some(max) = request.max_tokens {
+        body["max_tokens"] = json!(max);
+    }
+    if !request.tools.is_empty() {
+        body["tools"] = json!(
+            request
+                .tools
+                .iter()
+                .map(|tool| json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    }
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
+    body
 }
 
 fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {

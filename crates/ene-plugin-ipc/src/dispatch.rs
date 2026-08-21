@@ -6,10 +6,11 @@ use crate::host::negotiate;
 use crate::protocol::{CORE_VERSION, HelloAck, HostHello, Message, ProtoId, VersionRange};
 use crate::provider::{
     EmbedRequest, EmbedResult, InstallAssetRequest, InstallAssetResult, InstallStatusRequest,
-    InstallStatusResult, ListAssetsResult, ListModelsRequest, ListModelsResult, LlmGenerateRequest,
-    LlmGeneration, PROVIDER_ASSETS_VERSION, PROVIDER_EMBED_VERSION, PROVIDER_LLM_VERSION,
-    PROVIDER_MODELS_VERSION, PROVIDER_STT_VERSION, PROVIDER_TTS_VERSION, ProviderFaces,
-    SetActiveAssetRequest, SetActiveAssetResult, SttRequest, SttResult, TtsAudio, TtsRequest,
+    InstallStatusResult, ListAssetsResult, ListModelsRequest, ListModelsResult, LlmChunk,
+    LlmGenerateRequest, LlmGeneration, PROVIDER_ASSETS_VERSION, PROVIDER_EMBED_VERSION,
+    PROVIDER_LLM_VERSION, PROVIDER_MODELS_VERSION, PROVIDER_STT_VERSION, PROVIDER_TTS_VERSION,
+    ProviderFaces, SetActiveAssetRequest, SetActiveAssetResult, SttRequest, SttResult, TtsAudio,
+    TtsRequest,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -33,10 +34,29 @@ impl PluginIdentity {
     }
 }
 
+/// Incremental tokens for an in-flight `llm.generate`.
+#[async_trait]
+pub trait LlmStreamSink: Send {
+    async fn on_text(&mut self, text: &str) -> Result<(), IpcError>;
+    async fn on_thinking(&mut self, text: &str) -> Result<(), IpcError>;
+}
+
 /// LLM generate face.
 #[async_trait]
 pub trait LlmHandler: Send + Sync {
     async fn generate(&self, request: LlmGenerateRequest) -> Result<LlmGeneration, IpcError>;
+
+    /// Stream tokens then return the completed generation.
+    ///
+    /// The default is one-shot: `generate` with no `LlmChunk` frames. Providers
+    /// that speak SSE override this; unsupported engines stay on the default.
+    async fn generate_stream(
+        &self,
+        request: LlmGenerateRequest,
+        _sink: &mut dyn LlmStreamSink,
+    ) -> Result<LlmGeneration, IpcError> {
+        self.generate(request).await
+    }
 }
 
 /// Embedding face.
@@ -115,7 +135,7 @@ pub async fn serve_provider<S>(
     handlers: ProviderHandlers,
 ) -> Result<(), IpcError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let hello = expect_hello(&mut stream).await?;
     let max_frame = hello.frame_limit();
@@ -143,13 +163,8 @@ where
                 write_msg(&mut stream, &Message::Pong { id }, max_frame).await?;
             }
             Message::LlmGenerate { id, body } => {
-                let reply = dispatch_llm(handlers.llm.as_ref(), body).await;
-                write_msg(
-                    &mut stream,
-                    &Message::LlmDone { id, body: reply },
-                    max_frame,
-                )
-                .await?;
+                dispatch_llm_stream(&mut stream, max_frame, id, handlers.llm.as_ref(), body)
+                    .await?;
             }
             Message::EmbedEncode { id, body } => {
                 let reply = dispatch_embed(handlers.embed.as_ref(), body).await;
@@ -264,26 +279,88 @@ where
     }
 }
 
-async fn dispatch_llm(
+struct ChunkWriter<'a, S> {
+    stream: &'a mut S,
+    max_frame: usize,
+    id: u64,
+}
+
+#[async_trait]
+impl<S> LlmStreamSink for ChunkWriter<'_, S>
+where
+    S: AsyncWrite + Unpin + Send,
+{
+    async fn on_text(&mut self, text: &str) -> Result<(), IpcError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        write_msg(
+            self.stream,
+            &Message::LlmChunk {
+                id: self.id,
+                body: LlmChunk {
+                    text: text.to_owned(),
+                    thinking: None,
+                },
+            },
+            self.max_frame,
+        )
+        .await
+    }
+
+    async fn on_thinking(&mut self, text: &str) -> Result<(), IpcError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        write_msg(
+            self.stream,
+            &Message::LlmChunk {
+                id: self.id,
+                body: LlmChunk {
+                    text: String::new(),
+                    thinking: Some(text.to_owned()),
+                },
+            },
+            self.max_frame,
+        )
+        .await
+    }
+}
+
+async fn dispatch_llm_stream<S>(
+    stream: &mut S,
+    max_frame: usize,
+    id: u64,
     handler: Option<&Arc<dyn LlmHandler>>,
     body: LlmGenerateRequest,
-) -> LlmGeneration {
-    match handler {
-        Some(handler) => handler
-            .generate(body)
-            .await
-            .unwrap_or_else(|err| LlmGeneration {
-                text: String::new(),
-                finish_reason: "error".to_owned(),
-                model_id: err.to_string(),
-                ..LlmGeneration::default()
-            }),
+) -> Result<(), IpcError>
+where
+    S: AsyncWrite + Unpin + Send,
+{
+    let reply = match handler {
+        Some(handler) => {
+            let mut sink = ChunkWriter {
+                stream,
+                max_frame,
+                id,
+            };
+            match handler.generate_stream(body, &mut sink).await {
+                Ok(generation) => generation,
+                Err(err) => LlmGeneration {
+                    text: String::new(),
+                    finish_reason: "error".to_owned(),
+                    model_id: err.to_string(),
+                    ..LlmGeneration::default()
+                },
+            }
+        }
         None => LlmGeneration {
             finish_reason: "error".to_owned(),
             model_id: "llm disabled".to_owned(),
             ..LlmGeneration::default()
         },
-    }
+    };
+    write_msg(stream, &Message::LlmDone { id, body: reply }, max_frame).await
 }
 
 async fn dispatch_embed(

@@ -10,8 +10,9 @@ use ene_kernel::{HookEvent, LoopHooks, WaterfallGuard, WaterfallNext};
 use ene_plugin_ipc::{
     BuiltinKind, EmbedRequest, EmbedResult, HostConn, InstallAssetRequest, InstallAssetResult,
     InstallPhase, InstallStatusRequest, InstallStatusResult, ListAssetsResult, ListModelsRequest,
-    ListModelsResult, LlmGenerateRequest, LlmGeneration, ProviderFaces, SetActiveAssetRequest,
-    SetActiveAssetResult, SttRequest, SttResult, ToolCall, TtsAudio, TtsRequest,
+    ListModelsResult, LlmChunk, LlmGenerateRequest, LlmGeneration, ProviderFaces,
+    SetActiveAssetRequest, SetActiveAssetResult, SttRequest, SttResult, ToolCall, TtsAudio,
+    TtsRequest,
 };
 use ene_provider_assets::CatalogRegistry;
 use ene_registry::{
@@ -883,9 +884,24 @@ impl Supervisor {
         row_id: &str,
         request: LlmGenerateRequest,
     ) -> Result<LlmGeneration, SupervisorError> {
+        self.generate_llm_streaming(row_id, request, |_| {}).await
+    }
+
+    /// LLM generate that forwards matching `LlmChunk` frames to `on_chunk`.
+    pub async fn generate_llm_streaming<F>(
+        &self,
+        row_id: &str,
+        request: LlmGenerateRequest,
+        on_chunk: F,
+    ) -> Result<LlmGeneration, SupervisorError>
+    where
+        F: FnMut(LlmChunk),
+    {
         let session = self.session_by_row(row_id)?;
         let mut conn = session.conn.lock().await;
-        conn.generate_llm(request).await.map_err(Into::into)
+        conn.generate_llm_streaming(request, on_chunk)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn embed(

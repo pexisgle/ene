@@ -3,11 +3,15 @@
 //! The host spawns the loopback sidecar and injects `sidecar_base_url`; this
 //! plugin maps host-canonical messages onto `/v1` chat completions and embeddings.
 
-#![cfg_attr(test, expect(clippy::expect_used, reason = "tests fail fast"))]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, clippy::unwrap_used, reason = "tests fail fast")
+)]
 
 mod assets;
 mod client;
 mod sidecar;
+mod stream;
 
 use std::sync::Arc;
 
