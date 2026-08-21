@@ -2498,6 +2498,7 @@ dependencies = [
  "ene-plugin-ipc",
  "ene-registry",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

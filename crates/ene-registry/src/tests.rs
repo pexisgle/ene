@@ -131,6 +131,7 @@ fn exec_tools_stay_off_surface_schema() {
         .filter_map(|schema| schema.get("name").and_then(|v| v.as_str()))
         .collect();
     assert!(job.contains(&"exec.run"));
+    assert!(job.contains(&"exec.shell"));
     assert!(job.contains(&"fs.write"));
 }
 
@@ -331,6 +332,20 @@ async fn web_fetch_is_on_surface_and_blocks_loopback() {
         matches!(&err, PipelineError::Execute(message) if message.contains("host net broker")),
         "{err}"
     );
+}
+
+#[test]
+fn exec_run_and_shell_differ_in_sensitivity_and_side_effects() {
+    let defs = crate::builtins::definitions_for(BuiltinKind::Exec);
+    let run = defs.iter().find(|def| def.name == "exec.run").unwrap();
+    let shell = defs.iter().find(|def| def.name == "exec.shell").unwrap();
+    assert_eq!(run.side_effects, vec!["exec".to_owned()]);
+    assert_eq!(
+        shell.side_effects,
+        vec!["exec".to_owned(), "shell".to_owned()]
+    );
+    assert_eq!(run.sensitivity, ene_plane::Sensitivity::None);
+    assert_eq!(shell.sensitivity, ene_plane::Sensitivity::Medium);
 }
 
 #[test]

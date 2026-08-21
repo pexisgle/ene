@@ -246,11 +246,34 @@ impl ToolRegistry {
             }
         }
         confine_fs_args(name, &mut args, workspace.as_deref())?;
+        confine_exec_args(name, &mut args, workspace.as_deref())?;
         invoke
             .invoke(name, args)
             .await
             .map_err(PipelineError::Execute)
     }
+}
+
+fn confine_exec_args(
+    name: &str,
+    args: &mut Value,
+    workspace: Option<&Path>,
+) -> Result<(), PipelineError> {
+    if !matches!(name, "exec.run" | "exec.shell") {
+        return Ok(());
+    }
+    let Some(root) = workspace else {
+        return Ok(());
+    };
+    let raw = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+    let confined = confine_tool_path(root, Path::new(raw), false)?;
+    if let Some(obj) = args.as_object_mut() {
+        obj.insert(
+            "cwd".to_owned(),
+            Value::String(confined.display().to_string()),
+        );
+    }
+    Ok(())
 }
 
 fn confine_fs_args(
