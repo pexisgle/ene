@@ -63,6 +63,7 @@ pub struct ObservationPipeline {
     recent: VecDeque<String>,
     last_summary: Option<String>,
     pending_digest: Option<String>,
+    vision_candidate: Option<(String, Vec<u8>)>,
 }
 
 impl ObservationPipeline {
@@ -73,6 +74,9 @@ impl ObservationPipeline {
 
     /// Compare `png` to the previous luma grid and decide whether vision is needed.
     ///
+    /// A changed frame is not committed until [`Self::commit_summary`] is called.
+    /// This keeps transient vision failures retryable on the next observation.
+    ///
     /// # Errors
     ///
     /// Returns [`ObserveError`] when the PNG cannot be decoded or re-encoded.
@@ -80,18 +84,24 @@ impl ObservationPipeline {
         let frame = decode_frame(png)?;
         let digest = frame.digest.clone();
         let action = self.decide(&frame);
-        if should_commit_luma(&action) {
-            self.last_luma = Some(frame.luma);
-        }
-        self.recent.push_back(digest);
-        while self.recent.len() > RECENT_DIGESTS {
-            self.recent.pop_front();
+        if matches!(action, ObserveAction::Changed { .. }) {
+            self.vision_candidate = Some((digest, frame.luma));
+        } else {
+            self.vision_candidate = None;
+            if should_commit_luma(&action) {
+                self.last_luma = Some(frame.luma);
+            }
+            self.push_recent(digest);
         }
         Ok(action)
     }
 
-    /// Remember the vision summary so an unchanged later frame can reuse it.
+    /// Remember the vision summary and atomically accept the frame that produced it.
     pub fn commit_summary(&mut self, summary: String) {
+        if let Some((digest, luma)) = self.vision_candidate.take() {
+            self.last_luma = Some(luma);
+            self.push_recent(digest);
+        }
         self.last_summary = Some(summary);
         self.pending_digest = None;
     }
@@ -99,6 +109,13 @@ impl ObservationPipeline {
     #[must_use]
     pub fn last_summary(&self) -> Option<&str> {
         self.last_summary.as_deref()
+    }
+
+    fn push_recent(&mut self, digest: String) {
+        self.recent.push_back(digest);
+        while self.recent.len() > RECENT_DIGESTS {
+            self.recent.pop_front();
+        }
     }
 
     fn decide(&mut self, frame: &DecodedFrame) -> ObserveAction {
@@ -171,7 +188,7 @@ impl ObservationPipeline {
 
 fn should_commit_luma(action: &ObserveAction) -> bool {
     match action {
-        ObserveAction::Changed { .. } => true,
+        ObserveAction::Changed { .. } => false,
         ObserveAction::Skip { reason, .. } => {
             matches!(reason, ObserveSkip::Unchanged | ObserveSkip::CaretBlink)
         }
@@ -463,6 +480,29 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn failed_vision_keeps_same_frame_retryable() {
+        let mut pipe = ObservationPipeline::new();
+        let png = solid();
+        assert!(matches!(
+            pipe.evaluate(&png).unwrap(),
+            ObserveAction::Changed { .. }
+        ));
+        // No commit_summary: this models a transient vision failure.
+        assert!(matches!(
+            pipe.evaluate(&png).unwrap(),
+            ObserveAction::Changed { .. }
+        ));
+        pipe.commit_summary("recovered".to_owned());
+        assert!(matches!(
+            pipe.evaluate(&png).unwrap(),
+            ObserveAction::Skip {
+                reason: ObserveSkip::Unchanged,
+                ..
+            }
+        ));
     }
 
     #[test]
