@@ -34,6 +34,26 @@ pub fn egui_anchor(position: &str) -> (egui::Align2, [f32; 2]) {
     }
 }
 
+/// True when `text` is spoken reply content, not a provider or HTTP error body.
+#[must_use]
+pub(crate) fn is_speech_caption(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("the chat provider failed") {
+        return false;
+    }
+    if lower.starts_with("error:") || lower.starts_with("error ") {
+        return false;
+    }
+    if lower.contains("401 unauthorized") || lower.contains("403 forbidden") {
+        return false;
+    }
+    true
+}
+
 pub fn show(
     ctx: &egui::Context,
     state: &SurfaceUiState,
@@ -41,14 +61,10 @@ pub fn show(
     position: &str,
     pinned: bool,
 ) {
-    if state.caption.is_empty() && state.streaming_text.is_empty() {
+    let text = speech_text(state);
+    if text.is_empty() {
         return;
     }
-    let text = if state.caption.is_empty() {
-        state.streaming_text.as_str()
-    } else {
-        state.caption.as_str()
-    };
     let max_width = (ctx.content_rect().width() * 0.72).clamp(240.0, 720.0);
     let (anchor, offset) = egui_anchor(position);
     egui::Window::new(i18n::fl("caption-title"))
@@ -71,6 +87,19 @@ pub fn show(
                 .wrap(),
             );
         });
+}
+
+fn speech_text(state: &SurfaceUiState) -> &str {
+    let candidate = if state.caption.is_empty() {
+        state.streaming_text.as_str()
+    } else {
+        state.caption.as_str()
+    };
+    if is_speech_caption(candidate) {
+        candidate
+    } else {
+        ""
+    }
 }
 
 #[cfg(test)]
@@ -102,5 +131,15 @@ mod tests {
         assert_eq!(right.0, 1920 - 720 - 24);
         assert_eq!(left.1, (1080 - 160) / 2);
         assert_eq!(right.1, left.1);
+    }
+
+    #[test]
+    fn provider_errors_are_not_speech() {
+        assert!(!is_speech_caption(
+            "The chat provider failed: 401 Unauthorized"
+        ));
+        assert!(!is_speech_caption("401 Unauthorized"));
+        assert!(!is_speech_caption("error: model not found"));
+        assert!(is_speech_caption("Hello from the companion."));
     }
 }

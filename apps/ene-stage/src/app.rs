@@ -863,19 +863,16 @@ impl StageApp {
         while let Ok(event) = self.feeds.surface.try_recv() {
             match event {
                 LiveEvent::TextDelta { text, .. } => {
-                    self.surface.streaming_text.push_str(&text);
-                    if self.settings.caption_enabled {
-                        self.surface
-                            .caption
-                            .clone_from(&self.surface.streaming_text);
-                        self.surface.caption_open = true;
-                    }
+                    self.surface
+                        .apply_text_delta(&text, self.settings.caption_enabled);
+                    self.sync_caption_window();
                 }
                 LiveEvent::SessionEvent { kind, text } => {
                     if kind == "turn/end" || kind.ends_with("/end") {
                         self.session.clear_turn();
                         self.request_history_refresh();
-                        self.surface.streaming_text.clear();
+                        self.surface.on_turn_ended();
+                        self.sync_caption_window();
                     }
                     tracing::debug!(kind, text, "surface session event");
                 }
@@ -1081,6 +1078,12 @@ impl StageApp {
         }
     }
 
+    fn sync_caption_window(&mut self) {
+        if !self.surface.caption_visible() {
+            self.caption = None;
+        }
+    }
+
     fn ensure_caption(&mut self, event_loop: &ActiveEventLoop) {
         if self.caption.is_some() || !self.settings.caption_enabled {
             return;
@@ -1226,10 +1229,10 @@ impl StageApp {
         if self.surface.chat_open {
             self.ensure_chat(event_loop);
         }
-        if self.settings.caption_enabled
-            && (self.surface.caption_open || !self.surface.caption.is_empty())
-        {
+        if self.settings.caption_enabled && self.surface.caption_visible() {
             self.ensure_caption(event_loop);
+        } else {
+            self.caption = None;
         }
         if self.surface.spotlight_open {
             self.ensure_spotlight(event_loop);

@@ -20,7 +20,7 @@ SDK.
 |---|---|---|
 | Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Click-through is System → Overlay click-through (on by default). Esc quits. A/D switch avatar bodies; W/S change motion. F3 toggles spring-bone collider wireframes. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
 | Chat (F2) | `surface` | Prompt / Steer / Follow-up (hover for meaning), approvals (Allow / Always / Deny), ask-user, mic PCM relay, Detail button (same as the tray) |
-| Caption | `surface` | Streamed speech. Voice → Caption position (`top` / `bottom` / `left` / `right`) places the window; Pin caption stops it being dragged. |
+| Caption | `surface` | Spoken captions. Voice → Caption position (`top` / `bottom` / `left` / `right`) places the window; Pin caption stops it being dragged. Provider and HTTP errors stay on the chat status line (wrapped), not as spoken captions. The overlay closes when the turn ends. Long spoken lines wrap inside the overlay. |
 | Spotlight (Alt+Space) | local | Jump to detail sections, mic, quit. Choosing a command closes the palette. If the OS keeps Alt+Space, use Voice → Open Spotlight |
 | Detail (tray or Chat → Detail; F1 Companion, F4 Log) | `detail` | Settings IA, inner/thinking/tool/PAD log. Search filters sections; clicking a tab, Home shortcut, Spotlight, or F1/F4 clears the filter so it cannot pin you on the current section. |
 

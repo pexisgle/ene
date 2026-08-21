@@ -42,7 +42,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
             {
                 state.push_action(SurfaceAction::OpenDetail(DetailTab::Home));
             }
-            ui.label(&state.status);
+            ui.add(egui::Label::new(&state.status).wrap());
         });
         ui.horizontal(|ui| {
             ui.label(i18n::fl("chat-mode"));

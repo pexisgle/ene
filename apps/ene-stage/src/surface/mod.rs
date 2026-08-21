@@ -88,6 +88,36 @@ impl SurfaceUiState {
     pub fn push_action(&mut self, action: SurfaceAction) {
         self.pending_actions.push(action);
     }
+
+    pub(crate) fn apply_text_delta(&mut self, text: &str, captions: bool) {
+        if caption::is_speech_caption(text) {
+            self.streaming_text.push_str(text);
+            if captions {
+                self.caption.clone_from(&self.streaming_text);
+                self.caption_open = true;
+            }
+            return;
+        }
+        if !text.trim().is_empty() {
+            text.clone_into(&mut self.status);
+            self.dismiss_caption();
+        }
+    }
+
+    pub(crate) fn on_turn_ended(&mut self) {
+        self.streaming_text.clear();
+        self.dismiss_caption();
+    }
+
+    pub(crate) fn dismiss_caption(&mut self) {
+        self.caption.clear();
+        self.caption_open = false;
+    }
+
+    #[must_use]
+    pub(crate) fn caption_visible(&self) -> bool {
+        self.caption_open && caption::is_speech_caption(&self.caption)
+    }
 }
 
 pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
@@ -129,4 +159,34 @@ pub fn show_spotlight(ctx: &egui::Context, state: &mut SurfaceUiState) -> Option
         state.spotlight_open = false;
     }
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SurfaceUiState;
+
+    #[test]
+    fn provider_error_delta_goes_to_status_not_caption() {
+        let mut state = SurfaceUiState::default();
+        state.apply_text_delta(
+            "The chat provider failed: model: call failed: 401 Unauthorized",
+            true,
+        );
+        assert!(!state.caption_visible());
+        assert!(state.caption.is_empty());
+        assert!(state.streaming_text.is_empty());
+        assert!(state.status.contains("401 Unauthorized"));
+    }
+
+    #[test]
+    fn speech_delta_opens_caption_and_turn_end_closes_it() {
+        let mut state = SurfaceUiState::default();
+        state.apply_text_delta("Hello from the companion.", true);
+        assert!(state.caption_visible());
+        assert_eq!(state.caption, "Hello from the companion.");
+        state.on_turn_ended();
+        assert!(!state.caption_visible());
+        assert!(state.caption.is_empty());
+        assert!(state.streaming_text.is_empty());
+    }
 }
