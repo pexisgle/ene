@@ -32,6 +32,30 @@ running turn; `compact` compresses history.
 5. Events are committed to `ene-session` (model-visible equals logged).
 6. Live events go out at `surface` or `detail` depth.
 
+### System context
+
+Each turn, `ene-kernel::ContextRegistry` assembles System Context in a fixed
+order and logs every line as `context/system_message` (`source_key` is the
+stable name). The dialogue lane keeps `platform_contract` and a fallback
+`identity_kernel`; `ene-core` loads the rest for that turn:
+
+| Key | What it carries |
+|---|---|
+| `platform_contract` | Output and safety rules |
+| `identity_kernel` | Persona from the character package when present |
+| `character_state` | Affect mood words (not PAD numbers) |
+| `memory.semantic` | Ranked recall for this user text |
+| `memory.user_profile` | Standing profile / preference notes |
+| `memory.commitments` | Open commitments |
+| `skills.active` | Installed skill names and descriptions |
+| `mcp.resources` | Snapshots under `<workspace>/mcp-context/` |
+| `inner_recent` | Trailing model-visible inner thoughts |
+| `interruption_note` | Only after an interrupted turn |
+| `delegation.active` | Created / queued / running public jobs |
+
+Empty loads omit the key. A failed load keeps the last good persona. Replaying
+the session log rebuilds the same model-visible surface.
+
 Signatures live in rustdoc for `ene-kernel` and `ene-session`.
 
 ## Events

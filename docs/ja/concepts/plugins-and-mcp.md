@@ -44,8 +44,8 @@ GitHub から `llama-server` リリースを取得し、
 `templates/sidecar` にもあります。
 
 MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショットされ、
-コンテキスト源として注入されます。`prompts/list` は data-dir の skills 配下の
-`SKILL.md` になります。
+`mcp.resources` コンテキスト源として注入されます。`prompts/list` は data-dir の
+skills 配下の `SKILL.md` になり、表層レーンでは `skills.active` に載ります。
 
 ## 起動プロファイル
 

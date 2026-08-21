@@ -14,7 +14,8 @@ pub trait TurnFinalizer: Send + Sync {
     async fn finalize_turn(&self, soul: SoulId, user_text: &str, assistant_text: &str);
 }
 
-/// Logged system-context lines assembled before the model runs (recall, etc.).
+/// Logged System Context lines. The lane merges these into `ContextRegistry`
+/// (canonical keys, draw order) before the model runs.
 #[async_trait]
 pub trait TurnPrefetch: Send + Sync {
     async fn lines(

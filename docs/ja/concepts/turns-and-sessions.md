@@ -33,6 +33,30 @@
 5. イベントは `ene-session` にコミット（モデル可視 = ログ）。
 6. ライブイベントは `surface` または `detail` の深さで送出。
 
+### システムコンテキスト
+
+各ターン、`ene-kernel::ContextRegistry` が固定順で System Context を組み、
+行ごとに `context/system_message`（`source_key` が安定名）としてログします。
+対話レーンは `platform_contract` とフォールバックの `identity_kernel` を持ち、
+残りはそのターンで `ene-core` が載せます:
+
+| キー | 中身 |
+|---|---|
+| `platform_contract` | 出力契約と安全規則 |
+| `identity_kernel` | キャラクターパッケージのペルソナ（あれば） |
+| `character_state` | 感情の語彙（PAD 数値は出さない） |
+| `memory.semantic` | この発話に対するランク付き想起 |
+| `memory.user_profile` | 常設のプロフィール / 好み |
+| `memory.commitments` | 未完了の約束 |
+| `skills.active` | 導入済みスキルの名前と説明 |
+| `mcp.resources` | `<workspace>/mcp-context/` のスナップショット |
+| `inner_recent` | 直近のモデル可視な内面 |
+| `interruption_note` | 中断の直後だけ |
+| `delegation.active` | created / queued / running の公開ジョブ |
+
+空のロードはキーごと省きます。ロード失敗時は直前の有効なペルソナを残します。
+セッションログを再生すると、同じモデル可視面が再構築できます。
+
 シグネチャは `ene-kernel` と `ene-session` の rustdoc にあります。
 
 ## イベント

@@ -32,9 +32,11 @@
 
 ## メモリの想起
 
-各ターン、`ene-companion` の想起は title/content（FTS）に salience・新しさ・
-アクセス回数を足して検索します。結果はカーネルのプロンプトへ入ります。
-読んだメモリは `access_count` が上がります。
+各ターン、`ene-companion` の想起は title/content に salience・新しさ、さらに
+クエリベクトルがあるときは埋め込みの cosine を足して検索します。ヒットは
+`ene-kernel::ContextRegistry` の `memory.semantic` に載ります。常設の
+プロフィールと好みは `memory.user_profile`、未完了の約束は
+`memory.commitments` です。読んだメモリは `access_count` が上がります。
 
 ## 忘却
 

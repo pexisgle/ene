@@ -577,24 +577,34 @@ impl CompanionStore {
                AND (scope = 'shared' OR soul_id = ?1)
              ORDER BY last_access DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![soul_id.to_string(), limit as i64], |row| {
-            let title: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            Ok((title, content))
-        })?;
-        let mut notes = Vec::new();
-        for row in rows {
-            let (title, content) = row?;
-            if title.trim().is_empty() && content.trim().is_empty() {
-                continue;
-            }
-            notes.push(if content.trim().is_empty() {
-                title
-            } else {
-                format!("{title}: {content}")
-            });
+        collect_titled_notes(
+            stmt.query_map(params![soul_id.to_string(), limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?,
+        )
+    }
+
+    pub fn open_commitments(
+        &self,
+        soul_id: SoulId,
+        limit: usize,
+    ) -> Result<Vec<String>, CompanionError> {
+        if limit == 0 {
+            return Ok(Vec::new());
         }
-        Ok(notes)
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT title, content FROM memories
+             WHERE forgotten = 0 AND superseded_by IS NULL
+               AND kind = 'commitment'
+               AND (scope = 'shared' OR soul_id = ?1)
+             ORDER BY last_access DESC LIMIT ?2",
+        )?;
+        collect_titled_notes(
+            stmt.query_map(params![soul_id.to_string(), limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?,
+        )
     }
 
     pub fn decay_salience(&self, kind: MemoryKind, factor: f32) -> Result<(), CompanionError> {
@@ -849,6 +859,32 @@ fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
         expires_at: row.get(14)?,
         forgotten: row.get::<_, i32>(15)? != 0,
     })
+}
+
+fn collect_titled_notes(
+    rows: rusqlite::MappedRows<
+        '_,
+        impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, String)>,
+    >,
+) -> Result<Vec<String>, CompanionError> {
+    let mut notes = Vec::new();
+    for row in rows {
+        let (title, content) = row?;
+        if let Some(note) = titled_note(&title, &content) {
+            notes.push(note);
+        }
+    }
+    Ok(notes)
+}
+
+fn titled_note(title: &str, content: &str) -> Option<String> {
+    if title.trim().is_empty() && content.trim().is_empty() {
+        None
+    } else if content.trim().is_empty() {
+        Some(title.to_owned())
+    } else {
+        Some(format!("{title}: {content}"))
+    }
 }
 
 fn sql_id(idx: usize, err: impl std::fmt::Display) -> rusqlite::Error {

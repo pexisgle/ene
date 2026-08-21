@@ -36,9 +36,11 @@ candidates wait in the pending queue. Resolve them through
 
 ## How memories are recalled
 
-Each turn, recall in `ene-companion` searches title/content (FTS) plus
-salience, recency, and access count. Results are injected into the kernel
-prompt. Reading a memory bumps `access_count`.
+Each turn, recall in `ene-companion` searches title/content plus salience,
+recency, and an embedding cosine term when a query vector is present. Hits
+land on `ene-kernel::ContextRegistry` as `memory.semantic`. Standing profile
+and preference notes are `memory.user_profile`; open commitments are
+`memory.commitments`. Reading a memory bumps `access_count`.
 
 ## Forgetting
 

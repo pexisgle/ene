@@ -667,7 +667,16 @@ async fn spawn_turn(
             },
         ));
     }
+    state.context.begin_turn();
+    if let Some(prefetch) = &state.prefetch {
+        let user = last_user_text(&state.store, state.session).unwrap_or_default();
+        let loaded = prefetch.lines(state.soul, state.session, &user).await;
+        state.context.apply_loaded(loaded);
+    }
     for (key, text) in state.context.assemble() {
+        if text.trim().is_empty() {
+            continue;
+        }
         begin.push(NewEvent::new(
             state.session,
             EventKind::ContextSystemMessage,
@@ -677,23 +686,6 @@ async fn spawn_turn(
                 source_key: key,
             },
         ));
-    }
-    if let Some(prefetch) = &state.prefetch {
-        let user = last_user_text(&state.store, state.session).unwrap_or_default();
-        for (key, text) in prefetch.lines(state.soul, state.session, &user).await {
-            if text.is_empty() {
-                continue;
-            }
-            begin.push(NewEvent::new(
-                state.session,
-                EventKind::ContextSystemMessage,
-                EventPayload::ContextSystemMessage {
-                    v: v1(),
-                    blocks: vec![Block::text(text)],
-                    source_key: key,
-                },
-            ));
-        }
     }
     begin.push(NewEvent::new(
         state.session,
