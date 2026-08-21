@@ -7,13 +7,52 @@ use async_trait::async_trait;
 use ene_plane::Sensitivity;
 use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use ene_session::SoulId;
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::str::FromStr;
 use std::sync::Arc;
 
+/// Optional query embedding for `memory.recall` (fail-closed when unset).
+#[async_trait]
+pub trait QueryEmbed: Send + Sync {
+    async fn embed_query(&self, text: &str) -> Option<Vec<f32>>;
+}
+
+/// Filled after the core daemon exists so memory tools can call `ai.tasks.embedding`.
+#[derive(Default)]
+pub struct SlotQueryEmbed {
+    inner: Mutex<Option<Arc<dyn QueryEmbed>>>,
+}
+
+impl SlotQueryEmbed {
+    pub fn bind(&self, embed: Arc<dyn QueryEmbed>) {
+        *self.inner.lock() = Some(embed);
+    }
+}
+
+#[async_trait]
+impl QueryEmbed for SlotQueryEmbed {
+    async fn embed_query(&self, text: &str) -> Option<Vec<f32>> {
+        let inner = self.inner.lock().clone();
+        match inner {
+            Some(embed) => embed.embed_query(text).await,
+            None => None,
+        }
+    }
+}
+
 /// Register harness memory tools (`memory.recall` on the surface,
 /// `memory.write_shared` on the job layer).
-pub fn register_memory_tools(registry: &ToolRegistry, store: Arc<CompanionStore>) {
+pub fn register_memory_tools(
+    registry: &ToolRegistry,
+    store: Arc<CompanionStore>,
+    embed: Option<Arc<dyn QueryEmbed>>,
+) {
+    let invoker = Arc::new(MemoryInvoker {
+        store,
+        bound_soul: None,
+        embed,
+    });
     registry.register_with(
         ToolDefinition {
             name: "memory.recall".to_owned(),
@@ -34,10 +73,7 @@ pub fn register_memory_tools(registry: &ToolRegistry, store: Arc<CompanionStore>
             timeout_ms: Some(5_000),
             sensitivity: Sensitivity::None,
         },
-        Arc::new(MemoryInvoker {
-            store: Arc::clone(&store),
-            bound_soul: None,
-        }),
+        Arc::clone(&invoker) as Arc<dyn ToolInvoke>,
     );
     registry.register_with(
         ToolDefinition {
@@ -61,10 +97,7 @@ pub fn register_memory_tools(registry: &ToolRegistry, store: Arc<CompanionStore>
             timeout_ms: Some(5_000),
             sensitivity: Sensitivity::High,
         },
-        Arc::new(MemoryInvoker {
-            store,
-            bound_soul: None,
-        }),
+        invoker as Arc<dyn ToolInvoke>,
     );
 }
 
@@ -73,6 +106,7 @@ struct MemoryInvoker {
     store: Arc<CompanionStore>,
     /// When set, `args.soul_id` is ignored and this soul is always used.
     bound_soul: Option<SoulId>,
+    embed: Option<Arc<dyn QueryEmbed>>,
 }
 
 #[async_trait]
@@ -85,14 +119,21 @@ impl ToolInvoke for MemoryInvoker {
                     .and_then(Value::as_str)
                     .ok_or("missing query")?;
                 let soul = self.resolve_soul(&args)?;
+                let query_vec = if let Some(embed) = &self.embed {
+                    embed.embed_query(query).await
+                } else {
+                    None
+                };
                 let hits = self
                     .store
-                    .recall(
+                    .recall_ranked(
                         soul,
                         query,
                         8,
                         &chrono::Utc::now().to_rfc3339(),
                         recall_weights(&crate::config::RecallSettings::default()),
+                        query_vec.as_deref(),
+                        false,
                     )
                     .map_err(|err| err.to_string())?;
                 Ok(json!({

@@ -2,6 +2,7 @@ use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use ene_body::EmotionCue;
+use ene_companion::QueryEmbed;
 use ene_kernel::{SessionId, SoulId, TurnPrefetch};
 use ene_plugin_ipc::{EmbedRequest, ProviderAuth};
 
@@ -21,6 +22,28 @@ impl RecallPrefetch {
             core: Arc::downgrade(core),
             classify,
         }
+    }
+}
+
+/// Query embedder used by `memory.recall` after the daemon Arc exists.
+pub struct SeamedQueryEmbed {
+    core: Weak<CoreDaemon>,
+}
+
+impl SeamedQueryEmbed {
+    #[must_use]
+    pub fn new(core: &Arc<CoreDaemon>) -> Self {
+        Self {
+            core: Arc::downgrade(core),
+        }
+    }
+}
+
+#[async_trait]
+impl QueryEmbed for SeamedQueryEmbed {
+    async fn embed_query(&self, text: &str) -> Option<Vec<f32>> {
+        let core = self.core.upgrade()?;
+        embed_query(&core, text).await
     }
 }
 
