@@ -1,7 +1,7 @@
 //! Surface chrome: chat, caption, spotlight, approvals.
 
 mod approvals;
-mod caption;
+pub(crate) mod caption;
 mod chat;
 mod spotlight;
 
@@ -113,8 +113,14 @@ pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool
     }
 }
 
-pub fn show_caption(ctx: &egui::Context, state: &SurfaceUiState, font_size: f32) {
-    caption::show(ctx, state, font_size);
+pub fn show_caption(
+    ctx: &egui::Context,
+    state: &SurfaceUiState,
+    font_size: f32,
+    position: &str,
+    pinned: bool,
+) {
+    caption::show(ctx, state, font_size, position, pinned);
 }
 
 pub fn show_spotlight(ctx: &egui::Context, state: &mut SurfaceUiState) -> Option<SpotlightAction> {

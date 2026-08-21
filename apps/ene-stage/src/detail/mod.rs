@@ -782,7 +782,24 @@ fn show_voice(
     }
     ui.horizontal(|ui| {
         ui.label(i18n::fl("settings-caption-position"));
-        ui.text_edit_singleline(&mut local_settings.caption_position);
+        let current = if crate::surface::caption::POSITIONS
+            .contains(&local_settings.caption_position.as_str())
+        {
+            local_settings.caption_position.as_str()
+        } else {
+            "bottom"
+        };
+        egui::ComboBox::from_id_salt("caption-position")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for position in crate::surface::caption::POSITIONS {
+                    ui.selectable_value(
+                        &mut local_settings.caption_position,
+                        position.to_owned(),
+                        position,
+                    );
+                }
+            });
     });
     ui.checkbox(
         &mut local_settings.caption_pinned,
