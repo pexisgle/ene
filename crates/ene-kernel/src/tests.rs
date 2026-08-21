@@ -250,7 +250,41 @@ async fn text_turn_is_logged_and_projected() {
 
 #[tokio::test]
 async fn extra_context_is_logged_as_system_source() {
-    let (_dir, store, lane, _model) = open_lane().await;
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(EchoModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: vec![(
+            "skills.catalog".to_owned(),
+            "Installed skills:\n- travel: trips".to_owned(),
+        )],
+        hooks: None,
+        router: None,
+    });
     lane.prompt("hello").await.unwrap();
     lane.wait_for_idle().await.unwrap();
     let events = store.load_events(lane.session_id(), 0).unwrap();
