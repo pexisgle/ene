@@ -84,7 +84,8 @@ pub struct McpTool {
     pub side_effects: Vec<String>,
 }
 
-/// In-process MCP stand-in for tests / offline boots.
+/// In-process MCP stand-in for registry unit tests. Process acceptance uses
+/// `ene-tool-mcp` plus a real stdio server.
 #[derive(Debug, Default)]
 pub struct ScriptedMcp {
     replies: parking_lot::Mutex<HashMap<String, Value>>,
