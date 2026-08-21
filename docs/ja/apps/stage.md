@@ -43,7 +43,8 @@ CCv3 エディタはありません。
 です。常駐させたい場合は `detached` にします。
 
 チャットは **未設定** から始まります。詳細 → Conversation で `ai.tasks.chat`
-を束縛してください。エンジンや GGUF は Connections のプロバイダ資産です。
+を束縛してください。モデル一覧はスクロールとフィルタ付きなので、Apply core fields
+は画面外へ消えません。エンジンや GGUF は Connections のプロバイダ資産です。
 TTS/STT は `ai.tasks.tts` / `ai.tasks.stt` です。
 
 VAD/ASR/TTS はコアが持ちます。Stage は `POST /sessions/{id}/listen` でマイク

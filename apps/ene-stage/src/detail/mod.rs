@@ -206,6 +206,7 @@ pub struct DetailUiState {
     pub provider_assets: Vec<ProviderAssetView>,
     pub provider_install_jobs: HashMap<String, String>,
     pub provider_models: Vec<String>,
+    pub provider_model_filter: String,
     pub mcp_json: String,
     pub schema_json: String,
     pub usage_text: String,
@@ -336,6 +337,20 @@ pub fn list_models_status(models: &[String], error: Option<&str>) -> String {
     } else {
         String::new()
     }
+}
+
+#[must_use]
+pub fn filtered_provider_models<'a>(models: &'a [String], query: &str) -> Vec<&'a str> {
+    let q = query.trim();
+    if q.is_empty() {
+        return models.iter().map(String::as_str).collect();
+    }
+    let needle = q.to_ascii_lowercase();
+    models
+        .iter()
+        .filter(|model| model.to_ascii_lowercase().contains(&needle))
+        .map(String::as_str)
+        .collect()
 }
 
 pub fn sync_search_tab(state: &mut DetailUiState) {
@@ -703,21 +718,10 @@ fn show_conversation(
     if state.ai_chat_key_set {
         ui.label(i18n::fl("settings-chat-key-set"));
     }
-    task_row(
-        ui,
-        i18n::fl("settings-classifier-plugin"),
-        &mut state.classifier_plugin,
-    );
-    task_row(
-        ui,
-        i18n::fl("settings-embedding-plugin"),
-        &mut state.embedding_plugin,
-    );
-    task_row(
-        ui,
-        i18n::fl("settings-proactive-plugin"),
-        &mut state.proactive_plugin,
-    );
+    if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
+        apply_ai_patch(state, client, rt, async_results);
+    }
+    ui.separator();
     if ui.button(i18n::fl("settings-list-models")).clicked() {
         let plugin = state.chat_plugin.clone();
         if plugin.is_empty() {
@@ -740,17 +744,51 @@ fn show_conversation(
             });
         }
     }
-    for model in &state.provider_models {
-        if ui
-            .selectable_label(state.chat_model == *model, model)
-            .clicked()
-        {
-            state.chat_model.clone_from(model);
+    if !state.provider_models.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(i18n::fl("settings-model-filter"));
+            ui.text_edit_singleline(&mut state.provider_model_filter);
+            ui.label(format!(
+                "{}: {}",
+                i18n::fl("settings-models"),
+                state.provider_models.len()
+            ));
+        });
+        let query = state.provider_model_filter.clone();
+        let mut picked = None;
+        egui::ScrollArea::vertical()
+            .id_salt("provider-models")
+            .max_height(180.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for model in filtered_provider_models(&state.provider_models, &query) {
+                    if ui
+                        .selectable_label(state.chat_model == model, model)
+                        .clicked()
+                    {
+                        picked = Some(model.to_owned());
+                    }
+                }
+            });
+        if let Some(model) = picked {
+            state.chat_model = model;
         }
     }
-    if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
-        apply_ai_patch(state, client, rt, async_results);
-    }
+    task_row(
+        ui,
+        i18n::fl("settings-classifier-plugin"),
+        &mut state.classifier_plugin,
+    );
+    task_row(
+        ui,
+        i18n::fl("settings-embedding-plugin"),
+        &mut state.embedding_plugin,
+    );
+    task_row(
+        ui,
+        i18n::fl("settings-proactive-plugin"),
+        &mut state.proactive_plugin,
+    );
 }
 
 fn show_voice(
@@ -1679,5 +1717,20 @@ mod tests {
             i18n::fl("settings-list-models-empty")
         );
         assert!(list_models_status(&["gpt".into()], None).is_empty());
+    }
+
+    #[test]
+    fn filtered_provider_models_keeps_apply_reachable_by_narrowing() {
+        let models = vec![
+            "openai/gpt-4o".into(),
+            "openai/gpt-4o-mini".into(),
+            "anthropic/claude".into(),
+        ];
+        assert_eq!(filtered_provider_models(&models, "").len(), 3);
+        assert_eq!(
+            filtered_provider_models(&models, "mini"),
+            vec!["openai/gpt-4o-mini"]
+        );
+        assert!(filtered_provider_models(&models, "nope").is_empty());
     }
 }

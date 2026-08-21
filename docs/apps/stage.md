@@ -46,7 +46,8 @@ Core lifetime defaults to `desktop.core_lifetime = app` (stop the child core
 when stage exits). Set `detached` to leave the core running.
 
 Chat starts **unconfigured**. Open Detail → Conversation and bind
-`ai.tasks.chat` from installed plugins. Engines and GGUF weights live under
+`ai.tasks.chat` from installed plugins. List models stays in a scrollable,
+filterable list so Apply core fields remains on screen. Engines and GGUF weights live under
 Connections → provider assets. TTS/STT are `ai.tasks.tts` / `ai.tasks.stt`.
 
 VAD/ASR/TTS belong to core. Stage relays microphone PCM on
