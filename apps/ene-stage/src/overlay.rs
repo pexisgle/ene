@@ -1,5 +1,6 @@
 //! Transparent always-on-top character overlay (wgpu, no egui).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,6 +12,19 @@ use winit::window::{Window, WindowId};
 use crate::avatar::CompanionAvatar;
 use crate::gpu::{self, GpuContext, GpuError};
 
+/// One GPU-resident body drawn in the overlay, keyed by soul.
+pub struct OverlaySlot {
+    pub soul_id: String,
+    pub avatar: CompanionAvatar,
+}
+
+/// Path + motions for one occupant the overlay should load.
+pub struct AvatarLoad {
+    pub soul_id: String,
+    pub path: PathBuf,
+    pub motions_dir: Option<PathBuf>,
+}
+
 /// Native overlay window that draws VRM into a transparent swapchain.
 pub struct OverlayWindow {
     pub window: Arc<Window>,
@@ -19,7 +33,7 @@ pub struct OverlayWindow {
     format: wgpu::TextureFormat,
     depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
-    pub avatar: Option<CompanionAvatar>,
+    pub slots: Vec<OverlaySlot>,
     pub transparent: bool,
     pub click_through: bool,
     pub collider_debug: bool,
@@ -46,7 +60,7 @@ impl OverlayWindow {
             format,
             depth,
             depth_view,
-            avatar: None,
+            slots: Vec::new(),
             transparent,
             click_through: transparent,
             collider_debug: false,
@@ -63,6 +77,35 @@ impl OverlayWindow {
     #[must_use]
     pub fn format(&self) -> wgpu::TextureFormat {
         self.format
+    }
+
+    #[must_use]
+    pub fn has_avatars(&self) -> bool {
+        !self.slots.is_empty()
+    }
+
+    #[must_use]
+    pub fn first_avatar(&self) -> Option<&CompanionAvatar> {
+        self.slots.first().map(|slot| &slot.avatar)
+    }
+
+    pub fn first_avatar_mut(&mut self) -> Option<&mut CompanionAvatar> {
+        self.slots.first_mut().map(|slot| &mut slot.avatar)
+    }
+
+    pub fn avatar_mut(&mut self, soul_id: &str) -> Option<&mut CompanionAvatar> {
+        self.slots
+            .iter_mut()
+            .find(|slot| slot.soul_id == soul_id)
+            .map(|slot| &mut slot.avatar)
+    }
+
+    pub fn avatar_or_first_mut(&mut self, soul_id: &str) -> Option<&mut CompanionAvatar> {
+        if self.slots.iter().any(|slot| slot.soul_id == soul_id) {
+            self.avatar_mut(soul_id)
+        } else {
+            self.first_avatar_mut()
+        }
     }
 
     pub fn resize(&mut self, gpu: &GpuContext, size: PhysicalSize<u32>) {
@@ -99,18 +142,44 @@ impl OverlayWindow {
         }
     }
 
-    pub fn load_avatar(
+    pub fn clear_avatars(&mut self) {
+        self.slots.clear();
+    }
+
+    pub fn load_avatars(
         &mut self,
         gpu: &GpuContext,
-        path: &std::path::Path,
-        motions_dir: Option<&std::path::Path>,
-    ) -> Result<(), crate::avatar::AvatarError> {
-        let mut avatar = CompanionAvatar::load(path, &gpu.device, &gpu.queue, self.format)?;
-        if let Some(dir) = motions_dir {
-            avatar.load_motions(dir);
+        specs: &[AvatarLoad],
+    ) -> Result<usize, crate::avatar::AvatarError> {
+        let mut loaded = Vec::new();
+        let mut last_err = None;
+        for spec in specs {
+            match load_one(gpu, self.format, &spec.path, spec.motions_dir.as_deref()) {
+                Ok(avatar) => loaded.push(OverlaySlot {
+                    soul_id: spec.soul_id.clone(),
+                    avatar,
+                }),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        path = %spec.path.display(),
+                        soul_id = %spec.soul_id,
+                        "VRM load failed"
+                    );
+                    last_err = Some(err);
+                }
+            }
         }
-        self.avatar = Some(avatar);
-        Ok(())
+        self.slots = loaded;
+        if self.slots.is_empty() {
+            return Err(last_err.unwrap_or_else(|| {
+                crate::avatar::AvatarError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no avatar paths",
+                ))
+            }));
+        }
+        Ok(self.slots.len())
     }
 
     pub fn tick_and_render(
@@ -118,18 +187,21 @@ impl OverlayWindow {
         gpu: &GpuContext,
         look_at: Option<Vec3>,
         visemes: Option<ene_vrm::VisemeWeights>,
+        speaking_soul: Option<&str>,
     ) -> Result<(), OverlayError> {
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
-        if let Some(avatar) = self.avatar.as_mut() {
+        for slot in &mut self.slots {
             if let Some(target) = look_at {
-                avatar.set_look_at_target(target);
+                slot.avatar.set_look_at_target(target);
             }
-            if let Some(weights) = visemes {
-                avatar.apply_viseme(weights);
+            if speaking_soul.is_some_and(|id| id == slot.soul_id)
+                && let Some(weights) = visemes
+            {
+                slot.avatar.apply_viseme(weights);
             }
-            avatar.tick(dt);
+            slot.avatar.tick(dt);
         }
         let frame = gpu::acquire_frame(&self.surface).map_err(OverlayError::Surface)?;
         let view = frame
@@ -140,16 +212,7 @@ impl OverlayWindow {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ene-stage.overlay"),
             });
-        if let Some(avatar) = self.avatar.as_mut() {
-            avatar.render_to_texture(
-                &gpu.queue,
-                &mut encoder,
-                &view,
-                &self.depth_view,
-                self.config.width,
-                self.config.height,
-            )?;
-        } else {
+        if self.slots.is_empty() {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ene-stage.overlay.clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -166,26 +229,71 @@ impl OverlayWindow {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+        } else {
+            for (index, slot) in self.slots.iter_mut().enumerate() {
+                slot.avatar.render_to_texture(
+                    &gpu.queue,
+                    &mut encoder,
+                    &view,
+                    &self.depth_view,
+                    self.config.width,
+                    self.config.height,
+                    index == 0,
+                )?;
+            }
         }
-        if self.collider_debug
-            && let Some(avatar) = self.avatar.as_ref()
-            && let Some(camera_uniform) = avatar.debug_camera_uniform()
-        {
+        if self.collider_debug {
             self.debug.clear();
-            avatar.push_spring_collider_wires(&mut self.debug);
-            self.debug.render(
-                &gpu.device,
-                &gpu.queue,
-                &mut encoder,
-                &view,
-                &self.depth_view,
-                &camera_uniform,
-            );
+            let mut camera_uniform = None;
+            for slot in &self.slots {
+                slot.avatar.push_spring_collider_wires(&mut self.debug);
+                if camera_uniform.is_none() {
+                    camera_uniform = slot.avatar.debug_camera_uniform();
+                }
+            }
+            if let Some(camera_uniform) = camera_uniform {
+                self.debug.render(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut encoder,
+                    &view,
+                    &self.depth_view,
+                    &camera_uniform,
+                );
+            }
         }
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
     }
+}
+
+fn load_one(
+    gpu: &GpuContext,
+    format: wgpu::TextureFormat,
+    path: &Path,
+    motions_dir: Option<&Path>,
+) -> Result<CompanionAvatar, crate::avatar::AvatarError> {
+    let mut avatar = CompanionAvatar::load(path, &gpu.device, &gpu.queue, format)?;
+    if let Some(dir) = motions_dir {
+        avatar.load_motions(dir);
+    }
+    Ok(avatar)
+}
+
+/// World X offset so concurrent bodies stand apart around `base`.
+#[must_use]
+pub fn overlay_slot_offset(index: usize, count: usize, base: [f32; 3]) -> [f32; 3] {
+    if count <= 1 {
+        return base;
+    }
+    let last = count.saturating_sub(1);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "overlay body count is 1..=2; indices fit f32 exactly"
+    )]
+    let t = index as f32 / last as f32;
+    [base[0] + (t - 0.5) * 0.55, base[1], base[2]]
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -194,4 +302,19 @@ pub enum OverlayError {
     Surface(String),
     #[error(transparent)]
     Avatar(#[from] crate::avatar::AvatarError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overlay_slot_offset;
+
+    #[test]
+    fn overlay_slot_offsets_place_two_bodies_apart() {
+        let base = [0.0, 0.1, 0.0];
+        let left = overlay_slot_offset(0, 2, base);
+        let right = overlay_slot_offset(1, 2, base);
+        assert!(right[0] > left[0]);
+        assert_eq!(left[1], base[1]);
+        assert_eq!(overlay_slot_offset(0, 1, base), base);
+    }
 }

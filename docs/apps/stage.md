@@ -18,7 +18,7 @@ SDK.
 
 | Window | Depth | Contents |
 |---|---|---|
-| Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Click-through is System → Overlay click-through (on by default). Esc quits. A/D switch avatar bodies; W/S change motion. F3 toggles spring-bone collider wireframes. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
+| Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Click-through is System → Overlay click-through (on by default). Esc quits. Up to two VRM bodies stay on the overlay at once (`body.render.max_concurrent`, default 2). A/D switch which soul the chat session targets; W/S change motion on the active body. F3 toggles spring-bone collider wireframes. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
 | Chat (F2) | `surface` | Prompt / Steer / Follow-up (hover for meaning), approvals (Allow / Always / Deny), ask-user, mic PCM relay, Detail button (same as the tray). Status wraps on its own line so setup errors stay readable in a narrow window. |
 | Caption | `surface` | Spoken captions. Voice → Caption position (`top` / `bottom` / `left` / `right`) places the window; Pin caption stops it being dragged. Provider and HTTP errors stay on the chat status line (wrapped), not as spoken captions. The overlay closes when the turn ends. Long spoken lines wrap inside the overlay. |
 | Spotlight (Alt+Space) | local | Jump to detail sections, mic, quit. Choosing a command closes the palette. If the OS keeps Alt+Space, use Voice → Open Spotlight |
@@ -32,7 +32,9 @@ on winit. The process talks to the core only through `ene-api`
 Characters are `.enechar` packages. `GET /characters` is install inventory;
 playable companions are souls (`GET /souls` / `GET /stage` occupants).
 `body_ref` is a body UUID. Stage imports the bundled Alicia VRM as
-`char.alicia@1.0.0` and activates it over HTTP (`soul_from_install`). CCv3/PNG/CHARX
+`char.alicia@1.0.0` and a second copy as `char.alicia-b@1.0.0` so two
+occupants can render at once, then activates them over HTTP
+(`soul_from_install`). CCv3/PNG/CHARX
 are conversion inputs only — there is no CCv3 editor. Companion export and Work
 session export open a save dialog in Documents or Downloads with a typed file name
 (`.enechar` / `.json`).
@@ -72,3 +74,23 @@ VAD/ASR/TTS belong to core. Stage relays microphone PCM on
 
 Audio device relay, approval popups, tray, and OS notifications (`notify.hint`)
 are stage's client-side jobs; the core owns policy and the live bus.
+
+## Two companions
+
+Core boot seeds two souls. Stage then installs the shipped Alicia VRM
+(`assets/characters/Alicia/AliciaSolid.vrm`) twice under distinct package ids
+so the overlay can draw two bodies. Each soul keeps its own session; history
+does not leak across them. A/D retargets chat to the other soul without
+unloading the other mesh.
+
+### Automated vs manual
+
+CI and the Cloud Agent use software Vulkan (lavapipe):
+`DISPLAY=:1 WGPU_BACKEND=vulkan`. Automated coverage is:
+
+- `ene-vrm` parses and, when a wgpu adapter exists, GPU-loads the shipped Alicia VRM
+- HTTP: two souls keep isolated sessions; importing Alicia exposes `avatar_path`
+- Overlay layout places two slots apart; `ene-stage` writes the minimal GLB fixture
+
+Manual check: run `ene-stage`, confirm two VRM bodies on the overlay, and talk
+to each via A/D. That GUI walkthrough is not part of CI.

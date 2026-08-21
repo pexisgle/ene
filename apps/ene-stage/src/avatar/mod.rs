@@ -402,6 +402,7 @@ impl CompanionAvatar {
         depth_view: &wgpu::TextureView,
         width: u32,
         height: u32,
+        clear: bool,
     ) -> Result<(), AvatarError> {
         #[expect(
             clippy::cast_precision_loss,
@@ -422,6 +423,7 @@ impl CompanionAvatar {
             &self.camera,
             &uniform,
             true,
+            clear,
         );
         Ok(())
     }
@@ -495,10 +497,24 @@ fn discover_motions(dir: &Path) -> Vec<(String, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn unknown_expression_is_not_stored() {
-        // Construction requires a GPU; this only checks the JSON matcher does not panic.
         let value = serde_json::json!({ "type": "body.posture", "name": "sit" });
         assert_eq!(value["type"], "body.posture");
+    }
+
+    #[test]
+    fn default_minimal_vrm_writes_parseable_glb() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("minimal.vrm");
+        CompanionAvatar::write_default_minimal_vrm(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"glTF"));
+        assert!(
+            bytes.windows(8).any(|window| window == b"VRMC_vrm"),
+            "minimal fixture must declare VRMC_vrm"
+        );
     }
 }

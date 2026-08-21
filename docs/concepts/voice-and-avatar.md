@@ -37,6 +37,9 @@ Cues are rate-limited so the avatar does not flicker.
 - **Expressions** — VRM blend shapes plus procedural blink / gaze / mouth
 - **Look-at** — cursor tracking within configured ranges
 - **Spring bones** — hair / cloth
+- **Concurrent bodies** — the overlay composites up to
+  `body.render.max_concurrent` meshes (default 2). Visemes apply to the
+  active soul; A/D retargets the chat session without unloading the other body.
 
 The supported rendering API is documented in
 [ene-vrm API reference](../reference/api/ene-vrm.md).

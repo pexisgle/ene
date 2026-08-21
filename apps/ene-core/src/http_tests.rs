@@ -1285,6 +1285,152 @@ async fn boot_seeds_two_souls_and_session_ops() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn two_souls_keep_isolated_sessions_and_stage_occupants() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    assert!(
+        souls.items.len() >= 2,
+        "boot must present two companions, got {}",
+        souls.items.len()
+    );
+    let soul_a = souls.items[0].id.clone();
+    let soul_b = souls.items[1].id.clone();
+    assert_ne!(soul_a, soul_b);
+
+    let session_a = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_a.clone(),
+            title: Some("alpha lane".into()),
+        })
+        .await
+        .unwrap();
+    let session_b = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_b.clone(),
+            title: Some("beta lane".into()),
+        })
+        .await
+        .unwrap();
+    assert_ne!(session_a.id, session_b.id);
+    assert_eq!(session_a.soul_id, soul_a);
+    assert_eq!(session_b.soul_id, soul_b);
+
+    client
+        .send_message(
+            &session_a.id,
+            &MessageRequest {
+                text: "token-mango-unique".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session_a.id).await;
+    client
+        .send_message(
+            &session_b.id,
+            &MessageRequest {
+                text: "token-kiwi-unique".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session_b.id).await;
+
+    let hist_a = client.history(&session_a.id, "surface").await.unwrap();
+    let hist_b = client.history(&session_b.id, "surface").await.unwrap();
+    let texts_a: Vec<&str> = hist_a.messages.iter().map(|m| m.text.as_str()).collect();
+    let texts_b: Vec<&str> = hist_b.messages.iter().map(|m| m.text.as_str()).collect();
+    assert!(
+        texts_a
+            .iter()
+            .any(|text| text.contains("token-mango-unique")),
+        "soul A history: {texts_a:?}"
+    );
+    assert!(
+        !texts_a
+            .iter()
+            .any(|text| text.contains("token-kiwi-unique")),
+        "soul A leaked B: {texts_a:?}"
+    );
+    assert!(
+        texts_b
+            .iter()
+            .any(|text| text.contains("token-kiwi-unique")),
+        "soul B history: {texts_b:?}"
+    );
+    assert!(
+        !texts_b
+            .iter()
+            .any(|text| text.contains("token-mango-unique")),
+        "soul B leaked A: {texts_b:?}"
+    );
+
+    let stage = client.stage().await.unwrap();
+    assert!(
+        stage.occupants.iter().any(|item| item.soul_id == soul_a),
+        "stage occupants: {:?}",
+        stage.occupants
+    );
+    assert!(
+        stage.occupants.iter().any(|item| item.soul_id == soul_b),
+        "stage occupants: {:?}",
+        stage.occupants
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn import_shipped_alicia_vrm_exposes_parseable_avatar() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/characters/Alicia/AliciaSolid.vrm");
+    assert!(
+        path.is_file(),
+        "shipped AliciaSolid.vrm is required for VRM acceptance"
+    );
+    let vrm = std::fs::read(&path).unwrap();
+    assert!(vrm.starts_with(b"glTF"));
+    assert!(
+        vrm.windows(8).any(|window| window == b"VRMC_vrm"),
+        "shipped Alicia VRM must declare VRMC_vrm"
+    );
+
+    let (_dir, client, _core, server) = boot_server().await;
+    let mut files = sample_char_files();
+    files.insert(
+        "body/body.toml".into(),
+        b"[body]\nkind = \"vrm\"\navatar = \"avatar/model.vrm\"\n".to_vec(),
+    );
+    files.insert("body/avatar/model.vrm".into(), vrm);
+    let zip = pack_archive(&stamp_digest(files)).unwrap();
+    let imported = client
+        .import_character_archive_b64(&base64::engine::general_purpose::STANDARD.encode(&zip))
+        .await
+        .unwrap();
+    let soul_id = imported.soul_id.expect("soul");
+    let soul = client.get_soul(&soul_id).await.unwrap();
+    let avatar = soul.avatar_path.expect("avatar_path");
+    let installed = std::fs::read(&avatar).unwrap();
+    assert!(installed.starts_with(b"glTF"));
+    assert!(installed.windows(8).any(|window| window == b"VRMC_vrm"));
+    let stage = client.stage().await.unwrap();
+    assert!(
+        stage
+            .occupants
+            .iter()
+            .any(|occupant| occupant.soul_id == soul_id && occupant.avatar_path.is_some()),
+        "stage occupants: {:?}",
+        stage.occupants
+    );
+    server.shutdown().await;
+}
+
 fn sample_char_files() -> BTreeMap<String, Vec<u8>> {
     let mut files = BTreeMap::new();
     files.insert(
