@@ -1,5 +1,7 @@
 //! Bundled `tool.app` plugin: screenshot, windows, clipboard, input.
 
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
+
 mod logic;
 
 use tracing_subscriber::EnvFilter;

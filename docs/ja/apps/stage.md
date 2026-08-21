@@ -52,7 +52,8 @@ CCv3 エディタはありません。Companion の書き出しと Work のセ�
 プラグインの有効化は `plugins.profile`（`desktop` / `minimal` / `headless`）で、
 `plugins.list` の個別マップはありません。API キーはボールトに置きます。
 Connections の MCP は名前・ローカルコマンドまたは HTTP・引数/URL のフォームで
-編集し、System もプラグインプロファイルと承認モードを同じように適用します。
+編集し、プラグイン設定は `GET /api/v1/plugins/{id}/config` で host API と同じ
+schema / validation を使います（秘密は名前だけ）。System もプラグインプロファイルと承認モードを同じように適用します。
 JSON の取り込み / 書き出しは詳細用に折りたたみます。既に動いているコアへは
 `ENE_API_URL` / `ENE_API_TOKEN` で接続します。
 

@@ -364,6 +364,36 @@ impl StageApp {
                 Ok(items) => self.detail.plugins = items,
                 Err(err) => self.detail.core_status = err,
             },
+            AsyncOutcome::LoadPluginConfig(result) => match result {
+                Ok(view) => {
+                    detail::apply_plugin_config_view(&mut self.detail, view);
+                    self.detail.connections_status.clear();
+                }
+                Err(err) => self.detail.connections_status = err,
+            },
+            AsyncOutcome::ValidatePluginConfig(result)
+            | AsyncOutcome::ApplyPluginConfig(result) => match result {
+                Ok(view) => {
+                    self.detail.connections_status = detail::plugin_config_status(&view);
+                }
+                Err(err) => self.detail.connections_status = err,
+            },
+            AsyncOutcome::PluginConfigOptions(result) => match result {
+                Ok(view) => {
+                    self.detail.plugin_config_options = if view.fallback {
+                        view.error
+                            .unwrap_or_else(|| i18n::fl("plugins-config-options-fallback"))
+                    } else {
+                        view.options
+                            .iter()
+                            .map(|opt| format!("{} ({})", opt.label, opt.id))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    self.detail.connections_status.clear();
+                }
+                Err(err) => self.detail.connections_status = err,
+            },
             AsyncOutcome::RestartPlugin { result, .. }
             | AsyncOutcome::SetActiveProviderAsset { result, .. } => {
                 if let Err(err) = result {

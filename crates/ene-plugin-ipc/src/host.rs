@@ -19,6 +19,7 @@ pub struct HostConn<S> {
     next_id: u64,
     negotiated: Negotiated,
     max_frame: usize,
+    has_config: bool,
 }
 
 impl<S> std::fmt::Debug for HostConn<S> {
@@ -58,6 +59,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
                     next_id: 1,
                     negotiated: body.protocols,
                     max_frame,
+                    has_config: body.has_config,
                 })
             }
             Message::HelloReject { body } => Err(IpcError::Rejected(body.reason)),
@@ -349,6 +351,96 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
         .await?;
         match self.recv().await? {
             Message::StreamOpened { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    #[must_use]
+    pub fn has_config(&self) -> bool {
+        self.has_config
+    }
+
+    /// Fetch the plugin settings schema. Plugins without config skip the RPC.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IpcError`] when the plugin replies with the wrong kind.
+    pub async fn config_schema(&mut self) -> Result<crate::PluginConfigSchema, IpcError> {
+        if !self.has_config {
+            return Ok(crate::PluginConfigSchema::default());
+        }
+        let id = self.alloc();
+        self.send(&Message::PluginConfigSchema { id }).await?;
+        match self.recv().await? {
+            Message::PluginConfigSchemaResult { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    /// Validate candidate settings without applying them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IpcError`] when the plugin replies with the wrong kind.
+    pub async fn config_validate(
+        &mut self,
+        values: serde_json::Value,
+    ) -> Result<crate::PluginConfigValidateResult, IpcError> {
+        if !self.has_config {
+            return Ok(crate::PluginConfigValidateResult::ok());
+        }
+        let id = self.alloc();
+        self.send(&Message::PluginConfigValidate { id, values })
+            .await?;
+        match self.recv().await? {
+            Message::PluginConfigValidateResult { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    /// Look up dynamic options for one field. Failure degrades to a free-text fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IpcError`] only on a protocol mismatch, not when the plugin
+    /// cannot enumerate options.
+    pub async fn config_options(
+        &mut self,
+        field: &str,
+    ) -> Result<crate::PluginConfigOptionsResult, IpcError> {
+        if !self.has_config {
+            return Ok(crate::PluginConfigOptionsResult::unsupported());
+        }
+        let id = self.alloc();
+        self.send(&Message::PluginConfigOptions {
+            id,
+            field: field.to_owned(),
+        })
+        .await?;
+        match self.recv().await? {
+            Message::PluginConfigOptionsResult { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    /// Apply settings after a successful validate. The host keeps the previous
+    /// effective config when `ok` is false.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IpcError`] when the plugin replies with the wrong kind.
+    pub async fn config_apply(
+        &mut self,
+        values: serde_json::Value,
+    ) -> Result<crate::PluginConfigApplyResult, IpcError> {
+        if !self.has_config {
+            return Ok(crate::PluginConfigApplyResult::ok(false));
+        }
+        let id = self.alloc();
+        self.send(&Message::PluginConfigApply { id, values })
+            .await?;
+        match self.recv().await? {
+            Message::PluginConfigApplyResult { id: got, body } if got == id => Ok(body),
             other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
         }
     }

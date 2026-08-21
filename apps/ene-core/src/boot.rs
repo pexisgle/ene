@@ -374,7 +374,9 @@ impl CoreDaemon {
             plugins.ipc.max_frame_bytes,
             plugins.policy.allow_unverified,
         );
-        let rows = crate::plugin_profile::collect_rows(&self.data_dir, &self.work, &ai, &plugins);
+        let mut rows =
+            crate::plugin_profile::collect_rows(&self.data_dir, &self.work, &ai, &plugins);
+        crate::plugin_profile::overlay_persisted_config(&mut rows, &self.data_dir, &self.vault);
         let report = self.supervisor.apply_profile(&rows).await;
         if !report.waiting.is_empty() {
             tracing::warn!(waiting = ?report.waiting, "plugin profile rows waiting");

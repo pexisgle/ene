@@ -112,14 +112,14 @@ host connectors.
 
 | Old action | Current | Status | Notes |
 |---|---|---|---|
-| `screenshot` / `capture_window` | `app.screenshot` | Current / Missing | CLI cascade (grim / ImageMagick / …). Portal-first + capability detection: [#800](https://github.com/pexisgle/ene/issues/800) |
-| `list_windows` | `app.window_list` | Current / Missing | wmctrl / hyprctl / sway. Same capability matrix: [#800](https://github.com/pexisgle/ene/issues/800) |
+| `screenshot` / `capture_window` | `app.screenshot` | Current | Portal-first on Wayland, CLI fallback, GDI on Windows. Capture JSON includes size/scale/permission. See [App platform matrix](../guides/tools/app-platform.md) |
+| `list_windows` | `app.window_list` | Current | wmctrl / hyprctl / sway. GNOME/KDE Wayland reports unsupported via `app.capabilities` |
 | `get_active_window` | `app.active_window` | Current | Observation source when proactive screen is enabled |
-| `list_monitors` | — | Missing | Scale/size on capture: [#800](https://github.com/pexisgle/ene/issues/800) |
-| `clipboard_read` / `write` | `app.clipboard_get` / `app.clipboard_set` | Current / Missing | Native backend first, CLI fallback: [#800](https://github.com/pexisgle/ene/issues/800) |
-| `mouse_click` / `type_text` / `press_key` / `key_combo` | `app.click` / `app.type` / `app.key` | Current | `side_effects: ["input"]`; not on the surface schema |
-| `mouse_move` / `drag` / `scroll` / `focus_window` | — | Dropped / platform-limited | Do not advertise GNOME/KDE Wayland input that cannot be guaranteed ([#800](https://github.com/pexisgle/ene/issues/800)) |
-| Portal session lifecycle | — | Missing | Waiting / denied / cancelled / unsupported: [#800](https://github.com/pexisgle/ene/issues/800) |
+| `list_monitors` | `app.list_monitors` | Current | Scale/size aligned with capture when the compositor exposes layout |
+| `clipboard_read` / `write` | `app.clipboard_get` / `app.clipboard_set` | Current | Native (`arboard`) first, CLI fallback flagged in the payload |
+| `mouse_click` / `type_text` / `press_key` / `key_combo` | `app.click` / `app.type` / `app.key` | Current | Advertised only on X11/Windows. `side_effects: ["input"]`; not on the surface schema |
+| `mouse_move` / `drag` / `scroll` / `focus_window` | — | Dropped / platform-limited | GNOME/KDE Wayland input is not advertised |
+| Portal session lifecycle | `app.screenshot` error `code` | Current | `waiting` / `denied` / `cancelled` / `unsupported` / `unavailable` |
 
 ### `utility` / `calc` / `random` (reclassified, D-25)
 

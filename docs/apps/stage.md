@@ -55,7 +55,9 @@ Core PATCH keys
 are `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins`.
 Plugin enablement is `plugins.profile` (`desktop` / `minimal` / `headless`),
 not a `plugins.list` map. API keys stay in the vault. Connections edits MCP
-servers as a form (name, local command or HTTP, args/URL); System applies
+servers as a form (name, local command or HTTP, args/URL) and loads plugin
+config from `GET /api/v1/plugins/{id}/config` (same schema and validation as
+the host API; secrets are names only). System applies
 plugin profile and approval mode the same way. JSON import/export stays folded
 for advanced use. Attach to an already-running core with `ENE_API_URL` /
 `ENE_API_TOKEN`.

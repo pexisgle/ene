@@ -30,6 +30,7 @@
 - [Write a tool](guides/tools/write-a-tool.md)
 - [MCP servers](guides/tools/mcp-servers.md)
 - [Built-in tools](guides/tools/builtin-tools.md)
+- [App platform matrix](guides/tools/app-platform.md)
 
 # Reference
 

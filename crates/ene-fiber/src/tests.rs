@@ -656,3 +656,63 @@ fn net_fetch_runs_after_grant() {
     assert_eq!(value["status"], 200);
     assert_eq!(value["text"], "ok");
 }
+
+#[test]
+fn plugin_config_values_omit_secrets() {
+    let (_dir, sup) = supervisor();
+    let mut r = row("r-util", "tool.utility", &[]);
+    r.config = json!({"model": "keep", "api_key": "sk-live"});
+    let _ = sup.activate(&r).unwrap();
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "model": { "type": "string" },
+            "api_key": { "type": "string", "x-ene-secret": true }
+        }
+    });
+    let values = sup.plugin_config_values("r-util", &schema);
+    assert_eq!(values["model"], "keep");
+    assert!(values.get("api_key").is_none());
+    assert!(!format!("{values:?}").contains("sk-live"));
+}
+
+#[test]
+fn commit_applied_config_keeps_previous_on_failure() {
+    let rows = parking_lot::Mutex::new(std::collections::HashMap::from([(
+        "r-util".to_owned(),
+        row("r-util", "tool.utility", &[]),
+    )]));
+    rows.lock().get_mut("r-util").unwrap().config = json!({"model": "keep"});
+    crate::supervisor::commit_applied_config(
+        &rows,
+        "r-util",
+        json!({"model": "new"}),
+        false,
+        json!({"model": "keep"}),
+    );
+    assert_eq!(rows.lock().get("r-util").unwrap().config["model"], "keep");
+    crate::supervisor::commit_applied_config(
+        &rows,
+        "r-util",
+        json!({"model": "new"}),
+        true,
+        json!({"model": "keep"}),
+    );
+    assert_eq!(rows.lock().get("r-util").unwrap().config["model"], "new");
+}
+
+#[tokio::test]
+async fn apply_without_session_keeps_previous_config() {
+    let (_dir, sup) = supervisor();
+    let mut r = row("r-util", "tool.utility", &[]);
+    r.config = json!({"model": "keep"});
+    let _ = sup.activate(&r).unwrap();
+    assert!(
+        sup.plugin_config_apply("r-util", json!({"model": "new"}))
+            .await
+            .is_err()
+    );
+    assert_eq!(sup.profile_row("r-util").unwrap().config["model"], "keep");
+    let schema = sup.plugin_config_schema("r-util").await.unwrap();
+    assert!(!schema.has_config);
+}
