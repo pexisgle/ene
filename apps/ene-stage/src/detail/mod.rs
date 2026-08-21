@@ -184,6 +184,7 @@ pub struct DetailUiState {
     pub chat_base_url: String,
     pub chat_api_key: String,
     pub ai_chat_key_set: bool,
+    pub providers: Value,
     pub classifier_plugin: String,
     pub embedding_plugin: String,
     pub proactive_plugin: String,
@@ -266,6 +267,10 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
         .get("ai_chat_key_set")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    state.providers = effective
+        .get("providers")
+        .cloned()
+        .unwrap_or(Value::Array(Vec::new()));
     state.classifier_plugin = nested_string(effective, &["ai", "tasks", "classifier", "plugin"]);
     state.embedding_plugin = nested_string(effective, &["ai", "tasks", "embedding", "plugin"]);
     state.proactive_plugin = nested_string(effective, &["ai", "tasks", "proactive", "plugin"]);
@@ -282,7 +287,12 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
         ("stt", ["ai", "tasks", "stt", "plugin"]),
     ] {
         let plugin = nested_string(effective, &path);
-        if plugin.is_empty() || plugin == "echo" {
+        let missing_plugin = plugin.is_empty() || plugin == "echo";
+        let missing_chat_model = name == "chat"
+            && nested_string(effective, &["ai", "tasks", "chat", "model"]).is_empty();
+        let missing_chat_key =
+            name == "chat" && plugin_needs_key(&plugin, &state.providers) && !state.ai_chat_key_set;
+        if missing_plugin || missing_chat_model || missing_chat_key {
             state.unconfigured.push(name.to_owned());
         }
     }
@@ -314,6 +324,55 @@ pub fn default_provider_assets_plugin(chat_plugin: &str, plugins: &[PluginView])
         .find(|plugin| is_provider_plugin_id(&plugin.plugin))
         .map(|plugin| plugin.plugin.clone())
         .unwrap_or_default()
+}
+
+#[must_use]
+pub fn plugin_needs_key(plugin: &str, providers: &Value) -> bool {
+    providers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row.get("id").and_then(Value::as_str) == Some(plugin))
+        .and_then(|row| row.get("needs_key").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatSetupGap {
+    Plugin,
+    Model,
+    ApiKey,
+}
+
+#[must_use]
+pub fn chat_setup_gap(state: &DetailUiState) -> Option<ChatSetupGap> {
+    if state.chat_plugin.is_empty() || state.chat_plugin == "echo" {
+        return Some(ChatSetupGap::Plugin);
+    }
+    if state.chat_model.is_empty() {
+        return Some(ChatSetupGap::Model);
+    }
+    if plugin_needs_key(&state.chat_plugin, &state.providers) && !state.ai_chat_key_set {
+        return Some(ChatSetupGap::ApiKey);
+    }
+    None
+}
+
+#[must_use]
+pub fn chat_setup_status(gap: ChatSetupGap) -> String {
+    match gap {
+        ChatSetupGap::Plugin | ChatSetupGap::Model => i18n::fl("chat-unconfigured"),
+        ChatSetupGap::ApiKey => i18n::fl("chat-missing-key"),
+    }
+}
+
+#[must_use]
+pub fn home_chat_next_step(state: &DetailUiState) -> String {
+    if chat_setup_gap(state) == Some(ChatSetupGap::ApiKey) {
+        i18n::fl("home-next-chat-key")
+    } else {
+        i18n::fl("home-next-chat")
+    }
 }
 
 #[must_use]
@@ -468,9 +527,9 @@ fn show_home(
         state.plugins.len()
     ));
     ui.label(i18n::fl("home-fibers-hint"));
-    let chat_unconfigured = blocking_unconfigured(&state.unconfigured).contains(&"chat");
-    if chat_unconfigured {
-        ui.colored_label(egui::Color32::YELLOW, i18n::fl("home-next-chat"));
+    let required = blocking_unconfigured(&state.unconfigured);
+    if required.contains(&"chat") {
+        ui.colored_label(egui::Color32::YELLOW, home_chat_next_step(state));
         if ui.button(i18n::fl("detail-tab-conversation")).clicked() {
             state.select_tab(DetailTab::Conversation);
         }
@@ -717,6 +776,11 @@ fn show_conversation(
     });
     if state.ai_chat_key_set {
         ui.label(i18n::fl("settings-chat-key-set"));
+    } else if chat_setup_gap(state) == Some(ChatSetupGap::ApiKey) {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            i18n::fl("settings-chat-key-required"),
+        );
     }
     if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
         apply_ai_patch(state, client, rt, async_results);
@@ -1774,6 +1838,56 @@ mod tests {
         assert!(state.unconfigured.iter().any(|task| task == "stt"));
         assert!(blocking_unconfigured(&state.unconfigured).is_empty());
         assert!(optional_unconfigured(&state.unconfigured).contains(&"classifier"));
+    }
+
+    #[test]
+    fn openai_compat_without_key_is_not_chat_ready() {
+        let json = r#"{
+            "overlay": {},
+            "effective": {
+                "ai": {
+                    "tasks": {
+                        "chat": {
+                            "plugin": "provider.openai_compat",
+                            "model": "openai/gpt-4o-mini",
+                            "base_url": "https://example.invalid/v1"
+                        }
+                    }
+                },
+                "ai_chat_key_set": false,
+                "providers": [
+                    { "id": "provider.openai_compat", "needs_key": true },
+                    { "id": "provider.gguf", "needs_key": false }
+                ]
+            }
+        }"#;
+        let mut state = DetailUiState::default();
+        parse_core_fields(json, &mut state);
+        assert_eq!(chat_setup_gap(&state), Some(ChatSetupGap::ApiKey));
+        assert!(blocking_unconfigured(&state.unconfigured).contains(&"chat"));
+        assert_eq!(home_chat_next_step(&state), i18n::fl("home-next-chat-key"));
+    }
+
+    #[test]
+    fn gguf_without_key_is_chat_ready() {
+        let json = r#"{
+            "overlay": {},
+            "effective": {
+                "ai": {
+                    "tasks": {
+                        "chat": { "plugin": "provider.gguf", "model": "local.gguf" }
+                    }
+                },
+                "ai_chat_key_set": false,
+                "providers": [
+                    { "id": "provider.gguf", "needs_key": false }
+                ]
+            }
+        }"#;
+        let mut state = DetailUiState::default();
+        parse_core_fields(json, &mut state);
+        assert_eq!(chat_setup_gap(&state), None);
+        assert!(blocking_unconfigured(&state.unconfigured).is_empty());
     }
 
     #[test]

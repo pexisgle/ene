@@ -1290,6 +1290,7 @@ async fn finish_speech(
         LiveEvent::TurnEnded {
             turn_id: ctx.turn,
             outcome: "completed".to_owned(),
+            error: None,
         },
     );
     spawn_finalize(ctx, &speech_for_live);
@@ -1427,6 +1428,7 @@ async fn finish_interrupted(ctx: &TurnCtx, step_index: u32) -> Result<(), Kernel
         LiveEvent::TurnEnded {
             turn_id: ctx.turn,
             outcome: "interrupted".to_owned(),
+            error: None,
         },
     );
     Ok(())
@@ -1471,6 +1473,7 @@ async fn commit_turn_interrupted(
         LiveEvent::TurnEnded {
             turn_id: turn,
             outcome: "interrupted".to_owned(),
+            error: None,
         },
     );
     Ok(())
@@ -1483,25 +1486,10 @@ async fn commit_turn_failure(
     turn: TurnId,
     err: &KernelError,
 ) -> Result<(), KernelError> {
-    let speech = format!(
-        "The chat provider failed: {}",
-        truncate_chars(&err.to_string(), 400)
-    );
+    let detail = truncate_chars(&err.to_string(), 400);
     store
         .commit(Transaction {
             entries: vec![
-                NewEvent::new(
-                    session,
-                    EventKind::AssistantMessage,
-                    EventPayload::AssistantMessage {
-                        v: v1(),
-                        turn_id: turn,
-                        step_index: 0,
-                        blocks: vec![Block::text(&speech)],
-                        finish_reason: "error".to_owned(),
-                        token_count: None,
-                    },
-                ),
                 NewEvent::new(
                     session,
                     EventKind::StepEnd,
@@ -1529,16 +1517,10 @@ async fn commit_turn_failure(
         .await?;
     live.emit(
         DisplayDepth::Surface,
-        LiveEvent::TextDelta {
-            turn_id: turn,
-            text: speech,
-        },
-    );
-    live.emit(
-        DisplayDepth::Surface,
         LiveEvent::TurnEnded {
             turn_id: turn,
             outcome: "failed".to_owned(),
+            error: Some(detail),
         },
     );
     Ok(())

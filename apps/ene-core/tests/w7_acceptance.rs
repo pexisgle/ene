@@ -133,15 +133,22 @@ async fn spawned_core_offline_conversation_and_rss() {
         .await
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut saw_unconfigured_failure = false;
+    let mut saw_user = false;
+    let mut saw_assistant = false;
     while Instant::now() < deadline {
         let history = client.history(&session.id, "surface").await.unwrap();
-        if let Some(message) = history
+        if history
             .messages
             .iter()
-            .find(|message| message.role == "assistant")
+            .any(|message| message.role == "user")
         {
-            saw_unconfigured_failure = message.text.contains("not configured");
+            saw_user = true;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let history = client.history(&session.id, "surface").await.unwrap();
+            saw_assistant = history
+                .messages
+                .iter()
+                .any(|message| message.role == "assistant");
             assert!(
                 history
                     .messages
@@ -152,9 +159,10 @@ async fn spawned_core_offline_conversation_and_rss() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert!(saw_user, "unconfigured chat must persist the user line");
     assert!(
-        saw_unconfigured_failure,
-        "unconfigured chat must fail clearly without Echo replies"
+        !saw_assistant,
+        "unconfigured chat must fail without Echo assistant replies"
     );
     let detail = client.history(&session.id, "detail").await.unwrap();
     assert!(
