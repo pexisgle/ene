@@ -1271,6 +1271,23 @@ async fn next_run_works_when_lane_is_idle() {
     assert!(history.messages.iter().any(|m| m.text() == "scheduled"));
 }
 
+#[tokio::test]
+async fn scheduled_turn_records_scheduled_origin() {
+    let (_dir, store, lane, _model) = open_lane().await;
+    lane.wait_for_idle().await.unwrap();
+    lane.scheduled("timer tick").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let events = store.load_events(lane.session_id(), 0).unwrap();
+    let origin = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::TurnStart { origin, .. } => Some(*origin),
+            _ => None,
+        })
+        .expect("turn/start");
+    assert_eq!(origin, TurnOrigin::Scheduled);
+}
+
 struct ScriptedPrefetch;
 
 #[async_trait]

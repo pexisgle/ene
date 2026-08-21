@@ -47,15 +47,33 @@ pub fn fire_due(
 }
 
 /// Startup: `remind` that missed its window fires once; `job`/`turn` do not (D-5).
+///
+/// This compatibility entry point keeps the historical no-quiet-hours behavior.
 pub fn catch_up_missed(
     store: &WorkStore,
     now: DateTime<Utc>,
+) -> Result<Vec<FiredSchedule>, WorkError> {
+    catch_up_missed_with_quiet(store, now, &QuietWindow::default())
+}
+
+/// Startup catch-up with the same quiet-hours semantics as [`fire_due`].
+/// Non-important reminders are deferred past quiet hours instead of being
+/// marked fired and silently lost.
+pub fn catch_up_missed_with_quiet(
+    store: &WorkStore,
+    now: DateTime<Utc>,
+    quiet: &QuietWindow,
 ) -> Result<Vec<FiredSchedule>, WorkError> {
     let due = store.due_schedules(now)?;
     let mut out = Vec::new();
     for sched in due {
         match sched.action {
             ScheduleAction::Remind => {
+                if in_quiet(&sched, now, quiet) && !sched.important {
+                    let deferred = defer_past_quiet(now, quiet);
+                    store.defer_next_fire(&sched.id, deferred)?;
+                    continue;
+                }
                 store.mark_fired(&sched.id, now)?;
                 out.push(FiredSchedule {
                     schedule: sched,

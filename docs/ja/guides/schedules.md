@@ -15,6 +15,21 @@
 | `job` | 裏層ジョブを起動する（`action_ref`）。デーモンのジョブレーンがツールを回します |
 
 `important` なスケジュールは、静穏時間が発話を抑えていても発火します。
+スケジュールの静穏時間は `mind.proactive.quiet_hours` と同じ開始・終了時
+とタイムゾーンを使います。能動発話のゲートは使いません。期限の `remind`
+は窓が終わるまで繰り下げ、`important` だけ貫通します。
+
+## デーモンの駆動
+
+`ene-core` は約 1 秒ごとに期限行を見ます。
+
+- 起動時は先に `catch_up_missed`: 過ぎた `remind` は一度だけ発火。過ぎた
+  `job` / `turn` は走らせず（D-5）、`next_fire` だけ進めます。
+- その後は `fire_due`。`remind` はジョブの発話ゲート経由の
+  `CompanionReport`（`it's time: …`）で、開いているセッションに入ります。
+  `job` は公開デリゲーションを開始（`action_ref` または名前）。
+  `turn` は開いているセッションがあるとき `TurnOrigin::Scheduled` の対話
+  ターンを開始します。
 
 ## スケジュールの管理
 

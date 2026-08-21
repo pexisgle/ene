@@ -149,6 +149,11 @@ impl DelegationHost {
         }
     }
 
+    /// Offer companion speech through the voice-gap gate and the live-bus sink.
+    pub fn deliver_companion_report(&self, report: CompanionReport) -> CompanionReport {
+        self.deliver_or_queue(report, "queued")
+    }
+
     fn deliver_or_queue(&self, report: CompanionReport, queued_intent: &str) -> CompanionReport {
         let soul_id = report.soul_id;
         if let Some(delivered) = self.speech_gate.offer(report) {

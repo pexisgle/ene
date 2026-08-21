@@ -153,6 +153,10 @@
 
 - [x] リマインドがスケジュールされ、quiet hours をまたぐ場合は繰り下げ、
       `important` は quiet hours 中でも発火する(P-606 / P-607)。
+      `ene-core` が `catch_up_missed` / `fire_due` を駆動し、`remind` は
+      `CompanionReport` として開いているセッションへ届く。根拠は HTTP
+      テスト `schedule_driver_delivers_remind_through_http` と
+      `schedule_driver_defers_quiet_hours_and_fires_important`。
 - [ ] 「このテーマで調べてしおりにまとめて」が裏層ジョブとして走り、
       調査と成果物交付まで完了する(P-608 / P-609)。
       Markdown 書き込みヘルパーはある。モデルも web 検索も呼ばない。

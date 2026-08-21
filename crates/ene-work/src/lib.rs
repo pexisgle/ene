@@ -29,7 +29,10 @@ pub use mcp::{McpProfile, McpServer, McpTool, ScriptedMcp, register_mcp_tools};
 pub use questions::{combine_questions, route_combined_answers};
 pub use router::WorkSurfaceRouter;
 pub use runner::{JobDrive, drive_job};
-pub use schedule::{FiredSchedule, QuietWindow, catch_up_missed, fire_due, reminder_report};
+pub use schedule::{
+    FiredSchedule, QuietWindow, catch_up_missed, catch_up_missed_with_quiet, fire_due,
+    reminder_report,
+};
 pub use skill::{
     InstalledSkill, SkillMeta, catalog, install_skill_dir, load_skill, match_skills,
     parse_skill_md, read_skill_file, skill_active_blocks, skill_catalog_blocks,

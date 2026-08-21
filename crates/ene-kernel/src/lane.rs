@@ -48,6 +48,7 @@ enum LaneCmd {
     },
     Proactive {
         hint: String,
+        origin: TurnOrigin,
         reply: oneshot::Sender<Result<TurnId, KernelError>>,
     },
     Abort {
@@ -306,8 +307,22 @@ impl LaneHandle {
 
     /// Start a companion-origin turn (no user message). Busy when a turn is running.
     pub async fn proactive(&self, hint: impl Into<String>) -> Result<TurnId, KernelError> {
+        self.origin_turn(hint, TurnOrigin::Proactive).await
+    }
+
+    /// Start a schedule-origin turn (no user message). Busy when a turn is running.
+    pub async fn scheduled(&self, hint: impl Into<String>) -> Result<TurnId, KernelError> {
+        self.origin_turn(hint, TurnOrigin::Scheduled).await
+    }
+
+    async fn origin_turn(
+        &self,
+        hint: impl Into<String>,
+        origin: TurnOrigin,
+    ) -> Result<TurnId, KernelError> {
         self.ask(|reply| LaneCmd::Proactive {
             hint: hint.into(),
+            origin,
             reply,
         })
         .await
@@ -410,8 +425,12 @@ async fn dispatch_cmd(
             let result = enqueue_next_run(state, text).await;
             drop(reply.send(result));
         }
-        LaneCmd::Proactive { hint, reply } => {
-            let result = start_proactive_turn(state, hint, done_tx).await;
+        LaneCmd::Proactive {
+            hint,
+            origin,
+            reply,
+        } => {
+            let result = start_origin_turn(state, hint, origin, done_tx).await;
             drop(reply.send(result));
         }
         LaneCmd::Abort { reply } => {
@@ -620,9 +639,10 @@ async fn start_follow_turn(
     Ok(turn)
 }
 
-async fn start_proactive_turn(
+async fn start_origin_turn(
     state: &mut LaneState,
     hint: String,
+    origin: TurnOrigin,
     done_tx: &mpsc::UnboundedSender<TurnFinish>,
 ) -> Result<TurnId, KernelError> {
     if let Some(running) = &state.running {
@@ -634,7 +654,7 @@ async fn start_proactive_turn(
         state,
         TurnSpawn {
             turn,
-            origin: TurnOrigin::Proactive,
+            origin,
             delegation_id: None,
             claim_seq: None,
             inject: None,
