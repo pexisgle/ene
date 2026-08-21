@@ -54,7 +54,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-108 | `ene-session::session_end_and_surface_search`; `boot_seeds_two_souls_and_session_ops` (split / end / search) | store / HTTP | はい |
 | P-109 | `ene-session::fork_copies_prefix_and_leaves_source_intact`; `fork_leaves_original_session_intact` | store / HTTP | はい |
 | P-110 | `ene-daemon::http_tests::export_default_omits_inner` | HTTP | はい |
-| P-112 | `ene-work::observe_screen_does_not_enter_session_history`; `screenshot_is_surface_and_high_sensitivity`; `world_state_does_not_store_screen_summary` | Placeholder / host API | いいえ |
+| P-112 | `ene-work::observe_screen_from_png_does_not_enter_session_history`; `tool_path_returns_png_and_placeholder_is_unavailable`; `world_state_does_not_store_screen_summary` | process / host API | はい(PNG。補助LLM要約はオプトイン) |
 | P-201 | `ene-companion::memory_survives_reopen` | store | はい(永続化。抽出は正規表現) |
 | P-202 | `ene-companion::extract_names_as_shared_and_arbitrates` | Scripted / 正規表現 | いいえ |
 | P-203 | `memory_survives_reopen` (recall); `shared_pool_is_usable_by_another_soul_as_own_knowledge` | store(語彙スコア) | いいえ(埋め込みハイブリッド未観測) |

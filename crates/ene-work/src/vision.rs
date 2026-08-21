@@ -1,4 +1,9 @@
+//! Dual-path vision (D-16): the model calls `app.screenshot` (PNG on the
+//! conversation turn); the harness observation path decodes the same payload
+//! and summarizes off the session log.
+
 use async_trait::async_trait;
+use base64::Engine;
 use ene_companion::{
     ProactiveObservation, ScreenSummaryStatus, WorldStateMemory, WorldStateSettings,
     WorldStateSnapshot,
@@ -7,8 +12,9 @@ use ene_plane::Sensitivity;
 use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use thiserror::Error;
 
-/// Dual-path vision (D-16): tool screenshot vs continuous observation.
+/// Register the model-facing `app.screenshot` tool.
 pub fn register_screenshot_tool(registry: &ToolRegistry, invoke: Arc<dyn ToolInvoke>) {
     registry.register_with(
         ToolDefinition {
@@ -27,7 +33,64 @@ pub fn register_screenshot_tool(registry: &ToolRegistry, invoke: Arc<dyn ToolInv
     );
 }
 
-/// Offline screenshot stand-in (no display in the daemon).
+/// Smallest valid PNG (1×1). Scripted captures use this instead of `{available:false}`.
+pub const MINIMAL_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
+
+/// Failures when turning an `app.screenshot` result into PNG bytes.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ScreenshotError {
+    #[error("screenshot unavailable")]
+    Unavailable,
+    #[error("screenshot missing png_base64")]
+    MissingPng,
+    #[error("invalid png_base64")]
+    InvalidPng,
+    #[error("screenshot failed: {0}")]
+    Invoke(String),
+}
+
+/// Decode a screenshot tool result. `{available: false}` is not a successful look.
+///
+/// # Errors
+///
+/// Returns [`ScreenshotError`] when the payload is unavailable, missing, or not Base64.
+pub fn screenshot_png(value: &Value) -> Result<Vec<u8>, ScreenshotError> {
+    if value.get("available") == Some(&Value::Bool(false)) {
+        return Err(ScreenshotError::Unavailable);
+    }
+    let encoded = value
+        .get("png_base64")
+        .and_then(Value::as_str)
+        .ok_or(ScreenshotError::MissingPng)?;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| ScreenshotError::InvalidPng)?;
+    if png.len() < 8 || !png.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Err(ScreenshotError::InvalidPng);
+    }
+    Ok(png)
+}
+
+/// Host observation capture: same `app.screenshot` tool, approval skipped.
+///
+/// # Errors
+///
+/// Returns [`ScreenshotError`] when the tool fails or the body is not a PNG.
+pub async fn capture_screenshot(registry: &ToolRegistry) -> Result<Vec<u8>, ScreenshotError> {
+    let value = registry
+        .execute_host("app.screenshot", json!({}))
+        .await
+        .map_err(|err| ScreenshotError::Invoke(err.to_string()))?;
+    screenshot_png(&value)
+}
+
+/// Headless stand-in when no display is attached.
 #[derive(Debug, Default)]
 pub struct PlaceholderScreenshot;
 
@@ -35,6 +98,33 @@ pub struct PlaceholderScreenshot;
 impl ToolInvoke for PlaceholderScreenshot {
     async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
         Ok(json!({ "available": false }))
+    }
+}
+
+/// In-process PNG capture for tests and scripted observation.
+#[derive(Debug, Clone)]
+pub struct PngScreenshot {
+    png: Vec<u8>,
+}
+
+impl PngScreenshot {
+    #[must_use]
+    pub fn new(png: impl Into<Vec<u8>>) -> Self {
+        Self { png: png.into() }
+    }
+
+    #[must_use]
+    pub fn minimal() -> Self {
+        Self::new(MINIMAL_PNG)
+    }
+}
+
+#[async_trait]
+impl ToolInvoke for PngScreenshot {
+    async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
+        Ok(json!({
+            "png_base64": base64::engine::general_purpose::STANDARD.encode(&self.png),
+        }))
     }
 }
 
@@ -46,7 +136,8 @@ pub fn observe_screen(
     idle_seconds: u64,
 ) -> WorldStateSnapshot {
     let obs = ProactiveObservation {
-        captured_at_unix_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        captured_at_unix_ms: u64::try_from(chrono::Utc::now().timestamp_millis().max(0))
+            .unwrap_or(0),
         activity: None,
         screen_summary: Some(summary.to_owned()),
         screen_summary_status: ScreenSummaryStatus::Available,

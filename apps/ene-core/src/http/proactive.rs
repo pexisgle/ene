@@ -152,14 +152,7 @@ async fn capture_screen_summary(
     classify: &SeamedClassify,
     window_label: &str,
 ) -> Option<String> {
-    let value = registry
-        .execute_host("app.screenshot", json!({}))
-        .await
-        .ok()?;
-    let encoded = value
-        .get("png_base64")
-        .and_then(serde_json::Value::as_str)?;
-    let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
+    let png = ene_work::capture_screenshot(registry).await.ok()?;
     tracing::debug!(bytes = png.len(), "proactive screenshot captured");
     classify.summarize_screen(&png, window_label).await.ok()
 }
