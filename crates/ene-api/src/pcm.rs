@@ -45,8 +45,9 @@ pub fn decode_pcm_s16le(bytes: &[u8]) -> Result<Vec<f32>, ApiError> {
         ));
     }
     let mut pcm = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
-        let int = i16::from_le_bytes([chunk[0], chunk[1]]);
+    let (chunks, _) = bytes.as_chunks::<2>();
+    for chunk in chunks {
+        let int = i16::from_le_bytes(*chunk);
         pcm.push(f32::from(int) / 32_768.0);
     }
     Ok(pcm)
