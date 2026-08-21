@@ -743,7 +743,7 @@ async fn job_question_answer_reaches_mailbox() {
                 break;
             }
             Ok(Ok(Some(_))) => {}
-            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(None) | Err(_)) | Err(_) => break,
         }
     }
     let asked = asked.expect("live bus must emit question.asked");

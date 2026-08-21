@@ -2448,8 +2448,7 @@ pub(crate) fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
             let (prompt, questions) = ask_user_prompt(state, report);
             let id = report
                 .job_id
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| report.soul_id.to_string());
+                .map_or_else(|| report.soul_id.to_string(), |id| id.to_string());
             state.events.emit(
                 DisplayDepth::Surface,
                 json!({
