@@ -53,13 +53,14 @@ already-running core with `ENE_API_URL` / `ENE_API_TOKEN`.
 Core lifetime defaults to `desktop.core_lifetime = app` (stop the child core
 when stage exits). Set `detached` to leave the core running.
 
-Chat starts **unconfigured**. Open Detail → Conversation and bind
-`ai.tasks.chat` from installed plugins. Home shows **Chat is ready.** only when
-that binding has a model and, if `effective.providers[].needs_key` is true, a
-vault API key (`effective.ai_chat_key_set`). Provider failures such as HTTP 401
-are settings/status errors, not assistant replies. List models stays in a
-scrollable, filterable list so Apply core fields remains on screen. Engines and
-GGUF weights live under Connections → provider assets. TTS/STT are
+Chat starts **unconfigured**. Open Detail → Conversation and pick a named
+provider from the installed catalog (`GET /settings` → `effective.providers`),
+then a model. Home shows **Chat is ready.** only when that binding has a model
+and, if `effective.providers[].needs_key` is true, a vault API key
+(`effective.ai_chat_key_set`). Provider failures such as HTTP 401 are
+settings/status errors, not assistant replies. Apply sits above a scrollable,
+filterable model list so listing models cannot push save off-screen. Engines
+and GGUF weights live under Connections → provider assets. TTS/STT are
 `ai.tasks.tts` / `ai.tasks.stt`.
 
 VAD/ASR/TTS belong to core. Stage relays microphone PCM on

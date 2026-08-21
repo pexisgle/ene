@@ -328,13 +328,77 @@ pub fn default_provider_assets_plugin(chat_plugin: &str, plugins: &[PluginView])
 
 #[must_use]
 pub fn plugin_needs_key(plugin: &str, providers: &Value) -> bool {
+    provider_bool(providers, plugin, "needs_key")
+}
+
+#[must_use]
+pub fn plugin_is_local(plugin: &str, providers: &Value) -> bool {
+    provider_bool(providers, plugin, "local")
+}
+
+fn provider_bool(providers: &Value, plugin: &str, key: &str) -> bool {
     providers
         .as_array()
         .into_iter()
         .flatten()
         .find(|row| row.get("id").and_then(Value::as_str) == Some(plugin))
-        .and_then(|row| row.get("needs_key").and_then(Value::as_bool))
+        .and_then(|row| row.get(key).and_then(Value::as_bool))
         .unwrap_or(false)
+}
+
+#[must_use]
+pub fn provider_display_name(id: &str) -> String {
+    match id {
+        "provider.gguf" => i18n::fl("provider-gguf"),
+        "provider.openai_compat" => i18n::fl("provider-openai-compat"),
+        "provider.anthropic" => i18n::fl("provider-anthropic"),
+        "provider.elevenlabs" => i18n::fl("provider-elevenlabs"),
+        "provider.voicevox" => i18n::fl("provider-voicevox"),
+        "provider.edge_tts" => i18n::fl("provider-edge-tts"),
+        other if other.starts_with("provider.") => other["provider.".len()..].replace('_', " "),
+        other => other.to_owned(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderChoice {
+    pub id: String,
+    pub label: String,
+}
+
+#[must_use]
+pub fn chat_provider_choices(providers: &Value) -> Vec<ProviderChoice> {
+    let mut rows: Vec<ProviderChoice> = providers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let id = row.get("id").and_then(Value::as_str)?;
+            if id.is_empty() {
+                return None;
+            }
+            let installed = row
+                .get("installed")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            if !installed {
+                return None;
+            }
+            let has_llm = row
+                .get("seams")
+                .and_then(Value::as_array)
+                .is_none_or(|seams| seams.iter().any(|seam| seam.as_str() == Some("seam.llm")));
+            if !has_llm {
+                return None;
+            }
+            Some(ProviderChoice {
+                id: id.to_owned(),
+                label: provider_display_name(id),
+            })
+        })
+        .collect();
+    rows.sort_by(|left, right| left.label.cmp(&right.label));
+    rows
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,6 +428,23 @@ pub fn chat_setup_status(gap: ChatSetupGap) -> String {
         ChatSetupGap::Plugin | ChatSetupGap::Model => i18n::fl("chat-unconfigured"),
         ChatSetupGap::ApiKey => i18n::fl("chat-missing-key"),
     }
+}
+
+#[must_use]
+pub fn chat_apply_block_reason(state: &DetailUiState) -> Option<String> {
+    if state.chat_plugin.is_empty() || state.chat_plugin == "echo" {
+        return Some(i18n::fl("settings-chat-pick-provider"));
+    }
+    if state.chat_model.is_empty() {
+        return Some(i18n::fl("settings-chat-pick-model"));
+    }
+    if plugin_needs_key(&state.chat_plugin, &state.providers)
+        && !state.ai_chat_key_set
+        && state.chat_api_key.is_empty()
+    {
+        return Some(i18n::fl("settings-chat-key-required"));
+    }
+    None
 }
 
 #[must_use]
@@ -763,81 +844,10 @@ fn show_conversation(
 ) {
     ensure_settings(state, client, rt, async_results);
     ui.heading(i18n::fl("detail-tab-conversation"));
-    task_row(ui, i18n::fl("settings-chat-plugin"), &mut state.chat_plugin);
-    task_row(ui, i18n::fl("settings-chat-model"), &mut state.chat_model);
-    task_row(
-        ui,
-        i18n::fl("settings-chat-base-url"),
-        &mut state.chat_base_url,
-    );
-    ui.horizontal(|ui| {
-        ui.label(i18n::fl("settings-chat-api-key"));
-        ui.add(egui::TextEdit::singleline(&mut state.chat_api_key).password(true));
-    });
-    if state.ai_chat_key_set {
-        ui.label(i18n::fl("settings-chat-key-set"));
-    } else if chat_setup_gap(state) == Some(ChatSetupGap::ApiKey) {
-        ui.colored_label(
-            egui::Color32::YELLOW,
-            i18n::fl("settings-chat-key-required"),
-        );
-    }
-    if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
-        apply_ai_patch(state, client, rt, async_results);
-    }
+    ui.label(i18n::fl("settings-chat-guide"));
+    show_chat_provider_setup(ui, state, client, rt, async_results);
     ui.separator();
-    if ui.button(i18n::fl("settings-list-models")).clicked() {
-        let plugin = state.chat_plugin.clone();
-        if plugin.is_empty() {
-            state.core_status = i18n::fl("settings-patch-hint");
-        } else {
-            let base_url = state.chat_base_url.clone();
-            let client = Arc::clone(client);
-            spawn_async(rt, async_results, async move {
-                let result = client
-                    .list_provider_models(&ene_api::ListProviderModelsRequest {
-                        plugin,
-                        task: "chat".to_owned(),
-                        base_url,
-                        api_key: String::new(),
-                    })
-                    .await
-                    .map(|r| (r.models, r.error))
-                    .map_err(|e| e.to_string());
-                AsyncOutcome::ListProviderModels(result)
-            });
-        }
-    }
-    if !state.provider_models.is_empty() {
-        ui.horizontal(|ui| {
-            ui.label(i18n::fl("settings-model-filter"));
-            ui.text_edit_singleline(&mut state.provider_model_filter);
-            ui.label(format!(
-                "{}: {}",
-                i18n::fl("settings-models"),
-                state.provider_models.len()
-            ));
-        });
-        let query = state.provider_model_filter.clone();
-        let mut picked = None;
-        egui::ScrollArea::vertical()
-            .id_salt("provider-models")
-            .max_height(180.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                for model in filtered_provider_models(&state.provider_models, &query) {
-                    if ui
-                        .selectable_label(state.chat_model == model, model)
-                        .clicked()
-                    {
-                        picked = Some(model.to_owned());
-                    }
-                }
-            });
-        if let Some(model) = picked {
-            state.chat_model = model;
-        }
-    }
+    ui.label(i18n::fl("home-optional-tasks"));
     task_row(
         ui,
         i18n::fl("settings-classifier-plugin"),
@@ -853,6 +863,133 @@ fn show_conversation(
         i18n::fl("settings-proactive-plugin"),
         &mut state.proactive_plugin,
     );
+}
+
+fn show_chat_provider_setup(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    let choices = chat_provider_choices(&state.providers);
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-chat-provider"));
+        let selected = if state.chat_plugin.is_empty() || state.chat_plugin == "echo" {
+            i18n::fl("settings-chat-provider-none")
+        } else {
+            provider_display_name(&state.chat_plugin)
+        };
+        egui::ComboBox::from_id_salt("chat-provider")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for choice in &choices {
+                    if ui
+                        .selectable_label(state.chat_plugin == choice.id, &choice.label)
+                        .clicked()
+                    {
+                        state.chat_plugin.clone_from(&choice.id);
+                        state.provider_models.clear();
+                    }
+                }
+            });
+    });
+    if choices.is_empty() {
+        ui.label(i18n::fl("settings-chat-no-providers"));
+    }
+    if plugin_is_local(&state.chat_plugin, &state.providers) {
+        ui.label(i18n::fl("settings-chat-local-hint"));
+    } else if !state.chat_plugin.is_empty() && state.chat_plugin != "echo" {
+        ui.horizontal(|ui| {
+            ui.label(i18n::fl("settings-chat-base-url"));
+            ui.add(
+                egui::TextEdit::singleline(&mut state.chat_base_url)
+                    .hint_text("https://api.example.invalid/v1"),
+            );
+        });
+        ui.label(i18n::fl("settings-chat-base-url-hint"));
+    }
+    if plugin_needs_key(&state.chat_plugin, &state.providers) {
+        ui.horizontal(|ui| {
+            ui.label(i18n::fl("settings-chat-api-key"));
+            ui.add(egui::TextEdit::singleline(&mut state.chat_api_key).password(true));
+        });
+        if state.ai_chat_key_set {
+            ui.label(i18n::fl("settings-chat-key-set"));
+        } else {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                i18n::fl("settings-chat-key-required"),
+            );
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-chat-model"));
+        ui.text_edit_singleline(&mut state.chat_model);
+    });
+    if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
+        apply_ai_patch(state, client, rt, async_results, true);
+    }
+    if ui.button(i18n::fl("settings-list-models")).clicked() {
+        request_provider_models(state, client, rt, async_results);
+    }
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-model-filter"));
+        ui.text_edit_singleline(&mut state.provider_model_filter);
+        ui.label(format!(
+            "{}: {}",
+            i18n::fl("settings-models"),
+            state.provider_models.len()
+        ));
+    });
+    let query = state.provider_model_filter.clone();
+    let mut picked = None;
+    egui::ScrollArea::vertical()
+        .id_salt("provider-models")
+        .max_height(180.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for model in filtered_provider_models(&state.provider_models, &query) {
+                if ui
+                    .selectable_label(state.chat_model == model, model)
+                    .clicked()
+                {
+                    picked = Some(model.to_owned());
+                }
+            }
+        });
+    if let Some(model) = picked {
+        state.chat_model = model;
+    }
+}
+
+fn request_provider_models(
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    let plugin = state.chat_plugin.clone();
+    if plugin.is_empty() || plugin == "echo" {
+        state.core_status = i18n::fl("settings-chat-pick-provider");
+        return;
+    }
+    let base_url = state.chat_base_url.clone();
+    let api_key = state.chat_api_key.clone();
+    let client = Arc::clone(client);
+    spawn_async(rt, async_results, async move {
+        let result = client
+            .list_provider_models(&ene_api::ListProviderModelsRequest {
+                plugin,
+                task: "chat".to_owned(),
+                base_url,
+                api_key,
+            })
+            .await
+            .map(|r| (r.models, r.error))
+            .map_err(|e| e.to_string());
+        AsyncOutcome::ListProviderModels(result)
+    });
 }
 
 fn show_voice(
@@ -908,7 +1045,7 @@ fn show_voice(
         i18n::fl("settings-caption-pin"),
     );
     if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
-        apply_ai_patch(state, client, rt, async_results);
+        apply_ai_patch(state, client, rt, async_results, false);
     }
     if ui.button(i18n::fl("settings-save-local")).clicked() {
         state.save_local_pending = true;
@@ -1756,7 +1893,12 @@ fn apply_ai_patch(
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+    require_chat: bool,
 ) {
+    if require_chat && let Some(reason) = chat_apply_block_reason(state) {
+        state.core_status = reason;
+        return;
+    }
     let mut chat = serde_json::json!({
         "plugin": state.chat_plugin,
         "model": state.chat_model,
@@ -1841,6 +1983,38 @@ mod tests {
     }
 
     #[test]
+    fn chat_provider_choices_use_display_names_not_raw_ids() {
+        let providers = serde_json::json!([
+            {
+                "id": "provider.openai_compat",
+                "seams": ["seam.llm"],
+                "needs_key": true,
+                "local": false,
+                "installed": true
+            },
+            {
+                "id": "provider.elevenlabs",
+                "seams": ["seam.tts"],
+                "needs_key": true,
+                "installed": true
+            },
+            {
+                "id": "provider.gguf",
+                "seams": ["seam.llm", "seam.embed"],
+                "needs_key": false,
+                "local": true,
+                "installed": false
+            }
+        ]);
+        let choices = chat_provider_choices(&providers);
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].id, "provider.openai_compat");
+        assert_eq!(choices[0].label, i18n::fl("provider-openai-compat"));
+        assert_ne!(choices[0].label, "provider.openai_compat");
+        assert_eq!(provider_display_name("provider.custom_llm"), "custom llm");
+    }
+
+    #[test]
     fn openai_compat_without_key_is_not_chat_ready() {
         let json = r#"{
             "overlay": {},
@@ -1856,7 +2030,12 @@ mod tests {
                 },
                 "ai_chat_key_set": false,
                 "providers": [
-                    { "id": "provider.openai_compat", "needs_key": true },
+                    {
+                        "id": "provider.openai_compat",
+                        "seams": ["seam.llm"],
+                        "needs_key": true,
+                        "installed": true
+                    },
                     { "id": "provider.gguf", "needs_key": false }
                 ]
             }
@@ -1866,6 +2045,12 @@ mod tests {
         assert_eq!(chat_setup_gap(&state), Some(ChatSetupGap::ApiKey));
         assert!(blocking_unconfigured(&state.unconfigured).contains(&"chat"));
         assert_eq!(home_chat_next_step(&state), i18n::fl("home-next-chat-key"));
+        assert_eq!(
+            chat_apply_block_reason(&state),
+            Some(i18n::fl("settings-chat-key-required"))
+        );
+        state.chat_api_key = "placeholder-key".to_owned();
+        assert!(chat_apply_block_reason(&state).is_none());
     }
 
     #[test]

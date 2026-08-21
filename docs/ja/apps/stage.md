@@ -50,13 +50,14 @@ CCv3 エディタはありません。Companion の書き出しと Work のセ�
 コア寿命の既定は `desktop.core_lifetime = app`（stage 終了時に子コアも停止）
 です。常駐させたい場合は `detached` にします。
 
-チャットは **未設定** から始まります。詳細 → Conversation で `ai.tasks.chat`
-を束縛してください。Home の **チャットの準備ができています。** は、その束縛に
+チャットは **未設定** から始まります。詳細 → Conversation で、インストール済み
+カタログ（`GET /settings` → `effective.providers`）から名前付きプロバイダを選び、
+続けてモデルを選びます。Home の **チャットの準備ができています。** は、その束縛に
 モデルがあり、かつ `effective.providers[].needs_key` が真ならボールトに API
 キーがある（`effective.ai_chat_key_set`）ときだけ出ます。HTTP 401 などの
 プロバイダ失敗は設定 / ステータスのエラーであり、アシスタントの返信ではありません。
-モデル一覧はスクロールとフィルタ付きなので、Apply core fields は画面外へ
-消えません。エンジンや GGUF は Connections のプロバイダ資産です。
+適用ボタンはスクロールとフィルタ付きのモデル一覧の上にあるので、一覧取得で
+保存が画面外へ押し出されません。エンジンや GGUF は Connections のプロバイダ資産です。
 TTS/STT は `ai.tasks.tts` / `ai.tasks.stt` です。
 
 VAD/ASR/TTS はコアが持ちます。Stage は `POST /sessions/{id}/listen` でマイク
