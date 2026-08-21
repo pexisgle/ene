@@ -81,6 +81,7 @@ pub async fn drive_job(drive: JobDrive) -> Result<(), WorkError> {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: Some(router as Arc<dyn SurfaceRouter>),
     });

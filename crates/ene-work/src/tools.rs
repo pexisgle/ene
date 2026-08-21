@@ -1,7 +1,8 @@
 use crate::error::WorkError;
 use crate::host::{DelegationHost, StartDelegation};
-use crate::skill::load_skill;
+use crate::skill::{load_skill, read_skill_file};
 use crate::types::{Artifact, ArtifactKind, DelegationMode};
+use crate::workflow::{BookmarkFill, fill_bookmark_job};
 use async_trait::async_trait;
 use chrono::Utc;
 use ene_plane::Sensitivity;
@@ -10,16 +11,20 @@ use ene_session::{DelegationId, SoulId};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use uuid::Uuid;
 
 /// Register surface `delegate.*` plus job-layer harness tools.
 pub fn register_work_tools(
-    registry: &ToolRegistry,
+    registry: &Arc<ToolRegistry>,
     host: Arc<DelegationHost>,
     skills_home: PathBuf,
 ) {
-    let invoke = Arc::new(WorkInvoker { host, skills_home });
+    let invoke = Arc::new(WorkInvoker {
+        host,
+        skills_home,
+        registry: Arc::downgrade(registry),
+    });
     for def in delegate_defs() {
         registry.register_with(def, Arc::clone(&invoke) as Arc<dyn ToolInvoke>);
     }
@@ -124,6 +129,34 @@ fn delegate_defs() -> Vec<ToolDefinition> {
             Vec::new(),
         ),
         harness(
+            "skill.read",
+            "Read a file from an installed skill package.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "path": { "type": "string" }
+                },
+                "required": ["name", "path"]
+            }),
+            Vec::new(),
+        ),
+        harness(
+            "workflow.bookmark",
+            "Research a theme and deliver a bookmark Markdown artifact.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "soul_id": { "type": "string" },
+                    "theme": { "type": "string" },
+                    "goal": { "type": "string" }
+                },
+                "required": ["id", "soul_id", "theme"]
+            }),
+            vec!["artifact.register".to_owned()],
+        ),
+        harness(
             "artifact.register",
             "Register a workspace file as an artifact.",
             json!({
@@ -193,6 +226,7 @@ fn harness(
 struct WorkInvoker {
     host: Arc<DelegationHost>,
     skills_home: PathBuf,
+    registry: Weak<ToolRegistry>,
 }
 
 #[async_trait]
@@ -250,6 +284,41 @@ impl ToolInvoke for WorkInvoker {
                     "name": meta.name,
                     "description": meta.description,
                     "body": meta.body,
+                }))
+            }
+            "skill.read" => {
+                let text = read_skill_file(
+                    &self.skills_home,
+                    str_arg(&args, "name")?,
+                    str_arg(&args, "path")?,
+                )
+                .map_err(|err| err.to_string())?;
+                Ok(json!({ "text": text }))
+            }
+            "workflow.bookmark" => {
+                let theme = args
+                    .get("theme")
+                    .and_then(Value::as_str)
+                    .or_else(|| args.get("goal").and_then(Value::as_str))
+                    .ok_or_else(|| "missing theme".to_owned())?;
+                let soul_id = soul_arg(&args)?;
+                let enabled = soul_skill_refs(&self.host, soul_id);
+                let registry = self.registry.upgrade();
+                let (artifact, report) = fill_bookmark_job(BookmarkFill {
+                    host: self.host.as_ref(),
+                    soul_id,
+                    job_id: id_arg(&args)?,
+                    theme,
+                    skills_home: &self.skills_home,
+                    enabled: &enabled,
+                    registry: registry.as_deref(),
+                })
+                .await
+                .map_err(|err| err.to_string())?;
+                Ok(json!({
+                    "artifact_id": artifact.id,
+                    "path": artifact.path,
+                    "speech": report.speech,
                 }))
             }
             "artifact.register" => {
@@ -385,6 +454,14 @@ fn send_from_child(host: &DelegationHost, args: &Value) -> Result<Value, String>
             Ok(json!({ "ok": true }))
         }
     }
+}
+
+fn soul_skill_refs(host: &DelegationHost, soul: SoulId) -> Vec<String> {
+    ene_companion::CompanionStore::open(host.data_dir().join("companions.db"))
+        .ok()
+        .and_then(|store| store.get_soul(soul).ok().flatten())
+        .map(|row| row.skill_refs)
+        .unwrap_or_default()
 }
 
 fn soul_arg(args: &Value) -> Result<SoulId, String> {

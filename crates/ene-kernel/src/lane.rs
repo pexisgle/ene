@@ -94,6 +94,7 @@ struct LaneState {
     speech: Option<Arc<dyn SpeechPresenter>>,
     finalizer: Option<Arc<dyn TurnFinalizer>>,
     prefetch: Option<Arc<dyn TurnPrefetch>>,
+    extra_context: Vec<(String, String)>,
     running: Option<RunningTurn>,
     queued_wakes: VecDeque<QueuedWake>,
     pending_next_run: Option<QueuedWake>,
@@ -132,6 +133,10 @@ pub struct LaneOptions {
     pub finalizer: Option<Arc<dyn TurnFinalizer>>,
     /// Optional recall / companion context logged as `context/system_message`.
     pub prefetch: Option<Arc<dyn TurnPrefetch>>,
+    /// Extra System Context blocks (skill catalog and similar host sources).
+    /// Re-applied after `begin_turn` so standing host extras survive the drop of
+    /// per-turn sources.
+    pub extra_context: Vec<(String, String)>,
     /// Shared waterfall points. `None` uses a lane-private chain.
     pub hooks: Option<LoopHooks>,
 }
@@ -159,6 +164,11 @@ impl LaneHandle {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut context = ContextRegistry::new();
         context.set_interruption_note(format_recovery_note(&opts.recovery));
+        let extra_context = opts
+            .extra_context
+            .into_iter()
+            .filter(|(_, text)| !text.is_empty())
+            .collect::<Vec<_>>();
         let state = LaneState {
             store: opts.store,
             session: opts.session,
@@ -174,6 +184,7 @@ impl LaneHandle {
             speech: opts.speech,
             finalizer: opts.finalizer,
             prefetch: opts.prefetch,
+            extra_context,
             running: None,
             queued_wakes: VecDeque::new(),
             pending_next_run: None,
@@ -720,6 +731,9 @@ async fn spawn_turn(
         ));
     }
     state.context.begin_turn();
+    for (key, text) in &state.extra_context {
+        state.context.insert(key.clone(), text.clone());
+    }
     if let Some(prefetch) = &state.prefetch {
         let user = last_user_text(&state.store, state.session).unwrap_or_default();
         let loaded = prefetch.lines(state.soul, state.session, &user).await;

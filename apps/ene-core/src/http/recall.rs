@@ -5,7 +5,7 @@ use ene_companion::MemoryKind;
 use ene_kernel::{SessionId, SoulId, TurnPrefetch};
 use ene_plugin_ipc::{EmbedRequest, ProviderAuth};
 use ene_session::{ProjectOptions, Role, derive_messages};
-use ene_work::{JobStatus, catalog};
+use ene_work::JobStatus;
 
 use crate::CoreDaemon;
 
@@ -49,6 +49,7 @@ impl TurnPrefetch for RecallPrefetch {
         out.extend(delegation_line(&core, soul));
         if !user_text.trim().is_empty() {
             out.extend(recall_lines(&core, soul, user_text).await);
+            out.extend(skill_active_lines(&core, soul, user_text));
         }
         out
     }
@@ -91,27 +92,24 @@ fn commitments_line(core: &CoreDaemon, soul: SoulId) -> Option<(String, String)>
     source_block("memory.commitments", "Open commitments", &notes)
 }
 
-fn skills_line(core: &CoreDaemon, soul: SoulId) -> Option<(String, String)> {
+fn skills_line(core: &CoreDaemon, soul: SoulId) -> Vec<(String, String)> {
     let enabled = core
         .companion()
         .soul(soul)
         .ok()
         .map(|row| row.skill_refs)
         .unwrap_or_default();
-    let home = core.data_dir().join("skills");
-    let entries = catalog(&home, &enabled).unwrap_or_default();
-    if entries.is_empty() {
-        return None;
-    }
-    let body = entries
-        .iter()
-        .map(|(name, description)| format!("- {name}: {description}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some((
-        "skills.active".to_owned(),
-        format!("Available skills:\n{body}"),
-    ))
+    ene_work::skill_catalog_blocks(&core.data_dir().join("skills"), &enabled)
+}
+
+fn skill_active_lines(core: &CoreDaemon, soul: SoulId, user_text: &str) -> Vec<(String, String)> {
+    let enabled = core
+        .companion()
+        .soul(soul)
+        .ok()
+        .map(|row| row.skill_refs)
+        .unwrap_or_default();
+    ene_work::skill_active_blocks(&core.data_dir().join("skills"), &enabled, user_text)
 }
 
 fn inner_recent_line(core: &CoreDaemon, session: SessionId) -> Option<(String, String)> {

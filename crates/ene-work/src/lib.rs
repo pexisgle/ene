@@ -31,7 +31,9 @@ pub use router::WorkSurfaceRouter;
 pub use runner::{JobDrive, drive_job};
 pub use schedule::{FiredSchedule, QuietWindow, catch_up_missed, fire_due, reminder_report};
 pub use skill::{
-    InstalledSkill, SkillMeta, catalog, install_skill_dir, load_skill, parse_skill_md,
+    InstalledSkill, SkillMeta, catalog, install_skill_dir, load_skill, match_skills,
+    parse_skill_md, read_skill_file, skill_active_blocks, skill_catalog_blocks,
+    skill_context_lines, skill_matches,
 };
 pub use speech_gate::SpeechGate;
 pub use spill::{
@@ -48,7 +50,7 @@ pub use vision::{
     ScreenshotError, capture_screenshot, observe_screen, register_screenshot_tool,
     screenshot_is_job_or_surface, screenshot_png,
 };
-pub use workflow::{BookmarkSection, deliver_bookmark_workflow};
+pub use workflow::{BookmarkFill, BookmarkSection, deliver_bookmark_workflow, fill_bookmark_job};
 
 pub use ene_session::{DelegationId, SoulId};
 

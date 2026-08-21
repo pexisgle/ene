@@ -26,11 +26,15 @@ running turn; `compact` compresses history.
 
 1. Recall and affect tick in `ene-companion`.
 2. The kernel composes the model-visible prompt from the session log.
+   Installed skills appear as the `skills.catalog` System Context source.
+   A matching `SKILL.md` body is injected as `skills.active`.
 3. The configured conversation model streams text through its bound `provider.*`
    plugin.
 4. Surface-eligible tools run through `ene-registry` / `ene-plane`.
    `delegate.start` returns immediately; `ene-work` opens a **job lane**
    (`origin: delegation`) that uses job-layer tools and `delegation.send`.
+   A bookmark request (`workflow.bookmark`) researches with `web.search` when
+   that tool is registered, writes Markdown, and delivers it as a job artifact.
 5. Events are committed to `ene-session` (model-visible equals logged).
 6. Live events go out at `surface` or `detail` depth.
 
@@ -55,7 +59,8 @@ stable name). The dialogue lane keeps `platform_contract` and a fallback
 | `memory.semantic` | Ranked recall for this user text |
 | `memory.user_profile` | Standing profile / preference notes |
 | `memory.commitments` | Open (unexpired) commitments |
-| `skills.active` | Installed skill names and descriptions |
+| `skills.catalog` | Installed skill names and descriptions |
+| `skills.active` | Matching `SKILL.md` bodies for this user text |
 | `mcp.resources` | Snapshots under `<workspace>/mcp-context/` |
 | `inner_recent` | Trailing model-visible inner thoughts |
 | `interruption_note` | Only after an interrupted turn |

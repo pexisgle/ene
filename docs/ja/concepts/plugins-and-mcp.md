@@ -50,7 +50,9 @@ GitHub から `llama-server` リリースを取得し、
 
 MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショットされ、
 `mcp.resources` コンテキスト源として注入されます。`prompts/list` は data-dir の
-skills 配下の `SKILL.md` になり、表層レーンでは `skills.active` に載ります。
+skills 配下の `SKILL.md` になります。対話レーンはそのカタログを
+`skills.catalog` として載せ、依頼に合う本文を `skills.active` として注入します。
+ジョブ層の `workflow.bookmark` はテーマを調べて Markdown を交付します。
 
 ## 起動プロファイル
 
