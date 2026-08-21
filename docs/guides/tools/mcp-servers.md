@@ -5,8 +5,10 @@ vendored. Each handwritten row becomes a `mcp.<id>` fiber that runs
 `ene-tool-mcp` and registers tools as `mcp:<id>.<tool>` on the same
 `ene-registry` pipeline as in-tree tools.
 
-Write `<data-dir>/mcp.json` or use **Connectors** (JSON editor +
-`GET`/`PUT /api/v1/mcp`):
+Write `<data-dir>/mcp.json` or use **Connections** (name / command-or-URL form +
+`GET`/`PUT /api/v1/mcp`). Arguments are one argv entry per line so paths with
+spaces stay a single argument. JSON import/export stays available for advanced
+use.
 
 ```json
 {

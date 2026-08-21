@@ -47,8 +47,11 @@ binary. Changing language updates open chrome window titles without a restart.
 Core PATCH keys
 are `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins`.
 Plugin enablement is `plugins.profile` (`desktop` / `minimal` / `headless`),
-not a `plugins.list` map. API keys stay in the vault. Attach to an
-already-running core with `ENE_API_URL` / `ENE_API_TOKEN`.
+not a `plugins.list` map. API keys stay in the vault. Connections edits MCP
+servers as a form (name, local command or HTTP, args/URL); System applies
+plugin profile and approval mode the same way. JSON import/export stays folded
+for advanced use. Attach to an already-running core with `ENE_API_URL` /
+`ENE_API_TOKEN`.
 
 Core lifetime defaults to `desktop.core_lifetime = app` (stop the child core
 when stage exits). Set `detached` to leave the core running.

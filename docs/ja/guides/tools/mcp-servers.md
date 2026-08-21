@@ -4,8 +4,9 @@
 手書きの各行は `mcp.<id>` ファイバーになり、`ene-tool-mcp` が
 `mcp:<id>.<tool>` として内製ツールと同じ `ene-registry` パイプラインに載せます。
 
-`<data-dir>/mcp.json` を書くか、**コネクター**（JSON エディタと
-`GET`/`PUT /api/v1/mcp`）を使います。
+`<data-dir>/mcp.json` を書くか、**接続**（名前 / コマンドまたは URL のフォームと
+`GET`/`PUT /api/v1/mcp`）を使います。引数は 1 行が 1 引数なので、空白を含む
+パスも分割されません。JSON の取り込み / 書き出しは詳細用に残しています。
 
 ```json
 {

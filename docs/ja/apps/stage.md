@@ -45,7 +45,10 @@ CCv3 エディタはありません。Companion の書き出しと Work のセ�
 `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins` です。
 プラグインの有効化は `plugins.profile`（`desktop` / `minimal` / `headless`）で、
 `plugins.list` の個別マップはありません。API キーはボールトに置きます。
-既に動いているコアへは `ENE_API_URL` / `ENE_API_TOKEN` で接続します。
+Connections の MCP は名前・ローカルコマンドまたは HTTP・引数/URL のフォームで
+編集し、System もプラグインプロファイルと承認モードを同じように適用します。
+JSON の取り込み / 書き出しは詳細用に折りたたみます。既に動いているコアへは
+`ENE_API_URL` / `ENE_API_TOKEN` で接続します。
 
 コア寿命の既定は `desktop.core_lifetime = app`（stage 終了時に子コアも停止）
 です。常駐させたい場合は `detached` にします。
