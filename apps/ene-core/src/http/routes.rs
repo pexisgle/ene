@@ -24,7 +24,7 @@ use ene_companion::{
     install_archive, looks_like_package_zip, soul_from_install,
 };
 use ene_kernel::DisplayDepth;
-use ene_plane::{ApprovalMode, PopupDecision};
+use ene_plane::PopupDecision;
 use ene_registry::Layer;
 use ene_session::{
     Block, ClientId, DelegationId, EventKind, EventPayload, NewEvent, NewSession, QuestionId,
@@ -1601,8 +1601,8 @@ pub async fn import_character(
     Json(body): Json<Value>,
 ) -> Result<Json<CharacterView>, ApiReject> {
     web_mutate_forbidden(&client_id_from_headers(&headers))?;
-    let bytes = read_import_bytes(&body, state.core.data_dir())?;
-    let home = state.core.data_dir().join("characters");
+    let bytes = read_import_bytes(&body, state.core.data_dir(), &state.core.character_home())?;
+    let home = state.core.character_home();
     let store = state.core.companions();
     let installed = if looks_like_package_zip(&bytes) {
         install_archive(store.as_ref(), &home, &bytes, 32 * 1024 * 1024).map_err(map_companion)?
@@ -1683,13 +1683,19 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
     core.data_dir = state.core.data_dir().display().to_string();
     let ai = state.core.ai().lock().clone();
     let plugins = state.core.plugins().lock().clone();
+    let mut approval = state.core.approval_settings();
+    approval.mode = state.core.plane().mode();
     let mut effective = json!({
         "core": core,
-        "harness": crate::boot::load_harness_settings(state.core.data_dir()),
-        "approval": { "mode": format!("{:?}", state.core.plane().mode()).to_ascii_lowercase() },
+        "harness": state.core.harness(),
+        "approval": approval,
         "ai": ai,
         "plugins": plugins,
         "mind": state.core.mind(),
+        "store": state.core.store_settings(),
+        "body": state.core.body_settings(),
+        "voice": state.core.voice_settings(),
+        "characters": state.core.character_settings(),
         "ai_chat_key_set": state.core.task_key_set("chat"),
         "ai_classifier_key_set": state.core.task_key_set("classifier"),
         "ai_embedding_key_set": state.core.task_key_set("embedding"),
@@ -1735,12 +1741,10 @@ pub async fn patch_settings(
     Json(patch): Json<SettingsPatch>,
 ) -> Result<Json<Value>, ApiReject> {
     web_mutate_forbidden(&client_id_from_headers(&headers))?;
-    let allowed = [
-        "core", "harness", "approval", "theme", "ai", "mind", "plugins",
-    ];
+    let allowed = crate::boot::settings_patch_keys();
     if let Some(incoming) = patch.fields.as_object() {
         for key in incoming.keys() {
-            if !allowed.contains(&key.as_str()) {
+            if !allowed.iter().any(|allowed| allowed == key) {
                 return Err(bad_request("invalid_message", "unknown settings key"));
             }
         }
@@ -1871,18 +1875,43 @@ pub async fn patch_settings(
     if profile_dirty {
         state.core.apply_plugin_profile().await;
     }
-    if let Some(mode) = current
-        .pointer("/approval/mode")
-        .and_then(Value::as_str)
-        .and_then(ApprovalMode::parse)
-        && let Err(err) = state.core.plane().set_mode(mode)
-    {
-        tracing::warn!(error = %err, "failed to apply approval.mode");
-    }
     if let Some(mind_value) = current.get("mind")
         && let Ok(mind) = serde_json::from_value::<ene_companion::MindSettings>(mind_value.clone())
     {
         state.core.replace_mind(mind);
+    }
+    if let Some(harness_value) = current.get("harness")
+        && let Ok(harness) =
+            serde_json::from_value::<ene_kernel::HarnessSettings>(harness_value.clone())
+    {
+        state.core.replace_harness(harness);
+    }
+    if let Some(store_value) = current.get("store")
+        && let Ok(store) = serde_json::from_value::<ene_session::StoreSettings>(store_value.clone())
+    {
+        state.core.replace_store_settings(store);
+    }
+    if let Some(approval_value) = current.get("approval")
+        && let Ok(approval) =
+            serde_json::from_value::<ene_plane::ApprovalSettings>(approval_value.clone())
+    {
+        state.core.replace_approval(approval);
+    }
+    if let Some(body_value) = current.get("body")
+        && let Ok(body) = serde_json::from_value::<ene_body::BodySettings>(body_value.clone())
+    {
+        state.core.replace_body_settings(body);
+    }
+    if let Some(voice_value) = current.get("voice")
+        && let Ok(voice) = serde_json::from_value::<ene_body::VoiceSettings>(voice_value.clone())
+    {
+        state.core.replace_voice_settings(voice);
+    }
+    if let Some(characters_value) = current.get("characters")
+        && let Ok(characters) =
+            serde_json::from_value::<ene_companion::CharacterSettings>(characters_value.clone())
+    {
+        state.core.replace_character_settings(characters);
     }
     drop(state.core.plane().audit().append("settings", &current));
     if let Some(policy) = current
@@ -2217,7 +2246,11 @@ fn resolve_display_name(
 
 const MAX_IMPORT_BYTES: u64 = 32 * 1024 * 1024;
 
-fn read_import_bytes(body: &Value, data_dir: &std::path::Path) -> Result<Vec<u8>, ApiReject> {
+fn read_import_bytes(
+    body: &Value,
+    data_dir: &std::path::Path,
+    character_home: &std::path::Path,
+) -> Result<Vec<u8>, ApiReject> {
     if let Some(raw) = body
         .get("archive_b64")
         .or_else(|| body.get("bytes"))
@@ -2228,7 +2261,7 @@ fn read_import_bytes(body: &Value, data_dir: &std::path::Path) -> Result<Vec<u8>
             .map_err(|err| bad_request("invalid_message", &err.to_string()));
     }
     if let Some(path) = body.get("path").and_then(Value::as_str) {
-        let resolved = resolve_import_path(data_dir, path)?;
+        let resolved = resolve_import_path(data_dir, character_home, path)?;
         let meta = fs::metadata(&resolved).map_err(|err| bad_request("fault", &err.to_string()))?;
         if meta.len() > MAX_IMPORT_BYTES {
             return Err(bad_request("invalid_message", "file too large"));
@@ -2241,13 +2274,18 @@ fn read_import_bytes(body: &Value, data_dir: &std::path::Path) -> Result<Vec<u8>
     ))
 }
 
-fn resolve_import_path(data_dir: &std::path::Path, raw: &str) -> Result<PathBuf, ApiReject> {
+fn resolve_import_path(
+    data_dir: &std::path::Path,
+    character_home: &std::path::Path,
+    raw: &str,
+) -> Result<PathBuf, ApiReject> {
     if raw.contains("..") {
         return Err(bad_request("invalid_message", "invalid path"));
     }
     let imports = data_dir.join("imports");
     fs::create_dir_all(&imports).map_err(|err| bad_request("fault", &err.to_string()))?;
-    let allowed = [imports.clone(), data_dir.join("characters")];
+    fs::create_dir_all(character_home).map_err(|err| bad_request("fault", &err.to_string()))?;
+    let allowed = [imports.clone(), character_home.to_path_buf()];
     let path = if std::path::Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else {

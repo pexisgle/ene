@@ -35,8 +35,9 @@ pub mod user_persona;
 pub use config::{
     ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_schema_json,
     get_global_config, get_global_section, load_config, load_config_from, load_full_config,
-    load_full_config_from, register_config_schema, register_runtime_schema, save_full_config,
-    update_global_config, update_section, write_schemas,
+    load_full_config_from, register_config_schema, register_runtime_schema,
+    registered_settings_section_keys, save_full_config, update_global_config, update_section,
+    write_schemas,
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;

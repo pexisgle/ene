@@ -251,7 +251,7 @@ impl CoreDaemon {
             while let Some(job) = job_rx.recv().await {
                 let core = Arc::clone(&job_core);
                 tokio::spawn(async move {
-                    let harness = crate::boot::load_harness_settings(core.data_dir());
+                    let harness = core.harness();
                     let wall = std::time::Duration::from_secs(u64::from(
                         harness.delegation.wall_timeout_secs,
                     ));

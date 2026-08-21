@@ -3,8 +3,10 @@
 Ene loads settings as defaults → JSON → `ENE_` environment variables.
 `__` separates nested keys (for example `ENE_CORE__SERVER__BIND`).
 
-The daemon reads `settings.json` from the data directory, then overlays
-`ENE_CORE__SERVER__*` and related env keys at boot. The repository file
+The daemon loads `<data>/settings.json` through the same `ene-config` figment
+pipeline used elsewhere: defaults, then JSON, then `ENE_` environment variables.
+A missing file is treated as `{}`; malformed JSON fails boot. Do not overlay
+`ENE_*` by hand in `ene-core`. The repository file
 `assets/settings.json` is a development sample, not the runtime file.
 `ene-ctl` and `ene-stage` take `--url` / `--token` (or `ENE_API_URL` /
 `ENE_API_TOKEN`) to reach an already-running core. When those env vars are

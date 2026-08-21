@@ -3,8 +3,10 @@
 設定の優先順位は defaults → JSON → `ENE_` 環境変数です。
 ネストしたキーは `__` で区切ります（例: `ENE_CORE__SERVER__BIND`）。
 
-デーモンはデータディレクトリの `settings.json` を読み、その後
-`ENE_CORE__SERVER__*` などの環境変数を重ねます。リポジトリの
+デーモンはデータディレクトリの `settings.json` を、他と同じ `ene-config` の
+figment パイプライン（defaults → JSON → `ENE_`）で読みます。ファイルが無いとき
+は `{}` として扱い、壊れた JSON では起動に失敗します。`ene-core` で `ENE_*` を
+手で重ねないでください。リポジトリの
 `assets/settings.json` は開発用サンプルであり、実行時ファイルではありません。
 `ene-ctl` と `ene-stage` は `--url` / `--token`（または `ENE_API_URL` /
 `ENE_API_TOKEN`）で起動済みコアへ接続します。これらの環境変数が無いとき、
