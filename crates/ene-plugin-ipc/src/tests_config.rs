@@ -33,6 +33,9 @@ impl ToolHandler for BareHandler {
             parameters: json!({"type":"object"}),
             output: json!({"type":"object"}),
             side_effects: Vec::new(),
+            category: String::new(),
+            keywords: Vec::new(),
+            examples: Vec::new(),
         }]
     }
     async fn call(
