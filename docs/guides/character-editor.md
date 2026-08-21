@@ -1,7 +1,9 @@
 # Character editor
 
-There is no in-process Settings form. Edit the package or V3 fixture, then
-let the daemon reload.
+The product GUI (`ene-stage`) has no in-app CCv3 form. Edit the package or
+a V3 fixture, then let the daemon reload. The legacy `ene-desktop` Character
+editor still writes local `character.json`; that is not the v1.0 path
+([Product boundaries](../concepts/product-boundaries.md)).
 
 ## 1. Motions and expressions
 

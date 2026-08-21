@@ -3,6 +3,8 @@
 Ene は Rust で書かれた **ローカル AI コンパニオン型ハーネス**です。コンパニオンは
 ユーザーのデバイスに住み、話し、聞き、覚え、承認 plane の下でツールを実行します。
 状態はコアデーモン (`ene-core`) が持ち、desktop / CLI / stage / Web は同一 API のクライアントです。
+製品 GUI は `ene-stage`、`ene-desktop` は旧 GUI です。
+[製品境界](concepts/product-boundaries.md) を見てください。
 
 完成形の定義は
 [`plans/harness-redesign/`](../../plans/harness-redesign/README.md) にあります。
@@ -23,7 +25,7 @@ Ene は Rust で書かれた **ローカル AI コンパニオン型ハーネス
 | [クイックスタート](quickstart.md) | `ene-ctl` / `ene-stage` のビルドと起動 |
 | [設定](configuration.md) | `settings.json`、環境変数、ファイル位置 |
 | [コンセプト](concepts/architecture.md) | プロセスモデル、パッケージ、記憶、プラグイン |
-| [アプリ](apps/cli.md) | CLI と stage のユーザーガイド |
+| [アプリ](apps/stage.md) | stage、CLI、旧 desktop のユーザーガイド |
 | [ガイド](guides/character-editor.md) | 作業別の手順 |
 | [リファレンス](reference/crates.md) | クレート地図と描画 API |
 

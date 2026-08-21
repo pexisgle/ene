@@ -1,8 +1,10 @@
 # Desktop user guide
 
-`ene-desktop` is the product GUI. It starts `ene-core` when needed, draws
-the character overlay with `ene-vrm`, keeps chat on the **surface** depth,
-and opens a **separate detail window**.
+`ene-desktop` is the **pre-redesign GUI**, restored in PR #794 as a legacy
+client. The product GUI is `ene-stage`; grow that instead of this tree.
+This process still starts `ene-core` when needed, draws the character overlay
+with `ene-vrm`, keeps chat on the **surface** depth, and opens a **separate
+detail window**.
 
 ```sh
 cargo build -p ene-daemon -p ene-desktop
@@ -31,7 +33,10 @@ as the data directory; release builds use the OS data directory and never read
 repository `assets/`. API keys stay in the vault. Core reads and PATCHes that
 same file. Attach to an already-running core with `ENE_API_URL` / `ENE_API_TOKEN`.
 
-`ene-stage` remains an optional debug client for the same API.
+`ene-stage` is the product GUI on the same API. Desktop does not need
+feature parity with it, and product work does not land here. The
+client/tool/security judgment table is
+[Product boundaries](../concepts/product-boundaries.md).
 
 Chat starts **unconfigured**. The surface prompts you to open the **AI** page.
 Choices come from **installed provider plugins** (the host catalog), not a

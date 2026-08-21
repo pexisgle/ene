@@ -17,3 +17,7 @@
 資格情報はボールト (`vault.bin` + `vault.key`) に置き、プラグインの環境変数には
 出しません。レジストリが知らないツールは、`side_effects` が空でも機微さ Medium
 になります。
+
+既知のギャップ（web プラグインが net broker を迂回する、FileBroker の
+glob/delete、`exec` の process tree 上限）は
+[製品境界](product-boundaries.md) に表があります。

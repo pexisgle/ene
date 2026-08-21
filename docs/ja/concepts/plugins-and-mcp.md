@@ -18,8 +18,10 @@ tool IPC を話します。
 MCP サーバーはベンダーしません。手書きの `mcp.json` の各行は `ene-tool-mcp`
 （stdio または Streamable HTTP）の `mcp.<id>` ファイバーになり、内製ツールと
 同じパイプラインに載ります。プロセス受入は実 `git` を呼ぶ stdio サーバー
-（`mcp:git.status` / `mcp:git.log`）です。コネクターページがそのドキュメントを
-編集します。代表的なサーバーを選ぶマーケット UI は後継マイルストーンです。
+（`mcp:git.status` / `mcp:git.log`）です。stage の **Connections** がその
+ドキュメントを編集します（旧 desktop の Connectors も同じ）。代表的な
+サーバーを選ぶマーケット UI は stage 上の後継
+（[#812](https://github.com/pexisgle/ene/issues/812)、P-616）です。
 
 プロバイダプラグインは `plugins/provider/` にあり、`provider` 副プロトコルを話します。
 ホストカタログ（`ene_fiber::PROVIDER_PLUGINS`）が唯一の一覧です。デスクトップの

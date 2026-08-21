@@ -9,8 +9,9 @@
 | パッケージ | パス | 役割 |
 |---|---|---|
 | `ene-daemon` | `apps/ene-core`（バイナリ `ene-core`） | コアデーモン: データディレクトリのロック、HTTP/WS API、session + kernel + companion + work + plane + fiber |
+| `ene-stage` | `apps/ene-stage` | 製品 GUI: wgpu オーバーレイ、チャット、9 セクションの詳細、トレイ。表層 + 詳細の 2 本のソケット（`client_id = stage`） |
 | `ene-ctl` | `apps/ene-ctl` | 同一 HTTP/WS API の CLI クライアント |
-| `ene-stage` | `apps/ene-stage` | 製品 GUI: wgpu オーバーレイ、チャット、8セクションの詳細、トレイ。表層 + 詳細の 2 本のソケット |
+| `ene-desktop` | `apps/ene-desktop` | 再設計前の旧 GUI（#794 で復元）。同一 API。伸ばさない |
 
 ## ライブラリクレート
 
@@ -44,15 +45,18 @@ ene-vrm         ↛ kernel, companion, work, session
 ene-api         ↛ daemon types
 ```
 
-クライアントは `ene-api` 経由でのみデーモンと話します。`ene-stage` の本番
-コードから `ene-daemon` をリンクしないでください（`ene-ctl` のテストは
-デーモンを spawn してよい）。
+クライアントは `ene-api` 経由でのみデーモンと話します。`ene-desktop` と
+`ene-stage` の本番コードから `ene-daemon` をリンクしないでください
+（`ene-ctl` のテストはデーモンを spawn してよい）。
+
+どのクライアントが製品 GUI か、旧ツールがどこへ行ったかは
+[製品境界](../concepts/product-boundaries.md) にあります。
 
 ## プラグインバイナリ
 
 ### ツールプラグイン (`plugins/tool/*`)
 
-`fs`、`exec`、`web`、`utility` — [同梱ツール](../guides/tools/builtin-tools.md)。
+`fs`、`exec`、`web`、`utility`、`app` — [同梱ツール](../guides/tools/builtin-tools.md)。
 `exec` は `fs` とは別プラグインです（D-24）。
 
 Python のダミー (`plugins/tool/dummy-py`) は IPC 用フィクスチャのみで、Cargo

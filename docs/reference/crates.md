@@ -10,8 +10,9 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 | Package | Path | Role |
 |---|---|---|
 | `ene-daemon` | `apps/ene-core` (binary `ene-core`) | Core daemon: data-dir lock, HTTP/WS API, session + kernel + companion + work + plane + fiber |
+| `ene-stage` | `apps/ene-stage` | Product GUI: wgpu overlay, chat, 9-section detail, tray; surface + detail sockets (`client_id = stage`) |
 | `ene-ctl` | `apps/ene-ctl` | CLI client for the same HTTP/WS API |
-| `ene-stage` | `apps/ene-stage` | Product GUI: wgpu overlay, chat, 8-section detail, tray; surface + detail sockets |
+| `ene-desktop` | `apps/ene-desktop` | Legacy pre-redesign GUI restored in #794. Same API; do not grow it |
 
 ## Library crates
 
@@ -46,13 +47,17 @@ ene-api         ↛ daemon types
 ```
 
 Clients talk to the daemon only through `ene-api`. Do not link `ene-daemon`
-from `ene-stage` production code (`ene-ctl` tests may spawn the daemon).
+from `ene-desktop` or `ene-stage` production code (`ene-ctl` tests may spawn
+the daemon).
+
+Which client is the product GUI, and how old tools map onto the current
+tree, is recorded in [Product boundaries](../concepts/product-boundaries.md).
 
 ## Plugin binaries
 
 ### Tool plugins (`plugins/tool/*`)
 
-`fs`, `exec`, `web`, `utility` — see [Built-in tools](../guides/tools/builtin-tools.md).
+`fs`, `exec`, `web`, `utility`, `app` — see [Built-in tools](../guides/tools/builtin-tools.md).
 `exec` is a separate plugin from `fs` (D-24).
 
 A Python dummy (`plugins/tool/dummy-py`) exists only as an IPC fixture and is

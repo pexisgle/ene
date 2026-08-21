@@ -20,4 +20,6 @@ approval popup when the user enabled the proactive source. Observation decodes
 successful look.
 
 Mature MCP servers (git, browser, calendar, homeassistant, geo) are not
-in-tree; connect them as handwritten `mcp.<id>` rows.
+in-tree; connect them as handwritten `mcp.<id>` rows. Old-action mapping,
+security gaps, and v1.0 vs post-v1.0 live in
+[Product boundaries](../../concepts/product-boundaries.md).

@@ -20,4 +20,6 @@
 「見る」ではありません。
 
 成熟した MCP サーバー（git、browser、calendar、homeassistant、geo）はツリーに
-含めません。手書きの `mcp.<id>` 行で接続します。
+含めません。手書きの `mcp.<id>` 行で接続します。旧 action の対応、セキュリティ
+ギャップ、v1.0 / post-v1.0 は [製品境界](../../concepts/product-boundaries.md)
+にあります。

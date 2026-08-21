@@ -7,6 +7,7 @@
 # Concepts
 
 - [Architecture](concepts/architecture.md)
+- [Product boundaries](concepts/product-boundaries.md)
 - [Character packages](concepts/character-cards.md)
 - [Memory](concepts/memory.md)
 - [Turns & sessions](concepts/turns-and-sessions.md)
@@ -16,8 +17,9 @@
 
 # Apps
 
-- [CLI user guide](apps/cli.md)
 - [Stage user guide](apps/stage.md)
+- [CLI user guide](apps/cli.md)
+- [Desktop user guide](apps/desktop.md) (legacy)
 
 # Guides
 

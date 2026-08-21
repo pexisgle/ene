@@ -46,7 +46,7 @@ cargo run -p ene-ctl -- --help
 `ene-core` を起動した場合は `--url` と `--token`（または `ENE_API_URL` /
 `ENE_API_TOKEN`）を合わせてください。
 
-## 4. stage を動かす
+## 4. 製品 GUI（stage）を動かす
 
 ```sh
 cargo run -p ene-stage

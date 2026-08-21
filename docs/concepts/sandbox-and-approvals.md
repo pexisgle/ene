@@ -18,3 +18,7 @@ read targets.
 Credentials live in the vault (`vault.bin` + `vault.key`), not in plugin
 environment variables. Unknown tools with empty `side_effects` still
 classify as medium sensitivity unless the registry knows them.
+
+Known gaps (web plugin bypassing the net broker, FileBroker glob/delete,
+`exec` process-tree limits) are tabulated in
+[Product boundaries](product-boundaries.md).

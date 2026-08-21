@@ -17,9 +17,10 @@ and [Write a tool](../guides/tools/write-a-tool.md).
 MCP servers are not vendored. Each handwritten `mcp.json` row becomes a
 `mcp.<id>` fiber running `ene-tool-mcp` (stdio or Streamable HTTP) on the
 same pipeline as in-tree tools. Process acceptance is a stdio server that
-invokes real `git` (`mcp:git.status` / `mcp:git.log`). The Connectors page
-edits that document. A marketplace picker for popular servers is a successor
-milestone.
+invokes real `git` (`mcp:git.status` / `mcp:git.log`). Stage **Connections**
+edits that document (the legacy desktop Connectors page does too). A
+marketplace picker for popular servers is a successor milestone on stage
+([#812](https://github.com/pexisgle/ene/issues/812), P-616).
 
 Provider plugins live under `plugins/provider/` and speak the `provider`
 subprotocol. The host catalog (`ene_fiber::PROVIDER_PLUGINS`) is the single
