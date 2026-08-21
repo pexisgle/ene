@@ -732,6 +732,16 @@ fn web_ui_is_read_only_in_source() {
         !html.contains("method: \"PATCH\"") && !html.contains("method: \"DELETE\""),
         "Web UI must not PATCH/DELETE in page scripts"
     );
+    assert!(
+        !html.contains("JSON.stringify(memories")
+            && !html.contains("JSON.stringify(jobs")
+            && !html.contains("JSON.stringify(affect")
+            && !html.contains("log(detail, JSON.stringify"),
+        "detail pane must render fields, not JSON dumps"
+    );
+    assert!(html.contains("History (detail)"));
+    assert!(html.contains("Memories"));
+    assert!(html.contains("PAD"));
 }
 
 #[tokio::test]
