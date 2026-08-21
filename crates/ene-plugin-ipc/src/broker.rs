@@ -10,6 +10,7 @@ pub struct BrokerClient<S> {
     stream: S,
 }
 
+#[cfg(unix)]
 impl BrokerClient<tokio::net::UnixStream> {
     /// Connect to `ENE_BROKER_SOCKET`.
     ///
@@ -39,6 +40,35 @@ impl BrokerClient<tokio::net::UnixStream> {
     /// Returns [`crate::IpcError::Io`] when connect fails.
     pub async fn from_path(path: &str) -> Result<Self, crate::IpcError> {
         Self::connect(path).await
+    }
+}
+
+#[cfg(windows)]
+impl BrokerClient<tokio::net::TcpStream> {
+    /// Connect to `ENE_BROKER_SOCKET`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IpcError::Io`] when the env is missing or connect fails.
+    pub async fn from_env() -> Result<Self, crate::IpcError> {
+        let path = std::env::var("ENE_BROKER_SOCKET").map_err(|_| {
+            crate::IpcError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "ENE_BROKER_SOCKET is not set",
+            ))
+        })?;
+        Self::from_path(&path).await
+    }
+
+    /// Connect to an explicit broker endpoint, primarily for host tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IpcError::Io`] when connect fails.
+    pub async fn from_path(path: &str) -> Result<Self, crate::IpcError> {
+        Ok(Self {
+            stream: tokio::net::TcpStream::connect(path).await?,
+        })
     }
 }
 
