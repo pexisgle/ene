@@ -1032,7 +1032,10 @@ mod tests {
                     "job_id": "mode-job",
                 }),
             )?;
-            assert_eq!(fs::read_to_string(&path).unwrap(), "#!/bin/sh\necho after\n");
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "#!/bin/sh\necho after\n"
+            );
             let mode = fs::metadata(&path).unwrap().mode() & 0o7777;
             assert_eq!(mode, 0o755, "executable mode must survive atomic replace");
             Ok(())
