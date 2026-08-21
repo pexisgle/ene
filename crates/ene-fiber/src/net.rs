@@ -3,8 +3,7 @@
 use crate::broker::BrokerError;
 use serde_json::{Value, json};
 use std::io::Read;
-use std::net::IpAddr;
-use std::sync::OnceLock;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 use url::Url;
 
@@ -73,15 +72,21 @@ fn is_private(ip: IpAddr) -> bool {
         IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.octets()[0] == 0
         }
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private(IpAddr::V4(v4));
+            }
+            v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local()
+        }
     }
 }
 
 fn fetch(url: &Url) -> Result<Value, BrokerError> {
     let url = url.clone();
     off_runtime(move || {
-        let response = http()
-            .get(url)
+        let client = pinned_client(&url)?;
+        let response = client
+            .get(url.clone())
             .send()
             .map_err(|err| BrokerError::Fetch(err.to_string()))?;
         let status = response.status().as_u16();
@@ -109,6 +114,48 @@ fn fetch(url: &Url) -> Result<Value, BrokerError> {
     })
 }
 
+fn pinned_client(url: &Url) -> Result<reqwest::blocking::Client, BrokerError> {
+    drop(rustls::crypto::ring::default_provider().install_default());
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(addr) = resolve_public(url)? {
+        let host = url
+            .host_str()
+            .ok_or_else(|| BrokerError::Ssrf("URL has no host".to_owned()))?;
+        builder = builder.resolve(host, addr);
+    }
+    builder
+        .build()
+        .map_err(|err| BrokerError::Fetch(err.to_string()))
+}
+
+fn resolve_public(url: &Url) -> Result<Option<SocketAddr>, BrokerError> {
+    match url.host() {
+        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => Ok(None),
+        Some(url::Host::Domain(host)) => {
+            let port = url.port_or_known_default().unwrap_or(80);
+            let mut chosen = None;
+            let mut resolved = false;
+            for addr in (host, port)
+                .to_socket_addrs()
+                .map_err(|err| BrokerError::Fetch(err.to_string()))?
+            {
+                resolved = true;
+                if is_private(addr.ip()) {
+                    return Err(BrokerError::Ssrf("private hosts are blocked".to_owned()));
+                }
+                chosen.get_or_insert(addr);
+            }
+            if !resolved {
+                return Err(BrokerError::Ssrf("host did not resolve".to_owned()));
+            }
+            Ok(chosen)
+        }
+        None => Err(BrokerError::Ssrf("URL has no host".to_owned())),
+    }
+}
+
 fn off_runtime<T: Send>(
     work: impl FnOnce() -> Result<T, BrokerError> + Send,
 ) -> Result<T, BrokerError> {
@@ -117,18 +164,6 @@ fn off_runtime<T: Send>(
             .spawn(work)
             .join()
             .unwrap_or_else(|_| Err(BrokerError::Fetch("fetch worker panicked".to_owned())))
-    })
-}
-
-fn http() -> &'static reqwest::blocking::Client {
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        drop(rustls::crypto::ring::default_provider().install_default());
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
     })
 }
 
@@ -146,6 +181,7 @@ mod tests {
             "http://10.0.0.1/",
             "http://192.168.1.1/",
             "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
             "file:///etc/passwd",
         ] {
             assert!(
@@ -163,5 +199,14 @@ mod tests {
         let url = deny_ssrf("https://example.invalid/v1").unwrap();
         assert_eq!(url.scheme(), "https");
         assert_eq!(url.host_str(), Some("example.invalid"));
+    }
+
+    #[test]
+    fn resolve_public_blocks_localhost() {
+        let url = url::Url::parse("http://localhost/").unwrap();
+        assert!(matches!(
+            super::resolve_public(&url),
+            Err(BrokerError::Ssrf(_))
+        ));
     }
 }

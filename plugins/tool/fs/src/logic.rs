@@ -2,6 +2,7 @@ use ene_plugin_ipc::ToolSpecWire;
 use ene_registry::{arg_str, spec};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
@@ -72,9 +73,10 @@ fn read(args: &Value) -> Result<Value, String> {
 fn write(args: &Value) -> Result<Value, String> {
     let path = resolve(arg_str(args, "path")?, true)?;
     let text = arg_str(args, "text")?;
-    record_undo(args, &path)?;
+    let job_id = job_key(args);
+    record_undo(&job_id, &path)?;
     std::fs::write(&path, text).map_err(|err| err.to_string())?;
-    Ok(json!({ "ok": true }))
+    Ok(json!({ "ok": true, "job_id": job_id }))
 }
 
 fn edit(args: &Value) -> Result<Value, String> {
@@ -89,14 +91,15 @@ fn edit(args: &Value) -> Result<Value, String> {
     if !body.contains(old) {
         return Err("old text not found".to_owned());
     }
-    record_undo(args, &path)?;
+    let job_id = job_key(args);
+    record_undo(&job_id, &path)?;
     let next = if replace_all {
         body.replace(old, new)
     } else {
         body.replacen(old, new, 1)
     };
     std::fs::write(&path, next).map_err(|err| err.to_string())?;
-    Ok(json!({ "ok": true }))
+    Ok(json!({ "ok": true, "job_id": job_id }))
 }
 
 fn list(args: &Value) -> Result<Value, String> {
@@ -204,9 +207,10 @@ fn patch(args: &Value) -> Result<Value, String> {
     let diff = arg_str(args, "diff")?;
     let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
     let next = apply_unified_diff(&body, diff)?;
-    record_undo(args, &path)?;
+    let job_id = job_key(args);
+    record_undo(&job_id, &path)?;
     std::fs::write(&path, next).map_err(|err| err.to_string())?;
-    Ok(json!({ "ok": true }))
+    Ok(json!({ "ok": true, "job_id": job_id }))
 }
 
 #[derive(Debug)]
@@ -342,7 +346,8 @@ fn matches_at(lines: &[String], expected: &[String], idx: usize) -> bool {
 }
 
 fn undo(args: &Value) -> Result<Value, String> {
-    let journal = journal_path(args)?;
+    let job_id = explicit_job_key(args).ok_or_else(|| "job_id is required".to_owned())?;
+    let journal = journal_path(&job_id)?;
     let raw = std::fs::read_to_string(&journal).unwrap_or_default();
     let mut lines: Vec<&str> = raw.lines().filter(|line| !line.is_empty()).collect();
     let Some(last) = lines.pop() else {
@@ -369,13 +374,13 @@ fn undo(args: &Value) -> Result<Value, String> {
     Ok(json!({ "ok": true, "path": path }))
 }
 
-fn record_undo(args: &Value, path: &Path) -> Result<(), String> {
-    let journal = journal_path(args)?;
+fn record_undo(job_id: &str, path: &Path) -> Result<(), String> {
+    let journal = journal_path(job_id)?;
     let prev = std::fs::read_to_string(path).ok();
     let entry = json!({
         "path": path.display().to_string(),
         "prev": prev,
-        "job_id": job_key(args),
+        "job_id": job_id,
     });
     let mut line = serde_json::to_string(&entry).map_err(|err| err.to_string())?;
     line.push('\n');
@@ -391,30 +396,38 @@ fn record_undo(args: &Value, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn journal_path(args: &Value) -> Result<PathBuf, String> {
+fn journal_path(job_id: &str) -> Result<PathBuf, String> {
     let dir = workspace()?.join(".ene").join("undo");
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-    Ok(dir.join(format!("{}.jsonl", job_key(args))))
+    Ok(dir.join(format!("{job_id}.jsonl")))
 }
 
 fn job_key(args: &Value) -> String {
+    explicit_job_key(args).unwrap_or_else(unique_job_key)
+}
+
+fn explicit_job_key(args: &Value) -> Option<String> {
     let raw = args
         .get("job_id")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .or_else(|| std::env::var("ENE_JOB_ID").ok())
-        .unwrap_or_else(|| "_default".to_owned());
+        .or_else(|| std::env::var("ENE_JOB_ID").ok())?;
     let mut out = String::new();
     for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
             out.push(ch);
         }
     }
-    if out.is_empty() {
-        "_default".to_owned()
-    } else {
-        out
-    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn unique_job_key() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "anon-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn workspace() -> Result<PathBuf, String> {
@@ -502,6 +515,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "one");
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "B");
         assert_eq!(job_key(&json!({"job_id": "job-a"})), "job-a");
+    }
+
+    #[test]
+    fn undo_without_job_id_is_rejected() {
+        let err = execute("fs.undo", &json!({})).unwrap_err();
+        assert!(err.contains("job_id"), "{err}");
+        assert_ne!(job_key(&json!({})), job_key(&json!({})));
     }
 
     #[test]

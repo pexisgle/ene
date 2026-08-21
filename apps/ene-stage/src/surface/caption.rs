@@ -34,24 +34,14 @@ pub fn egui_anchor(position: &str) -> (egui::Align2, [f32; 2]) {
     }
 }
 
-/// True when `text` is spoken reply content, not a provider or HTTP error body.
+/// True when `text` is spoken reply content, not a kernel provider-failure marker.
 #[must_use]
 pub(crate) fn is_speech_caption(text: &str) -> bool {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("the chat provider failed") {
-        return false;
-    }
-    if lower.starts_with("error:") || lower.starts_with("error ") {
-        return false;
-    }
-    if lower.contains("401 unauthorized") || lower.contains("403 forbidden") {
-        return false;
-    }
-    true
+    !trimmed.is_empty()
+        && !trimmed
+            .to_ascii_lowercase()
+            .starts_with("the chat provider failed")
 }
 
 pub fn show(
@@ -138,8 +128,8 @@ mod tests {
         assert!(!is_speech_caption(
             "The chat provider failed: 401 Unauthorized"
         ));
-        assert!(!is_speech_caption("401 Unauthorized"));
-        assert!(!is_speech_caption("error: model not found"));
+        assert!(is_speech_caption("401 Unauthorized"));
+        assert!(is_speech_caption("Error handling in Rust"));
         assert!(is_speech_caption("Hello from the companion."));
     }
 }

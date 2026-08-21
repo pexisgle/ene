@@ -13,8 +13,8 @@ use crate::i18n;
 pub use approvals::PendingApproval;
 pub use spotlight::SpotlightAction;
 
-pub const CHAT_WINDOW_WIDTH: u32 = 520;
-pub const CHAT_WINDOW_HEIGHT: u32 = 560;
+pub(crate) const CHAT_WINDOW_WIDTH: u32 = 520;
+pub(crate) const CHAT_WINDOW_HEIGHT: u32 = 560;
 
 const _: () = {
     assert!(CHAT_WINDOW_WIDTH >= 480);
@@ -114,7 +114,7 @@ impl SurfaceUiState {
 
     pub(crate) fn on_turn_ended(&mut self) {
         self.streaming_text.clear();
-        self.dismiss_caption();
+        self.turn_active = false;
     }
 
     pub(crate) fn dismiss_caption(&mut self) {
@@ -187,14 +187,16 @@ mod tests {
     }
 
     #[test]
-    fn speech_delta_opens_caption_and_turn_end_closes_it() {
+    fn speech_delta_stays_visible_after_turn_end() {
         let mut state = SurfaceUiState::default();
         state.apply_text_delta("Hello from the companion.", true);
         assert!(state.caption_visible());
         assert_eq!(state.caption, "Hello from the companion.");
         state.on_turn_ended();
-        assert!(!state.caption_visible());
-        assert!(state.caption.is_empty());
+        assert!(state.caption_visible());
+        assert_eq!(state.caption, "Hello from the companion.");
         assert!(state.streaming_text.is_empty());
+        state.apply_text_delta("Next turn.", true);
+        assert_eq!(state.caption, "Next turn.");
     }
 }

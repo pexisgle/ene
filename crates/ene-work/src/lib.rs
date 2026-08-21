@@ -43,8 +43,8 @@ pub use types::{
     WorkDelegationSettings,
 };
 pub use vision::{
-    MINIMAL_PNG, PlaceholderScreenshot, PngScreenshot, ScreenshotError, capture_screenshot,
-    observe_screen, register_screenshot_tool, screenshot_is_job_or_surface, screenshot_png,
+    ScreenshotError, capture_screenshot, observe_screen, register_screenshot_tool,
+    screenshot_is_job_or_surface, screenshot_png,
 };
 pub use workflow::{BookmarkSection, deliver_bookmark_workflow};
 

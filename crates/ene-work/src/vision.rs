@@ -1,7 +1,8 @@
-//! Dual-path vision (D-16): the model calls `app.screenshot` (PNG on the
+//! Dual-path vision: the model calls `app.screenshot` (PNG on the
 //! conversation turn); the harness observation path decodes the same payload
 //! and summarizes off the session log.
 
+#[cfg(test)]
 use async_trait::async_trait;
 use base64::Engine;
 use ene_companion::{
@@ -34,7 +35,8 @@ pub fn register_screenshot_tool(registry: &ToolRegistry, invoke: Arc<dyn ToolInv
 }
 
 /// Smallest valid PNG (1×1). Scripted captures use this instead of `{available:false}`.
-pub const MINIMAL_PNG: &[u8] = &[
+#[cfg(test)]
+pub(crate) const MINIMAL_PNG: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
     0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
@@ -91,9 +93,11 @@ pub async fn capture_screenshot(registry: &ToolRegistry) -> Result<Vec<u8>, Scre
 }
 
 /// Headless stand-in when no display is attached.
+#[cfg(test)]
 #[derive(Debug, Default)]
-pub struct PlaceholderScreenshot;
+pub(crate) struct PlaceholderScreenshot;
 
+#[cfg(test)]
 #[async_trait]
 impl ToolInvoke for PlaceholderScreenshot {
     async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
@@ -102,23 +106,26 @@ impl ToolInvoke for PlaceholderScreenshot {
 }
 
 /// In-process PNG capture for tests and scripted observation.
+#[cfg(test)]
 #[derive(Debug, Clone)]
-pub struct PngScreenshot {
+pub(crate) struct PngScreenshot {
     png: Vec<u8>,
 }
 
+#[cfg(test)]
 impl PngScreenshot {
     #[must_use]
-    pub fn new(png: impl Into<Vec<u8>>) -> Self {
+    pub(crate) fn new(png: impl Into<Vec<u8>>) -> Self {
         Self { png: png.into() }
     }
 
     #[must_use]
-    pub fn minimal() -> Self {
+    pub(crate) fn minimal() -> Self {
         Self::new(MINIMAL_PNG)
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl ToolInvoke for PngScreenshot {
     async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {

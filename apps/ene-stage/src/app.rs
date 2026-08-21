@@ -383,6 +383,7 @@ impl StageApp {
             AsyncOutcome::ListProviderModels(result) => match result {
                 Ok((items, error)) => {
                     self.detail.provider_models = items;
+                    self.detail.provider_model_filter.clear();
                     self.detail.core_status =
                         detail::list_models_status(&self.detail.provider_models, error.as_deref());
                 }
@@ -1414,7 +1415,7 @@ impl ApplicationHandler for StageApp {
                     self.surface.push_action(SurfaceAction::PersistCharacterPos);
                 }
                 WindowEvent::KeyboardInput { event, .. }
-                    if event.state == ElementState::Pressed =>
+                    if event.state == ElementState::Pressed && !event.repeat =>
                 {
                     self.handle_overlay_key(event_loop, &event.logical_key);
                 }
@@ -1469,6 +1470,7 @@ impl ApplicationHandler for StageApp {
                 event: key_event, ..
             } = &event
             && key_event.state == ElementState::Pressed
+            && !key_event.repeat
         {
             self.handle_overlay_shortcut(&key_event.logical_key);
         }

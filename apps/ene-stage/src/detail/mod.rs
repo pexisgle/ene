@@ -1548,7 +1548,7 @@ fn show_system_inner(
 }
 
 #[must_use]
-pub fn log_empty_copy(entry_count: usize) -> Option<String> {
+fn log_empty_copy(entry_count: usize) -> Option<String> {
     (entry_count == 0).then(|| i18n::fl("log-empty"))
 }
 

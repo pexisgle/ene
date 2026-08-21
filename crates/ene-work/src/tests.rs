@@ -592,7 +592,7 @@ async fn tool_path_returns_png_and_placeholder_is_unavailable() {
         .await
         .unwrap();
     let png = screenshot_png(&value).unwrap();
-    assert_eq!(png, crate::MINIMAL_PNG);
+    assert_eq!(png, crate::vision::MINIMAL_PNG);
     let empty = ToolRegistry::new();
     register_screenshot_tool(&empty, Arc::new(PlaceholderScreenshot));
     let err = capture_screenshot(&empty).await.unwrap_err();

@@ -1,6 +1,7 @@
 use ene_plugin_ipc::ToolSpecWire;
 use ene_registry::{arg_str, spec};
 use serde_json::{Value, json};
+use std::io::Read;
 use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -46,10 +47,7 @@ fn fetch(raw: &str) -> Result<Value, String> {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_owned();
-        let mut body = response.text().map_err(|err| err.to_string())?;
-        if body.len() > MAX_FETCH_CHARS {
-            body.truncate(MAX_FETCH_CHARS);
-        }
+        let body = read_capped_text(response)?;
         Ok((status, content_type, body))
     })?;
     let text = if content_type.contains("html") {
@@ -127,11 +125,7 @@ fn search_html(query: &str) -> Result<Vec<Value>, String> {
     url.query_pairs_mut().append_pair("q", query);
     let html: String = off_runtime(move || {
         let response = http().get(url).send().map_err(|err| err.to_string())?;
-        let mut body = response.text().map_err(|err| err.to_string())?;
-        if body.len() > MAX_FETCH_CHARS {
-            body.truncate(MAX_FETCH_CHARS);
-        }
-        Ok(body)
+        read_capped_text(response)
     })?;
     Ok(parse_ddg_html(&html))
 }
@@ -209,6 +203,22 @@ fn percent_decode(raw: &str) -> String {
         idx += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn read_capped_text(response: reqwest::blocking::Response) -> Result<String, String> {
+    let limit = u64::try_from(MAX_FETCH_CHARS.saturating_add(1)).unwrap_or(u64::MAX);
+    let mut buf = Vec::new();
+    response
+        .take(limit)
+        .read_to_end(&mut buf)
+        .map_err(|err| err.to_string())?;
+    if buf.len() > MAX_FETCH_CHARS {
+        buf.truncate(MAX_FETCH_CHARS);
+        while !buf.is_empty() && std::str::from_utf8(&buf).is_err() {
+            buf.pop();
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 fn off_runtime<T: Send>(work: impl FnOnce() -> Result<T, String> + Send) -> Result<T, String> {

@@ -2,7 +2,7 @@
 name = "ene-tool-exec"
 version.workspace = true
 edition.workspace = true
-description = "Exec tool plugin: process execution, separate from fs (D-24)"
+description = "Exec tool plugin: process execution, separate from fs"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

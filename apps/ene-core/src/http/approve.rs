@@ -29,6 +29,16 @@ impl SeamedApprove {
             ai.tasks.approve.clone()
         }
     }
+
+    fn row_id(core: &CoreDaemon) -> String {
+        let guard = core.ai();
+        let ai = guard.lock();
+        if ai.tasks.approve.is_unconfigured() {
+            crate::plugin_profile::task_row_id("chat")
+        } else {
+            crate::plugin_profile::task_row_id("approve")
+        }
+    }
 }
 
 #[async_trait]
@@ -49,19 +59,29 @@ impl ApproveModel for SeamedApprove {
                     "You are the approval helper. Reply with a JSON object only: \
                      {\"allow\": boolean, \"reason\": string}. \
                      allow=true only when the tool call is clearly bounded and reversible. \
-                     Never allow destructive or out-of-workspace access.",
+                     Never allow destructive filesystem or credential access. \
+                     If a filesystem target is present, never allow a path outside the workspace.",
                 ),
-                LlmMessage::new(
-                    LlmRole::User,
+                LlmMessage::new(LlmRole::User, {
+                    let target = if req.target.is_empty() {
+                        "(none)"
+                    } else {
+                        req.target.as_str()
+                    };
+                    let in_workspace = if req.target.is_empty() {
+                        "n/a"
+                    } else if req.in_workspace {
+                        "true"
+                    } else {
+                        "false"
+                    };
                     format!(
-                        "tool: {}\ntarget: {}\nside_effects: {}\nin_workspace: {}\nsensitivity: {:?}",
+                        "tool: {}\ntarget: {target}\nside_effects: {}\nin_workspace: {in_workspace}\nsensitivity: {:?}",
                         req.tool,
-                        req.target,
                         req.side_effects.join(","),
-                        req.in_workspace,
                         req.sensitivity
-                    ),
-                ),
+                    )
+                }),
             ],
             tools: Vec::new(),
             model: binding.model,
@@ -73,7 +93,7 @@ impl ApproveModel for SeamedApprove {
         };
         let generation = core
             .supervisor()
-            .generate_llm(&binding.plugin, request)
+            .generate_llm(&Self::row_id(&core), request)
             .await
             .map_err(|err| err.to_string())?;
         if generation.finish_reason == "error" {

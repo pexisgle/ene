@@ -25,7 +25,7 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
         ),
         spec(
             "utility.calc",
-            "Exact arithmetic, unit conversion, or ISO 4217 FX from a published table",
+            "Exact arithmetic, unit conversion, or FX among USD EUR GBP JPY CNY KRW AUD CAD CHF INR from a static USD table dated 2026-08-01 (ECB SDMX eurofxref rounded to two figures)",
             json!({"type":"object","properties":{"expr":{"type":"string"},"value":{"type":"number"},"from":{"type":"string"},"to":{"type":"string"}},"additionalProperties":false}),
             Vec::new(),
         ),
@@ -106,7 +106,7 @@ fn calc(args: &Value) -> Result<Value, String> {
             "rate": fx.rate,
             "as_of": FX_AS_OF,
             "quote": "USD",
-            "source": "table",
+            "source": FX_SOURCE,
         }));
     }
     let converted = convert_unit(value, from, to)?;
@@ -302,8 +302,9 @@ fn convert_unit(value: f64, from: &str, to: &str) -> Result<f64, String> {
     temp_convert(value, from, to)
 }
 
-/// Snapshot date for [`units_per_usd`]. Not a live market feed.
+/// Snapshot date and publisher for [`units_per_usd`]. Not a live market feed.
 const FX_AS_OF: &str = "2026-08-01";
+const FX_SOURCE: &str = "ECB eurofxref daily (USD cross, rounded)";
 
 #[derive(Debug)]
 struct FxQuote {
@@ -615,7 +616,7 @@ mod tests {
         let value = calc(&json!({"value": 1, "from": "USD", "to": "eur"})).unwrap();
         assert!((value["value"].as_f64().unwrap() - 0.92).abs() < 1e-9);
         assert_eq!(value["as_of"], json!(super::FX_AS_OF));
-        assert_eq!(value["source"], json!("table"));
+        assert_eq!(value["source"], json!(super::FX_SOURCE));
         assert_eq!(value["quote"], json!("USD"));
     }
 

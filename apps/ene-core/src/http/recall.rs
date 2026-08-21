@@ -1,7 +1,7 @@
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use ene_kernel::{SessionId, SoulId, TaskBinding, TurnPrefetch};
+use ene_kernel::{SessionId, SoulId, TurnPrefetch};
 use ene_plugin_ipc::{EmbedRequest, ProviderAuth};
 
 use crate::CoreDaemon;
@@ -16,16 +16,6 @@ impl RecallPrefetch {
     pub fn new(core: &Arc<CoreDaemon>) -> Self {
         Self {
             core: Arc::downgrade(core),
-        }
-    }
-
-    fn embed_binding(core: &CoreDaemon) -> TaskBinding {
-        let guard = core.ai();
-        let ai = guard.lock();
-        if ai.tasks.embedding.is_unconfigured() {
-            ai.tasks.chat.clone()
-        } else {
-            ai.tasks.embedding.clone()
         }
     }
 }
@@ -120,14 +110,28 @@ fn mcp_context_lines(workspace: &std::path::Path) -> Vec<(String, String)> {
 }
 
 async fn embed_query(core: &CoreDaemon, text: &str) -> Option<Vec<f32>> {
-    let binding = RecallPrefetch::embed_binding(core);
+    let (binding, row_id) = {
+        let guard = core.ai();
+        let ai = guard.lock();
+        if ai.tasks.embedding.is_unconfigured() {
+            (
+                ai.tasks.chat.clone(),
+                crate::plugin_profile::task_row_id("chat"),
+            )
+        } else {
+            (
+                ai.tasks.embedding.clone(),
+                crate::plugin_profile::task_row_id("embedding"),
+            )
+        }
+    };
     if binding.is_unconfigured() {
         return None;
     }
     let result = core
         .supervisor()
         .embed(
-            &binding.plugin,
+            &row_id,
             EmbedRequest {
                 texts: vec![text.to_owned()],
                 model: binding.model,
