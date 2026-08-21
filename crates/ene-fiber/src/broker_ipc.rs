@@ -7,8 +7,6 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 
-#[cfg(windows)]
-use std::os::windows::net::TcpListenerExt;
 #[cfg(unix)]
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -76,6 +74,7 @@ impl BrokerServer {
             let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
             listener.set_nonblocking(true)?;
             let endpoint = listener.local_addr()?.to_string();
+            tracing::debug!(row_id = %row_id, "binding broker ipc listener");
             let token = token.to_owned();
             let task = tokio::spawn(async move {
                 let Ok(listener) = TcpListener::from_std(listener) else {
