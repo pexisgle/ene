@@ -73,12 +73,7 @@ impl ChromeWindow {
         if let Some(monitor) = window.current_monitor() {
             match kind {
                 ChromeKind::Caption => {
-                    let screen = monitor.size();
-                    let x = screen.width.saturating_sub(inner.width) / 2;
-                    let y = screen
-                        .height
-                        .saturating_sub(inner.height.saturating_add(96));
-                    window.set_outer_position(PhysicalPosition::new(x, y));
+                    place_caption_window(&window, "bottom");
                 }
                 ChromeKind::Chat => {
                     let origin = monitor.position();
@@ -136,6 +131,13 @@ impl ChromeWindow {
     #[must_use]
     pub fn wants_keyboard_input(&self) -> bool {
         self.egui_ctx.egui_wants_keyboard_input()
+    }
+
+    pub fn place_caption(&self, position: &str) {
+        if self.kind != ChromeKind::Caption {
+            return;
+        }
+        place_caption_window(&self.window, position);
     }
 
     pub fn on_window_event(&mut self, event: &WindowEvent) -> bool {
@@ -263,6 +265,24 @@ pub fn color32_to_wgpu(color: egui::Color32) -> wgpu::Color {
         b: f64::from(color.b()) / 255.0,
         a: f64::from(color.a()) / 255.0,
     }
+}
+
+fn place_caption_window(window: &Window, position: &str) {
+    let Some(monitor) = window.current_monitor() else {
+        return;
+    };
+    let screen = monitor.size();
+    let origin = monitor.position();
+    let inner = window.inner_size();
+    let (x, y) = crate::surface::caption::outer_offset(
+        position,
+        (screen.width, screen.height),
+        (inner.width, inner.height),
+    );
+    window.set_outer_position(PhysicalPosition::new(
+        origin.x + i32::try_from(x).unwrap_or(i32::MAX),
+        origin.y + i32::try_from(y).unwrap_or(i32::MAX),
+    ));
 }
 
 #[cfg(test)]

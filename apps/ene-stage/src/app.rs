@@ -718,6 +718,9 @@ impl StageApp {
         self.settings = settings.clone();
         i18n::select_language(&settings.language);
         self.sync_chrome_titles();
+        if let Some(caption) = &self.caption {
+            caption.place_caption(&settings.caption_position);
+        }
         if let Some(overlay) = self.overlay.as_mut()
             && overlay.transparent
         {
@@ -1092,7 +1095,10 @@ impl StageApp {
             PhysicalSize::new(720, 160),
             false,
         ) {
-            Ok(win) => self.caption = Some(win),
+            Ok(win) => {
+                win.place_caption(&self.settings.caption_position);
+                self.caption = Some(win);
+            }
             Err(err) => tracing::warn!(error = %err, "caption window failed"),
         }
     }
@@ -1268,8 +1274,10 @@ impl StageApp {
         if let Some(caption) = self.caption.as_mut() {
             let surface = &self.surface;
             let font = self.settings.caption_font_size;
+            let position = self.settings.caption_position.clone();
+            let pinned = self.settings.caption_pinned;
             if let Err(err) = caption.paint(gpu, None, |ui| {
-                surface::show_caption(ui.ctx(), surface, font);
+                surface::show_caption(ui.ctx(), surface, font, &position, pinned);
             }) {
                 tracing::debug!(error = %err, "caption paint failed");
             }
