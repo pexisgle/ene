@@ -1,10 +1,24 @@
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ene_plugin_ipc::ToolSpecWire;
 use ene_registry::{arg_str, spec};
+use parking_lot::Mutex;
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const MAX_UNDO_BYTES: usize = 1024 * 1024;
+
+static PATH_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static TEMP_SUFFIX: AtomicU64 = AtomicU64::new(1);
+
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
+    let expected_hash = json!({"type":"string"});
     vec![
         spec(
             "fs.read",
@@ -15,13 +29,13 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
         spec(
             "fs.write",
             "Write a UTF-8 file in the workspace",
-            json!({"type":"object","properties":{"path":{"type":"string"},"text":{"type":"string"},"job_id":{"type":"string"}},"required":["path","text"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"path":{"type":"string"},"text":{"type":"string"},"job_id":{"type":"string"},"expected_hash":expected_hash.clone()},"required":["path","text"],"additionalProperties":false}),
             vec!["fs.write".to_owned()],
         ),
         spec(
             "fs.edit",
             "Replace text in a workspace file",
-            json!({"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"},"replace_all":{"type":"boolean"},"job_id":{"type":"string"}},"required":["path","old","new"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"},"replace_all":{"type":"boolean"},"job_id":{"type":"string"},"expected_hash":expected_hash.clone()},"required":["path","old","new"],"additionalProperties":false}),
             vec!["fs.write".to_owned()],
         ),
         spec(
@@ -39,7 +53,7 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
         spec(
             "fs.patch",
             "Apply a unified diff to a workspace file",
-            json!({"type":"object","properties":{"path":{"type":"string"},"diff":{"type":"string"},"job_id":{"type":"string"}},"required":["path","diff"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"path":{"type":"string"},"diff":{"type":"string"},"job_id":{"type":"string"},"expected_hash":expected_hash},"required":["path","diff"],"additionalProperties":false}),
             vec!["fs.write".to_owned()],
         ),
         spec(
@@ -66,17 +80,30 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
 
 fn read(args: &Value) -> Result<Value, String> {
     let path = resolve(arg_str(args, "path")?, false)?;
-    let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    Ok(json!({ "text": body }))
+    let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| "file is not valid UTF-8".to_owned())?;
+    Ok(json!({ "text": text, "hash": hash_bytes(&bytes) }))
 }
 
 fn write(args: &Value) -> Result<Value, String> {
     let path = resolve(arg_str(args, "path")?, true)?;
     let text = arg_str(args, "text")?;
     let job_id = job_key(args);
-    record_undo(&job_id, &path)?;
-    std::fs::write(&path, text).map_err(|err| err.to_string())?;
-    Ok(json!({ "ok": true, "job_id": job_id }))
+    let expected = optional_hash(args);
+    with_path_lock(&path, || {
+        check_precondition(&path, expected)?;
+        record_undo(&job_id, &path)?;
+        let bytes = text.as_bytes();
+        if let Err(err) = atomic_write_bytes(&path, bytes) {
+            drop(pop_journal_entry(&job_id));
+            return Err(err);
+        }
+        Ok(json!({
+            "ok": true,
+            "job_id": job_id,
+            "hash": hash_bytes(bytes),
+        }))
+    })
 }
 
 fn edit(args: &Value) -> Result<Value, String> {
@@ -87,19 +114,23 @@ fn edit(args: &Value) -> Result<Value, String> {
         .get("replace_all")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    if !body.contains(old) {
-        return Err("old text not found".to_owned());
-    }
     let job_id = job_key(args);
-    record_undo(&job_id, &path)?;
-    let next = if replace_all {
-        body.replace(old, new)
-    } else {
-        body.replacen(old, new, 1)
-    };
-    std::fs::write(&path, next).map_err(|err| err.to_string())?;
-    Ok(json!({ "ok": true, "job_id": job_id }))
+    let expected = optional_hash(args);
+    with_path_lock(&path, || {
+        check_precondition(&path, expected)?;
+        let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        let next = apply_edit(&body, old, new, replace_all)?;
+        record_undo(&job_id, &path)?;
+        if let Err(err) = atomic_write_bytes(&path, next.as_bytes()) {
+            drop(pop_journal_entry(&job_id));
+            return Err(err);
+        }
+        Ok(json!({
+            "ok": true,
+            "job_id": job_id,
+            "hash": hash_bytes(next.as_bytes()),
+        }))
+    })
 }
 
 fn list(args: &Value) -> Result<Value, String> {
@@ -205,12 +236,23 @@ fn walk_search(
 fn patch(args: &Value) -> Result<Value, String> {
     let path = resolve(arg_str(args, "path")?, false)?;
     let diff = arg_str(args, "diff")?;
-    let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    let next = apply_unified_diff(&body, diff)?;
     let job_id = job_key(args);
-    record_undo(&job_id, &path)?;
-    std::fs::write(&path, next).map_err(|err| err.to_string())?;
-    Ok(json!({ "ok": true, "job_id": job_id }))
+    let expected = optional_hash(args);
+    with_path_lock(&path, || {
+        check_precondition(&path, expected)?;
+        let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        let next = apply_unified_diff(&body, diff)?;
+        record_undo(&job_id, &path)?;
+        if let Err(err) = atomic_write_bytes(&path, next.as_bytes()) {
+            drop(pop_journal_entry(&job_id));
+            return Err(err);
+        }
+        Ok(json!({
+            "ok": true,
+            "job_id": job_id,
+            "hash": hash_bytes(next.as_bytes()),
+        }))
+    })
 }
 
 #[derive(Debug)]
@@ -226,20 +268,58 @@ enum HunkOp {
     Add(String),
 }
 
+struct LineEnding {
+    sep: &'static str,
+    trailing: bool,
+}
+
+fn detect_line_ending(body: &str) -> LineEnding {
+    let sep = if body.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing = if sep == "\r\n" {
+        body.ends_with("\r\n")
+    } else {
+        body.ends_with('\n')
+    };
+    LineEnding { sep, trailing }
+}
+
+fn split_lines(body: &str, ending: &LineEnding) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut rest = body;
+    loop {
+        if let Some(idx) = rest.find(ending.sep) {
+            lines.push(rest[..idx].to_owned());
+            rest = &rest[idx + ending.sep.len()..];
+        } else {
+            lines.push(rest.to_owned());
+            break;
+        }
+    }
+    if ending.trailing && lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+fn join_lines(lines: &[String], ending: &LineEnding) -> String {
+    let mut out = lines.join(ending.sep);
+    if ending.trailing {
+        out.push_str(ending.sep);
+    }
+    out
+}
+
 fn apply_unified_diff(body: &str, diff: &str) -> Result<String, String> {
     let hunks = parse_hunks(diff)?;
     if hunks.is_empty() {
         return Err("diff has no hunks".to_owned());
     }
-    let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
+    let ending = detect_line_ending(body);
+    let mut lines = split_lines(body, &ending);
     for hunk in hunks {
         lines = apply_hunk(lines, &hunk)?;
     }
-    let mut next = lines.join("\n");
-    if body.ends_with('\n') {
-        next.push('\n');
-    }
-    Ok(next)
+    Ok(join_lines(&lines, &ending))
 }
 
 fn parse_hunks(diff: &str) -> Result<Vec<Hunk>, String> {
@@ -345,6 +425,104 @@ fn matches_at(lines: &[String], expected: &[String], idx: usize) -> bool {
         .is_some_and(|slice| slice == expected)
 }
 
+fn apply_edit(body: &str, old: &str, new: &str, replace_all: bool) -> Result<String, String> {
+    let exact_count = body.matches(old).count();
+    if exact_count > 0 {
+        if replace_all {
+            return Ok(body.replace(old, new));
+        }
+        if exact_count == 1 {
+            return Ok(body.replacen(old, new, 1));
+        }
+        return Err("ambiguous match: old text occurs multiple times".to_owned());
+    }
+    if replace_all {
+        return Err("old text not found".to_owned());
+    }
+    let indent_matches = find_indent_matches(body, old);
+    match indent_matches.len() {
+        0 => Err("old text not found".to_owned()),
+        1 => {
+            let (start, end) = indent_matches[0];
+            let mut out = String::with_capacity(body.len().saturating_sub(end - start) + new.len());
+            out.push_str(&body[..start]);
+            out.push_str(new);
+            out.push_str(&body[end..]);
+            Ok(out)
+        }
+        _ => Err("ambiguous match: old text occurs multiple times".to_owned()),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LineSpan {
+    start: usize,
+    content_end: usize,
+    term_end: usize,
+}
+
+fn line_spans(body: &str) -> Vec<LineSpan> {
+    let sep = if body.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut spans = Vec::new();
+    let mut pos = 0;
+    while pos <= body.len() {
+        if let Some(rel) = body[pos..].find(sep) {
+            let content_end = pos + rel;
+            spans.push(LineSpan {
+                start: pos,
+                content_end,
+                term_end: content_end + sep.len(),
+            });
+            pos = content_end + sep.len();
+        } else {
+            if pos < body.len() {
+                spans.push(LineSpan {
+                    start: pos,
+                    content_end: body.len(),
+                    term_end: body.len(),
+                });
+            }
+            break;
+        }
+    }
+    spans
+}
+
+fn find_indent_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
+    let old_lines: Vec<&str> = split_match_lines(old);
+    if old_lines.is_empty() {
+        return Vec::new();
+    }
+    let spans = line_spans(body);
+    if spans.len() < old_lines.len() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for start_idx in 0..=spans.len() - old_lines.len() {
+        let window_ok = old_lines.iter().enumerate().all(|(offset, old_line)| {
+            let span = spans[start_idx + offset];
+            let body_line = &body[span.start..span.content_end];
+            old_line.trim_start() == body_line.trim_start()
+        });
+        if window_ok {
+            let start = spans[start_idx].start;
+            let end = spans[start_idx + old_lines.len() - 1].term_end;
+            matches.push((start, end));
+        }
+    }
+    matches
+}
+
+fn split_match_lines(text: &str) -> Vec<&str> {
+    if text.contains('\n') {
+        text.split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .collect()
+    } else {
+        vec![text]
+    }
+}
+
 fn undo(args: &Value) -> Result<Value, String> {
     let job_id = explicit_job_key(args).ok_or_else(|| "job_id is required".to_owned())?;
     let journal = journal_path(&job_id)?;
@@ -354,14 +532,38 @@ fn undo(args: &Value) -> Result<Value, String> {
         return Err("nothing to undo".to_owned());
     };
     let entry: Value = serde_json::from_str(last).map_err(|err| err.to_string())?;
-    let path = entry
+    let path_raw = entry
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| "bad undo record".to_owned())?;
-    if let Some(prev) = entry.get("prev").and_then(Value::as_str) {
-        std::fs::write(path, prev).map_err(|err| err.to_string())?;
+    if entry
+        .get("too_large")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("undo refused: prior body exceeds journal size cap".to_owned());
+    }
+    let path = PathBuf::from(path_raw);
+    let existed = entry
+        .get("existed")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if existed {
+        let prev_b64 = entry
+            .get("prev_b64")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "bad undo record".to_owned())?;
+        let bytes = B64
+            .decode(prev_b64)
+            .map_err(|err| format!("bad undo record: {err}"))?;
+        with_path_lock(&path, || atomic_write_bytes(&path, &bytes))?;
     } else {
-        drop(std::fs::remove_file(path));
+        with_path_lock(&path, || {
+            if path.exists() {
+                std::fs::remove_file(&path).map_err(|err| err.to_string())?;
+            }
+            Ok(())
+        })?;
     }
     let rest = if lines.is_empty() {
         String::new()
@@ -371,18 +573,40 @@ fn undo(args: &Value) -> Result<Value, String> {
         out
     };
     std::fs::write(&journal, rest).map_err(|err| err.to_string())?;
-    Ok(json!({ "ok": true, "path": path }))
+    Ok(json!({ "ok": true, "path": path_raw }))
 }
 
 fn record_undo(job_id: &str, path: &Path) -> Result<(), String> {
+    if is_secret_path(path) {
+        return Ok(());
+    }
+    let entry = if path.exists() {
+        let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
+        if bytes.len() > MAX_UNDO_BYTES {
+            json!({
+                "path": path.display().to_string(),
+                "existed": true,
+                "too_large": true,
+            })
+        } else {
+            json!({
+                "path": path.display().to_string(),
+                "existed": true,
+                "prev_b64": B64.encode(bytes),
+            })
+        }
+    } else {
+        json!({
+            "path": path.display().to_string(),
+            "existed": false,
+        })
+    };
+    append_journal(job_id, &entry)
+}
+
+fn append_journal(job_id: &str, entry: &Value) -> Result<(), String> {
     let journal = journal_path(job_id)?;
-    let prev = std::fs::read_to_string(path).ok();
-    let entry = json!({
-        "path": path.display().to_string(),
-        "prev": prev,
-        "job_id": job_id,
-    });
-    let mut line = serde_json::to_string(&entry).map_err(|err| err.to_string())?;
+    let mut line = serde_json::to_string(entry).map_err(|err| err.to_string())?;
     line.push('\n');
     std::fs::OpenOptions::new()
         .create(true)
@@ -396,11 +620,134 @@ fn record_undo(job_id: &str, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn pop_journal_entry(job_id: &str) -> Result<(), String> {
+    let journal = journal_path(job_id)?;
+    let raw = std::fs::read_to_string(&journal).unwrap_or_default();
+    let mut lines: Vec<&str> = raw.lines().filter(|line| !line.is_empty()).collect();
+    if lines.pop().is_none() {
+        return Ok(());
+    }
+    let rest = if lines.is_empty() {
+        String::new()
+    } else {
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    };
+    std::fs::write(&journal, rest).map_err(|err| err.to_string())
+}
+
+fn is_secret_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if name == ".env" || name == "vault.bin" {
+        return true;
+    }
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pem") || ext.eq_ignore_ascii_case("key"))
+}
+
 fn journal_path(job_id: &str) -> Result<PathBuf, String> {
     let dir = workspace()?.join(".ene").join("undo");
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     Ok(dir.join(format!("{job_id}.jsonl")))
 }
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn optional_hash(args: &Value) -> Option<&str> {
+    args.get("expected_hash")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+fn check_precondition(path: &Path, expected: Option<&str>) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if !path.exists() {
+        return Err("stale precondition: file does not exist".to_owned());
+    }
+    let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
+    let current = hash_bytes(&bytes);
+    if current != expected {
+        return Err(format!(
+            "stale precondition: file changed (expected {expected}, found {current})"
+        ));
+    }
+    Ok(())
+}
+
+fn lock_key(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return path.canonicalize().map_err(|err| err.to_string());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "path has no parent directory".to_owned())?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "path has no file name".to_owned())?;
+    let canon_parent = parent.canonicalize().map_err(|err| err.to_string())?;
+    Ok(canon_parent.join(file_name))
+}
+
+fn with_path_lock<T>(path: &Path, action: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let key = lock_key(path)?;
+    let lock = {
+        let mut locks = PATH_LOCKS.lock();
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let _guard = lock.lock();
+    action()
+}
+
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "path has no parent directory".to_owned())?;
+    std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    let suffix = TEMP_SUFFIX.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(".ene-write-{}-{suffix}.tmp", std::process::id()));
+    let result = write_temp_then_rename(path, &temp_path, bytes);
+    if result.is_err() {
+        drop(std::fs::remove_file(&temp_path));
+    }
+    result
+}
+
+fn write_temp_then_rename(path: &Path, temp_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = std::fs::File::create(temp_path).map_err(|err| err.to_string())?;
+    file.write_all(bytes).map_err(|err| err.to_string())?;
+    preserve_permissions(path, &file);
+    drop(file);
+    std::fs::rename(temp_path, path).map_err(|err| err.to_string())
+}
+
+/// Copies mode bits from an existing `src` onto the temp file before rename.
+///
+/// A missing source (first write) or any metadata error is ignored so the temp
+/// file keeps the default mode. Without this, replacing an executable via
+/// rename would drop `+x` (and other Unix mode bits).
+#[cfg(unix)]
+fn preserve_permissions(src: &Path, dst: &std::fs::File) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let Ok(meta) = std::fs::metadata(src) else {
+        return;
+    };
+    let perms = std::fs::Permissions::from_mode(meta.mode() & 0o7777);
+    drop(dst.set_permissions(perms));
+}
+
+#[cfg(not(unix))]
+fn preserve_permissions(_src: &Path, _dst: &std::fs::File) {}
 
 fn job_key(args: &Value) -> String {
     explicit_job_key(args).unwrap_or_else(unique_job_key)
@@ -443,7 +790,15 @@ fn workspace() -> Result<PathBuf, String> {
 #[cfg(test)]
 static TEST_WORKSPACE: parking_lot::Mutex<Option<PathBuf>> = parking_lot::Mutex::new(None);
 
+#[cfg(test)]
+static TEST_WORKSPACE_GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(root) = TEST_WORKSPACE.lock().clone() {
+        return ene_registry::confine_tool_path(&root, Path::new(path), create_parent)
+            .map_err(|err| err.to_string());
+    }
     let Ok(workspace) = std::env::var("ENE_WORKSPACE") else {
         return Ok(PathBuf::from(path));
     };
@@ -453,8 +808,318 @@ fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Needle, TEST_WORKSPACE, apply_unified_diff, execute, job_key};
+    use super::{
+        Needle, TEST_WORKSPACE, TEST_WORKSPACE_GATE, apply_edit, apply_unified_diff, execute,
+        hash_bytes, job_key, journal_path,
+    };
     use serde_json::json;
+    use std::fs;
+    use std::thread;
+
+    fn with_workspace(dir: &tempfile::TempDir, action: impl FnOnce() -> Result<(), String>) {
+        let _gate = TEST_WORKSPACE_GATE.lock();
+        *TEST_WORKSPACE.lock() = Some(dir.path().to_path_buf());
+        let result = action();
+        *TEST_WORKSPACE.lock() = None;
+        result.unwrap();
+    }
+
+    #[test]
+    fn read_returns_hash_of_raw_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("raw.txt");
+        fs::write(&path, b"\xef\xbb\xbfhello").unwrap();
+        with_workspace(&dir, || {
+            let out = execute("fs.read", &json!({"path": path.to_string_lossy()}))?;
+            assert_eq!(out["text"], "\u{feff}hello");
+            assert_eq!(out["hash"], hash_bytes(b"\xef\xbb\xbfhello"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn stale_expected_hash_does_not_overwrite() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("stale.txt");
+        fs::write(&path, "original").unwrap();
+        with_workspace(&dir, || {
+            let read = execute("fs.read", &json!({"path": path.to_string_lossy()}))?;
+            let hash = read["hash"].as_str().unwrap();
+            execute(
+                "fs.write",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "text": "changed",
+                    "job_id": "stale-job",
+                }),
+            )?;
+            let err = execute(
+                "fs.write",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "text": "mutated",
+                    "expected_hash": hash,
+                    "job_id": "stale-job",
+                }),
+            )
+            .unwrap_err();
+            assert!(err.contains("stale precondition"), "{err}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "changed");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn duplicate_old_without_replace_all_is_ambiguous() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("dup.txt");
+        fs::write(&path, "foo bar foo").unwrap();
+        with_workspace(&dir, || {
+            let err = execute(
+                "fs.edit",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "old": "foo",
+                    "new": "baz",
+                    "job_id": "dup-job",
+                }),
+            )
+            .unwrap_err();
+            assert!(err.contains("ambiguous"), "{err}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "foo bar foo");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn crlf_is_preserved_on_edit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("crlf.txt");
+        fs::write(&path, "a\r\nb\r\n").unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.edit",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "old": "b",
+                    "new": "B",
+                    "job_id": "crlf-job",
+                }),
+            )?;
+            assert_eq!(fs::read(&path).unwrap(), b"a\r\nB\r\n");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn lf_and_bom_and_trailing_newline_are_preserved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("mixed.txt");
+        fs::write(&path, b"\xef\xbb\xbfline\n").unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.edit",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "old": "line",
+                    "new": "LINE",
+                    "job_id": "bom-job",
+                }),
+            )?;
+            assert_eq!(fs::read(&path).unwrap(), b"\xef\xbb\xbfLINE\n");
+            Ok(())
+        });
+
+        let no_nl = dir.path().join("no_nl.txt");
+        fs::write(&no_nl, "keep").unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.edit",
+                &json!({
+                    "path": no_nl.to_string_lossy(),
+                    "old": "keep",
+                    "new": "kept",
+                    "job_id": "nonl-job",
+                }),
+            )?;
+            assert_eq!(fs::read(&no_nl).unwrap(), b"kept");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn concurrent_writes_are_serialized() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("shared.txt");
+        fs::write(&path, "seed").unwrap();
+        let _gate = TEST_WORKSPACE_GATE.lock();
+        *TEST_WORKSPACE.lock() = Some(dir.path().to_path_buf());
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                for idx in 0..40 {
+                    execute(
+                        "fs.write",
+                        &json!({
+                            "path": "shared.txt",
+                            "text": format!("left-{idx}"),
+                            "job_id": "left",
+                        }),
+                    )
+                    .unwrap();
+                }
+            });
+            scope.spawn(|| {
+                for idx in 0..40 {
+                    execute(
+                        "fs.write",
+                        &json!({
+                            "path": "shared.txt",
+                            "text": format!("right-{idx}"),
+                            "job_id": "right",
+                        }),
+                    )
+                    .unwrap();
+                }
+            });
+        });
+        *TEST_WORKSPACE.lock() = None;
+        let final_text = fs::read_to_string(&path).unwrap();
+        assert!(
+            final_text.starts_with("left-") || final_text.starts_with("right-"),
+            "{final_text}"
+        );
+        assert!(final_text.len() < 12, "{final_text}");
+    }
+
+    #[test]
+    fn atomic_write_replaces_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("atomic.txt");
+        fs::write(&path, "before").unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.write",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "text": "after",
+                    "job_id": "atomic-job",
+                }),
+            )?;
+            assert_eq!(fs::read_to_string(&path).unwrap(), "after");
+            Ok(())
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_edit_preserves_executable_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("tool.sh");
+        fs::write(&path, "#!/bin/sh\necho before\n").unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+
+        with_workspace(&dir, || {
+            execute(
+                "fs.edit",
+                &json!({
+                    "path": path.to_string_lossy(),
+                    "old": "before",
+                    "new": "after",
+                    "job_id": "mode-job",
+                }),
+            )?;
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "#!/bin/sh\necho after\n"
+            );
+            let mode = fs::metadata(&path).unwrap().mode() & 0o7777;
+            assert_eq!(mode, 0o755, "executable mode must survive atomic replace");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn undo_restores_overwrite_and_deletes_created_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let existing = dir.path().join("existing.txt");
+        fs::write(&existing, "old").unwrap();
+        let created = dir.path().join("created.txt");
+        with_workspace(&dir, || {
+            execute(
+                "fs.write",
+                &json!({
+                    "path": existing.to_string_lossy(),
+                    "text": "new",
+                    "job_id": "undo-job",
+                }),
+            )?;
+            execute(
+                "fs.write",
+                &json!({
+                    "path": created.to_string_lossy(),
+                    "text": "fresh",
+                    "job_id": "undo-job",
+                }),
+            )?;
+            execute("fs.undo", &json!({"job_id": "undo-job"}))?;
+            assert!(!created.exists());
+            assert_eq!(fs::read_to_string(&existing).unwrap(), "new");
+            execute("fs.undo", &json!({"job_id": "undo-job"}))?;
+            assert_eq!(fs::read_to_string(&existing).unwrap(), "old");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn undo_is_scoped_to_the_job() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, "one").unwrap();
+        fs::write(&b, "two").unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.write",
+                &json!({"path": a.to_string_lossy(), "text": "A", "job_id": "job-a"}),
+            )?;
+            execute(
+                "fs.write",
+                &json!({"path": b.to_string_lossy(), "text": "B", "job_id": "job-b"}),
+            )?;
+            execute("fs.undo", &json!({"job_id": "job-a"}))?;
+            assert_eq!(fs::read_to_string(&a).unwrap(), "one");
+            assert_eq!(fs::read_to_string(&b).unwrap(), "B");
+            Ok(())
+        });
+        assert_eq!(job_key(&json!({"job_id": "job-a"})), "job-a");
+    }
+
+    #[test]
+    fn secret_files_are_not_stored_in_journal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let secret = dir.path().join(".env");
+        fs::write(&secret, "SECRET=value").unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.write",
+                &json!({
+                    "path": secret.to_string_lossy(),
+                    "text": "SECRET=changed",
+                    "job_id": "secret-job",
+                }),
+            )?;
+            let journal = journal_path("secret-job").unwrap();
+            let raw = fs::read_to_string(journal).unwrap_or_default();
+            assert!(!raw.contains("SECRET"));
+            assert!(!raw.contains("changed"));
+            assert!(!raw.contains("value"));
+            Ok(())
+        });
+    }
 
     #[test]
     fn unified_diff_replaces_matching_context() {
@@ -462,6 +1127,14 @@ mod tests {
         let diff = "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
         let next = apply_unified_diff(body, diff).unwrap();
         assert_eq!(next, "alpha\nBETA\ngamma\n");
+    }
+
+    #[test]
+    fn unified_diff_preserves_crlf() {
+        let body = "alpha\r\nbeta\r\ngamma\r\n";
+        let diff = "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
+        let next = apply_unified_diff(body, diff).unwrap();
+        assert_eq!(next, "alpha\r\nBETA\r\ngamma\r\n");
     }
 
     #[test]
@@ -482,39 +1155,12 @@ mod tests {
     #[test]
     fn search_literal_does_not_compile_regex() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "cost is $5+\n").unwrap();
-        let found = execute(
-            "fs.search",
-            &json!({"path": dir.path().join("a.txt").to_string_lossy(), "query": "$5+"}),
-        )
-        .unwrap();
-        assert_eq!(found["matches"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn undo_is_scoped_to_the_job() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let a = dir.path().join("a.txt");
-        let b = dir.path().join("b.txt");
-        std::fs::write(&a, "one").unwrap();
-        std::fs::write(&b, "two").unwrap();
-        *TEST_WORKSPACE.lock() = Some(dir.path().to_path_buf());
-        let result = (|| {
-            execute(
-                "fs.write",
-                &json!({"path": a.to_string_lossy(), "text": "A", "job_id": "job-a"}),
-            )?;
-            execute(
-                "fs.write",
-                &json!({"path": b.to_string_lossy(), "text": "B", "job_id": "job-b"}),
-            )?;
-            execute("fs.undo", &json!({"job_id": "job-a"}))
-        })();
-        *TEST_WORKSPACE.lock() = None;
-        result.unwrap();
-        assert_eq!(std::fs::read_to_string(&a).unwrap(), "one");
-        assert_eq!(std::fs::read_to_string(&b).unwrap(), "B");
-        assert_eq!(job_key(&json!({"job_id": "job-a"})), "job-a");
+        fs::write(dir.path().join("a.txt"), "cost is $5+\n").unwrap();
+        with_workspace(&dir, || {
+            let found = execute("fs.search", &json!({"path": "a.txt", "query": "$5+"}))?;
+            assert_eq!(found["matches"].as_array().unwrap().len(), 1);
+            Ok(())
+        });
     }
 
     #[test]
@@ -531,5 +1177,12 @@ mod tests {
         assert!(!lit.is_match("aaa"));
         let re = Needle::Regex(regex::Regex::new("a+").unwrap());
         assert!(re.is_match("aaa"));
+    }
+
+    #[test]
+    fn apply_edit_indent_tolerance_is_unique() {
+        let body = "    alpha\n    beta\n";
+        let next = apply_edit(body, "alpha\nbeta", "OK", false).unwrap();
+        assert_eq!(next, "OK");
     }
 }
