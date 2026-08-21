@@ -5,7 +5,7 @@
 
 | プラグイン | バイナリ | 役割 |
 |---|---|---|
-| `utility` | `ene-harness-utility` | ハッシュ、時刻、計算、乱数、テキスト |
+| `utility` | `ene-harness-utility` | ハッシュ、時刻、system_info、計算（単位と為替テーブル）、乱数、テキスト |
 | `fs` | `ene-harness-fs` | ワークスペース内の read / write / edit / list / search / patch / undo。シェルは持たない |
 | `exec` | `ene-harness-exec` | プログラム名でのプロセス実行（`fs` から分離） |
 | `web` | `ene-harness-web` | HTTPS fetch と公開検索（SSRF 禁止） |

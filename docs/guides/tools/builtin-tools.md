@@ -5,7 +5,7 @@ third-party tool. `ene-core` always applies these profile rows:
 
 | Plugin | Binary | Role |
 |---|---|---|
-| `utility` | `ene-harness-utility` | Hash, time, calc, random, text |
+| `utility` | `ene-harness-utility` | Hash, time, system_info, calc (units and snapshot FX), random, text |
 | `fs` | `ene-harness-fs` | Read / write / edit / list / search / patch / undo in the workspace. No shell. |
 | `exec` | `ene-harness-exec` | Process execution by program name (separate from `fs`) |
 | `web` | `ene-harness-web` | HTTPS fetch and public search (SSRF blocked) |

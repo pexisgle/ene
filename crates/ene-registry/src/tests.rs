@@ -19,6 +19,7 @@ fn surface_schemas_omit_fs_write() {
         .collect();
     assert!(names.contains(&"utility.hash"));
     assert!(names.contains(&"utility.calc"));
+    assert!(names.contains(&"utility.system_info"));
     assert!(names.contains(&"fs.read"));
     assert!(names.contains(&"fs.list"));
     assert!(!names.contains(&"fs.write"));
@@ -256,6 +257,21 @@ async fn calc_and_text_tools_run_on_surface() {
         .await
         .unwrap();
     assert_eq!(sum["value"], json!(7.0));
+    let yen = registry
+        .execute(
+            "utility.calc",
+            json!({"value": 1, "from": "USD", "to": "JPY"}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    assert_eq!(yen["source"], json!("table"));
+    assert!((yen["value"].as_f64().unwrap() - 150.0).abs() < 1e-9);
+    let host = registry
+        .execute("utility.system_info", json!({}), Layer::Surface)
+        .await
+        .unwrap();
+    assert_eq!(host["os"], json!(std::env::consts::OS));
     let hashed = registry
         .execute(
             "utility.text",

@@ -19,9 +19,12 @@ pub(crate) fn specs(kind: BuiltinKind) -> Vec<ToolSpecWire> {
 
 pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "utility.hash" | "utility.time" | "utility.calc" | "utility.random" | "utility.text" => {
-            utility::execute(name, args)
-        }
+        "utility.hash"
+        | "utility.time"
+        | "utility.system_info"
+        | "utility.calc"
+        | "utility.random"
+        | "utility.text" => utility::execute(name, args),
         "fs.read" | "fs.write" | "fs.edit" | "fs.list" | "fs.search" | "fs.patch" | "fs.undo" => {
             fs::execute(name, args)
         }
