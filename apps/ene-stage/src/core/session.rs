@@ -12,6 +12,9 @@ use uuid::Uuid;
 
 use crate::bundle::{self, motions_dir_for_package};
 
+/// Overlay draws at most this many VRM bodies (`body.render.max_concurrent` default).
+pub const MAX_OVERLAY_BODIES: usize = 2;
+
 /// Active stage session bound to one soul and surface history.
 pub struct StageSession {
     client: Arc<ApiClient>,
@@ -100,7 +103,8 @@ impl StageSession {
 
     /// Resolve a soul (preferring an occupant with an avatar), open a session, load history.
     pub async fn bootstrap(client: Arc<ApiClient>) -> Result<Self, ApiError> {
-        let (soul_id, occupants, avatar_path, motions_dir) = resolve_stage(&client).await?;
+        let (soul_id, occupants, avatar_path, motions_dir) =
+            resolve_stage(&client, MAX_OVERLAY_BODIES).await?;
         let session_id = resolve_session_id(&client, &soul_id).await?;
         let history = client.history(&session_id, "surface").await?;
         Ok(Self {
@@ -124,18 +128,25 @@ impl StageSession {
         *self.history.lock() = history;
         if let Some(occupant) = self.occupants.iter().find(|item| item.soul_id == soul_id) {
             self.avatar_path = occupant.avatar_path.as_ref().map(PathBuf::from);
-            self.motions_dir = occupant
-                .package_id
-                .as_ref()
-                .and(occupant.avatar_path.as_ref())
-                .and_then(|avatar| {
-                    PathBuf::from(avatar)
-                        .parent()
-                        .and_then(std::path::Path::parent)
-                        .map(|body| body.join("motions"))
-                });
+            self.motions_dir = motions_dir_for_occupant(occupant);
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn avatar_loads(&self) -> Vec<crate::overlay::AvatarLoad> {
+        avatar_slots(&self.occupants)
+            .into_iter()
+            .filter_map(|occupant| {
+                let path = PathBuf::from(occupant.avatar_path.as_ref()?);
+                let motions_dir = motions_dir_for_occupant(&occupant);
+                Some(crate::overlay::AvatarLoad {
+                    soul_id: occupant.soul_id,
+                    path,
+                    motions_dir,
+                })
+            })
+            .collect()
     }
 
     pub async fn send_prompt(&self, text: &str) -> Result<SendMessageResponse, ApiError> {
@@ -356,36 +367,90 @@ impl SessionHandle {
 
 /// Import or activate Alicia so a stage occupant exposes `avatar_path`.
 pub async fn ensure_alicia(client: &ApiClient) -> Result<Option<OccupantView>, ApiError> {
-    if let Some(occupant) = occupant_with_avatar(&client.stage().await?.occupants) {
+    let occupants = client.stage().await?.occupants;
+    if let Some(occupant) = occupant_with_avatar(&occupants) {
         return Ok(Some(occupant));
     }
+    import_named_companion(client, "char.alicia", "Alicia").await?;
+    Ok(occupant_with_avatar(&client.stage().await?.occupants))
+}
+
+/// Ensure up to `want` occupants expose a VRM `avatar_path`.
+pub async fn ensure_avatar_occupants(
+    client: &ApiClient,
+    want: usize,
+) -> Result<Vec<OccupantView>, ApiError> {
+    let _ = ensure_alicia(client).await?;
+    let occupants = client.stage().await?.occupants;
+    if avatar_slots(&occupants).len() >= want {
+        return Ok(occupants);
+    }
+    import_named_companion(client, "char.alicia-b", "Alicia B").await?;
+    Ok(client.stage().await?.occupants)
+}
+
+async fn import_named_companion(
+    client: &ApiClient,
+    id: &str,
+    display_name: &str,
+) -> Result<(), ApiError> {
     let packages = client.list_characters().await?.items;
-    if let Some(pkg) = find_alicia_package(&packages) {
-        tracing::info!(id = %pkg.id, "activating installed Alicia package");
+    let existing = packages.iter().find(|pkg| pkg.id == id).or_else(|| {
+        if id == "char.alicia" {
+            find_alicia_package(&packages)
+        } else {
+            None
+        }
+    });
+    if let Some(pkg) = existing {
+        tracing::info!(id = %pkg.id, "activating installed VRM package");
         let _ = client.activate_character(&pkg.id).await?;
-    } else {
-        match bundle::pack_bundled_alicia() {
-            Ok(bytes) => {
-                tracing::info!(bytes = bytes.len(), "importing bundled Alicia .enechar");
-                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-                let imported = client.import_character_archive_b64(&encoded).await?;
-                if imported.soul_id.is_none() {
-                    let _ = client.activate_character(&imported.id).await?;
-                }
+        return Ok(());
+    }
+    match bundle::pack_bundled_named(id, display_name) {
+        Ok(bytes) => {
+            tracing::info!(id, bytes = bytes.len(), "importing bundled VRM .enechar");
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            let imported = client.import_character_archive_b64(&encoded).await?;
+            if imported.soul_id.is_none() {
+                let _ = client.activate_character(&imported.id).await?;
             }
-            Err(err) => {
-                tracing::warn!(error = %err, "bundled Alicia package unavailable");
-                return Ok(occupant_with_avatar(&client.stage().await?.occupants));
-            }
+            Ok(())
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, id, "bundled VRM package unavailable");
+            Ok(())
         }
     }
-    Ok(occupant_with_avatar(&client.stage().await?.occupants))
 }
 
 fn find_alicia_package(packages: &[CharacterView]) -> Option<&CharacterView> {
     packages.iter().find(|pkg| {
         let id = pkg.id.to_ascii_lowercase();
-        id.contains("alicia") || id == "char.alicia"
+        id == "char.alicia" || id == "alicia"
+    })
+}
+
+#[must_use]
+pub fn avatar_slots(occupants: &[OccupantView]) -> Vec<OccupantView> {
+    occupants
+        .iter()
+        .filter(|occupant| occupant_has_avatar(occupant))
+        .take(MAX_OVERLAY_BODIES)
+        .cloned()
+        .collect()
+}
+
+#[must_use]
+pub fn motions_dir_for_occupant(occupant: &OccupantView) -> Option<PathBuf> {
+    occupant.avatar_path.as_ref().map(|avatar| {
+        PathBuf::from(avatar)
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map_or_else(
+                || motions_dir_for_package(occupant.package_id.as_deref().unwrap_or("")),
+                |body| body.join("motions"),
+            )
     })
 }
 
@@ -446,9 +511,10 @@ pub fn pick_avatar_occupant(occupants: &[OccupantView]) -> Option<OccupantView> 
 
 async fn resolve_stage(
     client: &ApiClient,
+    want_avatars: usize,
 ) -> Result<(String, Vec<OccupantView>, Option<PathBuf>, Option<PathBuf>), ApiError> {
-    if let Err(err) = ensure_alicia(client).await {
-        tracing::warn!(error = %err, "Alicia package bootstrap failed");
+    if let Err(err) = ensure_avatar_occupants(client, want_avatars).await {
+        tracing::warn!(error = %err, "VRM package bootstrap failed");
     }
     let occupants = client.stage().await?.occupants;
     let occupant = pick_avatar_occupant(&occupants);
@@ -467,17 +533,7 @@ async fn resolve_stage(
         .as_ref()
         .and_then(|item| item.avatar_path.clone())
         .map(PathBuf::from);
-    let motions_dir = occupant.as_ref().and_then(|item| {
-        item.avatar_path.as_ref().map(|avatar| {
-            PathBuf::from(avatar)
-                .parent()
-                .and_then(std::path::Path::parent)
-                .map_or_else(
-                    || motions_dir_for_package(item.package_id.as_deref().unwrap_or("")),
-                    |body| body.join("motions"),
-                )
-        })
-    });
+    let motions_dir = occupant.as_ref().and_then(motions_dir_for_occupant);
     Ok((soul_id, occupants, avatar_path, motions_dir))
 }
 
@@ -559,5 +615,53 @@ mod tests {
             find_alicia_package(&packages).map(|p| p.id.as_str()),
             Some("char.alicia")
         );
+        let mixed = vec![
+            CharacterView {
+                id: "char.alicia-b".into(),
+                version: "1.0.0".into(),
+                kind: "character".into(),
+                path: "/tmp".into(),
+                soul_id: None,
+            },
+            packages[0].clone(),
+        ];
+        assert_eq!(
+            find_alicia_package(&mixed).map(|p| p.id.as_str()),
+            Some("char.alicia")
+        );
+    }
+
+    #[test]
+    fn avatar_slots_caps_at_two_and_skips_text() {
+        let occupants = vec![
+            OccupantView {
+                soul_id: "text".into(),
+                body_id: None,
+                package_id: None,
+                avatar_path: None,
+            },
+            OccupantView {
+                soul_id: "a".into(),
+                body_id: Some("b1".into()),
+                package_id: Some("char.alicia@1.0.0".into()),
+                avatar_path: Some("/data/a.vrm".into()),
+            },
+            OccupantView {
+                soul_id: "b".into(),
+                body_id: Some("b2".into()),
+                package_id: Some("char.alicia-b@1.0.0".into()),
+                avatar_path: Some("/data/b.vrm".into()),
+            },
+            OccupantView {
+                soul_id: "c".into(),
+                body_id: Some("b3".into()),
+                package_id: Some("char.other@1.0.0".into()),
+                avatar_path: Some("/data/c.vrm".into()),
+            },
+        ];
+        let slots = avatar_slots(&occupants);
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].soul_id, "a");
+        assert_eq!(slots[1].soul_id, "b");
     }
 }

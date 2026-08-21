@@ -59,6 +59,7 @@ impl TtsHandler for ElevenLabs {
         Ok(TtsAudio {
             pcm: pcm16le_to_f32(&bytes),
             sample_rate: SAMPLE_RATE,
+            bulk: None,
         })
     }
 }

@@ -1,7 +1,8 @@
 use crate::affect::{
-    AffectPresentation, ExpressionArbiter, apply_self_report, apply_turn_signals, project_decay,
+    AffectPresentation, ExpressionArbiter, apply_self_report, apply_turn_signals,
+    parse_affect_json, project_decay,
 };
-use crate::classify::ClassifyModel;
+use crate::classify::{ClassifyModel, ClassifyTask};
 use crate::config::{AffectSettings, MemoryApprovalSettings, MindSettings};
 use crate::error::CompanionError;
 use crate::inner::parse_emotion_report;
@@ -47,12 +48,13 @@ impl CompanionRuntime {
         self.settings.lock().clone()
     }
 
-    /// Decay + user signals + optional self-report. Returns surface presentation.
-    pub fn on_user_turn(
+    /// Decay + user signals + optional classifier blend + inner self-report.
+    pub async fn on_user_turn(
         &self,
         soul_id: SoulId,
         user_text: &str,
         inner: &[(InnerAspect, String)],
+        classifier: Option<&dyn ClassifyModel>,
     ) -> Result<Option<AffectPresentation>, CompanionError> {
         let mut soul = self
             .store
@@ -61,7 +63,14 @@ impl CompanionRuntime {
         let now = Utc::now();
         let affect = self.settings.lock().affect.clone();
         project_decay(&mut soul.affect, &soul.affect_baseline, &affect, now);
-        apply_turn_signals(&mut soul.affect, user_text, None, &affect);
+        let proposal = match classifier {
+            Some(model) => match model.complete_json(ClassifyTask::Affect, user_text).await {
+                Ok(raw) => parse_affect_json(&raw),
+                Err(_) => None,
+            },
+            None => None,
+        };
+        apply_turn_signals(&mut soul.affect, user_text, proposal.as_ref(), &affect);
         let mut presentation = None;
         for (aspect, body) in inner {
             if *aspect == InnerAspect::Emotion

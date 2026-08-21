@@ -25,10 +25,19 @@ older row.
 After a turn, the companion memory writer:
 
 1. Extracts structured signals (commitments, user-stated facts, tool
-   outcomes).
-2. Optionally classifies more candidates when a classify model is wired.
+   outcomes). Regex patterns (`my name is`, `i like`, `remember that`)
+   are a fail-closed safety net.
+2. When `ai.tasks.classifier` (or chat fallback) is bound, the auxiliary
+   LLM returns JSON candidates. Its `scope` (`private` / `shared`) overlays
+   matching deterministic rows. Classifier errors skip extra candidates;
+   they do not drop the safety-net extract.
 3. The arbiter scores duplicates and contradictions, then writes, rejects,
    or parks the candidate.
+
+Affect is hybrid: user-utterance heuristics blend with a classifier
+proposal when confidence is high enough (`mind.affect.classifier_min_confidence`).
+Unconfigured classifiers fail closed (heuristics only). Each prompt applies
+that state before generation and logs `companion.affect` into system context.
 
 When `mind.memory_approval.require_approval` is true (the default), parked
 candidates wait in the pending queue. Resolve them through

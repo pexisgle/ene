@@ -1,6 +1,5 @@
 //! winit application handler for the product stage client.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -922,10 +921,11 @@ impl StageApp {
                     }
                 }
                 LiveEvent::BodyCommand { value } => {
-                    if let Some(overlay) = self.overlay.as_mut()
-                        && let Some(avatar) = overlay.avatar.as_mut()
-                    {
-                        avatar.apply_body_event(&value);
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        let soul = self.session.soul_id().to_owned();
+                        if let Some(avatar) = overlay.avatar_or_first_mut(&soul) {
+                            avatar.apply_body_event(&value);
+                        }
                     }
                 }
                 LiveEvent::AudioChunk { pcm, sample_rate } => {
@@ -1014,27 +1014,20 @@ impl StageApp {
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
-        let Some(path) = self.session.avatar_path().cloned() else {
-            overlay.avatar = None;
+        let specs = self.session.avatar_loads();
+        if specs.is_empty() {
+            overlay.clear_avatars();
             tracing::info!("no avatar_path; overlay stays empty (text-only)");
             return;
-        };
-        match overlay.load_avatar(gpu, &path, self.session.motions_dir().map(PathBuf::as_path)) {
-            Ok(()) => {
-                if let Some(avatar) = overlay.avatar.as_mut() {
-                    avatar.model_scale = self.local_settings.model_scale;
-                    avatar.world_offset = [
-                        (self.local_settings.character_x - 0.5) * 0.8,
-                        (0.5 - self.local_settings.character_y) * 0.8,
-                        0.0,
-                    ];
-                }
+        }
+        match overlay.load_avatars(gpu, &specs) {
+            Ok(count) => {
                 self.surface.status = i18n::fl("status-ready");
-                tracing::info!(path = %path.display(), "loaded overlay VRM");
+                tracing::info!(count, "loaded overlay VRM bodies");
             }
             Err(err) => {
                 self.surface.status = format!("{}: {err}", i18n::fl("status-error"));
-                tracing::warn!(error = %err, path = %path.display(), "VRM load failed");
+                tracing::warn!(error = %err, "VRM load failed");
             }
         }
     }
@@ -1060,11 +1053,10 @@ impl StageApp {
         }
         self.feeds = spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
         self.surface.history = self.session.history();
-        self.reload_avatar();
         if self
             .overlay
             .as_ref()
-            .is_some_and(|overlay| overlay.avatar.is_some())
+            .is_some_and(crate::overlay::OverlayWindow::has_avatars)
         {
             self.surface.status = format!("{}: {label}", i18n::fl("overlay-showing"));
         }
@@ -1183,17 +1175,19 @@ impl StageApp {
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("a") => self.cycle_occupant(-1),
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("d") => self.cycle_occupant(1),
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("w") => {
-                if let Some(overlay) = self.overlay.as_mut()
-                    && let Some(avatar) = overlay.avatar.as_mut()
-                {
-                    avatar.cycle_motion(-1);
+                if let Some(overlay) = self.overlay.as_mut() {
+                    let soul = self.session.soul_id().to_owned();
+                    if let Some(avatar) = overlay.avatar_or_first_mut(&soul) {
+                        avatar.cycle_motion(-1);
+                    }
                 }
             }
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("s") => {
-                if let Some(overlay) = self.overlay.as_mut()
-                    && let Some(avatar) = overlay.avatar.as_mut()
-                {
-                    avatar.cycle_motion(1);
+                if let Some(overlay) = self.overlay.as_mut() {
+                    let soul = self.session.soul_id().to_owned();
+                    if let Some(avatar) = overlay.avatar_or_first_mut(&soul) {
+                        avatar.cycle_motion(1);
+                    }
                 }
             }
             _ => {}
@@ -1207,7 +1201,7 @@ impl StageApp {
         let strength = self.local_settings.look_at_strength;
         let visemes = self.audio.analyze_visemes(&mut self.viseme);
         let look_input = self.overlay.as_ref().and_then(|overlay| {
-            overlay.avatar.as_ref().map(|avatar| {
+            overlay.first_avatar().map(|avatar| {
                 (
                     overlay.window.inner_size(),
                     avatar.camera().eye(),
@@ -1234,17 +1228,20 @@ impl StageApp {
         };
         let scale = self.local_settings.model_scale;
         let pos = self.surface.character_pos;
+        let soul = self.session.soul_id().to_owned();
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
-        if let Some(avatar) = overlay.avatar.as_mut() {
-            avatar.model_scale = scale;
-            avatar.world_offset = [(pos[0] - 0.5) * 0.8, (0.5 - pos[1]) * 0.8, 0.0];
+        let count = overlay.slots.len();
+        let base = [(pos[0] - 0.5) * 0.8, (0.5 - pos[1]) * 0.8, 0.0];
+        for (index, slot) in overlay.slots.iter_mut().enumerate() {
+            slot.avatar.model_scale = scale;
+            slot.avatar.world_offset = crate::overlay::overlay_slot_offset(index, count, base);
         }
-        if let Err(err) = overlay.tick_and_render(gpu, look, Some(visemes)) {
+        if let Err(err) = overlay.tick_and_render(gpu, look, Some(visemes), Some(soul.as_str())) {
             match err {
                 OverlayError::Surface(_) => {
                     tracing::debug!(error = %err, "overlay surface skipped");

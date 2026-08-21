@@ -227,6 +227,31 @@ fn idle_speech_becomes_transcript() {
 }
 
 #[test]
+fn live_idle_speech_defers_transcribe() {
+    let mut voice = VoiceRuntime::live(VoiceSettings::default());
+    let pcm = speech_tone(0.2, 1600);
+    assert_eq!(voice.push_input(&pcm, 0), InputEffect::Listening);
+    let done = voice.push_input(&[0.0; 160], 500);
+    assert_eq!(done, InputEffect::NeedsTranscribe);
+    assert_eq!(voice.state(), DuplexState::Thinking);
+    assert!(!voice.take_utterance().is_empty());
+}
+
+#[test]
+fn begin_playback_sets_speaking_for_plugin_pcm() {
+    let mut voice = VoiceRuntime::live(VoiceSettings::default());
+    let body = BodyId::new();
+    let pcm = speech_tone(0.2, 1600);
+    let cmd = voice.begin_playback(body, &pcm, 0, 16_000).unwrap();
+    assert_eq!(voice.state(), DuplexState::Speaking);
+    assert_eq!(voice.speaking_body(), Some(body));
+    assert!(matches!(
+        cmd,
+        PerformanceCommand::LipSync { amplitude, .. } if amplitude > 0.0
+    ));
+}
+
+#[test]
 fn stage_caps_concurrent_rendered_bodies() {
     let settings = BodySettings {
         render: crate::RenderSettings {

@@ -129,6 +129,7 @@ fn decode_wav(bytes: &[u8]) -> Result<TtsAudio, IpcError> {
     Ok(TtsAudio {
         pcm,
         sample_rate: sample_rate.max(1),
+        bulk: None,
     })
 }
 

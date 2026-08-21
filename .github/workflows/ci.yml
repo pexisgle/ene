@@ -61,7 +61,7 @@ jobs:
               -p ene-sandbox -p ene-vrm -p ene-provider-assets
           - name: apps
             packages: >-
-              -p ene-daemon -p ene-ctl -p ene-stage
+              -p ene-daemon -p ene-ctl -p ene-desktop -p ene-stage
           - name: plugins
             packages: >-
               -p ene-tool-fs -p ene-tool-exec -p ene-tool-web

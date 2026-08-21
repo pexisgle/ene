@@ -27,7 +27,7 @@ mod tools;
 
 pub use affect::{
     AffectBaseline, AffectPresentation, AffectProposal, AffectState, ExpressionArbiter, VOCABULARY,
-    apply_self_report, apply_turn_signals, project_decay,
+    apply_self_report, apply_turn_signals, parse_affect_json, project_decay,
 };
 pub use classify::{ClassifyModel, ClassifyTask, ScriptedClassify};
 pub use config::{

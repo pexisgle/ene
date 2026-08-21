@@ -33,7 +33,7 @@
 |---|---|---|---|
 | 1 | stage + CLI + Web が同一コアに接続 | `ene-daemon::http_tests::three_clients_share_one_core` | はい(HTTP) |
 | 2 | 1 体が done.md の全 P-xxx を満たす | 下表の機構検出。VRM は minimal fixture | いいえ。総括 3・ジョブループ・本番音声が未達 |
-| 3 | ネットワークなしで会話 | `spawned_core_offline_conversation_and_rss` は Echo 往復。`SeamedModel` 配線はあるが受入未観測 | いいえ |
+| 3 | ネットワークなしで会話 | `spawned_core_offline_conversation_and_rss` は Echo 往復（機構）。`seamed_model_rejects_unconfigured_chat`; `tool_calling_model_runs_calc_through_http` | いいえ（実 GGUF 未観測） |
 | 4 | ビルドと性能(D-29) | `minimal_http_baselines_are_measurable` / `kernel::echo_turn_to_first_chunk_is_measurable` / `w7_acceptance` RSS | はい(測定。会話は Echo) |
 | 5 | 監査・バックアップ・エクスポート | `ene-plane::audit_hash_chain_verifies` / `http::backup::backup_and_restore_roundtrip` / `export_default_omits_inner` | はい(store / HTTP) |
 
@@ -44,13 +44,14 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 
 | P-id | 機構テスト | 経路 | 完成 |
 |---|---|---|---|
-| P-101 | `ene-kernel::text_turn_is_logged_and_projected`; `ene-daemon::http_tests::three_clients_share_one_core`; `concurrent_prompt_returns_lane_busy` | Echo / HTTP | いいえ(応答は Echo) |
+| P-101 | `ene-kernel::text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `ene-daemon::http_tests::three_clients_share_one_core`; `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat` | Echo（機構） / ToolCalling / Seamed fail-closed | いいえ(実モデル応答は未観測) |
 | P-102 | `ene-body::barge_in_stops_playback_after_min_speech`; `self_voice_during_playback_is_ignored`; `idle_speech_becomes_transcript` | Scripted | いいえ |
 | P-103 | `ene-kernel::abort_does_not_write_assistant_closure`; `boot_seeds_two_souls_and_session_ops` (barge-in API) | Echo / HTTP | いいえ(本番音声未配線) |
 | P-104 | `ene-session::surface_projection_hides_inner_and_thinking`; `ene-kernel::surface_live_subscription_does_not_receive_inner`; `ene-daemon::surface_ws_never_sees_inner` | store / HTTP | はい(表層非露出) |
 | P-105 | `ene-companion::proactive_gate_fail_closed_without_llm`; `proactive_speaks_when_gates_pass`; `proactive_disabled_never_invokes_llm`; `tendency_does_not_pierce_gates` | Scripted | いいえ(ゲート機構は実コード) |
 | P-106 | `ene-body::autonomy_tick_does_not_require_a_turn` | store | はい(描画なし tick) |
-| P-107 | `ene-daemon::http_tests::boot_seeds_two_souls_and_session_ops` | HTTP(occupant seed) | いいえ(stage 2体 E2E 未観測) |
+| P-107 | `boot_seeds_two_souls_and_session_ops`; `two_souls_keep_isolated_sessions_and_stage_occupants`; overlay 2-slot layout | HTTP / stage | 部分(セッション隔離と2スロット。GUI E2E は手動) |
+
 | P-108 | `ene-session::session_end_and_surface_search`; `boot_seeds_two_souls_and_session_ops` (split / end / search) | store / HTTP | はい |
 | P-109 | `ene-session::fork_copies_prefix_and_leaves_source_intact`; `fork_leaves_original_session_intact` | store / HTTP | はい |
 | P-110 | `ene-daemon::http_tests::export_default_omits_inner` | HTTP | はい |
@@ -74,18 +75,18 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-305 | `runtime_persists_affect_across_turns` | store | はい(永続化) |
 | P-306 | `schedule_remind_fires_and_quiet_hours_defer`; `proactive_gate_fail_closed_without_llm` | store / Scripted | 部分(スケジュールははい) |
 | P-307 | `commands_never_include_pad_numbers`; `boot_seeds_two_souls_and_session_ops` (`/affect`) | store / HTTP | はい(PAD 非露出) |
-| P-401 | `package_install_and_soul_creation`; `soul_and_body_packages_compose` | store | 部分(I/O ははい。stage 表示はいいえ) |
+| P-401 | `package_install_and_soul_creation`; `soul_and_body_packages_compose`; `import_shipped_alicia_vrm_exposes_parseable_avatar` | store / HTTP | 部分(I/O とはい。stage GUI 表示は手動) |
 | P-402 | `hot_swap_drops_pending_cues`; `unknown_emotion_falls_back_with_warning` | store | はい |
-| P-403 | `ene-vrm::minimal_glb_parses_as_vrm`; `minimal_glb_loads_with_wgpu`; `ene-stage::default_minimal_vrm_writes_parseable_glb` | fixture | いいえ(正規 VRM 未観測) |
+| P-403 | `ene-vrm::minimal_glb_parses_as_vrm`; `minimal_glb_loads_with_wgpu`; `shipped_alicia_vrm_parses_and_loads`; `ene-stage::default_minimal_vrm_writes_parseable_glb` | Alicia / fixture | 部分(同梱 Alicia のパース/wgpu。GUI は手動) |
 | P-404 | `lipsync_from_tone_has_amplitude`; `emotion_always_emits_expression_even_without_body`; `autonomy_tick_does_not_require_a_turn` | Scripted | いいえ |
-| P-405 | `stage_caps_concurrent_rendered_bodies`; `boot_seeds_two_souls_and_session_ops` | store / HTTP | いいえ(2体 stage E2E 未観測) |
+| P-405 | `stage_caps_concurrent_rendered_bodies`; `boot_seeds_two_souls_and_session_ops`; `two_souls_keep_isolated_sessions_and_stage_occupants`; `overlay_slot_offsets_place_two_bodies_apart` | store / HTTP / overlay | 部分(2スロット配置。GUI E2E は手動) |
 | P-406 | `hot_swap_drops_pending_cues` | store | はい |
 | P-407 | `boot_stage_maps_emotion_without_a_rendered_body`; `emotion_always_emits_expression_even_without_body` | HTTP / store | はい(描画なしレーン) |
 | P-501 | `turn_roundtrip_projects_history`; `seq_is_monotonic_without_gaps` | store | はい |
 | P-502 | `model_visible_hash_matches_projection`; `model_visible_hash_matches_logged_projection` | store | はい |
-| P-503 | `text_turn_is_logged_and_projected` | Echo | いいえ |
+| P-503 | `text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `tool_calling_model_runs_calc_through_http` | Echo（機構） / ToolCalling | いいえ（実モデル簡易応答は未観測） |
 | P-504 | `lane_prompt_still_works_while_job_running` | host API | いいえ(ランナー無し) |
-| P-505 | `text_turn_is_logged_and_projected`(コンテキスト組立は固定文2本) | Echo | いいえ |
+| P-505 | `text_turn_is_logged_and_projected`(コンテキスト組立は固定文2本); `tool_calling_model_runs_calc_through_http` | Echo（機構） / ToolCalling | いいえ |
 | P-506 | `compaction_replaces_range_in_projection`; `compact_keeps_original_rows` | store(切り詰め) | いいえ(要約 LLM 無し) |
 | P-507 | `spill_huge_tool_output_keeps_brief_bounded` | store | はい |
 | P-508 | `internal_delegation_has_no_job_row` | host API | はい(行契約) |
@@ -147,7 +148,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-910 | `observe_spans_do_not_leak_content` | store | はい |
 | P-1001 | `out_of_process_utility_registers_and_runs` | process | はい |
 | P-1002 | `apply_profile_unloads_removed_rows_and_keeps_uid` | process | はい |
-| P-1003 | `EchoModel` 経路 (`text_turn_is_logged_and_projected`) | Echo | いいえ |
+| P-1003 | `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat`; Echo は `text_turn_is_logged_and_projected` の機構検出 | ToolCalling / Seamed fail-closed | いいえ（実 provider 会話は未観測） |
 | P-1004 | `python_dummy_registers_in_registry_and_executes` | process | はい |
 | P-1005 | `circuit_breaker_opens_after_spawn_failures`; `unload_removes_tools_and_grants` | process | はい |
 | P-1006 | `sidecar_binary_resolves_config_then_cas_then_bundled_and_rejects_urls`; `sidecar_spawn_health_and_kill_on_loopback` | process | はい |
@@ -164,7 +165,8 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 - Web UI は memory/settings の PATCH/DELETE を持たない。stage は eframe+wgpu で WebView なし
 - スパン属性にプロンプト内容が乗らない
 - 空トークンは `/api/v1/health` 以外 `unauthorized`
-- 会話 LLM の受入は EchoModel。P-xxx の自動テストの多くは機構検出。
+- 会話 LLM の機構検出は EchoModel。ツール呼び出しの受入は
+  `ToolCallingModel`（`utility.calc`）。`SeamedModel` は未設定で fail-closed。
   実モデルの分類・応答品質は総括 3 完了まで対象外
 
 ## 性能基準線

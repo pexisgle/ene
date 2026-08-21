@@ -17,6 +17,20 @@ pub enum DuplexState {
     Interrupting,
 }
 
+impl DuplexState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Listening => "listening",
+            Self::Thinking => "thinking",
+            Self::Responding => "responding",
+            Self::Speaking => "speaking",
+            Self::Interrupting => "interrupting",
+        }
+    }
+}
+
 /// What happened after an input frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEffect {
@@ -25,9 +39,17 @@ pub enum InputEffect {
     IgnoredSelfVoice,
     Listening,
     HoldForMinSpeech,
-    BargeIn { body: BodyId },
+    BargeIn {
+        body: BodyId,
+    },
     Transcript(String),
+    /// VAD closed an utterance. Production `VoiceRuntime::live` defers STT to the host.
+    NeedsTranscribe,
 }
+
+/// 16 kHz × 30 s. Live listen buffers until VAD closes; this is the hard cap.
+const MAX_UTTERANCE_SAMPLES: usize = 16_000 * 30;
+const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
 pub trait TtsEngine: Send + Sync {
     fn synthesize(&self, text: &str) -> Result<Vec<f32>, BodyError>;
@@ -104,6 +126,8 @@ pub struct VoiceRuntime {
     speech_started_ms: Option<u64>,
     last_barge_ms: Option<u64>,
     last_output: Vec<f32>,
+    utterance: Vec<f32>,
+    defer_asr: bool,
     lips: LipSyncAnalyzer,
     last_viseme: VisemeWeights,
 }
@@ -122,6 +146,8 @@ impl VoiceRuntime {
             speech_started_ms: None,
             last_barge_ms: None,
             last_output: Vec::new(),
+            utterance: Vec::new(),
+            defer_asr: false,
             lips: LipSyncAnalyzer::default(),
             last_viseme: VisemeWeights::default(),
         }
@@ -134,6 +160,14 @@ impl VoiceRuntime {
             Box::new(ScriptedTts),
             Box::new(ScriptedAsr::default()),
         )
+    }
+
+    /// Production duplex machine: VAD / barge-in / self-voice / lipsync, STT deferred.
+    #[must_use]
+    pub fn live(settings: VoiceSettings) -> Self {
+        let mut runtime = Self::scripted(settings);
+        runtime.defer_asr = true;
+        runtime
     }
 
     #[must_use]
@@ -156,35 +190,45 @@ impl VoiceRuntime {
         if !self.settings.enabled {
             return Err(BodyError::VoiceDisabled);
         }
+        let pcm = self.tts.synthesize(text)?;
+        let lipsync = self.begin_playback(body, &pcm, now_ms, DEFAULT_SAMPLE_RATE)?;
+        Ok(SpeakOutput { pcm, lipsync })
+    }
+
+    /// Drive duplex + visemes from plugin TTS PCM (production path).
+    pub fn begin_playback(
+        &mut self,
+        body: BodyId,
+        pcm: &[f32],
+        now_ms: u64,
+        sample_rate: u32,
+    ) -> Result<PerformanceCommand, BodyError> {
+        if !self.settings.enabled {
+            return Err(BodyError::VoiceDisabled);
+        }
         if let Some(current) = self.speaking
             && current != body
             && matches!(self.state, DuplexState::Speaking | DuplexState::Responding)
         {
             return Err(BodyError::SpeakerBusy);
         }
-        let pcm = self.tts.synthesize(text)?;
-        let duration_ms = pcm_duration_ms(&pcm);
         self.speaking = Some(body);
-        self.last_output.clone_from(&pcm);
-        self.playback_until_ms = now_ms
-            .saturating_add(duration_ms)
-            .saturating_add(self.settings.mask_pad_ms);
         self.state = DuplexState::Speaking;
         self.speech_started_ms = None;
-        let viseme = self.lips.push(&pcm);
-        self.last_viseme = viseme;
-        Ok(SpeakOutput {
-            pcm,
-            lipsync: viseme_command(viseme),
-        })
+        Ok(self.push_output_pcm(pcm, now_ms, sample_rate))
     }
 
-    pub fn push_output_pcm(&mut self, pcm: &[f32], now_ms: u64) -> PerformanceCommand {
+    pub fn push_output_pcm(
+        &mut self,
+        pcm: &[f32],
+        now_ms: u64,
+        sample_rate: u32,
+    ) -> PerformanceCommand {
         self.last_output = pcm.to_vec();
         let viseme = self.lips.push(pcm);
         self.last_viseme = viseme;
         self.playback_until_ms = now_ms
-            .saturating_add(pcm_duration_ms(pcm))
+            .saturating_add(pcm_duration_ms(pcm, sample_rate))
             .saturating_add(self.settings.mask_pad_ms);
         viseme_command(viseme)
     }
@@ -196,7 +240,20 @@ impl VoiceRuntime {
         self.lips = LipSyncAnalyzer::default();
         self.last_viseme = VisemeWeights::default();
         self.last_output.clear();
+        self.utterance.clear();
         self.speech_started_ms = None;
+    }
+
+    pub fn mark_idle(&mut self) {
+        self.state = DuplexState::Idle;
+        self.utterance.clear();
+        self.speech_started_ms = None;
+    }
+
+    /// PCM captured while `Listening`, for host STT after `NeedsTranscribe`.
+    #[must_use]
+    pub fn take_utterance(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.utterance)
     }
 
     /// Mic/WS frame. Playback echoes that match TTS are dropped (self-voice).
@@ -219,15 +276,22 @@ impl VoiceRuntime {
         match self.state {
             DuplexState::Interrupting if speech => {
                 self.state = DuplexState::Listening;
+                self.utterance.clear();
+                self.append_utterance(pcm);
                 InputEffect::Listening
             }
             DuplexState::Idle | DuplexState::Thinking if speech => {
                 self.state = DuplexState::Listening;
                 self.speech_started_ms = Some(now_ms);
+                self.utterance.clear();
+                self.append_utterance(pcm);
                 InputEffect::Listening
             }
-            DuplexState::Listening if speech => InputEffect::Listening,
-            DuplexState::Listening => self.finish_utterance(pcm, now_ms),
+            DuplexState::Listening if speech => {
+                self.append_utterance(pcm);
+                InputEffect::Listening
+            }
+            DuplexState::Listening => self.finish_utterance(now_ms),
             _ => InputEffect::Silence,
         }
     }
@@ -258,14 +322,24 @@ impl VoiceRuntime {
         InputEffect::BargeIn { body }
     }
 
-    fn finish_utterance(&mut self, pcm: &[f32], now_ms: u64) -> InputEffect {
+    fn finish_utterance(&mut self, now_ms: u64) -> InputEffect {
         let started = self.speech_started_ms.take().unwrap_or(now_ms);
         let elapsed = now_ms.saturating_sub(started);
         if elapsed < self.settings.barge_in.min_speech_ms {
+            self.utterance.clear();
             self.state = DuplexState::Idle;
             return InputEffect::HoldForMinSpeech;
         }
-        match self.asr.transcribe(pcm) {
+        if self.defer_asr {
+            if self.utterance.is_empty() {
+                self.state = DuplexState::Idle;
+                return InputEffect::HoldForMinSpeech;
+            }
+            self.state = DuplexState::Thinking;
+            return InputEffect::NeedsTranscribe;
+        }
+        let pcm = std::mem::take(&mut self.utterance);
+        match self.asr.transcribe(&pcm) {
             Ok(text) if !text.trim().is_empty() => {
                 self.state = DuplexState::Thinking;
                 InputEffect::Transcript(text)
@@ -275,6 +349,15 @@ impl VoiceRuntime {
                 InputEffect::HoldForMinSpeech
             }
         }
+    }
+
+    fn append_utterance(&mut self, pcm: &[f32]) {
+        let room = MAX_UTTERANCE_SAMPLES.saturating_sub(self.utterance.len());
+        if room == 0 {
+            return;
+        }
+        let take = pcm.len().min(room);
+        self.utterance.extend_from_slice(&pcm[..take]);
     }
 
     pub fn mark_thinking(&mut self) {
@@ -295,8 +378,9 @@ pub struct SpeakOutput {
     pub lipsync: PerformanceCommand,
 }
 
-fn pcm_duration_ms(pcm: &[f32]) -> u64 {
-    ((pcm.len() as u64) * 1000) / 16_000
+fn pcm_duration_ms(pcm: &[f32], sample_rate: u32) -> u64 {
+    let rate = u64::from(sample_rate.max(1));
+    (pcm.len() as u64).saturating_mul(1000) / rate
 }
 
 fn viseme_command(weights: VisemeWeights) -> PerformanceCommand {

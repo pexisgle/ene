@@ -44,6 +44,7 @@ impl TtsHandler for EdgeTts {
             return Ok(TtsAudio {
                 pcm: Vec::new(),
                 sample_rate: SAMPLE_RATE,
+                bulk: None,
             });
         }
         let endpoint = if request.base_url.is_empty() {
@@ -59,6 +60,7 @@ impl TtsHandler for EdgeTts {
         Ok(TtsAudio {
             pcm: pcm16le_to_f32(&pcm_bytes),
             sample_rate: SAMPLE_RATE,
+            bulk: None,
         })
     }
 }

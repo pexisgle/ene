@@ -189,10 +189,12 @@ impl CoreDaemon {
         }
         let companion = Arc::new(CompanionRuntime::new(Arc::clone(&companions), mind.clone()));
         let bus = Arc::new(PerformanceBus::default());
+        let voice_settings = load_voice_settings(&opts.data_dir);
+        let body_settings = load_body_settings(&opts.data_dir);
         let stage = Arc::new(Stage::new(
             bus,
-            VoiceRuntime::scripted(VoiceSettings::default()),
-            BodySettings::default(),
+            VoiceRuntime::live(voice_settings),
+            body_settings,
         ));
         let supervisor = Arc::new(Supervisor::new(workspace, registry));
         let loop_hooks = LoopHooks::new();
@@ -457,6 +459,11 @@ impl CoreDaemon {
     #[must_use]
     pub fn stage(&self) -> Arc<Stage> {
         Arc::clone(&self.stage)
+    }
+
+    pub fn with_voice<R>(&self, f: impl FnOnce(&mut VoiceRuntime) -> R) -> R {
+        let mut voice = self.stage.voice().lock();
+        f(&mut voice)
     }
 
     #[must_use]
@@ -756,6 +763,30 @@ fn load_plugin_settings(data_dir: &Path) -> PluginSettings {
     }
     apply_plugin_env(&mut settings);
     settings
+}
+
+fn load_voice_settings(data_dir: &Path) -> VoiceSettings {
+    let path = data_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(voice) = file.get("voice")
+        && let Ok(overlay) = serde_json::from_value::<VoiceSettings>(voice.clone())
+    {
+        return overlay;
+    }
+    VoiceSettings::default()
+}
+
+fn load_body_settings(data_dir: &Path) -> BodySettings {
+    let path = data_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(body) = file.get("body")
+        && let Ok(overlay) = serde_json::from_value::<BodySettings>(body.clone())
+    {
+        return overlay;
+    }
+    BodySettings::default()
 }
 
 fn load_mind_settings(data_dir: &Path) -> CompanionMind {

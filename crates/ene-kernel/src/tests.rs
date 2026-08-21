@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 use crate::{
     CancelQueued, ConversationModel, DisplayDepth, EchoModel, EmitBus, EventKind, EventPayload,
     HarnessSettings, KernelError, LaneHandle, LaneOptions, LiveEvent, LoopHooks, MindSettings,
-    ModelGeneration, ModelRequest, ProjectOptions, TurnId, TurnPrefetch, Waterfall,
-    derive_messages, hash_model_visible, hash_projected, spans_leak_content,
+    ModelGeneration, ModelRequest, ProjectOptions, SurfaceRouter, SurfaceToolOutcome,
+    ToolCallingModel, TurnId, TurnPrefetch, Waterfall, derive_messages, hash_model_visible,
+    hash_projected, spans_leak_content,
 };
 use async_trait::async_trait;
 use ene_session::{
@@ -248,32 +249,6 @@ async fn text_turn_is_logged_and_projected() {
 }
 
 #[tokio::test]
-async fn prompt_job_logs_delegation_origin_and_lane() {
-    let (_dir, store, lane, _model) = open_lane().await;
-    let job_id = DelegationId::new();
-    lane.prompt_job("research the itinerary", job_id)
-        .await
-        .unwrap();
-    lane.wait_for_idle().await.unwrap();
-    let events = store.load_events(lane.session_id(), 0).unwrap();
-    let start = events
-        .iter()
-        .find_map(|event| match &event.payload {
-            EventPayload::TurnStart {
-                origin,
-                delegation_id,
-                lane,
-                ..
-            } => Some((*origin, *delegation_id, lane.clone())),
-            _ => None,
-        })
-        .expect("turn/start");
-    assert_eq!(start.0, TurnOrigin::Delegation);
-    assert_eq!(start.1, Some(job_id));
-    assert_eq!(start.2, format!("delegation:{job_id}"));
-}
-
-#[tokio::test]
 async fn extra_context_is_logged_as_system_source() {
     let dir = TempDir::new().unwrap();
     let store = Arc::new(
@@ -312,17 +287,107 @@ async fn extra_context_is_logged_as_system_source() {
     });
     lane.prompt("hello").await.unwrap();
     lane.wait_for_idle().await.unwrap();
-    let events = store.load_events(session, 0).unwrap();
+    let events = store.load_events(lane.session_id(), 0).unwrap();
     assert!(events.iter().any(|event| matches!(
         &event.payload,
         EventPayload::ContextSystemMessage { source_key, blocks, .. }
             if source_key == "skills.catalog"
-                && blocks.iter().any(|block| {
-                    block
-                        .as_text()
-                        .is_some_and(|text| text.contains("travel"))
-                })
+                && blocks.iter().any(|block| block
+                    .as_text()
+                    .is_some_and(|text| text.contains("travel")))
     )));
+}
+
+#[tokio::test]
+async fn tool_calling_model_runs_surface_tool_then_speaks() {
+    struct StubRouter;
+
+    #[async_trait]
+    impl SurfaceRouter for StubRouter {
+        async fn on_tool(
+            &self,
+            name: &str,
+            args: serde_json::Value,
+            _step: u32,
+        ) -> Result<SurfaceToolOutcome, KernelError> {
+            assert_eq!(name, "utility.calc");
+            assert_eq!(args["expr"], "1+2*3");
+            Ok(SurfaceToolOutcome::Result(
+                serde_json::json!({"value": 7.0}),
+            ))
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(ToolCallingModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: Vec::new(),
+        hooks: None,
+        router: Some(Arc::new(StubRouter) as Arc<dyn SurfaceRouter>),
+    });
+    lane.prompt("please calc 1+2*3").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let history = lane.project(DisplayDepth::Surface).unwrap();
+    let texts: Vec<String> = history
+        .messages
+        .iter()
+        .map(ene_session::ProjectedMessage::text)
+        .collect();
+    assert!(
+        texts.iter().any(|text| text.contains('7')),
+        "assistant should speak the calc result: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn prompt_job_logs_delegation_origin_and_lane() {
+    let (_dir, store, lane, _model) = open_lane().await;
+    let job_id = DelegationId::new();
+    lane.prompt_job("research the itinerary", job_id)
+        .await
+        .unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let events = store.load_events(lane.session_id(), 0).unwrap();
+    let start = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::TurnStart {
+                origin,
+                delegation_id,
+                lane,
+                ..
+            } => Some((*origin, *delegation_id, lane.clone())),
+            _ => None,
+        })
+        .expect("turn/start");
+    assert_eq!(start.0, TurnOrigin::Delegation);
+    assert_eq!(start.1, Some(job_id));
+    assert_eq!(start.2, format!("delegation:{job_id}"));
 }
 
 #[tokio::test]

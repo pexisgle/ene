@@ -1,7 +1,7 @@
 # プラグインと MCP
 
 ツールは **アウトプロセスのバイナリ**です。ホスト (`ene-fiber`) が spawn し、
-分割された `core` / `tool` / `provider` 副プロトコル (`ene-plugin-ipc`) を交渉し、
+分割された `core` / `tool` / `provider` / `capability` 副プロトコル (`ene-plugin-ipc`) を交渉し、
 仕様を `ene-registry` に載せます。コンパニオン状態に触るハーネス機能は
 ホスト内のまま、同じレジストリパイプラインを通ります。
 
@@ -48,6 +48,12 @@ GitHub から `llama-server` リリースを取得し、
 `data_dir/plugins/provider.gguf/assets/` に検証済みアーティファクトを置き、
 `ene-fiber` 経由で `llama-server` をループバック起動します。Sidecar 補助は
 `templates/sidecar` にもあります。
+
+`hello_ack` で `capability` を名乗るプラグインは Broker RPC
+（`capability.request`、`capability.approval_query`）を呼び、grant を受け取れます。
+`plugins.ipc.bulk_threshold_bytes` を超える本体は MessagePack フレームに載せません。
+ホストが `stream.open` でバルク流を開き、Linux では `SCM_RIGHTS` でソケットを渡します。
+`capability` を省いたツールプラグインは `core` + `tool` のまま動きます。
 
 MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショットされ、
 `mcp.resources` コンテキスト源として注入されます。`prompts/list` は data-dir の

@@ -26,6 +26,10 @@ pub enum IpcError {
     Call(String),
     #[error("peer closed")]
     Closed,
+    #[error("bulk transfer is not supported on this platform")]
+    BulkUnsupported,
+    #[error("capability denied: {0}")]
+    CapabilityDenied(String),
 }
 
 impl IpcError {

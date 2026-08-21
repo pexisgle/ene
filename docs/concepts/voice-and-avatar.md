@@ -4,6 +4,14 @@
 
 `ene-body` owns duplex voice state (idle / listening / thinking /
 responding / speaking / interrupting), energy VAD, and lip-sync visemes.
+Production boots `VoiceRuntime::live`: VAD, barge-in, self-voice, and visemes
+run in the core. `POST /sessions/{id}/listen` feeds mic PCM into that machine
+first; a closed utterance is sent to `ai.tasks.stt` when that task is bound.
+Plugin TTS PCM enters the same machine so lipsync and barge-in see live
+playback. The surface bus emits `voice.state` (`state` plus `barge_in` while
+interrupting). Tests may still construct `VoiceRuntime::scripted` for
+in-process ASR doubles.
+
 TTS and STT bind through `ai.tasks.tts` / `ai.tasks.stt` to provider plugins
 (`provider.openai_compat`, `provider.elevenlabs`, `provider.voicevox`,
 `provider.edge_tts`). PCM is `f32` on the provider subprotocol. Stage owns
@@ -37,6 +45,9 @@ Cues are rate-limited so the avatar does not flicker.
 - **Expressions** — VRM blend shapes plus procedural blink / gaze / mouth
 - **Look-at** — cursor tracking within configured ranges
 - **Spring bones** — hair / cloth
+- **Concurrent bodies** — the overlay composites up to
+  `body.render.max_concurrent` meshes (default 2). Visemes apply to the
+  active soul; A/D retargets the chat session without unloading the other body.
 
 The supported rendering API is documented in
 [ene-vrm API reference](../reference/api/ene-vrm.md).

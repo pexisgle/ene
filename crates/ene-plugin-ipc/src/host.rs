@@ -1,7 +1,8 @@
 use crate::error::IpcError;
 use crate::frame::{read_frame, write_frame};
 use crate::protocol::{
-    HelloAck, HostHello, Message, Negotiated, ProtoId, ProtocolRanges, ToolCall, ToolResult,
+    ApprovalAnswer, CapabilityGrant, CapabilityGranted, CapabilityRelease, HelloAck, HostHello,
+    Message, Negotiated, ProtoId, ProtocolRanges, StreamOpen, StreamOpened, ToolCall, ToolResult,
     ToolSpecWire, VersionRange,
 };
 use crate::provider::{
@@ -293,6 +294,93 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
         }
     }
 
+    /// Grant a Broker resource. The plugin acks with `capability.granted`.
+    pub async fn grant_capability(
+        &mut self,
+        body: CapabilityGrant,
+    ) -> Result<CapabilityGranted, IpcError> {
+        if self.negotiated.capability.is_none() {
+            return Err(IpcError::Unexpected("capability disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::CapabilityGrant { id, body }).await?;
+        match self.recv().await? {
+            Message::CapabilityGranted { id: got, body } if got == id => Ok(body),
+            Message::CapabilityDenied { id: got, body } if got == id => {
+                Err(IpcError::CapabilityDenied(body.reason))
+            }
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    /// Drop a previously granted resource.
+    pub async fn release_capability(&mut self, grant_id: &str) -> Result<(), IpcError> {
+        if self.negotiated.capability.is_none() {
+            return Err(IpcError::Unexpected("capability disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::CapabilityRelease {
+            id,
+            body: CapabilityRelease {
+                grant_id: grant_id.to_owned(),
+            },
+        })
+        .await?;
+        match self.recv().await? {
+            Message::CapabilityReleased { id: got } if got == id => Ok(()),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    /// Open an out-of-band bulk stream (`audio`, `tool_result`, `vad`).
+    pub async fn open_stream(&mut self, kind: &str) -> Result<StreamOpened, IpcError> {
+        if self.negotiated.capability.is_none() {
+            return Err(IpcError::Unexpected("capability disabled".to_owned()));
+        }
+        let id = self.alloc();
+        let stream_id = format!("s-{id}");
+        self.send(&Message::StreamOpen {
+            id,
+            body: StreamOpen {
+                stream_id,
+                kind: kind.to_owned(),
+            },
+        })
+        .await?;
+        match self.recv().await? {
+            Message::StreamOpened { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    /// Pause or resume a bulk stream. Notification: no reply.
+    pub async fn flow_control(&mut self, stream_id: &str, pause: bool) -> Result<(), IpcError> {
+        self.send(&Message::FlowControl {
+            body: crate::protocol::FlowControl {
+                stream_id: stream_id.to_owned(),
+                pause,
+            },
+        })
+        .await
+    }
+
+    /// Answer a plugin `capability.approval_query` the host already received.
+    pub async fn answer_approval(
+        &mut self,
+        id: u64,
+        allowed: bool,
+        reason: &str,
+    ) -> Result<(), IpcError> {
+        self.send(&Message::CapabilityApproval {
+            id,
+            body: ApprovalAnswer {
+                allowed,
+                reason: reason.to_owned(),
+            },
+        })
+        .await
+    }
+
     pub async fn drain(&mut self) -> Result<(), IpcError> {
         let id = self.alloc();
         self.send(&Message::Drain { id }).await?;
@@ -336,6 +424,9 @@ pub(crate) fn validate_ack(
     if ack.protocols.provider.is_some() && !declared.contains(&ProtoId::Provider) {
         return Err(IpcError::UndeclaredProtocol("provider".to_owned()));
     }
+    if ack.protocols.capability.is_some() && !declared.contains(&ProtoId::Capability) {
+        return Err(IpcError::UndeclaredProtocol("capability".to_owned()));
+    }
     Ok(())
 }
 
@@ -345,6 +436,7 @@ pub fn negotiate(
     plugin_core: VersionRange,
     plugin_tool: Option<VersionRange>,
     plugin_provider: Option<ProviderFaces>,
+    plugin_capability: Option<VersionRange>,
 ) -> Result<Negotiated, IpcError> {
     let core = host
         .core
@@ -354,10 +446,15 @@ pub fn negotiate(
         (Some(host_tool), Some(plugin_tool)) => host_tool.negotiate(plugin_tool),
         _ => None,
     };
+    let capability = match (host.capability, plugin_capability) {
+        (Some(host_cap), Some(plugin_cap)) => host_cap.negotiate(plugin_cap),
+        _ => None,
+    };
     Ok(Negotiated {
         core,
         tool,
         provider: negotiate_faces(host.provider, plugin_provider),
+        capability,
     })
 }
 

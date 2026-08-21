@@ -16,6 +16,7 @@ use ene_api::{
     SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView,
     UsageView,
 };
+use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
     JournalAction, MemoryId, MemoryScope, avatar_path_for_install, export_dir, import_v3,
     install_archive, looks_like_package_zip, soul_from_install,
@@ -380,12 +381,52 @@ pub async fn listen(
     Json(req): Json<ene_api::ListenRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiReject> {
     let session = parse_session(&id)?;
+    let effect = state.core.with_voice(|voice| {
+        let effect = voice.push_input(&req.pcm, super::speech::wall_clock_ms());
+        super::speech::emit_voice_state(&state.events, voice);
+        effect
+    });
+    match effect {
+        InputEffect::BargeIn { .. } => {
+            drop(state.core.host().mark_user_speaking(true));
+            super::speech::emit_audio_abort(&state.events);
+            let lane = state
+                .lanes
+                .get_or_open(&state.core, session)
+                .map_err(map_core)?;
+            lane.abort().await.map_err(|err| map_kernel(&err))?;
+            Ok(Json(empty_listen()))
+        }
+        InputEffect::NeedsTranscribe => {
+            let pcm = state.core.with_voice(VoiceRuntime::take_utterance);
+            transcribe_listen(&state, session, pcm, req.sample_rate).await
+        }
+        InputEffect::Transcript(text) => dispatch_listen_text(&state, session, text).await,
+        InputEffect::Silence
+        | InputEffect::IgnoredDisabled
+        | InputEffect::IgnoredSelfVoice
+        | InputEffect::Listening
+        | InputEffect::HoldForMinSpeech => Ok(Json(empty_listen())),
+    }
+}
+
+fn empty_listen() -> SendMessageResponse {
+    SendMessageResponse {
+        turn_id: None,
+        entry_id: None,
+    }
+}
+
+async fn transcribe_listen(
+    state: &AppState,
+    session: SessionId,
+    pcm: Vec<f32>,
+    sample_rate: u32,
+) -> Result<Json<SendMessageResponse>, ApiReject> {
     let binding = state.core.ai().lock().tasks.stt.clone();
-    if binding.is_unconfigured() {
-        return Ok(Json(SendMessageResponse {
-            turn_id: None,
-            entry_id: None,
-        }));
+    if binding.is_unconfigured() || pcm.is_empty() {
+        state.core.with_voice(VoiceRuntime::mark_idle);
+        return Ok(Json(empty_listen()));
     }
     let result = state
         .core
@@ -393,8 +434,8 @@ pub async fn listen(
         .transcribe(
             &crate::plugin_profile::task_row_id("stt"),
             ene_plugin_ipc::SttRequest {
-                pcm: req.pcm,
-                sample_rate: req.sample_rate.max(1),
+                pcm,
+                sample_rate: sample_rate.max(1),
                 language: None,
                 model: binding.model,
                 base_url: binding.base_url,
@@ -404,16 +445,25 @@ pub async fn listen(
             },
         )
         .await
-        .map_err(|err| bad_request("fault", &err.to_string()))?;
-    let text = result.text.trim();
+        .map_err(|err| {
+            state.core.with_voice(VoiceRuntime::mark_idle);
+            bad_request("fault", &err.to_string())
+        })?;
+    dispatch_listen_text(state, session, result.text).await
+}
+
+async fn dispatch_listen_text(
+    state: &AppState,
+    session: SessionId,
+    text: String,
+) -> Result<Json<SendMessageResponse>, ApiReject> {
+    let text = text.trim();
     if text.is_empty() {
-        return Ok(Json(SendMessageResponse {
-            turn_id: None,
-            entry_id: None,
-        }));
+        state.core.with_voice(VoiceRuntime::mark_idle);
+        return Ok(Json(empty_listen()));
     }
     dispatch_message(
-        &state,
+        state,
         session,
         &MessageRequest {
             text: text.to_owned(),

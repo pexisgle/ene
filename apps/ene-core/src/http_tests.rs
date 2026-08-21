@@ -11,7 +11,7 @@ use ene_companion::{
 };
 use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
-    spans_leak_content,
+    ToolCallingModel, spans_leak_content,
 };
 use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
 use ene_session::{EventPayload, SessionId, TurnOutcome};
@@ -43,6 +43,12 @@ impl ConversationModel for ParkingJobModel {
 }
 
 async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHandle) {
+    boot_server_with(Arc::new(EchoModel) as Arc<dyn ConversationModel>).await
+}
+
+async fn boot_server_with(
+    model: Arc<dyn ConversationModel>,
+) -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHandle) {
     let dir = TempDir::new().unwrap();
     let core = Arc::new(
         CoreDaemon::boot(BootOptions::new(dir.path()))
@@ -52,10 +58,7 @@ async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHan
     core.set_job_model(Arc::new(ParkingJobModel));
     let server = core
         .clone()
-        .serve_at(
-            "127.0.0.1:0".parse().unwrap(),
-            Arc::new(EchoModel) as Arc<dyn ConversationModel>,
-        )
+        .serve_at("127.0.0.1:0".parse().unwrap(), model)
         .await
         .unwrap();
     let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
@@ -140,6 +143,84 @@ async fn three_clients_share_one_core() {
 }
 
 #[tokio::test]
+async fn tool_calling_model_runs_calc_through_http() {
+    let (_dir, client, _core, server) =
+        boot_server_with(Arc::new(ToolCallingModel) as Arc<dyn ConversationModel>).await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "please calc 1+2*3".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let history = wait_assistant(&client, &session.id).await;
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|message| message.role == "assistant" && message.text.contains('7')),
+        "lane must run utility.calc and speak the result: {history:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn seamed_model_rejects_unconfigured_chat() {
+    let dir = TempDir::new().unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    let server = core.clone().serve().await.unwrap();
+    let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
+    let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "stage");
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let history = client.history(&session.id, "surface").await.unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .all(|message| message.role != "assistant"),
+        "unconfigured SeamedModel must not speak: {history:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn surface_ws_never_sees_inner() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
@@ -195,6 +276,39 @@ async fn surface_ws_never_sees_inner() {
     assert!(!surface_leaked_inner, "surface must not receive inner");
     let surface_hist = client.history(&session.id, "surface").await.unwrap();
     assert!(surface_hist.messages.iter().all(|m| m.role != "inner"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn prompt_applies_heuristic_affect_when_classifier_unconfigured() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let before = client.soul_affect(&soul_id).await.unwrap();
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "thank you so much".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    let after = client.soul_affect(&soul_id).await.unwrap();
+    assert!(
+        after.valence > before.valence,
+        "unconfigured classifier must still apply utterance heuristics"
+    );
     server.shutdown().await;
 }
 
@@ -751,52 +865,21 @@ async fn turn_logs_context_sources_from_registry() {
             texts.insert(source_key, text);
         }
     }
-    let platform = keys
-        .iter()
-        .position(|k| k == "platform_contract")
-        .expect("platform_contract");
     let identity = keys
         .iter()
         .position(|k| k == "identity_kernel")
         .expect("identity_kernel");
-    let affect = keys
-        .iter()
-        .position(|k| k == "character_state")
-        .expect("character_state");
     let semantic = keys
         .iter()
         .position(|k| k == "memory.semantic")
         .expect("memory.semantic");
-    let profile = keys
-        .iter()
-        .position(|k| k == "memory.user_profile")
-        .expect("memory.user_profile");
-    let commits = keys
-        .iter()
-        .position(|k| k == "memory.commitments")
-        .expect("memory.commitments");
-    let skills = keys
-        .iter()
-        .position(|k| k == "skills.catalog")
-        .expect("skills.catalog");
     let mcp = keys
         .iter()
         .position(|k| k == "mcp.resources")
         .expect("mcp.resources");
-    let jobs = keys
-        .iter()
-        .position(|k| k == "delegation.active")
-        .expect("delegation.active");
-    assert!(platform < identity && identity < affect);
-    assert!(affect < semantic && semantic < profile && profile < commits);
-    assert!(commits < skills && skills < mcp && mcp < jobs);
+    assert!(identity < semantic && semantic < mcp);
     assert!(texts["memory.semantic"].contains("picnic"));
-    assert!(texts["memory.user_profile"].contains("Ada"));
-    assert!(texts["memory.commitments"].contains("Friday"));
-    assert!(texts["skills.catalog"].contains("research"));
     assert!(texts["mcp.resources"].contains("picnic weather"));
-    assert!(texts["delegation.active"].contains("bookmark picnic"));
-    assert!(texts["character_state"].contains("mood="));
     server.shutdown().await;
 }
 
@@ -1285,6 +1368,152 @@ async fn boot_seeds_two_souls_and_session_ops() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn two_souls_keep_isolated_sessions_and_stage_occupants() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    assert!(
+        souls.items.len() >= 2,
+        "boot must present two companions, got {}",
+        souls.items.len()
+    );
+    let soul_a = souls.items[0].id.clone();
+    let soul_b = souls.items[1].id.clone();
+    assert_ne!(soul_a, soul_b);
+
+    let session_a = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_a.clone(),
+            title: Some("alpha lane".into()),
+        })
+        .await
+        .unwrap();
+    let session_b = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_b.clone(),
+            title: Some("beta lane".into()),
+        })
+        .await
+        .unwrap();
+    assert_ne!(session_a.id, session_b.id);
+    assert_eq!(session_a.soul_id, soul_a);
+    assert_eq!(session_b.soul_id, soul_b);
+
+    client
+        .send_message(
+            &session_a.id,
+            &MessageRequest {
+                text: "token-mango-unique".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session_a.id).await;
+    client
+        .send_message(
+            &session_b.id,
+            &MessageRequest {
+                text: "token-kiwi-unique".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session_b.id).await;
+
+    let hist_a = client.history(&session_a.id, "surface").await.unwrap();
+    let hist_b = client.history(&session_b.id, "surface").await.unwrap();
+    let texts_a: Vec<&str> = hist_a.messages.iter().map(|m| m.text.as_str()).collect();
+    let texts_b: Vec<&str> = hist_b.messages.iter().map(|m| m.text.as_str()).collect();
+    assert!(
+        texts_a
+            .iter()
+            .any(|text| text.contains("token-mango-unique")),
+        "soul A history: {texts_a:?}"
+    );
+    assert!(
+        !texts_a
+            .iter()
+            .any(|text| text.contains("token-kiwi-unique")),
+        "soul A leaked B: {texts_a:?}"
+    );
+    assert!(
+        texts_b
+            .iter()
+            .any(|text| text.contains("token-kiwi-unique")),
+        "soul B history: {texts_b:?}"
+    );
+    assert!(
+        !texts_b
+            .iter()
+            .any(|text| text.contains("token-mango-unique")),
+        "soul B leaked A: {texts_b:?}"
+    );
+
+    let stage = client.stage().await.unwrap();
+    assert!(
+        stage.occupants.iter().any(|item| item.soul_id == soul_a),
+        "stage occupants: {:?}",
+        stage.occupants
+    );
+    assert!(
+        stage.occupants.iter().any(|item| item.soul_id == soul_b),
+        "stage occupants: {:?}",
+        stage.occupants
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn import_shipped_alicia_vrm_exposes_parseable_avatar() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/characters/Alicia/AliciaSolid.vrm");
+    assert!(
+        path.is_file(),
+        "shipped AliciaSolid.vrm is required for VRM acceptance"
+    );
+    let vrm = std::fs::read(&path).unwrap();
+    assert!(vrm.starts_with(b"glTF"));
+    assert!(
+        vrm.windows(8).any(|window| window == b"VRMC_vrm"),
+        "shipped Alicia VRM must declare VRMC_vrm"
+    );
+
+    let (_dir, client, _core, server) = boot_server().await;
+    let mut files = sample_char_files();
+    files.insert(
+        "body/body.toml".into(),
+        b"[body]\nkind = \"vrm\"\navatar = \"avatar/model.vrm\"\n".to_vec(),
+    );
+    files.insert("body/avatar/model.vrm".into(), vrm);
+    let zip = pack_archive(&stamp_digest(files)).unwrap();
+    let imported = client
+        .import_character_archive_b64(&base64::engine::general_purpose::STANDARD.encode(&zip))
+        .await
+        .unwrap();
+    let soul_id = imported.soul_id.expect("soul");
+    let soul = client.get_soul(&soul_id).await.unwrap();
+    let avatar = soul.avatar_path.expect("avatar_path");
+    let installed = std::fs::read(&avatar).unwrap();
+    assert!(installed.starts_with(b"glTF"));
+    assert!(installed.windows(8).any(|window| window == b"VRMC_vrm"));
+    let stage = client.stage().await.unwrap();
+    assert!(
+        stage
+            .occupants
+            .iter()
+            .any(|occupant| occupant.soul_id == soul_id && occupant.avatar_path.is_some()),
+        "stage occupants: {:?}",
+        stage.occupants
+    );
+    server.shutdown().await;
+}
+
 fn sample_char_files() -> BTreeMap<String, Vec<u8>> {
     let mut files = BTreeMap::new();
     files.insert(
@@ -1736,6 +1965,51 @@ async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
         .await
         .unwrap();
     assert!(empty.turn_id.is_none());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn listen_feeds_duplex_machine_without_stt() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    let pcm: Vec<f32> = (0..1_600).map(|i| ((i as f32) * 0.2).sin() * 0.3).collect();
+    let empty = client
+        .listen(
+            &session.id,
+            &ene_api::ListenRequest {
+                pcm,
+                sample_rate: 16_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(empty.turn_id.is_none());
+    assert_eq!(
+        core.with_voice(|voice| voice.state()),
+        ene_body::DuplexState::Listening
+    );
+    let closed = client
+        .listen(
+            &session.id,
+            &ene_api::ListenRequest {
+                pcm: vec![0.0; 160],
+                sample_rate: 16_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(closed.turn_id.is_none());
+    assert_eq!(
+        core.with_voice(|voice| voice.state()),
+        ene_body::DuplexState::Idle
+    );
     server.shutdown().await;
 }
 

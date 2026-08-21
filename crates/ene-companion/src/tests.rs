@@ -1,6 +1,6 @@
 use crate::affect::{
-    AffectBaseline, AffectPresentation, AffectState, ExpressionArbiter, apply_self_report,
-    project_decay,
+    AffectBaseline, AffectPresentation, AffectProposal, AffectState, ExpressionArbiter,
+    apply_self_report, apply_turn_signals, parse_affect_json, project_decay,
 };
 use crate::classify::ScriptedClassify;
 use crate::config::{AffectSettings, MindSettings, ProactiveSettings};
@@ -516,6 +516,105 @@ async fn classifier_scope_defaults_private_when_missing() {
     assert_eq!(cands[0].scope, MemoryScope::Private);
 }
 
+#[tokio::test]
+async fn classifier_json_can_mark_shared_scope() {
+    let soul = ene_session::SoulId::new();
+    let classify = ScriptedClassify::new([
+        r#"{"candidates":[{"kind":"semantic","title":"i work nights","content":"i work nights","scope":"shared","confidence":0.9}]}"#,
+    ]);
+    let cands = extract_turn(soul, "remember that I work nights", "ok", Some(&classify)).await;
+    assert!(
+        cands
+            .iter()
+            .any(|cand| cand.kind == MemoryKind::Semantic && cand.scope == MemoryScope::Shared)
+    );
+}
+
+#[tokio::test]
+async fn classifier_failure_keeps_deterministic_extract() {
+    let soul = ene_session::SoulId::new();
+    let cands = extract_turn(
+        soul,
+        "My name is Bob",
+        "hi",
+        Some(&ScriptedClassify::silent()),
+    )
+    .await;
+    assert!(
+        cands
+            .iter()
+            .any(|cand| cand.kind == MemoryKind::UserProfile && cand.content.contains("bob"))
+    );
+}
+
+#[test]
+fn classifier_affect_proposal_blends_when_confident() {
+    let mut state = AffectState::default();
+    let before = state.valence;
+    let proposal = parse_affect_json(
+        r#"```json
+{"valence":0.9,"arousal":0.4,"irritation":0.0,"affinity":0.5,"confidence":0.95}
+```"#,
+    )
+    .expect("proposal");
+    apply_turn_signals(
+        &mut state,
+        "the weather is fine",
+        Some(&proposal),
+        &AffectSettings::default(),
+    );
+    assert!(state.valence > before);
+}
+
+#[test]
+fn classifier_affect_proposal_ignored_when_unconfident() {
+    let mut state = AffectState::default();
+    let before = state.valence;
+    apply_turn_signals(
+        &mut state,
+        "the weather is fine",
+        Some(&AffectProposal {
+            valence: 0.9,
+            arousal: 0.4,
+            irritation: 0.0,
+            affinity: 0.5,
+            confidence: 0.1,
+        }),
+        &AffectSettings::default(),
+    );
+    assert!((state.valence - before).abs() < f32::EPSILON);
+}
+
+#[tokio::test]
+async fn runtime_blends_classifier_affect_and_fail_closes() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let runtime = CompanionRuntime::new(Arc::new(store), MindSettings::default());
+    let classify = ScriptedClassify::new([
+        r#"{"valence":0.85,"arousal":0.2,"irritation":0.0,"affinity":0.4,"confidence":0.9}"#,
+    ]);
+    runtime
+        .on_user_turn(soul.id, "the weather is fine", &[], Some(&classify))
+        .await
+        .unwrap();
+    let after = runtime.soul(soul.id).unwrap();
+    assert!(after.affect.valence > soul.affect.valence);
+
+    runtime
+        .on_user_turn(
+            soul.id,
+            "still talking",
+            &[],
+            Some(&ScriptedClassify::silent()),
+        )
+        .await
+        .unwrap();
+    let again = runtime.soul(soul.id).unwrap();
+    assert!((again.affect.valence - after.affect.valence).abs() < 0.0001);
+}
+
 #[test]
 fn inner_tags_do_not_leak_on_surface_projection() {
     let (speech, inner) =
@@ -862,8 +961,8 @@ async fn memory_recall_tool_is_hybrid_when_embedder_bound() {
     assert!(!blob.contains("zebra"), "{blob}");
 }
 
-#[test]
-fn runtime_persists_affect_across_turns() {
+#[tokio::test]
+async fn runtime_persists_affect_across_turns() {
     let (_dir, store) = open_store();
     let soul = store
         .create_soul(&NewSoul::text_only("char.ene@1"))
@@ -874,7 +973,9 @@ fn runtime_persists_affect_across_turns() {
             soul.id,
             "thank you so much",
             &[(InnerAspect::Emotion, "emotion: happy(0.8)".into())],
+            None,
         )
+        .await
         .unwrap();
     let after = runtime.soul(soul.id).unwrap();
     assert!(after.affect.valence > soul.affect.valence);

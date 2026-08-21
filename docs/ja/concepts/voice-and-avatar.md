@@ -4,7 +4,15 @@
 
 `ene-body` がデュプレックス音声状態（idle / listening / thinking /
 responding / speaking / interrupting）、エネルギー VAD、リップシンクの
-viseme を持ちます。TTS / STT は `ai.tasks.tts` / `ai.tasks.stt` で
+viseme を持ちます。本番は `VoiceRuntime::live` で起動し、VAD・割り込み・
+自声回避・viseme はコアが動かします。`POST /sessions/{id}/listen` は先に
+その状態機械へマイク PCM を入れ、発話が閉じたら設定済みの `ai.tasks.stt`
+へ送ります。プラグイン TTS の PCM も同じ機械に入るので、リップシンクと
+割り込みは再生中の音声を見ます。surface バスは `voice.state`（`state` と、
+割り込み中は `barge_in`）を出します。テストは in-process の ASR 二重化に
+`VoiceRuntime::scripted` を組み立てて構いません。
+
+TTS / STT は `ai.tasks.tts` / `ai.tasks.stt` で
 プロバイダプラグイン（`provider.openai_compat`、`provider.elevenlabs`、
 `provider.voicevox`、`provider.edge_tts`）に結びます。音声はプロバイダ
 副プロトコル上の `f32` PCM です。マイクと再生デバイスは stage が持ちます。
@@ -37,6 +45,9 @@ stage が消費するのは `ene-body::PerformanceCommand` です:
 - **表情** — VRM ブレンドシェイプ + 手続き的なまばたき / 視線 / 口
 - **Look-at** — 設定範囲内でカーソルを追う
 - **スプリングボーン** — 髪 / 布
+- **同時表示** — オーバーレイは `body.render.max_concurrent` 体まで合成します
+  （既定 2）。ビセームはアクティブなソウルへ。A/D はチャットの対象を付け替え、
+  もう一方の体はアンロードしません。
 
 対応する描画 API は
 [ene-vrm API リファレンス](../reference/api/ene-vrm.md) です。

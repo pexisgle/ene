@@ -21,4 +21,4 @@ cargo new --bin plugins/tool/my-tool
 
 Rust 以外のフィクスチャは `plugins/tool/dummy-py`（ワークスペース除外）です。
 サードパーティツールは同じ core+tool ハンドシェイクを実装し、Ene クレートは
-リンクしません。
+リンクしません。`capability` は任意です。Broker の grant やバルク FD が要るときだけ名乗ってください。
