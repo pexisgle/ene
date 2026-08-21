@@ -42,7 +42,8 @@ inner / thinking / tool args. Stage's main window is surface; the separate
 detail window (and `ene-ctl --verbose`) is detail.
 
 Conversation history is the append-only log in `sessions.db`, not a
-client-side buffer.
+client-side buffer. A provider failure ends the turn as `failed` and is not
+written as assistant speech.
 
 ## Sessions
 

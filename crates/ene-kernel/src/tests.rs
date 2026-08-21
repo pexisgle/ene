@@ -129,7 +129,7 @@ async fn open_lane() -> (TempDir, Arc<SessionStore>, LaneHandle, Arc<RecordingMo
 }
 
 #[tokio::test]
-async fn provider_failure_writes_assistant_error() {
+async fn provider_failure_is_not_assistant_speech() {
     struct FailingModel;
     #[async_trait]
     impl ConversationModel for FailingModel {
@@ -167,6 +167,7 @@ async fn provider_failure_writes_assistant_error() {
         prefetch: None,
         router: None,
     });
+    let mut surface = lane.subscribe(DisplayDepth::Surface);
     lane.prompt("hello").await.unwrap();
     lane.wait_for_idle().await.unwrap();
     let history = lane.project(DisplayDepth::Surface).unwrap();
@@ -174,8 +175,36 @@ async fn provider_failure_writes_assistant_error() {
         history
             .messages
             .iter()
-            .any(|message| message.text().contains("401 unauthorized")),
-        "failed turns must surface the provider error, got {history:?}"
+            .all(|message| message.role != ene_session::Role::Assistant
+                || !message.text().to_ascii_lowercase().contains("401")),
+        "failed turns must not look like spoken replies, got {history:?}"
+    );
+    let events = store.load_events(session, 0).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
+        EventPayload::TurnEnd {
+            outcome: TurnOutcome::Failed,
+            ..
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AssistantMessage))
+    );
+    let live = surface.try_drain();
+    assert!(live.iter().any(|event| matches!(
+        event,
+        LiveEvent::TurnEnded {
+            outcome,
+            error: Some(detail),
+            ..
+        } if outcome == "failed" && detail.contains("401 unauthorized")
+    )));
+    assert!(
+        !live
+            .iter()
+            .any(|event| matches!(event, LiveEvent::TextDelta { .. }))
     );
 }
 

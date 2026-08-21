@@ -198,10 +198,16 @@ fn parse_live_event(value: &Value) -> Option<LiveEvent> {
                 .unwrap_or("")
                 .to_owned(),
         }),
-        "session.event" => Some(LiveEvent::SessionEvent {
-            kind: string_field(value, "kind"),
-            text: string_field(value, "text"),
-        }),
+        "session.event" => {
+            let mut text = string_field(value, "text");
+            if text.is_empty() {
+                text = string_field(value, "error");
+            }
+            Some(LiveEvent::SessionEvent {
+                kind: string_field(value, "kind"),
+                text,
+            })
+        }
         "approval.requested" | "approval.asked" => Some(LiveEvent::ApprovalAsked {
             id: string_field(value, "id"),
             tool: string_field(value, "tool"),
@@ -377,5 +383,21 @@ mod tests {
         assert!(
             parse_detail_event(&json!({"type": "affect.state", "mood_label": "calm"})).is_some()
         );
+    }
+
+    #[test]
+    fn turn_end_reads_error_when_text_missing() {
+        let event = parse_live_event(&json!({
+            "type": "session.event",
+            "kind": "turn/end",
+            "outcome": "failed",
+            "error": "model: call failed: 401 Unauthorized"
+        }))
+        .expect("event");
+        assert!(matches!(
+            event,
+            LiveEvent::SessionEvent { kind, text }
+                if kind == "turn/end" && text.contains("401 Unauthorized")
+        ));
     }
 }

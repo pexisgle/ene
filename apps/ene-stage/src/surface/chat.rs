@@ -106,9 +106,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
                     if message.role != "user" && message.role != "assistant" {
                         continue;
                     }
+                    if message.role == "assistant" && is_provider_failure_speech(&message.text) {
+                        continue;
+                    }
                     ui.label(format!("{}: {}", message.role, message.text));
                 }
-                if !state.streaming_text.is_empty() {
+                if !state.streaming_text.is_empty()
+                    && !is_provider_failure_speech(&state.streaming_text)
+                {
                     ui.colored_label(
                         egui::Color32::LIGHT_GREEN,
                         format!("assistant: {}", state.streaming_text),
@@ -116,4 +121,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
                 }
             });
     });
+}
+
+fn is_provider_failure_speech(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower.starts_with("the chat provider failed")
+        || lower.contains("401 unauthorized")
+        || lower.contains("403 forbidden")
 }
