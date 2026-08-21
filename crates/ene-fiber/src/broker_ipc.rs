@@ -3,10 +3,16 @@
 use crate::broker::{Broker, BrokerError};
 use crate::fiber::FiberUid;
 use ene_plugin_ipc::{BrokerErrorCode, BrokerRequest, BrokerResponse};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
+
+#[cfg(unix)]
+use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(windows)]
+use tokio::net::TcpListener;
+#[cfg(unix)]
 use tokio::net::UnixListener;
 
 #[derive(Debug, Error)]
@@ -19,13 +25,15 @@ pub enum BrokerIpcError {
     Broker(#[from] BrokerError),
 }
 
-/// Serve broker requests over a local socket until the plugin disconnects.
+/// Serve broker requests over a platform-local endpoint until stopped.
 ///
-/// The socket path is returned so the supervisor can advertise it to the
-/// plugin. Only the granted fiber uid can access the shared [`Broker`].
+/// The first request must prove possession of the spawn token before the
+/// server binds that connection to the activating fiber's broker grants.
 pub struct BrokerServer {
-    socket: PathBuf,
+    endpoint: String,
     task: tokio::task::JoinHandle<()>,
+    #[cfg(unix)]
+    socket: Option<PathBuf>,
 }
 
 impl BrokerServer {
@@ -34,61 +42,137 @@ impl BrokerServer {
     /// # Errors
     ///
     /// Returns an I/O error when the listener cannot be bound.
-    pub fn bind(
+    #[cfg_attr(
+        unix,
+        expect(
+            clippy::unused_async,
+            reason = "Windows binds an ephemeral TCP port; Unix bind is synchronous"
+        )
+    )]
+    pub async fn bind(
         broker: Arc<parking_lot::Mutex<Broker>>,
         uid: FiberUid,
         row_id: &str,
+        token: &str,
     ) -> Result<Self, BrokerIpcError> {
-        let socket = crate::spawn::broker_endpoint(row_id);
-        if let Err(err) = std::fs::remove_file(&socket)
-            && err.kind() != std::io::ErrorKind::NotFound
+        #[cfg(unix)]
         {
-            return Err(err.into());
-        }
-        let listener = UnixListener::bind(&socket)?;
-        let task = tokio::spawn(async move {
-            if let Err(err) = accept_loop(broker, uid, listener).await {
-                tracing::warn!(error = %err, "broker ipc stopped");
+            let socket = crate::spawn::broker_endpoint(row_id);
+            if let Err(err) = std::fs::remove_file(&socket)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(err.into());
             }
-        });
-        Ok(Self { socket, task })
+            let listener = UnixListener::bind(&socket)?;
+            let token = token.to_owned();
+            let task = tokio::spawn(async move {
+                if let Err(err) = accept_loop_unix(broker, uid, listener, token).await {
+                    tracing::warn!(error = %err, "broker ipc stopped");
+                }
+            });
+            Ok(Self {
+                endpoint: socket.to_string_lossy().into_owned(),
+                task,
+                socket: Some(socket),
+            })
+        }
+        #[cfg(windows)]
+        {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+            let endpoint = listener.local_addr()?.to_string();
+            let token = token.to_owned();
+            let task = tokio::spawn(async move {
+                if let Err(err) = accept_loop_windows(broker, uid, listener, token).await {
+                    tracing::warn!(error = %err, "broker ipc stopped");
+                }
+            });
+            Ok(Self { endpoint, task })
+        }
     }
 
     #[must_use]
-    pub fn socket_path(&self) -> &Path {
-        &self.socket
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 
     pub fn shutdown(self) {
         self.task.abort();
-        drop(std::fs::remove_file(&self.socket));
+        #[cfg(unix)]
+        if let Some(socket) = self.socket {
+            drop(std::fs::remove_file(socket));
+        }
     }
 }
 
-async fn accept_loop(
+#[cfg(unix)]
+async fn accept_loop_unix(
     broker: Arc<parking_lot::Mutex<Broker>>,
     uid: FiberUid,
     listener: UnixListener,
+    token: String,
 ) -> Result<(), BrokerIpcError> {
-    loop {
-        let (stream, _) = listener.accept().await?;
+    while let Ok((stream, _)) = listener.accept().await {
         let broker = Arc::clone(&broker);
+        let token = token.clone();
         tokio::spawn(async move {
-            if let Err(err) = serve_connection(stream, broker, uid).await {
+            if let Err(err) = serve_connection(stream, broker, uid, &token).await {
                 tracing::debug!(error = %err, "broker connection closed");
             }
         });
     }
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn accept_loop_windows(
+    broker: Arc<parking_lot::Mutex<Broker>>,
+    uid: FiberUid,
+    listener: TcpListener,
+    token: String,
+) -> Result<(), BrokerIpcError> {
+    while let Ok((stream, _)) = listener.accept().await {
+        let broker = Arc::clone(&broker);
+        tokio::spawn(async move {
+            if let Err(err) = serve_connection(stream, broker, uid, &token).await {
+                tracing::debug!(error = %err, "broker connection closed");
+            }
+        });
+    }
+    Ok(())
 }
 
 async fn serve_connection<S>(
     mut stream: S,
     broker: Arc<parking_lot::Mutex<Broker>>,
     uid: FiberUid,
+    token: &str,
 ) -> Result<(), BrokerIpcError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let Some(BrokerRequest::Hello { token: offered }) =
+        ene_plugin_ipc::read_broker_request(&mut stream)
+            .await
+            .map_err(|err| BrokerIpcError::Codec(err.to_string()))?
+    else {
+        return Err(BrokerIpcError::Codec(
+            "first broker request is not hello".to_owned(),
+        ));
+    };
+    if !constant_time_eq(offered.as_bytes(), token.as_bytes()) {
+        let response = BrokerResponse::Error {
+            code: BrokerErrorCode::Denied,
+            message: "broker hello rejected".to_owned(),
+        };
+        ene_plugin_ipc::write_broker_response(&mut stream, response)
+            .await
+            .map_err(|err| BrokerIpcError::Codec(err.to_string()))?;
+        return Ok(());
+    }
+    ene_plugin_ipc::write_broker_response(&mut stream, BrokerResponse::HelloOk)
+        .await
+        .map_err(|err| BrokerIpcError::Codec(err.to_string()))?;
+
     while let Some(request) = ene_plugin_ipc::read_broker_request(&mut stream)
         .await
         .map_err(|err| BrokerIpcError::Codec(err.to_string()))?
@@ -101,12 +185,26 @@ where
     Ok(())
 }
 
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
+        == 0
+}
+
 fn dispatch(
     broker: &parking_lot::Mutex<Broker>,
     uid: FiberUid,
     request: BrokerRequest,
 ) -> BrokerResponse {
     match request {
+        BrokerRequest::Hello { .. } => BrokerResponse::Error {
+            code: BrokerErrorCode::Denied,
+            message: "broker hello is accepted once per connection".to_owned(),
+        },
         BrokerRequest::FsRead { path } => {
             let broker = broker.lock();
             match broker.fs_read(uid, Path::new(&path)) {

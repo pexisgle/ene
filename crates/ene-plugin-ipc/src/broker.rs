@@ -104,6 +104,7 @@ pub enum BrokerErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrokerRequest {
+    Hello { token: String },
     FsRead { path: String },
     FsWrite { path: String, text: String },
     NetFetch { url: String },
@@ -113,6 +114,7 @@ pub enum BrokerRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrokerResponse {
+    HelloOk,
     FsReadOk {
         text: String,
     },

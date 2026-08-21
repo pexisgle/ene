@@ -15,11 +15,21 @@ async fn broker_client_round_trips_fs_read_and_denies_undeclared_ops() {
         Arc::new(parking_lot::Mutex::new(broker)),
         uid,
         "r-broker-roundtrip",
+        "test-token",
     )
+    .await
     .unwrap();
-    let path = server.socket_path().to_string_lossy().into_owned();
+    let path = server.endpoint().to_owned();
 
     let mut client = BrokerClient::from_path(&path).await.unwrap();
+    let hello = client
+        .call(BrokerRequest::Hello {
+            token: "test-token".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(hello, BrokerResponse::HelloOk);
+
     let read = client
         .call(BrokerRequest::FsRead {
             path: dir.path().join("input.txt").display().to_string(),
@@ -44,4 +54,28 @@ async fn broker_client_round_trips_fs_read_and_denies_undeclared_ops() {
     assert!(!dir.path().join("output.txt").exists());
 
     drop(server);
+}
+
+#[tokio::test]
+async fn broker_client_rejects_bad_hello() {
+    let dir = TempDir::new().unwrap();
+    let server = BrokerServer::bind(
+        Arc::new(parking_lot::Mutex::new(Broker::new(
+            dir.path().to_path_buf(),
+        ))),
+        FiberUid::new(),
+        "r-broker-bad-token",
+        "expected-token",
+    )
+    .await
+    .unwrap();
+    let mut client = BrokerClient::from_path(server.endpoint()).await.unwrap();
+
+    let rejected = client
+        .call(BrokerRequest::Hello {
+            token: "wrong".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(rejected, BrokerResponse::Error { .. }));
 }

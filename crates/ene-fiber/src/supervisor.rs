@@ -593,26 +593,23 @@ impl Supervisor {
                 &mut broker,
             )?;
         }
-        let broker_server: Option<crate::broker_ipc::BrokerServer> =
-            if plugin_kind(&row.plugin).is_some() {
-                #[cfg(unix)]
-                {
-                    Some(crate::broker_ipc::BrokerServer::bind(
-                        Arc::clone(&self.inner.broker),
-                        fiber.uid,
-                        &row.row_id,
-                    )?)
-                }
-                #[cfg(not(unix))]
-                {
-                    None
-                }
-            } else {
-                None
-            };
+        let spawn_token = Uuid::now_v7().to_string();
+        let broker_server = if plugin_kind(&row.plugin).is_some() {
+            Some(
+                crate::broker_ipc::BrokerServer::bind(
+                    Arc::clone(&self.inner.broker),
+                    fiber.uid,
+                    &row.row_id,
+                    &spawn_token,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let broker_socket = broker_server
             .as_ref()
-            .map(|server| server.socket_path().to_string_lossy().into_owned());
+            .map(|server| server.endpoint().to_owned());
         let spawned = match spawn_plugin(SpawnOpts {
             binary,
             plugin_id: &plugin_id,
@@ -623,6 +620,7 @@ impl Supervisor {
             workspace: &self.inner.workspace,
             config: &config,
             broker_socket: broker_socket.as_deref(),
+            broker_token: Some(&spawn_token),
             max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
             allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
         })
@@ -1158,6 +1156,7 @@ impl Supervisor {
             workspace: &self.inner.workspace,
             config,
             broker_socket: None,
+            broker_token: None,
             max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
             allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
         })
