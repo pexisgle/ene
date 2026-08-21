@@ -8,7 +8,6 @@
 
 mod assets_host;
 mod broker;
-#[cfg(unix)]
 mod broker_ipc;
 mod fiber;
 mod managed_sidecar;
