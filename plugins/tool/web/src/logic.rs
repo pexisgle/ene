@@ -1,10 +1,7 @@
 use ene_plugin_ipc::ToolSpecWire;
-use ene_registry::{arg_str, spec};
+use ene_registry::{arg_str, spec, try_host_fetch};
 use serde_json::{Value, json};
-use std::io::Read;
 use std::net::IpAddr;
-use std::sync::OnceLock;
-use std::time::Duration;
 use url::Url;
 
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
@@ -32,24 +29,12 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     }
 }
 
-const MAX_FETCH_CHARS: usize = 512 * 1024;
-
 fn fetch(raw: &str) -> Result<Value, String> {
-    let url = deny_ssrf(raw)?;
-    // reqwest::blocking owns a tokio runtime; construct, send, and drop it off
-    // the plugin's async thread or Drop panics and kills the fiber.
-    let (status, content_type, body) = off_runtime(move || {
-        let response = http().get(url).send().map_err(|err| err.to_string())?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
-        let body = read_capped_text(response)?;
-        Ok((status, content_type, body))
-    })?;
+    deny_ssrf(raw)?;
+    let payload = host_get(raw)?;
+    let status = status_of(&payload);
+    let content_type = str_field(&payload, "content_type");
+    let body = str_field(&payload, "text");
     let text = if content_type.contains("html") {
         strip_tags(&body)
     } else {
@@ -68,10 +53,8 @@ fn search(query: &str) -> Result<Value, String> {
         .append_pair("format", "json")
         .append_pair("no_html", "1")
         .append_pair("skip_disambig", "1");
-    let payload: Value = off_runtime(move || {
-        let response = http().get(url).send().map_err(|err| err.to_string())?;
-        response.json().map_err(|err| err.to_string())
-    })?;
+    let payload: Value = serde_json::from_str(&str_field(&host_get(url.as_str())?, "text"))
+        .unwrap_or_else(|_| json!({}));
     let heading = payload
         .get("Heading")
         .and_then(Value::as_str)
@@ -102,13 +85,13 @@ fn search(query: &str) -> Result<Value, String> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned();
-            let url = topic
+            let topic_url = topic
                 .get("FirstURL")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned();
             if !title.is_empty() {
-                results.push(json!({ "title": title, "url": url, "snippet": "" }));
+                results.push(json!({ "title": title, "url": topic_url, "snippet": "" }));
             }
         }
     }
@@ -123,11 +106,28 @@ fn search(query: &str) -> Result<Value, String> {
 fn search_html(query: &str) -> Result<Vec<Value>, String> {
     let mut url = deny_ssrf("https://html.duckduckgo.com/html/")?;
     url.query_pairs_mut().append_pair("q", query);
-    let html: String = off_runtime(move || {
-        let response = http().get(url).send().map_err(|err| err.to_string())?;
-        read_capped_text(response)
-    })?;
+    let html = str_field(&host_get(url.as_str())?, "text");
     Ok(parse_ddg_html(&html))
+}
+
+fn host_get(raw: &str) -> Result<Value, String> {
+    try_host_fetch(raw).unwrap_or_else(|| Err("web tools require the host net broker".to_owned()))
+}
+
+fn status_of(payload: &Value) -> u16 {
+    payload
+        .get("status")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+fn str_field(payload: &Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
 }
 
 fn parse_ddg_html(html: &str) -> Vec<Value> {
@@ -205,44 +205,6 @@ fn percent_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn read_capped_text(response: reqwest::blocking::Response) -> Result<String, String> {
-    let limit = u64::try_from(MAX_FETCH_CHARS.saturating_add(1)).unwrap_or(u64::MAX);
-    let mut buf = Vec::new();
-    response
-        .take(limit)
-        .read_to_end(&mut buf)
-        .map_err(|err| err.to_string())?;
-    if buf.len() > MAX_FETCH_CHARS {
-        buf.truncate(MAX_FETCH_CHARS);
-        while !buf.is_empty() && std::str::from_utf8(&buf).is_err() {
-            buf.pop();
-        }
-    }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
-fn off_runtime<T: Send>(work: impl FnOnce() -> Result<T, String> + Send) -> Result<T, String> {
-    std::thread::scope(|scope| {
-        scope
-            .spawn(work)
-            .join()
-            .unwrap_or_else(|_| Err("web worker panicked".to_owned()))
-    })
-}
-
-fn http() -> &'static reqwest::blocking::Client {
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        drop(rustls::crypto::ring::default_provider().install_default());
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .user_agent("ene-web/0.1")
-            .redirect(reqwest::redirect::Policy::limited(4))
-            .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
-    })
-}
-
 fn deny_ssrf(raw: &str) -> Result<Url, String> {
     let url = Url::parse(raw).map_err(|err| err.to_string())?;
     if url.scheme() != "https" && url.scheme() != "http" {
@@ -265,7 +227,12 @@ fn is_private(ip: IpAddr) -> bool {
         IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.octets()[0] == 0
         }
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_private(IpAddr::V4(mapped));
+            }
+            v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local()
+        }
     }
 }
 
@@ -302,7 +269,9 @@ fn collapse_ws(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_ddg_href, parse_ddg_html};
+    use super::{decode_ddg_href, execute, parse_ddg_html};
+    use ene_registry::with_http_fetch;
+    use serde_json::json;
 
     #[test]
     fn parse_ddg_html_reads_result_links() {
@@ -323,5 +292,53 @@ mod tests {
             decode_ddg_href("//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.invalid%2Fx&rut=1"),
             "https://example.invalid/x"
         );
+    }
+
+    #[test]
+    fn fetch_without_host_broker_fails_closed() {
+        let err = execute("web.fetch", &json!({"url":"https://example.invalid/"})).unwrap_err();
+        assert!(err.contains("host net broker"), "{err}");
+    }
+
+    #[test]
+    fn fetch_still_blocks_loopback_before_broker() {
+        let err = execute("web.fetch", &json!({"url":"http://127.0.0.1/secret"})).unwrap_err();
+        assert!(err.contains("private hosts"), "{err}");
+    }
+
+    #[test]
+    fn fetch_uses_host_broker_and_strips_html() {
+        let value = with_http_fetch(
+            |url| {
+                assert_eq!(url, "https://example.invalid/page");
+                Ok(json!({
+                    "status": 200,
+                    "content_type": "text/html; charset=utf-8",
+                    "text": "<p>Hello <b>world</b></p>"
+                }))
+            },
+            || execute("web.fetch", &json!({"url":"https://example.invalid/page"})),
+        )
+        .unwrap();
+        assert_eq!(value["status"], 200);
+        assert_eq!(value["text"], "Hello world");
+    }
+
+    #[test]
+    fn search_uses_host_broker_json() {
+        let value = with_http_fetch(
+            |url| {
+                assert!(url.contains("api.duckduckgo.com"), "{url}");
+                Ok(json!({
+                    "status": 200,
+                    "content_type": "application/json",
+                    "text": r#"{"Heading":"Tokyo","AbstractText":"Capital","AbstractURL":"https://example.invalid/tokyo","RelatedTopics":[]}"#
+                }))
+            },
+            || execute("web.search", &json!({"query":"tokyo"})),
+        )
+        .unwrap();
+        assert_eq!(value["results"][0]["title"], "Tokyo");
+        assert_eq!(value["results"][0]["snippet"], "Capital");
     }
 }

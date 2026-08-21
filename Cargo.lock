@@ -2377,8 +2377,6 @@ dependencies = [
  "image",
  "parking_lot",
  "regex",
- "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -2567,8 +2565,6 @@ version = "0.1.0"
 dependencies = [
  "ene-plugin-ipc",
  "ene-registry",
- "reqwest",
- "rustls",
  "serde_json",
  "tokio",
  "tracing",
