@@ -11,7 +11,10 @@ use crate::tools::{register_work_tools, surface_shows_delegate};
 use crate::types::{
     ArtifactKind, DelegationMode, JobStatus, NewSchedule, ScheduleAction, UpgradeReason,
 };
-use crate::vision::{observe_screen, register_screenshot_tool, screenshot_is_job_or_surface};
+use crate::vision::{
+    PlaceholderScreenshot, PngScreenshot, ScreenshotError, capture_screenshot, observe_screen,
+    register_screenshot_tool, screenshot_is_job_or_surface, screenshot_png,
+};
 use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};
 use ene_companion::{WorldStateMemory, WorldStateSettings};
@@ -571,13 +574,7 @@ async fn mcp_handwritten_tools_execute_through_registry() {
 #[test]
 fn screenshot_is_surface_and_high_sensitivity() {
     let registry = ToolRegistry::new();
-    register_screenshot_tool(
-        &registry,
-        Arc::new(ScriptedMcp::new([(
-            "app.screenshot".into(),
-            json!({"ok": true}),
-        )])),
-    );
+    register_screenshot_tool(&registry, Arc::new(PngScreenshot::minimal()));
     assert!(screenshot_is_job_or_surface(&registry));
     let def = registry.get("app.screenshot").unwrap();
     assert!(def.side_effects.is_empty());
@@ -585,7 +582,27 @@ fn screenshot_is_surface_and_high_sensitivity() {
 }
 
 #[tokio::test]
-async fn observe_screen_does_not_enter_session_history() {
+async fn tool_path_returns_png_and_placeholder_is_unavailable() {
+    let registry = ToolRegistry::new();
+    register_screenshot_tool(&registry, Arc::new(PngScreenshot::minimal()));
+    let value = registry
+        .execute("app.screenshot", json!({}), Layer::Surface)
+        .await
+        .unwrap();
+    let png = screenshot_png(&value).unwrap();
+    assert_eq!(png, crate::MINIMAL_PNG);
+    let empty = ToolRegistry::new();
+    register_screenshot_tool(&empty, Arc::new(PlaceholderScreenshot));
+    let err = capture_screenshot(&empty).await.unwrap_err();
+    assert_eq!(err, ScreenshotError::Unavailable);
+    assert_eq!(
+        screenshot_png(&json!({"available": false})).unwrap_err(),
+        ScreenshotError::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn observe_screen_from_png_does_not_enter_session_history() {
     let dir = TempDir::new().unwrap();
     let sessions = SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
         .await
@@ -601,6 +618,11 @@ async fn observe_screen_does_not_enter_session_history() {
         })
         .await
         .unwrap();
+    let registry = ToolRegistry::new();
+    register_screenshot_tool(&registry, Arc::new(PngScreenshot::minimal()));
+    let png = capture_screenshot(&registry).await.unwrap();
+    assert!(png.starts_with(b"\x89PNG"));
+    let summary = "terminal with cargo test";
     let mut memory = WorldStateMemory::default();
     let snap = observe_screen(
         &mut memory,
@@ -608,10 +630,10 @@ async fn observe_screen_does_not_enter_session_history() {
             enabled: true,
             ..WorldStateSettings::default()
         },
-        "secret pixels",
+        summary,
         12,
     );
-    assert!(!format!("{snap:?}").contains("secret pixels"));
+    assert!(!format!("{snap:?}").contains(summary));
     let events = sessions.load_events(session, 0).unwrap();
     let history = derive_messages(&events, ene_session::ProjectOptions::model_visible(8));
     let text = history
@@ -620,7 +642,7 @@ async fn observe_screen_does_not_enter_session_history() {
         .map(ene_session::ProjectedMessage::text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!text.contains("secret pixels"));
+    assert!(!text.contains(summary));
     assert!(
         !events
             .iter()
