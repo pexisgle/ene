@@ -4,18 +4,48 @@ use serde_json::{Value, json};
 use std::net::IpAddr;
 use url::Url;
 
+#[path = "html.rs"]
+mod html;
+#[path = "search.rs"]
+mod search;
+
+use html::{fail, parse_format, render};
+use search::{catalog, parse_arxiv_atom, parse_backend, require_available};
+
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
         spec(
             "web.fetch",
-            "Fetch a URL via HTTPS and return text",
-            json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"],"additionalProperties":false}),
+            "Fetch a URL and return markdown, text, or html",
+            json!({
+                "type":"object",
+                "properties":{
+                    "url":{"type":"string"},
+                    "format":{"type":"string","enum":["markdown","text","html"]}
+                },
+                "required":["url"],
+                "additionalProperties":false
+            }),
             Vec::new(),
         ),
         spec(
             "web.search",
-            "Search the public web (DuckDuckGo answers, HTML fallback)",
-            json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}),
+            "Search with an explicit backend (DuckDuckGo default, ArXiv domain)",
+            json!({
+                "type":"object",
+                "properties":{
+                    "query":{"type":"string"},
+                    "backend":{"type":"string","enum":["duckduckgo","arxiv","tavily","exa"]}
+                },
+                "required":["query"],
+                "additionalProperties":false
+            }),
+            Vec::new(),
+        ),
+        spec(
+            "web.search_backends",
+            "List search backends, credential requirements, and availability",
+            json!({"type":"object","additionalProperties":false}),
             Vec::new(),
         ),
     ]
@@ -23,30 +53,61 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
 
 pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "web.fetch" => fetch(arg_str(args, "url")?),
-        "web.search" => search(arg_str(args, "query")?),
+        "web.fetch" => {
+            let format = parse_format(args.get("format").and_then(Value::as_str))?;
+            fetch(arg_str(args, "url")?, format)
+        }
+        "web.search" => {
+            let backend = parse_backend(args.get("backend").and_then(Value::as_str))?;
+            search(arg_str(args, "query")?, backend)
+        }
+        "web.search_backends" => Ok(catalog()),
         other => Err(format!("unknown builtin {other}")),
     }
 }
 
-fn fetch(raw: &str) -> Result<Value, String> {
+fn fetch(raw: &str, format: html::FetchFormat) -> Result<Value, String> {
     deny_ssrf(raw)?;
     let payload = host_get(raw)?;
     let status = status_of(&payload);
     let content_type = str_field(&payload, "content_type");
     let body = str_field(&payload, "text");
-    let text = if content_type.contains("html") {
-        strip_tags(&body)
-    } else {
-        body
-    };
-    Ok(json!({ "status": status, "content_type": content_type, "text": text }))
+    let mut value = render(&body, &content_type, format, raw)?;
+    if status == 429 {
+        return Err(fail("rate_limited", "server returned HTTP 429"));
+    }
+    value["status"] = json!(status);
+    Ok(value)
 }
 
-fn search(query: &str) -> Result<Value, String> {
+fn search(query: &str, backend: search::SearchBackend) -> Result<Value, String> {
     if query.trim().is_empty() {
-        return Err("query is empty".to_owned());
+        return Err(fail("invalid_query", "query is empty"));
     }
+    require_available(backend)?;
+    let results = match backend {
+        search::SearchBackend::DuckDuckGo => search_ddg(query)?,
+        search::SearchBackend::Arxiv => search_arxiv(query)?,
+        search::SearchBackend::Tavily | search::SearchBackend::Exa => {
+            return Err(fail("credential_missing", "paid backend is not configured"));
+        }
+    };
+    Ok(json!({
+        "results": results,
+        "backend": backend_id(backend),
+    }))
+}
+
+fn backend_id(backend: search::SearchBackend) -> &'static str {
+    match backend {
+        search::SearchBackend::DuckDuckGo => "duckduckgo",
+        search::SearchBackend::Arxiv => "arxiv",
+        search::SearchBackend::Tavily => "tavily",
+        search::SearchBackend::Exa => "exa",
+    }
+}
+
+fn search_ddg(query: &str) -> Result<Vec<Value>, String> {
     let mut url = deny_ssrf("https://api.duckduckgo.com/")?;
     url.query_pairs_mut()
         .append_pair("q", query)
@@ -100,7 +161,17 @@ fn search(query: &str) -> Result<Value, String> {
     {
         results = html_rows;
     }
-    Ok(json!({ "results": results }))
+    Ok(results)
+}
+
+fn search_arxiv(query: &str) -> Result<Vec<Value>, String> {
+    let mut url = deny_ssrf("https://export.arxiv.org/api/query")?;
+    url.query_pairs_mut()
+        .append_pair("search_query", &format!("all:{query}"))
+        .append_pair("start", "0")
+        .append_pair("max_results", "8");
+    let xml = str_field(&host_get(url.as_str())?, "text");
+    Ok(parse_arxiv_atom(&xml))
 }
 
 fn search_html(query: &str) -> Result<Vec<Value>, String> {
@@ -153,7 +224,7 @@ fn parse_ddg_html(html: &str) -> Vec<Value> {
         let Some(lt) = after_gt.find('<') else {
             break;
         };
-        let title = strip_tags(&after_gt[..lt]);
+        let title = html::strip_tags(&after_gt[..lt]);
         if !title.is_empty() && !href.is_empty() {
             results.push(json!({
                 "title": title,
@@ -236,37 +307,6 @@ fn is_private(ip: IpAddr) -> bool {
     }
 }
 
-fn strip_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    collapse_ws(&out)
-}
-
-fn collapse_ws(text: &str) -> String {
-    let mut out = String::new();
-    let mut prev_space = false;
-    for c in text.chars() {
-        if c.is_whitespace() {
-            if !prev_space {
-                out.push(' ');
-                prev_space = true;
-            }
-        } else {
-            prev_space = false;
-            out.push(c);
-        }
-    }
-    out.trim().to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{decode_ddg_href, execute, parse_ddg_html};
@@ -307,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_uses_host_broker_and_strips_html() {
+    fn fetch_uses_host_broker_and_renders_html() {
         let value = with_http_fetch(
             |url| {
                 assert_eq!(url, "https://example.invalid/page");
@@ -317,7 +357,12 @@ mod tests {
                     "text": "<p>Hello <b>world</b></p>"
                 }))
             },
-            || execute("web.fetch", &json!({"url":"https://example.invalid/page"})),
+            || {
+                execute(
+                    "web.fetch",
+                    &json!({"url":"https://example.invalid/page","format":"text"}),
+                )
+            },
         )
         .unwrap();
         assert_eq!(value["status"], 200);

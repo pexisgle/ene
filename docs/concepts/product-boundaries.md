@@ -102,10 +102,10 @@ host connectors.
 
 | Old action | Current | Status | Notes |
 |---|---|---|---|
-| `webfetch` | `web.fetch` | Current / Missing | Surface contract kept. Plugin still uses reqwest directly. Host broker, redirect/DNS revalidation, byte cap: [#799](https://github.com/pexisgle/ene/issues/799) |
-| HTML → readable Markdown | tag strip | Missing | After [#799](https://github.com/pexisgle/ene/issues/799): [#818](https://github.com/pexisgle/ene/issues/818) |
-| `websearch` | `web.search` | Current / Missing | DuckDuckGo Instant Answer + HTML fallback. Backend choice / credentials: [#818](https://github.com/pexisgle/ene/issues/818) |
-| Paid search backends | — | Missing | Vault ref + host allowlist only; no raw secrets in the plugin: [#818](https://github.com/pexisgle/ene/issues/818) |
+| `webfetch` | `web.fetch` | Current | `format` is `markdown` (default), `text`, or `html`. HTML keeps headings, paragraphs, and links. Binary types error with `binary_content`. Byte and converted-char caps apply |
+| HTML → readable Markdown | `web.fetch` `format=markdown` | Current | Script/style/nav dropped; title and source URL kept |
+| `websearch` | `web.search` | Current | `backend` is `duckduckgo` (default, no credential), `arxiv` (domain, same result shape), or `tavily`/`exa` (`credential_missing` until vault). `web.search_backends` lists availability |
+| Paid search backends | `web.search_backends` | Current | Declared; not selected without a vault credential |
 | Browser automation | — | MCP / Dropped as builtin | Playwright-class MCP, not `tool.web` |
 
 ### `app` (in-tree)
@@ -244,7 +244,7 @@ Closing a child issue does not close [#717](https://github.com/pexisgle/ene/issu
 | Tool discovery index | [#817](https://github.com/pexisgle/ene/issues/817) (epic [#796](https://github.com/pexisgle/ene/issues/796)) | Scoring stays in `ene-registry`; not a v1.0 `done.md` box |
 | Background tool start/cancel/completion | [#816](https://github.com/pexisgle/ene/issues/816) (epic #796) | Persist on `ene-work` jobs; no second task store |
 | Plugin config schema / dynamic options | [#819](https://github.com/pexisgle/ene/issues/819) (epic #796) | Unreleased: no legacy config shim |
-| Readable Markdown + search backends | [#818](https://github.com/pexisgle/ene/issues/818) | After SSRF (#799). Surface `web.fetch`/`web.search` already exist |
+| Readable Markdown + search backends | [#818](https://github.com/pexisgle/ene/issues/818) | Shipped: markdown/text/html fetch, DDG+ArXiv, paid backends declared unconfigured |
 | Portal-first capture/clipboard | [#800](https://github.com/pexisgle/ene/issues/800) | CLI path is the current v1.0 capability |
 | Utility math/units/color/random fill | [#814](https://github.com/pexisgle/ene/issues/814) | Low priority; no eval/code execution |
 | `exec.pty`, desktop-pet mode, camera, Live2D, mobile | features.md successor IDs | Form-compatible, not v1.0 |
