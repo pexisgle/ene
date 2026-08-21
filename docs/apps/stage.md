@@ -18,7 +18,7 @@ SDK.
 
 | Window | Depth | Contents |
 |---|---|---|
-| Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Click-through is System → Overlay click-through (on by default). Esc quits. A/D switch avatar bodies; W/S change motion. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
+| Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Click-through is System → Overlay click-through (on by default). Esc quits. A/D switch avatar bodies; W/S change motion. F3 toggles spring-bone collider wireframes. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
 | Chat (F2) | `surface` | Prompt / Steer / Follow-up (hover for meaning), approvals (Allow / Always / Deny), ask-user, mic PCM relay, Detail button (same as the tray) |
 | Caption | `surface` | Streamed speech |
 | Spotlight (Alt+Space) | local | Jump to detail sections, mic, quit. If the OS keeps Alt+Space, use Voice → Open Spotlight |

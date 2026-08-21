@@ -1,15 +1,17 @@
 //! Overlay VRM loaded from a core-resolved `avatar_path`.
 
+mod collider_debug;
 pub mod look_at;
 
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use ene_vrm::DebugRenderer;
 use ene_vrm::VrmError;
-use ene_vrm::camera::{ModelUniform, OrthographicCamera};
+use ene_vrm::camera::{CameraUniform, ModelUniform, OrthographicCamera};
 use ene_vrm::expression::ExpressionName;
 use ene_vrm::look_at::{LookAtEvaluator, LookAtOutput};
 use ene_vrm::minimal::write_glb;
@@ -363,6 +365,35 @@ impl CompanionAvatar {
         let _ = self.model.rebuild_skin_palette(hips);
     }
 
+    fn overlay_model_transform(&self) -> (Mat4, f32) {
+        let (aabb_min, aabb_max) = self.model.normalized_aabb();
+        let auto = self.camera.compute_auto_fit_scale(aabb_min, aabb_max, 0.9);
+        let scale = auto * self.model_scale * self.model.normalize_scale();
+        let center = self.model.center();
+        let translate = Vec3::from(self.world_offset);
+        let model_mat = Mat4::from_translation(translate)
+            * Mat4::from_scale(Vec3::splat(scale))
+            * Mat4::from_translation(-Vec3::from(center));
+        (model_mat, scale)
+    }
+
+    pub(crate) fn push_spring_collider_wires(&self, debug: &mut DebugRenderer) {
+        let Some(props) = self.model.spring_bones.as_ref() else {
+            return;
+        };
+        let (model, scale) = self.overlay_model_transform();
+        for line in
+            collider_debug::collider_debug_lines(&props.colliders, &self.model.nodes, model, scale)
+        {
+            debug.push_line(line);
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn debug_camera_uniform(&self) -> Option<CameraUniform> {
+        self.camera.uniform().ok()
+    }
+
     pub fn render_to_texture(
         &mut self,
         queue: &wgpu::Queue,
@@ -378,14 +409,7 @@ impl CompanionAvatar {
         )]
         let aspect = (width.max(1) as f32 / height.max(1) as f32).max(0.0001);
         self.camera.set_aspect(aspect);
-        let (aabb_min, aabb_max) = self.model.normalized_aabb();
-        let auto = self.camera.compute_auto_fit_scale(aabb_min, aabb_max, 0.9);
-        let scale = auto * self.model_scale * self.model.normalize_scale();
-        let center = self.model.center();
-        let translate = Vec3::from(self.world_offset);
-        let model_mat = glam::Mat4::from_translation(translate)
-            * glam::Mat4::from_scale(Vec3::splat(scale))
-            * glam::Mat4::from_translation(-Vec3::from(center));
+        let (model_mat, _) = self.overlay_model_transform();
         let uniform = ModelUniform::from_mat4(model_mat);
         let palette = self.model.rebuild_skin_palette(self.last_hips);
         self.renderer.update_skin_palette(queue, palette);
