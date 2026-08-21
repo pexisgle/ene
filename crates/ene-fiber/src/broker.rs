@@ -39,6 +39,12 @@ pub enum BrokerError {
     Timeout,
     #[error("too many redirects")]
     RedirectLoop,
+    #[error("refusing to delete a symlink")]
+    Symlink,
+    #[error("directory is not empty")]
+    NotEmpty,
+    #[error("path is read-only")]
+    ReadOnly,
 }
 
 /// One grant tracked as a fiber effect.
@@ -201,6 +207,54 @@ impl Broker {
         std::fs::write(resolved, text).map_err(BrokerError::from)
     }
 
+    pub fn fs_list(&self, uid: FiberUid, path: &Path) -> Result<Vec<String>, BrokerError> {
+        self.require(uid, "fs.list")?;
+        let resolved = confine_path(&self.workspace, path, false)?;
+        let mut names = Vec::new();
+        for ent in std::fs::read_dir(resolved)? {
+            names.push(ent?.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn fs_glob(&self, uid: FiberUid, pattern: &str) -> Result<Vec<String>, BrokerError> {
+        self.require(uid, "fs.glob")?;
+        if Path::new(pattern).is_absolute()
+            || Path::new(pattern)
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(BrokerError::PathEscape(pattern.to_owned()));
+        }
+        let root = self.workspace.canonicalize()?;
+        let mut paths = Vec::new();
+        broker_walk_glob(&root, &root, pattern, &mut paths, 500)?;
+        paths.sort();
+        Ok(paths)
+    }
+
+    pub fn fs_delete(&self, uid: FiberUid, path: &Path) -> Result<(), BrokerError> {
+        self.require(uid, "fs.delete")?;
+        let resolved = confine_path(&self.workspace, path, false)?;
+        let meta = std::fs::symlink_metadata(&resolved)?;
+        if is_link_or_reparse(&meta) {
+            return Err(BrokerError::Symlink);
+        }
+        if meta.permissions().readonly() {
+            return Err(BrokerError::ReadOnly);
+        }
+        if meta.is_dir() {
+            if std::fs::read_dir(&resolved)?.next().is_some() {
+                return Err(BrokerError::NotEmpty);
+            }
+            std::fs::remove_dir(resolved)?;
+        } else {
+            std::fs::remove_file(resolved)?;
+        }
+        Ok(())
+    }
+
     pub fn net_fetch(&self, uid: FiberUid, url: &str) -> Result<Value, BrokerError> {
         self.require(uid, "net.fetch")?;
         crate::net::get(url)
@@ -286,6 +340,97 @@ impl Broker {
                 op: op.to_owned(),
             })
         }
+    }
+}
+
+fn broker_walk_glob(
+    root: &Path,
+    dir: &Path,
+    pattern: &str,
+    out: &mut Vec<String>,
+    max: usize,
+) -> Result<(), BrokerError> {
+    if out.len() >= max {
+        return Ok(());
+    }
+    for ent in std::fs::read_dir(dir)? {
+        if out.len() >= max {
+            break;
+        }
+        let ent = ent?;
+        let path = ent.path();
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if name == ".ene" || name.starts_with('.') {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(&path)?;
+        if is_link_or_reparse(&meta) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|_| BrokerError::PathEscape(path.display().to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if broker_glob_match(pattern, &rel) {
+            out.push(rel);
+        }
+        if meta.is_dir() {
+            broker_walk_glob(root, &path, pattern, out, max)?;
+        }
+    }
+    Ok(())
+}
+
+fn broker_glob_match(pattern: &str, rel: &str) -> bool {
+    let pat: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
+    let path: Vec<&str> = rel.split('/').filter(|part| !part.is_empty()).collect();
+    broker_glob_components(&pat, &path)
+}
+
+fn broker_glob_components(pat: &[&str], path: &[&str]) -> bool {
+    match (pat.first().copied(), path.first().copied()) {
+        (None, None) => true,
+        (Some("**"), _) => {
+            broker_glob_components(&pat[1..], path)
+                || (!path.is_empty() && broker_glob_components(pat, &path[1..]))
+        }
+        (Some(seg), Some(name)) if broker_glob_segment(seg, name) => {
+            broker_glob_components(&pat[1..], &path[1..])
+        }
+        _ => false,
+    }
+}
+
+fn broker_glob_segment(pattern: &str, name: &str) -> bool {
+    broker_glob_stars(pattern.as_bytes(), name.as_bytes())
+}
+
+fn broker_glob_stars(pattern: &[u8], name: &[u8]) -> bool {
+    match (pattern.first().copied(), name.first().copied()) {
+        (None, None) => true,
+        (Some(b'*'), _) => {
+            broker_glob_stars(&pattern[1..], name)
+                || (!name.is_empty() && broker_glob_stars(pattern, &name[1..]))
+        }
+        (Some(b'?'), Some(_)) => broker_glob_stars(&pattern[1..], &name[1..]),
+        (Some(p), Some(n)) if p == n => broker_glob_stars(&pattern[1..], &name[1..]),
+        _ => false,
+    }
+}
+
+fn is_link_or_reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_type().is_symlink()
+            || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
     }
 }
 

@@ -251,10 +251,16 @@ fn harness_rows(kind: PluginProfileKind, home: &Path) -> Vec<ProfileRow> {
 fn harness_row(plugin: &str, home: &Path) -> ProfileRow {
     let binary = discover_plugin_executable_in(plugin, Some(home));
     let needs_sandbox = matches!(plugin, "tool.fs" | "tool.exec" | "tool.web");
-    let capabilities = if plugin == "tool.web" {
-        vec!["net.fetch".to_owned()]
-    } else {
-        Vec::new()
+    let capabilities = match plugin {
+        "tool.fs" => vec![
+            "fs.read".to_owned(),
+            "fs.write".to_owned(),
+            "fs.list".to_owned(),
+            "fs.glob".to_owned(),
+            "fs.delete".to_owned(),
+        ],
+        "tool.web" => vec!["net.fetch".to_owned()],
+        _ => Vec::new(),
     };
     ProfileRow {
         row_id: plugin.to_owned(),
@@ -424,6 +430,17 @@ mod tests {
             .find(|row| row.plugin == "tool.web")
             .expect("tool.web");
         assert_eq!(web.capabilities, ["net.fetch"]);
+    }
+
+    #[test]
+    fn fs_harness_row_grants_file_broker_caps() {
+        let rows = harness_rows(PluginProfileKind::Headless, Path::new(""));
+        let fs = rows
+            .iter()
+            .find(|row| row.plugin == "tool.fs")
+            .expect("tool.fs");
+        assert!(fs.capabilities.contains(&"fs.glob".to_owned()));
+        assert!(fs.capabilities.contains(&"fs.delete".to_owned()));
     }
 
     #[test]

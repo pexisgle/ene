@@ -22,8 +22,10 @@ fn surface_schemas_omit_fs_write() {
     assert!(names.contains(&"utility.system_info"));
     assert!(names.contains(&"fs.read"));
     assert!(names.contains(&"fs.list"));
+    assert!(names.contains(&"fs.glob"));
     assert!(!names.contains(&"fs.write"));
     assert!(!names.contains(&"fs.edit"));
+    assert!(!names.contains(&"fs.delete"));
     assert!(
         surface
             .iter()
@@ -48,6 +50,34 @@ async fn side_effect_tools_are_denied_by_default() {
         .await
         .unwrap_err();
     assert!(matches!(err, PipelineError::Denied { .. }));
+}
+
+#[tokio::test]
+async fn fs_delete_is_denied_without_approval() {
+    let registry = ToolRegistry::new();
+    for def in crate::builtins::definitions_for(BuiltinKind::Fs) {
+        registry.register(def);
+    }
+    let err = registry
+        .execute("fs.delete", json!({"path":"/tmp/x"}), Layer::Job)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PipelineError::Denied { .. }));
+}
+
+#[tokio::test]
+async fn fs_glob_parent_escape_is_rejected() {
+    let registry = ToolRegistry::new();
+    for def in crate::builtins::definitions_for(BuiltinKind::Fs) {
+        registry.register(def);
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    registry.set_workspace(dir.path());
+    let err = registry
+        .execute("fs.glob", json!({"pattern":"../secret"}), Layer::Surface)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PipelineError::PathEscape(_)), "{err}");
 }
 
 #[tokio::test]

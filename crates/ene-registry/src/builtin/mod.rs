@@ -34,9 +34,8 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
         | "utility.calc"
         | "utility.random"
         | "utility.text" => utility::execute(name, args),
-        "fs.read" | "fs.write" | "fs.edit" | "fs.list" | "fs.search" | "fs.patch" | "fs.undo" => {
-            fs::execute(name, args)
-        }
+        "fs.read" | "fs.write" | "fs.edit" | "fs.list" | "fs.glob" | "fs.delete" | "fs.search"
+        | "fs.patch" | "fs.undo" => fs::execute(name, args),
         "exec.run" | "exec.shell" => exec::execute(name, args),
         "web.fetch" | "web.search" | "web.search_backends" => web::execute(name, args),
         "app.screenshot" | "app.window_list" | "app.active_window" | "app.clipboard_get"

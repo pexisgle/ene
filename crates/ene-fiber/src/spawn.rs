@@ -376,11 +376,13 @@ fn build_spec(
     allowed_read.push(temp_dir.to_path_buf());
     allowed_write.push(socket_path.to_path_buf());
     allowed_write.push(temp_dir.to_path_buf());
-    let workspace = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
-    allowed_read.push(workspace.clone());
-    allowed_write.push(workspace);
+    if plugin_id != "tool.fs" {
+        let workspace = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
+        allowed_read.push(workspace.clone());
+        allowed_write.push(workspace);
+    }
     if let Some(parent) = binary.parent() {
         allowed_read.push(parent.to_path_buf());
     }
