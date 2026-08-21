@@ -333,6 +333,10 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/sessions/{id}/end", post(routes::end_session))
         .route("/api/v1/sessions/{id}/barge-in", post(routes::barge_in))
         .route("/api/v1/sessions/{id}/listen", post(routes::listen))
+        .route(
+            "/api/v1/sessions/{id}/listen/stream",
+            get(ws::listen_stream),
+        )
         .route("/api/v1/sessions/{id}/export", post(routes::export_session))
         .route("/api/v1/sessions/{id}/messages", post(routes::send_message))
         .route("/api/v1/sessions/{id}/history", get(routes::history))
@@ -487,7 +491,8 @@ fn token_from(request: &Request) -> Option<String> {
     {
         return Some(token.to_owned());
     }
-    if request.uri().path() != "/api/v1/events" {
+    if request.uri().path() != "/api/v1/events" && !request.uri().path().ends_with("/listen/stream")
+    {
         return None;
     }
     let query = request.uri().query()?;

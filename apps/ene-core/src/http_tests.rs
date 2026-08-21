@@ -2181,6 +2181,48 @@ async fn listen_feeds_duplex_machine_without_stt() {
 }
 
 #[tokio::test]
+async fn listen_stream_feeds_duplex_machine_without_stt() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    let pcm: Vec<f32> = (0..1_600).map(|i| ((i as f32) * 0.2).sin() * 0.3).collect();
+    let mut stream = client.listen_stream(&session.id, 16_000).await.unwrap();
+    stream.send_pcm(&pcm).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Listening).await;
+    stream.send_pcm(&vec![0.0; 160]).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Idle).await;
+    let openapi = client.openapi().await.unwrap();
+    assert!(
+        openapi
+            .pointer("/paths/~1sessions~1{id}~1listen~1stream")
+            .is_some(),
+        "openapi must list listen/stream"
+    );
+    server.shutdown().await;
+}
+
+async fn wait_voice_state(core: &CoreDaemon, want: ene_body::DuplexState) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if core.with_voice(|voice| voice.state()) == want {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "voice state still {:?} want {want:?}",
+            core.with_voice(|voice| voice.state())
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
 async fn plugins_profile_minimal_unloads_non_utility_harness() {
     let (_dir, client, core, server) = boot_server().await;
     let settings = client.settings().await.unwrap();

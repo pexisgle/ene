@@ -76,7 +76,10 @@ and GGUF weights live under Connections → provider assets. TTS/STT are
 `ai.tasks.tts` / `ai.tasks.stt`.
 
 VAD/ASR/TTS belong to core. Stage relays microphone PCM on
-`POST /sessions/{id}/listen` and plays `audio.chunk`. Barge-in is decided in
+`GET /sessions/{id}/listen/stream` as packed `pcm_s16le` (not per-chunk JSON
+POST) and plays `audio.chunk`. While local TTS is playing, stage raises the
+mic RMS gate (`BARGE_IN_ENERGY_FACTOR = 2.0`) so speaker bleed does not look
+like barge-in; loud user speech still reaches core VAD. Barge-in is decided in
 core (`voice.state` plus an `audio.chunk` with `abort: true`). Stage stops the
 playback sink and resets visemes when that abort chunk arrives; it does not use
 client RMS as the source of truth. Stage claims speaker/notify exclusive by

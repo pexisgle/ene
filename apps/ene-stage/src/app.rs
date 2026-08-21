@@ -15,7 +15,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::audio::AudioHub;
+use crate::audio::{AudioHub, run_listen_stream};
 use crate::avatar::look_at;
 use crate::chrome::{ChromeKind, ChromeWindow};
 use crate::core::events::{EventFeeds, LiveEvent, spawn_event_feeds};
@@ -95,6 +95,7 @@ pub fn run() -> Result<(), AppError> {
         detail: DetailUiState::default(),
         async_results: Arc::new(Mutex::new(Vec::new())),
         mic_active: false,
+        mic_pcm_tx: None,
         notify_claimed: false,
         speaker_claimed: false,
         gpu: None,
@@ -142,6 +143,7 @@ struct StageApp {
     detail: DetailUiState,
     async_results: Arc<Mutex<Vec<AsyncOutcome>>>,
     mic_active: bool,
+    mic_pcm_tx: Option<tokio::sync::mpsc::Sender<Vec<f32>>>,
     notify_claimed: bool,
     speaker_claimed: bool,
     gpu: Option<GpuContext>,
@@ -451,7 +453,14 @@ impl StageApp {
                 };
             }
             AsyncOutcome::MicClaim(result) => match result {
-                Ok(active) => self.mic_active = active,
+                Ok(active) => {
+                    self.mic_active = active;
+                    if active {
+                        self.start_mic_listen_stream();
+                    } else {
+                        self.mic_pcm_tx = None;
+                    }
+                }
                 Err(err) => self.surface.status = err,
             },
             AsyncOutcome::SpeakerClaim(result) => match result {
@@ -1044,22 +1053,34 @@ impl StageApp {
         }
     }
 
-    fn poll_audio(&mut self) {
-        if !self.mic_active {
+    fn start_mic_listen_stream(&mut self) {
+        if self.mic_pcm_tx.is_some() {
             return;
         }
-        let sample_rate = self.audio.sample_rate();
-        for chunk in self.audio.poll_mic_chunks() {
-            let session = self.session.clone_handle();
-            self.spawn(async move {
-                AsyncOutcome::Listen(
-                    session
-                        .listen_pcm(chunk, sample_rate)
-                        .await
-                        .map(|_| ())
-                        .map_err(|err| err.to_string()),
-                )
-            });
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        self.mic_pcm_tx = Some(tx);
+        let client = Arc::clone(&self.client);
+        let session_id = self.session.session_id().to_owned();
+        self.spawn(
+            async move { AsyncOutcome::Listen(run_listen_stream(client, session_id, rx).await) },
+        );
+    }
+
+    fn poll_audio(&mut self) {
+        if !self.mic_active {
+            self.mic_pcm_tx = None;
+            return;
+        }
+        if self.mic_pcm_tx.is_none() {
+            self.start_mic_listen_stream();
+        }
+        let Some(tx) = self.mic_pcm_tx.as_ref() else {
+            return;
+        };
+        for batch in self.audio.poll_mic_batches() {
+            if tx.try_send(batch).is_err() {
+                tracing::debug!("listen stream dropped a mic frame");
+            }
         }
     }
 

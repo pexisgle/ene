@@ -1,5 +1,8 @@
 //! Voice capture/playback hub for the stage client.
 
+mod dsp;
+mod stream;
+
 #[cfg(feature = "voice")]
 mod capture;
 #[cfg(feature = "voice")]
@@ -10,7 +13,15 @@ pub use capture::MicCapture;
 #[cfg(feature = "voice")]
 pub use playback::AudioPlayback;
 
+pub use dsp::{
+    BARGE_IN_ENERGY_FACTOR, CAPTURE_SAMPLE_RATE, LISTEN_FRAME_SAMPLES, SILENCE_RMS,
+    should_forward_mic,
+};
+pub use stream::run_listen_stream;
+
 use ene_vrm::viseme::VisemeWeights;
+
+use self::dsp::push_coalesced;
 
 /// Central audio IO facade (mic in, speaker out, viseme tap).
 pub struct AudioHub {
@@ -18,6 +29,7 @@ pub struct AudioHub {
     capture: MicCapture,
     #[cfg(feature = "voice")]
     playback: AudioPlayback,
+    pending: Vec<f32>,
 }
 
 impl AudioHub {
@@ -26,13 +38,25 @@ impl AudioHub {
         Self::default()
     }
 
-    /// Poll mic chunks and forward them to the viseme analyzer path.
-    pub fn poll_mic_chunks(&mut self) -> Vec<Vec<f32>> {
+    /// Coalesced 16 kHz frames for the listen stream (~100 ms each).
+    pub fn poll_mic_batches(&mut self) -> Vec<Vec<f32>> {
         #[cfg(feature = "voice")]
         {
+            self.playback.tick_playback();
+            let tts = self.playback.is_tts_playing();
+            if tts {
+                self.pending.clear();
+            }
             let mut out = Vec::new();
             while let Some(chunk) = self.capture.try_recv() {
-                out.push(chunk);
+                if !should_forward_mic(&chunk, tts) {
+                    continue;
+                }
+                if tts {
+                    out.push(chunk);
+                    continue;
+                }
+                push_coalesced(&mut self.pending, &chunk, LISTEN_FRAME_SAMPLES, &mut out);
             }
             out
         }
@@ -88,6 +112,19 @@ impl AudioHub {
         }
     }
 
+    /// Whether local TTS playback is still queued (echo-aware barge-in).
+    #[must_use]
+    pub fn is_tts_playing(&self) -> bool {
+        #[cfg(feature = "voice")]
+        {
+            self.playback.is_tts_playing()
+        }
+        #[cfg(not(feature = "voice"))]
+        {
+            false
+        }
+    }
+
     /// Whether mic energy exceeded the barge-in threshold.
     #[must_use]
     pub fn mic_barge_in(&self) -> bool {
@@ -124,14 +161,19 @@ impl Default for AudioHub {
     fn default() -> Self {
         #[cfg(feature = "voice")]
         {
+            let playback = AudioPlayback::new();
+            let capture = MicCapture::new(None, playback.tts_playing_flag());
             Self {
-                capture: MicCapture::new(None),
-                playback: AudioPlayback::new(),
+                capture,
+                playback,
+                pending: Vec::new(),
             }
         }
         #[cfg(not(feature = "voice"))]
         {
-            Self {}
+            Self {
+                pending: Vec::new(),
+            }
         }
     }
 }
@@ -144,7 +186,10 @@ pub struct MicCapture;
 #[cfg(not(feature = "voice"))]
 impl MicCapture {
     #[must_use]
-    pub fn new(_energy_threshold: Option<f32>) -> Self {
+    pub fn new(
+        _energy_threshold: Option<f32>,
+        _tts_playing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
         Self
     }
 
