@@ -396,6 +396,9 @@ mod tests {
 
     #[test]
     fn sidecar_base_errors_when_not_started() {
+        if crate::sidecar::managed_base().is_some() {
+            return;
+        }
         let err = sidecar_base().expect_err("no sidecar");
         assert!(err.to_string().contains("sidecar"));
     }
