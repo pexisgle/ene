@@ -2326,7 +2326,7 @@ async fn wait_event_type(
             Ok(Ok(Some(_))) => {}
             Ok(Ok(None)) => panic!("websocket closed waiting for {ty}"),
             Ok(Err(err)) => panic!("{err}"),
-            Err(_) => panic!("timeout waiting for {ty}"),
+            Err(elapsed) => panic!("timeout waiting for {ty}: {elapsed}"),
         }
     }
 }

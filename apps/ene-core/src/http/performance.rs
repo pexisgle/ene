@@ -27,9 +27,7 @@ pub(crate) fn flush_soul(core: &CoreDaemon, events: &CoreBus, soul: SoulId) {
         return;
     };
     for command in commands {
-        if let Some(payload) = command_payload(soul, &command) {
-            events.emit(DisplayDepth::Surface, payload);
-        }
+        events.emit(DisplayDepth::Surface, command_payload(soul, &command));
     }
 }
 
@@ -39,52 +37,52 @@ fn flush_all(core: &CoreDaemon, events: &CoreBus) {
     }
 }
 
-fn command_payload(soul: SoulId, command: &PerformanceCommand) -> Option<Value> {
+fn command_payload(soul: SoulId, command: &PerformanceCommand) -> Value {
     let soul_id = soul.to_string();
     match command {
         PerformanceCommand::Expression {
             label,
             intensity,
             duration_ms,
-        } => Some(json!({
+        } => json!({
             "type": "body.expression",
             "soul_id": soul_id,
             "name": label,
             "label": label,
             "intensity": intensity,
             "duration_ms": duration_ms,
-        })),
+        }),
         PerformanceCommand::Motion {
             name,
             layer,
             intensity,
-        } => Some(json!({
+        } => json!({
             "type": "body.motion",
             "soul_id": soul_id,
             "name": name,
             "layer": motion_layer_name(*layer),
             "intensity": intensity,
-        })),
-        PerformanceCommand::LipSync { amplitude, viseme } => Some(json!({
+        }),
+        PerformanceCommand::LipSync { amplitude, viseme } => json!({
             "type": "body.lipsync",
             "soul_id": soul_id,
             "weight": amplitude,
             "amplitude": amplitude,
             "viseme": viseme.map(ene_body::Viseme::as_str),
             "name": viseme.map(ene_body::Viseme::as_str),
-        })),
-        PerformanceCommand::LookAt { target, weight } => Some(json!({
+        }),
+        PerformanceCommand::LookAt { target, weight } => json!({
             "type": "body.gaze",
             "soul_id": soul_id,
             "target": look_target_name(*target),
             "weight": weight,
-        })),
-        PerformanceCommand::Posture { pose, blend } => Some(json!({
+        }),
+        PerformanceCommand::Posture { pose, blend } => json!({
             "type": "body.posture",
             "soul_id": soul_id,
             "pose": posture_name(*pose),
             "blend": blend,
-        })),
+        }),
     }
 }
 
@@ -127,8 +125,7 @@ mod tests {
                 intensity: 0.7,
                 duration_ms: None,
             },
-        )
-        .expect("expression is published");
+        );
         assert_eq!(payload["type"], "body.expression");
         assert_eq!(payload["soul_id"], soul.to_string());
         assert_eq!(payload["label"], "happy");
@@ -145,8 +142,7 @@ mod tests {
                 layer: MotionLayer::OneShot,
                 intensity: Some(1.0),
             },
-        )
-        .expect("motion is published");
+        );
         assert_eq!(motion["type"], "body.motion");
         assert_eq!(motion["name"], "wave");
         assert_eq!(motion["layer"], "one_shot");
@@ -157,8 +153,7 @@ mod tests {
                 amplitude: 0.4,
                 viseme: Some(Viseme::Aa),
             },
-        )
-        .expect("lipsync is published");
+        );
         assert_eq!(lips["type"], "body.lipsync");
         assert_eq!(lips["viseme"], "aa");
     }
