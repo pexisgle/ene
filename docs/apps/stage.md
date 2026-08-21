@@ -36,7 +36,11 @@ playable companions are souls (`GET /souls` / `GET /stage` occupants).
 are conversion inputs only — there is no CCv3 editor.
 
 Local `desktop.*` keys (theme, language, mic, captions, beat sync, graphics
-quality, core lifetime, overlay placement) stay on the client. Core PATCH keys
+quality, core lifetime, overlay placement) stay on the client. Japanese UI
+text uses a bundled `assets/fonts/NotoSansJP-Regular.ttf` when present,
+otherwise an OS CJK font (Yu Gothic / Meiryo on Windows, Noto or Droid on
+Linux). Changing language updates open chrome window titles without a restart.
+Core PATCH keys
 are `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins`.
 Plugin enablement is `plugins.profile` (`desktop` / `minimal` / `headless`),
 not a `plugins.list` map. API keys stay in the vault. Attach to an

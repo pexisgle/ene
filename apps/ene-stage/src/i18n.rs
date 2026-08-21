@@ -21,17 +21,19 @@ fn loader_lock() -> &'static RwLock<FluentLanguageLoader> {
     })
 }
 
-/// Apply a BCP-47 tag (`en-US`, `ja`). Empty string keeps the OS default.
+/// Apply a BCP-47 tag (`en-US`, `ja`). Empty string follows the OS default.
 pub fn select_language(tag: &str) {
+    let loader = loader_lock();
+    let guard = loader.read();
     if tag.is_empty() {
+        let requested = DesktopLanguageRequester::requested_languages();
+        let _selected = i18n_embed::select(&*guard, &Localizations, &requested);
         return;
     }
     let Ok(lang): Result<LanguageIdentifier, _> = tag.parse() else {
         tracing::warn!(tag, "unrecognised language tag");
         return;
     };
-    let loader = loader_lock();
-    let guard = loader.read();
     let _selected = i18n_embed::select(&*guard, &Localizations, &[lang]);
 }
 

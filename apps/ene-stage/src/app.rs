@@ -717,6 +717,7 @@ impl StageApp {
         let settings = self.local_settings.clone();
         self.settings = settings.clone();
         i18n::select_language(&settings.language);
+        self.sync_chrome_titles();
         if let Some(overlay) = self.overlay.as_mut()
             && overlay.transparent
         {
@@ -727,6 +728,21 @@ impl StageApp {
                 save_desktop_settings(&settings).map_err(|err| err.to_string()),
             )
         });
+    }
+
+    fn sync_chrome_titles(&self) {
+        if let Some(win) = &self.chat {
+            win.sync_title();
+        }
+        if let Some(win) = &self.detail_win {
+            win.sync_title();
+        }
+        if let Some(win) = &self.caption {
+            win.sync_title();
+        }
+        if let Some(win) = &self.spotlight {
+            win.sync_title();
+        }
     }
 
     fn toggle_overlay_chrome(&mut self) {

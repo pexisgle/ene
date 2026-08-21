@@ -93,6 +93,7 @@ settings-local = Local settings
 settings-core = Core settings
 settings-theme = Theme
 settings-language = Language
+settings-language-system = System default
 settings-core-lifetime = Core lifetime
 settings-captions = Captions
 settings-caption-position = Caption position

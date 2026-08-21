@@ -33,7 +33,11 @@ Stage は WebView を使いません。オーバーレイは wgpu、操作窓は
 CCv3 エディタはありません。
 
 ローカルの `desktop.*`（テーマ、言語、マイク、キャプション、ビート同期、画質、
-コア寿命、オーバーレイ配置）はクライアント側です。コアの PATCH キーは
+コア寿命、オーバーレイ配置）はクライアント側です。日本語 UI は同梱の
+`assets/fonts/NotoSansJP-Regular.ttf`、無ければ OS の CJK フォント
+（Windows は游ゴシック / メイリオ、Linux は Noto や Droid）で描画します。
+表示言語を変えると、開いている操作窓のタイトルも再起動なしで更新されます。
+コアの PATCH キーは
 `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins` です。
 プラグインの有効化は `plugins.profile`（`desktop` / `minimal` / `headless`）で、
 `plugins.list` の個別マップはありません。API キーはボールトに置きます。
