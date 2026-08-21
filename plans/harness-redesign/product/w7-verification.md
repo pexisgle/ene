@@ -9,7 +9,7 @@
 > [done.md](done.md) の `[x]` にしない。完成は Echo / Scripted /
 > Placeholder 以外、または実プロセスで観察できるものに限る。
 
-測定日: 2026-08-17(機構検出)。完成列の見直しは 2026-08-20。
+測定日: 2026-08-17(機構検出)。完成列の見直しは 2026-08-21。
 対象は現行アプリと並べて追加した新クレート
 (`ene-session` / `ene-kernel` / `ene-daemon` / `ene-api` / `ene-ctl` /
 `ene-stage` ほか)。W7 時点では旧 `ene-desktop` も残していた。
@@ -109,8 +109,8 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-603 | `handwritten_stdio_mcp_registers_and_runs` | process | はい |
 | P-604 | `handwritten_stdio_mcp_git_status_runs_real_git` | process | はい |
 | P-605 | `lane_prompt_still_works_while_job_running`; `progress_and_complete_are_companion_speech` | host API | いいえ |
-| P-606 | `schedule_remind_fires_and_quiet_hours_defer`; `missed_remind_fires_once` | store | はい |
-| P-607 | `schedule_remind_fires_and_quiet_hours_defer` | store | はい |
+| P-606 | `schedule_driver_delivers_remind_through_http`; `schedule_driver_defers_quiet_hours_and_fires_important`; `schedule_catch_up_does_not_start_missed_jobs`; `schedule_remind_fires_and_quiet_hours_defer`; `missed_remind_fires_once` | HTTP / store | はい |
+| P-607 | `schedule_driver_delivers_remind_through_http` | HTTP | はい |
 | P-608 | `bookmark_workflow_delivers_markdown_artifact` | host API | いいえ |
 | P-609 | `bookmark_workflow_delivers_markdown_artifact`; `artifact_register_and_deliver` | host API | 部分(I/O ははい) |
 | P-610 | `skill_install_and_load` | store | いいえ(コンテキスト未接続) |

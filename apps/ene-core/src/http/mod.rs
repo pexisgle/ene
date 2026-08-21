@@ -9,6 +9,7 @@ mod model;
 mod proactive;
 mod recall;
 mod routes;
+mod schedule;
 mod speech;
 mod ws;
 
@@ -219,6 +220,10 @@ impl CoreDaemon {
         let proactive_task = tokio::spawn(async move {
             proactive::run_loop(proactive_state, classify).await;
         });
+        let schedule_state = state.clone();
+        let schedule_task = tokio::spawn(async move {
+            schedule::run_loop(schedule_state).await;
+        });
         let job_core = Arc::clone(&self);
         let job_task = tokio::spawn(async move {
             while let Some(job) = job_rx.recv().await {
@@ -260,9 +265,9 @@ impl CoreDaemon {
         };
         tracing::info!(%addr, "http/ws listening");
         #[cfg(not(test))]
-        let mut background = vec![report_task, proactive_task, job_task];
+        let mut background = vec![report_task, proactive_task, schedule_task, job_task];
         #[cfg(test)]
-        let background = vec![report_task, proactive_task, job_task];
+        let background = vec![report_task, proactive_task, schedule_task, job_task];
         #[cfg(not(test))]
         background.push(profile_task);
         Ok(ServerHandle {

@@ -15,7 +15,23 @@ restart because they live in the work database, not in a client.
 | `job` | Kick a back-harness job (`action_ref`); the daemon job lane then runs tools |
 
 `important` schedules still fire when quiet hours would otherwise hold
-speech.
+speech. Quiet hours for schedules use the same window as
+`mind.proactive.quiet_hours` (start/end hour and timezone). They do not
+reuse the proactive speech gate: a due `remind` is deferred until the
+window ends, except `important`.
+
+## Daemon driver
+
+`ene-core` polls due rows about once a second.
+
+- On boot, `catch_up_missed` runs first: overdue `remind` fires once;
+  overdue `job` / `turn` are not started (D-5) and `next_fire` is
+  advanced.
+- After that, `fire_due` runs. `remind` is a `CompanionReport` through
+  the job speech gate (`it's time: …`) and lands in the open session.
+  `job` starts a public delegation (`action_ref` or the schedule name).
+  `turn` starts a dialogue turn with `TurnOrigin::Scheduled` when the
+  soul has an open session.
 
 ## Managing schedules
 

@@ -2170,3 +2170,140 @@ async fn patch_settings_writes_data_dir_settings_json() {
     );
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn schedule_driver_delivers_remind_through_http() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul.to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let now = chrono::Utc::now();
+    let remind = core
+        .work()
+        .insert_schedule(&ene_work::NewSchedule {
+            soul_id: soul,
+            name: "tea".into(),
+            spec: "* * * * * *".into(),
+            timezone: "UTC".into(),
+            action: ene_work::ScheduleAction::Remind,
+            action_ref: Some("drink tea".into()),
+            important: false,
+        })
+        .unwrap();
+    core.work()
+        .defer_next_fire(&remind.id, now - chrono::Duration::seconds(5))
+        .unwrap();
+    wait_history_contains(&client, &session.id, "drink tea").await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn schedule_driver_defers_quiet_hours_and_fires_important() {
+    let (_dir, client, core, server) = boot_server().await;
+    let mut mind = core.mind();
+    mind.proactive.quiet_hours.enabled = true;
+    mind.proactive.quiet_hours.timezone = "UTC".into();
+    mind.proactive.quiet_hours.start.hour = 0;
+    mind.proactive.quiet_hours.end.hour = 24;
+    core.replace_mind(mind);
+    let soul = core.occupants()[0].0;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul.to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let now = chrono::Utc::now();
+    let quiet = core
+        .work()
+        .insert_schedule(&ene_work::NewSchedule {
+            soul_id: soul,
+            name: "tea".into(),
+            spec: "* * * * * *".into(),
+            timezone: "UTC".into(),
+            action: ene_work::ScheduleAction::Remind,
+            action_ref: Some("drink tea".into()),
+            important: false,
+        })
+        .unwrap();
+    core.work()
+        .defer_next_fire(&quiet.id, now - chrono::Duration::seconds(5))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let history = client.history(&session.id, "surface").await.unwrap();
+    assert!(
+        !history
+            .messages
+            .iter()
+            .any(|message| message.text.contains("drink tea")),
+        "non-important remind must wait out quiet hours"
+    );
+    let important = core
+        .work()
+        .insert_schedule(&ene_work::NewSchedule {
+            soul_id: soul,
+            name: "meds".into(),
+            spec: "* * * * * *".into(),
+            timezone: "UTC".into(),
+            action: ene_work::ScheduleAction::Remind,
+            action_ref: Some("take meds".into()),
+            important: true,
+        })
+        .unwrap();
+    core.work()
+        .defer_next_fire(&important.id, now - chrono::Duration::seconds(5))
+        .unwrap();
+    wait_history_contains(&client, &session.id, "take meds").await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn schedule_catch_up_does_not_start_missed_jobs() {
+    let dir = TempDir::new().unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    let soul = core.occupants()[0].0;
+    let now = chrono::Utc::now();
+    let job_sched = core
+        .work()
+        .insert_schedule(&ene_work::NewSchedule {
+            soul_id: soul,
+            name: "nightly".into(),
+            spec: "0 0 * * * *".into(),
+            timezone: "UTC".into(),
+            action: ene_work::ScheduleAction::Job,
+            action_ref: Some("nightly brief".into()),
+            important: false,
+        })
+        .unwrap();
+    let past = now - chrono::Duration::hours(2);
+    core.work().defer_next_fire(&job_sched.id, past).unwrap();
+    let server = core
+        .clone()
+        .serve_at(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(EchoModel) as Arc<dyn ConversationModel>,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        core.work().list_jobs(soul).unwrap().is_empty(),
+        "D-5: missed job schedules must not start on boot"
+    );
+    let updated = core.work().get_schedule(&job_sched.id).unwrap().unwrap();
+    assert_ne!(
+        updated.next_fire.as_deref(),
+        Some(past.to_rfc3339().as_str())
+    );
+    server.shutdown().await;
+}

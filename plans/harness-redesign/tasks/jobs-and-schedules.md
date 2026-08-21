@@ -159,6 +159,11 @@ CREATE INDEX idx_sched_next ON schedules (enabled, next_fire);
   能動発話側で同じ発火を再ゲートしない。
 - タイムゾーンはスケジュールごとに保持し、サマータイムも
   tz DB で正しく扱う。`next_fire` は発火後に再計算。
+- **駆動**: `ene-core` が起動時に `catch_up_missed`、以降約1秒ごとに
+  `fire_due` を呼ぶ。`remind` は `CompanionReport` → speech gate。
+  `job` は公開デリゲーション、`turn` は `TurnOrigin::Scheduled`。
+  v1.0 の受入は `remind`(P-606 / P-607)。`job` / `turn` の発火は同じ
+  ループに載せる。
 - **停止中の発火漏れ**(起動時に `next_fire` が過去):
   `remind` は**1回だけ**即時発火する(時刻の約束を落とさない。繰り越しはしない)。
   `job` / `turn` は走らせない(D-5)。過ぎた枠は捨てて次の `next_fire` を計算し、
