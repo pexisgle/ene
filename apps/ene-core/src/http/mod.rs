@@ -188,7 +188,10 @@ impl CoreDaemon {
         let classify = Arc::new(classify::SeamedClassify::new(&self));
         self.plane()
             .set_ai(Arc::new(approve::SeamedApprove::new(&self)));
-        self.set_prefetch(Arc::new(recall::RecallPrefetch::new(&self)));
+        self.set_prefetch(Arc::new(recall::RecallPrefetch::new(
+            &self,
+            Arc::clone(&classify),
+        )));
         self.set_finalizer(Arc::new(classify::MemoryFinalizer::new(
             &self,
             Arc::clone(&classify),

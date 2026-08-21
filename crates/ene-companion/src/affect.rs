@@ -285,6 +285,36 @@ pub struct AffectProposal {
     pub confidence: f32,
 }
 
+/// Parse a classifier JSON object. Fail-closed: malformed input is `None`.
+#[must_use]
+pub fn parse_affect_json(raw: &str) -> Option<AffectProposal> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let text = extract_json_object(trimmed).unwrap_or(trimmed);
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let obj = value.as_object()?;
+    let f = |key: &str| {
+        obj.get(key)
+            .and_then(serde_json::Value::as_f64)
+            .map(|n| n as f32)
+    };
+    Some(AffectProposal {
+        valence: f("valence").unwrap_or(0.0).clamp(-1.0, 1.0),
+        arousal: f("arousal").unwrap_or(0.0).clamp(-1.0, 1.0),
+        irritation: f("irritation").unwrap_or(0.0).clamp(0.0, 1.0),
+        affinity: f("affinity").unwrap_or(0.0).clamp(-1.0, 1.0),
+        confidence: f("confidence").unwrap_or(0.0).clamp(0.0, 1.0),
+    })
+}
+
+fn extract_json_object(raw: &str) -> Option<&str> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    (end >= start).then(|| &raw[start..=end])
+}
+
 fn looks_positive(text: &str) -> bool {
     [
         "thank",

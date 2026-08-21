@@ -198,6 +198,39 @@ async fn surface_ws_never_sees_inner() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn prompt_applies_heuristic_affect_when_classifier_unconfigured() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let before = client.soul_affect(&soul_id).await.unwrap();
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "thank you so much".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    let after = client.soul_affect(&soul_id).await.unwrap();
+    assert!(
+        after.valence > before.valence,
+        "unconfigured classifier must still apply utterance heuristics"
+    );
+    server.shutdown().await;
+}
+
 struct SlowModel;
 
 #[async_trait]

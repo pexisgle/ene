@@ -84,10 +84,7 @@ impl ClassifyModel for SeamedClassify {
             messages: vec![
                 LlmMessage {
                     role: LlmRole::System,
-                    text: format!(
-                        "You are a JSON classifier for task `{}`. Reply with a JSON object only.",
-                        task.as_str()
-                    ),
+                    text: system_prompt(task).to_owned(),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     tool_name: None,
@@ -125,6 +122,32 @@ impl ClassifyModel for SeamedClassify {
             ));
         }
         Ok(text.to_owned())
+    }
+}
+
+fn system_prompt(task: ClassifyTask) -> &'static str {
+    match task {
+        ClassifyTask::MemoryExtract => {
+            "You extract memories. Reply with a JSON object only: \
+{\"candidates\":[{\"kind\":\"episodic|semantic|user_profile|preference|commitment\",\
+\"title\":\"...\",\"content\":\"...\",\"scope\":\"private|shared\",\
+\"confidence\":0.0,\"salience\":0.0}]}. \
+Use shared only when the user clearly wants every companion to know. \
+Empty candidates is valid. No markdown."
+        }
+        ClassifyTask::Affect => {
+            "You estimate affect from the user utterance. Reply with a JSON object only: \
+{\"valence\":0.0,\"arousal\":0.0,\"irritation\":0.0,\"affinity\":0.0,\"confidence\":0.0}. \
+valence/arousal/affinity are -1..1, irritation and confidence are 0..1. No markdown."
+        }
+        ClassifyTask::ProactiveDecision => {
+            "You decide whether the companion should speak unprompted. Reply with a JSON object only: \
+{\"should_speak\":false,\"confidence\":0.0,\"reason\":\"...\",\"topic_hint\":\"...\",\
+\"urgency\":\"low|normal|high\",\"screen_digest\":\"\"}. Fail closed: should_speak false unless sure. No markdown."
+        }
+        ClassifyTask::ScreenSummary => {
+            "You are a JSON classifier for task `screen_summary`. Reply with a JSON object only."
+        }
     }
 }
 
