@@ -1,0 +1,77 @@
+//! # ECS Schedule for `ene-desktop`
+//!
+//! This module defines the [`AppSet`] system sets and the [`configure_schedule`]
+//! helper that powers the desktop application. The 5-stage layout follows
+//! the [`bevy_app`] convention (with a `Startup` prelude for one-shot
+//! initialization), giving us a deterministic and idiomatic execution order
+//! for every frame of the runtime.
+//!
+//! ## Why `bevy_ecs`
+//!
+//! `bevy_ecs` provides a `Schedule` / `SystemSet` / `Message` /
+//! `Resource` toolbox so the per-frame logic runs as small,
+//! composable systems instead of one monolithic
+//! `Runtime::about_to_wait` method.
+//!
+//! ## Stages
+//!
+//! | Stage          | Purpose                                                          |
+//! |----------------|------------------------------------------------------------------|
+//! | `Startup`      | One-shot initialization (resources, egui, VRM loading).          |
+//! | `First`        | Pump external event sources (winit, AI bridge, tray).            |
+//! | `PreUpdate`    | Translate raw events into ECS messages; run structural changes.  |
+//! | `Update`       | Game / app logic (input, animation, settings, physics).          |
+//! | `PostUpdate`   | Mirror ECS state into GPU staging buffers.                       |
+//! | `Last`         | Acquire the surface, encode passes, submit, present.             |
+//!
+//! Systems that must touch non-`Send` resources (e.g. `wgpu::Surface`,
+//! `egui::Context`) use [`NonSendMut`](bevy_ecs::system::NonSendMut) so the
+//! executor keeps them on the main thread.
+use bevy_app::{App, First, Last, PostUpdate, Startup, Update};
+use bevy_ecs::prelude::*;
+
+#[cfg(target_os = "linux")]
+use crate::system::event_pump::publish_tick_gtk_system;
+use crate::system::event_pump::pump_legacy_events;
+
+/// Per-stage ordering labels used inside the five standard `bevy_app` stages.
+///
+/// These are *not* new schedules; they are markers that any system can be
+/// pinned to within `First` / `PreUpdate` / `Update` / `PostUpdate` / `Last`.
+/// The full ordering of systems inside a stage is still controlled with
+/// [`IntoScheduleConfigs::chain`], [`IntoScheduleConfigs::before`] and
+/// [`IntoScheduleConfigs::after`].
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum AppSet {
+    EventDispatch,
+    Input,
+    Settings,
+    Animation,
+    Render,
+    Present,
+}
+
+/// The schedule runs once per frame via [`App::update`] from
+/// `Runtime::about_to_wait`.
+pub fn configure_schedule(app: &mut App) {
+    app.configure_sets(First, AppSet::EventDispatch);
+    app.configure_sets(
+        Update,
+        (AppSet::Input, AppSet::Settings, AppSet::Animation).chain(),
+    );
+    app.configure_sets(PostUpdate, AppSet::Render);
+    app.configure_sets(Last, (AppSet::Render, AppSet::Present).chain());
+
+    app.add_systems(
+        First,
+        (
+            pump_legacy_events.in_set(AppSet::EventDispatch),
+            #[cfg(target_os = "linux")]
+            publish_tick_gtk_system,
+        ),
+    );
+}
+
+pub fn configure_startup(app: &mut App) {
+    app.configure_sets(Startup, AppSet::EventDispatch);
+}

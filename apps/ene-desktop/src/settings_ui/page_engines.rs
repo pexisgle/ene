@@ -1,0 +1,87 @@
+use std::sync::Arc;
+
+use crate::core_session::CoreSession;
+
+use super::components::section_card;
+use super::draft::SettingsDraft;
+use super::input::SettingsInputState;
+use super::provider_assets::render_engines_assets;
+use super::provider_form::{
+    catalog_from_settings, provider_description, provider_display_group, provider_display_name,
+};
+
+pub fn render(
+    ui: &mut egui::Ui,
+    _draft: &mut SettingsDraft,
+    ai: &Arc<CoreSession>,
+    input: &mut SettingsInputState,
+) {
+    ui.weak(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "engines-core-hint"
+    ));
+    input.plugins.poll();
+    if !input.plugins.started() {
+        input.plugins.start(ai.fetch_plugins());
+    }
+    input.core_settings.poll();
+    if !input.core_settings.started() {
+        input.core_settings.start(ai.fetch_core_settings());
+    }
+    input.provider_assets.poll(ai);
+    let catalog = catalog_from_settings(
+        input
+            .core_settings
+            .data
+            .as_ref()
+            .and_then(|result| result.as_ref().ok()),
+    );
+
+    section_card(
+        ui,
+        "engines-assets",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "engines-assets"),
+        |ui| {
+            render_engines_assets(ui, &mut input.provider_assets, ai, &catalog);
+        },
+    );
+
+    section_card(
+        ui,
+        "engines-list",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "engines-list"),
+        |ui| {
+            for plugin in &catalog {
+                ui.separator();
+                ui.strong(provider_display_name(&plugin.id));
+                if let Some(group) = provider_display_group(&plugin.id) {
+                    ui.weak(group);
+                }
+                if let Some(desc) = provider_description(&plugin.id) {
+                    ui.label(desc);
+                }
+                ui.weak(plugin.seams.join(" · "));
+            }
+        },
+    );
+    section_card(
+        ui,
+        "engines-plugins",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "engines"),
+        |ui| {
+            let Some(items) = input.plugins.data.clone() else {
+                return;
+            };
+            if items.is_empty() {
+                ui.weak(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "engines-live-empty"
+                ));
+                return;
+            }
+            for plugin in items {
+                ui.label(format!("{} — {}", plugin.plugin, plugin.state));
+            }
+        },
+    );
+}
