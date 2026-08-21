@@ -389,7 +389,11 @@ impl StageApp {
                 Err(err) => self.detail.core_status = err,
             },
             AsyncOutcome::LoadMcp(result) => match result {
-                Ok(json) => self.detail.mcp_json = json,
+                Ok(json) => {
+                    if let Err(err) = detail::load_mcp_form(&mut self.detail, &json) {
+                        self.detail.core_status = err;
+                    }
+                }
                 Err(err) => self.detail.core_status = err,
             },
             AsyncOutcome::SaveMcp(result) => {

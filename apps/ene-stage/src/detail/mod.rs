@@ -189,6 +189,7 @@ pub struct DetailUiState {
     pub tts_plugin: String,
     pub stt_plugin: String,
     pub plugins_profile: String,
+    pub approval_mode: String,
     pub core_status: String,
     pub connections_status: String,
     pub health: String,
@@ -207,6 +208,7 @@ pub struct DetailUiState {
     pub provider_install_jobs: HashMap<String, String>,
     pub provider_models: Vec<String>,
     pub mcp_json: String,
+    pub mcp_servers: Vec<ene_api::McpServerView>,
     pub schema_json: String,
     pub usage_text: String,
     pub spans_text: String,
@@ -264,6 +266,7 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
     state.tts_plugin = nested_string(effective, &["ai", "tasks", "tts", "plugin"]);
     state.stt_plugin = nested_string(effective, &["ai", "tasks", "stt", "plugin"]);
     state.plugins_profile = nested_string(effective, &["plugins", "profile"]);
+    state.approval_mode = normalize_approval_mode(&nested_string(effective, &["approval", "mode"]));
     state.unconfigured.clear();
     for (name, path) in [
         ("chat", ["ai", "tasks", "chat", "plugin"]),
@@ -289,6 +292,60 @@ fn nested_string(value: &Value, path: &[&str]) -> String {
         current = next;
     }
     current.as_str().unwrap_or("").to_owned()
+}
+
+#[must_use]
+pub fn normalize_approval_mode(raw: &str) -> String {
+    match raw.to_ascii_lowercase().replace('-', "_").as_str() {
+        "ask_all" | "askall" => "ask_all".to_owned(),
+        "ai_auto" | "aiauto" => "ai_auto".to_owned(),
+        "auto" => "auto".to_owned(),
+        _ => "policy".to_owned(),
+    }
+}
+
+#[must_use]
+pub fn mcp_args_text(args: &[String]) -> String {
+    args.join(" ")
+}
+
+pub fn set_mcp_args_text(server: &mut ene_api::McpServerView, text: &str) {
+    server.args = text.split_whitespace().map(str::to_owned).collect();
+}
+
+pub fn load_mcp_form(state: &mut DetailUiState, json: &str) -> Result<(), String> {
+    let doc: ene_api::McpDocument = serde_json::from_str(json)
+        .map_err(|err| format!("{}: {err}", i18n::fl("mcp-json-invalid")))?;
+    state.mcp_servers = doc.servers;
+    json.clone_into(&mut state.mcp_json);
+    Ok(())
+}
+
+pub fn validate_mcp_server(server: &ene_api::McpServerView) -> Result<(), String> {
+    if server.id.trim().is_empty() {
+        return Err(i18n::fl("mcp-id-required"));
+    }
+    match server.transport.as_str() {
+        "stdio" | "" => {
+            if server.command.as_deref().unwrap_or("").trim().is_empty() {
+                return Err(i18n::fl("mcp-command-required"));
+            }
+        }
+        "http" | "sse" | "streamable_http" | "streamable-http" => {
+            if server.url.as_deref().unwrap_or("").trim().is_empty() {
+                return Err(i18n::fl("mcp-url-required"));
+            }
+        }
+        _ => return Err(i18n::fl("mcp-transport-required")),
+    }
+    Ok(())
+}
+
+pub fn validate_mcp_document(servers: &[ene_api::McpServerView]) -> Result<(), String> {
+    for server in servers {
+        validate_mcp_server(server)?;
+    }
+    Ok(())
 }
 
 #[must_use]
@@ -1118,27 +1175,132 @@ fn show_connections(
     }
     show_provider_assets(ui, state, client, rt, async_results);
     ui.separator();
+    show_mcp_form(ui, state, client, rt, async_results);
+}
+
+fn show_mcp_form(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
     ui.heading(i18n::fl("plugins-mcp"));
-    ui.add(
-        egui::TextEdit::multiline(&mut state.mcp_json)
-            .desired_width(f32::INFINITY)
-            .desired_rows(8),
-    );
-    if ui.button(i18n::fl("plugins-mcp-save")).clicked() {
-        let text = state.mcp_json.clone();
-        let client = Arc::clone(client);
-        spawn_async(rt, async_results, async move {
-            AsyncOutcome::SaveMcp(
-                async {
-                    let doc: ene_api::McpDocument = serde_json::from_str(&text)
-                        .map_err(|e| format!("invalid MCP JSON: {e}"))?;
-                    client.put_mcp(&doc).await.map_err(|e| e.to_string())?;
-                    Ok(())
+    let mut remove = None;
+    for (index, server) in state.mcp_servers.iter_mut().enumerate() {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(i18n::fl("plugins-mcp-id"));
+                ui.text_edit_singleline(&mut server.id);
+                ui.checkbox(&mut server.enabled, i18n::fl("plugins-mcp-enabled"));
+                if ui.button(i18n::fl("plugins-mcp-remove")).clicked() {
+                    remove = Some(index);
                 }
-                .await,
-            )
+            });
+            ui.horizontal(|ui| {
+                ui.label(i18n::fl("plugins-mcp-transport"));
+                let label = if server.transport == "stdio" || server.transport.is_empty() {
+                    i18n::fl("plugins-mcp-stdio")
+                } else {
+                    i18n::fl("plugins-mcp-http")
+                };
+                egui::ComboBox::from_id_salt(("mcp-transport", index))
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(
+                                server.transport == "stdio" || server.transport.is_empty(),
+                                i18n::fl("plugins-mcp-stdio"),
+                            )
+                            .clicked()
+                        {
+                            "stdio".clone_into(&mut server.transport);
+                        }
+                        if ui
+                            .selectable_label(
+                                server.transport == "http",
+                                i18n::fl("plugins-mcp-http"),
+                            )
+                            .clicked()
+                        {
+                            "http".clone_into(&mut server.transport);
+                        }
+                    });
+            });
+            if server.transport == "http"
+                || server.transport == "sse"
+                || server.transport == "streamable_http"
+                || server.transport == "streamable-http"
+            {
+                ui.horizontal(|ui| {
+                    ui.label(i18n::fl("plugins-mcp-url"));
+                    let url = server.url.get_or_insert_with(String::new);
+                    ui.text_edit_singleline(url);
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(i18n::fl("plugins-mcp-command"));
+                    let command = server.command.get_or_insert_with(String::new);
+                    ui.text_edit_singleline(command);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(i18n::fl("plugins-mcp-args"));
+                    let mut args = mcp_args_text(&server.args);
+                    if ui.text_edit_singleline(&mut args).changed() {
+                        set_mcp_args_text(server, &args);
+                    }
+                });
+            }
         });
     }
+    if let Some(index) = remove {
+        state.mcp_servers.remove(index);
+    }
+    if ui.button(i18n::fl("plugins-mcp-add")).clicked() {
+        state.mcp_servers.push(ene_api::McpServerView {
+            id: String::new(),
+            transport: "stdio".to_owned(),
+            command: Some(String::new()),
+            args: Vec::new(),
+            url: None,
+            enabled: true,
+        });
+    }
+    if ui.button(i18n::fl("plugins-mcp-save")).clicked() {
+        if let Err(err) = validate_mcp_document(&state.mcp_servers) {
+            state.core_status = err;
+        } else {
+            let doc = ene_api::McpDocument {
+                servers: state.mcp_servers.clone(),
+            };
+            if let Ok(pretty) = serde_json::to_string_pretty(&doc) {
+                pretty.clone_into(&mut state.mcp_json);
+            }
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::SaveMcp(
+                    client
+                        .put_mcp(&doc)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
+                )
+            });
+        }
+    }
+    ui.collapsing(i18n::fl("plugins-mcp-json"), |ui| {
+        ui.add(
+            egui::TextEdit::multiline(&mut state.mcp_json)
+                .desired_width(f32::INFINITY)
+                .desired_rows(6),
+        );
+        if ui.button(i18n::fl("plugins-mcp-from-json")).clicked() {
+            match load_mcp_form(state, &state.mcp_json.clone()) {
+                Ok(()) => state.core_status = i18n::fl("settings-loaded"),
+                Err(err) => state.core_status = err,
+            }
+        }
+    });
 }
 
 fn show_provider_assets(
@@ -1431,38 +1593,90 @@ fn show_system_inner(
     if !state.spans_text.is_empty() {
         ui.label(&state.spans_text);
     }
-    ui.heading(i18n::fl("settings-core-json"));
-    ui.add(
-        egui::TextEdit::multiline(&mut state.core_settings_text)
-            .desired_width(f32::INFINITY)
-            .desired_rows(8),
-    );
-    ui.label(i18n::fl("settings-core-patch"));
-    ui.add(
-        egui::TextEdit::multiline(&mut state.core_patch_text)
-            .desired_width(f32::INFINITY)
-            .desired_rows(4)
-            .hint_text(i18n::fl("settings-patch-hint")),
-    );
+    ui.separator();
+    ui.heading(i18n::fl("settings-core-common"));
     ui.horizontal(|ui| {
-        if ui.button(i18n::fl("settings-apply-patch")).clicked() {
-            let text = state.core_patch_text.clone();
-            let client = Arc::clone(client);
-            spawn_async(rt, async_results, async move {
-                AsyncOutcome::ApplyCoreSettings(
-                    async {
-                        let patch: Value = serde_json::from_str(&text)
-                            .map_err(|e| format!("invalid JSON: {e}"))?;
-                        client
-                            .patch_settings(&patch)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        Ok(())
-                    }
-                    .await,
-                )
-            });
+        ui.label(i18n::fl("settings-plugins-profile"));
+        for profile in ["desktop", "minimal", "headless"] {
+            if ui
+                .selectable_label(state.plugins_profile == profile, profile)
+                .clicked()
+            {
+                profile.clone_into(&mut state.plugins_profile);
+            }
         }
+    });
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-approval-mode"));
+        let current = normalize_approval_mode(&state.approval_mode);
+        let label = approval_mode_label(&current);
+        egui::ComboBox::from_id_salt("approval-mode")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                for (id, key) in [
+                    ("policy", "settings-approval-policy"),
+                    ("ask_all", "settings-approval-ask"),
+                    ("auto", "settings-approval-auto"),
+                    ("ai_auto", "settings-approval-ai"),
+                ] {
+                    if ui.selectable_label(current == id, i18n::fl(key)).clicked() {
+                        id.clone_into(&mut state.approval_mode);
+                    }
+                }
+            });
+    });
+    if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
+        let profile = state.plugins_profile.clone();
+        let mode = normalize_approval_mode(&state.approval_mode);
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::ApplyCoreSettings(
+                client
+                    .patch_settings(&serde_json::json!({
+                        "plugins": { "profile": profile },
+                        "approval": { "mode": mode },
+                    }))
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            )
+        });
+    }
+    ui.collapsing(i18n::fl("settings-core-json-fold"), |ui| {
+        ui.heading(i18n::fl("settings-core-json"));
+        ui.add(
+            egui::TextEdit::multiline(&mut state.core_settings_text)
+                .desired_width(f32::INFINITY)
+                .desired_rows(8),
+        );
+        ui.label(i18n::fl("settings-core-patch"));
+        ui.add(
+            egui::TextEdit::multiline(&mut state.core_patch_text)
+                .desired_width(f32::INFINITY)
+                .desired_rows(4)
+                .hint_text(i18n::fl("settings-patch-hint")),
+        );
+        ui.horizontal(|ui| {
+            if ui.button(i18n::fl("settings-apply-patch")).clicked() {
+                let text = state.core_patch_text.clone();
+                let client = Arc::clone(client);
+                spawn_async(rt, async_results, async move {
+                    AsyncOutcome::ApplyCoreSettings(
+                        async {
+                            let patch: Value = serde_json::from_str(&text).map_err(|err| {
+                                format!("{}: {err}", i18n::fl("settings-patch-invalid"))
+                            })?;
+                            client
+                                .patch_settings(&patch)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            Ok(())
+                        }
+                        .await,
+                    )
+                });
+            }
+        });
     });
     if !state.schema_json.is_empty() {
         ui.heading(i18n::fl("system-advanced"));
@@ -1471,6 +1685,15 @@ fn show_system_inner(
                 .desired_width(f32::INFINITY)
                 .desired_rows(8),
         );
+    }
+}
+
+fn approval_mode_label(mode: &str) -> String {
+    match mode {
+        "ask_all" => i18n::fl("settings-approval-ask"),
+        "auto" => i18n::fl("settings-approval-auto"),
+        "ai_auto" => i18n::fl("settings-approval-ai"),
+        _ => i18n::fl("settings-approval-policy"),
     }
 }
 
@@ -1601,6 +1824,7 @@ mod tests {
         assert_eq!(state.chat_base_url, "https://example.invalid/v1");
         assert!(state.ai_chat_key_set);
         assert_eq!(state.plugins_profile, "desktop");
+        assert_eq!(state.approval_mode, "policy");
         assert!(!state.unconfigured.iter().any(|task| task == "chat"));
         assert!(state.unconfigured.iter().any(|task| task == "classifier"));
         assert!(state.unconfigured.iter().any(|task| task == "stt"));
@@ -1679,5 +1903,41 @@ mod tests {
             i18n::fl("settings-list-models-empty")
         );
         assert!(list_models_status(&["gpt".into()], None).is_empty());
+    }
+
+    #[test]
+    fn mcp_form_rejects_incomplete_servers_and_loads_json() {
+        let incomplete = ene_api::McpServerView {
+            id: String::new(),
+            transport: "stdio".to_owned(),
+            command: Some("npx".to_owned()),
+            args: Vec::new(),
+            url: None,
+            enabled: true,
+        };
+        assert!(validate_mcp_server(&incomplete).is_err());
+        let stdio = ene_api::McpServerView {
+            id: "files".to_owned(),
+            transport: "stdio".to_owned(),
+            command: Some("npx".to_owned()),
+            args: vec![
+                "-y".to_owned(),
+                "@modelcontextprotocol/server-filesystem".to_owned(),
+            ],
+            url: None,
+            enabled: true,
+        };
+        assert!(validate_mcp_server(&stdio).is_ok());
+        let mut state = DetailUiState::default();
+        load_mcp_form(
+            &mut state,
+            r#"{"servers":[{"id":"web","transport":"http","url":"http://127.0.0.1:9"}]}"#,
+        )
+        .expect("json");
+        assert_eq!(state.mcp_servers.len(), 1);
+        assert_eq!(state.mcp_servers[0].id, "web");
+        assert!(validate_mcp_document(&state.mcp_servers).is_ok());
+        assert_eq!(normalize_approval_mode("AskAll"), "ask_all");
+        assert_eq!(normalize_approval_mode("policy"), "policy");
     }
 }
