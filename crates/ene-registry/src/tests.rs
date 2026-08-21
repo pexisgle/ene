@@ -104,6 +104,17 @@ fn unregister_source_drops_only_that_plugin() {
 }
 
 #[test]
+fn unregister_drops_one_tool_and_keeps_siblings() {
+    let registry = ToolRegistry::new();
+    for def in crate::builtins::definitions_for(BuiltinKind::Utility) {
+        registry.register(def);
+    }
+    registry.unregister("utility.hash");
+    assert!(registry.get("utility.hash").is_none());
+    assert!(registry.get("utility.time").is_some());
+}
+
+#[test]
 fn side_effects_field_is_required_on_the_wire() {
     let raw = r#"{"name":"x","description":"d","parameters":{},"output":{}}"#;
     let err = serde_json::from_str::<ene_plugin_ipc::ToolSpecWire>(raw).unwrap_err();

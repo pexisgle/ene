@@ -4,7 +4,8 @@ Three layers keep tools from touching what they were not granted:
 
 1. **OS sandbox** (`ene-sandbox`) — Landlock, seccomp, rlimits on Linux.
 2. **Host mediation** (`ene-fiber`) — spawn, grants, and reversible
-   dispose. Kill is not unload.
+   dispose. `unload`, circuit trip, and loading rollback invert the same
+   `Effect` stack LIFO. Kill is not unload.
 3. **Approval plane** (`ene-plane`) — deny-by-default until a policy row
    matches; decisions are hash-chained in the audit log. `approval.mode =
    ai_auto` asks `ai.tasks.approve` (chat fallback); a failed or missing

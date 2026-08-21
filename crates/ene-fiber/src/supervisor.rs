@@ -14,7 +14,9 @@ use ene_plugin_ipc::{
     SetActiveAssetResult, SttRequest, SttResult, ToolCall, TtsAudio, TtsRequest,
 };
 use ene_provider_assets::CatalogRegistry;
-use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for};
+use ene_registry::{
+    BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for,
+};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -87,6 +89,8 @@ struct SupervisorInner {
     allow_unverified: AtomicBool,
     loop_hooks: Mutex<Option<LoopHooks>>,
     waterfall_guards: Mutex<HashMap<String, Vec<WaterfallGuard<HookEvent>>>>,
+    #[cfg(test)]
+    dispose_log: Mutex<Vec<Effect>>,
 }
 
 /// Fiber supervisor. Reconcile is per-row; the core process is not restarted.
@@ -168,37 +172,86 @@ impl SupervisorInner {
     }
 
     fn trip_circuit(&self, row_id: &str, plugin: &str) {
-        let fiber = self
+        let mut fiber = self
             .fibers
             .lock()
             .remove(row_id)
             .unwrap_or_else(|| Fiber::new(row_id, plugin));
-        self.registry.unregister_source(&ToolSource::Plugin {
-            plugin_id: fiber.plugin.clone(),
-        });
-        self.broker.lock().revoke_all(fiber.uid);
-        if let Some(mut child) = self.children.lock().remove(row_id) {
-            terminate_child(&mut child);
-        }
-        self.sessions.lock().remove(row_id);
-        let mut failed = fiber;
-        failed.state = FiberState::Failed;
-        failed.dispose.clear();
-        failed.wait_reason = Some("circuit open".to_owned());
-        self.fibers.lock().insert(row_id.to_owned(), failed);
-        self.drop_waterfall(row_id);
+        self.dispose(&mut fiber);
+        fiber.state = FiberState::Failed;
+        fiber.wait_reason = Some("circuit open".to_owned());
+        self.fibers.lock().insert(row_id.to_owned(), fiber);
     }
 
-    fn rollback_loading(&self, fiber: &Fiber) {
-        self.registry.unregister_source(&ToolSource::Plugin {
-            plugin_id: fiber.plugin.clone(),
-        });
-        self.broker.lock().revoke_all(fiber.uid);
+    fn rollback_loading(&self, fiber: &mut Fiber) {
+        self.dispose(fiber);
+    }
+
+    fn dispose(&self, fiber: &mut Fiber) {
+        #[cfg(test)]
+        self.dispose_log.lock().clear();
+        while let Some(effect) = fiber.dispose.pop() {
+            #[cfg(test)]
+            self.dispose_log.lock().push(effect.clone());
+            self.invert(fiber, effect);
+        }
+        self.sweep_host_context(fiber);
+    }
+
+    fn invert(&self, fiber: &Fiber, effect: Effect) {
+        match effect {
+            Effect::ListenWaterfall { .. } => self.drop_one_waterfall(&fiber.row_id),
+            Effect::BindSeam { .. } => {}
+            Effect::SpawnProcess { .. } => {
+                self.sessions.lock().remove(&fiber.row_id);
+                if let Some(mut child) = self.children.lock().remove(&fiber.row_id) {
+                    terminate_child(&mut child);
+                }
+            }
+            Effect::BrokerGrant { op } => {
+                self.broker.lock().revoke(fiber.uid, &op);
+            }
+            Effect::RegisterTool { name } => {
+                self.registry.unregister(&name);
+            }
+        }
+    }
+
+    fn sweep_host_context(&self, fiber: &Fiber) {
+        self.drop_waterfall(&fiber.row_id);
+        self.sessions.lock().remove(&fiber.row_id);
         if let Some(mut child) = self.children.lock().remove(&fiber.row_id) {
             terminate_child(&mut child);
         }
-        self.sessions.lock().remove(&fiber.row_id);
-        self.drop_waterfall(&fiber.row_id);
+        self.broker.lock().release_owned_sidecars(fiber.uid);
+    }
+
+    fn record_tool(&self, fiber: &mut Fiber, def: ToolDefinition, invoke: Arc<dyn ToolInvoke>) {
+        let name = def.name.clone();
+        self.registry.register_with(def, invoke);
+        fiber.push_effect(Effect::RegisterTool { name });
+    }
+
+    fn record_grant(&self, fiber: &mut Fiber, op: String) {
+        self.broker.lock().grant(fiber.uid, op.clone());
+        fiber.push_effect(Effect::BrokerGrant { op });
+    }
+
+    fn record_spawn(&self, fiber: &mut Fiber, child: Child) {
+        let pid = child.id();
+        self.children.lock().insert(fiber.row_id.clone(), child);
+        fiber.push_effect(Effect::SpawnProcess { pid });
+    }
+
+    fn drop_one_waterfall(&self, row_id: &str) {
+        let mut guards = self.waterfall_guards.lock();
+        let Some(stack) = guards.get_mut(row_id) else {
+            return;
+        };
+        drop(stack.pop());
+        if stack.is_empty() {
+            guards.remove(row_id);
+        }
     }
 
     fn drop_waterfall(&self, row_id: &str) {
@@ -245,6 +298,8 @@ impl Supervisor {
                 allow_unverified: AtomicBool::new(false),
                 loop_hooks: Mutex::new(None),
                 waterfall_guards: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                dispose_log: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -310,21 +365,21 @@ impl Supervisor {
             return Err(SupervisorError::HooksNotBound);
         };
         {
-            let mut fibers = self.inner.fibers.lock();
-            let fiber = fibers
-                .get_mut(row_id)
-                .ok_or_else(|| SupervisorError::UnknownFiber(row_id.to_owned()))?;
-            fiber.push_effect(Effect::ListenWaterfall {
-                point: point.to_owned(),
-            });
+            let fibers = self.inner.fibers.lock();
+            if !fibers.contains_key(row_id) {
+                return Err(SupervisorError::UnknownFiber(row_id.to_owned()));
+            }
         }
         let guard = subscribe(&hooks, listener);
         {
-            let fibers = self.inner.fibers.lock();
-            if !fibers.contains_key(row_id) {
+            let mut fibers = self.inner.fibers.lock();
+            let Some(fiber) = fibers.get_mut(row_id) else {
                 drop(guard);
                 return Err(SupervisorError::UnknownFiber(row_id.to_owned()));
-            }
+            };
+            fiber.push_effect(Effect::ListenWaterfall {
+                point: point.to_owned(),
+            });
             self.inner
                 .waterfall_guards
                 .lock()
@@ -535,17 +590,11 @@ impl Supervisor {
         fiber.sandbox_required = row.sandbox_required;
         fiber.state = FiberState::Loading;
         for def in definitions_for(kind) {
-            fiber.push_effect(Effect::RegisterTool {
-                name: def.name.clone(),
-            });
-            self.inner.registry.register(def);
+            self.inner
+                .record_tool(&mut fiber, def, Arc::new(BuiltinInvoker));
         }
-        {
-            let mut broker = self.inner.broker.lock();
-            for cap in &row.capabilities {
-                broker.grant(fiber.uid, cap.clone());
-                fiber.push_effect(Effect::BrokerGrant { op: cap.clone() });
-            }
+        for cap in &row.capabilities {
+            self.inner.record_grant(&mut fiber, cap.clone());
         }
         finish_active(&mut fiber);
         let uid = fiber.uid;
@@ -602,7 +651,7 @@ impl Supervisor {
         {
             Ok(spawned) => spawned,
             Err(err) => {
-                self.inner.rollback_loading(&fiber);
+                self.inner.rollback_loading(&mut fiber);
                 self.inner
                     .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
                 return Err(err);
@@ -612,7 +661,7 @@ impl Supervisor {
             .apply_spawned(row, &plugin_id, &mut fiber, spawned)
             .await
         {
-            self.inner.rollback_loading(&fiber);
+            self.inner.rollback_loading(&mut fiber);
             self.inner
                 .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
             return Err(err);
@@ -631,9 +680,7 @@ impl Supervisor {
         mut spawned: SpawnedPlugin,
     ) -> Result<(), SupervisorError> {
         let (child, mut conn) = spawned.take()?;
-        let pid = child.id();
-        fiber.push_effect(Effect::SpawnProcess { pid });
-        self.inner.children.lock().insert(row.row_id.clone(), child);
+        self.inner.record_spawn(fiber, child);
         let faces = conn.negotiated().provider.clone();
         let tools = if conn.negotiated().tool.is_some() {
             timeout(Duration::from_secs(5), conn.list_tools())
@@ -660,10 +707,7 @@ impl Supervisor {
         };
         if let Some(kind) = plugin_kind(&row.plugin) {
             for def in definitions_for(kind) {
-                fiber.push_effect(Effect::RegisterTool {
-                    name: def.name.clone(),
-                });
-                self.inner.registry.register_with(def, Arc::clone(&invoke));
+                self.inner.record_tool(fiber, def, Arc::clone(&invoke));
             }
         } else if row.plugin == "tool.dummy" {
             let allowed: Vec<_> = tools
@@ -672,29 +716,19 @@ impl Supervisor {
                 .collect();
             for spec in allowed {
                 let def = ToolDefinition::from_wire(spec, source.clone());
-                fiber.push_effect(Effect::RegisterTool {
-                    name: def.name.clone(),
-                });
-                self.inner.registry.register_with(def, Arc::clone(&invoke));
+                self.inner.record_tool(fiber, def, Arc::clone(&invoke));
             }
         } else if !row.plugin.starts_with("provider.") {
             for spec in tools {
                 let def = ToolDefinition::from_wire(spec, source.clone());
-                fiber.push_effect(Effect::RegisterTool {
-                    name: def.name.clone(),
-                });
-                self.inner.registry.register_with(def, Arc::clone(&invoke));
+                self.inner.record_tool(fiber, def, Arc::clone(&invoke));
             }
         }
         if let Some(faces) = faces {
             bind_negotiated_seams(fiber, &faces, &row.seams);
         }
-        {
-            let mut broker = self.inner.broker.lock();
-            for cap in &row.capabilities {
-                broker.grant(fiber.uid, cap.clone());
-                fiber.push_effect(Effect::BrokerGrant { op: cap.clone() });
-            }
+        for cap in &row.capabilities {
+            self.inner.record_grant(fiber, cap.clone());
         }
         finish_active(fiber);
         Ok(())
@@ -717,29 +751,40 @@ impl Supervisor {
         self.inner.sessions.lock().clear();
     }
 
-    /// Unload a row: stop providing, then apply dispose LIFO (I-46).
+    /// Unload a row: stop providing, then apply dispose LIFO.
     pub async fn unload(&self, row_id: &str) {
         let Some(mut fiber) = self.inner.fibers.lock().remove(row_id) else {
             return;
         };
         fiber.state = FiberState::Unloading;
-        self.inner.drop_waterfall(row_id);
-        let session = self.inner.sessions.lock().remove(row_id);
+        let session = self.inner.sessions.lock().get(row_id).cloned();
         if let Some(session) = session {
             let drain = async { session.conn.lock().await.drain().await };
             drop(timeout(Duration::from_secs(2), drain).await);
         }
-        if let Some(mut child) = self.inner.children.lock().remove(row_id) {
-            terminate_child(&mut child);
-        }
-        self.inner.registry.unregister_source(&ToolSource::Plugin {
-            plugin_id: fiber.plugin.clone(),
-        });
-        self.inner.broker.lock().revoke_all(fiber.uid);
-        fiber.dispose.clear();
-        fiber.state = FiberState::Inactive;
+        self.inner.dispose(&mut fiber);
         self.inner.failure_counts.lock().remove(row_id);
         self.inner.missing_requires.lock().remove(row_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_dispose(&self) -> Vec<Effect> {
+        self.inner.dispose_log.lock().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rollback_active(&self, row_id: &str) {
+        let Some(mut fiber) = self.inner.fibers.lock().remove(row_id) else {
+            return;
+        };
+        self.inner.rollback_loading(&mut fiber);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_effect(&self, row_id: &str, effect: Effect) {
+        if let Some(fiber) = self.inner.fibers.lock().get_mut(row_id) {
+            fiber.push_effect(effect);
+        }
     }
 
     /// Disable one row; other rows keep uid and Active (I-49).

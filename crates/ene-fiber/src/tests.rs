@@ -1,8 +1,7 @@
-#[cfg(target_os = "linux")]
-use crate::Effect;
 use crate::{
-    Broker, BrokerError, CircuitBreakerConfig, FiberState, FiberUid, ProfileRow, SidecarRequest,
-    Supervisor, SupervisorError, confine_path, discover_plugin_script, manifest_digest,
+    Broker, BrokerError, CircuitBreakerConfig, Effect, FiberState, FiberUid, ProfileRow,
+    SidecarRequest, Supervisor, SupervisorError, confine_path, discover_plugin_script,
+    manifest_digest,
 };
 use ene_registry::{Layer, ToolRegistry};
 use serde_json::json;
@@ -54,6 +53,73 @@ async fn unload_removes_tools_and_grants() {
     assert!(!sup.surface_has_tool("utility.hash"));
     assert!(!sup.broker_has_grant(uid, "fs.read"));
     assert!(sup.fiber("r-util").is_none());
+}
+
+#[tokio::test]
+async fn dispose_inverts_every_effect_kind_lifo() {
+    use ene_plugin_ipc::BuiltinKind;
+    use ene_registry::definitions_for;
+
+    let (_dir, sup) = supervisor();
+    let hooks = ene_kernel::LoopHooks::new();
+    sup.set_loop_hooks(hooks);
+    sup.activate(&row("r-util", "tool.utility", &["fs.read"]))
+        .unwrap();
+    sup.push_effect(
+        "r-util",
+        Effect::BindSeam {
+            name: "llm".to_owned(),
+        },
+    );
+    sup.push_effect("r-util", Effect::SpawnProcess { pid: 1 });
+    sup.listen_pre_step("r-util", |event, _next| event).unwrap();
+    let tool_names: Vec<String> = definitions_for(BuiltinKind::Utility)
+        .into_iter()
+        .map(|def| def.name)
+        .rev()
+        .collect();
+    sup.unload("r-util").await;
+    let inverted = sup.last_dispose();
+    let mut expected = vec![
+        Effect::ListenWaterfall {
+            point: "agent/pre-step".to_owned(),
+        },
+        Effect::SpawnProcess { pid: 1 },
+        Effect::BindSeam {
+            name: "llm".to_owned(),
+        },
+        Effect::BrokerGrant {
+            op: "fs.read".to_owned(),
+        },
+    ];
+    expected.extend(
+        tool_names
+            .into_iter()
+            .map(|name| Effect::RegisterTool { name }),
+    );
+    assert_eq!(inverted, expected);
+    assert!(!sup.surface_has_tool("utility.hash"));
+}
+
+#[test]
+fn rollback_loading_uses_the_same_dispose_path() {
+    let (_dir, sup) = supervisor();
+    sup.activate(&row("r-util", "tool.utility", &["fs.read"]))
+        .unwrap();
+    assert!(sup.surface_has_tool("utility.hash"));
+    sup.rollback_active("r-util");
+    assert!(!sup.surface_has_tool("utility.hash"));
+    assert!(sup.fiber("r-util").is_none());
+    assert!(
+        sup.last_dispose()
+            .iter()
+            .any(|effect| matches!(effect, Effect::BrokerGrant { op } if op == "fs.read"))
+    );
+    assert!(
+        sup.last_dispose().iter().any(
+            |effect| matches!(effect, Effect::RegisterTool { name } if name == "utility.hash")
+        )
+    );
 }
 
 #[tokio::test]
@@ -220,6 +286,9 @@ async fn circuit_breaker_opens_after_spawn_failures() {
         err,
         crate::supervisor::SupervisorError::CircuitOpen(_)
     ));
+    let failed = sup.fiber("r-dummy-circuit").expect("failed fiber stays");
+    assert_eq!(failed.state, FiberState::Failed);
+    assert!(failed.dispose.is_empty());
 }
 
 #[tokio::test]

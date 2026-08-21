@@ -95,6 +95,12 @@ impl ToolRegistry {
         self.index.lock().insert(name, indexed);
     }
 
+    /// Inverse of a single `register` / `register_with`.
+    pub fn unregister(&self, name: &str) {
+        self.tools.lock().remove(name);
+        self.index.lock().remove(name);
+    }
+
     /// Inverse of register for one plugin source (I-46).
     pub fn unregister_source(&self, source: &ToolSource) {
         let mut tools = self.tools.lock();
