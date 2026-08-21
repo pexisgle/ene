@@ -193,7 +193,8 @@ async fn boot_opens_companions_db() {
         .create_soul(&ene_companion::NewSoul::text_only("char.boot@1"))
         .unwrap();
     core.companion()
-        .on_user_turn(soul.id, "hello", &[])
+        .on_user_turn(soul.id, "hello", &[], None)
+        .await
         .unwrap();
     assert!(dir.path().join("companions.db").exists());
 }

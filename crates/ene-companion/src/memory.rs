@@ -222,9 +222,30 @@ pub async fn extract_turn(
             )
             .await
     {
-        out.extend(parse_extract_json(soul_id, &raw));
+        let extra = parse_extract_json(soul_id, &raw);
+        overlay_classifier_scope(&mut out, &extra);
+        for cand in extra {
+            if !out.iter().any(|existing| same_fact(existing, &cand)) {
+                out.push(cand);
+            }
+        }
     }
     out
+}
+
+fn overlay_classifier_scope(base: &mut [MemoryCandidate], classified: &[MemoryCandidate]) {
+    for det in base.iter_mut() {
+        if let Some(hit) = classified.iter().find(|cand| same_fact(det, cand)) {
+            det.scope = hit.scope;
+            det.confidence = det.confidence.max(hit.confidence);
+            det.salience = det.salience.max(hit.salience);
+        }
+    }
+}
+
+fn same_fact(a: &MemoryCandidate, b: &MemoryCandidate) -> bool {
+    a.kind == b.kind
+        && (a.title.eq_ignore_ascii_case(&b.title) || a.content.eq_ignore_ascii_case(&b.content))
 }
 
 /// Pattern safety net: name / like / remember / forget.

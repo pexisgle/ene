@@ -23,8 +23,18 @@
 ターンの後、コンパニオンのメモリライターが:
 
 1. 構造化シグナル（約束・ユーザー明示の事実・ツール結果）を抽出します。
-2. 分類モデルが接続されていれば、追加の候補を分類します。
+   正規表現（`my name is` / `i like` / `remember that`）は fail-closed の
+   安全網です。
+2. `ai.tasks.classifier`（無ければ chat）が結んであるとき、補助 LLM が
+   JSON 候補を返します。その `scope`（`private` / `shared`）は一致する
+   決定的抽出に上書きされます。分類器の失敗は追加候補を捨てるだけで、
+   安全網の抽出は残します。
 3. 仲裁者が重複と矛盾をスコアし、書き込み・却下・保留を決めます。
+
+感情はハイブリッドです。ユーザー発話のヒューリスティックに、確信度が
+`mind.affect.classifier_min_confidence` 以上の分類器提案を混ぜます。
+未設定の分類器は fail-closed（ヒューリスティックのみ）です。各 prompt は
+生成前にその状態を適用し、`companion.affect` をシステム文脈へ残します。
 
 `mind.memory_approval.require_approval` が true（既定）のとき、保留候補は
 キューで待ちます。`/api/v1/memories/pending` か対応する `ene-ctl memory`
