@@ -33,7 +33,9 @@ pub use error::{CancelQueued, KernelError, RunOutcome};
 pub use inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
 pub use lane::{LaneHandle, LaneOptions};
 pub use live::{LiveBus, LiveEvent, LiveSubscription};
-pub use model::{ConversationModel, EchoModel, ModelGeneration, ModelRequest, ToolCall};
+pub use model::{
+    ConversationModel, EchoModel, ModelGeneration, ModelRequest, ToolCall, ToolCallingModel,
+};
 pub use observe::{ObserveHandle, Span, SpanGuard, SpanRing, spans_leak_content};
 pub use router::{SurfaceRouter, SurfaceToolOutcome};
 pub use speech::{SpeechPresenter, TurnFinalizer, TurnPrefetch};

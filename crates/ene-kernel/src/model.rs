@@ -1,6 +1,6 @@
 use crate::error::KernelError;
 use async_trait::async_trait;
-use ene_session::{InnerAspect, ProjectedMessage};
+use ene_session::{InnerAspect, ProjectedMessage, Role};
 use serde_json::Value;
 
 /// Conversation LLM used by the dialogue lane.
@@ -50,7 +50,8 @@ impl Default for ModelGeneration {
     }
 }
 
-/// Deterministic echo model for tests and offline boots.
+/// Deterministic echo model for tests and offline boots. Not an acceptance path:
+/// it never emits `tool_calls`.
 pub struct EchoModel;
 
 #[async_trait]
@@ -82,5 +83,53 @@ impl ConversationModel for EchoModel {
             input_tokens: u32::try_from(request.messages.len()).unwrap_or(0),
             output_tokens,
         })
+    }
+}
+
+/// Test double that emits one `utility.calc` call, then speaks the tool result.
+///
+/// Use this for lane / HTTP acceptance of tool calling. Echo never takes that path.
+pub struct ToolCallingModel;
+
+#[async_trait]
+impl ConversationModel for ToolCallingModel {
+    async fn generate(&self, request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        if let Some(result) = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Tool)
+        {
+            let text = format!("result: {}", result.text());
+            let output_tokens = u32::try_from(text.len()).unwrap_or(u32::MAX);
+            return Ok(ModelGeneration {
+                text,
+                finish_reason: "stop".to_owned(),
+                model_id: "tool-calling".to_owned(),
+                input_tokens: u32::try_from(request.messages.len()).unwrap_or(0),
+                output_tokens,
+                ..ModelGeneration::default()
+            });
+        }
+        let last = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User)
+            .map_or_else(String::new, ProjectedMessage::text);
+        let lower = last.to_ascii_lowercase();
+        if lower.contains("calc") || lower.contains("1+2") {
+            return Ok(ModelGeneration {
+                tool_calls: vec![ToolCall {
+                    name: "utility.calc".to_owned(),
+                    arguments: serde_json::json!({"expr": "1+2*3"}),
+                }],
+                finish_reason: "tool_calls".to_owned(),
+                model_id: "tool-calling".to_owned(),
+                input_tokens: u32::try_from(request.messages.len()).unwrap_or(0),
+                ..ModelGeneration::default()
+            });
+        }
+        EchoModel.generate(request).await
     }
 }

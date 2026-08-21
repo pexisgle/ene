@@ -11,7 +11,7 @@ use ene_companion::{
 };
 use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
-    spans_leak_content,
+    ToolCallingModel, spans_leak_content,
 };
 use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
 use ene_session::{EventPayload, SessionId, TurnOutcome};
@@ -43,6 +43,12 @@ impl ConversationModel for ParkingJobModel {
 }
 
 async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHandle) {
+    boot_server_with(Arc::new(EchoModel) as Arc<dyn ConversationModel>).await
+}
+
+async fn boot_server_with(
+    model: Arc<dyn ConversationModel>,
+) -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHandle) {
     let dir = TempDir::new().unwrap();
     let core = Arc::new(
         CoreDaemon::boot(BootOptions::new(dir.path()))
@@ -52,10 +58,7 @@ async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHan
     core.set_job_model(Arc::new(ParkingJobModel));
     let server = core
         .clone()
-        .serve_at(
-            "127.0.0.1:0".parse().unwrap(),
-            Arc::new(EchoModel) as Arc<dyn ConversationModel>,
-        )
+        .serve_at("127.0.0.1:0".parse().unwrap(), model)
         .await
         .unwrap();
     let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
@@ -136,6 +139,84 @@ async fn three_clients_share_one_core() {
     assert_eq!(web.health().await.unwrap().status, "ok");
     let openapi = stage.openapi().await.unwrap();
     assert_eq!(openapi["info"]["title"], "ene-core API");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn tool_calling_model_runs_calc_through_http() {
+    let (_dir, client, _core, server) =
+        boot_server_with(Arc::new(ToolCallingModel) as Arc<dyn ConversationModel>).await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "please calc 1+2*3".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let history = wait_assistant(&client, &session.id).await;
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|message| message.role == "assistant" && message.text.contains('7')),
+        "lane must run utility.calc and speak the result: {history:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn seamed_model_rejects_unconfigured_chat() {
+    let dir = TempDir::new().unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    let server = core.clone().serve().await.unwrap();
+    let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
+    let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "stage");
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let history = client.history(&session.id, "surface").await.unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .all(|message| message.role != "assistant"),
+        "unconfigured SeamedModel must not speak: {history:?}"
+    );
     server.shutdown().await;
 }
 
