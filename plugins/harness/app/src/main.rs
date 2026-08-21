@@ -1,6 +1,7 @@
-//! Bundled `tool.app` plugin: GUI automation and screen capture (P-602 / P-112).
+//! Bundled `tool.app` plugin: screenshot, windows, clipboard, input.
 
-use ene_plugin_ipc::BuiltinKind;
+mod logic;
+
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -10,7 +11,8 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    if let Err(err) = ene_registry::run_plugin(BuiltinKind::App).await {
+    if let Err(err) = ene_registry::run_tool_plugin("tool.app", logic::specs, logic::execute).await
+    {
         tracing::error!(error = %err, plugin = "tool.app", "fatal");
         std::process::exit(1);
     }

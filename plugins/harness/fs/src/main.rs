@@ -1,6 +1,9 @@
 //! Bundled `tool.fs` plugin. Shell execution lives in `tool.exec` (D-24).
 
-use ene_plugin_ipc::BuiltinKind;
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
+
+mod logic;
+
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -10,7 +13,7 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    if let Err(err) = ene_registry::run_plugin(BuiltinKind::Fs).await {
+    if let Err(err) = ene_registry::run_tool_plugin("tool.fs", logic::specs, logic::execute).await {
         tracing::error!(error = %err, plugin = "tool.fs", "fatal");
         std::process::exit(1);
     }

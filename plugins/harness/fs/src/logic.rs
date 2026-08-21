@@ -1,9 +1,9 @@
-use super::{arg_str, spec};
 use ene_plugin_ipc::ToolSpecWire;
+use ene_registry::{arg_str, spec};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-pub(super) fn specs() -> Vec<ToolSpecWire> {
+pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
         spec(
             "fs.read",
@@ -50,7 +50,7 @@ pub(super) fn specs() -> Vec<ToolSpecWire> {
     ]
 }
 
-pub(super) fn execute(name: &str, args: &Value) -> Result<Value, String> {
+pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "fs.read" => read(args),
         "fs.write" => write(args),
@@ -434,7 +434,7 @@ fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {
     let Ok(workspace) = std::env::var("ENE_WORKSPACE") else {
         return Ok(PathBuf::from(path));
     };
-    crate::pipeline::confine_tool_path(Path::new(&workspace), Path::new(path), create_parent)
+    ene_registry::confine_tool_path(Path::new(&workspace), Path::new(path), create_parent)
         .map_err(|err| err.to_string())
 }
 

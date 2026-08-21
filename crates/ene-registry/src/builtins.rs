@@ -16,15 +16,73 @@ pub fn file_digest(path: &Path) -> Result<String, IpcError> {
 }
 
 /// Digest of the current plugin executable.
+///
+/// # Errors
+///
+/// Returns [`IpcError::Io`] when the executable path cannot be read.
 pub fn builtin_digest(_kind: BuiltinKind) -> Result<String, IpcError> {
     let exe = std::env::current_exe().map_err(IpcError::Io)?;
     file_digest(&exe)
 }
 
-/// Process entry for a bundled harness plugin binary.
+/// Serve a tool plugin over `ENE_PLUGIN_SOCKET`.
+///
+/// Bundled binaries and a third-party Rust plugin use this entry: local specs
+/// and `execute`, no host `BuiltinKind` table. The host still maps bundled
+/// plugin ids for in-process tests.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the socket env is missing or the session fails.
+pub async fn run_tool_plugin(
+    plugin_id: &'static str,
+    specs: fn() -> Vec<ToolSpecWire>,
+    execute: fn(&str, &Value) -> Result<Value, String>,
+) -> Result<(), IpcError> {
+    let exe = std::env::current_exe().map_err(IpcError::Io)?;
+    let digest = file_digest(&exe)?;
+    serve_from_env(ToolPluginHandler {
+        plugin_id,
+        digest,
+        specs,
+        execute,
+    })
+    .await
+}
+
+/// Host-side wrapper around [`run_tool_plugin`] when a [`BuiltinKind`] is already in hand.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the socket env is missing or the session fails.
 pub async fn run_plugin(kind: BuiltinKind) -> Result<(), IpcError> {
-    let digest = builtin_digest(kind)?;
-    serve_from_env(BuiltinHandler::new(kind, digest)).await
+    match kind {
+        BuiltinKind::Fs => {
+            run_tool_plugin(kind.plugin_id(), builtin::fs::specs, builtin::fs::execute).await
+        }
+        BuiltinKind::Exec => {
+            run_tool_plugin(
+                kind.plugin_id(),
+                builtin::exec::specs,
+                builtin::exec::execute,
+            )
+            .await
+        }
+        BuiltinKind::Web => {
+            run_tool_plugin(kind.plugin_id(), builtin::web::specs, builtin::web::execute).await
+        }
+        BuiltinKind::Utility => {
+            run_tool_plugin(
+                kind.plugin_id(),
+                builtin::utility::specs,
+                builtin::utility::execute,
+            )
+            .await
+        }
+        BuiltinKind::App => {
+            run_tool_plugin(kind.plugin_id(), builtin::app::specs, builtin::app::execute).await
+        }
+    }
 }
 
 /// Executes bundled tools in-process (tests) or from a plugin binary.
@@ -32,6 +90,11 @@ pub async fn run_plugin(kind: BuiltinKind) -> Result<(), IpcError> {
 pub struct BuiltinExecutor;
 
 impl BuiltinExecutor {
+    /// Run one bundled tool by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns a tool-defined error string.
     pub fn execute(&self, name: &str, args: &Value) -> Result<Value, String> {
         builtin::execute(name, args)
     }
@@ -82,37 +145,28 @@ pub fn definitions_for(kind: BuiltinKind) -> Vec<ToolDefinition> {
         .collect()
 }
 
-/// Plugin-side handler for a bundled tool set.
-pub struct BuiltinHandler {
-    kind: BuiltinKind,
+struct ToolPluginHandler {
+    plugin_id: &'static str,
     digest: String,
-}
-
-impl BuiltinHandler {
-    #[must_use]
-    pub fn new(kind: BuiltinKind, digest: impl Into<String>) -> Self {
-        Self {
-            kind,
-            digest: digest.into(),
-        }
-    }
+    specs: fn() -> Vec<ToolSpecWire>,
+    execute: fn(&str, &Value) -> Result<Value, String>,
 }
 
 #[async_trait::async_trait]
-impl ToolHandler for BuiltinHandler {
+impl ToolHandler for ToolPluginHandler {
     fn plugin_id(&self) -> &str {
-        self.kind.plugin_id()
+        self.plugin_id
     }
     fn plugin_name(&self) -> &str {
-        self.kind.plugin_id()
+        self.plugin_id
     }
     fn digest(&self) -> &str {
         self.digest.as_str()
     }
     fn specs(&self) -> Vec<ToolSpecWire> {
-        builtin_specs(self.kind)
+        (self.specs)()
     }
     async fn call(&self, name: &str, args: Value) -> Result<Value, IpcError> {
-        BuiltinExecutor.execute(name, &args).map_err(IpcError::Call)
+        (self.execute)(name, &args).map_err(IpcError::Call)
     }
 }

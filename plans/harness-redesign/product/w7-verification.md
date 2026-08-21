@@ -22,7 +22,7 @@
 | Scripted | `ScriptedClassify` / `ScriptedTts` / `ScriptedAsr` / `ScriptedAi` / `ScriptedMcp` |
 | Placeholder | `{ "available": false }` 等のプレースホルダ |
 | host API | テストがホスト API(`host.start` / `progress` / `complete` 等)を直接呼ぶ |
-| launcher | `BuiltinKind` ランチャー起動。本体はホスト lib |
+| launcher | `BuiltinKind` ランチャー起動。本体はホスト lib（現行バンドルは `run_tool_plugin`） |
 | store | 実ストア / スキーマ / 監査 / マイグレーション |
 | HTTP | 実 HTTP/WS プロセス |
 | process | アウトプロセスプラグインまたはサンドボックス |
@@ -145,7 +145,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-908 | `audit_hash_chain_verifies` | store | はい |
 | P-909 | `spawned_core_offline_conversation_and_rss` | Echo | いいえ |
 | P-910 | `observe_spans_do_not_leak_content` | store | はい |
-| P-1001 | `out_of_process_utility_registers_and_runs` | launcher | いいえ(D-10。`BuiltinKind` ランチャー) |
+| P-1001 | `out_of_process_utility_registers_and_runs` | process | はい |
 | P-1002 | `apply_profile_unloads_removed_rows_and_keeps_uid` | process | はい |
 | P-1003 | `EchoModel` 経路 (`text_turn_is_logged_and_projected`) | Echo | いいえ |
 | P-1004 | `python_dummy_registers_in_registry_and_executes` | process | はい |

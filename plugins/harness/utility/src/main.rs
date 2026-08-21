@@ -1,6 +1,7 @@
-//! Bundled `tool.utility` plugin (core + tool subprotocols).
+//! Bundled `tool.utility` plugin: hash, time, calc, random, text.
 
-use ene_plugin_ipc::BuiltinKind;
+mod logic;
+
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -10,7 +11,9 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    if let Err(err) = ene_registry::run_plugin(BuiltinKind::Utility).await {
+    if let Err(err) =
+        ene_registry::run_tool_plugin("tool.utility", logic::specs, logic::execute).await
+    {
         tracing::error!(error = %err, plugin = "tool.utility", "fatal");
         std::process::exit(1);
     }

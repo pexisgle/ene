@@ -1,12 +1,12 @@
-use super::{arg_str, spec};
 use ene_plugin_ipc::ToolSpecWire;
+use ene_registry::{arg_str, spec};
 use serde_json::{Value, json};
 use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
 use url::Url;
 
-pub(super) fn specs() -> Vec<ToolSpecWire> {
+pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
         spec(
             "web.fetch",
@@ -23,7 +23,7 @@ pub(super) fn specs() -> Vec<ToolSpecWire> {
     ]
 }
 
-pub(super) fn execute(name: &str, args: &Value) -> Result<Value, String> {
+pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "web.fetch" => fetch(arg_str(args, "url")?),
         "web.search" => search(arg_str(args, "query")?),

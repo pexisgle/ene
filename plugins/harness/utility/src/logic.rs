@@ -1,9 +1,9 @@
-use super::spec;
 use ene_plugin_ipc::ToolSpecWire;
+use ene_registry::{arg_str, spec};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-pub(super) fn specs() -> Vec<ToolSpecWire> {
+pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
         spec(
             "utility.hash",
@@ -38,9 +38,9 @@ pub(super) fn specs() -> Vec<ToolSpecWire> {
     ]
 }
 
-pub(super) fn execute(name: &str, args: &Value) -> Result<Value, String> {
+pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "utility.hash" => hash_text(super::arg_str(args, "text")?, "blake3"),
+        "utility.hash" => hash_text(arg_str(args, "text")?, "blake3"),
         "utility.time" => Ok(time(args)),
         "utility.calc" => calc(args),
         "utility.random" => random(args),
@@ -77,14 +77,14 @@ fn calc(args: &Value) -> Result<Value, String> {
         .get("value")
         .and_then(Value::as_f64)
         .ok_or_else(|| "utility.calc needs expr or value+from+to".to_owned())?;
-    let from = super::arg_str(args, "from")?;
-    let to = super::arg_str(args, "to")?;
+    let from = arg_str(args, "from")?;
+    let to = arg_str(args, "to")?;
     let converted = convert_unit(value, from, to)?;
     Ok(json!({ "value": converted, "text": format_number(converted), "from": from, "to": to }))
 }
 
 fn random(args: &Value) -> Result<Value, String> {
-    let kind = super::arg_str(args, "kind")?;
+    let kind = arg_str(args, "kind")?;
     match kind {
         "uuid" => Ok(json!({ "uuid": uuid::Uuid::now_v7().to_string() })),
         "number" => {
@@ -119,8 +119,8 @@ fn random(args: &Value) -> Result<Value, String> {
 }
 
 fn text(args: &Value) -> Result<Value, String> {
-    let op = super::arg_str(args, "op")?;
-    let text = super::arg_str(args, "text")?;
+    let op = arg_str(args, "op")?;
+    let text = arg_str(args, "text")?;
     match op {
         "hash" => hash_text(
             text,
@@ -141,7 +141,7 @@ fn text(args: &Value) -> Result<Value, String> {
                 .unwrap_or("base64"),
         ),
         "regex" => {
-            let pattern = super::arg_str(args, "pattern")?;
+            let pattern = arg_str(args, "pattern")?;
             let re = regex::Regex::new(pattern).map_err(|err| err.to_string())?;
             if let Some(replace) = args.get("replace").and_then(Value::as_str) {
                 Ok(json!({ "text": re.replace_all(text, replace).into_owned() }))

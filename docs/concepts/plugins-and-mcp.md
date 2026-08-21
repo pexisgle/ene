@@ -6,7 +6,8 @@ and registers tools in `ene-registry`. Harness functions that touch companion
 state stay in-process and still go through the same registry pipeline.
 
 Built-in tools live under `plugins/harness/`: `fs`, `exec`, `web`, `utility`,
-`app`. `exec` is not part of `fs`. See [Built-in tools](../guides/tools/builtin-tools.md)
+`app`. Each binary owns its `specs` / `execute` and speaks the same tool IPC as
+a third-party plugin. `exec` is not part of `fs`. See [Built-in tools](../guides/tools/builtin-tools.md)
 and [Write a tool](../guides/tools/write-a-tool.md).
 
 MCP servers are not vendored. Each handwritten `mcp.json` row becomes a

@@ -1,8 +1,13 @@
-mod app;
-mod exec;
-mod fs;
-mod utility;
-mod web;
+#[path = "../../../../plugins/harness/app/src/logic.rs"]
+pub(crate) mod app;
+#[path = "../../../../plugins/harness/exec/src/logic.rs"]
+pub(crate) mod exec;
+#[path = "../../../../plugins/harness/fs/src/logic.rs"]
+pub(crate) mod fs;
+#[path = "../../../../plugins/harness/utility/src/logic.rs"]
+pub(crate) mod utility;
+#[path = "../../../../plugins/harness/web/src/logic.rs"]
+pub(crate) mod web;
 
 use ene_plugin_ipc::{BuiltinKind, ToolSpecWire};
 use serde_json::{Value, json};
@@ -25,7 +30,7 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
         "fs.read" | "fs.write" | "fs.edit" | "fs.list" | "fs.search" | "fs.patch" | "fs.undo" => {
             fs::execute(name, args)
         }
-        "exec.run" => exec::execute(args),
+        "exec.run" => exec::execute(name, args),
         "web.fetch" | "web.search" => web::execute(name, args),
         "app.screenshot" | "app.window_list" | "app.active_window" | "app.clipboard_get"
         | "app.clipboard_set" | "app.click" | "app.type" | "app.key" => app::execute(name, args),
@@ -33,7 +38,9 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     }
 }
 
-pub(crate) fn spec(
+/// JSON schema helper shared by bundled tool plugins.
+#[must_use]
+pub fn spec(
     name: &str,
     description: &str,
     parameters: Value,
@@ -48,7 +55,12 @@ pub(crate) fn spec(
     }
 }
 
-pub(crate) fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+/// Required string argument, or `"missing {key}"`.
+///
+/// # Errors
+///
+/// Returns `Err` when `key` is absent or not a string.
+pub fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("missing {key}"))
