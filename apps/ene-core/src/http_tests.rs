@@ -1740,6 +1740,51 @@ async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
 }
 
 #[tokio::test]
+async fn listen_feeds_duplex_machine_without_stt() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    let pcm: Vec<f32> = (0..1_600).map(|i| ((i as f32) * 0.2).sin() * 0.3).collect();
+    let empty = client
+        .listen(
+            &session.id,
+            &ene_api::ListenRequest {
+                pcm,
+                sample_rate: 16_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(empty.turn_id.is_none());
+    assert_eq!(
+        core.with_voice(|voice| voice.state()),
+        ene_body::DuplexState::Listening
+    );
+    let closed = client
+        .listen(
+            &session.id,
+            &ene_api::ListenRequest {
+                pcm: vec![0.0; 160],
+                sample_rate: 16_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(closed.turn_id.is_none());
+    assert_eq!(
+        core.with_voice(|voice| voice.state()),
+        ene_body::DuplexState::Idle
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn plugins_profile_minimal_unloads_non_utility_harness() {
     let (_dir, client, core, server) = boot_server().await;
     let settings = client.settings().await.unwrap();
