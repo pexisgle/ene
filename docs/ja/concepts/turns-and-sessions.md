@@ -33,6 +33,12 @@
 5. イベントは `ene-session` にコミット（モデル可視 = ログ）。
 6. ライブイベントは `surface` または `detail` の深さで送出。
 
+生成の前に、共有 `LoopHooks` の waterfall として `agent/pre-step` が走ります。
+ホストと `ene-fiber` はガード付きで購読し、ファイバー unload で外れます。
+`next` を呼ばないリスナーはターンを書き換え／停止できます。`emit` は通知のみです。
+アウトプロセスプラグインに生の intercept IPC は渡しません。承認や quiet hours を
+ツール副プロトコルから迂回できてしまうためです。
+
 シグネチャは `ene-kernel` と `ene-session` の rustdoc にあります。
 
 ## イベント

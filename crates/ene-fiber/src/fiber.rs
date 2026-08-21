@@ -57,6 +57,7 @@ pub enum Effect {
     BrokerGrant { op: String },
     SpawnProcess { pid: u32 },
     BindSeam { name: String },
+    ListenWaterfall { point: String },
 }
 
 /// One profile-row activation.

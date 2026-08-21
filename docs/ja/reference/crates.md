@@ -22,7 +22,7 @@
 | `ene-body` | パフォーマンスキュー、感情→表情、全二重音声 | config, session |
 | `ene-work` | 委譲、ジョブ、スケジュール、skill、MCP | companion, kernel, plane, registry, session |
 | `ene-plane` | 承認 plane、hash chain 監査、資格情報ボールト | config |
-| `ene-fiber` | プラグインファイバー合成: 巻き戻し可能な effect、プロファイル reconcile、サンドボックス spawn | plugin-ipc, registry, sandbox |
+| `ene-fiber` | プラグインファイバー合成: 巻き戻し可能な effect、プロファイル reconcile、サンドボックス spawn | plugin-ipc, registry, sandbox, kernel |
 | `ene-registry` | 統一ツールレジストリ: side_effects フィルタ、deny-by-default パイプライン | plugin-ipc, plane |
 | `ene-plugin-ipc` | 分割 IPC: core / tool 副プロトコルの length-prefixed MessagePack | （内部依存なし） |
 | `ene-api` | HTTP/WS 型、OpenAPI、Rust クライアント | （内部依存なし） |
@@ -36,6 +36,7 @@
 ```text
 ene-session     ↛ kernel, companion, work, daemon
 ene-kernel      ↛ companion, work, fiber, daemon
+ene-fiber       → kernel（共有 `LoopHooks` のみ。kernel ↛ fiber は維持）
 ene-companion   ↛ daemon, fiber
 ene-plugin-ipc  ↛ business logic
 ene-card        → ene-config のみ（逆辺は禁止）

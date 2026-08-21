@@ -5,6 +5,10 @@
 仕様を `ene-registry` に載せます。コンパニオン状態に触るハーネス機能は
 ホスト内のまま、同じレジストリパイプラインを通ります。
 
+プラグイン監督はカーネルの waterfall（`agent/pre-step`、`agent/request`）を
+巻き戻し可能なホスト effect として購読できます。unload は LIFO でリスナーを
+外します。サードパーティのツール IPC からは登録できません。
+
 同梱ツールは `plugins/tool/` にあります: `fs`、`exec`、`web`、`utility`、
 `app`。
 `exec` は `fs` に含めません。[同梱ツール](../guides/tools/builtin-tools.md) と

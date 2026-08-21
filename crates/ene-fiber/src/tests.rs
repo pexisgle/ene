@@ -56,6 +56,27 @@ async fn unload_removes_tools_and_grants() {
     assert!(sup.fiber("r-util").is_none());
 }
 
+#[tokio::test]
+async fn fiber_pre_step_listen_unregisters_on_unload() {
+    let (_dir, sup) = supervisor();
+    let hooks = ene_kernel::LoopHooks::new();
+    sup.set_loop_hooks(hooks.clone());
+    sup.activate(&row("r-util", "tool.utility", &[])).unwrap();
+    sup.listen_pre_step("r-util", |mut event, _next| {
+        event.proceed = false;
+        event.note = "fiber intercept".into();
+        event
+    })
+    .unwrap();
+    let blocked = hooks.pre_step.run(ene_kernel::HookEvent::default());
+    assert!(!blocked.proceed);
+    assert_eq!(blocked.note, "fiber intercept");
+    sup.unload("r-util").await;
+    let after = hooks.pre_step.run(ene_kernel::HookEvent::default());
+    assert!(after.proceed);
+    assert!(after.note.is_empty());
+}
+
 #[test]
 fn loading_failure_does_not_leave_half_registration() {
     let (_dir, sup) = supervisor();

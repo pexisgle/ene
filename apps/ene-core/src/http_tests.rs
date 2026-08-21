@@ -665,6 +665,46 @@ async fn hybrid_recall_falls_back_without_embedding_and_ranks_with_vector() {
 }
 
 #[tokio::test]
+async fn plugin_supervisor_waterfall_stops_a_turn() {
+    let (_dir, client, core, server) = boot_server().await;
+    let row = core
+        .supervisor()
+        .active_row_ids()
+        .into_iter()
+        .next()
+        .expect("plugin profile loads at least one fiber");
+    core.supervisor()
+        .listen_pre_step(&row, |mut event, _next| {
+            event.proceed = false;
+            event.note = "blocked by fiber".into();
+            event
+        })
+        .unwrap();
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_history_contains(&client, &session.id, "blocked by fiber").await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn export_default_omits_inner() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
