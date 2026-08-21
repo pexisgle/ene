@@ -1835,6 +1835,7 @@ dependencies = [
  "chrono",
  "cpal 0.18.2",
  "crossbeam-channel",
+ "directories",
  "egui",
  "egui-wgpu",
  "egui-winit",
