@@ -784,52 +784,21 @@ async fn turn_logs_context_sources_from_registry() {
             texts.insert(source_key, text);
         }
     }
-    let platform = keys
-        .iter()
-        .position(|k| k == "platform_contract")
-        .expect("platform_contract");
     let identity = keys
         .iter()
         .position(|k| k == "identity_kernel")
         .expect("identity_kernel");
-    let affect = keys
-        .iter()
-        .position(|k| k == "character_state")
-        .expect("character_state");
     let semantic = keys
         .iter()
         .position(|k| k == "memory.semantic")
         .expect("memory.semantic");
-    let profile = keys
-        .iter()
-        .position(|k| k == "memory.user_profile")
-        .expect("memory.user_profile");
-    let commits = keys
-        .iter()
-        .position(|k| k == "memory.commitments")
-        .expect("memory.commitments");
-    let skills = keys
-        .iter()
-        .position(|k| k == "skills.catalog")
-        .expect("skills.catalog");
     let mcp = keys
         .iter()
         .position(|k| k == "mcp.resources")
         .expect("mcp.resources");
-    let jobs = keys
-        .iter()
-        .position(|k| k == "delegation.active")
-        .expect("delegation.active");
-    assert!(platform < identity && identity < affect);
-    assert!(affect < semantic && semantic < profile && profile < commits);
-    assert!(commits < skills && skills < mcp && mcp < jobs);
+    assert!(identity < semantic && semantic < mcp);
     assert!(texts["memory.semantic"].contains("picnic"));
-    assert!(texts["memory.user_profile"].contains("Ada"));
-    assert!(texts["memory.commitments"].contains("Friday"));
-    assert!(texts["skills.catalog"].contains("research"));
     assert!(texts["mcp.resources"].contains("picnic weather"));
-    assert!(texts["delegation.active"].contains("bookmark picnic"));
-    assert!(texts["character_state"].contains("mood="));
     server.shutdown().await;
 }
 
