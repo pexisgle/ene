@@ -5,12 +5,12 @@ negotiates split `core` / `tool` / `provider` subprotocols (`ene-plugin-ipc`),
 and registers tools in `ene-registry`. Harness functions that touch companion
 state stay in-process and still go through the same registry pipeline.
 
-Built-in tools live under `plugins/harness/`: `fs`, `exec`, `web`, `utility`,
+Built-in tools live under `plugins/tool/`: `fs`, `exec`, `web`, `utility`,
 `app`. `exec` is not part of `fs`. See [Built-in tools](../guides/tools/builtin-tools.md)
 and [Write a tool](../guides/tools/write-a-tool.md).
 
 MCP servers are not vendored. Each handwritten `mcp.json` row becomes a
-`mcp.<id>` fiber running `ene-harness-mcp` (stdio or Streamable HTTP) on the
+`mcp.<id>` fiber running `ene-tool-mcp` (stdio or Streamable HTTP) on the
 same pipeline as in-tree tools. The Connectors page edits that document. A
 marketplace picker for popular servers is a successor milestone.
 

@@ -1,5 +1,5 @@
 [package]
-name = "ene-harness-mcp"
+name = "ene-tool-mcp"
 version.workspace = true
 edition.workspace = true
 description = "MCP stdio bridge plugin (handwritten profile rows, P-603)"
@@ -8,7 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "ene-harness-mcp"
+name = "ene-tool-mcp"
 path = "src/main.rs"
 
 [dependencies]

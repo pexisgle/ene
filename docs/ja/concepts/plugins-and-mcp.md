@@ -5,12 +5,12 @@
 仕様を `ene-registry` に載せます。コンパニオン状態に触るハーネス機能は
 ホスト内のまま、同じレジストリパイプラインを通ります。
 
-同梱ツールは `plugins/harness/` にあります: `fs`、`exec`、`web`、`utility`、
+同梱ツールは `plugins/tool/` にあります: `fs`、`exec`、`web`、`utility`、
 `app`。
 `exec` は `fs` に含めません。[同梱ツール](../guides/tools/builtin-tools.md) と
 [ツールを書く](../guides/tools/write-a-tool.md) を見てください。
 
-MCP サーバーはベンダーしません。手書きの `mcp.json` の各行は `ene-harness-mcp`
+MCP サーバーはベンダーしません。手書きの `mcp.json` の各行は `ene-tool-mcp`
 （stdio または Streamable HTTP）の `mcp.<id>` ファイバーになり、内製ツールと
 同じパイプラインに載ります。コネクターページがそのドキュメントを編集します。
 代表的なサーバーを選ぶマーケット UI は後継マイルストーンです。

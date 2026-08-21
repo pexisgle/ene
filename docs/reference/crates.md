@@ -49,7 +49,7 @@ from `ene-stage` production code (`ene-ctl` tests may spawn the daemon).
 
 ## Plugin binaries
 
-### Harness tools (`plugins/harness/*`)
+### Tool plugins (`plugins/tool/*`)
 
 `fs`, `exec`, `web`, `utility` — see [Built-in tools](../guides/tools/builtin-tools.md).
 `exec` is a separate plugin from `fs` (D-24).

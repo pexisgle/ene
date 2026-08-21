@@ -1,14 +1,14 @@
 [package]
-name = "ene-harness-fs"
+name = "ene-tool-utility"
 version.workspace = true
 edition.workspace = true
-description = "Harness filesystem plugin (exec is a separate plugin)"
+description = "Utility tool plugin: hash and time over split IPC"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "ene-harness-fs"
+name = "ene-tool-utility"
 path = "src/main.rs"
 
 [dependencies]

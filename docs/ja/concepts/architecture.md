@@ -16,7 +16,7 @@ Web         ─┘                              │
                                             ├── ene-session / ene-kernel
                                             ├── ene-companion / ene-body / ene-work
                                             ├── ene-plane (承認 + 監査 + ボールト)
-                                            └── ene-fiber ──► plugins/harness/*
+                                            └── ene-fiber ──► plugins/tool/*
 ```
 
 - **ホストは1つ。** 本体の状態は `ene-core` が持ちます。クライアントはカーネルを埋め込みません。

@@ -107,7 +107,7 @@ async fn reenable_allocates_a_new_uid() {
 
 #[test]
 fn discover_plugin_bin_is_optional() {
-    drop(crate::discover_plugin_bin("ene-harness-utility"));
+    drop(crate::discover_plugin_bin("ene-tool-utility"));
 }
 
 #[tokio::test]
@@ -496,23 +496,23 @@ fn sidecar_spawn_health_and_kill_on_loopback() {
 #[test]
 fn exe_plugin_candidates_include_plugins_dir() {
     let dir = PathBuf::from("/opt/ene");
-    let found = crate::spawn::exe_plugin_candidates(&dir, "ene-harness-fs");
+    let found = crate::spawn::exe_plugin_candidates(&dir, "ene-tool-fs");
     #[cfg(windows)]
     assert_eq!(
         found,
         vec![
-            dir.join("ene-harness-fs"),
-            dir.join("ene-harness-fs.exe"),
-            dir.join("plugins").join("ene-harness-fs"),
-            dir.join("plugins").join("ene-harness-fs.exe"),
+            dir.join("ene-tool-fs"),
+            dir.join("ene-tool-fs.exe"),
+            dir.join("plugins").join("ene-tool-fs"),
+            dir.join("plugins").join("ene-tool-fs.exe"),
         ]
     );
     #[cfg(not(windows))]
     assert_eq!(
         found,
         vec![
-            dir.join("ene-harness-fs"),
-            dir.join("plugins").join("ene-harness-fs"),
+            dir.join("ene-tool-fs"),
+            dir.join("plugins").join("ene-tool-fs"),
         ]
     );
 }
@@ -520,7 +520,7 @@ fn exe_plugin_candidates_include_plugins_dir() {
 #[test]
 fn discover_plugin_executable_in_searches_home() {
     let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("ene-harness-utility");
+    let binary = dir.path().join("ene-tool-utility");
     std::fs::write(&binary, b"#!/bin/true\n").unwrap();
     let found = crate::spawn::discover_plugin_executable_in("tool.utility", Some(dir.path()));
     assert_eq!(found.as_deref(), Some(binary.as_path()));

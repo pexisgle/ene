@@ -49,7 +49,7 @@ ene-api         ↛ daemon types
 
 ## プラグインバイナリ
 
-### ハーネスツール (`plugins/harness/*`)
+### ツールプラグイン (`plugins/tool/*`)
 
 `fs`、`exec`、`web`、`utility` — [同梱ツール](../guides/tools/builtin-tools.md)。
 `exec` は `fs` とは別プラグインです（D-24）。

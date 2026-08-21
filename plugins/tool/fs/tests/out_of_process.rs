@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_ene-harness-fs"))
+    PathBuf::from(env!("CARGO_BIN_EXE_ene-tool-fs"))
 }
 
 #[tokio::test]

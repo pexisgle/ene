@@ -14,12 +14,12 @@ TARGET_DIR="${2:-target/release}"
 DIST_DIR="${3:-dist}"
 
 PLUGINS=(
-  ene-harness-fs
-  ene-harness-exec
-  ene-harness-web
-  ene-harness-utility
-  ene-harness-app
-  ene-harness-mcp
+  ene-tool-fs
+  ene-tool-exec
+  ene-tool-web
+  ene-tool-utility
+  ene-tool-app
+  ene-tool-mcp
   ene-provider-openai-compat
   ene-provider-gguf
   ene-provider-anthropic

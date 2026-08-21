@@ -1,13 +1,13 @@
 # ツールを書く
 
-ハーネスのツールは `plugins/harness/<name>` のアウトプロセスバイナリです。
+同梱ツールは `plugins/tool/<name>` のアウトプロセスバイナリです。
 `ene-plugin-ipc` の分割 IPC を話し、`ene_registry::run_plugin` で登録します。
 
 ```sh
-cargo new --bin plugins/harness/my-tool
+cargo new --bin plugins/tool/my-tool
 ```
 
-雛形は `plugins/harness/fs` です。`[[bin]]` のみ、`[lib]` なし、
+雛形は `plugins/tool/fs` です。`[[bin]]` のみ、`[lib]` なし、
 `ene-plugin-ipc` + `ene-registry`、`main` から `ene_registry::run_plugin` を呼びます。
 アクション名は名前空間付き (`my_tool.echo`) にし、`side_effects` を宣言します。
 `side_effects` が空であることが、表層レーンに載る条件です。

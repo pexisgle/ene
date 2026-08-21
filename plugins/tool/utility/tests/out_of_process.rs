@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_ene-harness-utility"))
+    PathBuf::from(env!("CARGO_BIN_EXE_ene-tool-utility"))
 }
 
 fn row(id: &str) -> ProfileRow {

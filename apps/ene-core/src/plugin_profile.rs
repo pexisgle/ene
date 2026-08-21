@@ -150,7 +150,7 @@ fn provider_row(task: &str, binding: &TaskBinding) -> Option<ProfileRow> {
 fn mcp_rows(data_dir: &Path, servers: &[McpServer], home: &Path) -> Vec<ProfileRow> {
     if discover_plugin_executable_in("mcp.bridge", Some(home)).is_none() {
         if servers.iter().any(|server| server.enabled) {
-            tracing::warn!("ene-harness-mcp missing; handwritten MCP rows skipped");
+            tracing::warn!("ene-tool-mcp missing; handwritten MCP rows skipped");
         }
         return Vec::new();
     }
