@@ -118,8 +118,10 @@ fn decode_wav(bytes: &[u8]) -> Result<TtsAudio, IpcError> {
     let pcm_bytes = bytes.get(data_offset..).unwrap_or(&[]);
     let pcm = if bits == 16 {
         pcm_bytes
-            .chunks_exact(2)
-            .map(|chunk| f32::from(i16::from_le_bytes([chunk[0], chunk[1]])) / 32768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| f32::from(i16::from_le_bytes(*chunk)) / 32768.0)
             .collect()
     } else {
         return Err(IpcError::Call(format!("unsupported WAV bits={bits}")));

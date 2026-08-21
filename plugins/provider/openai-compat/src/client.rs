@@ -486,9 +486,11 @@ fn u64_to_u32(value: u64) -> u32 {
 
 fn pcm16le_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+            let sample = i16::from_le_bytes(*chunk);
             f32::from(sample) / 32768.0
         })
         .collect()

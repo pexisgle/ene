@@ -159,8 +159,7 @@ pub fn looks_like_package_zip(bytes: &[u8]) -> bool {
         return false;
     }
     ZipArchive::new(Cursor::new(bytes))
-        .ok()
-        .is_some_and(|mut archive| archive.by_name("manifest.toml").is_ok())
+        .is_ok_and(|mut archive| archive.by_name("manifest.toml").is_ok())
 }
 
 /// Avatar file inside an installed package (`body.toml` `avatar`, else first `.vrm`).
