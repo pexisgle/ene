@@ -1216,9 +1216,8 @@ impl StageApp {
         if let Some(chat) = self.chat.as_mut() {
             let surface = &mut self.surface;
             let mic = self.mic_active;
-            let theme = self.local_settings.theme.clone();
-            if let Err(err) = chat.paint(gpu, |ui| {
-                ui.ctx().set_visuals(theme_visuals(&theme));
+            let theme = self.local_settings.theme.as_str();
+            if let Err(err) = chat.paint(gpu, Some(theme), |ui| {
                 surface::show_chat(ui, surface, mic);
             }) {
                 tracing::debug!(error = %err, "chat paint failed");
@@ -1232,8 +1231,8 @@ impl StageApp {
             let results = Arc::clone(&self.async_results);
             let soul_id = self.session.soul_id().to_owned();
             self.session.session_id().clone_into(&mut detail.session_id);
-            let paint = detail_win.paint(gpu, |ui| {
-                ui.ctx().set_visuals(theme_visuals(&local.theme));
+            let theme = local.theme.clone();
+            let paint = detail_win.paint(gpu, Some(theme.as_str()), |ui| {
                 detail::show(
                     ui,
                     &mut detail,
@@ -1253,7 +1252,7 @@ impl StageApp {
         if let Some(caption) = self.caption.as_mut() {
             let surface = &self.surface;
             let font = self.settings.caption_font_size;
-            if let Err(err) = caption.paint(gpu, |ui| {
+            if let Err(err) = caption.paint(gpu, None, |ui| {
                 surface::show_caption(ui.ctx(), surface, font);
             }) {
                 tracing::debug!(error = %err, "caption paint failed");
@@ -1261,7 +1260,7 @@ impl StageApp {
         }
         if let Some(spotlight) = self.spotlight.as_mut() {
             let mut action = None;
-            if let Err(err) = spotlight.paint(gpu, |ui| {
+            if let Err(err) = spotlight.paint(gpu, None, |ui| {
                 action = surface::show_spotlight(ui.ctx(), &mut self.surface);
             }) {
                 tracing::debug!(error = %err, "spotlight paint failed");
@@ -1492,19 +1491,5 @@ fn map_turn_err(err: String) -> String {
         i18n::fl("chat-no-active-turn")
     } else {
         err
-    }
-}
-
-fn theme_visuals(theme: &str) -> egui::Visuals {
-    match theme {
-        "light" => egui::Visuals::light(),
-        "dark" => egui::Visuals::dark(),
-        _ => {
-            if cfg!(target_os = "windows") {
-                egui::Visuals::light()
-            } else {
-                egui::Visuals::dark()
-            }
-        }
     }
 }

@@ -36,7 +36,9 @@ playable companions are souls (`GET /souls` / `GET /stage` occupants).
 are conversion inputs only — there is no CCv3 editor.
 
 Local `desktop.*` keys (theme, language, mic, captions, beat sync, graphics
-quality, core lifetime, overlay placement) stay on the client. Core PATCH keys
+quality, core lifetime, overlay placement) stay on the client. Theme (`light` /
+`dark` / `system`) applies to both the wgpu window clear color and egui widget
+colors, so light mode keeps readable contrast. Core PATCH keys
 are `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins`.
 Plugin enablement is `plugins.profile` (`desktop` / `minimal` / `headless`),
 not a `plugins.list` map. API keys stay in the vault. Attach to an
