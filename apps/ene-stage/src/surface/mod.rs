@@ -115,6 +115,7 @@ impl SurfaceUiState {
     pub(crate) fn on_turn_ended(&mut self) {
         self.streaming_text.clear();
         self.turn_active = false;
+        self.dismiss_caption();
     }
 
     pub(crate) fn dismiss_caption(&mut self) {
@@ -187,16 +188,17 @@ mod tests {
     }
 
     #[test]
-    fn speech_delta_stays_visible_after_turn_end() {
+    fn speech_caption_closes_when_the_turn_ends() {
         let mut state = SurfaceUiState::default();
         state.apply_text_delta("Hello from the companion.", true);
         assert!(state.caption_visible());
         assert_eq!(state.caption, "Hello from the companion.");
         state.on_turn_ended();
-        assert!(state.caption_visible());
-        assert_eq!(state.caption, "Hello from the companion.");
+        assert!(!state.caption_visible());
+        assert!(state.caption.is_empty());
         assert!(state.streaming_text.is_empty());
         state.apply_text_delta("Next turn.", true);
+        assert!(state.caption_visible());
         assert_eq!(state.caption, "Next turn.");
     }
 }
