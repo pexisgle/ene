@@ -103,6 +103,115 @@ pub fn catalog(home: &Path, enabled: &[String]) -> Result<Vec<(String, String)>,
     Ok(out)
 }
 
+/// Catalog as a System Context block (`skills.catalog`). Empty when nothing is installed.
+#[must_use]
+pub fn skill_catalog_blocks(home: &Path, enabled: &[String]) -> Vec<(String, String)> {
+    let Ok(rows) = catalog(home, enabled) else {
+        return Vec::new();
+    };
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut text = String::from(
+        "Installed skills (name — description). Call skill.load for a matching body.\n",
+    );
+    for (name, description) in rows {
+        text.push_str("- ");
+        text.push_str(&name);
+        text.push_str(": ");
+        text.push_str(&description);
+        text.push('\n');
+    }
+    vec![("skills.catalog".to_owned(), text)]
+}
+
+/// Skill bodies whose catalog text matches `query` (`skills.active`).
+#[must_use]
+pub fn skill_active_blocks(home: &Path, enabled: &[String], query: &str) -> Vec<(String, String)> {
+    let Ok(matched) = match_skills(home, enabled, query) else {
+        return Vec::new();
+    };
+    if matched.is_empty() {
+        return Vec::new();
+    }
+    let mut text = String::from("Active skills for this request:\n");
+    for meta in matched {
+        text.push_str("\n## ");
+        text.push_str(&meta.name);
+        text.push('\n');
+        text.push_str(&meta.body);
+        text.push('\n');
+    }
+    vec![("skills.active".to_owned(), text)]
+}
+
+/// Catalog plus matching bodies, for job briefings.
+#[must_use]
+pub fn skill_context_lines(home: &Path, enabled: &[String], query: &str) -> Vec<(String, String)> {
+    let mut out = skill_catalog_blocks(home, enabled);
+    out.extend(skill_active_blocks(home, enabled, query));
+    out
+}
+
+pub fn match_skills(
+    home: &Path,
+    enabled: &[String],
+    query: &str,
+) -> Result<Vec<SkillMeta>, WorkError> {
+    let mut out = Vec::new();
+    for (name, _) in catalog(home, enabled)? {
+        let meta = load_skill(home, &name)?;
+        if skill_matches(&meta, query) {
+            out.push(meta);
+        }
+    }
+    Ok(out)
+}
+
+#[must_use]
+pub fn skill_matches(meta: &SkillMeta, query: &str) -> bool {
+    let q = query.to_lowercase();
+    if q.trim().is_empty() {
+        return false;
+    }
+    let name = meta.name.to_lowercase();
+    let desc = meta.description.to_lowercase();
+    if !name.is_empty() && (q.contains(&name) || name.contains(q.trim())) {
+        return true;
+    }
+    for token in tokens(&name).chain(tokens(&desc)) {
+        if token.chars().count() >= 2 && q.contains(&token) {
+            return true;
+        }
+    }
+    for token in tokens(&q) {
+        if token.chars().count() >= 2 && (name.contains(&token) || desc.contains(&token)) {
+            return true;
+        }
+    }
+    let bookmarkish = ["しおり", "bookmark", "itinerary", "まとめて"];
+    let skill_is_bookmark = ["bookmark", "travel", "しおり", "itinerary"]
+        .iter()
+        .any(|key| name.contains(key) || desc.contains(key));
+    skill_is_bookmark && bookmarkish.iter().any(|key| q.contains(key))
+}
+
+pub fn read_skill_file(home: &Path, name: &str, rel: &str) -> Result<String, WorkError> {
+    let root = home.join(name);
+    if !root.is_dir() {
+        return Err(WorkError::UnknownSkill(name.to_owned()));
+    }
+    let confined = ene_registry::confine_tool_path(&root, Path::new(rel), false)
+        .map_err(|err| WorkError::Skill(err.to_string()))?;
+    fs::read_to_string(confined).map_err(WorkError::from)
+}
+
+fn tokens(text: &str) -> impl Iterator<Item = String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+}
+
 fn copy_dir(src: &Path, dest: &Path) -> Result<(), WorkError> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {

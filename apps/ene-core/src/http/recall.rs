@@ -49,6 +49,7 @@ impl TurnPrefetch for RecallPrefetch {
         if user_text.trim().is_empty() {
             return out;
         }
+        out.extend(skill_active_lines(&core, soul, user_text));
         let query_vec = embed_query(&core, user_text).await;
         let hits = match core
             .companion()
@@ -93,6 +94,17 @@ fn persona_from_package(package_dir: &std::path::Path) -> Option<String> {
     } else {
         Some(text.to_owned())
     }
+}
+
+fn skill_active_lines(core: &CoreDaemon, soul: SoulId, user_text: &str) -> Vec<(String, String)> {
+    let enabled = core
+        .companions()
+        .get_soul(soul)
+        .ok()
+        .flatten()
+        .map(|row| row.skill_refs)
+        .unwrap_or_default();
+    ene_work::skill_active_blocks(&core.data_dir().join("skills"), &enabled, user_text)
 }
 
 fn mcp_context_lines(workspace: &std::path::Path) -> Vec<(String, String)> {

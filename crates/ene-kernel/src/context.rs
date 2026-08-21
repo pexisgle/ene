@@ -45,6 +45,16 @@ impl ContextRegistry {
         }
     }
 
+    /// Replace or append a System Context block (skill catalog, host extras).
+    pub fn insert(&mut self, key: impl Into<String>, text: String) {
+        let key = key.into();
+        self.sources.retain(|source| source.key != key);
+        self.sources.push(ContextSource {
+            key,
+            renderer: Box::new(move || text.clone()),
+        });
+    }
+
     #[must_use]
     pub fn assemble(&self) -> Vec<(String, String)> {
         self.sources
@@ -94,5 +104,27 @@ mod tests {
             .map_or("", |(_, text)| text.as_str());
         assert!(!identity.contains("Ene"));
         assert!(identity.contains("companion"));
+    }
+
+    #[test]
+    fn insert_replaces_skill_catalog_source() {
+        let mut registry = ContextRegistry::new();
+        registry.insert(
+            "skills.catalog",
+            "Installed skills:\n- travel: trips".to_owned(),
+        );
+        registry.insert(
+            "skills.catalog",
+            "Installed skills:\n- briefing: mornings".to_owned(),
+        );
+        let assembled = registry.assemble();
+        let catalog = assembled
+            .iter()
+            .filter(|(key, _)| key == "skills.catalog")
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog[0].contains("briefing"));
+        assert!(!catalog[0].contains("travel"));
     }
 }

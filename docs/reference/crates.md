@@ -21,7 +21,7 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 | `ene-kernel` | Dialogue lane: prompt / steer / follow_up / abort / compact, visibility, observability | config, session |
 | `ene-companion` | Soul, affect, memory, inner channel, proactive speech, character packages | card, config, plane, registry, session |
 | `ene-body` | Performance queue, emotion-to-expression mapping, duplex voice | config, session |
-| `ene-work` | Delegation, jobs, schedules, skills, MCP bindings | companion, kernel, plane, registry, session |
+| `ene-work` | Delegation, jobs, schedules, skills (catalog/active context, bookmark workflow), MCP bindings | companion, kernel, plane, registry, session |
 | `ene-plane` | Approval plane, hash-chained audit log, credential vault | config |
 | `ene-fiber` | Plugin fiber composition: reversible effects, profile reconcile, sandbox spawn | plugin-ipc, registry, sandbox |
 | `ene-registry` | Unified tool registry: side_effects filter, deny-by-default pipeline | plugin-ipc, plane |

@@ -27,9 +27,13 @@
 
 1. `ene-companion` で想起と感情のティック。
 2. カーネルがセッションログからモデル可視プロンプトを構成。
+   インストール済み skill は `skills.catalog` として System Context に載る。
+   依頼に合う `SKILL.md` 本文は `skills.active` として注入される。
 3. 設定済みの会話モデルが、結び付けた `provider.*` プラグイン経由でテキストを
    ストリーム。
 4. 表層向けツールは `ene-registry` / `ene-plane` を通る。
+   しおり依頼（`workflow.bookmark`）は `web.search` があれば調査し、
+   Markdown を書いてジョブ成果物として交付する。
 5. イベントは `ene-session` にコミット（モデル可視 = ログ）。
 6. ライブイベントは `surface` または `detail` の深さで送出。
 

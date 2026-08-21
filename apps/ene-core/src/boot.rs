@@ -585,8 +585,20 @@ impl CoreDaemon {
             speech: self.speech.lock().clone(),
             finalizer: self.finalizer.lock().clone(),
             prefetch: self.prefetch.lock().clone(),
+            extra_context: skill_catalog_for_soul(self, soul),
         })
     }
+}
+
+fn skill_catalog_for_soul(core: &CoreDaemon, soul: SoulId) -> Vec<(String, String)> {
+    let enabled = core
+        .companions()
+        .get_soul(soul)
+        .ok()
+        .flatten()
+        .map(|row| row.skill_refs)
+        .unwrap_or_default();
+    ene_work::skill_catalog_blocks(&core.data_dir().join("skills"), &enabled)
 }
 
 fn seed_default_occupants(companions: &CompanionStore, stage: &Stage) -> Result<(), CoreError> {

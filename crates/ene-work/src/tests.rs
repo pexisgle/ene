@@ -5,7 +5,10 @@ use crate::host::{
 use crate::mcp::{McpProfile, McpTool, ScriptedMcp, register_mcp_tools};
 use crate::router::WorkSurfaceRouter;
 use crate::schedule::{QuietWindow, catch_up_missed, fire_due, reminder_report};
-use crate::skill::{catalog, install_skill_dir, load_skill, parse_skill_md};
+use crate::skill::{
+    catalog, install_skill_dir, load_skill, match_skills, parse_skill_md, read_skill_file,
+    skill_catalog_blocks,
+};
 use crate::store::WorkStore;
 use crate::tools::{register_work_tools, surface_shows_delegate};
 use crate::types::{
@@ -40,6 +43,8 @@ struct CaptureInvoke {
     last: parking_lot::Mutex<Option<Value>>,
 }
 
+struct SearchInvoke;
+
 #[async_trait]
 impl ToolInvoke for SpyInvoke {
     async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
@@ -53,6 +58,19 @@ impl ToolInvoke for CaptureInvoke {
     async fn invoke(&self, _name: &str, args: Value) -> Result<Value, String> {
         *self.last.lock() = Some(args);
         Ok(json!({ "ok": true }))
+    }
+}
+
+#[async_trait]
+impl ToolInvoke for SearchInvoke {
+    async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
+        Ok(json!({
+            "results": [{
+                "title": "Tokyo",
+                "snippet": "Shibuya crossing",
+                "url": "https://example.invalid/tokyo"
+            }]
+        }))
     }
 }
 
@@ -265,6 +283,7 @@ async fn lane_prompt_still_works_while_job_running() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         router: None,
     });
     lane.prompt("hello while working").await.unwrap();
@@ -338,6 +357,7 @@ async fn lane_auto_upgrade_does_not_execute_fs_write() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         router: Some(router as Arc<dyn SurfaceRouter>),
     });
     lane.prompt("please write a file").await.unwrap();
@@ -538,6 +558,90 @@ fn skill_install_and_load() {
     assert!(parse_skill_md("not a skill").is_err());
 }
 
+#[test]
+fn matching_skill_enters_catalog_and_active_context() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("references")).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: travel\ndescription: 旅行の計画・しおり作成を支援する\n---\n\n# Travel\npack light\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("references/checklist.md"), "- passport\n").unwrap();
+    let home = dir.path().join("skills");
+    install_skill_dir(&home, &src).unwrap();
+    let catalog = skill_catalog_blocks(&home, &[]);
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].0, "skills.catalog");
+    assert!(catalog[0].1.contains("travel"));
+    let matched = match_skills(&home, &[], "東京を調べてしおりにまとめて").unwrap();
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].name, "travel");
+    let hash = match_skills(&home, &[], "hash this file").unwrap();
+    assert!(hash.is_empty());
+    let checklist = read_skill_file(&home, "travel", "references/checklist.md").unwrap();
+    assert!(checklist.contains("passport"));
+    assert!(read_skill_file(&home, "travel", "../escape.md").is_err());
+}
+
+#[tokio::test]
+async fn bookmark_job_searches_and_applies_matching_skill() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: travel\ndescription: 旅行の計画・しおり作成を支援する\n---\n\nWrite an itinerary bookmark.\n",
+    )
+    .unwrap();
+    let home = dir.path().join("skills");
+    install_skill_dir(&home, &src).unwrap();
+    let job = public_start(&host, soul, "東京を調べてしおりにまとめて");
+    host.present_plan(job.id, "1. search\n2. write bookmark")
+        .unwrap();
+    host.approve_plan(job.id).unwrap();
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_with(
+        ToolDefinition {
+            name: "web.search".to_owned(),
+            description: "search".to_owned(),
+            parameters: json!({"type":"object"}),
+            output: json!({"type":"object"}),
+            side_effects: Vec::new(),
+            source: ToolSource::Harness {
+                name: "web".to_owned(),
+            },
+            timeout_ms: Some(1_000),
+            sensitivity: Sensitivity::None,
+        },
+        Arc::new(SearchInvoke) as Arc<dyn ToolInvoke>,
+    );
+    let (artifact, report) = crate::fill_bookmark_job(crate::BookmarkFill {
+        host: host.as_ref(),
+        soul_id: soul,
+        job_id: job.id,
+        theme: "東京を調べてしおりにまとめて",
+        skills_home: &home,
+        enabled: &[],
+        registry: Some(registry.as_ref()),
+    })
+    .await
+    .unwrap();
+    assert!(artifact.delivered);
+    assert!(report.speech.contains("bookmark ready"));
+    let content = std::fs::read_to_string(&artifact.path).unwrap();
+    assert!(content.contains("Shibuya crossing"));
+    assert!(content.contains("Write an itinerary bookmark"));
+    assert!(content.contains("https://example.invalid/tokyo"));
+}
+
 #[tokio::test]
 async fn mcp_handwritten_tools_execute_through_registry() {
     let registry = ToolRegistry::new();
@@ -641,7 +745,7 @@ async fn artifact_register_and_deliver() {
     host.present_plan(job.id, "1. write notes\n2. register artifact")
         .unwrap();
     host.approve_plan(job.id).unwrap();
-    let registry = ToolRegistry::new();
+    let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
     let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
@@ -698,7 +802,7 @@ async fn artifact_register_rejects_path_outside_workspace() {
     let job = public_start(&host, soul, "notes");
     host.present_plan(job.id, "1. write notes").unwrap();
     host.approve_plan(job.id).unwrap();
-    let registry = ToolRegistry::new();
+    let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
     let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
@@ -743,7 +847,7 @@ async fn artifact_register_requires_job_id() {
         dir.path().to_path_buf(),
     ));
     let soul = SoulId::new();
-    let registry = ToolRegistry::new();
+    let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, host, dir.path().join("skills"));
     let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
@@ -795,7 +899,7 @@ fn question_timeout_is_24h() {
 #[test]
 fn work_tools_cover_delegate_surface() {
     let (_dir, _store, host, _soul) = open_work();
-    let registry = ToolRegistry::new();
+    let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, host, PathBuf::from("/tmp/skills"));
     let names: Vec<String> = registry
         .schemas(Layer::Surface)
@@ -810,8 +914,21 @@ fn work_tools_cover_delegate_surface() {
     assert!(names.iter().any(|n| n == "delegate.start"));
     assert!(names.iter().any(|n| n == "delegate.approve_plan"));
     assert!(names.iter().any(|n| n == "skill.load"));
+    assert!(names.iter().any(|n| n == "skill.read"));
     assert!(!names.iter().any(|n| n == "delegation.send"));
     assert!(!names.iter().any(|n| n == "artifact.register"));
+    assert!(!names.iter().any(|n| n == "workflow.bookmark"));
+    let job_names: Vec<String> = registry
+        .schemas(Layer::Job)
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert!(job_names.iter().any(|n| n == "workflow.bookmark"));
 }
 
 #[test]
@@ -1187,7 +1304,7 @@ async fn mutating_work_waits_for_plan_approval() {
     host.approve_plan(job.id).unwrap();
     host.require_mutating_allowed(job.id).unwrap();
 
-    let registry = ToolRegistry::new();
+    let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), PathBuf::from("/tmp/skills"));
     let names: Vec<String> = registry
         .schemas(ene_registry::Layer::Surface)

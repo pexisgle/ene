@@ -26,9 +26,13 @@ running turn; `compact` compresses history.
 
 1. Recall and affect tick in `ene-companion`.
 2. The kernel composes the model-visible prompt from the session log.
+   Installed skills appear as the `skills.catalog` System Context source.
+   A matching `SKILL.md` body is injected as `skills.active`.
 3. The configured conversation model streams text through its bound `provider.*`
    plugin.
 4. Surface-eligible tools run through `ene-registry` / `ene-plane`.
+   A bookmark request (`workflow.bookmark`) researches with `web.search` when
+   that tool is registered, writes Markdown, and delivers it as a job artifact.
 5. Events are committed to `ene-session` (model-visible equals logged).
 6. Live events go out at `surface` or `detail` depth.
 
