@@ -871,7 +871,6 @@ fn sanitize_name(raw: &str) -> Option<String> {
 mod tests {
     use std::io::Write;
 
-    use base64::Engine as _;
     use flate2::Compression;
     use flate2::write::ZlibEncoder;
     use zip::write::SimpleFileOptions;
