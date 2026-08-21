@@ -1,7 +1,9 @@
-//! Plugin IPC: independent `core` / `tool` / `provider` subprotocols (D-22).
+//! Plugin IPC: independent `core` / `tool` / `provider` / `capability`
+//! subprotocols (D-22).
 //!
 //! Frames are 32-bit big-endian length + `MessagePack`. `id` is required on
-//! every request/response (never defaulted).
+//! every request/response (never defaulted). Bulk payloads leave the frame
+//! via `capability` grants and Unix `SCM_RIGHTS` (or a Windows handle grant).
 
 #![cfg_attr(
     test,
@@ -9,6 +11,14 @@
 )]
 #![deny(unsafe_code)]
 
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "SCM_RIGHTS sendmsg/recvmsg is the Unix bulk-FD path"
+)]
+mod bulk;
+#[cfg(not(unix))]
+mod bulk;
 mod dispatch;
 mod error;
 mod frame;
@@ -17,6 +27,10 @@ mod plugin;
 mod protocol;
 mod provider;
 
+#[cfg(not(unix))]
+pub use bulk::should_spill;
+#[cfg(unix)]
+pub use bulk::{recv_fds, send_fds, should_spill};
 pub use dispatch::{
     AssetsHandler, EmbedHandler, LlmHandler, ModelsHandler, PluginIdentity, ProviderHandlers,
     SttHandler, TtsHandler, serve_provider, serve_provider_from_env,
@@ -26,8 +40,10 @@ pub use frame::{MAX_FRAME_BYTES, frame_limit, read_frame, write_frame};
 pub use host::{HostConn, negotiate};
 pub use plugin::{BuiltinKind, ToolHandler, serve_from_env, serve_plugin};
 pub use protocol::{
-    CORE_VERSION, HostHello, Negotiated, ProtoId, ProtocolRanges, TOOL_VERSION, ToolCall,
-    ToolResult, ToolSpecWire, VersionRange,
+    ApprovalAnswer, ApprovalQuery, BulkRef, CAPABILITY_VERSION, CORE_VERSION, CapabilityDenied,
+    CapabilityGrant, CapabilityGranted, CapabilityRelease, CapabilityRequest,
+    DEFAULT_BULK_THRESHOLD_BYTES, FlowControl, HostHello, Negotiated, ProtoId, ProtocolRanges,
+    StreamOpen, StreamOpened, TOOL_VERSION, ToolCall, ToolResult, ToolSpecWire, VersionRange,
 };
 pub use provider::{
     AssetVersionView, AssetView, EmbedRequest, EmbedResult, InstallAssetRequest,
@@ -43,3 +59,5 @@ pub use provider::{
 mod tests;
 #[cfg(test)]
 mod tests_asset_version;
+#[cfg(test)]
+mod tests_capability;

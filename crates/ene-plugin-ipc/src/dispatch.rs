@@ -227,6 +227,38 @@ where
                 write_msg(&mut stream, &Message::DrainAck { id }, max_frame).await?;
                 return Ok(());
             }
+            Message::StreamOpen { id, body } => {
+                write_msg(
+                    &mut stream,
+                    &Message::StreamOpened {
+                        id,
+                        body: crate::protocol::StreamOpened {
+                            stream_id: body.stream_id,
+                            fd_count: 0,
+                        },
+                    },
+                    max_frame,
+                )
+                .await?;
+            }
+            Message::CapabilityGrant { id, body } => {
+                write_msg(
+                    &mut stream,
+                    &Message::CapabilityGranted {
+                        id,
+                        body: crate::protocol::CapabilityGranted {
+                            grant_id: body.grant_id,
+                            status: "applied".to_owned(),
+                        },
+                    },
+                    max_frame,
+                )
+                .await?;
+            }
+            Message::CapabilityRelease { id, .. } => {
+                write_msg(&mut stream, &Message::CapabilityReleased { id }, max_frame).await?;
+            }
+            Message::FlowControl { .. } | Message::Log { .. } => {}
             other => return Err(IpcError::Unexpected(other.kind_name().to_owned())),
         }
     }
@@ -273,10 +305,12 @@ async fn dispatch_tts(handler: Option<&Arc<dyn TtsHandler>>, body: TtsRequest) -
         Some(handler) => handler.synthesize(body).await.unwrap_or_else(|_| TtsAudio {
             pcm: Vec::new(),
             sample_rate: 16_000,
+            bulk: None,
         }),
         None => TtsAudio {
             pcm: Vec::new(),
             sample_rate: 16_000,
+            bulk: None,
         },
     }
 }
@@ -408,11 +442,16 @@ fn build_ack(
         .declared_protocols
         .contains(&ProtoId::Tool)
         .then_some(VersionRange::exact(crate::protocol::TOOL_VERSION));
+    let plugin_capability = hello
+        .declared_protocols
+        .contains(&ProtoId::Capability)
+        .then_some(VersionRange::exact(crate::protocol::CAPABILITY_VERSION));
     let negotiated = negotiate(
         &hello.protocols,
         VersionRange::exact(CORE_VERSION),
         plugin_tool,
         offered_faces(hello, handlers),
+        plugin_capability,
     )
     .map_err(|err| err.to_string())?;
     let spawn_token = identity.spawn_token()?;

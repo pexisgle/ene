@@ -219,6 +219,9 @@ pub struct TtsRequest {
 pub struct TtsAudio {
     pub pcm: Vec<f32>,
     pub sample_rate: u32,
+    /// When set, PCM travelled on a bulk stream instead of this frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk: Option<crate::protocol::BulkRef>,
 }
 
 /// `stt.transcribe` request.

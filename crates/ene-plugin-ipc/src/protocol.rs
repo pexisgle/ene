@@ -11,6 +11,10 @@ use crate::provider::{
 pub const CORE_VERSION: u32 = 1;
 /// Current `tool` subprotocol version.
 pub const TOOL_VERSION: u32 = 1;
+/// Current `capability` subprotocol version.
+pub const CAPABILITY_VERSION: u32 = 1;
+/// Default `plugins.ipc.bulk_threshold_bytes`. `0` in config keeps this.
+pub const DEFAULT_BULK_THRESHOLD_BYTES: u32 = 65_536;
 
 /// Inclusive version window for one subprotocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +81,7 @@ impl ProtocolRanges {
             core: VersionRange::exact(CORE_VERSION),
             tool: Some(VersionRange::exact(TOOL_VERSION)),
             provider: Some(VersionRange::exact(crate::provider::PROVIDER_VERSION)),
-            capability: None,
+            capability: Some(VersionRange::exact(CAPABILITY_VERSION)),
         }
     }
 }
@@ -90,6 +94,8 @@ pub struct Negotiated {
     pub tool: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub provider: Option<ProviderFaces>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub capability: Option<u32>,
 }
 
 /// Host hello (first frame).
@@ -159,6 +165,89 @@ pub struct ToolResult {
     pub call_id: String,
     pub status: String,
     pub value: serde_json::Value,
+}
+
+/// Plugin → host Broker RPC (`capability.request`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityRequest {
+    pub method: String,
+    pub params: serde_json::Value,
+    pub capability_ref: String,
+}
+
+/// Host → plugin resource grant. Unix follows this frame with `fd_count`
+/// `SCM_RIGHTS` descriptors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityGrant {
+    pub grant_id: String,
+    pub method: String,
+    #[serde(default)]
+    pub fd_count: u32,
+    #[serde(default)]
+    pub stream_id: String,
+}
+
+/// Plugin ack of a grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityGranted {
+    pub grant_id: String,
+    pub status: String,
+}
+
+/// Host denial of a Broker request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityDenied {
+    pub method: String,
+    pub reason: String,
+}
+
+/// Either side releases a grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityRelease {
+    pub grant_id: String,
+}
+
+/// Plugin → host: is this operation already approved?
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalQuery {
+    pub tool: String,
+    pub target: String,
+}
+
+/// Host → plugin approval answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalAnswer {
+    pub allowed: bool,
+    pub reason: String,
+}
+
+/// Host → plugin: open an out-of-band bulk stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamOpen {
+    pub stream_id: String,
+    pub kind: String,
+}
+
+/// Plugin ack. `fd_count` is 1 when a socketpair fd follows on Unix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamOpened {
+    pub stream_id: String,
+    #[serde(default)]
+    pub fd_count: u32,
+}
+
+/// Back-pressure on a bulk stream. Notification: no `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowControl {
+    pub stream_id: String,
+    pub pause: bool,
+}
+
+/// Frame-side reference to bytes that travelled out of band.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkRef {
+    pub stream_id: String,
+    pub byte_len: u64,
 }
 
 /// Envelope. `id` is required on request/response variants.
@@ -286,6 +375,48 @@ pub enum Message {
         id: u64,
         body: SetActiveAssetResult,
     },
+    CapabilityRequest {
+        id: u64,
+        body: CapabilityRequest,
+    },
+    CapabilityGrant {
+        id: u64,
+        body: CapabilityGrant,
+    },
+    CapabilityGranted {
+        id: u64,
+        body: CapabilityGranted,
+    },
+    CapabilityDenied {
+        id: u64,
+        body: CapabilityDenied,
+    },
+    CapabilityRelease {
+        id: u64,
+        body: CapabilityRelease,
+    },
+    CapabilityReleased {
+        id: u64,
+    },
+    CapabilityApprovalQuery {
+        id: u64,
+        body: ApprovalQuery,
+    },
+    CapabilityApproval {
+        id: u64,
+        body: ApprovalAnswer,
+    },
+    StreamOpen {
+        id: u64,
+        body: StreamOpen,
+    },
+    StreamOpened {
+        id: u64,
+        body: StreamOpened,
+    },
+    FlowControl {
+        body: FlowControl,
+    },
 }
 
 impl Message {
@@ -333,6 +464,17 @@ impl Message {
             Self::ProviderInstallStatusResult { .. } => "provider_install_status_result",
             Self::ProviderSetActiveAsset { .. } => "provider_set_active_asset",
             Self::ProviderSetActiveAssetResult { .. } => "provider_set_active_asset_result",
+            Self::CapabilityRequest { .. } => "capability_request",
+            Self::CapabilityGrant { .. } => "capability_grant",
+            Self::CapabilityGranted { .. } => "capability_granted",
+            Self::CapabilityDenied { .. } => "capability_denied",
+            Self::CapabilityRelease { .. } => "capability_release",
+            Self::CapabilityReleased { .. } => "capability_released",
+            Self::CapabilityApprovalQuery { .. } => "capability_approval_query",
+            Self::CapabilityApproval { .. } => "capability_approval",
+            Self::StreamOpen { .. } => "stream_open",
+            Self::StreamOpened { .. } => "stream_opened",
+            Self::FlowControl { .. } => "flow_control",
         }
     }
 }

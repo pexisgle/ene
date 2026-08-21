@@ -65,6 +65,7 @@ per-plugin enable map (`plugins.list` is gone). Related keys:
 | `plugins.policy.approval_mode` | Seeds `approval.mode` at boot (`ask_all`, `policy`, `ai_auto`, `auto`). Runtime truth stays `approval.mode`. |
 | `plugins.policy.allow_unverified` | Allow a fiber whose digest does not match. Default `false`. |
 | `plugins.ipc.max_frame_bytes` | IPC frame cap. Default `1048576`. Env: `ENE_PLUGINS__IPC__MAX_FRAME_BYTES`. |
+| `plugins.ipc.bulk_threshold_bytes` | Payloads larger than this leave the MessagePack frame (`stream.open` / Unix `SCM_RIGHTS`). Default `65536`. Env: `ENE_PLUGINS__IPC__BULK_THRESHOLD_BYTES`. |
 
 MCP servers are handwritten `mcp.json` rows, not settings keys. See
 [Plugins & MCP](concepts/plugins-and-mcp.md).
