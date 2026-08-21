@@ -584,8 +584,16 @@ mod tests {
             },
             |message| matches!(message.role, LlmRole::System),
         );
-        assert_eq!(packed.len(), 2);
         assert_eq!(packed[0].text, "contract");
-        assert_eq!(packed[1].text, "latest-turn");
+        assert_eq!(
+            packed.last().map(|message| message.text.as_str()),
+            Some("latest-turn")
+        );
+        assert!(
+            packed
+                .iter()
+                .all(|message| !message.text.contains("old-turn-")),
+            "oversized older turn should be dropped: {packed:?}"
+        );
     }
 }
