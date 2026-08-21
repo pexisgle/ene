@@ -13,6 +13,14 @@ use crate::i18n;
 pub use approvals::PendingApproval;
 pub use spotlight::SpotlightAction;
 
+pub const CHAT_WINDOW_WIDTH: u32 = 520;
+pub const CHAT_WINDOW_HEIGHT: u32 = 560;
+
+const _: () = {
+    assert!(CHAT_WINDOW_WIDTH >= 480);
+    assert!(CHAT_WINDOW_HEIGHT >= 560);
+};
+
 #[derive(Debug, Clone)]
 pub enum SurfaceAction {
     SendChat,
