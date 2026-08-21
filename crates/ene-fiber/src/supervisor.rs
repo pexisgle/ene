@@ -593,22 +593,23 @@ impl Supervisor {
                 &mut broker,
             )?;
         }
-        let broker_server = if plugin_kind(&row.plugin).is_some() {
-            #[cfg(unix)]
-            {
-                Some(crate::broker_ipc::BrokerServer::bind(
-                    Arc::clone(&self.inner.broker),
-                    fiber.uid,
-                    &row.row_id,
-                )?)
-            }
-            #[cfg(not(unix))]
-            {
+        let broker_server: Option<crate::broker_ipc::BrokerServer> =
+            if plugin_kind(&row.plugin).is_some() {
+                #[cfg(unix)]
+                {
+                    Some(crate::broker_ipc::BrokerServer::bind(
+                        Arc::clone(&self.inner.broker),
+                        fiber.uid,
+                        &row.row_id,
+                    )?)
+                }
+                #[cfg(not(unix))]
+                {
+                    None
+                }
+            } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
         let broker_socket = broker_server
             .as_ref()
             .map(|server| server.socket_path().to_string_lossy().into_owned());
