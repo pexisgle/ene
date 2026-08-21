@@ -902,16 +902,11 @@ async fn run_compact(state: &LaneState) -> Result<u64, KernelError> {
             state.mind.inner.self_reference_window,
         ),
     );
-    let summary = history
-        .messages
-        .iter()
-        .map(ene_session::ProjectedMessage::text)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let summary =
+        crate::compact::summarize_history(&history.messages, crate::compact::MAX_SUMMARY_CHARS);
     if summary.is_empty() {
         return Err(KernelError::NothingToCompact);
     }
-    let truncated = truncate_chars(&summary, 2_000);
     let summary_commit = state
         .store
         .commit(Transaction {
@@ -921,7 +916,7 @@ async fn run_compact(state: &LaneState) -> Result<u64, KernelError> {
                 EventPayload::SessionSummary {
                     v: v1(),
                     scope: "compaction_ref".to_owned(),
-                    summary: truncated,
+                    summary,
                 },
             )],
             usage: Vec::new(),
