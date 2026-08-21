@@ -9,8 +9,8 @@ use std::io::Cursor;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HGDIOBJ, ReleaseDC, SRCCOPY,
-    SelectObject,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HGDIOBJ, RGBQUAD, ReleaseDC,
+    SRCCOPY, SelectObject,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
@@ -77,7 +77,7 @@ fn capture_bgra() -> Result<(u32, u32, Vec<u8>), String> {
                 biClrUsed: 0,
                 biClrImportant: 0,
             },
-            bmiColors: [Default::default()],
+            bmiColors: [RGBQUAD::default()],
         };
         let stride = usize::try_from(width).unwrap_or(0).saturating_mul(4);
         let mut pixels = vec![0u8; stride.saturating_mul(usize::try_from(height).unwrap_or(0))];
@@ -91,9 +91,9 @@ fn capture_bgra() -> Result<(u32, u32, Vec<u8>), String> {
             DIB_RGB_COLORS,
         );
         SelectObject(mem, old);
-        drop(DeleteObject(bitmap as HGDIOBJ));
-        drop(DeleteDC(mem));
-        drop(ReleaseDC(hwnd, hdc));
+        let _ = DeleteObject(bitmap as HGDIOBJ);
+        let _ = DeleteDC(mem);
+        let _ = ReleaseDC(hwnd, hdc);
         if copied == 0 || got == 0 {
             return Err(fail("unavailable", "gdi", "BitBlt/GetDIBits failed"));
         }
@@ -103,7 +103,7 @@ fn capture_bgra() -> Result<(u32, u32, Vec<u8>), String> {
 
 fn encode_png(width: u32, height: u32, bgra: &[u8]) -> Result<Vec<u8>, String> {
     let mut rgba = Vec::with_capacity(bgra.len());
-    for chunk in bgra.chunks_exact(4) {
+    for chunk in bgra.as_chunks::<4>().0 {
         rgba.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
     }
     let img = image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
