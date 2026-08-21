@@ -93,6 +93,7 @@ settings-local = ローカル設定
 settings-core = コア設定
 settings-theme = テーマ
 settings-language = 言語
+settings-language-system = システムの既定
 settings-core-lifetime = コア存続
 settings-captions = キャプション
 settings-caption-position = キャプション位置

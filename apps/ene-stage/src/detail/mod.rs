@@ -1296,7 +1296,22 @@ fn show_system_inner(
                 });
             ui.end_row();
             ui.label(i18n::fl("settings-language"));
-            ui.text_edit_singleline(&mut local_settings.language);
+            let language_label = if local_settings.language.is_empty() {
+                i18n::fl("settings-language-system")
+            } else {
+                local_settings.language.clone()
+            };
+            egui::ComboBox::from_id_salt("language")
+                .selected_text(language_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut local_settings.language,
+                        String::new(),
+                        i18n::fl("settings-language-system"),
+                    );
+                    ui.selectable_value(&mut local_settings.language, "ja".to_owned(), "ja");
+                    ui.selectable_value(&mut local_settings.language, "en-US".to_owned(), "en-US");
+                });
             ui.end_row();
             ui.label(i18n::fl("settings-core-lifetime"));
             egui::ComboBox::from_id_salt("core-lifetime")

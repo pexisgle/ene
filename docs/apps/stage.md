@@ -38,7 +38,11 @@ are conversion inputs only — there is no CCv3 editor.
 Local `desktop.*` keys (theme, language, mic, captions, beat sync, graphics
 quality, core lifetime, overlay placement) stay on the client. Theme (`light` /
 `dark` / `system`) applies to both the wgpu window clear color and egui widget
-colors, so light mode keeps readable contrast. Core PATCH keys
+colors, so light mode keeps readable contrast. Japanese UI text uses an OS CJK
+font (Yu Gothic / Meiryo on Windows, Noto or Droid on Linux), or
+`assets/fonts/NotoSansJP-Regular.ttf` when that file is packaged next to the
+binary. Changing language updates open chrome window titles without a restart.
+Core PATCH keys
 are `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins`.
 Plugin enablement is `plugins.profile` (`desktop` / `minimal` / `headless`),
 not a `plugins.list` map. API keys stay in the vault. Attach to an

@@ -35,7 +35,11 @@ CCv3 エディタはありません。
 ローカルの `desktop.*`（テーマ、言語、マイク、キャプション、ビート同期、画質、
 コア寿命、オーバーレイ配置）はクライアント側です。テーマ（`light` / `dark` /
 `system`）は wgpu のクリア色と egui の文字色の両方に効くので、light でも
-コントラストが保たれます。コアの PATCH キーは
+コントラストが保たれます。日本語 UI は OS の CJK フォント（Windows は游ゴシック
+/ メイリオ、Linux は Noto や Droid）で描画し、バイナリ横に
+`assets/fonts/NotoSansJP-Regular.ttf` がある場合はそれを使います。表示言語を
+変えると、開いている操作窓のタイトルも再起動なしで更新されます。
+コアの PATCH キーは
 `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins` です。
 プラグインの有効化は `plugins.profile`（`desktop` / `minimal` / `headless`）で、
 `plugins.list` の個別マップはありません。API キーはボールトに置きます。

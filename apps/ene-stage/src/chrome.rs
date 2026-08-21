@@ -93,6 +93,7 @@ impl ChromeWindow {
         let config =
             gpu::configure_surface(&surface, &gpu.device, format, window.inner_size(), alpha);
         let egui_ctx = egui::Context::default();
+        crate::fonts::install_on(&egui_ctx);
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
             ViewportId::ROOT,
@@ -126,6 +127,10 @@ impl ChromeWindow {
     #[must_use]
     pub fn id(&self) -> WindowId {
         self.window.id()
+    }
+
+    pub fn sync_title(&self) {
+        self.window.set_title(&self.kind.title());
     }
 
     #[must_use]
