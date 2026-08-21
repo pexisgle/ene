@@ -3,8 +3,8 @@ use std::time::Duration;
 use chrono::Utc;
 use ene_companion::MindSettings;
 use ene_work::{
-    DelegationMode, FiredSchedule, QuietWindow, ScheduleAction, StartDelegation, catch_up_missed,
-    fire_due, reminder_report,
+    DelegationMode, FiredSchedule, QuietWindow, ScheduleAction, StartDelegation,
+    catch_up_missed_with_quiet, fire_due, reminder_report,
 };
 
 use super::AppState;
@@ -22,8 +22,9 @@ pub async fn run_loop(state: AppState) {
 async fn tick(state: &AppState, catch_up: bool) {
     let work = state.core.work();
     let now = Utc::now();
+    let quiet = quiet_from_mind(&state.core.mind());
     let fired = if catch_up {
-        match catch_up_missed(&work, now) {
+        match catch_up_missed_with_quiet(&work, now, &quiet) {
             Ok(rows) => rows,
             Err(err) => {
                 tracing::warn!(error = %err, "schedule catch-up failed");
@@ -31,7 +32,6 @@ async fn tick(state: &AppState, catch_up: bool) {
             }
         }
     } else {
-        let quiet = quiet_from_mind(&state.core.mind());
         match fire_due(&work, now, &quiet) {
             Ok(rows) => rows,
             Err(err) => {
