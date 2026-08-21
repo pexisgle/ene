@@ -2307,3 +2307,87 @@ async fn schedule_catch_up_does_not_start_missed_jobs() {
     );
     server.shutdown().await;
 }
+
+async fn wait_event_type(
+    socket: &mut ene_api::EventSocket,
+    ty: &str,
+    timeout: Duration,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remain.is_zero(), "timeout waiting for {ty}");
+        match tokio::time::timeout(remain, socket.recv_json()).await {
+            Ok(Ok(Some(value)))
+                if value.get("type").and_then(serde_json::Value::as_str) == Some(ty) =>
+            {
+                return value;
+            }
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) => panic!("websocket closed waiting for {ty}"),
+            Ok(Err(err)) => panic!("{err}"),
+            Err(_) => panic!("timeout waiting for {ty}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn affect_flushes_body_expression_to_surface_ws() {
+    let (_dir, client, core, server) = boot_server().await;
+    let mut surface = client.events("surface", None).await.unwrap();
+    let mut detail = client.events("detail", None).await.unwrap();
+    let soul = core.occupants()[0].0;
+    core.apply_body_emotion(
+        soul,
+        &ene_body::EmotionCue {
+            label: "happy".into(),
+            intensity: 0.7,
+        },
+    )
+    .unwrap();
+    let event = wait_event_type(&mut surface, "body.expression", Duration::from_secs(2)).await;
+    assert_eq!(event["soul_id"], soul.to_string());
+    assert_eq!(event["label"], "happy");
+    assert_eq!(event["name"], "happy");
+    let detail_event =
+        wait_event_type(&mut detail, "body.expression", Duration::from_secs(2)).await;
+    assert_eq!(detail_event["label"], "happy");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn body_events_are_scoped_per_soul() {
+    let (_dir, client, core, server) = boot_server().await;
+    let occupants = core.occupants();
+    assert!(occupants.len() >= 2, "boot seeds two occupants");
+    let soul_a = occupants[0].0;
+    let soul_b = occupants[1].0;
+    let mut surface = client.events("surface", None).await.unwrap();
+    core.apply_body_emotion(
+        soul_a,
+        &ene_body::EmotionCue {
+            label: "happy".into(),
+            intensity: 0.8,
+        },
+    )
+    .unwrap();
+    let first = wait_event_type(&mut surface, "body.expression", Duration::from_secs(2)).await;
+    assert_eq!(first["soul_id"], soul_a.to_string());
+    assert_eq!(first["label"], "happy");
+
+    core.stage()
+        .bus()
+        .push(
+            soul_b,
+            ene_body::PerformanceCommand::Motion {
+                name: "wave".into(),
+                layer: ene_body::MotionLayer::OneShot,
+                intensity: Some(1.0),
+            },
+        )
+        .unwrap();
+    let second = wait_event_type(&mut surface, "body.motion", Duration::from_secs(2)).await;
+    assert_eq!(second["soul_id"], soul_b.to_string());
+    assert_eq!(second["name"], "wave");
+    server.shutdown().await;
+}

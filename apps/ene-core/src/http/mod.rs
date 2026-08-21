@@ -6,6 +6,7 @@ mod error;
 mod exclusive;
 mod lanes;
 mod model;
+mod performance;
 mod proactive;
 mod recall;
 mod routes;
@@ -192,6 +193,7 @@ impl CoreDaemon {
         self.set_prefetch(Arc::new(recall::RecallPrefetch::new(
             &self,
             Arc::clone(&classify),
+            events.clone(),
         )));
         self.memory_embed()
             .bind(Arc::new(recall::SeamedQueryEmbed::new(&self)));
@@ -223,6 +225,10 @@ impl CoreDaemon {
         let schedule_state = state.clone();
         let schedule_task = tokio::spawn(async move {
             schedule::run_loop(schedule_state).await;
+        });
+        let performance_state = state.clone();
+        let performance_task = tokio::spawn(async move {
+            performance::run_loop(performance_state).await;
         });
         let job_core = Arc::clone(&self);
         let job_task = tokio::spawn(async move {
@@ -265,9 +271,21 @@ impl CoreDaemon {
         };
         tracing::info!(%addr, "http/ws listening");
         #[cfg(not(test))]
-        let mut background = vec![report_task, proactive_task, schedule_task, job_task];
+        let mut background = vec![
+            report_task,
+            proactive_task,
+            schedule_task,
+            job_task,
+            performance_task,
+        ];
         #[cfg(test)]
-        let background = vec![report_task, proactive_task, schedule_task, job_task];
+        let background = vec![
+            report_task,
+            proactive_task,
+            schedule_task,
+            job_task,
+            performance_task,
+        ];
         #[cfg(not(test))]
         background.push(profile_task);
         Ok(ServerHandle {

@@ -20,7 +20,10 @@ TTS / STT は `ai.tasks.tts` / `ai.tasks.stt` で
 
 リップシンクは PCM エネルギーを `ene-vrm` と同じ viseme ターゲットへ
 写します。`ene-companion` の感情が表情キューを選び、`ene-body` が
-パフォーマンスコマンドとして積みます。
+パフォーマンスコマンドとして積みます。コアはそのバスを surface の
+WebSocket へ `body.expression` / `body.motion` / `body.lipsync`
+（いずれも `soul_id` 付き）として流すので、stage と desktop は該当
+occupant に適用できます。
 
 ## パフォーマンスコマンド
 

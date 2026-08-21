@@ -20,7 +20,9 @@ bus; exclusive resources (mic) are claimed through the API.
 
 Lip-sync maps PCM energy to the same viseme targets `ene-vrm` expects.
 Affect in `ene-companion` picks expression cues that `ene-body` queues as
-performance commands.
+performance commands. Core drains that bus onto the surface WebSocket as
+`body.expression`, `body.motion`, and `body.lipsync` (each carrying `soul_id`)
+so stage and desktop can apply the cue to the matching occupant.
 
 ## Performance commands
 

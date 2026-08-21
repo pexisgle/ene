@@ -126,6 +126,7 @@ fn feed_playback(core: &CoreDaemon, events: &CoreBus, pcm: &[f32], sample_rate: 
         });
         if let Some(cmd) = lips {
             drop(core.stage().bus().push(soul, cmd));
+            super::performance::flush_soul(core, events, soul);
         }
     }
 }

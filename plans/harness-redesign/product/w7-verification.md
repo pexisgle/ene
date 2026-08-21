@@ -78,7 +78,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-401 | `package_install_and_soul_creation`; `soul_and_body_packages_compose`; `import_shipped_alicia_vrm_exposes_parseable_avatar` | store / HTTP | 部分(I/O とはい。stage GUI 表示は手動) |
 | P-402 | `hot_swap_drops_pending_cues`; `unknown_emotion_falls_back_with_warning` | store | はい |
 | P-403 | `ene-vrm::minimal_glb_parses_as_vrm`; `minimal_glb_loads_with_wgpu`; `shipped_alicia_vrm_parses_and_loads`; `ene-stage::default_minimal_vrm_writes_parseable_glb` | Alicia / fixture | 部分(同梱 Alicia のパース/wgpu。GUI は手動) |
-| P-404 | `lipsync_from_tone_has_amplitude`; `emotion_always_emits_expression_even_without_body`; `autonomy_tick_does_not_require_a_turn` | Scripted | いいえ |
+| P-404 | `lipsync_from_tone_has_amplitude`; `emotion_always_emits_expression_even_without_body`; `autonomy_tick_does_not_require_a_turn`; `ene-daemon::affect_flushes_body_expression_to_surface_ws`; `ene-daemon::body_events_are_scoped_per_soul` | Scripted / HTTP | 部分(WS 配信。stage GUI の表情観察は手動) |
 | P-405 | `stage_caps_concurrent_rendered_bodies`; `boot_seeds_two_souls_and_session_ops`; `two_souls_keep_isolated_sessions_and_stage_occupants`; `overlay_slot_offsets_place_two_bodies_apart` | store / HTTP / overlay | 部分(2スロット配置。GUI E2E は手動) |
 | P-406 | `hot_swap_drops_pending_cues` | store | はい |
 | P-407 | `boot_stage_maps_emotion_without_a_rendered_body`; `emotion_always_emits_expression_even_without_body` | HTTP / store | はい(描画なしレーン) |
