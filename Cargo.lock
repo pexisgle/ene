@@ -1600,6 +1600,7 @@ dependencies = [
 name = "ene-harness-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "ene-fiber",
  "ene-plane",
  "ene-plugin-ipc",
@@ -1617,6 +1618,7 @@ version = "0.1.0"
 dependencies = [
  "ene-plugin-ipc",
  "ene-registry",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1630,6 +1632,8 @@ dependencies = [
  "ene-plugin-ipc",
  "ene-registry",
  "ene-sandbox",
+ "parking_lot",
+ "regex",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1659,15 +1663,21 @@ dependencies = [
 name = "ene-harness-utility"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
+ "blake3",
+ "chrono",
  "ene-fiber",
  "ene-plugin-ipc",
  "ene-registry",
  "ene-sandbox",
+ "regex",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1676,9 +1686,13 @@ version = "0.1.0"
 dependencies = [
  "ene-plugin-ipc",
  "ene-registry",
+ "reqwest",
+ "rustls",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
