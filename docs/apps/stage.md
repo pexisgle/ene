@@ -22,7 +22,7 @@ SDK.
 | Chat (F2) | `surface` | Prompt / Steer / Follow-up (hover for meaning), approvals (Allow / Always / Deny), ask-user, mic PCM relay, Detail button (same as the tray) |
 | Caption | `surface` | Streamed speech |
 | Spotlight (Alt+Space) | local | Jump to detail sections, mic, quit. If the OS keeps Alt+Space, use Voice → Open Spotlight |
-| Detail (tray or Chat → Detail; F1 Companion, F4 Log) | `detail` | Settings IA, inner/thinking/tool/PAD log |
+| Detail (tray or Chat → Detail; F1 Companion, F4 Log) | `detail` | Settings IA, inner/thinking/tool/PAD log. Search filters sections; clicking a tab, Home shortcut, Spotlight, or F1/F4 clears the filter so it cannot pin you on the current section. |
 
 Stage does not use a WebView. Overlay drawing is wgpu; chrome windows are egui
 on winit. The process talks to the core only through `ene-api`
