@@ -19,10 +19,10 @@ SDK.
 | Window | Depth | Contents |
 |---|---|---|
 | Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Click-through is System → Overlay click-through (on by default). Esc quits. A/D switch avatar bodies; W/S change motion. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
-| Chat (F2) | `surface` | Prompt / Steer / Follow-up (hover for meaning), approvals (Allow / Always / Deny), ask-user, mic PCM relay, Detail button (same as the tray) |
+| Chat (F2) | `surface` | Prompt / Steer / Follow-up (hover for meaning), approvals (Allow / Always / Deny), ask-user, mic PCM relay, Detail button (same as the tray). Status wraps on its own line so setup errors stay readable in a narrow window. |
 | Caption | `surface` | Streamed speech |
 | Spotlight (Alt+Space) | local | Jump to detail sections, mic, quit. If the OS keeps Alt+Space, use Voice → Open Spotlight |
-| Detail (tray or Chat → Detail; F1 Companion, F4 Log) | `detail` | Settings IA, inner/thinking/tool/PAD log |
+| Detail (tray or Chat → Detail; F1 Companion, F4 Log) | `detail` | Settings IA, inner/thinking/tool/PAD log. An empty log shows a next-step hint instead of a blank pane. |
 
 Stage does not use a WebView. Overlay drawing is wgpu; chrome windows are egui
 on winit. The process talks to the core only through `ene-api`

@@ -1054,7 +1054,7 @@ impl StageApp {
             event_loop,
             gpu,
             ChromeKind::Chat,
-            PhysicalSize::new(420, 560),
+            PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
             true,
         ) {
             Ok(win) => self.chat = Some(win),

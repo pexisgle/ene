@@ -1474,7 +1474,18 @@ fn show_system_inner(
     }
 }
 
+#[must_use]
+pub fn log_empty_copy(entry_count: usize) -> Option<String> {
+    (entry_count == 0).then(|| i18n::fl("log-empty"))
+}
+
 fn show_log(ui: &mut egui::Ui, state: &DetailUiState) {
+    ui.heading(i18n::fl("detail-tab-log"));
+    if let Some(empty) = log_empty_copy(state.log.len()) {
+        ui.label(empty);
+        ui.label(i18n::fl("log-empty-hint"));
+        return;
+    }
     egui::ScrollArea::vertical().show(ui, |ui| {
         for entry in &state.log {
             let prefix = match entry.kind {
@@ -1485,7 +1496,7 @@ fn show_log(ui: &mut egui::Ui, state: &DetailUiState) {
                 LogKind::Job => "job",
                 LogKind::Affect => "affect",
             };
-            ui.label(format!("[{prefix}] {}", entry.text));
+            ui.add(egui::Label::new(format!("[{prefix}] {}", entry.text)).wrap());
         }
     });
 }
@@ -1679,5 +1690,13 @@ mod tests {
             i18n::fl("settings-list-models-empty")
         );
         assert!(list_models_status(&["gpt".into()], None).is_empty());
+    }
+
+    #[test]
+    fn log_empty_copy_is_resolved() {
+        assert_eq!(log_empty_copy(1), None);
+        let empty = log_empty_copy(0).expect("placeholder");
+        assert_ne!(empty, "log-empty");
+        assert_ne!(i18n::fl("log-empty-hint"), "log-empty-hint");
     }
 }
