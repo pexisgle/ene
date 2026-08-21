@@ -6,12 +6,23 @@
   <style>
     :root { color-scheme: light dark; font-family: sans-serif; }
     body { margin: 0; display: grid; grid-template-columns: 1fr 1fr; min-height: 100vh; }
-    section { padding: 1rem; border-right: 1px solid #8884; display: flex; flex-direction: column; gap: .5rem; }
+    section { padding: 1rem; border-right: 1px solid #8884; display: flex; flex-direction: column; gap: .5rem; min-width: 0; }
     h1 { font-size: 1.1rem; margin: 0; }
+    h2 { font-size: .75rem; margin: 0 0 .45rem; text-transform: uppercase; letter-spacing: .04em; color: #888; }
     #soul-picker { display: flex; gap: .5rem; flex-wrap: wrap; }
     #soul-picker button { font: inherit; padding: .35rem .6rem; cursor: pointer; }
     #soul-picker button.active { font-weight: bold; outline: 2px solid currentColor; }
-    #surface-log, #detail-log { flex: 1; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 13px; }
+    #surface-log { flex: 1; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 13px; }
+    #detail-log { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: .65rem; font-size: 13px; }
+    .block { border: 1px solid #8884; border-radius: 8px; padding: .55rem .7rem; }
+    .row { display: grid; grid-template-columns: 6.5rem 1fr; gap: .25rem .6rem; align-items: start; }
+    .role { font-weight: 600; }
+    .role.inner { color: #7c3aed; }
+    .role.thinking { color: #0369a1; }
+    .role.tool { color: #b45309; }
+    .role.pad { color: #0f766e; }
+    .empty { color: #888; }
+    .live { min-height: 4rem; }
     form { display: flex; gap: .5rem; }
     input, button { font: inherit; }
     input { flex: 1; }
@@ -33,7 +44,7 @@
   </section>
   <section>
     <h1>Detail</h1>
-    <p class="hint">history?depth=detail, memories, tasks, PAD (read-only on Web).</p>
+    <p class="hint">Read-only: inner, thinking, tools, PAD, memories, jobs. Web cannot change settings or delete memories.</p>
     <div id="detail-log"></div>
   </section>
   <script>
@@ -53,14 +64,36 @@
     const detail = document.getElementById("detail-log");
     const sessionLabel = document.getElementById("session-label");
     const soulPicker = document.getElementById("soul-picker");
+    const liveList = () => document.getElementById("detail-live");
     const log = (el, line) => { el.textContent += line + "\n"; el.scrollTop = el.scrollHeight; };
-    const clear = (el) => { el.textContent = ""; };
+    const clear = (el) => { el.replaceChildren(); };
 
     async function api(path, opts) {
       const res = await fetch(path, opts);
       const body = await res.json();
       if (!res.ok) throw body;
       return body;
+    }
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text) node.textContent = text;
+      return node;
+    }
+
+    function block(title) {
+      const wrap = el("div", "block");
+      wrap.append(el("h2", "", title));
+      return wrap;
+    }
+
+    function addRow(parent, role, text, roleClass) {
+      const row = el("div", "row");
+      const label = el("div", "role" + (roleClass ? " " + roleClass : ""), role);
+      const body = el("div", "", text || "—");
+      row.append(label, body);
+      parent.append(row);
     }
 
     function orderedSoulIds(stage, soulsPage) {
@@ -101,7 +134,7 @@
         button.type = "button";
         button.textContent = companion.label + (soul ? " (" + soul.mood_label + ")" : "");
         button.classList.toggle("active", companion.id === selectedSoulId);
-        button.onclick = () => selectSoul(companion.id, soulsPage).catch((err) => log(surface, "error " + JSON.stringify(err)));
+        button.onclick = () => selectSoul(companion.id, soulsPage).catch((err) => log(surface, "error " + String(err && err.message || err)));
         soulPicker.appendChild(button);
       }
     }
@@ -119,14 +152,70 @@
       }
     }
 
+    function surfaceSpeech(msg) {
+      if (msg.type === "inner.message" || (msg.type && msg.type.startsWith("thinking.")) || (msg.type && msg.type.startsWith("tool."))) {
+        return "";
+      }
+      if (msg.type === "text.delta" || msg.type === "session.event") return msg.text || "";
+      if (msg.role && msg.text) return msg.role + ": " + msg.text;
+      return msg.text || "";
+    }
+
+    function detailEventRow(msg) {
+      const type = msg.type || "event";
+      if (type === "thinking.delta" || type.startsWith("thinking.")) {
+        return { role: "thinking", cls: "thinking", text: msg.text || "" };
+      }
+      if (type.startsWith("inner.")) {
+        return { role: "inner", cls: "inner", text: msg.text || "" };
+      }
+      if (type.startsWith("tool.")) {
+        const name = msg.name || msg.summary || msg.line || "";
+        const args = msg.arguments || msg.args;
+        const argText = args && typeof args === "object" ? Object.keys(args).map((k) => k + "=" + String(args[k])).join(", ") : "";
+        return { role: "tool", cls: "tool", text: [name, msg.text, argText].filter(Boolean).join(" — ") };
+      }
+      if (type === "affect.state" || type === "pad.update") {
+        return { role: "PAD", cls: "pad", text: padLine(msg) };
+      }
+      if (type === "job.progress") {
+        return { role: "job", cls: "tool", text: (msg.title || msg.id || "job") + " " + (msg.progress_note || msg.status || "") };
+      }
+      return { role: type, cls: "", text: msg.text || msg.kind || "" };
+    }
+
+    function padLine(affect) {
+      const parts = [
+        "mood " + (affect.mood_label || "—"),
+        "V " + fmtNum(affect.valence),
+        "A " + fmtNum(affect.arousal),
+        "D " + fmtNum(affect.dominance),
+        "trust " + fmtNum(affect.trust),
+        "affinity " + fmtNum(affect.affinity),
+      ];
+      return parts.join(" · ");
+    }
+
+    function fmtNum(value) {
+      if (typeof value !== "number" || Number.isNaN(value)) return "—";
+      return value.toFixed(2);
+    }
+
     function connectSockets(sessionId) {
       closeSockets();
       surfaceSock = openSocket("surface", sessionId, (msg) => {
-        if (msg.type === "inner.message" || msg.type === "thinking.delta") return;
-        log(surface, JSON.stringify(msg));
+        const line = surfaceSpeech(msg);
+        if (line) log(surface, line);
       });
       detailSock = openSocket("detail", sessionId, (msg) => {
-        log(detail, JSON.stringify(msg));
+        const live = liveList();
+        if (!live) return;
+        const empty = live.querySelector(".empty");
+        if (empty) empty.remove();
+        const row = detailEventRow(msg);
+        if (!row.text) return;
+        addRow(live, row.role, row.text, row.cls);
+        detail.scrollTop = detail.scrollHeight;
       });
     }
 
@@ -144,8 +233,24 @@
     async function loadSurfaceHistory(sessionId) {
       const history = await api("/api/v1/sessions/" + sessionId + "/history?depth=surface", { headers: headers() });
       for (const message of history.messages) {
-        log(surface, message.role + ": " + message.text);
+        log(surface, message.role + ": " + (message.text || ""));
       }
+    }
+
+    function historyText(message) {
+      const bits = [message.text || ""];
+      if (message.tool_name) bits.unshift(message.tool_name);
+      if (message.tool_args && typeof message.tool_args === "object") {
+        bits.push(Object.keys(message.tool_args).map((k) => k + "=" + String(message.tool_args[k])).join(", "));
+      }
+      return bits.filter(Boolean).join(" — ");
+    }
+
+    function roleClass(role) {
+      if (role === "inner") return "inner";
+      if (role === "thinking") return "thinking";
+      if (role === "tool") return "tool";
+      return "";
     }
 
     async function loadDetailPane(soulId, sessionId) {
@@ -155,19 +260,49 @@
         api("/api/v1/jobs?soul_id=" + soulId, { headers: headers() }),
         api("/api/v1/souls/" + soulId + "/affect", { headers: headers() }),
       ]);
-      log(detail, "--- history (depth=detail) ---");
-      for (const message of history.messages) {
-        log(detail, message.role + ": " + message.text);
+      detail.replaceChildren();
+
+      const hist = block("History (detail)");
+      const messages = history.messages || [];
+      if (!messages.length) hist.append(el("div", "empty", "No detail history yet."));
+      for (const message of messages) {
+        addRow(hist, message.role || "message", historyText(message), roleClass(message.role));
       }
-      log(detail, "memories " + JSON.stringify(memories.items));
-      log(detail, "tasks " + JSON.stringify(jobs.items));
-      log(detail, "pad " + JSON.stringify(affect));
+      detail.append(hist);
+
+      const mem = block("Memories");
+      const memItems = memories.items || [];
+      if (!memItems.length) mem.append(el("div", "empty", "No memories."));
+      for (const item of memItems) {
+        addRow(mem, item.kind || item.scope || "memory", (item.title ? item.title + " — " : "") + (item.content || ""));
+      }
+      detail.append(mem);
+
+      const work = block("Jobs");
+      const jobItems = jobs.items || [];
+      if (!jobItems.length) work.append(el("div", "empty", "No jobs."));
+      for (const job of jobItems) {
+        const progress = typeof job.progress_fraction === "number" ? Math.round(job.progress_fraction * 100) + "%" : "";
+        addRow(work, job.status || "job", [job.title || job.goal, progress, job.progress_note].filter(Boolean).join(" · "));
+      }
+      detail.append(work);
+
+      const pad = block("PAD");
+      addRow(pad, "state", padLine(affect), "pad");
+      detail.append(pad);
+
+      const live = block("Live");
+      live.append(el("div", "empty", "Waiting for inner / thinking / tool events…"));
+      const list = el("div", "live");
+      list.id = "detail-live";
+      live.append(list);
+      detail.append(live);
     }
 
     async function selectSoul(soulId, soulsPage) {
       selectedSoulId = soulId;
       renderSoulPicker(soulsPage);
-      clear(surface);
+      surface.textContent = "";
       clear(detail);
       const sessionId = await ensureSession(soulId);
       sessionLabel.textContent = "session " + sessionId;
@@ -191,7 +326,7 @@
         await ensureSession(companion.id);
       }
       await selectSoul(companions[0].id, soulsPage);
-    })().catch((err) => log(surface, "error " + JSON.stringify(err)));
+    })().catch((err) => log(surface, "error " + String(err && err.message || err)));
 
     document.getElementById("chat").onsubmit = async (e) => {
       e.preventDefault();
