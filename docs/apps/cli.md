@@ -1,7 +1,7 @@
 # CLI user guide
 
 `ene-ctl` is the terminal client for `ene-core`. It talks over the public
-HTTP/WS API — the same contract as desktop, stage, and Web.
+HTTP/WS API — the same contract as stage, Web, and the legacy desktop.
 
 ```sh
 cargo run -p ene-ctl -- --help
@@ -19,5 +19,5 @@ cargo run -p ene-ctl -- core status
 `core start` launches the `ene-core` binary, waits for `api.json`, and prints
 the token **file path** (not the token). `core stop` signals the recorded PID.
 
-There is no desktop-only API. Anything desktop or stage can do on the wire,
+There is no desktop-only API. Anything stage can do on the wire,
 `ene-ctl` can do as well.

@@ -1,10 +1,15 @@
 # Stage user guide
 
-`ene-stage` is the product GUI for the new harness core. It starts `ene-core`
-when needed, draws companions with `ene-vrm` into a **transparent wgpu overlay**,
-keeps chat on the **surface** WebSocket, and opens a **separate detail window**
-for Home, Companion, Conversation, Voice, Memory, Work, Connections, System, and
+`ene-stage` is the product GUI. It starts `ene-core` when needed, draws
+companions with `ene-vrm` into a **transparent wgpu overlay**, keeps chat
+on the **surface** WebSocket, and opens a **separate detail window** for
+Home, Companion, Conversation, Voice, Memory, Work, Connections, System, and
 the session log.
+
+`ene-desktop` is frozen pre-redesign GUI. Do not add features there; do
+not require feature parity. When stage is judged to replace the
+product-relevant desktop capabilities, delete desktop. Roles are recorded
+in [Product boundaries](../concepts/product-boundaries.md).
 
 ```sh
 cargo build -p ene-core -p ene-stage

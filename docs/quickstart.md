@@ -48,7 +48,7 @@ cargo run -p ene-ctl -- --help
 and `--token` (or `ENE_API_URL` / `ENE_API_TOKEN`) at an already-running
 `ene-core` if you started it yourself.
 
-## 4. Run the stage client
+## 4. Run the product GUI (stage)
 
 ```sh
 cargo run -p ene-stage

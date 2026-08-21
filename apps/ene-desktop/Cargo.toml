@@ -2,7 +2,7 @@
 name = "ene-desktop"
 version.workspace = true
 edition.workspace = true
-description = "Native desktop client: character overlay, chat, settings, tray; talks to ene-core via ene-api"
+description = "Frozen pre-redesign desktop client; no new features; talks to ene-core via ene-api"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

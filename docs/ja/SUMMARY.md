@@ -7,6 +7,7 @@
 # コンセプト
 
 - [アーキテクチャ](concepts/architecture.md)
+- [製品境界](concepts/product-boundaries.md)
 - [キャラクターパッケージ](concepts/character-cards.md)
 - [メモリ](concepts/memory.md)
 - [ターンとセッション](concepts/turns-and-sessions.md)
@@ -16,8 +17,9 @@
 
 # アプリ
 
-- [CLI ユーザーガイド](apps/cli.md)
 - [Stage ユーザーガイド](apps/stage.md)
+- [CLI ユーザーガイド](apps/cli.md)
+- [Desktop ユーザーガイド](apps/desktop.md)（旧版）
 
 # ガイド
 

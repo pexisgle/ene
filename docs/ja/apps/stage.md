@@ -1,9 +1,14 @@
 # Stage ユーザーガイド
 
-`ene-stage` は新 harness コア向けの製品 GUI です。必要なら `ene-core` を起動し、
-`ene-vrm` で **透過 wgpu オーバーレイ** にコンパニオンを描き、会話は **表層**
+`ene-stage` が製品 GUI です。必要なら `ene-core` を起動し、`ene-vrm` で
+**透過 wgpu オーバーレイ** にコンパニオンを描き、会話は **表層**
 WebSocket、Home / Companion / Conversation / Voice / Memory / Work /
 Connections / System とセッションログは **別窓の詳細** に出します。
+
+`ene-desktop` は凍結した再設計前の GUI です。機能追加はせず、機能対比も
+要求しません。stage が、製品として要る desktop の能力を代替できたと
+判断したら desktop を削除します。役割は
+[製品境界](../concepts/product-boundaries.md) にあります。
 
 ```sh
 cargo build -p ene-core -p ene-stage

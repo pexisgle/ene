@@ -1,6 +1,6 @@
 # CLI ユーザーガイド
 
-`ene-ctl` は `ene-core` のターミナルクライアントです。desktop / stage / Web と同じ
+`ene-ctl` は `ene-core` のターミナルクライアントです。stage / Web / 旧 desktop と同じ
 公開 HTTP/WS API を使います。
 
 ```sh
@@ -20,4 +20,4 @@ cargo run -p ene-ctl -- core status
 **ファイルのパス**（トークンそのものではない）を表示します。`core stop` は
 記録した PID にシグナルを送ります。
 
-desktop 専用 API はありません。desktop や stage が線上でできることは `ene-ctl` でもできます。
+desktop 専用 API はありません。stage が線上でできることは `ene-ctl` でもできます。
