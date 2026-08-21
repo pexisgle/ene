@@ -314,7 +314,10 @@ mod tests {
         let left = overlay_slot_offset(0, 2, base);
         let right = overlay_slot_offset(1, 2, base);
         assert!(right[0] > left[0]);
-        assert_eq!(left[1], base[1]);
-        assert_eq!(overlay_slot_offset(0, 1, base), base);
+        assert!((left[1] - base[1]).abs() < f32::EPSILON);
+        let single = overlay_slot_offset(0, 1, base);
+        assert!((single[0] - base[0]).abs() < f32::EPSILON);
+        assert!((single[1] - base[1]).abs() < f32::EPSILON);
+        assert!((single[2] - base[2]).abs() < f32::EPSILON);
     }
 }

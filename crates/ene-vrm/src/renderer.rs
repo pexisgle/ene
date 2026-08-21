@@ -896,11 +896,7 @@ impl VrmRenderer {
     /// uniforms before the render pass; the encoder is
     /// responsible for the rest. `transparent` controls the
     /// clear color when `clear` is true. Subsequent bodies in the
-    /// same overlay pass pass `clear = false` so they composite.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "wgpu pass needs device objects, model, camera, and load ops together"
-    )]
+    /// same overlay frame use `clear = false` so they composite.
     pub fn render(
         &self,
         queue: &wgpu::Queue,
