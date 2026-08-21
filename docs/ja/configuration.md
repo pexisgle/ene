@@ -32,10 +32,11 @@
 | `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs` |
 | `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
-会話・分類・埋め込み・TTS・STT は `ai.tasks.<task>`（`plugin`、`model`、
+会話・分類・埋め込み・TTS・STT・承認は `ai.tasks.<task>`（`plugin`、`model`、
 `model_path`、`base_url`、`voice`、`max_tokens`）でバインドします。チャットは
 未設定のまま起動するので、最初のメッセージの前に `ai.tasks.chat.plugin` を
-`provider.*` に設定してください。API キーは vault 秘密です（起動時は
+`provider.*` に設定してください。`approval.mode = ai_auto` は `ai.tasks.approve`
+（無ければ chat）を使い、失敗時はポップアップに落ちます。API キーは vault 秘密です（起動時は
 `ENE_AI__TASKS__<TASK>__API_KEY`。PATCH `/api/v1/settings` は JSON に
 書きません）。プラグイン id は [プラグイン一覧](concepts/plugins-and-mcp.md) の
 `provider.*` です（`GET /api/v1/settings` の `effective.providers`）。

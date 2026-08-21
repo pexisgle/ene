@@ -28,7 +28,7 @@ pub struct ApprovalPlane {
     policy_path: Mutex<Option<PathBuf>>,
     audit: AuditLog,
     popup: Arc<dyn PopupSink>,
-    ai: Option<Arc<dyn ApproveModel>>,
+    ai: Mutex<Option<Arc<dyn ApproveModel>>>,
 }
 
 impl ApprovalPlane {
@@ -45,7 +45,7 @@ impl ApprovalPlane {
             policy_path: Mutex::new(None),
             audit,
             popup,
-            ai,
+            ai: Mutex::new(ai),
         }
     }
 
@@ -72,6 +72,15 @@ impl ApprovalPlane {
             &json!({"key": "approval.mode", "value": format!("{mode:?}")}),
         )?;
         Ok(())
+    }
+
+    pub fn set_ai(&self, ai: Arc<dyn ApproveModel>) {
+        *self.ai.lock() = Some(ai);
+    }
+
+    #[must_use]
+    pub fn has_approve_model(&self) -> bool {
+        self.ai.lock().is_some()
     }
 
     #[must_use]
@@ -184,7 +193,7 @@ impl ApprovalPlane {
         if risk == Risk::High {
             return self.popup(req).await;
         }
-        let Some(ai) = &self.ai else {
+        let Some(ai) = self.ai.lock().clone() else {
             return self.popup(req).await;
         };
         match ai.judge(req).await {

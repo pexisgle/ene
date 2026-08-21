@@ -1400,6 +1400,7 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
         "ai_proactive_key_set": state.core.task_key_set("proactive"),
         "ai_tts_key_set": state.core.task_key_set("tts"),
         "ai_stt_key_set": state.core.task_key_set("stt"),
+        "ai_approve_key_set": state.core.task_key_set("approve"),
     });
     let overlay = {
         let settings_path = state.core.data_dir().join("settings.json");
@@ -1496,6 +1497,13 @@ pub async fn patch_settings(
         "ai.stt",
         &mut secrets.stt,
     )?;
+    take_task_secret(
+        &state,
+        &patch.fields,
+        "/ai/tasks/approve/api_key",
+        "ai.approve",
+        &mut secrets.approve,
+    )?;
     let settings_path = state.core.data_dir().join("settings.json");
     let mut current = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)
@@ -1517,7 +1525,15 @@ pub async fn patch_settings(
             }
         }
     }
-    for task in ["chat", "classifier", "embedding", "proactive", "tts", "stt"] {
+    for task in [
+        "chat",
+        "classifier",
+        "embedding",
+        "proactive",
+        "tts",
+        "stt",
+        "approve",
+    ] {
         if let Some(binding) = current
             .pointer_mut(&format!("/ai/tasks/{task}"))
             .and_then(Value::as_object_mut)
