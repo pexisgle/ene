@@ -2,6 +2,7 @@ use ene_plugin_ipc::ToolSpecWire;
 use ene_registry::{arg_str, spec};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
@@ -26,13 +27,19 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
         spec(
             "utility.calc",
             "Exact arithmetic, unit conversion, or FX among USD EUR GBP JPY CNY KRW AUD CAD CHF INR from a static USD table dated 2026-08-01 (ECB SDMX eurofxref rounded to two figures)",
-            json!({"type":"object","properties":{"expr":{"type":"string"},"value":{"type":"number"},"from":{"type":"string"},"to":{"type":"string"}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"expr":{"type":"string"},"vars":{"type":"object","additionalProperties":{"type":"number"}},"value":{"type":"number"},"from":{"type":"string"},"to":{"type":"string"}},"additionalProperties":false}),
+            Vec::new(),
+        ),
+        spec(
+            "utility.color",
+            "Convert sRGB colors between hex, rgb/rgba, and hsl/hsla",
+            json!({"type":"object","properties":{"color":{"type":"string"},"to":{"type":"string","enum":["hex","rgb","rgba","hsl","hsla"]}},"required":["color","to"],"additionalProperties":false}),
             Vec::new(),
         ),
         spec(
             "utility.random",
-            "Uniform random number, pick, or UUID",
-            json!({"type":"object","properties":{"kind":{"type":"string","enum":["number","pick","uuid"]},"min":{"type":"number"},"max":{"type":"number"},"items":{"type":"array","items":{"type":"string"}}},"required":["kind"],"additionalProperties":false}),
+            "Uniform random number, integer, pick, UUID, or color",
+            json!({"type":"object","properties":{"kind":{"type":"string","enum":["number","integer","pick","uuid","uuid4","color"]},"min":{"type":"number","description":"Lower bound. Integer kind: inclusive. Number kind: inclusive."},"max":{"type":"number","description":"Upper bound. Integer kind: inclusive. Number kind: exclusive."},"items":{"type":"array","items":{"type":"string"}}},"required":["kind"],"additionalProperties":false}),
             Vec::new(),
         ),
         spec(
@@ -50,9 +57,31 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
         "utility.time" => Ok(time(args)),
         "utility.system_info" => Ok(system_info()),
         "utility.calc" => calc(args),
+        "utility.color" => color(args),
         "utility.random" => random(args),
         "utility.text" => text(args),
-        other => Err(format!("unknown builtin {other}")),
+        other => Err(structured_error(
+            "unknown_tool",
+            format!("unknown builtin {other}"),
+        )),
+    }
+}
+
+fn structured_error(kind: &str, message: impl std::fmt::Display) -> String {
+    json!({
+        "error": {
+            "kind": kind,
+            "message": message.to_string(),
+        }
+    })
+    .to_string()
+}
+
+fn ensure_finite(value: f64, kind: &str, message: impl std::fmt::Display) -> Result<f64, String> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(structured_error(kind, message))
     }
 }
 
@@ -86,15 +115,53 @@ fn system_info() -> Value {
     })
 }
 
+fn parse_vars(args: &Value) -> Result<HashMap<String, f64>, String> {
+    let Some(raw) = args.get("vars") else {
+        return Ok(HashMap::new());
+    };
+    let Some(map) = raw.as_object() else {
+        return Err(structured_error(
+            "invalid_arguments",
+            "vars must be an object",
+        ));
+    };
+    let mut out = HashMap::with_capacity(map.len());
+    for (key, value) in map {
+        let Some(number) = value.as_f64() else {
+            return Err(structured_error(
+                "invalid_arguments",
+                format!("vars.{key} must be a number"),
+            ));
+        };
+        if !number.is_finite() {
+            return Err(structured_error(
+                "invalid_arguments",
+                format!("vars.{key} must be finite"),
+            ));
+        }
+        out.insert(key.clone(), number);
+    }
+    Ok(out)
+}
+
 fn calc(args: &Value) -> Result<Value, String> {
     if let Some(expr) = args.get("expr").and_then(Value::as_str) {
-        let value = eval_expr(expr)?;
+        let vars = parse_vars(args)?;
+        let value = eval_expr(expr, &vars)?;
         return Ok(json!({ "value": value, "text": format_number(value) }));
     }
-    let value = args
-        .get("value")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| "utility.calc needs expr or value+from+to".to_owned())?;
+    let value = args.get("value").and_then(Value::as_f64).ok_or_else(|| {
+        structured_error(
+            "invalid_arguments",
+            "utility.calc needs expr or value+from+to",
+        )
+    })?;
+    if !value.is_finite() {
+        return Err(structured_error(
+            "invalid_arguments",
+            "value must be a finite number",
+        ));
+    }
     let from = arg_str(args, "from")?;
     let to = arg_str(args, "to")?;
     if let Some(fx) = currency_convert(value, from, to)? {
@@ -107,33 +174,86 @@ fn calc(args: &Value) -> Result<Value, String> {
             "as_of": FX_AS_OF,
             "quote": "USD",
             "source": FX_SOURCE,
+            "stale": true,
         }));
     }
     let converted = convert_unit(value, from, to)?;
     Ok(json!({ "value": converted, "text": format_number(converted), "from": from, "to": to }))
 }
 
+fn color(args: &Value) -> Result<Value, String> {
+    let input = arg_str(args, "color")?;
+    let to = arg_str(args, "to")?;
+    let parsed = parse_color(input).map_err(|message| {
+        structured_error(
+            "invalid_color",
+            format!("invalid color '{input}': {message}"),
+        )
+    })?;
+    let text = match to.trim().to_ascii_lowercase().as_str() {
+        "hex" => format_hex(parsed),
+        "rgb" | "rgba" => format_rgb(parsed),
+        "hsl" | "hsla" => format_hsl(parsed),
+        other => {
+            return Err(structured_error(
+                "invalid_arguments",
+                format!("unknown output format '{other}' (expected hex, rgb, or hsl)"),
+            ));
+        }
+    };
+    Ok(json!({ "text": text, "to": to }))
+}
+
 fn random(args: &Value) -> Result<Value, String> {
     let kind = arg_str(args, "kind")?;
     match kind {
         "uuid" => Ok(json!({ "uuid": uuid::Uuid::now_v7().to_string() })),
+        "uuid4" => Ok(json!({ "uuid": uuid::Uuid::new_v4().to_string() })),
         "number" => {
             let min = args.get("min").and_then(Value::as_f64).unwrap_or(0.0);
             let max = args.get("max").and_then(Value::as_f64).unwrap_or(1.0);
-            if max < min {
-                return Err("max must be >= min".to_owned());
+            if !min.is_finite() || !max.is_finite() {
+                return Err(structured_error(
+                    "invalid_range",
+                    "min and max must be finite numbers",
+                ));
+            }
+            if max <= min {
+                return Err(structured_error(
+                    "invalid_range",
+                    "max must be greater than min for float ranges",
+                ));
             }
             let span = max - min;
             let drawn = min + span * fastrand();
             Ok(json!({ "value": drawn }))
         }
+        "integer" => {
+            let min = args.get("min").and_then(Value::as_i64).unwrap_or(0);
+            let max = args.get("max").and_then(Value::as_i64).unwrap_or(1);
+            if min > max {
+                return Err(structured_error(
+                    "invalid_range",
+                    "max must be >= min for integer ranges",
+                ));
+            }
+            let drawn = random_integer_inclusive(min, max)?;
+            Ok(json!({ "value": drawn }))
+        }
+        "color" => {
+            let r = random_integer_inclusive(0, 255)?;
+            let g = random_integer_inclusive(0, 255)?;
+            let b = random_integer_inclusive(0, 255)?;
+            let hex = format!("#{r:02x}{g:02x}{b:02x}");
+            Ok(json!({ "hex": hex, "rgb": format!("rgb({r}, {g}, {b})") }))
+        }
         "pick" => {
             let items = args
                 .get("items")
                 .and_then(Value::as_array)
-                .ok_or_else(|| "pick needs items".to_owned())?;
+                .ok_or_else(|| structured_error("invalid_arguments", "pick needs items"))?;
             if items.is_empty() {
-                return Err("items is empty".to_owned());
+                return Err(structured_error("invalid_arguments", "items is empty"));
             }
             #[expect(
                 clippy::cast_precision_loss,
@@ -144,8 +264,46 @@ fn random(args: &Value) -> Result<Value, String> {
             let idx = idx.min(items.len() - 1);
             Ok(json!({ "value": items[idx].clone(), "index": idx }))
         }
-        other => Err(format!("unknown kind {other}")),
+        other => Err(structured_error(
+            "invalid_arguments",
+            format!("unknown kind {other}"),
+        )),
     }
+}
+
+fn random_integer_inclusive(min: i64, max: i64) -> Result<i64, String> {
+    if min > max {
+        return Err(structured_error(
+            "invalid_range",
+            "max must be >= min for integer ranges",
+        ));
+    }
+    if min == max {
+        return Ok(min);
+    }
+    let span = max - min;
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "span is non-negative because min <= max"
+    )]
+    let range = u128::from(span as u64)
+        .checked_add(1)
+        .ok_or_else(|| structured_error("invalid_range", "integer range is too large"))?;
+    let threshold = (u128::from(u64::MAX) / range) * range;
+    loop {
+        let bits = random_u64();
+        let sample = u128::from(bits);
+        if sample < threshold {
+            return Ok(min + (sample % range) as i64);
+        }
+    }
+}
+
+fn random_u64() -> u64 {
+    let bytes = uuid::Uuid::now_v7().into_bytes();
+    let mut seed = [0u8; 8];
+    seed.copy_from_slice(&bytes[0..8]);
+    u64::from_be_bytes(seed)
 }
 
 fn text(args: &Value) -> Result<Value, String> {
@@ -277,32 +435,155 @@ fn format_number(value: f64) -> String {
         .to_owned()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dimension {
+    Length,
+    Mass,
+    Time,
+    Volume,
+    Speed,
+    Area,
+    Temperature,
+    Data,
+}
+
+impl Dimension {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Length => "length",
+            Self::Mass => "mass",
+            Self::Time => "time",
+            Self::Volume => "volume",
+            Self::Speed => "speed",
+            Self::Area => "area",
+            Self::Temperature => "temperature",
+            Self::Data => "data",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UnitDef {
+    dimension: Dimension,
+    factor: f64,
+    offset: f64,
+}
+
+impl UnitDef {
+    const fn linear(dimension: Dimension, factor: f64) -> Self {
+        Self {
+            dimension,
+            factor,
+            offset: 0.0,
+        }
+    }
+}
+
+fn unit_def(unit: &str) -> Option<UnitDef> {
+    let key = unit.trim().to_ascii_lowercase();
+    Some(match key.as_str() {
+        "m" | "meter" | "meters" | "metre" | "metres" => UnitDef::linear(Dimension::Length, 1.0),
+        "km" | "kilometer" | "kilometers" | "kilometre" | "kilometres" => {
+            UnitDef::linear(Dimension::Length, 1_000.0)
+        }
+        "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => {
+            UnitDef::linear(Dimension::Length, 0.01)
+        }
+        "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => {
+            UnitDef::linear(Dimension::Length, 0.001)
+        }
+        "in" | "inch" | "inches" => UnitDef::linear(Dimension::Length, 0.0254),
+        "ft" | "foot" | "feet" => UnitDef::linear(Dimension::Length, 0.3048),
+        "mi" | "mile" | "miles" => UnitDef::linear(Dimension::Length, 1_609.344),
+        "kg" | "kilogram" | "kilograms" => UnitDef::linear(Dimension::Mass, 1.0),
+        "g" | "gram" | "grams" => UnitDef::linear(Dimension::Mass, 0.001),
+        "lb" | "lbs" | "pound" | "pounds" => UnitDef::linear(Dimension::Mass, 0.453_592_37),
+        "oz" | "ounce" | "ounces" => UnitDef::linear(Dimension::Mass, 0.028_349_523_125),
+        "s" | "sec" | "second" | "seconds" => UnitDef::linear(Dimension::Time, 1.0),
+        "min" | "minute" | "minutes" => UnitDef::linear(Dimension::Time, 60.0),
+        "h" | "hr" | "hour" | "hours" => UnitDef::linear(Dimension::Time, 3_600.0),
+        "day" | "days" => UnitDef::linear(Dimension::Time, 86_400.0),
+        "ml" | "milliliter" | "milliliters" | "millilitre" | "millilitres" => {
+            UnitDef::linear(Dimension::Volume, 1.0e-6)
+        }
+        "l" | "liter" | "liters" | "litre" | "litres" => UnitDef::linear(Dimension::Volume, 0.001),
+        "m3" | "cubic_meter" | "cubic_meters" | "cubic_metre" | "cubic_metres" => {
+            UnitDef::linear(Dimension::Volume, 1.0)
+        }
+        "gal" | "gal_us" | "us_gallon" | "us_gallons" | "gallon" | "gallons" => {
+            UnitDef::linear(Dimension::Volume, 0.003_785_411_784)
+        }
+        "cup" | "cups" => UnitDef::linear(Dimension::Volume, 0.000_236_588_236_5),
+        "m/s" | "meter_per_second" | "meters_per_second" => UnitDef::linear(Dimension::Speed, 1.0),
+        "km/h"
+        | "kilometer_per_hour"
+        | "kilometers_per_hour"
+        | "kilometre_per_hour"
+        | "kilometres_per_hour" => UnitDef::linear(Dimension::Speed, 1.0 / 3.6),
+        "mph" | "mile_per_hour" | "miles_per_hour" => UnitDef::linear(Dimension::Speed, 0.447_04),
+        "m2" | "square_meter" | "square_meters" | "square_metre" | "square_metres" => {
+            UnitDef::linear(Dimension::Area, 1.0)
+        }
+        "km2" | "square_kilometer" | "square_kilometers" => UnitDef::linear(Dimension::Area, 1.0e6),
+        "ha" | "hectare" | "hectares" => UnitDef::linear(Dimension::Area, 1.0e4),
+        "acre" | "acres" => UnitDef::linear(Dimension::Area, 4_046.856_422_4),
+        "ft2" | "square_foot" | "square_feet" => UnitDef::linear(Dimension::Area, 0.092_903_04),
+        "b" | "byte" | "bytes" => UnitDef::linear(Dimension::Data, 1.0),
+        "kb" => UnitDef::linear(Dimension::Data, 1_000.0),
+        "mb" => UnitDef::linear(Dimension::Data, 1_000_000.0),
+        "gb" => UnitDef::linear(Dimension::Data, 1_000_000_000.0),
+        "kib" => UnitDef::linear(Dimension::Data, 1_024.0),
+        "mib" => UnitDef::linear(Dimension::Data, 1_048_576.0),
+        "gib" => UnitDef::linear(Dimension::Data, 1_073_741_824.0),
+        "c" | "celsius" => UnitDef {
+            dimension: Dimension::Temperature,
+            factor: 1.0,
+            offset: 273.15,
+        },
+        "f" | "fahrenheit" => UnitDef {
+            dimension: Dimension::Temperature,
+            factor: 5.0 / 9.0,
+            offset: 459.67,
+        },
+        "k" | "kelvin" => UnitDef {
+            dimension: Dimension::Temperature,
+            factor: 1.0,
+            offset: 0.0,
+        },
+        _ => return None,
+    })
+}
+
 fn convert_unit(value: f64, from: &str, to: &str) -> Result<f64, String> {
     let from = from.trim();
     let to = to.trim();
     if from.eq_ignore_ascii_case(to) {
         return Ok(value);
     }
-    if let Some(si) = length_to_m(from) {
-        let dest = length_to_m(to).ok_or_else(|| format!("unknown unit {to}"))?;
-        return Ok(value * si / dest);
+    let from_def = unit_def(from)
+        .ok_or_else(|| structured_error("unknown_unit", format!("unknown unit {from}")))?;
+    let to_def = unit_def(to)
+        .ok_or_else(|| structured_error("unknown_unit", format!("unknown unit {to}")))?;
+    if from_def.dimension != to_def.dimension {
+        return Err(structured_error(
+            "dimension_mismatch",
+            format!(
+                "cannot convert {from} ({}) to {to} ({}): dimensions differ",
+                from_def.dimension.label(),
+                to_def.dimension.label()
+            ),
+        ));
     }
-    if let Some(si) = mass_to_kg(from) {
-        let dest = mass_to_kg(to).ok_or_else(|| format!("unknown unit {to}"))?;
-        return Ok(value * si / dest);
+    if from_def.dimension == Dimension::Temperature {
+        let kelvin = (value + from_def.offset) * from_def.factor;
+        let converted = kelvin / to_def.factor - to_def.offset;
+        return ensure_finite(converted, "overflow", "unit conversion overflowed");
     }
-    if let Some(si) = time_to_s(from) {
-        let dest = time_to_s(to).ok_or_else(|| format!("unknown unit {to}"))?;
-        return Ok(value * si / dest);
-    }
-    if let Some(si) = data_to_b(from) {
-        let dest = data_to_b(to).ok_or_else(|| format!("unknown unit {to}"))?;
-        return Ok(value * si / dest);
-    }
-    temp_convert(value, from, to)
+    let si = value * from_def.factor;
+    let converted = si / to_def.factor;
+    ensure_finite(converted, "overflow", "unit conversion overflowed")
 }
 
-/// Snapshot date and publisher for [`units_per_usd`]. Not a live market feed.
 const FX_AS_OF: &str = "2026-08-01";
 const FX_SOURCE: &str = "ECB eurofxref daily (USD cross, rounded)";
 
@@ -344,16 +625,22 @@ fn currency_convert(value: f64, from: &str, to: &str) -> Result<Option<FxQuote>,
     let to_code = currency_code(to);
     match (from_code, to_code) {
         (None, None) => Ok(None),
-        (Some(_), None) | (None, Some(_)) => {
-            Err("currency conversion needs two ISO 4217 codes".to_owned())
-        }
+        (Some(_), None) | (None, Some(_)) => Err(structured_error(
+            "invalid_arguments",
+            "currency conversion needs two ISO 4217 codes",
+        )),
         (Some(from), Some(to)) => {
-            let from_per =
-                units_per_usd(&from).ok_or_else(|| format!("unknown currency {from}"))?;
-            let to_per = units_per_usd(&to).ok_or_else(|| format!("unknown currency {to}"))?;
+            let from_per = units_per_usd(&from).ok_or_else(|| {
+                structured_error("unknown_unit", format!("unknown currency {from}"))
+            })?;
+            let to_per = units_per_usd(&to).ok_or_else(|| {
+                structured_error("unknown_unit", format!("unknown currency {to}"))
+            })?;
             let rate = to_per / from_per;
+            let converted = value * rate;
+            ensure_finite(converted, "overflow", "currency conversion overflowed")?;
             Ok(Some(FxQuote {
-                value: value * rate,
+                value: converted,
                 from,
                 to,
                 rate,
@@ -362,81 +649,29 @@ fn currency_convert(value: f64, from: &str, to: &str) -> Result<Option<FxQuote>,
     }
 }
 
-fn length_to_m(unit: &str) -> Option<f64> {
-    Some(match unit {
-        "m" | "meter" | "meters" => 1.0,
-        "km" => 1_000.0,
-        "cm" => 0.01,
-        "mm" => 0.001,
-        "in" | "inch" => 0.0254,
-        "ft" | "foot" | "feet" => 0.3048,
-        "mi" | "mile" | "miles" => 1_609.344,
-        _ => return None,
-    })
-}
-
-fn mass_to_kg(unit: &str) -> Option<f64> {
-    Some(match unit {
-        "kg" => 1.0,
-        "g" => 0.001,
-        "lb" | "lbs" => 0.453_592_37,
-        "oz" => 0.028_349_523_125,
-        _ => return None,
-    })
-}
-
-fn time_to_s(unit: &str) -> Option<f64> {
-    Some(match unit {
-        "s" | "sec" | "second" | "seconds" => 1.0,
-        "min" | "minute" | "minutes" => 60.0,
-        "h" | "hr" | "hour" | "hours" => 3_600.0,
-        "day" | "days" => 86_400.0,
-        _ => return None,
-    })
-}
-
-fn data_to_b(unit: &str) -> Option<f64> {
-    Some(match unit {
-        "B" | "byte" | "bytes" => 1.0,
-        "KB" => 1_000.0,
-        "MB" => 1_000_000.0,
-        "GB" => 1_000_000_000.0,
-        "KiB" => 1_024.0,
-        "MiB" => 1_048_576.0,
-        "GiB" => 1_073_741_824.0,
-        _ => return None,
-    })
-}
-
-fn temp_convert(value: f64, from: &str, to: &str) -> Result<f64, String> {
-    let k = match from {
-        "C" | "c" | "celsius" => value + 273.15,
-        "F" | "f" | "fahrenheit" => (value - 32.0) * 5.0 / 9.0 + 273.15,
-        "K" | "k" | "kelvin" => value,
-        _ => return Err(format!("unknown unit {from}")),
+fn eval_expr(input: &str, vars: &HashMap<String, f64>) -> Result<f64, String> {
+    let mut p = Parser {
+        input,
+        pos: 0,
+        vars,
     };
-    Ok(match to {
-        "C" | "c" | "celsius" => k - 273.15,
-        "F" | "f" | "fahrenheit" => (k - 273.15) * 9.0 / 5.0 + 32.0,
-        "K" | "k" | "kelvin" => k,
-        _ => return Err(format!("unknown unit {to}")),
-    })
-}
-
-fn eval_expr(input: &str) -> Result<f64, String> {
-    let mut p = Parser { input, pos: 0 };
     p.skip();
     let value = p.expr()?;
     p.skip();
     if p.pos < p.input.len() {
-        return Err("trailing input".to_owned());
+        return Err(structured_error("invalid_expression", "trailing input"));
     }
-    Ok(value)
+    ensure_finite(
+        value,
+        "overflow",
+        "result is not a finite number (division by zero, overflow, or undefined operation)",
+    )
 }
 
 struct Parser<'a> {
     input: &'a str,
     pos: usize,
+    vars: &'a HashMap<String, f64>,
 }
 
 impl Parser<'_> {
@@ -490,7 +725,7 @@ impl Parser<'_> {
                     self.bump();
                     let rhs = self.power()?;
                     if rhs == 0.0 {
-                        return Err("division by zero".to_owned());
+                        return Err(structured_error("division_by_zero", "division by zero"));
                     }
                     value /= rhs;
                 }
@@ -504,7 +739,9 @@ impl Parser<'_> {
         self.skip();
         if self.peek() == Some('^') {
             self.bump();
-            Ok(base.powf(self.power()?))
+            let exp = self.power()?;
+            let value = base.powf(exp);
+            ensure_finite(value, "overflow", "power overflowed or is undefined")
         } else {
             Ok(base)
         }
@@ -515,6 +752,9 @@ impl Parser<'_> {
         if self.peek() == Some('-') {
             self.bump();
             return Ok(-self.unary()?);
+        }
+        if self.peek() == Some('+') {
+            self.bump();
         }
         self.primary()
     }
@@ -527,13 +767,13 @@ impl Parser<'_> {
                 let value = self.expr()?;
                 self.skip();
                 if self.bump() != Some(')') {
-                    return Err("expected )".to_owned());
+                    return Err(structured_error("invalid_expression", "expected )"));
                 }
                 Ok(value)
             }
             Some(c) if c.is_ascii_digit() || c == '.' => self.number(),
-            Some(c) if c.is_ascii_alphabetic() => self.call(),
-            _ => Err("expected number".to_owned()),
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => self.ident_or_call(),
+            _ => Err(structured_error("invalid_expression", "expected number")),
         }
     }
 
@@ -542,21 +782,42 @@ impl Parser<'_> {
         while matches!(self.peek(), Some(c) if c.is_ascii_digit() || c == '.') {
             self.bump();
         }
+        if matches!(self.peek(), Some('e' | 'E')) {
+            self.bump();
+            if matches!(self.peek(), Some('+' | '-')) {
+                self.bump();
+            }
+            while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                self.bump();
+            }
+        }
         self.input[start..self.pos]
             .parse::<f64>()
-            .map_err(|err| err.to_string())
+            .map_err(|_| structured_error("invalid_expression", "invalid number literal"))
     }
 
-    fn call(&mut self) -> Result<f64, String> {
+    fn ident_or_call(&mut self) -> Result<f64, String> {
         let start = self.pos;
-        while matches!(self.peek(), Some(c) if c.is_ascii_alphabetic()) {
+        while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == '_') {
             self.bump();
         }
-        let name = self.input[start..self.pos].to_owned();
+        let name = &self.input[start..self.pos];
         self.skip();
-        if self.bump() != Some('(') {
-            return Err(format!("unknown ident {name}"));
+        if self.peek() == Some('(') {
+            return self.finish_call(name);
         }
+        match name {
+            "pi" => Ok(std::f64::consts::PI),
+            "e" => Ok(std::f64::consts::E),
+            "tau" => Ok(std::f64::consts::TAU),
+            _ => self.vars.get(name).copied().ok_or_else(|| {
+                structured_error("unknown_variable", format!("unknown variable {name}"))
+            }),
+        }
+    }
+
+    fn finish_call(&mut self, name: &str) -> Result<f64, String> {
+        self.bump();
         let mut args = Vec::new();
         self.skip();
         if self.peek() != Some(')') {
@@ -568,29 +829,351 @@ impl Parser<'_> {
                         self.bump();
                     }
                     Some(')') => break,
-                    _ => return Err("expected , or )".to_owned()),
+                    _ => {
+                        return Err(structured_error("invalid_expression", "expected , or )"));
+                    }
                 }
             }
         }
         if self.bump() != Some(')') {
-            return Err("expected )".to_owned());
+            return Err(structured_error("invalid_expression", "expected )"));
         }
-        match name.as_str() {
-            "sqrt" if args.len() == 1 => Ok(args[0].sqrt()),
-            "abs" if args.len() == 1 => Ok(args[0].abs()),
-            "floor" if args.len() == 1 => Ok(args[0].floor()),
-            "ceil" if args.len() == 1 => Ok(args[0].ceil()),
-            "min" if args.len() == 2 => Ok(args[0].min(args[1])),
-            "max" if args.len() == 2 => Ok(args[0].max(args[1])),
-            _ => Err(format!("unknown function {name}")),
+        Self::dispatch_call(name, &args)
+    }
+
+    fn dispatch_call(name: &str, args: &[f64]) -> Result<f64, String> {
+        let value = match (name, args) {
+            ("sqrt", [x]) if *x >= 0.0 => x.sqrt(),
+            ("sqrt", [_]) => {
+                return Err(structured_error(
+                    "domain_error",
+                    "sqrt of a negative number",
+                ));
+            }
+            ("abs", [x]) => x.abs(),
+            ("floor", [x]) => x.floor(),
+            ("ceil", [x]) => x.ceil(),
+            ("round", [x]) => x.round(),
+            ("sin", [x]) => x.sin(),
+            ("cos", [x]) => x.cos(),
+            ("tan", [x]) => x.tan(),
+            ("asin", [x]) if (-1.0..=1.0).contains(x) => x.asin(),
+            ("asin", [_]) => {
+                return Err(structured_error(
+                    "domain_error",
+                    "asin input must be in [-1, 1]",
+                ));
+            }
+            ("acos", [x]) if (-1.0..=1.0).contains(x) => x.acos(),
+            ("acos", [_]) => {
+                return Err(structured_error(
+                    "domain_error",
+                    "acos input must be in [-1, 1]",
+                ));
+            }
+            ("atan", [x]) => x.atan(),
+            ("ln", [x]) if *x > 0.0 => x.ln(),
+            ("ln", [_]) => {
+                return Err(structured_error(
+                    "domain_error",
+                    "ln input must be positive",
+                ));
+            }
+            ("log", [x]) if *x > 0.0 => x.log10(),
+            ("log", [_]) => {
+                return Err(structured_error(
+                    "domain_error",
+                    "log input must be positive",
+                ));
+            }
+            ("exp", [x]) => x.exp(),
+            ("deg", [x]) => x.to_radians(),
+            ("rad", [x]) => x.to_degrees(),
+            ("min", [a, b]) => a.min(*b),
+            ("max", [a, b]) => a.max(*b),
+            _ => {
+                return Err(structured_error(
+                    "unknown_function",
+                    format!("unknown function {name}"),
+                ));
+            }
+        };
+        ensure_finite(value, "overflow", "function result is not finite")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Rgba {
+    r: u8,
+    g: u8,
+    b: u8,
+    a: f64,
+}
+
+fn parse_color(input: &str) -> Result<Rgba, String> {
+    let input = input.trim();
+    let lower = input.to_ascii_lowercase();
+    if let Some(digits) = lower.strip_prefix('#') {
+        parse_hex(digits)
+    } else if lower.starts_with("rgb") {
+        parse_rgb_style(&lower)
+    } else if lower.starts_with("hsl") {
+        parse_hsl_style(&lower)
+    } else if lower.contains(',') {
+        parse_rgb_channels(&lower)
+    } else if !lower.is_empty() && lower.chars().all(|c| c.is_ascii_hexdigit()) {
+        parse_hex(&lower)
+    } else {
+        Err(format!(
+            "expected hex, rgb(...), or hsl(...), got '{input}'"
+        ))
+    }
+}
+
+fn parse_hex(digits: &str) -> Result<Rgba, String> {
+    if !matches!(digits.len(), 3 | 4 | 6 | 8) || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "'{digits}' is not valid hex (3, 4, 6, or 8 digits)"
+        ));
+    }
+    let full = match digits.len() {
+        3 | 4 => digits.chars().flat_map(|c| [c, c]).collect::<String>(),
+        _ => digits.to_string(),
+    };
+    let value =
+        u32::from_str_radix(&full, 16).map_err(|_| format!("'{digits}' is not valid hex"))?;
+    let shift = if full.len() == 8 { 24 } else { 16 };
+    let r = ((value >> shift) & 0xff) as u8;
+    let g = ((value >> (shift - 8)) & 0xff) as u8;
+    let b = ((value >> (shift - 16)) & 0xff) as u8;
+    let a = if full.len() == 8 {
+        f64::from((value & 0xff) as u8) / 255.0
+    } else {
+        1.0
+    };
+    Ok(Rgba { r, g, b, a })
+}
+
+fn parse_rgb_style(input: &str) -> Result<Rgba, String> {
+    let inner = input
+        .strip_prefix("rgba")
+        .or_else(|| input.strip_prefix("rgb"))
+        .ok_or_else(|| format!("'{input}' is not an rgb(...) color"))?;
+    let body = inner
+        .trim()
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(|| "rgb(...) must wrap the channels in parentheses".to_string())?;
+    parse_rgb_channels(body.trim())
+}
+
+fn parse_rgb_channels(body: &str) -> Result<Rgba, String> {
+    let parts: Vec<&str> = body
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|p| !p.is_empty())
+        .collect();
+    match parts.as_slice() {
+        [r, g, b] => Ok(Rgba {
+            r: parse_channel(r)?,
+            g: parse_channel(g)?,
+            b: parse_channel(b)?,
+            a: 1.0,
+        }),
+        [r, g, b, a] => Ok(Rgba {
+            r: parse_channel(r)?,
+            g: parse_channel(g)?,
+            b: parse_channel(b)?,
+            a: parse_alpha(a)?,
+        }),
+        _ => Err(format!("expected 3 or 4 channels, got {}", parts.len())),
+    }
+}
+
+fn parse_channel(raw: &str) -> Result<u8, String> {
+    if let Some(percent) = raw.strip_suffix('%') {
+        let value: f64 = percent
+            .parse()
+            .map_err(|_| format!("'{raw}' is not a number"))?;
+        if !(0.0..=100.0).contains(&value) {
+            return Err(format!("channel '{raw}' is out of range (0-100%)"));
         }
+        return Ok((value * 255.0 / 100.0).round() as u8);
+    }
+    let value: f64 = raw
+        .parse()
+        .map_err(|_| format!("'{raw}' is not a number"))?;
+    if !(0.0..=255.0).contains(&value) {
+        return Err(format!("channel '{raw}' is out of range (0-255)"));
+    }
+    Ok(value.round() as u8)
+}
+
+fn parse_alpha(raw: &str) -> Result<f64, String> {
+    let value: f64 = raw
+        .parse()
+        .map_err(|_| format!("'{raw}' is not a number"))?;
+    if !(0.0..=1.0).contains(&value) {
+        return Err(format!("alpha '{raw}' is out of range (0-1)"));
+    }
+    Ok(value)
+}
+
+fn parse_hsl_style(input: &str) -> Result<Rgba, String> {
+    let inner = input
+        .strip_prefix("hsla")
+        .or_else(|| input.strip_prefix("hsl"))
+        .ok_or_else(|| format!("'{input}' is not an hsl(...) color"))?;
+    let body = inner
+        .trim()
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(|| "hsl(...) must wrap the channels in parentheses".to_string())?;
+    let parts: Vec<&str> = body
+        .trim()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let (hue, sat, light, a) = match parts.as_slice() {
+        [h, s, l] => (
+            parse_hue(h)?,
+            parse_percent(s, "saturation")?,
+            parse_percent(l, "lightness")?,
+            1.0,
+        ),
+        [h, s, l, a] => (
+            parse_hue(h)?,
+            parse_percent(s, "saturation")?,
+            parse_percent(l, "lightness")?,
+            parse_alpha(a)?,
+        ),
+        _ => return Err(format!("expected 3 or 4 channels, got {}", parts.len())),
+    };
+    Ok(hsl_to_rgb(hue, sat, light, a))
+}
+
+fn parse_hue(raw: &str) -> Result<f64, String> {
+    let value: f64 = raw
+        .parse()
+        .map_err(|_| format!("'{raw}' is not a number"))?;
+    if !(0.0..=360.0).contains(&value) {
+        return Err(format!("hue '{raw}' is out of range (0-360)"));
+    }
+    Ok(value)
+}
+
+fn parse_percent(raw: &str, name: &str) -> Result<f64, String> {
+    let stripped = raw.trim().trim_end_matches('%');
+    let value: f64 = stripped
+        .parse()
+        .map_err(|_| format!("'{raw}' is not a number"))?;
+    if !(0.0..=100.0).contains(&value) {
+        return Err(format!("{name} '{raw}' is out of range (0-100%)"));
+    }
+    Ok(value / 100.0)
+}
+
+fn hsl_to_rgb(hue: f64, sat: f64, light: f64, a: f64) -> Rgba {
+    let c = (1.0 - (2.0 * light - 1.0).abs()) * sat;
+    let hp = hue / 60.0;
+    let x = c * (1.0 - ((hp % 2.0) - 1.0).abs());
+    let (r1, g1, b1) = match hp {
+        _ if (0.0..1.0).contains(&hp) => (c, x, 0.0),
+        _ if (1.0..2.0).contains(&hp) => (x, c, 0.0),
+        _ if (2.0..3.0).contains(&hp) => (0.0, c, x),
+        _ if (3.0..4.0).contains(&hp) => (0.0, x, c),
+        _ if (4.0..5.0).contains(&hp) => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = light - c / 2.0;
+    Rgba {
+        r: ((r1 + m) * 255.0).round() as u8,
+        g: ((g1 + m) * 255.0).round() as u8,
+        b: ((b1 + m) * 255.0).round() as u8,
+        a,
+    }
+}
+
+#[expect(
+    clippy::float_cmp,
+    reason = "max is always exactly one of r/g/b because every channel is a multiple of 1/255"
+)]
+fn rgb_to_hsl(color: Rgba) -> (f64, f64, f64) {
+    let r = f64::from(color.r) / 255.0;
+    let g = f64::from(color.g) / 255.0;
+    let b = f64::from(color.b) / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let light = f64::midpoint(max, min);
+    let delta = max - min;
+    if delta == 0.0 {
+        return (0.0, 0.0, light);
+    }
+    let sat = delta / (1.0 - (2.0 * light - 1.0).abs());
+    let hue = if max == r {
+        (g - b) / delta % 6.0
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    ((hue * 60.0).rem_euclid(360.0), sat, light)
+}
+
+fn format_hex(color: Rgba) -> String {
+    if color.a >= 1.0 {
+        format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+    } else {
+        format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            color.r,
+            color.g,
+            color.b,
+            (color.a * 255.0).round() as u8
+        )
+    }
+}
+
+fn format_rgb(color: Rgba) -> String {
+    if color.a >= 1.0 {
+        format!("rgb({}, {}, {})", color.r, color.g, color.b)
+    } else {
+        format!(
+            "rgba({}, {}, {}, {})",
+            color.r,
+            color.g,
+            color.b,
+            format_number(color.a)
+        )
+    }
+}
+
+fn format_hsl(color: Rgba) -> String {
+    let (h, s, l) = rgb_to_hsl(color);
+    let h = format_number(h);
+    let s = format_number(s * 100.0);
+    let l = format_number(l * 100.0);
+    if color.a >= 1.0 {
+        format!("hsl({h}, {s}%, {l}%)")
+    } else {
+        format!("hsla({h}, {s}%, {l}%, {})", format_number(color.a))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{calc, currency_convert, system_info};
-    use serde_json::json;
+    use super::{
+        FX_AS_OF, FX_SOURCE, calc, color, convert_unit, currency_convert, eval_expr, format_hex,
+        parse_color, random, random_integer_inclusive, structured_error, system_info,
+    };
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+
+    fn parse_structured_error(err: &str) -> Option<(String, String)> {
+        let value: Value = serde_json::from_str(err).ok()?;
+        let kind = value.get("error")?.get("kind")?.as_str()?.to_owned();
+        let message = value.get("error")?.get("message")?.as_str()?.to_owned();
+        Some((kind, message))
+    }
 
     #[test]
     fn system_info_reports_compile_target() {
@@ -615,19 +1198,126 @@ mod tests {
     fn calc_fx_includes_snapshot_metadata() {
         let value = calc(&json!({"value": 1, "from": "USD", "to": "eur"})).unwrap();
         assert!((value["value"].as_f64().unwrap() - 0.92).abs() < 1e-9);
-        assert_eq!(value["as_of"], json!(super::FX_AS_OF));
-        assert_eq!(value["source"], json!(super::FX_SOURCE));
+        assert_eq!(value["as_of"], json!(FX_AS_OF));
+        assert_eq!(value["source"], json!(FX_SOURCE));
         assert_eq!(value["quote"], json!("USD"));
+        assert_eq!(value["stale"], json!(true));
     }
 
     #[test]
     fn mixed_currency_and_length_is_rejected() {
         let err = currency_convert(1.0, "USD", "m").unwrap_err();
-        assert!(err.contains("ISO 4217"));
+        let (kind, message) = parse_structured_error(&err).unwrap();
+        assert_eq!(kind, "invalid_arguments");
+        assert!(message.contains("ISO 4217"));
     }
 
     #[test]
     fn length_conversion_still_skips_fx() {
         assert!(currency_convert(1.0, "m", "km").unwrap().is_none());
+    }
+
+    #[test]
+    fn sin_deg_45_is_sqrt2_over_2() {
+        let value = eval_expr("sin(deg(45))", &HashMap::new()).unwrap();
+        assert!((value - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_and_pi_evaluate() {
+        assert!((eval_expr("max(2,3)", &HashMap::new()).unwrap() - 3.0).abs() < 1e-12);
+        assert!((eval_expr("pi", &HashMap::new()).unwrap() - std::f64::consts::PI).abs() < 1e-12);
+    }
+
+    #[test]
+    fn vars_are_bound_in_calc() {
+        let value = calc(&json!({"expr":"x+1","vars":{"x":2}})).unwrap();
+        assert_eq!(value["value"], json!(3.0));
+    }
+
+    #[test]
+    fn volume_speed_and_area_convert() {
+        assert!((convert_unit(1.0, "L", "mL").unwrap() - 1_000.0).abs() < 1e-9);
+        assert!((convert_unit(36.0, "km/h", "m/s").unwrap() - 10.0).abs() < 1e-9);
+        assert!((convert_unit(10_000.0, "m2", "ha").unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dimension_mismatch_is_structured() {
+        let err = convert_unit(1.0, "L", "kg").unwrap_err();
+        let (kind, message) = parse_structured_error(&err).unwrap();
+        assert_eq!(kind, "dimension_mismatch");
+        assert!(message.contains("volume"));
+        assert!(message.contains("mass"));
+    }
+
+    #[test]
+    fn color_hex_rgb_hsl_round_trip() {
+        let red = parse_color("#ff0000").unwrap();
+        assert_eq!(format_hex(red), "#ff0000");
+        let value = color(&json!({"color":"#ff0000","to":"hsl"})).unwrap();
+        assert_eq!(value["text"], json!("hsl(0, 100%, 50%)"));
+        let back = color(&json!({"color": value["text"], "to":"hex"})).unwrap();
+        assert_eq!(back["text"], json!("#ff0000"));
+    }
+
+    #[test]
+    fn color_alpha_round_trip_within_bounds() {
+        let value = color(&json!({"color":"rgba(255, 0, 0, 0.5)","to":"hex"})).unwrap();
+        assert_eq!(value["text"], json!("#ff000080"));
+        let back = color(&json!({"color": value["text"], "to":"rgba"})).unwrap();
+        let alpha = back["text"].as_str().unwrap();
+        assert!(alpha.contains("0.5") || alpha.contains("0.501960784314"));
+    }
+
+    #[test]
+    fn integer_random_stays_in_bounds() {
+        for _ in 0..500 {
+            let value = random(&json!({"kind":"integer","min":3,"max":7})).unwrap()["value"]
+                .as_i64()
+                .unwrap();
+            assert!((3..=7).contains(&value), "{value}");
+        }
+    }
+
+    #[test]
+    fn integer_random_uses_rejection_sampling_not_modulo_bias() {
+        for _ in 0..200 {
+            let value = random_integer_inclusive(i64::MAX - 2, i64::MAX).unwrap();
+            assert!((i64::MAX - 2..=i64::MAX).contains(&value), "{value}");
+        }
+    }
+
+    #[test]
+    fn invalid_expression_is_structured() {
+        let err = eval_expr("1 +* 2", &HashMap::new()).unwrap_err();
+        let (kind, _) = parse_structured_error(&err).unwrap();
+        assert_eq!(kind, "invalid_expression");
+    }
+
+    #[test]
+    fn sqrt_negative_and_overflow_are_structured() {
+        let err = eval_expr("sqrt(-1)", &HashMap::new()).unwrap_err();
+        let (kind, _) = parse_structured_error(&err).unwrap();
+        assert_eq!(kind, "domain_error");
+        let err = eval_expr("1e308 * 1e308", &HashMap::new()).unwrap_err();
+        let (kind, _) = parse_structured_error(&err).unwrap();
+        assert_eq!(kind, "overflow");
+    }
+
+    #[test]
+    fn unknown_variable_is_structured() {
+        let err = eval_expr("x + 1", &HashMap::new()).unwrap_err();
+        let (kind, message) = parse_structured_error(&err).unwrap();
+        assert_eq!(kind, "unknown_variable");
+        assert!(message.contains('x'));
+    }
+
+    #[test]
+    fn structured_error_serializes_kind_and_message() {
+        let err = structured_error("invalid_expression", "bad token");
+        let (kind, message) = parse_structured_error(&err).unwrap();
+        assert_eq!(kind, "invalid_expression");
+        assert_eq!(message, "bad token");
     }
 }

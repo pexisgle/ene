@@ -32,6 +32,7 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
         | "utility.time"
         | "utility.system_info"
         | "utility.calc"
+        | "utility.color"
         | "utility.random"
         | "utility.text" => utility::execute(name, args),
         "fs.read" | "fs.write" | "fs.edit" | "fs.list" | "fs.search" | "fs.patch" | "fs.undo" => {
