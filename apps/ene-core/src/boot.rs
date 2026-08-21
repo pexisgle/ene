@@ -105,6 +105,7 @@ pub struct CoreDaemon {
     proactive_secret: Arc<parking_lot::Mutex<String>>,
     tts_secret: Arc<parking_lot::Mutex<String>>,
     stt_secret: Arc<parking_lot::Mutex<String>>,
+    approve_secret: Arc<parking_lot::Mutex<String>>,
     speech: parking_lot::Mutex<Option<Arc<dyn SpeechPresenter>>>,
     finalizer: parking_lot::Mutex<Option<Arc<dyn ene_kernel::TurnFinalizer>>>,
     prefetch: parking_lot::Mutex<Option<Arc<dyn TurnPrefetch>>>,
@@ -198,6 +199,8 @@ impl CoreDaemon {
             load_named_secret(&vault, "ENE_AI__TASKS__PROACTIVE__API_KEY", "ai.proactive");
         let tts_secret = load_named_secret(&vault, "ENE_AI__TASKS__TTS__API_KEY", "ai.tts");
         let stt_secret = load_named_secret(&vault, "ENE_AI__TASKS__STT__API_KEY", "ai.stt");
+        let approve_secret =
+            load_named_secret(&vault, "ENE_AI__TASKS__APPROVE__API_KEY", "ai.approve");
         Ok(Self {
             data_dir: opts.data_dir,
             _lock: lock,
@@ -222,6 +225,7 @@ impl CoreDaemon {
             proactive_secret: Arc::new(parking_lot::Mutex::new(proactive_secret)),
             tts_secret: Arc::new(parking_lot::Mutex::new(tts_secret)),
             stt_secret: Arc::new(parking_lot::Mutex::new(stt_secret)),
+            approve_secret: Arc::new(parking_lot::Mutex::new(approve_secret)),
             speech: parking_lot::Mutex::new(None),
             finalizer: parking_lot::Mutex::new(None),
             prefetch: parking_lot::Mutex::new(None),
@@ -264,6 +268,7 @@ impl CoreDaemon {
             "proactive" => self.proactive_secret.lock().clone(),
             "tts" => self.tts_secret.lock().clone(),
             "stt" => self.stt_secret.lock().clone(),
+            "approve" => self.approve_secret.lock().clone(),
             "chat" => self.chat_secret.lock().clone(),
             _ => String::new(),
         };
@@ -282,6 +287,7 @@ impl CoreDaemon {
             "proactive" => self.proactive_secret.lock().clone(),
             "tts" => self.tts_secret.lock().clone(),
             "stt" => self.stt_secret.lock().clone(),
+            "approve" => self.approve_secret.lock().clone(),
             _ => self.chat_secret.lock().clone(),
         };
         !named.is_empty()
@@ -361,6 +367,7 @@ impl CoreDaemon {
         store_secret(&self.proactive_secret, secrets.proactive);
         store_secret(&self.tts_secret, secrets.tts);
         store_secret(&self.stt_secret, secrets.stt);
+        store_secret(&self.approve_secret, secrets.approve);
     }
 
     pub fn replace_plugins(&self, plugins: PluginSettings) {
@@ -717,6 +724,7 @@ fn apply_ai_env(settings: &mut AiSettings) {
     apply_task_env("ENE_AI__TASKS__PROACTIVE", &mut settings.tasks.proactive);
     apply_task_env("ENE_AI__TASKS__TTS", &mut settings.tasks.tts);
     apply_task_env("ENE_AI__TASKS__STT", &mut settings.tasks.stt);
+    apply_task_env("ENE_AI__TASKS__APPROVE", &mut settings.tasks.approve);
 }
 
 fn apply_plugin_env(settings: &mut PluginSettings) {
@@ -796,6 +804,7 @@ pub struct TaskSecrets {
     pub proactive: Option<String>,
     pub tts: Option<String>,
     pub stt: Option<String>,
+    pub approve: Option<String>,
 }
 
 fn store_secret(slot: &parking_lot::Mutex<String>, value: Option<String>) {
@@ -820,6 +829,7 @@ pub(crate) fn overlay_ai(live: &mut AiSettings, incoming: &serde_json::Value) {
     );
     overlay_task(&mut live.tasks.tts, incoming.pointer("/tasks/tts"));
     overlay_task(&mut live.tasks.stt, incoming.pointer("/tasks/stt"));
+    overlay_task(&mut live.tasks.approve, incoming.pointer("/tasks/approve"));
 }
 
 pub(crate) fn overlay_plugins(live: &mut PluginSettings, incoming: &serde_json::Value) {

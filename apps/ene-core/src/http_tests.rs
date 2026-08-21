@@ -605,6 +605,16 @@ async fn http_forget_memory_is_audited() {
 }
 
 #[tokio::test]
+async fn serve_binds_seamed_approve_model() {
+    let (_dir, _client, core, server) = boot_server().await;
+    assert!(
+        core.plane().has_approve_model(),
+        "production plane must expose ai.tasks.approve"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn export_default_omits_inner() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;

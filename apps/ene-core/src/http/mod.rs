@@ -1,3 +1,4 @@
+mod approve;
 pub(crate) mod backup;
 mod classify;
 mod client_id;
@@ -162,6 +163,8 @@ impl CoreDaemon {
         }
         self.set_speech(Arc::new(speech::PluginSpeech::new(&self, events.clone())));
         let classify = Arc::new(classify::SeamedClassify::new(&self));
+        self.plane()
+            .set_ai(Arc::new(approve::SeamedApprove::new(&self)));
         self.set_prefetch(Arc::new(recall::RecallPrefetch::new(&self)));
         self.set_finalizer(Arc::new(classify::MemoryFinalizer::new(
             &self,

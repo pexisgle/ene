@@ -6,7 +6,9 @@
 2. **ホスト仲介** (`ene-fiber`) — spawn、grant、巻き戻し可能な dispose。
    kill は unload ではありません。
 3. **承認 plane** (`ene-plane`) — ポリシー行が一致するまで deny-by-default。
-   判断は監査ログの hash chain に残ります。
+   判断は監査ログの hash chain に残ります。`approval.mode = ai_auto` は
+   `ai.tasks.approve`（無ければ chat）に聞き、失敗・未設定はポップアップへ
+   落ち、暗黙実行しません。
 
 `fs.read` / `fs.write` は親の canonicalization で閉じ込めます（相対 `../` も含む）。
 ツールの workspace はデータディレクトリそのものではなく `<data>/workspace` なので、

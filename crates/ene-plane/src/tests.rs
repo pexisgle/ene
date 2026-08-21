@@ -138,6 +138,29 @@ async fn ai_judgement_reason_is_audited() {
 }
 
 #[tokio::test]
+async fn set_ai_after_new_is_used_in_ai_auto() {
+    let (_dir, plane) = make_plane(ScriptedPopup::deny_all(), None);
+    assert!(!plane.has_approve_model());
+    plane.set_ai(Arc::new(ScriptedAi {
+        judgement: Ok(AiJudgement {
+            allow: true,
+            reason: "late bind".to_owned(),
+        }),
+    }));
+    assert!(plane.has_approve_model());
+    plane.set_mode(ApprovalMode::AiAuto).unwrap();
+    plane
+        .authorize(&req("fs.write", &["fs.write"], Sensitivity::None, true))
+        .await
+        .unwrap();
+    let records = plane.audit().records().unwrap();
+    assert!(records.iter().any(|row| {
+        row.kind == "ai_judgement"
+            && row.payload.get("reason").and_then(|v| v.as_str()) == Some("late bind")
+    }));
+}
+
+#[tokio::test]
 async fn high_risk_skips_ai_and_pops() {
     let ai = Arc::new(ScriptedAi {
         judgement: Ok(AiJudgement {
