@@ -123,6 +123,7 @@ async fn open_lane() -> (TempDir, Arc<SessionStore>, LaneHandle, Arc<RecordingMo
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -166,6 +167,7 @@ async fn provider_failure_is_not_assistant_speech() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -272,6 +274,58 @@ async fn prompt_job_logs_delegation_origin_and_lane() {
 }
 
 #[tokio::test]
+async fn extra_context_is_logged_as_system_source() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(EchoModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: vec![(
+            "skills.catalog".to_owned(),
+            "Installed skills:\n- travel: trips".to_owned(),
+        )],
+        hooks: None,
+        router: None,
+    });
+    lane.prompt("hello").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let events = store.load_events(session, 0).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        EventPayload::ContextSystemMessage { source_key, blocks, .. }
+            if source_key == "skills.catalog"
+                && blocks.iter().any(|block| {
+                    block
+                        .as_text()
+                        .is_some_and(|text| text.contains("travel"))
+                })
+    )));
+}
+
+#[tokio::test]
 async fn model_visible_hash_matches_logged_projection() {
     let (_dir, store, lane, model) = open_lane().await;
     lane.prompt("ping").await.unwrap();
@@ -365,6 +419,7 @@ async fn prompt_while_busy_returns_lane_busy() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -409,6 +464,7 @@ async fn abort_does_not_write_assistant_closure() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -518,6 +574,7 @@ async fn crash_recovery_is_reported_and_not_resumed() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -813,6 +870,7 @@ async fn inner_only_model_does_not_leak_on_surface() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -923,6 +981,7 @@ async fn abort_after_generate_does_not_write_assistant_closure() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -997,6 +1056,7 @@ async fn abort_during_generate_error_does_not_write_llm_done_failure() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -1065,6 +1125,7 @@ async fn duplicate_abort_is_idempotent() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -1110,6 +1171,7 @@ async fn follow_up_queues_fifo_and_next_run_works_when_idle() {
         speech: None,
         finalizer: None,
         prefetch: None,
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });
@@ -1201,6 +1263,7 @@ async fn prefetch_lines_are_assembled_in_registry_order() {
         speech: None,
         finalizer: None,
         prefetch: Some(Arc::new(ScriptedPrefetch) as Arc<dyn TurnPrefetch>),
+        extra_context: Vec::new(),
         hooks: None,
         router: None,
     });

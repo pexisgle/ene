@@ -132,6 +132,8 @@ pub struct LaneOptions {
     pub finalizer: Option<Arc<dyn TurnFinalizer>>,
     /// Optional recall / companion context logged as `context/system_message`.
     pub prefetch: Option<Arc<dyn TurnPrefetch>>,
+    /// Extra System Context blocks (skill catalog and similar host sources).
+    pub extra_context: Vec<(String, String)>,
     /// Shared waterfall points. `None` uses a lane-private chain.
     pub hooks: Option<LoopHooks>,
 }
@@ -159,6 +161,11 @@ impl LaneHandle {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut context = ContextRegistry::new();
         context.set_interruption_note(format_recovery_note(&opts.recovery));
+        for (key, text) in opts.extra_context {
+            if !text.is_empty() {
+                context.insert(key, text);
+            }
+        }
         let state = LaneState {
             store: opts.store,
             session: opts.session,

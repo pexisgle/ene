@@ -9,6 +9,7 @@ pub const SOURCE_ORDER: &[&str] = &[
     "memory.user_profile",
     "memory.commitments",
     "workspace.context",
+    "skills.catalog",
     "skills.active",
     "mcp.resources",
     "scene_state",
@@ -96,6 +97,11 @@ impl ContextRegistry {
         if let Some(note) = note.filter(|text| !text.trim().is_empty()) {
             self.set("interruption_note", note);
         }
+    }
+
+    /// Replace or append a System Context block (skill catalog, host extras).
+    pub fn insert(&mut self, key: impl Into<String>, text: String) {
+        self.set(key, text);
     }
 
     #[must_use]
@@ -219,5 +225,27 @@ mod tests {
             "memory.semantic"
         );
         assert_eq!(canonicalize_source_key("mcp.resources"), "mcp.resources");
+    }
+
+    #[test]
+    fn insert_replaces_skill_catalog_source() {
+        let mut registry = ContextRegistry::new();
+        registry.insert(
+            "skills.catalog",
+            "Installed skills:\n- travel: trips".to_owned(),
+        );
+        registry.insert(
+            "skills.catalog",
+            "Installed skills:\n- briefing: mornings".to_owned(),
+        );
+        let assembled = registry.assemble();
+        let catalog = assembled
+            .iter()
+            .filter(|(key, _)| key == "skills.catalog")
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog[0].contains("briefing"));
+        assert!(!catalog[0].contains("travel"));
     }
 }

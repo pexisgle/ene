@@ -777,8 +777,8 @@ async fn turn_logs_context_sources_from_registry() {
         .expect("memory.commitments");
     let skills = keys
         .iter()
-        .position(|k| k == "skills.active")
-        .expect("skills.active");
+        .position(|k| k == "skills.catalog")
+        .expect("skills.catalog");
     let mcp = keys
         .iter()
         .position(|k| k == "mcp.resources")
@@ -793,7 +793,7 @@ async fn turn_logs_context_sources_from_registry() {
     assert!(texts["memory.semantic"].contains("picnic"));
     assert!(texts["memory.user_profile"].contains("Ada"));
     assert!(texts["memory.commitments"].contains("Friday"));
-    assert!(texts["skills.active"].contains("research"));
+    assert!(texts["skills.catalog"].contains("research"));
     assert!(texts["mcp.resources"].contains("picnic weather"));
     assert!(texts["delegation.active"].contains("bookmark picnic"));
     assert!(texts["character_state"].contains("mood="));

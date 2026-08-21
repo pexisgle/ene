@@ -48,8 +48,9 @@ via `ene-fiber`. Sidecar helpers also live in `templates/sidecar`.
 
 MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
 injected as the `mcp.resources` context source. MCP `prompts/list` become
-`SKILL.md` files under the data-dir skills home (`skills.active` on the
-surface lane).
+`SKILL.md` files under the data-dir skills home. The dialogue lane loads that
+catalog as `skills.catalog` and injects matching bodies as `skills.active`.
+`workflow.bookmark` on the job layer researches a theme and delivers Markdown.
 
 ## Launch profiles
 
