@@ -25,8 +25,7 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 |---|---|---|
 | `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
 | `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*` |
-| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` (`observation_interval_seconds` is the live tick interval; each open session is observed) |
-| `characters` | `ene-companion` | `home_dir`, `import_v3` |
+| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` (`observation_interval_seconds` is the live tick interval; each open session is observed; `proactive.world_state.title_mode` and `ocr_hint`) || `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
 | `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs` |
@@ -54,6 +53,12 @@ Embeddings are optional on their own `ai.tasks.embedding` fiber: unset, local
 GGUF (recommended Jina on `provider.gguf`), or a cloud plugin that declares
 `seam.embed`. Empty classifier and proactive tasks inherit the chat binding.
 Empty TTS and STT tasks stay disabled.
+
+Observation privacy lives under `mind.proactive.world_state`: `title_mode` is
+`app_only` (default), `redacted_title`, or `full_title`; `ocr_hint` is a local
+opt-in slot with no bundled backend. The product GUI (Detail → Conversation)
+shows the current send scope. Raw screenshots stay off session, memory, and
+audit; only luma digest and text summary cross those boundaries.
 
 Plugin launch is `plugins.profile` (`desktop`, `minimal`, or `headless`), not a
 per-plugin enable map (`plugins.list` is gone). Related keys:

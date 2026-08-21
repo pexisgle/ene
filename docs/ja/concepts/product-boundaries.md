@@ -162,7 +162,7 @@ v1.0 の接続は手書き `mcp.json` 行で、同じレジストリパイプラ
 | Character | occupants / bodies は HTTP、配置はローカル | Companion | 両方に Current |
 | Character editor（CCv3） | ローカル `character.json` を `ene-card` で I/O | なし | 移植しない。v1.0 はパッケージインポート（`P-803`）。desktop を残す理由にしない |
 | AI / Voice / Engines | `GET/PATCH /settings`、`providers`、`provider.assets` | Conversation、Voice、Connections | stage に Current。desktop にだけ残る操作があれば stage へ |
-| Features（能動発話のトグル） | `mind.proactive.*` の PATCH | System / Conversation | 残りのトグルは stage へ。観測パイプラインはコアの [#805](https://github.com/pexisgle/ene/issues/805) |
+| Features（能動発話のトグル） | `mind.proactive.*` の PATCH | Conversation | 観測プライバシー（`title_mode`、`ocr_hint`、送信範囲）は stage で Current。他の能動トグルはまだ増やせる |
 | Memory 設定 + Memories 台帳 | Memory HTTP | Memory | 一覧/編集/削除は stage で Current。補助 LLM の scope は [#717](https://github.com/pexisgle/ene/issues/717) |
 | Sessions | Session HTTP | Log | stage で Current |
 | Permissions / Approvals | Plane HTTP | System | stage で Current |
@@ -190,11 +190,10 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | 部品 | 所有者 | Status |
 |---|---|---|
 | スクリーンショット能力 | `app` ツール / クライアント | CLI 経路は Current。portal は [#800](https://github.com/pexisgle/ene/issues/800) |
-| ROI、luma fingerprint、changed-cell gate、caret 抑制 | `ene-work` の観測パイプライン | Missing [#805](https://github.com/pexisgle/ene/issues/805) |
-| タイトルの redaction（AppOnly / RedactedTitle / FullTitle） | `ene-work` + 設定 | Missing [#805](https://github.com/pexisgle/ene/issues/805) |
-| 能動発話 / 世界状態 | `ene-companion` + コア tick | Current: 開いているセッションすべて。間隔は `mind.proactive.observation_interval_seconds`。無変化フレームの vision 再利用は [#805](https://github.com/pexisgle/ene/issues/805) |
-| session / memory / audit への raw pixel | 禁止 | 入れない。E2E 証明は [#805](https://github.com/pexisgle/ene/issues/805) |
-| desktop の `ProactiveObserveControl` | クライアントのスタブ | Unconnected |
+| ROI、luma fingerprint、changed-cell gate、caret 抑制 | `ene-work` の観測パイプライン | Current |
+| タイトルの redaction（AppOnly / RedactedTitle / FullTitle） | `ene-companion` の設定 + `ene-work` の送信ラベル | Current（`mind.proactive.world_state.title_mode`） |
+| 能動発話 / 世界状態 | `ene-companion` + コア tick | Current: 開いているセッションすべて。間隔は `mind.proactive.observation_interval_seconds`。無変化フレームは前の要約を再利用 |
+| session / memory / audit への raw pixel | 禁止 | Current。digest とテキスト要約のみ || desktop の `ProactiveObserveControl` | クライアントのスタブ | Unconnected |
 
 ## 4. セキュリティ差分
 
@@ -206,7 +205,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | 資格情報 | ボールト（`vault.bin` + `vault.key`）。プラグイン環境へ生キーを出さない | 検索 backend（[#818](https://github.com/pexisgle/ene/issues/818)）と plugin config（[#819](https://github.com/pexisgle/ene/issues/819)）も vault 参照。MCP 向けホスト OAuth は持たない |
 | 承認（`ene-plane`） | deny-by-default、hash chain、ポップアップ、「次から確認しない」 | 本番の AI 自動承認モデルは未設定（[#717](https://github.com/pexisgle/ene/issues/717)） |
 | `exec` | 直接の子へ SIGTERM のあと SIGKILL | process tree の所有、出力 byte 上限、cwd/env allowlist は [#798](https://github.com/pexisgle/ene/issues/798) |
-| raw pixel | 観測要約はセッションログの外 | session/memory/audit が PNG を残さない E2E は [#805](https://github.com/pexisgle/ene/issues/805) |
+| raw pixel | 観測要約はセッションログの外 | Current: session / memory / audit は digest と要約であり PNG ではない |
 
 ## 5. v1.0 と post-v1.0
 
@@ -226,7 +225,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
   [#799](https://github.com/pexisgle/ene/issues/799)、
   [#813](https://github.com/pexisgle/ene/issues/813)。
 - モデルを埋めず raw pixel を残さない観測:
-  [#805](https://github.com/pexisgle/ene/issues/805)（`P-112`）。
+  現行（`ene-work` のゲートと stage のプライバシー操作）。
 - `done.md` の未チェック（実プロバイダ会話、本番 ASR/TTS、ジョブランナーの
   発話、GUI E2E）は #717 のまま。
 

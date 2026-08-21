@@ -81,6 +81,10 @@ impl DetailTab {
                 "openai",
                 "provider",
                 "credentials",
+                "observation",
+                "privacy",
+                "ocr",
+                "title",
             ],
             Self::Voice => &["tts", "stt", "mic", "caption", "spotlight", "voice"],
             Self::Memory => &["recall", "pending", "memory"],
@@ -192,6 +196,8 @@ pub struct DetailUiState {
     pub stt_plugin: String,
     pub plugins_profile: String,
     pub approval_mode: String,
+    pub observation_title_mode: String,
+    pub observation_ocr_hint: bool,
     pub core_status: String,
     pub connections_status: String,
     pub health: String,
@@ -287,6 +293,12 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
     state.stt_plugin = nested_string(effective, &["ai", "tasks", "stt", "plugin"]);
     state.plugins_profile = nested_string(effective, &["plugins", "profile"]);
     state.approval_mode = normalize_approval_mode(&nested_string(effective, &["approval", "mode"]));
+    state.observation_title_mode = normalize_title_mode(&nested_string(
+        effective,
+        &["mind", "proactive", "world_state", "title_mode"],
+    ));
+    state.observation_ocr_hint =
+        nested_bool(effective, &["mind", "proactive", "world_state", "ocr_hint"]);
     state.unconfigured.clear();
     for (name, path) in [
         ("chat", ["ai", "tasks", "chat", "plugin"]),
@@ -317,6 +329,26 @@ fn nested_string(value: &Value, path: &[&str]) -> String {
         current = next;
     }
     current.as_str().unwrap_or("").to_owned()
+}
+
+fn nested_bool(value: &Value, path: &[&str]) -> bool {
+    let mut current = value;
+    for key in path {
+        let Some(next) = current.get(*key) else {
+            return false;
+        };
+        current = next;
+    }
+    current.as_bool().unwrap_or(false)
+}
+
+#[must_use]
+pub fn normalize_title_mode(raw: &str) -> String {
+    match raw.to_ascii_lowercase().replace('-', "_").as_str() {
+        "redacted_title" | "redacted" => "redacted_title".to_owned(),
+        "full_title" | "full" => "full_title".to_owned(),
+        _ => "app_only".to_owned(),
+    }
 }
 
 #[must_use]
@@ -931,6 +963,68 @@ fn show_conversation(
         i18n::fl("settings-proactive-plugin"),
         &mut state.proactive_plugin,
     );
+    ui.separator();
+    show_observation_privacy(ui, state, client, rt, async_results);
+}
+
+fn show_observation_privacy(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    ui.heading(i18n::fl("settings-observation"));
+    ui.label(i18n::fl("settings-observation-hint"));
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-observation-title"));
+        let current = normalize_title_mode(&state.observation_title_mode);
+        let label = title_mode_label(&current);
+        egui::ComboBox::from_id_salt("observation-title-mode")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                for id in ["app_only", "redacted_title", "full_title"] {
+                    if ui
+                        .selectable_label(current == id, title_mode_label(id))
+                        .clicked()
+                    {
+                        id.clone_into(&mut state.observation_title_mode);
+                    }
+                }
+            });
+    });
+    ui.checkbox(
+        &mut state.observation_ocr_hint,
+        i18n::fl("settings-observation-ocr"),
+    );
+    ui.label(i18n::fl("settings-observation-ocr-hint"));
+    ui.label(format!(
+        "{}: {}",
+        i18n::fl("settings-observation-scope"),
+        observation_scope_text(state)
+    ));
+    ui.label(i18n::fl("settings-observation-scope-pixels"));
+    if ui.button(i18n::fl("settings-observation-apply")).clicked() {
+        apply_observation_patch(state, client, rt, async_results);
+    }
+}
+
+fn title_mode_label(mode: &str) -> String {
+    match mode {
+        "redacted_title" => i18n::fl("settings-observation-redacted"),
+        "full_title" => i18n::fl("settings-observation-full"),
+        _ => i18n::fl("settings-observation-app-only"),
+    }
+}
+
+fn observation_scope_text(state: &DetailUiState) -> String {
+    let title = title_mode_label(&normalize_title_mode(&state.observation_title_mode));
+    let ocr = if state.observation_ocr_hint {
+        i18n::fl("settings-observation-ocr-on")
+    } else {
+        i18n::fl("settings-observation-ocr-off")
+    };
+    format!("{title}; {ocr}")
 }
 
 fn show_chat_provider_setup(
@@ -2330,6 +2424,35 @@ fn apply_ai_patch(
     });
 }
 
+fn apply_observation_patch(
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    let title_mode = normalize_title_mode(&state.observation_title_mode);
+    let patch = serde_json::json!({
+        "mind": {
+            "proactive": {
+                "world_state": {
+                    "title_mode": title_mode,
+                    "ocr_hint": state.observation_ocr_hint
+                }
+            }
+        }
+    });
+    let client = Arc::clone(client);
+    spawn_async(rt, async_results, async move {
+        AsyncOutcome::ApplyCoreSettings(
+            client
+                .patch_settings(&patch)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        )
+    });
+}
+
 fn spawn_async(
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
@@ -2369,6 +2492,8 @@ mod tests {
         assert!(state.ai_chat_key_set);
         assert_eq!(state.plugins_profile, "desktop");
         assert_eq!(state.approval_mode, "policy");
+        assert_eq!(state.observation_title_mode, "app_only");
+        assert!(!state.observation_ocr_hint);
         assert!(!state.unconfigured.iter().any(|task| task == "chat"));
         assert!(state.unconfigured.iter().any(|task| task == "classifier"));
         assert!(state.unconfigured.iter().any(|task| task == "stt"));
@@ -2474,6 +2599,32 @@ mod tests {
         assert!(DetailTab::System.matches_search("backup"));
         assert!(DetailTab::System.matches_search("restore"));
         assert!(!DetailTab::Home.matches_search("backup"));
+    }
+
+    #[test]
+    fn observation_privacy_is_on_conversation_tab() {
+        assert!(DetailTab::Conversation.matches_search("observation"));
+        assert!(DetailTab::Conversation.matches_search("privacy"));
+        let json = r#"{
+            "overlay": {},
+            "effective": {
+                "mind": {
+                    "proactive": {
+                        "world_state": {
+                            "title_mode": "redacted_title",
+                            "ocr_hint": true
+                        }
+                    }
+                }
+            }
+        }"#;
+        let mut state = DetailUiState::default();
+        parse_core_fields(json, &mut state);
+        assert_eq!(state.observation_title_mode, "redacted_title");
+        assert!(state.observation_ocr_hint);
+        assert!(
+            observation_scope_text(&state).contains(&i18n::fl("settings-observation-redacted"))
+        );
     }
 
     #[test]

@@ -789,6 +789,46 @@ fn world_state_does_not_store_screen_summary() {
 }
 
 #[test]
+fn app_only_title_does_not_reach_proactive_context() {
+    let mut config = crate::config::ProactiveSettings {
+        enabled: true,
+        ..crate::config::ProactiveSettings::default()
+    };
+    config.sources.activity = true;
+    config.world_state.title_mode = crate::config::ObservationTitleMode::AppOnly;
+    let ctx = build_proactive_context(
+        &config,
+        &[],
+        &ProactiveObservation {
+            captured_at_unix_ms: 1,
+            activity: Some(ActivitySnapshot {
+                idle_seconds: Some(10),
+                active_window_label: "inbox user@x.com https://secret.example.jp/a - Firefox"
+                    .into(),
+                recent_change: String::new(),
+            }),
+            screen_summary: None,
+            screen_summary_status: ScreenSummaryStatus::Disabled,
+        },
+        None,
+        None,
+        &[],
+        &[],
+        ProactiveSuppressionState::default(),
+        crate::proactive::QuietHoursEval::inactive(),
+        None,
+        None,
+    );
+    let label = ctx
+        .activity
+        .as_ref()
+        .map_or("", |a| a.active_window_label.as_str());
+    assert_eq!(label, "Firefox");
+    assert!(!label.contains("inbox"));
+    assert!(!label.contains('@'));
+}
+
+#[test]
 fn package_install_and_soul_creation() {
     let dir = TempDir::new().unwrap();
     let store = CompanionStore::open(dir.path().join("companions.db")).unwrap();

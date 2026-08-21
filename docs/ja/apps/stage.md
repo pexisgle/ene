@@ -67,7 +67,9 @@ JSON の取り込み / 書き出しは詳細用に折りたたみます。既に
 キーがある（`effective.ai_chat_key_set`）ときだけ出ます。HTTP 401 などの
 プロバイダ失敗は設定 / ステータスのエラーであり、アシスタントの返信ではありません。
 適用ボタンはスクロールとフィルタ付きのモデル一覧の上にあるので、一覧取得で
-保存が画面外へ押し出されません。エンジンや GGUF は Connections のプロバイダ資産です。
+保存が画面外へ押し出されません。観測のプライバシー（タイトルモード、OCR ヒント、
+いまの送信範囲）も同じ Conversation タブにあり、`mind.proactive.world_state` を
+PATCH します。エンジンや GGUF は Connections のプロバイダ資産です。
 TTS/STT は `ai.tasks.tts` / `ai.tasks.stt` です。
 
 VAD/ASR/TTS はコアが持ちます。Stage は `POST /sessions/{id}/listen` でマイク

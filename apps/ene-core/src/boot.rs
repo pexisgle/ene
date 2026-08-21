@@ -116,6 +116,8 @@ pub struct CoreDaemon {
     loop_hooks: LoopHooks,
     mind: parking_lot::Mutex<CompanionMind>,
     last_proactive: parking_lot::Mutex<HashMap<SessionId, Instant>>,
+    observation: parking_lot::Mutex<ene_work::ObservationPipeline>,
+    world_state: parking_lot::Mutex<ene_companion::WorldStateMemory>,
     memory_embed: Arc<SlotQueryEmbed>,
 }
 
@@ -250,6 +252,8 @@ impl CoreDaemon {
             loop_hooks,
             mind: parking_lot::Mutex::new(mind),
             last_proactive: parking_lot::Mutex::new(HashMap::new()),
+            observation: parking_lot::Mutex::new(ene_work::ObservationPipeline::new()),
+            world_state: parking_lot::Mutex::new(ene_companion::WorldStateMemory::default()),
             memory_embed,
         })
     }
@@ -369,6 +373,16 @@ impl CoreDaemon {
     #[must_use]
     pub fn last_proactive(&self, session: SessionId) -> Option<Instant> {
         self.last_proactive.lock().get(&session).copied()
+    }
+
+    #[must_use]
+    pub fn observation(&self) -> &parking_lot::Mutex<ene_work::ObservationPipeline> {
+        &self.observation
+    }
+
+    #[must_use]
+    pub fn world_state(&self) -> &parking_lot::Mutex<ene_companion::WorldStateMemory> {
+        &self.world_state
     }
 
     /// Spawn harness tools, provider plugins, and handwritten MCP rows.

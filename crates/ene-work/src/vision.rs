@@ -38,8 +38,7 @@ pub fn register_screenshot_tool(registry: &ToolRegistry, invoke: Arc<dyn ToolInv
 }
 
 /// Smallest valid PNG (1×1). Scripted captures use this instead of `{available:false}`.
-#[cfg(test)]
-pub(crate) const MINIMAL_PNG: &[u8] = &[
+pub const MINIMAL_PNG: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
     0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
@@ -145,10 +144,26 @@ pub fn observe_screen(
     summary: &str,
     idle_seconds: u64,
 ) -> WorldStateSnapshot {
+    observe_screen_with_activity(memory, settings, summary, idle_seconds, "", "")
+}
+
+/// Same as [`observe_screen`], with a privacy-safe window label for the ring.
+pub fn observe_screen_with_activity(
+    memory: &mut WorldStateMemory,
+    settings: &WorldStateSettings,
+    summary: &str,
+    idle_seconds: u64,
+    window_label: &str,
+    recent_change: &str,
+) -> WorldStateSnapshot {
     let obs = ProactiveObservation {
         captured_at_unix_ms: u64::try_from(chrono::Utc::now().timestamp_millis().max(0))
             .unwrap_or(0),
-        activity: None,
+        activity: Some(ene_companion::ActivitySnapshot {
+            idle_seconds: Some(idle_seconds),
+            active_window_label: window_label.to_owned(),
+            recent_change: recent_change.to_owned(),
+        }),
         screen_summary: Some(summary.to_owned()),
         screen_summary_status: ScreenSummaryStatus::Available,
     };
