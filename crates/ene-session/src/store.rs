@@ -8,6 +8,7 @@ use crate::inbox::{InboxItem, OpenTurn, open_turns, unclaimed_inbox};
 use crate::usage::{NewUsage, UsageRow, UsageTotals};
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -69,6 +70,14 @@ pub struct CommitResult {
     pub ts: String,
 }
 
+/// Content-addressed spill or image blob beside `sessions.db`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpillObject {
+    pub sha256: String,
+    pub mime: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 /// Listing row (projection; log remains authoritative).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMeta {
@@ -117,6 +126,12 @@ enum WriteOp {
     ReopenWriter {
         reply: oneshot::Sender<Result<(), SessionError>>,
     },
+    RecordSpill {
+        sha256: String,
+        size_bytes: u64,
+        mime: Option<String>,
+        reply: oneshot::Sender<Result<(), SessionError>>,
+    },
     Shutdown,
 }
 
@@ -156,6 +171,68 @@ impl SessionStore {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Directory for content-addressed spill / image blobs (`<data>/spill`).
+    #[must_use]
+    pub fn spill_dir(&self) -> PathBuf {
+        spill_dir_for(&self.path)
+    }
+
+    /// Store bytes under their SHA-256 hex and record them in `spill_objects`.
+    pub async fn put_spill(
+        &self,
+        bytes: &[u8],
+        mime: Option<&str>,
+    ) -> Result<String, SessionError> {
+        let sha256 = sha256_hex(bytes);
+        let dir = spill_dir_for(&self.path);
+        std::fs::create_dir_all(&dir)?;
+        let dest = dir.join(&sha256);
+        if !dest.exists() {
+            let tmp = dir.join(format!(".{sha256}.tmp"));
+            std::fs::write(&tmp, bytes)?;
+            std::fs::rename(&tmp, &dest)?;
+        }
+        let size_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let mime = mime.map(ToOwned::to_owned);
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(WriteOp::RecordSpill {
+                sha256: sha256.clone(),
+                size_bytes,
+                mime,
+                reply,
+            })
+            .map_err(|_| SessionError::WriterClosed)?;
+        rx.await.map_err(|_| SessionError::WriterClosed)??;
+        Ok(sha256)
+    }
+
+    /// Load a spill blob by SHA-256 hex id. Missing files are `Ok(None)`.
+    pub fn get_spill(&self, id: &str) -> Result<Option<SpillObject>, SessionError> {
+        let sha256 = parse_spill_id(id)?;
+        let dest = spill_dir_for(&self.path).join(sha256);
+        if !dest.exists() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&dest)?;
+        let mime = {
+            let reader = self.reader.lock();
+            reader
+                .query_row(
+                    "SELECT mime FROM spill_objects WHERE sha256 = ?1",
+                    [sha256],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten()
+        };
+        Ok(Some(SpillObject {
+            sha256: sha256.to_owned(),
+            mime,
+            bytes,
+        }))
     }
 
     pub async fn create_session(&self, spec: NewSession) -> Result<SessionId, SessionError> {
@@ -390,6 +467,18 @@ fn writer_loop(
                     .as_mut()
                     .ok_or(SessionError::WriterClosed)
                     .and_then(recover_conn);
+                drop(reply.send(result));
+            }
+            WriteOp::RecordSpill {
+                sha256,
+                size_bytes,
+                mime,
+                reply,
+            } => {
+                let result = conn
+                    .as_mut()
+                    .ok_or(SessionError::WriterClosed)
+                    .and_then(|open| record_spill_conn(open, &sha256, size_bytes, mime.as_deref()));
                 drop(reply.send(result));
             }
         }
@@ -1017,4 +1106,45 @@ fn parse_uuid(raw: &str) -> rusqlite::Result<uuid::Uuid> {
     uuid::Uuid::parse_str(raw).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
     })
+}
+
+fn spill_dir_for(db_path: &Path) -> PathBuf {
+    db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("spill")
+}
+
+fn parse_spill_id(id: &str) -> Result<&str, SessionError> {
+    if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(id)
+    } else {
+        Err(SessionError::InvalidId(format!("spill ref {id}")))
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for &byte in digest.as_slice() {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
+fn record_spill_conn(
+    conn: &Connection,
+    sha256: &str,
+    size_bytes: u64,
+    mime: Option<&str>,
+) -> Result<(), SessionError> {
+    let size = i64::try_from(size_bytes).unwrap_or(i64::MAX);
+    conn.execute(
+        "INSERT OR IGNORE INTO spill_objects (sha256, size_bytes, mime, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![sha256, size, mime, now_ts()],
+    )?;
+    Ok(())
 }

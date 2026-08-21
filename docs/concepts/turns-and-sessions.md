@@ -42,6 +42,8 @@ running turn; `compact` compresses history.
    A bookmark request (`workflow.bookmark`) researches with `web.search` when
    that tool is registered, writes Markdown, and delivers it as a job artifact.
 5. Events are committed to `ene-session` (model-visible equals logged).
+   Screenshot and other image tool results store bytes beside the log and keep
+   an `ImageRef` in the projection; huge JSON results become `tool/spill`.
 6. Live events go out at `surface` or `detail` depth.
 
 Before generation, `agent/pre-step` runs as a waterfall on the shared

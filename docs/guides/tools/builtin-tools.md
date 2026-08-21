@@ -17,7 +17,10 @@ allow-list. Approval is deny-by-default until `ene-plane` has a matching
 policy. Host observation (`app.active_window`, `app.screenshot`) skips the
 approval popup when the user enabled the proactive source. Observation decodes
 `png_base64` and summarizes off the session log; `{available: false}` is not a
-successful look.
+successful look. When the model calls `app.screenshot`, the PNG is stored as a
+spill blob and the conversation log keeps an `ImageRef` so multimodal chat
+receives `LlmImage` instead of a giant base64 text block. Tool JSON larger than
+`harness.tool_output.soft_limit_bytes` (default 64 KiB) is spilled the same way.
 
 Mature MCP servers (git, browser, calendar, homeassistant, geo) are not
 in-tree; connect them as handwritten `mcp.<id>` rows. Old-action mapping,

@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
 ene-config = { workspace = true }
 ene-session = { workspace = true }
 parking_lot = { workspace = true }

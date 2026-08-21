@@ -7,6 +7,8 @@ ene_config::define_config!(
         pub loop_cfg: LoopSettings,
         pub context: ContextSettings,
         pub delegation: DelegationSettings,
+        /// Soft/hard byte caps for inlining tool results (D-29).
+        pub tool_output: ToolOutputSettings,
     }
 );
 
@@ -65,6 +67,30 @@ impl Default for DelegationSettings {
             wall_timeout_secs: 3_600,
             max_depth: 3,
             question_timeout_hours: 24,
+        }
+    }
+}
+
+/// Inline vs spill thresholds for surface-tool results.
+///
+/// Chosen in bytes (not tokens) so a PNG base64 payload and a huge `fs.read`
+/// share one cap. Defaults sit at 64 KiB / 256 KiB: large enough for metadata
+/// JSON, small enough that a screenshot cannot bloat the conversation log.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ToolOutputSettings {
+    /// Results larger than this are spilled; the log keeps a summary + ref.
+    pub soft_limit_bytes: u64,
+    /// Spill summaries shrink further once the body exceeds this size.
+    pub hard_limit_bytes: u64,
+}
+
+impl Default for ToolOutputSettings {
+    fn default() -> Self {
+        Self {
+            soft_limit_bytes: 64 * 1024,
+            hard_limit_bytes: 256 * 1024,
         }
     }
 }

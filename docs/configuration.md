@@ -24,8 +24,8 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 | Section | Owner | Typical keys |
 |---|---|---|
 | `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
-| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*` |
-| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` (`observation_interval_seconds` is the live tick interval; each open session is observed) |
+| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*`, `tool_output.soft_limit_bytes`, `tool_output.hard_limit_bytes` |
+| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` (`observation_interval_seconds` is the live tick interval; each open session is observed; including `proactive.world_state.title_mode` and `ocr_hint`) |
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |

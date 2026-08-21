@@ -17,7 +17,11 @@
 ホスト観測（`app.active_window`、`app.screenshot`）は、ユーザーがプロアクティブ
 ソースを有効にしているとき承認ポップアップを飛ばします。観測経路は `png_base64`
 をデコードしてセッション履歴の外で要約します。`{available: false}` は成功した
-「見る」ではありません。
+「見る」ではありません。モデルが `app.screenshot` を呼んだときは PNG を spill
+blob に置き、会話ログには `ImageRef` だけを残します。マルチモーダルな chat には
+`LlmImage` として渡り、巨大な base64 テキストは積みません。
+`harness.tool_output.soft_limit_bytes`（既定 64 KiB）を超えるツール JSON も
+同じ spill 経路です。
 
 成熟した MCP サーバー（git、browser、calendar、homeassistant、geo）はツリーに
 含めません。手書きの `mcp.<id>` 行で接続します。旧 action の対応、セキュリティ

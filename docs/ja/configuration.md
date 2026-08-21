@@ -24,8 +24,8 @@
 | セクション | 所有 | 代表キー |
 |---|---|---|
 | `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
-| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*` |
-| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*`（`observation_interval_seconds` が観測 tick 間隔。開いているセッションをすべて観測する） |
+| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*`, `tool_output.soft_limit_bytes`, `tool_output.hard_limit_bytes` |
+| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*`（`observation_interval_seconds` が観測 tick 間隔。開いているセッションをすべて観測する。`proactive.world_state.title_mode` と `ocr_hint` を含む） |
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
