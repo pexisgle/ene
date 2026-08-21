@@ -160,6 +160,8 @@ pub fn spec_with_discovery(
         parameters,
         output: json!({"type":"object"}),
         side_effects,
+        broker_socket: None,
+
         category: category.to_owned(),
         keywords: keywords.iter().map(|item| (*item).to_owned()).collect(),
         examples: examples.iter().map(|item| (*item).to_owned()).collect(),

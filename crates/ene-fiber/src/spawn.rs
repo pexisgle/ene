@@ -62,6 +62,7 @@ pub(crate) struct SpawnOpts<'a> {
     pub temp_dir: &'a Path,
     pub workspace: &'a Path,
     pub config: &'a serde_json::Value,
+    pub broker_socket: Option<&'a str>,
     pub max_frame_bytes: u32,
     pub allow_unverified: bool,
 }
@@ -79,6 +80,12 @@ pub(crate) fn plugin_ipc_socket_path(row_id: &str) -> PathBuf {
     let hex = format!("{}", blake3::hash(key.as_bytes()).to_hex());
     let name = format!("ene-{}.sock", hex.get(..16).unwrap_or(hex.as_str()));
     PathBuf::from("/tmp").join(name)
+}
+
+/// Unix endpoint for a broker listener, reusing the short `/tmp` socket path.
+#[cfg(unix)]
+pub(crate) fn broker_endpoint(row_id: &str) -> PathBuf {
+    plugin_ipc_socket_path(&format!("broker-{row_id}"))
 }
 
 /// BLAKE3 digest of a plugin binary or script file (`blake3:<hex>`).
@@ -103,6 +110,7 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
         &spawn_token,
         opts.workspace,
         opts.config,
+        opts.broker_socket,
     );
     tracing::debug!(
         plugin = opts.plugin_id,
@@ -220,6 +228,7 @@ fn plugin_command(
     spawn_token: &str,
     workspace: &Path,
     config: &serde_json::Value,
+    broker_socket: Option<&str>,
 ) -> Command {
     let mut cmd = if let Some(interpreter) = script_interpreter(binary) {
         let mut command = Command::new(interpreter);
@@ -266,6 +275,9 @@ fn plugin_command(
         }
     }
     cmd.env("ENE_PLUGIN_SOCKET", endpoint);
+    if let Some(broker_socket) = broker_socket {
+        cmd.env("ENE_BROKER_SOCKET", broker_socket);
+    }
     cmd.env("ENE_PLUGIN_SPAWN_TOKEN", spawn_token);
     cmd.env("ENE_WORKSPACE", workspace);
     cmd.env("TMPDIR", temp_dir);

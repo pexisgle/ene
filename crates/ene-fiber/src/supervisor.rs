@@ -75,7 +75,7 @@ struct SupervisorInner {
     asset_install_jobs: tokio::sync::Mutex<HashMap<String, AssetInstallJob>>,
     host_assets: Arc<HostAssets>,
     registry: Arc<ToolRegistry>,
-    broker: Mutex<Broker>,
+    broker: Arc<Mutex<Broker>>,
     workspace: PathBuf,
     circuit_breaker: CircuitBreakerConfig,
     failure_counts: Mutex<HashMap<String, u32>>,
@@ -87,6 +87,7 @@ struct SupervisorInner {
     allow_unverified: AtomicBool,
     loop_hooks: Mutex<Option<LoopHooks>>,
     waterfall_guards: Mutex<HashMap<String, Vec<WaterfallGuard<HookEvent>>>>,
+    broker_servers: Mutex<HashMap<String, crate::broker_ipc::BrokerServer>>,
 }
 
 /// Fiber supervisor. Reconcile is per-row; the core process is not restarted.
@@ -150,6 +151,8 @@ pub enum SupervisorError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Ipc(#[from] ene_plugin_ipc::IpcError),
+    #[error("broker ipc: {0}")]
+    BrokerIpc(#[from] crate::BrokerIpcError),
 }
 
 impl SupervisorInner {
@@ -232,7 +235,7 @@ impl Supervisor {
                 sessions: Mutex::new(HashMap::new()),
                 asset_install_jobs: tokio::sync::Mutex::new(HashMap::new()),
                 host_assets,
-                broker: Mutex::new(Broker::new(workspace.clone())),
+                broker: Arc::new(Mutex::new(Broker::new(workspace.clone()))),
                 registry,
                 workspace,
                 circuit_breaker,
@@ -245,6 +248,7 @@ impl Supervisor {
                 allow_unverified: AtomicBool::new(false),
                 loop_hooks: Mutex::new(None),
                 waterfall_guards: Mutex::new(HashMap::new()),
+                broker_servers: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -586,6 +590,18 @@ impl Supervisor {
                 &mut broker,
             )?;
         }
+        let broker_server = if plugin_kind(&row.plugin).is_some() {
+            Some(crate::broker_ipc::BrokerServer::bind(
+                Arc::clone(&self.inner.broker),
+                fiber.uid,
+                &row.row_id,
+            )?)
+        } else {
+            None
+        };
+        let broker_socket = broker_server
+            .as_ref()
+            .map(|server| server.socket_path().to_string_lossy().into_owned());
         let spawned = match spawn_plugin(SpawnOpts {
             binary,
             plugin_id: &plugin_id,
@@ -595,6 +611,7 @@ impl Supervisor {
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row.row_id),
             workspace: &self.inner.workspace,
             config: &config,
+            broker_socket: broker_socket.as_deref(),
             max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
             allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
         })
@@ -605,6 +622,9 @@ impl Supervisor {
                 self.inner.rollback_loading(&fiber);
                 self.inner
                     .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
+                if let Some(server) = broker_server {
+                    server.shutdown();
+                }
                 return Err(err);
             }
         };
@@ -615,9 +635,22 @@ impl Supervisor {
             self.inner.rollback_loading(&fiber);
             self.inner
                 .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
+            if let Some(server) = broker_server {
+                server.shutdown();
+            }
             return Err(err);
         }
         let uid = fiber.uid;
+        if let Some(server) = broker_server {
+            fiber.broker_socket.clone_from(&broker_socket);
+            fiber.push_effect(Effect::BrokerListen {
+                path: fiber.broker_socket.clone().unwrap_or_default(),
+            });
+            self.inner
+                .broker_servers
+                .lock()
+                .insert(row.row_id.clone(), server);
+        }
         self.inner.fibers.lock().insert(row.row_id.clone(), fiber);
         self.inner.reset_failures(&row.row_id);
         Ok(uid)
@@ -724,6 +757,9 @@ impl Supervisor {
         };
         fiber.state = FiberState::Unloading;
         self.inner.drop_waterfall(row_id);
+        if let Some(server) = self.inner.broker_servers.lock().remove(row_id) {
+            server.shutdown();
+        }
         let session = self.inner.sessions.lock().remove(row_id);
         if let Some(session) = session {
             let drain = async { session.conn.lock().await.drain().await };
@@ -1110,6 +1146,7 @@ impl Supervisor {
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row_id),
             workspace: &self.inner.workspace,
             config,
+            broker_socket: None,
             max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
             allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
         })
@@ -1211,7 +1248,9 @@ fn finish_active(fiber: &mut Fiber) {
             Effect::RegisterTool { name } => Some(format!("tool.{name}")),
             Effect::BrokerGrant { op } => Some(format!("broker.{op}")),
             Effect::BindSeam { name } => Some(format!("seam.{name}")),
-            Effect::SpawnProcess { .. } | Effect::ListenWaterfall { .. } => None,
+            Effect::BrokerListen { .. }
+            | Effect::SpawnProcess { .. }
+            | Effect::ListenWaterfall { .. } => None,
         })
         .collect();
     fiber.state = FiberState::Active;

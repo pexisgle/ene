@@ -55,6 +55,7 @@ impl FiberState {
 pub enum Effect {
     RegisterTool { name: String },
     BrokerGrant { op: String },
+    BrokerListen { path: String },
     SpawnProcess { pid: u32 },
     BindSeam { name: String },
     ListenWaterfall { point: String },
@@ -70,6 +71,7 @@ pub struct Fiber {
     pub provides: Vec<String>,
     pub requires: Vec<String>,
     pub dispose: Vec<Effect>,
+    pub broker_socket: Option<String>,
     pub sandbox_required: bool,
     pub wait_reason: Option<String>,
 }
@@ -85,6 +87,7 @@ impl Fiber {
             provides: Vec::new(),
             requires: Vec::new(),
             dispose: Vec::new(),
+            broker_socket: None,
             sandbox_required: true,
             wait_reason: None,
         }

@@ -8,6 +8,7 @@
 
 mod assets_host;
 mod broker;
+mod broker_ipc;
 mod fiber;
 mod managed_sidecar;
 mod net;
@@ -18,6 +19,7 @@ mod spawn;
 mod supervisor;
 
 pub use broker::{Broker, BrokerError, Grant, confine_path};
+pub use broker_ipc::{BrokerIpcError, BrokerServer};
 pub use fiber::{Effect, Fiber, FiberState, FiberUid};
 pub use profile::ProfileApplyReport;
 pub use providers::{
@@ -34,3 +36,5 @@ pub use supervisor::{
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_broker_ipc;
