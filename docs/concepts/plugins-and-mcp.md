@@ -10,7 +10,8 @@ The plugin supervisor can subscribe to kernel waterfall points
 drops the listener LIFO. Third-party tool IPC cannot register those hooks.
 
 Built-in tools live under `plugins/tool/`: `fs`, `exec`, `web`, `utility`,
-`app`. `exec` is not part of `fs`. See [Built-in tools](../guides/tools/builtin-tools.md)
+`app`. Each binary owns its `specs` / `execute` and speaks the same tool IPC as
+a third-party plugin. `exec` is not part of `fs`. See [Built-in tools](../guides/tools/builtin-tools.md)
 and [Write a tool](../guides/tools/write-a-tool.md).
 
 MCP servers are not vendored. Each handwritten `mcp.json` row becomes a

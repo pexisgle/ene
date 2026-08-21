@@ -1,11 +1,11 @@
-use super::spec;
 use ene_plugin_ipc::ToolSpecWire;
+use ene_registry::spec;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-pub(super) fn specs() -> Vec<ToolSpecWire> {
+pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![spec(
         "exec.run",
         "Run a process in the workspace (not a shell)",
@@ -14,7 +14,10 @@ pub(super) fn specs() -> Vec<ToolSpecWire> {
     )]
 }
 
-pub(super) fn execute(args: &Value) -> Result<Value, String> {
+pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
+    if name != "exec.run" {
+        return Err(format!("unknown builtin {name}"));
+    }
     let command = args
         .get("command")
         .and_then(Value::as_str)
@@ -115,18 +118,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn timeout_sends_term_and_returns_partial() {
-        let value = execute(&json!({
-            "command": "sleep",
-            "args": ["30"],
-            "timeout_ms": 200
-        }))
+        let value = execute(
+            "exec.run",
+            &json!({
+                "command": "sleep",
+                "args": ["30"],
+                "timeout_ms": 200
+            }),
+        )
         .unwrap();
         assert_eq!(value["timed_out"], json!(true));
     }
 
     #[test]
     fn rejects_path_command() {
-        let err = execute(&json!({"command": "/bin/echo"})).unwrap_err();
+        let err = execute("exec.run", &json!({"command": "/bin/echo"})).unwrap_err();
         assert!(err.contains("program name"));
     }
 }

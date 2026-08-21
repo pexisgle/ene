@@ -149,14 +149,17 @@ owning `define_config!` invocation (`ene-session`, `ene-kernel`, `ene-companion`
 ## Plugins and IPC
 
 New tools are separate lightweight binaries: `cargo new --bin plugins/tool/<name>`.
-Serve via `ene_registry::run_plugin(BuiltinKind::…)` (see `plugins/tool/fs/src/main.rs`).
-Use namespaced `<namespace>.<action>` names and declare side effects. Verify through
+Serve via `ene_registry::run_tool_plugin` with local `specs` / `execute` (see
+`plugins/tool/fs/src/main.rs`). Do not dispatch on `BuiltinKind` in the plugin
+binary — that enum is a host catalog for in-process tests. Use namespaced
+`<namespace>.<action>` names and declare side effects. Verify through
 `ene-ctl` and update both `docs/concepts/plugins-and-mcp.md` and its `docs/ja/` counterpart.
 
 Plugin crates are **binary-only** — no `[lib]` target (see `plugins/tool/fs`). Size is
 not a reason to add one: `#[cfg(test)]` modules run normally in a bin crate. Add `[lib]`
 only when an integration test under `tests/` or another workspace crate must link the
-logic directly.
+logic directly. In-process host tests may `#[path]`-include `src/logic.rs` from
+`ene-registry` instead.
 
 One plugin per native runtime. `llama.cpp`, `whisper.cpp`, and ONNX Runtime each get their
 own plugin binary — never bundle two native runtimes into one.

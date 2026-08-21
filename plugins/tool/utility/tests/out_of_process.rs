@@ -1,7 +1,6 @@
 #![expect(clippy::unwrap_used, clippy::expect_used, reason = "tests fail fast")]
 
 use ene_fiber::{ProfileRow, Supervisor};
-use ene_plugin_ipc::BuiltinKind;
 use ene_registry::{Layer, ToolRegistry};
 use serde_json::json;
 use std::path::PathBuf;
@@ -75,6 +74,8 @@ async fn process_survives_os_sandbox_when_supported() {
 }
 
 #[test]
-fn builtin_kind_matches_binary() {
-    assert_eq!(BuiltinKind::Utility.plugin_id(), "tool.utility");
+fn plugin_serves_local_logic_not_builtin_kind() {
+    let src = include_str!("../src/main.rs");
+    assert!(!src.contains("BuiltinKind"));
+    assert!(src.contains("run_tool_plugin"));
 }

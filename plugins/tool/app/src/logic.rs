@@ -1,6 +1,6 @@
-use super::{arg_str, spec};
 use base64::Engine;
 use ene_plugin_ipc::ToolSpecWire;
+use ene_registry::{arg_str, spec};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -10,7 +10,7 @@ const HOST_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SCREENSHOT_BYTES: usize = 512 * 1024;
 
-pub(super) fn specs() -> Vec<ToolSpecWire> {
+pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
         spec(
             "app.screenshot",
@@ -63,7 +63,7 @@ pub(super) fn specs() -> Vec<ToolSpecWire> {
     ]
 }
 
-pub(super) fn execute(name: &str, args: &Value) -> Result<Value, String> {
+pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "app.screenshot" => screenshot(),
         "app.window_list" => window_list(),

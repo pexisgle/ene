@@ -10,7 +10,8 @@
 外します。サードパーティのツール IPC からは登録できません。
 
 同梱ツールは `plugins/tool/` にあります: `fs`、`exec`、`web`、`utility`、
-`app`。
+`app`。各バイナリが自分の `specs` / `execute` を持ち、サードパーティと同じ
+tool IPC を話します。
 `exec` は `fs` に含めません。[同梱ツール](../guides/tools/builtin-tools.md) と
 [ツールを書く](../guides/tools/write-a-tool.md) を見てください。
 

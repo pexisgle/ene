@@ -1,6 +1,7 @@
-//! Bundled `tool.web` plugin.
+//! Bundled `tool.web` plugin: fetch and search.
 
-use ene_plugin_ipc::BuiltinKind;
+mod logic;
+
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -10,7 +11,8 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    if let Err(err) = ene_registry::run_plugin(BuiltinKind::Web).await {
+    if let Err(err) = ene_registry::run_tool_plugin("tool.web", logic::specs, logic::execute).await
+    {
         tracing::error!(error = %err, plugin = "tool.web", "fatal");
         std::process::exit(1);
     }

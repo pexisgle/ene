@@ -367,3 +367,26 @@ async fn fs_list_and_edit_stay_in_workspace() {
             .any(|row| { row.get("name").and_then(Value::as_str) == Some("a.txt") })
     );
 }
+
+#[test]
+fn bundled_plugin_mains_own_logic_without_builtin_kind() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in ["fs", "exec", "web", "utility", "app"] {
+        let main =
+            std::fs::read_to_string(root.join(format!("plugins/tool/{name}/src/main.rs")))
+                .unwrap();
+        assert!(
+            !main.contains("BuiltinKind"),
+            "{name} must not launch via BuiltinKind"
+        );
+        assert!(
+            main.contains("run_tool_plugin"),
+            "{name} must call run_tool_plugin"
+        );
+        assert!(
+            root.join(format!("plugins/tool/{name}/src/logic.rs"))
+                .is_file(),
+            "{name} logic.rs"
+        );
+    }
+}
