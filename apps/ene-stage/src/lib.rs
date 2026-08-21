@@ -1,5 +1,12 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "tests"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "tests"
+    )
+)]
 
 //! Product stage client library.
 

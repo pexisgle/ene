@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use ene_vrm::DebugRenderer;
 use glam::Vec3;
 use winit::dpi::PhysicalSize;
 use winit::window::{Window, WindowId};
@@ -21,6 +22,8 @@ pub struct OverlayWindow {
     pub avatar: Option<CompanionAvatar>,
     pub transparent: bool,
     pub click_through: bool,
+    pub collider_debug: bool,
+    debug: DebugRenderer,
     last_frame: Instant,
 }
 
@@ -46,6 +49,8 @@ impl OverlayWindow {
             avatar: None,
             transparent,
             click_through: transparent,
+            collider_debug: false,
+            debug: DebugRenderer::new(&gpu.device, format),
             last_frame: Instant::now(),
         })
     }
@@ -161,6 +166,21 @@ impl OverlayWindow {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+        }
+        if self.collider_debug
+            && let Some(avatar) = self.avatar.as_ref()
+            && let Some(camera_uniform) = avatar.debug_camera_uniform()
+        {
+            self.debug.clear();
+            avatar.push_spring_collider_wires(&mut self.debug);
+            self.debug.render(
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                &view,
+                &self.depth_view,
+                &camera_uniform,
+            );
         }
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();

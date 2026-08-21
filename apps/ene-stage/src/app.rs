@@ -1131,7 +1131,10 @@ impl StageApp {
                 self.ensure_chat(event_loop);
             }
             Key::Named(NamedKey::F3) => {
-                tracing::info!("collider overlay is a stub in this client");
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.collider_debug = !overlay.collider_debug;
+                    tracing::info!(on = overlay.collider_debug, "collider debug overlay");
+                }
             }
             Key::Named(NamedKey::F4) => self.open_detail(event_loop, DetailTab::Log),
             _ => self.handle_overlay_shortcut(key),
