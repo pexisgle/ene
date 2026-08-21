@@ -5,7 +5,7 @@ third-party tool. `ene-core` always applies these profile rows:
 
 | Plugin | Binary | Role |
 |---|---|---|
-| `utility` | `ene-tool-utility` | Hash, time, calc, random, text |
+| `utility` | `ene-tool-utility` | Hash, time, system_info, calc (units and snapshot FX), random, text |
 | `fs` | `ene-tool-fs` | Read / write / edit / list / search / patch / undo in the workspace. No shell. |
 | `exec` | `ene-tool-exec` | Process execution by program name (separate from `fs`) |
 | `web` | `ene-tool-web` | HTTPS fetch and public search (SSRF blocked) |

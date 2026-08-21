@@ -18,8 +18,14 @@ pub(super) fn specs() -> Vec<ToolSpecWire> {
             Vec::new(),
         ),
         spec(
+            "utility.system_info",
+            "OS, architecture, and CPU count this process sees",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+            Vec::new(),
+        ),
+        spec(
             "utility.calc",
-            "Exact arithmetic or unit conversion the model must not guess",
+            "Exact arithmetic, unit conversion, or ISO 4217 FX from a published table",
             json!({"type":"object","properties":{"expr":{"type":"string"},"value":{"type":"number"},"from":{"type":"string"},"to":{"type":"string"}},"additionalProperties":false}),
             Vec::new(),
         ),
@@ -42,6 +48,7 @@ pub(super) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "utility.hash" => hash_text(super::arg_str(args, "text")?, "blake3"),
         "utility.time" => Ok(time(args)),
+        "utility.system_info" => Ok(system_info()),
         "utility.calc" => calc(args),
         "utility.random" => random(args),
         "utility.text" => text(args),
@@ -68,6 +75,17 @@ fn time(args: &Value) -> Value {
     })
 }
 
+fn system_info() -> Value {
+    let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    json!({
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "family": std::env::consts::FAMILY,
+        "pointer_width": usize::BITS,
+        "cpus": cpus,
+    })
+}
+
 fn calc(args: &Value) -> Result<Value, String> {
     if let Some(expr) = args.get("expr").and_then(Value::as_str) {
         let value = eval_expr(expr)?;
@@ -79,6 +97,18 @@ fn calc(args: &Value) -> Result<Value, String> {
         .ok_or_else(|| "utility.calc needs expr or value+from+to".to_owned())?;
     let from = super::arg_str(args, "from")?;
     let to = super::arg_str(args, "to")?;
+    if let Some(fx) = currency_convert(value, from, to)? {
+        return Ok(json!({
+            "value": fx.value,
+            "text": format_number(fx.value),
+            "from": fx.from,
+            "to": fx.to,
+            "rate": fx.rate,
+            "as_of": FX_AS_OF,
+            "quote": "USD",
+            "source": "table",
+        }));
+    }
     let converted = convert_unit(value, from, to)?;
     Ok(json!({ "value": converted, "text": format_number(converted), "from": from, "to": to }))
 }
@@ -270,6 +300,65 @@ fn convert_unit(value: f64, from: &str, to: &str) -> Result<f64, String> {
         return Ok(value * si / dest);
     }
     temp_convert(value, from, to)
+}
+
+/// Snapshot date for [`units_per_usd`]. Not a live market feed.
+const FX_AS_OF: &str = "2026-08-01";
+
+#[derive(Debug)]
+struct FxQuote {
+    value: f64,
+    from: String,
+    to: String,
+    rate: f64,
+}
+
+fn units_per_usd(code: &str) -> Option<f64> {
+    Some(match code {
+        "USD" => 1.0,
+        "EUR" => 0.92,
+        "GBP" => 0.78,
+        "JPY" => 150.0,
+        "CNY" => 7.2,
+        "KRW" => 1_350.0,
+        "AUD" => 1.52,
+        "CAD" => 1.37,
+        "CHF" => 0.88,
+        "INR" => 84.0,
+        _ => return None,
+    })
+}
+
+fn currency_code(raw: &str) -> Option<String> {
+    let code = raw.trim().to_ascii_uppercase();
+    if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_uppercase()) {
+        return None;
+    }
+    units_per_usd(&code)?;
+    Some(code)
+}
+
+fn currency_convert(value: f64, from: &str, to: &str) -> Result<Option<FxQuote>, String> {
+    let from_code = currency_code(from);
+    let to_code = currency_code(to);
+    match (from_code, to_code) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => {
+            Err("currency conversion needs two ISO 4217 codes".to_owned())
+        }
+        (Some(from), Some(to)) => {
+            let from_per =
+                units_per_usd(&from).ok_or_else(|| format!("unknown currency {from}"))?;
+            let to_per = units_per_usd(&to).ok_or_else(|| format!("unknown currency {to}"))?;
+            let rate = to_per / from_per;
+            Ok(Some(FxQuote {
+                value: value * rate,
+                from,
+                to,
+                rate,
+            }))
+        }
+    }
 }
 
 fn length_to_m(unit: &str) -> Option<f64> {
@@ -494,5 +583,50 @@ impl Parser<'_> {
             "max" if args.len() == 2 => Ok(args[0].max(args[1])),
             _ => Err(format!("unknown function {name}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{calc, currency_convert, system_info};
+    use serde_json::json;
+
+    #[test]
+    fn system_info_reports_compile_target() {
+        let info = system_info();
+        assert_eq!(info["os"], json!(std::env::consts::OS));
+        assert_eq!(info["arch"], json!(std::env::consts::ARCH));
+        assert_eq!(info["family"], json!(std::env::consts::FAMILY));
+        assert_eq!(info["pointer_width"], json!(usize::BITS));
+        assert!(info["cpus"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn fx_table_converts_usd_to_jpy() {
+        let quote = currency_convert(2.5, "usd", "JPY").unwrap().unwrap();
+        assert!((quote.value - 375.0).abs() < 1e-9);
+        assert!((quote.rate - 150.0).abs() < 1e-9);
+        assert_eq!(quote.from, "USD");
+        assert_eq!(quote.to, "JPY");
+    }
+
+    #[test]
+    fn calc_fx_includes_snapshot_metadata() {
+        let value = calc(&json!({"value": 1, "from": "USD", "to": "eur"})).unwrap();
+        assert!((value["value"].as_f64().unwrap() - 0.92).abs() < 1e-9);
+        assert_eq!(value["as_of"], json!(super::FX_AS_OF));
+        assert_eq!(value["source"], json!("table"));
+        assert_eq!(value["quote"], json!("USD"));
+    }
+
+    #[test]
+    fn mixed_currency_and_length_is_rejected() {
+        let err = currency_convert(1.0, "USD", "m").unwrap_err();
+        assert!(err.contains("ISO 4217"));
+    }
+
+    #[test]
+    fn length_conversion_still_skips_fx() {
+        assert!(currency_convert(1.0, "m", "km").unwrap().is_none());
     }
 }
