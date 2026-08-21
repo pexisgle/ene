@@ -42,8 +42,12 @@ CCv3 エディタはありません。
 コア寿命の既定は `desktop.core_lifetime = app`（stage 終了時に子コアも停止）
 です。常駐させたい場合は `detached` にします。
 
-チャットは **未設定** から始まります。詳細 → Conversation で `ai.tasks.chat`
-を束縛してください。エンジンや GGUF は Connections のプロバイダ資産です。
+チャットは **未設定** から始まります。詳細 → Conversation で、インストール済み
+カタログ（`GET /settings` → `effective.providers`）から名前付きプロバイダを選び、
+続けてモデルを選びます。Home の **チャットの準備ができています。** は、その束縛に
+モデルがあり、プロバイダが `needs_key` ならボールトに API キーがあるときだけ出ます。
+適用ボタンはモデル一覧の上にあるので、一覧取得で保存が画面外へ押し出されません。
+エンジンや GGUF は Connections のプロバイダ資産です。
 TTS/STT は `ai.tasks.tts` / `ai.tasks.stt` です。
 
 VAD/ASR/TTS はコアが持ちます。Stage は `POST /sessions/{id}/listen` でマイク

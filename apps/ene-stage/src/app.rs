@@ -615,8 +615,8 @@ impl StageApp {
         if text.is_empty() {
             return;
         }
-        if self.detail.chat_plugin.is_empty() || self.detail.chat_plugin == "echo" {
-            self.surface.status = i18n::fl("chat-unconfigured");
+        if let Some(gap) = detail::chat_setup_gap(&self.detail) {
+            self.surface.status = detail::chat_setup_status(gap);
             return;
         }
         if !self.surface.turn_active
