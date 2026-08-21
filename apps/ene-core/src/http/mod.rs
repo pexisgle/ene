@@ -5,6 +5,7 @@ mod client_id;
 mod error;
 mod exclusive;
 mod lanes;
+mod llm;
 mod model;
 mod performance;
 pub(crate) mod proactive;

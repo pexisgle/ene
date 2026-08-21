@@ -907,6 +907,11 @@ fn apply_task_env(prefix: &str, binding: &mut TaskBinding) {
     {
         binding.max_tokens = Some(n);
     }
+    if let Ok(raw) = std::env::var(format!("{prefix}__CONTEXT_WINDOW"))
+        && let Ok(n) = raw.parse()
+    {
+        binding.context_window = Some(n);
+    }
     if let Ok(voice) = std::env::var(format!("{prefix}__VOICE"))
         && !voice.is_empty()
     {

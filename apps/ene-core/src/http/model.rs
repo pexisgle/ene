@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ene_kernel::{
     ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, ToolCall,
+    effective_window, estimate_tokens, fit_prompt,
 };
 use ene_plugin_ipc::{
     LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
@@ -75,29 +76,40 @@ impl ConversationModel for SeamedModel {
                 self.task
             )));
         }
+        let harness = crate::boot::load_harness_settings(self.core.data_dir());
+        let reserve = binding
+            .max_tokens
+            .unwrap_or(harness.context.response_reserve_tokens);
+        let window = effective_window(
+            None,
+            binding.context_window,
+            Some(reserve),
+            harness.context.safety_margin_ratio,
+        );
+        let estimation = harness.context.token_estimation;
+        let store = self.core.store();
+        let vision_store = vision_store_for(&binding, store.as_ref());
+        let messages = fit_prompt(
+            fold_history(&request.messages, vision_store),
+            window.available,
+            |message| estimate_tokens(&pack_text(message), estimation),
+            |message| matches!(message.role, LlmRole::System),
+        );
         let llm_request = map_request(
-            &request,
+            messages,
             &binding,
             &self.core.secret_for(self.task),
             &self.core,
             self.layer(),
+            reserve,
         );
-        let generation = self
-            .core
-            .supervisor()
-            .generate_llm(
-                &crate::plugin_profile::task_row_id(self.fiber_task()),
-                llm_request,
-            )
-            .await
-            .map_err(|err| KernelError::Model(err.to_string()))?;
-        if generation.finish_reason == "error" {
-            return Err(KernelError::Model(if generation.model_id.is_empty() {
-                "provider failed".to_owned()
-            } else {
-                generation.model_id
-            }));
-        }
+        let generation = super::llm::generate_llm(
+            &self.core,
+            &crate::plugin_profile::task_row_id(self.fiber_task()),
+            llm_request,
+        )
+        .await
+        .map_err(KernelError::Model)?;
         Ok(map_generation(generation))
     }
 }
@@ -110,24 +122,34 @@ fn vision_store_for<'a>(
 }
 
 fn map_request(
-    request: &ModelRequest,
+    messages: Vec<LlmMessage>,
     binding: &TaskBinding,
     api_key: &str,
     core: &CoreDaemon,
     layer: Layer,
+    reserve: u32,
 ) -> LlmGenerateRequest {
-    let store = core.store();
-    let vision_store = vision_store_for(binding, store.as_ref());
     LlmGenerateRequest {
-        messages: fold_history(&request.messages, vision_store),
+        messages,
         tools: tool_schemas(core, layer),
         model: binding.model.clone(),
-        max_tokens: binding.max_tokens,
+        max_tokens: Some(reserve),
         base_url: binding.base_url.clone(),
         auth: ProviderAuth {
             api_key: api_key.to_owned(),
         },
     }
+}
+
+fn pack_text(message: &LlmMessage) -> String {
+    let mut text = message.text.clone();
+    for call in &message.tool_calls {
+        text.push(' ');
+        text.push_str(&call.name);
+        text.push(' ');
+        text.push_str(&call.arguments.to_string());
+    }
+    text
 }
 
 // OpenAI/Anthropic function names must match ^[a-zA-Z0-9_-]+$.
@@ -522,5 +544,48 @@ mod tests {
         assert_eq!(mapped[0].images[0].mime, "image/png");
         assert_eq!(mapped[0].images[0].base64, encoded);
         assert!(!mapped[0].text.contains("[image omitted]"));
+    }
+
+    #[test]
+    fn pack_text_includes_tool_call_payload() {
+        let message = LlmMessage {
+            role: LlmRole::Assistant,
+            text: String::new(),
+            tool_calls: vec![LlmToolCall {
+                id: "c1".to_owned(),
+                name: "fs__read".to_owned(),
+                arguments: serde_json::json!({"path": "a.txt"}),
+            }],
+            tool_call_id: None,
+            tool_name: None,
+            images: Vec::new(),
+        };
+        let packed = pack_text(&message);
+        assert!(packed.contains("fs__read"));
+        assert!(packed.contains("a.txt"));
+    }
+
+    #[test]
+    fn token_budget_keeps_system_and_latest_user() {
+        let messages = vec![
+            LlmMessage::new(LlmRole::System, "contract"),
+            LlmMessage::new(LlmRole::User, "old-turn-".repeat(80)),
+            LlmMessage::new(LlmRole::Assistant, "ack-old"),
+            LlmMessage::new(LlmRole::User, "latest-turn"),
+        ];
+        let packed = ene_kernel::fit_prompt(
+            messages,
+            8,
+            |message| {
+                ene_kernel::estimate_tokens(
+                    &pack_text(message),
+                    ene_kernel::TokenEstimation::Chars4,
+                )
+            },
+            |message| matches!(message.role, LlmRole::System),
+        );
+        assert_eq!(packed.len(), 2);
+        assert_eq!(packed[0].text, "contract");
+        assert_eq!(packed[1].text, "latest-turn");
     }
 }

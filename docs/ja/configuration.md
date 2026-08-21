@@ -24,7 +24,7 @@
 | セクション | 所有 | 代表キー |
 |---|---|---|
 | `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
-| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*`, `tool_output.soft_limit_bytes`, `tool_output.hard_limit_bytes` |
+| `harness` | `ene-kernel` | `loop.max_steps_per_turn`、`retry.*`、`context.*`、`delegation.*`、`tool_output.soft_limit_bytes`、`tool_output.hard_limit_bytes` |
 | `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*`（`observation_interval_seconds` が観測 tick 間隔。開いているセッションをすべて観測する。`proactive.world_state.title_mode` と `ocr_hint` を含む） |
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
@@ -33,7 +33,8 @@
 | `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
 会話・分類・埋め込み・TTS・STT・承認・ジョブは `ai.tasks.<task>`（`plugin`、
-`model`、`model_path`、`base_url`、`voice`、`max_tokens`、`supports_images`）でバインドします。
+`model`、`model_path`、`base_url`、`voice`、`max_tokens`、`supports_images`、
+`context_window`）でバインドします。
 チャットは未設定のまま起動するので、最初のメッセージの前に
 `ai.tasks.chat.plugin` を `provider.*` に設定してください。
 `supports_images` はオプトインで既定は false です。設定済みかつフラグが真の
@@ -41,7 +42,9 @@
 provider は `[image omitted]` のままにします。
 `approval.mode = ai_auto` は `ai.tasks.approve`（無ければ chat）を使い、失敗時は
 ポップアップに落ちます。裏層ジョブは `ai.tasks.job`（無ければ chat。どちらも
-未設定なら echo）を、対話レーンとは別のレーンで使います。API キーは vault 秘密です（起動時は
+未設定なら echo）を、対話レーンとは別のレーンで使います。複数プロバイダの
+フェイルオーバーはありません。空のタスク行は chat を継承します（TTS / STT /
+埋め込みは空のまま無効）。API キーは vault 秘密です（起動時は
 `ENE_AI__TASKS__<TASK>__API_KEY`。PATCH `/api/v1/settings` は JSON に
 書きません）。プラグイン id は [プラグイン一覧](concepts/plugins-and-mcp.md) の
 `provider.*` です（`GET /api/v1/settings` の `effective.providers`）。
@@ -62,6 +65,24 @@ TTS・STT が空なら無効のままです。
 opt-in の枠で、バックエンドは同梱しません。製品 GUI（詳細 → Conversation）
 がいまの送信範囲を出します。生のスクリーンショットは session / memory /
 audit に残さず、luma digest とテキスト要約だけが永続境界を越えます。
+
+プロバイダ LLM 呼び出し（`ai.tasks.chat` / `job` / `classifier` / `approve`）は
+一時障害（`429` / `502` / `503` / timeout / overload）を `harness.retry` で
+再試行し、最後の失敗がターンまたはヘルパーのエラーになります。実効コンテキスト
+ウィンドウは `min(プロバイダ申告, ai.tasks.<task>.context_window)`、どちらも無ければ
+8192 です。`harness.context.response_reserve_tokens`（`max_tokens` があればそれ）と
+`safety_margin_ratio` を引き、対話モデルは system 以外の古いメッセージを落として
+パックします。プラグイン hello はまだ窓を申告しないので、大きいモデルは
+`context_window` で上限を付けます。
+
+| キー | 役割 |
+|---|---|
+| `harness.retry.max_attempts` | 初回を含む総試行回数。既定 `3`。 |
+| `harness.retry.backoff_ms` | 再試行可能な失敗のあとの待ち（ms）。既定 `[500, 2000, 8000]`。 |
+| `harness.context.response_reserve_tokens` | `max_tokens` 未設定時の応答予約。既定 `4096`。 |
+| `harness.context.safety_margin_ratio` | 窓のうち見積もり誤差用に残す比。既定 `0.1`。 |
+| `harness.context.token_estimation` | `auto`（CJK 判定）、`chars4`、`cjk15`。 |
+| `ai.tasks.<task>.context_window` | オペレータが付ける窓の上限。環境変数: `ENE_AI__TASKS__<TASK>__CONTEXT_WINDOW`。 |
 
 プラグイン起動は `plugins.profile`（`desktop` / `minimal` / `headless`）です。
 プラグインごとの有効マップ（`plugins.list`）はありません。
