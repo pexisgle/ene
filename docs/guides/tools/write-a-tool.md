@@ -22,4 +22,5 @@ add a bundled plugin.
 
 A non-Rust fixture lives at `plugins/tool/dummy-py` (workspace-excluded).
 Third-party tools must implement the same core+tool handshake; they do not
-link Ene crates.
+link Ene crates. Naming `capability` is optional: omit it unless the plugin
+needs Broker grants or bulk FD transfer.

@@ -1,7 +1,7 @@
 # Plugins & MCP
 
 Tools are **out-of-process binaries**. The host (`ene-fiber`) spawns them,
-negotiates split `core` / `tool` / `provider` subprotocols (`ene-plugin-ipc`),
+negotiates split `core` / `tool` / `provider` / `capability` subprotocols (`ene-plugin-ipc`),
 and registers tools in `ene-registry`. Harness functions that touch companion
 state stay in-process and still go through the same registry pipeline.
 
@@ -47,6 +47,13 @@ The plugin owns the static weight catalog; the host fetches `llama-server`
 releases from GitHub, stores verified artifacts under
 `data_dir/plugins/provider.gguf/assets/`, and spawns `llama-server` on loopback
 via `ene-fiber`. Sidecar helpers also live in `templates/sidecar`.
+
+A plugin that names `capability` in `hello_ack` can call Broker RPC
+(`capability.request`, `capability.approval_query`) and receive grants.
+Payloads larger than `plugins.ipc.bulk_threshold_bytes` leave the MessagePack
+frame: the host opens a bulk stream (`stream.open`) and, on Linux, passes the
+socket with `SCM_RIGHTS`. Tool plugins that omit `capability` keep working on
+`core` + `tool` only.
 
 MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
 injected as the `mcp.resources` context source. MCP `prompts/list` become

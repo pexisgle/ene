@@ -108,6 +108,7 @@ impl TtsHandler for OpenAiCompat {
         Ok(TtsAudio {
             pcm: pcm16le_to_f32(&bytes),
             sample_rate: 24_000,
+            bulk: None,
         })
     }
 }

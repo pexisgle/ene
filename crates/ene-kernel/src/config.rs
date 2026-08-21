@@ -300,12 +300,14 @@ impl Default for PluginPolicySettings {
 #[schemars(crate = "::ene_config::schemars")]
 pub struct PluginIpcSettings {
     pub max_frame_bytes: u32,
+    pub bulk_threshold_bytes: u32,
 }
 
 impl Default for PluginIpcSettings {
     fn default() -> Self {
         Self {
             max_frame_bytes: 1_048_576,
+            bulk_threshold_bytes: 65_536,
         }
     }
 }

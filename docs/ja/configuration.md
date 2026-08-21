@@ -64,6 +64,7 @@ TTS・STT が空なら無効のままです。
 | `plugins.policy.approval_mode` | 起動時に `approval.mode` を初期化（`ask_all` / `policy` / `ai_auto` / `auto`）。実行時の正は `approval.mode`。 |
 | `plugins.policy.allow_unverified` | digest 不一致でも起動するか。既定 `false`。 |
 | `plugins.ipc.max_frame_bytes` | IPC フレーム上限。既定 `1048576`。環境変数: `ENE_PLUGINS__IPC__MAX_FRAME_BYTES`。 |
+| `plugins.ipc.bulk_threshold_bytes` | これを超える本体は MessagePack フレームに載せない（`stream.open` / Unix の `SCM_RIGHTS`）。既定 `65536`。環境変数: `ENE_PLUGINS__IPC__BULK_THRESHOLD_BYTES`。 |
 
 MCP サーバーは手書きの `mcp.json` であり、設定キーではありません。
 [プラグインと MCP](concepts/plugins-and-mcp.md) を見てください。
