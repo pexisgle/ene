@@ -105,8 +105,8 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-524 | `proactive_speaks_when_gates_pass`; `classifier_scope_defaults_private_when_missing` | Scripted | いいえ |
 | P-601 | `surface_schemas_omit_fs_write`; `harness_tool_uses_the_same_pipeline` | store | はい |
 | P-602 | `builtin_specs_cover_five_plugins`; `out_of_process_utility_registers_and_runs` | launcher | いいえ(薄いスケッチ。`system_info` / 為替欠落) |
-| P-603 | `mcp_handwritten_tools_execute_through_registry` | Scripted | いいえ |
-| P-604 | `mcp_handwritten_tools_execute_through_registry` (git スタブ) | Scripted | いいえ |
+| P-603 | `handwritten_stdio_mcp_registers_and_runs` | process | はい |
+| P-604 | `handwritten_stdio_mcp_git_status_runs_real_git` | process | はい |
 | P-605 | `lane_prompt_still_works_while_job_running`; `progress_and_complete_are_companion_speech` | host API | いいえ |
 | P-606 | `schedule_remind_fires_and_quiet_hours_defer`; `missed_remind_fires_once` | store | はい |
 | P-607 | `schedule_remind_fires_and_quiet_hours_defer` | store | はい |
@@ -114,7 +114,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-609 | `bookmark_workflow_delivers_markdown_artifact`; `artifact_register_and_deliver` | host API | 部分(I/O ははい) |
 | P-610 | `skill_install_and_load` | store | いいえ(コンテキスト未接続) |
 | P-611 | `exec_tools_stay_off_surface_schema`; `exec_is_higher_risk_than_workspace_fs_write` | store | はい |
-| P-612 | `mcp_handwritten_tools_execute_through_registry`; `exec_tools_stay_off_surface_schema` | Scripted / store | いいえ(git スタブ) |
+| P-612 | `handwritten_stdio_mcp_git_status_runs_real_git`; `exec_tools_stay_off_surface_schema` | process / store | いいえ(`status`/`log` のみ。fs/exec コーディング未達) |
 | P-613 | `work_tools_cover_delegate_surface`; `plane_denies_side_effects_and_sensitive_reads` | store | はい(スキーマ) |
 | P-614 | `spill_huge_tool_output_keeps_brief_bounded` | store | はい |
 | P-615 | `work_tools_cover_delegate_surface` | store | 部分(呼称契約。発話は host API) |
