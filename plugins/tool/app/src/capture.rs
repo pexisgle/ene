@@ -90,7 +90,7 @@ pub(crate) fn list_monitors() -> Result<Value, String> {
         }
     }
     #[cfg(windows)]
-    if let Ok(parsed) = crate::win32::list_monitors() {
+    if let Ok(parsed) = super::win32::list_monitors() {
         return Ok(json!({ "monitors": parsed, "backend": "gdi" }));
     }
     Err(fail(
