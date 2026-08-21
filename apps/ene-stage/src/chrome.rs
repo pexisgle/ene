@@ -149,10 +149,17 @@ impl ChromeWindow {
     pub fn paint(
         &mut self,
         gpu: &GpuContext,
+        theme: Option<&str>,
         mut add_contents: impl FnMut(&mut egui::Ui),
     ) -> Result<(), GpuError> {
+        if let Some(theme) = theme {
+            apply_theme(&self.egui_ctx, theme);
+        }
         let raw = self.egui_state.take_egui_input(&self.window);
-        let full = self.egui_ctx.run_ui(raw, |ui| add_contents(ui));
+        let full = self.egui_ctx.run_ui(raw, |ui| {
+            fill_opaque_panel(ui, self.kind);
+            add_contents(ui);
+        });
         self.egui_state
             .handle_platform_output(&self.window, full.platform_output);
 
@@ -183,16 +190,7 @@ impl ChromeWindow {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let clear = if self.kind == ChromeKind::Caption || self.kind == ChromeKind::Spotlight {
-            wgpu::Color::TRANSPARENT
-        } else {
-            wgpu::Color {
-                r: 0.07,
-                g: 0.07,
-                b: 0.09,
-                a: 1.0,
-            }
-        };
+        let clear = clear_color(self.kind, &self.egui_ctx.global_style().visuals);
         {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ene-stage.chrome.pass"),
@@ -220,5 +218,83 @@ impl ChromeWindow {
             .submit(extra.into_iter().chain(std::iter::once(encoder.finish())));
         frame.present();
         Ok(())
+    }
+}
+
+fn fill_opaque_panel(ui: &mut egui::Ui, kind: ChromeKind) {
+    if kind == ChromeKind::Caption || kind == ChromeKind::Spotlight {
+        return;
+    }
+    ui.painter()
+        .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
+}
+
+/// Map `desktop.theme` onto egui's light/dark/system preference.
+///
+/// Chrome windows used to keep a dark wgpu clear while switching only widget
+/// text color, which made light theme unreadable.
+pub fn apply_theme(ctx: &egui::Context, theme: &str) {
+    match theme {
+        "light" => ctx.set_theme(egui::Theme::Light),
+        "dark" => ctx.set_theme(egui::Theme::Dark),
+        _ => ctx.set_theme(egui::ThemePreference::System),
+    }
+}
+
+#[must_use]
+pub fn clear_color(kind: ChromeKind, visuals: &egui::Visuals) -> wgpu::Color {
+    if kind == ChromeKind::Caption || kind == ChromeKind::Spotlight {
+        wgpu::Color::TRANSPARENT
+    } else {
+        color32_to_wgpu(visuals.panel_fill)
+    }
+}
+
+#[must_use]
+pub fn color32_to_wgpu(color: egui::Color32) -> wgpu::Color {
+    wgpu::Color {
+        r: f64::from(color.r()) / 255.0,
+        g: f64::from(color.g()) / 255.0,
+        b: f64::from(color.b()) / 255.0,
+        a: f64::from(color.a()) / 255.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luma(color: wgpu::Color) -> f64 {
+        0.2126_f64.mul_add(color.r, 0.7152_f64.mul_add(color.g, 0.0722 * color.b))
+    }
+
+    #[test]
+    fn light_opaque_clear_is_brighter_than_dark() {
+        let light = clear_color(ChromeKind::Detail, &egui::Visuals::light());
+        let dark = clear_color(ChromeKind::Detail, &egui::Visuals::dark());
+        assert!(luma(light) > luma(dark));
+        assert!(luma(light) > 0.7);
+        assert!(luma(dark) < 0.3);
+        assert!((light.a - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_theme_switches_panel_luma() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, "light");
+        let light = clear_color(ChromeKind::Chat, &ctx.global_style().visuals);
+        apply_theme(&ctx, "dark");
+        let dark = clear_color(ChromeKind::Chat, &ctx.global_style().visuals);
+        assert!(luma(light) > luma(dark));
+        assert!(luma(light) > 0.7);
+        assert!(luma(dark) < 0.3);
+    }
+
+    #[test]
+    fn caption_and_spotlight_stay_transparent() {
+        let caption = clear_color(ChromeKind::Caption, &egui::Visuals::light());
+        let spotlight = clear_color(ChromeKind::Spotlight, &egui::Visuals::dark());
+        assert!((caption.a).abs() < f64::EPSILON);
+        assert!((spotlight.a).abs() < f64::EPSILON);
     }
 }

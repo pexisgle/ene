@@ -33,7 +33,9 @@ Stage は WebView を使いません。オーバーレイは wgpu、操作窓は
 CCv3 エディタはありません。
 
 ローカルの `desktop.*`（テーマ、言語、マイク、キャプション、ビート同期、画質、
-コア寿命、オーバーレイ配置）はクライアント側です。コアの PATCH キーは
+コア寿命、オーバーレイ配置）はクライアント側です。テーマ（`light` / `dark` /
+`system`）は wgpu のクリア色と egui の文字色の両方に効くので、light でも
+コントラストが保たれます。コアの PATCH キーは
 `core` / `harness` / `approval` / `theme` / `ai` / `mind` / `plugins` です。
 プラグインの有効化は `plugins.profile`（`desktop` / `minimal` / `headless`）で、
 `plugins.list` の個別マップはありません。API キーはボールトに置きます。
