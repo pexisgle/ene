@@ -91,16 +91,15 @@ fn time(args: &Value) -> Value {
         .get("timezone")
         .and_then(Value::as_str)
         .unwrap_or("UTC");
-    let offset = if timezone.eq_ignore_ascii_case("UTC") || timezone.eq_ignore_ascii_case("Z") {
-        now.to_rfc3339()
-    } else {
-        format!("{now} ({timezone})")
-    };
+    let local = timezone.parse::<chrono_tz::Tz>().ok().map(|tz| {
+        now.with_timezone(&tz)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    });
     json!({
         "unix_ms": now.timestamp_millis(),
         "rfc3339": now.to_rfc3339(),
         "timezone": timezone,
-        "local": offset,
+        "local": local.unwrap_or_else(|| format!("{now} ({timezone})")),
     })
 }
 
@@ -1168,7 +1167,7 @@ fn format_hsl(color: Rgba) -> String {
 mod tests {
     use super::{
         FX_AS_OF, FX_SOURCE, calc, color, convert_unit, currency_convert, eval_expr, format_hex,
-        parse_color, random, random_integer_inclusive, structured_error, system_info,
+        parse_color, random, random_integer_inclusive, structured_error, system_info, time,
     };
     use serde_json::{Value, json};
     use std::collections::HashMap;
@@ -1344,5 +1343,13 @@ mod tests {
         let (kind, message) = parse_structured_error(&err).unwrap();
         assert_eq!(kind, "invalid_expression");
         assert_eq!(message, "bad token");
+    }
+
+    #[test]
+    fn time_converts_iana_timezone() {
+        let args = json!({"timezone":"Asia/Tokyo"});
+        let value = time(&args);
+        assert_eq!(value["timezone"], "Asia/Tokyo");
+        assert!(value["local"].as_str().unwrap().ends_with("+09:00"));
     }
 }
