@@ -220,6 +220,7 @@ pub struct DetailUiState {
     pub mcp_servers: Vec<ene_api::McpServerView>,
     pub plugin_config_id: String,
     pub plugin_config_has: bool,
+    pub plugin_config_open: bool,
     pub plugin_config_schema: String,
     pub plugin_config_values: String,
     pub plugin_config_secrets: Vec<String>,
@@ -1714,6 +1715,7 @@ fn show_connections(
             }
             if ui.button(i18n::fl("plugins-config")).clicked() {
                 let id = plugin.row_id.clone();
+                state.plugin_config_open = true;
                 let client = Arc::clone(client);
                 spawn_async(rt, async_results, async move {
                     AsyncOutcome::LoadPluginConfig(
@@ -1736,7 +1738,7 @@ fn show_plugin_config(
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
-    if state.plugin_config_id.is_empty() {
+    if state.plugin_config_id.is_empty() || !state.plugin_config_open {
         return;
     }
     ui.separator();
@@ -1757,53 +1759,97 @@ fn show_plugin_config(
             state.plugin_config_secrets.join(", ")
         ));
     }
-    ui.collapsing(i18n::fl("plugins-config-schema"), |ui| {
+    if editable_schema_fields(&state.plugin_config_schema) {
+        ui.collapsing(i18n::fl("plugins-config-schema"), |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut state.plugin_config_schema)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(6),
+            );
+        });
+        ui.label(i18n::fl("plugins-config-values"));
         ui.add(
-            egui::TextEdit::multiline(&mut state.plugin_config_schema)
+            egui::TextEdit::multiline(&mut state.plugin_config_values)
                 .desired_width(f32::INFINITY)
                 .desired_rows(6),
         );
-    });
-    ui.label(i18n::fl("plugins-config-values"));
-    ui.add(
-        egui::TextEdit::multiline(&mut state.plugin_config_values)
-            .desired_width(f32::INFINITY)
-            .desired_rows(6),
-    );
-    ui.horizontal(|ui| {
-        if ui.button(i18n::fl("plugins-config-validate")).clicked() {
-            spawn_plugin_config_values(
-                state,
-                client,
-                rt,
-                async_results,
-                PluginConfigAction::Validate,
-            );
-        }
-        if ui.button(i18n::fl("plugins-config-apply")).clicked() {
-            spawn_plugin_config_values(state, client, rt, async_results, PluginConfigAction::Apply);
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label(i18n::fl("plugins-config-options-field"));
-        ui.text_edit_singleline(&mut state.plugin_config_options_field);
-        if ui.button(i18n::fl("plugins-config-options")).clicked() {
-            let id = state.plugin_config_id.clone();
-            let field = state.plugin_config_options_field.clone();
-            let client = Arc::clone(client);
-            spawn_async(rt, async_results, async move {
-                AsyncOutcome::PluginConfigOptions(
-                    client
-                        .plugin_config_options(&id, &PluginConfigField { field })
-                        .await
-                        .map_err(|e| e.to_string()),
+        ui.horizontal(|ui| {
+            let values_empty =
+                serde_json::from_str::<serde_json::Value>(&state.plugin_config_values)
+                    .is_ok_and(|value| value == serde_json::json!({}));
+            if ui
+                .add_enabled(
+                    !values_empty,
+                    egui::Button::new(i18n::fl("plugins-config-validate")),
                 )
-            });
+                .clicked()
+            {
+                spawn_plugin_config_values(
+                    state,
+                    client,
+                    rt,
+                    async_results,
+                    PluginConfigAction::Validate,
+                );
+            }
+            if ui
+                .add_enabled(
+                    !values_empty,
+                    egui::Button::new(i18n::fl("plugins-config-apply")),
+                )
+                .clicked()
+            {
+                spawn_plugin_config_values(
+                    state,
+                    client,
+                    rt,
+                    async_results,
+                    PluginConfigAction::Apply,
+                );
+            }
+            if values_empty {
+                ui.weak(i18n::fl("plugins-config-empty-apply"));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(i18n::fl("plugins-config-options-field"));
+            ui.text_edit_singleline(&mut state.plugin_config_options_field);
+            if ui.button(i18n::fl("plugins-config-options")).clicked() {
+                let id = state.plugin_config_id.clone();
+                let field = state.plugin_config_options_field.clone();
+                let client = Arc::clone(client);
+                spawn_async(rt, async_results, async move {
+                    AsyncOutcome::PluginConfigOptions(
+                        client
+                            .plugin_config_options(&id, &PluginConfigField { field })
+                            .await
+                            .map_err(|e| e.to_string()),
+                    )
+                });
+            }
+        });
+        if !state.plugin_config_options.is_empty() {
+            ui.weak(&state.plugin_config_options);
         }
-    });
-    if !state.plugin_config_options.is_empty() {
-        ui.weak(&state.plugin_config_options);
+    } else {
+        ui.label(i18n::fl("plugins-config-not-editable"));
     }
+    if ui.button(i18n::fl("plugins-config-close")).clicked() {
+        state.plugin_config_open = false;
+    }
+}
+
+#[must_use]
+pub fn editable_schema_fields(schema: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(schema)
+        .ok()
+        .and_then(|schema| {
+            schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|properties| !properties.is_empty())
+        })
+        .unwrap_or(false)
 }
 
 enum PluginConfigAction {
