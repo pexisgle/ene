@@ -240,6 +240,7 @@ pub struct DetailUiState {
     pub usage_text: String,
     pub spans_text: String,
     pub save_local_pending: bool,
+    pub request_chat_open: bool,
     pub restore_id: String,
     pub restore_confirm: bool,
     pub session_id: String,
@@ -769,6 +770,7 @@ pub fn show(
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
+    state.request_chat_open = false;
     ui.horizontal(|ui| {
         ui.label(i18n::fl("detail-search"));
         ui.text_edit_singleline(&mut state.search);
@@ -945,6 +947,9 @@ fn show_companion(
         }
     } else {
         ui.label(soul_id);
+    }
+    if ui.button(i18n::fl("tray-chat")).clicked() {
+        state.request_chat_open = true;
     }
     if ui.button(i18n::fl("character-import")).clicked()
         && let Some(path) = rfd::FileDialog::new()
