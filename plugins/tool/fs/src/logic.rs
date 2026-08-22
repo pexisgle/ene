@@ -1189,7 +1189,7 @@ thread_local! {
 }
 
 // Used when this source is included by ene-registry; unused in the standalone plugin binary.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "used via ene-registry include; unused in standalone plugin binary")]
 struct WorkspaceOverrideGuard(Option<PathBuf>);
 
 impl Drop for WorkspaceOverrideGuard {
@@ -1200,7 +1200,7 @@ impl Drop for WorkspaceOverrideGuard {
 }
 
 // Host-only entry point; the standalone plugin build does not call it.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "host-only entry; unused in standalone plugin binary")]
 pub fn with_workspace<T>(
     root: &Path,
     action: impl FnOnce() -> Result<T, String>,
