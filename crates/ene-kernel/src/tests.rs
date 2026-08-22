@@ -5,10 +5,11 @@ use crate::{
     CancelQueued, ConversationModel, DisplayDepth, EchoModel, EmitBus, EventKind, EventPayload,
     HarnessSettings, KernelError, LaneHandle, LaneOptions, LiveEvent, LoopHooks, MindSettings,
     ModelGeneration, ModelRequest, ProjectOptions, SurfaceRouter, SurfaceToolOutcome,
-    ToolCallingModel, TurnId, TurnPrefetch, Waterfall, derive_messages, hash_model_visible,
-    hash_projected, spans_leak_content,
+    ToolCallingModel, ToolOutputSettings, TurnId, TurnPrefetch, Waterfall, derive_messages,
+    hash_model_visible, hash_projected, spans_leak_content,
 };
 use async_trait::async_trait;
+use base64::Engine;
 use ene_session::{
     Block, ClientId, DelegationId, InnerAspect, NewEvent, NewSession, SessionCreatedBy,
     SessionKind, SessionStore, SoulId, Transaction, TurnOrigin, TurnOutcome, TurnTrigger,
@@ -362,6 +363,250 @@ async fn tool_calling_model_runs_surface_tool_then_speaks() {
         texts.iter().any(|text| text.contains('7')),
         "assistant should speak the calc result: {texts:?}"
     );
+}
+
+#[tokio::test]
+async fn screenshot_tool_result_stores_image_ref_not_base64() {
+    struct ShotRouter;
+
+    #[async_trait]
+    impl SurfaceRouter for ShotRouter {
+        async fn on_tool(
+            &self,
+            name: &str,
+            _args: serde_json::Value,
+            _step: u32,
+        ) -> Result<SurfaceToolOutcome, KernelError> {
+            assert_eq!(name, "app.screenshot");
+            tokio::time::sleep(Duration::from_millis(8)).await;
+            let png = [0x89_u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+            let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+            Ok(SurfaceToolOutcome::Result(serde_json::json!({
+                "mime": "image/png",
+                "png_base64": encoded,
+                "width": 1,
+                "height": 1,
+            })))
+        }
+    }
+
+    struct ShotModel;
+
+    #[async_trait]
+    impl ConversationModel for ShotModel {
+        async fn generate(&self, request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+            if request.messages.iter().any(|message| {
+                message.role == ene_session::Role::Tool && message.tool_args.is_none()
+            }) {
+                return Ok(ModelGeneration {
+                    text: "I see the screen.".to_owned(),
+                    finish_reason: "stop".to_owned(),
+                    model_id: "shot".to_owned(),
+                    ..ModelGeneration::default()
+                });
+            }
+            Ok(ModelGeneration {
+                tool_calls: vec![crate::ToolCall {
+                    name: "app.screenshot".to_owned(),
+                    arguments: serde_json::json!({}),
+                }],
+                finish_reason: "tool_calls".to_owned(),
+                model_id: "shot".to_owned(),
+                ..ModelGeneration::default()
+            })
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(ShotModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: Vec::new(),
+        hooks: None,
+        router: Some(Arc::new(ShotRouter) as Arc<dyn SurfaceRouter>),
+    });
+    lane.prompt("look at the screen").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let events = store.load_events(session, 0).unwrap();
+    let result = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::ToolResult {
+                blocks,
+                duration_ms,
+                spill_ref,
+                ..
+            } => Some((blocks.clone(), *duration_ms, spill_ref.clone())),
+            _ => None,
+        })
+        .expect("tool/result");
+    assert!(result.2.is_none(), "screenshot metadata should stay inline");
+    assert!(
+        result.1 >= 8,
+        "duration_ms should reflect measured tool time, got {}",
+        result.1
+    );
+    let image_id = result
+        .0
+        .iter()
+        .find_map(|block| match block {
+            Block::ImageRef { artifact_id } => Some(artifact_id.clone()),
+            _ => None,
+        })
+        .expect("ImageRef");
+    let blob = store.get_spill(&image_id).unwrap().expect("stored png");
+    assert_eq!(blob.bytes[0], 0x89);
+    let logged = serde_json::to_string(&events).unwrap();
+    assert!(
+        !logged.contains("iVBORw0KGgo") && !logged.contains("png_base64"),
+        "session log must not keep screenshot base64: {logged}"
+    );
+}
+
+#[tokio::test]
+async fn huge_tool_result_becomes_tool_spill() {
+    struct HugeRouter;
+
+    #[async_trait]
+    impl SurfaceRouter for HugeRouter {
+        async fn on_tool(
+            &self,
+            _name: &str,
+            _args: serde_json::Value,
+            _step: u32,
+        ) -> Result<SurfaceToolOutcome, KernelError> {
+            Ok(SurfaceToolOutcome::Result(serde_json::json!({
+                "body": "x".repeat(64)
+            })))
+        }
+    }
+
+    struct OnceToolModel;
+
+    #[async_trait]
+    impl ConversationModel for OnceToolModel {
+        async fn generate(&self, request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+            if request.messages.iter().any(|message| {
+                message.role == ene_session::Role::Tool && message.tool_args.is_none()
+            }) {
+                let text = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message.role == ene_session::Role::Tool && message.tool_args.is_none()
+                    })
+                    .map(ene_session::ProjectedMessage::text)
+                    .unwrap_or_default();
+                return Ok(ModelGeneration {
+                    text: format!("got {text}"),
+                    finish_reason: "stop".to_owned(),
+                    ..ModelGeneration::default()
+                });
+            }
+            Ok(ModelGeneration {
+                tool_calls: vec![crate::ToolCall {
+                    name: "utility.hash".to_owned(),
+                    arguments: serde_json::json!({"text": "hi"}),
+                }],
+                finish_reason: "tool_calls".to_owned(),
+                ..ModelGeneration::default()
+            })
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let harness = HarnessSettings {
+        tool_output: ToolOutputSettings {
+            soft_limit_bytes: 16,
+            hard_limit_bytes: 64,
+        },
+        ..HarnessSettings::default()
+    };
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(OnceToolModel) as Arc<dyn ConversationModel>,
+        harness,
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: Vec::new(),
+        hooks: None,
+        router: Some(Arc::new(HugeRouter) as Arc<dyn SurfaceRouter>),
+    });
+    lane.prompt("hash this").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let events = store.load_events(session, 0).unwrap();
+    let spill = events.iter().find_map(|event| match &event.payload {
+        EventPayload::ToolSpill {
+            spill_ref,
+            size_bytes,
+            summary_blocks,
+            ..
+        } => Some((spill_ref.clone(), *size_bytes, summary_blocks.clone())),
+        _ => None,
+    });
+    let (spill_ref, size_bytes, summary) = spill.expect("tool/spill");
+    assert!(size_bytes > 16);
+    let blob = store.get_spill(&spill_ref).unwrap().expect("spill body");
+    assert_eq!(u64::try_from(blob.bytes.len()).unwrap(), size_bytes);
+    let projected = derive_messages(&events, ProjectOptions::model_visible(8));
+    assert!(
+        projected
+            .messages
+            .iter()
+            .any(|message| message.text().contains(&spill_ref)),
+        "later projection should keep the spill ref"
+    );
+    assert!(summary.iter().any(|block| {
+        block
+            .as_text()
+            .is_some_and(|text| text.contains(&spill_ref))
+    }));
 }
 
 #[tokio::test]
@@ -1389,4 +1634,15 @@ async fn prefetch_lines_are_assembled_in_registry_order() {
         })
         .unwrap();
     assert_eq!(identity, "You are Alicia.");
+}
+
+#[tokio::test]
+async fn shutdown_stops_the_lane_actor() {
+    let (_dir, _store, lane, _model) = open_lane().await;
+    lane.shutdown().await.unwrap();
+    let err = lane.prompt("hi").await.unwrap_err();
+    assert!(matches!(
+        err,
+        KernelError::ShuttingDown | KernelError::Closed
+    ));
 }

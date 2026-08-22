@@ -117,6 +117,7 @@ pub struct CoreDaemon {
     mind: parking_lot::Mutex<CompanionMind>,
     last_proactive: parking_lot::Mutex<HashMap<SessionId, Instant>>,
     memory_embed: Arc<SlotQueryEmbed>,
+    idle_timeout_secs: parking_lot::Mutex<u64>,
 }
 
 impl CoreDaemon {
@@ -251,6 +252,9 @@ impl CoreDaemon {
             mind: parking_lot::Mutex::new(mind),
             last_proactive: parking_lot::Mutex::new(HashMap::new()),
             memory_embed,
+            idle_timeout_secs: parking_lot::Mutex::new(
+                SessionsSettings::default().idle_timeout_secs,
+            ),
         })
     }
 
@@ -569,14 +573,19 @@ impl CoreDaemon {
         })
     }
 
-    /// End conversations whose last event is older than `store.sessions.idle_timeout_secs`.
-    pub async fn end_idle_sessions(&self) -> Result<u32, CoreError> {
-        let timeout_secs = SessionsSettings::default().idle_timeout_secs;
+    /// Conversations whose last event is older than `store.sessions.idle_timeout_secs`.
+    ///
+    /// Does not write `session/end`; the HTTP layer stops the turn first.
+    pub fn list_idle_sessions(&self) -> Result<Vec<SessionId>, CoreError> {
+        self.list_idle_sessions_since(self.idle_timeout_secs())
+    }
+
+    fn list_idle_sessions_since(&self, timeout_secs: u64) -> Result<Vec<SessionId>, CoreError> {
         if timeout_secs == 0 {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         let now = chrono::Utc::now();
-        let mut ended = 0_u32;
+        let mut idle = Vec::new();
         for meta in self.store.list_sessions(None)? {
             if meta.ended_at.is_some() {
                 continue;
@@ -591,13 +600,21 @@ impl CoreDaemon {
             if age.num_seconds() < i64::try_from(timeout_secs).unwrap_or(i64::MAX) {
                 continue;
             }
-            self.end_session(meta.id, SessionEndReason::IdleTimeout)
-                .await?;
-            ended = ended.saturating_add(1);
+            idle.push(meta.id);
         }
-        Ok(ended)
+        Ok(idle)
     }
 
+    fn idle_timeout_secs(&self) -> u64 {
+        *self.idle_timeout_secs.lock()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_idle_timeout_secs(&self, secs: u64) {
+        *self.idle_timeout_secs.lock() = secs;
+    }
+
+    /// Write `session/end`. Callers must stop any in-flight turn first.
     pub async fn end_session(
         &self,
         session: SessionId,

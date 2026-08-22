@@ -1,13 +1,16 @@
 //! HTTP/WS contract for `ene-core`. Transport only — no daemon types.
 
 #![deny(unsafe_code)]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "tests"))]
 
 mod client;
 mod error;
+mod pcm;
 mod types;
 
-pub use client::{ApiClient, EventSocket};
+pub use client::{ApiClient, EventSocket, ListenStream};
 pub use error::ApiError;
+pub use pcm::{LISTEN_SAMPLE_RATE, PCM_S16LE, decode_pcm_s16le, encode_pcm_s16le};
 pub use types::{
     AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
     ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,

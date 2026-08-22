@@ -2,6 +2,8 @@
 
 use std::num::NonZero;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use rodio::buffer::SamplesBuffer;
@@ -17,6 +19,8 @@ pub struct AudioPlayback {
     player: Option<Player>,
     recent_pcm: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
+    tts_playing: Arc<AtomicBool>,
+    playback_until: Mutex<Option<Instant>>,
 }
 
 impl Default for AudioPlayback {
@@ -28,6 +32,7 @@ impl Default for AudioPlayback {
 impl AudioPlayback {
     pub fn new() -> Self {
         let recent_pcm = Arc::new(Mutex::new(Vec::with_capacity(RECENT_PCM_CAP)));
+        let tts_playing = Arc::new(AtomicBool::new(false));
         match DeviceSinkBuilder::open_default_sink() {
             Ok(sink) => {
                 let player = Player::connect_new(sink.mixer());
@@ -36,6 +41,8 @@ impl AudioPlayback {
                     player: Some(player),
                     recent_pcm,
                     sample_rate: 48_000,
+                    tts_playing,
+                    playback_until: Mutex::new(None),
                 }
             }
             Err(err) => {
@@ -45,13 +52,21 @@ impl AudioPlayback {
                     player: None,
                     recent_pcm,
                     sample_rate: 48_000,
+                    tts_playing,
+                    playback_until: Mutex::new(None),
                 }
             }
         }
     }
 
+    #[must_use]
+    pub fn tts_playing_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.tts_playing)
+    }
+
     pub fn play_pcm(&mut self, samples: &[f32], sample_rate: u32) -> Result<(), AudioError> {
         self.sample_rate = sample_rate.max(1);
+        self.note_playback(samples.len(), self.sample_rate);
         {
             let mut recent = self.recent_pcm.lock();
             recent.extend_from_slice(samples);
@@ -59,6 +74,10 @@ impl AudioPlayback {
                 let drain = recent.len() - RECENT_PCM_CAP;
                 recent.drain(0..drain);
             }
+        }
+
+        if samples.is_empty() {
+            return Ok(());
         }
 
         let Some(player) = self.player.as_ref() else {
@@ -79,6 +98,37 @@ impl AudioPlayback {
         if let Some(player) = self.player.as_ref() {
             player.stop();
         }
+        *self.playback_until.lock() = None;
+        self.tts_playing.store(false, Ordering::Relaxed);
+    }
+
+    pub fn tick_playback(&self) {
+        let until = self.playback_until.lock();
+        if until.is_none_or(|deadline| Instant::now() >= deadline) {
+            self.tts_playing.store(false, Ordering::Relaxed);
+        }
+    }
+
+    #[must_use]
+    pub fn is_tts_playing(&self) -> bool {
+        self.tick_playback();
+        self.tts_playing.load(Ordering::Relaxed)
+    }
+
+    fn note_playback(&self, n_samples: usize, sample_rate: u32) {
+        if n_samples == 0 {
+            *self.playback_until.lock() = None;
+            self.tts_playing.store(false, Ordering::Relaxed);
+            return;
+        }
+        let seconds = n_samples as f64 / f64::from(sample_rate.max(1));
+        let dur = Duration::from_secs_f64(seconds);
+        let mut until = self.playback_until.lock();
+        let start = until
+            .filter(|deadline| *deadline > Instant::now())
+            .unwrap_or_else(Instant::now);
+        *until = Some(start + dur);
+        self.tts_playing.store(true, Ordering::Relaxed);
     }
 
     #[must_use]

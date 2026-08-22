@@ -49,6 +49,8 @@ running turn; `compact` compresses history.
    not used: the live root is singular `workspace`, with per-soul job dirs
    under `jobs/<soul_id>/<job_id>/`.
 5. Events are committed to `ene-session` (model-visible equals logged).
+   Screenshot and other image tool results store bytes beside the log and keep
+   an `ImageRef` in the projection; huge JSON results become `tool/spill`.
 6. Live events go out at `surface` or `detail` depth.
 
 Before generation, `agent/pre-step` runs as a waterfall on the shared
@@ -113,4 +115,10 @@ A **session** is a contiguous conversation with one soul, identified by a
 split, and end sessions against the HTTP API.
 
 Idle end and explicit split are server-side. Compaction writes a summary
-into the log so later turns stay in budget.
+into the log so later turns stay in budget. Ending a session (explicit
+`POST /api/v1/sessions/{id}/end`, idle timeout, or split of a live
+session) aborts any in-flight turn, waits until that turn has committed
+(interrupted, not assistant speech), writes `session/end`, then drops the
+session's dialogue-lane actor from the in-process hub. If the turn does not
+go idle in time, the end request fails and `session/end` is not written. A
+later prompt on the ended session fails with `closed`.

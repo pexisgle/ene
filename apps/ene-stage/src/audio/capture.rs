@@ -1,6 +1,7 @@
 //! Microphone capture via cpal.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
@@ -8,11 +9,12 @@ use crossbeam_channel::{Receiver, unbounded};
 use parking_lot::Mutex;
 
 use super::AudioError;
+use super::dsp::{Resampler, SILENCE_RMS, rms, should_forward_mic};
 
-/// Default RMS threshold for barge-in detection.
+/// Default RMS flag used by [`MicCapture::barge_in_active`].
 const DEFAULT_BARGE_IN_THRESHOLD: f32 = 0.02;
 
-/// Streaming microphone input that forwards `f32` PCM chunks.
+/// Streaming microphone input that forwards 16 kHz mono `f32` chunks.
 pub struct MicCapture {
     _stream: Option<Stream>,
     rx: Receiver<Vec<f32>>,
@@ -21,12 +23,12 @@ pub struct MicCapture {
 
 impl MicCapture {
     /// Open the default input device. `energy_threshold` overrides the barge-in RMS gate.
-    pub fn new(energy_threshold: Option<f32>) -> Self {
+    pub fn new(energy_threshold: Option<f32>, tts_playing: Arc<AtomicBool>) -> Self {
         let threshold = energy_threshold.unwrap_or(DEFAULT_BARGE_IN_THRESHOLD);
         let (tx, rx) = unbounded();
         let barge_in = Arc::new(Mutex::new(false));
 
-        match open_stream(tx, Arc::clone(&barge_in), threshold) {
+        match open_stream(tx, Arc::clone(&barge_in), threshold, tts_playing) {
             Ok(stream) => Self {
                 _stream: Some(stream),
                 rx,
@@ -43,7 +45,7 @@ impl MicCapture {
         }
     }
 
-    /// Non-blocking receive of the next PCM chunk.
+    /// Non-blocking receive of the next 16 kHz PCM chunk.
     pub fn try_recv(&self) -> Option<Vec<f32>> {
         self.rx.try_recv().ok()
     }
@@ -58,6 +60,7 @@ fn open_stream(
     tx: crossbeam_channel::Sender<Vec<f32>>,
     barge_in: Arc<Mutex<bool>>,
     threshold: f32,
+    tts_playing: Arc<AtomicBool>,
 ) -> Result<Stream, AudioError> {
     let host = cpal::default_host();
     let device = host
@@ -67,12 +70,37 @@ fn open_stream(
         .default_input_config()
         .map_err(|err| AudioError::Device(err.to_string()))?;
     let sample_format = config.sample_format();
+    let src_rate = config.sample_rate();
     let stream_config: cpal::StreamConfig = config.into();
 
     let stream = match sample_format {
-        SampleFormat::F32 => build_stream::<f32>(&device, stream_config, tx, barge_in, threshold)?,
-        SampleFormat::I16 => build_stream::<i16>(&device, stream_config, tx, barge_in, threshold)?,
-        SampleFormat::U16 => build_stream::<u16>(&device, stream_config, tx, barge_in, threshold)?,
+        SampleFormat::F32 => build_stream::<f32>(
+            &device,
+            stream_config,
+            src_rate,
+            tx,
+            barge_in,
+            threshold,
+            tts_playing,
+        )?,
+        SampleFormat::I16 => build_stream::<i16>(
+            &device,
+            stream_config,
+            src_rate,
+            tx,
+            barge_in,
+            threshold,
+            tts_playing,
+        )?,
+        SampleFormat::U16 => build_stream::<u16>(
+            &device,
+            stream_config,
+            src_rate,
+            tx,
+            barge_in,
+            threshold,
+            tts_playing,
+        )?,
         other => {
             return Err(AudioError::Device(format!(
                 "unsupported sample format: {other:?}"
@@ -88,15 +116,18 @@ fn open_stream(
 fn build_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
+    src_rate: u32,
     tx: crossbeam_channel::Sender<Vec<f32>>,
     barge_in: Arc<Mutex<bool>>,
     threshold: f32,
+    tts_playing: Arc<AtomicBool>,
 ) -> Result<Stream, AudioError>
 where
     T: cpal::Sample + cpal::SizedSample,
     f32: cpal::FromSample<T>,
 {
     let channels = usize::from(config.channels.max(1));
+    let mut resampler = Resampler::new(src_rate);
     let stream = device
         .build_input_stream(
             config,
@@ -106,14 +137,23 @@ where
                     .map(|frame| {
                         let sum: f32 = frame
                             .iter()
-                            .map(|s| cpal::Sample::to_sample::<f32>(*s))
+                            .map(|sample| cpal::Sample::to_sample::<f32>(*sample))
                             .sum();
                         sum / channels as f32
                     })
                     .collect();
-                let energy = rms(&mono);
-                *barge_in.lock() = energy >= threshold;
-                if tx.send(mono).is_err() {
+                let mut at_16k = Vec::new();
+                resampler.process(&mono, &mut at_16k);
+                if at_16k.is_empty() {
+                    return;
+                }
+                let energy = rms(&at_16k);
+                *barge_in.lock() = energy >= threshold.max(SILENCE_RMS);
+                let playing = tts_playing.load(Ordering::Relaxed);
+                if !should_forward_mic(&at_16k, playing) {
+                    return;
+                }
+                if tx.send(at_16k).is_err() {
                     // Mic consumer dropped.
                 }
             },
@@ -122,12 +162,4 @@ where
         )
         .map_err(|err| AudioError::Device(err.to_string()))?;
     Ok(stream)
-}
-
-fn rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum: f32 = samples.iter().map(|s| s * s).sum();
-    (sum / samples.len() as f32).sqrt()
 }
