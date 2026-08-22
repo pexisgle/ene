@@ -211,8 +211,8 @@ impl SupervisorInner {
             Effect::BrokerGrant { op } => {
                 self.broker.lock().revoke(fiber.uid, &op);
             }
-            Effect::RegisterTool { name } => {
-                self.registry.unregister(&name);
+            Effect::RegisterTool { name, owner } => {
+                self.registry.unregister_owned(&name, &owner);
             }
         }
     }
@@ -228,8 +228,9 @@ impl SupervisorInner {
 
     fn record_tool(&self, fiber: &mut Fiber, def: ToolDefinition, invoke: Arc<dyn ToolInvoke>) {
         let name = def.name.clone();
-        self.registry.register_with(def, invoke);
-        fiber.push_effect(Effect::RegisterTool { name });
+        let owner = fiber.uid.to_string();
+        self.registry.register_owned(owner.clone(), def, invoke);
+        fiber.push_effect(Effect::RegisterTool { name, owner });
     }
 
     fn record_grant(&self, fiber: &mut Fiber, op: String) {
@@ -1253,7 +1254,7 @@ fn finish_active(fiber: &mut Fiber) {
         .dispose
         .iter()
         .filter_map(|effect| match effect {
-            Effect::RegisterTool { name } => Some(format!("tool.{name}")),
+            Effect::RegisterTool { name, .. } => Some(format!("tool.{name}")),
             Effect::BrokerGrant { op } => Some(format!("broker.{op}")),
             Effect::BindSeam { name } => Some(format!("seam.{name}")),
             Effect::SpawnProcess { .. } | Effect::ListenWaterfall { .. } => None,

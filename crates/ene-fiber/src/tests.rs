@@ -56,6 +56,31 @@ async fn unload_removes_tools_and_grants() {
 }
 
 #[tokio::test]
+async fn unloading_one_fiber_keeps_another_fibers_tool() {
+    let (_dir, sup) = supervisor();
+    sup.activate(&row("r-a", "tool.utility", &[])).unwrap();
+    sup.activate(&row("r-b", "tool.utility", &[])).unwrap();
+    assert!(sup.surface_has_tool("utility.hash"));
+    sup.unload("r-a").await;
+    assert!(sup.surface_has_tool("utility.hash"));
+    assert!(sup.fiber("r-b").is_some());
+    sup.unload("r-b").await;
+    assert!(!sup.surface_has_tool("utility.hash"));
+}
+
+#[tokio::test]
+async fn unloading_the_later_fiber_restores_the_earlier_tool() {
+    let (_dir, sup) = supervisor();
+    sup.activate(&row("r-a", "tool.utility", &[])).unwrap();
+    sup.activate(&row("r-b", "tool.utility", &[])).unwrap();
+    sup.unload("r-b").await;
+    assert!(sup.surface_has_tool("utility.hash"));
+    assert!(sup.fiber("r-a").is_some());
+    sup.unload("r-a").await;
+    assert!(!sup.surface_has_tool("utility.hash"));
+}
+
+#[tokio::test]
 async fn dispose_inverts_every_effect_kind_lifo() {
     use ene_plugin_ipc::BuiltinKind;
     use ene_registry::definitions_for;
@@ -63,7 +88,8 @@ async fn dispose_inverts_every_effect_kind_lifo() {
     let (_dir, sup) = supervisor();
     let hooks = ene_kernel::LoopHooks::new();
     sup.set_loop_hooks(hooks);
-    sup.activate(&row("r-util", "tool.utility", &["fs.read"]))
+    let uid = sup
+        .activate(&row("r-util", "tool.utility", &["fs.read"]))
         .unwrap();
     sup.push_effect(
         "r-util",
@@ -92,11 +118,10 @@ async fn dispose_inverts_every_effect_kind_lifo() {
             op: "fs.read".to_owned(),
         },
     ];
-    expected.extend(
-        tool_names
-            .into_iter()
-            .map(|name| Effect::RegisterTool { name }),
-    );
+    expected.extend(tool_names.into_iter().map(|name| Effect::RegisterTool {
+        name,
+        owner: uid.to_string(),
+    }));
     assert_eq!(inverted, expected);
     assert!(!sup.surface_has_tool("utility.hash"));
 }
@@ -115,11 +140,9 @@ fn rollback_loading_uses_the_same_dispose_path() {
             .iter()
             .any(|effect| matches!(effect, Effect::BrokerGrant { op } if op == "fs.read"))
     );
-    assert!(
-        sup.last_dispose().iter().any(
-            |effect| matches!(effect, Effect::RegisterTool { name } if name == "utility.hash")
-        )
-    );
+    assert!(sup.last_dispose().iter().any(
+        |effect| matches!(effect, Effect::RegisterTool { name, .. } if name == "utility.hash")
+    ));
 }
 
 #[tokio::test]

@@ -53,7 +53,7 @@ impl FiberState {
 /// Reversible host-context mutation. Inverse runs LIFO.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    RegisterTool { name: String },
+    RegisterTool { name: String, owner: String },
     BrokerGrant { op: String },
     SpawnProcess { pid: u32 },
     BindSeam { name: String },
