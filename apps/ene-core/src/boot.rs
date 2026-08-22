@@ -40,8 +40,9 @@ use tracing::info;
 pub struct BootOptions {
     /// Data directory that holds `sessions.db` and the lock file.
     pub data_dir: PathBuf,
-    /// `SQLite` `synchronous` pragma (`NORMAL` or `FULL`).
-    pub synchronous: String,
+    /// `SQLite` `synchronous` pragma override (`NORMAL` or `FULL`).
+    /// `None` uses `store.sessions.synchronous` from the config pipeline.
+    pub synchronous: Option<String>,
 }
 
 impl BootOptions {
@@ -49,7 +50,7 @@ impl BootOptions {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
-            synchronous: "NORMAL".to_owned(),
+            synchronous: None,
         }
     }
 }
@@ -141,7 +142,11 @@ impl CoreDaemon {
         let mind = loaded.mind;
         let lock = lock_data_dir(&opts.data_dir)?;
         let db_path = opts.data_dir.join("sessions.db");
-        let store = SessionStore::open(&db_path, &opts.synchronous).await?;
+        let sync = opts
+            .synchronous
+            .clone()
+            .unwrap_or_else(|| loaded.store.sessions.synchronous.clone());
+        let store = SessionStore::open(&db_path, &sync).await?;
         let recovery = store.recover_interrupted().await?;
         if !recovery.is_empty() {
             info!(
@@ -435,6 +440,7 @@ impl CoreDaemon {
     }
 
     pub fn replace_body_settings(&self, settings: BodySettings) {
+        self.stage.replace_body_settings(settings.clone());
         *self.body.lock() = settings;
     }
 
@@ -444,6 +450,7 @@ impl CoreDaemon {
     }
 
     pub fn replace_voice_settings(&self, settings: VoiceSettings) {
+        self.with_voice(|voice| voice.replace_settings(settings.clone()));
         *self.voice.lock() = settings;
     }
 

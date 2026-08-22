@@ -302,6 +302,13 @@ impl SessionStore {
         Ok(())
     }
 
+    /// `PRAGMA synchronous` on the reader connection (`NORMAL` or `FULL`).
+    pub fn reader_synchronous(&self) -> Result<&'static str, SessionError> {
+        let conn = self.reader.lock();
+        let code: i64 = conn.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+        Ok(if code >= 2 { "FULL" } else { "NORMAL" })
+    }
+
     pub fn load_events(
         &self,
         session_id: SessionId,

@@ -669,3 +669,14 @@ async fn put_spill_round_trips_bytes_by_sha256() {
     assert!(store.get_spill("not-a-valid-spill-id").is_err());
     assert!(store.get_spill(&"0".repeat(64)).unwrap().is_none());
 }
+
+#[tokio::test]
+async fn open_applies_full_synchronous_pragma() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+    let store = SessionStore::open(&path, "FULL").await.unwrap();
+    assert_eq!(store.reader_synchronous().unwrap(), "FULL");
+    drop(store);
+    let store = SessionStore::open(&path, "NORMAL").await.unwrap();
+    assert_eq!(store.reader_synchronous().unwrap(), "NORMAL");
+}

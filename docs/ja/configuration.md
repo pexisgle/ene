@@ -18,7 +18,10 @@ figment パイプライン（defaults → JSON → `ENE_`）で読みます。�
 リポジトリの `assets/` は読みません。stage の適用とコアの PATCH は同じ
 `settings.json` に書きます。`GET /api/v1/settings` の `effective` はライブ
 メモリが正で、ディスクの `overlay` は AI / mind / plugins のライブ値を
-上書きしません。API キーは vault のままです。
+上書きしません。`body` / `voice` の PATCH は再起動なしでライブの `Stage` と
+`VoiceRuntime`（同時表示上限、barge-in）にも入ります。
+`store.sessions.synchronous` は `sessions.db` を開くときに適用します。
+API キーは vault のままです。
 
 キーは所有側の `define_config!` に足します。スキーマは `assets/schema/` へ
 再生成されます（gitignored — コミットしない）。
@@ -31,7 +34,7 @@ figment パイプライン（defaults → JSON → `ENE_`）で読みます。�
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
-| `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs` |
+| `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs`, `sessions.synchronous` |
 | `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
 会話・分類・埋め込み・TTS・STT・承認・ジョブは `ai.tasks.<task>`（`plugin`、

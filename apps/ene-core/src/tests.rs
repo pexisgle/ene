@@ -585,3 +585,34 @@ async fn harness_max_steps_one_auto_delegates_the_second_step() {
         "max_steps_per_turn=1 must auto-delegate: {blob}"
     );
 }
+
+#[tokio::test]
+async fn boot_applies_store_sessions_synchronous_pragma() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"store":{"sessions":{"synchronous":"FULL"}}}"#,
+    )
+    .unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(core.store().reader_synchronous().unwrap(), "FULL");
+}
+
+#[tokio::test]
+async fn boot_options_synchronous_overrides_settings_json() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"store":{"sessions":{"synchronous":"FULL"}}}"#,
+    )
+    .unwrap();
+    let core = CoreDaemon::boot(BootOptions {
+        data_dir: dir.path().to_path_buf(),
+        synchronous: Some("NORMAL".to_owned()),
+    })
+    .await
+    .unwrap();
+    assert_eq!(core.store().reader_synchronous().unwrap(), "NORMAL");
+}

@@ -3378,3 +3378,53 @@ async fn settings_json_max_steps_one_delegates_through_http() {
     );
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn patch_body_and_voice_apply_to_runtime() {
+    let (_dir, client, core, server) = boot_server().await;
+    client
+        .patch_settings(&serde_json::json!({
+            "body": { "render": { "max_concurrent": 1, "enabled": true } },
+            "voice": { "barge_in": { "enabled": false } }
+        }))
+        .await
+        .unwrap();
+    let settings = client.settings().await.unwrap();
+    assert_eq!(
+        settings.pointer("/effective/body/render/max_concurrent"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        settings.pointer("/effective/voice/barge_in/enabled"),
+        Some(&serde_json::json!(false))
+    );
+
+    let s1 = ene_session::SoulId::new();
+    let s2 = ene_session::SoulId::new();
+    core.present_companion(
+        s1,
+        Some(ene_session::BodyId::new()),
+        ene_body::BodyCatalog::text_default(),
+    )
+    .unwrap();
+    core.present_companion(
+        s2,
+        Some(ene_session::BodyId::new()),
+        ene_body::BodyCatalog::text_default(),
+    )
+    .unwrap();
+    let occupants = core.occupants();
+    let rendered = occupants.iter().filter(|(_, body)| body.is_some()).count();
+    assert_eq!(rendered, 1, "live max_concurrent=1: {occupants:?}");
+
+    let effect = core.with_voice(|voice| {
+        let body = ene_session::BodyId::new();
+        voice.speak(body, "long reply text here", 0).expect("speak");
+        let pcm: Vec<f32> = (0..1600)
+            .map(|i| ((i as f32) * 0.31).sin() * 0.31)
+            .collect();
+        voice.push_input(&pcm, 500)
+    });
+    assert_eq!(effect, ene_body::InputEffect::IgnoredSelfVoice);
+    server.shutdown().await;
+}
