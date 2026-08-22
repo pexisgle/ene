@@ -317,6 +317,18 @@ async fn web_fetch_is_on_surface_and_blocks_loopback() {
         .await
         .unwrap_err();
     assert!(matches!(err, PipelineError::Execute(_)));
+    let err = registry
+        .execute(
+            "web.fetch",
+            json!({"url":"https://example.invalid/"}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, PipelineError::Execute(message) if message.contains("host net broker")),
+        "{err}"
+    );
 }
 
 #[test]
