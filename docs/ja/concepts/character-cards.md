@@ -16,14 +16,13 @@
 配置ではありません。インポートは既存インストールを上書きしません。
 エントリ単位とアーカイブ合計のサイズ上限があります。
 
-V3 の `data`（`name`、`description`、`personality`、lorebook など）と
+V3 の `data`（`name`、`description`、`personality` など）と
 `extensions.ene`（表情、`motion_catalog.motions`、speech）はインポート時に
 写されます。未知フィールドは `ene-card` でラウンドトリップします。
 
 ## lorebook とテンプレート
 
-`character_book` はキーワード一致で注入します（`before_char` /
-`after_char`）。カード文は Character Book Spec マクロ（`{{char}}`、
+lorebook データは import/export 互換のために保存しますが、Ene は内容を解釈・検索・model context への注入をしません。Stage v1 に実行用の lorebook エディタはありません。カード文は Character Book Spec マクロ（`{{char}}`、
 `{{user}}`、`{{random:…}}`、`{{date}}` など）を使えます。W++ / AliChat /
 YAML のペルソナ文はアイデンティティカーネルに平坦化されます。
 
