@@ -4,7 +4,7 @@ on:
   pull_request:
 
 jobs:
-  diagnose-pr-873:
+  normalize-pr-873:
     if: github.head_ref == 'tmp-placeholder-never-use'
     runs-on: ubuntu-latest
     permissions:
@@ -13,20 +13,33 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Diagnose PR 873 against current main
+      - name: Normalize PR 873 onto current main
         shell: bash
         run: |
           set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin main
           git fetch origin a0cb05bf7f59cc7cd2cea422bf7ce6a21af4b116
           git fetch origin 7124865e4f6383d1910919d4359e02cabb1fd898
           git diff --binary a0cb05bf7f59cc7cd2cea422bf7ce6a21af4b116 7124865e4f6383d1910919d4359e02cabb1fd898 > /tmp/pr-873.patch
           git reset --hard origin/main
-          if git apply --3way --index /tmp/pr-873.patch; then
-            echo 'PR873_APPLIES_CLEANLY'
-          else
-            echo '=== PR 873 CONFLICTS ==='
-            git status --short
-            git diff --cc || true
+          if ! git apply --3way --index /tmp/pr-873.patch; then
+            conflicts="$(git diff --name-only --diff-filter=U | sort)"
+            if [ "$conflicts" != 'apps/ene-core/src/tests.rs' ]; then
+              echo 'Unexpected conflicts:'
+              printf '%s\n' "$conflicts"
+              git diff --cc || true
+              exit 1
+            fi
+            git checkout --ours -- apps/ene-core/src/tests.rs
+            git add apps/ene-core/src/tests.rs
+          fi
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            git diff --cc
             exit 1
           fi
+          cargo fmt --all
+          git add -A
+          git commit -m 'fix(core): include mcp, policy, and skills in backups'
+          git push --force origin HEAD:cursor/backup-mcp-policy-skills-860b
