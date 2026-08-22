@@ -320,11 +320,14 @@ fn error_response(err: &BrokerError) -> BrokerResponse {
         code: match &err {
             BrokerError::Denied { .. } => BrokerErrorCode::Denied,
             BrokerError::InvalidGlob(_) => BrokerErrorCode::InvalidGlob,
+            BrokerError::InvalidRegex(_) => BrokerErrorCode::InvalidRegex,
             BrokerError::Io(_) => BrokerErrorCode::Io,
             BrokerError::Timeout => BrokerErrorCode::Timeout,
             BrokerError::InvalidUrl(_) => BrokerErrorCode::InvalidUrl,
             BrokerError::Ssrf(_) => BrokerErrorCode::Ssrf,
-            BrokerError::Fetch(_) | BrokerError::RedirectLoop => BrokerErrorCode::Fetch,
+            BrokerError::Fetch(_)
+            | BrokerError::RedirectLoop
+            | BrokerError::SearchEngineUnavailable => BrokerErrorCode::Fetch,
             BrokerError::PathEscape(_) => BrokerErrorCode::PathEscape,
             BrokerError::Oversize | BrokerError::Binary => BrokerErrorCode::Oversize,
             BrokerError::Symlink => BrokerErrorCode::Symlink,

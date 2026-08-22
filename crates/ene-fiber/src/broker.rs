@@ -44,6 +44,10 @@ pub enum BrokerError {
     RedirectLoop,
     #[error("invalid glob: {0}")]
     InvalidGlob(String),
+    #[error("invalid regular expression: {0}")]
+    InvalidRegex(String),
+    #[error("search engine is unavailable")]
+    SearchEngineUnavailable,
     #[error("refusing to delete a symlink")]
     Symlink,
     #[error("directory is not empty")]
@@ -342,6 +346,10 @@ impl Broker {
             }
             None => None,
         };
+        if regex {
+            rg_regex::Regex::new(query)
+                .map_err(|err| BrokerError::InvalidRegex(err.to_string()))?;
+        }
         let mut command = std::process::Command::new("rg");
         if !regex {
             command.arg("--fixed-strings");
@@ -371,13 +379,24 @@ impl Broker {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let output = command.output()?;
-        if !output.status.success() && output.status.code() != Some(1) {
-            return Err(BrokerError::Fetch(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            ));
+        let output = command.output().map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                BrokerError::SearchEngineUnavailable
+            } else {
+                BrokerError::from(err)
+            }
+        })?;
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+
+        match output.status.code() {
+            Some(0 | 1) => Self::finish_search_output(&output.stdout),
+            _ if stderr.contains("regex parse error") => Err(BrokerError::InvalidRegex(stderr)),
+            _ => Err(BrokerError::Fetch(stderr)),
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    }
+
+    fn finish_search_output(stdout: &[u8]) -> Result<Value, BrokerError> {
+        let stdout = String::from_utf8_lossy(stdout);
         let matches = parse_rg_json(&stdout);
         serde_json::to_value(matches).map_err(|_| BrokerError::Fetch("serialize search".into()))
     }
