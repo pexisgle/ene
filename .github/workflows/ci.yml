@@ -73,6 +73,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/rust-build-env
+      - name: Install ripgrep
+        run: sudo apt-get install -y --no-install-recommends ripgrep
       - name: Run tests
         run: cargo test --locked ${{ matrix.group.packages }}
 
@@ -102,6 +104,9 @@ jobs:
         with:
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install ripgrep
+        shell: pwsh
+        run: choco install ripgrep -y --no-progress
       - name: Lint native Windows applications
         run: cargo clippy --locked -p ene-daemon -p ene-stage --all-targets -- -D warnings
       - name: Test Windows-compatible libraries

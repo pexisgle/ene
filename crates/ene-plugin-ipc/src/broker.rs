@@ -97,6 +97,7 @@ pub enum BrokerErrorCode {
     InvalidUrl,
     Ssrf,
     Fetch,
+    InvalidArgument,
     Internal,
 }
 
@@ -104,10 +105,29 @@ pub enum BrokerErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrokerRequest {
-    Hello { token: String },
-    FsRead { path: String },
-    FsWrite { path: String, text: String },
-    NetFetch { url: String },
+    Hello {
+        token: String,
+    },
+    FsRead {
+        path: String,
+    },
+    FsWrite {
+        path: String,
+        text: String,
+    },
+    FsSearch {
+        path: String,
+        query: String,
+        regex: bool,
+        case_insensitive: bool,
+        include: Option<String>,
+        context_lines: u32,
+        count: bool,
+        max: u32,
+    },
+    NetFetch {
+        url: String,
+    },
 }
 
 /// Broker response for [`BrokerRequest`].
@@ -119,6 +139,9 @@ pub enum BrokerResponse {
         text: String,
     },
     FsWriteOk,
+    FsSearchOk {
+        matches: serde_json::Value,
+    },
     NetFetchOk {
         value: serde_json::Value,
     },

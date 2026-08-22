@@ -1,5 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use ene_plugin_ipc::ToolSpecWire;
+use ene_plugin_ipc::{BrokerClient, BrokerRequest, BrokerResponse, ToolSpecWire};
 use ene_registry::{arg_str, spec};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -46,8 +46,22 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
         ),
         spec(
             "fs.search",
-            "Search file contents in the workspace (literal by default)",
-            json!({"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"max":{"type":"integer"},"regex":{"type":"boolean"}},"required":["query"],"additionalProperties":false}),
+            "Search file contents through the host ripgrep broker (literal by default)",
+            json!({
+                "type":"object",
+                "properties":{
+                    "path":{"type":"string"},
+                    "query":{"type":"string"},
+                    "regex":{"type":"boolean"},
+                    "case_insensitive":{"type":"boolean"},
+                    "include":{"type":"string"},
+                    "context_lines":{"type":"integer","minimum":0,"maximum":10},
+                    "count":{"type":"boolean"},
+                    "max":{"type":"integer","minimum":1,"maximum":200}
+                },
+                "required":["query"],
+                "additionalProperties":false
+            }),
             Vec::new(),
         ),
         spec(
@@ -75,6 +89,62 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
         "fs.patch" => patch(args),
         "fs.undo" => undo(args),
         other => Err(format!("unknown builtin {other}")),
+    }
+}
+
+fn broker_search(args: &Value) -> Result<Value, String> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(broker_search_async(args))
+    })
+}
+
+async fn broker_search_async(args: &Value) -> Result<Value, String> {
+    let mut client = BrokerClient::from_env()
+        .await
+        .map_err(|err| format!("broker unavailable: {err}"))?;
+    let response = client
+        .call(BrokerRequest::Hello {
+            token: std::env::var("ENE_PLUGIN_SPAWN_TOKEN")
+                .map_err(|_| "ENE_PLUGIN_SPAWN_TOKEN is not set".to_owned())?,
+        })
+        .await
+        .map_err(|err| format!("broker hello failed: {err}"))?;
+    if matches!(response, BrokerResponse::Error { .. }) {
+        return Err("broker hello rejected".to_owned());
+    }
+
+    let query = arg_str(args, "query")?;
+    let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+    let request = BrokerRequest::FsSearch {
+        path: path.to_owned(),
+        query: query.to_owned(),
+        regex: args.get("regex").and_then(Value::as_bool).unwrap_or(false),
+        case_insensitive: args
+            .get("case_insensitive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        include: args
+            .get("include")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        context_lines: u32::try_from(
+            args.get("context_lines")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        )
+        .unwrap_or(0)
+        .min(10),
+        count: args.get("count").and_then(Value::as_bool).unwrap_or(false),
+        max: u32::try_from(args.get("max").and_then(Value::as_u64).unwrap_or(50))
+            .unwrap_or(50)
+            .min(200),
+    };
+
+    match client.call(request).await {
+        Ok(BrokerResponse::FsSearchOk { matches }) => Ok(json!({ "matches": matches })),
+        Ok(BrokerResponse::Error { message, .. }) => Err(message),
+        Err(err) => Err(err.to_string()),
+        Ok(_) => Err("unexpected broker response".to_owned()),
     }
 }
 
@@ -156,6 +226,14 @@ fn list(args: &Value) -> Result<Value, String> {
 }
 
 fn search(args: &Value) -> Result<Value, String> {
+    if std::env::var_os("ENE_BROKER_SOCKET").is_some() {
+        broker_search(args)
+    } else {
+        fallback_search(args)
+    }
+}
+
+fn fallback_search(args: &Value) -> Result<Value, String> {
     let query = arg_str(args, "query")?;
     let needle = if args.get("regex").and_then(Value::as_bool).unwrap_or(false) {
         Needle::Regex(regex::Regex::new(query).map_err(|err| err.to_string())?)
@@ -914,7 +992,13 @@ fn workspace() -> Result<PathBuf, String> {
 #[cfg(test)]
 static TEST_WORKSPACE: parking_lot::Mutex<Option<PathBuf>> = parking_lot::Mutex::new(None);
 
-#[cfg(test)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only plugin unit tests serialize workspace overrides"
+    )
+)]
 static TEST_WORKSPACE_GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {
