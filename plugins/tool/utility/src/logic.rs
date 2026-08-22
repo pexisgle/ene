@@ -281,20 +281,27 @@ fn random_integer_inclusive(min: i64, max: i64) -> Result<i64, String> {
     if min == max {
         return Ok(min);
     }
-    let span = max - min;
-    #[expect(
-        clippy::cast_sign_loss,
-        reason = "span is non-negative because min <= max"
-    )]
-    let range = u128::from(span as u64)
+    let span = i128::from(max) - i128::from(min);
+    let range = span
         .checked_add(1)
+        .and_then(|wide| u128::try_from(wide).ok())
         .ok_or_else(|| structured_error("invalid_range", "integer range is too large"))?;
+    if range == u128::from(u64::MAX) + 1 {
+        return Ok(random_u64() as i64);
+    }
     let threshold = (u128::from(u64::MAX) / range) * range;
     loop {
-        let bits = random_u64();
-        let sample = u128::from(bits);
+        let sample = u128::from(random_u64());
         if sample < threshold {
-            return Ok(min + (sample % range) as i64);
+            let offset = i128::try_from(sample % range).map_err(|_| {
+                structured_error("invalid_range", "integer range is too large")
+            })?;
+            let drawn = i128::from(min)
+                .checked_add(offset)
+                .ok_or_else(|| structured_error("invalid_range", "integer range is too large"))?;
+            return i64::try_from(drawn).map_err(|_| {
+                structured_error("invalid_range", "integer range is too large")
+            });
         }
     }
 }
@@ -1286,6 +1293,20 @@ mod tests {
             let value = random_integer_inclusive(i64::MAX - 2, i64::MAX).unwrap();
             assert!((i64::MAX - 2..=i64::MAX).contains(&value), "{value}");
         }
+    }
+
+    #[test]
+    fn integer_random_accepts_full_i64_range() {
+        for _ in 0..200 {
+            let value = random_integer_inclusive(i64::MIN, i64::MAX).unwrap();
+            assert!((i64::MIN..=i64::MAX).contains(&value), "{value}");
+        }
+        assert_eq!(random_integer_inclusive(i64::MIN, i64::MIN).unwrap(), i64::MIN);
+        assert_eq!(random_integer_inclusive(i64::MAX, i64::MAX).unwrap(), i64::MAX);
+        let value = random_integer_inclusive(i64::MIN, i64::MIN + 1).unwrap();
+        assert!(value == i64::MIN || value == i64::MIN + 1, "{value}");
+        let value = random_integer_inclusive(i64::MAX - 1, i64::MAX).unwrap();
+        assert!(value == i64::MAX - 1 || value == i64::MAX, "{value}");
     }
 
     #[test]
