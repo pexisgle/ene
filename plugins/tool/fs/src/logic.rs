@@ -1510,7 +1510,10 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         with_workspace(&dir, || {
             let err = execute("fs.delete", &json!({"path": link.to_string_lossy()})).unwrap_err();
-            assert!(err.contains("symlink"), "{err}");
+            assert!(
+                err.contains("symlink") || err.contains("path escapes workspace"),
+                "{err}"
+            );
             assert!(target.exists());
             Ok(())
         });

@@ -356,6 +356,13 @@ pub fn confine_tool_path(
     {
         return Ok(base);
     }
+    if let Some(file_name) = requested.file_name() {
+        let lexical = requested.parent().unwrap_or(&base).join(file_name);
+        // Reject the link itself before `canonicalize()` dereferences it.
+        if std::fs::symlink_metadata(&lexical).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(PipelineError::PathEscape(lexical.display().to_string()));
+        }
+    }
     let file_name = requested
         .file_name()
         .ok_or_else(|| PipelineError::PathEscape(requested.display().to_string()))?;
