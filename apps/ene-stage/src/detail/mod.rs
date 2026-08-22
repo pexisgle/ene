@@ -263,6 +263,14 @@ impl DetailUiState {
         self.loaded.settings = false;
     }
 
+    /// Reload core settings when Detail is reopened so external vault writes
+    /// and restarts cannot leave a stale API-key banner behind.
+    pub fn refresh_settings_on_open(&mut self) {
+        if self.visible {
+            self.invalidate_settings();
+        }
+    }
+
     /// Explicit navigation wins over the search box; otherwise search re-selects the tab every frame.
     pub fn select_tab(&mut self, tab: DetailTab) {
         self.tab = tab;
@@ -1465,10 +1473,11 @@ fn show_work(
     });
     ui.label(i18n::fl("jobs-export-hint"));
     ui.heading(i18n::fl("jobs-active"));
-    if state.jobs.is_empty() {
+    let active_jobs = active_jobs(&state.jobs);
+    if active_jobs.is_empty() {
         ui.label(i18n::fl("jobs-empty"));
     }
-    for job in &state.jobs {
+    for job in active_jobs {
         ui.horizontal(|ui| {
             ui.label(format!("{} [{}] {}", job.title, job.status, job.id));
             if ui.button(i18n::fl("jobs-cancel")).clicked() {
@@ -1517,6 +1526,12 @@ fn show_work(
             }
         });
     }
+}
+
+fn active_jobs(jobs: &[JobView]) -> Vec<&JobView> {
+    jobs.iter()
+        .filter(|job| matches!(job.status.as_str(), "created" | "queued" | "running"))
+        .collect()
 }
 
 fn show_connections(
@@ -2094,12 +2109,6 @@ fn show_system_inner(
                 0.0..=1.0,
             ));
             ui.end_row();
-            ui.label(i18n::fl("settings-beat-sync"));
-            ui.checkbox(&mut local_settings.beat_sync, "");
-            ui.end_row();
-            ui.label(i18n::fl("settings-beat-sync-device"));
-            ui.text_edit_singleline(&mut local_settings.beat_sync_device);
-            ui.end_row();
         });
     ui.horizontal(|ui| {
         if ui.button(i18n::fl("settings-save-local")).clicked() {
@@ -2531,6 +2540,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn active_jobs_exclude_terminal_states() {
+        let job = |status: &str| JobView {
+            id: status.to_owned(),
+            soul_id: "soul".to_owned(),
+            title: "task".to_owned(),
+            goal: String::new(),
+            status: status.to_owned(),
+            progress_fraction: None,
+            progress_note: None,
+        };
+        let jobs = vec![
+            job("created"),
+            job("queued"),
+            job("running"),
+            job("completed"),
+            job("failed"),
+            job("cancelled"),
+            job("interrupted"),
+        ];
+
+        let active = active_jobs(&jobs)
+            .into_iter()
+            .map(|job| job.status.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(active, ["created", "queued", "running"]);
+    }
+
+    #[test]
     fn parse_core_fields_reads_effective_tasks_and_profile() {
         let json = r#"{
             "overlay": {},
@@ -2631,6 +2668,30 @@ mod tests {
         );
         state.chat_api_key = "placeholder-key".to_owned();
         assert!(chat_apply_block_reason(&state).is_none());
+    }
+
+    #[test]
+    fn reopening_detail_refreshes_stale_vault_state() {
+        let mut state = DetailUiState {
+            visible: true,
+            ..DetailUiState::default()
+        };
+        parse_core_fields(
+            r#"{
+                "effective": {
+                    "ai": {"tasks": {"chat": {"plugin": "provider.openai_compat", "model": "m"}}},
+                    "ai_chat_key_set": false,
+                    "providers": [{"id": "provider.openai_compat", "needs_key": true}]
+                }
+            }"#,
+            &mut state,
+        );
+        assert_eq!(chat_setup_gap(&state), Some(ChatSetupGap::ApiKey));
+
+        // Simulate a later settings load after an external vault write.
+        state.loaded.settings = true;
+        state.refresh_settings_on_open();
+        assert!(!state.loaded.settings);
     }
 
     #[test]

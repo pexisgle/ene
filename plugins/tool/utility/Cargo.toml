@@ -15,6 +15,7 @@ path = "src/main.rs"
 base64 = { workspace = true, features = ["std"] }
 blake3 = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 ene-plugin-ipc = { workspace = true }
 ene-registry = { workspace = true }
 regex = { workspace = true }

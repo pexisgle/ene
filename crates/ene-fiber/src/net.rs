@@ -256,6 +256,7 @@ fn is_text_content_type(content_type: &str) -> bool {
     let mime = mime.to_ascii_lowercase();
     mime.starts_with("text/")
         || mime == "application/json"
+        || mime == "application/x-javascript"
         || mime == "application/xml"
         || mime == "application/javascript"
         || mime == "application/xhtml+xml"
@@ -491,6 +492,25 @@ mod tests {
                     get("https://example.invalid/img"),
                     Err(BrokerError::Binary)
                 ));
+            },
+        );
+    }
+
+    #[test]
+    fn duckduckgo_json_content_type_is_text() {
+        with_hop_stub(
+            |_url, _auth| {
+                Ok(HopResponse {
+                    status: 202,
+                    location: None,
+                    content_type: "application/x-javascript".to_owned(),
+                    body: br#"{"Heading":"Rust"}"#.to_vec(),
+                })
+            },
+            || {
+                let value = get("https://api.duckduckgo.com/").unwrap();
+                assert_eq!(value["status"], 202);
+                assert!(value["text"].as_str().unwrap().contains("Rust"));
             },
         );
     }
