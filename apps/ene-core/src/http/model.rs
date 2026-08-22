@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ene_kernel::{
-    ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, ToolCall,
-    effective_window, estimate_tokens, fit_prompt,
+    ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, TokenEstimation,
+    ToolCall, effective_window, estimate_tokens, fit_prompt,
 };
 use ene_plugin_ipc::{
     LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
@@ -89,9 +89,16 @@ impl ConversationModel for SeamedModel {
         let estimation = harness.context.token_estimation;
         let store = self.core.store();
         let vision_store = vision_store_for(&binding, store.as_ref());
+        let tool_overhead = estimate_tool_schema_tokens(&self.core, self.layer(), estimation);
+        let message_budget = window.available.saturating_sub(tool_overhead);
+        if message_budget == 0 {
+            return Err(KernelError::Model(
+                "context window exhausted by tool definitions".to_owned(),
+            ));
+        }
         let messages = fit_prompt(
             fold_history(&request.messages, vision_store),
-            window.available,
+            message_budget,
             |message| estimate_tokens(&pack_text(message), estimation),
             |message| matches!(message.role, LlmRole::System),
         );
@@ -150,6 +157,24 @@ fn pack_text(message: &LlmMessage) -> String {
         text.push_str(&call.arguments.to_string());
     }
     text
+}
+
+fn estimate_tool_schema_tokens(
+    core: &CoreDaemon,
+    layer: Layer,
+    estimation: TokenEstimation,
+) -> u32 {
+    estimate_tool_schema_tokens_for(&tool_schemas(core, layer), estimation)
+}
+
+fn estimate_tool_schema_tokens_for(schemas: &[LlmToolSchema], estimation: TokenEstimation) -> u32 {
+    if schemas.is_empty() {
+        return 0;
+    }
+    let Ok(serialized) = serde_json::to_string(schemas) else {
+        return u32::MAX;
+    };
+    estimate_tokens(&serialized, estimation)
 }
 
 // OpenAI/Anthropic function names must match ^[a-zA-Z0-9_-]+$.
@@ -563,6 +588,44 @@ mod tests {
         let packed = pack_text(&message);
         assert!(packed.contains("fs__read"));
         assert!(packed.contains("a.txt"));
+    }
+
+    #[test]
+    fn tool_schema_overhead_can_exhaust_available_window() {
+        let schemas = vec![LlmToolSchema {
+            name: "big".to_owned(),
+            description: "d".repeat(10_000),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let overhead =
+            estimate_tool_schema_tokens_for(&schemas, ene_kernel::TokenEstimation::Chars4);
+        assert!(overhead > 100);
+        let messages = vec![LlmMessage::new(LlmRole::User, "short")];
+        let msg_cost = ene_kernel::estimate_tokens("short", ene_kernel::TokenEstimation::Chars4);
+        let packed = ene_kernel::fit_prompt(
+            messages,
+            msg_cost,
+            |message| {
+                ene_kernel::estimate_tokens(
+                    &pack_text(message),
+                    ene_kernel::TokenEstimation::Chars4,
+                )
+            },
+            |_| false,
+        );
+        assert_eq!(packed.len(), 1);
+        let packed_with_overhead = ene_kernel::fit_prompt(
+            packed,
+            msg_cost.saturating_sub(overhead),
+            |message| {
+                ene_kernel::estimate_tokens(
+                    &pack_text(message),
+                    ene_kernel::TokenEstimation::Chars4,
+                )
+            },
+            |_| false,
+        );
+        assert!(packed_with_overhead.is_empty() || overhead >= msg_cost);
     }
 
     #[test]
