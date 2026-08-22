@@ -1698,6 +1698,7 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
         "ai_stt_key_set": state.core.task_key_set("stt"),
         "ai_approve_key_set": state.core.task_key_set("approve"),
         "ai_job_key_set": state.core.task_key_set("job"),
+        "observation_scope": state.core.mind().proactive.world_state.send_scope(),
     });
     let overlay = {
         let settings_path = state.core.data_dir().join("settings.json");

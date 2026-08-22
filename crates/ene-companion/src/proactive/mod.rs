@@ -2,11 +2,13 @@
 
 mod gate;
 mod parse;
+mod privacy;
 mod quiet_hours;
 mod world_state;
 
 pub use gate::{GateRejectReason, evaluate_deterministic_gates};
 pub use parse::{decision_schema_object, parse_decision_json};
+pub use privacy::redact_window_title;
 pub use quiet_hours::{QuietHoursEval, evaluate_quiet_hours};
 pub use world_state::{IdleTrend, WorldStateMemory, WorldStateSnapshot, WorldStateSummary};
 
@@ -187,7 +189,7 @@ pub fn build_proactive_context(
         observation.activity.as_ref().map(|snap| ActivitySnapshot {
             idle_seconds: snap.idle_seconds,
             active_window_label: truncate_chars(
-                &redact_window_label(&snap.active_window_label),
+                &redact_window_title(&snap.active_window_label, config.world_state.title_mode),
                 config.max_activity_chars.min(200),
             ),
             recent_change: truncate_chars(&snap.recent_change, config.max_activity_chars),
@@ -369,22 +371,4 @@ fn truncate_history(history: &[String], max_chars: usize) -> Vec<String> {
     }
     out.reverse();
     out
-}
-
-fn redact_window_label(label: &str) -> String {
-    let mut out = String::new();
-    for token in label.split_whitespace() {
-        if token.contains('@') || token.contains('/') || token.contains('\\') {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(token);
-    }
-    if out.is_empty() {
-        "window".to_owned()
-    } else {
-        out
-    }
 }

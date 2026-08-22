@@ -25,7 +25,7 @@
 |---|---|---|
 | `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
 | `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*`, `tool_output.soft_limit_bytes`, `tool_output.hard_limit_bytes` |
-| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*`（`observation_interval_seconds` が観測 tick 間隔。開いているセッションをすべて観測する） |
+| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*`（`observation_interval_seconds` が観測 tick 間隔。開いているセッションをすべて観測する。`proactive.world_state.title_mode` と `ocr_hint` を含む） |
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
@@ -56,6 +56,12 @@ provider は `[image omitted]` のままにします。
 ローカル GGUF（`provider.gguf`、おすすめ Jina）、または `seam.embed` の
 クラウドプラグイン。分類・能動発話が未指定なら会話モデルの値を継承します。
 TTS・STT が空なら無効のままです。
+
+観測のプライバシーは `mind.proactive.world_state` です。`title_mode` は
+`app_only`（既定）、`redacted_title`、`full_title`。`ocr_hint` はローカル
+opt-in の枠で、バックエンドは同梱しません。製品 GUI（詳細 → Conversation）
+がいまの送信範囲を出します。生のスクリーンショットは session / memory /
+audit に残さず、luma digest とテキスト要約だけが永続境界を越えます。
 
 プラグイン起動は `plugins.profile`（`desktop` / `minimal` / `headless`）です。
 プラグインごとの有効マップ（`plugins.list`）はありません。

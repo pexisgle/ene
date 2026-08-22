@@ -169,7 +169,7 @@ not a reason to keep the crate.
 | Character | Occupants / bodies over HTTP; local placement | Companion | Current on both |
 | Character editor (CCv3) | Local `character.json` via `ene-card` | None | Do not port. v1.0 is package import (`P-803`). Not a reason to keep desktop |
 | AI / Voice / Engines | `GET/PATCH /settings`, `providers`, `provider.assets` | Conversation, Voice, Connections | Current on stage; grow stage if a desktop control is still missing |
-| Features (proactive toggles) | `mind.proactive.*` PATCH | System / Conversation | Port remaining toggles to stage. Observation pipeline: [#805](https://github.com/pexisgle/ene/issues/805) in core |
+| Features (proactive toggles) | `mind.proactive.*` PATCH | Conversation | Observation privacy (`title_mode`, `ocr_hint`, send scope) is current on stage. Other proactive toggles may still grow |
 | Memory config + Memories ledger | Memory HTTP | Memory | Current on stage for list/edit/delete; auxiliary LLM scope remains [#717](https://github.com/pexisgle/ene/issues/717) |
 | Sessions | Session HTTP | Log | Current on stage |
 | Permissions / Approvals | Plane HTTP | System | Current on stage |
@@ -197,10 +197,10 @@ and surface privacy controls on **stage**.
 | Piece | Owner | Status |
 |---|---|---|
 | Screenshot capability | `app` tool / client | Current CLI path; portal: [#800](https://github.com/pexisgle/ene/issues/800) |
-| ROI, luma fingerprint, changed-cell gate, caret suppression | `ene-work` observation pipeline | Missing [#805](https://github.com/pexisgle/ene/issues/805) |
-| Title redaction (AppOnly / RedactedTitle / FullTitle) | `ene-work` + settings | Missing [#805](https://github.com/pexisgle/ene/issues/805) |
-| Proactive speak / world-state | `ene-companion` + core tick | Current: every open session, interval from `mind.proactive.observation_interval_seconds`. Vision reuse of unchanged frames: [#805](https://github.com/pexisgle/ene/issues/805) |
-| Raw pixels in session / memory / audit | Forbidden | Must stay out; E2E proof: [#805](https://github.com/pexisgle/ene/issues/805) |
+| ROI, luma fingerprint, changed-cell gate, caret suppression | `ene-work` observation pipeline | Current |
+| Title redaction (AppOnly / RedactedTitle / FullTitle) | `ene-companion` settings + `ene-work` send label | Current (`mind.proactive.world_state.title_mode`) |
+| Proactive speak / world-state | `ene-companion` + core tick | Current: every open session, interval from `mind.proactive.observation_interval_seconds`; unchanged frames reuse the last summary |
+| Raw pixels in session / memory / audit | Forbidden | Current; digest and text summary only |
 | Desktop `ProactiveObserveControl` | Client stub | Unconnected |
 
 ## 4. Security delta
@@ -213,7 +213,7 @@ and surface privacy controls on **stage**.
 | Credentials | Vault (`vault.bin` + `vault.key`); plugins do not get raw keys in env | Keep vault refs for search backends ([#818](https://github.com/pexisgle/ene/issues/818)) and plugin config ([#819](https://github.com/pexisgle/ene/issues/819)). No host OAuth for MCP services |
 | Approval (`ene-plane`) | Deny-by-default, hash chain, popup, “don’t ask next time” | AI auto-approve production model still unset ([#717](https://github.com/pexisgle/ene/issues/717)) |
 | `exec` | SIGTERM then SIGKILL on the direct child | Process-tree ownership, output byte caps, cwd/env allowlist: [#798](https://github.com/pexisgle/ene/issues/798) |
-| Raw pixels | Observation summarizes off the session log | No E2E that session/memory/audit never persist PNG: [#805](https://github.com/pexisgle/ene/issues/805) |
+| Raw pixels | Observation summarizes off the session log | Current: session / memory / audit store digest and summary, not PNG |
 
 ## 5. v1.0 versus post-v1.0
 
@@ -232,7 +232,7 @@ Closing a child issue does not close [#717](https://github.com/pexisgle/ene/issu
   [#799](https://github.com/pexisgle/ene/issues/799),
   [#813](https://github.com/pexisgle/ene/issues/813).
 - Observation that does not flood the model or persist raw pixels:
-  [#805](https://github.com/pexisgle/ene/issues/805) (`P-112`).
+  current (`ene-work` gate + stage privacy controls).
 - Remaining `done.md` unchecked items (real provider chat, production
   ASR/TTS, job runner speech, GUI E2E) stay on #717.
 

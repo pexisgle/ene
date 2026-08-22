@@ -2608,6 +2608,7 @@ dependencies = [
  "ene-plane",
  "ene-registry",
  "ene-session",
+ "image",
  "parking_lot",
  "rusqlite",
  "serde",

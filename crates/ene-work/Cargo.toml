@@ -18,6 +18,7 @@ ene-kernel = { workspace = true }
 ene-plane = { workspace = true }
 ene-registry = { workspace = true }
 ene-session = { workspace = true }
+image = { workspace = true, features = ["png"] }
 parking_lot = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

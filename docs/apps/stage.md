@@ -71,7 +71,9 @@ then a model. Home shows **Chat is ready.** only when that binding has a model
 and, if `effective.providers[].needs_key` is true, a vault API key
 (`effective.ai_chat_key_set`). Provider failures such as HTTP 401 are
 settings/status errors, not assistant replies. Apply sits above a scrollable,
-filterable model list so listing models cannot push save off-screen. Engines
+filterable model list so listing models cannot push save off-screen. Observation
+privacy (title mode, OCR hint, current send scope) is on the same Conversation
+tab and patches `mind.proactive.world_state`. Engines
 and GGUF weights live under Connections → provider assets. TTS/STT are
 `ai.tasks.tts` / `ai.tasks.stt`.
 
