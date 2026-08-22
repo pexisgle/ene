@@ -1,8 +1,8 @@
 use crate::{Broker, BrokerServer, FiberUid};
 use ene_plugin_ipc::{BrokerClient, BrokerRequest, BrokerResponse};
-use grep::searcher::{BinaryDetection, SearcherBuilder};
 use std::sync::Arc;
 use tempfile::TempDir;
+use which::which;
 
 #[tokio::test]
 async fn broker_client_round_trips_fs_read_and_denies_undeclared_ops() {
@@ -90,9 +90,7 @@ async fn broker_client_round_trips_fs_search() {
     #![cfg_attr(test, expect(clippy::panic, reason = "tests fail fast"))]
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("input.txt"), "alpha\nbeta\n").unwrap();
-    let _searcher = SearcherBuilder::new()
-        .binary_detection(BinaryDetection::quit(b'r'))
-        .build();
+    which("rg").expect("ripgrep binary must be provided by the ripgrep dev-dependency");
     let mut broker = Broker::new(dir.path().to_path_buf());
     let uid = FiberUid::new();
     broker.grant(uid, "fs.search");
