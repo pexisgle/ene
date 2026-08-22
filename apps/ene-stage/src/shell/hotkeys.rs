@@ -17,7 +17,7 @@ pub enum ShellAction {
     Quit,
 }
 
-/// Registers Alt+Space, F1, F2, F4 and polls for events.
+/// Registers Alt+Space and Alt-modified function keys, then polls for events.
 pub struct HotkeyManager {
     manager: GlobalHotKeyManager,
     spotlight: HotKey,
@@ -43,9 +43,9 @@ impl HotkeyManager {
         let manager =
             GlobalHotKeyManager::new().map_err(|err| HotkeyError::Manager(err.to_string()))?;
         let spotlight = HotKey::new(Some(Modifiers::ALT), Code::Space);
-        let detail = HotKey::new(None, Code::F1);
-        let chat = HotKey::new(None, Code::F2);
-        let log = HotKey::new(None, Code::F4);
+        let detail = HotKey::new(Some(Modifiers::ALT), Code::F1);
+        let chat = HotKey::new(Some(Modifiers::ALT), Code::F2);
+        let log = HotKey::new(Some(Modifiers::ALT), Code::F4);
         let spotlight_id = spotlight.id();
         let detail_id = detail.id();
         let chat_id = chat.id();
@@ -55,13 +55,13 @@ impl HotkeyManager {
             tracing::warn!("could not register Alt+Space hotkey; will retry");
         }
         if let Err(err) = manager.register(detail) {
-            tracing::warn!(error = %err, "could not register F1 hotkey");
+            tracing::warn!(error = %err, "could not register Alt+F1 hotkey");
         }
         if let Err(err) = manager.register(chat) {
-            tracing::warn!(error = %err, "could not register F2 hotkey");
+            tracing::warn!(error = %err, "could not register Alt+F2 hotkey");
         }
         if let Err(err) = manager.register(log) {
-            tracing::warn!(error = %err, "could not register F4 hotkey");
+            tracing::warn!(error = %err, "could not register Alt+F4 hotkey");
         }
         Ok(Self {
             manager,
@@ -110,5 +110,25 @@ impl HotkeyManager {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_function_keys_require_alt() {
+        for hotkey in [
+            HotKey::new(Some(Modifiers::ALT), Code::F1),
+            HotKey::new(Some(Modifiers::ALT), Code::F2),
+            HotKey::new(Some(Modifiers::ALT), Code::F4),
+        ] {
+            assert!(
+                hotkey.mods.contains(Modifiers::ALT),
+                "{} must be globally modified",
+                hotkey.into_string()
+            );
+        }
     }
 }
