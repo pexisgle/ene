@@ -2594,11 +2594,25 @@ async fn proactive_tick_observes_every_open_session() {
         })
         .await
         .unwrap();
+    for session in [&session_a.id, &session_b.id] {
+        client
+            .send_message(
+                session,
+                &MessageRequest {
+                    text: "hello".into(),
+                    mode: MessageMode::Prompt,
+                    input_modality: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        wait_assistant(&client, session).await;
+    }
     let mut mind = core.mind();
     mind.proactive.enabled = true;
     mind.proactive.min_idle_seconds = 0;
     mind.proactive.cooldown_seconds = 0;
-    mind.proactive.sources.activity = false;
     mind.proactive.sources.screen_summary = false;
     core.replace_mind(mind);
     let classify = ScriptedClassify::new([speak_decision(), speak_decision()]);
