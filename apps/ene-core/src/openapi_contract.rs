@@ -7,6 +7,9 @@ const OPENAPI_EXCLUDED: &[&str] = &["/", "/web", "/api/v1/health", "/api/v1/open
 
 const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
 
+/// Axum composition that can register routes this parser cannot see.
+const UNSUPPORTED_ROUTER_COMPOSITION: &[&str] = &["merge", "nest", "nest_service", "route_service"];
+
 type RouteTable = BTreeMap<String, BTreeSet<String>>;
 
 fn router_contract() -> RouteTable {
@@ -27,6 +30,7 @@ fn filter_excluded(mut table: RouteTable) -> RouteTable {
 
 fn parse_router_routes(src: &str) -> Result<RouteTable, String> {
     let body = fn_body(src, "router").ok_or_else(|| "fn router not found".to_owned())?;
+    reject_unsupported_composition(body)?;
     let mut table = RouteTable::new();
     let mut cursor = 0;
     while let Some(rel) = body[cursor..].find(".route(") {
@@ -88,6 +92,17 @@ fn parse_openapi_paths(json: &str) -> Result<RouteTable, String> {
     Ok(table)
 }
 
+fn reject_unsupported_composition(body: &str) -> Result<(), String> {
+    for method in UNSUPPORTED_ROUTER_COMPOSITION {
+        if has_dot_call(body, method) {
+            return Err(format!(
+                "fn router uses .{method}(...), which this parser cannot enumerate; fail closed"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn fn_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
     let needle = format!("fn {name}(");
     let start = src.find(&needle)?;
@@ -111,6 +126,41 @@ fn first_string_literal(src: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+fn has_dot_call(src: &str, method: &str) -> bool {
+    let needle = format!(".{method}");
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if byte == b'.' && src[i..].starts_with(&needle) {
+            let after = &src[i + needle.len()..];
+            if after.trim_start().starts_with('(') {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 fn has_method_call(src: &str, method: &str) -> bool {
@@ -209,6 +259,46 @@ mod tests {
         assert!(raw_router.contains_key("/web"));
         assert!(!router_contract().contains_key("/"));
         assert!(!router_contract().contains_key("/web"));
+    }
+
+    #[test]
+    fn merge_extra_router_is_a_parser_failure() {
+        let src = r#"
+            fn router(state: AppState) -> Router {
+                Router::new()
+                    .route("/api/v1/sessions", get(routes::list_sessions))
+                    .merge(extra_router())
+            }
+
+            fn extra_router() -> Router {
+                Router::new().route("/api/v1/hidden", get(routes::hidden))
+            }
+        "#;
+        let err = parse_router_routes(src).unwrap_err();
+        assert!(
+            err.contains(".merge("),
+            "parser must fail closed on .merge(extra_router()), got {err}"
+        );
+    }
+
+    #[test]
+    fn unsupported_router_composition_fails_closed() {
+        for method in UNSUPPORTED_ROUTER_COMPOSITION {
+            let src = format!(
+                r#"
+                fn router(state: AppState) -> Router {{
+                    Router::new()
+                        .route("/api/v1/sessions", get(routes::list_sessions))
+                        .{method}(extra_router())
+                }}
+            "#
+            );
+            let err = parse_router_routes(&src).unwrap_err();
+            assert!(
+                err.contains(&format!(".{method}(")),
+                "parser must fail closed on .{method}(), got {err}"
+            );
+        }
     }
 
     #[test]
