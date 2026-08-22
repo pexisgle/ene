@@ -223,6 +223,7 @@ fn harness(
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
+        background: false,
     }
 }
 

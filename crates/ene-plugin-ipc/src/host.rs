@@ -2,8 +2,10 @@ use crate::error::IpcError;
 use crate::frame::{read_frame, write_frame};
 use crate::protocol::{
     ApprovalAnswer, CapabilityGrant, CapabilityGranted, CapabilityRelease, HelloAck, HostHello,
-    Message, Negotiated, ProtoId, ProtocolRanges, StreamOpen, StreamOpened, ToolCall, ToolResult,
-    ToolSpecWire, VersionRange,
+    Message, Negotiated, ProtoId, ProtocolRanges, StreamOpen, StreamOpened,
+    ToolBackgroundCancelAck, ToolBackgroundStart, ToolBackgroundStarted,
+    ToolBackgroundStatusResult, ToolCall, ToolExecutionComplete, ToolResult, ToolSpecWire,
+    VersionRange,
 };
 use crate::provider::{
     EmbedRequest, EmbedResult, InstallAssetRequest, InstallAssetResult, InstallStatusRequest,
@@ -11,6 +13,7 @@ use crate::provider::{
     LlmGenerateRequest, LlmGeneration, ProviderFaces, SetActiveAssetRequest, SetActiveAssetResult,
     SttRequest, SttResult, TtsAudio, TtsRequest,
 };
+use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Host side of a negotiated plugin connection.
@@ -20,6 +23,7 @@ pub struct HostConn<S> {
     negotiated: Negotiated,
     max_frame: usize,
     has_config: bool,
+    completions: HashMap<String, ToolExecutionComplete>,
 }
 
 impl<S> std::fmt::Debug for HostConn<S> {
@@ -60,6 +64,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
                     negotiated: body.protocols,
                     max_frame,
                     has_config: body.has_config,
+                    completions: HashMap::new(),
                 })
             }
             Message::HelloReject { body } => Err(IpcError::Rejected(body.reason)),
@@ -103,6 +108,70 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
             Message::ToolResult { id: got, body } if got == id => Ok(body),
             other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
         }
+    }
+
+    pub async fn start_background(
+        &mut self,
+        body: ToolBackgroundStart,
+    ) -> Result<ToolBackgroundStarted, IpcError> {
+        if self.negotiated.tool.is_none() {
+            return Err(IpcError::Unexpected("tool disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::ToolBackgroundStart { id, body })
+            .await?;
+        match self.recv().await? {
+            Message::ToolBackgroundStarted { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    pub async fn cancel_background(
+        &mut self,
+        execution_id: &str,
+    ) -> Result<ToolBackgroundCancelAck, IpcError> {
+        if self.negotiated.tool.is_none() {
+            return Err(IpcError::Unexpected("tool disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::ToolBackgroundCancel {
+            id,
+            execution_id: execution_id.to_owned(),
+        })
+        .await?;
+        match self.recv().await? {
+            Message::ToolBackgroundCancelAck { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    pub async fn status_background(
+        &mut self,
+        execution_id: &str,
+    ) -> Result<ToolBackgroundStatusResult, IpcError> {
+        if self.negotiated.tool.is_none() {
+            return Err(IpcError::Unexpected("tool disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::ToolBackgroundStatus {
+            id,
+            execution_id: execution_id.to_owned(),
+        })
+        .await?;
+        match self.recv().await? {
+            Message::ToolBackgroundStatusResult { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    #[must_use]
+    pub fn take_completion(&mut self, execution_id: &str) -> Option<ToolExecutionComplete> {
+        self.completions.remove(execution_id)
+    }
+
+    #[must_use]
+    pub fn take_completions(&mut self) -> Vec<ToolExecutionComplete> {
+        self.completions.drain().map(|(_, body)| body).collect()
     }
 
     /// One-shot LLM generate. `LlmChunk` frames are ignored; helpers that need
@@ -507,8 +576,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
     }
 
     async fn recv(&mut self) -> Result<Message, IpcError> {
-        let bytes = read_frame(&mut self.stream, self.max_frame).await?;
-        Message::decode(&bytes)
+        loop {
+            let bytes = read_frame(&mut self.stream, self.max_frame).await?;
+            match Message::decode(&bytes)? {
+                Message::ToolExecutionComplete { body } => {
+                    self.completions.insert(body.execution_id.clone(), body);
+                }
+                other => return Ok(other),
+            }
+        }
     }
 
     fn alloc(&mut self) -> u64 {

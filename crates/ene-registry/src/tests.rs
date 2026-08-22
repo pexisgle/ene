@@ -141,6 +141,7 @@ fn overlapping_def() -> ToolDefinition {
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
+        background: false,
     }
 }
 
@@ -227,6 +228,7 @@ fn harness_tool_uses_the_same_pipeline() {
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
+        background: false,
     });
     let surface = registry.schemas(Layer::Surface);
     assert_eq!(surface[0]["name"], "memory.recall");
@@ -263,6 +265,7 @@ async fn plane_denies_side_effects_and_sensitive_reads() {
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
+        background: false,
     });
     let denied = registry
         .execute("fs.write", json!({"path":"/tmp/x","text":"no"}), Layer::Job)
@@ -310,10 +313,10 @@ fn unknown_plugin_empty_side_effects_are_medium_sensitivity() {
         output: json!({"type":"object"}),
         side_effects: Vec::new(),
         broker_socket: None,
-
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
+        background: false,
     };
     let def = ToolDefinition::from_wire(
         spec,
@@ -322,6 +325,25 @@ fn unknown_plugin_empty_side_effects_are_medium_sensitivity() {
         },
     );
     assert_eq!(def.sensitivity, ene_plane::Sensitivity::Medium);
+}
+
+#[tokio::test]
+async fn start_background_rejects_sync_tools() {
+    let registry = ToolRegistry::new();
+    for def in crate::builtins::definitions_for(BuiltinKind::Utility) {
+        registry.register(def);
+    }
+    let err = registry
+        .start_background(
+            "utility.hash",
+            json!({"text": "x"}),
+            "exec-1",
+            Layer::Surface,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PipelineError::NotBackground(_)));
 }
 
 #[tokio::test]
@@ -571,6 +593,7 @@ fn search_tools_tie_breaks_by_name() {
         category: "test".to_owned(),
         keywords: vec!["needle".to_owned()],
         examples: Vec::new(),
+        background: false,
     });
     registry.register(ToolDefinition {
         name: "zzz.match".to_owned(),
@@ -586,6 +609,7 @@ fn search_tools_tie_breaks_by_name() {
         category: "test".to_owned(),
         keywords: vec!["needle".to_owned()],
         examples: Vec::new(),
+        background: false,
     });
     let hits = registry.search_tools("needle", 8);
     assert_eq!(hits.len(), 2);
@@ -631,6 +655,7 @@ fn search_tools_truncates_huge_metadata() {
         category: "x".repeat(256),
         keywords: vec!["x".repeat(256); 64],
         examples: vec!["y".repeat(512); 16],
+        background: false,
     });
     let hits = registry.search_tools("huge", 1);
     assert_eq!(hits.len(), 1);
@@ -654,6 +679,7 @@ fn search_tools_finds_mcp_tool_definition() {
         category: "vcs".to_owned(),
         keywords: vec!["git".to_owned(), "status".to_owned()],
         examples: vec!["git status".to_owned()],
+        background: false,
     });
     let hits = registry.search_tools("git status", 4);
     assert_eq!(hits[0].tool.name, "mcp:git.status");

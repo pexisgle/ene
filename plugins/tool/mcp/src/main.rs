@@ -201,6 +201,7 @@ impl McpBridge {
                     category: String::new(),
                     keywords: Vec::new(),
                     examples: Vec::new(),
+                    background: false,
                 })
             })
             .collect();

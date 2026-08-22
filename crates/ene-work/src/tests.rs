@@ -126,6 +126,7 @@ fn fs_write_def() -> ToolDefinition {
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
+        background: false,
     }
 }
 
@@ -144,6 +145,7 @@ fn utility_time_def() -> ToolDefinition {
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
+        background: false,
     }
 }
 
@@ -490,6 +492,7 @@ async fn job_router_confines_fs_to_job_workspace() {
             category: String::new(),
             keywords: Vec::new(),
             examples: Vec::new(),
+            background: false,
         },
         Arc::clone(&capture) as Arc<dyn ToolInvoke>,
     );
@@ -904,6 +907,7 @@ async fn bookmark_job_searches_and_applies_matching_skill() {
             category: String::new(),
             keywords: Vec::new(),
             examples: Vec::new(),
+            background: false,
         },
         Arc::new(SearchInvoke) as Arc<dyn ToolInvoke>,
     );
@@ -954,6 +958,7 @@ async fn mcp_handwritten_tools_execute_through_registry() {
         .await
         .unwrap();
     assert_eq!(value["clean"], json!(true));
+    assert!(!registry.get("mcp:git.status").unwrap().background);
 }
 
 #[test]
@@ -1845,4 +1850,150 @@ fn mcp_store_round_trips_args() {
     assert_eq!(listed[0].args, vec!["-y".to_owned(), "git-mcp".to_owned()]);
     store.replace_mcp(&[]).unwrap();
     assert!(store.list_mcp().unwrap().is_empty());
+}
+
+struct BgInvoke {
+    phase: parking_lot::Mutex<std::collections::HashMap<String, String>>,
+}
+
+#[async_trait]
+impl ToolInvoke for BgInvoke {
+    async fn invoke(&self, name: &str, _args: Value) -> Result<Value, String> {
+        Err(format!("{name} is background-only"))
+    }
+
+    async fn start_background(
+        &self,
+        execution_id: &str,
+        _name: &str,
+        _args: Value,
+        _deadline_ms: Option<u64>,
+    ) -> Result<(), String> {
+        self.phase
+            .lock()
+            .insert(execution_id.to_owned(), "running".to_owned());
+        Ok(())
+    }
+
+    async fn cancel_background(&self, execution_id: &str) -> Result<String, String> {
+        let mut phase = self.phase.lock();
+        match phase.get(execution_id).map(String::as_str) {
+            None => Ok("unknown".to_owned()),
+            Some("completed" | "cancelled") => Ok("already_terminal".to_owned()),
+            Some(_) => {
+                phase.insert(execution_id.to_owned(), "cancelled".to_owned());
+                Ok("cancelled".to_owned())
+            }
+        }
+    }
+
+    async fn status_background(
+        &self,
+        execution_id: &str,
+    ) -> Result<(String, Option<String>), String> {
+        Ok((
+            self.phase
+                .lock()
+                .get(execution_id)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned()),
+            None,
+        ))
+    }
+}
+
+fn bg_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "bg.sleep".to_owned(),
+        description: "sleep in the background".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: Vec::new(),
+        source: ToolSource::Plugin {
+            plugin_id: "tool.bg".to_owned(),
+        },
+        timeout_ms: Some(2_000),
+        sensitivity: Sensitivity::None,
+        category: String::new(),
+        keywords: Vec::new(),
+        examples: Vec::new(),
+        background: true,
+    }
+}
+
+#[tokio::test]
+async fn background_tool_releases_the_turn_and_reports_once() {
+    let (_dir, _store, host, soul) = open_work();
+    host.set_report_sink({
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tx
+    });
+    let registry = Arc::new(ToolRegistry::new());
+    let invoke = Arc::new(BgInvoke {
+        phase: parking_lot::Mutex::new(std::collections::HashMap::new()),
+    });
+    registry.register_with(bg_def(), Arc::clone(&invoke) as Arc<dyn ToolInvoke>);
+    let router = WorkSurfaceRouter::new(Arc::clone(&host), Arc::clone(&registry), soul, 8);
+    let outcome = router
+        .on_tool("bg.sleep", json!({"ms": 1}), 0)
+        .await
+        .unwrap();
+    let SurfaceToolOutcome::Result(value) = outcome else {
+        panic!("expected immediate result, got {outcome:?}");
+    };
+    assert_eq!(value["status"], "started");
+    let execution_id = value["execution_id"].as_str().unwrap().to_owned();
+    invoke
+        .phase
+        .lock()
+        .insert(execution_id.clone(), "completed".to_owned());
+    tokio::time::sleep(StdDuration::from_millis(80)).await;
+    let row = host.tool_execution(&execution_id).unwrap().unwrap();
+    assert!(row.status.is_terminal());
+    let first = host
+        .apply_tool_completion(
+            &execution_id,
+            crate::ToolExecStatus::Completed,
+            None,
+            "again",
+        )
+        .unwrap();
+    assert!(first.is_none());
+}
+
+#[tokio::test]
+async fn background_cancel_unknown_and_timeout_are_distinct() {
+    let (_dir, _store, host, soul) = open_work();
+    assert_eq!(host.cancel_tool_execution("missing").unwrap(), "unknown");
+    host.begin_tool_execution(&crate::NewToolExecution {
+        execution_id: "exec-t".to_owned(),
+        job_id: None,
+        soul_id: soul,
+        tool_name: "bg.sleep".to_owned(),
+        plugin_id: Some("tool.bg".to_owned()),
+        call_id: "c".to_owned(),
+    })
+    .unwrap();
+    let report = host.timeout_tool_execution("exec-t").unwrap().unwrap();
+    assert!(report.speech.contains("timed out"));
+    assert_eq!(
+        host.tool_execution("exec-t").unwrap().unwrap().status,
+        crate::ToolExecStatus::TimedOut
+    );
+    host.begin_tool_execution(&crate::NewToolExecution {
+        execution_id: "exec-c".to_owned(),
+        job_id: None,
+        soul_id: soul,
+        tool_name: "bg.sleep".to_owned(),
+        plugin_id: Some("tool.bg".to_owned()),
+        call_id: "c".to_owned(),
+    })
+    .unwrap();
+    let crash = host
+        .crash_tool_execution("exec-c", "plugin_crash")
+        .unwrap()
+        .unwrap();
+    assert!(crash.speech.contains("stopped"));
+    let reports = host.recover_tool_executions().unwrap();
+    assert!(reports.is_empty());
 }

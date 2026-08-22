@@ -39,6 +39,7 @@ impl ToolHandler for EchoHandler {
             category: String::new(),
             keywords: Vec::new(),
             examples: Vec::new(),
+            background: false,
         }]
     }
     async fn call(

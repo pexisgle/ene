@@ -5,7 +5,8 @@ use crate::spill::{DEFAULT_SOFT_LIMIT_BYTES, bound_brief};
 use crate::store::WorkStore;
 use crate::types::{
     Artifact, CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus, NewJob,
-    OpenQuestion, UpgradeReason, WorkDelegationSettings,
+    NewToolExecution, OpenQuestion, ToolExecStatus, ToolExecution, UpgradeReason,
+    WorkDelegationSettings,
 };
 use chrono::{DateTime, Utc};
 use ene_registry::{Layer, ToolDefinition, ToolRegistry};
@@ -468,6 +469,16 @@ impl DelegationHost {
             JobStatus::Cancelled => Err(WorkError::Cancelled),
             _ => {
                 self.store.set_status(id, JobStatus::Cancelled, None)?;
+                for exec in self.store.list_tool_executions_for_job(id)? {
+                    if !exec.status.is_terminal() {
+                        let _ = self.store.complete_tool_execution_once(
+                            &exec.execution_id,
+                            ToolExecStatus::Cancelled,
+                            None,
+                            None,
+                        )?;
+                    }
+                }
                 Ok(JobStatus::Cancelled)
             }
         }
@@ -475,7 +486,7 @@ impl DelegationHost {
 
     pub fn recover_interrupted(&self) -> Result<Vec<CompanionReport>, WorkError> {
         let jobs = self.store.interrupt_running()?;
-        Ok(jobs
+        let mut reports: Vec<CompanionReport> = jobs
             .into_iter()
             .map(|job| {
                 let speech = match job.status {
@@ -496,7 +507,111 @@ impl DelegationHost {
                     starts_conversation: true,
                 }
             })
-            .collect())
+            .collect();
+        reports.extend(self.recover_tool_executions()?);
+        Ok(reports)
+    }
+
+    pub fn begin_tool_execution(&self, new: &NewToolExecution) -> Result<ToolExecution, WorkError> {
+        self.store.insert_tool_execution(new)
+    }
+
+    pub fn tool_execution(&self, execution_id: &str) -> Result<Option<ToolExecution>, WorkError> {
+        self.store.get_tool_execution(execution_id)
+    }
+
+    pub fn apply_tool_completion(
+        &self,
+        execution_id: &str,
+        status: ToolExecStatus,
+        error_class: Option<&str>,
+        summary: &str,
+    ) -> Result<Option<CompanionReport>, WorkError> {
+        let Some(row) = self.store.get_tool_execution(execution_id)? else {
+            return Err(WorkError::UnknownExecution(execution_id.to_owned()));
+        };
+        if !self.store.complete_tool_execution_once(
+            execution_id,
+            status,
+            error_class,
+            Some(summary),
+        )? {
+            return Ok(None);
+        }
+        if let Some(job_id) = row.job_id {
+            self.store
+                .mailbox_push(job_id, "child_to_parent", "tool_complete", summary)?;
+        }
+        let speech = match status {
+            ToolExecStatus::Cancelled => format!("{} was cancelled", row.tool_name),
+            ToolExecStatus::TimedOut => format!("{} timed out", row.tool_name),
+            ToolExecStatus::PluginCrash => format!(
+                "{} stopped ({})",
+                row.tool_name,
+                error_class.unwrap_or("plugin_crash")
+            ),
+            ToolExecStatus::Failed => format!("{} failed: {summary}", row.tool_name),
+            _ => format!("{} finished: {summary}", row.tool_name),
+        };
+        let intent = match status {
+            ToolExecStatus::Cancelled => "tool_cancelled",
+            ToolExecStatus::TimedOut => "tool_timeout",
+            ToolExecStatus::PluginCrash => "tool_plugin_crash",
+            ToolExecStatus::Failed => "tool_failed",
+            _ => "tool_complete",
+        };
+        Ok(Some(self.deliver_or_queue(
+            Self::speak(row.soul_id, row.job_id, speech, intent, true),
+            "tool_complete_queued",
+        )))
+    }
+
+    pub fn cancel_tool_execution(&self, execution_id: &str) -> Result<String, WorkError> {
+        let Some(row) = self.store.get_tool_execution(execution_id)? else {
+            return Ok("unknown".to_owned());
+        };
+        if row.status.is_terminal() {
+            return Ok("already_terminal".to_owned());
+        }
+        let _ =
+            self.apply_tool_completion(execution_id, ToolExecStatus::Cancelled, None, "cancelled")?;
+        Ok("cancelled".to_owned())
+    }
+
+    pub fn timeout_tool_execution(
+        &self,
+        execution_id: &str,
+    ) -> Result<Option<CompanionReport>, WorkError> {
+        self.apply_tool_completion(
+            execution_id,
+            ToolExecStatus::TimedOut,
+            Some("timeout"),
+            "timeout",
+        )
+    }
+
+    pub fn crash_tool_execution(
+        &self,
+        execution_id: &str,
+        error_class: &str,
+    ) -> Result<Option<CompanionReport>, WorkError> {
+        self.apply_tool_completion(
+            execution_id,
+            ToolExecStatus::PluginCrash,
+            Some(error_class),
+            error_class,
+        )
+    }
+
+    pub fn recover_tool_executions(&self) -> Result<Vec<CompanionReport>, WorkError> {
+        let running = self.store.list_running_tool_executions()?;
+        let mut reports = Vec::new();
+        for row in running {
+            if let Some(report) = self.crash_tool_execution(&row.execution_id, "host_restart")? {
+                reports.push(report);
+            }
+        }
+        Ok(reports)
     }
 
     pub fn question(&self, id: DelegationId, prompt: &str) -> Result<CompanionReport, WorkError> {

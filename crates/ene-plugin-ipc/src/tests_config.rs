@@ -37,6 +37,7 @@ impl ToolHandler for BareHandler {
             category: String::new(),
             keywords: Vec::new(),
             examples: Vec::new(),
+            background: false,
         }]
     }
     async fn call(

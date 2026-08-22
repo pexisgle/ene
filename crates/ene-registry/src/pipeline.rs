@@ -14,6 +14,42 @@ use thiserror::Error;
 #[async_trait]
 pub trait ToolInvoke: Send + Sync {
     async fn invoke(&self, name: &str, args: Value) -> Result<Value, String>;
+
+    async fn start_background(
+        &self,
+        execution_id: &str,
+        name: &str,
+        args: Value,
+        deadline_ms: Option<u64>,
+    ) -> Result<(), String> {
+        let _ = (execution_id, args, deadline_ms);
+        Err(format!("{name} is not background-capable"))
+    }
+
+    async fn cancel_background(&self, execution_id: &str) -> Result<String, String> {
+        let _ = execution_id;
+        Ok("unknown".to_owned())
+    }
+
+    async fn status_background(
+        &self,
+        execution_id: &str,
+    ) -> Result<(String, Option<String>), String> {
+        let _ = execution_id;
+        Ok(("unknown".to_owned(), Some("unknown_execution".to_owned())))
+    }
+
+    async fn take_completion(
+        &self,
+        execution_id: &str,
+    ) -> Option<ene_plugin_ipc::ToolExecutionComplete> {
+        let _ = execution_id;
+        None
+    }
+
+    async fn take_completions(&self) -> Vec<ene_plugin_ipc::ToolExecutionComplete> {
+        Vec::new()
+    }
 }
 
 /// In-process executor used by tests and by plugin-side handlers.
@@ -43,6 +79,8 @@ pub enum PipelineError {
     NotOnSurface(String),
     #[error("denied {name}: {reason}")]
     Denied { name: String, reason: String },
+    #[error("tool {0} is not background-capable")]
+    NotBackground(String),
     #[error("path escapes workspace: {0}")]
     PathEscape(String),
     #[error(transparent)]
@@ -260,11 +298,131 @@ impl ToolRegistry {
     async fn execute_inner(
         &self,
         name: &str,
-        mut args: Value,
+        args: Value,
         layer: Layer,
         host: bool,
         workspace_override: Option<PathBuf>,
     ) -> Result<Value, PipelineError> {
+        let (_, invoke, prepared) = self
+            .prepare(name, args, layer, host, workspace_override)
+            .await?;
+        invoke
+            .invoke(name, prepared)
+            .await
+            .map_err(PipelineError::Execute)
+    }
+
+    pub async fn start_background(
+        &self,
+        name: &str,
+        args: Value,
+        execution_id: &str,
+        layer: Layer,
+        deadline_ms: Option<u64>,
+    ) -> Result<(), PipelineError> {
+        self.start_background_inner(name, args, execution_id, layer, deadline_ms, None)
+            .await
+    }
+
+    pub async fn start_background_in_workspace(
+        &self,
+        name: &str,
+        args: Value,
+        execution_id: &str,
+        layer: Layer,
+        deadline_ms: Option<u64>,
+        workspace: &Path,
+    ) -> Result<(), PipelineError> {
+        self.start_background_inner(
+            name,
+            args,
+            execution_id,
+            layer,
+            deadline_ms,
+            Some(workspace.to_path_buf()),
+        )
+        .await
+    }
+
+    async fn start_background_inner(
+        &self,
+        name: &str,
+        args: Value,
+        execution_id: &str,
+        layer: Layer,
+        deadline_ms: Option<u64>,
+        workspace_override: Option<PathBuf>,
+    ) -> Result<(), PipelineError> {
+        let (def, invoke, prepared) = self
+            .prepare(name, args, layer, false, workspace_override)
+            .await?;
+        if !def.background {
+            return Err(PipelineError::NotBackground(name.to_owned()));
+        }
+        invoke
+            .start_background(execution_id, name, prepared, deadline_ms)
+            .await
+            .map_err(PipelineError::Execute)
+    }
+
+    pub async fn cancel_background(
+        &self,
+        name: &str,
+        execution_id: &str,
+    ) -> Result<String, PipelineError> {
+        let invoke = self.invoke_for(name)?;
+        invoke
+            .cancel_background(execution_id)
+            .await
+            .map_err(PipelineError::Execute)
+    }
+
+    pub async fn status_background(
+        &self,
+        name: &str,
+        execution_id: &str,
+    ) -> Result<(String, Option<String>), PipelineError> {
+        let invoke = self.invoke_for(name)?;
+        invoke
+            .status_background(execution_id)
+            .await
+            .map_err(PipelineError::Execute)
+    }
+
+    pub async fn take_completion(
+        &self,
+        name: &str,
+        execution_id: &str,
+    ) -> Result<Option<ene_plugin_ipc::ToolExecutionComplete>, PipelineError> {
+        let invoke = self.invoke_for(name)?;
+        Ok(invoke.take_completion(execution_id).await)
+    }
+
+    pub async fn take_completions(
+        &self,
+        name: &str,
+    ) -> Result<Vec<ene_plugin_ipc::ToolExecutionComplete>, PipelineError> {
+        let invoke = self.invoke_for(name)?;
+        Ok(invoke.take_completions().await)
+    }
+
+    fn invoke_for(&self, name: &str) -> Result<Arc<dyn ToolInvoke>, PipelineError> {
+        let tools = self.tools.lock();
+        let row = tools
+            .get(name)
+            .and_then(|stack| stack.last())
+            .ok_or_else(|| PipelineError::Unknown(name.to_owned()))?;
+        Ok(Arc::clone(&row.invoke))
+    }
+
+    async fn prepare(
+        &self,
+        name: &str,
+        mut args: Value,
+        layer: Layer,
+        host: bool,
+        workspace_override: Option<PathBuf>,
+    ) -> Result<(ToolDefinition, Arc<dyn ToolInvoke>, Value), PipelineError> {
         let (def, invoke) = {
             let tools = self.tools.lock();
             let row = tools
@@ -298,34 +456,8 @@ impl ToolRegistry {
             }
         }
         confine_fs_args(name, &mut args, workspace.as_deref())?;
-        confine_exec_args(name, &mut args, workspace.as_deref())?;
-        invoke
-            .invoke(name, args)
-            .await
-            .map_err(PipelineError::Execute)
+        Ok((def, invoke, args))
     }
-}
-
-fn confine_exec_args(
-    name: &str,
-    args: &mut Value,
-    workspace: Option<&Path>,
-) -> Result<(), PipelineError> {
-    if !matches!(name, "exec.run" | "exec.shell") {
-        return Ok(());
-    }
-    let Some(root) = workspace else {
-        return Ok(());
-    };
-    let raw = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
-    let confined = confine_tool_path(root, Path::new(raw), false)?;
-    if let Some(obj) = args.as_object_mut() {
-        obj.insert(
-            "cwd".to_owned(),
-            Value::String(confined.display().to_string()),
-        );
-    }
-    Ok(())
 }
 
 fn confine_fs_args(

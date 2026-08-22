@@ -1,7 +1,7 @@
 use crate::error::WorkError;
 use crate::types::{
-    Artifact, ArtifactKind, DelegationMode, Job, JobStatus, NewJob, NewSchedule, OpenQuestion,
-    Schedule, ScheduleAction,
+    Artifact, ArtifactKind, DelegationMode, Job, JobStatus, NewJob, NewSchedule, NewToolExecution,
+    OpenQuestion, Schedule, ScheduleAction, ToolExecStatus, ToolExecution,
 };
 use chrono::{DateTime, Utc};
 use cron::Schedule as Cron;
@@ -74,6 +74,21 @@ CREATE TABLE IF NOT EXISTS mailbox (
   body TEXT NOT NULL,
   ts TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS tool_executions (
+  execution_id TEXT PRIMARY KEY,
+  job_id TEXT,
+  soul_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  plugin_id TEXT,
+  call_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error_class TEXT,
+  result_json TEXT,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  completion_delivered INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_tool_exec_job ON tool_executions (job_id, status);
 ";
 
 /// Jobs / schedules / artifacts. Opens the same file as `companions.db`.
@@ -639,6 +654,106 @@ impl WorkStore {
         }
         Ok(())
     }
+
+    pub fn insert_tool_execution(
+        &self,
+        new: &NewToolExecution,
+    ) -> Result<ToolExecution, WorkError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.lock().execute(
+            "INSERT INTO tool_executions (
+                execution_id, job_id, soul_id, tool_name, plugin_id, call_id,
+                status, error_class, result_json, started_at, ended_at, completion_delivered
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                new.execution_id,
+                new.job_id.map(|id| id.to_string()),
+                new.soul_id.to_string(),
+                new.tool_name,
+                new.plugin_id,
+                new.call_id,
+                ToolExecStatus::Running.as_str(),
+                None::<String>,
+                None::<String>,
+                now,
+                None::<String>,
+                0_i32,
+            ],
+        )?;
+        self.get_tool_execution(&new.execution_id)?
+            .ok_or_else(|| WorkError::UnknownExecution(new.execution_id.clone()))
+    }
+
+    pub fn get_tool_execution(
+        &self,
+        execution_id: &str,
+    ) -> Result<Option<ToolExecution>, WorkError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT execution_id, job_id, soul_id, tool_name, plugin_id, call_id,
+                    status, error_class, result_json, started_at, ended_at, completion_delivered
+             FROM tool_executions WHERE execution_id = ?1",
+        )?;
+        stmt.query_row(params![execution_id], row_tool_exec)
+            .optional()
+            .map_err(WorkError::from)
+    }
+
+    pub fn complete_tool_execution_once(
+        &self,
+        execution_id: &str,
+        status: ToolExecStatus,
+        error_class: Option<&str>,
+        result_json: Option<&str>,
+    ) -> Result<bool, WorkError> {
+        let now = Utc::now().to_rfc3339();
+        let n = self.conn.lock().execute(
+            "UPDATE tool_executions
+             SET status = ?1, error_class = ?2, result_json = ?3, ended_at = ?4, completion_delivered = 1
+             WHERE execution_id = ?5 AND completion_delivered = 0",
+            params![
+                status.as_str(),
+                error_class,
+                result_json,
+                now,
+                execution_id
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn list_running_tool_executions(&self) -> Result<Vec<ToolExecution>, WorkError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT execution_id, job_id, soul_id, tool_name, plugin_id, call_id,
+                    status, error_class, result_json, started_at, ended_at, completion_delivered
+             FROM tool_executions WHERE status IN ('pending','running')",
+        )?;
+        let rows = stmt.query_map([], row_tool_exec)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_tool_executions_for_job(
+        &self,
+        job_id: DelegationId,
+    ) -> Result<Vec<ToolExecution>, WorkError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT execution_id, job_id, soul_id, tool_name, plugin_id, call_id,
+                    status, error_class, result_json, started_at, ended_at, completion_delivered
+             FROM tool_executions WHERE job_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![job_id.to_string()], row_tool_exec)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -748,5 +863,35 @@ fn row_art(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {
         size_bytes: row.get(7)?,
         created_at: row.get(8)?,
         delivered: row.get::<_, i32>(9)? != 0,
+    })
+}
+
+fn row_tool_exec(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolExecution> {
+    Ok(ToolExecution {
+        execution_id: row.get(0)?,
+        job_id: row
+            .get::<_, Option<String>>(1)?
+            .map(|raw| {
+                DelegationId::from_str(&raw).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })
+            })
+            .transpose()?,
+        soul_id: SoulId::from_str(&row.get::<_, String>(2)?).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        tool_name: row.get(3)?,
+        plugin_id: row.get(4)?,
+        call_id: row.get(5)?,
+        status: ToolExecStatus::parse(&row.get::<_, String>(6)?),
+        error_class: row.get(7)?,
+        result_json: row.get(8)?,
+        started_at: row.get(9)?,
+        ended_at: row.get(10)?,
+        completion_delivered: row.get::<_, i32>(11)? != 0,
     })
 }

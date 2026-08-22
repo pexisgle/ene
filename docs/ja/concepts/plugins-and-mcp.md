@@ -73,6 +73,29 @@ skills 配下の `SKILL.md` になります。対話レーンはそのカタロ�
 （`PATCH /api/v1/souls/{id}/skills`。空は導入済みすべて）、
 ジョブ層の `workflow.bookmark` はテーマを調べて Markdown を交付します。
 
+## Background tools
+
+ツール仕様は `background: true` を付けられます（ホスト専用。モデル schema には
+出ません）。ホストが安定した `execution_id` を割り当て、`ene-work` のジョブ
+（`companions.db` の `tool_executions`。第二の task store ではない）に永続し、
+`{execution_id, status: "started"}` を返して会話ターンを解放します。
+
+プラグインは `tool_background_start` / `cancel` / `status` を受けます（cancel と
+status は冪等、未知 id は `unknown`）。完了は `tool_execution_complete`
+通知です。取りこぼしは status 監視で補い、job/report レーンへ **一度だけ**
+届きます（`completion_delivered`）。
+
+| プラグイン / ホスト事象 | 永続 status | report intent |
+|---|---|---|
+| 成功 | `completed` | `tool_complete` |
+| キャンセル | `cancelled` | `tool_cancelled` |
+| ホスト期限 | `timed_out` | `tool_timeout` |
+| プラグインクラッシュ / IPC切断 | `plugin_crash` | `tool_plugin_crash` |
+| 実行中のホスト再起動 | `plugin_crash`（`error_class=host_restart`） | `tool_plugin_crash` |
+
+cancel 時にプラグインは子プロセスを止めます。`background` のない同期
+`tool_call` / `tool_result` と MCP ツールは従来どおりです。
+
 ## 起動プロファイル
 
 `plugins.profile` がハーネスの起動ツリーを選びます。`apply_profile` がファイバーを

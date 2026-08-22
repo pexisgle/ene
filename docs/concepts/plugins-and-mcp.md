@@ -73,6 +73,30 @@ decisions and affect classification. Each soul has a skill allowlist
 (`PATCH /api/v1/souls/{id}/skills`; empty means all installed skills).
 `workflow.bookmark` on the job layer researches a theme and delivers Markdown.
 
+## Background tools
+
+A tool spec may set `background: true` (host-only; it is not copied into model
+schemas). The host assigns a stable `execution_id`, persists the row on the
+`ene-work` job (`tool_executions` in `companions.db` — not a second task store),
+and returns `{execution_id, status: "started"}` so the conversation turn is
+released.
+
+The plugin loop accepts `tool_background_start` / `cancel` / `status` (idempotent
+cancel and status; unknown ids are `unknown`). Completion is a
+`tool_execution_complete` notification; the host also watches status so a missed
+push still reaches the job/report lane **once** (`completion_delivered`).
+
+| Plugin / host event | Persisted status | Report intent |
+|---|---|---|
+| success | `completed` | `tool_complete` |
+| cancel | `cancelled` | `tool_cancelled` |
+| host deadline | `timed_out` | `tool_timeout` |
+| plugin crash / IPC drop | `plugin_crash` | `tool_plugin_crash` |
+| host restart of a running row | `plugin_crash` (`error_class=host_restart`) | `tool_plugin_crash` |
+
+Plugins must stop child processes on cancel. Sync `tool_call` / `tool_result` and
+MCP tools without `background` stay unchanged.
+
 ## Launch profiles
 
 `plugins.profile` chooses the harness tree. `apply_profile` reconciles fibers;
