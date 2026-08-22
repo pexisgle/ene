@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ene_kernel::{ConversationModel, KernelError, LaneHandle};
 use ene_session::{SessionId, TurnId};
 use parking_lot::Mutex;
 
 use crate::{CoreDaemon, CoreError};
+
+/// Bound for waiting out an in-flight turn before `session/end` is written.
+const TURN_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One dialogue lane per session. HTTP handlers share these handles.
 pub struct LaneHub {
@@ -61,10 +65,20 @@ impl LaneHub {
         self.turns.lock().get(&turn).copied()
     }
 
-    /// Abort a running turn, stop the actor, and drop the cache entry.
+    /// Abort a running turn and wait until the actor is idle. No-op if there is no handle.
+    ///
+    /// Does not remove the cache entry; call [`Self::close`] after `session/end` is written.
+    pub async fn stop_turn(&self, session: SessionId) {
+        let Some(handle) = self.lanes.lock().get(&session).cloned() else {
+            return;
+        };
+        drop(handle.abort().await);
+        drop(handle.wait_until_idle(TURN_STOP_TIMEOUT).await);
+    }
+
+    /// Stop the actor and drop the cache entry. The turn must already be idle.
     pub async fn close(&self, session: SessionId) {
         if let Some(handle) = self.take(session) {
-            drop(handle.abort().await);
             drop(handle.shutdown().await);
         }
     }

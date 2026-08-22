@@ -1590,6 +1590,81 @@ async fn end_session_releases_lane_actor() {
 }
 
 #[tokio::test]
+async fn end_session_waits_for_turn_before_session_end() {
+    let (_dir, client, core, server) =
+        boot_server_with(Arc::new(ParkingJobModel) as Arc<dyn ConversationModel>).await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("end while generating".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hold".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let sid = SessionId::from_str(&session.id).unwrap();
+    let started = Instant::now();
+    loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        if events
+            .iter()
+            .any(|event| event.kind == EventKind::TurnStart)
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "turn did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    client
+        .end_session(
+            &session.id,
+            &EndSessionRequest {
+                reason: "explicit".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let events = core.store().load_events(sid, 0).unwrap();
+    assert_eq!(
+        events.last().map(|event| &event.kind),
+        Some(&EventKind::SessionEnd)
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event.kind,
+            EventKind::AssistantMessage | EventKind::ToolResult
+        )),
+        "aborted generate must not write assistant speech or tool results"
+    );
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let later = core.store().load_events(sid, 0).unwrap();
+    assert_eq!(later.len(), events.len());
+    assert_eq!(
+        later.last().map(|event| &event.kind),
+        Some(&EventKind::SessionEnd)
+    );
+    assert_eq!(server.lane_count(), 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn idle_timeout_releases_lane_actor() {
     let (_dir, client, core, server) = boot_server().await;
     let soul = first_soul_id(&client).await;

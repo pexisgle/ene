@@ -180,9 +180,9 @@ pub async fn list_sessions(
     State(state): State<AppState>,
     Query(filter): Query<SoulFilter>,
 ) -> Result<Json<Page<SessionView>>, ApiReject> {
-    let ended = state.core.end_idle_sessions().await.map_err(map_core)?;
-    for session in ended {
-        state.lanes.close(session).await;
+    let idle = state.core.list_idle_sessions().map_err(map_core)?;
+    for session in idle {
+        finish_session(&state, session, SessionEndReason::IdleTimeout).await?;
     }
     let soul = filter.soul_id.as_deref().map(parse_soul).transpose()?;
     let mut items = state
@@ -329,12 +329,7 @@ pub async fn split_session(
         .get_session(session)
         .map_err(map_session)?;
     if previous.ended_at.is_none() {
-        state
-            .core
-            .end_session(session, SessionEndReason::Explicit)
-            .await
-            .map_err(map_core)?;
-        state.lanes.close(session).await;
+        finish_session(&state, session, SessionEndReason::Explicit).await?;
     }
     let previous = state
         .core
@@ -375,13 +370,24 @@ pub async fn end_session(
     } else {
         SessionEndReason::Explicit
     };
+    finish_session(&state, session, reason).await?;
+    get_session(State(state), Path(id)).await
+}
+
+/// Abort the running turn, wait until it has committed, write `session/end`, then stop the actor.
+async fn finish_session(
+    state: &AppState,
+    session: SessionId,
+    reason: SessionEndReason,
+) -> Result<(), ApiReject> {
+    state.lanes.stop_turn(session).await;
     state
         .core
         .end_session(session, reason)
         .await
         .map_err(map_core)?;
     state.lanes.close(session).await;
-    get_session(State(state), Path(id)).await
+    Ok(())
 }
 
 pub async fn barge_in(

@@ -573,20 +573,19 @@ impl CoreDaemon {
         })
     }
 
-    /// End conversations whose last event is older than `store.sessions.idle_timeout_secs`.
-    pub async fn end_idle_sessions(&self) -> Result<Vec<SessionId>, CoreError> {
-        self.end_idle_sessions_since(self.idle_timeout_secs()).await
+    /// Conversations whose last event is older than `store.sessions.idle_timeout_secs`.
+    ///
+    /// Does not write `session/end`; the HTTP layer stops the turn first.
+    pub fn list_idle_sessions(&self) -> Result<Vec<SessionId>, CoreError> {
+        self.list_idle_sessions_since(self.idle_timeout_secs())
     }
 
-    async fn end_idle_sessions_since(
-        &self,
-        timeout_secs: u64,
-    ) -> Result<Vec<SessionId>, CoreError> {
+    fn list_idle_sessions_since(&self, timeout_secs: u64) -> Result<Vec<SessionId>, CoreError> {
         if timeout_secs == 0 {
             return Ok(Vec::new());
         }
         let now = chrono::Utc::now();
-        let mut ended = Vec::new();
+        let mut idle = Vec::new();
         for meta in self.store.list_sessions(None)? {
             if meta.ended_at.is_some() {
                 continue;
@@ -601,11 +600,9 @@ impl CoreDaemon {
             if age.num_seconds() < i64::try_from(timeout_secs).unwrap_or(i64::MAX) {
                 continue;
             }
-            self.end_session(meta.id, SessionEndReason::IdleTimeout)
-                .await?;
-            ended.push(meta.id);
+            idle.push(meta.id);
         }
-        Ok(ended)
+        Ok(idle)
     }
 
     fn idle_timeout_secs(&self) -> u64 {
@@ -617,6 +614,7 @@ impl CoreDaemon {
         *self.idle_timeout_secs.lock() = secs;
     }
 
+    /// Write `session/end`. Callers must stop any in-flight turn first.
     pub async fn end_session(
         &self,
         session: SessionId,
