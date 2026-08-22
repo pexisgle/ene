@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn direct_exec_uses_shell_equivalent_approval_boundary() {
-        let run = host_spec_for("exec.run").expect("exec.run host spec");
+        let run = host_spec_for("exec.run").unwrap();
         assert!(run.side_effects.iter().any(|effect| effect == "exec"));
         assert!(run.side_effects.iter().any(|effect| effect == "shell"));
         assert_eq!(host_sensitivity("exec.run"), Sensitivity::Medium);
