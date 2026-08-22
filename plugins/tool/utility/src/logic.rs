@@ -293,15 +293,13 @@ fn random_integer_inclusive(min: i64, max: i64) -> Result<i64, String> {
     loop {
         let sample = u128::from(random_u64());
         if sample < threshold {
-            let offset = i128::try_from(sample % range).map_err(|_| {
-                structured_error("invalid_range", "integer range is too large")
-            })?;
+            let offset = i128::try_from(sample % range)
+                .map_err(|_| structured_error("invalid_range", "integer range is too large"))?;
             let drawn = i128::from(min)
                 .checked_add(offset)
                 .ok_or_else(|| structured_error("invalid_range", "integer range is too large"))?;
-            return i64::try_from(drawn).map_err(|_| {
-                structured_error("invalid_range", "integer range is too large")
-            });
+            return i64::try_from(drawn)
+                .map_err(|_| structured_error("invalid_range", "integer range is too large"));
         }
     }
 }
@@ -1301,8 +1299,14 @@ mod tests {
             let value = random_integer_inclusive(i64::MIN, i64::MAX).unwrap();
             assert!((i64::MIN..=i64::MAX).contains(&value), "{value}");
         }
-        assert_eq!(random_integer_inclusive(i64::MIN, i64::MIN).unwrap(), i64::MIN);
-        assert_eq!(random_integer_inclusive(i64::MAX, i64::MAX).unwrap(), i64::MAX);
+        assert_eq!(
+            random_integer_inclusive(i64::MIN, i64::MIN).unwrap(),
+            i64::MIN
+        );
+        assert_eq!(
+            random_integer_inclusive(i64::MAX, i64::MAX).unwrap(),
+            i64::MAX
+        );
         let value = random_integer_inclusive(i64::MIN, i64::MIN + 1).unwrap();
         assert!(value == i64::MIN || value == i64::MIN + 1, "{value}");
         let value = random_integer_inclusive(i64::MAX - 1, i64::MAX).unwrap();
