@@ -1493,7 +1493,7 @@ fn spill_huge_tool_output_keeps_brief_bounded() {
 
 #[test]
 fn bookmark_workflow_delivers_markdown_artifact() {
-    let (_dir, store, host, soul) = open_work();
+    let (dir, store, host, soul) = open_work();
     let job = public_start(&host, soul, "travel notes");
     store.set_status(job.id, JobStatus::Running, None).unwrap();
     host.present_plan(job.id, "1. write markdown\n2. deliver")
@@ -1515,7 +1515,7 @@ fn bookmark_workflow_delivers_markdown_artifact() {
     assert!(report.speech.contains("bookmark ready"));
     let arts = store.artifacts_for(job.id).unwrap();
     assert_eq!(arts.len(), 1);
-    let dest = crate::soul_artifacts_dir(_dir.path(), soul);
+    let dest = crate::soul_artifacts_dir(dir.path(), soul);
     assert!(PathBuf::from(&artifact.path).starts_with(&dest));
     let content = std::fs::read_to_string(&artifact.path).unwrap();
     assert!(content.contains("# Tokyo trip"));
