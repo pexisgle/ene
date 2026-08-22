@@ -159,6 +159,28 @@ struct StageApp {
 }
 
 impl StageApp {
+    fn open_chat(&mut self, event_loop: &ActiveEventLoop) {
+        self.surface.chat_open = true;
+        self.surface.focus_chat = true;
+        if let Some(chat) = self.chat.as_ref() {
+            chat.show_and_focus();
+            return;
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        match ChromeWindow::create(
+            event_loop,
+            gpu,
+            ChromeKind::Chat,
+            PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
+            true,
+        ) {
+            Ok(win) => self.chat = Some(win),
+            Err(err) => tracing::warn!(error = %err, "chat window failed"),
+        }
+    }
+
     fn spawn<F>(&self, task: F)
     where
         F: std::future::Future<Output = AsyncOutcome> + Send + 'static,
@@ -866,11 +888,7 @@ impl StageApp {
         for action in tray_actions {
             match action {
                 TrayAction::OpenDetail => self.open_detail(event_loop, DetailTab::Home),
-                TrayAction::OpenChatFocus => {
-                    self.surface.chat_open = true;
-                    self.surface.focus_chat = true;
-                    self.ensure_chat(event_loop);
-                }
+                TrayAction::OpenChatFocus => self.open_chat(event_loop),
                 TrayAction::ToggleMic => self.toggle_mic(),
                 TrayAction::Quit => self.surface.quit = true,
             }
@@ -887,11 +905,7 @@ impl StageApp {
                 }
                 ShellAction::OpenDetail => self.open_detail(event_loop, DetailTab::Home),
                 ShellAction::OpenLog => self.open_detail(event_loop, DetailTab::Log),
-                ShellAction::FocusChat => {
-                    self.surface.chat_open = true;
-                    self.surface.focus_chat = true;
-                    self.ensure_chat(event_loop);
-                }
+                ShellAction::FocusChat => self.open_chat(event_loop),
                 ShellAction::ToggleMic => self.toggle_mic(),
                 ShellAction::Quit => self.surface.quit = true,
             }
@@ -923,6 +937,9 @@ impl StageApp {
         if self.detail.save_local_pending {
             self.detail.save_local_pending = false;
             self.save_local_settings();
+        }
+        if std::mem::take(&mut self.detail.request_chat_open) {
+            self.open_chat(event_loop);
         }
     }
 
@@ -1170,25 +1187,6 @@ impl StageApp {
         }
     }
 
-    fn ensure_chat(&mut self, event_loop: &ActiveEventLoop) {
-        if self.chat.is_some() {
-            return;
-        }
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        match ChromeWindow::create(
-            event_loop,
-            gpu,
-            ChromeKind::Chat,
-            PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
-            true,
-        ) {
-            Ok(win) => self.chat = Some(win),
-            Err(err) => tracing::warn!(error = %err, "chat window failed"),
-        }
-    }
-
     fn sync_caption_window(&mut self) {
         if !self.surface.caption_visible() {
             self.caption = None;
@@ -1240,10 +1238,7 @@ impl StageApp {
         match key {
             Key::Named(NamedKey::Escape) => self.surface.quit = true,
             Key::Named(NamedKey::F1) => self.open_detail(event_loop, DetailTab::Companion),
-            Key::Named(NamedKey::F2) => {
-                self.surface.chat_open = true;
-                self.ensure_chat(event_loop);
-            }
+            Key::Named(NamedKey::F2) => self.open_chat(event_loop),
             Key::Named(NamedKey::F3) => {
                 if let Some(overlay) = self.overlay.as_mut() {
                     overlay.collider_debug = !overlay.collider_debug;
@@ -1351,7 +1346,11 @@ impl StageApp {
 
     fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {
         if self.surface.chat_open {
-            self.ensure_chat(event_loop);
+            if let Some(chat) = self.chat.as_ref() {
+                chat.show_and_focus();
+            } else {
+                self.open_chat(event_loop);
+            }
         }
         if self.settings.caption_enabled && self.surface.caption_visible() {
             self.ensure_caption(event_loop);
@@ -1486,7 +1485,7 @@ impl ApplicationHandler for StageApp {
         self.gpu = Some(gpu);
         self.reload_avatar();
         if self.surface.chat_open {
-            self.ensure_chat(event_loop);
+            self.open_chat(event_loop);
         }
     }
 
