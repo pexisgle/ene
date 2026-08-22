@@ -106,7 +106,7 @@ impl StageSession {
         let (soul_id, occupants, avatar_path, motions_dir) =
             resolve_stage(&client, MAX_OVERLAY_BODIES).await?;
         let session_id = resolve_session_id(&client, &soul_id).await?;
-        let history = client.history(&session_id, "surface").await?;
+        let history = normalize_history(client.history(&session_id, "surface").await?);
         Ok(Self {
             client,
             soul_id,
@@ -121,7 +121,7 @@ impl StageSession {
 
     pub async fn retarget_soul(&mut self, soul_id: &str) -> Result<(), ApiError> {
         let session_id = resolve_session_id(&self.client, soul_id).await?;
-        let history = self.client.history(&session_id, "surface").await?;
+        let history = normalize_history(self.client.history(&session_id, "surface").await?);
         soul_id.clone_into(&mut self.soul_id);
         self.session_id = session_id;
         *self.turn_id.lock() = None;
@@ -211,7 +211,7 @@ impl StageSession {
     }
 
     pub async fn refresh_history(&self) -> Result<HistoryResponse, ApiError> {
-        let history = self.client.history(&self.session_id, "surface").await?;
+        let history = normalize_history(self.client.history(&self.session_id, "surface").await?);
         *self.history.lock() = history.clone();
         Ok(history)
     }
@@ -257,7 +257,7 @@ impl StageSession {
 
 impl SessionHandle {
     pub async fn refresh_history(&self) -> Result<HistoryResponse, ApiError> {
-        let history = self.client.history(&self.session_id, "surface").await?;
+        let history = normalize_history(self.client.history(&self.session_id, "surface").await?);
         *self.history.lock() = history.clone();
         Ok(history)
     }
@@ -538,9 +538,38 @@ async fn resolve_session_id(client: &ApiClient, soul_id: &str) -> Result<String,
     Ok(created.id)
 }
 
+/// Keep the chat transcript in chronological order regardless of API ordering.
+#[must_use]
+pub fn normalize_history(mut history: HistoryResponse) -> HistoryResponse {
+    history.messages.sort_by_key(|message| message.seq);
+    history
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_api::MessageResponse;
+
+    #[test]
+    fn history_is_normalized_oldest_to_newest() {
+        let message = |seq: u64, text: &'static str| MessageResponse {
+            seq,
+            role: "user".to_owned(),
+            text: text.to_owned(),
+        };
+        let normalized = normalize_history(HistoryResponse {
+            messages: vec![
+                message(3, "third"),
+                message(1, "first"),
+                message(2, "second"),
+            ],
+            depth: "surface".to_owned(),
+        });
+
+        let seqs: Vec<_> = normalized.messages.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, [1, 2, 3]);
+        assert_eq!(normalized.depth, "surface");
+    }
 
     #[test]
     fn pick_avatar_occupant_prefers_avatar_path() {
