@@ -439,32 +439,32 @@ fn apply_edit(body: &str, old: &str, new: &str, replace_all: bool) -> Result<Str
         }
         return Err("ambiguous match: old text occurs multiple times".to_owned());
     }
-    if replace_all {
-        return Err("old text not found".to_owned());
-    }
-    let normalized_body = normalize_line_endings(body);
     let normalized_old = normalize_line_endings(old);
-    let mut candidates: Vec<(usize, usize)> =
-        find_indent_matches(&normalized_body, &normalized_old)
-            .into_iter()
-            .chain(find_line_matches(&normalized_body, &normalized_old))
-            .chain(find_block_matches(&normalized_body, &normalized_old))
-            .collect();
+    let replacement = adapt_newline_style(body, new);
+    let mut candidates: Vec<(usize, usize)> = find_indent_matches(body, &normalized_old)
+        .into_iter()
+        .chain(find_line_matches(body, &normalized_old))
+        .chain(find_block_matches(body, &normalized_old))
+        .collect();
     candidates.sort_unstable();
     candidates.dedup();
 
     let selected = match (replace_all, candidates.as_slice()) {
-        (_, []) => None,
-        (false, [candidate]) => Some(vec![*candidate]),
-        (false, _) => return Err("old text not found".to_owned()),
-        (true, matches) => Some(matches.to_vec()),
+        (_, []) => return Err("old text not found".to_owned()),
+        (false, [candidate]) => vec![*candidate],
+        (false, _) => return Err("ambiguous match: old text occurs multiple times".to_owned()),
+        (true, matches) => matches.to_vec(),
     };
 
-    replace_spans(
-        &normalized_body,
-        new,
-        selected.ok_or_else(|| "old text not found".to_owned())?,
-    )
+    replace_spans(body, &replacement, selected)
+}
+
+fn adapt_newline_style(body: &str, new: &str) -> String {
+    if body.contains("\r\n") {
+        normalize_line_endings(new).replace('\n', "\r\n")
+    } else {
+        new.to_owned()
+    }
 }
 
 fn normalize_line_endings(text: &str) -> String {
@@ -550,7 +550,6 @@ fn find_indent_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
             line_text(body, *line).trim_start().trim_end_matches('\r') == expected.trim()
         }) {
             matches.push((window[0].start, window[window.len() - 1].term_end));
-            break;
         }
     }
     matches
@@ -608,7 +607,7 @@ fn find_block_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
     for (start_idx, start_line) in lines
         .iter()
         .enumerate()
-        .skip_while(|(_, line)| line_text(body, **line).trim() != first)
+        .filter(|(_, line)| line_text(body, **line).trim() == first)
     {
         let Some(end_idx) = lines[start_idx + 2..]
             .iter()
@@ -1286,5 +1285,35 @@ mod tests {
         let body = "    alpha\n    beta\n";
         let next = apply_edit(body, "alpha\nbeta", "OK", false).unwrap();
         assert_eq!(next, "OK");
+    }
+
+    #[test]
+    fn tolerant_edit_preserves_crlf() {
+        let body = "    alpha\r\n    beta\r\n";
+        let next = apply_edit(body, "alpha\nbeta", "gamma\ndelta", false).unwrap();
+        assert!(next.contains("\r\n"), "expected CRLF line endings: {next:?}");
+        assert_eq!(next, "gamma\r\ndelta");
+    }
+
+    #[test]
+    fn tolerant_edit_rejects_ambiguous_indent_matches() {
+        let body = "    dup\n    dup\n";
+        let err = apply_edit(body, "dup", "x", false).unwrap_err();
+        assert!(err.contains("ambiguous match"), "{err}");
+    }
+
+    #[test]
+    fn tolerant_replace_all_replaces_every_indent_match() {
+        let body = "    one\n    two\n    one\n";
+        let next = apply_edit(body, "one", "X", true).unwrap();
+        assert_eq!(next, "    X\n    two\n    X\n");
+    }
+
+    #[test]
+    fn block_anchor_does_not_match_from_non_anchor_lines() {
+        let body = "BEGIN\nnot anchor\nEND\nBEGIN\nmiddle\nEND\n";
+        let old = "BEGIN\nmiddle\nEND";
+        let next = apply_edit(body, old, "OK", false).unwrap();
+        assert_eq!(next, "BEGIN\nnot anchor\nEND\nOK\n");
     }
 }
