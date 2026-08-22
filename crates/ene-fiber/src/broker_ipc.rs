@@ -98,7 +98,7 @@ impl BrokerServer {
         self.task.abort();
         #[cfg(unix)]
         if let Some(socket) = self.socket.take() {
-            let _ = std::fs::remove_file(socket);
+            drop(std::fs::remove_file(socket));
         }
     }
 
