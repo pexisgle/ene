@@ -1473,10 +1473,11 @@ fn show_work(
     });
     ui.label(i18n::fl("jobs-export-hint"));
     ui.heading(i18n::fl("jobs-active"));
-    if state.jobs.is_empty() {
+    let active_jobs = active_jobs(&state.jobs);
+    if active_jobs.is_empty() {
         ui.label(i18n::fl("jobs-empty"));
     }
-    for job in &state.jobs {
+    for job in active_jobs {
         ui.horizontal(|ui| {
             ui.label(format!("{} [{}] {}", job.title, job.status, job.id));
             if ui.button(i18n::fl("jobs-cancel")).clicked() {
@@ -1525,6 +1526,12 @@ fn show_work(
             }
         });
     }
+}
+
+fn active_jobs(jobs: &[JobView]) -> Vec<&JobView> {
+    jobs.iter()
+        .filter(|job| matches!(job.status.as_str(), "created" | "queued" | "running"))
+        .collect()
 }
 
 fn show_connections(
@@ -2531,6 +2538,34 @@ fn spawn_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_jobs_exclude_terminal_states() {
+        let job = |status: &str| JobView {
+            id: status.to_owned(),
+            soul_id: "soul".to_owned(),
+            title: "task".to_owned(),
+            goal: String::new(),
+            status: status.to_owned(),
+            progress_fraction: None,
+            progress_note: None,
+        };
+        let jobs = vec![
+            job("created"),
+            job("queued"),
+            job("running"),
+            job("completed"),
+            job("failed"),
+            job("cancelled"),
+            job("interrupted"),
+        ];
+
+        let active = active_jobs(&jobs)
+            .into_iter()
+            .map(|job| job.status.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(active, ["created", "queued", "running"]);
+    }
 
     #[test]
     fn parse_core_fields_reads_effective_tasks_and_profile() {
