@@ -1,4 +1,4 @@
-name: TMP 869 merge main
+name: TMP 869 normalize main
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  merge-main:
+  normalize:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -18,16 +18,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Merge current main, format, and clean probe files
+      - name: Merge current main and format
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin main
-          git merge --no-edit origin/main
-          git rm -f .github/workflows/tmp-869-conflicts.yml .tmp-869-conflicts.txt
+          if ! git merge --no-edit origin/main; then
+            {
+              echo '=== UNMERGED ==='
+              git diff --name-only --diff-filter=U || true
+              echo '=== CONFLICT MARKERS ==='
+              for f in $(git diff --name-only --diff-filter=U); do
+                echo "----- $f -----"
+                grep -n -B 12 -A 18 '^<<<<<<<\|^=======\|^>>>>>>>' "$f" || true
+              done
+            } > /tmp/conflicts.txt
+            git merge --abort || true
+            cp /tmp/conflicts.txt .tmp-869-conflicts.txt
+            git add .tmp-869-conflicts.txt
+            git commit -m "ci: refresh PR 869 merge conflicts" || true
+            git push origin HEAD:cursor/provider-retry-context-860b
+            exit 0
+          fi
           cargo fmt --all
           git add -A
-          git commit --amend --no-edit
+          if ! git diff --cached --quiet; then
+            git commit --amend --no-edit
+          fi
           git push origin HEAD:cursor/provider-retry-context-860b
