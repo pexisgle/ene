@@ -320,11 +320,13 @@ fn error_response(err: &BrokerError) -> BrokerResponse {
         code: match &err {
             BrokerError::Denied { .. } => BrokerErrorCode::Denied,
             BrokerError::InvalidGlob(_) => BrokerErrorCode::InvalidGlob,
+            BrokerError::InvalidRegex(_) => BrokerErrorCode::InvalidRegex,
             BrokerError::Io(_) => BrokerErrorCode::Io,
             BrokerError::Timeout => BrokerErrorCode::Timeout,
             BrokerError::InvalidUrl(_) => BrokerErrorCode::InvalidUrl,
             BrokerError::Ssrf(_) => BrokerErrorCode::Ssrf,
             BrokerError::Fetch(_) | BrokerError::RedirectLoop => BrokerErrorCode::Fetch,
+            BrokerError::SearchEngineUnavailable => BrokerErrorCode::SearchEngineUnavailable,
             BrokerError::PathEscape(_) => BrokerErrorCode::PathEscape,
             BrokerError::Oversize | BrokerError::Binary => BrokerErrorCode::Oversize,
             BrokerError::Symlink => BrokerErrorCode::Symlink,
@@ -354,6 +356,10 @@ mod tests {
             (BrokerError::Symlink, BrokerErrorCode::Symlink),
             (BrokerError::NotEmpty, BrokerErrorCode::DirectoryNotEmpty),
             (BrokerError::ReadOnly, BrokerErrorCode::ReadOnlyPath),
+            (
+                BrokerError::SearchEngineUnavailable,
+                BrokerErrorCode::SearchEngineUnavailable,
+            ),
         ];
         for (error, expected) in cases {
             let response = error_response(&error);

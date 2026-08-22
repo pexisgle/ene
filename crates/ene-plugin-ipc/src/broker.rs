@@ -175,6 +175,7 @@ pub enum BrokerErrorCode {
     InvalidUrl,
     Ssrf,
     Fetch,
+    SearchEngineUnavailable,
     Symlink,
     DirectoryNotEmpty,
     ReadOnlyPath,
