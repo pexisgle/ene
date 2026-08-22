@@ -185,6 +185,8 @@ impl Default for ServerSettings {
 pub struct BackupSettings {
     pub auto: bool,
     pub retention: u32,
+    /// Maximum bytes copied from `skills/` into a backup generation.
+    pub skills_max_bytes: u64,
 }
 
 impl Default for BackupSettings {
@@ -192,6 +194,7 @@ impl Default for BackupSettings {
         Self {
             auto: true,
             retention: 7,
+            skills_max_bytes: 100 * 1024 * 1024,
         }
     }
 }
