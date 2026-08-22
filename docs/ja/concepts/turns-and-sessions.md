@@ -96,6 +96,16 @@ surface、別窓の詳細画面（と `ene-ctl --verbose`）は detail です。
 プロバイダ失敗はターンを `failed` で終え、アシスタント発話としては書きません。
 履歴はその失敗を `status` メッセージとして出すので、再接続後もエラーが残ります。
 
+実行中ジョブからの ask-user はライブイベント `question.asked` です（`id` は
+ジョブ / 委譲 id、`prompt` / `text` は発話、`questions` は結合した質問配列）。
+stage / desktop / Web はこの名前を待ちます。回答は対話レーンではなく
+`POST /api/v1/jobs/{id}/answer`（`{ "text" }` または `{ "answers": ["…"] }`）で
+ジョブメールボックス（`host.answer`）へ送ります。同一ジョブに未回答が複数ある
+ときは `combine_pending_questions` で結合して出します。単一の `text` はその
+ジョブの未回答すべてに届きます。`question_timeout_hours`（既定 24 時間）を
+過ぎた未回答は、デーモンのティックがメールボックスに `assumption` を書いて
+閉じます。
+
 ## セッション
 
 **セッション**は 1 つの soul との連続した会話で、`SessionId` で識別されます。

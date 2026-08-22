@@ -1503,6 +1503,16 @@ fn combined_child_questions_merge_and_route_answers() {
 }
 
 #[test]
+fn question_report_carries_job_id() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "research");
+    let report = host.question(job.id, "which city?").unwrap();
+    assert_eq!(report.job_id, Some(job.id));
+    assert_eq!(report.inner_intent.as_deref(), Some("ask_user"));
+    assert_eq!(report.speech, "which city?");
+}
+
+#[test]
 fn question_timeout_proceeds_with_assumption() {
     let (_dir, store, host, soul) = open_work();
     let job = public_start(&host, soul, "planning");

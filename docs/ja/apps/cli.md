@@ -20,6 +20,10 @@ cargo run -p ene-ctl -- core status
 **ファイルのパス**（トークンそのものではない）を表示します。`core stop` は
 記録した PID にシグナルを送ります。
 
+`ene-ctl task list` / `task cancel` / `task answer <id> <text>` がジョブを
+扱います。`task answer` は `POST /api/v1/jobs/{id}/answer` で、チャットの
+follow-up ではありません。
+
 desktop 専用 API はありません。stage が線上でできることは `ene-ctl` でもできます。
 
 | コマンド | 意味 |

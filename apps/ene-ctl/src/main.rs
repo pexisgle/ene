@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use ene_api::{
-    ApiClient, CreateSessionRequest, MessageMode, MessageRequest, ResourceKind, SoulSkillsPatch,
+    AnswerJobRequest, ApiClient, CreateSessionRequest, MessageMode, MessageRequest, ResourceKind,
+    SoulSkillsPatch,
 };
 use ene_ctl::core;
 use ene_ctl::session;
@@ -154,6 +155,7 @@ enum SessionCmd {
 enum TaskCmd {
     List,
     Cancel { id: String },
+    Answer { id: String, text: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -297,6 +299,17 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
         Cmd::Task { op } => match op {
             TaskCmd::List => print_json(&client.list_jobs(None).await?)?,
             TaskCmd::Cancel { id } => print_json(&client.cancel_job(id).await?)?,
+            TaskCmd::Answer { id, text } => print_json(
+                &client
+                    .answer_job(
+                        id,
+                        &AnswerJobRequest {
+                            text: text.clone(),
+                            answers: Vec::new(),
+                        },
+                    )
+                    .await?,
+            )?,
         },
         Cmd::Memory { op } => match op {
             MemoryCmd::List { soul } => print_json(&client.list_memories(soul, None).await?)?,

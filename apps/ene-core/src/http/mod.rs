@@ -8,6 +8,7 @@ mod lanes;
 mod model;
 mod performance;
 pub(crate) mod proactive;
+mod questions;
 mod recall;
 mod routes;
 mod schedule;
@@ -241,6 +242,10 @@ impl CoreDaemon {
         let performance_task = tokio::spawn(async move {
             performance::run_loop(performance_state).await;
         });
+        let question_state = state.clone();
+        let question_task = tokio::spawn(async move {
+            questions::run_loop(question_state).await;
+        });
         let job_core = Arc::clone(&self);
         let job_task = tokio::spawn(async move {
             while let Some(job) = job_rx.recv().await {
@@ -286,6 +291,7 @@ impl CoreDaemon {
             report_task,
             proactive_task,
             schedule_task,
+            question_task,
             job_task,
             performance_task,
         ];
@@ -294,6 +300,7 @@ impl CoreDaemon {
             report_task,
             proactive_task,
             schedule_task,
+            question_task,
             job_task,
             performance_task,
         ];
@@ -359,6 +366,7 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/jobs", get(routes::list_jobs))
         .route("/api/v1/jobs/{id}", get(routes::get_job))
         .route("/api/v1/jobs/{id}/cancel", post(routes::cancel_job))
+        .route("/api/v1/jobs/{id}/answer", post(routes::answer_job))
         .route(
             "/api/v1/schedules",
             get(routes::list_schedules).post(routes::create_schedule),
