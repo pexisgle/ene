@@ -106,10 +106,7 @@ impl TurnPrefetch for RecallPrefetch {
         } else {
             out.extend(catalog);
         }
-        let now = chrono::Utc::now().to_rfc3339();
-        if let Err(err) = core.companions().expire_commitments(&now) {
-            tracing::debug!(error = %err, "expire commitments skipped");
-        }
+        core.expire_due_commitments();
         if let Ok(notes) = core.companions().standing_notes(soul, 8)
             && !notes.is_empty()
         {

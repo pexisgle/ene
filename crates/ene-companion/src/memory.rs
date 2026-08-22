@@ -166,6 +166,7 @@ pub struct MemoryRecord {
     pub access_count: u32,
     pub superseded_by: Option<MemoryId>,
     pub expires_at: Option<String>,
+    pub schedule_id: Option<String>,
     pub forgotten: bool,
 }
 

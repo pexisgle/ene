@@ -457,6 +457,28 @@ impl CoreDaemon {
         &self.vault
     }
 
+    /// Forget past-due commitments and disable any Work schedule they named.
+    pub fn expire_due_commitments(&self) {
+        let now = chrono::Utc::now().to_rfc3339();
+        match self.companions.expire_commitments(&now) {
+            Ok((_, schedule_ids)) => {
+                for id in schedule_ids {
+                    self.disable_linked_schedule(Some(&id));
+                }
+            }
+            Err(err) => tracing::debug!(error = %err, "expire commitments skipped"),
+        }
+    }
+
+    pub(crate) fn disable_linked_schedule(&self, schedule_id: Option<&str>) {
+        let Some(id) = schedule_id.filter(|value| !value.is_empty()) else {
+            return;
+        };
+        if let Err(err) = self.work.set_schedule_enabled(id, false) {
+            tracing::debug!(error = %err, schedule_id = %id, "disable linked schedule skipped");
+        }
+    }
+
     #[must_use]
     pub fn companions(&self) -> Arc<CompanionStore> {
         Arc::clone(&self.companions)

@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS memories (
   access_count INTEGER NOT NULL DEFAULT 0,
   superseded_by TEXT,
   expires_at TEXT,
+  schedule_id TEXT,
   forgotten INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_mem_scope ON memories (scope, soul_id, kind);
@@ -110,6 +111,7 @@ impl CompanionStore {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch(SCHEMA)?;
         ensure_candidate_expires_column(&conn)?;
+        ensure_memory_schedule_column(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             path,
@@ -267,6 +269,7 @@ impl CompanionStore {
             access_count: 0,
             superseded_by: None,
             expires_at: new.expires_at,
+            schedule_id: None,
             forgotten: false,
         };
         {
@@ -311,7 +314,7 @@ impl CompanionStore {
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
-                    superseded_by, expires_at, forgotten
+                    superseded_by, expires_at, schedule_id, forgotten
              FROM memories WHERE id = ?1",
         )?;
         stmt.query_row(params![id.to_string()], row_to_memory)
@@ -328,13 +331,13 @@ impl CompanionStore {
         let sql = if scope.is_some() {
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
-                    superseded_by, expires_at, forgotten
+                    superseded_by, expires_at, schedule_id, forgotten
              FROM memories WHERE soul_id = ?1 AND scope = ?2 AND forgotten = 0
              ORDER BY created_at DESC"
         } else {
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
-                    superseded_by, expires_at, forgotten
+                    superseded_by, expires_at, schedule_id, forgotten
              FROM memories WHERE soul_id = ?1 AND forgotten = 0
              ORDER BY created_at DESC"
         };
@@ -412,11 +415,26 @@ impl CompanionStore {
         Ok(())
     }
 
-    pub fn expire_commitments(&self, now: &str) -> Result<u32, CompanionError> {
-        let due: Vec<(MemoryId, SoulId)> = {
+    pub fn set_memory_schedule_id(
+        &self,
+        id: MemoryId,
+        schedule_id: Option<&str>,
+    ) -> Result<(), CompanionError> {
+        let n = self.conn.lock().execute(
+            "UPDATE memories SET schedule_id = ?1 WHERE id = ?2",
+            params![schedule_id, id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(CompanionError::UnknownMemory(id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn expire_commitments(&self, now: &str) -> Result<(u32, Vec<String>), CompanionError> {
+        let due: Vec<(MemoryId, SoulId, Option<String>)> = {
             let conn = self.conn.lock();
             let mut stmt = conn.prepare(
-                "SELECT id, soul_id FROM memories
+                "SELECT id, soul_id, schedule_id FROM memories
                  WHERE forgotten = 0 AND kind = 'commitment'
                    AND expires_at IS NOT NULL AND expires_at <= ?1",
             )?;
@@ -424,16 +442,21 @@ impl CompanionStore {
                 Ok((
                     MemoryId::from_str(&row.get::<_, String>(0)?).map_err(|err| sql_id(0, err))?,
                     SoulId::from_str(&row.get::<_, String>(1)?).map_err(|err| sql_id(1, err))?,
+                    row.get(2)?,
                 ))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         let mut n = 0u32;
-        for (id, soul_id) in due {
+        let mut schedule_ids = Vec::new();
+        for (id, soul_id, schedule_id) in due {
             self.forget(id, soul_id, JournalAction::Expired)?;
+            if let Some(schedule_id) = schedule_id.filter(|value| !value.is_empty()) {
+                schedule_ids.push(schedule_id);
+            }
             n += 1;
         }
-        Ok(n)
+        Ok((n, schedule_ids))
     }
 
     pub fn supersede(
@@ -477,7 +500,7 @@ impl CompanionStore {
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
-                    superseded_by, expires_at, forgotten
+                    superseded_by, expires_at, schedule_id, forgotten
              FROM memories
              WHERE soul_id = ?1 AND kind = ?2 AND lower(title) = lower(?3)
                AND superseded_by IS NULL AND forgotten = 0
@@ -500,7 +523,7 @@ impl CompanionStore {
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
-                    superseded_by, expires_at, forgotten
+                    superseded_by, expires_at, schedule_id, forgotten
              FROM memories
              WHERE scope = 'shared' AND kind = ?1 AND lower(title) = lower(?2)
                AND superseded_by IS NULL AND forgotten = 0
@@ -539,7 +562,7 @@ impl CompanionStore {
         let sql = if exclude_standing {
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
-                    superseded_by, expires_at, forgotten, embedding
+                    superseded_by, expires_at, schedule_id, forgotten, embedding
              FROM memories
              WHERE forgotten = 0 AND superseded_by IS NULL
                AND (scope = 'shared' OR soul_id = ?1)
@@ -548,7 +571,7 @@ impl CompanionStore {
         } else {
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
-                    superseded_by, expires_at, forgotten, embedding
+                    superseded_by, expires_at, schedule_id, forgotten, embedding
              FROM memories
              WHERE forgotten = 0 AND superseded_by IS NULL
                AND (scope = 'shared' OR soul_id = ?1)
@@ -557,7 +580,7 @@ impl CompanionStore {
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(params![soul_id.to_string(), now], |row| {
             let mem = row_to_memory(row)?;
-            let blob: Option<Vec<u8>> = row.get(16)?;
+            let blob: Option<Vec<u8>> = row.get(17)?;
             Ok((mem, blob))
         })?;
         let mut scored = Vec::new();
@@ -713,7 +736,7 @@ impl CompanionStore {
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
-                    superseded_by, expires_at, forgotten
+                    superseded_by, expires_at, schedule_id, forgotten
              FROM memories
              WHERE forgotten = 0 AND kind != 'commitment' AND salience < ?1
                AND superseded_by IS NULL",
@@ -950,7 +973,8 @@ fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
             .map(|raw| MemoryId::from_str(&raw).map_err(|err| sql_id(13, err)))
             .transpose()?,
         expires_at: row.get(14)?,
-        forgotten: row.get::<_, i32>(15)? != 0,
+        schedule_id: row.get(15)?,
+        forgotten: row.get::<_, i32>(16)? != 0,
     })
 }
 
@@ -1000,6 +1024,18 @@ fn ensure_candidate_expires_column(conn: &Connection) -> Result<(), CompanionErr
         "ALTER TABLE memory_candidates ADD COLUMN expires_at TEXT",
         [],
     )?;
+    Ok(())
+}
+
+fn ensure_memory_schedule_column(conn: &Connection) -> Result<(), CompanionError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == "schedule_id" {
+            return Ok(());
+        }
+    }
+    conn.execute("ALTER TABLE memories ADD COLUMN schedule_id TEXT", [])?;
     Ok(())
 }
 

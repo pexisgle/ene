@@ -573,6 +573,7 @@ impl CoreSession {
                         content: Some(content),
                         scope: None,
                         completed: None,
+                        schedule_id: None,
                     },
                 )
                 .await

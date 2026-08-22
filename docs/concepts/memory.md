@@ -60,9 +60,12 @@ even if vectors were stored earlier. Hits land on
 preference notes are `memory.user_profile`; open (unexpired) commitments
 are `memory.commitments`. Reading a memory bumps `access_count`.
 
-A commitment due is `expires_at` on the memory row. It does not create
-a Work schedule. Spoken reminders and cron jobs stay on
-`/api/v1/schedules` (see [Schedules](../guides/schedules.md)).
+A commitment due is `expires_at` on the memory row. Creating a due does
+not auto-create a Work schedule (cron rows are recurring; a due is a
+one-shot datetime). An optional `schedule_id` on the commitment names an
+existing `/api/v1/schedules` row for the same soul. Completing, deleting,
+or expiring the commitment disables that schedule. Clearing `schedule_id`
+with an empty PATCH leaves the Work row enabled.
 
 Open commitments are injected every turn. Past-due rows are forgotten
 with journal action `expired`. Completing one from Stage (or

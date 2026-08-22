@@ -102,10 +102,6 @@ impl CompanionRuntime {
         classifier: Option<&dyn ClassifyModel>,
     ) -> Result<Vec<ArbitrateOutcome>, CompanionError> {
         let settings = self.settings.lock().clone();
-        let now = Utc::now().to_rfc3339();
-        if let Err(err) = self.store.expire_commitments(&now) {
-            tracing::debug!(error = %err, "expire commitments skipped");
-        }
         if apply_forget_request(&self.store, soul_id, user_text, settings.forgetting.mode)? > 0 {
             return Ok(Vec::new());
         }

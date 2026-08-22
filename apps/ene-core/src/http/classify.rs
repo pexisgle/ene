@@ -240,6 +240,7 @@ impl TurnFinalizer for MemoryFinalizer {
         let Some(core) = self.core.upgrade() else {
             return;
         };
+        core.expire_due_commitments();
         let outcomes = match core
             .companion()
             .after_turn(

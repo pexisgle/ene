@@ -345,12 +345,74 @@ fn expire_commitments_journals_expired() {
             expires_at: Some("2000-01-01T00:00:00Z".into()),
         })
         .unwrap();
-    assert_eq!(store.expire_commitments("2001-01-01T00:00:00Z").unwrap(), 1);
+    assert_eq!(
+        store.expire_commitments("2001-01-01T00:00:00Z").unwrap().0,
+        1
+    );
     let forgotten = store.get_memory(row.id).unwrap().expect("row");
     assert!(forgotten.forgotten);
     let actions = store.journal_actions_for(row.id).unwrap();
     assert!(actions.iter().any(|action| action == "expired"));
     assert!(store.open_commitments(soul.id, 8).unwrap().is_empty());
+}
+
+#[test]
+fn commitment_schedule_id_round_trip() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let row = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "call".into(),
+            content: "call Ada".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    assert!(row.schedule_id.is_none());
+    store
+        .set_memory_schedule_id(row.id, Some("sched-1"))
+        .unwrap();
+    let linked = store.get_memory(row.id).unwrap().expect("row");
+    assert_eq!(linked.schedule_id.as_deref(), Some("sched-1"));
+    store.set_memory_schedule_id(row.id, None).unwrap();
+    let cleared = store.get_memory(row.id).unwrap().expect("row");
+    assert!(cleared.schedule_id.is_none());
+}
+
+#[test]
+fn expire_commitments_returns_linked_schedule_id() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let row = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "stale".into(),
+            content: "already passed".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2000-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    store
+        .set_memory_schedule_id(row.id, Some("sched-due"))
+        .unwrap();
+    let (n, ids) = store.expire_commitments("2001-01-01T00:00:00Z").unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(ids, vec!["sched-due".to_owned()]);
 }
 
 #[test]

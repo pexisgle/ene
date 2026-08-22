@@ -168,6 +168,7 @@ memory-reject = Reject
 memory-commitments = Commitments
 memory-commitments-empty = No open commitments.
 memory-due = Due
+memory-schedule = Schedule
 memory-complete = Complete
 character-soul = Soul
 character-display = Display name

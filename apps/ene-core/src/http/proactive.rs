@@ -145,10 +145,7 @@ async fn tick_session(
         screen_summary,
         screen_summary_status,
     };
-    let now_rfc = now.to_rfc3339();
-    if let Err(err) = state.core.companions().expire_commitments(&now_rfc) {
-        tracing::debug!(error = %err, "expire commitments skipped");
-    }
+    state.core.expire_due_commitments();
     let commitments = state
         .core
         .companions()

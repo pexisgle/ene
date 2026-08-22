@@ -2,8 +2,9 @@ use crate::{BootOptions, CoreDaemon};
 use async_trait::async_trait;
 use base64::Engine;
 use ene_api::{
-    ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
-    MessageMode, MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
+    ApiClient, ClaimResourceRequest, CreateScheduleRequest, CreateSessionRequest,
+    EndSessionRequest, HistoryResponse, MessageMode, MessageRequest, ResourceKind, RestoreRequest,
+    SoulSkillsPatch, ToolTestRequest,
 };
 use ene_companion::{
     CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, ScriptedClassify,
@@ -864,6 +865,150 @@ async fn http_complete_commitment_drops_from_list() {
     );
     let actions = core.companions().journal_actions_for(memory.id).unwrap();
     assert!(actions.iter().any(|action| action == "completed"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn http_commitment_schedule_association_disables_on_complete() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul_id = souls.items[0].id.clone();
+    let soul = ene_session::SoulId::from_str(&soul_id).unwrap();
+    let schedule = client
+        .create_schedule(&CreateScheduleRequest {
+            soul_id: soul_id.clone(),
+            name: "call reminder".into(),
+            spec: "0 9 * * *".into(),
+            timezone: "UTC".into(),
+            action: "remind".into(),
+            action_ref: Some("call Ada".into()),
+            important: false,
+        })
+        .await
+        .unwrap();
+    assert!(schedule.enabled);
+    let memory = core
+        .companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "call".into(),
+            content: "call Ada".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    let linked = client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                schedule_id: Some(schedule.id.clone()),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(linked.schedule_id.as_deref(), Some(schedule.id.as_str()));
+    let cleared = client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                schedule_id: Some(String::new()),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(cleared.schedule_id.is_none());
+    assert!(
+        core.work()
+            .get_schedule(&schedule.id)
+            .unwrap()
+            .expect("schedule")
+            .enabled
+    );
+    client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                schedule_id: Some(schedule.id.clone()),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                completed: Some(true),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    let after = core
+        .work()
+        .get_schedule(&schedule.id)
+        .unwrap()
+        .expect("schedule");
+    assert!(!after.enabled);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn expire_due_commitments_disables_linked_schedule() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul_id = souls.items[0].id.clone();
+    let soul = ene_session::SoulId::from_str(&soul_id).unwrap();
+    let schedule = client
+        .create_schedule(&CreateScheduleRequest {
+            soul_id,
+            name: "stale reminder".into(),
+            spec: "0 9 * * *".into(),
+            timezone: "UTC".into(),
+            action: "remind".into(),
+            action_ref: Some("stale".into()),
+            important: false,
+        })
+        .await
+        .unwrap();
+    let memory = core
+        .companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "stale".into(),
+            content: "already passed".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2000-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    core.companions()
+        .set_memory_schedule_id(memory.id, Some(&schedule.id))
+        .unwrap();
+    core.expire_due_commitments();
+    let forgotten = core
+        .companions()
+        .get_memory(memory.id)
+        .unwrap()
+        .expect("row");
+    assert!(forgotten.forgotten);
+    let after = core
+        .work()
+        .get_schedule(&schedule.id)
+        .unwrap()
+        .expect("schedule");
+    assert!(!after.enabled);
     server.shutdown().await;
 }
 

@@ -1196,6 +1196,9 @@ fn show_memory(
             if let Some(due) = memory.expires_at.as_deref() {
                 ui.label(format!("{}: {due}", i18n::fl("memory-due")));
             }
+            if let Some(schedule_id) = memory.schedule_id.as_deref() {
+                ui.label(format!("{}: {schedule_id}", i18n::fl("memory-schedule")));
+            }
             ui.horizontal(|ui| {
                 if ui.button(i18n::fl("memory-complete")).clicked() {
                     let id = memory.id.clone();
@@ -1207,9 +1210,8 @@ fn show_memory(
                                 .patch_memory(
                                     &id,
                                     &MemoryPatch {
-                                        content: None,
-                                        scope: None,
                                         completed: Some(true),
+                                        ..MemoryPatch::default()
                                     },
                                 )
                                 .await

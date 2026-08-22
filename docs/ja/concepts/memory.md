@@ -55,9 +55,12 @@ chat タスクのフォールバック）は、`memories.embedding` との cosin
 プロフィールと好みは `memory.user_profile`、期限切れでない約束は
 `memory.commitments` です。読んだメモリは `access_count` が上がります。
 
-約束の期限は記憶行の `expires_at` です。Work のスケジュールは作りません。
-発話リマインドや cron ジョブは `/api/v1/schedules` のままです
-（[スケジュール](../guides/schedules.md)）。
+約束の期限は記憶行の `expires_at` です。期限を付けても Work の
+スケジュールは自動では作りません（cron 行は繰り返し、期限は一度きりの
+日時です）。任意の `schedule_id` で、同じ soul の既存
+`/api/v1/schedules` 行を指せます。約束の完了・削除・期限切れはその
+スケジュールを無効にします。空文字の PATCH で `schedule_id` を外すと、
+Work 行は有効のままです。
 
 未完了の約束は毎ターン注入されます。期限を過ぎた行はジャーナル
 `expired` で忘却されます。Stage から完了する（または

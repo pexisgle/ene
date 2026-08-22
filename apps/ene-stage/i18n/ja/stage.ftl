@@ -168,6 +168,7 @@ memory-reject = 却下
 memory-commitments = 約束
 memory-commitments-empty = 未完了の約束はありません。
 memory-due = 期限
+memory-schedule = スケジュール
 memory-complete = 完了
 character-soul = ソウル
 character-display = 表示名
