@@ -1428,7 +1428,8 @@ mod tests {
                 &json!({"path": file.to_string_lossy(), "job_id": "del-job"}),
             )?;
             assert!(!file.exists());
-            execute("fs.undo", &json!({"job_id": "del-job"}))
+            execute("fs.undo", &json!({"job_id": "del-job"}))?;
+            Ok(())
         });
         assert_eq!(fs::read_to_string(&file).unwrap(), "keep-me");
     }
