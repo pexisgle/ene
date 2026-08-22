@@ -100,7 +100,8 @@ async fn broker_client_round_trips_fs_search() {
         return;
     }
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("input.txt"), "alpha\nbeta\n").unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hit\nhit\nhit\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "hit\nhit\nhit\n").unwrap();
     let mut broker = Broker::new(dir.path().to_path_buf());
     let uid = FiberUid::new();
     broker.grant(uid, "fs.search");
@@ -123,18 +124,43 @@ async fn broker_client_round_trips_fs_search() {
     let response = client
         .call(BrokerRequest::FsSearch {
             path: dir.path().display().to_string(),
-            query: "beta".to_owned(),
+            query: "hit".to_owned(),
             regex: false,
             case_insensitive: false,
             include: Some("*.txt".to_owned()),
             context_lines: 0,
             count: false,
-            max: 10,
+            max: 2,
         })
         .await
         .unwrap();
     let BrokerResponse::FsSearchOk { matches } = response else {
         panic!("expected search response, got {response:?}");
     };
-    assert!(matches.is_array());
+    let rows = matches.as_array().expect("normalized match rows");
+    assert_eq!(rows.len(), 2, "max must be global across files");
+    assert!(rows.iter().all(|row| row.get("text").is_some()));
+    assert!(rows.iter().all(|row| row.get("type").is_none()));
+
+    let response = client
+        .call(BrokerRequest::FsSearch {
+            path: dir.path().display().to_string(),
+            query: "hit".to_owned(),
+            regex: false,
+            case_insensitive: false,
+            include: Some("*.txt".to_owned()),
+            context_lines: 0,
+            count: true,
+            max: 1,
+        })
+        .await
+        .unwrap();
+    let BrokerResponse::FsSearchOk { matches } = response else {
+        panic!("expected count response, got {response:?}");
+    };
+    assert_eq!(matches["total"], 6);
+    let files = matches["files"].as_array().expect("per-file counts");
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|row| row.get("count").is_some()));
+    assert!(files.iter().all(|row| row.get("text").is_none()));
 }
