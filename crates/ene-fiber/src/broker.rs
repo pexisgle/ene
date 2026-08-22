@@ -144,10 +144,12 @@ mod confine_tests {
         #[cfg(windows)]
         std::os::windows::fs::symlink_file("target.txt", dir.path().join("link.txt")).unwrap();
         let lexical = confine_lexical(dir.path(), Path::new("link.txt"), false).unwrap();
-        assert!(std::fs::symlink_metadata(&lexical)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&lexical)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }
 

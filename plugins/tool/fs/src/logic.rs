@@ -1476,7 +1476,8 @@ mod tests {
             execute(
                 "fs.delete",
                 &json!({"path": empty.to_string_lossy(), "job_id": "empty-dir"}),
-            )
+            )?;
+            Ok(())
         });
         assert!(!empty.exists());
     }
