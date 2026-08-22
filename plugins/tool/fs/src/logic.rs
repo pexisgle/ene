@@ -12,6 +12,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_UNDO_BYTES: usize = 1024 * 1024;
 
+fn fail(code: &str, path: &Path, message: impl std::fmt::Display) -> String {
+    json!({
+        "code": code,
+        "path": path.display().to_string(),
+        "message": message.to_string(),
+    })
+    .to_string()
+}
+
+fn io_error(path: &Path, err: &std::io::Error) -> String {
+    let code = match err.kind() {
+        std::io::ErrorKind::NotFound => "path_not_found",
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        std::io::ErrorKind::AlreadyExists => "already_exists",
+        _ => "io_error",
+    };
+    fail(code, path, err)
+}
+
 static PATH_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -164,7 +183,7 @@ async fn broker_search_async(args: &Value) -> Result<Value, String> {
 
 fn read(args: &Value) -> Result<Value, String> {
     let path = resolve(arg_str(args, "path")?, false)?;
-    let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
+    let bytes = std::fs::read(&path).map_err(|err| io_error(&path, &err))?;
     let text = std::str::from_utf8(&bytes).map_err(|_| "file is not valid UTF-8".to_owned())?;
     Ok(json!({ "text": text, "hash": hash_bytes(&bytes) }))
 }
@@ -202,7 +221,7 @@ fn edit(args: &Value) -> Result<Value, String> {
     let expected = optional_hash(args);
     with_path_lock(&path, || {
         check_precondition(&path, expected)?;
-        let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        let body = std::fs::read_to_string(&path).map_err(|err| io_error(&path, &err))?;
         let next = apply_edit(&body, old, new, replace_all)?;
         record_undo(&job_id, &path)?;
         if let Err(err) = atomic_write_bytes(&path, next.as_bytes()) {
@@ -225,7 +244,7 @@ fn list(args: &Value) -> Result<Value, String> {
         resolve(raw, false)?
     };
     let mut entries = Vec::new();
-    let rd = std::fs::read_dir(&path).map_err(|err| err.to_string())?;
+    let rd = std::fs::read_dir(&path).map_err(|err| io_error(&path, &err))?;
     for ent in rd {
         let ent = ent.map_err(|err| err.to_string())?;
         let meta = ent.metadata().map_err(|err| err.to_string())?;
@@ -481,7 +500,7 @@ fn patch(args: &Value) -> Result<Value, String> {
     let expected = optional_hash(args);
     with_path_lock(&path, || {
         check_precondition(&path, expected)?;
-        let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        let body = std::fs::read_to_string(&path).map_err(|err| io_error(&path, &err))?;
         let next = apply_unified_diff(&body, diff)?;
         record_undo(&job_id, &path)?;
         if let Err(err) = atomic_write_bytes(&path, next.as_bytes()) {
@@ -1223,7 +1242,13 @@ fn workspace() -> Result<PathBuf, String> {
     }
     std::env::var("ENE_WORKSPACE")
         .map(PathBuf::from)
-        .map_err(|_| "ENE_WORKSPACE is not set".to_owned())
+        .map_err(|_| {
+            fail(
+                "workspace_unavailable",
+                Path::new("."),
+                "ENE_WORKSPACE is not set",
+            )
+        })
 }
 
 #[cfg(test)]
@@ -1241,18 +1266,18 @@ static TEST_WORKSPACE_GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(())
 fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {
     if let Some(root) = scoped_workspace() {
         return ene_registry::confine_tool_path(&root, Path::new(path), create_parent)
-            .map_err(|err| err.to_string());
+            .map_err(|err| fail("path_outside_workspace", Path::new(path), err));
     }
     #[cfg(test)]
     if let Some(root) = TEST_WORKSPACE.lock().clone() {
         return ene_registry::confine_tool_path(&root, Path::new(path), create_parent)
-            .map_err(|err| err.to_string());
+            .map_err(|err| fail("path_outside_workspace", Path::new(path), err));
     }
     let Ok(workspace) = std::env::var("ENE_WORKSPACE") else {
         return Ok(PathBuf::from(path));
     };
     ene_registry::confine_tool_path(Path::new(&workspace), Path::new(path), create_parent)
-        .map_err(|err| err.to_string())
+        .map_err(|err| fail("path_outside_workspace", Path::new(path), err))
 }
 
 #[cfg(test)]
@@ -1261,7 +1286,7 @@ mod tests {
         Needle, TEST_WORKSPACE, TEST_WORKSPACE_GATE, apply_edit, apply_unified_diff, execute,
         hash_bytes, job_key, journal_path,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::fs;
     use std::thread;
 
@@ -1282,6 +1307,38 @@ mod tests {
             let out = execute("fs.read", &json!({"path": path.to_string_lossy()}))?;
             assert_eq!(out["text"], "\u{feff}hello");
             assert_eq!(out["hash"], hash_bytes(b"\xef\xbb\xbfhello"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fs_write_creates_missing_nested_parent_and_reports_structured_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.write",
+                &json!({
+                    "path": "smoke-gui/nested/note.txt",
+                    "text": "hello",
+                    "job_id": "nested-job",
+                }),
+            )?;
+            assert_eq!(
+                fs::read_to_string(dir.path().join("smoke-gui/nested/note.txt")).unwrap(),
+                "hello"
+            );
+
+            let missing = execute("fs.read", &json!({"path": "missing.txt"})).unwrap_err();
+            let missing: Value = serde_json::from_str(&missing).unwrap();
+            assert_eq!(missing["code"], "path_not_found");
+            assert!(missing["path"].as_str().unwrap().ends_with("missing.txt"));
+
+            let escape =
+                execute("fs.write", &json!({"path": "../outside.txt", "text": "no"})).unwrap_err();
+            let escape: Value = serde_json::from_str(&escape).unwrap();
+            assert_eq!(escape["code"], "path_outside_workspace");
+            assert_eq!(escape["path"], "../outside.txt");
+
             Ok(())
         });
     }
