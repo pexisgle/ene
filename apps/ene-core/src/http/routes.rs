@@ -710,23 +710,7 @@ pub async fn answer_job(
         .map_err(|_| bad_request("invalid_message", "bad job id"))?;
     let host = state.core.host();
     let pending = host.open_questions(job).map_err(map_work)?;
-    let answered = if !req.answers.is_empty() {
-        let turn = host.combine_pending_questions(job).map_err(map_work)?;
-        let pairs = turn
-            .questions
-            .iter()
-            .zip(req.answers.iter())
-            .map(|(question, answer)| {
-                (
-                    QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq),
-                    answer.trim().to_owned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        host.apply_combined_answers(&turn, &req.answers)
-            .map_err(map_work)?;
-        pairs
-    } else {
+    let answered = if req.answers.is_empty() {
         let text = req.text.trim();
         if text.is_empty() {
             return Err(bad_request("invalid_message", "empty answer"));
@@ -749,6 +733,22 @@ pub async fn answer_job(
             }
             pairs
         }
+    } else {
+        let turn = host.combine_pending_questions(job).map_err(map_work)?;
+        let pairs = turn
+            .questions
+            .iter()
+            .zip(req.answers.iter())
+            .map(|(question, answer)| {
+                (
+                    QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq),
+                    answer.trim().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        host.apply_combined_answers(&turn, &req.answers)
+            .map_err(map_work)?;
+        pairs
     };
     persist_job_answer(&state, job, &answered).await;
     get_job(State(state), Path(id)).await
@@ -2529,7 +2529,7 @@ pub(crate) async fn persist_job_report(state: &AppState, report: &CompanionRepor
                         QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq)
                     })
             })
-            .unwrap_or_else(QuestionId::new);
+            .unwrap_or_default();
         entries.push(NewEvent::new(
             session.id,
             EventKind::DelegationQuestion,
