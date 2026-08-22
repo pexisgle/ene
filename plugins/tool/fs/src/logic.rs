@@ -45,6 +45,18 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
             Vec::new(),
         ),
         spec(
+            "fs.glob",
+            "List workspace paths matching a glob pattern",
+            json!({"type":"object","properties":{"pattern":{"type":"string"},"max":{"type":"integer"},"include_hidden":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}),
+            Vec::new(),
+        ),
+        spec(
+            "fs.delete",
+            "Delete a workspace file or empty directory",
+            json!({"type":"object","properties":{"path":{"type":"string"},"job_id":{"type":"string"}},"required":["path"],"additionalProperties":false}),
+            vec!["fs.delete".to_owned()],
+        ),
+        spec(
             "fs.search",
             "Search file contents through the host ripgrep broker (literal by default)",
             json!({
@@ -85,6 +97,8 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
         "fs.write" => write(args),
         "fs.edit" => edit(args),
         "fs.list" => list(args),
+        "fs.glob" => glob(args),
+        "fs.delete" => delete(args),
         "fs.search" => search(args),
         "fs.patch" => patch(args),
         "fs.undo" => undo(args),
@@ -223,6 +237,155 @@ fn list(args: &Value) -> Result<Value, String> {
         }));
     }
     Ok(json!({ "entries": entries }))
+}
+
+const MAX_GLOB_RESULTS: usize = 500;
+
+fn glob(args: &Value) -> Result<Value, String> {
+    let pattern = arg_str(args, "pattern")?;
+    deny_glob_escape(pattern)?;
+    let include_hidden = args
+        .get("include_hidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let max = args
+        .get("max")
+        .and_then(Value::as_u64)
+        .unwrap_or(200)
+        .min(MAX_GLOB_RESULTS as u64) as usize;
+    let root = workspace()?;
+    let mut paths = Vec::new();
+    walk_glob(&root, &root, pattern, include_hidden, &mut paths, max)?;
+    paths.sort();
+    Ok(json!({
+        "paths": paths,
+        "truncated": paths.len() >= max,
+    }))
+}
+
+fn deny_glob_escape(pattern: &str) -> Result<(), String> {
+    let path = Path::new(pattern);
+    if path.is_absolute() {
+        return Err("glob pattern must be workspace-relative".to_owned());
+    }
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err("glob pattern must not contain ..".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn walk_glob(
+    root: &Path,
+    dir: &Path,
+    pattern: &str,
+    include_hidden: bool,
+    out: &mut Vec<String>,
+    max: usize,
+) -> Result<(), String> {
+    if out.len() >= max {
+        return Ok(());
+    }
+    let rd = std::fs::read_dir(dir).map_err(|err| err.to_string())?;
+    for ent in rd {
+        if out.len() >= max {
+            break;
+        }
+        let ent = ent.map_err(|err| err.to_string())?;
+        let path = ent.path();
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if name == ".ene" {
+            continue;
+        }
+        if !include_hidden && name.starts_with('.') {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(&path).map_err(|err| err.to_string())?;
+        if meta.file_type().is_symlink() {
+            // Directory links (and Windows junctions) are never followed.
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            if canonical.is_dir() || !canonical.starts_with(root) {
+                continue;
+            }
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|_| "path escapes workspace".to_owned())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if glob_match(pattern, &rel) {
+            out.push(rel.clone());
+        }
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            walk_glob(root, &path, pattern, include_hidden, out, max)?;
+        }
+    }
+    Ok(())
+}
+
+fn glob_match(pattern: &str, rel: &str) -> bool {
+    let pat: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
+    let path: Vec<&str> = rel.split('/').filter(|part| !part.is_empty()).collect();
+    glob_components(&pat, &path)
+}
+
+fn glob_components(pat: &[&str], path: &[&str]) -> bool {
+    match (pat.first().copied(), path.first().copied()) {
+        (None, None) => true,
+        (Some("**"), _) => {
+            glob_components(&pat[1..], path)
+                || (!path.is_empty() && glob_components(pat, &path[1..]))
+        }
+        (Some(seg), Some(name)) if glob_segment(seg, name) => {
+            glob_components(&pat[1..], &path[1..])
+        }
+        _ => false,
+    }
+}
+
+fn glob_segment(pattern: &str, name: &str) -> bool {
+    glob_stars(pattern.as_bytes(), name.as_bytes())
+}
+
+fn glob_stars(pattern: &[u8], name: &[u8]) -> bool {
+    match (pattern.first().copied(), name.first().copied()) {
+        (None, None) => true,
+        (Some(b'*'), _) => {
+            glob_stars(&pattern[1..], name) || (!name.is_empty() && glob_stars(pattern, &name[1..]))
+        }
+        (Some(b'?'), Some(_)) => glob_stars(&pattern[1..], &name[1..]),
+        (Some(p), Some(n)) if p == n => glob_stars(&pattern[1..], &name[1..]),
+        _ => false,
+    }
+}
+
+fn delete(args: &Value) -> Result<Value, String> {
+    let path = resolve(arg_str(args, "path")?, false)?;
+    let meta = std::fs::symlink_metadata(&path).map_err(|err| err.to_string())?;
+    if is_link_or_reparse(&meta) {
+        return Err("refusing to delete a symlink".to_owned());
+    }
+    if meta.permissions().readonly() {
+        return Err("path is read-only".to_owned());
+    }
+    let job_id = job_key(args);
+    if meta.is_dir() {
+        let mut rd = std::fs::read_dir(&path).map_err(|err| err.to_string())?;
+        if rd.next().is_some() {
+            return Err("directory is not empty".to_owned());
+        }
+        record_undo_delete(&job_id, &path, None, "dir")?;
+        std::fs::remove_dir(&path).map_err(|err| err.to_string())?;
+    } else {
+        let prev = std::fs::read_to_string(&path).ok();
+        record_undo_delete(&job_id, &path, prev.as_deref(), "file")?;
+        std::fs::remove_file(&path).map_err(|err| err.to_string())?;
+    }
+    Ok(json!({ "ok": true, "job_id": job_id }))
 }
 
 fn search(args: &Value) -> Result<Value, String> {
@@ -746,26 +909,35 @@ fn undo(args: &Value) -> Result<Value, String> {
         return Err("undo refused: prior body exceeds journal size cap".to_owned());
     }
     let path = PathBuf::from(path_raw);
-    let existed = entry
-        .get("existed")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    if existed {
-        let prev_b64 = entry
-            .get("prev_b64")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "bad undo record".to_owned())?;
-        let bytes = B64
-            .decode(prev_b64)
-            .map_err(|err| format!("bad undo record: {err}"))?;
-        with_path_lock(&path, || atomic_write_bytes(&path, &bytes))?;
+    if entry.get("op").and_then(Value::as_str) == Some("delete") {
+        if entry.get("kind").and_then(Value::as_str) == Some("dir") {
+            std::fs::create_dir_all(&path).map_err(|err| err.to_string())?;
+        } else {
+            let prev = entry.get("prev").and_then(Value::as_str).unwrap_or("");
+            std::fs::write(&path, prev).map_err(|err| err.to_string())?;
+        }
     } else {
-        with_path_lock(&path, || {
-            if path.exists() {
-                std::fs::remove_file(&path).map_err(|err| err.to_string())?;
-            }
-            Ok(())
-        })?;
+        let existed = entry
+            .get("existed")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if existed {
+            let prev_b64 = entry
+                .get("prev_b64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "bad undo record".to_owned())?;
+            let bytes = B64
+                .decode(prev_b64)
+                .map_err(|err| format!("bad undo record: {err}"))?;
+            with_path_lock(&path, || atomic_write_bytes(&path, &bytes))?;
+        } else {
+            with_path_lock(&path, || {
+                if path.exists() {
+                    std::fs::remove_file(&path).map_err(|err| err.to_string())?;
+                }
+                Ok(())
+            })?;
+        }
     }
     let rest = if lines.is_empty() {
         String::new()
@@ -837,6 +1009,38 @@ fn pop_journal_entry(job_id: &str) -> Result<(), String> {
         out
     };
     std::fs::write(&journal, rest).map_err(|err| err.to_string())
+}
+
+fn record_undo_delete(
+    job_id: &str,
+    path: &Path,
+    prev: Option<&str>,
+    kind: &str,
+) -> Result<(), String> {
+    if is_secret_path(path) {
+        return Ok(());
+    }
+    let entry = json!({
+        "path": path.display().to_string(),
+        "prev": prev,
+        "job_id": job_id,
+        "op": "delete",
+        "kind": kind,
+    });
+    append_journal(job_id, &entry)
+}
+
+fn is_link_or_reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
 }
 
 fn is_secret_path(path: &Path) -> bool {
@@ -979,7 +1183,40 @@ fn unique_job_key() -> String {
     )
 }
 
+thread_local! {
+    static SCOPED_WORKSPACE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// Used when this source is included by ene-registry; unused in the standalone plugin binary
+// unless referenced from the plugin binary (see main.rs link stub).
+struct WorkspaceOverrideGuard(Option<PathBuf>);
+
+impl Drop for WorkspaceOverrideGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        SCOPED_WORKSPACE.with(|slot| drop(slot.replace(previous)));
+    }
+}
+
+// Host-only entry point; the standalone plugin binary keeps it live via main.rs.
+pub fn with_workspace<T>(
+    root: &Path,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let previous = SCOPED_WORKSPACE.with(|slot| slot.replace(Some(root.to_path_buf())));
+    let _guard = WorkspaceOverrideGuard(previous);
+    action()
+}
+
+fn scoped_workspace() -> Option<PathBuf> {
+    SCOPED_WORKSPACE.with(|slot| slot.borrow().clone())
+}
+
 fn workspace() -> Result<PathBuf, String> {
+    if let Some(root) = scoped_workspace() {
+        return Ok(root);
+    }
     #[cfg(test)]
     if let Some(root) = TEST_WORKSPACE.lock().clone() {
         return Ok(root);
@@ -1002,6 +1239,10 @@ static TEST_WORKSPACE: parking_lot::Mutex<Option<PathBuf>> = parking_lot::Mutex:
 static TEST_WORKSPACE_GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {
+    if let Some(root) = scoped_workspace() {
+        return ene_registry::confine_tool_path(&root, Path::new(path), create_parent)
+            .map_err(|err| err.to_string());
+    }
     #[cfg(test)]
     if let Some(root) = TEST_WORKSPACE.lock().clone() {
         return ene_registry::confine_tool_path(&root, Path::new(path), create_parent)
@@ -1439,5 +1680,134 @@ mod tests {
         let old = "BEGIN\nmiddle\nEND";
         let next = apply_edit(body, old, "OK", false).unwrap();
         assert_eq!(next, "BEGIN\nnot anchor\nEND\nOK\n");
+    }
+
+    #[test]
+    fn glob_lists_sorted_relative_paths_and_caps() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("a.rs"), "a").unwrap();
+        fs::write(dir.path().join("src/b.rs"), "b").unwrap();
+        fs::write(dir.path().join("src/c.txt"), "c").unwrap();
+        fs::write(dir.path().join(".hidden.rs"), "h").unwrap();
+        with_workspace(&dir, || {
+            let listed = execute("fs.glob", &json!({"pattern": "**/*.rs"}))?;
+            let paths = listed["paths"].as_array().unwrap();
+            assert_eq!(paths.len(), 2);
+            assert_eq!(paths[0], "a.rs");
+            assert_eq!(paths[1], "src/b.rs");
+            let capped = execute("fs.glob", &json!({"pattern": "**/*", "max": 1}))?;
+            assert_eq!(capped["paths"].as_array().unwrap().len(), 1);
+            assert_eq!(capped["truncated"], true);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn glob_rejects_parent_escape() {
+        let err = execute("fs.glob", &json!({"pattern": "../secret"})).unwrap_err();
+        assert!(err.contains(".."), "{err}");
+    }
+
+    #[test]
+    fn delete_removes_file_and_restores_on_undo() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("gone.txt");
+        fs::write(&file, "keep-me").unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.delete",
+                &json!({"path": file.to_string_lossy(), "job_id": "del-job"}),
+            )?;
+            assert!(!file.exists());
+            execute("fs.undo", &json!({"job_id": "del-job"}))?;
+            Ok(())
+        });
+        assert_eq!(fs::read_to_string(&file).unwrap(), "keep-me");
+    }
+
+    #[test]
+    fn delete_refuses_non_empty_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested/a.txt"), "x").unwrap();
+        with_workspace(&dir, || {
+            let err = execute(
+                "fs.delete",
+                &json!({"path": dir.path().join("nested").to_string_lossy()}),
+            )
+            .unwrap_err();
+            assert!(err.contains("not empty"), "{err}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn secret_delete_is_not_journaled() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let secret = dir.path().join(".env");
+        fs::write(&secret, "SECRET=1").unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.delete",
+                &json!({"path": secret.to_string_lossy(), "job_id": "secret-del"}),
+            )?;
+            assert!(!secret.exists());
+            let journal = journal_path("secret-del")?;
+            assert!(
+                !journal.exists() || fs::read_to_string(&journal).unwrap().is_empty(),
+                "secret must not enter the undo journal"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn delete_removes_empty_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let empty = dir.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        with_workspace(&dir, || {
+            execute(
+                "fs.delete",
+                &json!({"path": empty.to_string_lossy(), "job_id": "empty-dir"}),
+            )?;
+            Ok(())
+        });
+        assert!(!empty.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn glob_skips_directory_symlink_escape() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::write(outside.path().join("secret.rs"), "nope").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("out")).unwrap();
+        with_workspace(&dir, || {
+            let listed = execute("fs.glob", &json!({"pattern": "**/*.rs"}))?;
+            let paths = listed["paths"].as_array().unwrap();
+            assert!(paths.is_empty(), "{listed}");
+            Ok(())
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_refuses_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&target, "x").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        with_workspace(&dir, || {
+            let err = execute("fs.delete", &json!({"path": link.to_string_lossy()})).unwrap_err();
+            assert!(
+                err.contains("symlink") || err.contains("path escapes workspace"),
+                "{err}"
+            );
+            assert!(target.exists());
+            Ok(())
+        });
     }
 }

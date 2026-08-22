@@ -844,3 +844,36 @@ async fn web_fetch_with_grant_blocks_loopback() {
         "{err}"
     );
 }
+
+#[test]
+fn file_broker_glob_and_delete_stay_in_workspace() {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "a").unwrap();
+    std::fs::write(dir.path().join("gone.txt"), "x").unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    assert!(matches!(
+        broker.fs_glob(uid, "**/*.rs"),
+        Err(BrokerError::Denied { .. })
+    ));
+    broker.grant(uid, "fs.glob");
+    broker.grant(uid, "fs.delete");
+    broker.grant(uid, "fs.list");
+    let globbed = broker.fs_glob(uid, "**/*.rs").unwrap();
+    assert_eq!(globbed, vec!["src/a.rs".to_owned()]);
+    assert!(matches!(
+        broker.fs_glob(uid, "../outside"),
+        Err(BrokerError::PathEscape(_))
+    ));
+    broker
+        .fs_delete(uid, PathBuf::from("gone.txt").as_path())
+        .unwrap();
+    assert!(!dir.path().join("gone.txt").exists());
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join("nested/b.txt"), "b").unwrap();
+    assert!(matches!(
+        broker.fs_delete(uid, PathBuf::from("nested").as_path()),
+        Err(BrokerError::NotEmpty)
+    ));
+}

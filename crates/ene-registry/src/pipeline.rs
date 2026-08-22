@@ -467,7 +467,14 @@ fn confine_fs_args(
 ) -> Result<(), PipelineError> {
     if !matches!(
         name,
-        "fs.read" | "fs.write" | "fs.edit" | "fs.list" | "fs.search" | "fs.patch"
+        "fs.read"
+            | "fs.write"
+            | "fs.edit"
+            | "fs.list"
+            | "fs.glob"
+            | "fs.delete"
+            | "fs.search"
+            | "fs.patch"
     ) {
         return Ok(());
     }
@@ -477,6 +484,10 @@ fn confine_fs_args(
             reason: "workspace is not configured".to_owned(),
         });
     };
+    if name == "fs.glob" {
+        let pattern = args.get("pattern").and_then(Value::as_str).unwrap_or("");
+        return confine_glob_pattern(name, pattern);
+    }
     let raw = args.get("path").and_then(Value::as_str).unwrap_or("");
     if raw.is_empty() && (name == "fs.list" || name == "fs.search") {
         if let Some(obj) = args.as_object_mut() {
@@ -491,6 +502,25 @@ fn confine_fs_args(
             "path".to_owned(),
             Value::String(confined.display().to_string()),
         );
+    }
+    Ok(())
+}
+
+fn confine_glob_pattern(name: &str, pattern: &str) -> Result<(), PipelineError> {
+    if pattern.is_empty() {
+        return Err(PipelineError::Denied {
+            name: name.to_owned(),
+            reason: "pattern is required".to_owned(),
+        });
+    }
+    let path = Path::new(pattern);
+    if path.is_absolute() {
+        return Err(PipelineError::PathEscape(pattern.to_owned()));
+    }
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(PipelineError::PathEscape(pattern.to_owned()));
+        }
     }
     Ok(())
 }
@@ -532,6 +562,13 @@ pub fn confine_tool_path(
         && canonical == base
     {
         return Ok(base);
+    }
+    if let Some(file_name) = requested.file_name() {
+        let lexical = requested.parent().unwrap_or(&base).join(file_name);
+        // Reject the link itself before `canonicalize()` dereferences it.
+        if std::fs::symlink_metadata(&lexical).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(PipelineError::PathEscape(lexical.display().to_string()));
+        }
     }
     let file_name = requested
         .file_name()
