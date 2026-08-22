@@ -597,7 +597,10 @@ mod tests {
         };
         assert!(matches!(
             reason,
-            ObserveSkip::CaretBlink | ObserveSkip::PendingSmall | ObserveSkip::Clock
+            ObserveSkip::CaretBlink
+                | ObserveSkip::PendingSmall
+                | ObserveSkip::Clock
+                | ObserveSkip::Unchanged
         ));
         assert_eq!(summary.as_deref(), Some("editor"));
         assert!(matches!(
