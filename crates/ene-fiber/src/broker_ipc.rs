@@ -94,12 +94,22 @@ impl BrokerServer {
         &self.endpoint
     }
 
-    pub fn shutdown(self) {
+    fn cleanup(&mut self) {
         self.task.abort();
         #[cfg(unix)]
-        if let Some(socket) = self.socket {
-            drop(std::fs::remove_file(socket));
+        if let Some(socket) = self.socket.take() {
+            let _ = std::fs::remove_file(socket);
         }
+    }
+
+    pub fn shutdown(mut self) {
+        self.cleanup();
+    }
+}
+
+impl Drop for BrokerServer {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
 
