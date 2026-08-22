@@ -259,7 +259,6 @@ impl CoreDaemon {
             loop_hooks,
             mind: parking_lot::Mutex::new(mind),
             harness: parking_lot::Mutex::new(loaded.harness),
-            store_settings: parking_lot::Mutex::new(loaded.store),
             approval: parking_lot::Mutex::new(approval_settings),
             body: parking_lot::Mutex::new(body_settings),
             voice: parking_lot::Mutex::new(voice_settings),
@@ -269,6 +268,7 @@ impl CoreDaemon {
             world_state: parking_lot::Mutex::new(ene_companion::WorldStateMemory::default()),
             memory_embed,
             idle_timeout_secs: parking_lot::Mutex::new(loaded.store.sessions.idle_timeout_secs),
+            store_settings: parking_lot::Mutex::new(loaded.store),
         })
     }
 
