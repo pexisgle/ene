@@ -185,7 +185,8 @@ mod tests {
         };
         listen.on_done(first, true, t0);
         let ListenAction::Spawn {
-            generation: second, ..
+            generation: second,
+            rx: keep_open,
         } = listen.poll(true, t0 + LISTEN_RETRY)
         else {
             panic!("expected second stream");
@@ -193,6 +194,7 @@ mod tests {
         listen.on_done(first, true, t0 + LISTEN_RETRY);
         assert_eq!(listen.generation(), second);
         assert_eq!(listen.try_send(vec![0.5]), SendResult::Sent);
+        drop(keep_open);
     }
 
     #[test]
