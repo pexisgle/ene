@@ -234,10 +234,10 @@ impl StageApp {
                 if let Err(err) = result {
                     tracing::debug!(error = %err, "listen failed");
                 }
-                self.spawn_listen(
-                    self.listen
-                        .on_done(generation, self.mic_active, Instant::now()),
-                );
+                let action = self
+                    .listen
+                    .on_done(generation, self.mic_active, Instant::now());
+                self.spawn_listen(action);
             }
             AsyncOutcome::RefreshHistory(result) => match result {
                 Ok(history) => {
@@ -460,7 +460,8 @@ impl StageApp {
                 Ok(active) => {
                     self.mic_active = active;
                     if active {
-                        self.spawn_listen(self.listen.start());
+                        let action = self.listen.start();
+                        self.spawn_listen(action);
                     } else {
                         self.listen.release();
                     }
@@ -1076,7 +1077,8 @@ impl StageApp {
             self.listen.release();
             return;
         }
-        self.spawn_listen(self.listen.poll(true, Instant::now()));
+        let action = self.listen.poll(true, Instant::now());
+        self.spawn_listen(action);
         for batch in self.audio.poll_mic_batches() {
             match self.listen.try_send(batch) {
                 SendResult::Sent => {}
@@ -1084,7 +1086,8 @@ impl StageApp {
                     tracing::debug!("listen stream dropped a mic frame");
                 }
                 SendResult::Closed | SendResult::Idle => {
-                    self.spawn_listen(self.listen.poll(true, Instant::now()));
+                    let action = self.listen.poll(true, Instant::now());
+                    self.spawn_listen(action);
                 }
             }
         }
