@@ -789,13 +789,13 @@ impl StageApp {
         if let Some(caption) = &self.caption {
             caption.place_caption(&settings.caption_position);
         }
-        if let Some(overlay) = self.overlay.as_mut()
-            && overlay.transparent
-        {
+        if let Some(overlay) = self.overlay.as_mut() {
             overlay
                 .window
                 .set_window_level(window_level(settings.always_on_top));
-            overlay.set_click_through(settings.overlay_click_through);
+            if overlay.transparent {
+                overlay.set_click_through(settings.overlay_click_through);
+            }
         }
         self.spawn(async move {
             AsyncOutcome::SaveLocalSettings(
@@ -1686,7 +1686,7 @@ mod tests {
     use super::{format_log_text, provider_asset_load_status, window_level};
 
     #[test]
-    fn overlay_level_matches_always_on_top_setting() {
+    fn save_applies_window_level_for_transparent_and_opaque_overlays() {
         assert_eq!(window_level(true), winit::window::WindowLevel::AlwaysOnTop);
         assert_eq!(window_level(false), winit::window::WindowLevel::Normal);
     }
