@@ -3148,6 +3148,54 @@ async fn affect_flushes_body_expression_to_surface_ws() {
 }
 
 #[tokio::test]
+async fn settings_schema_and_patch_keys_match_registry() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let registry = ene_config::registered_settings_section_keys();
+    assert!(
+        registry.iter().any(|key| key == "store"),
+        "store must be a registered settings section: {registry:?}"
+    );
+    assert!(
+        registry.iter().any(|key| key == "harness"),
+        "harness must be a registered settings section: {registry:?}"
+    );
+    let schema = client.settings_schema().await.unwrap();
+    let properties = schema
+        .get("properties")
+        .and_then(|value| value.as_object())
+        .expect("generated schema must have properties");
+    for key in &registry {
+        assert!(
+            properties.contains_key(key),
+            "schema missing registered section {key}: {:?}",
+            properties.keys().collect::<Vec<_>>()
+        );
+    }
+    let settings = client.settings().await.unwrap();
+    let effective = settings["effective"]
+        .as_object()
+        .expect("effective settings object");
+    for key in &registry {
+        assert!(
+            effective.contains_key(key),
+            "GET effective missing registered section {key}"
+        );
+    }
+    client
+        .patch_settings(&serde_json::json!({
+            "store": { "sessions": { "idle_timeout_secs": 60 } }
+        }))
+        .await
+        .unwrap();
+    let err = client
+        .patch_settings(&serde_json::json!({ "not_a_section": true }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "invalid_message");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn body_events_are_scoped_per_soul() {
     let (_dir, client, core, server) = boot_server().await;
     let occupants = core.occupants();
@@ -3270,5 +3318,113 @@ async fn observation_interval_follows_mind_settings() {
         ),
         Duration::from_secs(1)
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn settings_json_max_steps_one_delegates_through_http() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"harness":{"loop":{"max_steps_per_turn":1}}}"#,
+    )
+    .unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    let server = core
+        .clone()
+        .serve_at(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(ToolCallingModel) as Arc<dyn ConversationModel>,
+        )
+        .await
+        .unwrap();
+    let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
+    let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "stage");
+    let settings = client.settings().await.unwrap();
+    assert_eq!(
+        settings.pointer("/effective/harness/loop/max_steps_per_turn"),
+        Some(&serde_json::json!(1))
+    );
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "please calc 1+2*3".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let history = wait_assistant(&client, &session.id).await;
+    assert!(
+        history.messages.iter().any(|message| {
+            message.role == "assistant" && message.text.contains("I'll look into that.")
+        }),
+        "HTTP lane must auto-delegate at max_steps_per_turn=1: {history:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn patch_body_and_voice_apply_to_runtime() {
+    let (_dir, client, core, server) = boot_server().await;
+    client
+        .patch_settings(&serde_json::json!({
+            "body": { "render": { "max_concurrent": 1, "enabled": true } },
+            "voice": { "barge_in": { "enabled": false } }
+        }))
+        .await
+        .unwrap();
+    let settings = client.settings().await.unwrap();
+    assert_eq!(
+        settings.pointer("/effective/body/render/max_concurrent"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        settings.pointer("/effective/voice/barge_in/enabled"),
+        Some(&serde_json::json!(false))
+    );
+
+    let s1 = ene_session::SoulId::new();
+    let s2 = ene_session::SoulId::new();
+    core.present_companion(
+        s1,
+        Some(ene_session::BodyId::new()),
+        ene_body::BodyCatalog::text_default(),
+    )
+    .unwrap();
+    core.present_companion(
+        s2,
+        Some(ene_session::BodyId::new()),
+        ene_body::BodyCatalog::text_default(),
+    )
+    .unwrap();
+    let occupants = core.occupants();
+    let rendered = occupants.iter().filter(|(_, body)| body.is_some()).count();
+    assert_eq!(rendered, 1, "live max_concurrent=1: {occupants:?}");
+
+    let effect = core.with_voice(|voice| {
+        let body = ene_session::BodyId::new();
+        voice.speak(body, "long reply text here", 0).expect("speak");
+        let pcm: Vec<f32> = (0..1600)
+            .map(|i| ((i as f32) * 0.31).sin() * 0.31)
+            .collect();
+        voice.push_input(&pcm, 500)
+    });
+    assert_eq!(effect, ene_body::InputEffect::IgnoredSelfVoice);
     server.shutdown().await;
 }

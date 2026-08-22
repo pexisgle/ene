@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub struct Stage {
     bus: Arc<PerformanceBus>,
     voice: Mutex<VoiceRuntime>,
-    settings: BodySettings,
+    settings: Mutex<BodySettings>,
     occupants: Mutex<Vec<(SoulId, Option<BodyId>)>>,
 }
 
@@ -22,9 +22,13 @@ impl Stage {
         Self {
             bus,
             voice: Mutex::new(voice),
-            settings,
+            settings: Mutex::new(settings),
             occupants: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn replace_body_settings(&self, settings: BodySettings) {
+        *self.settings.lock() = settings;
     }
 
     pub fn present(
@@ -33,13 +37,12 @@ impl Stage {
         body: Option<BodyId>,
         catalog: BodyCatalog,
     ) -> Result<(), BodyError> {
+        let max_concurrent = self.settings.lock().render.max_concurrent;
         let mut occupants = self.occupants.lock();
         if body.is_some() {
             let rendered = occupants.iter().filter(|(_, b)| b.is_some()).count();
             let already = occupants.iter().any(|(s, _)| *s == soul);
-            if u32::try_from(rendered).unwrap_or(u32::MAX) >= self.settings.render.max_concurrent
-                && !already
-            {
+            if u32::try_from(rendered).unwrap_or(u32::MAX) >= max_concurrent && !already {
                 occupants.retain(|(s, _)| *s != soul);
                 occupants.push((soul, None));
                 return self.bus.attach(soul, None, catalog);
@@ -75,6 +78,6 @@ impl Stage {
 
     #[must_use]
     pub fn render_enabled(&self) -> bool {
-        self.settings.render.enabled
+        self.settings.lock().render.enabled
     }
 }

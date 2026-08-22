@@ -26,7 +26,7 @@ mod waterfall;
 
 pub use config::{
     AiSettings, AiTasks, BackupSettings, ClientsSettings, CoreSettings, DelegationSettings,
-    HarnessSettings, MindSettings, PluginIpcSettings, PluginPolicySettings, PluginProfileKind,
+    HarnessSettings, LaneMindSettings, PluginIpcSettings, PluginPolicySettings, PluginProfileKind,
     PluginSettings, ServerSettings, TaskBinding, ToolOutputSettings,
 };
 pub use context::{ContextRegistry, SOURCE_ORDER, canonicalize_source_key, format_recovery_note};

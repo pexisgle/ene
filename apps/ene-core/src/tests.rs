@@ -1,14 +1,20 @@
 use crate::{BootOptions, CoreDaemon, CoreError};
+use async_trait::async_trait;
 use ene_fiber::{ProfileRow, discover_plugin_script};
-use ene_kernel::{ConversationModel, DisplayDepth, EchoModel, EventKind, EventPayload};
+use ene_kernel::{
+    ConversationModel, DisplayDepth, EchoModel, EventKind, EventPayload, KernelError, ModelRequest,
+    ToolCallingModel,
+};
 use ene_registry::Layer;
 use ene_session::{
-    Block, ClientId, NewEvent, NewSession, SessionCreatedBy, SessionKind, SessionStore, SoulId,
-    Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger, abandoned_inbox, unclaimed_inbox,
-    v1,
+    Block, ClientId, NewEvent, NewSession, Role, SessionCreatedBy, SessionKind, SessionStore,
+    SoulId, Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger, abandoned_inbox,
+    unclaimed_inbox, v1,
 };
+use parking_lot::Mutex;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -398,4 +404,215 @@ async fn observation_does_not_persist_png_in_session_memory_or_audit() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn boot_fails_on_malformed_settings_json() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("settings.json"), "{not-json").unwrap();
+    let Err(err) = CoreDaemon::boot(BootOptions::new(dir.path())).await else {
+        panic!("malformed settings.json must fail boot");
+    };
+    assert!(matches!(err, CoreError::Config(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn store_idle_timeout_from_settings_json_ends_sessions() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"store":{"sessions":{"idle_timeout_secs":1}}}"#,
+    )
+    .unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(core.store_settings().sessions.idle_timeout_secs, 1);
+    let soul = core.occupants()[0].0;
+    let session = core
+        .store()
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let idle = core.list_idle_sessions().unwrap();
+    assert!(
+        idle.contains(&session),
+        "idle timeout from settings.json must list the session"
+    );
+    for id in idle {
+        core.end_session(id, ene_session::SessionEndReason::IdleTimeout)
+            .await
+            .unwrap();
+    }
+    let meta = core.store().get_session(session).unwrap();
+    assert!(meta.ended_at.is_some());
+}
+
+#[tokio::test]
+async fn approval_policy_file_from_settings_json_is_loaded() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("team-policy.json"),
+        r#"{"rules":[{"tool":"fs.write","decision":"deny"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"approval":{"policy_file":"team-policy.json","mode":"auto"}}"#,
+    )
+    .unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(core.approval_settings().policy_file, "team-policy.json");
+    assert_eq!(core.plane().mode(), ene_plane::ApprovalMode::Auto);
+    let policy = core.plane().policy();
+    assert_eq!(policy.rules.len(), 1);
+    assert_eq!(policy.rules[0].tool, "fs.write");
+}
+
+struct CountingInnerModel {
+    inner_counts: Mutex<Vec<usize>>,
+}
+
+#[async_trait]
+impl ConversationModel for CountingInnerModel {
+    async fn generate(
+        &self,
+        request: ModelRequest,
+    ) -> Result<ene_kernel::ModelGeneration, KernelError> {
+        let count = request
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Inner)
+            .count();
+        self.inner_counts.lock().push(count);
+        EchoModel.generate(request).await
+    }
+}
+
+#[tokio::test]
+async fn mind_self_reference_window_projects_into_the_lane() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"mind":{"inner":{"self_reference_window":2}}}"#,
+    )
+    .unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(core.mind().inner.self_reference_window, 2);
+    let model = Arc::new(CountingInnerModel {
+        inner_counts: Mutex::new(Vec::new()),
+    });
+    let soul = core.occupants()[0].0;
+    let session = core
+        .store()
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = core.open_lane(
+        soul,
+        session,
+        Arc::clone(&model) as Arc<dyn ConversationModel>,
+    );
+    for i in 0..5 {
+        lane.prompt(format!("turn {i}")).await.unwrap();
+        lane.wait_for_idle().await.unwrap();
+    }
+    let counts = model.inner_counts.lock().clone();
+    let last = *counts.last().expect("model saw turns");
+    assert!(
+        last <= 2,
+        "lane must project the configured inner window, got {counts:?}"
+    );
+}
+
+#[tokio::test]
+async fn harness_max_steps_one_auto_delegates_the_second_step() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"harness":{"loop":{"max_steps_per_turn":1}}}"#,
+    )
+    .unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(core.harness().loop_cfg.max_steps_per_turn, 1);
+    let soul = core.occupants()[0].0;
+    let session = core
+        .store()
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = core.open_lane(
+        soul,
+        session,
+        Arc::new(ToolCallingModel) as Arc<dyn ConversationModel>,
+    );
+    lane.prompt("please calc 1+2*3").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let history = lane.project(DisplayDepth::Surface).unwrap();
+    let blob = history
+        .messages
+        .iter()
+        .map(ene_session::ProjectedMessage::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        blob.contains("I'll look into that."),
+        "max_steps_per_turn=1 must auto-delegate: {blob}"
+    );
+}
+
+#[tokio::test]
+async fn boot_applies_store_sessions_synchronous_pragma() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"store":{"sessions":{"synchronous":"FULL"}}}"#,
+    )
+    .unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(core.store().reader_synchronous().unwrap(), "FULL");
+}
+
+#[tokio::test]
+async fn boot_options_synchronous_overrides_settings_json() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"store":{"sessions":{"synchronous":"FULL"}}}"#,
+    )
+    .unwrap();
+    let core = CoreDaemon::boot(BootOptions {
+        data_dir: dir.path().to_path_buf(),
+        synchronous: Some("NORMAL".to_owned()),
+    })
+    .await
+    .unwrap();
+    assert_eq!(core.store().reader_synchronous().unwrap(), "NORMAL");
 }

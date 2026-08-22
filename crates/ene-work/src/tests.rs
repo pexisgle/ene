@@ -25,7 +25,7 @@ use chrono::{Duration, TimeZone, Utc};
 use ene_companion::{WorldStateMemory, WorldStateSettings};
 use ene_kernel::{
     ConversationModel, DisplayDepth, EchoModel, EventKind, HarnessSettings, KernelError,
-    LaneHandle, LaneOptions, MindSettings, ModelGeneration, ModelRequest, SurfaceRouter,
+    LaneHandle, LaneMindSettings, LaneOptions, ModelGeneration, ModelRequest, SurfaceRouter,
     SurfaceToolOutcome, ToolCall,
 };
 use ene_plane::Sensitivity;
@@ -301,7 +301,7 @@ async fn lane_prompt_still_works_while_job_running() {
         soul,
         model: Arc::new(ene_kernel::EchoModel) as Arc<dyn ConversationModel>,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -376,7 +376,7 @@ async fn lane_auto_upgrade_does_not_execute_fs_write() {
         soul,
         model,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
