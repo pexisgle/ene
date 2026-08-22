@@ -399,4 +399,3 @@ async fn observation_does_not_persist_png_in_session_memory_or_audit() {
         }
     }
 }
-}
