@@ -229,6 +229,32 @@ fn dispatch(
                 Err(err) => error_response(&err),
             }
         }
+        BrokerRequest::FsSearch {
+            path,
+            query,
+            regex,
+            case_insensitive,
+            include,
+            context_lines,
+            count,
+            max,
+        } => {
+            let broker = broker.lock();
+            match broker.fs_search(
+                uid,
+                Path::new(&path),
+                &query,
+                regex,
+                case_insensitive,
+                include.as_deref(),
+                context_lines,
+                count,
+                max,
+            ) {
+                Ok(matches) => BrokerResponse::FsSearchOk { matches },
+                Err(err) => error_response(&err),
+            }
+        }
         BrokerRequest::NetFetch { url } => {
             let broker = broker.lock();
             match broker.net_fetch(uid, &url) {
@@ -248,6 +274,7 @@ fn error_response(err: &BrokerError) -> BrokerResponse {
             BrokerError::InvalidUrl(_) => BrokerErrorCode::InvalidUrl,
             BrokerError::Ssrf(_) => BrokerErrorCode::Ssrf,
             BrokerError::Fetch(_) => BrokerErrorCode::Fetch,
+            BrokerError::InvalidGlob(_) => BrokerErrorCode::InvalidArgument,
             _ => BrokerErrorCode::Internal,
         },
         message: err.to_string(),

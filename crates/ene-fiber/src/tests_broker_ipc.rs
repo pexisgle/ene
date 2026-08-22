@@ -83,3 +83,46 @@ async fn broker_client_rejects_bad_hello() {
         .unwrap();
     assert!(matches!(rejected, BrokerResponse::Error { .. }));
 }
+
+#[tokio::test]
+async fn broker_client_round_trips_fs_search() {
+    #![cfg_attr(test, expect(clippy::panic, reason = "tests fail fast"))]
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("input.txt"), "alpha\nbeta\n").unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    broker.grant(uid, "fs.search");
+
+    let server = BrokerServer::bind(
+        Arc::new(parking_lot::Mutex::new(broker)),
+        uid,
+        "r-broker-search",
+        "test-token",
+    )
+    .unwrap();
+    let mut client = BrokerClient::from_path(server.endpoint()).await.unwrap();
+    client
+        .call(BrokerRequest::Hello {
+            token: "test-token".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let response = client
+        .call(BrokerRequest::FsSearch {
+            path: dir.path().display().to_string(),
+            query: "beta".to_owned(),
+            regex: false,
+            case_insensitive: false,
+            include: Some("*.txt".to_owned()),
+            context_lines: 0,
+            count: false,
+            max: 10,
+        })
+        .await
+        .unwrap();
+    let BrokerResponse::FsSearchOk { matches } = response else {
+        panic!("expected search response, got {response:?}");
+    };
+    assert!(matches.is_array());
+}

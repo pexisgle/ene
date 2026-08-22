@@ -80,13 +80,13 @@ host connectors.
 |---|---|---|---|
 | `read` | `fs.read` | Current | Workspace-confined; parent canonicalization |
 | `write` | `fs.write` | Current / Missing | Surface hidden (`side_effects: ["fs.write"]`). Atomic replace, line-ending preserve, job-scoped undo: [#797](https://github.com/pexisgle/ene/issues/797) |
-| `edit` | `fs.edit` | Current / Missing | Contains/replace today. Precondition hash, ambiguity error, CRLF/BOM: [#797](https://github.com/pexisgle/ene/issues/797) |
+| `edit` | `fs.edit` | Current / Missing | Tolerant fallback matching restored. Precondition hash, ambiguity error, CRLF/BOM: [#797](https://github.com/pexisgle/ene/issues/797) |
 | `patch` | `fs.patch` | Current / Missing | Hunk context match exists. Same atomic/precondition work as edit: [#797](https://github.com/pexisgle/ene/issues/797) |
-| `search` (grep / regex) | `fs.search` | Current | Literal unless `regex` is set |
+| `search` (grep / regex) | `fs.search` | Current | Host-`rg` backed; literal unless `regex` is set, with old grep options |
 | `search` glob / path enumerate | — | Missing | [`fs.glob` + FileBroker list](https://github.com/pexisgle/ene/issues/813) |
 | `delete` | — | Missing | Approval-gated delete on host FileBroker: [#813](https://github.com/pexisgle/ene/issues/813) |
 | `undo` | `fs.undo` | Current / Missing | Same-job only (`job_id` / `ENE_JOB_ID`). Journal atomicity and secret exclusion: [#797](https://github.com/pexisgle/ene/issues/797) |
-| Wide fuzzy edit chain | — | Dropped | Indent-only fuzzy is allowed in [#797](https://github.com/pexisgle/ene/issues/797); multi-match must error |
+| Escape-normalized and boundary-only edit strategies | — | Dropped | Indent, line-trimmed, and block-anchor fallbacks are retained; multi-match must error |
 | Regex playground | — | Dropped | Out of scope for [#813](https://github.com/pexisgle/ene/issues/813) |
 | Direct plugin FS (beyond workspace env) | — | Missing | Host FileBroker as the single confinement: [#813](https://github.com/pexisgle/ene/issues/813) |
 

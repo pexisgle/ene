@@ -74,13 +74,13 @@ WebView は使いません。[PR #794](https://github.com/pexisgle/ene/pull/794)
 |---|---|---|---|
 | `read` | `fs.read` | Current | ワークスペース閉じ込め、親の canonicalize |
 | `write` | `fs.write` | Current / Missing | 表層非公開（`side_effects: ["fs.write"]`）。atomic replace、行末保持、job 単位 undo は [#797](https://github.com/pexisgle/ene/issues/797) |
-| `edit` | `fs.edit` | Current / Missing | 今は contains/replace。precondition hash、曖昧さエラー、CRLF/BOM は [#797](https://github.com/pexisgle/ene/issues/797) |
+| `edit` | `fs.edit` | Current / Missing | 許容フォールバック照合を復活。precondition hash、曖昧さエラー、CRLF/BOM は [#797](https://github.com/pexisgle/ene/issues/797) |
 | `patch` | `fs.patch` | Current / Missing | hunk 文脈照合はある。atomic/precondition は edit と同じ [#797](https://github.com/pexisgle/ene/issues/797) |
-| `search`（grep / regex） | `fs.search` | Current | 既定はリテラル、`regex` で正規表現 |
+| `search`（grep / regex） | `fs.search` | Current | ホスト `rg` に委譲。既定はリテラル、`regex` で正規表現、旧 grep オプションあり |
 | `search` glob / パス列挙 | — | Missing | [`fs.glob` と FileBroker list](https://github.com/pexisgle/ene/issues/813) |
 | `delete` | — | Missing | 承認付き delete をホスト FileBroker で [#813](https://github.com/pexisgle/ene/issues/813) |
 | `undo` | `fs.undo` | Current / Missing | 同一 job のみ（`job_id` / `ENE_JOB_ID`）。ジャーナルの原子性と秘密除外は [#797](https://github.com/pexisgle/ene/issues/797) |
-| 広い fuzzy edit 連鎖 | — | Dropped | [#797](https://github.com/pexisgle/ene/issues/797) はインデント差だけ。複数候補はエラー |
+| escape 正規化と境界限定の編集戦略 | — | Dropped | indent・行 trim・block anchor フォールバックは維持。複数候補はエラー |
 | regex playground | — | Dropped | [#813](https://github.com/pexisgle/ene/issues/813) の範囲外 |
 | プラグインからの直接 FS（workspace env 超え） | — | Missing | 閉じ込めの単一境界はホスト FileBroker [#813](https://github.com/pexisgle/ene/issues/813) |
 
