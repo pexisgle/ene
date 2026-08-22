@@ -28,6 +28,7 @@ impl ToolInvoke for BuiltinInvoker {
 }
 
 struct Registered {
+    owner: String,
     def: ToolDefinition,
     invoke: Arc<dyn ToolInvoke>,
 }
@@ -52,7 +53,7 @@ pub enum PipelineError {
 
 /// In-memory registry. Fiber unload removes rows by plugin id.
 pub struct ToolRegistry {
-    tools: Mutex<HashMap<String, Registered>>,
+    tools: Mutex<HashMap<String, Vec<Registered>>>,
     index: Mutex<HashMap<String, IndexedTool>>,
     plane: Mutex<Option<Arc<ApprovalPlane>>>,
     workspace: Mutex<Option<PathBuf>>,
@@ -87,27 +88,66 @@ impl ToolRegistry {
     }
 
     pub fn register_with(&self, def: ToolDefinition, invoke: Arc<dyn ToolInvoke>) {
+        self.register_owned(String::new(), def, invoke);
+    }
+
+    /// Push a named tool owned by `owner`. The last push is the active binding.
+    pub fn register_owned(
+        &self,
+        owner: impl Into<String>,
+        def: ToolDefinition,
+        invoke: Arc<dyn ToolInvoke>,
+    ) {
+        let owner = owner.into();
         let name = def.name.clone();
         let indexed = IndexedTool::from_definition(&def);
         self.tools
             .lock()
-            .insert(name.clone(), Registered { def, invoke });
+            .entry(name.clone())
+            .or_default()
+            .push(Registered { owner, def, invoke });
         self.index.lock().insert(name, indexed);
     }
 
-    /// Inverse of register for one plugin source (I-46).
+    /// Inverse of a single `register` / `register_with`. Drops every owner.
+    pub fn unregister(&self, name: &str) {
+        self.tools.lock().remove(name);
+        self.index.lock().remove(name);
+    }
+
+    /// Drop this owner's entries for `name`. A buried owner can leave without
+    /// clobbering a later binding; unloading the top restores the previous owner.
+    pub fn unregister_owned(&self, name: &str, owner: &str) {
+        let mut tools = self.tools.lock();
+        let mut index = self.index.lock();
+        {
+            let Some(stack) = tools.get_mut(name) else {
+                return;
+            };
+            stack.retain(|row| row.owner != owner);
+            if let Some(last) = stack.last() {
+                index.insert(name.to_owned(), IndexedTool::from_definition(&last.def));
+                return;
+            }
+        }
+        tools.remove(name);
+        index.remove(name);
+    }
+
+    /// Inverse of register for one plugin source.
     pub fn unregister_source(&self, source: &ToolSource) {
         let mut tools = self.tools.lock();
-        let removed: Vec<String> = tools
-            .iter()
-            .filter_map(|(name, row)| (&row.def.source == source).then_some(name.clone()))
-            .collect();
-        tools.retain(|_, row| &row.def.source != source);
-        drop(tools);
         let mut index = self.index.lock();
-        for name in removed {
-            index.remove(&name);
-        }
+        tools.retain(|name, stack| {
+            stack.retain(|row| &row.def.source != source);
+            if let Some(last) = stack.last() {
+                index.insert(name.clone(), IndexedTool::from_definition(&last.def));
+                true
+            } else {
+                index.remove(name);
+                false
+            }
+        });
     }
 
     /// Drop every tool registered by one plugin id.
@@ -119,14 +159,21 @@ impl ToolRegistry {
 
     #[must_use]
     pub fn get(&self, name: &str) -> Option<ToolDefinition> {
-        self.tools.lock().get(name).map(|row| row.def.clone())
+        self.tools
+            .lock()
+            .get(name)
+            .and_then(|stack| stack.last())
+            .map(|row| row.def.clone())
     }
 
     /// All registered tools, name-sorted.
     #[must_use]
     pub fn list(&self) -> Vec<ToolDefinition> {
         let tools = self.tools.lock();
-        let mut defs: Vec<ToolDefinition> = tools.values().map(|row| row.def.clone()).collect();
+        let mut defs: Vec<ToolDefinition> = tools
+            .values()
+            .filter_map(|stack| stack.last().map(|row| row.def.clone()))
+            .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
     }
@@ -138,6 +185,7 @@ impl ToolRegistry {
         let index = self.index.lock();
         let mut hits: Vec<ToolHit> = tools
             .values()
+            .filter_map(|stack| stack.last())
             .map(|row| {
                 let indexed = index
                     .get(&row.def.name)
@@ -167,7 +215,10 @@ impl ToolRegistry {
     #[must_use]
     pub fn schemas(&self, layer: Layer) -> Vec<Value> {
         let tools = self.tools.lock();
-        let mut names: Vec<&ToolDefinition> = tools.values().map(|row| &row.def).collect();
+        let mut names: Vec<&ToolDefinition> = tools
+            .values()
+            .filter_map(|stack| stack.last().map(|row| &row.def))
+            .collect();
         names.sort_by(|a, b| a.name.cmp(&b.name));
         names
             .into_iter()
@@ -218,6 +269,7 @@ impl ToolRegistry {
             let tools = self.tools.lock();
             let row = tools
                 .get(name)
+                .and_then(|stack| stack.last())
                 .ok_or_else(|| PipelineError::Unknown(name.to_owned()))?;
             (row.def.clone(), Arc::clone(&row.invoke))
         };

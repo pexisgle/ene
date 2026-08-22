@@ -4,7 +4,9 @@
 
 1. **OS サンドボックス** (`ene-sandbox`) — Linux では Landlock、seccomp、rlimits。
 2. **ホスト仲介** (`ene-fiber`) — spawn、grant、巻き戻し可能な dispose。
-   kill は unload ではありません。
+   `unload`・サーキット trip・loading の rollback は同じ `Effect` スタックを
+   LIFO で逆適用する。ツール名はファイバー所有者ごとに積むので、一方の
+   unload が他方の生きたツールを消さない。kill は unload ではありません。
 3. **承認 plane** (`ene-plane`) — ポリシー行が一致するまで deny-by-default。
    判断は監査ログの hash chain に残ります。`approval.mode = ai_auto` は
    `ai.tasks.approve`（無ければ chat）に聞き、失敗・未設定はポップアップへ

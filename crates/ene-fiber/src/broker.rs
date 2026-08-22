@@ -169,8 +169,22 @@ impl Broker {
         self.grants.entry(uid).or_default().insert(op.into());
     }
 
+    pub fn revoke(&mut self, uid: FiberUid, op: &str) {
+        let Some(ops) = self.grants.get_mut(&uid) else {
+            return;
+        };
+        ops.remove(op);
+        if ops.is_empty() {
+            self.grants.remove(&uid);
+        }
+    }
+
     pub fn revoke_all(&mut self, uid: FiberUid) {
         self.grants.remove(&uid);
+        self.release_owned_sidecars(uid);
+    }
+
+    pub fn release_owned_sidecars(&mut self, uid: FiberUid) {
         let ids: Vec<SidecarId> = self
             .sidecars
             .iter()
