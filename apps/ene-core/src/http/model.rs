@@ -13,6 +13,8 @@ use ene_session::{Block, InnerAspect, ProjectedMessage, Role, SessionStore, Spil
 
 use crate::CoreDaemon;
 
+const IMAGE_TOKEN_ESTIMATE: u32 = 4096;
+
 /// Dialogue / job model that binds `ai.tasks.<task>` to a configured provider plugin.
 pub struct SeamedModel {
     core: Arc<CoreDaemon>,
@@ -99,7 +101,7 @@ impl ConversationModel for SeamedModel {
         let messages = fit_prompt(
             fold_history(&request.messages, vision_store),
             message_budget,
-            |message| estimate_tokens(&pack_text(message), estimation),
+            |message| estimate_message_tokens(message, estimation),
             |message| matches!(message.role, LlmRole::System),
         );
         let llm_request = map_request(
@@ -157,6 +159,12 @@ fn pack_text(message: &LlmMessage) -> String {
         text.push_str(&call.arguments.to_string());
     }
     text
+}
+
+fn estimate_message_tokens(message: &LlmMessage, estimation: TokenEstimation) -> u32 {
+    let text = estimate_tokens(&pack_text(message), estimation);
+    let image_count = u32::try_from(message.images.len()).unwrap_or(u32::MAX);
+    text.saturating_add(IMAGE_TOKEN_ESTIMATE.saturating_mul(image_count))
 }
 
 fn estimate_tool_schema_tokens(
@@ -591,6 +599,32 @@ mod tests {
     }
 
     #[test]
+    fn image_payloads_consume_context_budget() {
+        let plain = LlmMessage {
+            role: LlmRole::User,
+            text: "look".to_owned(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            images: Vec::new(),
+        };
+        let with_image = LlmMessage {
+            role: LlmRole::User,
+            text: "look".to_owned(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            images: vec![LlmImage {
+                mime: "image/png".to_owned(),
+                base64: "iVBORw0KGgo=".to_owned(),
+            }],
+        };
+        let plain_cost = estimate_message_tokens(&plain, ene_kernel::TokenEstimation::Chars4);
+        let image_cost = estimate_message_tokens(&with_image, ene_kernel::TokenEstimation::Chars4);
+        assert_eq!(image_cost, plain_cost.saturating_add(IMAGE_TOKEN_ESTIMATE));
+    }
+
+    #[test]
     fn tool_schema_overhead_can_exhaust_available_window() {
         let schemas = vec![LlmToolSchema {
             name: "big".to_owned(),
@@ -601,28 +635,18 @@ mod tests {
             estimate_tool_schema_tokens_for(&schemas, ene_kernel::TokenEstimation::Chars4);
         assert!(overhead > 100);
         let messages = vec![LlmMessage::new(LlmRole::User, "short")];
-        let msg_cost = ene_kernel::estimate_tokens("short", ene_kernel::TokenEstimation::Chars4);
+        let msg_cost = estimate_message_tokens(&messages[0], ene_kernel::TokenEstimation::Chars4);
         let packed = ene_kernel::fit_prompt(
             messages,
             msg_cost,
-            |message| {
-                ene_kernel::estimate_tokens(
-                    &pack_text(message),
-                    ene_kernel::TokenEstimation::Chars4,
-                )
-            },
+            |message| estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4),
             |_| false,
         );
         assert_eq!(packed.len(), 1);
         let packed_with_overhead = ene_kernel::fit_prompt(
             packed,
             msg_cost.saturating_sub(overhead),
-            |message| {
-                ene_kernel::estimate_tokens(
-                    &pack_text(message),
-                    ene_kernel::TokenEstimation::Chars4,
-                )
-            },
+            |message| estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4),
             |_| false,
         );
         assert!(packed_with_overhead.is_empty() || overhead >= msg_cost);
@@ -639,12 +663,7 @@ mod tests {
         let packed = ene_kernel::fit_prompt(
             messages,
             8,
-            |message| {
-                ene_kernel::estimate_tokens(
-                    &pack_text(message),
-                    ene_kernel::TokenEstimation::Chars4,
-                )
-            },
+            |message| estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4),
             |message| matches!(message.role, LlmRole::System),
         );
         assert_eq!(packed[0].text, "contract");
