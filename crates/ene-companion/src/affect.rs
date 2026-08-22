@@ -200,8 +200,20 @@ pub fn apply_turn_signals(
         state.irritation += (proposal.irritation - state.irritation) * w * 0.3;
         state.affinity += (proposal.affinity - state.affinity) * w * 0.2;
     }
+    apply_conversation_fatigue(state, user_text);
     state.clamp();
     nearest_label(state.valence, state.arousal, state.dominance).clone_into(&mut state.mood_label);
+}
+
+/// Raise fatigue from conversational activity. Empty text is a no-op.
+pub fn apply_conversation_fatigue(state: &mut AffectState, user_text: &str) {
+    let trimmed = user_text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let chars = u16::try_from(trimmed.chars().count()).unwrap_or(u16::MAX);
+    let extra = (f32::from(chars) / 160.0) * 0.01;
+    state.fatigue = (state.fatigue + 0.02 + extra.min(0.04)).clamp(0.0, 1.0);
 }
 
 /// Apply a model self-report as an input event, then return the presentation.

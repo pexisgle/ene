@@ -68,19 +68,6 @@ pub fn config_file_path() -> PathBuf {
     data_dir().join("settings.json")
 }
 
-/// Runtime prompt pack for a language within an explicit base assets directory
-/// (`base/lang/{code}/prompts.json`).
-///
-/// These packs are the runtime source of truth for [`crate::PromptLibrary`];
-/// the compile-time embedded packs are only a fallback when this file is absent.
-pub(crate) fn prompt_pack_path_in(base: &std::path::Path, language_code: &str) -> PathBuf {
-    base.join("lang").join(language_code).join("prompts.json")
-}
-
-pub fn prompt_pack_path(language_code: &str) -> PathBuf {
-    prompt_pack_path_in(assets_dir(), language_code)
-}
-
 /// Runtime pattern pack for a language within an explicit base assets directory
 /// (`base/lang/{code}/patterns.json`).
 ///

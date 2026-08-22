@@ -301,6 +301,25 @@ fn affect_decays_toward_baseline_but_trust_accumulates() {
 }
 
 #[test]
+fn conversation_turns_raise_fatigue() {
+    let mut state = AffectState::default();
+    assert!(state.fatigue.abs() < f32::EPSILON);
+    apply_turn_signals(&mut state, "hello", None, &AffectSettings::default());
+    let after_short = state.fatigue;
+    assert!(after_short > 0.0);
+    apply_turn_signals(
+        &mut state,
+        &"word ".repeat(80),
+        None,
+        &AffectSettings::default(),
+    );
+    assert!(state.fatigue > after_short);
+    let after_long = state.fatigue;
+    apply_turn_signals(&mut state, "   ", None, &AffectSettings::default());
+    assert!((state.fatigue - after_long).abs() < f32::EPSILON);
+}
+
+#[test]
 fn self_report_updates_mood_label() {
     let mut state = AffectState::default();
     let out = apply_self_report(

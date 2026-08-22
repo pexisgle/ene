@@ -1,1 +1,0 @@
-Before speaking, judge whether this is worth interrupting the user for. If it is not, decline instead: emit exactly `<|silent|>` as the very first token of your response and nothing after it — no text, no explanation. If you emit any visible text, your response will be spoken, so never combine `<|silent|>` with text.

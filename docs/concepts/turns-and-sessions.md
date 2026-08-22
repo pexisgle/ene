@@ -24,7 +24,8 @@ running turn; `compact` compresses history.
 
 ### What happens inside a turn
 
-1. Recall and affect tick in `ene-companion`.
+1. Recall and affect tick in `ene-companion`. User turns raise `fatigue`;
+   time decay pulls it back toward the card baseline.
 2. The kernel composes the model-visible prompt from the session log.
    Installed skills appear as the `skills.catalog` System Context source.
    A matching `SKILL.md` body is injected as `skills.active`. Matching
@@ -112,3 +113,6 @@ session) aborts any in-flight turn, waits until that turn has committed
 session's dialogue-lane actor from the in-process hub. If the turn does not
 go idle in time, the end request fails and `session/end` is not written. A
 later prompt on the ended session fails with `closed`.
+
+Session titles are whatever the client sends on create or `PATCH`. The daemon
+does not auto-generate a title from conversation content.
