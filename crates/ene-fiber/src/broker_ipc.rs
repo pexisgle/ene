@@ -277,10 +277,12 @@ fn dispatch(
             },
             Err(err) => error_response(&err),
         },
-        BrokerRequest::FsWrite { path, text } => match fs_write(&workspace, Path::new(&path), &text) {
-            Ok(()) => BrokerResponse::FsWriteOk,
-            Err(err) => error_response(&err),
-        },
+        BrokerRequest::FsWrite { path, text } => {
+            match fs_write(&workspace, Path::new(&path), &text) {
+                Ok(()) => BrokerResponse::FsWriteOk,
+                Err(err) => error_response(&err),
+            }
+        }
         BrokerRequest::FsWriteBytes { path, bytes_base64 } => {
             let bytes = match STANDARD.decode(bytes_base64) {
                 Ok(bytes) => bytes,
