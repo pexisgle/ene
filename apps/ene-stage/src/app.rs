@@ -789,10 +789,13 @@ impl StageApp {
         if let Some(caption) = &self.caption {
             caption.place_caption(&settings.caption_position);
         }
-        if let Some(overlay) = self.overlay.as_mut()
-            && overlay.transparent
-        {
-            overlay.set_click_through(settings.overlay_click_through);
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay
+                .window
+                .set_window_level(window_level(settings.always_on_top));
+            if overlay.transparent {
+                overlay.set_click_through(settings.overlay_click_through);
+            }
         }
         self.spawn(async move {
             AsyncOutcome::SaveLocalSettings(
@@ -1451,9 +1454,7 @@ impl ApplicationHandler for StageApp {
             .with_transparent(self.settings.transparent_overlay)
             .with_decorations(!self.settings.transparent_overlay)
             .with_visible(true);
-        if self.settings.always_on_top {
-            attrs = attrs.with_window_level(WindowLevel::AlwaysOnTop);
-        }
+        attrs = attrs.with_window_level(window_level(self.settings.always_on_top));
         if let Some(monitor) = monitor.as_ref() {
             attrs = attrs.with_position(monitor.position());
         }
@@ -1653,6 +1654,15 @@ fn provider_asset_load_status(count: usize) -> String {
     format!("{}: {count}", i18n::fl("plugins-assets"))
 }
 
+#[must_use]
+fn window_level(always_on_top: bool) -> WindowLevel {
+    if always_on_top {
+        WindowLevel::AlwaysOnTop
+    } else {
+        WindowLevel::Normal
+    }
+}
+
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
         "(empty)"
@@ -1673,7 +1683,13 @@ fn map_turn_err(err: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_log_text, provider_asset_load_status};
+    use super::{format_log_text, provider_asset_load_status, window_level};
+
+    #[test]
+    fn save_applies_window_level_for_transparent_and_opaque_overlays() {
+        assert_eq!(window_level(true), winit::window::WindowLevel::AlwaysOnTop);
+        assert_eq!(window_level(false), winit::window::WindowLevel::Normal);
+    }
 
     #[test]
     fn empty_log_payload_is_labeled_instead_of_hidden() {
