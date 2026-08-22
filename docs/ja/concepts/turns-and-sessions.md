@@ -18,7 +18,7 @@
 | 起点 | トリガー |
 |---|---|
 | `user` | クライアントからのメッセージ |
-| `proactive` | コンパニオンが自発的に話す（`ene-companion`） |
+| `proactive` | コンパニオンが自発的に話す（`ene-companion`）。開いているセッションをすべて `mind.proactive.observation_interval_seconds`（既定 60）で観測します。 |
 | `scheduled` | 永続スケジュールが発火（`ene-work`） |
 | `delegation` | 裏層ジョブからの報告 |
 | `subagent` | 入れ子のワークターン |

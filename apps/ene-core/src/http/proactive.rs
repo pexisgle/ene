@@ -2,10 +2,10 @@ use std::time::{Duration, Instant};
 
 use chrono::DateTime;
 use ene_companion::{
-    ActivitySnapshot, ProactiveObservation, ProactiveSuppressionState, ScreenSummaryStatus,
-    build_proactive_context, decide_proactive_speech, evaluate_quiet_hours,
+    ActivitySnapshot, ClassifyModel, ProactiveObservation, ProactiveSuppressionState,
+    ScreenSummaryStatus, build_proactive_context, decide_proactive_speech, evaluate_quiet_hours,
 };
-use ene_session::{EventKind, Role};
+use ene_session::{EventKind, Role, SessionMeta};
 
 use serde_json::json;
 
@@ -15,12 +15,30 @@ use super::classify::SeamedClassify;
 /// Event-driven companion speech. Fail-closed when the classifier is Echo.
 pub async fn run_loop(state: AppState, classify: std::sync::Arc<SeamedClassify>) {
     loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        tick(&state, classify.as_ref()).await;
+        tokio::time::sleep(observation_interval(
+            state.core.mind().proactive.observation_interval_seconds,
+        ))
+        .await;
+        tick_with(&state, classify.as_ref(), Some(classify.as_ref())).await;
     }
 }
 
-async fn tick(state: &AppState, classify: &SeamedClassify) {
+/// Sleep between observation ticks. Zero is treated as one second so the loop cannot spin.
+#[must_use]
+pub(crate) fn observation_interval(seconds: u64) -> Duration {
+    Duration::from_secs(seconds.max(1))
+}
+
+#[cfg(test)]
+pub(crate) async fn tick(state: &AppState, classify: &dyn ClassifyModel) {
+    tick_with(state, classify, None).await;
+}
+
+async fn tick_with(
+    state: &AppState,
+    classify: &dyn ClassifyModel,
+    screen: Option<&SeamedClassify>,
+) {
     let mind = state.core.mind();
     if !mind.proactive.enabled || mind.proactive.paused {
         return;
@@ -31,9 +49,18 @@ async fn tick(state: &AppState, classify: &SeamedClassify) {
     let Ok(sessions) = state.core.store().list_sessions(None) else {
         return;
     };
-    let Some(meta) = sessions.iter().find(|row| row.ended_at.is_none()) else {
-        return;
-    };
+    for meta in sessions.into_iter().filter(|row| row.ended_at.is_none()) {
+        tick_session(state, classify, screen, &meta).await;
+    }
+}
+
+async fn tick_session(
+    state: &AppState,
+    classify: &dyn ClassifyModel,
+    screen: Option<&SeamedClassify>,
+    meta: &SessionMeta,
+) {
+    let mind = state.core.mind();
     let Ok(events) = state.core.store().load_events(meta.id, 0) else {
         return;
     };
@@ -100,8 +127,13 @@ async fn tick(state: &AppState, classify: &SeamedClassify) {
         None
     };
     let (screen_summary, screen_summary_status) = if mind.proactive.sources.screen_summary {
-        match capture_screen_summary(registry.as_ref(), classify, &window_label).await {
-            Some(summary) => (Some(summary), ScreenSummaryStatus::Available),
+        match screen {
+            Some(seamed) => {
+                match capture_screen_summary(registry.as_ref(), seamed, &window_label).await {
+                    Some(summary) => (Some(summary), ScreenSummaryStatus::Available),
+                    None => (None, ScreenSummaryStatus::Unavailable),
+                }
+            }
             None => (None, ScreenSummaryStatus::Unavailable),
         }
     } else {

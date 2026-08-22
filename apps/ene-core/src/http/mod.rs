@@ -7,7 +7,7 @@ mod exclusive;
 mod lanes;
 mod model;
 mod performance;
-mod proactive;
+pub(crate) mod proactive;
 mod recall;
 mod routes;
 mod schedule;
@@ -64,6 +64,8 @@ pub struct ServerHandle {
     host: Arc<ene_work::DelegationHost>,
     core: Arc<CoreDaemon>,
     lanes: Arc<LaneHub>,
+    #[cfg(test)]
+    pub(crate) state: AppState,
 }
 
 impl ServerHandle {
@@ -306,6 +308,8 @@ impl CoreDaemon {
             host: self.host(),
             core: Arc::clone(&self),
             lanes,
+            #[cfg(test)]
+            state: state.clone(),
         })
     }
 }
