@@ -4,7 +4,7 @@ on:
   pull_request:
 
 jobs:
-  fix-pr-828-shared-api:
+  fix-pr-828-shared-lint:
     if: github.head_ref == 'tmp-placeholder-never-use'
     runs-on: ubuntu-latest
     permissions:
@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Refactor shared fs workspace entry point
+      - name: Remove obsolete shared-source lint suppression
         shell: bash
         run: |
           set -euo pipefail
@@ -25,46 +25,14 @@ jobs:
           git checkout -B repair-828 origin/cursor/fs-glob-delete-broker-860b
           python3 - <<'PY'
           from pathlib import Path
-
-          logic_path = Path('plugins/tool/fs/src/logic.rs')
-          text = logic_path.read_text()
-          text = text.replace('#[allow(dead_code)]\n', '')
-
-          old_execute = '''pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
-              match name {'''
-          new_execute = '''pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
-              if let Ok(root) = std::env::var("ENE_WORKSPACE") {
-                  return execute_in_workspace(Path::new(&root), name, args);
-              }
-              execute_inner(name, args)
-          }
-
-          pub(crate) fn execute_in_workspace(
-              root: &Path,
-              name: &str,
-              args: &Value,
-          ) -> Result<Value, String> {
-              with_workspace(root, || execute_inner(name, args))
-          }
-
-          fn execute_inner(name: &str, args: &Value) -> Result<Value, String> {
-              match name {'''
-          if old_execute not in text:
-              raise SystemExit('execute anchor not found')
-          text = text.replace(old_execute, new_execute, 1)
-          text = text.replace('pub fn with_workspace<T>(', 'fn with_workspace<T>(', 1)
-          logic_path.write_text(text)
-
-          builtins_path = Path('crates/ene-registry/src/builtins.rs')
-          builtins = builtins_path.read_text()
-          old = 'builtin::fs::with_workspace(workspace, || builtin::fs::execute(name, args))'
-          new = 'builtin::fs::execute_in_workspace(workspace, name, args)'
-          if old not in builtins:
-              raise SystemExit('builtins anchor not found')
-          builtins_path.write_text(builtins.replace(old, new, 1))
+          path = Path('plugins/tool/fs/src/logic.rs')
+          text = path.read_text()
+          if '#[allow(dead_code)]' not in text:
+              raise SystemExit('expected dead_code suppression not found')
+          path.write_text(text.replace('#[allow(dead_code)]\n', ''))
           PY
           cargo fmt --all
           cargo clippy -p ene-registry -p ene-tool-fs --all-targets -- -D warnings
-          git add plugins/tool/fs/src/logic.rs crates/ene-registry/src/builtins.rs
-          git commit -m 'fix(fs): make scoped workspace a shared execution API'
+          git add plugins/tool/fs/src/logic.rs
+          git commit -m 'fix(fs): remove obsolete shared-source lint suppression'
           git push origin HEAD:cursor/fs-glob-delete-broker-860b
