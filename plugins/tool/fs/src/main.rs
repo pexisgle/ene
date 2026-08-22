@@ -4,17 +4,19 @@
 
 mod logic;
 
-// Keep host-only `with_workspace` live in this binary so shared logic.rs stays
-// clean under -D warnings without #[allow] (forbidden by clippy::allow_attributes).
-#[expect(dead_code, reason = "link stub for host-only API shared with ene-registry")]
-fn _link_host_workspace_api() {
-    let _ = logic::with_workspace(std::path::Path::new("."), || Ok::<(), String>(()));
-}
-
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    // Keep host-only `logic::with_workspace` live in this binary so shared
+    // logic.rs stays clean under -D warnings (no #[allow]; expect(dead_code)
+    // is unfulfilled when ene-registry includes the same file).
+    if std::env::var_os("ENE_NEVER_SET_HOST_WORKSPACE_LINK").is_some() {
+        drop(logic::with_workspace(std::path::Path::new("."), || {
+            Ok::<(), String>(())
+        }));
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
