@@ -1177,9 +1177,11 @@ impl StageApp {
         self.detail.visible = true;
         self.detail.refresh_settings_on_open();
         self.detail.select_tab(tab);
-        if self.detail_win.is_none()
-            && let Some(gpu) = self.gpu.as_ref()
-        {
+        if let Some(detail) = self.detail_win.as_ref() {
+            detail.show_and_focus();
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_ref() {
             match ChromeWindow::create(
                 event_loop,
                 gpu,
