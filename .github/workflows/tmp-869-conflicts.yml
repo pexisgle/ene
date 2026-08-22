@@ -1,4 +1,4 @@
-name: TMP 869 conflict probe
+name: TMP 869 merge main
 
 on:
   push:
@@ -9,31 +9,25 @@ permissions:
   contents: write
 
 jobs:
-  probe:
+  merge-main:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Probe merge conflicts and publish report
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Merge current main, format, and clean probe files
         shell: bash
         run: |
-          set -u
-          git fetch origin main
-          git merge --no-commit --no-ff origin/main || true
-          {
-            echo '=== UNMERGED ==='
-            git diff --name-only --diff-filter=U || true
-            echo '=== CONFLICT MARKERS ==='
-            for f in $(git diff --name-only --diff-filter=U); do
-              echo "----- $f -----"
-              grep -n -B 12 -A 18 '^<<<<<<<\|^=======\|^>>>>>>>' "$f" || true
-            done
-          } > /tmp/conflicts.txt
-          git merge --abort || true
-          cp /tmp/conflicts.txt .tmp-869-conflicts.txt
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .tmp-869-conflicts.txt
-          git commit -m "ci: record PR 869 merge conflicts"
+          git fetch origin main
+          git merge --no-edit origin/main
+          git rm -f .github/workflows/tmp-869-conflicts.yml .tmp-869-conflicts.txt
+          cargo fmt --all
+          git add -A
+          git commit --amend --no-edit
           git push origin HEAD:cursor/provider-retry-context-860b
