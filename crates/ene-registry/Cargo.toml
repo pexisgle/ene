@@ -16,7 +16,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 blake3 = { workspace = true }
 chrono = { workspace = true }
-ene-plugin-ipc = { workspace = true }
+ene-plugin-ipc = { workspace = true, features = ["net"] }
 ene-plane = { workspace = true }
 parking_lot = { workspace = true }
 arboard = { workspace = true }

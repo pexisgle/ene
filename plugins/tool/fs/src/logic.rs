@@ -1,6 +1,8 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ene_plugin_ipc::BrokerSession;
-use ene_plugin_ipc::{BrokerClient, BrokerRequest, BrokerResponse, ToolSpecWire};
+use ene_plugin_ipc::{
+    BrokerClient, BrokerClientTransport, BrokerRequest, BrokerResponse, ToolSpecWire,
+};
 use ene_registry::{arg_str, spec};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -20,7 +22,7 @@ static PATH_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
 
 static TEMP_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
-static BROKER_SESSION: OnceLock<BrokerSession<tokio::net::UnixStream>> = OnceLock::new();
+static BROKER_SESSION: OnceLock<BrokerSession<BrokerClientTransport>> = OnceLock::new();
 
 static SHARED_BROKER: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
@@ -163,24 +165,7 @@ fn spawn_token() -> Result<String, String> {
         .map_err(|_| "ENE_PLUGIN_SPAWN_TOKEN is not set".to_owned())
 }
 
-#[cfg(unix)]
-async fn broker_session() -> Result<&'static BrokerSession<tokio::net::UnixStream>, String> {
-    if let Some(session) = BROKER_SESSION.get() {
-        return Ok(session);
-    }
-    let init = SHARED_BROKER.get_or_init(AsyncMutex::default);
-    let _guard = init.lock().await;
-    if let Some(session) = BROKER_SESSION.get() {
-        return Ok(session);
-    }
-    let client = BrokerClient::from_env()
-        .await
-        .map_err(|err| format!("broker unavailable: {err}"))?;
-    Ok(BROKER_SESSION.get_or_init(|| BrokerSession::new(client)))
-}
-
-#[cfg(not(unix))]
-async fn broker_session() -> Result<&'static BrokerSession<tokio::net::TcpStream>, String> {
+async fn broker_session() -> Result<&'static BrokerSession<BrokerClientTransport>, String> {
     if let Some(session) = BROKER_SESSION.get() {
         return Ok(session);
     }
