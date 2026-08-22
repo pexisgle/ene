@@ -1291,7 +1291,10 @@ mod tests {
     fn tolerant_edit_preserves_crlf() {
         let body = "    alpha\r\n    beta\r\n";
         let next = apply_edit(body, "alpha\nbeta", "gamma\ndelta", false).unwrap();
-        assert!(next.contains("\r\n"), "expected CRLF line endings: {next:?}");
+        assert!(
+            next.contains("\r\n"),
+            "expected CRLF line endings: {next:?}"
+        );
         assert_eq!(next, "gamma\r\ndelta");
     }
 
