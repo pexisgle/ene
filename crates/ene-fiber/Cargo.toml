@@ -28,10 +28,8 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-ripgrep = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-which = { workspace = true }
 
 [lints]
 workspace = true

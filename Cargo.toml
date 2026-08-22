@@ -85,8 +85,6 @@ ashpd = { version = "0.13", default-features = false, features = ["tokio", "scre
 rayon = "1.12"
 regex = "1"
 tempfile = "3"
-ripgrep = "14"
-which = "8"
 
 cargo-husky = { version = "1.5", default-features = false, features = ["user-hooks", "run-for-all"] }
 ctor = "1.0"
