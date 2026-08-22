@@ -98,6 +98,16 @@ impl BuiltinExecutor {
     pub fn execute(&self, name: &str, args: &Value) -> Result<Value, String> {
         builtin::execute(name, args)
     }
+
+    /// Execute a bundled fs tool against an explicit workspace.
+    pub fn execute_fs_in_workspace(
+        &self,
+        workspace: &Path,
+        name: &str,
+        args: &Value,
+    ) -> Result<Value, String> {
+        builtin::fs::with_workspace(workspace, || builtin::fs::execute(name, args))
+    }
 }
 
 #[must_use]
@@ -128,8 +138,9 @@ pub fn host_spec_for(name: &str) -> Option<ToolSpecWire> {
 pub fn host_sensitivity(name: &str) -> Sensitivity {
     match name {
         "exec.run" | "exec.shell" => Sensitivity::Medium,
-        "app.screenshot" | "app.window_list" | "app.active_window" | "app.clipboard_get"
-        | "app.list_monitors" => Sensitivity::High,
+        "fs.delete" | "app.screenshot" | "app.window_list" | "app.active_window"
+        | "app.clipboard_get" | "app.list_monitors" => Sensitivity::High,
+
         _ => Sensitivity::None,
     }
 }

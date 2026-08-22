@@ -117,6 +117,11 @@ struct HostWebInvoker {
     inner: Arc<SupervisorInner>,
 }
 
+struct HostFsInvoker {
+    uid: FiberUid,
+    inner: Arc<SupervisorInner>,
+}
+
 #[async_trait]
 impl ToolInvoke for PluginInvoker {
     async fn invoke(&self, name: &str, args: Value) -> Result<Value, String> {
@@ -196,6 +201,17 @@ impl ToolInvoke for PluginInvoker {
     async fn take_completions(&self) -> Vec<ene_plugin_ipc::ToolExecutionComplete> {
         let mut conn = self.session.conn.lock().await;
         conn.take_completions()
+    }
+}
+
+#[async_trait]
+impl ToolInvoke for HostFsInvoker {
+    async fn invoke(&self, name: &str, args: Value) -> Result<Value, String> {
+        self.inner
+            .broker
+            .lock()
+            .fs_invoke(self.uid, name, &args)
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -688,15 +704,20 @@ impl Supervisor {
         fiber.requires.clone_from(&row.requires);
         fiber.sandbox_required = row.sandbox_required;
         fiber.state = FiberState::Loading;
-        let web_invoke = (row.plugin == "tool.web").then(|| {
-            Arc::new(HostWebInvoker {
+        let host_invoke: Option<Arc<dyn ToolInvoke>> = match row.plugin.as_str() {
+            "tool.web" => Some(Arc::new(HostWebInvoker {
                 uid: fiber.uid,
                 inner: Arc::clone(&self.inner),
-            }) as Arc<dyn ToolInvoke>
-        });
+            })),
+            "tool.fs" => Some(Arc::new(HostFsInvoker {
+                uid: fiber.uid,
+                inner: Arc::clone(&self.inner),
+            })),
+            _ => None,
+        };
         let builtin_invoke = Arc::new(BuiltinInvoker) as Arc<dyn ToolInvoke>;
         for def in definitions_for(kind) {
-            let invoke = web_invoke
+            let invoke = host_invoke
                 .as_ref()
                 .map_or_else(|| Arc::clone(&builtin_invoke), Arc::clone);
             self.inner.record_tool(&mut fiber, def, invoke);
@@ -838,6 +859,11 @@ impl Supervisor {
             .insert(row.row_id.clone(), Arc::clone(&session));
         let invoke: Arc<dyn ToolInvoke> = if row.plugin == "tool.web" {
             Arc::new(HostWebInvoker {
+                uid: fiber.uid,
+                inner: Arc::clone(&self.inner),
+            })
+        } else if row.plugin == "tool.fs" {
+            Arc::new(HostFsInvoker {
                 uid: fiber.uid,
                 inner: Arc::clone(&self.inner),
             })
