@@ -1604,7 +1604,7 @@ impl ApplicationHandler for StageApp {
         }
         if close_chat {
             self.chat = None;
-            self.surface.chat_open = false;
+            self.surface.close_chat();
         }
         if close_detail {
             self.detail_win = None;

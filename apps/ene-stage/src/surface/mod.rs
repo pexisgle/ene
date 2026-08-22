@@ -99,6 +99,13 @@ impl SurfaceUiState {
         self.pending_actions.push(action);
     }
 
+    /// Closing the Chat window removes the redraw that would normally clear
+    /// input focus, so the flag must be reset alongside `chat_open`.
+    pub fn close_chat(&mut self) {
+        self.chat_open = false;
+        self.chat_input_focused = false;
+    }
+
     pub(crate) fn apply_text_delta(&mut self, text: &str, captions: bool) {
         if caption::is_speech_caption(text) {
             self.streaming_text.push_str(text);
@@ -203,5 +210,20 @@ mod tests {
         state.apply_text_delta("Next turn.", true);
         assert!(state.caption_visible());
         assert_eq!(state.caption, "Next turn.");
+    }
+
+    #[test]
+    fn closing_chat_clears_stale_input_focus() {
+        let mut state = SurfaceUiState::default();
+        assert!(state.chat_open);
+        state.chat_input_focused = true;
+
+        state.close_chat();
+
+        assert!(!state.chat_open);
+        assert!(
+            !state.chat_input_focused,
+            "overlay shortcuts must not stay blocked after Chat closes"
+        );
     }
 }
