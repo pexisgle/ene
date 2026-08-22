@@ -1067,12 +1067,15 @@ fn pairwise_similarity(
     if titles_too_close(left_title, right_title) {
         return 1.0;
     }
-    let embed = cosine(left_vec, right_vec);
-    if embed > 0.0 {
-        embed
+    if pairwise_embeddings_usable(left_vec, right_vec) {
+        cosine(left_vec, right_vec).max(0.0)
     } else {
         title_jaccard(left_title, right_title)
     }
+}
+
+fn pairwise_embeddings_usable(left: &[f32], right: &[f32]) -> bool {
+    !left.is_empty() && left.len() == right.len()
 }
 
 fn title_jaccard(left: &str, right: &str) -> f32 {
@@ -1119,5 +1122,27 @@ mod ranking_tests {
         assert!((super::title_jaccard("Paris Cafe", "paris cafe") - 1.0).abs() < 1e-5);
         assert!(super::title_jaccard("Paris cafe", "Tokyo sushi") < 0.01);
         assert!(super::title_jaccard("Paris cafe", "Paris restaurants") > 0.2);
+    }
+
+    #[test]
+    fn orthogonal_or_negative_embeddings_do_not_fall_back_to_title_jaccard() {
+        let left = "Paris cafe";
+        let right = "Paris restaurants";
+        let jaccard = super::title_jaccard(left, right);
+        assert!(jaccard > 0.2, "precondition: titles share a token");
+        let orthogonal = super::pairwise_similarity(left, &[1.0, 0.0], right, &[0.0, 1.0]);
+        assert!(
+            orthogonal.abs() < 1e-5,
+            "orthogonal embeddings must keep cosine 0, not Jaccard {jaccard}: {orthogonal}"
+        );
+        let opposite = super::pairwise_similarity(left, &[1.0, 0.0], right, &[-1.0, 0.0]);
+        assert!(
+            opposite.abs() < 1e-5,
+            "anti-aligned embeddings must stay non-negative cosine, not Jaccard {jaccard}: {opposite}"
+        );
+        let missing = super::pairwise_similarity(left, &[], right, &[]);
+        assert!((missing - jaccard).abs() < 1e-5);
+        let mismatched = super::pairwise_similarity(left, &[1.0], right, &[1.0, 0.0]);
+        assert!((mismatched - jaccard).abs() < 1e-5);
     }
 }
