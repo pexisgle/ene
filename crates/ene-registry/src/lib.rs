@@ -10,6 +10,7 @@ mod builtin;
 mod builtins;
 mod def;
 mod discovery;
+mod host_http;
 mod pipeline;
 
 pub use builtin::{arg_str, spec, spec_with_discovery};
@@ -19,6 +20,7 @@ pub use builtins::{
 };
 pub use def::{Layer, ToolDefinition, ToolSource};
 pub use discovery::ToolHit;
+pub use host_http::{try_host_fetch, with_http_fetch};
 pub use pipeline::{BuiltinInvoker, PipelineError, ToolInvoke, ToolRegistry, confine_tool_path};
 
 #[cfg(test)]

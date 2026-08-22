@@ -33,6 +33,8 @@ impl ToolHandler for EchoHandler {
             parameters: json!({"type": "object"}),
             output: json!({"type": "object"}),
             side_effects: Vec::new(),
+            broker_socket: None,
+
             category: String::new(),
             keywords: Vec::new(),
             examples: Vec::new(),

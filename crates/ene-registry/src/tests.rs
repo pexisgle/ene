@@ -242,6 +242,8 @@ fn unknown_plugin_empty_side_effects_are_medium_sensitivity() {
         parameters: json!({"type":"object"}),
         output: json!({"type":"object"}),
         side_effects: Vec::new(),
+        broker_socket: None,
+
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
@@ -317,6 +319,18 @@ async fn web_fetch_is_on_surface_and_blocks_loopback() {
         .await
         .unwrap_err();
     assert!(matches!(err, PipelineError::Execute(_)));
+    let err = registry
+        .execute(
+            "web.fetch",
+            json!({"url":"https://example.invalid/"}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, PipelineError::Execute(message) if message.contains("host net broker")),
+        "{err}"
+    );
 }
 
 #[test]

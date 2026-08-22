@@ -4,8 +4,8 @@ use crate::speech_gate::SpeechGate;
 use crate::spill::{DEFAULT_SOFT_LIMIT_BYTES, bound_brief};
 use crate::store::WorkStore;
 use crate::types::{
-    CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus, NewJob, OpenQuestion,
-    UpgradeReason, WorkDelegationSettings,
+    Artifact, CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus, NewJob,
+    OpenQuestion, UpgradeReason, WorkDelegationSettings,
 };
 use chrono::{DateTime, Utc};
 use ene_registry::{Layer, ToolDefinition, ToolRegistry};
@@ -21,6 +21,39 @@ use uuid::Uuid;
 #[must_use]
 pub fn workspace_root(data_dir: &Path) -> PathBuf {
     data_dir.join("workspace")
+}
+
+/// Delivered copies for one soul: `<data>/workspace/jobs/<soul_id>/artifacts`.
+#[must_use]
+pub fn soul_artifacts_dir(data_dir: &Path, soul: SoulId) -> PathBuf {
+    workspace_root(data_dir)
+        .join("jobs")
+        .join(soul.to_string())
+        .join("artifacts")
+}
+
+pub(crate) fn sanitize_filename(title: &str) -> String {
+    let mut out = String::new();
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else if (ch.is_whitespace() || ch == '-' || ch == '_') && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "artifact".to_owned()
+    } else {
+        out
+    }
+}
+
+fn delivered_file_name(id: &str, title: &str, src: &Path) -> String {
+    let stem = sanitize_filename(title);
+    match src.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{id}_{stem}.{ext}"),
+        _ => format!("{id}_{stem}"),
+    }
 }
 
 /// Host for public/internal delegations. Auto-upgrade uses the same entity.
@@ -386,6 +419,7 @@ impl DelegationHost {
             ) {
                 return Err(WorkError::AlreadyCompleted);
             }
+            self.deliver_job_artifacts(id)?;
             self.store.set_status(id, JobStatus::Completed, None)?;
         }
         self.store
@@ -564,6 +598,36 @@ impl DelegationHost {
             }
         }
         Ok(reports)
+    }
+
+    fn deliver_job_artifacts(&self, job_id: DelegationId) -> Result<(), WorkError> {
+        for art in self.store.artifacts_for(job_id)? {
+            if art.delivered {
+                continue;
+            }
+            let path = self.place_delivered_artifact(&art)?;
+            self.store.mark_delivered(&art.id, &path)?;
+        }
+        Ok(())
+    }
+
+    fn place_delivered_artifact(&self, art: &Artifact) -> Result<String, WorkError> {
+        let dest_dir = soul_artifacts_dir(&self.data_dir, art.soul_id);
+        std::fs::create_dir_all(&dest_dir)?;
+        let src = Path::new(&art.path);
+        if !src.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("artifact source is not a file: {}", art.path),
+            )
+            .into());
+        }
+        let dest = dest_dir.join(delivered_file_name(&art.id, &art.title, src));
+        if src == dest.as_path() {
+            return Ok(art.path.clone());
+        }
+        std::fs::copy(src, &dest)?;
+        Ok(dest.to_string_lossy().into_owned())
     }
 
     fn require_known(&self, id: DelegationId) -> Result<(), WorkError> {

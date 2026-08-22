@@ -2110,6 +2110,45 @@ async fn job_report_lands_only_in_owning_soul_session() {
 }
 
 #[tokio::test]
+async fn complete_marks_artifacts_delivered_on_http_list() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "notes");
+    let file = std::path::PathBuf::from(&job.workspace_dir).join("out.md");
+    std::fs::write(&file, "# delivered").unwrap();
+    core.host()
+        .store()
+        .register_artifact(ene_work::Artifact {
+            id: "http-art-1".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ene_work::ArtifactKind::Markdown,
+            title: "notes".into(),
+            path: file.to_string_lossy().into_owned(),
+            mime: Some("text/markdown".into()),
+            size_bytes: Some(12),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    core.host().complete(job.id, "notes ready").unwrap();
+    let page = client
+        .list_artifacts(Some(&soul.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert!(page.items[0].delivered);
+    assert!(
+        page.items[0].path.contains("artifacts"),
+        "delivered path should sit under the soul artifacts dir, got {}",
+        page.items[0].path
+    );
+    let body = client.artifact_content(&page.items[0].id).await.unwrap();
+    assert_eq!(body["content"].as_str(), Some("# delivered"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn web_release_does_not_drain_stage_speech_gate() {
     let (_dir, stage, core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");

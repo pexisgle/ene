@@ -196,6 +196,8 @@ impl McpBridge {
                     parameters,
                     output: json!({"type":"object"}),
                     side_effects: Vec::new(),
+                    broker_socket: None,
+
                     category: String::new(),
                     keywords: Vec::new(),
                     examples: Vec::new(),

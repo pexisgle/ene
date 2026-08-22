@@ -716,3 +716,39 @@ async fn apply_without_session_keeps_previous_config() {
     let schema = sup.plugin_config_schema("r-util").await.unwrap();
     assert!(!schema.has_config);
 }
+
+#[tokio::test]
+async fn web_fetch_without_net_grant_is_denied() {
+    let (_dir, sup) = supervisor();
+    sup.activate(&row("r-web", "tool.web", &[])).unwrap();
+    let err = sup
+        .registry()
+        .execute(
+            "web.fetch",
+            json!({"url": "https://example.invalid/"}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("denied net.fetch"), "{err}");
+}
+
+#[tokio::test]
+async fn web_fetch_with_grant_blocks_loopback() {
+    let (_dir, sup) = supervisor();
+    sup.activate(&row("r-web", "tool.web", &["net.fetch"]))
+        .unwrap();
+    let err = sup
+        .registry()
+        .execute(
+            "web.fetch",
+            json!({"url": "http://127.0.0.1/secret"}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("private") || err.to_string().contains("ssrf"),
+        "{err}"
+    );
+}

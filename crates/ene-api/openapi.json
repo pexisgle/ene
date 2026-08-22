@@ -58,6 +58,8 @@
       "patch": { "summary": "Edit memory (desktop)", "responses": { "200": { "description": "memory" } } },
       "delete": { "summary": "Forget memory (desktop)", "responses": { "200": { "description": "ok" } } }
     },
+    "/memories/pending": { "get": { "summary": "Pending memory candidates", "responses": { "200": { "description": "page" } } } },
+    "/memories/candidates/{id}/resolve": { "post": { "summary": "Accept or reject a memory candidate", "responses": { "200": { "description": "result" } } } },
     "/tools": { "get": { "summary": "Tool surface", "responses": { "200": { "description": "page" } } } },
     "/tools/{name}/test": { "post": { "summary": "Dev invoke", "responses": { "200": { "description": "result" } } } },
     "/plugins": { "get": { "summary": "Plugin fibers", "responses": { "200": { "description": "page" } } } },
@@ -69,6 +71,11 @@
     "/plugins/{id}/config/validate": { "post": { "summary": "Validate candidate plugin settings without applying", "responses": { "200": { "description": "validation" } } } },
     "/plugins/{id}/config/options": { "post": { "summary": "Dynamic options for one field; fallback is free-text", "responses": { "200": { "description": "options" } } } },
     "/providers/models": { "post": { "summary": "List vendor model ids through a one-shot provider IPC probe", "responses": { "200": { "description": "models" }, "400": { "description": "unknown plugin or task" } } } },
+    "/providers/assets/list": { "post": { "summary": "List installable sidecar and runtime assets", "responses": { "200": { "description": "assets" } } } },
+    "/providers/assets/install": { "post": { "summary": "Install a catalog asset", "responses": { "200": { "description": "install" } } } },
+    "/providers/assets/install/status": { "post": { "summary": "Poll asset install progress", "responses": { "200": { "description": "status" } } } },
+    "/providers/assets/set_active": { "post": { "summary": "Select the active installed asset", "responses": { "200": { "description": "ok" } } } },
+    "/providers/assets/refresh_catalog": { "post": { "summary": "Refetch the host-managed runtime catalog", "responses": { "200": { "description": "catalog" } } } },
     "/mcp": {
       "get": { "summary": "Handwritten MCP servers (mcp.json)", "responses": { "200": { "description": "document" } } },
       "put": { "summary": "Replace handwritten MCP servers and apply profile rows", "responses": { "200": { "description": "document" } } }
@@ -77,6 +84,7 @@
     "/approvals/{id}/respond": { "post": { "summary": "First writer wins", "responses": { "200": { "description": "ok" }, "409": { "description": "already_resolved" } } } },
     "/characters": { "get": { "summary": "Installed packages", "responses": { "200": { "description": "page" } } } },
     "/characters/import": { "post": { "summary": "Import archive from local path", "responses": { "200": { "description": "character" } } } },
+    "/characters/{id}/activate": { "post": { "summary": "Activate package as the current character", "responses": { "200": { "description": "character" } } } },
     "/characters/{id}/export": { "get": { "summary": "Export path", "responses": { "200": { "description": "path" } } } },
     "/settings": {
       "get": { "summary": "Current settings JSON", "responses": { "200": { "description": "settings" } } },
