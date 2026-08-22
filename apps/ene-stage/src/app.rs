@@ -1151,6 +1151,7 @@ impl StageApp {
 
     fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
         self.detail.visible = true;
+        self.detail.refresh_settings_on_open();
         self.detail.select_tab(tab);
         if self.detail_win.is_none()
             && let Some(gpu) = self.gpu.as_ref()

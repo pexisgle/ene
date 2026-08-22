@@ -263,6 +263,14 @@ impl DetailUiState {
         self.loaded.settings = false;
     }
 
+    /// Reload core settings when Detail is reopened so external vault writes
+    /// and restarts cannot leave a stale API-key banner behind.
+    pub fn refresh_settings_on_open(&mut self) {
+        if self.visible {
+            self.invalidate_settings();
+        }
+    }
+
     /// Explicit navigation wins over the search box; otherwise search re-selects the tab every frame.
     pub fn select_tab(&mut self, tab: DetailTab) {
         self.tab = tab;
@@ -2625,6 +2633,30 @@ mod tests {
         );
         state.chat_api_key = "placeholder-key".to_owned();
         assert!(chat_apply_block_reason(&state).is_none());
+    }
+
+    #[test]
+    fn reopening_detail_refreshes_stale_vault_state() {
+        let mut state = DetailUiState {
+            visible: true,
+            ..DetailUiState::default()
+        };
+        parse_core_fields(
+            r#"{
+                "effective": {
+                    "ai": {"tasks": {"chat": {"plugin": "provider.openai_compat", "model": "m"}}},
+                    "ai_chat_key_set": false,
+                    "providers": [{"id": "provider.openai_compat", "needs_key": true}]
+                }
+            }"#,
+            &mut state,
+        );
+        assert_eq!(chat_setup_gap(&state), Some(ChatSetupGap::ApiKey));
+
+        // Simulate a later settings load after an external vault write.
+        state.loaded.settings = true;
+        state.refresh_settings_on_open();
+        assert!(!state.loaded.settings);
     }
 
     #[test]
