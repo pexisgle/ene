@@ -1,9 +1,11 @@
 use crate::{BootOptions, CoreDaemon};
 use async_trait::async_trait;
 use base64::Engine;
+use chrono::TimeZone;
 use ene_api::{
-    ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
-    MessageMode, MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
+    AnswerJobRequest, ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest,
+    HistoryResponse, MessageMode, MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch,
+    ToolTestRequest,
 };
 use ene_companion::{
     CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, ScriptedClassify,
@@ -39,6 +41,19 @@ struct ParkingJobModel;
 impl ConversationModel for ParkingJobModel {
     async fn generate(&self, _: ModelRequest) -> Result<ModelGeneration, KernelError> {
         std::future::pending().await
+    }
+}
+
+struct BlockingGenerateModel {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ConversationModel for BlockingGenerateModel {
+    async fn generate(&self, _: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        self.entered.notify_one();
+        std::thread::sleep(Duration::from_millis(400));
+        Ok(ModelGeneration::default())
     }
 }
 
@@ -712,6 +727,263 @@ async fn job_runner_completes_queued_work_on_its_own_lane() {
             .any(|(direction, kind, _)| direction == "child_to_parent" && kind == "complete"),
         "runner must complete via the job lane, got {mail:?}"
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn job_question_answer_reaches_mailbox() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let mut surface = client.events("surface", Some(&session.id)).await.unwrap();
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a city");
+    let report = core.host().question(job.id, "which city?").unwrap();
+    assert_eq!(report.job_id, Some(job.id));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut asked = None;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, surface.recv_json()).await {
+            Ok(Ok(Some(value))) if value["type"] == "question.asked" => {
+                asked = Some(value);
+                break;
+            }
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None) | Err(_)) | Err(_) => break,
+        }
+    }
+    let asked = asked.expect("live bus must emit question.asked");
+    assert_eq!(asked["id"], job.id.to_string());
+    assert_eq!(asked["prompt"], "which city?");
+    assert_eq!(asked["questions"][0], "which city?");
+    client
+        .answer_job(
+            &job.id.to_string(),
+            &AnswerJobRequest {
+                text: "Tokyo".into(),
+                answers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let mail = core.work().mailbox(job.id).unwrap();
+    assert!(
+        mail.iter().any(|(direction, kind, body)| {
+            direction == "parent_to_child" && kind == "answer" && body == "Tokyo"
+        }),
+        "answer must land on the job mailbox, got {mail:?}"
+    );
+    assert!(core.host().open_questions(job.id).unwrap().is_empty());
+    let sid = SessionId::from_str(&session.id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let events = loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        let answered = events
+            .iter()
+            .any(|event| matches!(&event.payload, EventPayload::DelegationAnswer { .. }));
+        if answered {
+            break events;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session log missing delegation answer"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let question_id = events
+        .iter()
+        .find_map(|event| {
+            if let EventPayload::DelegationQuestion { question_id, .. } = event.payload {
+                Some(question_id)
+            } else {
+                None
+            }
+        })
+        .expect("session log must record delegation question");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::UserMessage { blocks, .. }
+                    if blocks.iter().any(|block| block.as_text() == Some("Tokyo"))
+            )
+        }),
+        "session log must record user answer text: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::DelegationAnswer {
+                    question_id: answer_qid,
+                    delegation_id,
+                    ..
+                } if *answer_qid == question_id && *delegation_id == job.id
+            )
+        }),
+        "delegation answer must correlate question_id: {events:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn combined_job_answers_persist_matching_question_ids() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a trip");
+    core.host().question(job.id, "which city?").unwrap();
+    core.host().question(job.id, "how many days?").unwrap();
+    let sid = SessionId::from_str(&session.id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let question_ids = loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        let ids = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::DelegationQuestion {
+                    question_id,
+                    question,
+                    ..
+                } => Some((*question_id, question.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if ids.len() >= 2 {
+            break ids;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session log missing both delegation questions: {events:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        question_ids.iter().any(|(_, q)| q == "which city?"),
+        "expected city question, got {question_ids:?}"
+    );
+    assert!(
+        question_ids.iter().any(|(_, q)| q == "how many days?"),
+        "expected days question, got {question_ids:?}"
+    );
+    client
+        .answer_job(
+            &job.id.to_string(),
+            &AnswerJobRequest {
+                text: String::new(),
+                answers: vec!["Tokyo".into(), "3".into()],
+            },
+        )
+        .await
+        .unwrap();
+    let mail = core.work().mailbox(job.id).unwrap();
+    assert!(mail.iter().any(|(direction, kind, body)| {
+        direction == "parent_to_child" && kind == "answer" && body == "Tokyo"
+    }));
+    assert!(mail.iter().any(|(direction, kind, body)| {
+        direction == "parent_to_child" && kind == "answer" && body == "3"
+    }));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let events = loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        let answers = events
+            .iter()
+            .filter(|event| matches!(event.payload, EventPayload::DelegationAnswer { .. }))
+            .count();
+        if answers >= 2 {
+            break events;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session log missing both delegation answers: {events:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    for (question_id, _) in &question_ids {
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    &event.payload,
+                    EventPayload::DelegationAnswer {
+                        question_id: answer_qid,
+                        delegation_id,
+                        ..
+                    } if answer_qid == question_id && *delegation_id == job.id
+                )
+            }),
+            "missing matching delegation/answer for {question_id}: {events:?}"
+        );
+    }
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::UserMessage { blocks, .. }
+                    if blocks.iter().any(|block| block.as_text() == Some("Tokyo"))
+            )
+        }),
+        "session log must record Tokyo: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::UserMessage { blocks, .. }
+                    if blocks.iter().any(|block| block.as_text() == Some("3"))
+            )
+        }),
+        "session log must record days answer: {events:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn job_question_timeout_loop_writes_assumption() {
+    let (_dir, _client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "pick an airline");
+    core.work()
+        .set_status(job.id, ene_work::JobStatus::Running, None)
+        .unwrap();
+    let asked = chrono::Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+    core.work()
+        .mailbox_push_at(
+            job.id,
+            "child_to_parent",
+            "question",
+            "which airline?",
+            &asked.to_rfc3339(),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let mail = core.work().mailbox(job.id).unwrap();
+        if mail
+            .iter()
+            .any(|(_, kind, body)| kind == "assumption" && body.contains("timeout"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon timeout loop did not write an assumption, mailbox={mail:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     server.shutdown().await;
 }
 
@@ -1526,12 +1798,260 @@ async fn boot_seeds_two_souls_and_session_ops() {
 
     let barge = client.barge_in(&split.session.id).await;
     assert!(
-        barge.is_ok()
-            || barge
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.error_class() == "no_active_operation")
+        barge
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.error_class() == "closed")
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn end_session_releases_lane_actor() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("release lane".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(server.lane_count(), 0);
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    assert_eq!(server.lane_count(), 1);
+
+    let ended = client
+        .end_session(
+            &session.id,
+            &EndSessionRequest {
+                reason: "explicit".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ended.end_reason.as_deref(), Some("explicit"));
+    assert_eq!(server.lane_count(), 0);
+
+    let err = client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "after end".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "closed");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn end_session_waits_for_turn_before_session_end() {
+    let (_dir, client, core, server) =
+        boot_server_with(Arc::new(ParkingJobModel) as Arc<dyn ConversationModel>).await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("end while generating".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hold".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let sid = SessionId::from_str(&session.id).unwrap();
+    let started = Instant::now();
+    loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        if events
+            .iter()
+            .any(|event| event.kind == EventKind::TurnStart)
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "turn did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    client
+        .end_session(
+            &session.id,
+            &EndSessionRequest {
+                reason: "explicit".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let events = core.store().load_events(sid, 0).unwrap();
+    assert_eq!(
+        events.last().map(|event| &event.kind),
+        Some(&EventKind::SessionEnd)
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event.kind,
+            EventKind::AssistantMessage | EventKind::ToolResult
+        )),
+        "aborted generate must not write assistant speech or tool results"
+    );
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let later = core.store().load_events(sid, 0).unwrap();
+    assert_eq!(later.len(), events.len());
+    assert_eq!(
+        later.last().map(|event| &event.kind),
+        Some(&EventKind::SessionEnd)
+    );
+    assert_eq!(server.lane_count(), 0);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_session_does_not_write_session_end_when_turn_stop_times_out() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (_dir, client, core, server) = boot_server_with(Arc::new(BlockingGenerateModel {
+        entered: Arc::clone(&entered),
+    }) as Arc<dyn ConversationModel>)
+    .await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("sticky generate".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hold".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    entered.notified().await;
+    let sid = SessionId::from_str(&session.id).unwrap();
+
+    server
+        .state
+        .lanes
+        .set_turn_stop_timeout(Duration::from_millis(80));
+    let err = client
+        .end_session(
+            &session.id,
+            &EndSessionRequest {
+                reason: "explicit".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "lane_busy");
+
+    let events = core.store().load_events(sid, 0).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == EventKind::SessionEnd),
+        "session/end must not commit when stop_turn times out"
+    );
+    let meta = client.get_session(&session.id).await.unwrap();
+    assert!(meta.ended_at.is_none());
+    assert_eq!(server.lane_count(), 1);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let later = core.store().load_events(sid, 0).unwrap();
+    assert!(
+        !later
+            .iter()
+            .any(|event| event.kind == EventKind::SessionEnd)
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn idle_timeout_releases_lane_actor() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("idle release".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    assert_eq!(server.lane_count(), 1);
+
+    core.set_idle_timeout_secs(1);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let listed = client.list_sessions(None).await.unwrap();
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.id == session.id && item.ended_at.is_some())
+    );
+    assert_eq!(server.lane_count(), 0);
+
+    let err = client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "after idle".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "closed");
     server.shutdown().await;
 }
 
@@ -1969,6 +2489,45 @@ async fn job_report_lands_only_in_owning_soul_session() {
 }
 
 #[tokio::test]
+async fn complete_marks_artifacts_delivered_on_http_list() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "notes");
+    let file = std::path::PathBuf::from(&job.workspace_dir).join("out.md");
+    std::fs::write(&file, "# delivered").unwrap();
+    core.host()
+        .store()
+        .register_artifact(ene_work::Artifact {
+            id: "http-art-1".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ene_work::ArtifactKind::Markdown,
+            title: "notes".into(),
+            path: file.to_string_lossy().into_owned(),
+            mime: Some("text/markdown".into()),
+            size_bytes: Some(12),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    core.host().complete(job.id, "notes ready").unwrap();
+    let page = client
+        .list_artifacts(Some(&soul.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert!(page.items[0].delivered);
+    assert!(
+        page.items[0].path.contains("artifacts"),
+        "delivered path should sit under the soul artifacts dir, got {}",
+        page.items[0].path
+    );
+    let body = client.artifact_content(&page.items[0].id).await.unwrap();
+    assert_eq!(body["content"].as_str(), Some("# delivered"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn web_release_does_not_drain_stage_speech_gate() {
     let (_dir, stage, core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -2178,6 +2737,72 @@ async fn listen_feeds_duplex_machine_without_stt() {
         ene_body::DuplexState::Idle
     );
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn listen_stream_feeds_duplex_machine_without_stt() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    let pcm: Vec<f32> = (0..1_600).map(|i| ((i as f32) * 0.2).sin() * 0.3).collect();
+    let mut stream = client.listen_stream(&session.id, 16_000).await.unwrap();
+    stream.send_pcm(&pcm).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Listening).await;
+    stream.send_pcm(&vec![0.0; 160]).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Idle).await;
+    let openapi = client.openapi().await.unwrap();
+    assert!(
+        openapi
+            .pointer("/paths/~1sessions~1{id}~1listen~1stream")
+            .is_some(),
+        "openapi must list listen/stream"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn listen_stream_reconnects_after_socket_close() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    let pcm: Vec<f32> = (0..1_600).map(|i| ((i as f32) * 0.2).sin() * 0.3).collect();
+    let mut first = client.listen_stream(&session.id, 16_000).await.unwrap();
+    first.send_pcm(&pcm).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Listening).await;
+    drop(first);
+    let mut second = client.listen_stream(&session.id, 16_000).await.unwrap();
+    second.send_pcm(&pcm).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Listening).await;
+    second.send_pcm(&vec![0.0; 160]).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Idle).await;
+    server.shutdown().await;
+}
+
+async fn wait_voice_state(core: &CoreDaemon, want: ene_body::DuplexState) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if core.with_voice(|voice| voice.state()) == want {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "voice state still {:?} want {want:?}",
+            core.with_voice(|voice| voice.state())
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]

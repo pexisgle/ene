@@ -1,5 +1,7 @@
 //! Bundled `tool.web` plugin: fetch and search.
 
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
+
 mod logic;
 
 use tracing_subscriber::EnvFilter;

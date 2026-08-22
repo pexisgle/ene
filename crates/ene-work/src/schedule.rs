@@ -98,6 +98,7 @@ pub fn reminder_report(sched: &Schedule) -> CompanionReport {
         .unwrap_or_else(|| sched.name.clone());
     CompanionReport {
         soul_id: sched.soul_id,
+        job_id: None,
         speech: format!("it's time: {body}"),
         inner_intent: Some("remind".into()),
         starts_conversation: true,

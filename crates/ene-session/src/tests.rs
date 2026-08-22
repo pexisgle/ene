@@ -656,3 +656,16 @@ async fn session_end_and_surface_search() {
     assert_eq!(meta.end_reason.as_deref(), Some("explicit"));
     assert!(store.last_event_ts(session).unwrap().is_some());
 }
+
+#[tokio::test]
+async fn put_spill_round_trips_bytes_by_sha256() {
+    let (_dir, store) = open_tmp().await;
+    let bytes = b"screenshot-png";
+    let id = store.put_spill(bytes, Some("image/png")).await.unwrap();
+    assert_eq!(id.len(), 64);
+    let loaded = store.get_spill(&id).unwrap().unwrap();
+    assert_eq!(loaded.bytes, bytes);
+    assert_eq!(loaded.mime.as_deref(), Some("image/png"));
+    assert!(store.get_spill("not-a-valid-spill-id").is_err());
+    assert!(store.get_spill(&"0".repeat(64)).unwrap().is_none());
+}

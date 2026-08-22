@@ -1,8 +1,8 @@
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Query, State, WebSocketUpgrade};
+use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
-use ene_api::ResourceKind;
+use ene_api::{PCM_S16LE, ResourceKind, decode_pcm_s16le};
 use ene_kernel::{DisplayDepth, LiveEvent};
 use ene_session::{EventKind, SessionId};
 use serde::Deserialize;
@@ -55,6 +55,17 @@ pub struct EventsQuery {
     pub access_token: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListenStreamQuery {
+    pub sample_rate: Option<u32>,
+    pub encoding: Option<String>,
+    #[expect(
+        dead_code,
+        reason = "read by the auth middleware from the query string"
+    )]
+    pub access_token: Option<String>,
+}
+
 pub async fn events(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
@@ -98,6 +109,76 @@ pub async fn events(
             query.cursor,
         )
     }))
+}
+
+/// Bulk mic PCM: binary frames are `pcm_s16le` at `sample_rate` (default 16 kHz).
+pub async fn listen_stream(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<ListenStreamQuery>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiReject> {
+    let session = routes::parse_session(&id)?;
+    let encoding = query.encoding.as_deref().unwrap_or(PCM_S16LE);
+    if encoding != PCM_S16LE {
+        return Err(bad_request("invalid_message", "encoding must be pcm_s16le"));
+    }
+    let sample_rate = query
+        .sample_rate
+        .unwrap_or(ene_api::LISTEN_SAMPLE_RATE)
+        .max(1);
+    let bearer_proto = headers
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .find(|proto| proto.starts_with("bearer."))
+                .map(str::to_owned)
+        });
+    let upgrade = if let Some(proto) = bearer_proto {
+        ws.protocols([proto])
+    } else {
+        ws
+    };
+    Ok(upgrade.on_upgrade(move |socket| listen_socket_loop(socket, state, session, sample_rate)))
+}
+
+async fn listen_socket_loop(
+    mut socket: WebSocket,
+    state: AppState,
+    session: SessionId,
+    sample_rate: u32,
+) {
+    loop {
+        match socket.recv().await {
+            Some(Ok(Message::Close(_))) | None => break,
+            Some(Ok(Message::Ping(payload))) => {
+                if socket.send(Message::Pong(payload)).await.is_err() {
+                    break;
+                }
+            }
+            Some(Ok(Message::Binary(bytes))) => {
+                let pcm = match decode_pcm_s16le(&bytes) {
+                    Ok(pcm) => pcm,
+                    Err(err) => {
+                        tracing::debug!(error = %err, "listen stream frame skipped");
+                        continue;
+                    }
+                };
+                if pcm.is_empty() {
+                    continue;
+                }
+                if let Err(err) = routes::apply_listen_pcm(&state, session, &pcm, sample_rate).await
+                {
+                    tracing::debug!(error = %err.0.error_class, "listen stream apply failed");
+                }
+            }
+            Some(Ok(_) | Err(_)) => {}
+        }
+    }
 }
 
 async fn socket_loop(

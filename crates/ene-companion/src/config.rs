@@ -372,6 +372,30 @@ impl QuietHoursTime {
     }
 }
 
+/// How much window-title text observation may send to the model.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    ene_config::schemars::JsonSchema,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case")]
+#[schemars(crate = "::ene_config::schemars")]
+pub enum ObservationTitleMode {
+    /// App name when it can be parsed; never the document title.
+    #[default]
+    AppOnly,
+    /// Title with path, URL, email, and digit-heavy tokens removed.
+    RedactedTitle,
+    /// Unredacted title (still truncated by proactive char caps).
+    FullTitle,
+}
+
 /// Non-persistent world-state ring.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
@@ -382,6 +406,9 @@ pub struct WorldStateSettings {
     pub min_snapshots_for_trend: usize,
     pub engaged_idle_seconds: u64,
     pub change_window: usize,
+    pub title_mode: ObservationTitleMode,
+    /// Local OCR hint slot. No bundled backend; enabling it sends nothing extra yet.
+    pub ocr_hint: bool,
 }
 
 impl Default for WorldStateSettings {
@@ -392,8 +419,33 @@ impl Default for WorldStateSettings {
             min_snapshots_for_trend: 3,
             engaged_idle_seconds: 60,
             change_window: 3,
+            title_mode: ObservationTitleMode::AppOnly,
+            ocr_hint: false,
         }
     }
+}
+
+impl WorldStateSettings {
+    /// Contract the product GUI shows as the current observation send scope.
+    #[must_use]
+    pub fn send_scope(&self) -> ObservationSendScope {
+        ObservationSendScope {
+            title_mode: self.title_mode,
+            ocr_hint: self.ocr_hint,
+            screen: "overview_and_roi",
+            persist: "digest_and_summary",
+        }
+    }
+}
+
+/// What observation may send now (settings, not a live frame).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case")]
+pub struct ObservationSendScope {
+    pub title_mode: ObservationTitleMode,
+    pub ocr_hint: bool,
+    pub screen: &'static str,
+    pub persist: &'static str,
 }
 
 /// Proactive confirmation of parked memory candidates.

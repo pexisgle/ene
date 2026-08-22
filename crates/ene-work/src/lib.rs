@@ -1,11 +1,20 @@
 //! Delegation, jobs, schedules, skills, MCP bindings, and vision dual-path.
 
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests may fail fast"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        reason = "tests may fail fast"
+    )
+)]
 #![deny(unsafe_code)]
 
 mod error;
 mod host;
 mod mcp;
+mod observe;
 mod questions;
 mod router;
 mod runner;
@@ -22,10 +31,14 @@ mod workflow;
 pub use error::WorkError;
 pub use host::{
     DelegationHost, StartDelegation, SurfaceCallKind, UpgradeRequest, def_is_side_effect,
-    fold_brief, layer_for_call, question_timed_out, should_upgrade_steps, surface_call_kind,
-    workspace_root,
+    fold_brief, layer_for_call, question_timed_out, should_upgrade_steps, soul_artifacts_dir,
+    surface_call_kind, workspace_root,
 };
 pub use mcp::{McpProfile, McpServer, McpTool, ScriptedMcp, register_mcp_tools};
+pub use observe::{
+    ObservationPipeline, ObserveAction, ObserveError, ObserveSkip, contains_raw_screenshot,
+    observation_send_label, title_reaches_model, vision_payload,
+};
 pub use questions::{combine_questions, route_combined_answers};
 pub use router::WorkSurfaceRouter;
 pub use runner::{JobDrive, drive_job};
@@ -50,8 +63,8 @@ pub use types::{
     WorkDelegationSettings,
 };
 pub use vision::{
-    ScreenshotError, capture_screenshot, observe_screen, register_screenshot_tool,
-    screenshot_is_job_or_surface, screenshot_png,
+    MINIMAL_PNG, ScreenshotError, capture_screenshot, observe_screen, observe_screen_with_activity,
+    register_screenshot_tool, screenshot_is_job_or_surface, screenshot_png,
 };
 pub use workflow::{BookmarkFill, BookmarkSection, deliver_bookmark_workflow, fill_bookmark_job};
 

@@ -24,7 +24,7 @@ SDK.
 | Window | Depth | Contents |
 |---|---|---|
 | Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Click-through is System → Overlay click-through (on by default). Esc quits. Up to two VRM bodies stay on the overlay at once (`body.render.max_concurrent`, default 2). A/D switch which soul the chat session targets; W/S change motion on the active body. F3 toggles spring-bone collider wireframes. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
-| Chat (F2) | `surface` | Prompt / Steer / Follow-up (hover for meaning), approvals (Allow / Always / Deny), ask-user, mic PCM relay, Detail button (same as the tray). Status wraps on its own line so setup errors stay readable in a narrow window. |
+| Chat (F2) | `surface` | Prompt / Steer / Follow-up (hover for meaning), approvals (Allow / Always / Deny), ask-user (`question.asked` → `POST /jobs/{id}/answer`), mic PCM relay, Detail button (same as the tray). Status wraps on its own line so setup errors stay readable in a narrow window. |
 | Caption | `surface` | Spoken captions. Voice → Caption position (`top` / `bottom` / `left` / `right`) places the window; Pin caption stops it being dragged. Provider and HTTP errors stay on the chat status line (wrapped), not as spoken captions. The overlay closes when the turn ends. Long spoken lines wrap inside the overlay. |
 | Spotlight (Alt+Space) | local | Jump to detail sections, mic, quit. Choosing a command closes the palette. If the OS keeps Alt+Space, use Voice → Open Spotlight |
 | Detail (tray or Chat → Detail; F1 Companion, F4 Log) | `detail` | Settings IA, inner/thinking/tool/PAD log. Search filters sections; clicking a tab, Home shortcut, Spotlight, or F1/F4 clears the filter so it cannot pin you on the current section. An empty log shows a next-step hint instead of a blank pane. |
@@ -71,12 +71,19 @@ then a model. Home shows **Chat is ready.** only when that binding has a model
 and, if `effective.providers[].needs_key` is true, a vault API key
 (`effective.ai_chat_key_set`). Provider failures such as HTTP 401 are
 settings/status errors, not assistant replies. Apply sits above a scrollable,
-filterable model list so listing models cannot push save off-screen. Engines
+filterable model list so listing models cannot push save off-screen. Observation
+privacy (title mode, OCR hint, current send scope) is on the same Conversation
+tab and patches `mind.proactive.world_state`. Engines
 and GGUF weights live under Connections → provider assets. TTS/STT are
 `ai.tasks.tts` / `ai.tasks.stt`.
 
 VAD/ASR/TTS belong to core. Stage relays microphone PCM on
-`POST /sessions/{id}/listen` and plays `audio.chunk`. Barge-in is decided in
+`GET /sessions/{id}/listen/stream` as packed `pcm_s16le` (not per-chunk JSON
+POST) and plays `audio.chunk`. If the listen socket ends while the mic is
+still claimed, stage drops the sender and reconnects with a short backoff.
+A `Closed` send starts a new stream; a `Full` send drops that frame only. While local TTS is playing, stage raises the
+mic RMS gate (`BARGE_IN_ENERGY_FACTOR = 2.0`) so speaker bleed does not look
+like barge-in; loud user speech still reaches core VAD. Barge-in is decided in
 core (`voice.state` plus an `audio.chunk` with `abort: true`). Stage stops the
 playback sink and resets visemes when that abort chunk arrives; it does not use
 client RMS as the source of truth. Stage claims speaker/notify exclusive by

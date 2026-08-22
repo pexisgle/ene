@@ -8,6 +8,7 @@ mod lanes;
 mod model;
 mod performance;
 pub(crate) mod proactive;
+mod questions;
 mod recall;
 mod routes;
 mod schedule;
@@ -63,6 +64,7 @@ pub struct ServerHandle {
     supervisor: Arc<ene_fiber::Supervisor>,
     host: Arc<ene_work::DelegationHost>,
     core: Arc<CoreDaemon>,
+    lanes: Arc<LaneHub>,
     #[cfg(test)]
     pub(crate) state: AppState,
 }
@@ -79,6 +81,7 @@ impl ServerHandle {
     /// Ask the server to stop, unload plugins, and wait for the accept loop.
     pub async fn shutdown(mut self) {
         self.abort_background();
+        self.lanes.reset().await;
         self.core.clear_turn_seams();
         self.supervisor.shutdown().await;
         for handle in self.background.drain(..) {
@@ -92,6 +95,12 @@ impl ServerHandle {
         if let Some(join) = self.join.take() {
             drop(join.await);
         }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn lane_count(&self) -> usize {
+        self.lanes.len()
     }
 }
 
@@ -203,10 +212,11 @@ impl CoreDaemon {
             &self,
             Arc::clone(&classify),
         )));
+        let lanes = Arc::new(LaneHub::new(model));
         let state = AppState {
             popup: Arc::clone(self.popup()),
             core: Arc::clone(&self),
-            lanes: Arc::new(LaneHub::new(model)),
+            lanes: Arc::clone(&lanes),
             exclusive: Arc::new(ExclusiveHub::new(last_used)),
             idem: Arc::new(Mutex::new(HashMap::new())),
             token: token.clone(),
@@ -231,6 +241,10 @@ impl CoreDaemon {
         let performance_state = state.clone();
         let performance_task = tokio::spawn(async move {
             performance::run_loop(performance_state).await;
+        });
+        let question_state = state.clone();
+        let question_task = tokio::spawn(async move {
+            questions::run_loop(question_state).await;
         });
         let job_core = Arc::clone(&self);
         let job_task = tokio::spawn(async move {
@@ -277,6 +291,7 @@ impl CoreDaemon {
             report_task,
             proactive_task,
             schedule_task,
+            question_task,
             job_task,
             performance_task,
         ];
@@ -285,6 +300,7 @@ impl CoreDaemon {
             report_task,
             proactive_task,
             schedule_task,
+            question_task,
             job_task,
             performance_task,
         ];
@@ -298,6 +314,7 @@ impl CoreDaemon {
             supervisor: self.supervisor(),
             host: self.host(),
             core: Arc::clone(&self),
+            lanes,
             #[cfg(test)]
             state: state.clone(),
         })
@@ -333,6 +350,10 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/sessions/{id}/end", post(routes::end_session))
         .route("/api/v1/sessions/{id}/barge-in", post(routes::barge_in))
         .route("/api/v1/sessions/{id}/listen", post(routes::listen))
+        .route(
+            "/api/v1/sessions/{id}/listen/stream",
+            get(ws::listen_stream),
+        )
         .route("/api/v1/sessions/{id}/export", post(routes::export_session))
         .route("/api/v1/sessions/{id}/messages", post(routes::send_message))
         .route("/api/v1/sessions/{id}/history", get(routes::history))
@@ -345,6 +366,7 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/jobs", get(routes::list_jobs))
         .route("/api/v1/jobs/{id}", get(routes::get_job))
         .route("/api/v1/jobs/{id}/cancel", post(routes::cancel_job))
+        .route("/api/v1/jobs/{id}/answer", post(routes::answer_job))
         .route(
             "/api/v1/schedules",
             get(routes::list_schedules).post(routes::create_schedule),
@@ -487,7 +509,8 @@ fn token_from(request: &Request) -> Option<String> {
     {
         return Some(token.to_owned());
     }
-    if request.uri().path() != "/api/v1/events" {
+    if request.uri().path() != "/api/v1/events" && !request.uri().path().ends_with("/listen/stream")
+    {
         return None;
     }
     let query = request.uri().query()?;

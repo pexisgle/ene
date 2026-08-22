@@ -350,8 +350,8 @@ fn sandbox_for(
     )))
 }
 
-fn plugin_isolates_network(plugin_id: &str) -> bool {
-    plugin_id != "tool.web"
+fn plugin_isolates_network(_plugin_id: &str) -> bool {
+    true
 }
 
 fn build_spec(
@@ -526,8 +526,8 @@ mod tests {
     use super::plugin_isolates_network;
 
     #[test]
-    fn web_plugin_keeps_host_network() {
-        assert!(!plugin_isolates_network("tool.web"));
+    fn web_plugin_isolates_host_network() {
+        assert!(plugin_isolates_network("tool.web"));
         assert!(plugin_isolates_network("tool.fs"));
         assert!(plugin_isolates_network("tool.exec"));
     }

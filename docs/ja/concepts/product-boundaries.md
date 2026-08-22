@@ -96,17 +96,17 @@ WebView は使いません。[PR #794](https://github.com/pexisgle/ene/pull/794)
 
 | 旧 action | 現行 | Status | 注記 |
 |---|---|---|---|
-| `webfetch` | `web.fetch` | Current / Missing | surface 契約は維持。プラグインはまだ直接 reqwest。ホスト broker、redirect/DNS 再検証、byte 上限は [#799](https://github.com/pexisgle/ene/issues/799) |
-| HTML → 読みやすい Markdown | タグ除去 | Missing | [#799](https://github.com/pexisgle/ene/issues/799) のあと [#818](https://github.com/pexisgle/ene/issues/818) |
-| `websearch` | `web.search` | Current / Missing | DuckDuckGo Instant Answer + HTML フォールバック。backend 選択 / 資格情報は [#818](https://github.com/pexisgle/ene/issues/818) |
-| 有料検索 backend | — | Missing | vault 参照とホスト allowlist のみ。プラグインへ生秘密を置かない [#818](https://github.com/pexisgle/ene/issues/818) |
+| `webfetch` | `web.fetch` | Current | `format` は `markdown`（既定）/ `text` / `html`。HTML は見出し・段落・link を保つ。binary は `binary_content`。byte と変換後文字数に上限 |
+| HTML → 読みやすい Markdown | `web.fetch` `format=markdown` | Current | script/style/nav を除き、title と元 URL を残す |
+| `websearch` | `web.search` | Current | `backend` は `duckduckgo`（既定・無credential）、`arxiv`（domain、同じ結果形）、`tavily`/`exa`（vault まで `credential_missing`）。`web.search_backends` が一覧 |
+| 有料検索 backend | `web.search_backends` | Current | 宣言する。vault 資格情報なしでは選ばない |
 | ブラウザ自動化 | — | MCP / ビルトインとしては Dropped | Playwright 系 MCP。`tool.web` ではない |
 
 ### `app`（内製）
 
 | 旧 action | 現行 | Status | 注記 |
 |---|---|---|---|
-| `screenshot` / `capture_window` | `app.screenshot` | Current | Wayland は portal 優先、CLI フォールバック、Windows は GDI。capture JSON に size/scale/permission。[App プラットフォーム表](../guides/tools/app-platform.md) |
+| `screenshot` / `capture_window` | `app.screenshot` | Current | Wayland は portal 優先、CLI フォールバック、Windows は GDI。capture JSON に size/scale/permission。モデル呼び出しは `ImageRef` + spill blob（inline base64 ではない）としてログし、`ai.tasks.<task>.supports_images` のときだけ `LlmImage` に畳む。[App プラットフォーム表](../guides/tools/app-platform.md) |
 | `list_windows` | `app.window_list` | Current | wmctrl / hyprctl / sway。GNOME/KDE Wayland は `app.capabilities` で unsupported |
 | `get_active_window` | `app.active_window` | Current | 能動観測ソース（画面観測が有効なとき） |
 | `list_monitors` | `app.list_monitors` | Current | compositor がレイアウトを出すとき capture の scale/size と揃える |
@@ -162,7 +162,7 @@ v1.0 の接続は手書き `mcp.json` 行で、同じレジストリパイプラ
 | Character | occupants / bodies は HTTP、配置はローカル | Companion | 両方に Current |
 | Character editor（CCv3） | ローカル `character.json` を `ene-card` で I/O | なし | 移植しない。v1.0 はパッケージインポート（`P-803`）。desktop を残す理由にしない |
 | AI / Voice / Engines | `GET/PATCH /settings`、`providers`、`provider.assets` | Conversation、Voice、Connections | stage に Current。desktop にだけ残る操作があれば stage へ |
-| Features（能動発話のトグル） | `mind.proactive.*` の PATCH | System / Conversation | 残りのトグルは stage へ。観測パイプラインはコアの [#805](https://github.com/pexisgle/ene/issues/805) |
+| Features（能動発話のトグル） | `mind.proactive.*` の PATCH | Conversation | 観測プライバシー（`title_mode`、`ocr_hint`、送信範囲）は stage で Current。他の能動トグルはまだ増やせる |
 | Memory 設定 + Memories 台帳 | Memory HTTP | Memory | 一覧/編集/削除は stage で Current。補助 LLM の scope は [#717](https://github.com/pexisgle/ene/issues/717) |
 | Sessions | Session HTTP | Log | stage で Current |
 | Permissions / Approvals | Plane HTTP | System | stage で Current |
@@ -190,10 +190,10 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | 部品 | 所有者 | Status |
 |---|---|---|
 | スクリーンショット能力 | `app` ツール / クライアント | CLI 経路は Current。portal は [#800](https://github.com/pexisgle/ene/issues/800) |
-| ROI、luma fingerprint、changed-cell gate、caret 抑制 | `ene-work` の観測パイプライン | Missing [#805](https://github.com/pexisgle/ene/issues/805) |
-| タイトルの redaction（AppOnly / RedactedTitle / FullTitle） | `ene-work` + 設定 | Missing [#805](https://github.com/pexisgle/ene/issues/805) |
-| 能動発話 / 世界状態 | `ene-companion` + コア tick | Current: 開いているセッションすべて。間隔は `mind.proactive.observation_interval_seconds`。無変化フレームの vision 再利用は [#805](https://github.com/pexisgle/ene/issues/805) |
-| session / memory / audit への raw pixel | 禁止 | 入れない。E2E 証明は [#805](https://github.com/pexisgle/ene/issues/805) |
+| ROI、luma fingerprint、changed-cell gate、caret 抑制 | `ene-work` の観測パイプライン | Current |
+| タイトルの redaction（AppOnly / RedactedTitle / FullTitle） | `ene-companion` の設定 + `ene-work` の送信ラベル | Current（`mind.proactive.world_state.title_mode`） |
+| 能動発話 / 世界状態 | `ene-companion` + コア tick | Current: 開いているセッションすべて。間隔は `mind.proactive.observation_interval_seconds`。無変化フレームは前の要約を再利用 |
+| session / memory / audit への raw pixel | 禁止 | Current。digest とテキスト要約のみ |
 | desktop の `ProactiveObserveControl` | クライアントのスタブ | Unconnected |
 
 ## 4. セキュリティ差分
@@ -206,7 +206,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | 資格情報 | ボールト（`vault.bin` + `vault.key`）。プラグイン環境へ生キーを出さない | 検索 backend（[#818](https://github.com/pexisgle/ene/issues/818)）と plugin config（[#819](https://github.com/pexisgle/ene/issues/819)）も vault 参照。MCP 向けホスト OAuth は持たない |
 | 承認（`ene-plane`） | deny-by-default、hash chain、ポップアップ、「次から確認しない」 | 本番の AI 自動承認モデルは未設定（[#717](https://github.com/pexisgle/ene/issues/717)） |
 | `exec` | 直接の子へ SIGTERM のあと SIGKILL | process tree の所有、出力 byte 上限、cwd/env allowlist は [#798](https://github.com/pexisgle/ene/issues/798) |
-| raw pixel | 観測要約はセッションログの外 | session/memory/audit が PNG を残さない E2E は [#805](https://github.com/pexisgle/ene/issues/805) |
+| raw pixel | 観測要約はセッションログの外 | Current: session / memory / audit は digest と要約であり PNG ではない |
 
 ## 5. v1.0 と post-v1.0
 
@@ -226,7 +226,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
   [#799](https://github.com/pexisgle/ene/issues/799)、
   [#813](https://github.com/pexisgle/ene/issues/813)。
 - モデルを埋めず raw pixel を残さない観測:
-  [#805](https://github.com/pexisgle/ene/issues/805)（`P-112`）。
+  現行（`ene-work` のゲートと stage のプライバシー操作）。
 - `done.md` の未チェック（実プロバイダ会話、本番 ASR/TTS、ジョブランナーの
   発話、GUI E2E）は #717 のまま。
 
@@ -238,7 +238,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | ツール discovery index | [#817](https://github.com/pexisgle/ene/issues/817)（epic [#796](https://github.com/pexisgle/ene/issues/796)） | scoring は `ene-registry`。`done.md` の箱ではない |
 | background tool の start/cancel/completion | [#816](https://github.com/pexisgle/ene/issues/816)（epic #796） | 永続は `ene-work` のジョブ。第二の task store は作らない |
 | plugin config schema / dynamic options | [#819](https://github.com/pexisgle/ene/issues/819)（epic #796） | 未リリースなので旧 config shim は不要 |
-| 読みやすい Markdown と検索 backend | [#818](https://github.com/pexisgle/ene/issues/818) | SSRF（#799）のあと。`web.fetch` / `web.search` の surface はある |
+| 読みやすい Markdown と検索 backend | [#818](https://github.com/pexisgle/ene/issues/818) | 出荷: fetch の markdown/text/html、DDG+ArXiv、有料 backend は未設定として宣言 |
 | portal 優先の capture/clipboard | [#800](https://github.com/pexisgle/ene/issues/800) | 現行 v1.0 の能力は CLI 経路 |
 | utility の数式/単位/色/乱数の不足 | [#814](https://github.com/pexisgle/ene/issues/814) | 低優先。eval や任意コード実行は入れない |
 | `exec.pty`、デスクトップペット、カメラ、Live2D、モバイル | features.md の後継 ID | 形式が支える。v1.0 ではない |

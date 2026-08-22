@@ -163,13 +163,17 @@ pub fn render_user_input_dialog(
                     .button(i18n_embed_fl::fl!(crate::i18n::loader(), "submit"))
                     .clicked()
                 {
-                    let text = drafts
+                    let answers = drafts
                         .iter()
-                        .filter(|draft| !draft.skipped)
-                        .map(|draft| draft.selected.clone().unwrap_or_else(|| draft.text.clone()))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    ai.answer_user_input(request_id.clone(), text);
+                        .map(|draft| {
+                            if draft.skipped {
+                                String::new()
+                            } else {
+                                draft.selected.clone().unwrap_or_else(|| draft.text.clone())
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    ai.answer_user_input(request_id.clone(), answers);
                     clear_pending_user_input(world, chat_entity);
                 }
                 if ui

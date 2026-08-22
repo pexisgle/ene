@@ -14,7 +14,10 @@ use ene_plugin_ipc::{
     SetActiveAssetResult, SttRequest, SttResult, ToolCall, TtsAudio, TtsRequest,
 };
 use ene_provider_assets::CatalogRegistry;
-use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for};
+use ene_registry::{
+    BuiltinExecutor, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for,
+    with_http_fetch,
+};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -106,6 +109,11 @@ struct PluginInvoker {
     inner: Arc<SupervisorInner>,
 }
 
+struct HostWebInvoker {
+    uid: FiberUid,
+    inner: Arc<SupervisorInner>,
+}
+
 #[async_trait]
 impl ToolInvoke for PluginInvoker {
     async fn invoke(&self, name: &str, args: Value) -> Result<Value, String> {
@@ -127,6 +135,27 @@ impl ToolInvoke for PluginInvoker {
                 Err(err.to_string())
             }
         }
+    }
+}
+
+#[async_trait]
+impl ToolInvoke for HostWebInvoker {
+    async fn invoke(&self, name: &str, args: Value) -> Result<Value, String> {
+        if !self.inner.broker.lock().has_grant(self.uid, "net.fetch") {
+            return Err("denied net.fetch".to_owned());
+        }
+        let uid = self.uid;
+        let inner = Arc::clone(&self.inner);
+        with_http_fetch(
+            move |url| {
+                inner
+                    .broker
+                    .lock()
+                    .net_fetch(uid, url)
+                    .map_err(|err| err.to_string())
+            },
+            || BuiltinExecutor.execute(name, &args),
+        )
     }
 }
 
@@ -538,11 +567,21 @@ impl Supervisor {
         fiber.requires.clone_from(&row.requires);
         fiber.sandbox_required = row.sandbox_required;
         fiber.state = FiberState::Loading;
+        let web_invoke = (row.plugin == "tool.web").then(|| {
+            Arc::new(HostWebInvoker {
+                uid: fiber.uid,
+                inner: Arc::clone(&self.inner),
+            }) as Arc<dyn ToolInvoke>
+        });
         for def in definitions_for(kind) {
             fiber.push_effect(Effect::RegisterTool {
                 name: def.name.clone(),
             });
-            self.inner.registry.register(def);
+            if let Some(invoke) = &web_invoke {
+                self.inner.registry.register_with(def, Arc::clone(invoke));
+            } else {
+                self.inner.registry.register(def);
+            }
         }
         {
             let mut broker = self.inner.broker.lock();
@@ -685,12 +724,19 @@ impl Supervisor {
             .sessions
             .lock()
             .insert(row.row_id.clone(), Arc::clone(&session));
-        let invoke: Arc<dyn ToolInvoke> = Arc::new(PluginInvoker {
-            session: Arc::clone(&session),
-            row_id: row.row_id.clone(),
-            plugin: row.plugin.clone(),
-            inner: Arc::clone(&self.inner),
-        });
+        let invoke: Arc<dyn ToolInvoke> = if row.plugin == "tool.web" {
+            Arc::new(HostWebInvoker {
+                uid: fiber.uid,
+                inner: Arc::clone(&self.inner),
+            })
+        } else {
+            Arc::new(PluginInvoker {
+                session: Arc::clone(&session),
+                row_id: row.row_id.clone(),
+                plugin: row.plugin.clone(),
+                inner: Arc::clone(&self.inner),
+            })
+        };
         let source = ToolSource::Plugin {
             plugin_id: plugin_id.to_owned(),
         };

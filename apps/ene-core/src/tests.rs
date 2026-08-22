@@ -349,3 +349,53 @@ async fn plugin_config_survives_daemon_restart() {
     assert_eq!(row.config["mode"], "strict");
     assert_eq!(row.config["api_key"], "sk-live");
 }
+
+#[tokio::test]
+async fn observation_does_not_persist_png_in_session_memory_or_audit() {
+    let dir = TempDir::new().unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    let png = ene_work::MINIMAL_PNG;
+    {
+        let mut pipe = core.observation().lock();
+        let action = pipe.evaluate(png).unwrap();
+        assert!(matches!(action, ene_work::ObserveAction::Changed { .. }));
+        pipe.commit_summary("tiny frame".to_owned());
+        let reuse = pipe.evaluate(png).unwrap();
+        assert!(matches!(reuse, ene_work::ObserveAction::Skip { .. }));
+        assert!(!ene_work::contains_raw_screenshot(
+            format!("{pipe:?}").as_bytes()
+        ));
+    }
+    {
+        let mut memory = core.world_state().lock();
+        let snap = ene_work::observe_screen(
+            &mut memory,
+            &core.mind().proactive.world_state,
+            "tiny frame",
+            4,
+        );
+        let snap_json = serde_json::to_vec(&snap).unwrap();
+        assert!(!ene_work::contains_raw_screenshot(&snap_json));
+        assert!(!format!("{snap:?}").contains("tiny frame"));
+    }
+    let sessions = core.store().list_sessions(None).unwrap();
+    for meta in sessions {
+        let events = core.store().load_events(meta.id, 0).unwrap();
+        let blob = serde_json::to_vec(&events).unwrap();
+        assert!(!ene_work::contains_raw_screenshot(&blob));
+    }
+    let audit = core.plane().audit().records().unwrap();
+    let audit_blob = serde_json::to_vec(&audit).unwrap();
+    assert!(!ene_work::contains_raw_screenshot(&audit_blob));
+    for name in ["sessions.db", "companions.db", "audit.db"] {
+        let path = dir.path().join(name);
+        if let Ok(bytes) = std::fs::read(&path) {
+            assert!(
+                !ene_work::contains_raw_screenshot(&bytes),
+                "{name} stored a PNG"
+            );
+        }
+    }
+}

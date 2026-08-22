@@ -13,6 +13,10 @@
 `fs.read` / `fs.write` は親の canonicalization で閉じ込めます（相対 `../` も含む）。
 ツールの workspace はデータディレクトリそのものではなく `<data>/workspace` なので、
 `api.token` / `vault.key` / `sessions.db` は自動承認の read 対象になりません。
+ジョブの作業コピーは `<data>/workspace/jobs/<soul_id>/<job_id>/` です。ジョブ
+完了時に登録済み成果物を `<data>/workspace/jobs/<soul_id>/artifacts/` へコピーし、
+`GET /api/v1/artifacts` の `delivered` を立てます。soul の `artifacts/` は
+fs/exec の既定スコープではありません。
 
 資格情報はボールト (`vault.bin` + `vault.key`) に置き、プラグインの環境変数には
 出しません。レジストリが知らないツールは、`side_effects` が空でも機微さ Medium

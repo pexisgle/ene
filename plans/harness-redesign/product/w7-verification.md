@@ -45,7 +45,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-id | 機構テスト | 経路 | 完成 |
 |---|---|---|---|
 | P-101 | `ene-kernel::text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `ene-daemon::http_tests::three_clients_share_one_core`; `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat` | Echo（機構） / ToolCalling / Seamed fail-closed | いいえ(実モデル応答は未観測) |
-| P-102 | `ene-body::barge_in_stops_playback_after_min_speech`; `self_voice_during_playback_is_ignored`; `idle_speech_becomes_transcript` | Scripted | いいえ |
+| P-102 | `ene-body::barge_in_stops_playback_after_min_speech`; `self_voice_during_playback_is_ignored`; `idle_speech_becomes_transcript`; `ene-stage::echo_aware_gate_drops_playback_bleed`; `ene-daemon::listen_stream_feeds_duplex_machine_without_stt` | Scripted / HTTP WS | いいえ（実スピーカ漏れは未観測。stage は 16 kHz `pcm_s16le` バルク WS と TTS 再生中 RMS×2 ゲート） |
 | P-103 | `ene-kernel::abort_does_not_write_assistant_closure`; `boot_seeds_two_souls_and_session_ops` (barge-in API); `ene-stage::parses_audio_chunk_abort`; `ene-stage::stop_clears_recent_playback_pcm` | Echo / HTTP / stage | 部分(stage が `audio.chunk` abort で sink 停止と viseme reset。0.5s 手動は本番 TTS 未配線) |
 | P-104 | `ene-session::surface_projection_hides_inner_and_thinking`; `ene-kernel::surface_live_subscription_does_not_receive_inner`; `ene-daemon::surface_ws_never_sees_inner` | store / HTTP | はい(表層非露出) |
 | P-105 | `ene-companion::proactive_gate_fail_closed_without_llm`; `proactive_speaks_when_gates_pass`; `proactive_disabled_never_invokes_llm`; `tendency_does_not_pierce_gates` | Scripted | いいえ(ゲート機構は実コード) |
@@ -173,6 +173,20 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 
 正は `minimal`(描画なし / EchoModel / debug)。数値と CI 上限は
 [process-model.md §6.1](../platform/process-model.md#61-v10-基準線d-29)。
+
+## P-102 手動確認（stage マイク bulk stream / echo-aware barge-in）
+
+手順:
+
+1. `ene-stage` を起動し、マイクをオンにする。TTS を結び、会話して再生を聞く。
+2. ヘッドホンなしで TTS 再生中に黙る。スピーカ漏れで割り込みが起きないこと。
+3. TTS 再生中にはっきり話しかける。割り込み（再生停止）が起きること。
+4. コア側で `POST /sessions/{id}/listen` の JSON チャンク連発が無いこと
+   （`GET /sessions/{id}/listen/stream` の `pcm_s16le` バイナリ）。
+
+結果（2026-08-21, Cloud Agent）: 実マイク/スピーカは無い。機構は
+`ene-stage::echo_aware_gate_drops_playback_bleed` と
+`ene-daemon::listen_stream_feeds_duplex_machine_without_stt` で確認。
 
 ## 意図的にやらないこと(W7)
 

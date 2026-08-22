@@ -24,8 +24,8 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 | Section | Owner | Typical keys |
 |---|---|---|
 | `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
-| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*` |
-| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` (`observation_interval_seconds` is the live tick interval; each open session is observed) |
+| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*`, `tool_output.soft_limit_bytes`, `tool_output.hard_limit_bytes` |
+| `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` (`observation_interval_seconds` is the live tick interval; each open session is observed; `proactive.world_state.title_mode` and `ocr_hint`) |
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
@@ -34,9 +34,12 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 
 Conversation, classifier, embedding, TTS, STT, approve, and job bind through
 `ai.tasks.<task>`
-(`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`). Chat
+(`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`,
+`supports_images`). Chat
 starts unconfigured — set `ai.tasks.chat.plugin` to a `provider.*` id before
-the first message. `approval.mode = ai_auto` uses `ai.tasks.approve` (chat
+the first message. `supports_images` is opt-in and defaults to false: only a
+configured binding with the flag set folds `ImageRef` tool results into
+`LlmImage`; text-only or unknown providers keep `[image omitted]`. `approval.mode = ai_auto` uses `ai.tasks.approve` (chat
 fallback) and pops up when that helper fails. Back-harness jobs use
 `ai.tasks.job` (chat fallback, or the echo model when neither is bound) on a
 lane independent of dialogue. API keys are vault secrets (`ENE_AI__TASKS__<TASK>__API_KEY`
@@ -54,6 +57,12 @@ Embeddings are optional on their own `ai.tasks.embedding` fiber: unset, local
 GGUF (recommended Jina on `provider.gguf`), or a cloud plugin that declares
 `seam.embed`. Empty classifier and proactive tasks inherit the chat binding.
 Empty TTS and STT tasks stay disabled.
+
+Observation privacy lives under `mind.proactive.world_state`: `title_mode` is
+`app_only` (default), `redacted_title`, or `full_title`; `ocr_hint` is a local
+opt-in slot with no bundled backend. The product GUI (Detail → Conversation)
+shows the current send scope. Raw screenshots stay off session, memory, and
+audit; only luma digest and text summary cross those boundaries.
 
 Plugin launch is `plugins.profile` (`desktop`, `minimal`, or `headless`), not a
 per-plugin enable map (`plugins.list` is gone). Related keys:

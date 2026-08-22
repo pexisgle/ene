@@ -22,7 +22,7 @@ PowerShell から同じコマンドを使います。
 | ウィンドウ | 深さ | 内容 |
 |---|---|---|
 | キャラクターオーバーレイ（wgpu） | `surface` | VRM、VRMA、スプリング、視線、ビセーム。Space で枠。クリック透過はシステム → オーバーレイのクリック透過（既定オン）。Esc で終了。VRM 体は同時に最大2体（`body.render.max_concurrent`、既定 2）。A/D はチャットが対象にするソウルを切り替え、両方はオーバーレイに残る。W/S でアクティブな体のモーション。F3 でスプリングボーンのコライダーをワイヤーフレーム表示する。入力欄にフォーカスがなければチャット/詳細からも同じショートカットが届く。 |
-| チャット（F2） | `surface` | Prompt / Steer / Follow-up（ホバーで意味）、承認（許可 / 常に許可 / 拒否）、ask-user、マイク PCM 中継、詳細ボタン（トレイと同じ）。ステータスは独立した行で折り返し、狭い窓でも設定エラーが読める。 |
+| チャット（F2） | `surface` | Prompt / Steer / Follow-up（ホバーで意味）、承認（許可 / 常に許可 / 拒否）、ask-user（`question.asked` → `POST /jobs/{id}/answer`）、マイク PCM 中継、詳細ボタン（トレイと同じ）。ステータスは独立した行で折り返し、狭い窓でも設定エラーが読める。 |
 | キャプション | `surface` | 発話の字幕。音声タブの Caption position（`top` / `bottom` / `left` / `right`）で位置を決め、Pin caption でドラッグを止めます。プロバイダ / HTTP エラーはチャットのステータス行（折り返し）に留め、字幕には出さない。ターン終了でオーバーレイは閉じる。長い発話はオーバーレイ内で折り返す。 |
 | スポットライト（Alt+Space） | ローカル | 詳細セクションへジャンプ、マイク、終了。コマンドを選ぶとパレットは閉じます。OS が Alt+Space を掴んでいるときは音声 → スポットライトを開く |
 | 詳細（トレイまたはチャット → 詳細。F1 はコンパニオン、F4 はログ） | `detail` | 設定 IA、内面 / thinking / ツール / PAD のログ。検索はセクションを絞り、タブやホームのショートカット、スポットライト、F1/F4 を押すとフィルタを消すので、今のタブに固定されません。ログが空のときは空状態と次の操作を出す。 |
@@ -67,14 +67,22 @@ JSON の取り込み / 書き出しは詳細用に折りたたみます。既に
 キーがある（`effective.ai_chat_key_set`）ときだけ出ます。HTTP 401 などの
 プロバイダ失敗は設定 / ステータスのエラーであり、アシスタントの返信ではありません。
 適用ボタンはスクロールとフィルタ付きのモデル一覧の上にあるので、一覧取得で
-保存が画面外へ押し出されません。エンジンや GGUF は Connections のプロバイダ資産です。
+保存が画面外へ押し出されません。観測のプライバシー（タイトルモード、OCR ヒント、
+いまの送信範囲）も同じ Conversation タブにあり、`mind.proactive.world_state` を
+PATCH します。エンジンや GGUF は Connections のプロバイダ資産です。
 TTS/STT は `ai.tasks.tts` / `ai.tasks.stt` です。
 
-VAD/ASR/TTS はコアが持ちます。Stage は `POST /sessions/{id}/listen` でマイク
-PCM を中継し、`audio.chunk` を再生します。割り込みの判定はコア
-（`voice.state` と `abort: true` の `audio.chunk`）が持ちます。Stage はその
-abort チャンクで再生シンクを止め、viseme をリセットします。正はクライアント
-の RMS ではありません。Stage は既定で speaker / notify の排他を取得します。
+VAD/ASR/TTS はコアが持ちます。Stage は `GET /sessions/{id}/listen/stream`
+でマイク PCM を `pcm_s16le` のバイナリフレームとして中継し（チャンクごとの
+JSON POST はしない）、`audio.chunk` を再生します。マイク取得中に listen
+ソケットが切れたときは sender を捨て、短い backoff のあと再接続します。
+送信 `Closed` は新しい stream を開き、`Full` のときだけそのフレームを捨てます。ローカル TTS 再生中は
+マイク RMS 閾値を 2 倍（`BARGE_IN_ENERGY_FACTOR`）に上げ、スピーカ漏れで
+割り込みが誤発火しないようにします。大きいユーザー発話はコア VAD へ届きます。
+割り込みの判定はコア（`voice.state` と `abort: true` の `audio.chunk`）が持ちます。
+Stage はその abort チャンクで再生シンクを止め、viseme をリセットします。正は
+クライアントの RMS ではありません。Stage は既定で speaker / notify の排他を
+取得します。
 
 音声デバイス中継・承認ポップアップ・トレイ・OS 通知（`notify.hint`）は
 stage 側の仕事で、ポリシーとライブバスはコアが所有します。
