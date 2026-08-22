@@ -72,11 +72,17 @@ JSON の取り込み / 書き出しは詳細用に折りたたみます。既に
 PATCH します。エンジンや GGUF は Connections のプロバイダ資産です。
 TTS/STT は `ai.tasks.tts` / `ai.tasks.stt` です。
 
-VAD/ASR/TTS はコアが持ちます。Stage は `POST /sessions/{id}/listen` でマイク
-PCM を中継し、`audio.chunk` を再生します。割り込みの判定はコア
-（`voice.state` と `abort: true` の `audio.chunk`）が持ちます。Stage はその
-abort チャンクで再生シンクを止め、viseme をリセットします。正はクライアント
-の RMS ではありません。Stage は既定で speaker / notify の排他を取得します。
+VAD/ASR/TTS はコアが持ちます。Stage は `GET /sessions/{id}/listen/stream`
+でマイク PCM を `pcm_s16le` のバイナリフレームとして中継し（チャンクごとの
+JSON POST はしない）、`audio.chunk` を再生します。マイク取得中に listen
+ソケットが切れたときは sender を捨て、短い backoff のあと再接続します。
+送信 `Closed` は新しい stream を開き、`Full` のときだけそのフレームを捨てます。ローカル TTS 再生中は
+マイク RMS 閾値を 2 倍（`BARGE_IN_ENERGY_FACTOR`）に上げ、スピーカ漏れで
+割り込みが誤発火しないようにします。大きいユーザー発話はコア VAD へ届きます。
+割り込みの判定はコア（`voice.state` と `abort: true` の `audio.chunk`）が持ちます。
+Stage はその abort チャンクで再生シンクを止め、viseme をリセットします。正は
+クライアントの RMS ではありません。Stage は既定で speaker / notify の排他を
+取得します。
 
 音声デバイス中継・承認ポップアップ・トレイ・OS 通知（`notify.hint`）は
 stage 側の仕事で、ポリシーとライブバスはコアが所有します。

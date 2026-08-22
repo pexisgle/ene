@@ -4,8 +4,8 @@ use std::sync::Arc;
 use base64::Engine as _;
 use ene_api::{
     ApiClient, ApiError, CharacterView, ClaimResourceRequest, CreateSessionRequest,
-    HistoryResponse, ListenRequest, MessageMode, MessageRequest, OccupantView, ResourceKind,
-    SendMessageResponse, SoulPatch, SoulView,
+    HistoryResponse, MessageMode, MessageRequest, OccupantView, ResourceKind, SendMessageResponse,
+    SoulPatch, SoulView,
 };
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -224,21 +224,6 @@ impl StageSession {
         self.client.respond_approval(id, decision).await
     }
 
-    pub async fn listen_pcm(
-        &self,
-        pcm: Vec<f32>,
-        sample_rate: u32,
-    ) -> Result<SendMessageResponse, ApiError> {
-        let response = self
-            .client
-            .listen(&self.session_id, &ListenRequest { pcm, sample_rate })
-            .await?;
-        if let Some(turn_id) = response.turn_id.clone() {
-            *self.turn_id.lock() = Some(turn_id);
-        }
-        Ok(response)
-    }
-
     pub async fn get_soul(&self) -> Result<SoulView, ApiError> {
         self.client.get_soul(&self.soul_id).await
     }
@@ -320,21 +305,6 @@ impl SessionHandle {
         decision: &str,
     ) -> Result<serde_json::Value, ApiError> {
         self.client.respond_approval(id, decision).await
-    }
-
-    pub async fn listen_pcm(
-        &self,
-        pcm: Vec<f32>,
-        sample_rate: u32,
-    ) -> Result<SendMessageResponse, ApiError> {
-        let response = self
-            .client
-            .listen(&self.session_id, &ListenRequest { pcm, sample_rate })
-            .await?;
-        if let Some(turn_id) = response.turn_id.clone() {
-            *self.turn_id.lock() = Some(turn_id);
-        }
-        Ok(response)
     }
 
     pub async fn claim_mic(&self) -> Result<ene_api::ExclusiveSnapshot, ApiError> {

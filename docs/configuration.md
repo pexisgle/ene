@@ -24,7 +24,7 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 | Section | Owner | Typical keys |
 |---|---|---|
 | `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
-| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*` |
+| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*`, `tool_output.soft_limit_bytes`, `tool_output.hard_limit_bytes` |
 | `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` (`observation_interval_seconds` is the live tick interval; each open session is observed; `proactive.world_state.title_mode` and `ocr_hint`) |
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
@@ -34,9 +34,12 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 
 Conversation, classifier, embedding, TTS, STT, approve, and job bind through
 `ai.tasks.<task>`
-(`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`). Chat
+(`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`,
+`supports_images`). Chat
 starts unconfigured — set `ai.tasks.chat.plugin` to a `provider.*` id before
-the first message. `approval.mode = ai_auto` uses `ai.tasks.approve` (chat
+the first message. `supports_images` is opt-in and defaults to false: only a
+configured binding with the flag set folds `ImageRef` tool results into
+`LlmImage`; text-only or unknown providers keep `[image omitted]`. `approval.mode = ai_auto` uses `ai.tasks.approve` (chat
 fallback) and pops up when that helper fails. Back-harness jobs use
 `ai.tasks.job` (chat fallback, or the echo model when neither is bound) on a
 lane independent of dialogue. API keys are vault secrets (`ENE_AI__TASKS__<TASK>__API_KEY`

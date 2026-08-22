@@ -31,6 +31,14 @@ pub enum BrokerError {
     Ssrf(String),
     #[error("fetch failed: {0}")]
     Fetch(String),
+    #[error("response exceeds size limit")]
+    Oversize,
+    #[error("binary content is not allowed")]
+    Binary,
+    #[error("fetch timed out")]
+    Timeout,
+    #[error("too many redirects")]
+    RedirectLoop,
 }
 
 /// One grant tracked as a fiber effect.

@@ -96,17 +96,17 @@ WebView は使いません。[PR #794](https://github.com/pexisgle/ene/pull/794)
 
 | 旧 action | 現行 | Status | 注記 |
 |---|---|---|---|
-| `webfetch` | `web.fetch` | Current / Missing | surface 契約は維持。プラグインはまだ直接 reqwest。ホスト broker、redirect/DNS 再検証、byte 上限は [#799](https://github.com/pexisgle/ene/issues/799) |
-| HTML → 読みやすい Markdown | タグ除去 | Missing | [#799](https://github.com/pexisgle/ene/issues/799) のあと [#818](https://github.com/pexisgle/ene/issues/818) |
-| `websearch` | `web.search` | Current / Missing | DuckDuckGo Instant Answer + HTML フォールバック。backend 選択 / 資格情報は [#818](https://github.com/pexisgle/ene/issues/818) |
-| 有料検索 backend | — | Missing | vault 参照とホスト allowlist のみ。プラグインへ生秘密を置かない [#818](https://github.com/pexisgle/ene/issues/818) |
+| `webfetch` | `web.fetch` | Current | `format` は `markdown`（既定）/ `text` / `html`。HTML は見出し・段落・link を保つ。binary は `binary_content`。byte と変換後文字数に上限 |
+| HTML → 読みやすい Markdown | `web.fetch` `format=markdown` | Current | script/style/nav を除き、title と元 URL を残す |
+| `websearch` | `web.search` | Current | `backend` は `duckduckgo`（既定・無credential）、`arxiv`（domain、同じ結果形）、`tavily`/`exa`（vault まで `credential_missing`）。`web.search_backends` が一覧 |
+| 有料検索 backend | `web.search_backends` | Current | 宣言する。vault 資格情報なしでは選ばない |
 | ブラウザ自動化 | — | MCP / ビルトインとしては Dropped | Playwright 系 MCP。`tool.web` ではない |
 
 ### `app`（内製）
 
 | 旧 action | 現行 | Status | 注記 |
 |---|---|---|---|
-| `screenshot` / `capture_window` | `app.screenshot` | Current | Wayland は portal 優先、CLI フォールバック、Windows は GDI。capture JSON に size/scale/permission。[App プラットフォーム表](../guides/tools/app-platform.md) |
+| `screenshot` / `capture_window` | `app.screenshot` | Current | Wayland は portal 優先、CLI フォールバック、Windows は GDI。capture JSON に size/scale/permission。モデル呼び出しは `ImageRef` + spill blob（inline base64 ではない）としてログし、`ai.tasks.<task>.supports_images` のときだけ `LlmImage` に畳む。[App プラットフォーム表](../guides/tools/app-platform.md) |
 | `list_windows` | `app.window_list` | Current | wmctrl / hyprctl / sway。GNOME/KDE Wayland は `app.capabilities` で unsupported |
 | `get_active_window` | `app.active_window` | Current | 能動観測ソース（画面観測が有効なとき） |
 | `list_monitors` | `app.list_monitors` | Current | compositor がレイアウトを出すとき capture の scale/size と揃える |
@@ -238,7 +238,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | ツール discovery index | [#817](https://github.com/pexisgle/ene/issues/817)（epic [#796](https://github.com/pexisgle/ene/issues/796)） | scoring は `ene-registry`。`done.md` の箱ではない |
 | background tool の start/cancel/completion | [#816](https://github.com/pexisgle/ene/issues/816)（epic #796） | 永続は `ene-work` のジョブ。第二の task store は作らない |
 | plugin config schema / dynamic options | [#819](https://github.com/pexisgle/ene/issues/819)（epic #796） | 未リリースなので旧 config shim は不要 |
-| 読みやすい Markdown と検索 backend | [#818](https://github.com/pexisgle/ene/issues/818) | SSRF（#799）のあと。`web.fetch` / `web.search` の surface はある |
+| 読みやすい Markdown と検索 backend | [#818](https://github.com/pexisgle/ene/issues/818) | 出荷: fetch の markdown/text/html、DDG+ArXiv、有料 backend は未設定として宣言 |
 | portal 優先の capture/clipboard | [#800](https://github.com/pexisgle/ene/issues/800) | 現行 v1.0 の能力は CLI 経路 |
 | utility の数式/単位/色/乱数の不足 | [#814](https://github.com/pexisgle/ene/issues/814) | 低優先。eval や任意コード実行は入れない |
 | `exec.pty`、デスクトップペット、カメラ、Live2D、モバイル | features.md の後継 ID | 形式が支える。v1.0 ではない |

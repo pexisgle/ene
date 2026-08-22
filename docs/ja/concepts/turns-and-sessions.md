@@ -41,7 +41,15 @@
    （`origin: delegation`）を開き、作業ツールと `delegation.send` を使います。
    しおり依頼（`workflow.bookmark`）は `web.search` があれば調査し、
    Markdown を書いてジョブ成果物として交付する。
+   `delegation.send kind=complete`（およびジョブランナーの暗黙 complete）は
+   登録済み成果物を `<data>/workspace/jobs/<soul_id>/artifacts/` へコピーし、
+   `GET /api/v1/artifacts` の `delivered` を立てます。失敗・キャンセルした
+   ジョブの成果物は未交付のままです。設計書の `<data>/workspaces/<soul_id>/`
+   配置は使っていません。実際の根は単数の `workspace` で、ジョブ作業
+   ディレクトリは `jobs/<soul_id>/<job_id>/` です。
 5. イベントは `ene-session` にコミット（モデル可視 = ログ）。
+   スクリーンショットなど画像のツール結果はログの横にバイトを置き、投影には
+   `ImageRef` を残す。巨大な JSON 結果は `tool/spill` になる。
 6. ライブイベントは `surface` または `detail` の深さで送出。
 
 生成の前に、共有 `LoopHooks` の waterfall として `agent/pre-step` が走ります。
@@ -95,4 +103,10 @@ surface、別窓の詳細画面（と `ene-ctl --verbose`）は detail です。
 検索・分割・終了ができます。
 
 アイドル終了と明示的な分割はサーバ側です。compaction は要約をログに
-書き、以降のターンが予算内に収まるようにします。
+書き、以降のターンが予算内に収まるようにします。セッション終了（明示的な
+`POST /api/v1/sessions/{id}/end`、アイドルタイムアウト、または生きている
+セッションの split）は、進行中のターンを abort し、そのターンが
+（アシスタント発話ではなく interrupted として）コミットされるのを待ってから
+`session/end` を書き、対話レーンアクターをプロセス内ハブから外します。
+ターンが時間内に idle にならなければ終了は失敗し、`session/end` は書きません。
+終了済みセッションへの prompt は `closed` で失敗します。

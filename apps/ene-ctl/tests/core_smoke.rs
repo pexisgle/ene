@@ -131,6 +131,8 @@ async fn ctl_client_lists_tools_and_debug_spans() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(saw_user, "ctl chat never persisted the user line");
+    let spans = client.diag_spans().await.unwrap();
+    assert!(!spans.items.is_empty());
     let found = ene_ctl::session::search_sessions(&client, "pineapple")
         .await
         .unwrap();
@@ -150,8 +152,6 @@ async fn ctl_client_lists_tools_and_debug_spans() {
         .await
         .unwrap();
     assert_eq!(ended.end_reason.as_deref(), Some("explicit"));
-    let spans = client.diag_spans().await.unwrap();
-    assert!(!spans.items.is_empty());
 }
 
 #[tokio::test]

@@ -22,4 +22,6 @@ pub use http::ServerHandle;
 #[cfg(test)]
 mod http_tests;
 #[cfg(test)]
+mod openapi_contract;
+#[cfg(test)]
 mod tests;

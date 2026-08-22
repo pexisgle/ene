@@ -41,7 +41,7 @@ pub use project::{
 };
 pub use store::{
     CommitResult, NewSession, RecoveryReport, STORAGE_VERSION, SessionKind, SessionMeta,
-    SessionStore, Transaction,
+    SessionStore, SpillObject, Transaction,
 };
 pub use usage::{NewUsage, UsageRow, UsageTotals};
 
