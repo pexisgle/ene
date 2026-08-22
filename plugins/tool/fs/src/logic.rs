@@ -1188,8 +1188,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-// Used when this source is included by ene-registry; unused in the standalone plugin binary.
-#[expect(dead_code, reason = "used via ene-registry include; unused in standalone plugin binary")]
+// Used when this source is included by ene-registry; unused in the standalone plugin binary
+// unless referenced from the plugin binary (see main.rs link stub).
 struct WorkspaceOverrideGuard(Option<PathBuf>);
 
 impl Drop for WorkspaceOverrideGuard {
@@ -1199,8 +1199,7 @@ impl Drop for WorkspaceOverrideGuard {
     }
 }
 
-// Host-only entry point; the standalone plugin build does not call it.
-#[expect(dead_code, reason = "host-only entry; unused in standalone plugin binary")]
+// Host-only entry point; the standalone plugin binary keeps it live via main.rs.
 pub fn with_workspace<T>(
     root: &Path,
     action: impl FnOnce() -> Result<T, String>,
