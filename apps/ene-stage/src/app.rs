@@ -1024,8 +1024,10 @@ impl StageApp {
                 LiveEvent::InnerMessage { text } => self.detail.push_log(LogKind::Inner, text),
                 LiveEvent::ToolCall { summary } => self.detail.push_log(LogKind::Tool, summary),
                 LiveEvent::SessionEvent { kind, text } => {
-                    self.detail
-                        .push_log(LogKind::Session, format!("{kind}: {text}"));
+                    self.detail.push_log(
+                        LogKind::Session,
+                        format!("{kind}: {}", format_log_text(&text)),
+                    );
                 }
                 LiveEvent::AffectState {
                     mood_label,
@@ -1645,6 +1647,14 @@ fn auth_failure(err: &str) -> bool {
         || lower.contains("no cookie auth")
 }
 
+fn format_log_text(text: &str) -> &str {
+    if text.trim().is_empty() {
+        "(empty)"
+    } else {
+        text
+    }
+}
+
 fn map_turn_err(err: &str) -> String {
     if err.contains("no_active_operation") || err.contains("no active turn") {
         i18n::fl("chat-no-active-turn")
@@ -1652,5 +1662,16 @@ fn map_turn_err(err: &str) -> String {
         i18n::fl("chat-auth-failed")
     } else {
         err.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_log_text;
+
+    #[test]
+    fn empty_log_payload_is_labeled_instead_of_hidden() {
+        assert_eq!(format_log_text("turn completed"), "turn completed");
+        assert_eq!(format_log_text("   "), "(empty)");
     }
 }
