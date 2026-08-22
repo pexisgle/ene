@@ -15,8 +15,8 @@ use ene_plugin_ipc::{
 };
 use ene_provider_assets::CatalogRegistry;
 use ene_registry::{
-    BuiltinExecutor, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for,
-    with_http_fetch,
+    BuiltinExecutor, BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource,
+    definitions_for, with_http_fetch,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -91,6 +91,8 @@ struct SupervisorInner {
     loop_hooks: Mutex<Option<LoopHooks>>,
     waterfall_guards: Mutex<HashMap<String, Vec<WaterfallGuard<HookEvent>>>>,
     broker_servers: Mutex<HashMap<String, crate::broker_ipc::BrokerServer>>,
+    #[cfg(test)]
+    dispose_log: Mutex<Vec<Effect>>,
 }
 
 /// Fiber supervisor. Reconcile is per-row; the core process is not restarted.
@@ -230,6 +232,11 @@ impl SupervisorInner {
         match effect {
             Effect::ListenWaterfall { .. } => self.drop_one_waterfall(&fiber.row_id),
             Effect::BindSeam { .. } => {}
+            Effect::BrokerListen { .. } => {
+                if let Some(server) = self.broker_servers.lock().remove(&fiber.row_id) {
+                    server.shutdown();
+                }
+            }
             Effect::SpawnProcess { .. } => {
                 self.sessions.lock().remove(&fiber.row_id);
                 if let Some(mut child) = self.children.lock().remove(&fiber.row_id) {
@@ -247,6 +254,9 @@ impl SupervisorInner {
 
     fn sweep_host_context(&self, fiber: &Fiber) {
         self.drop_waterfall(&fiber.row_id);
+        if let Some(server) = self.broker_servers.lock().remove(&fiber.row_id) {
+            server.shutdown();
+        }
         self.sessions.lock().remove(&fiber.row_id);
         if let Some(mut child) = self.children.lock().remove(&fiber.row_id) {
             terminate_child(&mut child);
@@ -328,6 +338,8 @@ impl Supervisor {
                 loop_hooks: Mutex::new(None),
                 waterfall_guards: Mutex::new(HashMap::new()),
                 broker_servers: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                dispose_log: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -623,15 +635,12 @@ impl Supervisor {
                 inner: Arc::clone(&self.inner),
             }) as Arc<dyn ToolInvoke>
         });
+        let builtin_invoke = Arc::new(BuiltinInvoker) as Arc<dyn ToolInvoke>;
         for def in definitions_for(kind) {
-            fiber.push_effect(Effect::RegisterTool {
-                name: def.name.clone(),
-            });
-            if let Some(invoke) = &web_invoke {
-                self.inner.registry.register_with(def, Arc::clone(invoke));
-            } else {
-                self.inner.registry.register(def);
-            }
+            let invoke = web_invoke
+                .as_ref()
+                .map_or_else(|| Arc::clone(&builtin_invoke), Arc::clone);
+            self.inner.record_tool(&mut fiber, def, invoke);
         }
         for cap in &row.capabilities {
             self.inner.record_grant(&mut fiber, cap.clone());
@@ -830,16 +839,12 @@ impl Supervisor {
         self.inner.sessions.lock().clear();
     }
 
-    /// Unload a row: stop providing, then apply dispose LIFO.
+    /// Unload a row: stop providing, drain the plugin session, then apply dispose LIFO.
     pub async fn unload(&self, row_id: &str) {
         let Some(mut fiber) = self.inner.fibers.lock().remove(row_id) else {
             return;
         };
         fiber.state = FiberState::Unloading;
-        self.inner.drop_waterfall(row_id);
-        if let Some(server) = self.inner.broker_servers.lock().remove(row_id) {
-            server.shutdown();
-        }
         let session = self.inner.sessions.lock().remove(row_id);
         if let Some(session) = session {
             let drain = async { session.conn.lock().await.drain().await };
