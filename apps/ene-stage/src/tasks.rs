@@ -23,6 +23,10 @@ pub enum AsyncOutcome {
         id: String,
         result: Result<(), String>,
     },
+    CompleteMemory {
+        id: String,
+        result: Result<(), String>,
+    },
     LoadSoul(Result<ene_api::SoulView, String>),
     PatchBody(Result<ene_api::SoulView, String>),
     ImportCharacter(Result<ene_api::CharacterView, String>),

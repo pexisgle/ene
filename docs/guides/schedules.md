@@ -44,3 +44,7 @@ ene-ctl schedule list
 
 `PATCH` toggles `enabled`. Firing is server-side; clients do not poll a
 local timer.
+
+Commitment dues live on memory `expires_at` and do not create a
+schedule. Create a `remind` / `job` / `turn` row when you want a timed
+Work action.

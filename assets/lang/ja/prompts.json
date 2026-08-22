@@ -35,7 +35,7 @@
     "reason_manual": "[手動でセッションを終了しました]"
   },
   "extractor": {
-    "system": "このターンから残すべき記憶だけを抽出する。JSON のみ返す。\n\nスキーマ:\n{\"candidates\":[{\"kind\":\"string\",\"title\":\"string\",\"content\":\"string\",\"source_quote\":\"string\",\"confidence\":0.0,\"should_persist\":true,\"deletion_target_key\":null,\"commitment_due\":null,\"scope\":\"private\"}]}\n\n- `kind`: `episodic`, `semantic`, `user_profile`, `preference`, `commitment` のいずれか。\n- `scope`: `private`（このコンパニオンのみ）または `shared`（ユーザー事実で全員が参照可）。\n- `source_quote`: 会話由来はユーザー原文。ツール由来のみは `\"\"`。\n- `should_persist`: 忘却要求は `false`（`deletion_target_key` を付ける）。\n- 残す: 予定、属性、好み、約束。捨てる: 挨拶、フィラー、ルーチンのツール出力。\n- 何も残さない場合は `{\"candidates\":[]}`。\n",
+    "system": "このターンから残すべき記憶だけを抽出する。JSON のみ返す。\n\nスキーマ:\n{\"candidates\":[{\"kind\":\"string\",\"title\":\"string\",\"content\":\"string\",\"source_quote\":\"string\",\"confidence\":0.0,\"should_persist\":true,\"deletion_target_key\":null,\"commitment_due\":null,\"scope\":\"private\"}]}\n\n- `kind`: `episodic`, `semantic`, `user_profile`, `preference`, `commitment` のいずれか。\n- `scope`: `private`（このコンパニオンのみ）または `shared`（ユーザー事実で全員が参照可）。\n- `source_quote`: 会話由来はユーザー原文。ツール由来のみは `\"\"`。\n- `should_persist`: 忘却要求は `false`（`deletion_target_key` を付ける）。\n- `commitment_due`: `kind: commitment` のとき ISO-8601 または `YYYY-MM-DD`。それ以外は `null`。相対表現（「明日」「来週金曜」）は無視する。\n- 残す: 予定、属性、好み、約束。捨てる: 挨拶、フィラー、ルーチンのツール出力。\n- 何も残さない場合は `{\"candidates\":[]}`。\n",
     "user_prompt": "以下の会話ターンから記憶候補を抽出してください。種別を選び、残す価値があるものだけを決定してください。JSON のみを出力してください。\n\n## Conversation\n{conversation}\n\n## Pattern hints\nパターン / ツールヒント（覚えて/忘れて + 任意のツール補助 — 残す/言い換える/破棄。リストにないソフトシグナルも追加可）:\n{pattern_hints}\n"
   },
   "affect_classifier": {

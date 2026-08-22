@@ -7,5 +7,6 @@ Schema:
 - `scope`: `private` (this companion) or `shared` (user facts every companion may use).
 - `source_quote`: exact user text for conversation facts; `""` for tool-only rows.
 - `should_persist`: `false` for forget requests (`deletion_target_key` set).
+- `commitment_due`: ISO-8601 datetime or `YYYY-MM-DD` for `kind: commitment`, else `null`. Relative phrases (`tomorrow`, `next Friday`) are ignored.
 - Keep schedules, identity, preferences, commitments. Drop greetings, filler, and routine tool output.
 - If nothing is worth storing, return `{"candidates":[]}`.

@@ -145,13 +145,22 @@ async fn tick_session(
         screen_summary,
         screen_summary_status,
     };
+    let now_rfc = now.to_rfc3339();
+    if let Err(err) = state.core.companions().expire_commitments(&now_rfc) {
+        tracing::debug!(error = %err, "expire commitments skipped");
+    }
+    let commitments = state
+        .core
+        .companions()
+        .open_commitments(meta.soul_id, 8)
+        .unwrap_or_default();
     let ctx = build_proactive_context(
         &mind.proactive,
         &history,
         &observation,
         None,
         None,
-        &[],
+        &commitments,
         &ene_work::skill_proactive_hints(
             &state.core.data_dir().join("skills"),
             &state.core.soul_skill_refs(meta.soul_id),

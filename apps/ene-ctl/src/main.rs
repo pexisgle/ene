@@ -307,6 +307,7 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
                         &ene_api::MemoryPatch {
                             content: Some(content.clone()),
                             scope: None,
+                            completed: None,
                         },
                     )
                     .await?,

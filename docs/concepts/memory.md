@@ -14,8 +14,8 @@ Each row has:
 - **Scope** — `private` (the writing soul) or `shared`.
 - **Source** — `extraction`, `user_stated`, `tool`, `import`, `shared`.
 - **Confidence and salience** — both influence recall.
-- **Journal** — create / update / forget / supersede / restore is
-  append-only.
+- **Journal** — create / update / forget / supersede / restore /
+  expire / complete is append-only.
 
 Forgotten rows stay in the journal. A contradictory write can supersede an
 older row.
@@ -25,8 +25,11 @@ older row.
 After a turn, the companion memory writer:
 
 1. Extracts structured signals (commitments, user-stated facts, tool
-   outcomes). Regex patterns (`my name is`, `i like`, `remember that`)
-   are a fail-closed safety net.
+   outcomes). Regex patterns (`my name is`, `i like`, `remember that`,
+   and an explicit ISO / `YYYY-MM-DD` due such as `by 2026-08-30`)
+   are a fail-closed safety net. Relative dates (`tomorrow`, `next
+   Friday`) are not parsed; the classifier may still emit a
+   `commitment` row without a due.
 2. When `ai.tasks.classifier` (or chat fallback) is bound, the auxiliary
    LLM returns JSON candidates. Its `scope` (`private` / `shared`) overlays
    matching deterministic rows. Classifier errors skip extra candidates;
@@ -56,6 +59,15 @@ even if vectors were stored earlier. Hits land on
 `ene-kernel::ContextRegistry` as `memory.semantic`. Standing profile and
 preference notes are `memory.user_profile`; open (unexpired) commitments
 are `memory.commitments`. Reading a memory bumps `access_count`.
+
+A commitment due is `expires_at` on the memory row. It does not create
+a Work schedule. Spoken reminders and cron jobs stay on
+`/api/v1/schedules` (see [Schedules](../guides/schedules.md)).
+
+Open commitments are injected every turn. Past-due rows are forgotten
+with journal action `expired`. Completing one from Stage (or
+`PATCH /api/v1/memories/{id}` with `completed: true`) journals
+`completed`.
 
 ## Forgetting
 

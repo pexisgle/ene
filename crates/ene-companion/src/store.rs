@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS memory_candidates (
   salience REAL NOT NULL,
   status TEXT NOT NULL,
   sensitive INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  expires_at TEXT
 );
 CREATE TABLE IF NOT EXISTS packages (
   id TEXT NOT NULL,
@@ -108,6 +109,7 @@ impl CompanionStore {
         let conn = Connection::open(&path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch(SCHEMA)?;
+        ensure_candidate_expires_column(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             path,
@@ -395,6 +397,45 @@ impl CompanionStore {
         )
     }
 
+    pub fn set_memory_expires_at(
+        &self,
+        id: MemoryId,
+        expires_at: Option<&str>,
+    ) -> Result<(), CompanionError> {
+        let n = self.conn.lock().execute(
+            "UPDATE memories SET expires_at = ?1 WHERE id = ?2",
+            params![expires_at, id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(CompanionError::UnknownMemory(id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn expire_commitments(&self, now: &str) -> Result<u32, CompanionError> {
+        let due: Vec<(MemoryId, SoulId)> = {
+            let conn = self.conn.lock();
+            let mut stmt = conn.prepare(
+                "SELECT id, soul_id FROM memories
+                 WHERE forgotten = 0 AND kind = 'commitment'
+                   AND expires_at IS NOT NULL AND expires_at <= ?1",
+            )?;
+            let rows = stmt.query_map(params![now], |row| {
+                Ok((
+                    MemoryId::from_str(&row.get::<_, String>(0)?).map_err(|err| sql_id(0, err))?,
+                    SoulId::from_str(&row.get::<_, String>(1)?).map_err(|err| sql_id(1, err))?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut n = 0u32;
+        for (id, soul_id) in due {
+            self.forget(id, soul_id, JournalAction::Expired)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     pub fn supersede(
         &self,
         old: MemoryId,
@@ -622,18 +663,28 @@ impl CompanionStore {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT title, content FROM memories
+            "SELECT title, content, expires_at FROM memories
              WHERE forgotten = 0 AND superseded_by IS NULL
                AND kind = 'commitment'
                AND (scope = 'shared' OR soul_id = ?1)
                AND (expires_at IS NULL OR expires_at > ?2)
-             ORDER BY last_access DESC LIMIT ?3",
+             ORDER BY expires_at IS NULL, expires_at ASC, last_access DESC LIMIT ?3",
         )?;
-        collect_titled_notes(
-            stmt.query_map(params![soul_id.to_string(), now, limit as i64], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?,
-        )
+        let rows = stmt.query_map(params![soul_id.to_string(), now, limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut notes = Vec::new();
+        for row in rows {
+            let (title, content, due) = row?;
+            if let Some(note) = commitment_note(&title, &content, due.as_deref()) {
+                notes.push(note);
+            }
+        }
+        Ok(notes)
     }
 
     pub fn decay_salience(&self, kind: MemoryKind, factor: f32) -> Result<(), CompanionError> {
@@ -679,8 +730,8 @@ impl CompanionStore {
         let now = Utc::now().to_rfc3339();
         self.conn.lock().execute(
             "INSERT INTO memory_candidates (
-                id, soul_id, kind, title, content, scope, confidence, salience, status, sensitive, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10)",
+                id, soul_id, kind, title, content, scope, confidence, salience, status, sensitive, created_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11)",
             params![
                 cand.id.to_string(),
                 cand.soul_id.to_string(),
@@ -692,6 +743,7 @@ impl CompanionStore {
                 cand.salience,
                 i32::from(cand.sensitive),
                 now,
+                cand.expires_at,
             ],
         )?;
         Ok(())
@@ -703,7 +755,7 @@ impl CompanionStore {
     ) -> Result<Vec<crate::memory::MemoryCandidate>, CompanionError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, soul_id, kind, title, content, scope, confidence, salience, sensitive
+            "SELECT id, soul_id, kind, title, content, scope, confidence, salience, sensitive, expires_at
              FROM memory_candidates WHERE soul_id = ?1 AND status = 'pending'",
         )?;
         let rows = stmt.query_map(params![soul_id.to_string()], |row| {
@@ -719,6 +771,7 @@ impl CompanionStore {
                 confidence: row.get(6)?,
                 salience: row.get(7)?,
                 sensitive: row.get::<_, i32>(8)? != 0,
+                expires_at: row.get(9)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -762,6 +815,17 @@ impl CompanionStore {
                 .lock()
                 .query_row("SELECT COUNT(*) FROM memory_journal", [], |row| row.get(0))?;
         Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    pub fn journal_actions_for(&self, memory_id: MemoryId) -> Result<Vec<String>, CompanionError> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT action FROM memory_journal WHERE memory_id = ?1 ORDER BY seq")?;
+        let rows = stmt.query_map(params![memory_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(CompanionError::from)
     }
 
     pub fn record_package(
@@ -914,6 +978,29 @@ fn titled_note(title: &str, content: &str) -> Option<String> {
     } else {
         Some(format!("{title}: {content}"))
     }
+}
+
+fn commitment_note(title: &str, content: &str, expires_at: Option<&str>) -> Option<String> {
+    let base = titled_note(title, content)?;
+    match expires_at {
+        Some(due) if !due.is_empty() => Some(format!("{base} (due {due})")),
+        _ => Some(base),
+    }
+}
+
+fn ensure_candidate_expires_column(conn: &Connection) -> Result<(), CompanionError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(memory_candidates)")?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == "expires_at" {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        "ALTER TABLE memory_candidates ADD COLUMN expires_at TEXT",
+        [],
+    )?;
+    Ok(())
 }
 
 fn sql_id(idx: usize, err: impl std::fmt::Display) -> rusqlite::Error {

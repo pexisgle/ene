@@ -572,6 +572,7 @@ impl CoreSession {
                     &MemoryPatch {
                         content: Some(content),
                         scope: None,
+                        completed: None,
                     },
                 )
                 .await

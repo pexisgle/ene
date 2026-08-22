@@ -13,7 +13,8 @@
 - **スコープ** — `private`（書いた soul）または `shared`。
 - **ソース** — `extraction`・`user_stated`・`tool`・`import`・`shared`。
 - **確信度と重要度（confidence / salience）** — どちらも想起に影響します。
-- **ジャーナル** — 作成 / 更新 / 忘却 / 上書き / 復元は追記専用です。
+- **ジャーナル** — 作成 / 更新 / 忘却 / 上書き / 復元 / 期限切れ /
+  完了は追記専用です。
 
 忘却した行もジャーナルに残ります。矛盾する書き込みは古い行を supersede
 できます。
@@ -23,8 +24,10 @@
 ターンの後、コンパニオンのメモリライターが:
 
 1. 構造化シグナル（約束・ユーザー明示の事実・ツール結果）を抽出します。
-   正規表現（`my name is` / `i like` / `remember that`）は fail-closed の
-   安全網です。
+   正規表現（`my name is` / `i like` / `remember that`、および
+   `by 2026-08-30` のような ISO / `YYYY-MM-DD` の明示期限）は
+   fail-closed の安全網です。相対日付（「明日」「来週金曜」）は
+   パースしません。分類器は期限なしの `commitment` 行を出せます。
 2. `ai.tasks.classifier`（無ければ chat）が結んであるとき、補助 LLM が
    JSON 候補を返します。その `scope`（`private` / `shared`）は一致する
    決定的抽出に上書きされます。分類器の失敗は追加候補を捨てるだけで、
@@ -51,6 +54,15 @@ chat タスクのフォールバック）は、`memories.embedding` との cosin
 `ene-kernel::ContextRegistry` の `memory.semantic` に載ります。常設の
 プロフィールと好みは `memory.user_profile`、期限切れでない約束は
 `memory.commitments` です。読んだメモリは `access_count` が上がります。
+
+約束の期限は記憶行の `expires_at` です。Work のスケジュールは作りません。
+発話リマインドや cron ジョブは `/api/v1/schedules` のままです
+（[スケジュール](../guides/schedules.md)）。
+
+未完了の約束は毎ターン注入されます。期限を過ぎた行はジャーナル
+`expired` で忘却されます。Stage から完了する（または
+`PATCH /api/v1/memories/{id}` に `completed: true`）と
+`completed` が残ります。
 
 ## 忘却
 

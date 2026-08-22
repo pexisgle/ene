@@ -808,6 +808,66 @@ async fn http_forget_memory_is_audited() {
 }
 
 #[tokio::test]
+async fn http_complete_commitment_drops_from_list() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul = ene_session::SoulId::from_str(&souls.items[0].id).unwrap();
+    let memory = core
+        .companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "call".into(),
+            content: "call Ada".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    let listed = client
+        .list_memories(&souls.items[0].id, None)
+        .await
+        .unwrap();
+    let view = listed
+        .items
+        .iter()
+        .find(|item| item.id == memory.id.to_string())
+        .expect("commitment listed");
+    assert_eq!(view.kind, "commitment");
+    assert!(
+        view.expires_at
+            .as_deref()
+            .is_some_and(|due| due.contains("2099-01-01"))
+    );
+    client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                completed: Some(true),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    let listed = client
+        .list_memories(&souls.items[0].id, None)
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .items
+            .iter()
+            .all(|item| item.id != memory.id.to_string())
+    );
+    let actions = core.companions().journal_actions_for(memory.id).unwrap();
+    assert!(actions.iter().any(|action| action == "completed"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn turn_logs_context_sources_from_registry() {
     let (dir, client, core, server) = boot_server().await;
     let souls = client.list_souls().await.unwrap();
@@ -930,6 +990,18 @@ async fn turn_logs_context_sources_from_registry() {
         .expect("mcp.resources");
     assert!(identity < semantic && semantic < mcp);
     assert!(texts["memory.semantic"].contains("picnic"));
+    assert!(
+        texts
+            .get("memory.commitments")
+            .is_some_and(|text| text.contains("call Ada")),
+        "open commitments must land on memory.commitments: {texts:?}"
+    );
+    assert!(
+        texts
+            .get("memory.user_profile")
+            .is_some_and(|text| text.contains("Ada")),
+        "standing profile notes must land on memory.user_profile: {texts:?}"
+    );
     assert!(texts["mcp.resources"].contains("picnic weather"));
     server.shutdown().await;
 }
