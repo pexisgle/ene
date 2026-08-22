@@ -3,6 +3,7 @@ use crate::host::{
     should_upgrade_steps, surface_call_kind,
 };
 use crate::mcp::{McpProfile, McpTool, ScriptedMcp, register_mcp_tools};
+use crate::observe::{ObservationPipeline, ObserveAction, contains_raw_screenshot};
 use crate::router::WorkSurfaceRouter;
 use crate::runner::{JobDrive, drive_job};
 use crate::schedule::{QuietWindow, catch_up_missed, fire_due, reminder_report};
@@ -1032,6 +1033,21 @@ async fn observe_screen_from_png_does_not_enter_session_history() {
             .iter()
             .any(|event| matches!(event.kind, EventKind::UserMessage))
     );
+    let snap_json = serde_json::to_vec(&snap).unwrap();
+    assert!(!contains_raw_screenshot(&snap_json));
+    assert!(!contains_raw_screenshot(format!("{memory:?}").as_bytes()));
+}
+
+#[test]
+fn observation_gate_does_not_keep_png_in_pipeline() {
+    let mut pipe = ObservationPipeline::new();
+    let png = crate::vision::MINIMAL_PNG.to_vec();
+    let first = pipe.evaluate(&png).unwrap();
+    assert!(matches!(first, ObserveAction::Changed { .. }));
+    pipe.commit_summary("one pixel".to_owned());
+    let second = pipe.evaluate(&png).unwrap();
+    assert!(matches!(second, ObserveAction::Skip { .. }));
+    assert!(!contains_raw_screenshot(format!("{pipe:?}").as_bytes()));
 }
 
 #[tokio::test]
@@ -1500,6 +1516,16 @@ fn combined_child_questions_merge_and_route_answers() {
             .iter()
             .any(|(_, kind, body)| kind == "answer" && body == "3")
     );
+}
+
+#[test]
+fn question_report_carries_job_id() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "research");
+    let report = host.question(job.id, "which city?").unwrap();
+    assert_eq!(report.job_id, Some(job.id));
+    assert_eq!(report.inner_intent.as_deref(), Some("ask_user"));
+    assert_eq!(report.speech, "which city?");
 }
 
 #[test]

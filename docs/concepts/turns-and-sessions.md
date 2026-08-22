@@ -24,7 +24,8 @@ running turn; `compact` compresses history.
 
 ### What happens inside a turn
 
-1. Recall and affect tick in `ene-companion`.
+1. Recall and affect tick in `ene-companion`. User turns raise `fatigue`;
+   time decay pulls it back toward the card baseline.
 2. The kernel composes the model-visible prompt from the session log.
    Installed skills appear as the `skills.catalog` System Context source.
    A matching `SKILL.md` body is injected as `skills.active`. Matching
@@ -98,6 +99,16 @@ client-side buffer. A provider failure ends the turn as `failed` and is not
 written as assistant speech. History projects that failure as a `status`
 message so reconnects still see the error.
 
+Ask-user from a running job is a **live** `question.asked` event (`id` is the
+job / delegation id, `prompt` / `text` is the speech, `questions` is the
+combined list). Stage, desktop, and Web all listen for that name. Answer with
+`POST /api/v1/jobs/{id}/answer` (`{ "text" }` or `{ "answers": ["…"] }`) so
+the reply lands on the job mailbox (`host.answer`), not the dialogue lane.
+Several open questions on one job are merged with `combine_pending_questions`
+before emit; a single `text` answers every still-open question on that job.
+Unanswered questions older than `question_timeout_hours` (default 24h) are
+closed by a daemon tick that writes an `assumption` mailbox note.
+
 ## Sessions
 
 A **session** is a contiguous conversation with one soul, identified by a
@@ -112,3 +123,6 @@ session) aborts any in-flight turn, waits until that turn has committed
 session's dialogue-lane actor from the in-process hub. If the turn does not
 go idle in time, the end request fails and `session/end` is not written. A
 later prompt on the ended session fails with `closed`.
+
+Session titles are whatever the client sends on create or `PATCH`. The daemon
+does not auto-generate a title from conversation content.

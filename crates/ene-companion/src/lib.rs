@@ -31,8 +31,8 @@ pub use affect::{
 };
 pub use classify::{ClassifyModel, ClassifyTask, ScriptedClassify};
 pub use config::{
-    CharacterSettings, ForgettingMode, MindSettings, ProactiveSettings, RecallSettings,
-    WorldStateSettings,
+    CharacterSettings, ForgettingMode, MindSettings, ObservationSendScope, ObservationTitleMode,
+    ProactiveSettings, RecallSettings, WorldStateSettings,
 };
 pub use error::CompanionError;
 pub use ids::{CandidateId, MemoryId};
@@ -55,7 +55,7 @@ pub use proactive::{
     ProactiveDecisionOutcome, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
     SILENT_TOKEN, ScreenSummaryStatus, WorldStateMemory, WorldStateSnapshot,
     build_proactive_context, classify_confirmation_prefix, decide_proactive_speech,
-    evaluate_deterministic_gates, evaluate_quiet_hours,
+    evaluate_deterministic_gates, evaluate_quiet_hours, redact_window_title,
 };
 pub use runtime::CompanionRuntime;
 pub use soul::{NewSoul, Soul};

@@ -190,6 +190,14 @@ pub struct JobView {
     pub progress_note: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AnswerJobRequest {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleView {
     pub id: String,

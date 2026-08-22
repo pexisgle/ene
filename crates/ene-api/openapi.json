@@ -44,6 +44,7 @@
     "/jobs": { "get": { "summary": "List tasks", "responses": { "200": { "description": "page" } } } },
     "/jobs/{id}": { "get": { "summary": "Task detail", "responses": { "200": { "description": "job" } } } },
     "/jobs/{id}/cancel": { "post": { "summary": "Cancel task", "responses": { "200": { "description": "job" } } } },
+    "/jobs/{id}/answer": { "post": { "summary": "Answer an ask-user question on a task mailbox", "responses": { "200": { "description": "job" }, "400": { "description": "empty answer" }, "404": { "description": "unknown job" } } } },
     "/schedules": {
       "get": { "summary": "List schedules", "responses": { "200": { "description": "page" } } },
       "post": { "summary": "Create schedule", "responses": { "200": { "description": "schedule" } } }

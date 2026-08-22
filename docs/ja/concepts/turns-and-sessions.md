@@ -25,7 +25,8 @@
 
 ### ターン内部で起きること
 
-1. `ene-companion` で想起と感情のティック。
+1. `ene-companion` で想起と感情のティック。ユーザーターンは `fatigue` を上げ、
+   時間減衰はカードのベースラインへ戻す。
 2. カーネルがセッションログからモデル可視プロンプトを構成。
    インストール済み skill は `skills.catalog` として System Context に載る。
    依頼に合う `SKILL.md` 本文は `skills.active` として注入される。
@@ -96,6 +97,16 @@ surface、別窓の詳細画面（と `ene-ctl --verbose`）は detail です。
 プロバイダ失敗はターンを `failed` で終え、アシスタント発話としては書きません。
 履歴はその失敗を `status` メッセージとして出すので、再接続後もエラーが残ります。
 
+実行中ジョブからの ask-user はライブイベント `question.asked` です（`id` は
+ジョブ / 委譲 id、`prompt` / `text` は発話、`questions` は結合した質問配列）。
+stage / desktop / Web はこの名前を待ちます。回答は対話レーンではなく
+`POST /api/v1/jobs/{id}/answer`（`{ "text" }` または `{ "answers": ["…"] }`）で
+ジョブメールボックス（`host.answer`）へ送ります。同一ジョブに未回答が複数ある
+ときは `combine_pending_questions` で結合して出します。単一の `text` はその
+ジョブの未回答すべてに届きます。`question_timeout_hours`（既定 24 時間）を
+過ぎた未回答は、デーモンのティックがメールボックスに `assumption` を書いて
+閉じます。
+
 ## セッション
 
 **セッション**は 1 つの soul との連続した会話で、`SessionId` で識別されます。
@@ -110,3 +121,6 @@ surface、別窓の詳細画面（と `ene-ctl --verbose`）は detail です。
 `session/end` を書き、対話レーンアクターをプロセス内ハブから外します。
 ターンが時間内に idle にならなければ終了は失敗し、`session/end` は書きません。
 終了済みセッションへの prompt は `closed` で失敗します。
+
+セッションタイトルは作成時または `PATCH` でクライアントが付けたものです。
+デーモンは会話内容から自動では付けません。

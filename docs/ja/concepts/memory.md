@@ -48,7 +48,10 @@
 各ターン、`ene-companion` の想起は title/content の重なり・新しさ・salience を
 スコアします。埋め込みのクエリベクトルがあるとき（`ai.tasks.embedding` または
 chat タスクのフォールバック）は、`memories.embedding` との cosine を同じ
-ランカーに足します。自動想起（`RecallPrefetch`）と表層ツール `memory.recall`
+ランカーに足します。スコア後、`mind.recall.mmr_lambda` で MMR 再順位付けします
+（1.0 は関連度のみ、0.0 は両方に同次元の埋め込みがあるときは cosine、
+なければタイトル語の重なりで多様性最大）。
+自動想起（`RecallPrefetch`）と表層ツール `memory.recall`
 は同じ経路です。埋め込みが未設定なら語彙想起のままです。トークンが重ならない
 クエリは、以前にベクトルを保存していてもヒットしません。ヒットは
 `ene-kernel::ContextRegistry` の `memory.semantic` に載ります。常設の
