@@ -185,6 +185,9 @@ async fn spawn_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENE_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn pid_file_name_matches_ctl() {
@@ -193,8 +196,9 @@ mod tests {
 
     #[test]
     fn stage_data_dir_honors_ene_data_dir() {
+        let _lock = ENE_DATA_DIR_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: test runs single-threaded under cargo test mutex.
+        // SAFETY: exclusive lock serializes ENE_DATA_DIR mutations in these tests.
         unsafe { std::env::set_var("ENE_DATA_DIR", dir.path()) };
         assert_eq!(stage_data_dir(), dir.path());
         // SAFETY: paired with set_var above in the same test.
@@ -203,7 +207,8 @@ mod tests {
 
     #[test]
     fn stage_data_dir_default_is_not_repo_assets() {
-        // SAFETY: test runs single-threaded under cargo test mutex.
+        let _lock = ENE_DATA_DIR_LOCK.lock().expect("env lock");
+        // SAFETY: exclusive lock serializes ENE_DATA_DIR mutations in these tests.
         unsafe { std::env::remove_var("ENE_DATA_DIR") };
         let dir = stage_data_dir();
         assert_eq!(dir, ene_config::paths::app_data_dir());
