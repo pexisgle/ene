@@ -112,7 +112,7 @@ host connectors.
 
 | Old action | Current | Status | Notes |
 |---|---|---|---|
-| `screenshot` / `capture_window` | `app.screenshot` | Current | Portal-first on Wayland, CLI fallback, GDI on Windows. Capture JSON includes size/scale/permission. Model-called shots log `ImageRef` + spill blob (not inline base64) and fold into `LlmImage`. See [App platform matrix](../guides/tools/app-platform.md) |
+| `screenshot` / `capture_window` | `app.screenshot` | Current | Portal-first on Wayland, CLI fallback, GDI on Windows. Capture JSON includes size/scale/permission. Model-called shots log `ImageRef` + spill blob (not inline base64) and fold into `LlmImage` only when `ai.tasks.<task>.supports_images` is set. See [App platform matrix](../guides/tools/app-platform.md) |
 | `list_windows` | `app.window_list` | Current | wmctrl / hyprctl / sway. GNOME/KDE Wayland reports unsupported via `app.capabilities` |
 | `get_active_window` | `app.active_window` | Current | Observation source when proactive screen is enabled |
 | `list_monitors` | `app.list_monitors` | Current | Scale/size aligned with capture when the compositor exposes layout |

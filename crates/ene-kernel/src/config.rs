@@ -272,6 +272,10 @@ pub struct TaskBinding {
     /// Sidecar health timeout. `None` uses the plugin default.
     #[serde(default)]
     pub startup_timeout_secs: Option<u32>,
+    /// Opt-in vision. Unknown or omitted stays false so a text-only model
+    /// never receives `LlmImage` payloads.
+    #[serde(default)]
+    pub supports_images: bool,
 }
 
 impl TaskBinding {
@@ -287,6 +291,11 @@ impl TaskBinding {
     #[must_use]
     pub fn is_unconfigured(&self) -> bool {
         self.plugin.is_empty() || self.plugin == "echo"
+    }
+
+    #[must_use]
+    pub fn accepts_images(&self) -> bool {
+        !self.is_unconfigured() && self.supports_images
     }
 }
 
@@ -399,5 +408,43 @@ impl PluginProfileKind {
     #[must_use]
     pub const fn includes_mcp(self) -> bool {
         !matches!(self, Self::Minimal)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskBinding;
+
+    #[test]
+    fn accepts_images_requires_configured_vision_flag() {
+        assert!(!TaskBinding::default().accepts_images());
+        let text_only = TaskBinding {
+            plugin: "provider.openai".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            ..TaskBinding::default()
+        };
+        assert!(!text_only.is_unconfigured());
+        assert!(!text_only.accepts_images());
+        let vision = TaskBinding {
+            plugin: "provider.openai".to_owned(),
+            model: "gpt-4o".to_owned(),
+            supports_images: true,
+            ..TaskBinding::default()
+        };
+        assert!(vision.accepts_images());
+        let echo_flagged = TaskBinding {
+            plugin: "echo".to_owned(),
+            supports_images: true,
+            ..TaskBinding::default()
+        };
+        assert!(!echo_flagged.accepts_images());
+    }
+
+    #[test]
+    fn omitted_supports_images_deserializes_false() {
+        let binding: TaskBinding =
+            serde_json::from_str(r#"{"plugin":"provider.x","model":"m"}"#).unwrap();
+        assert!(!binding.supports_images);
+        assert!(!binding.accepts_images());
     }
 }

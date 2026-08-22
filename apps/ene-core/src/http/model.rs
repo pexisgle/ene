@@ -102,6 +102,13 @@ impl ConversationModel for SeamedModel {
     }
 }
 
+fn vision_store_for<'a>(
+    binding: &TaskBinding,
+    store: &'a SessionStore,
+) -> Option<&'a SessionStore> {
+    binding.accepts_images().then_some(store)
+}
+
 fn map_request(
     request: &ModelRequest,
     binding: &TaskBinding,
@@ -110,7 +117,7 @@ fn map_request(
     layer: Layer,
 ) -> LlmGenerateRequest {
     let store = core.store();
-    let vision_store = (!binding.is_unconfigured()).then_some(store.as_ref());
+    let vision_store = vision_store_for(binding, store.as_ref());
     LlmGenerateRequest {
         messages: fold_history(&request.messages, vision_store),
         tools: tool_schemas(core, layer),
@@ -318,6 +325,7 @@ fn parse_aspect(aspect: &str) -> InnerAspect {
 mod tests {
     use super::*;
     use base64::Engine;
+    use ene_kernel::TaskBinding;
     use ene_plugin_ipc::LlmRole;
     use ene_session::{Block, ProjectedMessage, Role, SessionStore};
 
@@ -450,5 +458,69 @@ mod tests {
         assert!(mapped[0].images.is_empty());
         assert!(mapped[0].text.contains("[image omitted]"));
         assert!(mapped[0].text.contains(r#""width":1"#));
+    }
+
+    fn configured(plugin: &str, supports_images: bool) -> TaskBinding {
+        TaskBinding {
+            plugin: plugin.to_owned(),
+            model: "test-model".to_owned(),
+            supports_images,
+            ..TaskBinding::default()
+        }
+    }
+
+    fn png_tool_history(artifact_id: impl Into<String>) -> Vec<ProjectedMessage> {
+        vec![ProjectedMessage {
+            seq: 3,
+            role: Role::Tool,
+            blocks: vec![
+                Block::image_ref(artifact_id),
+                Block::text(r#"{"width":1,"height":1}"#),
+            ],
+            turn_id: None,
+            step_index: None,
+            tool_name: None,
+            tool_args: None,
+            tool_call_id: Some("call-1".to_owned()),
+        }]
+    }
+
+    #[tokio::test]
+    async fn configured_text_only_binding_omits_image_ref() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap();
+        let png = [0x89_u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let artifact_id = store.put_spill(&png, Some("image/png")).await.unwrap();
+        let binding = configured("provider.openai", false);
+        assert!(!binding.is_unconfigured());
+        let mapped = fold_history(
+            &png_tool_history(artifact_id),
+            vision_store_for(&binding, &store),
+        );
+        assert!(mapped[0].images.is_empty());
+        assert!(mapped[0].text.contains("[image omitted]"));
+        assert!(mapped[0].text.contains(r#""width":1"#));
+    }
+
+    #[tokio::test]
+    async fn configured_vision_binding_attaches_llm_image() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap();
+        let png = [0x89_u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let artifact_id = store.put_spill(&png, Some("image/png")).await.unwrap();
+        let binding = configured("provider.openai", true);
+        let mapped = fold_history(
+            &png_tool_history(artifact_id),
+            vision_store_for(&binding, &store),
+        );
+        assert_eq!(mapped[0].images.len(), 1);
+        assert_eq!(mapped[0].images[0].mime, "image/png");
+        assert_eq!(mapped[0].images[0].base64, encoded);
+        assert!(!mapped[0].text.contains("[image omitted]"));
     }
 }

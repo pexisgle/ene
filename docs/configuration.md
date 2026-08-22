@@ -34,9 +34,12 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 
 Conversation, classifier, embedding, TTS, STT, approve, and job bind through
 `ai.tasks.<task>`
-(`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`). Chat
+(`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`,
+`supports_images`). Chat
 starts unconfigured — set `ai.tasks.chat.plugin` to a `provider.*` id before
-the first message. `approval.mode = ai_auto` uses `ai.tasks.approve` (chat
+the first message. `supports_images` is opt-in and defaults to false: only a
+configured binding with the flag set folds `ImageRef` tool results into
+`LlmImage`; text-only or unknown providers keep `[image omitted]`. `approval.mode = ai_auto` uses `ai.tasks.approve` (chat
 fallback) and pops up when that helper fails. Back-harness jobs use
 `ai.tasks.job` (chat fallback, or the echo model when neither is bound) on a
 lane independent of dialogue. API keys are vault secrets (`ENE_AI__TASKS__<TASK>__API_KEY`

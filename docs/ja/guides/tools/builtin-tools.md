@@ -18,8 +18,9 @@
 ソースを有効にしているとき承認ポップアップを飛ばします。観測経路は `png_base64`
 をデコードしてセッション履歴の外で要約します。`{available: false}` は成功した
 「見る」ではありません。モデルが `app.screenshot` を呼んだときは PNG を spill
-blob に置き、会話ログには `ImageRef` だけを残します。マルチモーダルな chat には
-`LlmImage` として渡り、巨大な base64 テキストは積みません。
+blob に置き、会話ログには `ImageRef` だけを残します。`ai.tasks.chat.supports_images`
+が真のときだけ `LlmImage` として渡り、巨大な base64 テキストは積みません。
+text-only や能力不明のバインディングは `[image omitted]` のままです。
 `harness.tool_output.soft_limit_bytes`（既定 64 KiB）を超えるツール JSON も
 同じ spill 経路です。
 
