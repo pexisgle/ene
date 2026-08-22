@@ -184,11 +184,12 @@ mod tests {
 
     #[test]
     fn direct_exec_uses_shell_equivalent_approval_boundary() {
-        let Some(run) = host_spec_for("exec.run") else {
-            panic!("exec.run host spec must exist");
-        };
-        assert!(run.side_effects.iter().any(|effect| effect == "exec"));
-        assert!(run.side_effects.iter().any(|effect| effect == "shell"));
+        let run = host_spec_for("exec.run");
+        assert!(run.is_some(), "exec.run host spec must exist");
+        if let Some(run) = run {
+            assert!(run.side_effects.iter().any(|effect| effect == "exec"));
+            assert!(run.side_effects.iter().any(|effect| effect == "shell"));
+        }
         assert_eq!(host_sensitivity("exec.run"), Sensitivity::Medium);
         assert_eq!(host_sensitivity("exec.shell"), Sensitivity::Medium);
     }
