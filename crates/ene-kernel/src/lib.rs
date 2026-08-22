@@ -48,10 +48,8 @@ pub use ene_session::{
     SessionId, SessionStore, SoulId, TurnId, derive_messages, hash_model_visible, hash_projected,
 };
 
-// Current main renamed the lane-facing settings type. Keep the streaming branch's
-// existing tests source-compatible without restoring the old name in the public API.
 #[cfg(test)]
-pub(crate) type MindSettings = LaneMindSettings;
-
-#[cfg(test)]
-mod tests;
+mod tests {
+    use crate::LaneMindSettings as MindSettings;
+    include!("tests.rs");
+}
