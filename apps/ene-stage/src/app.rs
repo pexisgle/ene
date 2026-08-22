@@ -1152,9 +1152,11 @@ impl StageApp {
     fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
         self.detail.visible = true;
         self.detail.select_tab(tab);
-        if self.detail_win.is_none()
-            && let Some(gpu) = self.gpu.as_ref()
-        {
+        if let Some(detail) = self.detail_win.as_ref() {
+            detail.show_and_focus();
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_ref() {
             match ChromeWindow::create(
                 event_loop,
                 gpu,
