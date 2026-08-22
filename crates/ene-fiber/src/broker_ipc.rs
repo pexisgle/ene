@@ -2,6 +2,7 @@
 
 use crate::broker::{Broker, BrokerError};
 use crate::fiber::FiberUid;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use ene_plugin_ipc::{BrokerErrorCode, BrokerRequest, BrokerResponse};
 use std::path::Path;
 use std::sync::Arc;
@@ -236,11 +237,37 @@ fn dispatch(
                 Err(err) => error_response(&err),
             }
         }
+        BrokerRequest::FsReadBytes { path } => {
+            let broker = broker.lock();
+            match broker.fs_read_bytes(uid, Path::new(&path)) {
+                Ok(bytes) => BrokerResponse::FsReadBytesOk {
+                    bytes_base64: STANDARD.encode(bytes),
+                },
+                Err(err) => error_response(&err),
+            }
+        }
         BrokerRequest::FsWrite { path, text } => {
             let broker = broker.lock();
             match broker.fs_write(uid, Path::new(&path), &text) {
                 Ok(()) => BrokerResponse::FsWriteOk,
                 Err(err) => error_response(&err),
+            }
+        }
+        BrokerRequest::FsWriteBytes { path, bytes_base64 } => {
+            let decoded = STANDARD
+                .decode(bytes_base64)
+                .map_err(|err| format!("invalid base64: {err}"));
+            let broker = broker.lock();
+            match decoded.and_then(|bytes| {
+                broker
+                    .fs_write_bytes(uid, Path::new(&path), &bytes)
+                    .map_err(|err| err.to_string())
+            }) {
+                Ok(()) => BrokerResponse::FsWriteBytesOk,
+                Err(message) => BrokerResponse::Error {
+                    code: BrokerErrorCode::InvalidArgument,
+                    message,
+                },
             }
         }
         BrokerRequest::FsSearch {

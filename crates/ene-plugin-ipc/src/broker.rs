@@ -186,9 +186,16 @@ pub enum BrokerRequest {
     FsRead {
         path: String,
     },
+    FsReadBytes {
+        path: String,
+    },
     FsWrite {
         path: String,
         text: String,
+    },
+    FsWriteBytes {
+        path: String,
+        bytes_base64: String,
     },
     FsSearch {
         path: String,
@@ -213,7 +220,11 @@ pub enum BrokerResponse {
     FsReadOk {
         text: String,
     },
+    FsReadBytesOk {
+        bytes_base64: String,
+    },
     FsWriteOk,
+    FsWriteBytesOk,
     FsSearchOk {
         matches: serde_json::Value,
     },

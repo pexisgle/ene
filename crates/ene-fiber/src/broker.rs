@@ -5,6 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
+/// Keeps base64 broker payloads inside the configured 1 MiB IPC frame.
+const MAX_BROKER_FILE_BYTES: usize = 512 * 1024;
+
 /// Broker denial or path escape.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -221,10 +224,34 @@ impl Broker {
         std::fs::read_to_string(resolved).map_err(BrokerError::from)
     }
 
+    pub fn fs_read_bytes(&self, uid: FiberUid, path: &Path) -> Result<Vec<u8>, BrokerError> {
+        self.require(uid, "fs.read")?;
+        let resolved = confine_path(&self.workspace, path, false)?;
+        let bytes = std::fs::read(resolved).map_err(BrokerError::from)?;
+        if bytes.len() > MAX_BROKER_FILE_BYTES {
+            return Err(BrokerError::Oversize);
+        }
+        Ok(bytes)
+    }
+
     pub fn fs_write(&self, uid: FiberUid, path: &Path, text: &str) -> Result<(), BrokerError> {
         self.require(uid, "fs.write")?;
         let resolved = confine_path(&self.workspace, path, true)?;
         std::fs::write(resolved, text).map_err(BrokerError::from)
+    }
+
+    pub fn fs_write_bytes(
+        &self,
+        uid: FiberUid,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), BrokerError> {
+        if bytes.len() > MAX_BROKER_FILE_BYTES {
+            return Err(BrokerError::Oversize);
+        }
+        self.require(uid, "fs.write")?;
+        let resolved = confine_path(&self.workspace, path, true)?;
+        std::fs::write(resolved, bytes).map_err(BrokerError::from)
     }
 
     pub fn fs_list(&self, uid: FiberUid, path: &Path) -> Result<Vec<String>, BrokerError> {
