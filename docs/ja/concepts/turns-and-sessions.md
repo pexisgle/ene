@@ -100,4 +100,5 @@ surface、別窓の詳細画面（と `ene-ctl --verbose`）は detail です。
 セッションの split）は、進行中のターンを abort し、そのターンが
 （アシスタント発話ではなく interrupted として）コミットされるのを待ってから
 `session/end` を書き、対話レーンアクターをプロセス内ハブから外します。
+ターンが時間内に idle にならなければ終了は失敗し、`session/end` は書きません。
 終了済みセッションへの prompt は `closed` で失敗します。

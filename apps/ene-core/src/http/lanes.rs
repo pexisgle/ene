@@ -16,6 +16,7 @@ pub struct LaneHub {
     lanes: Mutex<HashMap<SessionId, LaneHandle>>,
     turns: Mutex<HashMap<TurnId, SessionId>>,
     model: Arc<dyn ConversationModel>,
+    turn_stop_timeout: Mutex<Duration>,
 }
 
 impl LaneHub {
@@ -25,6 +26,7 @@ impl LaneHub {
             lanes: Mutex::new(HashMap::new()),
             turns: Mutex::new(HashMap::new()),
             model,
+            turn_stop_timeout: Mutex::new(TURN_STOP_TIMEOUT),
         }
     }
 
@@ -68,12 +70,19 @@ impl LaneHub {
     /// Abort a running turn and wait until the actor is idle. No-op if there is no handle.
     ///
     /// Does not remove the cache entry; call [`Self::close`] after `session/end` is written.
-    pub async fn stop_turn(&self, session: SessionId) {
+    /// Returns [`KernelError::ShuttingDown`] if the turn does not go idle before the bound.
+    pub async fn stop_turn(&self, session: SessionId) -> Result<(), KernelError> {
         let Some(handle) = self.lanes.lock().get(&session).cloned() else {
-            return;
+            return Ok(());
         };
         drop(handle.abort().await);
-        drop(handle.wait_until_idle(TURN_STOP_TIMEOUT).await);
+        let timeout = *self.turn_stop_timeout.lock();
+        handle.wait_until_idle(timeout).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_turn_stop_timeout(&self, timeout: Duration) {
+        *self.turn_stop_timeout.lock() = timeout;
     }
 
     /// Stop the actor and drop the cache entry. The turn must already be idle.

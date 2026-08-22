@@ -100,5 +100,6 @@ into the log so later turns stay in budget. Ending a session (explicit
 `POST /api/v1/sessions/{id}/end`, idle timeout, or split of a live
 session) aborts any in-flight turn, waits until that turn has committed
 (interrupted, not assistant speech), writes `session/end`, then drops the
-session's dialogue-lane actor from the in-process hub. A later prompt on
-the ended session fails with `closed`.
+session's dialogue-lane actor from the in-process hub. If the turn does not
+go idle in time, the end request fails and `session/end` is not written. A
+later prompt on the ended session fails with `closed`.

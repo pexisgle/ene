@@ -380,7 +380,9 @@ async fn finish_session(
     session: SessionId,
     reason: SessionEndReason,
 ) -> Result<(), ApiReject> {
-    state.lanes.stop_turn(session).await;
+    state.lanes.stop_turn(session).await.map_err(|err| {
+        conflict("lane_busy", "in-flight turn did not stop").with_detail(err.to_string())
+    })?;
     state
         .core
         .end_session(session, reason)
