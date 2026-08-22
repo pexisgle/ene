@@ -46,6 +46,17 @@ pub struct ChromeWindow {
 }
 
 impl ChromeWindow {
+    /// Restore visibility even when the WM rejects programmatic focus.
+    pub fn show_and_focus(&self) {
+        if self.window.is_minimized() == Some(true) {
+            self.window.set_minimized(false);
+        }
+        self.window.set_visible(true);
+        clamp_to_monitor(&self.window);
+        self.raise();
+        self.window.request_redraw();
+    }
+
     pub fn raise(&self) {
         self.window
             .set_window_level(winit::window::WindowLevel::AlwaysOnTop);
@@ -284,6 +295,32 @@ fn place_caption_window(window: &Window, position: &str) {
         origin.x + i32::try_from(x).unwrap_or(i32::MAX),
         origin.y + i32::try_from(y).unwrap_or(i32::MAX),
     ));
+}
+
+fn clamp_to_monitor(window: &Window) {
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let size = window.outer_size();
+    let visible = window.available_monitors().any(|monitor| {
+        let origin = monitor.position();
+        let bounds = monitor.size();
+        position.x < origin.x + i32::try_from(bounds.width).unwrap_or(i32::MAX)
+            && origin.x < position.x + i32::try_from(size.width).unwrap_or(i32::MAX)
+            && position.y < origin.y + i32::try_from(bounds.height).unwrap_or(i32::MAX)
+            && origin.y < position.y + i32::try_from(size.height).unwrap_or(i32::MAX)
+    });
+    if visible {
+        return;
+    }
+    let monitor = window
+        .primary_monitor()
+        .or_else(|| window.current_monitor());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let origin = monitor.position();
+    window.set_outer_position(PhysicalPosition::new(origin.x + 48, origin.y + 48));
 }
 
 #[cfg(test)]
