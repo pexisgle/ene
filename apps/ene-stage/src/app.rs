@@ -951,11 +951,17 @@ impl StageApp {
                     }
                 }
                 LiveEvent::BodyCommand { value } => {
-                    if let Some(overlay) = self.overlay.as_mut() {
-                        let soul = self.session.soul_id().to_owned();
-                        if let Some(avatar) = overlay.avatar_or_first_mut(&soul) {
-                            avatar.apply_body_event(&value);
-                        }
+                    let Some(overlay) = self.overlay.as_mut() else {
+                        continue;
+                    };
+                    let session_soul = self.session.soul_id().to_owned();
+                    let event_soul = value.get("soul_id").and_then(serde_json::Value::as_str);
+                    let avatar = match event_soul {
+                        Some(soul) => overlay.avatar_mut(soul),
+                        None => overlay.avatar_or_first_mut(&session_soul),
+                    };
+                    if let Some(avatar) = avatar {
+                        avatar.apply_body_event(&value);
                     }
                 }
                 LiveEvent::AudioChunk {
@@ -1017,6 +1023,19 @@ impl StageApp {
                     );
                 }
                 LiveEvent::JobReport { text } => self.detail.push_log(LogKind::Job, text),
+                LiveEvent::BodyCommand { value } => {
+                    let kind = value
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("body");
+                    let name = value
+                        .get("name")
+                        .or_else(|| value.get("label"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    self.detail
+                        .push_log(LogKind::Session, format!("{kind} {name}"));
+                }
                 LiveEvent::Disconnected => self
                     .detail
                     .push_log(LogKind::Session, "detail disconnected".into()),

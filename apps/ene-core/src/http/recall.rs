@@ -7,20 +7,24 @@ use ene_kernel::{SessionId, SoulId, TurnPrefetch};
 use ene_plugin_ipc::{EmbedRequest, ProviderAuth};
 
 use super::classify::SeamedClassify;
+use super::performance;
+use super::ws::CoreBus;
 use crate::CoreDaemon;
 
 /// Logs recalled memories as `context/system_message` before generation.
 pub struct RecallPrefetch {
     core: Weak<CoreDaemon>,
     classify: Arc<SeamedClassify>,
+    events: CoreBus,
 }
 
 impl RecallPrefetch {
     #[must_use]
-    pub fn new(core: &Arc<CoreDaemon>, classify: Arc<SeamedClassify>) -> Self {
+    pub fn new(core: &Arc<CoreDaemon>, classify: Arc<SeamedClassify>, events: CoreBus) -> Self {
         Self {
             core: Arc::downgrade(core),
             classify,
+            events,
         }
     }
 }
@@ -81,6 +85,7 @@ impl TurnPrefetch for RecallPrefetch {
                             intensity: pres.intensity,
                         },
                     ));
+                    performance::flush_soul(&core, &self.events, soul);
                 }
                 Ok(None) => {}
                 Err(err) => tracing::debug!(error = %err, "affect skipped"),
