@@ -49,6 +49,8 @@ pub enum LiveEvent {
     AudioChunk {
         pcm: Vec<f32>,
         sample_rate: u32,
+        abort: bool,
+        is_final: bool,
     },
     VoiceState {
         state: String,
@@ -252,7 +254,12 @@ fn parse_live_event(value: &Value) -> Option<LiveEvent> {
                 .get("sample_rate")
                 .and_then(Value::as_u64)
                 .unwrap_or(44_100) as u32;
-            Some(LiveEvent::AudioChunk { pcm, sample_rate })
+            Some(LiveEvent::AudioChunk {
+                pcm,
+                sample_rate,
+                abort: bool_field(value, "abort"),
+                is_final: bool_field(value, "is_final"),
+            })
         }
         "voice.state" => Some(LiveEvent::VoiceState {
             state: value
@@ -307,6 +314,10 @@ fn f32_field(value: &Value, key: &str) -> f32 {
         .get(key)
         .and_then(Value::as_f64)
         .map_or(0.0, |n| n as f32)
+}
+
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -373,6 +384,46 @@ mod tests {
         assert!(
             parse_surface_event(&json!({"type": "question.asked", "id": "q", "prompt": "ok?"}))
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn parses_audio_chunk_abort() {
+        let event = parse_live_event(&json!({
+            "type": "audio.chunk",
+            "pcm": [],
+            "sample_rate": 16_000,
+            "abort": true,
+            "is_final": true
+        }))
+        .expect("event");
+        assert_eq!(
+            event,
+            LiveEvent::AudioChunk {
+                pcm: Vec::new(),
+                sample_rate: 16_000,
+                abort: true,
+                is_final: true,
+            }
+        );
+    }
+
+    #[test]
+    fn audio_chunk_abort_defaults_false() {
+        let event = parse_live_event(&json!({
+            "type": "audio.chunk",
+            "pcm": [0.5],
+            "sample_rate": 16_000
+        }))
+        .expect("event");
+        assert_eq!(
+            event,
+            LiveEvent::AudioChunk {
+                pcm: vec![0.5],
+                sample_rate: 16_000,
+                abort: false,
+                is_final: false,
+            }
         );
     }
 

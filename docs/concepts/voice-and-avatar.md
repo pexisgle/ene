@@ -9,8 +9,9 @@ run in the core. `POST /sessions/{id}/listen` feeds mic PCM into that machine
 first; a closed utterance is sent to `ai.tasks.stt` when that task is bound.
 Plugin TTS PCM enters the same machine so lipsync and barge-in see live
 playback. The surface bus emits `voice.state` (`state` plus `barge_in` while
-interrupting). Tests may still construct `VoiceRuntime::scripted` for
-in-process ASR doubles.
+interrupting) and an empty `audio.chunk` with `abort: true` / `is_final: true`
+so clients can stop the playback sink immediately. Tests may still construct
+`VoiceRuntime::scripted` for in-process ASR doubles.
 
 TTS and STT bind through `ai.tasks.tts` / `ai.tasks.stt` to provider plugins
 (`provider.openai_compat`, `provider.elevenlabs`, `provider.voicevox`,

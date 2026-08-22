@@ -73,6 +73,14 @@ impl AudioPlayback {
         Ok(())
     }
 
+    /// Drop queued PCM and stop the sink immediately (barge-in abort).
+    pub fn stop(&mut self) {
+        self.recent_pcm.lock().clear();
+        if let Some(player) = self.player.as_ref() {
+            player.stop();
+        }
+    }
+
     #[must_use]
     pub fn recent_pcm(&self) -> Vec<f32> {
         self.recent_pcm.lock().clone()
