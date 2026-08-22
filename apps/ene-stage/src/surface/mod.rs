@@ -127,6 +127,19 @@ impl SurfaceUiState {
     pub(crate) fn caption_visible(&self) -> bool {
         self.caption_open && caption::is_speech_caption(&self.caption)
     }
+
+    #[must_use]
+    pub(crate) fn terminal_error(&self) -> Option<&str> {
+        let text = self
+            .history
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "status")?
+            .text
+            .trim();
+        (!text.is_empty()).then_some(text)
+    }
 }
 
 pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
@@ -173,6 +186,23 @@ pub fn show_spotlight(ctx: &egui::Context, state: &mut SurfaceUiState) -> Option
 #[cfg(test)]
 mod tests {
     use super::SurfaceUiState;
+
+    #[test]
+    fn terminal_error_reads_latest_surface_status_message() {
+        let mut state = SurfaceUiState::default();
+        assert!(state.terminal_error().is_none());
+
+        state.history.messages.push(ene_api::MessageResponse {
+            seq: 1,
+            role: "status".to_owned(),
+            text: "model: call failed: 400 Bad Request: Invalid tool schema".to_owned(),
+        });
+
+        assert_eq!(
+            state.terminal_error(),
+            Some("model: call failed: 400 Bad Request: Invalid tool schema")
+        );
+    }
 
     #[test]
     fn provider_error_delta_goes_to_status_not_caption() {

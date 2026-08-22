@@ -108,6 +108,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
             .max_height(ui.available_height() - 8.0)
             .stick_to_bottom(true)
             .show(ui, |ui| {
+                if let Some(error) = state.terminal_error() {
+                    egui::Frame::default()
+                        .fill(egui::Color32::from_rgb(60, 24, 24))
+                        .inner_margin(8.0)
+                        .corner_radius(6.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 205, 205),
+                                format!("{}: {error}", i18n::fl("status-error")),
+                            );
+                        });
+                    ui.add_space(4.0);
+                }
                 for message in &state.history.messages {
                     if message.role != "user" && message.role != "assistant" {
                         continue;
