@@ -273,6 +273,7 @@ impl StageApp {
                     self.detail.core_settings_text.clone_from(&json);
                     self.detail.core_patch_text.clear();
                     detail::parse_core_fields(&json, &mut self.detail);
+                    self.detail.settings_loaded = true;
                     self.detail.core_status = if detail::chat_setup_gap(&self.detail)
                         == Some(detail::ChatSetupGap::ApiKey)
                     {
@@ -686,7 +687,9 @@ impl StageApp {
         if text.is_empty() {
             return;
         }
-        if let Some(gap) = detail::chat_setup_gap(&self.detail) {
+        if self.detail.settings_loaded
+            && let Some(gap) = detail::chat_setup_gap(&self.detail)
+        {
             self.surface.status = detail::chat_setup_status(gap);
             return;
         }

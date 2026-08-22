@@ -233,6 +233,7 @@ pub struct DetailUiState {
     pub restore_confirm: bool,
     pub session_id: String,
     pub open_spotlight: bool,
+    pub settings_loaded: bool,
     loaded: DetailLoaded,
 }
 
@@ -261,6 +262,7 @@ impl DetailUiState {
 
     pub fn invalidate_settings(&mut self) {
         self.loaded.settings = false;
+        self.settings_loaded = false;
     }
 
     /// Reload core settings when Detail is reopened so external vault writes
@@ -2530,10 +2532,11 @@ fn ensure_settings(
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
-    if state.loaded.settings {
+    if state.loaded.settings || state.settings_loaded {
         return;
     }
     state.loaded.settings = true;
+    state.settings_loaded = true;
     let client = Arc::clone(client);
     spawn_async(rt, async_results, async move {
         AsyncOutcome::LoadCoreSettings(
