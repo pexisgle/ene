@@ -75,7 +75,16 @@ pub fn install_skill_dir(home: &Path, src: &Path) -> Result<InstalledSkill, Work
 
 pub fn load_skill(home: &Path, name: &str) -> Result<SkillMeta, WorkError> {
     let path = home.join(name).join("SKILL.md");
-    if !path.exists() {
+    let canonical_home = home.canonicalize()?;
+    let Some(file_name) = path.file_name().filter(|file| *file == "SKILL.md") else {
+        return Err(WorkError::UnknownSkill(name.to_owned()));
+    };
+    let parent = path.parent().unwrap_or(home);
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|_| WorkError::UnknownSkill(name.to_owned()))?;
+    if !canonical_parent.starts_with(&canonical_home) || !canonical_parent.join(file_name).exists()
+    {
         return Err(WorkError::UnknownSkill(name.to_owned()));
     }
     let md = fs::read_to_string(path)?;

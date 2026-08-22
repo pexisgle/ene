@@ -802,6 +802,52 @@ fn skill_install_and_load() {
     assert!(parse_skill_md("not a skill").is_err());
 }
 
+#[tokio::test]
+async fn skill_list_loads_from_catalog_and_rejects_generic_name() {
+    let (dir, _store, host, soul) = open_work();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: travel\ndescription: plan a trip\n---\n\n# Travel\npack light\n",
+    )
+    .unwrap();
+    let home = dir.path().join("skills");
+    install_skill_dir(&home, &src).unwrap();
+
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, Arc::clone(&host), home);
+
+    registry
+        .execute(
+            "skill.load",
+            json!({"name": "skill", "soul_id": soul.to_string()}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+
+    let listed = registry
+        .execute(
+            "skill.list",
+            json!({"soul_id": soul.to_string()}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed["skills"][0]["name"], "travel");
+
+    let loaded = registry
+        .execute(
+            "skill.load",
+            json!({"name": "travel", "soul_id": soul.to_string()}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded["name"], "travel");
+}
+
 #[test]
 fn matching_skill_enters_catalog_and_active_context() {
     let dir = TempDir::new().unwrap();

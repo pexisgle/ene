@@ -1,6 +1,6 @@
 use crate::error::WorkError;
 use crate::host::{DelegationHost, StartDelegation};
-use crate::skill::{load_skill, read_skill_file};
+use crate::skill::{catalog, load_skill, read_skill_file};
 use crate::types::{Artifact, ArtifactKind, DelegationMode};
 use crate::workflow::{BookmarkFill, fill_bookmark_job};
 use async_trait::async_trait;
@@ -119,8 +119,14 @@ fn delegate_defs() -> Vec<ToolDefinition> {
             Vec::new(),
         ),
         harness(
+            "skill.list",
+            "List installed skills before loading one.",
+            json!({"type":"object","additionalProperties":false}),
+            Vec::new(),
+        ),
+        harness(
             "skill.load",
-            "Load a skill body into context.",
+            "Load an installed skill by its exact catalog ID.",
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" } },
@@ -280,8 +286,15 @@ impl ToolInvoke for WorkInvoker {
                     .map_err(|err| err.to_string())?;
                 Ok(json!({ "ok": true }))
             }
+            "skill.list" => list_skills(
+                &self.skills_home,
+                &soul_skill_refs_from_args(&self.host, &args),
+            ),
             "skill.load" => {
-                let skill_name = str_arg(&args, "name")?;
+                let skill_name = str_arg(&args, "name")?.trim();
+                if skill_name.is_empty() {
+                    return Err("invalid_arguments: name is required".to_owned());
+                }
                 let meta =
                     load_skill(&self.skills_home, skill_name).map_err(|err| err.to_string())?;
                 Ok(json!({
@@ -466,6 +479,23 @@ fn soul_skill_refs(host: &DelegationHost, soul: SoulId) -> Vec<String> {
         .and_then(|store| store.get_soul(soul).ok().flatten())
         .map(|row| row.skill_refs)
         .unwrap_or_default()
+}
+
+fn soul_skill_refs_from_args(host: &DelegationHost, args: &Value) -> Vec<String> {
+    args.get("soul_id")
+        .and_then(Value::as_str)
+        .and_then(|raw| SoulId::from_str(raw).ok())
+        .map_or_else(Vec::new, |soul_id| soul_skill_refs(host, soul_id))
+}
+
+fn list_skills(home: &Path, enabled: &[String]) -> Result<Value, String> {
+    let rows = catalog(home, enabled).map_err(|err| err.to_string())?;
+    Ok(json!({
+        "skills": rows.iter().map(|(name, description)| json!({
+            "name": name,
+            "description": description,
+        })).collect::<Vec<_>>(),
+    }))
 }
 
 fn soul_arg(args: &Value) -> Result<SoulId, String> {
