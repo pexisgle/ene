@@ -19,11 +19,12 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          cp .github/repair-828.py /tmp/repair-828.py
           git fetch origin main f20162b16dcb6aa13af6fcb2cf44d56b64a56ab9 ce0090d077c655a642d12741e28bede1be8453fc
           git diff --binary f20162b16dcb6aa13af6fcb2cf44d56b64a56ab9 ce0090d077c655a642d12741e28bede1be8453fc > /tmp/pr-828.patch
           git reset --hard origin/main
           git apply --3way --index /tmp/pr-828.patch || true
-          python3 .github/repair-828.py
+          python3 /tmp/repair-828.py
           git add -A
           if git diff --name-only --diff-filter=U | grep -q .; then
             git diff --cc
