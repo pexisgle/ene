@@ -42,6 +42,19 @@ impl ConversationModel for ParkingJobModel {
     }
 }
 
+struct BlockingGenerateModel {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ConversationModel for BlockingGenerateModel {
+    async fn generate(&self, _: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        self.entered.notify_one();
+        std::thread::sleep(Duration::from_millis(400));
+        Ok(ModelGeneration::default())
+    }
+}
+
 async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHandle) {
     boot_server_with(Arc::new(EchoModel) as Arc<dyn ConversationModel>).await
 }
@@ -1526,12 +1539,260 @@ async fn boot_seeds_two_souls_and_session_ops() {
 
     let barge = client.barge_in(&split.session.id).await;
     assert!(
-        barge.is_ok()
-            || barge
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.error_class() == "no_active_operation")
+        barge
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.error_class() == "closed")
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn end_session_releases_lane_actor() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("release lane".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(server.lane_count(), 0);
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    assert_eq!(server.lane_count(), 1);
+
+    let ended = client
+        .end_session(
+            &session.id,
+            &EndSessionRequest {
+                reason: "explicit".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ended.end_reason.as_deref(), Some("explicit"));
+    assert_eq!(server.lane_count(), 0);
+
+    let err = client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "after end".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "closed");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn end_session_waits_for_turn_before_session_end() {
+    let (_dir, client, core, server) =
+        boot_server_with(Arc::new(ParkingJobModel) as Arc<dyn ConversationModel>).await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("end while generating".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hold".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let sid = SessionId::from_str(&session.id).unwrap();
+    let started = Instant::now();
+    loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        if events
+            .iter()
+            .any(|event| event.kind == EventKind::TurnStart)
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "turn did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    client
+        .end_session(
+            &session.id,
+            &EndSessionRequest {
+                reason: "explicit".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let events = core.store().load_events(sid, 0).unwrap();
+    assert_eq!(
+        events.last().map(|event| &event.kind),
+        Some(&EventKind::SessionEnd)
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event.kind,
+            EventKind::AssistantMessage | EventKind::ToolResult
+        )),
+        "aborted generate must not write assistant speech or tool results"
+    );
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let later = core.store().load_events(sid, 0).unwrap();
+    assert_eq!(later.len(), events.len());
+    assert_eq!(
+        later.last().map(|event| &event.kind),
+        Some(&EventKind::SessionEnd)
+    );
+    assert_eq!(server.lane_count(), 0);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_session_does_not_write_session_end_when_turn_stop_times_out() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (_dir, client, core, server) = boot_server_with(Arc::new(BlockingGenerateModel {
+        entered: Arc::clone(&entered),
+    }) as Arc<dyn ConversationModel>)
+    .await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("sticky generate".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hold".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    entered.notified().await;
+    let sid = SessionId::from_str(&session.id).unwrap();
+
+    server
+        .state
+        .lanes
+        .set_turn_stop_timeout(Duration::from_millis(80));
+    let err = client
+        .end_session(
+            &session.id,
+            &EndSessionRequest {
+                reason: "explicit".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "lane_busy");
+
+    let events = core.store().load_events(sid, 0).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == EventKind::SessionEnd),
+        "session/end must not commit when stop_turn times out"
+    );
+    let meta = client.get_session(&session.id).await.unwrap();
+    assert!(meta.ended_at.is_none());
+    assert_eq!(server.lane_count(), 1);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let later = core.store().load_events(sid, 0).unwrap();
+    assert!(
+        !later
+            .iter()
+            .any(|event| event.kind == EventKind::SessionEnd)
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn idle_timeout_releases_lane_actor() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("idle release".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    assert_eq!(server.lane_count(), 1);
+
+    core.set_idle_timeout_secs(1);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let listed = client.list_sessions(None).await.unwrap();
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.id == session.id && item.ended_at.is_some())
+    );
+    assert_eq!(server.lane_count(), 0);
+
+    let err = client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "after idle".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "closed");
     server.shutdown().await;
 }
 

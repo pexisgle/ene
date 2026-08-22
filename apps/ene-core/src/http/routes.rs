@@ -180,7 +180,10 @@ pub async fn list_sessions(
     State(state): State<AppState>,
     Query(filter): Query<SoulFilter>,
 ) -> Result<Json<Page<SessionView>>, ApiReject> {
-    state.core.end_idle_sessions().await.map_err(map_core)?;
+    let idle = state.core.list_idle_sessions().map_err(map_core)?;
+    for session in idle {
+        finish_session(&state, session, SessionEndReason::IdleTimeout).await?;
+    }
     let soul = filter.soul_id.as_deref().map(parse_soul).transpose()?;
     let mut items = state
         .core
@@ -326,11 +329,7 @@ pub async fn split_session(
         .get_session(session)
         .map_err(map_session)?;
     if previous.ended_at.is_none() {
-        state
-            .core
-            .end_session(session, SessionEndReason::Explicit)
-            .await
-            .map_err(map_core)?;
+        finish_session(&state, session, SessionEndReason::Explicit).await?;
     }
     let previous = state
         .core
@@ -371,12 +370,26 @@ pub async fn end_session(
     } else {
         SessionEndReason::Explicit
     };
+    finish_session(&state, session, reason).await?;
+    get_session(State(state), Path(id)).await
+}
+
+/// Abort the running turn, wait until it has committed, write `session/end`, then stop the actor.
+async fn finish_session(
+    state: &AppState,
+    session: SessionId,
+    reason: SessionEndReason,
+) -> Result<(), ApiReject> {
+    state.lanes.stop_turn(session).await.map_err(|err| {
+        conflict("lane_busy", "in-flight turn did not stop").with_detail(err.to_string())
+    })?;
     state
         .core
         .end_session(session, reason)
         .await
         .map_err(map_core)?;
-    get_session(State(state), Path(id)).await
+    state.lanes.close(session).await;
+    Ok(())
 }
 
 pub async fn barge_in(
@@ -1934,7 +1947,7 @@ pub async fn restore(
         .finish_restore()
         .await
         .map_err(|err| bad_request("fault", &err.to_string()))?;
-    state.lanes.reset();
+    state.lanes.reset().await;
     Ok(Json(json!({ "ok": true, "restart_required": true })))
 }
 
@@ -2375,6 +2388,7 @@ fn map_work(err: ene_work::WorkError) -> ApiReject {
 fn map_core(err: CoreError) -> ApiReject {
     match err {
         CoreError::Session(err) => map_session(err),
+        CoreError::Kernel(err) => map_kernel(&err),
         other => bad_request("fault", &other.to_string()),
     }
 }

@@ -68,6 +68,9 @@ enum LaneCmd {
     WaitIdle {
         reply: oneshot::Sender<Result<(), KernelError>>,
     },
+    Shutdown {
+        reply: oneshot::Sender<Result<(), KernelError>>,
+    },
 }
 
 struct QueuedWake {
@@ -333,6 +336,11 @@ impl LaneHandle {
         self.ask(|reply| LaneCmd::Abort { reply }).await
     }
 
+    /// Stop the lane actor. Further commands fail with [`KernelError::ShuttingDown`].
+    pub async fn shutdown(&self) -> Result<(), KernelError> {
+        self.ask(|reply| LaneCmd::Shutdown { reply }).await
+    }
+
     /// Compact the session log. Original rows remain (I-23).
     pub async fn compact(&self) -> Result<u64, KernelError> {
         self.ask(|reply| LaneCmd::Compact { reply }).await
@@ -386,7 +394,9 @@ async fn lane_actor(mut state: LaneState, mut rx: mpsc::UnboundedReceiver<LaneCm
         tokio::select! {
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
-                dispatch_cmd(&mut state, cmd, &done_tx, &mut idle_waiters).await;
+                if dispatch_cmd(&mut state, cmd, &done_tx, &mut idle_waiters).await {
+                    break;
+                }
             }
             finished = done_rx.recv() => {
                 let Some(finished) = finished else { break };
@@ -401,7 +411,7 @@ async fn dispatch_cmd(
     cmd: LaneCmd,
     done_tx: &mpsc::UnboundedSender<TurnFinish>,
     idle_waiters: &mut Vec<oneshot::Sender<Result<(), KernelError>>>,
-) {
+) -> bool {
     match cmd {
         LaneCmd::Prompt {
             text,
@@ -464,7 +474,16 @@ async fn dispatch_cmd(
                 idle_waiters.push(reply);
             }
         }
+        LaneCmd::Shutdown { reply } => {
+            drop(request_abort(state));
+            for waiter in idle_waiters.drain(..) {
+                drop(waiter.send(Err(KernelError::Closed)));
+            }
+            drop(reply.send(Ok(())));
+            return true;
+        }
     }
+    false
 }
 
 async fn on_turn_finished(
