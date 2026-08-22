@@ -1,7 +1,7 @@
 use crate::fiber::FiberUid;
 use crate::sidecar::{self, LiveSidecar, SidecarHealth, SidecarId, SidecarRequest};
-use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
@@ -39,6 +39,8 @@ pub enum BrokerError {
     Timeout,
     #[error("too many redirects")]
     RedirectLoop,
+    #[error("invalid glob: {0}")]
+    InvalidGlob(String),
 }
 
 /// One grant tracked as a fiber effect.
@@ -61,11 +63,19 @@ pub fn confine_path(
     create_parent: bool,
 ) -> Result<PathBuf, BrokerError> {
     let base = workspace.canonicalize()?;
+    if path.as_os_str().is_empty() || path == Path::new(".") {
+        return Ok(base);
+    }
     let requested = if path.is_absolute() {
         path.to_path_buf()
     } else {
         base.join(path)
     };
+    if let Ok(canonical) = requested.canonicalize()
+        && canonical == base
+    {
+        return Ok(base);
+    }
     let file_name = requested
         .file_name()
         .ok_or_else(|| BrokerError::PathEscape(requested.display().to_string()))?;
@@ -220,6 +230,68 @@ impl Broker {
         crate::net::get(url)
     }
 
+    /// Search file contents with host-managed `rg`.
+    ///
+    /// # Errors
+    ///
+    /// Denies undeclared `fs.search`, escapes the workspace, or propagates
+    /// `rg` I/O failures. A literal query is passed as fixed strings; invalid
+    /// regular expressions are rejected by `rg` before any result is returned.
+    pub fn fs_search(
+        &self,
+        uid: FiberUid,
+        path: &Path,
+        query: &str,
+        regex: bool,
+        case_insensitive: bool,
+        include: Option<&str>,
+        context_lines: u32,
+        count: bool,
+        max: u32,
+    ) -> Result<Value, BrokerError> {
+        self.require(uid, "fs.search")?;
+        let root = confine_path(&self.workspace, path, false)?;
+        let include = match include {
+            Some(pattern) => {
+                validate_glob(pattern)?;
+                Some(pattern)
+            }
+            None => None,
+        };
+        let mut command = std::process::Command::new("rg");
+        if !regex {
+            command.arg("--fixed-strings");
+        }
+        if case_insensitive {
+            command.arg("--ignore-case");
+        }
+        if let Some(pattern) = include {
+            command.args(["--glob", pattern]);
+        }
+        if context_lines > 0 && !count {
+            command.arg(format!("--context={context_lines}"));
+        }
+
+        let max = usize::try_from(max).unwrap_or(200).min(200);
+        command
+            .arg("--json")
+            .arg("--")
+            .arg(query)
+            .arg(&root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let output = command.output()?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(BrokerError::Fetch(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_rg_json(&stdout, max, count))
+    }
+
     /// Resolve a sidecar binary without spawning it.
     ///
     /// # Errors
@@ -301,6 +373,62 @@ impl Broker {
             })
         }
     }
+}
+
+fn parse_rg_json(stdout: &str, max: usize, count_only: bool) -> Value {
+    let mut matches = Vec::new();
+    let mut counts = BTreeMap::<String, u64>::new();
+    let mut total = 0_u64;
+    for event in stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+    {
+        if event.get("type").and_then(Value::as_str) != Some("match") {
+            continue;
+        }
+        let data = &event["data"];
+        let path = data["path"]["text"].as_str().unwrap_or("").to_owned();
+        total = total.saturating_add(1);
+        if count_only {
+            *counts.entry(path).or_default() += 1;
+            continue;
+        }
+        if matches.len() >= max {
+            continue;
+        }
+        let line = data["line_number"].as_u64().unwrap_or(0);
+        let text = data["lines"]["text"]
+            .as_str()
+            .unwrap_or("")
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        matches.push(json!({
+            "path": path,
+            "line": line,
+            "text": text,
+        }));
+    }
+    if count_only {
+        let files: Vec<Value> = counts
+            .into_iter()
+            .map(|(path, count)| json!({ "path": path, "count": count }))
+            .collect();
+        json!({ "files": files, "total": total })
+    } else {
+        Value::Array(matches)
+    }
+}
+
+fn validate_glob(pattern: &str) -> Result<(), BrokerError> {
+    for component in Path::new(pattern).components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err(BrokerError::InvalidGlob(pattern.to_owned()));
+            }
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Broker {

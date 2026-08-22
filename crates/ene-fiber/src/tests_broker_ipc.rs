@@ -83,3 +83,84 @@ async fn broker_client_rejects_bad_hello() {
         .unwrap();
     assert!(matches!(rejected, BrokerResponse::Error { .. }));
 }
+
+#[tokio::test]
+async fn broker_client_round_trips_fs_search() {
+    #![cfg_attr(test, expect(clippy::panic, reason = "tests fail fast"))]
+    #![cfg_attr(
+        test,
+        expect(clippy::print_stderr, reason = "test skip must remain visible")
+    )]
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping search broker test because rg is not installed");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hit\nhit\nhit\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "hit\nhit\nhit\n").unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    broker.grant(uid, "fs.search");
+
+    let server = BrokerServer::bind(
+        Arc::new(parking_lot::Mutex::new(broker)),
+        uid,
+        "r-broker-search",
+        "test-token",
+    )
+    .unwrap();
+    let mut client = BrokerClient::from_path(server.endpoint()).await.unwrap();
+    client
+        .call(BrokerRequest::Hello {
+            token: "test-token".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let response = client
+        .call(BrokerRequest::FsSearch {
+            path: dir.path().display().to_string(),
+            query: "hit".to_owned(),
+            regex: false,
+            case_insensitive: false,
+            include: Some("*.txt".to_owned()),
+            context_lines: 0,
+            count: false,
+            max: 2,
+        })
+        .await
+        .unwrap();
+    let BrokerResponse::FsSearchOk { matches } = response else {
+        panic!("expected search response, got {response:?}");
+    };
+    let rows = matches.as_array().expect("normalized match rows");
+    assert_eq!(rows.len(), 2, "max must be global across files");
+    assert!(rows.iter().all(|row| row.get("text").is_some()));
+    assert!(rows.iter().all(|row| row.get("type").is_none()));
+
+    let response = client
+        .call(BrokerRequest::FsSearch {
+            path: dir.path().display().to_string(),
+            query: "hit".to_owned(),
+            regex: false,
+            case_insensitive: false,
+            include: Some("*.txt".to_owned()),
+            context_lines: 0,
+            count: true,
+            max: 1,
+        })
+        .await
+        .unwrap();
+    let BrokerResponse::FsSearchOk { matches } = response else {
+        panic!("expected count response, got {response:?}");
+    };
+    assert_eq!(matches["total"], 6);
+    let files = matches["files"].as_array().expect("per-file counts");
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|row| row.get("count").is_some()));
+    assert!(files.iter().all(|row| row.get("text").is_none()));
+}
