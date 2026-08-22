@@ -66,6 +66,23 @@ pub fn confine_path(
     path: &Path,
     create_parent: bool,
 ) -> Result<PathBuf, BrokerError> {
+    let resolved = confine_lexical(workspace, path, create_parent)?;
+    if resolved.exists() {
+        let canonical = resolved.canonicalize()?;
+        let base = workspace.canonicalize()?;
+        if !canonical.starts_with(&base) {
+            return Err(BrokerError::PathEscape(canonical.display().to_string()));
+        }
+        return Ok(canonical);
+    }
+    Ok(resolved)
+}
+
+fn confine_lexical(
+    workspace: &Path,
+    path: &Path,
+    create_parent: bool,
+) -> Result<PathBuf, BrokerError> {
     let base = workspace.canonicalize()?;
     let requested = if path.is_absolute() {
         path.to_path_buf()
@@ -90,14 +107,48 @@ pub fn confine_path(
         return Err(BrokerError::PathEscape(requested.display().to_string()));
     }
     let resolved = canonical_parent.join(file_name);
-    if resolved.exists() {
-        let canonical = resolved.canonicalize()?;
-        if !canonical.starts_with(&base) {
-            return Err(BrokerError::PathEscape(canonical.display().to_string()));
-        }
-        return Ok(canonical);
-    }
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod confine_tests {
+    use super::{Broker, BrokerError, confine_lexical};
+    use crate::fiber::FiberUid;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    #[test]
+    fn fs_delete_rejects_workspace_symlink_to_in_workspace_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("target.txt"), "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("target.txt", dir.path().join("link.txt")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file("target.txt", dir.path().join("link.txt")).unwrap();
+        let mut broker = Broker::new(dir.path().to_path_buf());
+        let uid = FiberUid::new();
+        broker.grant(uid, "fs.delete");
+        assert!(matches!(
+            broker.fs_delete(uid, Path::new("link.txt")),
+            Err(BrokerError::Symlink)
+        ));
+        assert!(dir.path().join("target.txt").exists());
+    }
+
+    #[test]
+    fn confine_lexical_does_not_dereference_final_component() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("target.txt"), "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("target.txt", dir.path().join("link.txt")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file("target.txt", dir.path().join("link.txt")).unwrap();
+        let lexical = confine_lexical(dir.path(), Path::new("link.txt"), false).unwrap();
+        assert!(std::fs::symlink_metadata(&lexical)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 }
 
 fn canonicalize_parent(
@@ -236,10 +287,17 @@ impl Broker {
 
     pub fn fs_delete(&self, uid: FiberUid, path: &Path) -> Result<(), BrokerError> {
         self.require(uid, "fs.delete")?;
-        let resolved = confine_path(&self.workspace, path, false)?;
-        let meta = std::fs::symlink_metadata(&resolved)?;
+        let lexical = confine_lexical(&self.workspace, path, false)?;
+        let meta = std::fs::symlink_metadata(&lexical)?;
         if is_link_or_reparse(&meta) {
             return Err(BrokerError::Symlink);
+        }
+        let base = self.workspace.canonicalize()?;
+        let resolved = lexical
+            .canonicalize()
+            .map_err(|_| BrokerError::PathEscape(lexical.display().to_string()))?;
+        if !resolved.starts_with(&base) {
+            return Err(BrokerError::PathEscape(resolved.display().to_string()));
         }
         if meta.permissions().readonly() {
             return Err(BrokerError::ReadOnly);
