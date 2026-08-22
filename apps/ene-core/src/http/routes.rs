@@ -542,15 +542,12 @@ pub async fn send_message(
         .and_then(|value| value.to_str().ok())
     {
         let cache_key = format!("{id}:{key}");
-        if let Some(cached) = state.idem.lock().get(&cache_key).cloned() {
+        if let Some(cached) = state.idem.lock().get(&cache_key) {
             return Ok(Json(cached));
         }
         let response = dispatch_message(&state, session, &req).await?;
         let mut cache = state.idem.lock();
-        if cache.len() >= 256 {
-            cache.clear();
-        }
-        cache.insert(cache_key, response.clone());
+        cache.insert(&cache_key, response.clone());
         return Ok(Json(response));
     }
     Ok(Json(dispatch_message(&state, session, &req).await?))

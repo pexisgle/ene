@@ -33,6 +33,7 @@ ene-registry = { workspace = true }
 ene-session = { workspace = true }
 ene-work = { workspace = true }
 fs2 = { workspace = true }
+indexmap = { workspace = true }
 parking_lot = { workspace = true }
 rusqlite = { workspace = true, features = ["backup"] }
 serde = { workspace = true }
