@@ -52,13 +52,15 @@ async fn broker_session_authenticates_once_and_reuses_the_connection() {
 }
 
 #[tokio::test]
-async fn broker_session_returns_hello_rejection_without_caching_it() {
+async fn broker_session_retries_hello_after_rejection_on_same_connection() {
     let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("input.txt"), "alpha\n").unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    broker.grant(uid, "fs.read");
     let server = BrokerServer::bind(
-        Arc::new(parking_lot::Mutex::new(Broker::new(
-            dir.path().to_path_buf(),
-        ))),
-        FiberUid::new(),
+        Arc::new(parking_lot::Mutex::new(broker)),
+        uid,
         "r-broker-session-reject",
         "expected-token",
     )
@@ -69,11 +71,28 @@ async fn broker_session_returns_hello_rejection_without_caching_it() {
         .call(
             "wrong",
             BrokerRequest::FsRead {
-                path: "input.txt".to_owned(),
+                path: dir.path().join("input.txt").display().to_string(),
             },
         )
         .await
         .unwrap();
     assert!(matches!(rejected, BrokerResponse::Error { .. }));
     assert!(!session.is_authenticated());
+
+    let retried = session
+        .call(
+            "expected-token",
+            BrokerRequest::FsRead {
+                path: dir.path().join("input.txt").display().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retried,
+        BrokerResponse::FsReadOk {
+            text: "alpha\n".to_owned()
+        }
+    );
+    assert!(session.is_authenticated());
 }
