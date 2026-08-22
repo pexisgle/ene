@@ -7,7 +7,7 @@ mod exclusive;
 mod lanes;
 mod model;
 mod performance;
-mod proactive;
+pub(crate) mod proactive;
 mod recall;
 mod routes;
 mod schedule;
@@ -63,6 +63,8 @@ pub struct ServerHandle {
     supervisor: Arc<ene_fiber::Supervisor>,
     host: Arc<ene_work::DelegationHost>,
     core: Arc<CoreDaemon>,
+    #[cfg(test)]
+    pub(crate) state: AppState,
 }
 
 impl ServerHandle {
@@ -296,6 +298,8 @@ impl CoreDaemon {
             supervisor: self.supervisor(),
             host: self.host(),
             core: Arc::clone(&self),
+            #[cfg(test)]
+            state: state.clone(),
         })
     }
 }

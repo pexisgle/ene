@@ -192,7 +192,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | スクリーンショット能力 | `app` ツール / クライアント | CLI 経路は Current。portal は [#800](https://github.com/pexisgle/ene/issues/800) |
 | ROI、luma fingerprint、changed-cell gate、caret 抑制 | `ene-work` の観測パイプライン | Missing [#805](https://github.com/pexisgle/ene/issues/805) |
 | タイトルの redaction（AppOnly / RedactedTitle / FullTitle） | `ene-work` + 設定 | Missing [#805](https://github.com/pexisgle/ene/issues/805) |
-| 能動発話 / 世界状態 | `ene-companion` | ゲートは Current。無変化フレームの vision 再利用は [#805](https://github.com/pexisgle/ene/issues/805) |
+| 能動発話 / 世界状態 | `ene-companion` + コア tick | Current: 開いているセッションすべて。間隔は `mind.proactive.observation_interval_seconds`。無変化フレームの vision 再利用は [#805](https://github.com/pexisgle/ene/issues/805) |
 | session / memory / audit への raw pixel | 禁止 | 入れない。E2E 証明は [#805](https://github.com/pexisgle/ene/issues/805) |
 | desktop の `ProactiveObserveControl` | クライアントのスタブ | Unconnected |
 
