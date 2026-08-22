@@ -1,5 +1,6 @@
 //! Runtime platform detection for app tools.
 
+use super::backend::{BackendAvailability, WMCTRL};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -163,38 +164,46 @@ fn screenshot_cap(session: SessionKind) -> ActionCap {
 }
 
 fn window_cap(session: SessionKind, desktop: DesktopKind) -> ActionCap {
-    match (session, desktop) {
-        (SessionKind::Windows, _) => ActionCap {
+    if session == SessionKind::Windows {
+        return ActionCap {
             available: true,
             backend: "win32",
             reason: None,
-        },
-        (SessionKind::X11, _) => ActionCap {
-            available: true,
-            backend: "wmctrl",
-            reason: Some("needs wmctrl"),
-        },
-        (SessionKind::Wayland, DesktopKind::Hyprland) => ActionCap {
-            available: true,
-            backend: "hyprctl",
-            reason: None,
-        },
-        (SessionKind::Wayland, DesktopKind::Sway) => ActionCap {
-            available: true,
-            backend: "swaymsg",
-            reason: None,
-        },
-        (SessionKind::Wayland, DesktopKind::Gnome | DesktopKind::Kde) => ActionCap {
-            available: false,
-            backend: "none",
-            reason: Some("GNOME/KDE Wayland has no stable window-list protocol for this tool"),
-        },
-        _ => ActionCap {
-            available: false,
-            backend: "none",
-            reason: Some("window list backend unknown for this session"),
-        },
+        };
     }
+    super::cap_from_availability(&window_availability_for_session(session, desktop))
+}
+
+pub(crate) fn window_availability_for_env(env: &HashMap<String, String>) -> BackendAvailability {
+    window_availability_for_session(session_kind(env), desktop_kind(env))
+}
+
+pub(crate) fn window_availability_for_session(
+    session: SessionKind,
+    desktop: DesktopKind,
+) -> BackendAvailability {
+    use super::backend::{HYPRLAND, SWAY};
+
+    match (session, desktop) {
+        (SessionKind::Windows, _) => BackendAvailability::Available(super::backend::WMCTRL),
+        (SessionKind::X11, _) => super::backend::resolve(&[WMCTRL], executable_probe),
+        (SessionKind::Wayland, DesktopKind::Hyprland | DesktopKind::Sway) => {
+            let candidates = [HYPRLAND, SWAY];
+            super::backend::resolve(&candidates, executable_probe)
+        }
+        (SessionKind::Wayland, DesktopKind::Gnome | DesktopKind::Kde) => {
+            BackendAvailability::Missing(super::backend::WMCTRL)
+        }
+        _ => BackendAvailability::Missing(WMCTRL),
+    }
+}
+
+fn executable_probe(executable: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(executable);
+        candidate.is_file().then_some(candidate)
+    })
 }
 
 fn active_cap(session: SessionKind, desktop: DesktopKind) -> ActionCap {
