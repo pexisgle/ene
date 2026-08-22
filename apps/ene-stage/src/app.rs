@@ -409,8 +409,9 @@ impl StageApp {
             }
             AsyncOutcome::ListProviderAssets(result) => match result {
                 Ok(items) => {
+                    let count = items.len();
                     self.detail.provider_assets = items;
-                    self.detail.connections_status.clear();
+                    self.detail.connections_status = provider_asset_load_status(count);
                 }
                 Err(err) => self.detail.connections_status = err,
             },
@@ -1648,6 +1649,10 @@ fn auth_failure(err: &str) -> bool {
         || lower.contains("no cookie auth")
 }
 
+fn provider_asset_load_status(count: usize) -> String {
+    format!("{}: {count}", i18n::fl("plugins-assets"))
+}
+
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
         "(empty)"
@@ -1668,11 +1673,17 @@ fn map_turn_err(err: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_log_text;
+    use super::{format_log_text, provider_asset_load_status};
 
     #[test]
     fn empty_log_payload_is_labeled_instead_of_hidden() {
         assert_eq!(format_log_text("turn completed"), "turn completed");
         assert_eq!(format_log_text("   "), "(empty)");
+    }
+
+    #[test]
+    fn provider_asset_load_status_reports_success_and_empty_results() {
+        assert!(provider_asset_load_status(2).ends_with(": 2"));
+        assert!(provider_asset_load_status(0).ends_with(": 0"));
     }
 }
