@@ -8,8 +8,8 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
         spec(
             "utility.hash",
-            "BLAKE3 hash of text",
-            json!({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}),
+            "Hash text with BLAKE3 by default or SHA-256",
+            json!({"type":"object","properties":{"text":{"type":"string"},"algorithm":{"type":"string","enum":["blake3","sha256"],"default":"blake3"}},"required":["text"],"additionalProperties":false}),
             Vec::new(),
         ),
         spec(
@@ -44,8 +44,8 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
         ),
         spec(
             "utility.text",
-            "Hash, encode/decode, or apply a regular expression",
-            json!({"type":"object","properties":{"op":{"type":"string","enum":["hash","encode","decode","regex"]},"text":{"type":"string"},"algorithm":{"type":"string"},"encoding":{"type":"string"},"pattern":{"type":"string"},"replace":{"type":"string"}},"required":["op","text"],"additionalProperties":false}),
+            "Hash, change letter case, encode/decode, or apply a regular expression",
+            json!({"type":"object","properties":{"op":{"type":"string","enum":["hash","uppercase","lowercase","encode","decode","regex"]},"text":{"type":"string"},"algorithm":{"type":"string","enum":["blake3","sha256"],"default":"blake3"},"encoding":{"type":"string","enum":["base64","hex"]},"pattern":{"type":"string"},"replace":{"type":"string"}},"required":["op","text"],"additionalProperties":false}),
             Vec::new(),
         ),
     ]
@@ -53,7 +53,12 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
 
 pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "utility.hash" => hash_text(arg_str(args, "text")?, "blake3"),
+        "utility.hash" => hash_text(
+            arg_str(args, "text")?,
+            args.get("algorithm")
+                .and_then(Value::as_str)
+                .unwrap_or("blake3"),
+        ),
         "utility.time" => Ok(time(args)),
         "utility.system_info" => Ok(system_info()),
         "utility.calc" => calc(args),
@@ -320,6 +325,14 @@ fn text(args: &Value) -> Result<Value, String> {
                 .and_then(Value::as_str)
                 .unwrap_or("blake3"),
         ),
+        "uppercase" | "lowercase" => {
+            let changed = if op == "uppercase" {
+                text.to_uppercase()
+            } else {
+                text.to_lowercase()
+            };
+            Ok(json!({ "text": changed }))
+        }
         "encode" => encode(
             text,
             args.get("encoding")
@@ -342,7 +355,10 @@ fn text(args: &Value) -> Result<Value, String> {
                 Ok(json!({ "matches": caps }))
             }
         }
-        other => Err(format!("unknown op {other}")),
+        other => Err(structured_error(
+            "unknown_op",
+            format!("unknown op {other}"),
+        )),
     }
 }
 
@@ -356,7 +372,10 @@ fn hash_text(text: &str, algorithm: &str) -> Result<Value, String> {
             hasher.update(text.as_bytes());
             Ok(json!({ "algorithm": "sha256", "hex": hex_encode(&hasher.finalize()) }))
         }
-        other => Err(format!("unknown algorithm {other}")),
+        other => Err(structured_error(
+            "unknown_algorithm",
+            format!("unknown algorithm {other}"),
+        )),
     }
 }
 
@@ -366,7 +385,10 @@ fn encode(text: &str, encoding: &str) -> Result<Value, String> {
             json!({ "text": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, text.as_bytes()) }),
         ),
         "hex" => Ok(json!({ "text": hex_encode(text.as_bytes()) })),
-        other => Err(format!("unknown encoding {other}")),
+        other => Err(structured_error(
+            "unknown_encoding",
+            format!("unknown encoding {other}"),
+        )),
     }
 }
 
@@ -375,7 +397,12 @@ fn decode(text: &str, encoding: &str) -> Result<Value, String> {
         "base64" => base64::Engine::decode(&base64::engine::general_purpose::STANDARD, text)
             .map_err(|err| err.to_string())?,
         "hex" => hex_decode(text)?,
-        other => return Err(format!("unknown encoding {other}")),
+        other => {
+            return Err(structured_error(
+                "unknown_encoding",
+                format!("unknown encoding {other}"),
+            ));
+        }
     };
     let decoded = String::from_utf8(bytes).map_err(|err| err.to_string())?;
     Ok(json!({ "text": decoded }))
@@ -1166,8 +1193,9 @@ fn format_hsl(color: Rgba) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        FX_AS_OF, FX_SOURCE, calc, color, convert_unit, currency_convert, eval_expr, format_hex,
-        parse_color, random, random_integer_inclusive, structured_error, system_info, time,
+        FX_AS_OF, FX_SOURCE, calc, color, convert_unit, currency_convert, eval_expr, execute,
+        format_hex, parse_color, random, random_integer_inclusive, structured_error, system_info,
+        time,
     };
     use serde_json::{Value, json};
     use std::collections::HashMap;
@@ -1187,6 +1215,40 @@ mod tests {
         assert_eq!(info["family"], json!(std::env::consts::FAMILY));
         assert_eq!(info["pointer_width"], json!(usize::BITS));
         assert!(info["cpus"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn hash_defaults_to_blake3_and_honors_sha256() {
+        let default = execute("utility.hash", &json!({"text": "hello"})).unwrap();
+        assert_eq!(default["algorithm"], json!("blake3"));
+
+        let sha256 = execute(
+            "utility.hash",
+            &json!({"text": "hello", "algorithm": "sha256"}),
+        )
+        .unwrap();
+        assert_eq!(sha256["algorithm"], json!("sha256"));
+        assert_eq!(
+            sha256["hex"],
+            json!("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        );
+    }
+
+    #[test]
+    fn text_changes_letter_case() {
+        let upper = execute("utility.text", &json!({"op": "uppercase", "text": "hello"})).unwrap();
+        assert_eq!(upper["text"], json!("HELLO"));
+
+        let lower = execute("utility.text", &json!({"op": "lowercase", "text": "HELLO"})).unwrap();
+        assert_eq!(lower["text"], json!("hello"));
+    }
+
+    #[test]
+    fn unknown_text_op_is_structured() {
+        let err = execute("utility.text", &json!({"op": "reverse", "text": "hi"})).unwrap_err();
+        let (kind, message) = parse_structured_error(&err).unwrap();
+        assert_eq!(kind, "unknown_op");
+        assert!(message.contains("reverse"));
     }
 
     #[test]
