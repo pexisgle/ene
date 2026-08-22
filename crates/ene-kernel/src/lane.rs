@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::warn;
 
-use crate::config::{HarnessSettings, MindSettings, ToolOutputSettings};
+use crate::config::{HarnessSettings, LaneMindSettings, ToolOutputSettings};
 use crate::context::{ContextRegistry, format_recovery_note};
 use crate::error::{CancelQueued, KernelError};
 use crate::inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
@@ -92,7 +92,7 @@ struct LaneState {
     observe: ObserveHandle,
     live: LiveBus,
     hooks: LoopHooks,
-    mind: MindSettings,
+    mind: LaneMindSettings,
     max_steps: u32,
     tool_output: ToolOutputSettings,
     context: ContextRegistry,
@@ -128,7 +128,7 @@ pub struct LaneOptions {
     /// Optional harness overrides.
     pub harness: HarnessSettings,
     /// Inner-window and related mind settings.
-    pub mind: MindSettings,
+    pub mind: LaneMindSettings,
     /// Reports from `recover_interrupted` to inject into the next turn.
     pub recovery: Vec<RecoveryReport>,
     /// Surface tool router. `None` keeps the lane speech-only.

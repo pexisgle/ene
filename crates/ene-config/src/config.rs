@@ -75,6 +75,22 @@ pub struct SchemaEntry {
 static SCHEMA_REGISTRY: std::sync::OnceLock<parking_lot::Mutex<HashMap<String, SchemaEntry>>> =
     std::sync::OnceLock::new();
 
+/// Top-level `settings.json` section keys registered via `define_config!`.
+///
+/// Nested registrations (`parent_key` is `Some`) are omitted so PATCH/GET
+/// allowlists stay aligned with the schema's top-level `properties`.
+#[must_use]
+pub fn registered_settings_section_keys() -> Vec<String> {
+    let mut keys: Vec<String> = registered_schemas_for(ConfigTarget::Settings)
+        .into_iter()
+        .filter(|(_, entry)| entry.parent_key.is_none())
+        .map(|(key, _)| key)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
 /// Exposed so `ene-card`'s character-schema generator can merge
 /// `ConfigTarget::Character` registrations without sharing the registry itself.
 pub fn registered_schemas_for(target: ConfigTarget) -> Vec<(String, SchemaEntry)> {

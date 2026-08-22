@@ -290,6 +290,55 @@ fn stage_caps_concurrent_rendered_bodies() {
 }
 
 #[test]
+fn replace_body_settings_applies_render_cap() {
+    let stage = Stage::new(
+        std::sync::Arc::new(PerformanceBus::default()),
+        VoiceRuntime::scripted(VoiceSettings::default()),
+        BodySettings::default(),
+    );
+    let s1 = SoulId::new();
+    let s2 = SoulId::new();
+    stage
+        .present(s1, Some(BodyId::new()), BodyCatalog::text_default())
+        .unwrap();
+    stage
+        .present(s2, Some(BodyId::new()), BodyCatalog::text_default())
+        .unwrap();
+    assert!(stage.bus().body_of(s1).is_some());
+    assert!(stage.bus().body_of(s2).is_some());
+    stage.replace_body_settings(BodySettings {
+        render: crate::RenderSettings {
+            enabled: true,
+            max_concurrent: 1,
+        },
+        ..BodySettings::default()
+    });
+    let s3 = SoulId::new();
+    stage
+        .present(s3, Some(BodyId::new()), BodyCatalog::text_default())
+        .unwrap();
+    assert!(stage.bus().body_of(s3).is_none());
+}
+
+#[test]
+fn replace_voice_settings_disables_barge_in_live() {
+    let mut voice = VoiceRuntime::scripted(VoiceSettings::default());
+    let body = BodyId::new();
+    voice.speak(body, "long reply text here", 0).unwrap();
+    voice.replace_settings(VoiceSettings {
+        barge_in: BargeInSettings {
+            enabled: false,
+            ..BargeInSettings::default()
+        },
+        ..VoiceSettings::default()
+    });
+    let other = speech_tone(0.31, 1600);
+    let effect = voice.push_input(&other, 500);
+    assert_eq!(effect, InputEffect::IgnoredSelfVoice);
+    assert_eq!(voice.state(), DuplexState::Speaking);
+}
+
+#[test]
 fn commands_never_include_pad_numbers() {
     let bus = bus();
     let soul = SoulId::new();

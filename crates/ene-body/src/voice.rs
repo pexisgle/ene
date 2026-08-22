@@ -153,6 +153,11 @@ impl VoiceRuntime {
         }
     }
 
+    /// Swap duplex knobs without resetting the state machine or buffers.
+    pub fn replace_settings(&mut self, settings: VoiceSettings) {
+        self.settings = settings;
+    }
+
     #[must_use]
     pub fn scripted(settings: VoiceSettings) -> Self {
         Self::new(

@@ -3,7 +3,7 @@ use crate::host::DelegationHost;
 use crate::router::JobLayerRouter;
 use crate::types::{Job, JobStatus};
 use ene_kernel::{
-    ConversationModel, HarnessSettings, LaneHandle, LaneOptions, MindSettings, SurfaceRouter,
+    ConversationModel, HarnessSettings, LaneHandle, LaneMindSettings, LaneOptions, SurfaceRouter,
 };
 use ene_registry::ToolRegistry;
 use ene_session::{
@@ -76,7 +76,7 @@ pub async fn drive_job(drive: JobDrive) -> Result<(), WorkError> {
         soul: job.soul_id,
         model,
         harness,
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,

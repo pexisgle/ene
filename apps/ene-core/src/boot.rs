@@ -9,14 +9,14 @@ use ene_body::{
     VoiceSettings,
 };
 use ene_companion::{
-    CompanionRuntime, CompanionStore, MindSettings as CompanionMind, NewSoul, QueryEmbed,
+    CharacterSettings, CompanionRuntime, CompanionStore, MindSettings, NewSoul, QueryEmbed,
     SlotQueryEmbed, register_memory_tools,
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{
-    AiSettings, ConversationModel, CoreSettings, HarnessSettings, LaneHandle, LaneOptions,
-    LoopHooks, PluginSettings, SpeechPresenter, SurfaceRouter, TaskBinding, TurnFinalizer,
-    TurnPrefetch, format_recovery_note,
+    AiSettings, ConversationModel, CoreSettings, HarnessSettings, LaneHandle, LaneMindSettings,
+    LaneOptions, LoopHooks, PluginSettings, SpeechPresenter, SurfaceRouter, TaskBinding,
+    TurnFinalizer, TurnPrefetch, format_recovery_note,
 };
 use ene_plane::{
     ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink,
@@ -25,7 +25,7 @@ use ene_plane::{
 use ene_registry::ToolRegistry;
 use ene_session::{
     BodyId, EventKind, EventPayload, NewEvent, RecoveryReport, SessionEndReason, SessionId,
-    SessionStore, SessionsSettings, SoulId, Transaction, v1,
+    SessionStore, SoulId, StoreSettings, Transaction, v1,
 };
 use ene_work::{
     CompanionReport, DelegationHost, WorkError, WorkStore, WorkSurfaceRouter, register_work_tools,
@@ -40,8 +40,9 @@ use tracing::info;
 pub struct BootOptions {
     /// Data directory that holds `sessions.db` and the lock file.
     pub data_dir: PathBuf,
-    /// `SQLite` `synchronous` pragma (`NORMAL` or `FULL`).
-    pub synchronous: String,
+    /// `SQLite` `synchronous` pragma override (`NORMAL` or `FULL`).
+    /// `None` uses `store.sessions.synchronous` from the config pipeline.
+    pub synchronous: Option<String>,
 }
 
 impl BootOptions {
@@ -49,7 +50,7 @@ impl BootOptions {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
-            synchronous: "NORMAL".to_owned(),
+            synchronous: None,
         }
     }
 }
@@ -80,6 +81,8 @@ pub enum CoreError {
     Http(String),
     #[error("another ene-core instance holds the data-directory lock at {0}")]
     AlreadyRunning(String),
+    #[error(transparent)]
+    Config(#[from] ene_config::EneConfigError),
 }
 
 /// Running core: exclusive lock, session store, D-5 recovery reports, plugin supervisor.
@@ -114,7 +117,13 @@ pub struct CoreDaemon {
     finalizer: parking_lot::Mutex<Option<Arc<dyn ene_kernel::TurnFinalizer>>>,
     prefetch: parking_lot::Mutex<Option<Arc<dyn TurnPrefetch>>>,
     loop_hooks: LoopHooks,
-    mind: parking_lot::Mutex<CompanionMind>,
+    mind: parking_lot::Mutex<MindSettings>,
+    harness: parking_lot::Mutex<HarnessSettings>,
+    store_settings: parking_lot::Mutex<StoreSettings>,
+    approval: parking_lot::Mutex<ApprovalSettings>,
+    body: parking_lot::Mutex<BodySettings>,
+    voice: parking_lot::Mutex<VoiceSettings>,
+    characters: parking_lot::Mutex<CharacterSettings>,
     last_proactive: parking_lot::Mutex<HashMap<SessionId, Instant>>,
     observation: parking_lot::Mutex<ene_work::ObservationPipeline>,
     world_state: parking_lot::Mutex<ene_companion::WorldStateMemory>,
@@ -126,13 +135,18 @@ impl CoreDaemon {
     /// Ensure the data dir, take the exclusive lock, open the store, recover interrupts.
     pub async fn boot(opts: BootOptions) -> Result<Self, CoreError> {
         std::fs::create_dir_all(&opts.data_dir)?;
-        let settings = load_core_settings(&opts.data_dir);
-        let ai = load_ai_settings(&opts.data_dir);
-        let plugins = load_plugin_settings(&opts.data_dir);
-        let mind = load_mind_settings(&opts.data_dir);
+        let loaded = load_boot_config(&opts.data_dir)?;
+        let settings = loaded.core;
+        let ai = loaded.ai;
+        let plugins = loaded.plugins;
+        let mind = loaded.mind;
         let lock = lock_data_dir(&opts.data_dir)?;
         let db_path = opts.data_dir.join("sessions.db");
-        let store = SessionStore::open(&db_path, &opts.synchronous).await?;
+        let sync = opts
+            .synchronous
+            .clone()
+            .unwrap_or_else(|| loaded.store.sessions.synchronous.clone());
+        let store = SessionStore::open(&db_path, &sync).await?;
         let recovery = store.recover_interrupted().await?;
         if !recovery.is_empty() {
             info!(
@@ -146,15 +160,7 @@ impl CoreDaemon {
         registry.set_workspace(workspace.clone());
         let audit = AuditLog::open(opts.data_dir.join("audit.db"))?;
         let popup = Arc::new(PendingPopup::new());
-        let mut approval_settings = ApprovalSettings::default();
-        if let Some(mode) = ApprovalMode::parse(&plugins.policy.approval_mode) {
-            approval_settings.mode = mode;
-        } else if !plugins.policy.approval_mode.is_empty() {
-            tracing::warn!(
-                mode = %plugins.policy.approval_mode,
-                "unknown plugins.policy.approval_mode; using policy"
-            );
-        }
+        let approval_settings = loaded.approval.clone();
         let plane = Arc::new(ApprovalPlane::new(
             approval_settings.clone(),
             audit,
@@ -192,12 +198,12 @@ impl CoreDaemon {
         }
         let companion = Arc::new(CompanionRuntime::new(Arc::clone(&companions), mind.clone()));
         let bus = Arc::new(PerformanceBus::default());
-        let voice_settings = load_voice_settings(&opts.data_dir);
-        let body_settings = load_body_settings(&opts.data_dir);
+        let voice_settings = loaded.voice.clone();
+        let body_settings = loaded.body.clone();
         let stage = Arc::new(Stage::new(
             bus,
-            VoiceRuntime::live(voice_settings),
-            body_settings,
+            VoiceRuntime::live(voice_settings.clone()),
+            body_settings.clone(),
         ));
         let supervisor = Arc::new(Supervisor::new(workspace, registry));
         let loop_hooks = LoopHooks::new();
@@ -252,19 +258,32 @@ impl CoreDaemon {
             prefetch: parking_lot::Mutex::new(None),
             loop_hooks,
             mind: parking_lot::Mutex::new(mind),
+            harness: parking_lot::Mutex::new(loaded.harness),
+            approval: parking_lot::Mutex::new(approval_settings),
+            body: parking_lot::Mutex::new(body_settings),
+            voice: parking_lot::Mutex::new(voice_settings),
+            characters: parking_lot::Mutex::new(loaded.characters),
             last_proactive: parking_lot::Mutex::new(HashMap::new()),
             observation: parking_lot::Mutex::new(ene_work::ObservationPipeline::new()),
             world_state: parking_lot::Mutex::new(ene_companion::WorldStateMemory::default()),
             memory_embed,
-            idle_timeout_secs: parking_lot::Mutex::new(
-                SessionsSettings::default().idle_timeout_secs,
-            ),
+            idle_timeout_secs: parking_lot::Mutex::new(loaded.store.sessions.idle_timeout_secs),
+            store_settings: parking_lot::Mutex::new(loaded.store),
         })
     }
 
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    #[must_use]
+    pub fn character_home(&self) -> PathBuf {
+        resolve_data_subdir(
+            &self.data_dir,
+            &self.characters.lock().home_dir,
+            "characters",
+        )
     }
 
     #[must_use]
@@ -361,13 +380,85 @@ impl CoreDaemon {
     }
 
     #[must_use]
-    pub fn mind(&self) -> CompanionMind {
+    pub fn mind(&self) -> MindSettings {
         self.mind.lock().clone()
     }
 
-    pub fn replace_mind(&self, mind: CompanionMind) {
+    pub fn replace_mind(&self, mind: MindSettings) {
         *self.mind.lock() = mind.clone();
         self.companion.replace_settings(mind);
+    }
+
+    #[must_use]
+    pub fn harness(&self) -> HarnessSettings {
+        self.harness.lock().clone()
+    }
+
+    pub fn replace_harness(&self, harness: HarnessSettings) {
+        *self.harness.lock() = harness;
+    }
+
+    #[must_use]
+    pub fn store_settings(&self) -> StoreSettings {
+        self.store_settings.lock().clone()
+    }
+
+    pub fn replace_store_settings(&self, settings: StoreSettings) {
+        *self.idle_timeout_secs.lock() = settings.sessions.idle_timeout_secs;
+        *self.store_settings.lock() = settings;
+    }
+
+    #[must_use]
+    pub fn approval_settings(&self) -> ApprovalSettings {
+        self.approval.lock().clone()
+    }
+
+    pub fn replace_approval(&self, settings: ApprovalSettings) {
+        if let Err(err) = self.plane.set_mode(settings.mode) {
+            tracing::warn!(error = %err, "failed to apply live approval mode");
+        }
+        let policy_path = self.data_dir.join(&settings.policy_file);
+        match PolicyFile::load_json(&policy_path) {
+            Ok(policy) => {
+                self.plane.set_policy(policy);
+                self.plane.set_policy_path(policy_path);
+            }
+            Err(err) => tracing::warn!(
+                error = %err,
+                path = %settings.policy_file,
+                "failed to reload approval.policy_file"
+            ),
+        }
+        *self.approval.lock() = settings;
+    }
+
+    #[must_use]
+    pub fn body_settings(&self) -> BodySettings {
+        self.body.lock().clone()
+    }
+
+    pub fn replace_body_settings(&self, settings: BodySettings) {
+        self.stage.replace_body_settings(settings.clone());
+        *self.body.lock() = settings;
+    }
+
+    #[must_use]
+    pub fn voice_settings(&self) -> VoiceSettings {
+        self.voice.lock().clone()
+    }
+
+    pub fn replace_voice_settings(&self, settings: VoiceSettings) {
+        self.with_voice(|voice| voice.replace_settings(settings.clone()));
+        *self.voice.lock() = settings;
+    }
+
+    #[must_use]
+    pub fn character_settings(&self) -> CharacterSettings {
+        self.characters.lock().clone()
+    }
+
+    pub fn replace_character_settings(&self, settings: CharacterSettings) {
+        *self.characters.lock() = settings;
     }
 
     pub fn mark_proactive(&self, session: SessionId) {
@@ -561,7 +652,7 @@ impl CoreDaemon {
 
     /// Reopen stores after [`Self::prepare_restore`].
     pub async fn finish_restore(&self) -> Result<(), CoreError> {
-        let sync = SessionsSettings::default().synchronous;
+        let sync = self.store_settings.lock().sessions.synchronous.clone();
         self.store.reopen_writer().await?;
         self.store.reload_reader(&sync)?;
         self.companions.reconnect()?;
@@ -685,7 +776,8 @@ impl CoreDaemon {
         session: SessionId,
         model: Arc<dyn ConversationModel>,
     ) -> LaneHandle {
-        let harness = HarnessSettings::default();
+        let harness = self.harness.lock().clone();
+        let mind = self.mind.lock().clone();
         let router = Arc::new(WorkSurfaceRouter::new(
             Arc::clone(&self.host),
             self.supervisor.registry(),
@@ -698,7 +790,11 @@ impl CoreDaemon {
             soul,
             model,
             harness,
-            mind: ene_kernel::MindSettings::default(),
+            mind: LaneMindSettings::from_inner_window(
+                mind.inner.self_reference_window,
+                mind.inner.auto_emotion_events,
+                mind.inner.derive_from_thinking,
+            ),
             recovery: self.recovery.clone(),
             router: Some(router as Arc<dyn SurfaceRouter>),
             speech: self.speech.lock().clone(),
@@ -775,165 +871,73 @@ fn lock_error(path: &Path, err: std::io::Error) -> CoreError {
     }
 }
 
-fn load_core_settings(data_dir: &Path) -> CoreSettings {
-    let mut settings = CoreSettings {
-        data_dir: data_dir.display().to_string(),
-        ..CoreSettings::default()
-    };
-    let path = data_dir.join("settings.json");
-    if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(core) = file.get("core")
-        && let Ok(overlay) = serde_json::from_value::<CoreSettings>(core.clone())
-    {
-        settings = overlay;
-        if settings.data_dir.is_empty() {
-            settings.data_dir = data_dir.display().to_string();
+struct BootConfig {
+    core: CoreSettings,
+    ai: AiSettings,
+    plugins: PluginSettings,
+    mind: MindSettings,
+    harness: HarnessSettings,
+    store: StoreSettings,
+    approval: ApprovalSettings,
+    voice: VoiceSettings,
+    body: BodySettings,
+    characters: CharacterSettings,
+}
+
+fn load_boot_config(data_dir: &Path) -> Result<BootConfig, CoreError> {
+    let full = ene_config::load_full_config_from(&data_dir.join("settings.json"))?;
+    let mut core = full.get_section::<CoreSettings>()?;
+    if core.data_dir.is_empty() {
+        core.data_dir = data_dir.display().to_string();
+    }
+    let plugins = full.get_section::<PluginSettings>()?;
+    let mut approval = full.get_section::<ApprovalSettings>()?;
+    if !full.extra.contains_key("approval") {
+        if let Some(mode) = ApprovalMode::parse(&plugins.policy.approval_mode) {
+            approval.mode = mode;
+        } else if !plugins.policy.approval_mode.is_empty() {
+            tracing::warn!(
+                mode = %plugins.policy.approval_mode,
+                "unknown plugins.policy.approval_mode; using policy"
+            );
         }
     }
-    apply_core_env(&mut settings);
-    settings
+    Ok(BootConfig {
+        core,
+        ai: full.get_section()?,
+        plugins,
+        mind: full.get_section()?,
+        harness: full.get_section()?,
+        store: full.get_section()?,
+        approval,
+        voice: full.get_section()?,
+        body: full.get_section()?,
+        characters: full.get_section()?,
+    })
 }
 
-fn load_ai_settings(data_dir: &Path) -> AiSettings {
-    let mut settings = AiSettings::default();
-    let path = data_dir.join("settings.json");
-    if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(ai) = file.get("ai")
-        && let Ok(overlay) = serde_json::from_value::<AiSettings>(ai.clone())
-    {
-        settings = overlay;
-    }
-    apply_ai_env(&mut settings);
-    settings
-}
-
-fn load_plugin_settings(data_dir: &Path) -> PluginSettings {
-    let mut settings = PluginSettings::default();
-    let path = data_dir.join("settings.json");
-    if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(plugins) = file.get("plugins")
-        && let Ok(overlay) = serde_json::from_value::<PluginSettings>(plugins.clone())
-    {
-        settings = overlay;
-    }
-    apply_plugin_env(&mut settings);
-    settings
-}
-
-fn load_voice_settings(data_dir: &Path) -> VoiceSettings {
-    let path = data_dir.join("settings.json");
-    if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(voice) = file.get("voice")
-        && let Ok(overlay) = serde_json::from_value::<VoiceSettings>(voice.clone())
-    {
-        return overlay;
-    }
-    VoiceSettings::default()
-}
-
-fn load_body_settings(data_dir: &Path) -> BodySettings {
-    let path = data_dir.join("settings.json");
-    if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(body) = file.get("body")
-        && let Ok(overlay) = serde_json::from_value::<BodySettings>(body.clone())
-    {
-        return overlay;
-    }
-    BodySettings::default()
-}
-
-fn load_mind_settings(data_dir: &Path) -> CompanionMind {
-    let path = data_dir.join("settings.json");
-    if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(mind) = file.get("mind")
-        && let Ok(overlay) = serde_json::from_value::<CompanionMind>(mind.clone())
-    {
-        return overlay;
-    }
-    CompanionMind::default()
-}
-
-pub(crate) fn load_harness_settings(data_dir: &Path) -> HarnessSettings {
-    let path = data_dir.join("settings.json");
-    if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(harness) = file.get("harness")
-        && let Ok(overlay) = serde_json::from_value::<HarnessSettings>(harness.clone())
-    {
-        return overlay;
-    }
-    HarnessSettings::default()
-}
-
-fn apply_ai_env(settings: &mut AiSettings) {
-    apply_task_env("ENE_AI__TASKS__CHAT", &mut settings.tasks.chat);
-    apply_task_env("ENE_AI__TASKS__CLASSIFIER", &mut settings.tasks.classifier);
-    apply_task_env("ENE_AI__TASKS__EMBEDDING", &mut settings.tasks.embedding);
-    apply_task_env("ENE_AI__TASKS__PROACTIVE", &mut settings.tasks.proactive);
-    apply_task_env("ENE_AI__TASKS__TTS", &mut settings.tasks.tts);
-    apply_task_env("ENE_AI__TASKS__STT", &mut settings.tasks.stt);
-    apply_task_env("ENE_AI__TASKS__APPROVE", &mut settings.tasks.approve);
-    apply_task_env("ENE_AI__TASKS__JOB", &mut settings.tasks.job);
-}
-
-fn apply_plugin_env(settings: &mut PluginSettings) {
-    if let Ok(profile) = std::env::var("ENE_PLUGINS__PROFILE")
-        && !profile.is_empty()
-    {
-        settings.profile = profile;
-    }
-    if let Ok(home) = std::env::var("ENE_PLUGINS__HOME_DIR")
-        && !home.is_empty()
-    {
-        settings.home_dir = home;
-    }
-    if let Ok(mode) = std::env::var("ENE_PLUGINS__POLICY__APPROVAL_MODE")
-        && !mode.is_empty()
-    {
-        settings.policy.approval_mode = mode;
-    }
-    if let Ok(raw) = std::env::var("ENE_PLUGINS__POLICY__ALLOW_UNVERIFIED") {
-        settings.policy.allow_unverified = matches!(raw.as_str(), "1" | "true" | "TRUE");
-    }
-    if let Ok(raw) = std::env::var("ENE_PLUGINS__IPC__MAX_FRAME_BYTES")
-        && let Ok(n) = raw.parse()
-    {
-        settings.ipc.max_frame_bytes = n;
+fn resolve_data_subdir(data_dir: &Path, configured: &str, default_name: &str) -> PathBuf {
+    if configured.is_empty() {
+        data_dir.join(default_name)
+    } else {
+        let path = PathBuf::from(configured);
+        if path.is_absolute() {
+            path
+        } else {
+            data_dir.join(path)
+        }
     }
 }
 
-fn apply_task_env(prefix: &str, binding: &mut TaskBinding) {
-    if let Ok(plugin) = std::env::var(format!("{prefix}__PLUGIN"))
-        && !plugin.is_empty()
-    {
-        binding.plugin = plugin;
+/// PATCH/GET allowlist: registered top-level settings sections plus `theme`.
+#[must_use]
+pub(crate) fn settings_patch_keys() -> Vec<String> {
+    let mut keys = ene_config::registered_settings_section_keys();
+    if !keys.iter().any(|key| key == "theme") {
+        keys.push("theme".to_owned());
     }
-    if let Ok(model) = std::env::var(format!("{prefix}__MODEL"))
-        && !model.is_empty()
-    {
-        binding.model = model;
-    }
-    if let Ok(base_url) = std::env::var(format!("{prefix}__BASE_URL"))
-        && !base_url.is_empty()
-    {
-        binding.base_url = base_url;
-    }
-    if let Ok(raw) = std::env::var(format!("{prefix}__MAX_TOKENS"))
-        && let Ok(n) = raw.parse()
-    {
-        binding.max_tokens = Some(n);
-    }
-    if let Ok(voice) = std::env::var(format!("{prefix}__VOICE"))
-        && !voice.is_empty()
-    {
-        binding.voice = voice;
-    }
+    keys.sort();
+    keys
 }
 
 fn load_named_secret(vault: &Vault, env_key: &str, vault_key: &str) -> String {
@@ -1025,28 +1029,5 @@ fn overlay_task(dst: &mut TaskBinding, value: Option<&serde_json::Value>) {
     };
     if let Ok(parsed) = serde_json::from_value::<TaskBinding>(value.clone()) {
         *dst = parsed;
-    }
-}
-
-fn apply_core_env(settings: &mut CoreSettings) {
-    if let Ok(bind) = std::env::var("ENE_CORE__SERVER__BIND")
-        && !bind.is_empty()
-    {
-        settings.server.bind = bind;
-    }
-    if let Ok(token_file) = std::env::var("ENE_CORE__SERVER__TOKEN_FILE")
-        && !token_file.is_empty()
-    {
-        settings.server.token_file = token_file;
-    }
-    if let Ok(raw) = std::env::var("ENE_CORE__SERVER__WS_SEND_BUFFER")
-        && let Ok(n) = raw.parse()
-    {
-        settings.server.ws_send_buffer = n;
-    }
-    if let Ok(policy) = std::env::var("ENE_CORE__CLIENTS__AUDIO_ACTIVE_POLICY")
-        && !policy.is_empty()
-    {
-        settings.clients.audio_active_policy = policy;
     }
 }
