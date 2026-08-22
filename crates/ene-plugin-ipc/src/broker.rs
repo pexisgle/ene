@@ -2,12 +2,77 @@
 
 use crate::frame::{read_frame, write_frame};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Client for the host broker socket injected into a plugin process.
 #[derive(Debug)]
 pub struct BrokerClient<S> {
     stream: S,
+}
+
+/// A process-wide authenticated broker session.
+///
+/// The first call performs the token handshake; later calls reuse the same
+/// connection. Clones share one serialized request/response stream.
+#[derive(Debug, Clone)]
+pub struct BrokerSession<S> {
+    client: Arc<tokio::sync::Mutex<BrokerClient<S>>>,
+    authenticated: Arc<AtomicBool>,
+}
+
+impl<S> BrokerSession<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Create a lazy session around an already-connected transport.
+    pub fn new(client: BrokerClient<S>) -> Self {
+        Self {
+            client: Arc::new(tokio::sync::Mutex::new(client)),
+            authenticated: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Send one request, authenticating the connection on first use.
+    ///
+    /// # Errors
+    ///
+    /// Returns IPC errors from the handshake and request exchange. A broker
+    /// rejection is returned as [`BrokerResponse::Error`], not as a transport
+    /// error, so callers can distinguish policy failures from reconnects.
+    pub async fn call(
+        &self,
+        token: &str,
+        request: BrokerRequest,
+    ) -> Result<BrokerResponse, crate::IpcError> {
+        let mut client = self.client.lock().await;
+        if !self.authenticated.load(Ordering::Acquire) {
+            match client
+                .call(BrokerRequest::Hello {
+                    token: token.to_owned(),
+                })
+                .await?
+            {
+                BrokerResponse::HelloOk => self.authenticated.store(true, Ordering::Release),
+                // Keep the connection usable after a rejected handshake so the
+                // next call can retry with a refreshed token.
+                response @ BrokerResponse::Error { .. } => return Ok(response),
+                response => {
+                    return Err(crate::IpcError::Unexpected(format!(
+                        "unexpected broker hello response {response:?}"
+                    )));
+                }
+            }
+        }
+        client.call(request).await
+    }
+
+    /// Whether the handshake has completed successfully.
+    #[must_use]
+    pub fn is_authenticated(&self) -> bool {
+        self.authenticated.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(unix)]

@@ -1,4 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use ene_plugin_ipc::BrokerSession;
 use ene_plugin_ipc::{BrokerClient, BrokerRequest, BrokerResponse, ToolSpecWire};
 use ene_registry::{arg_str, spec};
 use parking_lot::Mutex;
@@ -8,7 +9,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::Mutex as AsyncMutex;
 
 const MAX_UNDO_BYTES: usize = 1024 * 1024;
 
@@ -16,6 +19,10 @@ static PATH_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static TEMP_SUFFIX: AtomicU64 = AtomicU64::new(1);
+
+static BROKER_SESSION: OnceLock<BrokerSession<tokio::net::UnixStream>> = OnceLock::new();
+
+static SHARED_BROKER: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
     let expected_hash = json!({"type":"string"});
@@ -113,19 +120,8 @@ fn broker_search(args: &Value) -> Result<Value, String> {
 }
 
 async fn broker_search_async(args: &Value) -> Result<Value, String> {
-    let mut client = BrokerClient::from_env()
-        .await
-        .map_err(|err| format!("broker unavailable: {err}"))?;
-    let response = client
-        .call(BrokerRequest::Hello {
-            token: std::env::var("ENE_PLUGIN_SPAWN_TOKEN")
-                .map_err(|_| "ENE_PLUGIN_SPAWN_TOKEN is not set".to_owned())?,
-        })
-        .await
-        .map_err(|err| format!("broker hello failed: {err}"))?;
-    if matches!(response, BrokerResponse::Error { .. }) {
-        return Err("broker hello rejected".to_owned());
-    }
+    let session = broker_session().await?;
+    let token = spawn_token()?;
 
     let query = arg_str(args, "query")?;
     let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
@@ -154,12 +150,49 @@ async fn broker_search_async(args: &Value) -> Result<Value, String> {
             .min(200),
     };
 
-    match client.call(request).await {
+    match session.call(&token, request).await {
         Ok(BrokerResponse::FsSearchOk { matches }) => Ok(json!({ "matches": matches })),
         Ok(BrokerResponse::Error { message, .. }) => Err(message),
         Err(err) => Err(err.to_string()),
         Ok(_) => Err("unexpected broker response".to_owned()),
     }
+}
+
+fn spawn_token() -> Result<String, String> {
+    std::env::var("ENE_PLUGIN_SPAWN_TOKEN")
+        .map_err(|_| "ENE_PLUGIN_SPAWN_TOKEN is not set".to_owned())
+}
+
+#[cfg(unix)]
+async fn broker_session() -> Result<&'static BrokerSession<tokio::net::UnixStream>, String> {
+    if let Some(session) = BROKER_SESSION.get() {
+        return Ok(session);
+    }
+    let init = SHARED_BROKER.get_or_init(AsyncMutex::default);
+    let _guard = init.lock().await;
+    if let Some(session) = BROKER_SESSION.get() {
+        return Ok(session);
+    }
+    let client = BrokerClient::from_env()
+        .await
+        .map_err(|err| format!("broker unavailable: {err}"))?;
+    Ok(BROKER_SESSION.get_or_init(|| BrokerSession::new(client)))
+}
+
+#[cfg(not(unix))]
+async fn broker_session() -> Result<&'static BrokerSession<tokio::net::TcpStream>, String> {
+    if let Some(session) = BROKER_SESSION.get() {
+        return Ok(session);
+    }
+    let init = SHARED_BROKER.get_or_init(AsyncMutex::default);
+    let _guard = init.lock().await;
+    if let Some(session) = BROKER_SESSION.get() {
+        return Ok(session);
+    }
+    let client = BrokerClient::from_env()
+        .await
+        .map_err(|err| format!("broker unavailable: {err}"))?;
+    Ok(BROKER_SESSION.get_or_init(|| BrokerSession::new(client)))
 }
 
 fn read(args: &Value) -> Result<Value, String> {
