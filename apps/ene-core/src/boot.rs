@@ -268,9 +268,7 @@ impl CoreDaemon {
             observation: parking_lot::Mutex::new(ene_work::ObservationPipeline::new()),
             world_state: parking_lot::Mutex::new(ene_companion::WorldStateMemory::default()),
             memory_embed,
-            idle_timeout_secs: parking_lot::Mutex::new(
-                loaded.store.sessions.idle_timeout_secs,
-            ),
+            idle_timeout_secs: parking_lot::Mutex::new(loaded.store.sessions.idle_timeout_secs),
         })
     }
 
