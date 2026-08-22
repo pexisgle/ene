@@ -5,7 +5,10 @@ pub enum AsyncOutcome {
     BargeIn(Result<(), String>),
     CancelTurn(Result<(), String>),
     Approval(Result<(), String>),
-    Listen(Result<(), String>),
+    Listen {
+        generation: u64,
+        result: Result<(), String>,
+    },
     RefreshHistory(Result<ene_api::HistoryResponse, String>),
     SaveLocalSettings(Result<(), String>),
     LoadCoreSettings(Result<String, String>),

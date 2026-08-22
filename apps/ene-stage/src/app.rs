@@ -15,7 +15,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::audio::AudioHub;
+use crate::audio::{AudioHub, ListenAction, MicListen, SendResult, run_listen_stream};
 use crate::avatar::look_at;
 use crate::chrome::{ChromeKind, ChromeWindow};
 use crate::core::events::{EventFeeds, LiveEvent, spawn_event_feeds};
@@ -95,6 +95,7 @@ pub fn run() -> Result<(), AppError> {
         detail: DetailUiState::default(),
         async_results: Arc::new(Mutex::new(Vec::new())),
         mic_active: false,
+        listen: MicListen::new(),
         notify_claimed: false,
         speaker_claimed: false,
         gpu: None,
@@ -142,6 +143,7 @@ struct StageApp {
     detail: DetailUiState,
     async_results: Arc<Mutex<Vec<AsyncOutcome>>>,
     mic_active: bool,
+    listen: MicListen,
     notify_claimed: bool,
     speaker_claimed: bool,
     gpu: Option<GpuContext>,
@@ -228,10 +230,14 @@ impl StageApp {
                     self.surface.status = err;
                 }
             }
-            AsyncOutcome::Listen(result) => {
+            AsyncOutcome::Listen { generation, result } => {
                 if let Err(err) = result {
                     tracing::debug!(error = %err, "listen failed");
                 }
+                let action = self
+                    .listen
+                    .on_done(generation, self.mic_active, Instant::now());
+                self.spawn_listen(action);
             }
             AsyncOutcome::RefreshHistory(result) => match result {
                 Ok(history) => {
@@ -451,7 +457,15 @@ impl StageApp {
                 };
             }
             AsyncOutcome::MicClaim(result) => match result {
-                Ok(active) => self.mic_active = active,
+                Ok(active) => {
+                    self.mic_active = active;
+                    if active {
+                        let action = self.listen.start();
+                        self.spawn_listen(action);
+                    } else {
+                        self.listen.release();
+                    }
+                }
                 Err(err) => self.surface.status = err,
             },
             AsyncOutcome::SpeakerClaim(result) => match result {
@@ -702,13 +716,13 @@ impl StageApp {
         } else {
             self.surface.chat_draft.trim().to_owned()
         };
+        self.surface.chat_draft.clear();
         let session = self.session.clone_handle();
         self.spawn(async move {
             AsyncOutcome::SendMessage(
                 session
-                    .send(&text, MessageMode::FollowUp)
+                    .answer_job(&question.id, &text)
                     .await
-                    .map(|_| ())
                     .map_err(|err| err.to_string()),
             )
         });
@@ -1044,22 +1058,38 @@ impl StageApp {
         }
     }
 
+    fn spawn_listen(&mut self, action: ListenAction) {
+        let ListenAction::Spawn { generation, rx } = action else {
+            return;
+        };
+        let client = Arc::clone(&self.client);
+        let session_id = self.session.session_id().to_owned();
+        self.spawn(async move {
+            AsyncOutcome::Listen {
+                generation,
+                result: run_listen_stream(client, session_id, rx).await,
+            }
+        });
+    }
+
     fn poll_audio(&mut self) {
         if !self.mic_active {
+            self.listen.release();
             return;
         }
-        let sample_rate = self.audio.sample_rate();
-        for chunk in self.audio.poll_mic_chunks() {
-            let session = self.session.clone_handle();
-            self.spawn(async move {
-                AsyncOutcome::Listen(
-                    session
-                        .listen_pcm(chunk, sample_rate)
-                        .await
-                        .map(|_| ())
-                        .map_err(|err| err.to_string()),
-                )
-            });
+        let action = self.listen.poll(true, Instant::now());
+        self.spawn_listen(action);
+        for batch in self.audio.poll_mic_batches() {
+            match self.listen.try_send(batch) {
+                SendResult::Sent => {}
+                SendResult::Full => {
+                    tracing::debug!("listen stream dropped a mic frame");
+                }
+                SendResult::Closed | SendResult::Idle => {
+                    let action = self.listen.poll(true, Instant::now());
+                    self.spawn_listen(action);
+                }
+            }
         }
     }
 

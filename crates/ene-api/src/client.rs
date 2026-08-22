@@ -1,8 +1,9 @@
 use crate::error::ApiError;
+use crate::pcm::{PCM_S16LE, encode_pcm_s16le};
 use crate::types::{
-    AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
-    CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
-    ExclusiveSnapshot, Health, HistoryResponse, InstallProviderAssetRequest,
+    AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
+    ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
+    EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse, InstallProviderAssetRequest,
     InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
     ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument, MemoryPatch,
     MemoryView, MessageRequest, Page, PluginConfigField, PluginConfigOptionsView,
@@ -216,6 +217,26 @@ impl ApiClient {
         .await
     }
 
+    /// Open a bulk mic PCM socket. Binary frames are [`PCM_S16LE`] at `sample_rate`.
+    pub async fn listen_stream(
+        &self,
+        session_id: &str,
+        sample_rate: u32,
+    ) -> Result<ListenStream, ApiError> {
+        let rate = sample_rate.max(1);
+        let path = format!("/api/v1/sessions/{session_id}/listen/stream");
+        let stream = self
+            .connect_ws(
+                &path,
+                &[
+                    ("sample_rate", rate.to_string()),
+                    ("encoding", PCM_S16LE.to_owned()),
+                ],
+            )
+            .await?;
+        Ok(ListenStream { stream })
+    }
+
     pub async fn stage(&self) -> Result<StageView, ApiError> {
         self.send_json(self.request(Method::GET, "/api/v1/stage"))
             .await
@@ -302,6 +323,14 @@ impl ApiClient {
     pub async fn cancel_job(&self, id: &str) -> Result<JobView, ApiError> {
         self.send_json(self.request(Method::POST, &format!("/api/v1/jobs/{id}/cancel")))
             .await
+    }
+
+    pub async fn answer_job(&self, id: &str, req: &AnswerJobRequest) -> Result<JobView, ApiError> {
+        self.send_json(
+            self.request(Method::POST, &format!("/api/v1/jobs/{id}/answer"))
+                .json(req),
+        )
+        .await
     }
 
     pub async fn list_schedules(&self) -> Result<Page<ScheduleView>, ApiError> {
@@ -680,6 +709,27 @@ impl ApiClient {
         depth: &str,
         session_id: Option<&str>,
     ) -> Result<EventSocket, ApiError> {
+        let mut extra = vec![
+            ("depth", depth.to_owned()),
+            ("client_id", self.client_id.clone()),
+        ];
+        if let Some(session) = session_id {
+            extra.push(("session_id", session.to_owned()));
+        }
+        let stream = self.connect_ws("/api/v1/events", &extra).await?;
+        Ok(EventSocket { stream })
+    }
+
+    async fn connect_ws(
+        &self,
+        path: &str,
+        extra: &[(&str, String)],
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        ApiError,
+    > {
         let ws_base = if let Some(rest) = self.base.strip_prefix("https://") {
             format!("wss://{rest}")
         } else if let Some(rest) = self.base.strip_prefix("http://") {
@@ -687,15 +737,13 @@ impl ApiClient {
         } else {
             return Err(ApiError::Websocket("base URL must be http(s)".to_owned()));
         };
-        let mut url = Url::parse(&format!("{ws_base}/api/v1/events"))
+        let mut url = Url::parse(&format!("{ws_base}{path}"))
             .map_err(|err| ApiError::Websocket(err.to_string()))?;
         {
             let mut query = url.query_pairs_mut();
-            query.append_pair("depth", depth);
-            query.append_pair("client_id", &self.client_id);
             query.append_pair("access_token", &self.token);
-            if let Some(session) = session_id {
-                query.append_pair("session_id", session);
+            for (key, value) in extra {
+                query.append_pair(key, value);
             }
         }
         let mut request = url
@@ -712,7 +760,7 @@ impl ApiClient {
         let (stream, _) = connect_async(request)
             .await
             .map_err(|err| ApiError::Websocket(err.to_string()))?;
-        Ok(EventSocket { stream })
+        Ok(stream)
     }
 }
 
@@ -741,6 +789,40 @@ impl EventSocket {
                 }
                 None | Some(Ok(Message::Close(_))) => return Ok(None),
                 Some(Ok(_)) => {}
+            }
+        }
+    }
+}
+
+/// Client → core bulk mic PCM (`pcm_s16le` binary frames).
+pub struct ListenStream {
+    stream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+}
+
+impl ListenStream {
+    /// Send one mono `f32` frame packed as [`PCM_S16LE`].
+    pub async fn send_pcm(&mut self, pcm: &[f32]) -> Result<(), ApiError> {
+        self.stream
+            .send(Message::Binary(encode_pcm_s16le(pcm).into()))
+            .await
+            .map_err(|err| ApiError::Websocket(err.to_string()))
+    }
+
+    /// Drive ping/pong and observe a server close. `None` means the socket ended.
+    pub async fn recv(&mut self) -> Result<Option<()>, ApiError> {
+        loop {
+            match self.stream.next().await {
+                Some(Err(err)) => return Err(ApiError::Websocket(err.to_string())),
+                Some(Ok(Message::Ping(payload))) => {
+                    self.stream
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|err| ApiError::Websocket(err.to_string()))?;
+                }
+                None | Some(Ok(Message::Close(_))) => return Ok(None),
+                Some(Ok(_)) => return Ok(Some(())),
             }
         }
     }

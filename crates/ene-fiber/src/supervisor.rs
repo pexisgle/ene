@@ -15,7 +15,8 @@ use ene_plugin_ipc::{
 };
 use ene_provider_assets::CatalogRegistry;
 use ene_registry::{
-    BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for,
+    BuiltinExecutor, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for,
+    with_http_fetch,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -77,7 +78,7 @@ struct SupervisorInner {
     asset_install_jobs: tokio::sync::Mutex<HashMap<String, AssetInstallJob>>,
     host_assets: Arc<HostAssets>,
     registry: Arc<ToolRegistry>,
-    broker: Mutex<Broker>,
+    broker: Arc<Mutex<Broker>>,
     workspace: PathBuf,
     circuit_breaker: CircuitBreakerConfig,
     failure_counts: Mutex<HashMap<String, u32>>,
@@ -89,8 +90,7 @@ struct SupervisorInner {
     allow_unverified: AtomicBool,
     loop_hooks: Mutex<Option<LoopHooks>>,
     waterfall_guards: Mutex<HashMap<String, Vec<WaterfallGuard<HookEvent>>>>,
-    #[cfg(test)]
-    dispose_log: Mutex<Vec<Effect>>,
+    broker_servers: Mutex<HashMap<String, crate::broker_ipc::BrokerServer>>,
 }
 
 /// Fiber supervisor. Reconcile is per-row; the core process is not restarted.
@@ -106,6 +106,11 @@ struct PluginInvoker {
     session: Arc<PluginSession>,
     row_id: String,
     plugin: String,
+    inner: Arc<SupervisorInner>,
+}
+
+struct HostWebInvoker {
+    uid: FiberUid,
     inner: Arc<SupervisorInner>,
 }
 
@@ -133,6 +138,27 @@ impl ToolInvoke for PluginInvoker {
     }
 }
 
+#[async_trait]
+impl ToolInvoke for HostWebInvoker {
+    async fn invoke(&self, name: &str, args: Value) -> Result<Value, String> {
+        if !self.inner.broker.lock().has_grant(self.uid, "net.fetch") {
+            return Err("denied net.fetch".to_owned());
+        }
+        let uid = self.uid;
+        let inner = Arc::clone(&self.inner);
+        with_http_fetch(
+            move |url| {
+                inner
+                    .broker
+                    .lock()
+                    .net_fetch(uid, url)
+                    .map_err(|err| err.to_string())
+            },
+            || BuiltinExecutor.execute(name, &args),
+        )
+    }
+}
+
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SupervisorError {
@@ -154,6 +180,8 @@ pub enum SupervisorError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Ipc(#[from] ene_plugin_ipc::IpcError),
+    #[error("broker ipc: {0}")]
+    BrokerIpc(#[from] crate::BrokerIpcError),
 }
 
 impl SupervisorInner {
@@ -286,7 +314,7 @@ impl Supervisor {
                 sessions: Mutex::new(HashMap::new()),
                 asset_install_jobs: tokio::sync::Mutex::new(HashMap::new()),
                 host_assets,
-                broker: Mutex::new(Broker::new(workspace.clone())),
+                broker: Arc::new(Mutex::new(Broker::new(workspace.clone()))),
                 registry,
                 workspace,
                 circuit_breaker,
@@ -299,8 +327,7 @@ impl Supervisor {
                 allow_unverified: AtomicBool::new(false),
                 loop_hooks: Mutex::new(None),
                 waterfall_guards: Mutex::new(HashMap::new()),
-                #[cfg(test)]
-                dispose_log: Mutex::new(Vec::new()),
+                broker_servers: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -590,9 +617,21 @@ impl Supervisor {
         fiber.requires.clone_from(&row.requires);
         fiber.sandbox_required = row.sandbox_required;
         fiber.state = FiberState::Loading;
+        let web_invoke = (row.plugin == "tool.web").then(|| {
+            Arc::new(HostWebInvoker {
+                uid: fiber.uid,
+                inner: Arc::clone(&self.inner),
+            }) as Arc<dyn ToolInvoke>
+        });
         for def in definitions_for(kind) {
-            self.inner
-                .record_tool(&mut fiber, def, Arc::new(BuiltinInvoker));
+            fiber.push_effect(Effect::RegisterTool {
+                name: def.name.clone(),
+            });
+            if let Some(invoke) = &web_invoke {
+                self.inner.registry.register_with(def, Arc::clone(invoke));
+            } else {
+                self.inner.registry.register(def);
+            }
         }
         for cap in &row.capabilities {
             self.inner.record_grant(&mut fiber, cap.clone());
@@ -636,6 +675,20 @@ impl Supervisor {
                 &mut broker,
             )?;
         }
+        let spawn_token = Uuid::now_v7().to_string();
+        let broker_server = if plugin_kind(&row.plugin).is_some() {
+            Some(crate::broker_ipc::BrokerServer::bind(
+                Arc::clone(&self.inner.broker),
+                fiber.uid,
+                &row.row_id,
+                &spawn_token,
+            )?)
+        } else {
+            None
+        };
+        let broker_socket = broker_server
+            .as_ref()
+            .map(|server| server.endpoint().to_owned());
         let spawned = match spawn_plugin(SpawnOpts {
             binary,
             plugin_id: &plugin_id,
@@ -645,6 +698,8 @@ impl Supervisor {
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row.row_id),
             workspace: &self.inner.workspace,
             config: &config,
+            broker_socket: broker_socket.as_deref(),
+            broker_token: Some(&spawn_token),
             max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
             allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
         })
@@ -655,6 +710,9 @@ impl Supervisor {
                 self.inner.rollback_loading(&mut fiber);
                 self.inner
                     .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
+                if let Some(server) = broker_server {
+                    server.shutdown();
+                }
                 return Err(err);
             }
         };
@@ -665,9 +723,22 @@ impl Supervisor {
             self.inner.rollback_loading(&mut fiber);
             self.inner
                 .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
+            if let Some(server) = broker_server {
+                server.shutdown();
+            }
             return Err(err);
         }
         let uid = fiber.uid;
+        if let Some(server) = broker_server {
+            fiber.broker_socket.clone_from(&broker_socket);
+            fiber.push_effect(Effect::BrokerListen {
+                path: fiber.broker_socket.clone().unwrap_or_default(),
+            });
+            self.inner
+                .broker_servers
+                .lock()
+                .insert(row.row_id.clone(), server);
+        }
         self.inner.fibers.lock().insert(row.row_id.clone(), fiber);
         self.inner.reset_failures(&row.row_id);
         Ok(uid)
@@ -697,12 +768,19 @@ impl Supervisor {
             .sessions
             .lock()
             .insert(row.row_id.clone(), Arc::clone(&session));
-        let invoke: Arc<dyn ToolInvoke> = Arc::new(PluginInvoker {
-            session: Arc::clone(&session),
-            row_id: row.row_id.clone(),
-            plugin: row.plugin.clone(),
-            inner: Arc::clone(&self.inner),
-        });
+        let invoke: Arc<dyn ToolInvoke> = if row.plugin == "tool.web" {
+            Arc::new(HostWebInvoker {
+                uid: fiber.uid,
+                inner: Arc::clone(&self.inner),
+            })
+        } else {
+            Arc::new(PluginInvoker {
+                session: Arc::clone(&session),
+                row_id: row.row_id.clone(),
+                plugin: row.plugin.clone(),
+                inner: Arc::clone(&self.inner),
+            })
+        };
         let source = ToolSource::Plugin {
             plugin_id: plugin_id.to_owned(),
         };
@@ -758,7 +836,11 @@ impl Supervisor {
             return;
         };
         fiber.state = FiberState::Unloading;
-        let session = self.inner.sessions.lock().get(row_id).cloned();
+        self.inner.drop_waterfall(row_id);
+        if let Some(server) = self.inner.broker_servers.lock().remove(row_id) {
+            server.shutdown();
+        }
+        let session = self.inner.sessions.lock().remove(row_id);
         if let Some(session) = session {
             let drain = async { session.conn.lock().await.drain().await };
             drop(timeout(Duration::from_secs(2), drain).await);
@@ -1156,6 +1238,8 @@ impl Supervisor {
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row_id),
             workspace: &self.inner.workspace,
             config,
+            broker_socket: None,
+            broker_token: None,
             max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
             allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
         })
@@ -1257,7 +1341,9 @@ fn finish_active(fiber: &mut Fiber) {
             Effect::RegisterTool { name, .. } => Some(format!("tool.{name}")),
             Effect::BrokerGrant { op } => Some(format!("broker.{op}")),
             Effect::BindSeam { name } => Some(format!("seam.{name}")),
-            Effect::SpawnProcess { .. } | Effect::ListenWaterfall { .. } => None,
+            Effect::BrokerListen { .. }
+            | Effect::SpawnProcess { .. }
+            | Effect::ListenWaterfall { .. } => None,
         })
         .collect();
     fiber.state = FiberState::Active;

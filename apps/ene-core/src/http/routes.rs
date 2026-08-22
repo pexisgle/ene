@@ -7,15 +7,16 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use base64::Engine;
 use ene_api::{
-    AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
-    CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
-    ExclusiveSnapshot, Health, HistoryResponse, JobView, ListProviderModelsRequest,
-    ListProviderModelsResponse, McpDocument, McpServerView, MemoryPatch, MemoryView, MessageMode,
-    MessageRequest, MessageResponse, OccupantView, Page, PluginConfigErrorView, PluginConfigField,
-    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
-    PluginView, QueuedCancel, ResourceKind, RestoreRequest, ScheduleView, SendMessageResponse,
-    SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView,
-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
+    ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
+    EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse, JobView,
+    ListProviderModelsRequest, ListProviderModelsResponse, McpDocument, McpServerView, MemoryPatch,
+    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
+    PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
+    PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResourceKind, RestoreRequest,
+    ScheduleView, SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch,
+    SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest,
+    ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
@@ -26,8 +27,9 @@ use ene_kernel::DisplayDepth;
 use ene_plane::{ApprovalMode, PopupDecision};
 use ene_registry::Layer;
 use ene_session::{
-    Block, EventKind, EventPayload, NewEvent, NewSession, SessionCreatedBy, SessionEndReason,
-    SessionId, SessionKind, SessionMeta, SoulId, Transaction, TurnId, v1,
+    Block, ClientId, DelegationId, EventKind, EventPayload, NewEvent, NewSession, QuestionId,
+    SessionCreatedBy, SessionEndReason, SessionId, SessionKind, SessionMeta, SoulId, Transaction,
+    TurnId, v1,
 };
 use ene_work::{CompanionReport, NewSchedule, ScheduleAction};
 use serde::Deserialize;
@@ -180,7 +182,10 @@ pub async fn list_sessions(
     State(state): State<AppState>,
     Query(filter): Query<SoulFilter>,
 ) -> Result<Json<Page<SessionView>>, ApiReject> {
-    state.core.end_idle_sessions().await.map_err(map_core)?;
+    let idle = state.core.list_idle_sessions().map_err(map_core)?;
+    for session in idle {
+        finish_session(&state, session, SessionEndReason::IdleTimeout).await?;
+    }
     let soul = filter.soul_id.as_deref().map(parse_soul).transpose()?;
     let mut items = state
         .core
@@ -326,11 +331,7 @@ pub async fn split_session(
         .get_session(session)
         .map_err(map_session)?;
     if previous.ended_at.is_none() {
-        state
-            .core
-            .end_session(session, SessionEndReason::Explicit)
-            .await
-            .map_err(map_core)?;
+        finish_session(&state, session, SessionEndReason::Explicit).await?;
     }
     let previous = state
         .core
@@ -371,12 +372,26 @@ pub async fn end_session(
     } else {
         SessionEndReason::Explicit
     };
+    finish_session(&state, session, reason).await?;
+    get_session(State(state), Path(id)).await
+}
+
+/// Abort the running turn, wait until it has committed, write `session/end`, then stop the actor.
+async fn finish_session(
+    state: &AppState,
+    session: SessionId,
+    reason: SessionEndReason,
+) -> Result<(), ApiReject> {
+    state.lanes.stop_turn(session).await.map_err(|err| {
+        conflict("lane_busy", "in-flight turn did not stop").with_detail(err.to_string())
+    })?;
     state
         .core
         .end_session(session, reason)
         .await
         .map_err(map_core)?;
-    get_session(State(state), Path(id)).await
+    state.lanes.close(session).await;
+    Ok(())
 }
 
 pub async fn barge_in(
@@ -399,8 +414,18 @@ pub async fn listen(
     Json(req): Json<ene_api::ListenRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiReject> {
     let session = parse_session(&id)?;
+    let response = apply_listen_pcm(&state, session, &req.pcm, req.sample_rate).await?;
+    Ok(Json(response))
+}
+
+pub(super) async fn apply_listen_pcm(
+    state: &AppState,
+    session: SessionId,
+    pcm: &[f32],
+    sample_rate: u32,
+) -> Result<SendMessageResponse, ApiReject> {
     let effect = state.core.with_voice(|voice| {
-        let effect = voice.push_input(&req.pcm, super::speech::wall_clock_ms());
+        let effect = voice.push_input(pcm, super::speech::wall_clock_ms());
         super::speech::emit_voice_state(&state.events, voice);
         effect
     });
@@ -413,18 +438,18 @@ pub async fn listen(
                 .get_or_open(&state.core, session)
                 .map_err(map_core)?;
             lane.abort().await.map_err(|err| map_kernel(&err))?;
-            Ok(Json(empty_listen()))
+            Ok(empty_listen())
         }
         InputEffect::NeedsTranscribe => {
             let pcm = state.core.with_voice(VoiceRuntime::take_utterance);
-            transcribe_listen(&state, session, pcm, req.sample_rate).await
+            transcribe_listen(state, session, pcm, sample_rate).await
         }
-        InputEffect::Transcript(text) => dispatch_listen_text(&state, session, text).await,
+        InputEffect::Transcript(text) => dispatch_listen_text(state, session, text).await,
         InputEffect::Silence
         | InputEffect::IgnoredDisabled
         | InputEffect::IgnoredSelfVoice
         | InputEffect::Listening
-        | InputEffect::HoldForMinSpeech => Ok(Json(empty_listen())),
+        | InputEffect::HoldForMinSpeech => Ok(empty_listen()),
     }
 }
 
@@ -440,11 +465,11 @@ async fn transcribe_listen(
     session: SessionId,
     pcm: Vec<f32>,
     sample_rate: u32,
-) -> Result<Json<SendMessageResponse>, ApiReject> {
+) -> Result<SendMessageResponse, ApiReject> {
     let binding = state.core.ai().lock().tasks.stt.clone();
     if binding.is_unconfigured() || pcm.is_empty() {
         state.core.with_voice(VoiceRuntime::mark_idle);
-        return Ok(Json(empty_listen()));
+        return Ok(empty_listen());
     }
     let result = state
         .core
@@ -474,11 +499,11 @@ async fn dispatch_listen_text(
     state: &AppState,
     session: SessionId,
     text: String,
-) -> Result<Json<SendMessageResponse>, ApiReject> {
+) -> Result<SendMessageResponse, ApiReject> {
     let text = text.trim();
     if text.is_empty() {
         state.core.with_voice(VoiceRuntime::mark_idle);
-        return Ok(Json(empty_listen()));
+        return Ok(empty_listen());
     }
     dispatch_message(
         state,
@@ -490,7 +515,6 @@ async fn dispatch_listen_text(
         },
     )
     .await
-    .map(Json)
 }
 
 pub async fn export_session(
@@ -695,6 +719,60 @@ pub async fn cancel_job(
         .parse()
         .map_err(|_| bad_request("invalid_message", "bad job id"))?;
     state.core.host().cancel(job).map_err(map_work)?;
+    get_job(State(state), Path(id)).await
+}
+
+pub async fn answer_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AnswerJobRequest>,
+) -> Result<Json<JobView>, ApiReject> {
+    let job = id
+        .parse()
+        .map_err(|_| bad_request("invalid_message", "bad job id"))?;
+    let host = state.core.host();
+    let pending = host.open_questions(job).map_err(map_work)?;
+    let answered = if req.answers.is_empty() {
+        let text = req.text.trim();
+        if text.is_empty() {
+            return Err(bad_request("invalid_message", "empty answer"));
+        }
+        if pending.is_empty() {
+            host.answer(job, text).map_err(map_work)?;
+            Vec::new()
+        } else {
+            let pairs = pending
+                .iter()
+                .map(|question| {
+                    (
+                        QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq),
+                        text.to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for _ in &pending {
+                host.answer(job, text).map_err(map_work)?;
+            }
+            pairs
+        }
+    } else {
+        let turn = host.combine_pending_questions(job).map_err(map_work)?;
+        let pairs = turn
+            .questions
+            .iter()
+            .zip(req.answers.iter())
+            .map(|(question, answer)| {
+                (
+                    QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq),
+                    answer.trim().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        host.apply_combined_answers(&turn, &req.answers)
+            .map_err(map_work)?;
+        pairs
+    };
+    persist_job_answer(&state, job, &answered).await;
     get_job(State(state), Path(id)).await
 }
 
@@ -1620,6 +1698,7 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
         "ai_stt_key_set": state.core.task_key_set("stt"),
         "ai_approve_key_set": state.core.task_key_set("approve"),
         "ai_job_key_set": state.core.task_key_set("job"),
+        "observation_scope": state.core.mind().proactive.world_state.send_scope(),
     });
     let overlay = {
         let settings_path = state.core.data_dir().join("settings.json");
@@ -1934,7 +2013,7 @@ pub async fn restore(
         .finish_restore()
         .await
         .map_err(|err| bad_request("fault", &err.to_string()))?;
-    state.lanes.reset();
+    state.lanes.reset().await;
     Ok(Json(json!({ "ok": true, "restart_required": true })))
 }
 
@@ -2313,7 +2392,7 @@ fn normalize_skill_refs(raw: Vec<String>) -> Result<Vec<String>, ApiReject> {
     Ok(out)
 }
 
-fn parse_session(raw: &str) -> Result<SessionId, ApiReject> {
+pub(super) fn parse_session(raw: &str) -> Result<SessionId, ApiReject> {
     SessionId::from_str(raw).map_err(|_| bad_request("invalid_message", "bad session id"))
 }
 
@@ -2375,6 +2454,7 @@ fn map_work(err: ene_work::WorkError) -> ApiReject {
 fn map_core(err: CoreError) -> ApiReject {
     match err {
         CoreError::Session(err) => map_session(err),
+        CoreError::Kernel(err) => map_kernel(&err),
         other => bad_request("fault", &other.to_string()),
     }
 }
@@ -2389,12 +2469,19 @@ pub(crate) fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
             continue;
         }
         if report.inner_intent.as_deref() == Some("ask_user") {
+            let (prompt, questions) = ask_user_prompt(state, report);
+            let id = report
+                .job_id
+                .map_or_else(|| report.soul_id.to_string(), |id| id.to_string());
             state.events.emit(
                 DisplayDepth::Surface,
                 json!({
                     "type": "question.asked",
-                    "id": report.soul_id.to_string(),
-                    "prompt": report.speech,
+                    "id": id,
+                    "soul_id": report.soul_id.to_string(),
+                    "prompt": prompt,
+                    "text": prompt,
+                    "questions": questions,
                 }),
             );
         }
@@ -2403,11 +2490,29 @@ pub(crate) fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
             json!({
                 "type": "job.report",
                 "soul_id": report.soul_id.to_string(),
+                "job_id": report.job_id.map(|id| id.to_string()),
                 "speech": report.speech,
                 "inner_intent": report.inner_intent,
                 "starts_conversation": report.starts_conversation,
             }),
         );
+    }
+}
+
+fn ask_user_prompt(state: &AppState, report: &CompanionReport) -> (String, Vec<String>) {
+    let Some(job_id) = report.job_id else {
+        return (report.speech.clone(), vec![report.speech.clone()]);
+    };
+    match state.core.host().combine_pending_questions(job_id) {
+        Ok(turn) if !turn.questions.is_empty() => {
+            let questions = turn
+                .questions
+                .into_iter()
+                .map(|question| question.prompt)
+                .collect();
+            (turn.speech, questions)
+        }
+        _ => (report.speech.clone(), vec![report.speech.clone()]),
     }
 }
 
@@ -2421,20 +2526,108 @@ pub(crate) async fn persist_job_report(state: &AppState, report: &CompanionRepor
     let Some(session) = sessions.iter().find(|meta| meta.ended_at.is_none()) else {
         return;
     };
+    let mut entries = vec![NewEvent::new(
+        session.id,
+        EventKind::ContextSystemMessage,
+        EventPayload::ContextSystemMessage {
+            v: v1(),
+            blocks: vec![Block::text(report.speech.clone())],
+            source_key: "job.report".to_owned(),
+        },
+    )];
+    if report.inner_intent.as_deref() == Some("ask_user")
+        && let Some(job_id) = report.job_id
+        && let Some(question_id) =
+            state
+                .core
+                .host()
+                .open_questions(job_id)
+                .ok()
+                .and_then(|questions| {
+                    questions
+                        .iter()
+                        .rev()
+                        .find(|question| question.prompt == report.speech)
+                        .map(|question| {
+                            QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq)
+                        })
+                })
+    {
+        entries.push(NewEvent::new(
+            session.id,
+            EventKind::DelegationQuestion,
+            EventPayload::DelegationQuestion {
+                v: v1(),
+                delegation_id: job_id,
+                question_id,
+                question: report.speech.clone(),
+            },
+        ));
+    }
     drop(
         state
             .core
             .store()
             .commit(Transaction {
-                entries: vec![NewEvent::new(
-                    session.id,
-                    EventKind::ContextSystemMessage,
-                    EventPayload::ContextSystemMessage {
-                        v: v1(),
-                        blocks: vec![Block::text(report.speech.clone())],
-                        source_key: "job.report".to_owned(),
-                    },
-                )],
+                entries,
+                usage: Vec::new(),
+            })
+            .await,
+    );
+}
+
+async fn persist_job_answer(
+    state: &AppState,
+    job_id: DelegationId,
+    answered: &[(QuestionId, String)],
+) {
+    if answered.is_empty() {
+        return;
+    }
+    let Ok(job) = state.core.host().status_snapshot(job_id) else {
+        return;
+    };
+    let Ok(sessions) = state.core.store().list_sessions(Some(job.soul_id)) else {
+        return;
+    };
+    let Some(session) = sessions.iter().find(|meta| meta.ended_at.is_none()) else {
+        return;
+    };
+    let mut entries = Vec::with_capacity(answered.len().saturating_mul(2));
+    for (question_id, answer_text) in answered {
+        if answer_text.is_empty() {
+            continue;
+        }
+        entries.push(NewEvent::new(
+            session.id,
+            EventKind::UserMessage,
+            EventPayload::UserMessage {
+                v: v1(),
+                turn_id: None,
+                blocks: vec![Block::text(answer_text)],
+                input_modality: "text".to_owned(),
+                client_id: ClientId::new(),
+            },
+        ));
+        entries.push(NewEvent::new(
+            session.id,
+            EventKind::DelegationAnswer,
+            EventPayload::DelegationAnswer {
+                v: v1(),
+                delegation_id: job_id,
+                question_id: *question_id,
+            },
+        ));
+    }
+    if entries.is_empty() {
+        return;
+    }
+    drop(
+        state
+            .core
+            .store()
+            .commit(Transaction {
+                entries,
                 usage: Vec::new(),
             })
             .await,

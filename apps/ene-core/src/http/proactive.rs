@@ -110,17 +110,20 @@ async fn tick_session(
     };
     let registry = state.core.supervisor().registry();
     let mut window_label = String::new();
+    if mind.proactive.sources.activity
+        && let Ok(value) = registry.execute_host("app.active_window", json!({})).await
+    {
+        value
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .clone_into(&mut window_label);
+    }
+    let send_label = ene_work::observation_send_label(&window_label, &mind.proactive.world_state);
     let activity = if mind.proactive.sources.activity {
-        if let Ok(value) = registry.execute_host("app.active_window", json!({})).await {
-            value
-                .get("title")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .clone_into(&mut window_label);
-        }
         Some(ActivitySnapshot {
             idle_seconds: Some(seconds_since_user),
-            active_window_label: window_label.clone(),
+            active_window_label: send_label.clone(),
             recent_change: String::new(),
         })
     } else {
@@ -128,17 +131,32 @@ async fn tick_session(
     };
     let (screen_summary, screen_summary_status) = if mind.proactive.sources.screen_summary {
         match screen {
-            Some(seamed) => {
-                match capture_screen_summary(registry.as_ref(), seamed, &window_label).await {
-                    Some(summary) => (Some(summary), ScreenSummaryStatus::Available),
-                    None => (None, ScreenSummaryStatus::Unavailable),
-                }
-            }
+            Some(seamed) => match capture_screen_summary(state, seamed, &window_label).await {
+                Some(summary) => (Some(summary), ScreenSummaryStatus::Available),
+                None => (None, ScreenSummaryStatus::Unavailable),
+            },
             None => (None, ScreenSummaryStatus::Unavailable),
         }
     } else {
         (None, ScreenSummaryStatus::Disabled)
     };
+    if mind.proactive.world_state.enabled {
+        let mut memory = state.core.world_state().lock();
+        let recent = if screen_summary.is_some() {
+            "screen"
+        } else {
+            ""
+        };
+        ene_work::observe_screen_with_activity(
+            &mut memory,
+            &mind.proactive.world_state,
+            screen_summary.as_deref().unwrap_or(""),
+            seconds_since_user,
+            &send_label,
+            recent,
+        );
+    }
+    let world = state.core.world_state().lock().clone();
     let observation = ProactiveObservation {
         captured_at_unix_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),
         activity,
@@ -159,7 +177,7 @@ async fn tick_session(
         suppression,
         evaluate_quiet_hours(&mind.proactive.quiet_hours, now),
         None,
-        None,
+        Some(&world),
     );
     let outcome = decide_proactive_speech(&mind.proactive, &ctx, Some(classify)).await;
     if outcome.skip.is_some() || !outcome.decision.should_speak {
@@ -183,11 +201,40 @@ async fn tick_session(
 }
 
 async fn capture_screen_summary(
-    registry: &ene_registry::ToolRegistry,
+    state: &AppState,
     classify: &SeamedClassify,
     window_label: &str,
 ) -> Option<String> {
-    let png = ene_work::capture_screenshot(registry).await.ok()?;
-    tracing::debug!(bytes = png.len(), "proactive screenshot captured");
-    classify.summarize_screen(&png, window_label).await.ok()
+    let png = ene_work::capture_screenshot(state.core.supervisor().registry().as_ref())
+        .await
+        .ok()?;
+    let settings = state.core.mind().proactive.world_state;
+    let send_label = ene_work::observation_send_label(window_label, &settings);
+    let action = state.core.observation().lock().evaluate(&png).ok()?;
+    match action {
+        ene_work::ObserveAction::Skip {
+            summary, reason, ..
+        } => {
+            tracing::debug!(?reason, "observation skipped vision");
+            summary
+        }
+        ene_work::ObserveAction::Changed {
+            overview_png,
+            roi_png,
+            ..
+        } => {
+            let payload = ene_work::vision_payload(&overview_png, roi_png.as_deref()).ok()?;
+            tracing::debug!(bytes = payload.len(), "proactive screenshot gated");
+            let summary = classify
+                .summarize_screen(&payload, &send_label)
+                .await
+                .ok()?;
+            state
+                .core
+                .observation()
+                .lock()
+                .commit_summary(summary.clone());
+            Some(summary)
+        }
+    }
 }

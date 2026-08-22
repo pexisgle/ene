@@ -5,8 +5,10 @@
 `ene-body` owns duplex voice state (idle / listening / thinking /
 responding / speaking / interrupting), energy VAD, and lip-sync visemes.
 Production boots `VoiceRuntime::live`: VAD, barge-in, self-voice, and visemes
-run in the core. `POST /sessions/{id}/listen` feeds mic PCM into that machine
-first; a closed utterance is sent to `ai.tasks.stt` when that task is bound.
+run in the core. Stage streams 16 kHz mono `pcm_s16le` on
+`GET /sessions/{id}/listen/stream` (WebSocket binary frames). JSON
+`POST /sessions/{id}/listen` remains for tests and other clients. A closed
+utterance is sent to `ai.tasks.stt` when that task is bound.
 Plugin TTS PCM enters the same machine so lipsync and barge-in see live
 playback. The surface bus emits `voice.state` (`state` plus `barge_in` while
 interrupting) and an empty `audio.chunk` with `abort: true` / `is_final: true`

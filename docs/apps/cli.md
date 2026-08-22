@@ -19,6 +19,10 @@ cargo run -p ene-ctl -- core status
 `core start` launches the `ene-core` binary, waits for `api.json`, and prints
 the token **file path** (not the token). `core stop` signals the recorded PID.
 
+`ene-ctl task list` / `task cancel` / `task answer <id> <text>` talk to jobs.
+`task answer` is `POST /api/v1/jobs/{id}/answer` — it does not send a chat
+follow-up.
+
 There is no desktop-only API. Anything stage can do on the wire,
 `ene-ctl` can do as well.
 

@@ -461,6 +461,14 @@ impl WorkStore {
         Ok(())
     }
 
+    pub fn mark_delivered(&self, id: &str, path: &str) -> Result<(), WorkError> {
+        self.conn.lock().execute(
+            "UPDATE artifacts SET delivered = 1, path = ?2 WHERE id = ?1",
+            params![id, path],
+        )?;
+        Ok(())
+    }
+
     pub fn artifacts_for(&self, job: DelegationId) -> Result<Vec<Artifact>, WorkError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(

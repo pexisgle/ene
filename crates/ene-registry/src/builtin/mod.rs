@@ -38,7 +38,7 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
             fs::execute(name, args)
         }
         "exec.run" | "exec.shell" => exec::execute(name, args),
-        "web.fetch" | "web.search" => web::execute(name, args),
+        "web.fetch" | "web.search" | "web.search_backends" => web::execute(name, args),
         "app.screenshot" | "app.window_list" | "app.active_window" | "app.clipboard_get"
         | "app.clipboard_set" | "app.click" | "app.type" | "app.key" | "app.capabilities"
         | "app.list_monitors" => app::execute(name, args),
@@ -160,6 +160,8 @@ pub fn spec_with_discovery(
         parameters,
         output: json!({"type":"object"}),
         side_effects,
+        broker_socket: None,
+
         category: category.to_owned(),
         keywords: keywords.iter().map(|item| (*item).to_owned()).collect(),
         examples: examples.iter().map(|item| (*item).to_owned()).collect(),

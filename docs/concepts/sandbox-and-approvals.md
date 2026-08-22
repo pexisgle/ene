@@ -15,7 +15,11 @@ Three layers keep tools from touching what they were not granted:
 `fs.read` / `fs.write` are confined with parent-canonicalization (relative
 `../` included). The tool workspace is `<data>/workspace`, not the data
 directory, so `api.token` / `vault.key` / `sessions.db` are not auto-approved
-read targets.
+read targets. Job working copies live at
+`<data>/workspace/jobs/<soul_id>/<job_id>/`. Completing a job copies
+registered artifacts to `<data>/workspace/jobs/<soul_id>/artifacts/` and
+flips `delivered` on `GET /api/v1/artifacts`. That soul `artifacts/` tree
+is not the fs/exec default scope.
 
 Credentials live in the vault (`vault.bin` + `vault.key`), not in plugin
 environment variables. Unknown tools with empty `side_effects` still

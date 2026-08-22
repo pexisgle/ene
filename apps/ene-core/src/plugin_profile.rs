@@ -251,11 +251,16 @@ fn harness_rows(kind: PluginProfileKind, home: &Path) -> Vec<ProfileRow> {
 fn harness_row(plugin: &str, home: &Path) -> ProfileRow {
     let binary = discover_plugin_executable_in(plugin, Some(home));
     let needs_sandbox = matches!(plugin, "tool.fs" | "tool.exec" | "tool.web");
+    let capabilities = if plugin == "tool.web" {
+        vec!["net.fetch".to_owned()]
+    } else {
+        Vec::new()
+    };
     ProfileRow {
         row_id: plugin.to_owned(),
         plugin: plugin.to_owned(),
         requires: Vec::new(),
-        capabilities: Vec::new(),
+        capabilities,
         seams: Vec::new(),
         sandbox_required: needs_sandbox && binary.is_some(),
         config: serde_json::Value::Null,
@@ -409,6 +414,16 @@ mod tests {
         assert!(plugins.contains(&"tool.fs"));
         assert!(!plugins.contains(&"tool.app"));
         assert!(PluginProfileKind::Headless.includes_mcp());
+    }
+
+    #[test]
+    fn web_harness_row_grants_net_fetch() {
+        let rows = harness_rows(PluginProfileKind::Headless, Path::new(""));
+        let web = rows
+            .iter()
+            .find(|row| row.plugin == "tool.web")
+            .expect("tool.web");
+        assert_eq!(web.capabilities, ["net.fetch"]);
     }
 
     #[test]
