@@ -2094,12 +2094,6 @@ fn show_system_inner(
                 0.0..=1.0,
             ));
             ui.end_row();
-            ui.label(i18n::fl("settings-beat-sync"));
-            ui.checkbox(&mut local_settings.beat_sync, "");
-            ui.end_row();
-            ui.label(i18n::fl("settings-beat-sync-device"));
-            ui.text_edit_singleline(&mut local_settings.beat_sync_device);
-            ui.end_row();
         });
     ui.horizontal(|ui| {
         if ui.button(i18n::fl("settings-save-local")).clicked() {
