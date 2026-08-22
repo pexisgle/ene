@@ -137,6 +137,12 @@ refs = ["skill.travel", "skill.morning-brief"]  # tasks/skills.md のカタロ�
   決定的ゲート(cooldown・quiet hours)は貫通しない**
   ([../companion/proactive.md](../companion/proactive.md))。
 
+### Character Card V3 の lorebook
+
+Character Card V3 インポート時も `character_book` は保存互換の対象だが、
+Ene は解釈・検索・identity/context への注入を行わない。製品 UI も
+v1 では実行用の編集や有効化を提供しない。
+
 ## 6. body 定義(`body.toml`)
 
 ```toml
@@ -265,4 +271,3 @@ V3/PNG/CHARX は**読み込みのみ**で正規形式へ変換する。
 ---
 
 - 次: [../tasks/README.md](../tasks/README.md)
-

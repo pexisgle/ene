@@ -16,14 +16,15 @@ bound as a character package. Canonical installs live under
 Import never overwrites an existing install. Size caps apply per entry and
 for the whole archive.
 
-V3 `data` fields (`name`, `description`, `personality`, lorebook, …) and
+V3 `data` fields (`name`, `description`, `personality`, …) and
 `extensions.ene` (expressions, `motion_catalog.motions`, speech) are mapped
 on import. Unknown fields round-trip in `ene-card`.
 
 ## Lorebook and templates
 
-`character_book` entries inject on keyword match (`before_char` /
-`after_char`). Card text may use Character Book Spec macros (`{{char}}`,
+Lorebook data is preserved for import/export compatibility, but Ene does not
+interpret, search, or inject it into model context. Stage v1 has no runtime
+lorebook editor. Card text may use Character Book Spec macros (`{{char}}`,
 `{{user}}`, `{{random:…}}`, `{{date}}`, …). Persona text in W++ / AliChat /
 YAML is flattened into the identity kernel.
 
