@@ -1,4 +1,9 @@
-#![expect(clippy::unwrap_used, clippy::expect_used, reason = "tests fail fast")]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::unreachable,
+    reason = "tests fail fast"
+)]
 
 use ene_fiber::{ProfileRow, Supervisor};
 use ene_registry::{Layer, ToolRegistry};
@@ -44,6 +49,68 @@ async fn out_of_process_utility_registers_and_runs() {
     sup.unload("r-util").await;
     assert!(!sup.surface_has_tool("utility.hash"));
     assert!(sup.fiber("r-util").is_none());
+}
+
+#[tokio::test]
+async fn every_advertised_utility_spec_executes_on_spawned_binary() {
+    let dir = TempDir::new().unwrap();
+    let sup = Supervisor::new(dir.path().to_path_buf(), Arc::new(ToolRegistry::new()));
+    let uid = sup
+        .activate_process(&row("r-util-contract"), &bin())
+        .await
+        .unwrap();
+    let names: Vec<String> = sup
+        .registry()
+        .schemas(Layer::Surface)
+        .iter()
+        .filter_map(|schema| schema.get("name").and_then(serde_json::Value::as_str))
+        .filter_map(|name| name.strip_prefix("utility.").map(str::to_owned))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "calc",
+            "color",
+            "hash",
+            "random",
+            "system_info",
+            "text",
+            "time"
+        ]
+    );
+    for name in [
+        "hash",
+        "time",
+        "system_info",
+        "calc",
+        "color",
+        "random",
+        "text",
+    ] {
+        let result = sup
+            .registry()
+            .execute(
+                &format!("utility.{name}"),
+                sample_args(name),
+                Layer::Surface,
+            )
+            .await;
+        assert!(result.is_ok(), "utility.{name} failed: {result:?}");
+    }
+    let _ = uid;
+    sup.unload("r-util-contract").await;
+}
+
+fn sample_args(action: &str) -> serde_json::Value {
+    match action {
+        "hash" => json!({"text": "hi"}),
+        "time" | "system_info" => json!({}),
+        "calc" => json!({"expr": "1 + 2"}),
+        "color" => json!({"color": "#ff8800", "to": "rgb"}),
+        "random" => json!({"kind": "integer", "min": 0, "max": 0}),
+        "text" => json!({"op": "encode", "text": "hi", "encoding": "base64"}),
+        other => unreachable!("missing contract args for {other}"),
+    }
 }
 
 #[tokio::test]

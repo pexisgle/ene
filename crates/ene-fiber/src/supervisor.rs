@@ -879,7 +879,12 @@ impl Supervisor {
             plugin_id: plugin_id.to_owned(),
         };
         if let Some(kind) = plugin_kind(&row.plugin) {
-            for def in definitions_for(kind) {
+            let advertised: HashSet<String> = tools.iter().map(|spec| spec.name.clone()).collect();
+            for mut def in definitions_for(kind) {
+                if !advertised.contains(&def.name) {
+                    continue;
+                }
+                def.source = source.clone();
                 self.inner.record_tool(fiber, def, Arc::clone(&invoke));
             }
         } else if row.plugin == "tool.dummy" {
