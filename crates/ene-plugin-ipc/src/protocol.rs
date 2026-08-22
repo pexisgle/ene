@@ -163,6 +163,9 @@ pub struct ToolSpecWire {
     /// Example invocations or use cases for discovery.
     #[serde(default)]
     pub examples: Vec<String>,
+    /// When true the host starts the tool asynchronously and frees the turn.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// Tool call request body.
@@ -181,6 +184,54 @@ pub struct ToolResult {
     pub call_id: String,
     pub status: String,
     pub value: serde_json::Value,
+}
+
+/// Host → plugin: start a background execution. The host assigns `execution_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolBackgroundStart {
+    pub call_id: String,
+    pub tool_name: String,
+    pub args: serde_json::Value,
+    pub execution_id: String,
+    #[serde(default)]
+    pub deadline_ms: Option<u64>,
+}
+
+/// Plugin ack of [`ToolBackgroundStart`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolBackgroundStarted {
+    pub execution_id: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Plugin ack of cancel. `status` is `cancelled`, `unknown`, or `already_terminal`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolBackgroundCancelAck {
+    pub execution_id: String,
+    pub status: String,
+}
+
+/// Plugin status. `phase` is `pending`, `running`, `completed`, `failed`,
+/// `cancelled`, `timed_out`, `plugin_crash`, or `unknown`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolBackgroundStatusResult {
+    pub execution_id: String,
+    pub phase: String,
+    #[serde(default)]
+    pub error_class: Option<String>,
+}
+
+/// Plugin → host completion notification (no `id`, like [`Message::Log`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolExecutionComplete {
+    pub execution_id: String,
+    pub call_id: String,
+    pub status: String,
+    pub value: serde_json::Value,
+    #[serde(default)]
+    pub error_class: Option<String>,
 }
 
 /// Plugin → host Broker RPC (`capability.request`).
@@ -303,6 +354,33 @@ pub enum Message {
     ToolCancel {
         id: u64,
         call_id: String,
+    },
+    ToolBackgroundStart {
+        id: u64,
+        body: ToolBackgroundStart,
+    },
+    ToolBackgroundStarted {
+        id: u64,
+        body: ToolBackgroundStarted,
+    },
+    ToolBackgroundCancel {
+        id: u64,
+        execution_id: String,
+    },
+    ToolBackgroundCancelAck {
+        id: u64,
+        body: ToolBackgroundCancelAck,
+    },
+    ToolBackgroundStatus {
+        id: u64,
+        execution_id: String,
+    },
+    ToolBackgroundStatusResult {
+        id: u64,
+        body: ToolBackgroundStatusResult,
+    },
+    ToolExecutionComplete {
+        body: ToolExecutionComplete,
     },
     Shutdown {
         id: u64,
@@ -488,6 +566,13 @@ impl Message {
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
             Self::ToolCancel { .. } => "tool_cancel",
+            Self::ToolBackgroundStart { .. } => "tool_background_start",
+            Self::ToolBackgroundStarted { .. } => "tool_background_started",
+            Self::ToolBackgroundCancel { .. } => "tool_background_cancel",
+            Self::ToolBackgroundCancelAck { .. } => "tool_background_cancel_ack",
+            Self::ToolBackgroundStatus { .. } => "tool_background_status",
+            Self::ToolBackgroundStatusResult { .. } => "tool_background_status_result",
+            Self::ToolExecutionComplete { .. } => "tool_execution_complete",
             Self::Shutdown { .. } => "shutdown",
             Self::Drain { .. } => "drain",
             Self::DrainAck { .. } => "drain_ack",

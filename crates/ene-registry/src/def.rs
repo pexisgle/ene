@@ -25,6 +25,7 @@ pub struct ToolDefinition {
     pub category: String,
     pub keywords: Vec<String>,
     pub examples: Vec<String>,
+    pub background: bool,
 }
 
 impl ToolDefinition {
@@ -43,8 +44,10 @@ impl ToolDefinition {
                 category: host.category,
                 keywords: host.keywords,
                 examples: host.examples,
+                background: spec.background,
             };
         }
+        let background = spec.background;
         let side_effects = spec.side_effects;
         let sensitivity = if side_effects.is_empty() {
             Sensitivity::Medium
@@ -63,6 +66,7 @@ impl ToolDefinition {
             category: spec.category,
             keywords: spec.keywords,
             examples: spec.examples,
+            background,
         }
     }
 

@@ -6,7 +6,7 @@
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        reason = "tests may fail fast"
+        reason = "unit tests use unwrap/expect/panic for assertions"
     )
 )]
 #![deny(unsafe_code)]
@@ -59,8 +59,8 @@ pub use store::{MailboxEntry, WorkStore, next_fire};
 pub use tools::{register_work_tools, surface_shows_delegate};
 pub use types::{
     Artifact, ArtifactKind, CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus,
-    NewJob, NewSchedule, OpenQuestion, Schedule, ScheduleAction, UpgradeReason,
-    WorkDelegationSettings,
+    NewJob, NewSchedule, NewToolExecution, OpenQuestion, Schedule, ScheduleAction, ToolExecStatus,
+    ToolExecution, UpgradeReason, WorkDelegationSettings,
 };
 pub use vision::{
     MINIMAL_PNG, ScreenshotError, capture_screenshot, observe_screen, observe_screen_with_activity,

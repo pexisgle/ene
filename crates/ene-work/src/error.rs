@@ -18,6 +18,8 @@ pub enum WorkError {
     UnknownSkill(String),
     #[error("unknown delegation {0}")]
     UnknownDelegation(String),
+    #[error("unknown execution {0}")]
+    UnknownExecution(String),
     #[error("schedule: {0}")]
     Schedule(String),
     #[error("already completed")]

@@ -75,6 +75,7 @@ pub fn register_memory_tools(
             category: String::new(),
             keywords: Vec::new(),
             examples: Vec::new(),
+            background: false,
         },
         Arc::clone(&invoker) as Arc<dyn ToolInvoke>,
     );
@@ -102,6 +103,7 @@ pub fn register_memory_tools(
             category: String::new(),
             keywords: Vec::new(),
             examples: Vec::new(),
+            background: false,
         },
         invoker as Arc<dyn ToolInvoke>,
     );

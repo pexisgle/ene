@@ -32,6 +32,7 @@ pub fn register_screenshot_tool(registry: &ToolRegistry, invoke: Arc<dyn ToolInv
             category: String::new(),
             keywords: Vec::new(),
             examples: Vec::new(),
+            background: false,
         },
         invoke,
     );

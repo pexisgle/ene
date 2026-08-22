@@ -54,7 +54,9 @@ pub use protocol::{
     ApprovalAnswer, ApprovalQuery, BulkRef, CAPABILITY_VERSION, CORE_VERSION, CapabilityDenied,
     CapabilityGrant, CapabilityGranted, CapabilityRelease, CapabilityRequest,
     DEFAULT_BULK_THRESHOLD_BYTES, FlowControl, HostHello, Negotiated, ProtoId, ProtocolRanges,
-    StreamOpen, StreamOpened, TOOL_VERSION, ToolCall, ToolResult, ToolSpecWire, VersionRange,
+    StreamOpen, StreamOpened, TOOL_VERSION, ToolBackgroundCancelAck, ToolBackgroundStart,
+    ToolBackgroundStarted, ToolBackgroundStatusResult, ToolCall, ToolExecutionComplete, ToolResult,
+    ToolSpecWire, VersionRange,
 };
 pub use provider::{
     AssetVersionView, AssetView, EmbedRequest, EmbedResult, InstallAssetRequest,
@@ -70,6 +72,8 @@ pub use provider::{
 mod tests;
 #[cfg(test)]
 mod tests_asset_version;
+#[cfg(test)]
+mod tests_background;
 #[cfg(test)]
 mod tests_capability;
 #[cfg(test)]

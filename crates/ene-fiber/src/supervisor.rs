@@ -11,8 +11,8 @@ use ene_plugin_ipc::{
     BuiltinKind, EmbedRequest, EmbedResult, HostConn, InstallAssetRequest, InstallAssetResult,
     InstallPhase, InstallStatusRequest, InstallStatusResult, ListAssetsResult, ListModelsRequest,
     ListModelsResult, LlmChunk, LlmGenerateRequest, LlmGeneration, ProviderFaces,
-    SetActiveAssetRequest, SetActiveAssetResult, SttRequest, SttResult, ToolCall, TtsAudio,
-    TtsRequest,
+    SetActiveAssetRequest, SetActiveAssetResult, SttRequest, SttResult, ToolBackgroundStart,
+    ToolCall, TtsAudio, TtsRequest,
 };
 use ene_provider_assets::CatalogRegistry;
 use ene_registry::{
@@ -138,6 +138,64 @@ impl ToolInvoke for PluginInvoker {
                 Err(err.to_string())
             }
         }
+    }
+
+    async fn start_background(
+        &self,
+        execution_id: &str,
+        name: &str,
+        args: Value,
+        deadline_ms: Option<u64>,
+    ) -> Result<(), String> {
+        let mut conn = self.session.conn.lock().await;
+        let started = conn
+            .start_background(ToolBackgroundStart {
+                call_id: Uuid::now_v7().to_string(),
+                tool_name: name.to_owned(),
+                args,
+                execution_id: execution_id.to_owned(),
+                deadline_ms,
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+        if started.accepted {
+            Ok(())
+        } else {
+            Err(started.error.unwrap_or_else(|| "not accepted".to_owned()))
+        }
+    }
+
+    async fn cancel_background(&self, execution_id: &str) -> Result<String, String> {
+        let mut conn = self.session.conn.lock().await;
+        conn.cancel_background(execution_id)
+            .await
+            .map(|ack| ack.status)
+            .map_err(|err| err.to_string())
+    }
+
+    async fn status_background(
+        &self,
+        execution_id: &str,
+    ) -> Result<(String, Option<String>), String> {
+        let mut conn = self.session.conn.lock().await;
+        let status = conn
+            .status_background(execution_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok((status.phase, status.error_class))
+    }
+
+    async fn take_completion(
+        &self,
+        execution_id: &str,
+    ) -> Option<ene_plugin_ipc::ToolExecutionComplete> {
+        let mut conn = self.session.conn.lock().await;
+        conn.take_completion(execution_id)
+    }
+
+    async fn take_completions(&self) -> Vec<ene_plugin_ipc::ToolExecutionComplete> {
+        let mut conn = self.session.conn.lock().await;
+        conn.take_completions()
     }
 }
 

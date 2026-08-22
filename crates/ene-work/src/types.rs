@@ -262,3 +262,76 @@ impl Default for WorkDelegationSettings {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+    PluginCrash,
+}
+
+impl ToolExecStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::PluginCrash => "plugin_crash",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "pending" => Self::Pending,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "timed_out" => Self::TimedOut,
+            "plugin_crash" => Self::PluginCrash,
+            _ => Self::Running,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut | Self::PluginCrash
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolExecution {
+    pub execution_id: String,
+    pub job_id: Option<DelegationId>,
+    pub soul_id: SoulId,
+    pub tool_name: String,
+    pub plugin_id: Option<String>,
+    pub call_id: String,
+    pub status: ToolExecStatus,
+    pub error_class: Option<String>,
+    pub result_json: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub completion_delivered: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewToolExecution {
+    pub execution_id: String,
+    pub job_id: Option<DelegationId>,
+    pub soul_id: SoulId,
+    pub tool_name: String,
+    pub plugin_id: Option<String>,
+    pub call_id: String,
+}

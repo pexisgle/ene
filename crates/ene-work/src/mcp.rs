@@ -73,6 +73,7 @@ pub fn register_mcp_tools(
                 category: String::new(),
                 keywords: Vec::new(),
                 examples: Vec::new(),
+                background: false,
             },
             Arc::clone(invoke),
         );
