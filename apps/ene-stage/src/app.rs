@@ -1542,7 +1542,9 @@ impl ApplicationHandler for StageApp {
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed && !event.repeat =>
                 {
-                    self.handle_overlay_key(event_loop, &event.logical_key);
+                    if !self.surface.chat_input_focused {
+                        self.handle_overlay_key(event_loop, &event.logical_key);
+                    }
                 }
                 WindowEvent::RedrawRequested => self.tick_overlay(),
                 _ => {}
@@ -1590,7 +1592,8 @@ impl ApplicationHandler for StageApp {
             spotlight.on_window_event(&event);
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
         }
-        if let Some(false) = overlay_from_chrome
+        if !self.surface.chat_input_focused
+            && overlay_from_chrome.is_none_or(|wants| !wants)
             && let WindowEvent::KeyboardInput {
                 event: key_event, ..
             } = &event

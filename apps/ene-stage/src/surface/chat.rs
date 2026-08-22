@@ -5,8 +5,8 @@ use crate::i18n;
 use crate::surface::{SurfaceAction, SurfaceUiState};
 use ene_api::MessageMode;
 
-pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
-    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> egui::Response {
+    let output = ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
         ui.horizontal(|ui| {
             if ui.button(i18n::fl("chat-send")).clicked() {
                 state.push_action(SurfaceAction::SendChat);
@@ -121,5 +121,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
                     );
                 }
             });
+
+        response
     });
+
+    output.inner
 }

@@ -44,6 +44,7 @@ pub struct PendingQuestion {
 pub struct SurfaceUiState {
     pub chat_draft: String,
     pub focus_chat: bool,
+    pub chat_input_focused: bool,
     pub history: HistoryResponse,
     pub streaming_text: String,
     pub caption: String,
@@ -68,6 +69,7 @@ impl Default for SurfaceUiState {
         Self {
             chat_draft: String::new(),
             focus_chat: false,
+            chat_input_focused: false,
             history: HistoryResponse {
                 messages: Vec::new(),
                 depth: "surface".to_owned(),
@@ -130,7 +132,7 @@ impl SurfaceUiState {
 }
 
 pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
-    chat::show(ui, state, mic_active);
+    let response = chat::show(ui, state, mic_active);
     if state.pending_approval.is_some() {
         approvals::show(ui.ctx(), state);
     }
@@ -150,6 +152,7 @@ pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool
         ui.ctx()
             .memory_mut(|mem| mem.request_focus(egui::Id::new("stage-chat-input")));
     }
+    state.chat_input_focused = response.has_focus();
 }
 
 pub fn show_caption(
