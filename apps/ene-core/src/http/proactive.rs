@@ -131,12 +131,10 @@ async fn tick_session(
     };
     let (screen_summary, screen_summary_status) = if mind.proactive.sources.screen_summary {
         match screen {
-            Some(seamed) => {
-                match capture_screen_summary(state, seamed, &window_label).await {
-                    Some(summary) => (Some(summary), ScreenSummaryStatus::Available),
-                    None => (None, ScreenSummaryStatus::Unavailable),
-                }
-            }
+            Some(seamed) => match capture_screen_summary(state, seamed, &window_label).await {
+                Some(summary) => (Some(summary), ScreenSummaryStatus::Available),
+                None => (None, ScreenSummaryStatus::Unavailable),
+            },
             None => (None, ScreenSummaryStatus::Unavailable),
         }
     } else {

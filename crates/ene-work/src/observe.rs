@@ -474,7 +474,9 @@ mod tests {
     fn caret(on: bool) -> Vec<u8> {
         rgba_png(96, 54, [20, 20, 24, 255], |img| {
             if on {
-                for y in 20..36 {
+                // Two 2×2 luma cells. A taller bar exceeds CARET_MAX_CELLS and
+                // is treated as a real change on the first blink.
+                for y in 20..24 {
                     img.put_pixel(40, y, Rgba([240, 240, 240, 255]));
                     img.put_pixel(41, y, Rgba([240, 240, 240, 255]));
                 }
@@ -588,24 +590,60 @@ mod tests {
             ObserveAction::Changed { .. }
         ));
         pipe.commit_summary("editor".to_owned());
-        let _first_blink = pipe.evaluate(&on).unwrap();
+        assert!(matches!(
+            pipe.evaluate(&on).unwrap(),
+            ObserveAction::Skip {
+                reason: ObserveSkip::PendingSmall,
+                ..
+            }
+        ));
         let ObserveAction::Skip {
             reason, summary, ..
         } = pipe.evaluate(&off).unwrap()
         else {
-            panic!("caret should skip vision");
+            panic!("caret returning to baseline should skip vision");
         };
         assert!(matches!(
             reason,
-            ObserveSkip::CaretBlink
-                | ObserveSkip::PendingSmall
-                | ObserveSkip::Clock
-                | ObserveSkip::Unchanged
+            ObserveSkip::CaretBlink | ObserveSkip::Unchanged
         ));
         assert_eq!(summary.as_deref(), Some("editor"));
         assert!(matches!(
             pipe.evaluate(&on).unwrap(),
-            ObserveAction::Skip { .. }
+            ObserveAction::Skip {
+                reason: ObserveSkip::CaretBlink,
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn edit_during_caret_blink_emits_roi() {
+        let mut pipe = ObservationPipeline::new();
+        let off = caret(false);
+        assert!(matches!(
+            pipe.evaluate(&off).unwrap(),
+            ObserveAction::Changed { .. }
+        ));
+        pipe.commit_summary("editor".to_owned());
+        assert!(matches!(
+            pipe.evaluate(&caret(true)).unwrap(),
+            ObserveAction::Skip {
+                reason: ObserveSkip::PendingSmall,
+                ..
+            }
+        ));
+        let ObserveAction::Changed {
+            roi_png,
+            roi_composited,
+            ..
+        } = pipe
+            .evaluate(&with_block(60, 8, [200, 40, 40, 255]))
+            .unwrap()
+        else {
+            panic!("real edit during caret pending should summarize");
+        };
+        assert!(roi_png.is_some());
+        assert!(roi_composited);
     }
 }
