@@ -41,6 +41,13 @@ running turn; `compact` compresses history.
    (`origin: delegation`) that uses job-layer tools and `delegation.send`.
    A bookmark request (`workflow.bookmark`) researches with `web.search` when
    that tool is registered, writes Markdown, and delivers it as a job artifact.
+   `delegation.send kind=complete` (and the job runner's implicit complete)
+   copies every registered artifact into
+   `<data>/workspace/jobs/<soul_id>/artifacts/` and sets `delivered` on
+   `GET /api/v1/artifacts`. Failed or cancelled jobs leave artifacts
+   undelivered. The design doc's `<data>/workspaces/<soul_id>/` layout is
+   not used: the live root is singular `workspace`, with per-soul job dirs
+   under `jobs/<soul_id>/<job_id>/`.
 5. Events are committed to `ene-session` (model-visible equals logged).
 6. Live events go out at `surface` or `detail` depth.
 
