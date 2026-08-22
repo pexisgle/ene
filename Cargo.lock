@@ -2444,6 +2444,7 @@ dependencies = [
  "ene-config",
  "ene-ctl",
  "ene-vrm",
+ "fluent",
  "fluent-bundle",
  "fluent-syntax",
  "glam 0.33.3",

@@ -427,6 +427,19 @@ pub fn default_provider_assets_plugin(chat_plugin: &str, plugins: &[PluginView])
 }
 
 #[must_use]
+pub fn provider_asset_load_status(count: usize) -> String {
+    if count == 0 {
+        i18n::fl("plugins-assets-empty")
+    } else {
+        use fluent::FluentValue;
+        i18n::fl_args(
+            "plugins-assets-loaded",
+            HashMap::from([("count", FluentValue::from(count))]),
+        )
+    }
+}
+
+#[must_use]
 pub fn plugin_needs_key(plugin: &str, providers: &Value) -> bool {
     provider_bool(providers, plugin, "needs_key")
 }
@@ -2529,6 +2542,18 @@ fn spawn_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_asset_load_status_reports_success_and_empty_results() {
+        assert_eq!(
+            provider_asset_load_status(2),
+            "Loaded \u{2068}2\u{2069} provider assets."
+        );
+        assert_eq!(
+            provider_asset_load_status(0),
+            i18n::fl("plugins-assets-empty")
+        );
+    }
 
     #[test]
     fn parse_core_fields_reads_effective_tasks_and_profile() {

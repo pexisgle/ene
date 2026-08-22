@@ -51,6 +51,7 @@ rust-embed = "8.11"
 fluent-bundle = { workspace = true }
 i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
 i18n-embed-fl = "0.10"
+fluent = "0.17"
 unic-langid = "0.9"
 cpal = { workspace = true, optional = true }
 rodio = { workspace = true, optional = true, features = ["playback"] }

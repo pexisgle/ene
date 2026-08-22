@@ -409,8 +409,9 @@ impl StageApp {
             }
             AsyncOutcome::ListProviderAssets(result) => match result {
                 Ok(items) => {
+                    let count = items.len();
                     self.detail.provider_assets = items;
-                    self.detail.connections_status.clear();
+                    self.detail.connections_status = detail::provider_asset_load_status(count);
                 }
                 Err(err) => self.detail.connections_status = err,
             },
