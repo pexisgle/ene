@@ -1280,6 +1280,63 @@ fn complete_without_artifacts_is_ok() {
 }
 
 #[test]
+fn complete_fails_when_artifact_source_is_missing() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "pack");
+    let missing = PathBuf::from(&job.workspace_dir).join("gone.md");
+    store
+        .register_artifact(Artifact {
+            id: "art-missing".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ArtifactKind::Markdown,
+            title: "gone".into(),
+            path: missing.to_string_lossy().into_owned(),
+            mime: None,
+            size_bytes: Some(0),
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    assert!(host.complete(job.id, "packed").is_err());
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 1);
+    assert!(!arts[0].delivered);
+    let status = store.get_job(job.id).unwrap().unwrap().status;
+    assert_ne!(status, JobStatus::Completed);
+}
+
+#[test]
+fn complete_fails_when_artifact_copy_errors() {
+    let (dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "pack");
+    let src = PathBuf::from(&job.workspace_dir).join("draft.md");
+    std::fs::write(&src, "body").unwrap();
+    store
+        .register_artifact(Artifact {
+            id: "art-copy".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ArtifactKind::Markdown,
+            title: "draft".into(),
+            path: src.to_string_lossy().into_owned(),
+            mime: None,
+            size_bytes: Some(4),
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    let dest = crate::soul_artifacts_dir(dir.path(), soul).join("art-copy_draft.md");
+    std::fs::create_dir_all(&dest).unwrap();
+    assert!(host.complete(job.id, "packed").is_err());
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 1);
+    assert!(!arts[0].delivered);
+    let status = store.get_job(job.id).unwrap().unwrap().status;
+    assert_ne!(status, JobStatus::Completed);
+}
+
+#[test]
 fn question_timeout_is_24h() {
     let asked = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
     let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 1).unwrap();

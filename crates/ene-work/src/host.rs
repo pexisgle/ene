@@ -600,16 +600,19 @@ impl DelegationHost {
         let dest_dir = soul_artifacts_dir(&self.data_dir, art.soul_id);
         std::fs::create_dir_all(&dest_dir)?;
         let src = Path::new(&art.path);
-        let dest = dest_dir.join(delivered_file_name(&art.id, &art.title, src));
-        if src.is_file() {
-            if src == dest.as_path() {
-                return Ok(art.path.clone());
-            }
-            if std::fs::copy(src, &dest).is_ok() {
-                return Ok(dest.to_string_lossy().into_owned());
-            }
+        if !src.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("artifact source is not a file: {}", art.path),
+            )
+            .into());
         }
-        Ok(art.path.clone())
+        let dest = dest_dir.join(delivered_file_name(&art.id, &art.title, src));
+        if src == dest.as_path() {
+            return Ok(art.path.clone());
+        }
+        std::fs::copy(src, &dest)?;
+        Ok(dest.to_string_lossy().into_owned())
     }
 
     fn require_known(&self, id: DelegationId) -> Result<(), WorkError> {
