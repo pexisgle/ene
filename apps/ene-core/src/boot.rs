@@ -117,7 +117,6 @@ pub struct CoreDaemon {
     mind: parking_lot::Mutex<CompanionMind>,
     last_proactive: parking_lot::Mutex<HashMap<SessionId, Instant>>,
     memory_embed: Arc<SlotQueryEmbed>,
-    #[cfg(test)]
     idle_timeout_secs: parking_lot::Mutex<u64>,
 }
 
@@ -253,7 +252,6 @@ impl CoreDaemon {
             mind: parking_lot::Mutex::new(mind),
             last_proactive: parking_lot::Mutex::new(HashMap::new()),
             memory_embed,
-            #[cfg(test)]
             idle_timeout_secs: parking_lot::Mutex::new(
                 SessionsSettings::default().idle_timeout_secs,
             ),
@@ -611,11 +609,7 @@ impl CoreDaemon {
     }
 
     fn idle_timeout_secs(&self) -> u64 {
-        #[cfg(test)]
-        let secs = *self.idle_timeout_secs.lock();
-        #[cfg(not(test))]
-        let secs = SessionsSettings::default().idle_timeout_secs;
-        secs
+        *self.idle_timeout_secs.lock()
     }
 
     #[cfg(test)]

@@ -48,6 +48,7 @@ impl LaneHub {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.lanes.lock().len()
     }

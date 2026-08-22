@@ -78,6 +78,7 @@ impl ServerHandle {
     /// Ask the server to stop, unload plugins, and wait for the accept loop.
     pub async fn shutdown(mut self) {
         self.abort_background();
+        self.lanes.reset().await;
         self.core.clear_turn_seams();
         self.supervisor.shutdown().await;
         for handle in self.background.drain(..) {
