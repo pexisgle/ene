@@ -2513,23 +2513,22 @@ pub(crate) async fn persist_job_report(state: &AppState, report: &CompanionRepor
     )];
     if report.inner_intent.as_deref() == Some("ask_user")
         && let Some(job_id) = report.job_id
+        && let Some(question_id) =
+            state
+                .core
+                .host()
+                .open_questions(job_id)
+                .ok()
+                .and_then(|questions| {
+                    questions
+                        .iter()
+                        .rev()
+                        .find(|question| question.prompt == report.speech)
+                        .map(|question| {
+                            QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq)
+                        })
+                })
     {
-        let question_id = state
-            .core
-            .host()
-            .open_questions(job_id)
-            .ok()
-            .and_then(|questions| {
-                questions
-                    .iter()
-                    .rev()
-                    .find(|question| question.prompt == report.speech)
-                    .or_else(|| questions.last())
-                    .map(|question| {
-                        QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq)
-                    })
-            })
-            .unwrap_or_default();
         entries.push(NewEvent::new(
             session.id,
             EventKind::DelegationQuestion,

@@ -821,6 +821,124 @@ async fn job_question_answer_reaches_mailbox() {
 }
 
 #[tokio::test]
+async fn combined_job_answers_persist_matching_question_ids() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a trip");
+    core.host().question(job.id, "which city?").unwrap();
+    core.host().question(job.id, "how many days?").unwrap();
+    let sid = SessionId::from_str(&session.id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let question_ids = loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        let ids = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::DelegationQuestion {
+                    question_id,
+                    question,
+                    ..
+                } => Some((*question_id, question.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if ids.len() >= 2 {
+            break ids;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session log missing both delegation questions: {events:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        question_ids.iter().any(|(_, q)| q == "which city?"),
+        "expected city question, got {question_ids:?}"
+    );
+    assert!(
+        question_ids.iter().any(|(_, q)| q == "how many days?"),
+        "expected days question, got {question_ids:?}"
+    );
+    client
+        .answer_job(
+            &job.id.to_string(),
+            &AnswerJobRequest {
+                text: String::new(),
+                answers: vec!["Tokyo".into(), "3".into()],
+            },
+        )
+        .await
+        .unwrap();
+    let mail = core.work().mailbox(job.id).unwrap();
+    assert!(mail.iter().any(|(direction, kind, body)| {
+        direction == "parent_to_child" && kind == "answer" && body == "Tokyo"
+    }));
+    assert!(mail.iter().any(|(direction, kind, body)| {
+        direction == "parent_to_child" && kind == "answer" && body == "3"
+    }));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let events = loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        let answers = events
+            .iter()
+            .filter(|event| matches!(event.payload, EventPayload::DelegationAnswer { .. }))
+            .count();
+        if answers >= 2 {
+            break events;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session log missing both delegation answers: {events:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    for (question_id, _) in &question_ids {
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    &event.payload,
+                    EventPayload::DelegationAnswer {
+                        question_id: answer_qid,
+                        delegation_id,
+                        ..
+                    } if answer_qid == question_id && *delegation_id == job.id
+                )
+            }),
+            "missing matching delegation/answer for {question_id}: {events:?}"
+        );
+    }
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::UserMessage { blocks, .. }
+                    if blocks.iter().any(|block| block.as_text() == Some("Tokyo"))
+            )
+        }),
+        "session log must record Tokyo: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::UserMessage { blocks, .. }
+                    if blocks.iter().any(|block| block.as_text() == Some("3"))
+            )
+        }),
+        "session log must record days answer: {events:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn job_question_timeout_loop_writes_assumption() {
     let (_dir, _client, core, server) = boot_server().await;
     let soul = core.occupants()[0].0;
