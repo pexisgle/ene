@@ -9,15 +9,17 @@ publish.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
 blake3 = { workspace = true }
 ene-kernel = { workspace = true }
-ene-plugin-ipc = { workspace = true }
+ene-plugin-ipc = { workspace = true, features = ["net"] }
 ene-provider-assets = { workspace = true }
 ene-registry = { workspace = true }
 ene-config = { workspace = true }
 ene-sandbox = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
+rg-regex = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,6 +30,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

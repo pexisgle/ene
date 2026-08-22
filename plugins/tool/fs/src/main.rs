@@ -2,6 +2,7 @@
 
 #![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
 
+mod broker_session;
 mod logic;
 
 use tracing_subscriber::EnvFilter;
@@ -22,7 +23,9 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    if let Err(err) = ene_registry::run_tool_plugin("tool.fs", logic::specs, logic::execute).await {
+    if let Err(err) =
+        ene_registry::run_tool_plugin("tool.fs", logic::specs, broker_session::execute).await
+    {
         tracing::error!(error = %err, plugin = "tool.fs", "fatal");
         std::process::exit(1);
     }

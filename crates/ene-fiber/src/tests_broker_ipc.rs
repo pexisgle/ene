@@ -1,4 +1,5 @@
 use crate::{Broker, BrokerServer, FiberUid};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use ene_plugin_ipc::{BrokerClient, BrokerRequest, BrokerResponse};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -59,6 +60,53 @@ async fn broker_client_round_trips_fs_read_and_denies_undeclared_ops() {
         !socket.exists(),
         "broker socket must be removed when the server is dropped"
     );
+}
+
+#[tokio::test]
+async fn broker_client_round_trips_binary_files() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("image.bin"), [0_u8, 1, 2, 255]).unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    broker.grant(uid, "fs.read");
+    broker.grant(uid, "fs.write");
+
+    let server = BrokerServer::bind(
+        Arc::new(parking_lot::Mutex::new(broker)),
+        uid,
+        "r-broker-binary",
+        "test-token",
+    )
+    .unwrap();
+    let mut client = BrokerClient::from_path(server.endpoint()).await.unwrap();
+    client
+        .call(BrokerRequest::Hello {
+            token: "test-token".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let read = client
+        .call(BrokerRequest::FsReadBytes {
+            path: dir.path().join("image.bin").display().to_string(),
+        })
+        .await
+        .unwrap();
+    let BrokerResponse::FsReadBytesOk { bytes_base64 } = read else {
+        unreachable!("expected binary read response, got {read:?}")
+    };
+    assert_eq!(STANDARD.decode(bytes_base64).unwrap(), [0_u8, 1, 2, 255]);
+
+    let output = dir.path().join("copy.bin");
+    let written = client
+        .call(BrokerRequest::FsWriteBytes {
+            path: output.display().to_string(),
+            bytes_base64: STANDARD.encode([9_u8, 0, 255]),
+        })
+        .await
+        .unwrap();
+    assert_eq!(written, BrokerResponse::FsWriteBytesOk);
+    assert_eq!(std::fs::read(&output).unwrap(), [9_u8, 0, 255]);
 }
 
 #[tokio::test]
