@@ -150,6 +150,10 @@ pub struct ToolSpecWire {
     pub parameters: serde_json::Value,
     pub output: serde_json::Value,
     pub side_effects: Vec<String>,
+    /// Unix socket path where the host serves broker RPCs for this plugin.
+    #[serde(default)]
+    pub broker_socket: Option<String>,
+
     /// Implementation-agnostic grouping label for discovery.
     #[serde(default)]
     pub category: String,
