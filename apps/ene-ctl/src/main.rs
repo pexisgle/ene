@@ -9,10 +9,13 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use ene_api::{
-    AnswerJobRequest, ApiClient, CreateSessionRequest, MessageMode, MessageRequest, ResourceKind,
-    SoulSkillsPatch,
+    AnswerJobRequest, ApiClient, CreateScheduleRequest, CreateSessionRequest, ResourceKind,
+    SoulSkillsPatch, ToolTestRequest,
 };
+use ene_ctl::chat::{self, ChatOpts, ChatPorts};
 use ene_ctl::core;
+use ene_ctl::inspect;
+use ene_ctl::schedule;
 use ene_ctl::session;
 
 #[derive(Parser, Debug)]
@@ -28,7 +31,7 @@ struct Args {
     #[arg(long, default_value = "cli")]
     client_id: String,
     /// Show inner / thinking (detail depth)
-    #[arg(long)]
+    #[arg(long, global = true)]
     verbose: bool,
     #[command(subcommand)]
     cmd: Cmd,
@@ -43,8 +46,13 @@ enum Cmd {
     },
     /// GET /health
     Status,
-    /// Text turn (surface by default)
-    Chat { session: String, text: String },
+    /// Text turn (surface by default). Omit TEXT for a REPL.
+    Chat {
+        /// Session id, or soul id (reuses an open conversation or creates one)
+        target: String,
+        /// One-shot prompt. When omitted, read turns from stdin until `.quit` / EOF
+        text: Option<String>,
+    },
     Soul {
         #[command(subcommand)]
         op: SoulCmd,
@@ -168,11 +176,31 @@ enum MemoryCmd {
 #[derive(Subcommand, Debug)]
 enum ScheduleCmd {
     List,
+    /// Create a cron schedule (quote SPEC when it contains spaces)
+    Add {
+        soul_id: String,
+        name: String,
+        spec: String,
+        #[arg(long, default_value = "UTC")]
+        timezone: String,
+        #[arg(long, default_value = "remind")]
+        action: String,
+        #[arg(long)]
+        action_ref: Option<String>,
+        #[arg(long)]
+        important: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum ToolCmd {
     List,
+    /// Execute a tool through POST /api/v1/tools/{name}/test
+    Call {
+        name: String,
+        /// JSON object of arguments (default `{}`)
+        arguments: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -184,7 +212,13 @@ enum PluginCmd {
 
 #[derive(Subcommand, Debug)]
 enum DebugCmd {
-    Log { session: String },
+    Log {
+        session: String,
+    },
+    /// View a job's child session (or a delegation session id) at detail depth
+    Delegation {
+        id: String,
+    },
     Spans,
 }
 
@@ -225,33 +259,21 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
             let health = client.health().await?;
             println!("{} {}", health.status, health.bind);
         }
-        Cmd::Chat { session, text } => {
-            let sent = client
-                .send_message(
-                    session,
-                    &MessageRequest {
-                        text: text.clone(),
-                        mode: MessageMode::Prompt,
-                        input_modality: None,
-                    },
-                    None,
-                )
-                .await?;
-            if args.verbose {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&sent)
-                        .map_err(|err| ene_api::ApiError::Codec(err.to_string()))?
-                );
-            }
-            let depth = if args.verbose { "detail" } else { "surface" };
-            let history = client.history(session, depth).await?;
-            for message in history.messages {
-                if !args.verbose && message.role == "inner" {
-                    continue;
-                }
-                println!("{}: {}", message.role, message.text);
-            }
+        Cmd::Chat { target, text } => {
+            chat::run_chat(
+                client,
+                &ChatOpts {
+                    target,
+                    text: text.as_deref(),
+                    verbose: args.verbose,
+                },
+                ChatPorts {
+                    input: std::io::stdin().lock(),
+                    output: std::io::stdout(),
+                    prompt: std::io::stderr(),
+                },
+            )
+            .await?;
         }
         Cmd::Soul { op } => match op {
             SoulCmd::List => print_json(&client.list_souls().await?)?,
@@ -328,9 +350,47 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
         },
         Cmd::Schedule { op } => match op {
             ScheduleCmd::List => print_json(&client.list_schedules().await?)?,
+            ScheduleCmd::Add {
+                soul_id,
+                name,
+                spec,
+                timezone,
+                action,
+                action_ref,
+                important,
+            } => {
+                schedule::validate_cron_spec(spec).map_err(ene_api::ApiError::Codec)?;
+                schedule::validate_timezone(timezone).map_err(ene_api::ApiError::Codec)?;
+                schedule::validate_action(action).map_err(ene_api::ApiError::Codec)?;
+                print_json(
+                    &client
+                        .create_schedule(&CreateScheduleRequest {
+                            soul_id: soul_id.clone(),
+                            name: name.clone(),
+                            spec: spec.clone(),
+                            timezone: timezone.clone(),
+                            action: action.clone(),
+                            action_ref: action_ref.clone(),
+                            important: *important,
+                        })
+                        .await?,
+                )?;
+            }
         },
         Cmd::Tool { op } => match op {
             ToolCmd::List => print_json(&client.list_tools().await?)?,
+            ToolCmd::Call { name, arguments } => {
+                print_json(
+                    &client
+                        .test_tool(
+                            name,
+                            &ToolTestRequest {
+                                arguments: parse_tool_args(arguments.as_deref())?,
+                            },
+                        )
+                        .await?,
+                )?;
+            }
         },
         Cmd::Plugin { op } => match op {
             PluginCmd::List => print_json(&client.list_plugins().await?)?,
@@ -340,6 +400,9 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
         Cmd::Usage { session } => print_json(&client.usage(session.as_deref()).await?)?,
         Cmd::Debug { op } => match op {
             DebugCmd::Log { session } => print_json(&client.history(session, "detail").await?)?,
+            DebugCmd::Delegation { id } => {
+                print_json(&inspect::show_delegation(client, id).await?)?;
+            }
             DebugCmd::Spans => print_json(&client.diag_spans().await?)?,
         },
         Cmd::Exclusive { op } => match op {
@@ -363,6 +426,15 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
         Cmd::Core { .. } => unreachable!("core commands are handled before run_api"),
     }
     Ok(())
+}
+
+fn parse_tool_args(raw: Option<&str>) -> Result<serde_json::Value, ene_api::ApiError> {
+    match raw {
+        None | Some("") => Ok(serde_json::json!({})),
+        Some(text) => {
+            serde_json::from_str(text).map_err(|err| ene_api::ApiError::Codec(err.to_string()))
+        }
+    }
 }
 
 fn print_json<T: serde::Serialize>(value: &T) -> Result<(), ene_api::ApiError> {

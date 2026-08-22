@@ -2320,6 +2320,7 @@ fn session_view(meta: ene_session::SessionMeta) -> SessionView {
         next_seq: meta.next_seq,
         ended_at: meta.ended_at,
         end_reason: meta.end_reason,
+        delegation_id: meta.delegation_id.map(|id| id.to_string()),
     }
 }
 

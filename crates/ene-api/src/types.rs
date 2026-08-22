@@ -100,6 +100,8 @@ pub struct SessionView {
     pub ended_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

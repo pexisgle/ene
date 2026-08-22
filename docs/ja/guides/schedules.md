@@ -33,11 +33,15 @@
 
 ## スケジュールの管理
 
-`ene-ctl schedule list` が HTTP の一覧を出します。作成 / 更新 / 削除は
-`/api/v1/schedules` です:
+`ene-ctl schedule list` が HTTP の一覧を出します。`ene-ctl schedule add` は
+`spec` が 5 または 6 フィールドの cron であることと、`timezone` が IANA 名
+（または `UTC`）であることを確認してから行を作ります。空白を含む `spec` は
+引用してください。作成 / 更新 / 削除は `/api/v1/schedules` でもできます:
 
 ```sh
 ene-ctl schedule list
+ene-ctl schedule add <soul-id> morning "0 9 * * *" --timezone UTC
+ene-ctl schedule add <soul-id> standup "0 30 9 * * 1-5" --timezone Asia/Tokyo --action remind
 ```
 
 `PATCH` は `enabled` を切り替えます。発火はサーバ側です。クライアントが

@@ -16,7 +16,9 @@ name = "ene_ctl"
 path = "src/lib.rs"
 
 [dependencies]
+chrono-tz = { workspace = true }
 clap = { workspace = true, features = ["env"] }
+cron = { workspace = true }
 ene-api = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde = { workspace = true }
