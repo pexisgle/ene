@@ -1608,6 +1608,7 @@ mod tests {
         assert_eq!(next, "BEGIN\nnot anchor\nEND\nOK\n");
     }
 
+    #[test]
     fn glob_lists_sorted_relative_paths_and_caps() {
         let dir = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
