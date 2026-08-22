@@ -48,7 +48,10 @@ candidates wait in the pending queue. Resolve them through
 Each turn, recall in `ene-companion` scores title/content overlap, recency,
 and salience. When an embedding query vector is present (a bound
 `ai.tasks.embedding` or chat-task fallback), cosine against
-`memories.embedding` is added to the same ranker. Auto-recall
+`memories.embedding` is added to the same ranker. After scoring, MMR
+re-ranks with `mind.recall.mmr_lambda` (1.0 keeps pure relevance, 0.0
+maximizes diversity via embedding cosine when both rows have same-dimension
+vectors, otherwise title-token overlap). Auto-recall
 (`RecallPrefetch`) and the surface tool `memory.recall` share that path.
 Unconfigured embedding
 keeps lexical recall: a query with no overlapping tokens returns no hits

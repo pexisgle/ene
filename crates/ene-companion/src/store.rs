@@ -9,6 +9,7 @@ use chrono::Utc;
 use ene_session::{BodyId, SoulId};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -536,35 +537,23 @@ impl CompanionStore {
                 + weights.recency * recency
                 + weights.salience * mem.salience
                 + weights.embedding * embed;
-            scored.push((score, mem));
-        }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut picked: Vec<RecalledMemory> = Vec::new();
-        let mut touch_ids = Vec::new();
-        for (score, mem) in scored {
-            if picked.len() >= budget.max(1) {
-                break;
-            }
-            if picked
-                .iter()
-                .any(|other: &RecalledMemory| titles_too_close(&other.title, &mem.title))
-            {
-                continue;
-            }
-            touch_ids.push(mem.id);
-            picked.push(RecalledMemory {
-                id: mem.id,
-                kind: mem.kind,
-                scope: mem.scope,
-                title: mem.title,
-                content: mem.content,
+            scored.push(RankedMemory {
                 score,
+                mem,
+                embedding: blob.map_or_else(Vec::new, |bytes| decode_f32_slice(&bytes)),
             });
         }
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let picked = select_mmr(scored, budget.max(1), weights.mmr_lambda);
         drop(stmt);
         drop(conn);
-        for id in touch_ids {
-            self.touch(id)?;
+        for recalled in &picked {
+            self.touch(recalled.id)?;
         }
         Ok(picked)
     }
@@ -993,6 +982,126 @@ fn cosine(left: &[f32], right: &[f32]) -> f32 {
     }
 }
 
+struct RankedMemory {
+    score: f32,
+    mem: MemoryRecord,
+    embedding: Vec<f32>,
+}
+
+fn select_mmr(remaining: Vec<RankedMemory>, budget: usize, lambda: f32) -> Vec<RecalledMemory> {
+    let lambda = if lambda.is_finite() {
+        lambda.clamp(0.0, 1.0)
+    } else {
+        0.7
+    };
+    let max_score = remaining
+        .iter()
+        .map(|row| row.score)
+        .fold(0.0_f32, f32::max);
+    let mut remaining = remaining;
+    let mut picked: Vec<RankedMemory> = Vec::new();
+    while picked.len() < budget && !remaining.is_empty() {
+        let mut best: Option<(usize, f32)> = None;
+        for (index, candidate) in remaining.iter().enumerate() {
+            if picked
+                .iter()
+                .any(|row| titles_too_close(&row.mem.title, &candidate.mem.title))
+            {
+                continue;
+            }
+            let mmr = mmr_score(candidate, &picked, lambda, max_score);
+            match best {
+                Some((_, best_mmr)) if mmr <= best_mmr => {}
+                _ => best = Some((index, mmr)),
+            }
+        }
+        let Some((index, _)) = best else {
+            break;
+        };
+        picked.push(remaining.swap_remove(index));
+    }
+    picked
+        .into_iter()
+        .map(|row| RecalledMemory {
+            id: row.mem.id,
+            kind: row.mem.kind,
+            scope: row.mem.scope,
+            title: row.mem.title,
+            content: row.mem.content,
+            score: row.score,
+        })
+        .collect()
+}
+
+fn mmr_score(
+    candidate: &RankedMemory,
+    picked: &[RankedMemory],
+    lambda: f32,
+    max_score: f32,
+) -> f32 {
+    let relevance = if max_score > f32::EPSILON {
+        (candidate.score / max_score).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let overlap = picked
+        .iter()
+        .map(|row| {
+            pairwise_similarity(
+                &candidate.mem.title,
+                &candidate.embedding,
+                &row.mem.title,
+                &row.embedding,
+            )
+        })
+        .fold(0.0_f32, f32::max);
+    lambda.mul_add(relevance, (lambda - 1.0) * overlap)
+}
+
+fn pairwise_similarity(
+    left_title: &str,
+    left_vec: &[f32],
+    right_title: &str,
+    right_vec: &[f32],
+) -> f32 {
+    if titles_too_close(left_title, right_title) {
+        return 1.0;
+    }
+    if pairwise_embeddings_usable(left_vec, right_vec) {
+        cosine(left_vec, right_vec).max(0.0)
+    } else {
+        title_jaccard(left_title, right_title)
+    }
+}
+
+fn pairwise_embeddings_usable(left: &[f32], right: &[f32]) -> bool {
+    !left.is_empty() && left.len() == right.len()
+}
+
+fn title_jaccard(left: &str, right: &str) -> f32 {
+    let left_tokens = title_tokens(left);
+    let right_tokens = title_tokens(right);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return 0.0;
+    }
+    let intersection = left_tokens.intersection(&right_tokens).count();
+    let union = left_tokens
+        .len()
+        .saturating_add(right_tokens.len())
+        .saturating_sub(intersection);
+    let intersection = u16::try_from(intersection).unwrap_or(u16::MAX);
+    let union = u16::try_from(union.max(1)).unwrap_or(u16::MAX);
+    f32::from(intersection) / f32::from(union)
+}
+
+fn title_tokens(title: &str) -> BTreeSet<String> {
+    title
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 fn titles_too_close(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
@@ -1006,5 +1115,34 @@ mod ranking_tests {
         assert!((cosine(&[1.0, 0.0], &[2.0, 0.0]) - 1.0).abs() < 1e-5);
         assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-5);
         assert!(cosine(&[1.0], &[1.0, 0.0]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn title_jaccard_is_one_for_same_tokens() {
+        assert!((super::title_jaccard("Paris Cafe", "paris cafe") - 1.0).abs() < 1e-5);
+        assert!(super::title_jaccard("Paris cafe", "Tokyo sushi") < 0.01);
+        assert!(super::title_jaccard("Paris cafe", "Paris restaurants") > 0.2);
+    }
+
+    #[test]
+    fn orthogonal_or_negative_embeddings_do_not_fall_back_to_title_jaccard() {
+        let left = "Paris cafe";
+        let right = "Paris restaurants";
+        let jaccard = super::title_jaccard(left, right);
+        assert!(jaccard > 0.2, "precondition: titles share a token");
+        let orthogonal = super::pairwise_similarity(left, &[1.0, 0.0], right, &[0.0, 1.0]);
+        assert!(
+            orthogonal.abs() < 1e-5,
+            "orthogonal embeddings must keep cosine 0, not Jaccard {jaccard}: {orthogonal}"
+        );
+        let opposite = super::pairwise_similarity(left, &[1.0, 0.0], right, &[-1.0, 0.0]);
+        assert!(
+            opposite.abs() < 1e-5,
+            "anti-aligned embeddings must stay non-negative cosine, not Jaccard {jaccard}: {opposite}"
+        );
+        let missing = super::pairwise_similarity(left, &[], right, &[]);
+        assert!((missing - jaccard).abs() < 1e-5);
+        let mismatched = super::pairwise_similarity(left, &[1.0], right, &[1.0, 0.0]);
+        assert!((mismatched - jaccard).abs() < 1e-5);
     }
 }
