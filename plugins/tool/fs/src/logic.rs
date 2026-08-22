@@ -1439,12 +1439,15 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         fs::create_dir(dir.path().join("nested")).unwrap();
         fs::write(dir.path().join("nested/a.txt"), "x").unwrap();
-        let err = execute(
-            "fs.delete",
-            &json!({"path": dir.path().join("nested").to_string_lossy()}),
-        )
-        .unwrap_err();
-        assert!(err.contains("not empty"), "{err}");
+        with_workspace(&dir, || {
+            let err = execute(
+                "fs.delete",
+                &json!({"path": dir.path().join("nested").to_string_lossy()}),
+            )
+            .unwrap_err();
+            assert!(err.contains("not empty"), "{err}");
+            Ok(())
+        });
     }
 
     #[test]
@@ -1505,8 +1508,11 @@ mod tests {
         let link = dir.path().join("link.txt");
         fs::write(&target, "x").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let err = execute("fs.delete", &json!({"path": link.to_string_lossy()})).unwrap_err();
-        assert!(err.contains("symlink"), "{err}");
-        assert!(target.exists());
+        with_workspace(&dir, || {
+            let err = execute("fs.delete", &json!({"path": link.to_string_lossy()})).unwrap_err();
+            assert!(err.contains("symlink"), "{err}");
+            assert!(target.exists());
+            Ok(())
+        });
     }
 }

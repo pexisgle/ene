@@ -121,12 +121,8 @@ pub fn host_spec_for(name: &str) -> Option<ToolSpecWire> {
 #[must_use]
 pub fn host_sensitivity(name: &str) -> Sensitivity {
     match name {
-        "fs.delete"
-        | "app.screenshot"
-        | "app.window_list"
-        | "app.active_window"
-        | "app.clipboard_get"
-        | "app.list_monitors" => Sensitivity::High,
+        "fs.delete" | "app.screenshot" | "app.window_list" | "app.active_window"
+        | "app.clipboard_get" | "app.list_monitors" => Sensitivity::High,
         _ => Sensitivity::None,
     }
 }

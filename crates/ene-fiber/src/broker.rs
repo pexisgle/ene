@@ -110,49 +110,6 @@ fn confine_lexical(
     Ok(resolved)
 }
 
-#[cfg(test)]
-mod confine_tests {
-    use super::{Broker, BrokerError, confine_lexical};
-    use crate::fiber::FiberUid;
-    use std::path::Path;
-    use tempfile::TempDir;
-
-    #[test]
-    fn fs_delete_rejects_workspace_symlink_to_in_workspace_file() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("target.txt"), "secret").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("target.txt", dir.path().join("link.txt")).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file("target.txt", dir.path().join("link.txt")).unwrap();
-        let mut broker = Broker::new(dir.path().to_path_buf());
-        let uid = FiberUid::new();
-        broker.grant(uid, "fs.delete");
-        assert!(matches!(
-            broker.fs_delete(uid, Path::new("link.txt")),
-            Err(BrokerError::Symlink)
-        ));
-        assert!(dir.path().join("target.txt").exists());
-    }
-
-    #[test]
-    fn confine_lexical_does_not_dereference_final_component() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("target.txt"), "secret").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("target.txt", dir.path().join("link.txt")).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file("target.txt", dir.path().join("link.txt")).unwrap();
-        let lexical = confine_lexical(dir.path(), Path::new("link.txt"), false).unwrap();
-        assert!(
-            std::fs::symlink_metadata(&lexical)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-    }
-}
-
 fn canonicalize_parent(
     base: &Path,
     parent: &Path,
@@ -498,5 +455,48 @@ impl Drop for Broker {
         for (_, mut live) in self.sidecars.drain() {
             sidecar::terminate(&mut live.child);
         }
+    }
+}
+
+#[cfg(test)]
+mod confine_tests {
+    use super::{Broker, BrokerError, confine_lexical};
+    use crate::fiber::FiberUid;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    #[test]
+    fn fs_delete_rejects_workspace_symlink_to_in_workspace_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("target.txt"), "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("target.txt", dir.path().join("link.txt")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file("target.txt", dir.path().join("link.txt")).unwrap();
+        let mut broker = Broker::new(dir.path().to_path_buf());
+        let uid = FiberUid::new();
+        broker.grant(uid, "fs.delete");
+        assert!(matches!(
+            broker.fs_delete(uid, Path::new("link.txt")),
+            Err(BrokerError::Symlink)
+        ));
+        assert!(dir.path().join("target.txt").exists());
+    }
+
+    #[test]
+    fn confine_lexical_does_not_dereference_final_component() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("target.txt"), "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("target.txt", dir.path().join("link.txt")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file("target.txt", dir.path().join("link.txt")).unwrap();
+        let lexical = confine_lexical(dir.path(), Path::new("link.txt"), false).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&lexical)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }
