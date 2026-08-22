@@ -1,5 +1,6 @@
 use crate::{Broker, BrokerServer, FiberUid};
 use ene_plugin_ipc::{BrokerClient, BrokerRequest, BrokerResponse};
+use grep::searcher::{BinaryDetection, SearcherBuilder};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -89,6 +90,9 @@ async fn broker_client_round_trips_fs_search() {
     #![cfg_attr(test, expect(clippy::panic, reason = "tests fail fast"))]
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("input.txt"), "alpha\nbeta\n").unwrap();
+    let _searcher = SearcherBuilder::new()
+        .binary_detection(BinaryDetection::quit(b'r'))
+        .build();
     let mut broker = Broker::new(dir.path().to_path_buf());
     let uid = FiberUid::new();
     broker.grant(uid, "fs.search");
