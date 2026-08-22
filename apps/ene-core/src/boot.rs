@@ -117,6 +117,8 @@ pub struct CoreDaemon {
     mind: parking_lot::Mutex<CompanionMind>,
     last_proactive: parking_lot::Mutex<HashMap<SessionId, Instant>>,
     memory_embed: Arc<SlotQueryEmbed>,
+    #[cfg(test)]
+    idle_timeout_secs: parking_lot::Mutex<u64>,
 }
 
 impl CoreDaemon {
@@ -251,6 +253,10 @@ impl CoreDaemon {
             mind: parking_lot::Mutex::new(mind),
             last_proactive: parking_lot::Mutex::new(HashMap::new()),
             memory_embed,
+            #[cfg(test)]
+            idle_timeout_secs: parking_lot::Mutex::new(
+                SessionsSettings::default().idle_timeout_secs,
+            ),
         })
     }
 
@@ -570,13 +576,19 @@ impl CoreDaemon {
     }
 
     /// End conversations whose last event is older than `store.sessions.idle_timeout_secs`.
-    pub async fn end_idle_sessions(&self) -> Result<u32, CoreError> {
-        let timeout_secs = SessionsSettings::default().idle_timeout_secs;
+    pub async fn end_idle_sessions(&self) -> Result<Vec<SessionId>, CoreError> {
+        self.end_idle_sessions_since(self.idle_timeout_secs()).await
+    }
+
+    async fn end_idle_sessions_since(
+        &self,
+        timeout_secs: u64,
+    ) -> Result<Vec<SessionId>, CoreError> {
         if timeout_secs == 0 {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         let now = chrono::Utc::now();
-        let mut ended = 0_u32;
+        let mut ended = Vec::new();
         for meta in self.store.list_sessions(None)? {
             if meta.ended_at.is_some() {
                 continue;
@@ -593,9 +605,22 @@ impl CoreDaemon {
             }
             self.end_session(meta.id, SessionEndReason::IdleTimeout)
                 .await?;
-            ended = ended.saturating_add(1);
+            ended.push(meta.id);
         }
         Ok(ended)
+    }
+
+    fn idle_timeout_secs(&self) -> u64 {
+        #[cfg(test)]
+        let secs = *self.idle_timeout_secs.lock();
+        #[cfg(not(test))]
+        let secs = SessionsSettings::default().idle_timeout_secs;
+        secs
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_idle_timeout_secs(&self, secs: u64) {
+        *self.idle_timeout_secs.lock() = secs;
     }
 
     pub async fn end_session(

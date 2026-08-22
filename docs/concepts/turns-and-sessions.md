@@ -96,4 +96,8 @@ A **session** is a contiguous conversation with one soul, identified by a
 split, and end sessions against the HTTP API.
 
 Idle end and explicit split are server-side. Compaction writes a summary
-into the log so later turns stay in budget.
+into the log so later turns stay in budget. Ending a session (explicit
+`POST /api/v1/sessions/{id}/end`, idle timeout, or split of a live
+session) writes `session/end` and drops that session's dialogue-lane actor
+from the in-process hub. A later prompt on the ended session fails with
+`closed`.

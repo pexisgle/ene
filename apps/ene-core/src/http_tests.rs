@@ -1526,12 +1526,119 @@ async fn boot_seeds_two_souls_and_session_ops() {
 
     let barge = client.barge_in(&split.session.id).await;
     assert!(
-        barge.is_ok()
-            || barge
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.error_class() == "no_active_operation")
+        barge
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.error_class() == "closed")
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn end_session_releases_lane_actor() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("release lane".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(server.lane_count(), 0);
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    assert_eq!(server.lane_count(), 1);
+
+    let ended = client
+        .end_session(
+            &session.id,
+            &EndSessionRequest {
+                reason: "explicit".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ended.end_reason.as_deref(), Some("explicit"));
+    assert_eq!(server.lane_count(), 0);
+
+    let err = client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "after end".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "closed");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn idle_timeout_releases_lane_actor() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul,
+            title: Some("idle release".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    assert_eq!(server.lane_count(), 1);
+
+    core.set_idle_timeout_secs(1);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let listed = client.list_sessions(None).await.unwrap();
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.id == session.id && item.ended_at.is_some())
+    );
+    assert_eq!(server.lane_count(), 0);
+
+    let err = client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "after idle".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "closed");
     server.shutdown().await;
 }
 

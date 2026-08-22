@@ -63,6 +63,7 @@ pub struct ServerHandle {
     supervisor: Arc<ene_fiber::Supervisor>,
     host: Arc<ene_work::DelegationHost>,
     core: Arc<CoreDaemon>,
+    lanes: Arc<LaneHub>,
 }
 
 impl ServerHandle {
@@ -90,6 +91,12 @@ impl ServerHandle {
         if let Some(join) = self.join.take() {
             drop(join.await);
         }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn lane_count(&self) -> usize {
+        self.lanes.len()
     }
 }
 
@@ -201,10 +208,11 @@ impl CoreDaemon {
             &self,
             Arc::clone(&classify),
         )));
+        let lanes = Arc::new(LaneHub::new(model));
         let state = AppState {
             popup: Arc::clone(self.popup()),
             core: Arc::clone(&self),
-            lanes: Arc::new(LaneHub::new(model)),
+            lanes: Arc::clone(&lanes),
             exclusive: Arc::new(ExclusiveHub::new(last_used)),
             idem: Arc::new(Mutex::new(HashMap::new())),
             token: token.clone(),
@@ -296,6 +304,7 @@ impl CoreDaemon {
             supervisor: self.supervisor(),
             host: self.host(),
             core: Arc::clone(&self),
+            lanes,
         })
     }
 }

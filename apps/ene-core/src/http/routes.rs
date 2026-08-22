@@ -180,7 +180,10 @@ pub async fn list_sessions(
     State(state): State<AppState>,
     Query(filter): Query<SoulFilter>,
 ) -> Result<Json<Page<SessionView>>, ApiReject> {
-    state.core.end_idle_sessions().await.map_err(map_core)?;
+    let ended = state.core.end_idle_sessions().await.map_err(map_core)?;
+    for session in ended {
+        state.lanes.close(session).await;
+    }
     let soul = filter.soul_id.as_deref().map(parse_soul).transpose()?;
     let mut items = state
         .core
@@ -331,6 +334,7 @@ pub async fn split_session(
             .end_session(session, SessionEndReason::Explicit)
             .await
             .map_err(map_core)?;
+        state.lanes.close(session).await;
     }
     let previous = state
         .core
@@ -376,6 +380,7 @@ pub async fn end_session(
         .end_session(session, reason)
         .await
         .map_err(map_core)?;
+    state.lanes.close(session).await;
     get_session(State(state), Path(id)).await
 }
 
@@ -1934,7 +1939,7 @@ pub async fn restore(
         .finish_restore()
         .await
         .map_err(|err| bad_request("fault", &err.to_string()))?;
-    state.lanes.reset();
+    state.lanes.reset().await;
     Ok(Json(json!({ "ok": true, "restart_required": true })))
 }
 
@@ -2375,6 +2380,7 @@ fn map_work(err: ene_work::WorkError) -> ApiReject {
 fn map_core(err: CoreError) -> ApiReject {
     match err {
         CoreError::Session(err) => map_session(err),
+        CoreError::Kernel(err) => map_kernel(&err),
         other => bad_request("fault", &other.to_string()),
     }
 }

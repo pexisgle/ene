@@ -1390,3 +1390,14 @@ async fn prefetch_lines_are_assembled_in_registry_order() {
         .unwrap();
     assert_eq!(identity, "You are Alicia.");
 }
+
+#[tokio::test]
+async fn shutdown_stops_the_lane_actor() {
+    let (_dir, _store, lane, _model) = open_lane().await;
+    lane.shutdown().await.unwrap();
+    let err = lane.prompt("hi").await.unwrap_err();
+    assert!(matches!(
+        err,
+        KernelError::ShuttingDown | KernelError::Closed
+    ));
+}
