@@ -96,7 +96,7 @@ impl SeamedModel {
                 self.task
             )));
         }
-        let harness = crate::boot::load_harness_settings(self.core.data_dir());
+        let harness = self.core.harness();
         let reserve = binding
             .max_tokens
             .unwrap_or(harness.context.response_reserve_tokens);
