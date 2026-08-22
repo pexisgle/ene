@@ -11,6 +11,10 @@ publish.workspace = true
 name = "ene-tool-exec"
 path = "src/main.rs"
 
+[features]
+default = ["win32-job"]
+win32-job = []
+
 [dependencies]
 ene-plugin-ipc = { workspace = true }
 ene-registry = { workspace = true }
