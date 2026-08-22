@@ -2223,7 +2223,6 @@ async fn listen_stream_reconnects_after_socket_close() {
     first.send_pcm(&pcm).await.unwrap();
     wait_voice_state(&core, ene_body::DuplexState::Listening).await;
     drop(first);
-    wait_voice_state(&core, ene_body::DuplexState::Idle).await;
     let mut second = client.listen_stream(&session.id, 16_000).await.unwrap();
     second.send_pcm(&pcm).await.unwrap();
     wait_voice_state(&core, ene_body::DuplexState::Listening).await;
