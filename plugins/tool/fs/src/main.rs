@@ -8,7 +8,7 @@ mod logic;
 // clean under -D warnings without #[allow] (forbidden by clippy::allow_attributes).
 #[expect(dead_code, reason = "link stub for host-only API shared with ene-registry")]
 fn _link_host_workspace_api() {
-    let _ = logic::with_workspace::<()>;
+    let _ = logic::with_workspace(std::path::Path::new("."), || Ok::<(), String>(()));
 }
 
 use tracing_subscriber::EnvFilter;
