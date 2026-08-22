@@ -36,6 +36,9 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 | `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs`, `sessions.synchronous` |
 | `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
+`core.backup.skills_max_bytes` caps the `skills/` tree copied into each manual
+backup generation. The default is 100 MiB.
+
 Conversation, classifier, embedding, TTS, STT, approve, and job bind through
 `ai.tasks.<task>`
 (`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`,

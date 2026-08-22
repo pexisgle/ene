@@ -2057,7 +2057,10 @@ pub async fn backup(
     headers: HeaderMap,
 ) -> Result<Json<BackupResponse>, ApiReject> {
     web_mutate_forbidden(&client_id_from_headers(&headers))?;
-    let (id, path) = super::backup::backup_now(state.core.data_dir())?;
+    let (id, path) = super::backup::backup_now(
+        state.core.data_dir(),
+        state.core.settings().backup.skills_max_bytes,
+    )?;
     Ok(Json(BackupResponse {
         id,
         path: path.display().to_string(),

@@ -645,8 +645,12 @@ impl CoreDaemon {
         checkpoint_db(&self.data_dir.join("audit.db"))
             .map_err(|err| CoreError::Http(err.0.title.clone()))?;
         self.store.close_writer().await?;
-        restore_copy(&self.data_dir, backup_id)
-            .map_err(|err| CoreError::Http(err.0.title.clone()))?;
+        restore_copy(
+            &self.data_dir,
+            backup_id,
+            self.settings().backup.skills_max_bytes,
+        )
+        .map_err(|err| CoreError::Http(err.0.title.clone()))?;
         Ok(())
     }
 
@@ -658,6 +662,10 @@ impl CoreDaemon {
         self.companions.reconnect()?;
         self.work.reconnect()?;
         self.plane.audit().reconnect()?;
+        let policy_path = self.data_dir.join("policy.json");
+        self.plane
+            .set_policy(PolicyFile::load_json(&policy_path).map_err(CoreError::Io)?);
+        self.apply_plugin_profile().await;
         Ok(())
     }
 

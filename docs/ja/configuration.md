@@ -37,6 +37,9 @@ API キーは vault のままです。
 | `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs`, `sessions.synchronous` |
 | `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
+`core.backup.skills_max_bytes` は手動バックアップへコピーする `skills/` ツリーの
+上限です。既定値は 100 MiB です。
+
 会話・分類・埋め込み・TTS・STT・承認・ジョブは `ai.tasks.<task>`（`plugin`、
 `model`、`model_path`、`base_url`、`voice`、`max_tokens`、`supports_images`、
 `context_window`）でバインドします。
