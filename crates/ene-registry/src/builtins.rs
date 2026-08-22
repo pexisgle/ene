@@ -109,8 +109,14 @@ pub fn host_spec_for(name: &str) -> Option<ToolSpecWire> {
         BuiltinKind::Utility,
         BuiltinKind::App,
     ] {
-        for spec in builtin_specs(kind) {
+        for mut spec in builtin_specs(kind) {
             if spec.name == name {
+                // `exec.run` can invoke interpreters (`sh -c`, `python -c`, etc.), so
+                // argv-form process execution must never bypass the shell/code-exec
+                // approval boundary merely because it did not use `exec.shell`.
+                if name == "exec.run" && !spec.side_effects.iter().any(|effect| effect == "shell") {
+                    spec.side_effects.push("shell".to_owned());
+                }
                 return Some(spec);
             }
         }
@@ -168,5 +174,20 @@ impl ToolHandler for ToolPluginHandler {
     }
     async fn call(&self, name: &str, args: Value) -> Result<Value, IpcError> {
         (self.execute)(name, &args).map_err(IpcError::Call)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{host_sensitivity, host_spec_for};
+    use ene_plane::Sensitivity;
+
+    #[test]
+    fn direct_exec_uses_shell_equivalent_approval_boundary() {
+        let run = host_spec_for("exec.run").expect("exec.run host spec");
+        assert!(run.side_effects.iter().any(|effect| effect == "exec"));
+        assert!(run.side_effects.iter().any(|effect| effect == "shell"));
+        assert_eq!(host_sensitivity("exec.run"), Sensitivity::Medium);
+        assert_eq!(host_sensitivity("exec.shell"), Sensitivity::Medium);
     }
 }
