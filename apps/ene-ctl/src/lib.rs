@@ -3,10 +3,7 @@
     clippy::print_stderr,
     reason = "CLI client writes to the terminal"
 )]
-#![cfg_attr(
-    test,
-    expect(clippy::unwrap_used, reason = "tests fail fast")
-)]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
 
 pub mod chat;
 pub mod core;
