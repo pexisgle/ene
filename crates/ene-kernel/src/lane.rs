@@ -12,7 +12,10 @@ use tracing::warn;
 use crate::config::{HarnessSettings, MindSettings, ToolOutputSettings};
 use crate::context::{ContextRegistry, format_recovery_note};
 use crate::error::{CancelQueued, KernelError};
-use crate::inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
+use crate::inner::{
+    derive_thought_from_thinking, model_visible_for, split_surface_and_inner,
+    StreamParseDelta, StreamingSurfaceInnerParser,
+};
 use crate::live::{LiveBus, LiveEvent, LiveSubscription};
 use crate::model::{ConversationModel, ModelGeneration, ModelRequest, TextDeltaSink};
 use crate::observe::ObserveHandle;
@@ -1189,6 +1192,8 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             turn: ctx.turn,
             streamed_text: false,
             streamed_thinking: false,
+            streamed_inner: false,
+            parser: StreamingSurfaceInnerParser::new(),
         };
         let generation = tokio::select! {
             () = ctx.cancel.notified() => {
@@ -1205,9 +1210,12 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             return Ok(());
         }
 
+        sink.flush();
+
         let streamed = StreamedLive {
             text: sink.streamed_text,
             thinking: sink.streamed_thinking,
+            inner: sink.streamed_inner,
         };
         let Some(call) = generation.tool_calls.first() else {
             finish_speech(&ctx, &generation, step_index, None, streamed).await?;
@@ -1266,12 +1274,14 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
 struct StreamedLive {
     text: bool,
     thinking: bool,
+    inner: bool,
 }
 
 impl StreamedLive {
     const NONE: Self = Self {
         text: false,
         thinking: false,
+        inner: false,
     };
 }
 
@@ -1280,6 +1290,42 @@ struct TurnDeltaSink<'a> {
     turn: TurnId,
     streamed_text: bool,
     streamed_thinking: bool,
+    streamed_inner: bool,
+    parser: StreamingSurfaceInnerParser,
+}
+
+impl TurnDeltaSink<'_> {
+    fn flush(&mut self) {
+        for delta in self.parser.flush() {
+            self.emit_delta(delta);
+        }
+    }
+
+    fn emit_delta(&mut self, delta: StreamParseDelta) {
+        match delta {
+            StreamParseDelta::Surface(text) if !text.is_empty() => {
+                self.streamed_text = true;
+                self.live.emit(
+                    DisplayDepth::Surface,
+                    LiveEvent::TextDelta {
+                        turn_id: self.turn,
+                        text,
+                    },
+                );
+            }
+            StreamParseDelta::Inner { aspect: _, text } if !text.is_empty() => {
+                self.streamed_inner = true;
+                self.live.emit(
+                    DisplayDepth::Detail,
+                    LiveEvent::InnerMessage {
+                        turn_id: Some(self.turn),
+                        text,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 impl TextDeltaSink for TurnDeltaSink<'_> {
@@ -1287,14 +1333,9 @@ impl TextDeltaSink for TurnDeltaSink<'_> {
         if text.is_empty() {
             return;
         }
-        self.streamed_text = true;
-        self.live.emit(
-            DisplayDepth::Surface,
-            LiveEvent::TextDelta {
-                turn_id: self.turn,
-                text: text.to_owned(),
-            },
-        );
+        for delta in self.parser.push(text) {
+            self.emit_delta(delta);
+        }
     }
 
     fn on_thinking(&mut self, text: &str) {
@@ -1444,7 +1485,9 @@ async fn finish_speech(
             },
         );
     }
-    if let Some((_, text)) = inner.first() {
+    if !streamed.inner
+        && let Some((_, text)) = inner.first()
+    {
         ctx.live.emit(
             DisplayDepth::Detail,
             LiveEvent::InnerMessage {

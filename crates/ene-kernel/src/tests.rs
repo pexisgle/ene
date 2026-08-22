@@ -40,6 +40,31 @@ struct HoldModel {
 
 struct InnerOnlyModel;
 
+struct InnerStreamingModel;
+
+#[async_trait]
+impl ConversationModel for InnerStreamingModel {
+    async fn generate(&self, _request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        Ok(ModelGeneration {
+            text: r#"<inner aspect="thought">secret</inner>"#.to_owned(),
+            finish_reason: "stop".to_owned(),
+            model_id: "inner-stream".to_owned(),
+            ..ModelGeneration::default()
+        })
+    }
+
+    async fn generate_streaming(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TextDeltaSink,
+    ) -> Result<ModelGeneration, KernelError> {
+        for chunk in ["<inner aspect=\"thought\">sec", "ret</inner>"] {
+            sink.on_text(chunk);
+        }
+        self.generate(request).await
+    }
+}
+
 #[async_trait]
 impl ConversationModel for InnerOnlyModel {
     async fn generate(&self, _request: ModelRequest) -> Result<ModelGeneration, KernelError> {
@@ -1374,6 +1399,58 @@ async fn inner_only_model_does_not_leak_on_surface() {
     let surface_events = surface.try_drain();
     for event in &surface_events {
         if let LiveEvent::TextDelta { text, .. } = event {
+            assert!(!text.contains("secret"));
+        }
+    }
+    let detail_hist = lane.project(DisplayDepth::Detail).unwrap();
+    assert!(
+        detail_hist
+            .messages
+            .iter()
+            .any(|m| m.text().contains("secret"))
+    );
+}
+
+#[tokio::test]
+async fn streamed_inner_tag_split_across_chunks_stays_off_surface() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(InnerStreamingModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: Vec::new(),
+        hooks: None,
+        router: None,
+    });
+    let mut surface = lane.subscribe(DisplayDepth::Surface);
+    lane.prompt("probe").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    for event in surface.try_drain() {
+        if let LiveEvent::TextDelta { text, .. } = event {
+            assert!(!text.contains("inner"));
             assert!(!text.contains("secret"));
         }
     }
