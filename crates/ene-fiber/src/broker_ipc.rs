@@ -160,28 +160,34 @@ async fn serve_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let Some(BrokerRequest::Hello { token: offered }) =
-        ene_plugin_ipc::read_broker_request(&mut stream)
+    loop {
+        let Some(request) = ene_plugin_ipc::read_broker_request(&mut stream)
             .await
             .map_err(|err| BrokerIpcError::Codec(err.to_string()))?
-    else {
-        return Err(BrokerIpcError::Codec(
-            "first broker request is not hello".to_owned(),
-        ));
-    };
-    if !constant_time_eq(offered.as_bytes(), token.as_bytes()) {
-        let response = BrokerResponse::Error {
-            code: BrokerErrorCode::Denied,
-            message: "broker hello rejected".to_owned(),
+        else {
+            return Ok(());
         };
-        ene_plugin_ipc::write_broker_response(&mut stream, response)
-            .await
-            .map_err(|err| BrokerIpcError::Codec(err.to_string()))?;
-        return Ok(());
-    }
-    ene_plugin_ipc::write_broker_response(&mut stream, BrokerResponse::HelloOk)
+        let BrokerRequest::Hello { token: offered } = request else {
+            return Err(BrokerIpcError::Codec(
+                "first broker request is not hello".to_owned(),
+            ));
+        };
+        if constant_time_eq(offered.as_bytes(), token.as_bytes()) {
+            ene_plugin_ipc::write_broker_response(&mut stream, BrokerResponse::HelloOk)
+                .await
+                .map_err(|err| BrokerIpcError::Codec(err.to_string()))?;
+            break;
+        }
+        ene_plugin_ipc::write_broker_response(
+            &mut stream,
+            BrokerResponse::Error {
+                code: BrokerErrorCode::Denied,
+                message: "broker hello rejected".to_owned(),
+            },
+        )
         .await
         .map_err(|err| BrokerIpcError::Codec(err.to_string()))?;
+    }
 
     while let Some(request) = ene_plugin_ipc::read_broker_request(&mut stream)
         .await

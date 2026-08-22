@@ -30,8 +30,9 @@ mod protocol;
 mod provider;
 
 pub use broker::{
-    BrokerClient, BrokerErrorCode, BrokerRequest, BrokerResponse, read_broker_request,
-    read_broker_response, write_broker_request, write_broker_response,
+    BrokerClient, BrokerClientTransport, BrokerErrorCode, BrokerRequest, BrokerResponse,
+    BrokerSession, read_broker_request, read_broker_response, write_broker_request,
+    write_broker_response,
 };
 #[cfg(not(unix))]
 pub use bulk::should_spill;

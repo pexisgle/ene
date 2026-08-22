@@ -38,3 +38,5 @@ pub use supervisor::{
 mod tests;
 #[cfg(test)]
 mod tests_broker_ipc;
+#[cfg(test)]
+mod tests_broker_session;

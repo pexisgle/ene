@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 base64 = { workspace = true, features = ["std"] }
 blake3 = { workspace = true }
-ene-plugin-ipc = { workspace = true }
+ene-plugin-ipc = { workspace = true, features = ["net"] }
 ene-registry = { workspace = true }
 parking_lot = { workspace = true }
 regex = { workspace = true }
