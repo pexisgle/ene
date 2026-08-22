@@ -319,15 +319,56 @@ fn error_response(err: &BrokerError) -> BrokerResponse {
     BrokerResponse::Error {
         code: match &err {
             BrokerError::Denied { .. } => BrokerErrorCode::Denied,
-            BrokerError::PathEscape(_) => BrokerErrorCode::PathEscape,
+            BrokerError::InvalidGlob(_) => BrokerErrorCode::InvalidGlob,
             BrokerError::Io(_) => BrokerErrorCode::Io,
             BrokerError::Timeout => BrokerErrorCode::Timeout,
             BrokerError::InvalidUrl(_) => BrokerErrorCode::InvalidUrl,
             BrokerError::Ssrf(_) => BrokerErrorCode::Ssrf,
-            BrokerError::Fetch(_) => BrokerErrorCode::Fetch,
-            BrokerError::InvalidGlob(_) => BrokerErrorCode::InvalidArgument,
+            BrokerError::Fetch(_) | BrokerError::RedirectLoop => BrokerErrorCode::Fetch,
+            BrokerError::PathEscape(_) => BrokerErrorCode::PathEscape,
+            BrokerError::Oversize | BrokerError::Binary => BrokerErrorCode::Oversize,
+            BrokerError::Symlink => BrokerErrorCode::Symlink,
+            BrokerError::NotEmpty => BrokerErrorCode::DirectoryNotEmpty,
+            BrokerError::ReadOnly => BrokerErrorCode::ReadOnlyPath,
             _ => BrokerErrorCode::Internal,
         },
         message: err.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{error_response, timeout_response};
+    use crate::broker::BrokerError;
+    use ene_plugin_ipc::BrokerErrorCode;
+    use std::time::Duration;
+
+    #[test]
+    fn broker_errors_are_machine_classified() {
+        let cases = [
+            (
+                BrokerError::InvalidGlob("../x".to_owned()),
+                BrokerErrorCode::InvalidGlob,
+            ),
+            (BrokerError::Oversize, BrokerErrorCode::Oversize),
+            (BrokerError::Symlink, BrokerErrorCode::Symlink),
+            (BrokerError::NotEmpty, BrokerErrorCode::DirectoryNotEmpty),
+            (BrokerError::ReadOnly, BrokerErrorCode::ReadOnlyPath),
+        ];
+        for (error, expected) in cases {
+            let response = error_response(&error);
+            assert!(matches!(
+                response,
+                ene_plugin_ipc::BrokerResponse::Error { code, .. }
+                    if code == expected
+            ));
+        }
+        assert_eq!(
+            timeout_response(Duration::from_secs(1)),
+            ene_plugin_ipc::BrokerResponse::Error {
+                code: BrokerErrorCode::Timeout,
+                message: "broker operation timed out after 1s".to_owned(),
+            }
+        );
     }
 }

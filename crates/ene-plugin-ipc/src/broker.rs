@@ -166,12 +166,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> BrokerClient<S> {
 #[serde(rename_all = "snake_case")]
 pub enum BrokerErrorCode {
     Denied,
+    InvalidGlob,
+    InvalidRegex,
     PathEscape,
+    Oversize,
     Io,
     Timeout,
     InvalidUrl,
     Ssrf,
     Fetch,
+    Symlink,
+    DirectoryNotEmpty,
+    ReadOnlyPath,
     InvalidArgument,
     Internal,
 }
