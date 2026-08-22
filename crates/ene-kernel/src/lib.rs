@@ -21,12 +21,13 @@ mod model;
 mod observe;
 mod router;
 mod speech;
+mod tool_result;
 mod waterfall;
 
 pub use config::{
     AiSettings, AiTasks, BackupSettings, ClientsSettings, CoreSettings, DelegationSettings,
     HarnessSettings, MindSettings, PluginIpcSettings, PluginPolicySettings, PluginProfileKind,
-    PluginSettings, ServerSettings, TaskBinding,
+    PluginSettings, ServerSettings, TaskBinding, ToolOutputSettings,
 };
 pub use context::{ContextRegistry, SOURCE_ORDER, canonicalize_source_key, format_recovery_note};
 pub use error::{CancelQueued, KernelError, RunOutcome};

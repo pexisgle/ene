@@ -24,7 +24,7 @@
 | セクション | 所有 | 代表キー |
 |---|---|---|
 | `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
-| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*` |
+| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*`, `tool_output.soft_limit_bytes`, `tool_output.hard_limit_bytes` |
 | `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*`（`observation_interval_seconds` が観測 tick 間隔。開いているセッションをすべて観測する） |
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
@@ -33,9 +33,12 @@
 | `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
 会話・分類・埋め込み・TTS・STT・承認・ジョブは `ai.tasks.<task>`（`plugin`、
-`model`、`model_path`、`base_url`、`voice`、`max_tokens`）でバインドします。
+`model`、`model_path`、`base_url`、`voice`、`max_tokens`、`supports_images`）でバインドします。
 チャットは未設定のまま起動するので、最初のメッセージの前に
 `ai.tasks.chat.plugin` を `provider.*` に設定してください。
+`supports_images` はオプトインで既定は false です。設定済みかつフラグが真の
+バインディングだけが `ImageRef` を `LlmImage` に畳み、text-only や能力不明の
+provider は `[image omitted]` のままにします。
 `approval.mode = ai_auto` は `ai.tasks.approve`（無ければ chat）を使い、失敗時は
 ポップアップに落ちます。裏層ジョブは `ai.tasks.job`（無ければ chat。どちらも
 未設定なら echo）を、対話レーンとは別のレーンで使います。API キーは vault 秘密です（起動時は

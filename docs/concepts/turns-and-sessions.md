@@ -49,6 +49,8 @@ running turn; `compact` compresses history.
    not used: the live root is singular `workspace`, with per-soul job dirs
    under `jobs/<soul_id>/<job_id>/`.
 5. Events are committed to `ene-session` (model-visible equals logged).
+   Screenshot and other image tool results store bytes beside the log and keep
+   an `ImageRef` in the projection; huge JSON results become `tool/spill`.
 6. Live events go out at `surface` or `detail` depth.
 
 Before generation, `agent/pre-step` runs as a waterfall on the shared

@@ -30,6 +30,13 @@ impl Block {
     }
 
     #[must_use]
+    pub fn image_ref(artifact_id: impl Into<String>) -> Self {
+        Self::ImageRef {
+            artifact_id: artifact_id.into(),
+        }
+    }
+
+    #[must_use]
     pub fn redacted(reason: impl Into<String>) -> Self {
         Self::Redacted {
             reason: reason.into(),

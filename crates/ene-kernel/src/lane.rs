@@ -4,12 +4,12 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::warn;
 
-use crate::config::{HarnessSettings, MindSettings};
+use crate::config::{HarnessSettings, MindSettings, ToolOutputSettings};
 use crate::context::{ContextRegistry, format_recovery_note};
 use crate::error::{CancelQueued, KernelError};
 use crate::inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
@@ -18,6 +18,7 @@ use crate::model::{ConversationModel, ModelGeneration, ModelRequest};
 use crate::observe::ObserveHandle;
 use crate::router::{SurfaceRouter, SurfaceToolOutcome};
 use crate::speech::{SpeechPresenter, TurnFinalizer, TurnPrefetch};
+use crate::tool_result::{extract_images, should_spill, spill_preview};
 use crate::waterfall::{HookEvent, LoopHooks};
 use ene_session::{
     Block, CallId, ClientId, DelegationId, DisplayDepth, EventKind, EventPayload, InboxClass,
@@ -93,6 +94,7 @@ struct LaneState {
     hooks: LoopHooks,
     mind: MindSettings,
     max_steps: u32,
+    tool_output: ToolOutputSettings,
     context: ContextRegistry,
     router: Option<Arc<dyn SurfaceRouter>>,
     speech: Option<Arc<dyn SpeechPresenter>>,
@@ -183,6 +185,7 @@ impl LaneHandle {
             hooks: hooks.clone(),
             mind: opts.mind,
             max_steps: opts.harness.loop_cfg.max_steps_per_turn,
+            tool_output: opts.harness.tool_output.clone(),
             context,
             router: opts.router,
             speech: opts.speech,
@@ -821,6 +824,7 @@ async fn spawn_turn(
         window: state.mind.inner.self_reference_window,
         derive_from_thinking: state.mind.inner.derive_from_thinking,
         max_steps: state.max_steps,
+        tool_output: state.tool_output.clone(),
         router: state.router.clone(),
         speech: state.speech.clone(),
         finalizer: state.finalizer.clone(),
@@ -1054,6 +1058,7 @@ struct TurnCtx {
     window: u32,
     derive_from_thinking: bool,
     max_steps: u32,
+    tool_output: ToolOutputSettings,
     router: Option<Arc<dyn SurfaceRouter>>,
     speech: Option<Arc<dyn SpeechPresenter>>,
     finalizer: Option<Arc<dyn TurnFinalizer>>,
@@ -1202,6 +1207,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             return Ok(());
         };
 
+        let started = Instant::now();
         match tokio::select! {
             () = ctx.cancel.notified() => {
                 finish_interrupted(&ctx, step_index).await?;
@@ -1221,7 +1227,16 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                 return Ok(());
             }
             SurfaceToolOutcome::Result(value) => {
-                commit_tool_step(&ctx, &call.name, &call.arguments, value, step_index).await?;
+                let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                commit_tool_step(
+                    &ctx,
+                    &call.name,
+                    &call.arguments,
+                    value,
+                    step_index,
+                    duration_ms,
+                )
+                .await?;
                 step_index = step_index.saturating_add(1);
             }
         }
@@ -1419,13 +1434,53 @@ async fn commit_tool_step(
     ctx: &TurnCtx,
     name: &str,
     args: &serde_json::Value,
-    value: serde_json::Value,
+    mut value: serde_json::Value,
     step_index: u32,
+    duration_ms: u64,
 ) -> Result<(), KernelError> {
     if ctx.cancelled.load(Ordering::SeqCst) {
         return finish_interrupted(ctx, step_index).await;
     }
     let call_id = CallId::new();
+    let images = extract_images(&mut value);
+    let mut blocks = Vec::new();
+    for image in images {
+        let artifact_id = ctx
+            .store
+            .put_spill(&image.bytes, Some(image.mime.as_str()))
+            .await?;
+        blocks.push(Block::image_ref(artifact_id));
+    }
+    let serialized = value.to_string();
+    let mut spill_ref = None;
+    let mut spill_event = None;
+    if should_spill(serialized.len(), &ctx.tool_output) {
+        let size_bytes = u64::try_from(serialized.len()).unwrap_or(u64::MAX);
+        let id = ctx
+            .store
+            .put_spill(serialized.as_bytes(), Some("application/json"))
+            .await?;
+        let summary = format!(
+            "[spilled {size_bytes} bytes to {id}]\n{preview}",
+            preview = spill_preview(&serialized, &ctx.tool_output)
+        );
+        let summary_blocks = vec![Block::text(summary)];
+        blocks.extend(summary_blocks.clone());
+        spill_ref = Some(id.clone());
+        spill_event = Some(NewEvent::new(
+            ctx.session,
+            EventKind::ToolSpill,
+            EventPayload::ToolSpill {
+                v: v1(),
+                call_id,
+                spill_ref: id,
+                size_bytes,
+                summary_blocks,
+            },
+        ));
+    } else {
+        blocks.push(Block::text(serialized));
+    }
     let mut entries = vec![
         NewEvent::new(
             ctx.session,
@@ -1447,24 +1502,27 @@ async fn commit_tool_step(
                 v: v1(),
                 call_id,
                 status: ToolStatus::Ok,
-                blocks: vec![Block::text(value.to_string())],
-                spill_ref: None,
+                blocks,
+                spill_ref,
                 error_class: None,
-                duration_ms: 0,
-            },
-        ),
-        NewEvent::new(
-            ctx.session,
-            EventKind::StepEnd,
-            EventPayload::StepEnd {
-                v: v1(),
-                turn_id: ctx.turn,
-                step_index,
-                outcome: StepOutcome::Next,
-                finish_reason: Some("tool".to_owned()),
+                duration_ms,
             },
         ),
     ];
+    if let Some(spill) = spill_event {
+        entries.push(spill);
+    }
+    entries.push(NewEvent::new(
+        ctx.session,
+        EventKind::StepEnd,
+        EventPayload::StepEnd {
+            v: v1(),
+            turn_id: ctx.turn,
+            step_index,
+            outcome: StepOutcome::Next,
+            finish_reason: Some("tool".to_owned()),
+        },
+    ));
     let next = step_index.saturating_add(1);
     if next < ctx.max_steps.max(1) {
         entries.push(NewEvent::new(

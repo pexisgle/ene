@@ -48,6 +48,8 @@
    配置は使っていません。実際の根は単数の `workspace` で、ジョブ作業
    ディレクトリは `jobs/<soul_id>/<job_id>/` です。
 5. イベントは `ene-session` にコミット（モデル可視 = ログ）。
+   スクリーンショットなど画像のツール結果はログの横にバイトを置き、投影には
+   `ImageRef` を残す。巨大な JSON 結果は `tool/spill` になる。
 6. ライブイベントは `surface` または `detail` の深さで送出。
 
 生成の前に、共有 `LoopHooks` の waterfall として `agent/pre-step` が走ります。

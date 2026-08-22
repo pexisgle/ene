@@ -5,10 +5,10 @@ use ene_kernel::{
     ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, ToolCall,
 };
 use ene_plugin_ipc::{
-    LlmGenerateRequest, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
+    LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
 };
 use ene_registry::Layer;
-use ene_session::{InnerAspect, ProjectedMessage, Role};
+use ene_session::{Block, InnerAspect, ProjectedMessage, Role, SessionStore, SpillObject};
 
 use crate::CoreDaemon;
 
@@ -102,6 +102,13 @@ impl ConversationModel for SeamedModel {
     }
 }
 
+fn vision_store_for<'a>(
+    binding: &TaskBinding,
+    store: &'a SessionStore,
+) -> Option<&'a SessionStore> {
+    binding.accepts_images().then_some(store)
+}
+
 fn map_request(
     request: &ModelRequest,
     binding: &TaskBinding,
@@ -109,8 +116,10 @@ fn map_request(
     core: &CoreDaemon,
     layer: Layer,
 ) -> LlmGenerateRequest {
+    let store = core.store();
+    let vision_store = vision_store_for(binding, store.as_ref());
     LlmGenerateRequest {
-        messages: fold_messages(&request.messages),
+        messages: fold_history(&request.messages, vision_store),
         tools: tool_schemas(core, layer),
         model: binding.model.clone(),
         max_tokens: binding.max_tokens,
@@ -153,7 +162,33 @@ fn tool_schemas(core: &CoreDaemon, layer: Layer) -> Vec<LlmToolSchema> {
         .collect()
 }
 
-fn fold_messages(history: &[ProjectedMessage]) -> Vec<LlmMessage> {
+fn llm_image_from_spill(obj: &SpillObject) -> Option<LlmImage> {
+    let mime = obj
+        .mime
+        .clone()
+        .unwrap_or_else(|| sniff_image_mime(&obj.bytes).to_owned());
+    if !mime.starts_with("image/") {
+        return None;
+    }
+    Some(LlmImage {
+        mime,
+        base64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &obj.bytes),
+    })
+}
+
+fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+fn fold_history(history: &[ProjectedMessage], store: Option<&SessionStore>) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
     let mut pending_calls: Vec<LlmToolCall> = Vec::new();
     for item in history {
@@ -171,13 +206,14 @@ fn fold_messages(history: &[ProjectedMessage]) -> Vec<LlmMessage> {
             }
             Role::Tool => {
                 flush_calls(&mut messages, &mut pending_calls);
+                let (text, images) = fold_tool_content(item, store);
                 messages.push(LlmMessage {
                     role: LlmRole::Tool,
-                    text: item.text(),
+                    text,
                     tool_calls: Vec::new(),
                     tool_call_id: item.tool_call_id.clone(),
                     tool_name: item.tool_name.as_deref().map(to_vendor_tool_name),
-                    images: Vec::new(),
+                    images,
                 });
             }
             Role::User => {
@@ -196,6 +232,36 @@ fn fold_messages(history: &[ProjectedMessage]) -> Vec<LlmMessage> {
     }
     flush_calls(&mut messages, &mut pending_calls);
     messages
+}
+
+fn fold_tool_content(
+    item: &ProjectedMessage,
+    store: Option<&SessionStore>,
+) -> (String, Vec<LlmImage>) {
+    let mut images = Vec::new();
+    let mut omitted = false;
+    for block in &item.blocks {
+        let Block::ImageRef { artifact_id } = block else {
+            continue;
+        };
+        if let Some(image) = store
+            .and_then(|store| store.get_spill(artifact_id).ok().flatten())
+            .and_then(|obj| llm_image_from_spill(&obj))
+        {
+            images.push(image);
+        } else {
+            omitted = true;
+        }
+    }
+    let text = item.text();
+    let text = if omitted && text.is_empty() {
+        "[image omitted]".to_owned()
+    } else if omitted {
+        format!("{text}\n[image omitted]")
+    } else {
+        text
+    };
+    (text, images)
 }
 
 fn plain(role: LlmRole, item: &ProjectedMessage) -> LlmMessage {
@@ -258,7 +324,10 @@ fn parse_aspect(aspect: &str) -> InnerAspect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_session::{Block, ProjectedMessage, Role};
+    use base64::Engine;
+    use ene_kernel::TaskBinding;
+    use ene_plugin_ipc::LlmRole;
+    use ene_session::{Block, ProjectedMessage, Role, SessionStore};
 
     fn msg(
         seq: u64,
@@ -294,7 +363,7 @@ mod tests {
             ),
             msg(3, Role::Tool, "file body", None, None, Some("call-1")),
         ];
-        let mapped = fold_messages(&history);
+        let mapped = fold_history(&history, None);
         assert_eq!(mapped.len(), 3);
         assert_eq!(mapped[0].role, LlmRole::User);
         assert_eq!(mapped[1].role, LlmRole::Assistant);
@@ -341,5 +410,117 @@ mod tests {
         };
         let mapped = map_generation(generation);
         assert_eq!(mapped.tool_calls[0].name, "utility.calc");
+    }
+
+    #[tokio::test]
+    async fn fold_history_attaches_llm_image_from_image_ref() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap();
+        let png = [0x89_u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let artifact_id = store.put_spill(&png, Some("image/png")).await.unwrap();
+        let history = vec![ProjectedMessage {
+            seq: 3,
+            role: Role::Tool,
+            blocks: vec![
+                Block::image_ref(artifact_id),
+                Block::text(r#"{"width":1,"height":1}"#),
+            ],
+            turn_id: None,
+            step_index: None,
+            tool_name: None,
+            tool_args: None,
+            tool_call_id: Some("call-1".to_owned()),
+        }];
+        let mapped = fold_history(&history, Some(&store));
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].images.len(), 1);
+        assert_eq!(mapped[0].images[0].mime, "image/png");
+        assert_eq!(mapped[0].images[0].base64, encoded);
+        assert_eq!(mapped[0].text, r#"{"width":1,"height":1}"#);
+    }
+
+    #[test]
+    fn fold_messages_omits_images_when_provider_has_no_vision() {
+        let history = vec![ProjectedMessage {
+            seq: 3,
+            role: Role::Tool,
+            blocks: vec![Block::image_ref("deadbeef"), Block::text(r#"{"width":1}"#)],
+            turn_id: None,
+            step_index: None,
+            tool_name: None,
+            tool_args: None,
+            tool_call_id: Some("call-1".to_owned()),
+        }];
+        let mapped = fold_history(&history, None);
+        assert!(mapped[0].images.is_empty());
+        assert!(mapped[0].text.contains("[image omitted]"));
+        assert!(mapped[0].text.contains(r#""width":1"#));
+    }
+
+    fn configured(plugin: &str, supports_images: bool) -> TaskBinding {
+        TaskBinding {
+            plugin: plugin.to_owned(),
+            model: "test-model".to_owned(),
+            supports_images,
+            ..TaskBinding::default()
+        }
+    }
+
+    fn png_tool_history(artifact_id: impl Into<String>) -> Vec<ProjectedMessage> {
+        vec![ProjectedMessage {
+            seq: 3,
+            role: Role::Tool,
+            blocks: vec![
+                Block::image_ref(artifact_id),
+                Block::text(r#"{"width":1,"height":1}"#),
+            ],
+            turn_id: None,
+            step_index: None,
+            tool_name: None,
+            tool_args: None,
+            tool_call_id: Some("call-1".to_owned()),
+        }]
+    }
+
+    #[tokio::test]
+    async fn configured_text_only_binding_omits_image_ref() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap();
+        let png = [0x89_u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let artifact_id = store.put_spill(&png, Some("image/png")).await.unwrap();
+        let binding = configured("provider.openai", false);
+        assert!(!binding.is_unconfigured());
+        let mapped = fold_history(
+            &png_tool_history(artifact_id),
+            vision_store_for(&binding, &store),
+        );
+        assert!(mapped[0].images.is_empty());
+        assert!(mapped[0].text.contains("[image omitted]"));
+        assert!(mapped[0].text.contains(r#""width":1"#));
+    }
+
+    #[tokio::test]
+    async fn configured_vision_binding_attaches_llm_image() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap();
+        let png = [0x89_u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let artifact_id = store.put_spill(&png, Some("image/png")).await.unwrap();
+        let binding = configured("provider.openai", true);
+        let mapped = fold_history(
+            &png_tool_history(artifact_id),
+            vision_store_for(&binding, &store),
+        );
+        assert_eq!(mapped[0].images.len(), 1);
+        assert_eq!(mapped[0].images[0].mime, "image/png");
+        assert_eq!(mapped[0].images[0].base64, encoded);
+        assert!(!mapped[0].text.contains("[image omitted]"));
     }
 }

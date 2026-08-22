@@ -106,7 +106,7 @@ WebView は使いません。[PR #794](https://github.com/pexisgle/ene/pull/794)
 
 | 旧 action | 現行 | Status | 注記 |
 |---|---|---|---|
-| `screenshot` / `capture_window` | `app.screenshot` | Current | Wayland は portal 優先、CLI フォールバック、Windows は GDI。capture JSON に size/scale/permission。[App プラットフォーム表](../guides/tools/app-platform.md) |
+| `screenshot` / `capture_window` | `app.screenshot` | Current | Wayland は portal 優先、CLI フォールバック、Windows は GDI。capture JSON に size/scale/permission。モデル呼び出しは `ImageRef` + spill blob（inline base64 ではない）としてログし、`ai.tasks.<task>.supports_images` のときだけ `LlmImage` に畳む。[App プラットフォーム表](../guides/tools/app-platform.md) |
 | `list_windows` | `app.window_list` | Current | wmctrl / hyprctl / sway。GNOME/KDE Wayland は `app.capabilities` で unsupported |
 | `get_active_window` | `app.active_window` | Current | 能動観測ソース（画面観測が有効なとき） |
 | `list_monitors` | `app.list_monitors` | Current | compositor がレイアウトを出すとき capture の scale/size と揃える |
