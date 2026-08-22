@@ -327,6 +327,16 @@ impl CoreDaemon {
         *self.prefetch.lock() = Some(prefetch);
     }
 
+    #[must_use]
+    pub(crate) fn soul_skill_refs(&self, soul: SoulId) -> Vec<String> {
+        self.companions()
+            .get_soul(soul)
+            .ok()
+            .flatten()
+            .map(|row| row.skill_refs)
+            .unwrap_or_default()
+    }
+
     pub fn set_job_model(&self, model: Arc<dyn ConversationModel>) {
         *self.job_model.lock() = Some(model);
     }
@@ -648,14 +658,7 @@ impl CoreDaemon {
 }
 
 fn skill_catalog_for_soul(core: &CoreDaemon, soul: SoulId) -> Vec<(String, String)> {
-    let enabled = core
-        .companions()
-        .get_soul(soul)
-        .ok()
-        .flatten()
-        .map(|row| row.skill_refs)
-        .unwrap_or_default();
-    ene_work::skill_catalog_blocks(&core.data_dir().join("skills"), &enabled)
+    ene_work::skill_catalog_blocks(&core.data_dir().join("skills"), &core.soul_skill_refs(soul))
 }
 
 fn seed_default_occupants(companions: &CompanionStore, stage: &Stage) -> Result<(), CoreError> {

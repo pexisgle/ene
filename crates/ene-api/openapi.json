@@ -18,6 +18,7 @@
     "/souls": { "get": { "summary": "List souls", "responses": { "200": { "description": "page" } } } },
     "/souls/{id}": { "get": { "summary": "Get soul", "responses": { "200": { "description": "soul" } } } },
     "/souls/{id}/body": { "patch": { "summary": "Hot-swap body binding", "responses": { "200": { "description": "soul" } } } },
+    "/souls/{id}/skills": { "patch": { "summary": "Replace enabled skill allowlist (empty = all installed)", "responses": { "200": { "description": "soul" } } } },
     "/souls/{id}/affect": { "get": { "summary": "PAD affect (detail)", "responses": { "200": { "description": "affect" } } } },
     "/souls/{id}/memories": { "get": { "summary": "List memories (scope filter)", "responses": { "200": { "description": "page" } } } },
     "/sessions": {

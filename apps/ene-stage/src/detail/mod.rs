@@ -2606,6 +2606,7 @@ mod tests {
             mood_label: String::new(),
             package_id: None,
             avatar_path: None,
+            skill_refs: Vec::new(),
         };
         assert!(character_export_package_id(Some(&unbound)).is_none());
         let mut packaged = unbound.clone();

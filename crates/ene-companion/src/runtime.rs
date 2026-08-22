@@ -53,6 +53,7 @@ impl CompanionRuntime {
         &self,
         soul_id: SoulId,
         user_text: &str,
+        tone_notes: &[String],
         inner: &[(InnerAspect, String)],
         classifier: Option<&dyn ClassifyModel>,
     ) -> Result<Option<AffectPresentation>, CompanionError> {
@@ -63,8 +64,12 @@ impl CompanionRuntime {
         let now = Utc::now();
         let affect = self.settings.lock().affect.clone();
         project_decay(&mut soul.affect, &soul.affect_baseline, &affect, now);
+        let classify_text = affect_classify_input(user_text, tone_notes);
         let proposal = match classifier {
-            Some(model) => match model.complete_json(ClassifyTask::Affect, user_text).await {
+            Some(model) => match model
+                .complete_json(ClassifyTask::Affect, &classify_text)
+                .await
+            {
                 Ok(raw) => parse_affect_json(&raw),
                 Err(_) => None,
             },
@@ -172,4 +177,19 @@ impl CompanionRuntime {
     pub fn approval_settings(&self) -> MemoryApprovalSettings {
         self.settings.lock().memory_approval.clone()
     }
+}
+
+fn affect_classify_input(user_text: &str, tone_notes: &[String]) -> String {
+    if tone_notes.is_empty() {
+        return user_text.to_owned();
+    }
+    let mut out = String::from("Tone notes:\n");
+    for note in tone_notes {
+        out.push_str("- ");
+        out.push_str(note);
+        out.push('\n');
+    }
+    out.push_str("\nUser:\n");
+    out.push_str(user_text);
+    out
 }

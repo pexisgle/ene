@@ -27,7 +27,13 @@ running turn; `compact` compresses history.
 1. Recall and affect tick in `ene-companion`.
 2. The kernel composes the model-visible prompt from the session log.
    Installed skills appear as the `skills.catalog` System Context source.
-   A matching `SKILL.md` body is injected as `skills.active`.
+   A matching `SKILL.md` body is injected as `skills.active`. Matching
+   `ene.emotion_note` frontmatter is prepended to the affect classifier
+   input and copied into that active block as a `Tone:` line.
+   `ene.proactive_hint` values from enabled skills are passed into the
+   proactive decision as `user_instructions`.
+   `PATCH /api/v1/souls/{id}/skills` (or `ene-ctl soul skills`) sets the
+   soul allowlist; an empty list means every installed skill is eligible.
 3. The configured conversation model streams text through its bound `provider.*`
    plugin.
 4. Surface-eligible tools run through `ene-registry` / `ene-plane`.
@@ -59,7 +65,7 @@ stable name). The dialogue lane keeps `platform_contract` and a fallback
 | `memory.semantic` | Ranked recall for this user text |
 | `memory.user_profile` | Standing profile / preference notes |
 | `memory.commitments` | Open (unexpired) commitments |
-| `skills.catalog` | Installed skill names and descriptions |
+| `skills.catalog` | Installed skill names and descriptions (filtered by the soul allowlist) |
 | `skills.active` | Matching `SKILL.md` bodies for this user text |
 | `mcp.resources` | Snapshots under `<workspace>/mcp-context/` |
 | `inner_recent` | Trailing model-visible inner thoughts |

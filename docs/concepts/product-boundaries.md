@@ -234,7 +234,7 @@ Closing a child issue does not close [#717](https://github.com/pexisgle/ene/issu
 - Observation that does not flood the model or persist raw pixels:
   [#805](https://github.com/pexisgle/ene/issues/805) (`P-112`).
 - Remaining `done.md` unchecked items (real provider chat, production
-  ASR/TTS, job runner speech, skill injection, GUI E2E) stay on #717.
+  ASR/TTS, job runner speech, GUI E2E) stay on #717.
 
 ### Post-v1.0 (do not block #717)
 

@@ -10,8 +10,8 @@ use crate::types::{
     ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse, QueuedCancel,
     RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse, ResourceKind,
     RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView,
-    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulView, SpanView,
-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -114,6 +114,18 @@ impl ApiClient {
     pub async fn patch_soul_body(&self, id: &str, patch: &SoulPatch) -> Result<SoulView, ApiError> {
         self.send_json(
             self.request(Method::PATCH, &format!("/api/v1/souls/{id}/body"))
+                .json(patch),
+        )
+        .await
+    }
+
+    pub async fn patch_soul_skills(
+        &self,
+        id: &str,
+        patch: &SoulSkillsPatch,
+    ) -> Result<SoulView, ApiError> {
+        self.send_json(
+            self.request(Method::PATCH, &format!("/api/v1/souls/{id}/skills"))
                 .json(patch),
         )
         .await

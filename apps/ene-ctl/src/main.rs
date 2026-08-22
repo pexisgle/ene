@@ -8,7 +8,9 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use ene_api::{ApiClient, CreateSessionRequest, MessageMode, MessageRequest, ResourceKind};
+use ene_api::{
+    ApiClient, CreateSessionRequest, MessageMode, MessageRequest, ResourceKind, SoulSkillsPatch,
+};
 use ene_ctl::core;
 use ene_ctl::session;
 
@@ -105,7 +107,15 @@ enum CoreCmd {
 #[derive(Subcommand, Debug)]
 enum SoulCmd {
     List,
-    Show { id: String },
+    Show {
+        id: String,
+    },
+    /// Replace enabled skills. Omit names to allow every installed skill.
+    Skills {
+        id: String,
+        #[arg(num_args = 0..)]
+        names: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -244,6 +254,16 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
         Cmd::Soul { op } => match op {
             SoulCmd::List => print_json(&client.list_souls().await?)?,
             SoulCmd::Show { id } => print_json(&client.get_soul(id).await?)?,
+            SoulCmd::Skills { id, names } => print_json(
+                &client
+                    .patch_soul_skills(
+                        id,
+                        &SoulSkillsPatch {
+                            skill_refs: names.clone(),
+                        },
+                    )
+                    .await?,
+            )?,
         },
         Cmd::Session { op } => match op {
             SessionCmd::List => print_json(&client.list_sessions(None).await?)?,

@@ -36,7 +36,7 @@ pub use schedule::{
 pub use skill::{
     InstalledSkill, SkillMeta, catalog, install_skill_dir, load_skill, match_skills,
     parse_skill_md, read_skill_file, skill_active_blocks, skill_catalog_blocks,
-    skill_context_lines, skill_matches,
+    skill_context_lines, skill_emotion_notes, skill_matches, skill_proactive_hints,
 };
 pub use speech_gate::SpeechGate;
 pub use spill::{

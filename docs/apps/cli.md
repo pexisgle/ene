@@ -21,3 +21,8 @@ the token **file path** (not the token). `core stop` signals the recorded PID.
 
 There is no desktop-only API. Anything stage can do on the wire,
 `ene-ctl` can do as well.
+
+| Command | Meaning |
+|---|---|
+| `soul list` / `soul show <id>` | List souls or show one |
+| `soul skills <id> [names…]` | Replace the soul's skill allowlist (`PATCH /souls/{id}/skills`). Omit names to allow every installed skill |

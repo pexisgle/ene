@@ -14,8 +14,8 @@ use ene_api::{
     MessageRequest, MessageResponse, OccupantView, Page, PluginConfigErrorView, PluginConfigField,
     PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
     PluginView, QueuedCancel, ResourceKind, RestoreRequest, ScheduleView, SendMessageResponse,
-    SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulView, SpanView, SplitSessionResponse,
-    StageView, ToolTestRequest, ToolView, UsageView,
+    SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView,
+    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
@@ -109,6 +109,23 @@ pub async fn patch_soul_body(
             .core
             .present_companion(soul, body, ene_body::BodyCatalog::text_default()),
     );
+    get_soul(State(state), Path(id)).await
+}
+
+pub async fn patch_soul_skills(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(patch): Json<SoulSkillsPatch>,
+) -> Result<Json<SoulView>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    let soul = parse_soul(&id)?;
+    let refs = normalize_skill_refs(patch.skill_refs)?;
+    state
+        .core
+        .companions()
+        .set_skill_refs(soul, &refs)
+        .map_err(map_companion)?;
     get_soul(State(state), Path(id)).await
 }
 
@@ -2051,6 +2068,7 @@ fn soul_view(store: &ene_companion::CompanionStore, soul: ene_companion::Soul) -
         mood_label: soul.affect.mood_label,
         package_id,
         avatar_path,
+        skill_refs: soul.skill_refs,
     }
 }
 
@@ -2276,6 +2294,23 @@ fn memory_view(row: ene_companion::MemoryRecord) -> MemoryView {
 
 fn parse_soul(raw: &str) -> Result<SoulId, ApiReject> {
     SoulId::from_str(raw).map_err(|_| bad_request("invalid_message", "bad soul id"))
+}
+
+fn normalize_skill_refs(raw: Vec<String>) -> Result<Vec<String>, ApiReject> {
+    let mut out = Vec::new();
+    for name in raw {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+            return Err(bad_request("invalid_message", "bad skill name"));
+        }
+        if !out.iter().any(|existing| existing == name) {
+            out.push(name.to_owned());
+        }
+    }
+    Ok(out)
 }
 
 fn parse_session(raw: &str) -> Result<SessionId, ApiReject> {

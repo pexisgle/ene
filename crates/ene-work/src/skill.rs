@@ -139,10 +139,44 @@ pub fn skill_active_blocks(home: &Path, enabled: &[String], query: &str) -> Vec<
         text.push_str("\n## ");
         text.push_str(&meta.name);
         text.push('\n');
+        if let Some(note) = &meta.emotion_note {
+            text.push_str("Tone: ");
+            text.push_str(note);
+            text.push('\n');
+        }
         text.push_str(&meta.body);
         text.push('\n');
     }
     vec![("skills.active".to_owned(), text)]
+}
+
+/// `ene.proactive_hint` values from enabled skills (empty allowlist = all installed).
+#[must_use]
+pub fn skill_proactive_hints(home: &Path, enabled: &[String]) -> Vec<String> {
+    let Ok(rows) = catalog(home, enabled) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (name, _) in rows {
+        if let Ok(meta) = load_skill(home, &name)
+            && let Some(hint) = meta.proactive_hint.filter(|text| !text.trim().is_empty())
+        {
+            out.push(hint);
+        }
+    }
+    out
+}
+
+/// `ene.emotion_note` values from skills whose catalog text matches `query`.
+#[must_use]
+pub fn skill_emotion_notes(home: &Path, enabled: &[String], query: &str) -> Vec<String> {
+    let Ok(matched) = match_skills(home, enabled, query) else {
+        return Vec::new();
+    };
+    matched
+        .into_iter()
+        .filter_map(|meta| meta.emotion_note.filter(|text| !text.trim().is_empty()))
+        .collect()
 }
 
 /// Catalog plus matching bodies, for job briefings.

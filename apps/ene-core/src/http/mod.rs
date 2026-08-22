@@ -291,6 +291,10 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/souls", get(routes::list_souls))
         .route("/api/v1/souls/{id}", get(routes::get_soul))
         .route("/api/v1/souls/{id}/body", patch(routes::patch_soul_body))
+        .route(
+            "/api/v1/souls/{id}/skills",
+            patch(routes::patch_soul_skills),
+        )
         .route("/api/v1/souls/{id}/affect", get(routes::get_soul_affect))
         .route("/api/v1/souls/{id}/memories", get(routes::list_memories))
         .route("/api/v1/stage", get(routes::get_stage))
