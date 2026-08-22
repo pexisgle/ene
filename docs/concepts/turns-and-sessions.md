@@ -94,6 +94,13 @@ is depth-filtered on the server: `surface` gets speech, `detail` also gets
 inner / thinking / tool args. Stage's main window is surface; the separate
 detail window (and `ene-ctl --verbose`) is detail.
 
+`text.delta` is incremental speech. `provider.openai_compat` and
+`provider.gguf` send `LlmChunk` frames as tokens arrive; other LLM providers
+finish in one shot and the lane forwards a single delta. The session log
+records the finished assistant message once (model-visible equals logged).
+`abort` while chunks are in flight ends the turn as `interrupted` and does
+not write that assistant message.
+
 Conversation history is the append-only log in `sessions.db`, not a
 client-side buffer. A provider failure ends the turn as `failed` and is not
 written as assistant speech. History projects that failure as a `status`

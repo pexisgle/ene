@@ -3,7 +3,10 @@
 //! Speaks the provider subprotocol and maps host-canonical messages onto
 //! remote `/v1` chat, embeddings, TTS, and STT. Local GGUF is `provider.gguf`.
 
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
+
 mod client;
+mod stream;
 
 use std::sync::Arc;
 

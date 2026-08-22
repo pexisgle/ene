@@ -7,9 +7,9 @@ use crate::protocol::{
 };
 use crate::provider::{
     EmbedRequest, EmbedResult, InstallAssetRequest, InstallAssetResult, InstallStatusRequest,
-    InstallStatusResult, ListAssetsResult, ListModelsRequest, ListModelsResult, LlmGenerateRequest,
-    LlmGeneration, ProviderFaces, SetActiveAssetRequest, SetActiveAssetResult, SttRequest,
-    SttResult, TtsAudio, TtsRequest,
+    InstallStatusResult, ListAssetsResult, ListModelsRequest, ListModelsResult, LlmChunk,
+    LlmGenerateRequest, LlmGeneration, ProviderFaces, SetActiveAssetRequest, SetActiveAssetResult,
+    SttRequest, SttResult, TtsAudio, TtsRequest,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -105,10 +105,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
         }
     }
 
+    /// One-shot LLM generate. `LlmChunk` frames are ignored; helpers that need
+    /// tokens use [`Self::generate_llm_streaming`].
     pub async fn generate_llm(
         &mut self,
         request: LlmGenerateRequest,
     ) -> Result<LlmGeneration, IpcError> {
+        self.generate_llm_streaming(request, |_| {}).await
+    }
+
+    /// LLM generate that forwards matching `LlmChunk` frames.
+    ///
+    /// Unmatched leftover `LlmChunk` / `LlmDone` frames (a dropped in-flight
+    /// generate after abort) are ignored so the connection stays usable.
+    pub async fn generate_llm_streaming<F>(
+        &mut self,
+        request: LlmGenerateRequest,
+        mut on_chunk: F,
+    ) -> Result<LlmGeneration, IpcError>
+    where
+        F: FnMut(LlmChunk),
+    {
         if self
             .negotiated
             .provider
@@ -123,7 +140,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
             .await?;
         loop {
             match self.recv().await? {
-                Message::LlmChunk { id: got, .. } if got == id => {}
+                Message::LlmChunk { id: got, body } if got == id => on_chunk(body),
+                Message::LlmChunk { .. } => {
+                    tracing::debug!("ignoring stray llm_chunk after cancel or id mismatch");
+                }
                 Message::LlmDone { id: got, body } if got == id => return Ok(body),
                 Message::LlmDone { .. } => {
                     tracing::debug!("ignoring stray llm_done after cancel or id mismatch");
