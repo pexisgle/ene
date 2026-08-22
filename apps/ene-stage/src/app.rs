@@ -15,7 +15,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::audio::{AudioHub, run_listen_stream};
+use crate::audio::{AudioHub, ListenAction, MicListen, SendResult, run_listen_stream};
 use crate::avatar::look_at;
 use crate::chrome::{ChromeKind, ChromeWindow};
 use crate::core::events::{EventFeeds, LiveEvent, spawn_event_feeds};
@@ -95,7 +95,7 @@ pub fn run() -> Result<(), AppError> {
         detail: DetailUiState::default(),
         async_results: Arc::new(Mutex::new(Vec::new())),
         mic_active: false,
-        mic_pcm_tx: None,
+        listen: MicListen::new(),
         notify_claimed: false,
         speaker_claimed: false,
         gpu: None,
@@ -143,7 +143,7 @@ struct StageApp {
     detail: DetailUiState,
     async_results: Arc<Mutex<Vec<AsyncOutcome>>>,
     mic_active: bool,
-    mic_pcm_tx: Option<tokio::sync::mpsc::Sender<Vec<f32>>>,
+    listen: MicListen,
     notify_claimed: bool,
     speaker_claimed: bool,
     gpu: Option<GpuContext>,
@@ -230,10 +230,14 @@ impl StageApp {
                     self.surface.status = err;
                 }
             }
-            AsyncOutcome::Listen(result) => {
+            AsyncOutcome::Listen { generation, result } => {
                 if let Err(err) = result {
                     tracing::debug!(error = %err, "listen failed");
                 }
+                self.spawn_listen(
+                    self.listen
+                        .on_done(generation, self.mic_active, Instant::now()),
+                );
             }
             AsyncOutcome::RefreshHistory(result) => match result {
                 Ok(history) => {
@@ -456,9 +460,9 @@ impl StageApp {
                 Ok(active) => {
                     self.mic_active = active;
                     if active {
-                        self.start_mic_listen_stream();
+                        self.spawn_listen(self.listen.start());
                     } else {
-                        self.mic_pcm_tx = None;
+                        self.listen.release();
                     }
                 }
                 Err(err) => self.surface.status = err,
@@ -1053,33 +1057,35 @@ impl StageApp {
         }
     }
 
-    fn start_mic_listen_stream(&mut self) {
-        if self.mic_pcm_tx.is_some() {
+    fn spawn_listen(&mut self, action: ListenAction) {
+        let ListenAction::Spawn { generation, rx } = action else {
             return;
-        }
-        let (tx, rx) = tokio::sync::mpsc::channel(8);
-        self.mic_pcm_tx = Some(tx);
+        };
         let client = Arc::clone(&self.client);
         let session_id = self.session.session_id().to_owned();
-        self.spawn(
-            async move { AsyncOutcome::Listen(run_listen_stream(client, session_id, rx).await) },
-        );
+        self.spawn(async move {
+            AsyncOutcome::Listen {
+                generation,
+                result: run_listen_stream(client, session_id, rx).await,
+            }
+        });
     }
 
     fn poll_audio(&mut self) {
         if !self.mic_active {
-            self.mic_pcm_tx = None;
+            self.listen.release();
             return;
         }
-        if self.mic_pcm_tx.is_none() {
-            self.start_mic_listen_stream();
-        }
-        let Some(tx) = self.mic_pcm_tx.as_ref() else {
-            return;
-        };
+        self.spawn_listen(self.listen.poll(true, Instant::now()));
         for batch in self.audio.poll_mic_batches() {
-            if tx.try_send(batch).is_err() {
-                tracing::debug!("listen stream dropped a mic frame");
+            match self.listen.try_send(batch) {
+                SendResult::Sent => {}
+                SendResult::Full => {
+                    tracing::debug!("listen stream dropped a mic frame");
+                }
+                SendResult::Closed | SendResult::Idle => {
+                    self.spawn_listen(self.listen.poll(true, Instant::now()));
+                }
             }
         }
     }

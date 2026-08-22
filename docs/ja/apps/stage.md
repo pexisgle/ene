@@ -72,7 +72,9 @@ TTS/STT は `ai.tasks.tts` / `ai.tasks.stt` です。
 
 VAD/ASR/TTS はコアが持ちます。Stage は `GET /sessions/{id}/listen/stream`
 でマイク PCM を `pcm_s16le` のバイナリフレームとして中継し（チャンクごとの
-JSON POST はしない）、`audio.chunk` を再生します。ローカル TTS 再生中は
+JSON POST はしない）、`audio.chunk` を再生します。マイク取得中に listen
+ソケットが切れたときは sender を捨て、短い backoff のあと再接続します。
+送信 `Closed` は新しい stream を開き、`Full` のときだけそのフレームを捨てます。ローカル TTS 再生中は
 マイク RMS 閾値を 2 倍（`BARGE_IN_ENERGY_FACTOR`）に上げ、スピーカ漏れで
 割り込みが誤発火しないようにします。大きいユーザー発話はコア VAD へ届きます。
 割り込みの判定はコア（`voice.state` と `abort: true` の `audio.chunk`）が持ちます。

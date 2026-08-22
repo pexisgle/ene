@@ -1,6 +1,7 @@
 //! Voice capture/playback hub for the stage client.
 
 mod dsp;
+mod listen;
 mod stream;
 
 #[cfg(feature = "voice")]
@@ -17,6 +18,7 @@ pub use dsp::{
     BARGE_IN_ENERGY_FACTOR, CAPTURE_SAMPLE_RATE, LISTEN_FRAME_SAMPLES, SILENCE_RMS,
     should_forward_mic,
 };
+pub use listen::{LISTEN_RETRY, ListenAction, MicListen, SendResult};
 pub use stream::run_listen_stream;
 
 use ene_vrm::viseme::VisemeWeights;

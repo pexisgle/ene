@@ -2207,6 +2207,31 @@ async fn listen_stream_feeds_duplex_machine_without_stt() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn listen_stream_reconnects_after_socket_close() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    let pcm: Vec<f32> = (0..1_600).map(|i| ((i as f32) * 0.2).sin() * 0.3).collect();
+    let mut first = client.listen_stream(&session.id, 16_000).await.unwrap();
+    first.send_pcm(&pcm).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Listening).await;
+    drop(first);
+    wait_voice_state(&core, ene_body::DuplexState::Idle).await;
+    let mut second = client.listen_stream(&session.id, 16_000).await.unwrap();
+    second.send_pcm(&pcm).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Listening).await;
+    second.send_pcm(&vec![0.0; 160]).await.unwrap();
+    wait_voice_state(&core, ene_body::DuplexState::Idle).await;
+    server.shutdown().await;
+}
+
 async fn wait_voice_state(core: &CoreDaemon, want: ene_body::DuplexState) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
