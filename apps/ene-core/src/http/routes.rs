@@ -412,8 +412,18 @@ pub async fn listen(
     Json(req): Json<ene_api::ListenRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiReject> {
     let session = parse_session(&id)?;
+    let response = apply_listen_pcm(&state, session, &req.pcm, req.sample_rate).await?;
+    Ok(Json(response))
+}
+
+pub(super) async fn apply_listen_pcm(
+    state: &AppState,
+    session: SessionId,
+    pcm: &[f32],
+    sample_rate: u32,
+) -> Result<SendMessageResponse, ApiReject> {
     let effect = state.core.with_voice(|voice| {
-        let effect = voice.push_input(&req.pcm, super::speech::wall_clock_ms());
+        let effect = voice.push_input(pcm, super::speech::wall_clock_ms());
         super::speech::emit_voice_state(&state.events, voice);
         effect
     });
@@ -426,18 +436,18 @@ pub async fn listen(
                 .get_or_open(&state.core, session)
                 .map_err(map_core)?;
             lane.abort().await.map_err(|err| map_kernel(&err))?;
-            Ok(Json(empty_listen()))
+            Ok(empty_listen())
         }
         InputEffect::NeedsTranscribe => {
             let pcm = state.core.with_voice(VoiceRuntime::take_utterance);
-            transcribe_listen(&state, session, pcm, req.sample_rate).await
+            transcribe_listen(state, session, pcm, sample_rate).await
         }
-        InputEffect::Transcript(text) => dispatch_listen_text(&state, session, text).await,
+        InputEffect::Transcript(text) => dispatch_listen_text(state, session, text).await,
         InputEffect::Silence
         | InputEffect::IgnoredDisabled
         | InputEffect::IgnoredSelfVoice
         | InputEffect::Listening
-        | InputEffect::HoldForMinSpeech => Ok(Json(empty_listen())),
+        | InputEffect::HoldForMinSpeech => Ok(empty_listen()),
     }
 }
 
@@ -453,11 +463,11 @@ async fn transcribe_listen(
     session: SessionId,
     pcm: Vec<f32>,
     sample_rate: u32,
-) -> Result<Json<SendMessageResponse>, ApiReject> {
+) -> Result<SendMessageResponse, ApiReject> {
     let binding = state.core.ai().lock().tasks.stt.clone();
     if binding.is_unconfigured() || pcm.is_empty() {
         state.core.with_voice(VoiceRuntime::mark_idle);
-        return Ok(Json(empty_listen()));
+        return Ok(empty_listen());
     }
     let result = state
         .core
@@ -487,11 +497,11 @@ async fn dispatch_listen_text(
     state: &AppState,
     session: SessionId,
     text: String,
-) -> Result<Json<SendMessageResponse>, ApiReject> {
+) -> Result<SendMessageResponse, ApiReject> {
     let text = text.trim();
     if text.is_empty() {
         state.core.with_voice(VoiceRuntime::mark_idle);
-        return Ok(Json(empty_listen()));
+        return Ok(empty_listen());
     }
     dispatch_message(
         state,
@@ -503,7 +513,6 @@ async fn dispatch_listen_text(
         },
     )
     .await
-    .map(Json)
 }
 
 pub async fn export_session(
@@ -2326,7 +2335,7 @@ fn normalize_skill_refs(raw: Vec<String>) -> Result<Vec<String>, ApiReject> {
     Ok(out)
 }
 
-fn parse_session(raw: &str) -> Result<SessionId, ApiReject> {
+pub(super) fn parse_session(raw: &str) -> Result<SessionId, ApiReject> {
     SessionId::from_str(raw).map_err(|_| bad_request("invalid_message", "bad session id"))
 }
 

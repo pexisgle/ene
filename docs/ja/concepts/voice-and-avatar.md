@@ -5,8 +5,10 @@
 `ene-body` がデュプレックス音声状態（idle / listening / thinking /
 responding / speaking / interrupting）、エネルギー VAD、リップシンクの
 viseme を持ちます。本番は `VoiceRuntime::live` で起動し、VAD・割り込み・
-自声回避・viseme はコアが動かします。`POST /sessions/{id}/listen` は先に
-その状態機械へマイク PCM を入れ、発話が閉じたら設定済みの `ai.tasks.stt`
+自声回避・viseme はコアが動かします。Stage は 16 kHz モノラル
+`pcm_s16le` を `GET /sessions/{id}/listen/stream`（WebSocket バイナリ
+フレーム）で送ります。JSON の `POST /sessions/{id}/listen` はテストと
+他クライアント向けに残します。発話が閉じたら設定済みの `ai.tasks.stt`
 へ送ります。プラグイン TTS の PCM も同じ機械に入るので、リップシンクと
 割り込みは再生中の音声を見ます。surface バスは `voice.state`（`state` と、
 割り込み中は `barge_in`）と、再生シンクを即停止するための空の
