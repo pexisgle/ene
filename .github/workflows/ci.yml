@@ -1,4 +1,4 @@
-# probe-v5
+# probe-v6
 name: PR maintenance
 
 on:
@@ -6,7 +6,7 @@ on:
 
 jobs:
   probe-pr-895-port:
-    if: github.head_ref == 'tmp-placeholder-never-use'
+    if: github.head_ref == 'tmp-pr895-probe-v6'
     runs-on: ubuntu-latest
     permissions:
       contents: read
