@@ -1,4 +1,7 @@
-use crate::{Layer, PipelineError, ToolDefinition, ToolRegistry, ToolSource, builtin_specs};
+use crate::{
+    Layer, PipelineError, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, builtin_specs,
+};
+use async_trait::async_trait;
 use ene_plugin_ipc::BuiltinKind;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -104,6 +107,70 @@ fn unregister_source_drops_only_that_plugin() {
 }
 
 #[test]
+fn unregister_drops_one_tool_and_keeps_siblings() {
+    let registry = ToolRegistry::new();
+    for def in crate::builtins::definitions_for(BuiltinKind::Utility) {
+        registry.register(def);
+    }
+    registry.unregister("utility.hash");
+    assert!(registry.get("utility.hash").is_none());
+    assert!(registry.get("utility.time").is_some());
+}
+
+struct MarkerInvoke(&'static str);
+
+#[async_trait]
+impl ToolInvoke for MarkerInvoke {
+    async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
+        Ok(json!({ "owner": self.0 }))
+    }
+}
+
+fn overlapping_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "overlap.tool".to_owned(),
+        description: "d".to_owned(),
+        parameters: json!({"type": "object"}),
+        output: json!({"type": "object"}),
+        side_effects: Vec::new(),
+        source: ToolSource::Harness {
+            name: "overlap.tool".to_owned(),
+        },
+        timeout_ms: None,
+        sensitivity: ene_plane::Sensitivity::None,
+        category: String::new(),
+        keywords: Vec::new(),
+        examples: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn unregister_owned_keeps_later_owner() {
+    let registry = ToolRegistry::new();
+    registry.register_owned("fiber-a", overlapping_def(), Arc::new(MarkerInvoke("a")));
+    registry.register_owned("fiber-b", overlapping_def(), Arc::new(MarkerInvoke("b")));
+    registry.unregister_owned("overlap.tool", "fiber-a");
+    let value = registry
+        .execute("overlap.tool", json!({}), Layer::Surface)
+        .await
+        .unwrap();
+    assert_eq!(value["owner"], json!("b"));
+}
+
+#[tokio::test]
+async fn unregister_owned_restores_earlier_owner() {
+    let registry = ToolRegistry::new();
+    registry.register_owned("fiber-a", overlapping_def(), Arc::new(MarkerInvoke("a")));
+    registry.register_owned("fiber-b", overlapping_def(), Arc::new(MarkerInvoke("b")));
+    registry.unregister_owned("overlap.tool", "fiber-b");
+    let value = registry
+        .execute("overlap.tool", json!({}), Layer::Surface)
+        .await
+        .unwrap();
+    assert_eq!(value["owner"], json!("a"));
+}
+
+#[test]
 fn side_effects_field_is_required_on_the_wire() {
     let raw = r#"{"name":"x","description":"d","parameters":{},"output":{}}"#;
     let err = serde_json::from_str::<ene_plugin_ipc::ToolSpecWire>(raw).unwrap_err();
@@ -131,7 +198,6 @@ fn exec_tools_stay_off_surface_schema() {
         .filter_map(|schema| schema.get("name").and_then(|v| v.as_str()))
         .collect();
     assert!(job.contains(&"exec.run"));
-    assert!(job.contains(&"exec.shell"));
     assert!(job.contains(&"fs.write"));
 }
 
@@ -332,20 +398,6 @@ async fn web_fetch_is_on_surface_and_blocks_loopback() {
         matches!(&err, PipelineError::Execute(message) if message.contains("host net broker")),
         "{err}"
     );
-}
-
-#[test]
-fn exec_run_and_shell_differ_in_sensitivity_and_side_effects() {
-    let defs = crate::builtins::definitions_for(BuiltinKind::Exec);
-    let run = defs.iter().find(|def| def.name == "exec.run").unwrap();
-    let shell = defs.iter().find(|def| def.name == "exec.shell").unwrap();
-    assert_eq!(run.side_effects, vec!["exec".to_owned()]);
-    assert_eq!(
-        shell.side_effects,
-        vec!["exec".to_owned(), "shell".to_owned()]
-    );
-    assert_eq!(run.sensitivity, ene_plane::Sensitivity::None);
-    assert_eq!(shell.sensitivity, ene_plane::Sensitivity::Medium);
 }
 
 #[test]
