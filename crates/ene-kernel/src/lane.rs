@@ -13,8 +13,8 @@ use crate::config::{HarnessSettings, MindSettings, ToolOutputSettings};
 use crate::context::{ContextRegistry, format_recovery_note};
 use crate::error::{CancelQueued, KernelError};
 use crate::inner::{
-    derive_thought_from_thinking, model_visible_for, split_surface_and_inner,
-    StreamParseDelta, StreamingSurfaceInnerParser,
+    StreamParseDelta, StreamingSurfaceInnerParser, derive_thought_from_thinking, model_visible_for,
+    split_surface_and_inner,
 };
 use crate::live::{LiveBus, LiveEvent, LiveSubscription};
 use crate::model::{ConversationModel, ModelGeneration, ModelRequest, TextDeltaSink};

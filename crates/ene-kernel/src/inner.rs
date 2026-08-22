@@ -15,10 +15,7 @@ pub struct StreamingSurfaceInnerParser {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamParseDelta {
     Surface(String),
-    Inner {
-        aspect: InnerAspect,
-        text: String,
-    },
+    Inner { aspect: InnerAspect, text: String },
 }
 
 impl StreamingSurfaceInnerParser {
@@ -47,9 +44,7 @@ impl StreamingSurfaceInnerParser {
                             text: body.to_owned(),
                         });
                     }
-                    self.pending = self
-                        .pending
-                        .split_off(close_idx + INNER_CLOSE.len());
+                    self.pending = self.pending.split_off(close_idx + INNER_CLOSE.len());
                     self.inside_inner = false;
                     continue;
                 }
@@ -225,9 +220,7 @@ pub fn derive_thought_from_thinking(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        StreamParseDelta, StreamingSurfaceInnerParser, split_surface_and_inner,
-    };
+    use super::{StreamParseDelta, StreamingSurfaceInnerParser, split_surface_and_inner};
     use ene_session::InnerAspect;
 
     #[test]
@@ -235,7 +228,11 @@ mod tests {
         let raw = r#"Hello <inner aspect="thought">secret</inner> world"#;
         let mut parser = StreamingSurfaceInnerParser::new();
         let mut streamed = Vec::new();
-        for chunk in ["Hello ", "<inner aspect=\"thought\">sec", "ret</inner> world"] {
+        for chunk in [
+            "Hello ",
+            "<inner aspect=\"thought\">sec",
+            "ret</inner> world",
+        ] {
             streamed.extend(parser.push(chunk));
         }
         streamed.extend(parser.flush());
@@ -251,10 +248,7 @@ mod tests {
             surface.split_whitespace().collect::<String>(),
             speech.split_whitespace().collect::<String>()
         );
-        assert_eq!(
-            inner,
-            vec![(InnerAspect::Thought, "secret".to_owned())]
-        );
+        assert_eq!(inner, vec![(InnerAspect::Thought, "secret".to_owned())]);
     }
 
     #[test]

@@ -6,8 +6,7 @@ use crate::{
     HarnessSettings, KernelError, LaneHandle, LaneOptions, LiveEvent, LoopHooks, MindSettings,
     ModelGeneration, ModelRequest, ProjectOptions, SurfaceRouter, SurfaceToolOutcome,
     TextDeltaSink, ToolCallingModel, ToolOutputSettings, TurnId, TurnPrefetch, Waterfall,
-    derive_messages,
-    hash_model_visible, hash_projected, spans_leak_content,
+    derive_messages, hash_model_visible, hash_projected, spans_leak_content,
 };
 use async_trait::async_trait;
 use base64::Engine;
