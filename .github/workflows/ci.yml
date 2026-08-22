@@ -27,20 +27,49 @@ jobs:
             337078c4ab6a8a7708d5663bbf75f7aa4de7cc61 \
             b4c5c586e7f668293319ca996d00e3738a55cc9b
           git reset --hard origin/main
-          for commit in \
-            38ee0eab1759c0335a14391ef3dda10cd23e24e7 \
-            b59f9615abbf1db867fe9c63a7731767ca44dbc8 \
-            ef439c0593f086a177f057fa07e37ffc2f53e0d9 \
-            16ab7d261fca65fc212d94e46597bc83f3429132 \
-            337078c4ab6a8a7708d5663bbf75f7aa4de7cc61 \
-            b4c5c586e7f668293319ca996d00e3738a55cc9b; do
-            echo "=== cherry-pick $commit ==="
-            if ! git cherry-pick "$commit"; then
-              echo "=== conflicts ==="
-              git status --short
-              git diff --cc
-              exit 1
-            fi
-          done
-          echo '=== broker stack ports cleanly ==='
+          git cherry-pick 38ee0eab1759c0335a14391ef3dda10cd23e24e7
+          git cherry-pick b59f9615abbf1db867fe9c63a7731767ca44dbc8
+          git cherry-pick ef439c0593f086a177f057fa07e37ffc2f53e0d9
+          git cherry-pick 16ab7d261fca65fc212d94e46597bc83f3429132
+          if ! git cherry-pick 337078c4ab6a8a7708d5663bbf75f7aa4de7cc61; then
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/ene-fiber/src/broker.rs')
+          text = path.read_text()
+          start = text.index('        let output = command.output()', text.index('pub fn fs_search'))
+          end = text.index('    /// Resolve a sidecar binary without spawning it.', start)
+          replacement = '''        let output = command.output().map_err(|err| {
+              if err.kind() == std::io::ErrorKind::NotFound {
+                  BrokerError::SearchEngineUnavailable
+              } else {
+                  BrokerError::from(err)
+              }
+          })?;
+          let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+          if !output.status.success() && output.status.code() != Some(1) {
+              if stderr.contains("regex parse error") {
+                  return Err(BrokerError::InvalidRegex(stderr));
+              }
+              return Err(BrokerError::Fetch(stderr));
+          }
+          let stdout = String::from_utf8_lossy(&output.stdout);
+          Ok(parse_rg_json(&stdout, max, count))
+      }
+
+'''
+          path.write_text(text[:start] + replacement + text[end:])
+          PY
+            git add crates/ene-fiber/src/broker.rs
+            git cherry-pick --continue
+          fi
+          echo '=== after error classification ==='
+          git status --short
+          if ! git cherry-pick b4c5c586e7f668293319ca996d00e3738a55cc9b; then
+            echo '=== global-lock commit conflicts ==='
+            git status --short
+            git diff --cc
+            exit 1
+          fi
+          cargo fmt --all -- --check
+          echo '=== broker stack ports with one resolved hunk ==='
           git log --oneline -7
