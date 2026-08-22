@@ -5,7 +5,7 @@ use base64::Engine as _;
 use ene_api::{
     AnswerJobRequest, ApiClient, ApiError, CharacterView, ClaimResourceRequest,
     CreateSessionRequest, HistoryResponse, MessageMode, MessageRequest, OccupantView, ResourceKind,
-    SendMessageResponse, SoulPatch, SoulView,
+    SendMessageResponse, SoulPatch, SoulView, SplitSessionResponse,
 };
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -45,6 +45,14 @@ impl StageSession {
     #[must_use]
     pub fn client(&self) -> &Arc<ApiClient> {
         &self.client
+    }
+
+    pub async fn apply_new_session(&mut self, split: SplitSessionResponse) -> Result<(), ApiError> {
+        let history = self.client.history(&split.session.id, "surface").await?;
+        self.session_id.clone_from(&split.session.id);
+        *self.turn_id.lock() = None;
+        *self.history.lock() = history;
+        Ok(())
     }
 
     #[must_use]

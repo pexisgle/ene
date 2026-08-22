@@ -24,6 +24,7 @@ const _: () = {
 #[derive(Debug, Clone)]
 pub enum SurfaceAction {
     SendChat,
+    NewSession,
     BargeIn,
     CancelTurn,
     ToggleMic,
