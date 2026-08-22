@@ -6,11 +6,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 
+#[cfg(unix)]
+type BrokerTransport = tokio::net::UnixStream;
+#[cfg(not(unix))]
+type BrokerTransport = tokio::net::TcpStream;
+
 /// Client for the host broker socket injected into a plugin process.
 #[derive(Debug)]
 pub struct BrokerClient<S> {
     stream: S,
 }
+
+/// Platform-local transport used by plugins for broker sessions.
+#[cfg(feature = "net")]
+pub type BrokerClientTransport = BrokerTransport;
 
 /// A process-wide authenticated broker session.
 ///
@@ -75,7 +84,7 @@ where
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "net"))]
 impl BrokerClient<tokio::net::UnixStream> {
     /// Connect to `ENE_BROKER_SOCKET`.
     ///
@@ -108,7 +117,7 @@ impl BrokerClient<tokio::net::UnixStream> {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "net"))]
 impl BrokerClient<tokio::net::TcpStream> {
     /// Connect to `ENE_BROKER_SOCKET`.
     ///
