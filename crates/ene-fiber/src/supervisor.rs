@@ -15,8 +15,8 @@ use ene_plugin_ipc::{
 };
 use ene_provider_assets::CatalogRegistry;
 use ene_registry::{
-    BuiltinExecutor, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for,
-    with_http_fetch,
+    BuiltinExecutor, BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource,
+    definitions_for, with_http_fetch,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -729,6 +729,8 @@ impl Supervisor {
                 uid: fiber.uid,
                 inner: Arc::clone(&self.inner),
             })
+        } else if row.plugin == "tool.fs" {
+            Arc::new(BuiltinInvoker)
         } else {
             Arc::new(PluginInvoker {
                 session: Arc::clone(&session),
