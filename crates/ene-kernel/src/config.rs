@@ -6,13 +6,14 @@ ene_config::define_config!(
         #[serde(rename = "loop")]
         pub loop_cfg: LoopSettings,
         pub context: ContextSettings,
+        pub retry: RetrySettings,
         pub delegation: DelegationSettings,
         /// Soft/hard byte caps for inlining tool results (D-29).
         pub tool_output: ToolOutputSettings,
     }
 );
 
-/// Dialogue-lane step budget and retry.
+/// Dialogue-lane step budget.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -36,6 +37,7 @@ impl Default for LoopSettings {
 pub struct ContextSettings {
     pub response_reserve_tokens: u32,
     pub safety_margin_ratio: f32,
+    pub token_estimation: TokenEstimation,
 }
 
 impl Default for ContextSettings {
@@ -43,6 +45,51 @@ impl Default for ContextSettings {
         Self {
             response_reserve_tokens: 4096,
             safety_margin_ratio: 0.1,
+            token_estimation: TokenEstimation::Auto,
+        }
+    }
+}
+
+/// Character-based token estimate used when packing a prompt into the window.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    ene_config::schemars::JsonSchema,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case")]
+#[schemars(crate = "::ene_config::schemars")]
+pub enum TokenEstimation {
+    /// CJK-heavy text uses [`Self::Cjk15`], otherwise [`Self::Chars4`].
+    #[default]
+    Auto,
+    /// `ceil(chars / 4)`.
+    Chars4,
+    /// `ceil(chars * 2 / 3)` (~1.5 chars/token).
+    Cjk15,
+}
+
+/// Provider-call retry (`harness.retry.*`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct RetrySettings {
+    /// Total attempts including the first call.
+    pub max_attempts: u32,
+    /// Backoff after each failed retryable attempt, in milliseconds.
+    pub backoff_ms: Vec<u32>,
+}
+
+impl Default for RetrySettings {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            backoff_ms: vec![500, 2_000, 8_000],
         }
     }
 }
@@ -295,6 +342,9 @@ pub struct TaskBinding {
     /// never receives `LlmImage` payloads.
     #[serde(default)]
     pub supports_images: bool,
+    /// Operator cap on the model context window in tokens.
+    #[serde(default)]
+    pub context_window: Option<u32>,
 }
 
 impl TaskBinding {

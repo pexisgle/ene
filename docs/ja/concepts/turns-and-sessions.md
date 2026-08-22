@@ -36,7 +36,8 @@
    `PATCH /api/v1/souls/{id}/skills`（または `ene-ctl soul skills`）が soul
    の許可リストを更新する。空リストは導入済み skill すべてが対象、という意味。
 3. 設定済みの会話モデルが、結び付けた `provider.*` プラグイン経由でテキストを
-   ストリーム。
+   ストリーム。一時的なプロバイダ失敗は `harness.retry` で再試行し、プロンプトは
+   実効コンテキスト窓に収まるようパックします（[設定](../configuration.md)）。
 4. 表層向けツールは `ene-registry` / `ene-plane` を通る。
    `delegate.start` はすぐに戻り、`ene-work` が **ジョブレーン**
    （`origin: delegation`）を開き、作業ツールと `delegation.send` を使います。

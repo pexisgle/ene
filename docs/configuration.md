@@ -28,7 +28,7 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 | Section | Owner | Typical keys |
 |---|---|---|
 | `core` | `ene-kernel` | `server.bind`, `server.token_file`, `backup.*`, `clients.*` |
-| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `context.*`, `delegation.*`, `tool_output.soft_limit_bytes`, `tool_output.hard_limit_bytes` |
+| `harness` | `ene-kernel` | `loop.max_steps_per_turn`, `retry.*`, `context.*`, `delegation.*`, `tool_output.soft_limit_bytes`, `tool_output.hard_limit_bytes` |
 | `mind` | `ene-companion` | `inner.*`, `affect.*`, `recall.*`, `memory_approval.*`, `proactive.*` (`observation_interval_seconds` is the live tick interval; each open session is observed; `proactive.world_state.title_mode` and `ocr_hint`) |
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
@@ -39,14 +39,15 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 Conversation, classifier, embedding, TTS, STT, approve, and job bind through
 `ai.tasks.<task>`
 (`plugin`, `model`, `model_path`, `base_url`, `voice`, `max_tokens`,
-`supports_images`). Chat
+`supports_images`, `context_window`). Chat
 starts unconfigured — set `ai.tasks.chat.plugin` to a `provider.*` id before
 the first message. `supports_images` is opt-in and defaults to false: only a
 configured binding with the flag set folds `ImageRef` tool results into
 `LlmImage`; text-only or unknown providers keep `[image omitted]`. `approval.mode = ai_auto` uses `ai.tasks.approve` (chat
 fallback) and pops up when that helper fails. Back-harness jobs use
 `ai.tasks.job` (chat fallback, or the echo model when neither is bound) on a
-lane independent of dialogue. API keys are vault secrets (`ENE_AI__TASKS__<TASK>__API_KEY`
+lane independent of dialogue. There is no multi-provider failover: an empty
+task row inherits chat (or stays disabled for TTS/STT/embedding). API keys stay in the vault (`ENE_AI__TASKS__<TASK>__API_KEY`
 at boot; PATCH `/api/v1/settings` never writes them into JSON). Plugin ids are
 `provider.*` names from the [plugin catalog](concepts/plugins-and-mcp.md)
 (`GET /api/v1/settings` → `effective.providers`). Desktop does not keep a
@@ -67,6 +68,25 @@ Observation privacy lives under `mind.proactive.world_state`: `title_mode` is
 opt-in slot with no bundled backend. The product GUI (Detail → Conversation)
 shows the current send scope. Raw screenshots stay off session, memory, and
 audit; only luma digest and text summary cross those boundaries.
+
+Provider LLM calls (`ai.tasks.chat` / `job` / `classifier` / `approve`) retry
+transient failures (`429` / `502` / `503` / timeout / overload) using
+`harness.retry`. The last error becomes the turn / helper failure. The
+effective context window is `min(provider advertised, ai.tasks.<task>.context_window)`
+or 8192 when neither is set. `harness.context.response_reserve_tokens` (or
+`max_tokens` when set) and `safety_margin_ratio` are subtracted; the dialogue
+model then drops oldest non-system messages so the packed prompt fits.
+Plugins do not yet advertise a window on hello — set `context_window` to cap
+a large model.
+
+| Key | Role |
+|---|---|
+| `harness.retry.max_attempts` | Total provider attempts, including the first. Default `3`. |
+| `harness.retry.backoff_ms` | Sleep after each retryable failure. Default `[500, 2000, 8000]`. |
+| `harness.context.response_reserve_tokens` | Completion reserve when `max_tokens` is unset. Default `4096`. |
+| `harness.context.safety_margin_ratio` | Fraction of the window held back. Default `0.1`. |
+| `harness.context.token_estimation` | `auto` (CJK-aware), `chars4`, or `cjk15`. |
+| `ai.tasks.<task>.context_window` | Operator cap on the model window. Env: `ENE_AI__TASKS__<TASK>__CONTEXT_WINDOW`. |
 
 Plugin launch is `plugins.profile` (`desktop`, `minimal`, or `headless`), not a
 per-plugin enable map (`plugins.list` is gone). Related keys:

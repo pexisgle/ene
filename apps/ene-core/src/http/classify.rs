@@ -107,14 +107,9 @@ impl ClassifyModel for SeamedClassify {
                 api_key: Self::secret_for(&core, task),
             },
         };
-        let generation = core
-            .supervisor()
-            .generate_llm(&Self::row_id_for(&core, task), request)
+        let generation = super::llm::generate_llm(&core, &Self::row_id_for(&core, task), request)
             .await
-            .map_err(|err| CompanionError::Classify(err.to_string()))?;
-        if generation.finish_reason == "error" {
-            return Err(CompanionError::Classify(generation.model_id));
-        }
+            .map_err(CompanionError::Classify)?;
         let text = generation.text.trim();
         if text.is_empty() {
             return Err(CompanionError::Classify(
@@ -199,14 +194,9 @@ impl SeamedClassify {
                 api_key: Self::secret_for(&core, task),
             },
         };
-        let generation = core
-            .supervisor()
-            .generate_llm(&Self::row_id_for(&core, task), request)
+        let generation = super::llm::generate_llm(&core, &Self::row_id_for(&core, task), request)
             .await
-            .map_err(|err| CompanionError::Classify(err.to_string()))?;
-        if generation.finish_reason == "error" {
-            return Err(CompanionError::Classify(generation.model_id));
-        }
+            .map_err(CompanionError::Classify)?;
         let text = generation.text.trim();
         if text.is_empty() {
             return Err(CompanionError::Classify("empty screen summary".to_owned()));

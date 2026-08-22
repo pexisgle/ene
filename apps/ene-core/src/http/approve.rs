@@ -91,14 +91,7 @@ impl ApproveModel for SeamedApprove {
                 api_key: core.secret_for("approve"),
             },
         };
-        let generation = core
-            .supervisor()
-            .generate_llm(&Self::row_id(&core), request)
-            .await
-            .map_err(|err| err.to_string())?;
-        if generation.finish_reason == "error" {
-            return Err(generation.model_id);
-        }
+        let generation = super::llm::generate_llm(&core, &Self::row_id(&core), request).await?;
         parse_ai_judgement(&generation.text)
     }
 }

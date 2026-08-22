@@ -36,7 +36,9 @@ running turn; `compact` compresses history.
    `PATCH /api/v1/souls/{id}/skills` (or `ene-ctl soul skills`) sets the
    soul allowlist; an empty list means every installed skill is eligible.
 3. The configured conversation model streams text through its bound `provider.*`
-   plugin.
+   plugin. Transient provider failures retry with `harness.retry`; the packed
+   prompt is trimmed to the effective context window (see
+   [Configuration](../configuration.md)).
 4. Surface-eligible tools run through `ene-registry` / `ene-plane`.
    `delegate.start` returns immediately; `ene-work` opens a **job lane**
    (`origin: delegation`) that uses job-layer tools and `delegation.send`.

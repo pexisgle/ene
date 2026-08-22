@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ene_kernel::{
     ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, TextDeltaSink,
-    ToolCall,
+    TokenEstimation, ToolCall, effective_window, estimate_tokens, fit_prompt,
 };
 use ene_plugin_ipc::{
     LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
@@ -12,6 +12,8 @@ use ene_registry::Layer;
 use ene_session::{Block, InnerAspect, ProjectedMessage, Role, SessionStore, SpillObject};
 
 use crate::CoreDaemon;
+
+const IMAGE_TOKEN_ESTIMATE: u32 = 4096;
 
 /// Dialogue / job model that binds `ai.tasks.<task>` to a configured provider plugin.
 pub struct SeamedModel {
@@ -94,44 +96,50 @@ impl SeamedModel {
                 self.task
             )));
         }
+        let harness = self.core.harness();
+        let reserve = binding
+            .max_tokens
+            .unwrap_or(harness.context.response_reserve_tokens);
+        let window = effective_window(
+            None,
+            binding.context_window,
+            Some(reserve),
+            harness.context.safety_margin_ratio,
+        );
+        let estimation = harness.context.token_estimation;
+        let store = self.core.store();
+        let vision_store = vision_store_for(&binding, store.as_ref());
+        let tool_overhead = estimate_tool_schema_tokens(&self.core, self.layer(), estimation);
+        let message_budget = window.available.saturating_sub(tool_overhead);
+        if message_budget == 0 {
+            return Err(KernelError::Model(
+                "context window exhausted by tool definitions".to_owned(),
+            ));
+        }
+        let messages = fit_prompt(
+            fold_history(&request.messages, vision_store),
+            message_budget,
+            |message| estimate_message_tokens(message, estimation),
+            |message| matches!(message.role, LlmRole::System),
+        );
         let llm_request = map_request(
-            &request,
+            messages,
             &binding,
             &self.core.secret_for(self.task),
             &self.core,
             self.layer(),
+            reserve,
         );
         let row_id = crate::plugin_profile::task_row_id(self.fiber_task());
         let generation = if let Some(sink) = sink {
-            self.core
-                .supervisor()
-                .generate_llm_streaming(&row_id, llm_request, |chunk| {
-                    if !chunk.text.is_empty() {
-                        sink.on_text(&chunk.text);
-                    }
-                    if let Some(thinking) = chunk.thinking.as_deref() {
-                        sink.on_thinking(thinking);
-                    }
-                })
-                .await
+            super::llm::generate_llm_streaming(&self.core, &row_id, llm_request, sink).await
         } else {
-            self.core
-                .supervisor()
-                .generate_llm(&row_id, llm_request)
-                .await
+            super::llm::generate_llm(&self.core, &row_id, llm_request).await
         }
-        .map_err(|err| KernelError::Model(err.to_string()))?;
-        if generation.finish_reason == "error" {
-            return Err(KernelError::Model(if generation.model_id.is_empty() {
-                "provider failed".to_owned()
-            } else {
-                generation.model_id
-            }));
-        }
+        .map_err(KernelError::Model)?;
         Ok(map_generation(generation))
     }
 }
-
 fn vision_store_for<'a>(
     binding: &TaskBinding,
     store: &'a SessionStore,
@@ -140,24 +148,58 @@ fn vision_store_for<'a>(
 }
 
 fn map_request(
-    request: &ModelRequest,
+    messages: Vec<LlmMessage>,
     binding: &TaskBinding,
     api_key: &str,
     core: &CoreDaemon,
     layer: Layer,
+    reserve: u32,
 ) -> LlmGenerateRequest {
-    let store = core.store();
-    let vision_store = vision_store_for(binding, store.as_ref());
     LlmGenerateRequest {
-        messages: fold_history(&request.messages, vision_store),
+        messages,
         tools: tool_schemas(core, layer),
         model: binding.model.clone(),
-        max_tokens: binding.max_tokens,
+        max_tokens: Some(reserve),
         base_url: binding.base_url.clone(),
         auth: ProviderAuth {
             api_key: api_key.to_owned(),
         },
     }
+}
+
+fn pack_text(message: &LlmMessage) -> String {
+    let mut text = message.text.clone();
+    for call in &message.tool_calls {
+        text.push(' ');
+        text.push_str(&call.name);
+        text.push(' ');
+        text.push_str(&call.arguments.to_string());
+    }
+    text
+}
+
+fn estimate_message_tokens(message: &LlmMessage, estimation: TokenEstimation) -> u32 {
+    let text = estimate_tokens(&pack_text(message), estimation);
+    let image_count = u32::try_from(message.images.len()).unwrap_or(u32::MAX);
+    text.saturating_add(IMAGE_TOKEN_ESTIMATE.saturating_mul(image_count))
+}
+
+fn estimate_tool_schema_tokens(
+    core: &CoreDaemon,
+    layer: Layer,
+    estimation: TokenEstimation,
+) -> u32 {
+    estimate_tool_schema_tokens_for(&tool_schemas(core, layer), estimation)
+}
+
+fn estimate_tool_schema_tokens_for(schemas: &[LlmToolSchema], estimation: TokenEstimation) -> u32 {
+    if schemas.is_empty() {
+        return 0;
+    }
+    let Ok(serialized) = serde_json::to_string(schemas) else {
+        return u32::MAX;
+    };
+    estimate_tokens(&serialized, estimation)
 }
 
 // OpenAI/Anthropic function names must match ^[a-zA-Z0-9_-]+$.
@@ -552,5 +594,105 @@ mod tests {
         assert_eq!(mapped[0].images[0].mime, "image/png");
         assert_eq!(mapped[0].images[0].base64, encoded);
         assert!(!mapped[0].text.contains("[image omitted]"));
+    }
+
+    #[test]
+    fn pack_text_includes_tool_call_payload() {
+        let message = LlmMessage {
+            role: LlmRole::Assistant,
+            text: String::new(),
+            tool_calls: vec![LlmToolCall {
+                id: "c1".to_owned(),
+                name: "fs__read".to_owned(),
+                arguments: serde_json::json!({"path": "a.txt"}),
+            }],
+            tool_call_id: None,
+            tool_name: None,
+            images: Vec::new(),
+        };
+        let packed = pack_text(&message);
+        assert!(packed.contains("fs__read"));
+        assert!(packed.contains("a.txt"));
+    }
+
+    #[test]
+    fn image_payloads_consume_context_budget() {
+        let plain = LlmMessage {
+            role: LlmRole::User,
+            text: "look".to_owned(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            images: Vec::new(),
+        };
+        let with_image = LlmMessage {
+            role: LlmRole::User,
+            text: "look".to_owned(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            images: vec![LlmImage {
+                mime: "image/png".to_owned(),
+                base64: "iVBORw0KGgo=".to_owned(),
+            }],
+        };
+        let plain_cost = estimate_message_tokens(&plain, ene_kernel::TokenEstimation::Chars4);
+        let image_cost = estimate_message_tokens(&with_image, ene_kernel::TokenEstimation::Chars4);
+        assert_eq!(image_cost, plain_cost.saturating_add(IMAGE_TOKEN_ESTIMATE));
+    }
+
+    #[test]
+    fn tool_schema_overhead_can_exhaust_available_window() {
+        let schemas = vec![LlmToolSchema {
+            name: "big".to_owned(),
+            description: "d".repeat(10_000),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let overhead =
+            estimate_tool_schema_tokens_for(&schemas, ene_kernel::TokenEstimation::Chars4);
+        assert!(overhead > 100);
+        let messages = vec![LlmMessage::new(LlmRole::User, "short")];
+        let msg_cost = estimate_message_tokens(&messages[0], ene_kernel::TokenEstimation::Chars4);
+        let packed = ene_kernel::fit_prompt(
+            messages,
+            msg_cost,
+            |message| estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4),
+            |_| false,
+        );
+        assert_eq!(packed.len(), 1);
+        let packed_with_overhead = ene_kernel::fit_prompt(
+            packed,
+            msg_cost.saturating_sub(overhead),
+            |message| estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4),
+            |_| false,
+        );
+        assert!(packed_with_overhead.is_empty() || overhead >= msg_cost);
+    }
+
+    #[test]
+    fn token_budget_keeps_system_and_latest_user() {
+        let messages = vec![
+            LlmMessage::new(LlmRole::System, "contract"),
+            LlmMessage::new(LlmRole::User, "old-turn-".repeat(80)),
+            LlmMessage::new(LlmRole::Assistant, "ack-old"),
+            LlmMessage::new(LlmRole::User, "latest-turn"),
+        ];
+        let packed = ene_kernel::fit_prompt(
+            messages,
+            8,
+            |message| estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4),
+            |message| matches!(message.role, LlmRole::System),
+        );
+        assert_eq!(packed[0].text, "contract");
+        assert_eq!(
+            packed.last().map(|message| message.text.as_str()),
+            Some("latest-turn")
+        );
+        assert!(
+            packed
+                .iter()
+                .all(|message| !message.text.contains("old-turn-")),
+            "oversized older turn should be dropped: {packed:?}"
+        );
     }
 }
