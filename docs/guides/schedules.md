@@ -35,11 +35,15 @@ window ends, except `important`.
 
 ## Managing schedules
 
-`ene-ctl schedule list` prints the HTTP page. Create / patch / delete are
-on `/api/v1/schedules`:
+`ene-ctl schedule list` prints the HTTP page. `ene-ctl schedule add` creates
+a row after checking that `spec` is a 5- or 6-field cron expression and that
+`timezone` is an IANA name (or `UTC`). Quote `spec` when it contains spaces.
+Create / patch / delete are also on `/api/v1/schedules`:
 
 ```sh
 ene-ctl schedule list
+ene-ctl schedule add <soul-id> morning "0 9 * * *" --timezone UTC
+ene-ctl schedule add <soul-id> standup "0 30 9 * * 1-5" --timezone Asia/Tokyo --action remind
 ```
 
 `PATCH` toggles `enabled`. Firing is server-side; clients do not poll a

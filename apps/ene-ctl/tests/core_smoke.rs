@@ -10,8 +10,9 @@
 use ene_api::{ApiClient, CreateSessionRequest, EndSessionRequest, MessageMode, MessageRequest};
 use ene_ctl::core::{read_api_ready, wait_for_api_json};
 use ene_daemon as _;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -54,6 +55,35 @@ fn ene_core_bin() -> PathBuf {
 
 fn ene_ctl_bin() -> PathBuf {
     sibling_bin("ene-ctl")
+}
+
+#[test]
+fn cli_help_includes_repl_schedule_add_tool_call_and_debug_delegation() {
+    let ctl = ene_ctl_bin();
+    assert!(ctl.is_file(), "ene-ctl missing at {}", ctl.display());
+    let help = |args: &[&str]| {
+        let out = Command::new(&ctl).args(args).output().expect("help");
+        assert!(
+            out.status.success(),
+            "{} failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    let chat = help(&["chat", "--help"]);
+    assert!(chat.contains("<TARGET>"), "{chat}");
+    assert!(chat.contains("REPL") || chat.contains(".quit"), "{chat}");
+    let schedule = help(&["schedule", "--help"]);
+    assert!(schedule.contains("add"), "{schedule}");
+    let tool = help(&["tool", "--help"]);
+    assert!(tool.contains("call"), "{tool}");
+    let debug = help(&["debug", "--help"]);
+    assert!(debug.contains("delegation"), "{debug}");
 }
 
 async fn spawn_core(dir: &TempDir) -> (KillOnDrop, ApiClient) {
@@ -250,6 +280,37 @@ async fn cli_binary_starts_core_and_runs_session_ops() {
         "unconfigured CLI chat must not emit an Echo assistant line"
     );
 
+    let mut repl = Command::new(&ctl_bin)
+        .args(["chat", session_id.as_str()])
+        .env("ENE_API_URL", &url)
+        .env("ENE_API_TOKEN", &token)
+        .env("RUST_LOG", "error")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chat REPL");
+    {
+        let mut stdin = repl.stdin.take().expect("repl stdin");
+        writeln!(stdin, "repl ping line").unwrap();
+        writeln!(stdin, ".quit").unwrap();
+    }
+    let repl_out = repl.wait_with_output().expect("repl wait");
+    assert!(
+        repl_out.status.success(),
+        "REPL failed:\n{}",
+        String::from_utf8_lossy(&repl_out.stderr)
+    );
+    let repl_stdout = String::from_utf8_lossy(&repl_out.stdout);
+    assert!(
+        repl_stdout.contains("user:"),
+        "REPL stdout missing surface user line: {repl_stdout}"
+    );
+    assert!(
+        !repl_stdout.to_ascii_lowercase().contains("inner:"),
+        "REPL leaked inner on surface: {repl_stdout}"
+    );
+
     let search = run(&["session", "search", session_id.as_str()]);
     assert!(search.status.success());
     let search_page: serde_json::Value = serde_json::from_slice(&search.stdout).unwrap();
@@ -278,6 +339,73 @@ async fn cli_binary_starts_core_and_runs_session_ops() {
 
     let tools = run(&["tool", "list"]);
     assert!(tools.status.success());
+    assert!(
+        String::from_utf8_lossy(&run(&["schedule", "--help"]).stdout).contains("add"),
+        "schedule add missing from help"
+    );
+    assert!(
+        String::from_utf8_lossy(&run(&["tool", "--help"]).stdout).contains("call"),
+        "tool call missing from help"
+    );
+    assert!(
+        String::from_utf8_lossy(&run(&["debug", "--help"]).stdout).contains("delegation"),
+        "debug delegation missing from help"
+    );
+
+    let bad_cron = run(&["schedule", "add", soul_id.as_str(), "bad", "not-a-cron"]);
+    assert!(
+        !bad_cron.status.success(),
+        "invalid cron must fail client-side"
+    );
+
+    let added = run(&[
+        "schedule",
+        "add",
+        soul_id.as_str(),
+        "morning",
+        "0 9 * * *",
+        "--timezone",
+        "UTC",
+    ]);
+    assert!(
+        added.status.success(),
+        "schedule add failed:\n{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let added_json: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(added_json["name"], "morning");
+    assert_eq!(added_json["spec"], "0 9 * * *");
+    assert_eq!(added_json["timezone"], "UTC");
+
+    let listed: serde_json::Value =
+        serde_json::from_slice(&run(&["schedule", "list"]).stdout).unwrap();
+    assert!(
+        listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"].as_str() == Some("morning"))
+    );
+
+    let call = run(&["tool", "call", "utility.time"]);
+    assert!(
+        call.status.success(),
+        "tool call failed:\n{}",
+        String::from_utf8_lossy(&call.stderr)
+    );
+    let call_json: serde_json::Value = serde_json::from_slice(&call.stdout).unwrap();
+    assert!(
+        call_json.get("unix_ms").is_some() || call_json.get("rfc3339").is_some(),
+        "{call_json}"
+    );
+
+    let dbg = run(&["debug", "delegation", session_id.as_str()]);
+    assert!(!dbg.status.success());
+    let dbg_err = String::from_utf8_lossy(&dbg.stderr);
+    assert!(
+        dbg_err.contains("delegation") || dbg_err.contains("conversation"),
+        "{dbg_err}"
+    );
 
     let stop = Command::new(&ctl_bin)
         .args(["core", "stop", "--data-dir"])
