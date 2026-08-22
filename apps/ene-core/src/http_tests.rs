@@ -6,15 +6,15 @@ use ene_api::{
     MessageMode, MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
 };
 use ene_companion::{
-    CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, content_digest,
-    install_archive, pack_archive,
+    CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, ScriptedClassify,
+    content_digest, install_archive, pack_archive,
 };
 use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
     ToolCallingModel, spans_leak_content,
 };
 use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
-use ene_session::{EventKind, EventPayload, SessionId, TurnOutcome};
+use ene_session::{EventKind, EventPayload, SessionId, TurnOrigin, TurnOutcome};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -2556,5 +2556,80 @@ async fn body_events_are_scoped_per_soul() {
     let second = wait_event_type(&mut surface, "body.motion", Duration::from_secs(2)).await;
     assert_eq!(second["soul_id"], soul_b.to_string());
     assert_eq!(second["name"], "wave");
+    server.shutdown().await;
+}
+
+fn speak_decision() -> &'static str {
+    r#"{"should_speak":true,"confidence":0.95,"reason":"idle","topic_hint":"check in","urgency":"low","screen_digest":""}"#
+}
+
+fn count_proactive_turns(core: &CoreDaemon, session: SessionId) -> usize {
+    core.store()
+        .load_events(session, 0)
+        .unwrap()
+        .iter()
+        .filter(|event| match &event.payload {
+            EventPayload::TurnStart { origin, .. } => *origin == TurnOrigin::Proactive,
+            _ => false,
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn proactive_tick_observes_every_open_session() {
+    let (_dir, client, core, server) = boot_server().await;
+    let occupants = core.occupants();
+    assert!(occupants.len() >= 2, "boot seeds two occupants");
+    let session_a = client
+        .create_session(&CreateSessionRequest {
+            soul_id: occupants[0].0.to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let session_b = client
+        .create_session(&CreateSessionRequest {
+            soul_id: occupants[1].0.to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let mut mind = core.mind();
+    mind.proactive.enabled = true;
+    mind.proactive.min_idle_seconds = 0;
+    mind.proactive.cooldown_seconds = 0;
+    mind.proactive.sources.activity = false;
+    mind.proactive.sources.screen_summary = false;
+    core.replace_mind(mind);
+    let classify = ScriptedClassify::new([speak_decision(), speak_decision()]);
+    crate::http::proactive::tick(&server.state, &classify).await;
+    let id_a = SessionId::from_str(&session_a.id).unwrap();
+    let id_b = SessionId::from_str(&session_b.id).unwrap();
+    assert_eq!(count_proactive_turns(&core, id_a), 1);
+    assert_eq!(count_proactive_turns(&core, id_b), 1);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn observation_interval_follows_mind_settings() {
+    let (_dir, _client, core, server) = boot_server().await;
+    let mut mind = core.mind();
+    mind.proactive.observation_interval_seconds = 7;
+    core.replace_mind(mind);
+    assert_eq!(
+        crate::http::proactive::observation_interval(
+            core.mind().proactive.observation_interval_seconds
+        ),
+        Duration::from_secs(7)
+    );
+    let mut mind = core.mind();
+    mind.proactive.observation_interval_seconds = 0;
+    core.replace_mind(mind);
+    assert_eq!(
+        crate::http::proactive::observation_interval(
+            core.mind().proactive.observation_interval_seconds
+        ),
+        Duration::from_secs(1)
+    );
     server.shutdown().await;
 }

@@ -17,7 +17,7 @@ running turn; `compact` compresses history.
 | Origin | Trigger |
 |---|---|
 | `user` | A message from a client |
-| `proactive` | The companion decides to speak (`ene-companion`) |
+| `proactive` | The companion decides to speak (`ene-companion`). Every open session is observed on `mind.proactive.observation_interval_seconds` (default 60). |
 | `scheduled` | A persistent schedule fired (`ene-work`) |
 | `delegation` | A back-harness job reporting in |
 | `subagent` | A nested work turn |
