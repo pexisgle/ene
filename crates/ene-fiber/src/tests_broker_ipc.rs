@@ -138,3 +138,14 @@ async fn broker_client_round_trips_fs_search() {
     };
     assert!(matches.is_array());
 }
+
+#[test]
+fn broker_rpc_timeout_is_machine_classified() {
+    assert_eq!(
+        crate::broker_ipc::timeout_response(std::time::Duration::from_secs(30)),
+        BrokerResponse::Error {
+            code: ene_plugin_ipc::BrokerErrorCode::Timeout,
+            message: "broker operation timed out after 30s".to_owned(),
+        }
+    );
+}

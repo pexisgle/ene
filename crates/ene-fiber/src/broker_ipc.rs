@@ -9,6 +9,7 @@ use thiserror::Error;
 
 #[cfg(unix)]
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(windows)]
 use tokio::net::TcpListener;
@@ -187,7 +188,20 @@ where
         .await
         .map_err(|err| BrokerIpcError::Codec(err.to_string()))?
     {
-        let response = dispatch(&broker, uid, request);
+        let worker_broker = Arc::clone(&broker);
+        let response = match tokio::time::timeout(
+            BROKER_RPC_TIMEOUT,
+            tokio::task::spawn_blocking(move || dispatch(&worker_broker, uid, request)),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(join_err)) => BrokerResponse::Error {
+                code: BrokerErrorCode::Internal,
+                message: format!("broker worker failed: {join_err}"),
+            },
+            Err(_) => timeout_response(BROKER_RPC_TIMEOUT),
+        };
         ene_plugin_ipc::write_broker_response(&mut stream, response)
             .await
             .map_err(|err| BrokerIpcError::Codec(err.to_string()))?;
@@ -265,12 +279,22 @@ fn dispatch(
     }
 }
 
+const BROKER_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) fn timeout_response(timeout: Duration) -> BrokerResponse {
+    BrokerResponse::Error {
+        code: BrokerErrorCode::Timeout,
+        message: format!("broker operation timed out after {timeout:?}"),
+    }
+}
+
 fn error_response(err: &BrokerError) -> BrokerResponse {
     BrokerResponse::Error {
         code: match &err {
             BrokerError::Denied { .. } => BrokerErrorCode::Denied,
             BrokerError::PathEscape(_) => BrokerErrorCode::PathEscape,
             BrokerError::Io(_) => BrokerErrorCode::Io,
+            BrokerError::Timeout => BrokerErrorCode::Timeout,
             BrokerError::InvalidUrl(_) => BrokerErrorCode::InvalidUrl,
             BrokerError::Ssrf(_) => BrokerErrorCode::Ssrf,
             BrokerError::Fetch(_) => BrokerErrorCode::Fetch,

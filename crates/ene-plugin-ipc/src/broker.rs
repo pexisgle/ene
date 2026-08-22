@@ -159,6 +159,7 @@ pub enum BrokerErrorCode {
     Denied,
     PathEscape,
     Io,
+    Timeout,
     InvalidUrl,
     Ssrf,
     Fetch,
