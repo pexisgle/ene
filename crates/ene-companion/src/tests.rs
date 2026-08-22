@@ -187,6 +187,98 @@ fn runtime_hybrid_recall_matches_store_when_vector_present() {
 }
 
 #[test]
+fn mmr_lambda_diversifies_near_duplicate_embeddings() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let cafe = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "Paris cafe".into(),
+            content: "travel notes from a cafe".into(),
+            confidence: 0.9,
+            salience: 1.0,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    let restaurants = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "Paris restaurants".into(),
+            content: "travel notes from restaurants".into(),
+            confidence: 0.9,
+            salience: 0.9,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    let sushi = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "Tokyo sushi".into(),
+            content: "travel notes from sushi".into(),
+            confidence: 0.9,
+            salience: 0.4,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    store.set_embedding(cafe.id, &[1.0, 0.0]).unwrap();
+    store.set_embedding(restaurants.id, &[1.0, 0.0]).unwrap();
+    store.set_embedding(sushi.id, &[0.0, 1.0]).unwrap();
+    let now = Utc::now().to_rfc3339();
+    let relevance_only = crate::store::RecallWeights {
+        lexical: 0.5,
+        recency: 0.0,
+        salience: 0.25,
+        embedding: 0.5,
+        mmr_lambda: 1.0,
+    };
+    let diverse = crate::store::RecallWeights {
+        mmr_lambda: 0.0,
+        ..relevance_only
+    };
+    let query = [1.0_f32, 0.0];
+    let by_score = store
+        .recall_ranked(
+            soul.id,
+            "travel",
+            2,
+            &now,
+            relevance_only,
+            Some(&query),
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        by_score
+            .iter()
+            .map(|hit| hit.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Paris cafe", "Paris restaurants"]
+    );
+    let diversified = store
+        .recall_ranked(soul.id, "travel", 2, &now, diverse, Some(&query), false)
+        .unwrap();
+    assert_eq!(diversified[0].title, "Paris cafe");
+    assert_eq!(
+        diversified[1].title, "Tokyo sushi",
+        "mmr_lambda=0 should drop the near-duplicate Paris row: {diversified:?}"
+    );
+}
+
+#[test]
 fn shared_pool_is_usable_by_another_soul_as_own_knowledge() {
     let (_dir, store) = open_store();
     let a = store.create_soul(&NewSoul::text_only("char.a@1")).unwrap();
