@@ -322,7 +322,6 @@ fn walk_glob(
         }
         let meta = std::fs::symlink_metadata(&path).map_err(|err| err.to_string())?;
         if meta.file_type().is_symlink() {
-            // Directory links (and Windows junctions) are never followed.
             let Ok(canonical) = path.canonicalize() else {
                 continue;
             };
@@ -780,6 +779,17 @@ fn line_text(body: &str, span: LineSpan) -> &str {
     body.get(span.start..span.content_end).unwrap_or("")
 }
 
+fn matched_line_end(body: &str, span: LineSpan, consume_terminator: bool) -> usize {
+    if consume_terminator {
+        return span.term_end;
+    }
+    let mut end = span.content_end;
+    if body.as_bytes().get(end.saturating_sub(1)) == Some(&b'\r') {
+        end = end.saturating_sub(1);
+    }
+    end
+}
+
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -800,6 +810,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 fn find_indent_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
+    let consume_terminator = old.ends_with('\n');
     let old_lines: Vec<&str> = old.strip_suffix('\n').unwrap_or(old).split('\n').collect();
     let lines = line_spans(body);
     let mut matches = Vec::new();
@@ -808,13 +819,17 @@ fn find_indent_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
         if window.iter().zip(&old_lines).all(|(line, expected)| {
             line_text(body, *line).trim_start().trim_end_matches('\r') == expected.trim()
         }) {
-            matches.push((window[0].start, window[window.len() - 1].term_end));
+            matches.push((
+                window[0].start,
+                matched_line_end(body, window[window.len() - 1], consume_terminator),
+            ));
         }
     }
     matches
 }
 
 fn find_line_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
+    let consume_terminator = old.ends_with('\n');
     let old_lines: Vec<&str> = old.strip_suffix('\n').unwrap_or(old).split('\n').collect();
     let lines = line_spans(body);
     let mut matches = Vec::new();
@@ -828,7 +843,10 @@ fn find_line_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
             .zip(&old_lines)
             .all(|(line, expected)| line_text(body, *line).trim_end_matches('\r') == *expected)
         {
-            matches.push((window[0].start, window[window.len() - 1].term_end));
+            matches.push((
+                window[0].start,
+                matched_line_end(body, window[window.len() - 1], consume_terminator),
+            ));
         }
     }
     matches
@@ -855,6 +873,7 @@ fn block_similarity(body: &str, lines: &[LineSpan], old_lines: &[&str]) -> Optio
 }
 
 fn find_block_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
+    let consume_terminator = old.ends_with('\n');
     let old_lines: Vec<&str> = old.split('\n').filter(|line| !line.is_empty()).collect();
     if old_lines.len() < 3 {
         return Vec::new();
@@ -877,7 +896,10 @@ fn find_block_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
         };
         let window = &lines[start_idx..=end_idx];
         if block_similarity(body, window, &old_lines).is_some_and(|score| score >= 0.75) {
-            matches.push((start_line.start, lines[end_idx].term_end));
+            matches.push((
+                start_line.start,
+                matched_line_end(body, lines[end_idx], consume_terminator),
+            ));
         }
     }
     matches
@@ -1131,11 +1153,6 @@ fn write_temp_then_rename(path: &Path, temp_path: &Path, bytes: &[u8]) -> Result
     std::fs::rename(temp_path, path).map_err(|err| err.to_string())
 }
 
-/// Copies mode bits from an existing `src` onto the temp file before rename.
-///
-/// A missing source (first write) or any metadata error is ignored so the temp
-/// file keeps the default mode. Without this, replacing an executable via
-/// rename would drop `+x` (and other Unix mode bits).
 #[cfg(unix)]
 fn preserve_permissions(src: &Path, dst: &std::fs::File) {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1590,7 +1607,7 @@ mod tests {
     fn apply_edit_indent_tolerance_is_unique() {
         let body = "    alpha\n    beta\n";
         let next = apply_edit(body, "alpha\nbeta", "OK", false).unwrap();
-        assert_eq!(next, "OK");
+        assert_eq!(next, "OK\n");
     }
 
     #[test]
@@ -1601,7 +1618,21 @@ mod tests {
             next.contains("\r\n"),
             "expected CRLF line endings: {next:?}"
         );
-        assert_eq!(next, "gamma\r\ndelta");
+        assert_eq!(next, "gamma\r\ndelta\r\n");
+    }
+
+    #[test]
+    fn tolerant_edit_preserves_separator_before_following_line() {
+        let lf = "    alpha\n    beta\nnext\n";
+        assert_eq!(
+            apply_edit(lf, "alpha\nbeta", "OK", false).unwrap(),
+            "OK\nnext\n"
+        );
+        let crlf = "    alpha\r\n    beta\r\nnext\r\n";
+        assert_eq!(
+            apply_edit(crlf, "alpha\nbeta", "OK", false).unwrap(),
+            "OK\r\nnext\r\n"
+        );
     }
 
     #[test]
