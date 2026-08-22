@@ -10,7 +10,7 @@ pub(crate) async fn generate_llm(
     row_id: &str,
     request: LlmGenerateRequest,
 ) -> Result<LlmGeneration, String> {
-    let policy = crate::boot::load_harness_settings(core.data_dir()).retry;
+    let policy = core.harness().retry;
     retry_call(
         &policy,
         |err: &String| is_retryable_provider_failure(err),
@@ -40,7 +40,7 @@ pub(crate) async fn generate_llm_streaming(
     request: LlmGenerateRequest,
     sink: &mut dyn TextDeltaSink,
 ) -> Result<LlmGeneration, String> {
-    let policy = crate::boot::load_harness_settings(core.data_dir()).retry;
+    let policy = core.harness().retry;
     let max_attempts = policy.max_attempts.max(1);
     let mut attempt = 0_u32;
 
