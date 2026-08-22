@@ -33,12 +33,21 @@
 
 ## スケジュールの管理
 
-`ene-ctl schedule list` が HTTP の一覧を出します。作成 / 更新 / 削除は
-`/api/v1/schedules` です:
+`ene-ctl schedule list` が HTTP の一覧を出します。`ene-ctl schedule add` は
+`spec` が 5 または 6 フィールドの cron であることと、`timezone` が IANA 名
+（または `UTC`）であることを確認してから行を作ります。空白を含む `spec` は
+引用してください。作成 / 更新 / 削除は `/api/v1/schedules` でもできます:
 
 ```sh
 ene-ctl schedule list
+ene-ctl schedule add <soul-id> morning "0 9 * * *" --timezone UTC
+ene-ctl schedule add <soul-id> standup "0 30 9 * * 1-5" --timezone Asia/Tokyo --action remind
 ```
 
 `PATCH` は `enabled` を切り替えます。発火はサーバ側です。クライアントが
 ローカルタイマーをポーリングすることはありません。
+
+約束の期限（`expires_at`）はスケジュールを自動では作りません。同じ soul
+の既存行を約束の `schedule_id` に PATCH できます。その約束の完了・削除・
+期限切れは、指名したスケジュールを無効にします。時間指定の Work
+アクションが要るときは `remind` / `job` / `turn` 行を作ってください。

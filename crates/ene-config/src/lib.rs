@@ -24,7 +24,7 @@ pub mod migration;
 pub mod paths;
 /// Deterministic pattern packs (forget patterns) with multi-language support.
 pub mod patterns;
-/// Prompt template management with multi-language support.
+/// Locale codes for pattern packs and character cards.
 pub mod prompts;
 /// First-launch asset deployment and resource directory initialization.
 pub mod resources;
@@ -35,8 +35,9 @@ pub mod user_persona;
 pub use config::{
     ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_schema_json,
     get_global_config, get_global_section, load_config, load_config_from, load_full_config,
-    load_full_config_from, register_config_schema, register_runtime_schema, save_full_config,
-    update_global_config, update_section, write_schemas,
+    load_full_config_from, register_config_schema, register_runtime_schema,
+    registered_settings_section_keys, save_full_config, update_global_config, update_section,
+    write_schemas,
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;
@@ -44,13 +45,12 @@ pub use migration::{CURRENT_CONFIG_VERSION, MigrationFn, apply_migrations, regis
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_plugins_dir, builtin_tools_dir,
     character_card_schema_file_path, character_schema_file_path, character_settings_path,
-    config_file_path, data_dir, models_dir, pattern_pack_path, plugin_socket_dir, prompt_pack_path,
-    schema_file_path, tool_socket_dir, user_plugins_dir, user_tools_dir,
+    config_file_path, data_dir, models_dir, pattern_pack_path, plugin_socket_dir, schema_file_path,
+    tool_socket_dir, user_plugins_dir, user_tools_dir,
 };
 pub use patterns::PatternLibrary;
 pub use prompts::{
-    PromptLibrary, SUPPORTED_LANGUAGES, resolve_language_alias, resolve_system_language,
-    substitute as substitute_prompt_vars, system_language,
+    SUPPORTED_LANGUAGES, resolve_language_alias, resolve_system_language, system_language,
 };
 pub use resources::ensure_resource_dirs;
 pub use store::ConfigStore;

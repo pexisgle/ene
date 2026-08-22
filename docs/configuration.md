@@ -3,8 +3,10 @@
 Ene loads settings as defaults → JSON → `ENE_` environment variables.
 `__` separates nested keys (for example `ENE_CORE__SERVER__BIND`).
 
-The daemon reads `settings.json` from the data directory, then overlays
-`ENE_CORE__SERVER__*` and related env keys at boot. The repository file
+The daemon loads `<data>/settings.json` through the same `ene-config` figment
+pipeline used elsewhere: defaults, then JSON, then `ENE_` environment variables.
+A missing file is treated as `{}`; malformed JSON fails boot. Do not overlay
+`ENE_*` by hand in `ene-core`. The repository file
 `assets/settings.json` is a development sample, not the runtime file.
 `ene-ctl` and `ene-stage` take `--url` / `--token` (or `ENE_API_URL` /
 `ENE_API_TOKEN`) to reach an already-running core. When those env vars are
@@ -16,7 +18,9 @@ and never write the OS data directory. Release builds use the OS data
 directory and never read the repository `assets/` folder. Stage Apply and
 core PATCH write the same `settings.json`. `GET /api/v1/settings` returns live
 memory as `effective`; the on-disk file is `overlay` and does not replace live
-AI, mind, or plugin bindings. API keys stay in the vault.
+AI, mind, or plugin bindings. PATCH of `body` / `voice` also updates the live
+`Stage` and `VoiceRuntime` (render cap, barge-in) without restart.
+`store.sessions.synchronous` is applied when opening `sessions.db`. API keys stay in the vault.
 
 Add keys at the owning `define_config!` invocation. Schemas regenerate into
 `assets/schema/` (gitignored — do not commit that directory).
@@ -29,7 +33,7 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
-| `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs` |
+| `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs`, `sessions.synchronous` |
 | `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
 Conversation, classifier, embedding, TTS, STT, approve, and job bind through

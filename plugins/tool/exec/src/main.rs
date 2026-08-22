@@ -3,6 +3,8 @@
 #![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
 
 mod logic;
+#[cfg(all(windows, feature = "win32-job"))]
+mod win32_job;
 
 use tracing_subscriber::EnvFilter;
 

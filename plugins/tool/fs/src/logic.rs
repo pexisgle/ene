@@ -426,6 +426,9 @@ fn matches_at(lines: &[String], expected: &[String], idx: usize) -> bool {
 }
 
 fn apply_edit(body: &str, old: &str, new: &str, replace_all: bool) -> Result<String, String> {
+    if old.is_empty() {
+        return Err("old text must not be empty".to_owned());
+    }
     let exact_count = body.matches(old).count();
     if exact_count > 0 {
         if replace_all {
@@ -436,22 +439,60 @@ fn apply_edit(body: &str, old: &str, new: &str, replace_all: bool) -> Result<Str
         }
         return Err("ambiguous match: old text occurs multiple times".to_owned());
     }
-    if replace_all {
-        return Err("old text not found".to_owned());
+    let normalized_old = normalize_line_endings(old);
+    let replacement = adapt_newline_style(body, new);
+    let mut candidates: Vec<(usize, usize)> = find_indent_matches(body, &normalized_old)
+        .into_iter()
+        .chain(find_line_matches(body, &normalized_old))
+        .chain(find_block_matches(body, &normalized_old))
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let selected = match (replace_all, candidates.as_slice()) {
+        (_, []) => return Err("old text not found".to_owned()),
+        (false, [candidate]) => vec![*candidate],
+        (false, _) => return Err("ambiguous match: old text occurs multiple times".to_owned()),
+        (true, matches) => matches.to_vec(),
+    };
+
+    replace_spans(body, &replacement, selected)
+}
+
+fn adapt_newline_style(body: &str, new: &str) -> String {
+    if body.contains("\r\n") {
+        normalize_line_endings(new).replace('\n', "\r\n")
+    } else {
+        new.to_owned()
     }
-    let indent_matches = find_indent_matches(body, old);
-    match indent_matches.len() {
-        0 => Err("old text not found".to_owned()),
-        1 => {
-            let (start, end) = indent_matches[0];
-            let mut out = String::with_capacity(body.len().saturating_sub(end - start) + new.len());
-            out.push_str(&body[..start]);
-            out.push_str(new);
-            out.push_str(&body[end..]);
-            Ok(out)
-        }
-        _ => Err("ambiguous match: old text occurs multiple times".to_owned()),
+}
+
+fn normalize_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+fn replace_spans(body: &str, new: &str, spans: Vec<(usize, usize)>) -> Result<String, String> {
+    if !spans.is_sorted()
+        || spans
+            .iter()
+            .zip(spans.iter().skip(1))
+            .any(|(a, b)| a.1 > b.0)
+    {
+        return Err("overlapping replacement matches".to_owned());
     }
+    let mut out = String::with_capacity(
+        body.len()
+            .saturating_sub(spans.iter().map(|(start, end)| end - start).sum::<usize>())
+            + new.len().saturating_mul(spans.len()),
+    );
+    let mut cursor = 0;
+    for (start, end) in spans {
+        out.push_str(body.get(cursor..start).ok_or("bad replacement span")?);
+        out.push_str(new);
+        cursor = end;
+    }
+    out.push_str(body.get(cursor..).ok_or("bad replacement span")?);
+    Ok(out)
 }
 
 #[derive(Clone, Copy)]
@@ -462,65 +503,148 @@ struct LineSpan {
 }
 
 fn line_spans(body: &str) -> Vec<LineSpan> {
-    let sep = if body.contains("\r\n") { "\r\n" } else { "\n" };
     let mut spans = Vec::new();
-    let mut pos = 0;
-    while pos <= body.len() {
-        if let Some(rel) = body[pos..].find(sep) {
-            let content_end = pos + rel;
-            spans.push(LineSpan {
-                start: pos,
-                content_end,
-                term_end: content_end + sep.len(),
-            });
-            pos = content_end + sep.len();
-        } else {
-            if pos < body.len() {
-                spans.push(LineSpan {
-                    start: pos,
-                    content_end: body.len(),
-                    term_end: body.len(),
-                });
-            }
-            break;
-        }
+    let mut start = 0;
+    for segment in body.split_inclusive('\n') {
+        let content_len = segment.strip_suffix('\n').map_or(segment.len(), str::len);
+        spans.push(LineSpan {
+            start,
+            content_end: start + content_len,
+            term_end: start + segment.len(),
+        });
+        start += segment.len();
     }
     spans
 }
 
+fn line_text(body: &str, span: LineSpan) -> &str {
+    body.get(span.start..span.content_end).unwrap_or("")
+}
+
+fn matched_line_end(body: &str, span: LineSpan, consume_terminator: bool) -> usize {
+    if consume_terminator {
+        return span.term_end;
+    }
+    let mut end = span.content_end;
+    if body.as_bytes().get(end.saturating_sub(1)) == Some(&b'\r') {
+        end = end.saturating_sub(1);
+    }
+    end
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0_usize; b.len() + 1];
+    for i in 1..=a.len() {
+        current[0] = i;
+        for j in 1..=b.len() {
+            current[j] = if a[i - 1] == b[j - 1] {
+                previous[j - 1]
+            } else {
+                1 + previous[j - 1].min(previous[j]).min(current[j - 1])
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
+}
+
 fn find_indent_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
-    let old_lines: Vec<&str> = split_match_lines(old);
-    if old_lines.is_empty() {
-        return Vec::new();
-    }
-    let spans = line_spans(body);
-    if spans.len() < old_lines.len() {
-        return Vec::new();
-    }
+    let consume_terminator = old.ends_with('\n');
+    let old_lines: Vec<&str> = old.strip_suffix('\n').unwrap_or(old).split('\n').collect();
+    let lines = line_spans(body);
     let mut matches = Vec::new();
-    for start_idx in 0..=spans.len() - old_lines.len() {
-        let window_ok = old_lines.iter().enumerate().all(|(offset, old_line)| {
-            let span = spans[start_idx + offset];
-            let body_line = &body[span.start..span.content_end];
-            old_line.trim_start() == body_line.trim_start()
-        });
-        if window_ok {
-            let start = spans[start_idx].start;
-            let end = spans[start_idx + old_lines.len() - 1].term_end;
-            matches.push((start, end));
+    for i in 0..=lines.len().saturating_sub(old_lines.len()) {
+        let window = &lines[i..i + old_lines.len()];
+        if window.iter().zip(&old_lines).all(|(line, expected)| {
+            line_text(body, *line).trim_start().trim_end_matches('\r') == expected.trim()
+        }) {
+            matches.push((
+                window[0].start,
+                matched_line_end(body, window[window.len() - 1], consume_terminator),
+            ));
         }
     }
     matches
 }
 
-fn split_match_lines(text: &str) -> Vec<&str> {
-    if text.contains('\n') {
-        text.split('\n')
-            .map(|line| line.strip_suffix('\r').unwrap_or(line))
-            .collect()
-    } else {
-        vec![text]
+fn find_line_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
+    let consume_terminator = old.ends_with('\n');
+    let old_lines: Vec<&str> = old.strip_suffix('\n').unwrap_or(old).split('\n').collect();
+    let lines = line_spans(body);
+    let mut matches = Vec::new();
+    if old_lines.iter().any(|line| line.is_empty()) {
+        return matches;
     }
+    for i in 0..=lines.len().saturating_sub(old_lines.len()) {
+        let window = &lines[i..i + old_lines.len()];
+        if window
+            .iter()
+            .zip(&old_lines)
+            .all(|(line, expected)| line_text(body, *line).trim_end_matches('\r') == *expected)
+        {
+            matches.push((
+                window[0].start,
+                matched_line_end(body, window[window.len() - 1], consume_terminator),
+            ));
+        }
+    }
+    matches
+}
+
+fn block_similarity(body: &str, lines: &[LineSpan], old_lines: &[&str]) -> Option<f64> {
+    let inner_count = old_lines.len().saturating_sub(2);
+    if inner_count == 0 || lines.len() < 3 {
+        return None;
+    }
+    let lines_to_check = inner_count.min(lines.len() - 2);
+    let mut score = 0.0;
+    for idx in 1..=lines_to_check {
+        let actual = line_text(body, lines[idx]).trim();
+        let expected = old_lines[idx].trim();
+        let distance = levenshtein(actual, expected);
+        let max_len = actual.chars().count().max(expected.chars().count());
+        if max_len == 0 {
+            continue;
+        }
+        score += 1.0 - distance as f64 / max_len as f64;
+    }
+    Some(score / lines_to_check as f64)
+}
+
+fn find_block_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
+    let consume_terminator = old.ends_with('\n');
+    let old_lines: Vec<&str> = old.split('\n').filter(|line| !line.is_empty()).collect();
+    if old_lines.len() < 3 {
+        return Vec::new();
+    }
+    let first = old_lines[0].trim();
+    let last = old_lines[old_lines.len() - 1].trim();
+    let lines = line_spans(body);
+    let mut matches = Vec::new();
+    for (start_idx, start_line) in lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line_text(body, **line).trim() == first)
+    {
+        let Some(end_idx) = lines[start_idx + 2..]
+            .iter()
+            .position(|line| line_text(body, *line).trim() == last)
+            .map(|rel| rel + start_idx + 2)
+        else {
+            continue;
+        };
+        let window = &lines[start_idx..=end_idx];
+        if block_similarity(body, window, &old_lines).is_some_and(|score| score >= 0.75) {
+            matches.push((
+                start_line.start,
+                matched_line_end(body, lines[end_idx], consume_terminator),
+            ));
+        }
+    }
+    matches
 }
 
 fn undo(args: &Value) -> Result<Value, String> {
@@ -1183,6 +1307,53 @@ mod tests {
     fn apply_edit_indent_tolerance_is_unique() {
         let body = "    alpha\n    beta\n";
         let next = apply_edit(body, "alpha\nbeta", "OK", false).unwrap();
-        assert_eq!(next, "OK");
+        assert_eq!(next, "OK\n");
+    }
+
+    #[test]
+    fn tolerant_edit_preserves_crlf() {
+        let body = "    alpha\r\n    beta\r\n";
+        let next = apply_edit(body, "alpha\nbeta", "gamma\ndelta", false).unwrap();
+        assert!(
+            next.contains("\r\n"),
+            "expected CRLF line endings: {next:?}"
+        );
+        assert_eq!(next, "gamma\r\ndelta\r\n");
+    }
+
+    #[test]
+    fn tolerant_edit_preserves_separator_before_following_line() {
+        let lf = "    alpha\n    beta\nnext\n";
+        assert_eq!(
+            apply_edit(lf, "alpha\nbeta", "OK", false).unwrap(),
+            "OK\nnext\n"
+        );
+        let crlf = "    alpha\r\n    beta\r\nnext\r\n";
+        assert_eq!(
+            apply_edit(crlf, "alpha\nbeta", "OK", false).unwrap(),
+            "OK\r\nnext\r\n"
+        );
+    }
+
+    #[test]
+    fn tolerant_edit_rejects_ambiguous_indent_matches() {
+        let body = "    dup\n    dup\n";
+        let err = apply_edit(body, "dup", "x", false).unwrap_err();
+        assert!(err.contains("ambiguous match"), "{err}");
+    }
+
+    #[test]
+    fn tolerant_replace_all_replaces_every_indent_match() {
+        let body = "    one\n    two\n    one\n";
+        let next = apply_edit(body, "one", "X", true).unwrap();
+        assert_eq!(next, "    X\n    two\n    X\n");
+    }
+
+    #[test]
+    fn block_anchor_does_not_match_from_non_anchor_lines() {
+        let body = "BEGIN\nnot anchor\nEND\nBEGIN\nmiddle\nEND\n";
+        let old = "BEGIN\nmiddle\nEND";
+        let next = apply_edit(body, old, "OK", false).unwrap();
+        assert_eq!(next, "BEGIN\nnot anchor\nEND\nOK\n");
     }
 }

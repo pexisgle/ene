@@ -168,6 +168,7 @@ impl ToolInvoke for MemoryInvoker {
                     confidence: 0.9,
                     salience: 0.8,
                     sensitive: false,
+                    expires_at: None,
                 };
                 let outcome =
                     arbitrate(&self.store, &cand, &MindSettings::default().memory_approval)

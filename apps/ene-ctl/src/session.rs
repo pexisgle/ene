@@ -127,6 +127,7 @@ mod tests {
             next_seq: 0,
             ended_at: None,
             end_reason: None,
+            delegation_id: None,
         }
     }
 

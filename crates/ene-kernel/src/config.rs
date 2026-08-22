@@ -235,14 +235,33 @@ impl Default for DiagSettings {
     }
 }
 
-/// Inner-channel window passed into the lane. Full `mind.*` lives in `ene-companion`.
+/// Dialogue-lane slice of `mind.inner.*`. The full `mind` section is
+/// `ene_companion::MindSettings`; core projects the inner window here so the
+/// kernel does not depend on companion persistence.
 #[derive(
     Debug, Clone, Default, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema,
 )]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
-pub struct MindSettings {
+pub struct LaneMindSettings {
     pub inner: InnerSettings,
+}
+
+impl LaneMindSettings {
+    #[must_use]
+    pub fn from_inner_window(
+        self_reference_window: u32,
+        auto_emotion_events: bool,
+        derive_from_thinking: bool,
+    ) -> Self {
+        Self {
+            inner: InnerSettings {
+                self_reference_window,
+                auto_emotion_events,
+                derive_from_thinking,
+            },
+        }
+    }
 }
 
 /// `mind.inner.*`

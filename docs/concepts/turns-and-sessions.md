@@ -24,7 +24,8 @@ running turn; `compact` compresses history.
 
 ### What happens inside a turn
 
-1. Recall and affect tick in `ene-companion`.
+1. Recall and affect tick in `ene-companion`. User turns raise `fatigue`;
+   time decay pulls it back toward the card baseline.
 2. The kernel composes the model-visible prompt from the session log.
    Installed skills appear as the `skills.catalog` System Context source.
    A matching `SKILL.md` body is injected as `skills.active`. Matching
@@ -95,6 +96,13 @@ is depth-filtered on the server: `surface` gets speech, `detail` also gets
 inner / thinking / tool args. Stage's main window is surface; the separate
 detail window (and `ene-ctl --verbose`) is detail.
 
+`text.delta` is incremental speech. `provider.openai_compat` and
+`provider.gguf` send `LlmChunk` frames as tokens arrive; other LLM providers
+finish in one shot and the lane forwards a single delta. The session log
+records the finished assistant message once (model-visible equals logged).
+`abort` while chunks are in flight ends the turn as `interrupted` and does
+not write that assistant message.
+
 Conversation history is the append-only log in `sessions.db`, not a
 client-side buffer. A provider failure ends the turn as `failed` and is not
 written as assistant speech. History projects that failure as a `status`
@@ -124,3 +132,6 @@ session) aborts any in-flight turn, waits until that turn has committed
 session's dialogue-lane actor from the in-process hub. If the turn does not
 go idle in time, the end request fails and `session/end` is not written. A
 later prompt on the ended session fails with `closed`.
+
+Session titles are whatever the client sends on create or `PATCH`. The daemon
+does not auto-generate a title from conversation content.

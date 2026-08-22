@@ -9,12 +9,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::warn;
 
-use crate::config::{HarnessSettings, MindSettings, ToolOutputSettings};
+use crate::config::{HarnessSettings, LaneMindSettings, ToolOutputSettings};
 use crate::context::{ContextRegistry, format_recovery_note};
 use crate::error::{CancelQueued, KernelError};
-use crate::inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
+use crate::inner::{
+    StreamParseDelta, StreamingSurfaceInnerParser, derive_thought_from_thinking, model_visible_for,
+    split_surface_and_inner,
+};
 use crate::live::{LiveBus, LiveEvent, LiveSubscription};
-use crate::model::{ConversationModel, ModelGeneration, ModelRequest};
+use crate::model::{ConversationModel, ModelGeneration, ModelRequest, TextDeltaSink};
 use crate::observe::ObserveHandle;
 use crate::router::{SurfaceRouter, SurfaceToolOutcome};
 use crate::speech::{SpeechPresenter, TurnFinalizer, TurnPrefetch};
@@ -92,7 +95,7 @@ struct LaneState {
     observe: ObserveHandle,
     live: LiveBus,
     hooks: LoopHooks,
-    mind: MindSettings,
+    mind: LaneMindSettings,
     max_steps: u32,
     tool_output: ToolOutputSettings,
     context: ContextRegistry,
@@ -128,7 +131,7 @@ pub struct LaneOptions {
     /// Optional harness overrides.
     pub harness: HarnessSettings,
     /// Inner-window and related mind settings.
-    pub mind: MindSettings,
+    pub mind: LaneMindSettings,
     /// Reports from `recover_interrupted` to inject into the next turn.
     pub recovery: Vec<RecoveryReport>,
     /// Surface tool router. `None` keeps the lane speech-only.
@@ -1125,6 +1128,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                 },
                 step_index,
                 None,
+                StreamedLive::NONE,
             )
             .await?;
             span.end();
@@ -1141,6 +1145,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                 },
                 step_index.saturating_sub(1),
                 None,
+                StreamedLive::NONE,
             )
             .await?;
             span.end();
@@ -1175,19 +1180,28 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                 },
                 step_index,
                 None,
+                StreamedLive::NONE,
             )
             .await?;
             span.end();
             return Ok(());
         }
 
+        let mut sink = TurnDeltaSink {
+            live: &ctx.live,
+            turn: ctx.turn,
+            streamed_text: false,
+            streamed_thinking: false,
+            streamed_inner: false,
+            parser: StreamingSurfaceInnerParser::new(),
+        };
         let generation = tokio::select! {
             () = ctx.cancel.notified() => {
                 finish_interrupted(&ctx, step_index).await?;
                 span.end();
                 return Ok(());
             }
-            result = ctx.model.generate(request) => result?,
+            result = ctx.model.generate_streaming(request, &mut sink) => result?,
         };
 
         if ctx.cancelled.load(Ordering::SeqCst) {
@@ -1196,13 +1210,20 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             return Ok(());
         }
 
+        sink.flush();
+
+        let streamed = StreamedLive {
+            text: sink.streamed_text,
+            thinking: sink.streamed_thinking,
+            inner: sink.streamed_inner,
+        };
         let Some(call) = generation.tool_calls.first() else {
-            finish_speech(&ctx, &generation, step_index, None).await?;
+            finish_speech(&ctx, &generation, step_index, None, streamed).await?;
             span.end();
             return Ok(());
         };
         let Some(router) = ctx.router.as_ref() else {
-            finish_speech(&ctx, &generation, step_index, None).await?;
+            finish_speech(&ctx, &generation, step_index, None, streamed).await?;
             span.end();
             return Ok(());
         };
@@ -1222,7 +1243,14 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                     finish_reason: "delegated".to_owned(),
                     ..generation
                 };
-                finish_speech(&ctx, &generation, step_index, Some(job_id)).await?;
+                finish_speech(
+                    &ctx,
+                    &generation,
+                    step_index,
+                    Some(job_id),
+                    StreamedLive::NONE,
+                )
+                .await?;
                 span.end();
                 return Ok(());
             }
@@ -1243,11 +1271,94 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
     }
 }
 
+struct StreamedLive {
+    text: bool,
+    thinking: bool,
+    inner: bool,
+}
+
+impl StreamedLive {
+    const NONE: Self = Self {
+        text: false,
+        thinking: false,
+        inner: false,
+    };
+}
+
+struct TurnDeltaSink<'a> {
+    live: &'a LiveBus,
+    turn: TurnId,
+    streamed_text: bool,
+    streamed_thinking: bool,
+    streamed_inner: bool,
+    parser: StreamingSurfaceInnerParser,
+}
+
+impl TurnDeltaSink<'_> {
+    fn flush(&mut self) {
+        for delta in self.parser.flush() {
+            self.emit_delta(delta);
+        }
+    }
+
+    fn emit_delta(&mut self, delta: StreamParseDelta) {
+        match delta {
+            StreamParseDelta::Surface(text) if !text.is_empty() => {
+                self.streamed_text = true;
+                self.live.emit(
+                    DisplayDepth::Surface,
+                    LiveEvent::TextDelta {
+                        turn_id: self.turn,
+                        text,
+                    },
+                );
+            }
+            StreamParseDelta::Inner { aspect: _, text } if !text.is_empty() => {
+                self.streamed_inner = true;
+                self.live.emit(
+                    DisplayDepth::Detail,
+                    LiveEvent::InnerMessage {
+                        turn_id: Some(self.turn),
+                        text,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+impl TextDeltaSink for TurnDeltaSink<'_> {
+    fn on_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        for delta in self.parser.push(text) {
+            self.emit_delta(delta);
+        }
+    }
+
+    fn on_thinking(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.streamed_thinking = true;
+        self.live.emit(
+            DisplayDepth::Detail,
+            LiveEvent::ThinkingDelta {
+                turn_id: self.turn,
+                text: text.to_owned(),
+            },
+        );
+    }
+}
+
 async fn finish_speech(
     ctx: &TurnCtx,
     generation: &ModelGeneration,
     step_index: u32,
     delegated_job: Option<String>,
+    streamed: StreamedLive,
 ) -> Result<(), KernelError> {
     if ctx.cancelled.load(Ordering::SeqCst) {
         return finish_interrupted(ctx, step_index).await;
@@ -1365,14 +1476,18 @@ async fn finish_speech(
         })
         .await?;
 
-    ctx.live.emit(
-        DisplayDepth::Surface,
-        LiveEvent::TextDelta {
-            turn_id: ctx.turn,
-            text: speech_for_live.clone(),
-        },
-    );
-    if let Some((_, text)) = inner.first() {
+    if !streamed.text {
+        ctx.live.emit(
+            DisplayDepth::Surface,
+            LiveEvent::TextDelta {
+                turn_id: ctx.turn,
+                text: speech_for_live.clone(),
+            },
+        );
+    }
+    if !streamed.inner
+        && let Some((_, text)) = inner.first()
+    {
         ctx.live.emit(
             DisplayDepth::Detail,
             LiveEvent::InnerMessage {
@@ -1381,7 +1496,9 @@ async fn finish_speech(
             },
         );
     }
-    if let Some(thinking) = generation.thinking.clone() {
+    if !streamed.thinking
+        && let Some(thinking) = generation.thinking.clone()
+    {
         ctx.live.emit(
             DisplayDepth::Detail,
             LiveEvent::ThinkingDelta {

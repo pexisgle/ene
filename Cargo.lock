@@ -2059,7 +2059,9 @@ dependencies = [
 name = "ene-ctl"
 version = "0.1.0"
 dependencies = [
+ "chrono-tz",
  "clap",
+ "cron",
  "ene-api",
  "ene-daemon",
  "ene-session",
@@ -2498,6 +2500,7 @@ dependencies = [
  "ene-plugin-ipc",
  "ene-registry",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

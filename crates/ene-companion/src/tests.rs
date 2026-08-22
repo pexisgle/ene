@@ -7,8 +7,8 @@ use crate::config::{AffectSettings, MindSettings, ProactiveSettings};
 use crate::ids::CandidateId;
 use crate::inner::{model_visible_for, split_surface_and_inner};
 use crate::memory::{
-    ArbitrateOutcome, MemoryCandidate, MemoryKind, MemoryScope, MemorySource, NewMemory, arbitrate,
-    extract_turn,
+    ArbitrateOutcome, JournalAction, MemoryCandidate, MemoryKind, MemoryScope, MemorySource,
+    NewMemory, arbitrate, deterministic_extract, extract_turn,
 };
 use crate::package::{
     avatar_path_for_install, compose_soul_and_body, content_digest, export_dir, import_v3,
@@ -187,6 +187,98 @@ fn runtime_hybrid_recall_matches_store_when_vector_present() {
 }
 
 #[test]
+fn mmr_lambda_diversifies_near_duplicate_embeddings() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let cafe = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "Paris cafe".into(),
+            content: "travel notes from a cafe".into(),
+            confidence: 0.9,
+            salience: 1.0,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    let restaurants = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "Paris restaurants".into(),
+            content: "travel notes from restaurants".into(),
+            confidence: 0.9,
+            salience: 0.9,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    let sushi = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "Tokyo sushi".into(),
+            content: "travel notes from sushi".into(),
+            confidence: 0.9,
+            salience: 0.4,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    store.set_embedding(cafe.id, &[1.0, 0.0]).unwrap();
+    store.set_embedding(restaurants.id, &[1.0, 0.0]).unwrap();
+    store.set_embedding(sushi.id, &[0.0, 1.0]).unwrap();
+    let now = Utc::now().to_rfc3339();
+    let relevance_only = crate::store::RecallWeights {
+        lexical: 0.5,
+        recency: 0.0,
+        salience: 0.25,
+        embedding: 0.5,
+        mmr_lambda: 1.0,
+    };
+    let diverse = crate::store::RecallWeights {
+        mmr_lambda: 0.0,
+        ..relevance_only
+    };
+    let query = [1.0_f32, 0.0];
+    let by_score = store
+        .recall_ranked(
+            soul.id,
+            "travel",
+            2,
+            &now,
+            relevance_only,
+            Some(&query),
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        by_score
+            .iter()
+            .map(|hit| hit.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Paris cafe", "Paris restaurants"]
+    );
+    let diversified = store
+        .recall_ranked(soul.id, "travel", 2, &now, diverse, Some(&query), false)
+        .unwrap();
+    assert_eq!(diversified[0].title, "Paris cafe");
+    assert_eq!(
+        diversified[1].title, "Tokyo sushi",
+        "mmr_lambda=0 should drop the near-duplicate Paris row: {diversified:?}"
+    );
+}
+
+#[test]
 fn shared_pool_is_usable_by_another_soul_as_own_knowledge() {
     let (_dir, store) = open_store();
     let a = store.create_soul(&NewSoul::text_only("char.a@1")).unwrap();
@@ -283,6 +375,193 @@ fn open_commitments_omit_expired_rows() {
 }
 
 #[test]
+fn deterministic_extract_keeps_explicit_iso_due() {
+    let soul = ene_session::SoulId::new();
+    let cands = deterministic_extract(soul, "Remind me to call Ada by 2026-08-30");
+    let hit = cands
+        .iter()
+        .find(|cand| cand.kind == MemoryKind::Commitment)
+        .expect("commitment");
+    assert!(hit.content.to_ascii_lowercase().contains("call ada"));
+    let due = hit.expires_at.as_deref().expect("due");
+    assert!(due.starts_with("2026-08-30T23:59:59"));
+}
+
+#[test]
+fn deterministic_extract_skips_nl_due_and_bare_dates() {
+    let soul = ene_session::SoulId::new();
+    assert!(
+        deterministic_extract(soul, "remind me to call Ada tomorrow")
+            .iter()
+            .all(|cand| cand.kind != MemoryKind::Commitment)
+    );
+    assert!(
+        deterministic_extract(soul, "my birthday is 1990-01-01")
+            .iter()
+            .all(|cand| cand.kind != MemoryKind::Commitment)
+    );
+}
+
+#[tokio::test]
+async fn classifier_commitment_due_normalizes_iso_date() {
+    let soul = ene_session::SoulId::new();
+    let classify = ScriptedClassify::new([
+        r#"{"candidates":[{"kind":"commitment","title":"file taxes","content":"file taxes","scope":"private","confidence":0.9,"commitment_due":"2026-04-15"}]}"#,
+    ]);
+    let cands = extract_turn(soul, "I should file taxes", "ok", Some(&classify)).await;
+    let hit = cands
+        .iter()
+        .find(|cand| cand.kind == MemoryKind::Commitment)
+        .expect("commitment");
+    let due = hit.expires_at.as_deref().expect("due");
+    assert!(due.starts_with("2026-04-15T23:59:59"));
+}
+
+#[test]
+fn expire_commitments_journals_expired() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let row = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "stale".into(),
+            content: "already passed".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2000-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        store.expire_commitments("2001-01-01T00:00:00Z").unwrap().0,
+        1
+    );
+    let forgotten = store.get_memory(row.id).unwrap().expect("row");
+    assert!(forgotten.forgotten);
+    let actions = store.journal_actions_for(row.id).unwrap();
+    assert!(actions.iter().any(|action| action == "expired"));
+    assert!(store.open_commitments(soul.id, 8).unwrap().is_empty());
+}
+
+#[test]
+fn commitment_schedule_id_round_trip() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let row = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "call".into(),
+            content: "call Ada".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    assert!(row.schedule_id.is_none());
+    store
+        .set_memory_schedule_id(row.id, Some("sched-1"))
+        .unwrap();
+    let linked = store.get_memory(row.id).unwrap().expect("row");
+    assert_eq!(linked.schedule_id.as_deref(), Some("sched-1"));
+    store.set_memory_schedule_id(row.id, None).unwrap();
+    let cleared = store.get_memory(row.id).unwrap().expect("row");
+    assert!(cleared.schedule_id.is_none());
+}
+
+#[test]
+fn expire_commitments_returns_linked_schedule_id() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let row = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "stale".into(),
+            content: "already passed".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2000-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    store
+        .set_memory_schedule_id(row.id, Some("sched-due"))
+        .unwrap();
+    let (n, ids) = store.expire_commitments("2001-01-01T00:00:00Z").unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(ids, vec!["sched-due".to_owned()]);
+}
+
+#[test]
+fn complete_commitment_journals_completed() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let row = store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "call".into(),
+            content: "call Ada".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2026-08-30T23:59:59+00:00".into()),
+        })
+        .unwrap();
+    store
+        .forget(row.id, soul.id, JournalAction::Completed)
+        .unwrap();
+    let actions = store.journal_actions_for(row.id).unwrap();
+    assert!(actions.iter().any(|action| action == "completed"));
+    assert!(store.open_commitments(soul.id, 8).unwrap().is_empty());
+}
+
+#[test]
+fn open_commitments_include_due_in_note() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "call".into(),
+            content: "call Ada".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    let notes = store.open_commitments(soul.id, 8).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].contains("call Ada"));
+    assert!(notes[0].contains("due 2099-01-01"));
+}
+
+#[test]
 fn affect_decays_toward_baseline_but_trust_accumulates() {
     let mut state = AffectState::baseline(&AffectBaseline::default());
     state.valence = 0.9;
@@ -298,6 +577,25 @@ fn affect_decays_toward_baseline_but_trust_accumulates() {
     assert!(state.valence < 0.9);
     assert!(state.valence > AffectBaseline::default().valence);
     assert!((state.trust - 0.5).abs() < f32::EPSILON);
+}
+
+#[test]
+fn conversation_turns_raise_fatigue() {
+    let mut state = AffectState::default();
+    assert!(state.fatigue.abs() < f32::EPSILON);
+    apply_turn_signals(&mut state, "hello", None, &AffectSettings::default());
+    let after_short = state.fatigue;
+    assert!(after_short > 0.0);
+    apply_turn_signals(
+        &mut state,
+        &"word ".repeat(80),
+        None,
+        &AffectSettings::default(),
+    );
+    assert!(state.fatigue > after_short);
+    let after_long = state.fatigue;
+    apply_turn_signals(&mut state, "   ", None, &AffectSettings::default());
+    assert!((state.fatigue - after_long).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -443,6 +741,7 @@ fn sensitive_candidate_queues_for_approval() {
         confidence: 0.95,
         salience: 0.9,
         sensitive: true,
+        expires_at: None,
     };
     let approval = MindSettings::default().memory_approval;
     let outcome = arbitrate(&store, &cand, &approval).unwrap();

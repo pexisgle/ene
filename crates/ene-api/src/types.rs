@@ -100,6 +100,8 @@ pub struct SessionView {
     pub ended_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,6 +255,10 @@ pub struct MemoryView {
     pub kind: String,
     pub title: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -261,6 +267,10 @@ pub struct MemoryPatch {
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

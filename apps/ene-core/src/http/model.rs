@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ene_kernel::{
-    ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, TokenEstimation,
-    ToolCall, effective_window, estimate_tokens, fit_prompt,
+    ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, TextDeltaSink,
+    TokenEstimation, ToolCall, effective_window, estimate_tokens, fit_prompt,
 };
 use ene_plugin_ipc::{
     LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
@@ -71,6 +71,24 @@ impl SeamedModel {
 #[async_trait]
 impl ConversationModel for SeamedModel {
     async fn generate(&self, request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        self.generate_on_fiber(request, None).await
+    }
+
+    async fn generate_streaming(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TextDeltaSink,
+    ) -> Result<ModelGeneration, KernelError> {
+        self.generate_on_fiber(request, Some(sink)).await
+    }
+}
+
+impl SeamedModel {
+    async fn generate_on_fiber(
+        &self,
+        request: ModelRequest,
+        sink: Option<&mut dyn TextDeltaSink>,
+    ) -> Result<ModelGeneration, KernelError> {
         let binding = self.binding();
         if binding.is_unconfigured() {
             return Err(KernelError::Model(format!(
@@ -112,17 +130,16 @@ impl ConversationModel for SeamedModel {
             self.layer(),
             reserve,
         );
-        let generation = super::llm::generate_llm(
-            &self.core,
-            &crate::plugin_profile::task_row_id(self.fiber_task()),
-            llm_request,
-        )
-        .await
+        let row_id = crate::plugin_profile::task_row_id(self.fiber_task());
+        let generation = if let Some(sink) = sink {
+            super::llm::generate_llm_streaming(&self.core, &row_id, llm_request, sink).await
+        } else {
+            super::llm::generate_llm(&self.core, &row_id, llm_request).await
+        }
         .map_err(KernelError::Model)?;
         Ok(map_generation(generation))
     }
 }
-
 fn vision_store_for<'a>(
     binding: &TaskBinding,
     store: &'a SessionStore,

@@ -14,8 +14,8 @@ Each row has:
 - **Scope** — `private` (the writing soul) or `shared`.
 - **Source** — `extraction`, `user_stated`, `tool`, `import`, `shared`.
 - **Confidence and salience** — both influence recall.
-- **Journal** — create / update / forget / supersede / restore is
-  append-only.
+- **Journal** — create / update / forget / supersede / restore /
+  expire / complete is append-only.
 
 Forgotten rows stay in the journal. A contradictory write can supersede an
 older row.
@@ -25,8 +25,11 @@ older row.
 After a turn, the companion memory writer:
 
 1. Extracts structured signals (commitments, user-stated facts, tool
-   outcomes). Regex patterns (`my name is`, `i like`, `remember that`)
-   are a fail-closed safety net.
+   outcomes). Regex patterns (`my name is`, `i like`, `remember that`,
+   and an explicit ISO / `YYYY-MM-DD` due such as `by 2026-08-30`)
+   are a fail-closed safety net. Relative dates (`tomorrow`, `next
+   Friday`) are not parsed; the classifier may still emit a
+   `commitment` row without a due.
 2. When `ai.tasks.classifier` (or chat fallback) is bound, the auxiliary
    LLM returns JSON candidates. Its `scope` (`private` / `shared`) overlays
    matching deterministic rows. Classifier errors skip extra candidates;
@@ -48,7 +51,10 @@ candidates wait in the pending queue. Resolve them through
 Each turn, recall in `ene-companion` scores title/content overlap, recency,
 and salience. When an embedding query vector is present (a bound
 `ai.tasks.embedding` or chat-task fallback), cosine against
-`memories.embedding` is added to the same ranker. Auto-recall
+`memories.embedding` is added to the same ranker. After scoring, MMR
+re-ranks with `mind.recall.mmr_lambda` (1.0 keeps pure relevance, 0.0
+maximizes diversity via embedding cosine when both rows have same-dimension
+vectors, otherwise title-token overlap). Auto-recall
 (`RecallPrefetch`) and the surface tool `memory.recall` share that path.
 Unconfigured embedding
 keeps lexical recall: a query with no overlapping tokens returns no hits
@@ -56,6 +62,18 @@ even if vectors were stored earlier. Hits land on
 `ene-kernel::ContextRegistry` as `memory.semantic`. Standing profile and
 preference notes are `memory.user_profile`; open (unexpired) commitments
 are `memory.commitments`. Reading a memory bumps `access_count`.
+
+A commitment due is `expires_at` on the memory row. Creating a due does
+not auto-create a Work schedule (cron rows are recurring; a due is a
+one-shot datetime). An optional `schedule_id` on the commitment names an
+existing `/api/v1/schedules` row for the same soul. Completing, deleting,
+or expiring the commitment disables that schedule. Clearing `schedule_id`
+with an empty PATCH leaves the Work row enabled.
+
+Open commitments are injected every turn. Past-due rows are forgotten
+with journal action `expired`. Completing one from Stage (or
+`PATCH /api/v1/memories/{id}` with `completed: true`) journals
+`completed`.
 
 ## Forgetting
 

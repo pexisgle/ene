@@ -3,10 +3,10 @@ use std::time::{Duration, Instant};
 
 use crate::{
     CancelQueued, ConversationModel, DisplayDepth, EchoModel, EmitBus, EventKind, EventPayload,
-    HarnessSettings, KernelError, LaneHandle, LaneOptions, LiveEvent, LoopHooks, MindSettings,
+    HarnessSettings, KernelError, LaneHandle, LaneMindSettings, LaneOptions, LiveEvent, LoopHooks,
     ModelGeneration, ModelRequest, ProjectOptions, SurfaceRouter, SurfaceToolOutcome,
-    ToolCallingModel, ToolOutputSettings, TurnId, TurnPrefetch, Waterfall, derive_messages,
-    hash_model_visible, hash_projected, spans_leak_content,
+    TextDeltaSink, ToolCallingModel, ToolOutputSettings, TurnId, TurnPrefetch, Waterfall,
+    derive_messages, hash_model_visible, hash_projected, spans_leak_content,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -38,6 +38,31 @@ struct HoldModel {
 }
 
 struct InnerOnlyModel;
+
+struct InnerStreamingModel;
+
+#[async_trait]
+impl ConversationModel for InnerStreamingModel {
+    async fn generate(&self, _request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        Ok(ModelGeneration {
+            text: r#"<inner aspect="thought">secret</inner>"#.to_owned(),
+            finish_reason: "stop".to_owned(),
+            model_id: "inner-stream".to_owned(),
+            ..ModelGeneration::default()
+        })
+    }
+
+    async fn generate_streaming(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TextDeltaSink,
+    ) -> Result<ModelGeneration, KernelError> {
+        for chunk in ["<inner aspect=\"thought\">sec", "ret</inner>"] {
+            sink.on_text(chunk);
+        }
+        self.generate(request).await
+    }
+}
 
 #[async_trait]
 impl ConversationModel for InnerOnlyModel {
@@ -120,7 +145,7 @@ async fn open_lane() -> (TempDir, Arc<SessionStore>, LaneHandle, Arc<RecordingMo
         soul,
         model: Arc::clone(&model) as Arc<dyn ConversationModel>,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -164,7 +189,7 @@ async fn provider_failure_is_not_assistant_speech() {
         soul,
         model: Arc::new(FailingModel) as Arc<dyn ConversationModel>,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -249,6 +274,180 @@ async fn text_turn_is_logged_and_projected() {
     );
 }
 
+struct ChunkModel;
+
+#[async_trait]
+impl ConversationModel for ChunkModel {
+    async fn generate(&self, _request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        Ok(ModelGeneration {
+            text: "hello".to_owned(),
+            finish_reason: "stop".to_owned(),
+            model_id: "chunk".to_owned(),
+            ..ModelGeneration::default()
+        })
+    }
+
+    async fn generate_streaming(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TextDeltaSink,
+    ) -> Result<ModelGeneration, KernelError> {
+        sink.on_text("hel");
+        sink.on_text("lo");
+        self.generate(request).await
+    }
+}
+
+struct StreamThenHold {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl ConversationModel for StreamThenHold {
+    async fn generate(&self, _request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        Ok(ModelGeneration {
+            text: "hello".to_owned(),
+            finish_reason: "stop".to_owned(),
+            model_id: "hold-stream".to_owned(),
+            ..ModelGeneration::default()
+        })
+    }
+
+    async fn generate_streaming(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TextDeltaSink,
+    ) -> Result<ModelGeneration, KernelError> {
+        sink.on_text("hel");
+        self.entered.notify_waiters();
+        self.release.notified().await;
+        self.generate(request).await
+    }
+}
+
+#[tokio::test]
+async fn streaming_chunks_reach_live_bus_and_log_once() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(ChunkModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: Vec::new(),
+        hooks: None,
+        router: None,
+    });
+    let mut surface = lane.subscribe(DisplayDepth::Surface);
+    lane.prompt("hi").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let deltas: Vec<String> = surface
+        .try_drain()
+        .into_iter()
+        .filter_map(|event| match event {
+            LiveEvent::TextDelta { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas, vec!["hel".to_owned(), "lo".to_owned()]);
+    let events = store.load_events(session, 0).unwrap();
+    let assistant: Vec<String> = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventPayload::AssistantMessage { blocks, .. } => {
+                Some(blocks.iter().filter_map(Block::as_text).collect::<String>())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant, vec!["hello".to_owned()]);
+}
+
+#[tokio::test]
+async fn abort_after_streamed_chunk_does_not_log_assistant() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(StreamThenHold {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: Vec::new(),
+        hooks: None,
+        router: None,
+    });
+    let wait_enter = entered.notified();
+    let turn = lane.prompt("race").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), wait_enter)
+        .await
+        .expect("model generate");
+    lane.abort().await.unwrap();
+    release.notify_one();
+    lane.wait_for_idle().await.unwrap();
+    let events = store.load_events(session, 0).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AssistantMessage))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
+        EventPayload::TurnEnd {
+            outcome: TurnOutcome::Interrupted,
+            turn_id,
+            ..
+        } if turn_id == turn
+    )));
+}
+
 #[tokio::test]
 async fn extra_context_is_logged_as_system_source() {
     let dir = TempDir::new().unwrap();
@@ -274,7 +473,7 @@ async fn extra_context_is_logged_as_system_source() {
         soul,
         model: Arc::new(EchoModel) as Arc<dyn ConversationModel>,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -342,7 +541,7 @@ async fn tool_calling_model_runs_surface_tool_then_speaks() {
         soul,
         model: Arc::new(ToolCallingModel) as Arc<dyn ConversationModel>,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -440,7 +639,7 @@ async fn screenshot_tool_result_stores_image_ref_not_base64() {
         soul,
         model: Arc::new(ShotModel) as Arc<dyn ConversationModel>,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -569,7 +768,7 @@ async fn huge_tool_result_becomes_tool_spill() {
         soul,
         model: Arc::new(OnceToolModel) as Arc<dyn ConversationModel>,
         harness,
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -724,7 +923,7 @@ async fn prompt_while_busy_returns_lane_busy() {
         soul,
         model,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -769,7 +968,7 @@ async fn abort_does_not_write_assistant_closure() {
         soul,
         model,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -879,7 +1078,7 @@ async fn crash_recovery_is_reported_and_not_resumed() {
         soul,
         model: Arc::clone(&model) as Arc<dyn ConversationModel>,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: reports,
         speech: None,
         finalizer: None,
@@ -1130,7 +1329,7 @@ async fn shared_hooks_register_from_host_before_spawn() {
         soul,
         model: Arc::clone(&model) as Arc<dyn ConversationModel>,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -1176,7 +1375,7 @@ async fn inner_only_model_does_not_leak_on_surface() {
         soul,
         model: Arc::new(InnerOnlyModel),
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -1199,6 +1398,58 @@ async fn inner_only_model_does_not_leak_on_surface() {
     let surface_events = surface.try_drain();
     for event in &surface_events {
         if let LiveEvent::TextDelta { text, .. } = event {
+            assert!(!text.contains("secret"));
+        }
+    }
+    let detail_hist = lane.project(DisplayDepth::Detail).unwrap();
+    assert!(
+        detail_hist
+            .messages
+            .iter()
+            .any(|m| m.text().contains("secret"))
+    );
+}
+
+#[tokio::test]
+async fn streamed_inner_tag_split_across_chunks_stays_off_surface() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(InnerStreamingModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: Vec::new(),
+        hooks: None,
+        router: None,
+    });
+    let mut surface = lane.subscribe(DisplayDepth::Surface);
+    lane.prompt("probe").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    for event in surface.try_drain() {
+        if let LiveEvent::TextDelta { text, .. } = event {
+            assert!(!text.contains("inner"));
             assert!(!text.contains("secret"));
         }
     }
@@ -1287,7 +1538,7 @@ async fn abort_after_generate_does_not_write_assistant_closure() {
             release: Arc::clone(&release),
         }),
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -1362,7 +1613,7 @@ async fn abort_during_generate_error_does_not_write_llm_done_failure() {
             release: Arc::clone(&release),
         }),
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -1431,7 +1682,7 @@ async fn duplicate_abort_is_idempotent() {
             release: Arc::clone(&release),
         }),
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -1477,7 +1728,7 @@ async fn follow_up_queues_fifo_and_next_run_works_when_idle() {
             held: AtomicBool::new(false),
         }),
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,
@@ -1586,7 +1837,7 @@ async fn prefetch_lines_are_assembled_in_registry_order() {
         soul,
         model: Arc::new(EchoModel) as Arc<dyn ConversationModel>,
         harness: HarnessSettings::default(),
-        mind: MindSettings::default(),
+        mind: LaneMindSettings::default(),
         recovery: Vec::new(),
         speech: None,
         finalizer: None,

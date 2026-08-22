@@ -7,6 +7,24 @@ use serde_json::Value;
 #[async_trait]
 pub trait ConversationModel: Send + Sync {
     async fn generate(&self, request: ModelRequest) -> Result<ModelGeneration, KernelError>;
+
+    /// Stream speech/thinking then return the completed generation.
+    ///
+    /// The default is one-shot: `generate` with no live deltas. The lane still
+    /// emits a single `TextDelta` when finishing speech.
+    async fn generate_streaming(
+        &self,
+        request: ModelRequest,
+        _sink: &mut dyn TextDeltaSink,
+    ) -> Result<ModelGeneration, KernelError> {
+        self.generate(request).await
+    }
+}
+
+/// Live speech/thinking tokens from [`ConversationModel::generate_streaming`].
+pub trait TextDeltaSink: Send {
+    fn on_text(&mut self, text: &str);
+    fn on_thinking(&mut self, text: &str);
 }
 
 /// Model-visible request. Content must be reconstructable from the session log (L-1).

@@ -3,8 +3,10 @@
 設定の優先順位は defaults → JSON → `ENE_` 環境変数です。
 ネストしたキーは `__` で区切ります（例: `ENE_CORE__SERVER__BIND`）。
 
-デーモンはデータディレクトリの `settings.json` を読み、その後
-`ENE_CORE__SERVER__*` などの環境変数を重ねます。リポジトリの
+デーモンはデータディレクトリの `settings.json` を、他と同じ `ene-config` の
+figment パイプライン（defaults → JSON → `ENE_`）で読みます。ファイルが無いとき
+は `{}` として扱い、壊れた JSON では起動に失敗します。`ene-core` で `ENE_*` を
+手で重ねないでください。リポジトリの
 `assets/settings.json` は開発用サンプルであり、実行時ファイルではありません。
 `ene-ctl` と `ene-stage` は `--url` / `--token`（または `ENE_API_URL` /
 `ENE_API_TOKEN`）で起動済みコアへ接続します。これらの環境変数が無いとき、
@@ -16,7 +18,10 @@
 リポジトリの `assets/` は読みません。stage の適用とコアの PATCH は同じ
 `settings.json` に書きます。`GET /api/v1/settings` の `effective` はライブ
 メモリが正で、ディスクの `overlay` は AI / mind / plugins のライブ値を
-上書きしません。API キーは vault のままです。
+上書きしません。`body` / `voice` の PATCH は再起動なしでライブの `Stage` と
+`VoiceRuntime`（同時表示上限、barge-in）にも入ります。
+`store.sessions.synchronous` は `sessions.db` を開くときに適用します。
+API キーは vault のままです。
 
 キーは所有側の `define_config!` に足します。スキーマは `assets/schema/` へ
 再生成されます（gitignored — コミットしない）。
@@ -29,7 +34,7 @@
 | `characters` | `ene-companion` | `home_dir`, `import_v3` |
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
-| `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs` |
+| `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs`, `sessions.synchronous` |
 | `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
 
 会話・分類・埋め込み・TTS・STT・承認・ジョブは `ai.tasks.<task>`（`plugin`、

@@ -43,8 +43,8 @@ pub use config::{
     secret_keys_from_schema,
 };
 pub use dispatch::{
-    AssetsHandler, EmbedHandler, LlmHandler, ModelsHandler, PluginIdentity, ProviderHandlers,
-    SttHandler, TtsHandler, serve_provider, serve_provider_from_env,
+    AssetsHandler, EmbedHandler, LlmHandler, LlmStreamSink, ModelsHandler, PluginIdentity,
+    ProviderHandlers, SttHandler, TtsHandler, serve_provider, serve_provider_from_env,
 };
 pub use error::IpcError;
 pub use frame::{MAX_FRAME_BYTES, frame_limit, read_frame, write_frame};

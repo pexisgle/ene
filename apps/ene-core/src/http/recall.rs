@@ -106,6 +106,17 @@ impl TurnPrefetch for RecallPrefetch {
         } else {
             out.extend(catalog);
         }
+        core.expire_due_commitments();
+        if let Ok(notes) = core.companions().standing_notes(soul, 8)
+            && !notes.is_empty()
+        {
+            out.push(("memory.user_profile".to_owned(), notes.join("\n")));
+        }
+        if let Ok(notes) = core.companions().open_commitments(soul, 8)
+            && !notes.is_empty()
+        {
+            out.push(("memory.commitments".to_owned(), notes.join("\n")));
+        }
         if user_text.trim().is_empty() {
             return out;
         }
@@ -115,28 +126,24 @@ impl TurnPrefetch for RecallPrefetch {
             user_text,
         ));
         let query_vec = embed_query(&core, user_text).await;
-        let hits = match core
+        match core
             .companion()
             .recall_ranked(soul, user_text, query_vec.as_deref())
         {
-            Ok(hits) => hits,
-            Err(err) => {
-                tracing::debug!(error = %err, "recall skipped");
-                return out;
+            Ok(hits) if !hits.is_empty() => {
+                let body = hits
+                    .iter()
+                    .map(|hit| format!("- {}: {}", hit.title, hit.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                out.push((
+                    "companion.recall".to_owned(),
+                    format!("Recalled memories:\n{body}"),
+                ));
             }
-        };
-        if hits.is_empty() {
-            return out;
+            Ok(_) => {}
+            Err(err) => tracing::debug!(error = %err, "recall skipped"),
         }
-        let body = hits
-            .iter()
-            .map(|hit| format!("- {}: {}", hit.title, hit.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        out.push((
-            "companion.recall".to_owned(),
-            format!("Recalled memories:\n{body}"),
-        ));
         out
     }
 }

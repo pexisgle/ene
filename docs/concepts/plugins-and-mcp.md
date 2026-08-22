@@ -43,8 +43,8 @@ plugin binary with different GGUFs.
 
 | Plugin | Modalities |
 |---|---|
-| `provider.gguf` | Local GGUF LLM and embeddings (`plugins/provider/gguf`). GGUF weights use the plugin catalog; `llama-server` is installed from the host GitHub catalog (`provider.assets`, Engines page). Optional `server_path` / `model_path` override installs. |
-| `provider.openai_compat` | Cloud LLM, embeddings, TTS, STT (`/v1` chat+audio). Optional `base_url` for OpenRouter and other hosts. |
+| `provider.gguf` | Local GGUF LLM and embeddings (`plugins/provider/gguf`). GGUF weights use the plugin catalog; `llama-server` is installed from the host GitHub catalog (`provider.assets`, Engines page). Optional `server_path` / `model_path` override installs. Chat completions stream SSE tokens onto `LlmChunk`. |
+| `provider.openai_compat` | Cloud LLM, embeddings, TTS, STT (`/v1` chat+audio). Optional `base_url` for OpenRouter and other hosts. Chat completions stream SSE tokens onto `LlmChunk`; a failed stream falls back to one-shot. |
 | `provider.anthropic` | LLM (Messages API) |
 | `provider.elevenlabs` | TTS |
 | `provider.voicevox` | TTS. Host-managed VOICEVOX Engine (VVPP CPU) via `provider.assets`, or user-run engine / `server_path` |

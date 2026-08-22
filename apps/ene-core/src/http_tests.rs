@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use base64::Engine;
 use chrono::TimeZone;
 use ene_api::{
-    AnswerJobRequest, ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest,
-    HistoryResponse, MessageMode, MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch,
-    ToolTestRequest,
+    AnswerJobRequest, ApiClient, ClaimResourceRequest, CreateScheduleRequest, CreateSessionRequest,
+    EndSessionRequest, HistoryResponse, MessageMode, MessageRequest, ResourceKind, RestoreRequest,
+    SoulSkillsPatch, ToolTestRequest,
 };
 use ene_companion::{
     CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, ScriptedClassify,
@@ -1067,6 +1067,210 @@ async fn http_forget_memory_is_audited() {
 }
 
 #[tokio::test]
+async fn http_complete_commitment_drops_from_list() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul = ene_session::SoulId::from_str(&souls.items[0].id).unwrap();
+    let memory = core
+        .companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "call".into(),
+            content: "call Ada".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    let listed = client
+        .list_memories(&souls.items[0].id, None)
+        .await
+        .unwrap();
+    let view = listed
+        .items
+        .iter()
+        .find(|item| item.id == memory.id.to_string())
+        .expect("commitment listed");
+    assert_eq!(view.kind, "commitment");
+    assert!(
+        view.expires_at
+            .as_deref()
+            .is_some_and(|due| due.contains("2099-01-01"))
+    );
+    client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                completed: Some(true),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    let listed = client
+        .list_memories(&souls.items[0].id, None)
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .items
+            .iter()
+            .all(|item| item.id != memory.id.to_string())
+    );
+    let actions = core.companions().journal_actions_for(memory.id).unwrap();
+    assert!(actions.iter().any(|action| action == "completed"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn http_commitment_schedule_association_disables_on_complete() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul_id = souls.items[0].id.clone();
+    let soul = ene_session::SoulId::from_str(&soul_id).unwrap();
+    let schedule = client
+        .create_schedule(&CreateScheduleRequest {
+            soul_id: soul_id.clone(),
+            name: "call reminder".into(),
+            spec: "0 9 * * *".into(),
+            timezone: "UTC".into(),
+            action: "remind".into(),
+            action_ref: Some("call Ada".into()),
+            important: false,
+        })
+        .await
+        .unwrap();
+    assert!(schedule.enabled);
+    let memory = core
+        .companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "call".into(),
+            content: "call Ada".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    let linked = client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                schedule_id: Some(schedule.id.clone()),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(linked.schedule_id.as_deref(), Some(schedule.id.as_str()));
+    let cleared = client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                schedule_id: Some(String::new()),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(cleared.schedule_id.is_none());
+    assert!(
+        core.work()
+            .get_schedule(&schedule.id)
+            .unwrap()
+            .expect("schedule")
+            .enabled
+    );
+    client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                schedule_id: Some(schedule.id.clone()),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    client
+        .patch_memory(
+            &memory.id.to_string(),
+            &ene_api::MemoryPatch {
+                completed: Some(true),
+                ..ene_api::MemoryPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    let after = core
+        .work()
+        .get_schedule(&schedule.id)
+        .unwrap()
+        .expect("schedule");
+    assert!(!after.enabled);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn expire_due_commitments_disables_linked_schedule() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul_id = souls.items[0].id.clone();
+    let soul = ene_session::SoulId::from_str(&soul_id).unwrap();
+    let schedule = client
+        .create_schedule(&CreateScheduleRequest {
+            soul_id,
+            name: "stale reminder".into(),
+            spec: "0 9 * * *".into(),
+            timezone: "UTC".into(),
+            action: "remind".into(),
+            action_ref: Some("stale".into()),
+            important: false,
+        })
+        .await
+        .unwrap();
+    let memory = core
+        .companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Commitment,
+            title: "stale".into(),
+            content: "already passed".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::UserStated,
+            source_seq: None,
+            expires_at: Some("2000-01-01T00:00:00Z".into()),
+        })
+        .unwrap();
+    core.companions()
+        .set_memory_schedule_id(memory.id, Some(&schedule.id))
+        .unwrap();
+    core.expire_due_commitments();
+    let forgotten = core
+        .companions()
+        .get_memory(memory.id)
+        .unwrap()
+        .expect("row");
+    assert!(forgotten.forgotten);
+    let after = core
+        .work()
+        .get_schedule(&schedule.id)
+        .unwrap()
+        .expect("schedule");
+    assert!(!after.enabled);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn turn_logs_context_sources_from_registry() {
     let (dir, client, core, server) = boot_server().await;
     let souls = client.list_souls().await.unwrap();
@@ -1189,6 +1393,18 @@ async fn turn_logs_context_sources_from_registry() {
         .expect("mcp.resources");
     assert!(identity < semantic && semantic < mcp);
     assert!(texts["memory.semantic"].contains("picnic"));
+    assert!(
+        texts
+            .get("memory.commitments")
+            .is_some_and(|text| text.contains("call Ada")),
+        "open commitments must land on memory.commitments: {texts:?}"
+    );
+    assert!(
+        texts
+            .get("memory.user_profile")
+            .is_some_and(|text| text.contains("Ada")),
+        "standing profile notes must land on memory.user_profile: {texts:?}"
+    );
     assert!(texts["mcp.resources"].contains("picnic weather"));
     server.shutdown().await;
 }
@@ -3148,6 +3364,54 @@ async fn affect_flushes_body_expression_to_surface_ws() {
 }
 
 #[tokio::test]
+async fn settings_schema_and_patch_keys_match_registry() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let registry = ene_config::registered_settings_section_keys();
+    assert!(
+        registry.iter().any(|key| key == "store"),
+        "store must be a registered settings section: {registry:?}"
+    );
+    assert!(
+        registry.iter().any(|key| key == "harness"),
+        "harness must be a registered settings section: {registry:?}"
+    );
+    let schema = client.settings_schema().await.unwrap();
+    let properties = schema
+        .get("properties")
+        .and_then(|value| value.as_object())
+        .expect("generated schema must have properties");
+    for key in &registry {
+        assert!(
+            properties.contains_key(key),
+            "schema missing registered section {key}: {:?}",
+            properties.keys().collect::<Vec<_>>()
+        );
+    }
+    let settings = client.settings().await.unwrap();
+    let effective = settings["effective"]
+        .as_object()
+        .expect("effective settings object");
+    for key in &registry {
+        assert!(
+            effective.contains_key(key),
+            "GET effective missing registered section {key}"
+        );
+    }
+    client
+        .patch_settings(&serde_json::json!({
+            "store": { "sessions": { "idle_timeout_secs": 60 } }
+        }))
+        .await
+        .unwrap();
+    let err = client
+        .patch_settings(&serde_json::json!({ "not_a_section": true }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "invalid_message");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn body_events_are_scoped_per_soul() {
     let (_dir, client, core, server) = boot_server().await;
     let occupants = core.occupants();
@@ -3270,5 +3534,113 @@ async fn observation_interval_follows_mind_settings() {
         ),
         Duration::from_secs(1)
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn settings_json_max_steps_one_delegates_through_http() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"harness":{"loop":{"max_steps_per_turn":1}}}"#,
+    )
+    .unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    let server = core
+        .clone()
+        .serve_at(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(ToolCallingModel) as Arc<dyn ConversationModel>,
+        )
+        .await
+        .unwrap();
+    let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
+    let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "stage");
+    let settings = client.settings().await.unwrap();
+    assert_eq!(
+        settings.pointer("/effective/harness/loop/max_steps_per_turn"),
+        Some(&serde_json::json!(1))
+    );
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "please calc 1+2*3".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let history = wait_assistant(&client, &session.id).await;
+    assert!(
+        history.messages.iter().any(|message| {
+            message.role == "assistant" && message.text.contains("I'll look into that.")
+        }),
+        "HTTP lane must auto-delegate at max_steps_per_turn=1: {history:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn patch_body_and_voice_apply_to_runtime() {
+    let (_dir, client, core, server) = boot_server().await;
+    client
+        .patch_settings(&serde_json::json!({
+            "body": { "render": { "max_concurrent": 1, "enabled": true } },
+            "voice": { "barge_in": { "enabled": false } }
+        }))
+        .await
+        .unwrap();
+    let settings = client.settings().await.unwrap();
+    assert_eq!(
+        settings.pointer("/effective/body/render/max_concurrent"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        settings.pointer("/effective/voice/barge_in/enabled"),
+        Some(&serde_json::json!(false))
+    );
+
+    let s1 = ene_session::SoulId::new();
+    let s2 = ene_session::SoulId::new();
+    core.present_companion(
+        s1,
+        Some(ene_session::BodyId::new()),
+        ene_body::BodyCatalog::text_default(),
+    )
+    .unwrap();
+    core.present_companion(
+        s2,
+        Some(ene_session::BodyId::new()),
+        ene_body::BodyCatalog::text_default(),
+    )
+    .unwrap();
+    let occupants = core.occupants();
+    let rendered = occupants.iter().filter(|(_, body)| body.is_some()).count();
+    assert_eq!(rendered, 1, "live max_concurrent=1: {occupants:?}");
+
+    let effect = core.with_voice(|voice| {
+        let body = ene_session::BodyId::new();
+        voice.speak(body, "long reply text here", 0).expect("speak");
+        let pcm: Vec<f32> = (0..1600)
+            .map(|i| ((i as f32) * 0.31).sin() * 0.31)
+            .collect();
+        voice.push_input(&pcm, 500)
+    });
+    assert_eq!(effect, ene_body::InputEffect::IgnoredSelfVoice);
     server.shutdown().await;
 }
