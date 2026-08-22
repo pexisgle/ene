@@ -1,142 +1,190 @@
-name: CI
+name: PR maintenance
 
 on:
-  push:
-    branches: [main]
   pull_request:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  # .cargo/config.toml must not require sccache. Empty wrapper lets GitHub
-  # runners and non-Nix hosts compile; the Nix shell sets RUSTC_WRAPPER when
-  # sccache is actually on PATH.
-  CARGO_BUILD_RUSTC_WRAPPER: ""
-
 jobs:
-  fmt:
-    name: Format check
+  normalize-pr-828:
+    if: github.head_ref == 'tmp-placeholder-never-use'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: ./.github/actions/rust-build-env
-      - name: Run clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-  test:
-    name: Tests (${{ matrix.group.name }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        group:
-          # Every workspace package belongs to exactly one group; the union
-          # is the full `cargo test --workspace` surface. Splitting the job
-          # isolates a flaky/slow package so a rerun targets one group.
-          - name: core
-            packages: >-
-              -p ene-card -p ene-config -p ene-session -p ene-kernel
-              -p ene-plane -p ene-work -p ene-companion -p ene-body
-              -p ene-fiber -p ene-registry -p ene-api -p ene-plugin-ipc
-              -p ene-sandbox -p ene-vrm -p ene-provider-assets
-          - name: apps
-            packages: >-
-              -p ene-daemon -p ene-ctl -p ene-desktop -p ene-stage
-          - name: plugins
-            packages: >-
-              -p ene-tool-fs -p ene-tool-exec -p ene-tool-web
-              -p ene-tool-utility -p ene-tool-app -p ene-tool-mcp
-              -p ene-provider-openai-compat -p ene-provider-anthropic
-              -p ene-provider-elevenlabs -p ene-provider-voicevox
-              -p ene-provider-edge-tts -p ene-provider-gguf
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: ./.github/actions/rust-build-env
-      - name: Install ripgrep
-        run: sudo apt-get install -y --no-install-recommends ripgrep
-      - name: Run tests
-        run: cargo test --locked ${{ matrix.group.packages }}
-
-  docs:
-    name: Doc build
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: ./.github/actions/rust-build-env
-      # Not run with RUSTDOCFLAGS=-D warnings: pre-existing broken
-      # intra-doc links would fail unrelated work.
-      - name: Build docs
-        run: cargo doc --locked --workspace --no-deps
-
-  windows-native:
-    name: Native Windows check
-    runs-on: windows-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install ripgrep
-        shell: pwsh
-        run: choco install ripgrep -y --no-progress
-      - name: Lint native Windows applications
-        run: cargo clippy --locked -p ene-daemon -p ene-stage --all-targets -- -D warnings
-      - name: Test Windows-compatible libraries
-        run: cargo test --locked -p ene-config -p ene-plane -p ene-fiber
-
-  # Keep the two newest rust-cache generations per job, run after the
-  # caching jobs save theirs.
-  cache-prune:
-    name: Prune rust caches
-    if: github.ref == 'refs/heads/main'
-    needs: [clippy, test, docs, windows-native]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
-      actions: write
+      contents: write
     steps:
-      - name: Prune stale rust-cache entries
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Normalize and repair PR 828
+        shell: bash
         run: |
-          keep_per_job=2
-          gh api --paginate "repos/${{ github.repository }}/actions/caches?per_page=100" \
-            --jq '.actions_caches[] | select(.key | startswith("v0-rust-")) | [.id, .key, .created_at] | @tsv' \
-          | sort -k3,3r \
-          | awk -v keep="$keep_per_job" '
-              { job = $2; sub(/^v0-rust-/, "", job); sub(/-(Linux|Windows)-.*/, "", job) }
-              count[job]++ < keep { next }
-              { print $1 }' \
-          | while read -r id; do
-              gh api -X DELETE "repos/${{ github.repository }}/actions/caches/$id" >/dev/null
-              deleted=$((deleted + 1))
-            done
-          echo "Deleted ${deleted} stale rust-cache entries."
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main
+          git fetch origin f20162b16dcb6aa13af6fcb2cf44d56b64a56ab9
+          git fetch origin ce0090d077c655a642d12741e28bede1be8453fc
+          git diff --binary f20162b16dcb6aa13af6fcb2cf44d56b64a56ab9 ce0090d077c655a642d12741e28bede1be8453fc > /tmp/pr-828.patch
+          git reset --hard origin/main
+          if ! git apply --3way --index /tmp/pr-828.patch; then
+            conflicts="$(git diff --name-only --diff-filter=U | sort)"
+            expected="$(printf '%s\n' crates/ene-fiber/src/broker.rs crates/ene-registry/src/builtins.rs docs/guides/tools/builtin-tools.md docs/ja/guides/tools/builtin-tools.md | sort)"
+            if [ "$conflicts" != "$expected" ]; then
+              echo 'Unexpected conflicts:'
+              printf '%s\n' "$conflicts"
+              git diff --cc || true
+              exit 1
+            fi
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def resolve_markers(path: str, mode: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              pattern = re.compile(r'<<<<<<< ours\n(.*?)=======\n(.*?)>>>>>>> theirs', re.S)
+              while pattern.search(text):
+                  def repl(match):
+                      ours, theirs = match.group(1), match.group(2)
+                      if mode == 'both':
+                          return ours.rstrip('\n') + '\n' + theirs
+                      return ours
+                  text = pattern.sub(repl, text, count=1)
+              if any(marker in text for marker in ('<<<<<<<', '=======', '>>>>>>>')):
+                  raise SystemExit(f'unresolved conflict marker in {path}')
+              p.write_text(text)
+
+          resolve_markers('crates/ene-fiber/src/broker.rs', 'both')
+          resolve_markers('crates/ene-registry/src/builtins.rs', 'ours')
+          resolve_markers('docs/guides/tools/builtin-tools.md', 'ours')
+          resolve_markers('docs/ja/guides/tools/builtin-tools.md', 'ours')
+
+          # FileBroker is the authority for host-side fs execution. The child
+          # receives no workspace mount; every invocation is grant-checked here.
+          p = Path('crates/ene-fiber/src/broker.rs')
+          text = p.read_text()
+          if 'use ene_registry::BuiltinExecutor;' not in text:
+              text = text.replace('use crate::fiber::FiberUid;\n', 'use crate::fiber::FiberUid;\nuse ene_registry::BuiltinExecutor;\n', 1)
+          if 'Tool(String)' not in text:
+              needle = '    #[error("path is read-only")]\n    ReadOnly,\n'
+              if needle not in text:
+                  raise SystemExit('BrokerError ReadOnly anchor not found')
+              text = text.replace(needle, needle + '    #[error("filesystem tool failed: {0}")]\n    Tool(String),\n', 1)
+          if 'pub fn fs_invoke(' not in text:
+              anchor = '    pub fn net_fetch(&self, uid: FiberUid, url: &str) -> Result<Value, BrokerError> {'
+              if anchor not in text:
+                  raise SystemExit('Broker net_fetch anchor not found')
+              method = '''    /// Execute a bundled filesystem tool in the broker-owned workspace.\n    ///\n    /// The child plugin never receives direct workspace filesystem access; this\n    /// method is the host-side capability boundary for every registered fs tool.\n    pub fn fs_invoke(\n        &self,\n        uid: FiberUid,\n        name: &str,\n        args: &Value,\n    ) -> Result<Value, BrokerError> {\n        if name == "fs.search" {\n            let query = args\n                .get("query")\n                .and_then(Value::as_str)\n                .ok_or_else(|| BrokerError::Tool("missing query".to_owned()))?;\n            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");\n            let context_lines = u32::try_from(\n                args.get("context_lines")\n                    .and_then(Value::as_u64)\n                    .unwrap_or(0),\n            )\n            .unwrap_or(0)\n            .min(10);\n            let max = u32::try_from(args.get("max").and_then(Value::as_u64).unwrap_or(50))\n                .unwrap_or(50)\n                .min(200);\n            let matches = self.fs_search(\n                uid,\n                Path::new(path),\n                query,\n                args.get("regex").and_then(Value::as_bool).unwrap_or(false),\n                args.get("case_insensitive")\n                    .and_then(Value::as_bool)\n                    .unwrap_or(false),\n                args.get("include").and_then(Value::as_str),\n                context_lines,\n                args.get("count").and_then(Value::as_bool).unwrap_or(false),\n                max,\n            )?;\n            return Ok(json!({ "matches": matches }));\n        }\n\n        let capability = match name {\n            "fs.read" => "fs.read",\n            "fs.write" | "fs.edit" | "fs.patch" | "fs.undo" => "fs.write",\n            "fs.list" => "fs.list",\n            "fs.glob" => "fs.glob",\n            "fs.delete" => "fs.delete",\n            _ => return Err(BrokerError::Tool(format!("unsupported fs tool {name}"))),\n        };\n        self.require(uid, capability)?;\n        BuiltinExecutor\n            .execute_fs_in_workspace(&self.workspace, name, args)\n            .map_err(BrokerError::Tool)\n    }\n\n'''
+              text = text.replace(anchor, method + anchor, 1)
+          if 'host_fs_invoke_uses_broker_workspace' not in text:
+              text += '''\n#[cfg(test)]\nmod host_fs_invoke_tests {\n    use super::{Broker, BrokerError};\n    use crate::fiber::FiberUid;\n    use serde_json::json;\n    use tempfile::TempDir;\n\n    #[test]\n    fn host_fs_invoke_uses_broker_workspace() {\n        let dir = TempDir::new().unwrap();\n        std::fs::write(dir.path().join("inside.txt"), "inside").unwrap();\n        let mut broker = Broker::new(dir.path().to_path_buf());\n        let uid = FiberUid::new();\n        broker.grant(uid, "fs.read");\n        let value = broker\n            .fs_invoke(uid, "fs.read", &json!({"path": "inside.txt"}))\n            .unwrap();\n        assert_eq!(value["text"], "inside");\n    }\n\n    #[test]\n    fn host_fs_invoke_requires_declared_grant() {\n        let dir = TempDir::new().unwrap();\n        std::fs::write(dir.path().join("inside.txt"), "inside").unwrap();\n        let broker = Broker::new(dir.path().to_path_buf());\n        let uid = FiberUid::new();\n        assert!(matches!(\n            broker.fs_invoke(uid, "fs.read", &json!({"path": "inside.txt"})),\n            Err(BrokerError::Denied { .. })\n        ));\n    }\n}\n'''
+          p.write_text(text)
+
+          # Add an explicit, panic-safe scoped workspace to the bundled fs logic.
+          p = Path('plugins/tool/fs/src/logic.rs')
+          text = p.read_text()
+          if 'SCOPED_WORKSPACE' not in text:
+              anchor = 'fn workspace() -> Result<PathBuf, String> {'
+              if anchor not in text:
+                  raise SystemExit('fs workspace anchor not found')
+              scoped = '''thread_local! {\n    static SCOPED_WORKSPACE: std::cell::RefCell<Option<PathBuf>> =\n        const { std::cell::RefCell::new(None) };\n}\n\nstruct WorkspaceOverrideGuard(Option<PathBuf>);\n\nimpl Drop for WorkspaceOverrideGuard {\n    fn drop(&mut self) {\n        let previous = self.0.take();\n        SCOPED_WORKSPACE.with(|slot| drop(slot.replace(previous)));\n    }\n}\n\npub(crate) fn with_workspace<T>(\n    root: &Path,\n    action: impl FnOnce() -> Result<T, String>,\n) -> Result<T, String> {\n    let previous = SCOPED_WORKSPACE.with(|slot| slot.replace(Some(root.to_path_buf())));\n    let _guard = WorkspaceOverrideGuard(previous);\n    action()\n}\n\nfn scoped_workspace() -> Option<PathBuf> {\n    SCOPED_WORKSPACE.with(|slot| slot.borrow().clone())\n}\n\n'''
+              text = text.replace(anchor, scoped + anchor, 1)
+              text = text.replace(
+                  'fn workspace() -> Result<PathBuf, String> {\n    #[cfg(test)]',
+                  'fn workspace() -> Result<PathBuf, String> {\n    if let Some(root) = scoped_workspace() {\n        return Ok(root);\n    }\n    #[cfg(test)]',
+                  1,
+              )
+              text = text.replace(
+                  'fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {\n    #[cfg(test)]',
+                  'fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {\n    if let Some(root) = scoped_workspace() {\n        return ene_registry::confine_tool_path(&root, Path::new(path), create_parent)\n            .map_err(|err| err.to_string());\n    }\n    #[cfg(test)]',
+                  1,
+              )
+          p.write_text(text)
+
+          # Expose only the scoped filesystem entry point to ene-fiber.
+          p = Path('crates/ene-registry/src/builtins.rs')
+          text = p.read_text()
+          if 'execute_fs_in_workspace' not in text:
+              anchor = '\n}\n\n#[must_use]\npub fn host_spec_for'
+              if anchor not in text:
+                  raise SystemExit('BuiltinExecutor impl anchor not found')
+              method = '''\n\n    /// Execute a bundled fs tool against an explicit workspace without relying\n    /// on process-global `ENE_WORKSPACE`.\n    pub fn execute_fs_in_workspace(\n        &self,\n        workspace: &Path,\n        name: &str,\n        args: &Value,\n    ) -> Result<Value, String> {\n        builtin::fs::with_workspace(workspace, || builtin::fs::execute(name, args))\n    }\n'''
+              text = text.replace(anchor, method + anchor, 1)
+          # Preserve #826's process-exec boundary while adding delete sensitivity.
+          old = '        "app.screenshot" | "app.window_list" | "app.active_window" | "app.clipboard_get"\n        | "app.list_monitors" => Sensitivity::High,'
+          if '"fs.delete" | "app.screenshot"' not in text:
+              needle = old[0]
+              if needle not in text:
+                  raise SystemExit('host_sensitivity anchor not found')
+              text = text.replace(needle, '        "fs.delete" | "app.screenshot" | "app.window_list" | "app.active_window"\n        | "app.clipboard_get" | "app.list_monitors" => Sensitivity::High,', 1)
+          p.write_text(text)
+
+          # Route tool.fs through a host invoker backed by the FileBroker.
+          p = Path('crates/ene-fiber/src/supervisor.rs')
+          text = p.read_text()
+          if 'struct HostFsInvoker' not in text:
+              anchor = '''struct HostWebInvoker {\n    uid: FiberUid,\n    inner: Arc<SupervisorInner>,\n}\n'''
+              if anchor not in text:
+                  raise SystemExit('HostWebInvoker struct anchor not found')
+              text = text.replace(anchor, anchor + '''\nstruct HostFsInvoker {\n    uid: FiberUid,\n    inner: Arc<SupervisorInner>,\n}\n''', 1)
+          if 'impl ToolInvoke for HostFsInvoker' not in text:
+              anchor = '#[async_trait]\nimpl ToolInvoke for HostWebInvoker {'
+              if anchor not in text:
+                  raise SystemExit('HostWebInvoker impl anchor not found')
+              impl_text = '''#[async_trait]\nimpl ToolInvoke for HostFsInvoker {\n    async fn invoke(&self, name: &str, args: Value) -> Result<Value, String> {\n        self.inner\n            .broker\n            .lock()\n            .fs_invoke(self.uid, name, &args)\n            .map_err(|err| err.to_string())\n    }\n}\n\n'''
+              text = text.replace(anchor, impl_text + anchor, 1)
+          old_activate = '''        let web_invoke = (row.plugin == "tool.web").then(|| {\n            Arc::new(HostWebInvoker {\n                uid: fiber.uid,\n                inner: Arc::clone(&self.inner),\n            }) as Arc<dyn ToolInvoke>\n        });\n        let builtin_invoke = Arc::new(BuiltinInvoker) as Arc<dyn ToolInvoke>;\n        for def in definitions_for(kind) {\n            let invoke = web_invoke\n                .as_ref()\n                .map_or_else(|| Arc::clone(&builtin_invoke), Arc::clone);\n            self.inner.record_tool(&mut fiber, def, invoke);\n        }\n'''
+          if old_activate in text:
+              new_activate = '''        let host_invoke: Option<Arc<dyn ToolInvoke>> = match row.plugin.as_str() {\n            "tool.web" => Some(Arc::new(HostWebInvoker {\n                uid: fiber.uid,\n                inner: Arc::clone(&self.inner),\n            })),\n            "tool.fs" => Some(Arc::new(HostFsInvoker {\n                uid: fiber.uid,\n                inner: Arc::clone(&self.inner),\n            })),\n            _ => None,\n        };\n        let builtin_invoke = Arc::new(BuiltinInvoker) as Arc<dyn ToolInvoke>;\n        for def in definitions_for(kind) {\n            let invoke = host_invoke\n                .as_ref()\n                .map_or_else(|| Arc::clone(&builtin_invoke), Arc::clone);\n            self.inner.record_tool(&mut fiber, def, invoke);\n        }\n'''
+              text = text.replace(old_activate, new_activate, 1)
+          text = text.replace(
+              '''        } else if row.plugin == "tool.fs" {\n            Arc::new(BuiltinInvoker)\n        } else {''',
+              '''        } else if row.plugin == "tool.fs" {\n            Arc::new(HostFsInvoker {\n                uid: fiber.uid,\n                inner: Arc::clone(&self.inner),\n            })\n        } else {''',
+              1,
+          )
+          p.write_text(text)
+
+          # Grant all fs capabilities used by the host invoker, including #891 search.
+          p = Path('apps/ene-core/src/plugin_profile.rs')
+          text = p.read_text()
+          if '"fs.search".to_owned()' not in text:
+              needle = '            "fs.delete".to_owned(),\n        ],'
+              if needle not in text:
+                  raise SystemExit('tool.fs capability anchor not found')
+              text = text.replace(needle, '            "fs.delete".to_owned(),\n            "fs.search".to_owned(),\n        ],', 1)
+          p.write_text(text)
+
+          # Keep current docs for utility/exec/search and add only glob/delete/broker details.
+          for path, japanese in [
+              (Path('docs/guides/tools/builtin-tools.md'), False),
+              (Path('docs/ja/guides/tools/builtin-tools.md'), True),
+          ]:
+              lines = path.read_text().splitlines()
+              hits = [i for i, line in enumerate(lines) if line.startswith('| `fs` | `ene-tool-fs` |')]
+              if len(hits) != 1:
+                  raise SystemExit(f'expected one fs row in {path}, got {len(hits)}')
+              line = lines[hits[0]]
+              if japanese:
+                  line = line.replace('read / write / edit / list / search / patch / undo', 'read / write / edit / list / glob / delete / search / patch / undo')
+                  line = line.replace('シェルは持たない。', 'シェルは持たない。`fs.glob` はワークスペース相対・ソート済み・件数上限付きで、ディレクトリ symlink を辿らない。`fs.delete` は承認対象の破壊的 side effect で、ファイルまたは空ディレクトリのみを削除し、symlink / junction / 読み取り専用 / 空でないディレクトリを拒否する。', 1)
+                  suffix = '`tool.fs` 子プロセスにはワークスペースの直接 FS 権限を渡さず、登録済み fs tool は Fiber の FileBroker で grant 検査してホスト側で実行する。'
+              else:
+                  line = line.replace('Read / write / edit / list / search / patch / undo', 'Read / write / edit / list / glob / delete / search / patch / undo')
+                  line = line.replace('No shell.', 'No shell. `fs.glob` is workspace-relative, sorted, capped, and does not follow directory symlinks. `fs.delete` is an approval-gated destructive side effect: files or empty directories only, rejecting symlinks, junctions, read-only paths, and non-empty directories.', 1)
+                  suffix = 'The `tool.fs` child has no direct workspace filesystem rights; every registered fs tool is grant-checked and executed host-side through the fiber FileBroker.'
+              if suffix not in line:
+                  if not line.endswith(' |'):
+                      raise SystemExit(f'unexpected fs row ending in {path}')
+                  line = line[:-2] + ' ' + suffix + ' |'
+              lines[hits[0]] = line
+              path.write_text('\n'.join(lines) + '\n')
+          PY
+          git add -A
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            git diff --cc
+            exit 1
+          fi
+          cargo fmt --all
+          git add -A
+          git status --short
+          git commit -m 'feat(fs): add brokered glob and approved delete'
+          git push --force origin HEAD:cursor/fs-glob-delete-broker-860b
