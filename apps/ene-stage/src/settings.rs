@@ -14,8 +14,6 @@ ene_config::define_config!(
         pub caption_font_size: f32 = 18.0,
         pub caption_position: String = "bottom".to_owned(),
         pub caption_pinned: bool = false,
-        pub beat_sync: bool = false,
-        pub beat_sync_device: String = String::new(),
         pub graphics_quality: String = "high".to_owned(),
         pub always_on_top: bool = true,
         pub transparent_overlay: bool = true,

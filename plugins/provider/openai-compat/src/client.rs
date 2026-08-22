@@ -258,6 +258,9 @@ fn chat_body(request: &LlmGenerateRequest) -> Value {
 
 fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
     if let Ok(value) = serde_json::from_str::<Value>(body) {
+        if let Some(message) = provider_error_message(&value) {
+            return format!("{status}: {message}");
+        }
         let message = value
             .pointer("/error/message")
             .or_else(|| value.get("message"))
@@ -274,6 +277,15 @@ fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
     } else {
         format!("{status}: {trimmed}")
     }
+}
+
+fn provider_error_message(value: &Value) -> Option<String> {
+    let top_level = value.pointer("/error/message")?.as_str()?.trim();
+    if top_level.is_empty() || !top_level.eq_ignore_ascii_case("provider returned error") {
+        return None;
+    }
+    let raw = value.pointer("/error/metadata/raw")?.as_str()?.trim();
+    (!raw.is_empty()).then(|| raw.to_owned())
 }
 
 fn attach_vendor_headers(
@@ -581,6 +593,35 @@ mod tests {
             formatted,
             "400 Bad Request: Invalid 'tools[0].function.name'"
         );
+    }
+
+    #[test]
+    fn unwraps_openrouter_raw_provider_error() {
+        let body = r#"{
+            "error": {
+                "message": "Provider returned error",
+                "metadata": {
+                    "raw": "Invalid parameter: messages with role 'tool' must follow tool_calls"
+                }
+            }
+        }"#;
+        let formatted = format_http_error(reqwest::StatusCode::BAD_REQUEST, body);
+        assert_eq!(
+            formatted,
+            "400 Bad Request: Invalid parameter: messages with role 'tool' must follow tool_calls"
+        );
+    }
+
+    #[test]
+    fn keeps_non_generic_provider_error_message() {
+        let body = r#"{
+            "error": {
+                "message": "Invalid request",
+                "metadata": { "raw": "internal detail" }
+            }
+        }"#;
+        let formatted = format_http_error(reqwest::StatusCode::BAD_REQUEST, body);
+        assert_eq!(formatted, "400 Bad Request: Invalid request");
     }
 
     #[test]

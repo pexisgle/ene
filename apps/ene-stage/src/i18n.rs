@@ -1,6 +1,5 @@
 use std::sync::OnceLock;
 
-use fluent::FluentValue;
 use i18n_embed::DesktopLanguageRequester;
 use i18n_embed::fluent::{FluentLanguageLoader, fluent_language_loader};
 use parking_lot::RwLock;
@@ -41,15 +40,6 @@ pub fn select_language(tag: &str) {
 #[must_use]
 pub fn fl(key: &str) -> String {
     loader_lock().read().get(key)
-}
-
-#[must_use]
-pub fn fl_args<'args>(
-    key: &str,
-    args: impl IntoIterator<Item = (&'args str, FluentValue<'args>)>,
-) -> String {
-    let args = args.into_iter().collect();
-    loader_lock().read().get_args_fluent(key, Some(&args))
 }
 
 #[cfg(test)]
