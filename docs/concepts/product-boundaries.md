@@ -200,7 +200,8 @@ and surface privacy controls on **stage**.
 | ROI, luma fingerprint, changed-cell gate, caret suppression | `ene-work` observation pipeline | Current |
 | Title redaction (AppOnly / RedactedTitle / FullTitle) | `ene-companion` settings + `ene-work` send label | Current (`mind.proactive.world_state.title_mode`) |
 | Proactive speak / world-state | `ene-companion` + core tick | Current: every open session, interval from `mind.proactive.observation_interval_seconds`; unchanged frames reuse the last summary |
-| Raw pixels in session / memory / audit | Forbidden | Current; digest and text summary only || Desktop `ProactiveObserveControl` | Client stub | Unconnected |
+| Raw pixels in session / memory / audit | Forbidden | Current; digest and text summary only |
+| Desktop `ProactiveObserveControl` | Client stub | Unconnected |
 
 ## 4. Security delta
 

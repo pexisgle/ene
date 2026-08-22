@@ -193,7 +193,8 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | ROI、luma fingerprint、changed-cell gate、caret 抑制 | `ene-work` の観測パイプライン | Current |
 | タイトルの redaction（AppOnly / RedactedTitle / FullTitle） | `ene-companion` の設定 + `ene-work` の送信ラベル | Current（`mind.proactive.world_state.title_mode`） |
 | 能動発話 / 世界状態 | `ene-companion` + コア tick | Current: 開いているセッションすべて。間隔は `mind.proactive.observation_interval_seconds`。無変化フレームは前の要約を再利用 |
-| session / memory / audit への raw pixel | 禁止 | Current。digest とテキスト要約のみ || desktop の `ProactiveObserveControl` | クライアントのスタブ | Unconnected |
+| session / memory / audit への raw pixel | 禁止 | Current。digest とテキスト要約のみ |
+| desktop の `ProactiveObserveControl` | クライアントのスタブ | Unconnected |
 
 ## 4. セキュリティ差分
 
