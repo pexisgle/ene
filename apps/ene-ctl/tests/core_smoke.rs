@@ -280,6 +280,37 @@ async fn cli_binary_starts_core_and_runs_session_ops() {
         "unconfigured CLI chat must not emit an Echo assistant line"
     );
 
+    let mut repl = Command::new(&ctl_bin)
+        .args(["chat", session_id.as_str()])
+        .env("ENE_API_URL", &url)
+        .env("ENE_API_TOKEN", &token)
+        .env("RUST_LOG", "error")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chat REPL");
+    {
+        let mut stdin = repl.stdin.take().expect("repl stdin");
+        writeln!(stdin, "repl ping line").unwrap();
+        writeln!(stdin, ".quit").unwrap();
+    }
+    let repl_out = repl.wait_with_output().expect("repl wait");
+    assert!(
+        repl_out.status.success(),
+        "REPL failed:\n{}",
+        String::from_utf8_lossy(&repl_out.stderr)
+    );
+    let repl_stdout = String::from_utf8_lossy(&repl_out.stdout);
+    assert!(
+        repl_stdout.contains("user:"),
+        "REPL stdout missing surface user line: {repl_stdout}"
+    );
+    assert!(
+        !repl_stdout.to_ascii_lowercase().contains("inner:"),
+        "REPL leaked inner on surface: {repl_stdout}"
+    );
+
     let search = run(&["session", "search", session_id.as_str()]);
     assert!(search.status.success());
     let search_page: serde_json::Value = serde_json::from_slice(&search.stdout).unwrap();
@@ -374,37 +405,6 @@ async fn cli_binary_starts_core_and_runs_session_ops() {
     assert!(
         dbg_err.contains("delegation") || dbg_err.contains("conversation"),
         "{dbg_err}"
-    );
-
-    let mut repl = Command::new(&ctl_bin)
-        .args(["chat", session_id.as_str()])
-        .env("ENE_API_URL", &url)
-        .env("ENE_API_TOKEN", &token)
-        .env("RUST_LOG", "error")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn chat REPL");
-    {
-        let mut stdin = repl.stdin.take().expect("repl stdin");
-        writeln!(stdin, "repl ping line").unwrap();
-        writeln!(stdin, ".quit").unwrap();
-    }
-    let repl_out = repl.wait_with_output().expect("repl wait");
-    assert!(
-        repl_out.status.success(),
-        "REPL failed:\n{}",
-        String::from_utf8_lossy(&repl_out.stderr)
-    );
-    let repl_stdout = String::from_utf8_lossy(&repl_out.stdout);
-    assert!(
-        repl_stdout.contains("user:"),
-        "REPL stdout missing surface user line: {repl_stdout}"
-    );
-    assert!(
-        !repl_stdout.to_ascii_lowercase().contains("inner:"),
-        "REPL leaked inner on surface: {repl_stdout}"
     );
 
     let stop = Command::new(&ctl_bin)
