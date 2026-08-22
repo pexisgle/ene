@@ -8,6 +8,7 @@
 
 mod assets_host;
 mod broker;
+mod broker_fs_invoke;
 mod broker_ipc;
 mod fiber;
 mod managed_sidecar;
@@ -38,3 +39,5 @@ pub use supervisor::{
 mod tests;
 #[cfg(test)]
 mod tests_broker_ipc;
+#[cfg(test)]
+mod tests_broker_session;

@@ -1,10 +1,12 @@
 use crate::fiber::FiberUid;
 use crate::sidecar::{self, LiveSidecar, SidecarHealth, SidecarId, SidecarRequest};
-use ene_registry::BuiltinExecutor;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
+
+/// Keeps base64 broker payloads inside the configured 1 MiB IPC frame.
+const MAX_BROKER_FILE_BYTES: usize = 512 * 1024;
 
 /// Broker denial or path escape.
 #[derive(Debug, Error)]
@@ -42,14 +44,16 @@ pub enum BrokerError {
     RedirectLoop,
     #[error("invalid glob: {0}")]
     InvalidGlob(String),
+    #[error("invalid regular expression: {0}")]
+    InvalidRegex(String),
+    #[error("search engine is unavailable")]
+    SearchEngineUnavailable,
     #[error("refusing to delete a symlink")]
     Symlink,
     #[error("directory is not empty")]
     NotEmpty,
     #[error("path is read-only")]
     ReadOnly,
-    #[error("filesystem tool failed: {0}")]
-    Tool(String),
 }
 
 /// One grant tracked as a fiber effect.
@@ -232,16 +236,34 @@ impl Broker {
         self.grants.get(&uid).is_some_and(|ops| ops.contains(op))
     }
 
+    #[must_use]
+    pub(crate) fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
     pub fn fs_read(&self, uid: FiberUid, path: &Path) -> Result<String, BrokerError> {
         self.require(uid, "fs.read")?;
-        let resolved = confine_path(&self.workspace, path, false)?;
-        std::fs::read_to_string(resolved).map_err(BrokerError::from)
+        fs_read(&self.workspace, path)
+    }
+
+    pub fn fs_read_bytes(&self, uid: FiberUid, path: &Path) -> Result<Vec<u8>, BrokerError> {
+        self.require(uid, "fs.read")?;
+        fs_read_bytes(&self.workspace, path)
     }
 
     pub fn fs_write(&self, uid: FiberUid, path: &Path, text: &str) -> Result<(), BrokerError> {
         self.require(uid, "fs.write")?;
-        let resolved = confine_path(&self.workspace, path, true)?;
-        std::fs::write(resolved, text).map_err(BrokerError::from)
+        fs_write(&self.workspace, path, text)
+    }
+
+    pub fn fs_write_bytes(
+        &self,
+        uid: FiberUid,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), BrokerError> {
+        self.require(uid, "fs.write")?;
+        fs_write_bytes(&self.workspace, path, bytes)
     }
 
     pub fn fs_list(&self, uid: FiberUid, path: &Path) -> Result<Vec<String>, BrokerError> {
@@ -299,56 +321,9 @@ impl Broker {
         Ok(())
     }
 
-    /// Execute a bundled filesystem tool inside the broker-owned workspace.
-    pub fn fs_invoke(&self, uid: FiberUid, name: &str, args: &Value) -> Result<Value, BrokerError> {
-        if name == "fs.search" {
-            let query = args
-                .get("query")
-                .and_then(Value::as_str)
-                .ok_or_else(|| BrokerError::Tool("missing query".to_owned()))?;
-            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let context_lines = u32::try_from(
-                args.get("context_lines")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            )
-            .unwrap_or(0)
-            .min(10);
-            let max = u32::try_from(args.get("max").and_then(Value::as_u64).unwrap_or(50))
-                .unwrap_or(50)
-                .min(200);
-            let matches = self.fs_search(
-                uid,
-                Path::new(path),
-                query,
-                args.get("regex").and_then(Value::as_bool).unwrap_or(false),
-                args.get("case_insensitive")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                args.get("include").and_then(Value::as_str),
-                context_lines,
-                args.get("count").and_then(Value::as_bool).unwrap_or(false),
-                max,
-            )?;
-            return Ok(json!({ "matches": matches }));
-        }
-        let cap = match name {
-            "fs.read" => "fs.read",
-            "fs.write" | "fs.edit" | "fs.patch" | "fs.undo" => "fs.write",
-            "fs.list" => "fs.list",
-            "fs.glob" => "fs.glob",
-            "fs.delete" => "fs.delete",
-            _ => return Err(BrokerError::Tool(format!("unsupported fs tool {name}"))),
-        };
-        self.require(uid, cap)?;
-        BuiltinExecutor
-            .execute_fs_in_workspace(&self.workspace, name, args)
-            .map_err(BrokerError::Tool)
-    }
-
     pub fn net_fetch(&self, uid: FiberUid, url: &str) -> Result<Value, BrokerError> {
         self.require(uid, "net.fetch")?;
-        crate::net::get(url)
+        net_fetch(url)
     }
 
     /// Search file contents with host-managed `rg`.
@@ -371,46 +346,17 @@ impl Broker {
         max: u32,
     ) -> Result<Value, BrokerError> {
         self.require(uid, "fs.search")?;
-        let root = confine_path(&self.workspace, path, false)?;
-        let include = match include {
-            Some(pattern) => {
-                validate_glob(pattern)?;
-                Some(pattern)
-            }
-            None => None,
-        };
-        let mut command = std::process::Command::new("rg");
-        if !regex {
-            command.arg("--fixed-strings");
-        }
-        if case_insensitive {
-            command.arg("--ignore-case");
-        }
-        if let Some(pattern) = include {
-            command.args(["--glob", pattern]);
-        }
-        if context_lines > 0 && !count {
-            command.arg(format!("--context={context_lines}"));
-        }
-
-        let max = usize::try_from(max).unwrap_or(200).min(200);
-        command
-            .arg("--json")
-            .arg("--")
-            .arg(query)
-            .arg(&root)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let output = command.output()?;
-        if !output.status.success() && output.status.code() != Some(1) {
-            return Err(BrokerError::Fetch(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            ));
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_rg_json(&stdout, max, count))
+        fs_search(
+            &self.workspace,
+            path,
+            query,
+            regex,
+            case_insensitive,
+            include,
+            context_lines,
+            count,
+            max,
+        )
     }
 
     /// Resolve a sidecar binary without spawning it.
@@ -496,6 +442,103 @@ impl Broker {
     }
 }
 
+pub(crate) fn fs_read(workspace: &Path, path: &Path) -> Result<String, BrokerError> {
+    let resolved = confine_path(workspace, path, false)?;
+    std::fs::read_to_string(resolved).map_err(BrokerError::from)
+}
+
+pub(crate) fn fs_read_bytes(workspace: &Path, path: &Path) -> Result<Vec<u8>, BrokerError> {
+    let resolved = confine_path(workspace, path, false)?;
+    let bytes = std::fs::read(resolved).map_err(BrokerError::from)?;
+    if bytes.len() > MAX_BROKER_FILE_BYTES {
+        return Err(BrokerError::Oversize);
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn fs_write(workspace: &Path, path: &Path, text: &str) -> Result<(), BrokerError> {
+    let resolved = confine_path(workspace, path, true)?;
+    std::fs::write(resolved, text).map_err(BrokerError::from)
+}
+
+pub(crate) fn fs_write_bytes(
+    workspace: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), BrokerError> {
+    if bytes.len() > MAX_BROKER_FILE_BYTES {
+        return Err(BrokerError::Oversize);
+    }
+    let resolved = confine_path(workspace, path, true)?;
+    std::fs::write(resolved, bytes).map_err(BrokerError::from)
+}
+
+pub(crate) fn net_fetch(url: &str) -> Result<Value, BrokerError> {
+    crate::net::get(url)
+}
+
+pub(crate) fn fs_search(
+    workspace: &Path,
+    path: &Path,
+    query: &str,
+    regex: bool,
+    case_insensitive: bool,
+    include: Option<&str>,
+    context_lines: u32,
+    count: bool,
+    max: u32,
+) -> Result<Value, BrokerError> {
+    let root = confine_path(workspace, path, false)?;
+    let include = match include {
+        Some(pattern) => {
+            validate_glob(pattern)?;
+            Some(pattern)
+        }
+        None => None,
+    };
+    if regex {
+        rg_regex::Regex::new(query).map_err(|err| BrokerError::InvalidRegex(err.to_string()))?;
+    }
+    let mut command = std::process::Command::new("rg");
+    if !regex {
+        command.arg("--fixed-strings");
+    }
+    if case_insensitive {
+        command.arg("--ignore-case");
+    }
+    if let Some(pattern) = include {
+        command.args(["--glob", pattern]);
+    }
+    if context_lines > 0 && !count {
+        command.arg(format!("--context={context_lines}"));
+    }
+
+    let max = usize::try_from(max).unwrap_or(200).min(200);
+    command
+        .arg("--json")
+        .arg("--")
+        .arg(query)
+        .arg(&root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = command.output().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            BrokerError::SearchEngineUnavailable
+        } else {
+            BrokerError::from(err)
+        }
+    })?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(BrokerError::Fetch(stderr));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_rg_json(&stdout, max, count))
+}
+
 fn parse_rg_json(stdout: &str, max: usize, count_only: bool) -> Value {
     let mut matches = Vec::new();
     let mut counts = BTreeMap::<String, u64>::new();
@@ -534,10 +577,9 @@ fn parse_rg_json(stdout: &str, max: usize, count_only: bool) -> Value {
             .into_iter()
             .map(|(path, count)| json!({ "path": path, "count": count }))
             .collect();
-        json!({ "files": files, "total": total })
-    } else {
-        Value::Array(matches)
+        return json!({ "files": files, "total": total });
     }
+    Value::Array(matches)
 }
 
 fn validate_glob(pattern: &str) -> Result<(), BrokerError> {
@@ -550,6 +592,96 @@ fn validate_glob(pattern: &str) -> Result<(), BrokerError> {
         }
     }
     Ok(())
+}
+
+fn broker_walk_glob(
+    root: &Path,
+    dir: &Path,
+    pattern: &str,
+    out: &mut Vec<String>,
+    max: usize,
+) -> Result<(), BrokerError> {
+    if out.len() >= max {
+        return Ok(());
+    }
+    for ent in std::fs::read_dir(dir)? {
+        if out.len() >= max {
+            break;
+        }
+        let ent = ent?;
+        let path = ent.path();
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if name == ".ene" || name.starts_with('.') {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(&path)?;
+        if is_link_or_reparse(&meta) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|_| BrokerError::PathEscape(path.display().to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if broker_glob_match(pattern, &rel) {
+            out.push(rel);
+        }
+        if meta.is_dir() {
+            broker_walk_glob(root, &path, pattern, out, max)?;
+        }
+    }
+    Ok(())
+}
+
+fn broker_glob_match(pattern: &str, rel: &str) -> bool {
+    let pat: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
+    let path: Vec<&str> = rel.split('/').filter(|part| !part.is_empty()).collect();
+    broker_glob_components(&pat, &path)
+}
+
+fn broker_glob_components(pat: &[&str], path: &[&str]) -> bool {
+    match (pat.first().copied(), path.first().copied()) {
+        (None, None) => true,
+        (Some("**"), _) => {
+            broker_glob_components(&pat[1..], path)
+                || (!path.is_empty() && broker_glob_components(pat, &path[1..]))
+        }
+        (Some(seg), Some(name)) if broker_glob_segment(seg, name) => {
+            broker_glob_components(&pat[1..], &path[1..])
+        }
+        _ => false,
+    }
+}
+
+fn broker_glob_segment(pattern: &str, name: &str) -> bool {
+    broker_glob_stars(pattern.as_bytes(), name.as_bytes())
+}
+
+fn broker_glob_stars(pattern: &[u8], name: &[u8]) -> bool {
+    match (pattern.first().copied(), name.first().copied()) {
+        (None, None) => true,
+        (Some(b'*'), _) => {
+            broker_glob_stars(&pattern[1..], name)
+                || (!name.is_empty() && broker_glob_stars(pattern, &name[1..]))
+        }
+        (Some(b'?'), Some(_)) => broker_glob_stars(&pattern[1..], &name[1..]),
+        (Some(p), Some(n)) if p == n => broker_glob_stars(&pattern[1..], &name[1..]),
+        _ => false,
+    }
+}
+
+fn is_link_or_reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
 }
 
 impl Drop for Broker {
@@ -600,127 +732,5 @@ mod confine_tests {
                 .file_type()
                 .is_symlink()
         );
-    }
-}
-
-fn broker_walk_glob(
-    root: &Path,
-    dir: &Path,
-    pattern: &str,
-    out: &mut Vec<String>,
-    max: usize,
-) -> Result<(), BrokerError> {
-    if out.len() >= max {
-        return Ok(());
-    }
-    for ent in std::fs::read_dir(dir)? {
-        if out.len() >= max {
-            break;
-        }
-        let ent = ent?;
-        let path = ent.path();
-        let name = ent.file_name();
-        let name = name.to_string_lossy();
-        if name == ".ene" || name.starts_with('.') {
-            continue;
-        }
-        let meta = std::fs::symlink_metadata(&path)?;
-        if is_link_or_reparse(&meta) {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(root)
-            .map_err(|_| BrokerError::PathEscape(path.display().to_string()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        if broker_glob_match(pattern, &rel) {
-            out.push(rel);
-        }
-        if meta.is_dir() {
-            broker_walk_glob(root, &path, pattern, out, max)?;
-        }
-    }
-    Ok(())
-}
-
-fn broker_glob_match(pattern: &str, rel: &str) -> bool {
-    let pat: Vec<&str> = pattern.split('/').filter(|p| !p.is_empty()).collect();
-    let path: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
-    broker_glob_components(&pat, &path)
-}
-
-fn broker_glob_components(pat: &[&str], path: &[&str]) -> bool {
-    match (pat.first().copied(), path.first().copied()) {
-        (None, None) => true,
-        (Some("**"), _) => {
-            broker_glob_components(&pat[1..], path)
-                || (!path.is_empty() && broker_glob_components(pat, &path[1..]))
-        }
-        (Some(seg), Some(name)) if broker_glob_segment(seg, name) => {
-            broker_glob_components(&pat[1..], &path[1..])
-        }
-        _ => false,
-    }
-}
-
-fn broker_glob_segment(pattern: &str, name: &str) -> bool {
-    broker_glob_stars(pattern.as_bytes(), name.as_bytes())
-}
-
-fn broker_glob_stars(pattern: &[u8], name: &[u8]) -> bool {
-    match (pattern.first().copied(), name.first().copied()) {
-        (None, None) => true,
-        (Some(b'*'), _) => {
-            broker_glob_stars(&pattern[1..], name)
-                || (!name.is_empty() && broker_glob_stars(pattern, &name[1..]))
-        }
-        (Some(b'?'), Some(_)) => broker_glob_stars(&pattern[1..], &name[1..]),
-        (Some(p), Some(n)) if p == n => broker_glob_stars(&pattern[1..], &name[1..]),
-        _ => false,
-    }
-}
-
-fn is_link_or_reparse(meta: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    {
-        meta.file_type().is_symlink()
-    }
-}
-
-#[cfg(test)]
-mod host_fs_invoke_tests {
-    use super::{Broker, BrokerError};
-    use crate::fiber::FiberUid;
-    use serde_json::json;
-    use tempfile::TempDir;
-
-    #[test]
-    fn host_fs_invoke_uses_broker_workspace() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("inside.txt"), "inside").unwrap();
-        let mut broker = Broker::new(dir.path().to_path_buf());
-        let uid = FiberUid::new();
-        broker.grant(uid, "fs.read");
-        let value = broker
-            .fs_invoke(uid, "fs.read", &json!({"path":"inside.txt"}))
-            .unwrap();
-        assert_eq!(value["text"], "inside");
-    }
-
-    #[test]
-    fn host_fs_invoke_requires_grant() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("inside.txt"), "inside").unwrap();
-        let broker = Broker::new(dir.path().to_path_buf());
-        assert!(matches!(
-            broker.fs_invoke(FiberUid::new(), "fs.read", &json!({"path":"inside.txt"})),
-            Err(BrokerError::Denied { .. })
-        ));
     }
 }
