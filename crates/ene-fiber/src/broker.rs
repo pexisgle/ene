@@ -1,7 +1,7 @@
 use crate::fiber::FiberUid;
 use crate::sidecar::{self, LiveSidecar, SidecarHealth, SidecarId, SidecarRequest};
-use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
@@ -325,16 +325,11 @@ impl Broker {
         if let Some(pattern) = include {
             command.args(["--glob", pattern]);
         }
-        if context_lines > 0 {
+        if context_lines > 0 && !count {
             command.arg(format!("--context={context_lines}"));
-        }
-        if count {
-            command.arg("--count");
-            command.arg("--no-filename");
         }
 
         let max = usize::try_from(max).unwrap_or(200).min(200);
-        command.arg(format!("--max-count={max}"));
         command
             .arg("--json")
             .arg("--")
@@ -351,8 +346,7 @@ impl Broker {
             ));
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let matches = parse_rg_json(&stdout);
-        serde_json::to_value(matches).map_err(|_| BrokerError::Fetch("serialize search".into()))
+        Ok(parse_rg_json(&stdout, max, count))
     }
 
     /// Resolve a sidecar binary without spawning it.
@@ -438,11 +432,48 @@ impl Broker {
     }
 }
 
-fn parse_rg_json(stdout: &str) -> Vec<Value> {
-    stdout
+fn parse_rg_json(stdout: &str, max: usize, count_only: bool) -> Value {
+    let mut matches = Vec::new();
+    let mut counts = BTreeMap::<String, u64>::new();
+    let mut total = 0_u64;
+    for event in stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect()
+    {
+        if event.get("type").and_then(Value::as_str) != Some("match") {
+            continue;
+        }
+        let data = &event["data"];
+        let path = data["path"]["text"].as_str().unwrap_or("").to_owned();
+        total = total.saturating_add(1);
+        if count_only {
+            *counts.entry(path).or_default() += 1;
+            continue;
+        }
+        if matches.len() >= max {
+            continue;
+        }
+        let line = data["line_number"].as_u64().unwrap_or(0);
+        let text = data["lines"]["text"]
+            .as_str()
+            .unwrap_or("")
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        matches.push(json!({
+            "path": path,
+            "line": line,
+            "text": text,
+        }));
+    }
+    if count_only {
+        let files: Vec<Value> = counts
+            .into_iter()
+            .map(|(path, count)| json!({ "path": path, "count": count }))
+            .collect();
+        json!({ "files": files, "total": total })
+    } else {
+        Value::Array(matches)
+    }
 }
 
 fn validate_glob(pattern: &str) -> Result<(), BrokerError> {
