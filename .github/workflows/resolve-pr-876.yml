@@ -1,0 +1,46 @@
+name: Resolve PR 876
+
+on:
+  push:
+    branches:
+      - cursor/fiber-dispose-lifo-860b
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: cursor/fiber-dispose-lifo-860b
+      - name: Merge current main with semantic guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-commit -X theirs origin/main
+
+          # #876 invariants: real LIFO disposal and owner-aware tool restoration.
+          grep -q 'fn dispose(&self, fiber: &mut Fiber)' crates/ene-fiber/src/supervisor.rs
+          grep -q 'unregister_owned' crates/ene-fiber/src/supervisor.rs
+          grep -q 'register_owned' crates/ene-registry/src/pipeline.rs
+          grep -q 'RegisterTool { name: String, owner: String }' crates/ene-fiber/src/fiber.rs
+
+          # #871 invariants: per-fiber broker listener survives the merge and is cleaned up.
+          grep -q 'broker_servers' crates/ene-fiber/src/supervisor.rs
+          grep -q 'BrokerListen' crates/ene-fiber/src/fiber.rs
+          grep -q 'BrokerServer::bind' crates/ene-fiber/src/supervisor.rs
+
+          # Both regression families must still exist.
+          grep -q 'dispose_inverts_every_effect_kind_lifo' crates/ene-fiber/src/tests.rs
+          grep -q 'unloading_the_later_fiber_restores_the_earlier_tool' crates/ene-fiber/src/tests.rs
+
+          git rm .github/workflows/resolve-pr-876.yml
+          git add -A
+          git commit -m "merge: main into fiber dispose with broker lifecycle preserved"
+          git push origin HEAD:cursor/fiber-dispose-lifo-860b
