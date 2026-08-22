@@ -13,7 +13,7 @@ use crate::skill::{
 use crate::store::WorkStore;
 use crate::tools::{register_work_tools, surface_shows_delegate};
 use crate::types::{
-    ArtifactKind, DelegationMode, JobStatus, NewSchedule, ScheduleAction, UpgradeReason,
+    Artifact, ArtifactKind, DelegationMode, JobStatus, NewSchedule, ScheduleAction, UpgradeReason,
 };
 use crate::vision::{
     PlaceholderScreenshot, PngScreenshot, ScreenshotError, capture_screenshot, observe_screen,
@@ -1085,10 +1085,18 @@ async fn artifact_register_and_deliver() {
         .await
         .unwrap();
     let art_id = registered["id"].as_str().unwrap();
-    store.deliver(art_id).unwrap();
+    host.complete(job.id, "notes ready").unwrap();
     let arts = store.artifacts_for(job.id).unwrap();
     assert_eq!(arts.len(), 1);
+    assert_eq!(arts[0].id, art_id);
     assert!(arts[0].delivered);
+    let dest = crate::soul_artifacts_dir(dir.path(), soul);
+    assert!(
+        std::path::Path::new(&arts[0].path).starts_with(&dest),
+        "delivered path should be under soul artifacts dir, got {}",
+        arts[0].path
+    );
+    assert_eq!(std::fs::read_to_string(&arts[0].path).unwrap(), "# hi");
     assert!(ArtifactKind::try_parse("docx").is_err());
 }
 
@@ -1184,6 +1192,148 @@ async fn artifact_register_requires_job_id() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("missing job_id"));
+}
+
+#[test]
+fn complete_delivers_all_job_artifacts() {
+    let (dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "pack");
+    let workspace = PathBuf::from(&job.workspace_dir);
+    std::fs::write(workspace.join("a.md"), "one").unwrap();
+    std::fs::write(workspace.join("b.csv"), "x,y").unwrap();
+    store
+        .register_artifact(Artifact {
+            id: "art-a".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ArtifactKind::Markdown,
+            title: "alpha".into(),
+            path: workspace.join("a.md").to_string_lossy().into_owned(),
+            mime: None,
+            size_bytes: Some(3),
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    store
+        .register_artifact(Artifact {
+            id: "art-b".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ArtifactKind::Csv,
+            title: "beta".into(),
+            path: workspace.join("b.csv").to_string_lossy().into_owned(),
+            mime: None,
+            size_bytes: Some(3),
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    host.complete(job.id, "packed").unwrap();
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 2);
+    assert!(arts.iter().all(|art| art.delivered));
+    let dest = crate::soul_artifacts_dir(dir.path(), soul);
+    for art in &arts {
+        assert!(
+            PathBuf::from(&art.path).starts_with(&dest),
+            "expected {} under {}",
+            art.path,
+            dest.display()
+        );
+        assert!(PathBuf::from(&art.path).is_file());
+    }
+}
+
+#[test]
+fn fail_does_not_deliver_artifacts() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "pack");
+    let file = PathBuf::from(&job.workspace_dir).join("draft.md");
+    std::fs::write(&file, "nope").unwrap();
+    store
+        .register_artifact(Artifact {
+            id: "art-fail".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ArtifactKind::Markdown,
+            title: "draft".into(),
+            path: file.to_string_lossy().into_owned(),
+            mime: None,
+            size_bytes: Some(4),
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    host.fail(job.id, "gave up").unwrap();
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 1);
+    assert!(!arts[0].delivered);
+}
+
+#[test]
+fn complete_without_artifacts_is_ok() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "talk");
+    host.complete(job.id, "nothing to hand over").unwrap();
+    assert!(store.artifacts_for(job.id).unwrap().is_empty());
+}
+
+#[test]
+fn complete_fails_when_artifact_source_is_missing() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "pack");
+    let missing = PathBuf::from(&job.workspace_dir).join("gone.md");
+    store
+        .register_artifact(Artifact {
+            id: "art-missing".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ArtifactKind::Markdown,
+            title: "gone".into(),
+            path: missing.to_string_lossy().into_owned(),
+            mime: None,
+            size_bytes: Some(0),
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    assert!(host.complete(job.id, "packed").is_err());
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 1);
+    assert!(!arts[0].delivered);
+    let status = store.get_job(job.id).unwrap().unwrap().status;
+    assert_ne!(status, JobStatus::Completed);
+}
+
+#[test]
+fn complete_fails_when_artifact_copy_errors() {
+    let (dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "pack");
+    let src = PathBuf::from(&job.workspace_dir).join("draft.md");
+    std::fs::write(&src, "body").unwrap();
+    store
+        .register_artifact(Artifact {
+            id: "art-copy".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ArtifactKind::Markdown,
+            title: "draft".into(),
+            path: src.to_string_lossy().into_owned(),
+            mime: None,
+            size_bytes: Some(4),
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    let dest = crate::soul_artifacts_dir(dir.path(), soul).join("art-copy_draft.md");
+    std::fs::create_dir_all(&dest).unwrap();
+    assert!(host.complete(job.id, "packed").is_err());
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 1);
+    assert!(!arts[0].delivered);
+    let status = store.get_job(job.id).unwrap().unwrap().status;
+    assert_ne!(status, JobStatus::Completed);
 }
 
 #[test]
@@ -1400,7 +1550,7 @@ fn spill_huge_tool_output_keeps_brief_bounded() {
 
 #[test]
 fn bookmark_workflow_delivers_markdown_artifact() {
-    let (_dir, store, host, soul) = open_work();
+    let (dir, store, host, soul) = open_work();
     let job = public_start(&host, soul, "travel notes");
     store.set_status(job.id, JobStatus::Running, None).unwrap();
     host.present_plan(job.id, "1. write markdown\n2. deliver")
@@ -1422,6 +1572,8 @@ fn bookmark_workflow_delivers_markdown_artifact() {
     assert!(report.speech.contains("bookmark ready"));
     let arts = store.artifacts_for(job.id).unwrap();
     assert_eq!(arts.len(), 1);
+    let dest = crate::soul_artifacts_dir(dir.path(), soul);
+    assert!(PathBuf::from(&artifact.path).starts_with(&dest));
     let content = std::fs::read_to_string(&artifact.path).unwrap();
     assert!(content.contains("# Tokyo trip"));
     assert!(content.contains("Shibuya crossing"));

@@ -41,6 +41,12 @@
    （`origin: delegation`）を開き、作業ツールと `delegation.send` を使います。
    しおり依頼（`workflow.bookmark`）は `web.search` があれば調査し、
    Markdown を書いてジョブ成果物として交付する。
+   `delegation.send kind=complete`（およびジョブランナーの暗黙 complete）は
+   登録済み成果物を `<data>/workspace/jobs/<soul_id>/artifacts/` へコピーし、
+   `GET /api/v1/artifacts` の `delivered` を立てます。失敗・キャンセルした
+   ジョブの成果物は未交付のままです。設計書の `<data>/workspaces/<soul_id>/`
+   配置は使っていません。実際の根は単数の `workspace` で、ジョブ作業
+   ディレクトリは `jobs/<soul_id>/<job_id>/` です。
 5. イベントは `ene-session` にコミット（モデル可視 = ログ）。
 6. ライブイベントは `surface` または `detail` の深さで送出。
 

@@ -27,7 +27,7 @@ pub fn deliver_bookmark_workflow(
 ) -> Result<(Artifact, CompanionReport), WorkError> {
     host.require_mutating_allowed(job_id)?;
     let job = host.status_snapshot(job_id)?;
-    let safe_title = sanitize_filename(title);
+    let safe_title = crate::host::sanitize_filename(title);
     let path = std::path::Path::new(&job.workspace_dir).join(format!("{safe_title}.md"));
     let mut markdown = format!("# {title}\n\n");
     for section in sections {
@@ -48,9 +48,8 @@ pub fn deliver_bookmark_workflow(
         created_at: Utc::now().to_rfc3339(),
         delivered: false,
     })?;
-    host.store().deliver(&artifact.id)?;
-    let delivered = host.store().get_artifact(&artifact.id)?.unwrap_or(artifact);
     let report = host.complete(job_id, &format!("bookmark ready: {title}"))?;
+    let delivered = host.store().get_artifact(&artifact.id)?.unwrap_or(artifact);
     Ok((delivered, report))
 }
 
@@ -157,20 +156,4 @@ fn bookmark_title(theme: &str, skills: &[crate::skill::SkillMeta]) -> String {
     let mut out: String = trimmed.chars().take(57).collect();
     out.push_str("...");
     out
-}
-
-fn sanitize_filename(title: &str) -> String {
-    let mut out = String::new();
-    for ch in title.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-        } else if (ch.is_whitespace() || ch == '-' || ch == '_') && !out.ends_with('_') {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        "bookmark".to_owned()
-    } else {
-        out
-    }
 }
