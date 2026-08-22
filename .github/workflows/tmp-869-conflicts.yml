@@ -1,0 +1,30 @@
+name: TMP 869 conflict probe
+
+on:
+  push:
+    branches:
+      - cursor/provider-retry-context-860b
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Probe merge conflicts
+        shell: bash
+        run: |
+          set -u
+          git fetch origin main
+          git merge --no-commit --no-ff origin/main || true
+          echo '=== UNMERGED ==='
+          git diff --name-only --diff-filter=U || true
+          echo '=== CONFLICT MARKERS ==='
+          for f in $(git diff --name-only --diff-filter=U); do
+            echo "----- $f -----"
+            grep -n -B 12 -A 18 '^<<<<<<<\|^=======\|^>>>>>>>' "$f" || true
+          done
