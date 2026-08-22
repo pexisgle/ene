@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, CharacterView, JobView, MemoryView, OccupantView, PluginConfigField,
+    ApiClient, CharacterView, JobView, MemoryPatch, MemoryView, OccupantView, PluginConfigField,
     PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
@@ -1271,12 +1271,73 @@ fn show_memory(
             });
         });
     }
+    ui.heading(i18n::fl("memory-commitments"));
+    let commitments: Vec<&MemoryView> = state
+        .memories
+        .iter()
+        .filter(|memory| memory.kind == "commitment")
+        .collect();
+    if commitments.is_empty() {
+        ui.label(i18n::fl("memory-commitments-empty"));
+    }
+    for memory in commitments {
+        ui.group(|ui| {
+            ui.label(format!(
+                "{} [{}] ({})",
+                memory.title, memory.kind, memory.scope
+            ));
+            ui.label(&memory.content);
+            if let Some(due) = memory.expires_at.as_deref() {
+                ui.label(format!("{}: {due}", i18n::fl("memory-due")));
+            }
+            if let Some(schedule_id) = memory.schedule_id.as_deref() {
+                ui.label(format!("{}: {schedule_id}", i18n::fl("memory-schedule")));
+            }
+            ui.horizontal(|ui| {
+                if ui.button(i18n::fl("memory-complete")).clicked() {
+                    let id = memory.id.clone();
+                    let client = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        AsyncOutcome::CompleteMemory {
+                            id: id.clone(),
+                            result: client
+                                .patch_memory(
+                                    &id,
+                                    &MemoryPatch {
+                                        completed: Some(true),
+                                        ..MemoryPatch::default()
+                                    },
+                                )
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| e.to_string()),
+                        }
+                    });
+                }
+                if ui.button(i18n::fl("memory-delete")).clicked() {
+                    let id = memory.id.clone();
+                    let client = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        AsyncOutcome::DeleteMemory {
+                            id: id.clone(),
+                            result: client.delete_memory(&id).await.map_err(|e| e.to_string()),
+                        }
+                    });
+                }
+            });
+        });
+    }
     ui.heading(i18n::fl("detail-tab-memory"));
-    if state.memories.is_empty() {
+    let others: Vec<&MemoryView> = state
+        .memories
+        .iter()
+        .filter(|memory| memory.kind != "commitment")
+        .collect();
+    if others.is_empty() && state.memories.is_empty() {
         ui.label(i18n::fl("memory-empty"));
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for memory in &state.memories {
+        for memory in others {
             ui.group(|ui| {
                 ui.label(format!(
                     "{} [{}] ({})",

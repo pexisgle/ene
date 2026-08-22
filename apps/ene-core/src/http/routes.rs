@@ -916,6 +916,28 @@ pub async fn patch_memory(
         .get_memory(memory)
         .map_err(map_companion)?
         .ok_or_else(|| not_found("memory not found"))?;
+    if patch.completed == Some(true) {
+        if row.kind != ene_companion::MemoryKind::Commitment {
+            return Err(bad_request(
+                "invalid_message",
+                "only commitments can be completed",
+            ));
+        }
+        let linked = row.schedule_id.clone();
+        state
+            .core
+            .companions()
+            .forget(memory, row.soul_id, JournalAction::Completed)
+            .map_err(map_companion)?;
+        state.core.disable_linked_schedule(linked.as_deref());
+        let updated = state
+            .core
+            .companions()
+            .get_memory(memory)
+            .map_err(map_companion)?
+            .ok_or_else(|| not_found("memory not found"))?;
+        return Ok(Json(memory_view(updated)));
+    }
     if let Some(content) = patch.content.as_deref() {
         state
             .core
@@ -929,6 +951,38 @@ pub async fn patch_memory(
             .companions()
             .set_scope(memory, MemoryScope::parse(scope), row.soul_id)
             .map_err(map_companion)?;
+    }
+    if let Some(schedule_id) = patch.schedule_id.as_deref() {
+        if schedule_id.is_empty() {
+            state
+                .core
+                .companions()
+                .set_memory_schedule_id(memory, None)
+                .map_err(map_companion)?;
+        } else if row.kind != ene_companion::MemoryKind::Commitment {
+            return Err(bad_request(
+                "invalid_message",
+                "only commitments can link a schedule",
+            ));
+        } else {
+            let schedule = state
+                .core
+                .work()
+                .get_schedule(schedule_id)
+                .map_err(map_work)?
+                .ok_or_else(|| not_found("schedule not found"))?;
+            if schedule.soul_id != row.soul_id {
+                return Err(bad_request(
+                    "invalid_message",
+                    "schedule soul does not match memory",
+                ));
+            }
+            state
+                .core
+                .companions()
+                .set_memory_schedule_id(memory, Some(schedule_id))
+                .map_err(map_companion)?;
+        }
     }
     let updated = state
         .core
@@ -953,11 +1007,13 @@ pub async fn delete_memory(
         .get_memory(memory)
         .map_err(map_companion)?
         .ok_or_else(|| not_found("memory not found"))?;
+    let linked = row.schedule_id.clone();
     state
         .core
         .companions()
         .forget(memory, row.soul_id, JournalAction::UserRequest)
         .map_err(map_companion)?;
+    state.core.disable_linked_schedule(linked.as_deref());
     drop(
         state
             .core
@@ -2131,6 +2187,8 @@ pub async fn list_pending_memories(
             kind: cand.kind.as_str().to_owned(),
             title: cand.title,
             content: cand.content,
+            expires_at: cand.expires_at,
+            schedule_id: None,
         })
         .collect();
     Ok(Json(Page::of(items)))
@@ -2406,6 +2464,8 @@ fn memory_view(row: ene_companion::MemoryRecord) -> MemoryView {
         kind: row.kind.as_str().to_owned(),
         title: row.title,
         content: row.content,
+        expires_at: row.expires_at,
+        schedule_id: row.schedule_id,
     }
 }
 

@@ -309,7 +309,8 @@ impl StageApp {
                 Err(err) => self.detail.core_status = err,
             },
             AsyncOutcome::ResolveMemory { result, .. }
-            | AsyncOutcome::DeleteMemory { result, .. } => {
+            | AsyncOutcome::DeleteMemory { result, .. }
+            | AsyncOutcome::CompleteMemory { result, .. } => {
                 if result.is_ok() {
                     self.request_memories();
                 } else if let Err(err) = result {

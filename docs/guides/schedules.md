@@ -44,3 +44,9 @@ ene-ctl schedule list
 
 `PATCH` toggles `enabled`. Firing is server-side; clients do not poll a
 local timer.
+
+A commitment due (`expires_at`) does not auto-create a schedule. Patch
+`schedule_id` on a commitment to name an existing row for the same soul.
+Completing, deleting, or expiring that commitment disables the named
+schedule. Create a `remind` / `job` / `turn` row when you want a timed
+Work action.

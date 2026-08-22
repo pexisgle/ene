@@ -56,7 +56,7 @@
     "/artifacts": { "get": { "summary": "List artifacts", "responses": { "200": { "description": "page" } } } },
     "/artifacts/{id}/content": { "get": { "summary": "Artifact bytes/text", "responses": { "200": { "description": "content" } } } },
     "/memories/{id}": {
-      "patch": { "summary": "Edit memory (desktop)", "responses": { "200": { "description": "memory" } } },
+      "patch": { "summary": "Edit memory or complete a commitment", "responses": { "200": { "description": "memory" } } },
       "delete": { "summary": "Forget memory (desktop)", "responses": { "200": { "description": "ok" } } }
     },
     "/memories/pending": { "get": { "summary": "Pending memory candidates", "responses": { "200": { "description": "page" } } } },

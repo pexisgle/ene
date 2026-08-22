@@ -163,13 +163,19 @@ async fn tick_session(
         screen_summary,
         screen_summary_status,
     };
+    state.core.expire_due_commitments();
+    let commitments = state
+        .core
+        .companions()
+        .open_commitments(meta.soul_id, 8)
+        .unwrap_or_default();
     let ctx = build_proactive_context(
         &mind.proactive,
         &history,
         &observation,
         None,
         None,
-        &[],
+        &commitments,
         &ene_work::skill_proactive_hints(
             &state.core.data_dir().join("skills"),
             &state.core.soul_skill_refs(meta.soul_id),

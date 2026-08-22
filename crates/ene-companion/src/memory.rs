@@ -3,6 +3,7 @@ use crate::config::{MemoryApprovalSettings, RecallSettings};
 use crate::error::CompanionError;
 use crate::ids::{CandidateId, MemoryId};
 use crate::store::{CompanionStore, RecallWeights};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use ene_session::SoulId;
 use serde::{Deserialize, Serialize};
 
@@ -112,6 +113,8 @@ pub enum JournalAction {
     Superseded,
     Restored,
     UserRequest,
+    Expired,
+    Completed,
 }
 
 impl JournalAction {
@@ -124,6 +127,8 @@ impl JournalAction {
             Self::Superseded => "superseded",
             Self::Restored => "restored",
             Self::UserRequest => "user_request",
+            Self::Expired => "expired",
+            Self::Completed => "completed",
         }
     }
 }
@@ -161,6 +166,7 @@ pub struct MemoryRecord {
     pub access_count: u32,
     pub superseded_by: Option<MemoryId>,
     pub expires_at: Option<String>,
+    pub schedule_id: Option<String>,
     pub forgotten: bool,
 }
 
@@ -195,6 +201,7 @@ pub struct MemoryCandidate {
     pub confidence: f32,
     pub salience: f32,
     pub sensitive: bool,
+    pub expires_at: Option<String>,
 }
 
 /// Outcome of [`arbitrate`].
@@ -239,6 +246,9 @@ fn overlay_classifier_scope(base: &mut [MemoryCandidate], classified: &[MemoryCa
             det.scope = hit.scope;
             det.confidence = det.confidence.max(hit.confidence);
             det.salience = det.salience.max(hit.salience);
+            if det.expires_at.is_none() {
+                det.expires_at.clone_from(&hit.expires_at);
+            }
         }
     }
 }
@@ -248,7 +258,9 @@ fn same_fact(a: &MemoryCandidate, b: &MemoryCandidate) -> bool {
         && (a.title.eq_ignore_ascii_case(&b.title) || a.content.eq_ignore_ascii_case(&b.content))
 }
 
-/// Pattern safety net: name / like / remember / forget.
+/// Pattern safety net: name / like / remember / forget, plus commitments
+/// that carry an explicit ISO-8601 or `YYYY-MM-DD` due. Relative dates
+/// (`tomorrow`, `next Friday`) are ignored on this path.
 #[must_use]
 pub fn deterministic_extract(soul_id: SoulId, user_text: &str) -> Vec<MemoryCandidate> {
     let text = user_text.trim();
@@ -308,6 +320,9 @@ pub fn deterministic_extract(soul_id: SoulId, user_text: &str) -> Vec<MemoryCand
             false,
         ));
     }
+    if let Some(cand) = extract_commitment_candidate(soul_id, text) {
+        out.push(cand);
+    }
     out
 }
 
@@ -347,6 +362,7 @@ fn candidate(
         confidence,
         salience: confidence,
         sensitive,
+        expires_at: None,
     }
 }
 
@@ -369,11 +385,21 @@ fn parse_extract_json(soul_id: SoulId, raw: &str) -> Vec<MemoryCandidate> {
                 Some("shared") => MemoryScope::Shared,
                 _ => MemoryScope::Private,
             };
-            let kind = MemoryKind::parse(item.get("kind").and_then(|v| v.as_str()).unwrap_or(""));
+            let mut kind =
+                MemoryKind::parse(item.get("kind").and_then(|v| v.as_str()).unwrap_or(""));
             let confidence = item
                 .get("confidence")
                 .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.5) as f32;
+            let expires_at = item
+                .get("commitment_due")
+                .or_else(|| item.get("expires_at"))
+                .or_else(|| item.get("due"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(normalize_explicit_due);
+            if expires_at.is_some() {
+                kind = MemoryKind::Commitment;
+            }
             Some(MemoryCandidate {
                 id: CandidateId::new(),
                 soul_id,
@@ -388,6 +414,7 @@ fn parse_extract_json(soul_id: SoulId, raw: &str) -> Vec<MemoryCandidate> {
                     .map_or(confidence, |v| v as f32)
                     .clamp(0.0, 1.0),
                 sensitive: looks_sensitive(content),
+                expires_at,
             })
         })
         .collect()
@@ -406,6 +433,158 @@ fn truncate(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
+fn persist_due(
+    store: &CompanionStore,
+    id: MemoryId,
+    cand: &MemoryCandidate,
+) -> Result<(), CompanionError> {
+    if let Some(due) = cand.expires_at.as_deref() {
+        store.set_memory_expires_at(id, Some(due))?;
+    }
+    Ok(())
+}
+
+fn extract_commitment_candidate(soul_id: SoulId, text: &str) -> Option<MemoryCandidate> {
+    let (due, range) = find_explicit_due(text)?;
+    if !has_commitment_cue(text, range.start) {
+        return None;
+    }
+    let stripped = strip_due_clause(text, range);
+    let title = if stripped.is_empty() {
+        "commitment".to_owned()
+    } else {
+        truncate(&stripped, 40)
+    };
+    Some(MemoryCandidate {
+        id: CandidateId::new(),
+        soul_id,
+        kind: MemoryKind::Commitment,
+        title,
+        content: stripped,
+        scope: MemoryScope::Private,
+        confidence: 0.88,
+        salience: 0.88,
+        sensitive: looks_sensitive(text),
+        expires_at: Some(due),
+    })
+}
+
+fn find_explicit_due(text: &str) -> Option<(String, std::ops::Range<usize>)> {
+    let mut i = 0;
+    while i + 10 <= text.len() {
+        if text.is_char_boundary(i)
+            && text.is_char_boundary(i + 10)
+            && looks_ymd(&text[i..i + 10])
+            && let Some((norm, end)) = take_due_at(text, i)
+        {
+            return Some((norm, i..end));
+        }
+        i += 1;
+        while i < text.len() && !text.is_char_boundary(i) {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn looks_ymd(slice: &str) -> bool {
+    let bytes = slice.as_bytes();
+    bytes.len() >= 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+}
+
+fn take_due_at(text: &str, start: usize) -> Option<(String, usize)> {
+    let rest = &text[start..];
+    if rest.len() > 10 && rest.as_bytes()[10] == b'T' {
+        let rel_end = rest
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '。' | '、'))
+            .unwrap_or(rest.len());
+        let candidate = rest[..rel_end].trim_end_matches(['.', '!', '?', ')', ']']);
+        if let Some(norm) = normalize_explicit_due(candidate) {
+            return Some((norm, start + candidate.len()));
+        }
+    }
+    normalize_explicit_due(&rest[..10]).map(|norm| (norm, start + 10))
+}
+
+fn normalize_explicit_due(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&Utc).to_rfc3339());
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc).to_rfc3339());
+    }
+    let date = NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?;
+    let end = date.and_hms_opt(23, 59, 59)?;
+    Some(DateTime::<Utc>::from_naive_utc_and_offset(end, Utc).to_rfc3339())
+}
+
+fn has_commitment_cue(text: &str, due_start: usize) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if [
+        "remind",
+        "remember to",
+        "don't forget",
+        "dont forget",
+        "until",
+        "約束",
+        "期限",
+        "リマインド",
+        "までに",
+    ]
+    .iter()
+    .any(|cue| {
+        if cue.is_ascii() {
+            lower.contains(cue)
+        } else {
+            text.contains(cue)
+        }
+    }) {
+        return true;
+    }
+    if contains_ascii_word(&lower, "due") {
+        return true;
+    }
+    let before = lower.get(..due_start).unwrap_or("").trim_end();
+    before.ends_with("by") || before.ends_with("by:")
+}
+
+fn contains_ascii_word(hay: &str, needle: &str) -> bool {
+    hay.split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|word| word == needle)
+}
+
+fn strip_due_clause(text: &str, range: std::ops::Range<usize>) -> String {
+    let mut owned = String::new();
+    owned.push_str(text[..range.start].trim());
+    let after = text[range.end..].trim();
+    if !after.is_empty() {
+        if !owned.is_empty() {
+            owned.push(' ');
+        }
+        owned.push_str(after);
+    }
+    let trimmed = owned.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    for suffix in [" by", " due", " until", " 期限", " までに"] {
+        if lower.ends_with(&suffix.to_ascii_lowercase()) {
+            return trimmed[..trimmed.len() - suffix.len()]
+                .trim()
+                .trim_end_matches([':', '-', ',', '、'])
+                .to_owned();
+        }
+    }
+    trimmed.trim_end_matches([':', '-', ',', '、']).to_owned()
+}
+
 /// Adopt / merge / queue a candidate.
 pub fn arbitrate(
     store: &CompanionStore,
@@ -416,6 +595,7 @@ pub fn arbitrate(
         && let Some(existing) = store.find_shared_by_title(&cand.title, cand.kind)?
     {
         store.update_memory_content(existing.id, &cand.content, cand.soul_id)?;
+        persist_due(store, existing.id, cand)?;
         return Ok(ArbitrateOutcome::Updated(
             store
                 .get_memory(existing.id)?
@@ -434,12 +614,13 @@ pub fn arbitrate(
                 salience: cand.salience,
                 source: MemorySource::Extraction,
                 source_seq: None,
-                expires_at: None,
+                expires_at: cand.expires_at.clone(),
             })?;
             store.supersede(existing.id, inserted.id, cand.soul_id)?;
             return Ok(ArbitrateOutcome::Updated(inserted));
         }
         store.update_memory_content(existing.id, &cand.content, cand.soul_id)?;
+        persist_due(store, existing.id, cand)?;
         return Ok(ArbitrateOutcome::Updated(
             store
                 .get_memory(existing.id)?
@@ -472,7 +653,7 @@ pub fn arbitrate(
             MemorySource::Extraction
         },
         source_seq: None,
-        expires_at: None,
+        expires_at: cand.expires_at.clone(),
     })?;
     Ok(ArbitrateOutcome::Inserted(inserted))
 }

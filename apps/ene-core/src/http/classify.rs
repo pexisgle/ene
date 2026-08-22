@@ -131,7 +131,8 @@ fn system_prompt(task: ClassifyTask) -> &'static str {
             "You extract memories. Reply with a JSON object only: \
 {\"candidates\":[{\"kind\":\"episodic|semantic|user_profile|preference|commitment\",\
 \"title\":\"...\",\"content\":\"...\",\"scope\":\"private|shared\",\
-\"confidence\":0.0,\"salience\":0.0}]}. \
+\"confidence\":0.0,\"salience\":0.0,\"commitment_due\":null}]}. \
+commitment_due is ISO-8601 or YYYY-MM-DD, else null — never a relative phrase. \
 Use shared only when the user clearly wants every companion to know. \
 Empty candidates is valid. No markdown."
         }
@@ -239,6 +240,7 @@ impl TurnFinalizer for MemoryFinalizer {
         let Some(core) = self.core.upgrade() else {
             return;
         };
+        core.expire_due_commitments();
         let outcomes = match core
             .companion()
             .after_turn(
