@@ -47,7 +47,7 @@ fn delegate_defs() -> Vec<ToolDefinition> {
                 },
                 "required": ["goal", "soul_id"]
             }),
-            Vec::new(),
+            vec!["job.create".to_owned()],
         ),
         harness(
             "delegate.instruct",
