@@ -443,6 +443,14 @@ impl DetailUiState {
         self.body_ref_draft.clear();
     }
 
+    pub fn invalidate_memory(&mut self) {
+        self.loaded.memory = false;
+        self.memories.clear();
+        self.pending_memories.clear();
+        self.memory_journal.clear();
+        self.candidate_drafts.clear();
+    }
+
     pub(crate) fn sync_candidate_drafts(&mut self, candidates: &[MemoryCandidateView]) {
         self.candidate_drafts
             .retain(|id, _| candidates.iter().any(|candidate| candidate.id == *id));
@@ -1866,35 +1874,38 @@ fn show_memory(
         let soul_id_mem = soul_id.to_owned();
         let client_m = Arc::clone(client);
         spawn_async(rt, async_results, async move {
-            AsyncOutcome::ListMemories(
-                client_m
+            AsyncOutcome::ListMemories {
+                soul_id: soul_id_mem.clone(),
+                result: client_m
                     .list_memories(&soul_id_mem, None)
                     .await
                     .map(|p| p.items)
                     .map_err(|e| e.to_string()),
-            )
+            }
         });
         let soul_id_pending = soul_id.to_owned();
         let client_p = Arc::clone(client);
         spawn_async(rt, async_results, async move {
-            AsyncOutcome::ListPendingMemories(
-                client_p
+            AsyncOutcome::ListPendingMemories {
+                soul_id: soul_id_pending.clone(),
+                result: client_p
                     .list_pending_memories(&soul_id_pending)
                     .await
                     .map(|p| p.items)
                     .map_err(|e| e.to_string()),
-            )
+            }
         });
         let soul_id_journal = soul_id.to_owned();
         let client_journal = Arc::clone(client);
         spawn_async(rt, async_results, async move {
-            AsyncOutcome::ListMemoryJournal(
-                client_journal
+            AsyncOutcome::ListMemoryJournal {
+                soul_id: soul_id_journal.clone(),
+                result: client_journal
                     .list_memory_journal(&soul_id_journal)
                     .await
                     .map(|p| p.items)
                     .map_err(|e| e.to_string()),
-            )
+            }
         });
     }
     if ui.button(i18n::fl("memory-refresh")).clicked() {
@@ -1989,6 +2000,7 @@ fn show_memory(
                     kind: Some(draft.kind.clone()),
                     scope: Some(draft.scope.clone()),
                 },
+                soul_id,
                 client,
                 rt,
                 async_results,
@@ -2003,6 +2015,7 @@ fn show_memory(
                     kind: None,
                     scope: None,
                 },
+                soul_id,
                 client,
                 rt,
                 async_results,
@@ -2068,9 +2081,11 @@ fn show_memory(
             ui.horizontal(|ui| {
                 if ui.button(i18n::fl("memory-complete")).clicked() {
                     let id = memory.id.clone();
+                    let soul_id = soul_id.to_owned();
                     let client = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
                         AsyncOutcome::CompleteMemory {
+                            soul_id,
                             id: id.clone(),
                             result: client
                                 .patch_memory(
@@ -2088,9 +2103,11 @@ fn show_memory(
                 }
                 if ui.button(i18n::fl("memory-delete")).clicked() {
                     let id = memory.id.clone();
+                    let soul_id = soul_id.to_owned();
                     let client = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
                         AsyncOutcome::DeleteMemory {
+                            soul_id,
                             id: id.clone(),
                             result: client.delete_memory(&id).await.map_err(|e| e.to_string()),
                         }
@@ -2120,9 +2137,11 @@ fn show_memory(
                 ui.label(&memory.content);
                 if ui.button(i18n::fl("memory-delete")).clicked() {
                     let id = memory.id.clone();
+                    let soul_id = soul_id.to_owned();
                     let client = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
                         AsyncOutcome::DeleteMemory {
+                            soul_id,
                             id: id.clone(),
                             result: client.delete_memory(&id).await.map_err(|e| e.to_string()),
                         }
@@ -2166,14 +2185,17 @@ fn memory_journal_action_label(value: &str) -> String {
 fn resolve_memory(
     id: &str,
     request: ResolveMemoryCandidateRequest,
+    soul_id: &str,
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     let id = id.to_owned();
+    let soul_id = soul_id.to_owned();
     let client = Arc::clone(client);
     spawn_async(rt, async_results, async move {
         AsyncOutcome::ResolveMemory {
+            soul_id,
             id: id.clone(),
             result: client
                 .resolve_memory_candidate(&id, &request)

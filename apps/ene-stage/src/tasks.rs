@@ -42,18 +42,30 @@ pub enum AsyncOutcome {
     SaveLocalSettings(Result<(), String>),
     LoadCoreSettings(Result<String, String>),
     ApplyCoreSettings(Result<(), String>),
-    ListMemories(Result<Vec<MemoryView>, String>),
-    ListPendingMemories(Result<Vec<MemoryCandidateView>, String>),
-    ListMemoryJournal(Result<Vec<MemoryJournalView>, String>),
+    ListMemories {
+        soul_id: String,
+        result: Result<Vec<MemoryView>, String>,
+    },
+    ListPendingMemories {
+        soul_id: String,
+        result: Result<Vec<MemoryCandidateView>, String>,
+    },
+    ListMemoryJournal {
+        soul_id: String,
+        result: Result<Vec<MemoryJournalView>, String>,
+    },
     ResolveMemory {
+        soul_id: String,
         id: String,
         result: Result<(), String>,
     },
     DeleteMemory {
+        soul_id: String,
         id: String,
         result: Result<(), String>,
     },
     CompleteMemory {
+        soul_id: String,
         id: String,
         result: Result<(), String>,
     },

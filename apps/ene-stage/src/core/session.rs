@@ -43,8 +43,17 @@ pub(crate) struct PreparedSessionTarget {
 impl PreparedSessionTarget {
     #[cfg(test)]
     pub(crate) fn new_for_test(session_id: &str, history: HistoryResponse) -> Self {
+        Self::new_for_test_with_soul("soul", session_id, history)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_soul(
+        soul_id: &str,
+        session_id: &str,
+        history: HistoryResponse,
+    ) -> Self {
         Self {
-            soul_id: "soul".to_owned(),
+            soul_id: soul_id.to_owned(),
             session_id: session_id.to_owned(),
             history,
             greetings: Vec::new(),
