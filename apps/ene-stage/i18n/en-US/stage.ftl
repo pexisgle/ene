@@ -230,6 +230,7 @@ plugins-config-options-field = Options field
 plugins-config-options = Load options
 plugins-config-options-fallback = Dynamic options unavailable; enter a value by hand.
 plugins-config-empty-apply = Add a value before applying plugin settings.
+plugins-config-invalid-json = Enter valid JSON before applying plugin settings.
 plugins-mcp = MCP document
 plugins-mcp-save = Save MCP
 plugins-mcp-add = Add MCP server

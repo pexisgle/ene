@@ -230,6 +230,7 @@ plugins-config-options-field = オプションのフィールド
 plugins-config-options = オプションを取得
 plugins-config-options-fallback = 動的オプションを取得できません。手入力してください。
 plugins-config-empty-apply = 値を入力してからプラグイン設定を適用してください。
+plugins-config-invalid-json = 正しいJSONを入力してからプラグイン設定を適用してください。
 plugins-mcp = MCP ドキュメント
 plugins-mcp-save = MCP を保存
 plugins-mcp-add = MCP サーバーを追加

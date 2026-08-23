@@ -49,6 +49,7 @@ pub enum AsyncOutcome {
         result: Result<(), String>,
     },
     LoadPluginConfig {
+        request_id: u64,
         id: String,
         result: Result<ene_api::PluginConfigView, String>,
     },
