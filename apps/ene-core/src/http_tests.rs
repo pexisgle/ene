@@ -231,6 +231,55 @@ async fn tool_calling_model_runs_calc_through_http() {
 }
 
 #[tokio::test]
+async fn greeting_api_lists_card_options_and_commits_once() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let card = serde_json::json!({
+        "spec": "chara_card_v3",
+        "spec_version": "3.0",
+        "data": {
+            "name": "Greeting Test",
+            "first_mes": "Welcome to the stage.",
+            "alternate_greetings": ["A different opening."]
+        }
+    });
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&card).unwrap());
+    let imported = client.import_character_archive_b64(&encoded).await.unwrap();
+    let soul_id = imported.soul_id.unwrap();
+    let greetings = client.list_greetings(&soul_id).await.unwrap();
+    assert_eq!(greetings.items.len(), 2);
+    assert_eq!(greetings.items[0].text, "Welcome to the stage.");
+
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        client
+            .select_greeting(&session.id, 1)
+            .await
+            .unwrap()
+            .committed
+    );
+    assert!(
+        !client
+            .select_greeting(&session.id, 0)
+            .await
+            .unwrap()
+            .committed
+    );
+
+    let history = client.history(&session.id, "surface").await.unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].role, "assistant");
+    assert_eq!(history.messages[0].text, "A different opening.");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn seamed_model_rejects_unconfigured_chat() {
     let dir = TempDir::new().unwrap();
     let core = Arc::new(

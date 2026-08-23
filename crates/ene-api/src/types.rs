@@ -159,6 +159,22 @@ pub struct MessageResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GreetingView {
+    pub index: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectGreetingRequest {
+    pub index: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectGreetingResponse {
+    pub committed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryResponse {
     pub messages: Vec<MessageResponse>,
     pub depth: String,

@@ -55,6 +55,10 @@ enum LaneCmd {
         origin: TurnOrigin,
         reply: oneshot::Sender<Result<TurnId, KernelError>>,
     },
+    Greeting {
+        text: String,
+        reply: oneshot::Sender<Result<bool, KernelError>>,
+    },
     Abort {
         reply: oneshot::Sender<Result<(), KernelError>>,
     },
@@ -255,6 +259,15 @@ impl LaneHandle {
         self.prompt_with_modality(text, "text").await
     }
 
+    /// Commit the selected opening greeting once, without starting model generation.
+    pub async fn record_greeting(&self, text: impl Into<String>) -> Result<bool, KernelError> {
+        self.ask(|reply| LaneCmd::Greeting {
+            text: text.into(),
+            reply,
+        })
+        .await
+    }
+
     /// Start a user turn tagged with `text` or `voice` input modality.
     pub async fn prompt_with_modality(
         &self,
@@ -449,6 +462,10 @@ async fn dispatch_cmd(
             let result = start_origin_turn(state, hint, origin, done_tx).await;
             drop(reply.send(result));
         }
+        LaneCmd::Greeting { text, reply } => {
+            let result = record_greeting(state, text).await;
+            drop(reply.send(result));
+        }
         LaneCmd::Abort { reply } => {
             let result = request_abort(state);
             drop(reply.send(result));
@@ -622,6 +639,96 @@ async fn start_prompt(
     )
     .await?;
     Ok(turn)
+}
+
+async fn record_greeting(state: &mut LaneState, text: String) -> Result<bool, KernelError> {
+    if !lane_is_idle(state) {
+        if let Some(running) = &state.running {
+            return Err(KernelError::lane_busy(running.turn));
+        }
+        return Err(KernelError::InvalidMessage(
+            "greeting requires an idle lane".to_owned(),
+        ));
+    }
+    let text = validate_text(&text)?;
+    let history = derive_messages(
+        &state.store.load_events(state.session, 0)?,
+        ProjectOptions::for_depth(DisplayDepth::Surface, 8),
+    );
+    if history
+        .messages
+        .iter()
+        .any(|message| matches!(message.role, Role::User | Role::Assistant))
+    {
+        return Ok(false);
+    }
+
+    let turn = TurnId::new();
+    let entries = vec![
+        NewEvent::new(
+            state.session,
+            EventKind::TurnStart,
+            EventPayload::TurnStart {
+                v: v1(),
+                turn_id: turn,
+                lane: LaneId::Dialogue.as_str().clone(),
+                origin: TurnOrigin::User,
+                delegation_id: None,
+                trigger: TurnTrigger::System,
+            },
+        ),
+        NewEvent::new(
+            state.session,
+            EventKind::StepStart,
+            EventPayload::StepStart {
+                v: v1(),
+                turn_id: turn,
+                step_index: 0,
+            },
+        ),
+        NewEvent::new(
+            state.session,
+            EventKind::AssistantMessage,
+            EventPayload::AssistantMessage {
+                v: v1(),
+                turn_id: turn,
+                step_index: 0,
+                blocks: vec![Block::text(&text)],
+                finish_reason: "greeting".to_owned(),
+                token_count: None,
+            },
+        ),
+        NewEvent::new(
+            state.session,
+            EventKind::StepEnd,
+            EventPayload::StepEnd {
+                v: v1(),
+                turn_id: turn,
+                step_index: 0,
+                outcome: StepOutcome::Stop,
+                finish_reason: Some("greeting".to_owned()),
+            },
+        ),
+        NewEvent::new(
+            state.session,
+            EventKind::TurnEnd,
+            EventPayload::TurnEnd {
+                v: v1(),
+                turn_id: turn,
+                outcome: TurnOutcome::Completed,
+                error_class: None,
+                error_detail: None,
+            },
+        ),
+    ];
+    state
+        .store
+        .commit(Transaction {
+            entries,
+            usage: Vec::new(),
+        })
+        .await?;
+    Ok(true)
 }
 
 async fn start_follow_turn(

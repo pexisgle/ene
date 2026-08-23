@@ -3,16 +3,17 @@ use crate::pcm::{PCM_S16LE, encode_pcm_s16le};
 use crate::types::{
     AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
     ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
-    EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse, InstallProviderAssetRequest,
-    InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
-    ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument, MemoryPatch,
-    MemoryView, MessageRequest, Page, PluginConfigField, PluginConfigOptionsView,
-    PluginConfigValidateView, PluginConfigValues, PluginConfigView, PluginView, Problem,
-    ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse, QueuedCancel,
-    RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse, ResourceKind,
-    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView,
-    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch,
-    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    EndSessionRequest, ExclusiveSnapshot, GreetingView, Health, HistoryResponse,
+    InstallProviderAssetRequest, InstallProviderAssetResponse, JobView, ListProviderAssetsRequest,
+    ListProviderAssetsResponse, ListProviderModelsRequest, ListProviderModelsResponse,
+    ListenRequest, McpDocument, MemoryPatch, MemoryView, MessageRequest, Page, PluginConfigField,
+    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
+    PluginView, Problem, ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse,
+    QueuedCancel, RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse,
+    ResourceKind, RestoreRequest, ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
+    SendMessageResponse, SessionPatch, SessionView, SetActiveProviderAssetRequest,
+    SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch, SoulView, SpanView,
+    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -109,6 +110,11 @@ impl ApiClient {
 
     pub async fn get_soul(&self, id: &str) -> Result<SoulView, ApiError> {
         self.send_json(self.request(Method::GET, &format!("/api/v1/souls/{id}")))
+            .await
+    }
+
+    pub async fn list_greetings(&self, soul_id: &str) -> Result<Page<GreetingView>, ApiError> {
+        self.send_json(self.request(Method::GET, &format!("/api/v1/souls/{soul_id}/greetings")))
             .await
     }
 
@@ -279,6 +285,21 @@ impl ApiClient {
             Method::GET,
             &format!("/api/v1/sessions/{session_id}/history?depth={depth}"),
         ))
+        .await
+    }
+
+    pub async fn select_greeting(
+        &self,
+        session_id: &str,
+        index: u32,
+    ) -> Result<SelectGreetingResponse, ApiError> {
+        self.send_json(
+            self.request(
+                Method::POST,
+                &format!("/api/v1/sessions/{session_id}/greeting"),
+            )
+            .json(&SelectGreetingRequest { index }),
+        )
         .await
     }
 

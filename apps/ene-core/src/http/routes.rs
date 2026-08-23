@@ -9,19 +9,20 @@ use base64::Engine;
 use ene_api::{
     AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
     ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
-    EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse, JobView,
+    EndSessionRequest, ExclusiveSnapshot, GreetingView, Health, HistoryResponse, JobView,
     ListProviderModelsRequest, ListProviderModelsResponse, McpDocument, McpServerView, MemoryPatch,
     MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
     PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
     PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResourceKind, RestoreRequest,
-    ScheduleView, SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch,
-    SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest,
-    ToolView, UsageView,
+    ScheduleView, SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch,
+    SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView,
+    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
-    JournalAction, MemoryId, MemoryScope, avatar_path_for_install, export_dir, import_v3,
-    install_archive, looks_like_package_zip, soul_from_install,
+    JournalAction, MemoryId, MemoryScope, avatar_path_for_install, export_dir,
+    greeting_options_for_install, import_v3, install_archive, looks_like_package_zip,
+    soul_from_install,
 };
 use ene_kernel::DisplayDepth;
 use ene_plane::PopupDecision;
@@ -83,6 +84,36 @@ pub async fn get_soul(
         .map_err(map_companion)?
         .ok_or_else(|| not_found("soul not found"))?;
     Ok(Json(soul_view(&state.core.companions(), row)))
+}
+
+pub async fn list_greetings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Page<GreetingView>>, ApiReject> {
+    let soul = parse_soul(&id)?;
+    let options = greeting_options_for_soul(&state, soul)?
+        .into_iter()
+        .map(|(index, text)| GreetingView { index, text })
+        .collect();
+    Ok(Json(Page::of(options)))
+}
+
+fn greeting_options_for_soul(
+    state: &AppState,
+    soul: SoulId,
+) -> Result<Vec<(u32, String)>, ApiReject> {
+    let store = state.core.companions();
+    let row = store
+        .get_soul(soul)
+        .map_err(map_companion)?
+        .ok_or_else(|| not_found("soul not found"))?;
+    let Some((id, version)) = row.character_ref.split_once('@') else {
+        return Ok(Vec::new());
+    };
+    let Some(path) = store.package_path(id, version).map_err(map_companion)? else {
+        return Ok(Vec::new());
+    };
+    greeting_options_for_install(std::path::Path::new(&path)).map_err(map_companion)
 }
 
 pub async fn patch_soul_body(
@@ -551,6 +582,32 @@ pub async fn send_message(
         return Ok(Json(response));
     }
     Ok(Json(dispatch_message(&state, session, &req).await?))
+}
+
+pub async fn select_greeting(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SelectGreetingRequest>,
+) -> Result<Json<SelectGreetingResponse>, ApiReject> {
+    let session = parse_session(&id)?;
+    let meta = state
+        .core
+        .store()
+        .get_session(session)
+        .map_err(map_session)?;
+    let text = greeting_options_for_soul(&state, meta.soul_id)?
+        .into_iter()
+        .find_map(|(index, text)| (index == req.index).then_some(text))
+        .ok_or_else(|| bad_request("invalid_message", "unknown greeting"))?;
+    let lane = state
+        .lanes
+        .get_or_open(&state.core, session)
+        .map_err(map_core)?;
+    let committed = lane
+        .record_greeting(&text)
+        .await
+        .map_err(|err| map_kernel(&err))?;
+    Ok(Json(SelectGreetingResponse { committed }))
 }
 
 async fn dispatch_message(
