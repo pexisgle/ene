@@ -12,6 +12,8 @@ set -euo pipefail
 VERSION="${1:?usage: $0 <version> [target-dir] [dist-dir]}"
 TARGET_DIR="${2:-target/release}"
 DIST_DIR="${3:-dist}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PLUGINS=(
   ene-tool-fs
@@ -52,11 +54,14 @@ DEB_ROOT="$DIST_DIR/ene-stage-deb"
 rm -rf "$DEB_ROOT"
 mkdir -p "$DEB_ROOT/DEBIAN" \
   "$DEB_ROOT/usr/bin/plugins" \
-  "$DEB_ROOT/usr/share/applications"
+  "$DEB_ROOT/usr/share/applications" \
+  "$DEB_ROOT/usr/share/pixmaps"
 
 cp "$TARGET_DIR/ene-stage" "$DEB_ROOT/usr/bin/ene-stage"
 cp "$TARGET_DIR/ene-core" "$DEB_ROOT/usr/bin/ene-core"
+cp "$REPO_ROOT/assets/icon.png" "$DEB_ROOT/usr/share/pixmaps/ene.png"
 chmod 755 "$DEB_ROOT/usr/bin/ene-stage" "$DEB_ROOT/usr/bin/ene-core"
+chmod 644 "$DEB_ROOT/usr/share/pixmaps/ene.png"
 for plugin in "${PLUGINS[@]}"; do
   cp "$TARGET_DIR/$plugin" "$DEB_ROOT/usr/bin/plugins/"
   chmod 755 "$DEB_ROOT/usr/bin/plugins/$plugin"
@@ -79,7 +84,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: amd64
-Maintainer: ene contributors <https://github.com/pexisgle/ene>
+Maintainer: ene contributors <info@pexisgle.dev>
 Depends: libgtk-3-0, libssl3 | libssl1.1, libx11-6, libxkbcommon0, libwayland-client0, libvulkan1
 Description: ene stage — local AI companion
  ene stage is an egui + wgpu client that starts ene-core and shows
