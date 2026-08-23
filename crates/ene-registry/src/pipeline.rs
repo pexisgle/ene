@@ -75,8 +75,12 @@ struct Registered {
 pub enum PipelineError {
     #[error("unknown tool {0}")]
     Unknown(String),
-    #[error("tool {0} is not on the surface schema")]
-    NotOnSurface(String),
+    #[error("wrong_layer: tool {name} requires the {required} layer (requested {requested})")]
+    WrongLayer {
+        name: String,
+        requested: Layer,
+        required: Layer,
+    },
     #[error("denied {name}: {reason}")]
     Denied { name: String, reason: String },
     #[error("tool {0} is not background-capable")]
@@ -260,10 +264,7 @@ impl ToolRegistry {
         names.sort_by(|a, b| a.name.cmp(&b.name));
         names
             .into_iter()
-            .filter(|def| match layer {
-                Layer::Surface => def.surface_visible(),
-                Layer::Job => true,
-            })
+            .filter(|def| def.available_on(layer))
             .map(ToolDefinition::model_schema)
             .collect()
     }
@@ -431,8 +432,12 @@ impl ToolRegistry {
                 .ok_or_else(|| PipelineError::Unknown(name.to_owned()))?;
             (row.def.clone(), Arc::clone(&row.invoke))
         };
-        if !host && layer == Layer::Surface && !def.surface_visible() {
-            return Err(PipelineError::NotOnSurface(name.to_owned()));
+        if !host && !def.available_on(layer) {
+            return Err(PipelineError::WrongLayer {
+                name: name.to_owned(),
+                requested: layer,
+                required: def.primary_layer(),
+            });
         }
         let workspace = workspace_override.or_else(|| self.workspace.lock().clone());
         let path = args.get("path").and_then(Value::as_str).unwrap_or("");

@@ -74,8 +74,13 @@ impl SurfaceRouter for WorkSurfaceRouter {
                     created_from_turn: None,
                 })
                 .map_err(|err| KernelError::Tool(err.to_string()))?;
+            let speech = if kind == SurfaceCallKind::Upgrade {
+                format!("That action requires a Work job, so I started one for `{name}`.")
+            } else {
+                "I'll look into that.".to_owned()
+            };
             return Ok(SurfaceToolOutcome::Delegated {
-                speech: "I'll look into that.".to_owned(),
+                speech,
                 job_id: job.id.to_string(),
             });
         }
