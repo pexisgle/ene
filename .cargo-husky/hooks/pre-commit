@@ -14,20 +14,11 @@ if [ ${#STAGED_RS[@]} -eq 0 ]; then
   exit 0
 fi
 
-echo "pre-commit: running cargo fmt on ${#STAGED_RS[@]} staged file(s)"
+echo "pre-commit: checking cargo fmt for ${#STAGED_RS[@]} staged Rust file(s)"
 
-cargo fmt --all
-
-RE_STAGED=0
-for f in "${STAGED_RS[@]}"; do
-  if ! git diff --quiet -- "$f" 2>/dev/null; then
-    git add -- "$f"
-    RE_STAGED=$((RE_STAGED + 1))
-  fi
-done
-
-if [ $RE_STAGED -gt 0 ]; then
-  echo "pre-commit: reformatted $RE_STAGED file(s) and re-staged them"
+if ! cargo fmt --all -- --check; then
+  echo "pre-commit: formatting check failed; run 'cargo fmt --all' and stage the intended changes" >&2
+  exit 1
 fi
 
 exit 0

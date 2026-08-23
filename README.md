@@ -20,19 +20,23 @@ ene は、ローカルで動く AI コンパニオン型エージェントハー
 - `apps/ene-core/` — コアデーモン
 - `apps/ene-stage/` — stage クライアント
 - `apps/ene-ctl/` — CLI
-- `plugins/tool/` — 同梱ツール (`fs` / `exec` / `web` / `utility`)
+- `plugins/tool/` — 同梱ツール (`fs` / `exec` / `web` / `utility` / `app` / `mcp`)
 - `assets/` — サンプルキャラクターやアセット
 
 ## 前提条件
 - Rust（stable。ツールチェーンは `rust-toolchain.toml` を参照）。
-- Linux のネイティブ依存は checked-in の Nix flake（Vulkan、ALSA、OpenSSL、mold など）。
+- Linux は Nix を推奨します。checked-in の flake が Vulkan、ALSA、OpenSSL、clang、mold などのネイティブ依存を提供します。
 - Windows は stable MSVC Rust、Visual Studio C++ Build Tools、Windows SDK が必要です。
 
 ## ビルド
 
+Linux では Nix 開発シェル内でビルドしてください。
+
 ```bash
-cargo build --workspace
+nix develop --command cargo build --workspace
 ```
+
+`direnv` を有効化している場合は、リポジトリ内で plain `cargo` を実行できます。Native Windows では必要な Build Tools を入れた PowerShell から `cargo build --workspace` を実行してください。
 
 ## 実行
 
