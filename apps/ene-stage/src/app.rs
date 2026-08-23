@@ -220,6 +220,28 @@ impl StageApp {
         }
     }
 
+    fn open_chat(&mut self, event_loop: &ActiveEventLoop) {
+        self.surface.chat_open = true;
+        self.surface.focus_chat = true;
+        if let Some(chat) = self.chat.as_ref() {
+            chat.show_and_focus();
+            return;
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        match ChromeWindow::create(
+            event_loop,
+            gpu,
+            ChromeKind::Chat,
+            PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
+            true,
+        ) {
+            Ok(win) => self.chat = Some(win),
+            Err(err) => tracing::warn!(error = %err, "chat window failed"),
+        }
+    }
+
     fn spawn<F>(&self, task: F)
     where
         F: std::future::Future<Output = AsyncOutcome> + Send + 'static,
@@ -989,11 +1011,7 @@ impl StageApp {
         for action in tray_actions {
             match action {
                 TrayAction::OpenDetail => self.open_detail(event_loop, DetailTab::Home),
-                TrayAction::OpenChatFocus => {
-                    self.surface.chat_open = true;
-                    self.surface.focus_chat = true;
-                    self.ensure_chat(event_loop);
-                }
+                TrayAction::OpenChatFocus => self.open_chat(event_loop),
                 TrayAction::ToggleMic => self.toggle_mic(),
                 TrayAction::Quit => self.surface.quit = true,
             }
@@ -1040,6 +1058,9 @@ impl StageApp {
         if self.detail.save_local_pending {
             self.detail.save_local_pending = false;
             self.save_local_settings();
+        }
+        if std::mem::take(&mut self.detail.request_chat_open) {
+            self.open_chat(event_loop);
         }
     }
 
@@ -1290,25 +1311,6 @@ impl StageApp {
         }
     }
 
-    fn ensure_chat(&mut self, event_loop: &ActiveEventLoop) {
-        if self.chat.is_some() {
-            return;
-        }
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        match ChromeWindow::create(
-            event_loop,
-            gpu,
-            ChromeKind::Chat,
-            PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
-            true,
-        ) {
-            Ok(win) => self.chat = Some(win),
-            Err(err) => tracing::warn!(error = %err, "chat window failed"),
-        }
-    }
-
     fn sync_caption_window(&mut self) {
         if !self.surface.caption_visible() {
             self.caption = None;
@@ -1360,10 +1362,7 @@ impl StageApp {
         match key {
             Key::Named(NamedKey::Escape) => self.surface.quit = true,
             Key::Named(NamedKey::F1) => self.open_detail(event_loop, DetailTab::Companion),
-            Key::Named(NamedKey::F2) => {
-                self.surface.chat_open = true;
-                self.ensure_chat(event_loop);
-            }
+            Key::Named(NamedKey::F2) => self.open_chat(event_loop),
             Key::Named(NamedKey::F3) => {
                 if let Some(overlay) = self.overlay.as_mut() {
                     overlay.collider_debug = !overlay.collider_debug;
@@ -1470,8 +1469,10 @@ impl StageApp {
     }
 
     fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {
-        if self.surface.chat_open {
-            self.ensure_chat(event_loop);
+        if chat_window_action(self.surface.chat_open, self.chat.is_some())
+            == ChatWindowAction::Create
+        {
+            self.open_chat(event_loop);
         }
         if self.settings.caption_enabled && self.surface.caption_visible() {
             self.ensure_caption(event_loop);
@@ -1584,6 +1585,21 @@ mod chat_tests {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatWindowAction {
+    None,
+    Create,
+}
+
+#[must_use]
+fn chat_window_action(chat_open: bool, chat_exists: bool) -> ChatWindowAction {
+    if chat_open && !chat_exists {
+        ChatWindowAction::Create
+    } else {
+        ChatWindowAction::None
+    }
+}
+
 impl ApplicationHandler for StageApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_some() {
@@ -1635,7 +1651,7 @@ impl ApplicationHandler for StageApp {
         self.gpu = Some(gpu);
         self.reload_avatar();
         if self.surface.chat_open {
-            self.ensure_chat(event_loop);
+            self.open_chat(event_loop);
         }
     }
 
@@ -1829,11 +1845,11 @@ fn map_turn_err(err: &str) -> String {
         err.to_owned()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncOutcome, StageApp, format_log_text, provider_asset_load_status, window_level,
+        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
+        provider_asset_load_status, window_level,
     };
     use ene_api::{HistoryResponse, MessageResponse, SessionView, SplitSessionResponse};
     use std::sync::Arc;
@@ -1957,5 +1973,12 @@ mod tests {
     fn provider_asset_load_status_reports_success_and_empty_results() {
         assert!(provider_asset_load_status(2).ends_with(": 2"));
         assert!(provider_asset_load_status(0).ends_with(": 0"));
+    }
+
+    #[test]
+    fn chat_paint_does_not_raise_an_existing_window() {
+        assert_eq!(chat_window_action(true, true), ChatWindowAction::None);
+        assert_eq!(chat_window_action(true, false), ChatWindowAction::Create);
+        assert_eq!(chat_window_action(false, false), ChatWindowAction::None);
     }
 }
