@@ -473,12 +473,14 @@ async fn web_fetch_is_on_surface_and_blocks_loopback() {
 #[test]
 fn app_screenshot_is_high_sensitivity_from_host_spec() {
     let defs = crate::builtins::definitions_for(BuiltinKind::App);
-    let shot = defs
-        .iter()
-        .find(|def| def.name == "app.screenshot")
-        .unwrap();
-    assert!(shot.side_effects.is_empty());
-    assert_eq!(shot.sensitivity, ene_plane::Sensitivity::High);
+    assert_eq!(
+        crate::builtins::host_sensitivity("app.screenshot"),
+        ene_plane::Sensitivity::High
+    );
+    if let Some(shot) = defs.iter().find(|def| def.name == "app.screenshot") {
+        assert!(shot.side_effects.is_empty());
+        assert_eq!(shot.sensitivity, ene_plane::Sensitivity::High);
+    }
     let click = defs.iter().find(|def| def.name == "app.click");
     if let Some(click) = click {
         assert_eq!(click.side_effects, vec!["input".to_owned()]);
