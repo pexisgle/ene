@@ -155,23 +155,23 @@ pub(crate) const CHAT_INPUT_ID: &str = "stage-chat-input";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComposerSendRequest {
     send: bool,
-    insert_newline: bool,
 }
 
-const COMPOSER_NONE: ComposerSendRequest = ComposerSendRequest {
-    send: false,
-    insert_newline: false,
-};
+const COMPOSER_NONE: ComposerSendRequest = ComposerSendRequest { send: false };
 
-const COMPOSER_SEND: ComposerSendRequest = ComposerSendRequest {
-    send: true,
-    insert_newline: false,
-};
+const COMPOSER_SEND: ComposerSendRequest = ComposerSendRequest { send: true };
 
-const COMPOSER_NEWLINE: ComposerSendRequest = ComposerSendRequest {
-    send: false,
-    insert_newline: true,
-};
+#[must_use]
+fn composer_request_for_key(
+    enter_pressed: bool,
+    shift_pressed: bool,
+    composing: bool,
+) -> ComposerSendRequest {
+    if !enter_pressed || shift_pressed || composing {
+        return COMPOSER_NONE;
+    }
+    COMPOSER_SEND
+}
 
 #[must_use]
 fn composer_send_requested(ui: &egui::Ui) -> ComposerSendRequest {
@@ -192,14 +192,7 @@ fn composer_send_requested(ui: &egui::Ui) -> ComposerSendRequest {
                 egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) if !text.is_empty()
             )
         });
-        if !enter_pressed || composing {
-            return COMPOSER_NONE;
-        }
-        if input.modifiers.shift {
-            COMPOSER_NEWLINE
-        } else {
-            COMPOSER_SEND
-        }
+        composer_request_for_key(enter_pressed, input.modifiers.shift, composing)
     })
 }
 
@@ -307,6 +300,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                 .desired_width(ui.available_width())
                 .desired_rows(2)
                 .min_size(egui::vec2(ui.available_width(), 56.0))
+                .return_key(Some(egui::KeyboardShortcut::new(
+                    egui::Modifiers::SHIFT,
+                    egui::Key::Enter,
+                )))
                 .code_editor(),
         );
         let send_request = response.has_focus().then(|| composer_send_requested(ui));
@@ -314,11 +311,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
             && !state.chat_draft.trim().is_empty()
         {
             state.push_action(SurfaceAction::SendChat);
-        } else if send_request
-            .as_ref()
-            .is_some_and(|request| request.insert_newline)
-        {
-            state.chat_draft.push('\n');
         }
 
         ui.add_space(4.0);
@@ -401,8 +393,10 @@ mod tests {
     }
 
     #[test]
-    fn composer_contract_separates_enter_shift_enter_and_ime() {
-        assert_ne!(COMPOSER_SEND, COMPOSER_NEWLINE);
+    fn composer_contract_keeps_shift_enter_out_of_send_path() {
+        assert_eq!(composer_request_for_key(true, false, false), COMPOSER_SEND);
+        assert_eq!(composer_request_for_key(true, true, false), COMPOSER_NONE);
+        assert_eq!(composer_request_for_key(true, false, true), COMPOSER_NONE);
     }
 
     #[test]
