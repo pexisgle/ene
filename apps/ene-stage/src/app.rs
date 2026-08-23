@@ -1374,12 +1374,10 @@ impl StageApp {
     }
 
     fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {
-        if self.surface.chat_open {
-            if let Some(chat) = self.chat.as_ref() {
-                chat.show_and_focus();
-            } else {
-                self.open_chat(event_loop);
-            }
+        if chat_window_action(self.surface.chat_open, self.chat.is_some())
+            == ChatWindowAction::Create
+        {
+            self.open_chat(event_loop);
         }
         if self.settings.caption_enabled && self.surface.caption_visible() {
             self.ensure_caption(event_loop);
@@ -1489,6 +1487,21 @@ mod chat_tests {
             chat_send_block_reason(&state),
             Some(i18n::fl("chat-unconfigured"))
         );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatWindowAction {
+    None,
+    Create,
+}
+
+#[must_use]
+fn chat_window_action(chat_open: bool, chat_exists: bool) -> ChatWindowAction {
+    if chat_open && !chat_exists {
+        ChatWindowAction::Create
+    } else {
+        ChatWindowAction::None
     }
 }
 
@@ -1737,10 +1750,12 @@ fn map_turn_err(err: &str) -> String {
         err.to_owned()
     }
 }
-
 #[cfg(test)]
 mod tests {
-    use super::{format_log_text, provider_asset_load_status, window_level};
+    use super::{
+        ChatWindowAction, chat_window_action, format_log_text, provider_asset_load_status,
+        window_level,
+    };
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
@@ -1758,5 +1773,12 @@ mod tests {
     fn provider_asset_load_status_reports_success_and_empty_results() {
         assert!(provider_asset_load_status(2).ends_with(": 2"));
         assert!(provider_asset_load_status(0).ends_with(": 0"));
+    }
+
+    #[test]
+    fn chat_paint_does_not_raise_an_existing_window() {
+        assert_eq!(chat_window_action(true, true), ChatWindowAction::None);
+        assert_eq!(chat_window_action(true, false), ChatWindowAction::Create);
+        assert_eq!(chat_window_action(false, false), ChatWindowAction::None);
     }
 }
