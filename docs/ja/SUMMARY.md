@@ -27,6 +27,7 @@
 - [メモリ台帳](guides/memory-ledger.md)
 - [スケジュール](guides/schedules.md)
 - [テスト](guides/testing.md)
+- [Rust ツールチェーン更新](guides/rust-toolchain.md)
 - [ツールを書く](guides/tools/write-a-tool.md)
 - [MCP サーバー](guides/tools/mcp-servers.md)
 - [同梱ツール](guides/tools/builtin-tools.md)

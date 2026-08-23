@@ -16,7 +16,7 @@ jobs:
         with:
           ref: codex/ask-user-protocol
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
       - name: Merge current parent and resolve known semantic conflicts

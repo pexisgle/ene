@@ -27,6 +27,7 @@
 - [Memory ledger](guides/memory-ledger.md)
 - [Schedules](guides/schedules.md)
 - [Testing](guides/testing.md)
+- [Rust toolchain updates](guides/rust-toolchain.md)
 - [Write a tool](guides/tools/write-a-tool.md)
 - [MCP servers](guides/tools/mcp-servers.md)
 - [Built-in tools](guides/tools/builtin-tools.md)
