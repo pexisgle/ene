@@ -500,10 +500,9 @@ pub(crate) fn dependency_missing(backend: &'static str, package: &'static str) -
 #[cfg(test)]
 mod tests {
     use super::super::cap_from_availability;
-    use super::{
-        DesktopKind, PlatformCaps, SessionKind, screenshot_cli_backend,
-        window_availability_for_session_with,
-    };
+    #[cfg(unix)]
+    use super::screenshot_cli_backend;
+    use super::{DesktopKind, PlatformCaps, SessionKind, window_availability_for_session_with};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
