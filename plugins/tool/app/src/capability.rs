@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 const SCREENSHOT_CLI_BACKENDS: &[&str] =
     &["grim", "import", "gnome-screenshot", "spectacle", "scrot"];
@@ -144,8 +146,16 @@ fn desktop_kind(env: &HashMap<String, String>) -> DesktopKind {
 }
 
 fn screenshot_cap(session: SessionKind, env: &HashMap<String, String>) -> ActionCap {
+    screenshot_cap_with_portal(session, env, portal_service_available(env))
+}
+
+fn screenshot_cap_with_portal(
+    session: SessionKind,
+    env: &HashMap<String, String>,
+    portal_available: bool,
+) -> ActionCap {
     match session {
-        SessionKind::Wayland if portal_session_available(env) => ActionCap {
+        SessionKind::Wayland if portal_available => ActionCap {
             available: true,
             backend: "portal",
             reason: None,
@@ -181,9 +191,41 @@ fn screenshot_cli_cap(env: &HashMap<String, String>) -> ActionCap {
     }
 }
 
-fn portal_session_available(env: &HashMap<String, String>) -> bool {
-    env.get("DBUS_SESSION_BUS_ADDRESS")
-        .is_some_and(|value| !value.is_empty())
+fn portal_service_available(env: &HashMap<String, String>) -> bool {
+    if env
+        .get("DBUS_SESSION_BUS_ADDRESS")
+        .is_none_or(String::is_empty)
+    {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match std::thread::Builder::new()
+            .name("ene-app-portal-probe".to_owned())
+            .spawn(|| {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return false;
+                };
+                runtime.block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_millis(500),
+                        ashpd::desktop::screenshot::ScreenshotProxy::new(),
+                    )
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+                })
+            }) {
+            Ok(thread) => thread.join().unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 pub(crate) fn screenshot_cli_backend(path: Option<&str>) -> Option<&'static str> {
@@ -457,7 +499,7 @@ mod tests {
                 .unwrap()
                 .contains("GNOME")
         );
-        assert_eq!(json["actions"]["app.screenshot"]["backend"], "portal");
+        assert!(json["actions"]["app.screenshot"]["backend"].is_string());
     }
 
     #[cfg(not(windows))]
@@ -546,5 +588,37 @@ mod tests {
         assert!(!caps.screenshot.available);
         assert_eq!(caps.screenshot.backend, "none");
         assert!(caps.screenshot.reason.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wayland_uses_cli_when_portal_service_is_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = dir.path().join("grim");
+        std::fs::write(&backend, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().to_str().unwrap();
+        let caps = super::screenshot_cap_with_portal(
+            SessionKind::Wayland,
+            &env(&[("PATH", path), ("DBUS_SESSION_BUS_ADDRESS", "session")]),
+            false,
+        );
+
+        assert!(caps.available);
+        assert_eq!(caps.backend, "grim");
+    }
+
+    #[test]
+    fn wayland_without_portal_or_cli_is_unavailable() {
+        let caps = super::screenshot_cap_with_portal(
+            SessionKind::Wayland,
+            &env(&[("PATH", "/definitely/missing")]),
+            false,
+        );
+
+        assert!(!caps.available);
+        assert_eq!(caps.backend, "none");
     }
 }
