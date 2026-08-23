@@ -17,7 +17,7 @@ mod hostcmd;
 #[path = "win32.rs"]
 mod win32;
 
-use backend::{Backend, BackendAvailability, WMCTRL};
+use backend::{Backend, BackendAvailability};
 use capability::{ActionCap, PlatformCaps, fail, window_availability_for_env};
 use hostcmd::{run, stdout_text};
 
@@ -36,6 +36,16 @@ fn run_window_backend(backend: &Backend) -> Result<String, String> {
         "wmctrl" => stdout_text(backend.executable, &["-l"]),
         "hyprctl" => stdout_text(backend.executable, &["clients"]),
         "swaymsg" => stdout_text(backend.executable, &["-t", "get_tree"]),
+        "win32" => {
+            #[cfg(windows)]
+            {
+                win32::list_windows()
+            }
+            #[cfg(not(windows))]
+            {
+                Err("Win32 window API is only available on Windows".to_owned())
+            }
+        }
         other => Err(format!("{other} has no window-list command")),
     }
 }
@@ -169,6 +179,8 @@ fn parse_backend_windows(backend: &Backend, text: &str) -> Value {
     match backend.name {
         "wmctrl" => json!({ "windows": parse_wmctrl(text), "backend": backend.name }),
         "hyprctl" => json!({ "windows": parse_hypr_clients(text), "backend": backend.name }),
+        "win32" => serde_json::from_str(text)
+            .unwrap_or_else(|_| json!({ "windows": [], "backend": backend.name })),
         _ => {
             let mut windows = Vec::new();
             if let Ok(tree) = serde_json::from_str::<Value>(text) {
@@ -184,7 +196,7 @@ pub(crate) fn cap_from_availability(availability: &BackendAvailability) -> Actio
     ActionCap {
         available: availability.available(),
         backend: backend.name,
-        reason: (*backend != WMCTRL).then_some("compositor CLI did not return any windows"),
+        reason: availability.reason(),
     }
 }
 
@@ -321,8 +333,11 @@ fn key(caps: &PlatformCaps, combo: &str) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::backend::{BackendAvailability, HYPRLAND};
     use super::capability::PlatformCaps;
-    use super::{collect_sway_windows, parse_hypr_clients, parse_wmctrl, specs_for};
+    use super::{
+        collect_sway_windows, parse_hypr_clients, parse_wmctrl, run_window_list, specs_for,
+    };
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -362,6 +377,18 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["title"], "Firefox");
         assert_eq!(out[0]["id"], json!(7));
+    }
+
+    #[test]
+    fn runtime_window_backend_failure_is_a_dependency_error() {
+        let error = run_window_list(&BackendAvailability::Available(HYPRLAND), |_| {
+            Err("command exited with status 1".to_owned())
+        })
+        .unwrap_err();
+        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["code"], "dependency_missing");
+        assert_eq!(error["backend"], "hyprctl");
+        assert!(error["message"].as_str().unwrap().contains("status 1"));
     }
 
     #[cfg(not(windows))]

@@ -1,6 +1,6 @@
 //! Runtime platform detection for app tools.
 
-use super::backend::{BackendAvailability, WMCTRL};
+use super::backend::{BackendAvailability, UNSUPPORTED, WIN32, WMCTRL};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -182,19 +182,38 @@ pub(crate) fn window_availability_for_session(
     session: SessionKind,
     desktop: DesktopKind,
 ) -> BackendAvailability {
+    window_availability_for_session_with(session, desktop, executable_probe)
+}
+
+pub(crate) fn window_availability_for_session_with(
+    session: SessionKind,
+    desktop: DesktopKind,
+    probe: impl Fn(&str) -> Option<std::path::PathBuf>,
+) -> BackendAvailability {
     use super::backend::{HYPRLAND, SWAY};
 
     match (session, desktop) {
-        (SessionKind::Windows, _) => BackendAvailability::Available(super::backend::WMCTRL),
-        (SessionKind::X11, _) => super::backend::resolve(&[WMCTRL], executable_probe),
-        (SessionKind::Wayland, DesktopKind::Hyprland | DesktopKind::Sway) => {
-            let candidates = [HYPRLAND, SWAY];
-            super::backend::resolve(&candidates, executable_probe)
+        (SessionKind::Windows, _) => BackendAvailability::Available(WIN32),
+        (SessionKind::X11, _) => super::backend::resolve(&[WMCTRL], probe),
+        (SessionKind::Wayland, DesktopKind::Hyprland) => {
+            super::backend::resolve(&[HYPRLAND], probe)
         }
-        (SessionKind::Wayland, DesktopKind::Gnome | DesktopKind::Kde) => {
-            BackendAvailability::Missing(super::backend::WMCTRL)
+        (SessionKind::Wayland, DesktopKind::Sway) => super::backend::resolve(&[SWAY], probe),
+        (SessionKind::Wayland, DesktopKind::Gnome) => BackendAvailability::Unsupported(
+            UNSUPPORTED,
+            "window listing is not exposed by GNOME Wayland",
+        ),
+        (SessionKind::Wayland, DesktopKind::Kde) => BackendAvailability::Unsupported(
+            UNSUPPORTED,
+            "window listing is not exposed by KDE Wayland",
+        ),
+        (SessionKind::Wayland, DesktopKind::Other) => BackendAvailability::Unsupported(
+            UNSUPPORTED,
+            "window listing is not exposed by this Wayland compositor",
+        ),
+        (SessionKind::Unknown, _) => {
+            BackendAvailability::Unsupported(UNSUPPORTED, "no display session for window listing")
         }
-        _ => BackendAvailability::Missing(WMCTRL),
     }
 }
 
@@ -345,8 +364,10 @@ pub(crate) fn fail(
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopKind, PlatformCaps, SessionKind};
+    use super::{DesktopKind, PlatformCaps, SessionKind, window_availability_for_session_with};
+    use crate::logic::cap_from_availability;
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -385,5 +406,56 @@ mod tests {
         assert_eq!(caps.session, SessionKind::X11);
         assert!(caps.advertise_input());
         assert_eq!(caps.input.backend, "xdotool");
+    }
+
+    #[test]
+    fn windows_window_list_uses_win32_backend() {
+        let availability =
+            window_availability_for_session_with(SessionKind::Windows, DesktopKind::Other, |_| {
+                Some(PathBuf::from("/bin/ignored"))
+            });
+        assert!(availability.available());
+        assert_eq!(availability.backend().name, "win32");
+        let cap = cap_from_availability(&availability);
+        assert_eq!(cap.backend, "win32");
+        assert_eq!(cap.reason, None);
+    }
+
+    #[test]
+    fn x11_missing_wmctrl_is_reported_as_missing_dependency() {
+        let availability =
+            window_availability_for_session_with(SessionKind::X11, DesktopKind::Other, |_| None);
+        assert!(!availability.available());
+        assert_eq!(availability.backend().name, "wmctrl");
+        assert_eq!(availability.reason(), Some("wmctrl is not installed"));
+    }
+
+    #[test]
+    fn wayland_uses_the_selected_compositors_cli() {
+        let hyprland = window_availability_for_session_with(
+            SessionKind::Wayland,
+            DesktopKind::Hyprland,
+            |_| Some(PathBuf::from("/bin/present")),
+        );
+        let sway =
+            window_availability_for_session_with(SessionKind::Wayland, DesktopKind::Sway, |_| {
+                Some(PathBuf::from("/bin/present"))
+            });
+        assert_eq!(hyprland.backend().name, "hyprctl");
+        assert_eq!(sway.backend().name, "swaymsg");
+    }
+
+    #[test]
+    fn unsupported_wayland_desktops_have_stable_reasons() {
+        for (desktop, reason) in [
+            (DesktopKind::Gnome, "GNOME Wayland"),
+            (DesktopKind::Kde, "KDE Wayland"),
+        ] {
+            let availability =
+                window_availability_for_session_with(SessionKind::Wayland, desktop, |_| None);
+            assert!(!availability.available());
+            assert_eq!(availability.backend().name, "none");
+            assert!(availability.reason().unwrap().contains(reason));
+        }
     }
 }
