@@ -42,12 +42,20 @@ if jq -e '
     (.redistribution | type) != "string" or
     (.distribution | type) != "string" or
     (.provenance_status | type) != "string" or
+    (.notice | type) != "string" or
     (.provenance_status == "unknown")
   )
 ' "$MANIFEST" >/dev/null; then
   printf 'asset provenance manifest contains an incomplete or unknown entry\n' >&2
   exit 1
 fi
+
+while IFS= read -r notice; do
+  if [[ ! -f "$REPO_ROOT/$notice" ]]; then
+    printf 'asset provenance notice is missing: %s\n' "$notice" >&2
+    exit 1
+  fi
+done < <(jq -r '.assets[].notice' "$MANIFEST" | sort -u)
 
 while IFS= read -r path; do
   expected="$(jq -er --arg path "$path" '.assets[] | select(.path == $path) | .sha256' "$MANIFEST")"
@@ -58,4 +66,4 @@ while IFS= read -r path; do
   fi
 done <"$tracked_assets"
 
-printf 'asset provenance manifest covers all tracked binary/media assets.\n'
+printf 'asset provenance manifest covers all tracked binary/media assets and notices.\n'
