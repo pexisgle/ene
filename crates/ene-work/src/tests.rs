@@ -95,6 +95,33 @@ struct SequenceModel {
     remaining: parking_lot::Mutex<Vec<ModelGeneration>>,
 }
 
+struct CapturePrompt {
+    prompts: parking_lot::Mutex<Vec<String>>,
+    remaining: parking_lot::Mutex<Vec<ModelGeneration>>,
+}
+
+#[async_trait]
+impl ConversationModel for CapturePrompt {
+    async fn generate(&self, request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        self.prompts.lock().extend(
+            request
+                .messages
+                .iter()
+                .map(ene_session::ProjectedMessage::text),
+        );
+        let mut remaining = self.remaining.lock();
+        remaining.pop().map_or_else(
+            || {
+                Ok(ModelGeneration {
+                    text: "all done".to_owned(),
+                    ..ModelGeneration::default()
+                })
+            },
+            Ok,
+        )
+    }
+}
+
 #[async_trait]
 impl ConversationModel for SequenceModel {
     async fn generate(&self, _request: ModelRequest) -> Result<ModelGeneration, KernelError> {
@@ -517,6 +544,46 @@ async fn job_router_confines_fs_to_job_workspace() {
     assert!(
         listed == job.workspace_dir || listed.starts_with(&job.workspace_dir),
         "empty fs.list must stay in the job workspace, got {listed}"
+    );
+}
+
+#[tokio::test]
+async fn job_briefing_bounds_filesystem_paths_to_the_job_workspace() {
+    let (dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "write smoke-gui/note.txt");
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    registry.register(fs_write_def());
+    let model = Arc::new(CapturePrompt {
+        prompts: parking_lot::Mutex::new(Vec::new()),
+        remaining: parking_lot::Mutex::new(vec![ModelGeneration {
+            tool_calls: vec![ToolCall {
+                name: "delegation.send".into(),
+                arguments: json!({"kind":"complete","body":"done"}),
+            }],
+            ..ModelGeneration::default()
+        }]),
+    });
+    drive_job(JobDrive {
+        host: Arc::clone(&host),
+        registry,
+        sessions: Arc::new(
+            SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+                .await
+                .unwrap(),
+        ),
+        model: Arc::clone(&model) as Arc<dyn ConversationModel>,
+        job: job.clone(),
+        step_budget: 4,
+        wall: StdDuration::from_secs(10),
+    })
+    .await
+    .unwrap();
+    let prompts = model.prompts.lock().join("\n");
+    assert!(
+        prompts.contains(job.workspace_dir.trim_end_matches('/'))
+            && prompts.contains("Use workspace-relative paths for filesystem tools"),
+        "job briefing must provide the scoped workspace and relative-path rule, got {prompts}"
     );
 }
 

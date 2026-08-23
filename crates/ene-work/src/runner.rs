@@ -102,7 +102,8 @@ pub async fn drive_job(drive: JobDrive) -> Result<(), WorkError> {
 fn job_briefing(job: &Job) -> String {
     let mut text = format!(
         "You are the back-harness job lane.\nGoal: {}\nWorkspace: {}\n\
-         Use tools as needed. Report with delegation.send kind=progress. \
+         Use workspace-relative paths for filesystem tools; do not use paths outside \
+         this workspace. Report with delegation.send kind=progress. \
          When finished, call delegation.send with kind=complete and a short summary.",
         job.goal, job.workspace_dir
     );
