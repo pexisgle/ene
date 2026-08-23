@@ -6,13 +6,75 @@
 use super::capability::fail;
 use serde_json::{Value, json};
 use std::io::Cursor;
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, LPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HGDIOBJ, RGBQUAD, ReleaseDC, SRCCOPY,
     SelectObject,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+    SM_CXSCREEN, SM_CYSCREEN,
+};
+use windows_sys::core::BOOL;
+
+pub(crate) fn list_windows() -> Result<String, String> {
+    let mut windows: Vec<Value> = Vec::new();
+    let result = unsafe {
+        // SAFETY: EnumWindows calls the synchronous callback before this vector goes out of scope;
+        // the callback receives only the vector's valid mutable pointer.
+        EnumWindows(
+            Some(enum_window),
+            std::ptr::addr_of_mut!(windows).cast::<()>() as LPARAM,
+        )
+    };
+    if result == 0 {
+        return Err(fail("unavailable", "win32", "EnumWindows failed"));
+    }
+    serde_json::to_string(&json!({ "windows": windows, "backend": "win32" }))
+        .map_err(|err| fail("unavailable", "win32", err.to_string()))
+}
+
+unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    if unsafe {
+        // SAFETY: IsWindowVisible accepts the HWND supplied by EnumWindows.
+        IsWindowVisible(hwnd)
+    } == 0
+    {
+        return 1;
+    }
+    let length = unsafe {
+        // SAFETY: GetWindowTextLengthW accepts the HWND supplied by EnumWindows.
+        GetWindowTextLengthW(hwnd)
+    };
+    if length <= 0 {
+        return 1;
+    }
+    let capacity = usize::try_from(length).unwrap_or(0).saturating_add(1);
+    let mut title = vec![0u16; capacity];
+    let copied = unsafe {
+        // SAFETY: `title` is writable for `capacity` UTF-16 code units and its size is bounded by
+        // the i32 length passed to GetWindowTextW.
+        GetWindowTextW(
+            hwnd,
+            title.as_mut_ptr(),
+            i32::try_from(capacity).unwrap_or(i32::MAX),
+        )
+    };
+    if copied <= 0 {
+        return 1;
+    }
+    title.truncate(usize::try_from(copied).unwrap_or(0));
+    let windows = unsafe {
+        // SAFETY: lparam is the mutable Vec pointer passed to EnumWindows above.
+        &mut *(lparam as *mut Vec<Value>)
+    };
+    windows.push(json!({
+        "id": format!("{hwnd:p}"),
+        "title": String::from_utf16_lossy(&title),
+    }));
+    1
+}
 
 pub(crate) fn capture_png() -> Result<Vec<u8>, String> {
     let (width, height, pixels) = capture_bgra()?;

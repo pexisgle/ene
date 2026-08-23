@@ -1,7 +1,10 @@
 use ene_plugin_ipc::ToolSpecWire;
 use ene_registry::{arg_str, spec};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
+#[path = "backend.rs"]
+mod backend;
 #[path = "capability.rs"]
 mod capability;
 #[path = "capture.rs"]
@@ -14,11 +17,37 @@ mod hostcmd;
 #[path = "win32.rs"]
 mod win32;
 
-use capability::{PlatformCaps, fail};
+use backend::{Backend, BackendAvailability};
+use capability::{ActionCap, PlatformCaps, fail, window_availability_for_env};
 use hostcmd::{run, stdout_text};
 
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
-    specs_for(&PlatformCaps::detect())
+    let env: HashMap<String, String> = std::env::vars().collect();
+    let caps = PlatformCaps::from_pairs(std::env::vars());
+    let availability = window_availability_for_env(&env);
+    specs_for(&PlatformCaps {
+        window_list: cap_from_availability(&availability),
+        ..caps
+    })
+}
+
+fn run_window_backend(backend: &Backend) -> Result<String, String> {
+    match backend.name {
+        "wmctrl" => stdout_text(backend.executable, &["-l"]),
+        "hyprctl" => stdout_text(backend.executable, &["clients"]),
+        "swaymsg" => stdout_text(backend.executable, &["-t", "get_tree"]),
+        "win32" => {
+            #[cfg(windows)]
+            {
+                win32::list_windows()
+            }
+            #[cfg(not(windows))]
+            {
+                Err("Win32 window API is only available on Windows".to_owned())
+            }
+        }
+        other => Err(format!("{other} has no window-list command")),
+    }
 }
 
 pub(crate) fn specs_for(caps: &PlatformCaps) -> Vec<ToolSpecWire> {
@@ -92,12 +121,19 @@ pub(crate) fn specs_for(caps: &PlatformCaps) -> Vec<ToolSpecWire> {
 }
 
 pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
-    let caps = PlatformCaps::detect();
+    let env: HashMap<String, String> = std::env::vars().collect();
+    let mut caps = PlatformCaps::from_pairs(std::env::vars());
+    if matches!(name, "app.capabilities" | "app.window_list") {
+        caps.window_list = cap_from_availability(&window_availability_for_env(&env));
+    }
     match name {
         "app.capabilities" => Ok(caps.to_json()),
         "app.screenshot" => capture::screenshot(),
         "app.list_monitors" => capture::list_monitors(),
-        "app.window_list" => window_list(&caps),
+        "app.window_list" => {
+            let availability = window_availability_for_env(&env);
+            window_list(&caps, &availability, run_window_backend)
+        }
         "app.active_window" => active_window(&caps),
         "app.clipboard_get" => clipboard::clipboard_get(),
         "app.clipboard_set" => clipboard::clipboard_set(arg_str(args, "text")?),
@@ -108,39 +144,79 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     }
 }
 
-fn window_list(caps: &PlatformCaps) -> Result<Value, String> {
+fn window_list(
+    caps: &PlatformCaps,
+    availability: &BackendAvailability,
+    run_backend: impl Fn(&Backend) -> Result<String, String>,
+) -> Result<Value, String> {
     if !caps.window_list.available {
-        return Err(fail(
-            "unsupported",
-            caps.window_list.backend,
-            caps.window_list
-                .reason
-                .unwrap_or("window list is not available"),
-        ));
+        let (code, backend, reason) = match availability {
+            BackendAvailability::Missing(backend) => (
+                "dependency_missing",
+                backend.name,
+                availability
+                    .reason()
+                    .unwrap_or("window-list backend is missing"),
+            ),
+            BackendAvailability::Unsupported(backend, reason) => {
+                ("unsupported", backend.name, *reason)
+            }
+            BackendAvailability::Available(backend) => (
+                "unavailable",
+                backend.name,
+                "window-list capability changed before execution",
+            ),
+        };
+        return Err(fail(code, backend, reason));
     }
-    if let Ok(text) = stdout_text("wmctrl", &["-l"]) {
-        return Ok(json!({ "windows": parse_wmctrl(&text), "backend": "wmctrl" }));
-    }
-    if let Ok(text) = stdout_text("hyprctl", &["clients"]) {
-        let windows = parse_hypr_clients(&text);
-        if !windows.is_empty() {
-            return Ok(json!({ "windows": windows, "backend": "hyprctl" }));
+    run_window_list(availability, run_backend)
+}
+
+fn run_window_list(
+    availability: &BackendAvailability,
+    run_backend: impl Fn(&Backend) -> Result<String, String>,
+) -> Result<Value, String> {
+    match run_backend(availability.backend()) {
+        Ok(text) => Ok(parse_backend_windows(availability.backend(), &text)),
+        Err(err) => {
+            let (code, message) = match availability {
+                BackendAvailability::Missing(backend) => (
+                    "dependency_missing",
+                    format!("{} ({err})", backend.install_hint),
+                ),
+                BackendAvailability::Unsupported(_, reason) => {
+                    ("unsupported", (*reason).to_owned())
+                }
+                BackendAvailability::Available(_) => ("backend_failed", err),
+            };
+            Err(fail(code, availability.backend().name, message))
         }
     }
-    if let Ok(text) = stdout_text("swaymsg", &["-t", "get_tree"])
-        && let Ok(tree) = serde_json::from_str::<Value>(&text)
-    {
-        let mut windows = Vec::new();
-        collect_sway_windows(&tree, &mut windows);
-        if !windows.is_empty() {
-            return Ok(json!({ "windows": windows, "backend": "swaymsg" }));
+}
+
+fn parse_backend_windows(backend: &Backend, text: &str) -> Value {
+    match backend.name {
+        "wmctrl" => json!({ "windows": parse_wmctrl(text), "backend": backend.name }),
+        "hyprctl" => json!({ "windows": parse_hypr_clients(text), "backend": backend.name }),
+        "win32" => serde_json::from_str(text)
+            .unwrap_or_else(|_| json!({ "windows": [], "backend": backend.name })),
+        _ => {
+            let mut windows = Vec::new();
+            if let Ok(tree) = serde_json::from_str::<Value>(text) {
+                collect_sway_windows(&tree, &mut windows);
+            }
+            json!({ "windows": windows, "backend": backend.name })
         }
     }
-    Err(fail(
-        "unavailable",
-        caps.window_list.backend,
-        "window list needs wmctrl, hyprctl, or swaymsg",
-    ))
+}
+
+pub(crate) fn cap_from_availability(availability: &BackendAvailability) -> ActionCap {
+    let backend = availability.backend();
+    ActionCap {
+        available: availability.available(),
+        backend: backend.name,
+        reason: availability.reason(),
+    }
 }
 
 fn parse_wmctrl(text: &str) -> Vec<Value> {
@@ -276,8 +352,12 @@ fn key(caps: &PlatformCaps, combo: &str) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::backend::{BackendAvailability, HYPRLAND, WMCTRL};
     use super::capability::PlatformCaps;
-    use super::{collect_sway_windows, parse_hypr_clients, parse_wmctrl, specs_for};
+    use super::{
+        cap_from_availability, collect_sway_windows, parse_hypr_clients, parse_wmctrl,
+        run_window_list, specs_for, window_list,
+    };
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -317,6 +397,33 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["title"], "Firefox");
         assert_eq!(out[0]["id"], json!(7));
+    }
+
+    #[test]
+    fn runtime_window_backend_failure_is_not_a_dependency_error() {
+        let error = run_window_list(&BackendAvailability::Available(HYPRLAND), |_| {
+            Err("command exited with status 1".to_owned())
+        })
+        .unwrap_err();
+        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["code"], "backend_failed");
+        assert_eq!(error["backend"], "hyprctl");
+        assert!(error["message"].as_str().unwrap().contains("status 1"));
+    }
+
+    #[test]
+    fn missing_window_backend_is_a_dependency_error_before_execution() {
+        let availability = BackendAvailability::Missing(WMCTRL);
+        let mut caps = PlatformCaps::from_env(&HashMap::new());
+        caps.window_list = cap_from_availability(&availability);
+        let error = window_list(&caps, &availability, |_| {
+            Err("backend should not run".to_owned())
+        })
+        .unwrap_err();
+        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["code"], "dependency_missing");
+        assert_eq!(error["backend"], "wmctrl");
+        assert!(error["message"].as_str().unwrap().contains("not installed"));
     }
 
     #[cfg(not(windows))]
