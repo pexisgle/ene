@@ -3,6 +3,19 @@
 use super::backend::{BackendAvailability, UNSUPPORTED, WIN32, WMCTRL};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+
+const SCREENSHOT_CLI_BACKENDS: &[&str] =
+    &["grim", "import", "gnome-screenshot", "spectacle", "scrot"];
+#[cfg(target_os = "linux")]
+const PORTAL_SERVICE: &str = "org.freedesktop.portal.Desktop";
+#[cfg(target_os = "linux")]
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+#[cfg(target_os = "linux")]
+const PORTAL_SCREENSHOT_INTERFACE: &str = "org.freedesktop.portal.Screenshot";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionKind {
@@ -60,7 +73,7 @@ impl PlatformCaps {
         Self {
             session,
             desktop,
-            screenshot: screenshot_cap(session),
+            screenshot: screenshot_cap(session, env),
             clipboard: ActionCap {
                 available: true,
                 backend: if cfg!(windows) {
@@ -138,18 +151,22 @@ fn desktop_kind(env: &HashMap<String, String>) -> DesktopKind {
     }
 }
 
-fn screenshot_cap(session: SessionKind) -> ActionCap {
+fn screenshot_cap(session: SessionKind, env: &HashMap<String, String>) -> ActionCap {
+    screenshot_cap_with_portal(session, env, portal_service_available(env))
+}
+
+fn screenshot_cap_with_portal(
+    session: SessionKind,
+    env: &HashMap<String, String>,
+    portal_available: bool,
+) -> ActionCap {
     match session {
-        SessionKind::Wayland => ActionCap {
+        SessionKind::Wayland if portal_available => ActionCap {
             available: true,
             backend: "portal",
-            reason: Some("XDG Desktop Portal first; grim/import only as explicit CLI fallback"),
+            reason: None,
         },
-        SessionKind::X11 => ActionCap {
-            available: true,
-            backend: "cli",
-            reason: Some("X11 capture via import/grim; portal used when a session bus exists"),
-        },
+        SessionKind::Wayland | SessionKind::X11 => screenshot_cli_cap(env),
         SessionKind::Windows => ActionCap {
             available: true,
             backend: "gdi",
@@ -160,6 +177,114 @@ fn screenshot_cap(session: SessionKind) -> ActionCap {
             backend: "none",
             reason: Some("no display session (WAYLAND_DISPLAY / DISPLAY / Windows)"),
         },
+    }
+}
+
+fn screenshot_cli_cap(env: &HashMap<String, String>) -> ActionCap {
+    match screenshot_cli_backend(env.get("PATH").map(String::as_str)) {
+        Some(backend) => ActionCap {
+            available: true,
+            backend,
+            reason: None,
+        },
+        None => ActionCap {
+            available: false,
+            backend: "none",
+            reason: Some(
+                "no screenshot backend (grim, ImageMagick import, gnome-screenshot, spectacle, or scrot)",
+            ),
+        },
+    }
+}
+
+fn portal_service_available(env: &HashMap<String, String>) -> bool {
+    if env
+        .get("DBUS_SESSION_BUS_ADDRESS")
+        .is_none_or(String::is_empty)
+    {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match std::thread::Builder::new()
+            .name("ene-app-portal-probe".to_owned())
+            .spawn(|| {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return false;
+                };
+                runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_millis(500), portal_service_probe())
+                        .await
+                        .is_ok_and(|available| available)
+                })
+            }) {
+            Ok(thread) => thread.join().unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn portal_service_probe() -> bool {
+    let Ok(connection) = ashpd::zbus::Connection::session().await else {
+        return false;
+    };
+    let Ok(dbus) = ashpd::zbus::fdo::DBusProxy::new(&connection).await else {
+        return false;
+    };
+    let Ok(service_name) = PORTAL_SERVICE.try_into() else {
+        return false;
+    };
+    if !dbus
+        .name_has_owner(service_name)
+        .await
+        .is_ok_and(|has_owner| has_owner)
+    {
+        return false;
+    }
+    let Ok(builder) = ashpd::zbus::fdo::IntrospectableProxy::builder(&connection)
+        .destination(PORTAL_SERVICE)
+        .and_then(|builder| builder.path(PORTAL_PATH))
+    else {
+        return false;
+    };
+    let Ok(proxy) = builder.build().await else {
+        return false;
+    };
+    let Ok(xml) = proxy.introspect().await else {
+        return false;
+    };
+    xml.contains(&format!("name=\"{PORTAL_SCREENSHOT_INTERFACE}\""))
+}
+
+pub(crate) fn screenshot_cli_backend(path: Option<&str>) -> Option<&'static str> {
+    let path = OsStr::new(path?);
+    SCREENSHOT_CLI_BACKENDS.iter().copied().find(|backend| {
+        std::env::split_paths(path).any(|directory| executable_file(&directory.join(backend)))
+    })
+}
+
+fn executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        path.metadata()
+            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -362,10 +487,23 @@ pub(crate) fn fail(
     .to_string()
 }
 
+pub(crate) fn dependency_missing(backend: &'static str, package: &'static str) -> String {
+    json!({
+        "code": "dependency_missing",
+        "backend": backend,
+        "package": package,
+        "message": format!("install {package} and ensure it is executable on PATH"),
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::cap_from_availability;
-    use super::{DesktopKind, PlatformCaps, SessionKind, window_availability_for_session_with};
+    use super::{
+        DesktopKind, PlatformCaps, SessionKind, screenshot_cli_backend,
+        window_availability_for_session_with,
+    };
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -383,6 +521,7 @@ mod tests {
             ("XDG_SESSION_TYPE", "wayland"),
             ("WAYLAND_DISPLAY", "wayland-0"),
             ("XDG_CURRENT_DESKTOP", "GNOME"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/session-bus"),
         ]));
         assert_eq!(caps.session, SessionKind::Wayland);
         assert_eq!(caps.desktop, DesktopKind::Gnome);
@@ -396,7 +535,7 @@ mod tests {
                 .unwrap()
                 .contains("GNOME")
         );
-        assert_eq!(json["actions"]["app.screenshot"]["backend"], "portal");
+        assert!(json["actions"]["app.screenshot"]["backend"].is_string());
     }
 
     #[cfg(not(windows))]
@@ -457,5 +596,65 @@ mod tests {
             assert_eq!(availability.backend().name, "none");
             assert!(availability.reason().unwrap().contains(reason));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn screenshot_cli_probe_requires_an_executable_backend() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = dir.path().join("grim");
+        std::fs::write(&backend, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        assert_eq!(screenshot_cli_backend(Some(path)), Some("grim"));
+        assert_eq!(screenshot_cli_backend(Some("/definitely/missing")), None);
+    }
+
+    #[test]
+    fn x11_without_a_screenshot_backend_is_unavailable() {
+        let caps = PlatformCaps::from_env(&env(&[
+            ("XDG_SESSION_TYPE", "x11"),
+            ("DISPLAY", ":1"),
+            ("PATH", "/definitely/missing"),
+        ]));
+
+        assert!(!caps.screenshot.available);
+        assert_eq!(caps.screenshot.backend, "none");
+        assert!(caps.screenshot.reason.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wayland_uses_cli_when_portal_service_is_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = dir.path().join("grim");
+        std::fs::write(&backend, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().to_str().unwrap();
+        let caps = super::screenshot_cap_with_portal(
+            SessionKind::Wayland,
+            &env(&[("PATH", path), ("DBUS_SESSION_BUS_ADDRESS", "session")]),
+            false,
+        );
+
+        assert!(caps.available);
+        assert_eq!(caps.backend, "grim");
+    }
+
+    #[test]
+    fn wayland_without_portal_or_cli_is_unavailable() {
+        let caps = super::screenshot_cap_with_portal(
+            SessionKind::Wayland,
+            &env(&[("PATH", "/definitely/missing")]),
+            false,
+        );
+
+        assert!(!caps.available);
+        assert_eq!(caps.backend, "none");
     }
 }

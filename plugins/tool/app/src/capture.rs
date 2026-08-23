@@ -1,4 +1,4 @@
-use super::capability::{PlatformCaps, fail};
+use super::capability::{PlatformCaps, dependency_missing, fail, screenshot_cli_backend};
 use super::hostcmd::{pipe_bytes, run, stdout_bytes_timeout, stdout_text};
 use base64::Engine;
 use serde_json::{Value, json};
@@ -19,24 +19,73 @@ pub(crate) fn screenshot() -> Result<Value, String> {
         ));
     }
     let monitors = list_monitors().ok();
-    #[cfg(target_os = "linux")]
-    if caps.session == super::capability::SessionKind::Wayland
-        || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
-    {
-        match portal_png() {
-            Ok(png) => return capture_json(&png, "portal", "granted", monitors.as_ref()),
-            Err(err) if err.contains("\"code\":\"cancelled\"") => return Err(err),
-            Err(err) if err.contains("\"code\":\"denied\"") => return Err(err),
-            Err(err) if err.contains("\"code\":\"waiting\"") => return Err(err),
-            Err(_) => {}
+    let backend = caps.screenshot.backend;
+    let (png, backend) = match capture_selected_backend(backend) {
+        Ok(png) => (png, backend),
+        Err(err) => {
+            let path = std::env::var("PATH").ok();
+            let Some(fallback) = portal_fallback_backend(backend, &err, path.as_deref()) else {
+                return Err(err);
+            };
+            (capture_selected_backend(fallback)?, fallback)
         }
+    };
+    capture_json(&png, backend, "granted", monitors.as_ref())
+}
+
+fn portal_fallback_backend(
+    backend: &'static str,
+    error: &str,
+    path: Option<&str>,
+) -> Option<&'static str> {
+    if backend != "portal" {
+        return None;
     }
-    #[cfg(windows)]
-    if let Ok(png) = super::win32::capture_png() {
-        return capture_json(&png, "gdi", "granted", monitors.as_ref());
+    let code = serde_json::from_str::<Value>(error)
+        .ok()
+        .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_owned))?;
+    if !matches!(
+        code.as_str(),
+        "unavailable" | "backend_failed" | "unsupported"
+    ) {
+        return None;
     }
-    let png = capture_png_cli()?;
-    capture_json(&png, "cli", "granted", monitors.as_ref())
+    screenshot_cli_backend(path)
+}
+
+fn capture_selected_backend(backend: &'static str) -> Result<Vec<u8>, String> {
+    match backend {
+        "portal" => {
+            #[cfg(target_os = "linux")]
+            {
+                portal_png()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(fail(
+                    "unsupported",
+                    backend,
+                    "portal is only available on Linux",
+                ))
+            }
+        }
+        "gdi" => {
+            #[cfg(windows)]
+            {
+                super::win32::capture_png()
+            }
+            #[cfg(not(windows))]
+            {
+                Err(fail(
+                    "unsupported",
+                    backend,
+                    "GDI is only available on Windows",
+                ))
+            }
+        }
+        "grim" | "import" | "gnome-screenshot" | "spectacle" | "scrot" => capture_png_cli(backend),
+        _ => Err(fail("unsupported", backend, "unknown screenshot backend")),
+    }
 }
 
 fn capture_json(
@@ -202,73 +251,105 @@ async fn portal_png_async() -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn capture_png_cli() -> Result<Vec<u8>, String> {
-    let candidates: &[&[&str]] = &[
-        &["grim", "-s", "0.5", "-"],
-        &["grim", "-"],
-        &["import", "-window", "root", "-resize", "50%", "png:-"],
-        &["import", "-window", "root", "png:-"],
-    ];
-    let mut last_err = fail(
-        "unavailable",
-        "cli",
-        "no screenshot backend (grim or ImageMagick import)",
-    );
-    for args in candidates {
-        match stdout_bytes_timeout(args[0], &args[1..], SCREENSHOT_TIMEOUT) {
-            Ok(bytes) if looks_like_png(&bytes) => return cap_png(bytes, "cli"),
-            Ok(_) => {
-                last_err = fail(
-                    "unavailable",
-                    "cli",
-                    format!("{} produced a non-PNG screenshot", args[0]),
-                );
-            }
-            Err(err) => {
-                last_err = fail("unavailable", "cli", err);
+fn capture_png_cli(backend: &'static str) -> Result<Vec<u8>, String> {
+    match backend {
+        "grim" => {
+            let args = ["-s", "0.5", "-"];
+            match stdout_bytes_timeout(backend, &args, SCREENSHOT_TIMEOUT) {
+                Ok(bytes) if looks_like_png(&bytes) => cap_png(bytes, backend),
+                Ok(_) => {
+                    let args = ["-"];
+                    match stdout_bytes_timeout(backend, &args, SCREENSHOT_TIMEOUT) {
+                        Ok(bytes) if looks_like_png(&bytes) => cap_png(bytes, backend),
+                        Ok(_) => Err(fail(
+                            "backend_failed",
+                            backend,
+                            "grim produced a non-PNG screenshot",
+                        )),
+                        Err(err) => Err(cli_error(backend, err)),
+                    }
+                }
+                Err(err) => Err(cli_error(backend, err)),
             }
         }
+        "import" => {
+            let candidates: &[&[&str]] = &[
+                &["-window", "root", "-resize", "50%", "png:-"],
+                &["-window", "root", "png:-"],
+            ];
+            for args in candidates {
+                match stdout_bytes_timeout(backend, args, SCREENSHOT_TIMEOUT) {
+                    Ok(bytes) if looks_like_png(&bytes) => return cap_png(bytes, backend),
+                    Ok(_) => {}
+                    Err(err) => return Err(cli_error(backend, err)),
+                }
+            }
+            Err(fail(
+                "backend_failed",
+                backend,
+                "ImageMagick import produced a non-PNG screenshot",
+            ))
+        }
+        "gnome-screenshot" | "spectacle" | "scrot" => {
+            let bytes = capture_png_file(backend)?;
+            cap_png(bytes, backend)
+        }
+        _ => Err(fail(
+            "unsupported",
+            backend,
+            "unknown CLI screenshot backend",
+        )),
     }
-    if let Ok(bytes) = capture_png_file() {
-        return cap_png(bytes, "cli");
-    }
-    Err(last_err)
 }
 
-fn capture_png_file() -> Result<Vec<u8>, String> {
+fn capture_png_file(backend: &'static str) -> Result<Vec<u8>, String> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis());
     let tmp = std::env::temp_dir().join(format!("ene-shot-{}-{stamp}.png", std::process::id()));
     let path = tmp.to_string_lossy().into_owned();
-    let backends = [
-        vec!["gnome-screenshot".to_owned(), "-f".to_owned(), path.clone()],
-        vec![
-            "spectacle".to_owned(),
+    let args: Vec<String> = match backend {
+        "gnome-screenshot" => vec![backend.to_owned(), "-f".to_owned(), path.clone()],
+        "spectacle" => vec![
+            backend.to_owned(),
             "-b".to_owned(),
             "-n".to_owned(),
             "-o".to_owned(),
             path.clone(),
         ],
-        vec!["scrot".to_owned(), "-o".to_owned(), path.clone()],
-    ];
-    for args in backends {
-        let bin = args[0].as_str();
-        let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
-        if run(bin, &rest).is_ok()
-            && let Ok(bytes) = std::fs::read(&tmp)
-            && looks_like_png(&bytes)
-        {
-            drop(std::fs::remove_file(&tmp));
-            return Ok(bytes);
+        "scrot" => vec![backend.to_owned(), "-o".to_owned(), path.clone()],
+        _ => {
+            return Err(fail(
+                "unsupported",
+                backend,
+                "unknown file screenshot backend",
+            ));
         }
+    };
+    let bin = args[0].as_str();
+    let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+    if run(bin, &rest).is_ok()
+        && let Ok(bytes) = std::fs::read(&tmp)
+        && looks_like_png(&bytes)
+    {
         drop(std::fs::remove_file(&tmp));
+        return Ok(bytes);
     }
+    drop(std::fs::remove_file(&tmp));
     Err(fail(
-        "unavailable",
-        "cli",
-        "file screenshot backends failed",
+        "backend_failed",
+        backend,
+        "file screenshot backend failed",
     ))
+}
+
+fn cli_error(backend: &'static str, error: String) -> String {
+    let path = std::env::var("PATH").ok();
+    if screenshot_cli_backend(path.as_deref()) == Some(backend) {
+        fail("backend_failed", backend, error)
+    } else {
+        dependency_missing(backend, backend)
+    }
 }
 
 fn cap_png(bytes: Vec<u8>, backend: &str) -> Result<Vec<u8>, String> {
@@ -412,5 +493,34 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&err).unwrap();
         assert_eq!(value["code"], "cancelled");
         assert_eq!(value["backend"], "portal");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portal_falls_back_only_for_unavailable_backend_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = dir.path().join("grim");
+        std::fs::write(&backend, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        assert_eq!(
+            super::portal_fallback_backend(
+                "portal",
+                &super::fail("unavailable", "portal", "service missing"),
+                Some(path),
+            ),
+            Some("grim")
+        );
+        assert_eq!(
+            super::portal_fallback_backend(
+                "portal",
+                &super::fail("cancelled", "portal", "user cancelled"),
+                Some(path),
+            ),
+            None
+        );
     }
 }
