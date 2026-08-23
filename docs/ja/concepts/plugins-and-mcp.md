@@ -71,6 +71,8 @@ skills 配下の `SKILL.md` になります。対話レーンはそのカタロ�
 `ene.proactive_hint` / `ene.emotion_note` の frontmatter は能動発話判定と
 感情分類へ渡ります。soul ごとに許可リストがあり
 （`PATCH /api/v1/souls/{id}/skills`。空は導入済みすべて）、
+ツールは `skill.list` で一覧を発見し、返された正確な ID を `skill.load` に渡します。
+未知の名前は `unknown_skill` になります。
 ジョブ層の `workflow.bookmark` はテーマを調べて Markdown を交付します。
 
 ## Background tools
