@@ -564,6 +564,98 @@ pub fn home_chat_next_step(state: &DetailUiState) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupState {
+    Ready,
+    NeedsSetup,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SetupCard {
+    tab: DetailTab,
+    state: SetupState,
+}
+
+impl SetupCard {
+    fn title(self) -> String {
+        self.tab.label()
+    }
+
+    fn state_label(self) -> String {
+        match self.state {
+            SetupState::Ready => i18n::fl("home-state-ready"),
+            SetupState::NeedsSetup => i18n::fl("home-state-needs-setup"),
+            SetupState::Error => i18n::fl("home-state-error"),
+        }
+    }
+
+    fn color(self) -> egui::Color32 {
+        match self.state {
+            SetupState::Ready => egui::Color32::LIGHT_GREEN,
+            SetupState::NeedsSetup => egui::Color32::YELLOW,
+            SetupState::Error => egui::Color32::LIGHT_RED,
+        }
+    }
+
+    fn detail(self, state: &DetailUiState) -> String {
+        match self.tab {
+            DetailTab::Conversation => home_chat_next_step(state),
+            DetailTab::Voice => {
+                if self.state == SetupState::Ready {
+                    i18n::fl("home-voice-ready")
+                } else {
+                    i18n::fl("home-optional-voice")
+                }
+            }
+            DetailTab::Companion => {
+                if state.soul.is_some() {
+                    i18n::fl("home-companion-ready")
+                } else {
+                    i18n::fl("home-next-companion")
+                }
+            }
+            _ => String::new(),
+        }
+    }
+}
+
+fn setup_cards(state: &DetailUiState) -> Vec<SetupCard> {
+    let health_error = !state.health.is_empty()
+        && (state.health.contains("error") || state.health.contains("Error"));
+    let companion_state = if state.soul.is_some() {
+        SetupState::Ready
+    } else if health_error {
+        SetupState::Error
+    } else {
+        SetupState::NeedsSetup
+    };
+    vec![
+        SetupCard {
+            tab: DetailTab::Companion,
+            state: companion_state,
+        },
+        SetupCard {
+            tab: DetailTab::Conversation,
+            state: if blocking_unconfigured(&state.unconfigured).is_empty() {
+                SetupState::Ready
+            } else {
+                SetupState::NeedsSetup
+            },
+        },
+        SetupCard {
+            tab: DetailTab::Voice,
+            state: if optional_unconfigured(&state.unconfigured).contains(&"tts")
+                || optional_unconfigured(&state.unconfigured).contains(&"stt")
+            {
+                SetupState::NeedsSetup
+            } else {
+                SetupState::Ready
+            },
+        },
+    ]
+}
+
 #[must_use]
 pub fn blocking_unconfigured(tasks: &[String]) -> Vec<&str> {
     tasks
@@ -709,21 +801,21 @@ fn show_home(
         });
     }
     ui.heading(i18n::fl("detail-tab-home"));
-    ui.label(format!("{}: {}", i18n::fl("home-health"), state.health));
-    ui.label(format!(
-        "{}: {}",
-        i18n::fl("home-fibers"),
-        state.plugins.len()
-    ));
-    ui.label(i18n::fl("home-fibers-hint"));
-    let required = blocking_unconfigured(&state.unconfigured);
-    if required.contains(&"chat") {
-        ui.colored_label(egui::Color32::YELLOW, home_chat_next_step(state));
-        if ui.button(i18n::fl("detail-tab-conversation")).clicked() {
-            state.select_tab(DetailTab::Conversation);
-        }
-    } else {
-        ui.label(i18n::fl("home-configured"));
+    for card in setup_cards(state) {
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.strong(card.title());
+                ui.colored_label(
+                    card.color(),
+                    format!("{} {}", i18n::fl("home-status-prefix"), card.state_label()),
+                );
+            });
+            ui.label(card.detail(state));
+            if ui.button(i18n::fl("home-open-card")).clicked() {
+                state.select_tab(card.tab);
+            }
+        });
     }
     let optional = optional_unconfigured(&state.unconfigured);
     if !optional.is_empty() {
@@ -742,6 +834,15 @@ fn show_home(
             ui.label(i18n::fl("home-optional-voice"));
         }
     }
+    ui.collapsing(i18n::fl("home-details"), |ui| {
+        ui.label(format!("{}: {}", i18n::fl("home-health"), state.health));
+        ui.label(format!(
+            "{}: {}",
+            i18n::fl("home-fibers"),
+            state.plugins.len()
+        ));
+        ui.label(i18n::fl("home-fibers-hint"));
+    });
     ui.horizontal(|ui| {
         if ui.button(i18n::fl("detail-tab-companion")).clicked() {
             state.select_tab(DetailTab::Companion);
@@ -2668,6 +2769,80 @@ mod tests {
         );
         state.chat_api_key = "placeholder-key".to_owned();
         assert!(chat_apply_block_reason(&state).is_none());
+    }
+
+    #[test]
+    fn home_cards_share_conversation_and_voice_readiness() {
+        let json = r#"{
+            "effective": {
+                "ai": {
+                    "tasks": {
+                        "chat": { "plugin": "provider.openai_compat", "model": "gpt" },
+                        "tts": { "plugin": "echo" },
+                        "stt": { "plugin": "echo" }
+                    }
+                },
+                "ai_chat_key_set": false,
+                "providers": [
+                    {
+                        "id": "provider.openai_compat",
+                        "seams": ["seam.llm"],
+                        "needs_key": true,
+                        "installed": true
+                    }
+                ]
+            }
+        }"#;
+        let mut state = DetailUiState::default();
+        parse_core_fields(json, &mut state);
+
+        let cards = setup_cards(&state);
+        assert!(cards.contains(&SetupCard {
+            tab: DetailTab::Conversation,
+            state: SetupState::NeedsSetup,
+        }));
+        assert!(cards.contains(&SetupCard {
+            tab: DetailTab::Voice,
+            state: SetupState::NeedsSetup,
+        }));
+        assert_eq!(
+            home_chat_next_step(&state),
+            i18n::fl("home-next-chat-key"),
+            "Home and Conversation must use the same chat readiness source"
+        );
+    }
+
+    #[test]
+    fn configured_chat_and_voice_show_ready_cards() {
+        let json = r#"{
+            "effective": {
+                "ai": {
+                    "tasks": {
+                        "chat": { "plugin": "provider.gguf", "model": "local.gguf" },
+                        "tts": { "plugin": "provider.voicevox" },
+                        "stt": { "plugin": "provider.openai_compat" }
+                    }
+                },
+                "ai_chat_key_set": false,
+                "providers": [
+                    { "id": "provider.gguf", "needs_key": false, "installed": true },
+                    { "id": "provider.voicevox", "needs_key": false, "installed": true },
+                    { "id": "provider.openai_compat", "needs_key": false, "installed": true }
+                ]
+            }
+        }"#;
+        let mut state = DetailUiState::default();
+        parse_core_fields(json, &mut state);
+
+        let cards = setup_cards(&state);
+        assert!(cards.contains(&SetupCard {
+            tab: DetailTab::Conversation,
+            state: SetupState::Ready,
+        }));
+        assert!(cards.contains(&SetupCard {
+            tab: DetailTab::Voice,
+            state: SetupState::Ready,
+        }));
     }
 
     #[test]
