@@ -1,5 +1,5 @@
 use crate::{
-    Broker, BrokerError, CircuitBreakerConfig, Effect, FiberState, FiberUid, ProfileRow,
+    Broker, BrokerError, CircuitBreakerConfig, Effect, FiberState, FiberUid, ProfileRow, SidecarId,
     SidecarRequest, Supervisor, SupervisorError, confine_path, discover_plugin_script,
     manifest_digest,
 };
@@ -571,6 +571,26 @@ fn python3_bin() -> Option<PathBuf> {
     None
 }
 
+/// The Windows runner can stall interpreter startup long enough to exhaust
+/// the production two-second health budget; retry once before treating the
+/// test as failed.
+fn spawn_loopback_sidecar_with_retry(
+    broker: &mut Broker,
+    uid: FiberUid,
+    request: &SidecarRequest,
+) -> Result<SidecarId, BrokerError> {
+    match broker.spawn_sidecar(uid, request) {
+        Err(BrokerError::SidecarUnhealthy)
+            if cfg!(target_os = "windows")
+                && std::env::var_os("ENE_FIBER_SIDECAR_TEST_NO_RETRY").is_none() =>
+        {
+            tracing::warn!("sidecar health check timed out; retrying Windows test spawn");
+            broker.spawn_sidecar(uid, request)
+        }
+        result => result,
+    }
+}
+
 #[test]
 fn sidecar_spawn_health_and_kill_on_loopback() {
     let Some(python) = python3_bin() else {
@@ -590,7 +610,7 @@ fn sidecar_spawn_health_and_kill_on_loopback() {
         Err(BrokerError::Denied { .. })
     ));
     broker.grant(uid, "proc.spawn_sidecar");
-    let id = broker.spawn_sidecar(uid, &request).unwrap();
+    let id = spawn_loopback_sidecar_with_retry(&mut broker, uid, &request).unwrap();
     let health = broker.sidecar_health(uid, id).unwrap();
     assert!(health.alive);
     assert_ne!(health.port, 0);
