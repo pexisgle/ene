@@ -1675,7 +1675,7 @@ impl ApplicationHandler for StageApp {
         let mut close_caption = false;
         let mut close_spotlight = false;
         let mut overlay_from_chrome = None;
-        let mut chrome_gained_focus = false;
+        let mut chrome_focus_state = None;
         if let Some(chat) = self.chat.as_mut()
             && chat.id() == id
         {
@@ -1686,7 +1686,7 @@ impl ApplicationHandler for StageApp {
                 chat.resize(gpu, *size);
             }
             overlay_from_chrome = Some(chat.owns_input());
-            chrome_gained_focus = matches!(event, WindowEvent::Focused(true));
+            chrome_focus_state = window_focus_state(&event);
             close_chat = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(detail) = self.detail_win.as_mut()
@@ -1699,25 +1699,25 @@ impl ApplicationHandler for StageApp {
                 detail.resize(gpu, *size);
             }
             overlay_from_chrome = Some(detail.owns_input());
-            chrome_gained_focus = matches!(event, WindowEvent::Focused(true));
+            chrome_focus_state = window_focus_state(&event);
             close_detail = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(caption) = self.caption.as_mut()
             && caption.id() == id
         {
             caption.on_window_event(&event);
-            chrome_gained_focus = matches!(event, WindowEvent::Focused(true));
+            chrome_focus_state = window_focus_state(&event);
             close_caption = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(spotlight) = self.spotlight.as_mut()
             && spotlight.id() == id
         {
             spotlight.on_window_event(&event);
-            chrome_gained_focus = matches!(event, WindowEvent::Focused(true));
+            chrome_focus_state = window_focus_state(&event);
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
         }
-        if chrome_gained_focus {
-            self.chrome_focused = true;
+        if let Some(focused) = chrome_focus_state {
+            self.chrome_focused = focused;
             self.sync_overlay_interaction();
         }
         if !self.surface.chat_input_focused
@@ -1808,6 +1808,14 @@ fn overlay_window_level(chrome_focused: bool, always_on_top: bool) -> WindowLeve
     }
 }
 
+#[must_use]
+fn window_focus_state(event: &WindowEvent) -> Option<bool> {
+    match event {
+        WindowEvent::Focused(focused) => Some(*focused),
+        _ => None,
+    }
+}
+
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
         "(empty)"
@@ -1829,7 +1837,7 @@ fn map_turn_err(err: &str) -> String {
 mod tests {
     use super::{
         ChatWindowAction, chat_window_action, format_log_text, overlay_window_level,
-        provider_asset_load_status, window_level,
+        provider_asset_load_status, window_focus_state, window_level,
     };
 
     #[test]
@@ -1851,6 +1859,22 @@ mod tests {
         assert_eq!(
             overlay_window_level(false, false),
             winit::window::WindowLevel::Normal
+        );
+    }
+
+    #[test]
+    fn chrome_focus_state_includes_focus_loss() {
+        assert_eq!(
+            window_focus_state(&winit::event::WindowEvent::Focused(true)),
+            Some(true)
+        );
+        assert_eq!(
+            window_focus_state(&winit::event::WindowEvent::Focused(false)),
+            Some(false)
+        );
+        assert_eq!(
+            window_focus_state(&winit::event::WindowEvent::CloseRequested),
+            None
         );
     }
 
