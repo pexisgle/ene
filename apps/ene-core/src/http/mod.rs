@@ -16,10 +16,10 @@ mod schedule;
 mod speech;
 mod ws;
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -48,11 +48,68 @@ pub struct AppState {
     pub core: Arc<CoreDaemon>,
     pub lanes: Arc<LaneHub>,
     pub exclusive: Arc<ExclusiveHub>,
-    pub idem: Arc<Mutex<HashMap<String, SendMessageResponse>>>,
+    pub idem: Arc<Mutex<IdempotencyCache>>,
     pub token: String,
     pub popup: Arc<PendingPopup>,
     pub events: CoreBus,
     pub bind: SocketAddr,
+}
+
+/// Bounded idempotency cache that evicts the oldest key instead of clearing
+/// every pending retry and expires entries so stale responses cannot persist.
+pub struct IdempotencyCache {
+    entries: indexmap::IndexMap<String, (Instant, SendMessageResponse)>,
+    clock: IdempotencyClock,
+}
+
+type IdempotencyClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+impl IdempotencyCache {
+    const CAPACITY: usize = 256;
+    const TTL: Duration = Duration::from_mins(10);
+
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_clock(Instant::now)
+    }
+
+    fn with_clock<F>(clock: F) -> Self
+    where
+        F: Fn() -> Instant + Send + Sync + 'static,
+    {
+        Self {
+            entries: indexmap::IndexMap::new(),
+            clock: Arc::new(clock),
+        }
+    }
+
+    #[must_use]
+    pub fn get(&mut self, key: &str) -> Option<SendMessageResponse> {
+        let now = (self.clock)();
+        self.entries.retain(|_, (expires_at, _)| *expires_at > now);
+        let index = self.entries.get_index_of(key)?;
+        let (stored_key, entry) = self.entries.shift_remove_index(index)?;
+        let response = entry.1.clone();
+        self.entries.insert(stored_key, entry);
+        Some(response)
+    }
+
+    pub fn insert(&mut self, key: &str, response: SendMessageResponse) {
+        let now = (self.clock)();
+        self.entries.retain(|_, (expires_at, _)| *expires_at > now);
+        let replaced = self.entries.shift_remove(key).is_some();
+        if !replaced && self.entries.len() >= Self::CAPACITY {
+            self.entries.shift_remove_index(0);
+        }
+        self.entries
+            .insert(key.to_owned(), (now + Self::TTL, response));
+    }
+}
+
+impl Default for IdempotencyCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Running HTTP/WS server.
@@ -219,7 +276,7 @@ impl CoreDaemon {
             core: Arc::clone(&self),
             lanes: Arc::clone(&lanes),
             exclusive: Arc::new(ExclusiveHub::new(last_used)),
-            idem: Arc::new(Mutex::new(HashMap::new())),
+            idem: Arc::new(Mutex::new(IdempotencyCache::default())),
             token: token.clone(),
             events,
             bind: addr,
@@ -625,4 +682,63 @@ fn write_ready_file(data_dir: &Path, addr: SocketAddr, token_file: &str) -> Resu
     });
     std::fs::write(data_dir.join("api.json"), body.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use parking_lot::Mutex;
+
+    use super::{IdempotencyCache, SendMessageResponse};
+
+    fn response(turn: Option<String>) -> SendMessageResponse {
+        SendMessageResponse {
+            turn_id: turn,
+            entry_id: None,
+        }
+    }
+
+    #[test]
+    fn cache_hit_promotes_key_before_capacity_eviction() {
+        let mut cache = IdempotencyCache::new();
+        for key in 0..256 {
+            cache.insert(&key.to_string(), response(Some(key.to_string())));
+        }
+        assert!(cache.get("0").is_some());
+        cache.insert("recent", response(Some("recent".to_owned())));
+        assert!(cache.get("0").is_some());
+        assert!(cache.get("1").is_none());
+        assert_eq!(
+            cache.get("recent").map(|cached| cached.turn_id),
+            Some(Some("recent".to_owned()))
+        );
+    }
+
+    #[test]
+    fn replacing_existing_key_does_not_evict_another_entry() {
+        let mut cache = IdempotencyCache::new();
+        for key in 0..256 {
+            cache.insert(&key.to_string(), response(Some(key.to_string())));
+        }
+        cache.insert("0", response(Some("updated".to_owned())));
+        assert_eq!(
+            cache.get("0").map(|cached| cached.turn_id),
+            Some(Some("updated".to_owned()))
+        );
+        assert!(cache.get("1").is_some());
+    }
+
+    #[test]
+    fn expired_entries_are_misses_after_ttl() {
+        let now = Arc::new(Mutex::new(Instant::now()));
+        let clock = Arc::clone(&now);
+        let mut cache = IdempotencyCache::with_clock(move || *clock.lock());
+        cache.insert("key", response(Some("turn".to_owned())));
+        assert!(cache.get("key").is_some());
+        *now.lock() += Duration::from_secs(601);
+        assert!(cache.get("key").is_none());
+        assert!(cache.entries.is_empty());
+    }
 }
