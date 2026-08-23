@@ -20,9 +20,7 @@ pub(crate) fn screenshot() -> Result<Value, String> {
     }
     let monitors = list_monitors().ok();
     #[cfg(target_os = "linux")]
-    if caps.session == super::capability::SessionKind::Wayland
-        || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
-    {
+    if caps.screenshot.backend == "portal" {
         match portal_png() {
             Ok(png) => return capture_json(&png, "portal", "granted", monitors.as_ref()),
             Err(err) if err.contains("\"code\":\"cancelled\"") => return Err(err),
