@@ -28,6 +28,8 @@ pub use types::{
     SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SettingsPatch, SoulPatch,
     SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest,
     ToolView, UsageView,
+    MemoryCandidateDecision, MemoryCandidateView, MemoryJournalView, ResolveMemoryCandidateRequest,
+    ResolveMemoryCandidateResponse,
 };
 
 /// `OpenAPI` 3.1 document. Served at `GET /api/v1/openapi.json`.

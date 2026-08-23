@@ -14,6 +14,10 @@ pub enum CompanionError {
     UnknownSoul(String),
     #[error("unknown memory {0}")]
     UnknownMemory(String),
+    #[error("memory candidate is no longer pending: {0}")]
+    CandidateConflict(String),
+    #[error("invalid memory candidate: {0}")]
+    InvalidCandidate(String),
     #[error("package: {0}")]
     Package(String),
     #[error("format_version {found} is not supported (expected {expected})")]

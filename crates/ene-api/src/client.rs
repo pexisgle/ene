@@ -14,6 +14,8 @@ use crate::types::{
     SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
     SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch,
     SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    MemoryCandidateView, MemoryJournalView, ResolveMemoryCandidateRequest,
+    ResolveMemoryCandidateResponse,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -441,7 +443,10 @@ impl ApiClient {
             .await
     }
 
-    pub async fn list_pending_memories(&self, soul_id: &str) -> Result<Page<MemoryView>, ApiError> {
+    pub async fn list_pending_memories(
+        &self,
+        soul_id: &str,
+    ) -> Result<Page<MemoryCandidateView>, ApiError> {
         self.send_json(self.request(
             Method::GET,
             &format!("/api/v1/memories/pending?soul_id={soul_id}"),
@@ -452,15 +457,26 @@ impl ApiClient {
     pub async fn resolve_memory_candidate(
         &self,
         id: &str,
-        accept: bool,
-    ) -> Result<Value, ApiError> {
+        request: &ResolveMemoryCandidateRequest,
+    ) -> Result<ResolveMemoryCandidateResponse, ApiError> {
         self.send_json(
             self.request(
                 Method::POST,
                 &format!("/api/v1/memories/candidates/{id}/resolve"),
             )
-            .json(&serde_json::json!({ "accept": accept })),
+            .json(request),
         )
+        .await
+    }
+
+    pub async fn list_memory_journal(
+        &self,
+        soul_id: &str,
+    ) -> Result<Page<MemoryJournalView>, ApiError> {
+        self.send_json(self.request(
+            Method::GET,
+            &format!("/api/v1/memories/journal?soul_id={soul_id}"),
+        ))
         .await
     }
 
