@@ -243,7 +243,6 @@
       const protocols = token ? ["bearer." + token] : [];
       const q = new URLSearchParams({ depth, client_id: clientId });
       if (sessionId) q.set("session_id", sessionId);
-      if (token) q.set("access_token", token);
       const sock = new WebSocket(`${proto}://${location.host}/api/v1/events?` + q, protocols);
       sock.onmessage = (ev) => onMessage(JSON.parse(ev.data));
       return sock;
