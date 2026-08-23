@@ -5,7 +5,7 @@ use base64::Engine as _;
 use ene_api::{
     AnswerJobRequest, ApiClient, ApiError, CharacterView, ClaimResourceRequest,
     CreateSessionRequest, HistoryResponse, MessageMode, MessageRequest, OccupantView, ResourceKind,
-    SendMessageResponse, SoulPatch, SoulView,
+    SendMessageResponse, SoulPatch, SoulView, SplitSessionResponse,
 };
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -45,6 +45,45 @@ impl StageSession {
     #[must_use]
     pub fn client(&self) -> &Arc<ApiClient> {
         &self.client
+    }
+
+    pub fn adopt_new_session(&mut self, split: &SplitSessionResponse) {
+        self.session_id.clone_from(&split.session.id);
+        *self.turn_id.lock() = None;
+        *self.history.lock() = HistoryResponse {
+            messages: Vec::new(),
+            depth: "surface".to_owned(),
+        };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        client: Arc<ApiClient>,
+        soul_id: &str,
+        session_id: &str,
+        history: HistoryResponse,
+    ) -> Self {
+        Self {
+            client,
+            soul_id: soul_id.to_owned(),
+            session_id: session_id.to_owned(),
+            turn_id: Arc::new(Mutex::new(None)),
+            history: Arc::new(Mutex::new(history)),
+            occupants: Vec::new(),
+            avatar_path: None,
+            motions_dir: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_for_test(
+        &mut self,
+        client: Arc<ApiClient>,
+        soul_id: &str,
+        session_id: &str,
+        history: HistoryResponse,
+    ) {
+        *self = Self::new_for_test(client, soul_id, session_id, history);
     }
 
     #[must_use]
@@ -548,7 +587,22 @@ pub fn normalize_history(mut history: HistoryResponse) -> HistoryResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_api::MessageResponse;
+    use ene_api::{MessageResponse, SessionView};
+
+    fn session_view(id: &str) -> SessionView {
+        SessionView {
+            id: id.to_owned(),
+            soul_id: "soul".to_owned(),
+            kind: "conversation".to_owned(),
+            title: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            archived: false,
+            next_seq: 0,
+            ended_at: None,
+            end_reason: None,
+            delegation_id: None,
+        }
+    }
 
     #[test]
     fn history_is_normalized_oldest_to_newest() {
@@ -569,6 +623,36 @@ mod tests {
         let seqs: Vec<_> = normalized.messages.iter().map(|m| m.seq).collect();
         assert_eq!(seqs, [1, 2, 3]);
         assert_eq!(normalized.depth, "surface");
+    }
+
+    #[test]
+    fn adopt_new_session_switches_before_history_refresh() {
+        let client = Arc::new(ApiClient::new("http://127.0.0.1:9", "token", "stage"));
+        let old_history = HistoryResponse {
+            messages: vec![MessageResponse {
+                seq: 1,
+                role: "assistant".to_owned(),
+                text: "old".to_owned(),
+            }],
+            depth: "surface".to_owned(),
+        };
+        let mut session = StageSession::new_for_test(
+            Arc::clone(&client),
+            "soul",
+            "old-session",
+            old_history.clone(),
+        );
+
+        let split = SplitSessionResponse {
+            previous: session_view("old-session"),
+            session: session_view("new-session"),
+        };
+        session.adopt_new_session(&split);
+        assert_eq!(session.session_id(), "new-session");
+        assert_eq!(session.turn_id(), None);
+        assert!(session.history().messages.is_empty());
+        assert_eq!(session.history().depth, "surface");
+        assert_eq!(old_history.messages[0].text, "old");
     }
 
     #[test]

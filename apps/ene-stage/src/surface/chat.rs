@@ -19,6 +19,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
             if ui.button(i18n::fl("chat-send")).clicked() {
                 state.push_action(SurfaceAction::SendChat);
             }
+            if ui
+                .button(i18n::fl("chat-new-session"))
+                .on_hover_text(i18n::fl("chat-new-session-hint"))
+                .clicked()
+            {
+                state.push_action(SurfaceAction::NewSession);
+            }
             let mic_label = if mic_active {
                 i18n::fl("mic-on")
             } else {

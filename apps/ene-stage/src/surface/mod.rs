@@ -24,6 +24,7 @@ const _: () = {
 #[derive(Debug, Clone)]
 pub enum SurfaceAction {
     SendChat,
+    NewSession,
     BargeIn,
     CancelTurn,
     ToggleMic,
@@ -60,6 +61,7 @@ pub struct SurfaceUiState {
     pub character_pos: [f32; 2],
     pub dragging_character: bool,
     pub pending_actions: Vec<SurfaceAction>,
+    pub(crate) new_session_inflight: bool,
     pub message_mode: MessageMode,
     pub turn_active: bool,
 }
@@ -88,6 +90,7 @@ impl Default for SurfaceUiState {
             character_pos: [0.78, 0.5],
             dragging_character: false,
             pending_actions: Vec::new(),
+            new_session_inflight: false,
             message_mode: MessageMode::Prompt,
             turn_active: false,
         }
@@ -96,6 +99,9 @@ impl Default for SurfaceUiState {
 
 impl SurfaceUiState {
     pub fn push_action(&mut self, action: SurfaceAction) {
+        if matches!(action, SurfaceAction::NewSession) && self.new_session_inflight {
+            return;
+        }
         self.pending_actions.push(action);
     }
 
@@ -202,7 +208,7 @@ pub fn show_spotlight(ctx: &egui::Context, state: &mut SurfaceUiState) -> Option
 
 #[cfg(test)]
 mod tests {
-    use super::SurfaceUiState;
+    use super::{SurfaceAction, SurfaceUiState};
 
     #[test]
     fn a_new_send_clears_the_previous_turn_status() {
@@ -286,5 +292,20 @@ mod tests {
             !state.chat_input_focused,
             "overlay shortcuts must not stay blocked after Chat closes"
         );
+    }
+
+    #[test]
+    fn new_chat_actions_are_deduplicated_while_inflight() {
+        let mut state = SurfaceUiState::default();
+        state.push_action(SurfaceAction::NewSession);
+        state.new_session_inflight = true;
+        state.push_action(SurfaceAction::NewSession);
+
+        let actions: Vec<_> = state
+            .pending_actions
+            .iter()
+            .filter(|action| matches!(action, SurfaceAction::NewSession))
+            .collect();
+        assert_eq!(actions.len(), 1);
     }
 }

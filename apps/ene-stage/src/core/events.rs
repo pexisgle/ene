@@ -77,6 +77,19 @@ pub struct EventFeeds {
     pub detail: crossbeam_channel::Receiver<LiveEvent>,
 }
 
+#[cfg(test)]
+impl EventFeeds {
+    pub(crate) fn new_for_test() -> Self {
+        let (surface_tx, surface_rx) = crossbeam_channel::unbounded();
+        let (detail_tx, detail_rx) = crossbeam_channel::unbounded();
+        drop((surface_tx, detail_tx));
+        Self {
+            surface: surface_rx,
+            detail: detail_rx,
+        }
+    }
+}
+
 /// Spawn one socket per depth. Overlay/chat must only read `surface`.
 pub fn spawn_event_feeds(rt: &Handle, client: &Arc<ApiClient>, session_id: &str) -> EventFeeds {
     let (surface_tx, surface_rx) = crossbeam_channel::unbounded();

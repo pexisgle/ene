@@ -85,6 +85,7 @@ pub enum AsyncOutcome {
     ReloadAvatar,
     ExportCharacter(Result<(), String>),
     ForkSession(Result<String, String>),
+    NewSession(Result<ene_api::SplitSessionResponse, String>),
     CompactSession(Result<String, String>),
     ExportSession(Result<(), String>),
 }

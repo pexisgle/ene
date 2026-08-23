@@ -243,6 +243,7 @@ pub struct DetailUiState {
     pub restore_id: String,
     pub restore_confirm: bool,
     pub session_id: String,
+    pub(crate) new_session_inflight: bool,
     pub open_spotlight: bool,
     settings_state: SettingsLoadState,
     loaded: DetailLoaded,
@@ -292,6 +293,10 @@ impl DetailUiState {
 
     pub(crate) fn finish_settings_load(&mut self) {
         self.settings_state = SettingsLoadState::Loaded;
+    }
+
+    pub(crate) fn set_session_id(&mut self, session_id: &str) {
+        session_id.clone_into(&mut self.session_id);
     }
 
     /// Reload core settings when Detail is reopened so external vault writes
@@ -1551,6 +1556,19 @@ fn show_work(
         state.loaded.jobs = false;
     }
     ui.horizontal(|ui| {
+        if !state.new_session_inflight && ui.button(i18n::fl("chat-new-session")).clicked() {
+            state.new_session_inflight = true;
+            let session_id = state.session_id.clone();
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::NewSession(
+                    client
+                        .split_session(&session_id)
+                        .await
+                        .map_err(|e| e.to_string()),
+                )
+            });
+        }
         if ui.button(i18n::fl("jobs-fork")).clicked() {
             let session_id = state.session_id.clone();
             let client = Arc::clone(client);
@@ -2769,6 +2787,17 @@ fn spawn_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_chat_button_is_guarded_by_shared_inflight_state() {
+        let state = DetailUiState {
+            new_session_inflight: true,
+            ..Default::default()
+        };
+
+        let guarded = !state.new_session_inflight;
+        assert!(!guarded, "Detail button must not start another split");
+    }
 
     #[test]
     fn active_jobs_exclude_terminal_states() {
