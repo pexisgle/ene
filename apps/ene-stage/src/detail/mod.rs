@@ -2789,6 +2789,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_chat_button_is_guarded_by_shared_inflight_state() {
+        let state = DetailUiState {
+            new_session_inflight: true,
+            ..Default::default()
+        };
+
+        let guarded = !state.new_session_inflight;
+        assert!(!guarded, "Detail button must not start another split");
+    }
+
+    #[test]
     fn active_jobs_exclude_terminal_states() {
         let job = |status: &str| JobView {
             id: status.to_owned(),

@@ -55,6 +55,36 @@ impl StageSession {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        client: Arc<ApiClient>,
+        soul_id: &str,
+        session_id: &str,
+        history: HistoryResponse,
+    ) -> Self {
+        Self {
+            client,
+            soul_id: soul_id.to_owned(),
+            session_id: session_id.to_owned(),
+            turn_id: Arc::new(Mutex::new(None)),
+            history: Arc::new(Mutex::new(history)),
+            occupants: Vec::new(),
+            avatar_path: None,
+            motions_dir: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_for_test(
+        &mut self,
+        client: Arc<ApiClient>,
+        soul_id: &str,
+        session_id: &str,
+        history: HistoryResponse,
+    ) {
+        *self = Self::new_for_test(client, soul_id, session_id, history);
+    }
+
     #[must_use]
     pub fn soul_id(&self) -> &str {
         &self.soul_id
@@ -556,7 +586,22 @@ pub fn normalize_history(mut history: HistoryResponse) -> HistoryResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_api::MessageResponse;
+    use ene_api::{MessageResponse, SessionView};
+
+    fn session_view(id: &str) -> SessionView {
+        SessionView {
+            id: id.to_owned(),
+            soul_id: "soul".to_owned(),
+            kind: "conversation".to_owned(),
+            title: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            archived: false,
+            next_seq: 0,
+            ended_at: None,
+            end_reason: None,
+            delegation_id: None,
+        }
+    }
 
     #[test]
     fn history_is_normalized_oldest_to_newest() {
@@ -577,6 +622,65 @@ mod tests {
         let seqs: Vec<_> = normalized.messages.iter().map(|m| m.seq).collect();
         assert_eq!(seqs, [1, 2, 3]);
         assert_eq!(normalized.depth, "surface");
+    }
+
+    #[tokio::test]
+    async fn apply_new_session_updates_state_only_after_history_loads() {
+        let client = Arc::new(ApiClient::new("http://127.0.0.1:9", "token", "stage"));
+        let old_history = HistoryResponse {
+            messages: vec![MessageResponse {
+                seq: 1,
+                role: "assistant".to_owned(),
+                text: "old".to_owned(),
+            }],
+            depth: "surface".to_owned(),
+        };
+        let mut session = StageSession::new_for_test(
+            Arc::clone(&client),
+            "soul",
+            "old-session",
+            old_history.clone(),
+        );
+
+        let failure = session
+            .apply_new_session(SplitSessionResponse {
+                previous: session_view("old-session"),
+                session: session_view("new-session"),
+            })
+            .await
+            .expect_err("history request fails without a server");
+        assert_eq!(failure.error_class(), "transport");
+        assert_eq!(session.session_id(), "old-session");
+        let unchanged = session.history();
+        assert_eq!(unchanged.messages.len(), old_history.messages.len());
+        assert_eq!(unchanged.messages[0].text, "old");
+        assert_eq!(unchanged.depth, old_history.depth);
+
+        let addr = crate::core::session_test_server::spawn(&tokio::runtime::Handle::current());
+        let client_url = format!("http://{addr}");
+        let mut session = StageSession::new_for_test(
+            Arc::new(ApiClient::new(client_url, "token", "stage")),
+            "soul",
+            "old-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        );
+        let split = SplitSessionResponse {
+            previous: session_view("old-session"),
+            session: session_view("new-session"),
+        };
+        session
+            .apply_new_session(split)
+            .await
+            .expect("history loads");
+        assert_eq!(session.session_id(), "new-session");
+        assert_eq!(session.turn_id(), None);
+        assert_eq!(
+            session.history().messages.first().map(|m| m.text.as_str()),
+            Some("new")
+        );
     }
 
     #[test]
