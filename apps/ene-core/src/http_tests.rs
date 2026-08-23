@@ -3006,7 +3006,7 @@ async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
         names.contains(&"utility.hash"),
         "harness tools must load with the plugin profile: {names:?}"
     );
-    assert!(names.contains(&"app.screenshot"));
+    assert!(names.contains(&"app.capabilities"));
 
     let empty = client
         .listen(
@@ -3143,7 +3143,6 @@ async fn plugins_profile_minimal_unloads_non_utility_harness() {
     );
     let before = client.list_tools().await.unwrap();
     let names: Vec<&str> = before.items.iter().map(|tool| tool.name.as_str()).collect();
-    assert!(names.contains(&"app.screenshot"), "{names:?}");
     assert!(names.contains(&"utility.hash"), "{names:?}");
 
     client
