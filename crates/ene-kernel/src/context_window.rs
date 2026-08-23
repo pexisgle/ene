@@ -2,6 +2,7 @@
 
 use crate::config::TokenEstimation;
 use ene_plugin_ipc::{LlmMessage, LlmRole};
+use std::collections::HashSet;
 
 /// Conservative window when neither the provider nor the operator names one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 8192;
@@ -191,9 +192,9 @@ pub fn fit_prompt_llm(
             .fold(0, u32::saturating_add),
     );
     let mut packed = Vec::new();
-    for group in rest.into_iter().rev() {
+    for (position, group) in rest.into_iter().rev().enumerate() {
         let cost = group_tokens(&group);
-        if cost > remaining && !(packed.is_empty() && is_newest_ordinary_user(&group)) {
+        if cost > remaining && !(position == 0 && is_newest_ordinary_user(&group)) {
             continue;
         }
         remaining = remaining.saturating_sub(cost);
@@ -213,29 +214,39 @@ struct ToolExchangeGroup {
 
 impl ToolExchangeGroup {
     fn is_complete(&self) -> bool {
-        let Some(call_message) = self
-            .messages
-            .iter()
-            .find(|message| !message.tool_calls.is_empty())
-        else {
+        let Some(call_message) = self.messages.first() else {
+            return false;
+        };
+        if call_message.role != LlmRole::Assistant || call_message.tool_calls.is_empty() {
             return !self
                 .messages
                 .iter()
-                .any(|message| message.role == LlmRole::Tool);
-        };
-        let mut answered_ids = std::collections::HashSet::new();
-        for result in self.messages.iter().filter(|m| m.role == LlmRole::Tool) {
+                .any(|message| message.role == LlmRole::Tool || !message.tool_calls.is_empty());
+        }
+        let expected_ids: HashSet<&str> = call_message
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_str())
+            .collect();
+        if expected_ids.len() != call_message.tool_calls.len() {
+            return false;
+        }
+        let mut answered_ids = HashSet::new();
+        for result in self.messages.iter().skip(1) {
+            if result.role != LlmRole::Tool {
+                return false;
+            }
             let Some(id) = &result.tool_call_id else {
                 return false;
             };
             if !answered_ids.insert(id.clone()) {
                 return false;
             }
-            if !call_message.tool_calls.iter().any(|call| call.id == *id) {
+            if !expected_ids.contains(id.as_str()) {
                 return false;
             }
         }
-        answered_ids.len() == call_message.tool_calls.len()
+        answered_ids.len() == expected_ids.len()
     }
 
     fn accepts_result(&self) -> bool {
@@ -467,7 +478,69 @@ mod tests {
                     "budget {budget} orphaned {result:?}"
                 );
             }
+            for call in packed.iter().flat_map(|message| message.tool_calls.iter()) {
+                assert!(
+                    packed.iter().any(|message| {
+                        message.role == LlmRole::Tool
+                            && message.tool_call_id.as_deref() == Some(call.id.as_str())
+                    }),
+                    "budget {budget} left unanswered {call:?}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn multiple_tool_calls_are_kept_or_dropped_as_one_group() {
+        let messages = vec![
+            LlmMessage::new(LlmRole::User, "search"),
+            LlmMessage {
+                role: LlmRole::Assistant,
+                text: String::new(),
+                tool_calls: vec![tool_call("call-1"), tool_call("call-2")],
+                tool_call_id: None,
+                tool_name: None,
+                images: Vec::new(),
+            },
+            tool_message("call-1", "one"),
+            tool_message("call-2", "two"),
+            LlmMessage::new(LlmRole::User, "latest"),
+        ];
+
+        let packed = fit_prompt_llm(messages.clone(), 100, message_tokens);
+        assert_eq!(packed.len(), messages.len());
+
+        let packed = fit_prompt_llm(messages, 4, message_tokens);
+        assert_eq!(
+            packed
+                .iter()
+                .filter(|message| message.role == LlmRole::Tool)
+                .count(),
+            0
+        );
+        assert_eq!(
+            packed.last().map(|message| message.text.as_str()),
+            Some("latest")
+        );
+    }
+
+    #[test]
+    fn oversized_latest_tool_group_does_not_pin_an_older_user() {
+        let messages = vec![
+            LlmMessage::new(LlmRole::User, "old request"),
+            LlmMessage {
+                role: LlmRole::Assistant,
+                text: String::new(),
+                tool_calls: vec![tool_call("call-1")],
+                tool_call_id: None,
+                tool_name: None,
+                images: Vec::new(),
+            },
+            tool_message("call-1", &"x".repeat(100)),
+        ];
+
+        let packed = fit_prompt_llm(messages, 1, message_tokens);
+        assert!(packed.is_empty());
     }
 
     #[test]

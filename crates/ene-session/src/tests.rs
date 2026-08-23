@@ -141,6 +141,96 @@ fn tool_call_event(session: SessionId, turn: TurnId, call_id: CallId) -> NewEven
     )
 }
 
+fn tool_result_event(session: SessionId, call_id: CallId, text: &str) -> NewEvent {
+    NewEvent::new(
+        session,
+        EventKind::ToolResult,
+        EventPayload::ToolResult {
+            v: v1(),
+            call_id,
+            status: ToolStatus::Ok,
+            blocks: vec![Block::text(text)],
+            spill_ref: None,
+            error_class: None,
+            duration_ms: 1,
+        },
+    )
+}
+
+#[tokio::test]
+async fn model_visible_projection_keeps_multiple_calls_as_one_exchange() {
+    let (_dir, store) = open_tmp().await;
+    let (_soul, session) = mk_session(&store).await;
+    let turn = TurnId::new();
+    let first = CallId::new();
+    let second = CallId::new();
+    store
+        .commit(Transaction {
+            entries: vec![
+                text_user(session, turn, "search both"),
+                tool_call_event(session, turn, first),
+                tool_call_event(session, turn, second),
+                tool_result_event(session, first, "first"),
+                tool_result_event(session, second, "second"),
+            ],
+            usage: vec![],
+        })
+        .await
+        .unwrap();
+
+    let events = store.load_events(session, 0).unwrap();
+    let projected = derive_messages(&events, ProjectOptions::model_visible(8));
+    let tool_messages: Vec<_> = projected
+        .messages
+        .iter()
+        .filter(|message| message.role == crate::Role::Tool)
+        .collect();
+    assert_eq!(tool_messages.len(), 4);
+    assert!(
+        tool_messages
+            .iter()
+            .all(|message| message.tool_call_id.is_some())
+    );
+}
+
+#[tokio::test]
+async fn model_visible_projection_drops_incomplete_multi_call_exchange() {
+    let (_dir, store) = open_tmp().await;
+    let (_soul, session) = mk_session(&store).await;
+    let turn = TurnId::new();
+    let first = CallId::new();
+    let second = CallId::new();
+    let next_turn = TurnId::new();
+    store
+        .commit(Transaction {
+            entries: vec![
+                text_user(session, turn, "search both"),
+                tool_call_event(session, turn, first),
+                tool_call_event(session, turn, second),
+                tool_result_event(session, first, "first"),
+                text_user(session, next_turn, "continue"),
+            ],
+            usage: vec![],
+        })
+        .await
+        .unwrap();
+
+    let events = store.load_events(session, 0).unwrap();
+    let projected = derive_messages(&events, ProjectOptions::model_visible(8));
+    assert!(
+        projected
+            .messages
+            .iter()
+            .all(|message| message.role != crate::Role::Tool)
+    );
+    assert!(
+        projected
+            .messages
+            .iter()
+            .any(|message| message.text() == "continue")
+    );
+}
+
 #[tokio::test]
 async fn turn_roundtrip_projects_history() {
     let (_dir, store) = open_tmp().await;
