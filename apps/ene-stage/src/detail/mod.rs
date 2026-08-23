@@ -265,6 +265,11 @@ impl DetailUiState {
         self.settings_loaded = false;
     }
 
+    pub fn settings_load_failed(&mut self) {
+        self.loaded.settings = false;
+        self.settings_loaded = false;
+    }
+
     /// Reload core settings when Detail is reopened so external vault writes
     /// and restarts cannot leave a stale API-key banner behind.
     pub fn refresh_settings_on_open(&mut self) {
@@ -2269,7 +2274,7 @@ fn show_system_inner(
     ui.label(i18n::fl("system-reload-hint"));
     ui.horizontal(|ui| {
         if ui.button(i18n::fl("settings-reload-core")).clicked() {
-            state.loaded.settings = false;
+            state.invalidate_settings();
             ensure_settings(state, client, rt, async_results);
         }
         ui.label(i18n::fl("system-restore-id"));
@@ -2526,7 +2531,7 @@ fn task_row(ui: &mut egui::Ui, label: String, value: &mut String) {
     });
 }
 
-fn ensure_settings(
+pub(crate) fn ensure_settings(
     state: &mut DetailUiState,
     client: &Arc<ApiClient>,
     rt: &Handle,
@@ -2536,7 +2541,6 @@ fn ensure_settings(
         return;
     }
     state.loaded.settings = true;
-    state.settings_loaded = true;
     let client = Arc::clone(client);
     spawn_async(rt, async_results, async move {
         AsyncOutcome::LoadCoreSettings(
@@ -2870,6 +2874,7 @@ mod tests {
         state.loaded.settings = true;
         state.refresh_settings_on_open();
         assert!(!state.loaded.settings);
+        assert!(!state.settings_loaded);
     }
 
     #[test]

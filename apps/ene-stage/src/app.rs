@@ -111,6 +111,12 @@ pub fn run() -> Result<(), AppError> {
     };
     app.surface.character_pos = [app.settings.character_x, app.settings.character_y];
     app.surface.history = app.session.history();
+    detail::ensure_settings(
+        &mut app.detail,
+        &app.client,
+        &app.rt_handle,
+        &app.async_results,
+    );
     app.claim_speaker_notify();
 
     let event_loop = EventLoop::new().map_err(|err| AppError::Window(err.to_string()))?;
@@ -282,7 +288,10 @@ impl StageApp {
                         i18n::fl("settings-loaded")
                     };
                 }
-                Err(err) => self.detail.core_status = err,
+                Err(err) => {
+                    self.detail.settings_load_failed();
+                    self.detail.core_status = err;
+                }
             },
             AsyncOutcome::ApplyCoreSettings(result) => match result {
                 Ok(()) => {
@@ -687,10 +696,16 @@ impl StageApp {
         if text.is_empty() {
             return;
         }
-        if self.detail.settings_loaded
-            && let Some(gap) = detail::chat_setup_gap(&self.detail)
-        {
-            self.surface.status = detail::chat_setup_status(gap);
+        if let Some(reason) = chat_send_block_reason(&self.detail) {
+            if !self.detail.settings_loaded {
+                detail::ensure_settings(
+                    &mut self.detail,
+                    &self.client,
+                    &self.rt_handle,
+                    &self.async_results,
+                );
+            }
+            self.surface.status = reason;
             return;
         }
         if !self.surface.turn_active
@@ -1435,6 +1450,37 @@ impl StageApp {
                 SpotlightAction::Close => {}
             }
         }
+    }
+}
+
+fn chat_send_block_reason(detail: &DetailUiState) -> Option<String> {
+    if !detail.settings_loaded {
+        return Some(i18n::fl("chat-settings-loading"));
+    }
+    detail::chat_setup_gap(detail).map(detail::chat_setup_status)
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+
+    #[test]
+    fn chat_waits_for_settings_before_checking_setup() {
+        let state = DetailUiState::default();
+        assert_eq!(
+            chat_send_block_reason(&state),
+            Some(i18n::fl("chat-settings-loading"))
+        );
+    }
+
+    #[test]
+    fn chat_checks_setup_after_settings_loads() {
+        let mut state = DetailUiState::default();
+        state.settings_loaded = true;
+        assert_eq!(
+            chat_send_block_reason(&state),
+            Some(i18n::fl("chat-unconfigured"))
+        );
     }
 }
 
