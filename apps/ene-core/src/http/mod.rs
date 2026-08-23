@@ -19,7 +19,7 @@ mod ws;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -59,31 +59,46 @@ pub struct AppState {
 /// every pending retry and expires entries so stale responses cannot persist.
 pub struct IdempotencyCache {
     entries: indexmap::IndexMap<String, (Instant, SendMessageResponse)>,
+    clock: IdempotencyClock,
 }
+
+type IdempotencyClock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 impl IdempotencyCache {
     const CAPACITY: usize = 256;
-    const TTL: std::time::Duration = std::time::Duration::from_mins(10);
+    const TTL: Duration = Duration::from_mins(10);
 
     #[must_use]
     pub fn new() -> Self {
+        Self::with_clock(Instant::now)
+    }
+
+    fn with_clock<F>(clock: F) -> Self
+    where
+        F: Fn() -> Instant + Send + Sync + 'static,
+    {
         Self {
             entries: indexmap::IndexMap::new(),
+            clock: Arc::new(clock),
         }
     }
 
     #[must_use]
     pub fn get(&mut self, key: &str) -> Option<SendMessageResponse> {
-        let now = Instant::now();
+        let now = (self.clock)();
         self.entries.retain(|_, (expires_at, _)| *expires_at > now);
-        let (_, _, entry) = self.entries.get_full(key)?;
-        Some(entry.1.clone())
+        let index = self.entries.get_index_of(key)?;
+        let (stored_key, entry) = self.entries.shift_remove_index(index)?;
+        let response = entry.1.clone();
+        self.entries.insert(stored_key, entry);
+        Some(response)
     }
 
     pub fn insert(&mut self, key: &str, response: SendMessageResponse) {
-        let now = Instant::now();
+        let now = (self.clock)();
         self.entries.retain(|_, (expires_at, _)| *expires_at > now);
-        if self.entries.len() >= Self::CAPACITY {
+        let replaced = self.entries.shift_remove(key).is_some();
+        if !replaced && self.entries.len() >= Self::CAPACITY {
             self.entries.shift_remove_index(0);
         }
         self.entries
@@ -671,6 +686,11 @@ fn write_ready_file(data_dir: &Path, addr: SocketAddr, token_file: &str) -> Resu
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use parking_lot::Mutex;
+
     use super::{IdempotencyCache, SendMessageResponse};
 
     fn response(turn: Option<String>) -> SendMessageResponse {
@@ -681,13 +701,15 @@ mod tests {
     }
 
     #[test]
-    fn capacity_evicts_oldest_not_recent_keys() {
+    fn cache_hit_promotes_key_before_capacity_eviction() {
         let mut cache = IdempotencyCache::new();
         for key in 0..256 {
             cache.insert(&key.to_string(), response(Some(key.to_string())));
         }
+        assert!(cache.get("0").is_some());
         cache.insert("recent", response(Some("recent".to_owned())));
-        assert!(cache.get("0").is_none());
+        assert!(cache.get("0").is_some());
+        assert!(cache.get("1").is_none());
         assert_eq!(
             cache.get("recent").map(|cached| cached.turn_id),
             Some(Some("recent".to_owned()))
@@ -695,11 +717,28 @@ mod tests {
     }
 
     #[test]
-    fn expired_entries_are_misses() {
+    fn replacing_existing_key_does_not_evict_another_entry() {
         let mut cache = IdempotencyCache::new();
+        for key in 0..256 {
+            cache.insert(&key.to_string(), response(Some(key.to_string())));
+        }
+        cache.insert("0", response(Some("updated".to_owned())));
+        assert_eq!(
+            cache.get("0").map(|cached| cached.turn_id),
+            Some(Some("updated".to_owned()))
+        );
+        assert!(cache.get("1").is_some());
+    }
+
+    #[test]
+    fn expired_entries_are_misses_after_ttl() {
+        let now = Arc::new(Mutex::new(Instant::now()));
+        let clock = Arc::clone(&now);
+        let mut cache = IdempotencyCache::with_clock(move || *clock.lock());
         cache.insert("key", response(Some("turn".to_owned())));
-        cache.entries.shift_remove("key");
-        assert!(cache.entries.is_empty());
+        assert!(cache.get("key").is_some());
+        *now.lock() += Duration::from_secs(601);
         assert!(cache.get("key").is_none());
+        assert!(cache.entries.is_empty());
     }
 }
