@@ -25,7 +25,7 @@ use ene_companion::{
 };
 use ene_kernel::DisplayDepth;
 use ene_plane::PopupDecision;
-use ene_registry::Layer;
+use ene_registry::{Layer, PipelineError};
 use ene_session::{
     Block, ClientId, DelegationId, EventKind, EventPayload, NewEvent, NewSession, QuestionId,
     SessionCreatedBy, SessionEndReason, SessionId, SessionKind, SessionMeta, SoulId, Transaction,
@@ -1029,11 +1029,7 @@ pub async fn list_tools(State(state): State<AppState>) -> Json<Page<ToolView>> {
         .list()
         .into_iter()
         .map(|def| ToolView {
-            layer: if def.surface_visible() {
-                "surface".to_owned()
-            } else {
-                "job".to_owned()
-            },
+            layer: def.primary_layer().as_str().to_owned(),
             name: def.name,
             description: def.description,
         })
@@ -1064,7 +1060,17 @@ pub async fn test_tool(
     let value = registry
         .execute(&name, req.arguments, layer)
         .await
-        .map_err(|err| bad_request("failed", &err.to_string()))?;
+        .map_err(|err| {
+            let class = match &err {
+                PipelineError::WrongLayer {
+                    required: Layer::Job,
+                    ..
+                } => "requires_job",
+                PipelineError::WrongLayer { .. } => "wrong_layer",
+                _ => "failed",
+            };
+            bad_request(class, &err.to_string())
+        })?;
     Ok(Json(value))
 }
 
