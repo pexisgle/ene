@@ -174,6 +174,18 @@ impl ChromeWindow {
         theme: Option<&str>,
         mut add_contents: impl FnMut(&mut egui::Ui),
     ) -> Result<(), GpuError> {
+        let window_size = self.window.inner_size();
+        if window_size.width == 0 || window_size.height == 0 {
+            return Ok(());
+        }
+        if self.config.width != window_size.width || self.config.height != window_size.height {
+            self.resize(gpu, window_size);
+        }
+        let frame = gpu::acquire_frame(&self.surface).map_err(GpuError::Surface)?;
+        let target_size = frame.texture.size();
+        if !surface_target_matches_window(target_size, window_size) {
+            return Ok(());
+        }
         if let Some(theme) = theme {
             apply_theme(&self.egui_ctx, theme);
         }
@@ -185,12 +197,8 @@ impl ChromeWindow {
         self.egui_state
             .handle_platform_output(&self.window, full.platform_output);
 
-        let size = self.window.inner_size();
         let pixels_per_point = self.window.scale_factor() as f32;
-        let screen = ScreenDescriptor {
-            size_in_pixels: [size.width.max(1), size.height.max(1)],
-            pixels_per_point,
-        };
+        let screen = screen_descriptor_for_target(target_size, pixels_per_point);
         let primitives = self.egui_ctx.tessellate(full.shapes, pixels_per_point);
         for (id, delta) in &full.textures_delta.set {
             self.renderer
@@ -208,7 +216,6 @@ impl ChromeWindow {
             &primitives,
             &screen,
         );
-        let frame = gpu::acquire_frame(&self.surface).map_err(GpuError::Surface)?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -241,6 +248,23 @@ impl ChromeWindow {
         frame.present();
         Ok(())
     }
+}
+
+fn screen_descriptor_for_target(
+    target_size: wgpu::Extent3d,
+    pixels_per_point: f32,
+) -> ScreenDescriptor {
+    ScreenDescriptor {
+        size_in_pixels: [target_size.width.max(1), target_size.height.max(1)],
+        pixels_per_point,
+    }
+}
+
+fn surface_target_matches_window(
+    target_size: wgpu::Extent3d,
+    window_size: PhysicalSize<u32>,
+) -> bool {
+    target_size.width == window_size.width && target_size.height == window_size.height
 }
 
 fn fill_opaque_panel(ui: &mut egui::Ui, kind: ChromeKind) {
@@ -359,5 +383,36 @@ mod tests {
         let spotlight = clear_color(ChromeKind::Spotlight, &egui::Visuals::dark());
         assert!((caption.a).abs() < f64::EPSILON);
         assert!((spotlight.a).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn screen_descriptor_uses_surface_target_dimensions() {
+        let screen = screen_descriptor_for_target(
+            wgpu::Extent3d {
+                width: 520,
+                height: 560,
+                depth_or_array_layers: 1,
+            },
+            1.5,
+        );
+        assert_eq!(screen.size_in_pixels, [520, 560]);
+        assert!((screen.pixels_per_point - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn stale_surface_frame_is_skipped_during_resize() {
+        let target = wgpu::Extent3d {
+            width: 520,
+            height: 560,
+            depth_or_array_layers: 1,
+        };
+        assert!(surface_target_matches_window(
+            target,
+            PhysicalSize::new(520, 560)
+        ));
+        assert!(!surface_target_matches_window(
+            target,
+            PhysicalSize::new(1280, 719)
+        ));
     }
 }
