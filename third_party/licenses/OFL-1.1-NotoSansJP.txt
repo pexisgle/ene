@@ -1,0 +1,12 @@
+Noto Sans JP is identified as a Noto Project font and is distributed under the
+SIL Open Font License, Version 1.1.
+
+The canonical license text is maintained by the upstream Google Fonts package:
+
+https://github.com/google/fonts/raw/main/ofl/notosansjp/OFL.txt
+
+This notice is kept with the repository inventory so release packaging can
+include the required attribution and the exact upstream license reference.
+The checked-in binary's exact upstream revision has not been hash-matched;
+see `third_party/assets.json` before treating this notice as proof of a
+particular upstream build.
