@@ -352,7 +352,7 @@ fn key(caps: &PlatformCaps, combo: &str) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::backend::{BackendAvailability, HYPRLAND, WMCTRL};
+    use super::backend::{BackendAvailability, HYPRLAND, WIN32, WMCTRL};
     use super::capability::PlatformCaps;
     use super::{
         cap_from_availability, collect_sway_windows, parse_hypr_clients, parse_wmctrl,
@@ -401,14 +401,19 @@ mod tests {
 
     #[test]
     fn runtime_window_backend_failure_is_not_a_dependency_error() {
-        let error = run_window_list(&BackendAvailability::Available(HYPRLAND), |_| {
-            Err("command exited with status 1".to_owned())
-        })
-        .unwrap_err();
-        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
-        assert_eq!(error["code"], "backend_failed");
-        assert_eq!(error["backend"], "hyprctl");
-        assert!(error["message"].as_str().unwrap().contains("status 1"));
+        for (availability, backend) in [
+            (BackendAvailability::Available(HYPRLAND), "hyprctl"),
+            (BackendAvailability::Available(WIN32), "win32"),
+        ] {
+            let error = run_window_list(&availability, |_| {
+                Err("command exited with status 1".to_owned())
+            })
+            .unwrap_err();
+            let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+            assert_eq!(error["code"], "backend_failed");
+            assert_eq!(error["backend"], backend);
+            assert!(error["message"].as_str().unwrap().contains("status 1"));
+        }
     }
 
     #[test]
