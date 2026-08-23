@@ -165,61 +165,6 @@ struct StageApp {
 }
 
 impl StageApp {
-    #[cfg(test)]
-    fn new_for_test() -> Self {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        let _guard = runtime.enter();
-        let client = Arc::new(ene_api::ApiClient::new(
-            "http://127.0.0.1:9",
-            "token",
-            "stage",
-        ));
-        let rt_handle = runtime.handle().clone();
-        Self {
-            settings: DesktopSettings::default(),
-            local_settings: DesktopSettings::default(),
-            core: StageCore::detached(),
-            session: StageSession::new_for_test(
-                Arc::clone(&client),
-                "soul",
-                "old-session",
-                ene_api::HistoryResponse {
-                    messages: Vec::new(),
-                    depth: "surface".to_owned(),
-                },
-            ),
-            client,
-            runtime,
-            rt_handle,
-            feeds: EventFeeds::new_for_test(),
-            audio: AudioHub::new(),
-            viseme: VisemeAnalyzer::new(AudioHub::new().sample_rate()),
-            look_at_state: look_at::LookAtState::default(),
-            tray: None,
-            hotkeys: None,
-            surface: SurfaceUiState::default(),
-            detail: DetailUiState::default(),
-            async_results: Arc::new(Mutex::new(Vec::new())),
-            mic_active: false,
-            listen: MicListen::new(),
-            notify_claimed: false,
-            speaker_claimed: false,
-            gpu: None,
-            overlay: None,
-            chat: None,
-            detail_win: None,
-            caption: None,
-            spotlight: None,
-            last_cursor: None,
-            last_tick: Instant::now(),
-            last_approval_poll: Instant::now(),
-            approval_poll_inflight: false,
-        }
-    }
-
     fn spawn<F>(&self, task: F)
     where
         F: std::future::Future<Output = AsyncOutcome> + Send + 'static,
@@ -618,27 +563,6 @@ impl StageApp {
                     Err(err) => err,
                 };
             }
-            AsyncOutcome::NewSession(result) => match result {
-                Ok(split) => {
-                    self.session.adopt_new_session(&split);
-                    self.feeds =
-                        spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
-                    self.detail.set_session_id(self.session.session_id());
-                    self.surface.history = self.session.history();
-                    self.surface.streaming_text.clear();
-                    self.surface.pending_approval = None;
-                    self.surface.pending_question = None;
-                    self.surface.status = i18n::fl("chat-new-session-ready");
-                    self.request_history_refresh();
-                    self.detail.new_session_inflight = false;
-                    self.surface.new_session_inflight = false;
-                }
-                Err(err) => {
-                    self.detail.new_session_inflight = false;
-                    self.surface.new_session_inflight = false;
-                    self.surface.status = err;
-                }
-            },
             AsyncOutcome::CompactSession(result) => {
                 self.detail.core_status = match result {
                     Ok(id) => format!("{}: {id}", i18n::fl("jobs-compacted")),
@@ -743,24 +667,6 @@ impl StageApp {
             AsyncOutcome::RefreshHistory(
                 session
                     .refresh_history()
-                    .await
-                    .map_err(|err| err.to_string()),
-            )
-        });
-    }
-
-    fn start_new_session(&mut self) {
-        if self.detail.new_session_inflight {
-            return;
-        }
-        self.detail.new_session_inflight = true;
-        self.surface.new_session_inflight = true;
-        let client = Arc::clone(&self.client);
-        let session_id = self.session.session_id().to_owned();
-        self.spawn(async move {
-            AsyncOutcome::NewSession(
-                client
-                    .split_session(&session_id)
                     .await
                     .map_err(|err| err.to_string()),
             )
@@ -1022,7 +928,6 @@ impl StageApp {
         for action in actions {
             match action {
                 SurfaceAction::SendChat => self.send_chat(),
-                SurfaceAction::NewSession => self.start_new_session(),
                 SurfaceAction::BargeIn => self.barge_in(),
                 SurfaceAction::CancelTurn => self.cancel_turn(),
                 SurfaceAction::ToggleMic => self.toggle_mic(),
@@ -1272,9 +1177,11 @@ impl StageApp {
         self.detail.visible = true;
         self.detail.refresh_settings_on_open();
         self.detail.select_tab(tab);
-        if self.detail_win.is_none()
-            && let Some(gpu) = self.gpu.as_ref()
-        {
+        if let Some(detail) = self.detail_win.as_ref() {
+            detail.show_and_focus();
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_ref() {
             match ChromeWindow::create(
                 event_loop,
                 gpu,
@@ -1500,7 +1407,7 @@ impl StageApp {
             let rt = self.rt_handle.clone();
             let results = Arc::clone(&self.async_results);
             let soul_id = self.session.soul_id().to_owned();
-            detail.set_session_id(self.session.session_id());
+            self.session.session_id().clone_into(&mut detail.session_id);
             let theme = local.theme.clone();
             let paint = detail_win.paint(gpu, Some(theme.as_str()), |ui| {
                 detail::show(
@@ -1830,119 +1737,12 @@ fn map_turn_err(err: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AsyncOutcome, StageApp, format_log_text, provider_asset_load_status, window_level,
-    };
-    use ene_api::{HistoryResponse, MessageResponse, SessionView, SplitSessionResponse};
-    use std::sync::Arc;
-
-    fn session_view(id: &str) -> SessionView {
-        SessionView {
-            id: id.to_owned(),
-            soul_id: "soul".to_owned(),
-            kind: "conversation".to_owned(),
-            title: None,
-            created_at: "2026-01-01T00:00:00Z".to_owned(),
-            archived: false,
-            next_seq: 0,
-            ended_at: None,
-            end_reason: None,
-            delegation_id: None,
-        }
-    }
+    use super::{format_log_text, provider_asset_load_status, window_level};
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
         assert_eq!(window_level(true), winit::window::WindowLevel::AlwaysOnTop);
         assert_eq!(window_level(false), winit::window::WindowLevel::Normal);
-    }
-
-    #[test]
-    fn new_chat_start_is_deduplicated_by_shared_inflight_guard() {
-        let mut app = StageApp::new_for_test();
-        app.detail.new_session_inflight = true;
-        app.surface.new_session_inflight = true;
-        let before = app.async_results.lock().len();
-
-        app.start_new_session();
-
-        assert_eq!(app.async_results.lock().len(), before);
-        assert!(app.detail.new_session_inflight);
-        assert!(app.surface.new_session_inflight);
-    }
-
-    #[test]
-    fn failed_new_session_split_keeps_visible_state() {
-        let mut app = StageApp::new_for_test();
-        app.surface.new_session_inflight = true;
-        app.detail.new_session_inflight = true;
-        app.session.set_for_test(
-            Arc::clone(&app.client),
-            "soul",
-            "old-session",
-            HistoryResponse {
-                messages: Vec::new(),
-                depth: "surface".to_owned(),
-            },
-        );
-        app.surface.history.messages.push(MessageResponse {
-            seq: 1,
-            role: "assistant".to_owned(),
-            text: "old".to_owned(),
-        });
-
-        app.apply_async_outcome(AsyncOutcome::NewSession(
-            Err("split unavailable".to_owned()),
-        ));
-
-        assert!(!app.detail.new_session_inflight);
-        assert!(!app.surface.new_session_inflight);
-        assert_eq!(app.surface.history.messages.len(), 1);
-        assert_eq!(app.surface.history.messages[0].text, "old");
-        assert_eq!(app.surface.status, "split unavailable");
-    }
-
-    #[test]
-    fn successful_new_session_adopts_before_refresh_failure() {
-        let mut app = StageApp::new_for_test();
-        app.surface.new_session_inflight = true;
-        app.detail.new_session_inflight = true;
-        let split = SplitSessionResponse {
-            previous: session_view("old-session"),
-            session: session_view("new-session"),
-        };
-        let old_history = HistoryResponse {
-            messages: vec![MessageResponse {
-                seq: 1,
-                role: "assistant".to_owned(),
-                text: "old".to_owned(),
-            }],
-            depth: "surface".to_owned(),
-        };
-        app.session.set_for_test(
-            Arc::clone(&app.client),
-            "soul",
-            "old-session",
-            old_history.clone(),
-        );
-        app.surface.history = old_history;
-
-        app.apply_async_outcome(AsyncOutcome::NewSession(Ok(split)));
-
-        assert!(!app.detail.new_session_inflight);
-        assert!(!app.surface.new_session_inflight);
-        assert_eq!(app.session.session_id(), "new-session");
-        assert_eq!(app.detail.session_id, "new-session");
-        assert!(app.surface.history.messages.is_empty());
-
-        app.apply_async_outcome(AsyncOutcome::RefreshHistory(Err(
-            "history unavailable".to_owned()
-        )));
-
-        assert_eq!(app.session.session_id(), "new-session");
-        assert_eq!(app.detail.session_id, "new-session");
-        assert!(app.surface.history.messages.is_empty());
-        assert_eq!(app.surface.status, "history unavailable");
     }
 
     #[test]
