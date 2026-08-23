@@ -175,6 +175,14 @@ pub struct LogEntry {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SettingsLoadState {
+    #[default]
+    Unloaded,
+    Loading,
+    Loaded,
+}
+
 #[derive(Default)]
 pub struct DetailUiState {
     pub visible: bool,
@@ -233,13 +241,12 @@ pub struct DetailUiState {
     pub restore_confirm: bool,
     pub session_id: String,
     pub open_spotlight: bool,
-    pub settings_loaded: bool,
+    settings_state: SettingsLoadState,
     loaded: DetailLoaded,
 }
 
 #[derive(Default)]
 struct DetailLoaded {
-    settings: bool,
     memory: bool,
     character: bool,
     jobs: bool,
@@ -261,13 +268,27 @@ impl DetailUiState {
     }
 
     pub fn invalidate_settings(&mut self) {
-        self.loaded.settings = false;
-        self.settings_loaded = false;
+        self.settings_state = SettingsLoadState::Unloaded;
     }
 
     pub fn settings_load_failed(&mut self) {
-        self.loaded.settings = false;
-        self.settings_loaded = false;
+        self.settings_state = SettingsLoadState::Unloaded;
+    }
+
+    pub(crate) fn settings_loaded(&self) -> bool {
+        self.settings_state == SettingsLoadState::Loaded
+    }
+
+    pub(crate) fn begin_settings_load(&mut self) -> bool {
+        if self.settings_state != SettingsLoadState::Unloaded {
+            return false;
+        }
+        self.settings_state = SettingsLoadState::Loading;
+        true
+    }
+
+    pub(crate) fn finish_settings_load(&mut self) {
+        self.settings_state = SettingsLoadState::Loaded;
     }
 
     /// Reload core settings when Detail is reopened so external vault writes
@@ -2537,10 +2558,9 @@ pub(crate) fn ensure_settings(
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
-    if state.loaded.settings || state.settings_loaded {
+    if !state.begin_settings_load() {
         return;
     }
-    state.loaded.settings = true;
     let client = Arc::clone(client);
     spawn_async(rt, async_results, async move {
         AsyncOutcome::LoadCoreSettings(
@@ -2871,10 +2891,33 @@ mod tests {
         assert_eq!(chat_setup_gap(&state), Some(ChatSetupGap::ApiKey));
 
         // Simulate a later settings load after an external vault write.
-        state.loaded.settings = true;
+        state.finish_settings_load();
         state.refresh_settings_on_open();
-        assert!(!state.loaded.settings);
-        assert!(!state.settings_loaded);
+        assert!(!state.settings_loaded());
+    }
+
+    #[test]
+    fn settings_loading_state_prevents_duplicate_requests() {
+        let mut state = DetailUiState::default();
+        assert!(!state.settings_loaded());
+        assert!(state.begin_settings_load());
+        assert!(!state.settings_loaded());
+        assert!(!state.begin_settings_load());
+
+        state.finish_settings_load();
+        assert!(state.settings_loaded());
+        assert!(!state.begin_settings_load());
+
+        state.invalidate_settings();
+        assert!(!state.settings_loaded());
+        assert!(state.begin_settings_load());
+    }
+
+    #[test]
+    fn unconfigured_chat_stays_blocked_after_settings_hydration() {
+        let mut state = DetailUiState::default();
+        state.finish_settings_load();
+        assert_eq!(chat_setup_gap(&state), Some(ChatSetupGap::Plugin));
     }
 
     #[test]

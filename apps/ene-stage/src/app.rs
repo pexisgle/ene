@@ -279,7 +279,7 @@ impl StageApp {
                     self.detail.core_settings_text.clone_from(&json);
                     self.detail.core_patch_text.clear();
                     detail::parse_core_fields(&json, &mut self.detail);
-                    self.detail.settings_loaded = true;
+                    self.detail.finish_settings_load();
                     self.detail.core_status = if detail::chat_setup_gap(&self.detail)
                         == Some(detail::ChatSetupGap::ApiKey)
                     {
@@ -297,19 +297,12 @@ impl StageApp {
                 Ok(()) => {
                     self.detail.core_status = i18n::fl("settings-applied");
                     self.detail.invalidate_settings();
-                    let client = Arc::clone(&self.client);
-                    self.spawn(async move {
-                        AsyncOutcome::LoadCoreSettings(
-                            client
-                                .settings()
-                                .await
-                                .map(|v| {
-                                    serde_json::to_string_pretty(&v)
-                                        .unwrap_or_else(|_| v.to_string())
-                                })
-                                .map_err(|e| e.to_string()),
-                        )
-                    });
+                    detail::ensure_settings(
+                        &mut self.detail,
+                        &self.client,
+                        &self.rt_handle,
+                        &self.async_results,
+                    );
                 }
                 Err(err) => self.detail.core_status = err,
             },
@@ -697,7 +690,7 @@ impl StageApp {
             return;
         }
         if let Some(reason) = chat_send_block_reason(&self.detail) {
-            if !self.detail.settings_loaded {
+            if !self.detail.settings_loaded() {
                 detail::ensure_settings(
                     &mut self.detail,
                     &self.client,
@@ -1454,7 +1447,7 @@ impl StageApp {
 }
 
 fn chat_send_block_reason(detail: &DetailUiState) -> Option<String> {
-    if !detail.settings_loaded {
+    if !detail.settings_loaded() {
         return Some(i18n::fl("chat-settings-loading"));
     }
     detail::chat_setup_gap(detail).map(detail::chat_setup_status)
@@ -1476,7 +1469,7 @@ mod chat_tests {
     #[test]
     fn chat_checks_setup_after_settings_loads() {
         let mut state = DetailUiState::default();
-        state.settings_loaded = true;
+        state.finish_settings_load();
         assert_eq!(
             chat_send_block_reason(&state),
             Some(i18n::fl("chat-unconfigured"))
