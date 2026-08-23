@@ -12,7 +12,7 @@ fn bin() -> PathBuf {
 }
 
 #[tokio::test]
-async fn app_screenshot_registers_on_surface() {
+async fn app_screenshot_is_advertised_only_when_available() {
     let dir = TempDir::new().unwrap();
     let sup = Supervisor::new(dir.path().to_path_buf(), Arc::new(ToolRegistry::new()));
     let row = ProfileRow {
@@ -25,7 +25,6 @@ async fn app_screenshot_registers_on_surface() {
         config: serde_json::Value::Null,
     };
     sup.activate_process(&row, &bin()).await.unwrap();
-    assert!(sup.surface_has_tool("app.screenshot"));
     assert!(sup.surface_has_tool("app.capabilities"));
     assert!(
         !sup.surface_has_tool("app.click"),
@@ -37,6 +36,12 @@ async fn app_screenshot_registers_on_surface() {
         .await
         .unwrap();
     assert!(caps["session"].is_string());
+    assert_eq!(
+        sup.surface_has_tool("app.screenshot"),
+        caps["actions"]["app.screenshot"]["available"]
+            .as_bool()
+            .unwrap()
+    );
     assert!(caps["actions"]["app.screenshot"]["backend"].is_string());
     assert!(caps["actions"]["app.click"].get("available").is_some());
     sup.unload("r-app").await;
