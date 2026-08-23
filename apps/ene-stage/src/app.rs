@@ -104,6 +104,7 @@ pub fn run() -> Result<(), AppError> {
         detail_win: None,
         caption: None,
         spotlight: None,
+        chrome_focused: false,
         last_cursor: None,
         last_tick: Instant::now(),
         last_approval_poll: Instant::now(),
@@ -158,6 +159,7 @@ struct StageApp {
     detail_win: Option<ChromeWindow>,
     caption: Option<ChromeWindow>,
     spotlight: Option<ChromeWindow>,
+    chrome_focused: bool,
     last_cursor: Option<LogicalPosition<f32>>,
     last_tick: Instant,
     last_approval_poll: Instant,
@@ -165,69 +167,38 @@ struct StageApp {
 }
 
 impl StageApp {
-    #[cfg(test)]
-    fn new_for_test() -> Self {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        let _guard = runtime.enter();
-        let client = Arc::new(ene_api::ApiClient::new(
-            "http://127.0.0.1:9",
-            "token",
-            "stage",
-        ));
-        let rt_handle = runtime.handle().clone();
-        Self {
-            settings: DesktopSettings::default(),
-            local_settings: DesktopSettings::default(),
-            core: StageCore::detached(),
-            session: StageSession::new_for_test(
-                Arc::clone(&client),
-                "soul",
-                "old-session",
-                ene_api::HistoryResponse {
-                    messages: Vec::new(),
-                    depth: "surface".to_owned(),
-                },
-            ),
-            client,
-            runtime,
-            rt_handle,
-            feeds: EventFeeds::new_for_test(),
-            audio: AudioHub::new(),
-            viseme: VisemeAnalyzer::new(AudioHub::new().sample_rate()),
-            look_at_state: look_at::LookAtState::default(),
-            tray: None,
-            hotkeys: None,
-            surface: SurfaceUiState::default(),
-            detail: DetailUiState::default(),
-            async_results: Arc::new(Mutex::new(Vec::new())),
-            mic_active: false,
-            listen: MicListen::new(),
-            notify_claimed: false,
-            speaker_claimed: false,
-            gpu: None,
-            overlay: None,
-            chat: None,
-            detail_win: None,
-            caption: None,
-            spotlight: None,
-            last_cursor: None,
-            last_tick: Instant::now(),
-            last_approval_poll: Instant::now(),
-            approval_poll_inflight: false,
-        }
+    fn chrome_window_exists(&self) -> bool {
+        self.chat.is_some()
+            || self.detail_win.is_some()
+            || self.caption.is_some()
+            || self.spotlight.is_some()
+    }
+
+    fn sync_overlay_interaction(&mut self) {
+        let protect_chrome = self.chrome_focused && self.chrome_window_exists();
+        let always_on_top = self.local_settings.always_on_top;
+        let click_through = self.local_settings.overlay_click_through;
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        let level = overlay_window_level(protect_chrome, always_on_top);
+        let click_through = protect_chrome || (overlay.transparent && click_through);
+        overlay.window.set_window_level(level);
+        overlay.set_click_through(click_through);
     }
 
     fn open_chat(&mut self, event_loop: &ActiveEventLoop) {
         self.surface.chat_open = true;
         self.surface.focus_chat = true;
+        self.chrome_focused = true;
+        self.sync_overlay_interaction();
         if let Some(chat) = self.chat.as_ref() {
             chat.show_and_focus();
             return;
         }
         let Some(gpu) = self.gpu.as_ref() else {
+            self.chrome_focused = false;
+            self.sync_overlay_interaction();
             return;
         };
         match ChromeWindow::create(
@@ -237,8 +208,20 @@ impl StageApp {
             PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
             true,
         ) {
-            Ok(win) => self.chat = Some(win),
-            Err(err) => tracing::warn!(error = %err, "chat window failed"),
+            Ok(win) => {
+                self.chat = Some(win);
+                self.sync_overlay_interaction();
+                if let Some(chat) = self.chat.as_ref() {
+                    chat.show_and_focus();
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "chat window failed");
+                if !self.chrome_window_exists() {
+                    self.chrome_focused = false;
+                    self.sync_overlay_interaction();
+                }
+            }
         }
     }
 
@@ -640,27 +623,6 @@ impl StageApp {
                     Err(err) => err,
                 };
             }
-            AsyncOutcome::NewSession(result) => match result {
-                Ok(split) => {
-                    self.session.adopt_new_session(&split);
-                    self.feeds =
-                        spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
-                    self.detail.set_session_id(self.session.session_id());
-                    self.surface.history = self.session.history();
-                    self.surface.streaming_text.clear();
-                    self.surface.pending_approval = None;
-                    self.surface.pending_question = None;
-                    self.surface.status = i18n::fl("chat-new-session-ready");
-                    self.request_history_refresh();
-                    self.detail.new_session_inflight = false;
-                    self.surface.new_session_inflight = false;
-                }
-                Err(err) => {
-                    self.detail.new_session_inflight = false;
-                    self.surface.new_session_inflight = false;
-                    self.surface.status = err;
-                }
-            },
             AsyncOutcome::CompactSession(result) => {
                 self.detail.core_status = match result {
                     Ok(id) => format!("{}: {id}", i18n::fl("jobs-compacted")),
@@ -765,24 +727,6 @@ impl StageApp {
             AsyncOutcome::RefreshHistory(
                 session
                     .refresh_history()
-                    .await
-                    .map_err(|err| err.to_string()),
-            )
-        });
-    }
-
-    fn start_new_session(&mut self) {
-        if self.detail.new_session_inflight {
-            return;
-        }
-        self.detail.new_session_inflight = true;
-        self.surface.new_session_inflight = true;
-        let client = Arc::clone(&self.client);
-        let session_id = self.session.session_id().to_owned();
-        self.spawn(async move {
-            AsyncOutcome::NewSession(
-                client
-                    .split_session(&session_id)
                     .await
                     .map_err(|err| err.to_string()),
             )
@@ -930,14 +874,7 @@ impl StageApp {
         if let Some(caption) = &self.caption {
             caption.place_caption(&settings.caption_position);
         }
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay
-                .window
-                .set_window_level(window_level(settings.always_on_top));
-            if overlay.transparent {
-                overlay.set_click_through(settings.overlay_click_through);
-            }
-        }
+        self.sync_overlay_interaction();
         self.spawn(async move {
             AsyncOutcome::SaveLocalSettings(
                 save_desktop_settings(&settings).map_err(|err| err.to_string()),
@@ -961,19 +898,18 @@ impl StageApp {
     }
 
     fn toggle_overlay_chrome(&mut self) {
-        let preferred = self.local_settings.overlay_click_through;
         let size = {
             let Some(overlay) = self.overlay.as_mut() else {
                 return;
             };
             overlay.toggle_chrome();
-            overlay.apply_click_through(preferred);
             overlay.window.inner_size()
         };
         let gpu = self.gpu.as_ref();
         if let (Some(gpu), Some(overlay)) = (gpu, self.overlay.as_mut()) {
             overlay.resize(gpu, size);
         }
+        self.sync_overlay_interaction();
     }
 
     fn raise_chrome(&self) {
@@ -1040,7 +976,6 @@ impl StageApp {
         for action in actions {
             match action {
                 SurfaceAction::SendChat => self.send_chat(),
-                SurfaceAction::NewSession => self.start_new_session(),
                 SurfaceAction::BargeIn => self.barge_in(),
                 SurfaceAction::CancelTurn => self.cancel_turn(),
                 SurfaceAction::ToggleMic => self.toggle_mic(),
@@ -1293,6 +1228,8 @@ impl StageApp {
         self.detail.visible = true;
         self.detail.refresh_settings_on_open();
         self.detail.select_tab(tab);
+        self.chrome_focused = true;
+        self.sync_overlay_interaction();
         if let Some(detail) = self.detail_win.as_ref() {
             detail.show_and_focus();
             return;
@@ -1305,9 +1242,24 @@ impl StageApp {
                 PhysicalSize::new(960, 680),
                 true,
             ) {
-                Ok(win) => self.detail_win = Some(win),
-                Err(err) => tracing::warn!(error = %err, "detail window failed"),
+                Ok(win) => {
+                    self.detail_win = Some(win);
+                    self.sync_overlay_interaction();
+                    if let Some(detail) = self.detail_win.as_ref() {
+                        detail.show_and_focus();
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "detail window failed");
+                    if !self.chrome_window_exists() {
+                        self.chrome_focused = false;
+                        self.sync_overlay_interaction();
+                    }
+                }
             }
+        } else {
+            self.chrome_focused = false;
+            self.sync_overlay_interaction();
         }
     }
 
@@ -1503,7 +1455,7 @@ impl StageApp {
             let rt = self.rt_handle.clone();
             let results = Arc::clone(&self.async_results);
             let soul_id = self.session.soul_id().to_owned();
-            detail.set_session_id(self.session.session_id());
+            self.session.session_id().clone_into(&mut detail.session_id);
             let theme = local.theme.clone();
             let paint = detail_win.paint(gpu, Some(theme.as_str()), |ui| {
                 detail::show(
@@ -1658,6 +1610,10 @@ impl ApplicationHandler for StageApp {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let overlay_id = self.overlay.as_ref().map(OverlayWindow::id);
         if overlay_id == Some(id) {
+            if matches!(event, WindowEvent::Focused(true)) {
+                self.chrome_focused = false;
+                self.sync_overlay_interaction();
+            }
             match event {
                 WindowEvent::CloseRequested => self.surface.quit = true,
                 WindowEvent::Resized(size) => {
@@ -1719,6 +1675,7 @@ impl ApplicationHandler for StageApp {
         let mut close_caption = false;
         let mut close_spotlight = false;
         let mut overlay_from_chrome = None;
+        let mut chrome_focus_state = None;
         if let Some(chat) = self.chat.as_mut()
             && chat.id() == id
         {
@@ -1729,6 +1686,7 @@ impl ApplicationHandler for StageApp {
                 chat.resize(gpu, *size);
             }
             overlay_from_chrome = Some(chat.owns_input());
+            chrome_focus_state = window_focus_state(&event);
             close_chat = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(detail) = self.detail_win.as_mut()
@@ -1741,19 +1699,26 @@ impl ApplicationHandler for StageApp {
                 detail.resize(gpu, *size);
             }
             overlay_from_chrome = Some(detail.owns_input());
+            chrome_focus_state = window_focus_state(&event);
             close_detail = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(caption) = self.caption.as_mut()
             && caption.id() == id
         {
             caption.on_window_event(&event);
+            chrome_focus_state = window_focus_state(&event);
             close_caption = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(spotlight) = self.spotlight.as_mut()
             && spotlight.id() == id
         {
             spotlight.on_window_event(&event);
+            chrome_focus_state = window_focus_state(&event);
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
+        }
+        if let Some(focused) = chrome_focus_state {
+            self.chrome_focused = focused;
+            self.sync_overlay_interaction();
         }
         if !self.surface.chat_input_focused
             && overlay_from_chrome.is_none_or(|wants| !wants)
@@ -1779,6 +1744,12 @@ impl ApplicationHandler for StageApp {
         if close_spotlight {
             self.spotlight = None;
             self.surface.spotlight_open = false;
+        }
+        if !self.chrome_window_exists() {
+            self.chrome_focused = false;
+        }
+        if close_chat || close_detail || close_caption || close_spotlight {
+            self.sync_overlay_interaction();
         }
     }
 
@@ -1828,6 +1799,23 @@ fn window_level(always_on_top: bool) -> WindowLevel {
     }
 }
 
+#[must_use]
+fn overlay_window_level(chrome_focused: bool, always_on_top: bool) -> WindowLevel {
+    if chrome_focused {
+        WindowLevel::Normal
+    } else {
+        window_level(always_on_top)
+    }
+}
+
+#[must_use]
+fn window_focus_state(event: &WindowEvent) -> Option<bool> {
+    match event {
+        WindowEvent::Focused(focused) => Some(*focused),
+        _ => None,
+    }
+}
+
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
         "(empty)"
@@ -1848,26 +1836,9 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
-        provider_asset_load_status, window_level,
+        ChatWindowAction, chat_window_action, format_log_text, overlay_window_level,
+        provider_asset_load_status, window_focus_state, window_level,
     };
-    use ene_api::{HistoryResponse, MessageResponse, SessionView, SplitSessionResponse};
-    use std::sync::Arc;
-
-    fn session_view(id: &str) -> SessionView {
-        SessionView {
-            id: id.to_owned(),
-            soul_id: "soul".to_owned(),
-            kind: "conversation".to_owned(),
-            title: None,
-            created_at: "2026-01-01T00:00:00Z".to_owned(),
-            archived: false,
-            next_seq: 0,
-            ended_at: None,
-            end_reason: None,
-            delegation_id: None,
-        }
-    }
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
@@ -1876,91 +1847,35 @@ mod tests {
     }
 
     #[test]
-    fn new_chat_start_is_deduplicated_by_shared_inflight_guard() {
-        let mut app = StageApp::new_for_test();
-        app.detail.new_session_inflight = true;
-        app.surface.new_session_inflight = true;
-        let before = app.async_results.lock().len();
-
-        app.start_new_session();
-
-        assert_eq!(app.async_results.lock().len(), before);
-        assert!(app.detail.new_session_inflight);
-        assert!(app.surface.new_session_inflight);
+    fn focused_chrome_lowers_overlay_until_focus_returns() {
+        assert_eq!(
+            overlay_window_level(true, true),
+            winit::window::WindowLevel::Normal
+        );
+        assert_eq!(
+            overlay_window_level(false, true),
+            winit::window::WindowLevel::AlwaysOnTop
+        );
+        assert_eq!(
+            overlay_window_level(false, false),
+            winit::window::WindowLevel::Normal
+        );
     }
 
     #[test]
-    fn failed_new_session_split_keeps_visible_state() {
-        let mut app = StageApp::new_for_test();
-        app.surface.new_session_inflight = true;
-        app.detail.new_session_inflight = true;
-        app.session.set_for_test(
-            Arc::clone(&app.client),
-            "soul",
-            "old-session",
-            HistoryResponse {
-                messages: Vec::new(),
-                depth: "surface".to_owned(),
-            },
+    fn chrome_focus_state_includes_focus_loss() {
+        assert_eq!(
+            window_focus_state(&winit::event::WindowEvent::Focused(true)),
+            Some(true)
         );
-        app.surface.history.messages.push(MessageResponse {
-            seq: 1,
-            role: "assistant".to_owned(),
-            text: "old".to_owned(),
-        });
-
-        app.apply_async_outcome(AsyncOutcome::NewSession(
-            Err("split unavailable".to_owned()),
-        ));
-
-        assert!(!app.detail.new_session_inflight);
-        assert!(!app.surface.new_session_inflight);
-        assert_eq!(app.surface.history.messages.len(), 1);
-        assert_eq!(app.surface.history.messages[0].text, "old");
-        assert_eq!(app.surface.status, "split unavailable");
-    }
-
-    #[test]
-    fn successful_new_session_adopts_before_refresh_failure() {
-        let mut app = StageApp::new_for_test();
-        app.surface.new_session_inflight = true;
-        app.detail.new_session_inflight = true;
-        let split = SplitSessionResponse {
-            previous: session_view("old-session"),
-            session: session_view("new-session"),
-        };
-        let old_history = HistoryResponse {
-            messages: vec![MessageResponse {
-                seq: 1,
-                role: "assistant".to_owned(),
-                text: "old".to_owned(),
-            }],
-            depth: "surface".to_owned(),
-        };
-        app.session.set_for_test(
-            Arc::clone(&app.client),
-            "soul",
-            "old-session",
-            old_history.clone(),
+        assert_eq!(
+            window_focus_state(&winit::event::WindowEvent::Focused(false)),
+            Some(false)
         );
-        app.surface.history = old_history;
-
-        app.apply_async_outcome(AsyncOutcome::NewSession(Ok(split)));
-
-        assert!(!app.detail.new_session_inflight);
-        assert!(!app.surface.new_session_inflight);
-        assert_eq!(app.session.session_id(), "new-session");
-        assert_eq!(app.detail.session_id, "new-session");
-        assert!(app.surface.history.messages.is_empty());
-
-        app.apply_async_outcome(AsyncOutcome::RefreshHistory(Err(
-            "history unavailable".to_owned()
-        )));
-
-        assert_eq!(app.session.session_id(), "new-session");
-        assert_eq!(app.detail.session_id, "new-session");
-        assert!(app.surface.history.messages.is_empty());
-        assert_eq!(app.surface.status, "history unavailable");
+        assert_eq!(
+            window_focus_state(&winit::event::WindowEvent::CloseRequested),
+            None
+        );
     }
 
     #[test]
