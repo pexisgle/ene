@@ -7,7 +7,8 @@ Build-environment details live in the repository's `AGENTS.md`.
 
 - **Linux and native Windows** are supported development platforms. macOS is
   not supported.
-- **Rust ≥ 1.85** (the workspace uses edition 2024). Use the stable toolchain.
+- **Rust 1.98.0** (the workspace uses edition 2024; the version is pinned in
+  `rust-toolchain.toml`).
 - On Linux, native dependencies are Vulkan, ALSA, OpenSSL, `libclang`, `mold`,
   and Wayland/X11 development packages. The checked-in Nix flake provides them.
 - On Windows, install the stable MSVC Rust toolchain, Visual Studio 2022
