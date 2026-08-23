@@ -277,6 +277,58 @@ pub struct MemoryView {
     pub schedule_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryCandidateView {
+    pub id: String,
+    pub soul_id: String,
+    pub scope: String,
+    pub kind: String,
+    pub title: String,
+    pub content: String,
+    pub confidence: f32,
+    pub sensitive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCandidateDecision {
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveMemoryCandidateRequest {
+    pub decision: MemoryCandidateDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveMemoryCandidateResponse {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryJournalView {
+    pub seq: u64,
+    pub ts: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_id: Option<String>,
+    pub soul_id: String,
+    pub action: String,
+    pub payload: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]

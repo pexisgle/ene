@@ -41,9 +41,9 @@ pub use inner::{
     split_surface_and_inner,
 };
 pub use memory::{
-    ArbitrateOutcome, JournalAction, MemoryCandidate, MemoryKind, MemoryRecord, MemoryScope,
-    MemorySource, NewMemory, RecalledMemory, apply_forget_request, arbitrate,
-    deterministic_extract, extract_turn,
+    ArbitrateOutcome, CandidateResolution, JournalAction, MemoryCandidate, MemoryJournalEntry,
+    MemoryKind, MemoryRecord, MemoryScope, MemorySource, NewMemory, RecalledMemory,
+    apply_forget_request, arbitrate, deterministic_extract, extract_turn,
 };
 pub use package::{
     InstalledPackage, PackageKind, avatar_path_for_install, compose_soul_and_body, content_digest,

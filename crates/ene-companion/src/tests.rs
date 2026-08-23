@@ -7,8 +7,8 @@ use crate::config::{AffectSettings, MindSettings, ProactiveSettings};
 use crate::ids::CandidateId;
 use crate::inner::{model_visible_for, split_surface_and_inner};
 use crate::memory::{
-    ArbitrateOutcome, JournalAction, MemoryCandidate, MemoryKind, MemoryScope, MemorySource,
-    NewMemory, arbitrate, deterministic_extract, extract_turn,
+    ArbitrateOutcome, CandidateResolution, JournalAction, MemoryCandidate, MemoryKind, MemoryScope,
+    MemorySource, NewMemory, arbitrate, deterministic_extract, extract_turn,
 };
 use crate::package::{
     avatar_path_for_install, compose_soul_and_body, content_digest, export_dir,
@@ -749,6 +749,107 @@ fn sensitive_candidate_queues_for_approval() {
     let pending = store.list_pending_candidates(soul.id).unwrap();
     assert_eq!(pending.len(), 1);
     assert!(pending[0].sensitive);
+}
+
+#[test]
+fn candidate_resolution_accepts_edits_and_records_decision() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let candidate = MemoryCandidate {
+        id: CandidateId::new(),
+        soul_id: soul.id,
+        kind: MemoryKind::Semantic,
+        title: "old title".into(),
+        content: "old content".into(),
+        scope: MemoryScope::Private,
+        confidence: 0.6,
+        salience: 0.8,
+        sensitive: false,
+        expires_at: None,
+    };
+    let candidate_id = candidate.id;
+    store.insert_candidate(&candidate).unwrap();
+
+    let memory = store
+        .resolve_candidate(
+            candidate_id,
+            CandidateResolution {
+                accept: true,
+                title: Some("edited title".into()),
+                content: Some("edited content".into()),
+                kind: Some("preference".into()),
+                scope: Some("shared".into()),
+            },
+        )
+        .unwrap()
+        .expect("accept creates a memory");
+    assert_eq!(memory.title, "edited title");
+    assert_eq!(memory.content, "edited content");
+    assert_eq!(memory.kind, MemoryKind::Preference);
+    assert_eq!(memory.scope, MemoryScope::Shared);
+    assert!(store.list_pending_candidates(soul.id).unwrap().is_empty());
+    assert_eq!(store.list_memories(soul.id, None).unwrap().len(), 1);
+    let journal = store.list_journal(soul.id).unwrap();
+    let accepted = journal
+        .iter()
+        .find(|entry| entry.action == "candidate_accepted")
+        .expect("accepted candidate is journaled");
+    assert_eq!(accepted.memory_id, Some(memory.id));
+    assert_eq!(accepted.payload["accepted"]["scope"], "shared");
+    assert!(matches!(
+        store.resolve_candidate(
+            candidate_id,
+            CandidateResolution {
+                accept: false,
+                ..CandidateResolution::default()
+            }
+        ),
+        Err(CompanionError::CandidateConflict(_))
+    ));
+}
+
+#[test]
+fn candidate_resolution_reject_records_without_creating_memory() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let candidate = MemoryCandidate {
+        id: CandidateId::new(),
+        soul_id: soul.id,
+        kind: MemoryKind::Episodic,
+        title: "reject me".into(),
+        content: "not a memory".into(),
+        scope: MemoryScope::Private,
+        confidence: 0.4,
+        salience: 0.4,
+        sensitive: true,
+        expires_at: None,
+    };
+    store.insert_candidate(&candidate).unwrap();
+    assert!(
+        store
+            .resolve_candidate(
+                candidate.id,
+                CandidateResolution {
+                    accept: false,
+                    ..CandidateResolution::default()
+                },
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.list_memories(soul.id, None).unwrap().is_empty());
+    let rejected = store
+        .list_journal(soul.id)
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.action == "candidate_rejected")
+        .expect("rejected candidate is journaled");
+    assert!(rejected.memory_id.is_none());
+    assert_eq!(rejected.payload["candidate_id"], candidate.id.to_string());
 }
 
 #[test]

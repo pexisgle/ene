@@ -4,12 +4,12 @@ use base64::Engine;
 use chrono::TimeZone;
 use ene_api::{
     AnswerJobRequest, ApiClient, ClaimResourceRequest, CreateScheduleRequest, CreateSessionRequest,
-    EndSessionRequest, HistoryResponse, MessageMode, MessageRequest, ResourceKind, RestoreRequest,
-    SoulSkillsPatch, ToolTestRequest,
+    EndSessionRequest, HistoryResponse, MemoryCandidateDecision, MessageMode, MessageRequest,
+    ResolveMemoryCandidateRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
 };
 use ene_companion::{
-    CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, ScriptedClassify,
-    content_digest, install_archive, pack_archive,
+    CandidateId, CompanionStore, MemoryCandidate, MemoryKind, MemoryScope, MemorySource, NewMemory,
+    ScriptedClassify, content_digest, install_archive, pack_archive,
 };
 use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
@@ -1063,6 +1063,75 @@ async fn http_forget_memory_is_audited() {
         blob.contains("forget") || blob.contains(&memory.id.to_string()),
         "forget must be audited: {blob}"
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn http_memory_candidate_resolution_edits_and_rejects_stale_writes() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul_id = ene_session::SoulId::from_str(&souls.items[0].id).unwrap();
+    let candidate = MemoryCandidate {
+        id: CandidateId::new(),
+        soul_id,
+        kind: MemoryKind::Semantic,
+        title: "candidate title".into(),
+        content: "candidate content".into(),
+        scope: MemoryScope::Private,
+        confidence: 0.42,
+        salience: 0.7,
+        sensitive: true,
+        expires_at: None,
+    };
+    core.companions().insert_candidate(&candidate).unwrap();
+    let pending = client
+        .list_pending_memories(&souls.items[0].id)
+        .await
+        .unwrap();
+    assert!((pending.items[0].confidence - 0.42).abs() < f32::EPSILON);
+    assert!(pending.items[0].sensitive);
+    let request = ResolveMemoryCandidateRequest {
+        decision: MemoryCandidateDecision::Accept,
+        title: Some("edited title".into()),
+        content: Some("edited content".into()),
+        kind: Some("preference".into()),
+        scope: Some("shared".into()),
+    };
+    let accepted = client
+        .resolve_memory_candidate(&candidate.id.to_string(), &request)
+        .await
+        .unwrap();
+    let memory = accepted.memory.expect("accepted candidate creates memory");
+    assert_eq!(accepted.status, "accepted");
+    assert_eq!(memory.title, "edited title");
+    assert_eq!(memory.scope, "shared");
+    let history = client
+        .list_memory_journal(&souls.items[0].id)
+        .await
+        .unwrap();
+    assert!(
+        history
+            .items
+            .iter()
+            .any(|entry| entry.action == "candidate_accepted")
+    );
+    let stale = client
+        .resolve_memory_candidate(
+            &candidate.id.to_string(),
+            &ResolveMemoryCandidateRequest {
+                decision: MemoryCandidateDecision::Reject,
+                title: None,
+                content: None,
+                kind: None,
+                scope: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale,
+        ene_api::ApiError::Problem { status: 409, .. }
+    ));
     server.shutdown().await;
 }
 

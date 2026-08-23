@@ -62,7 +62,8 @@
       "delete": { "summary": "Forget memory (desktop)", "responses": { "200": { "description": "ok" } } }
     },
     "/memories/pending": { "get": { "summary": "Pending memory candidates", "responses": { "200": { "description": "page" } } } },
-    "/memories/candidates/{id}/resolve": { "post": { "summary": "Accept or reject a memory candidate", "responses": { "200": { "description": "result" } } } },
+    "/memories/journal": { "get": { "summary": "Memory decision journal", "responses": { "200": { "description": "page" } } } },
+    "/memories/candidates/{id}/resolve": { "post": { "summary": "Accept or reject an editable memory candidate", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["decision"], "properties": { "decision": { "type": "string", "enum": ["accept", "reject"] }, "title": { "type": "string" }, "content": { "type": "string" }, "kind": { "type": "string" }, "scope": { "type": "string", "enum": ["private", "shared"] } } } } } }, "responses": { "200": { "description": "result" }, "409": { "description": "candidate already resolved" } } } },
     "/tools": { "get": { "summary": "Tool surface", "responses": { "200": { "description": "page" } } } },
     "/tools/{name}/test": { "post": { "summary": "Dev invoke", "responses": { "200": { "description": "result" } } } },
     "/plugins": { "get": { "summary": "Plugin fibers", "responses": { "200": { "description": "page" } } } },

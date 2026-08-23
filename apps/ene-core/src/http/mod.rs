@@ -455,6 +455,10 @@ fn router(state: AppState) -> Router {
             get(routes::list_pending_memories),
         )
         .route(
+            "/api/v1/memories/journal",
+            get(routes::list_memory_journal),
+        )
+        .route(
             "/api/v1/memories/candidates/{id}/resolve",
             post(routes::resolve_memory_candidate),
         )
