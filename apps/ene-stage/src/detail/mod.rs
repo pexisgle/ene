@@ -7,9 +7,8 @@ use std::sync::Arc;
 use base64::Engine as _;
 use ene_api::{
     ApiClient, ApiError, CharacterView, CreateJobRequest, JobView, MemoryPatch, MemoryView,
-    OccupantView,
-    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
-    ScheduleView, SoulView,
+    OccupantView, PluginConfigField, PluginConfigValues, PluginConfigView, PluginView,
+    ProviderAssetView, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
