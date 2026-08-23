@@ -42,6 +42,12 @@ async fn app_screenshot_is_advertised_only_when_available() {
             .as_bool()
             .unwrap()
     );
+    assert_eq!(
+        sup.surface_has_tool("app.window_list"),
+        caps["actions"]["app.window_list"]["available"]
+            .as_bool()
+            .unwrap()
+    );
     assert!(caps["actions"]["app.screenshot"]["backend"].is_string());
     assert!(caps["actions"]["app.click"].get("available").is_some());
     sup.unload("r-app").await;

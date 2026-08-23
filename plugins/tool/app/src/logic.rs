@@ -14,7 +14,7 @@ mod hostcmd;
 #[path = "win32.rs"]
 mod win32;
 
-use capability::{PlatformCaps, fail};
+use capability::{PlatformCaps, dependency_missing, fail};
 use hostcmd::{run, stdout_text};
 
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
@@ -93,6 +93,9 @@ pub(crate) fn specs_for(caps: &PlatformCaps) -> Vec<ToolSpecWire> {
             ),
         ]);
     }
+    if !caps.window_list.available {
+        out.retain(|tool| tool.name != "app.window_list");
+    }
     out
 }
 
@@ -123,29 +126,34 @@ fn window_list(caps: &PlatformCaps) -> Result<Value, String> {
                 .unwrap_or("window list is not available"),
         ));
     }
-    if let Ok(text) = stdout_text("wmctrl", &["-l"]) {
-        return Ok(json!({ "windows": parse_wmctrl(&text), "backend": "wmctrl" }));
-    }
-    if let Ok(text) = stdout_text("hyprctl", &["clients"]) {
-        let windows = parse_hypr_clients(&text);
-        if !windows.is_empty() {
-            return Ok(json!({ "windows": windows, "backend": "hyprctl" }));
+    match caps.window_list.backend {
+        "wmctrl" => {
+            let text = stdout_text("wmctrl", &["-l"])
+                .map_err(|_| dependency_missing("wmctrl", "wmctrl"))?;
+            Ok(json!({ "windows": parse_wmctrl(&text), "backend": "wmctrl" }))
         }
-    }
-    if let Ok(text) = stdout_text("swaymsg", &["-t", "get_tree"])
-        && let Ok(tree) = serde_json::from_str::<Value>(&text)
-    {
-        let mut windows = Vec::new();
-        collect_sway_windows(&tree, &mut windows);
-        if !windows.is_empty() {
-            return Ok(json!({ "windows": windows, "backend": "swaymsg" }));
+        "hyprctl" => {
+            let text = stdout_text("hyprctl", &["clients"])
+                .map_err(|_| dependency_missing("hyprctl", "hyprland"))?;
+            Ok(json!({ "windows": parse_hypr_clients(&text), "backend": "hyprctl" }))
         }
+        "swaymsg" => {
+            let text = stdout_text("swaymsg", &["-t", "get_tree"])
+                .map_err(|_| dependency_missing("swaymsg", "sway"))?;
+            let tree = serde_json::from_str::<Value>(&text)
+                .map_err(|_| fail("unavailable", "swaymsg", "invalid sway window tree"))?;
+            let mut windows = Vec::new();
+            collect_sway_windows(&tree, &mut windows);
+            Ok(json!({ "windows": windows, "backend": "swaymsg" }))
+        }
+        _ => Err(fail(
+            "unsupported",
+            caps.window_list.backend,
+            caps.window_list
+                .reason
+                .unwrap_or("window list is not available"),
+        )),
     }
-    Err(fail(
-        "unavailable",
-        caps.window_list.backend,
-        "window list needs wmctrl, hyprctl, or swaymsg",
-    ))
 }
 
 fn parse_wmctrl(text: &str) -> Vec<Value> {
@@ -351,5 +359,6 @@ mod tests {
 
         assert!(!names.iter().any(|name| name == "app.screenshot"));
         assert!(names.iter().any(|name| name == "app.capabilities"));
+        assert!(!names.iter().any(|name| name == "app.window_list"));
     }
 }

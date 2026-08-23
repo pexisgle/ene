@@ -7,6 +7,9 @@ use std::path::Path;
 
 const SCREENSHOT_CLI_BACKENDS: &[&str] =
     &["grim", "import", "gnome-screenshot", "spectacle", "scrot"];
+const X11_WINDOW_LIST_BACKENDS: &[&str] = &["wmctrl"];
+const HYPRLAND_WINDOW_LIST_BACKENDS: &[&str] = &["hyprctl"];
+const SWAY_WINDOW_LIST_BACKENDS: &[&str] = &["swaymsg"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionKind {
@@ -74,7 +77,7 @@ impl PlatformCaps {
                 },
                 reason: None,
             },
-            window_list: window_cap(session, desktop),
+            window_list: window_cap(session, desktop, env.get("PATH").map(String::as_str)),
             active_window: active_cap(session, desktop),
             list_monitors: monitor_cap(session, desktop),
             input,
@@ -186,8 +189,26 @@ fn portal_session_available(env: &HashMap<String, String>) -> bool {
 }
 
 pub(crate) fn screenshot_cli_backend(path: Option<&str>) -> Option<&'static str> {
+    executable_backend(path, SCREENSHOT_CLI_BACKENDS)
+}
+
+pub(crate) fn window_list_cli_backend(
+    session: SessionKind,
+    desktop: DesktopKind,
+    path: Option<&str>,
+) -> Option<&'static str> {
+    let candidates = match (session, desktop) {
+        (SessionKind::X11, _) => X11_WINDOW_LIST_BACKENDS,
+        (SessionKind::Wayland, DesktopKind::Hyprland) => HYPRLAND_WINDOW_LIST_BACKENDS,
+        (SessionKind::Wayland, DesktopKind::Sway) => SWAY_WINDOW_LIST_BACKENDS,
+        _ => return None,
+    };
+    executable_backend(path, candidates)
+}
+
+fn executable_backend(path: Option<&str>, candidates: &[&'static str]) -> Option<&'static str> {
     let path = OsStr::new(path?);
-    SCREENSHOT_CLI_BACKENDS.iter().copied().find(|backend| {
+    candidates.iter().copied().find(|backend| {
         std::env::split_paths(path).any(|directory| executable_file(&directory.join(backend)))
     })
 }
@@ -209,28 +230,28 @@ fn executable_file(path: &Path) -> bool {
     }
 }
 
-fn window_cap(session: SessionKind, desktop: DesktopKind) -> ActionCap {
+fn window_cap(session: SessionKind, desktop: DesktopKind, path: Option<&str>) -> ActionCap {
     match (session, desktop) {
         (SessionKind::Windows, _) => ActionCap {
-            available: true,
-            backend: "win32",
-            reason: None,
+            available: false,
+            backend: "none",
+            reason: Some("Windows window-list enumeration is not implemented"),
         },
-        (SessionKind::X11, _) => ActionCap {
-            available: true,
-            backend: "wmctrl",
-            reason: Some("needs wmctrl"),
-        },
-        (SessionKind::Wayland, DesktopKind::Hyprland) => ActionCap {
-            available: true,
-            backend: "hyprctl",
-            reason: None,
-        },
-        (SessionKind::Wayland, DesktopKind::Sway) => ActionCap {
-            available: true,
-            backend: "swaymsg",
-            reason: None,
-        },
+        (SessionKind::X11, _)
+        | (SessionKind::Wayland, DesktopKind::Hyprland | DesktopKind::Sway) => {
+            match window_list_cli_backend(session, desktop, path) {
+                Some(backend) => ActionCap {
+                    available: true,
+                    backend,
+                    reason: None,
+                },
+                None => ActionCap {
+                    available: false,
+                    backend: "none",
+                    reason: Some("window-list helper is missing or not executable on PATH"),
+                },
+            }
+        }
         (SessionKind::Wayland, DesktopKind::Gnome | DesktopKind::Kde) => ActionCap {
             available: false,
             backend: "none",
@@ -393,7 +414,9 @@ pub(crate) fn dependency_missing(backend: &'static str, package: &'static str) -
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopKind, PlatformCaps, SessionKind, screenshot_cli_backend};
+    use super::{
+        DesktopKind, PlatformCaps, SessionKind, screenshot_cli_backend, window_list_cli_backend,
+    };
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -451,6 +474,31 @@ mod tests {
         assert_eq!(screenshot_cli_backend(Some("/definitely/missing")), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn window_list_probe_requires_an_executable_backend() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = dir.path().join("wmctrl");
+        std::fs::write(&backend, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        assert_eq!(
+            window_list_cli_backend(SessionKind::X11, DesktopKind::Other, Some(path)),
+            Some("wmctrl")
+        );
+        assert_eq!(
+            window_list_cli_backend(
+                SessionKind::X11,
+                DesktopKind::Other,
+                Some("/definitely/missing")
+            ),
+            None
+        );
+    }
+
     #[test]
     fn x11_without_a_screenshot_backend_is_unavailable() {
         let caps = PlatformCaps::from_env(&env(&[
@@ -462,5 +510,7 @@ mod tests {
         assert!(!caps.screenshot.available);
         assert_eq!(caps.screenshot.backend, "none");
         assert!(caps.screenshot.reason.is_some());
+        assert!(!caps.window_list.available);
+        assert_eq!(caps.window_list.backend, "none");
     }
 }
