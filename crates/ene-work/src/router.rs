@@ -1,8 +1,8 @@
 use crate::host::{
-    DelegationHost, StartDelegation, SurfaceCallKind, UpgradeRequest, fold_brief,
-    should_upgrade_steps, surface_call_kind,
+    DelegationHost, StartDelegation, SurfaceCallKind, fold_brief, should_upgrade_steps,
+    surface_call_kind,
 };
-use crate::types::{DelegationMode, NewToolExecution, ToolExecStatus, UpgradeReason};
+use crate::types::{DelegationMode, NewToolExecution, ToolExecStatus};
 use async_trait::async_trait;
 use ene_kernel::{KernelError, SurfaceRouter, SurfaceToolOutcome};
 use ene_registry::{Layer, ToolRegistry, ToolSource};
@@ -52,28 +52,33 @@ impl SurfaceRouter for WorkSurfaceRouter {
         let kind = surface_call_kind(&self.registry, name);
         let budget = should_upgrade_steps(step, self.max_steps);
         if budget || kind == SurfaceCallKind::Upgrade {
-            let reason = if kind == SurfaceCallKind::Upgrade {
-                UpgradeReason::SideEffectTool
-            } else {
-                UpgradeReason::StepBudget
-            };
             let learned = self.learned.lock().clone();
             let brief = fold_brief(&learned, Some(name));
             let goal = args
                 .get("goal")
                 .and_then(Value::as_str)
                 .map_or_else(|| format!("continue after {name}"), str::to_owned);
-            let job = self
-                .host
-                .auto_upgrade(UpgradeRequest {
-                    soul_id: self.soul,
-                    goal,
-                    reason,
-                    steps_so_far: learned.join("; "),
-                    brief: Some(brief),
-                    created_from_turn: None,
-                })
+            let value = self
+                .registry
+                .execute(
+                    "delegate.start",
+                    json!({
+                        "goal": goal,
+                        "mode": "public",
+                        "soul_id": self.soul.to_string(),
+                        "title": "task",
+                        "excerpt": brief,
+                    }),
+                    Layer::Surface,
+                )
+                .await
                 .map_err(|err| KernelError::Tool(err.to_string()))?;
+            let job_id = value
+                .get("delegation_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    KernelError::Tool("delegate.start did not return a delegation_id".to_owned())
+                })?;
             let speech = if kind == SurfaceCallKind::Upgrade {
                 format!("That action requires a Work job, so I started one for `{name}`.")
             } else {
@@ -81,7 +86,7 @@ impl SurfaceRouter for WorkSurfaceRouter {
             };
             return Ok(SurfaceToolOutcome::Delegated {
                 speech,
-                job_id: job.id.to_string(),
+                job_id: job_id.to_owned(),
             });
         }
         match kind {

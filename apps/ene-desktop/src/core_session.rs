@@ -949,7 +949,7 @@ fn dispatch_surface(
                 drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(speech.to_owned()))));
             }
         }
-        "question.asked" => dispatch_question_asked(value, event_tx),
+        ene_api::QUESTION_ASKED_EVENT => dispatch_question_asked(value, event_tx),
         "audio.chunk" => {
             if let Some(sender) = audio_tx
                 && let Some(pcm) = value.get("pcm").and_then(Value::as_array)

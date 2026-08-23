@@ -10,7 +10,7 @@ use crate::types::{
 };
 use chrono::{DateTime, Utc};
 use ene_registry::{Layer, ToolDefinition, ToolRegistry};
-use ene_session::{DelegationId, SoulId};
+use ene_session::{DelegationId, QuestionId, SoulId};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,6 +63,7 @@ pub struct DelegationHost {
     data_dir: PathBuf,
     settings: WorkDelegationSettings,
     speech_gate: Arc<SpeechGate>,
+    question_gate: Mutex<()>,
     report_tx: Mutex<Option<mpsc::UnboundedSender<CompanionReport>>>,
     job_wake: Mutex<Option<mpsc::UnboundedSender<Job>>>,
 }
@@ -102,6 +103,7 @@ impl DelegationHost {
             data_dir,
             settings,
             speech_gate: Arc::new(SpeechGate::new()),
+            question_gate: Mutex::new(()),
             report_tx: Mutex::new(None),
             job_wake: Mutex::new(None),
         }
@@ -615,6 +617,7 @@ impl DelegationHost {
     }
 
     pub fn question(&self, id: DelegationId, prompt: &str) -> Result<CompanionReport, WorkError> {
+        let _question_guard = self.question_gate.lock();
         self.require_known(id)?;
         self.store
             .mailbox_push(id, "child_to_parent", "question", prompt)?;
@@ -630,6 +633,7 @@ impl DelegationHost {
     }
 
     pub fn open_questions(&self, id: DelegationId) -> Result<Vec<OpenQuestion>, WorkError> {
+        let _question_guard = self.question_gate.lock();
         self.require_known(id)?;
         self.store.open_questions(id)
     }
@@ -647,16 +651,103 @@ impl DelegationHost {
         turn: &CombinedQuestionTurn,
         answers: &[String],
     ) -> Result<(), WorkError> {
-        for (delegation_id, answer) in route_combined_answers(turn, answers) {
-            self.answer(delegation_id, &answer)?;
+        let Some(question) = turn.questions.first() else {
+            if answers.is_empty() {
+                return Ok(());
+            }
+            return Err(WorkError::QuestionAnswerCount {
+                expected: 0,
+                actual: answers.len(),
+            });
+        };
+        if turn
+            .questions
+            .iter()
+            .any(|pending| pending.delegation_id != question.delegation_id)
+        {
+            for (delegation_id, answer) in route_combined_answers(turn, answers) {
+                self.answer(delegation_id, &answer)?;
+            }
+            return Ok(());
         }
+        self.answer_pending(question.delegation_id, answers)?;
         Ok(())
     }
 
     pub fn answer(&self, id: DelegationId, answer: &str) -> Result<(), WorkError> {
+        let _question_guard = self.question_gate.lock();
         self.require_known(id)?;
+        let pending = self.store.open_questions(id)?;
+        let Some(question) = pending.first() else {
+            return Err(WorkError::NoOpenQuestion);
+        };
         self.store
-            .mailbox_push(id, "parent_to_child", "answer", answer)
+            .mailbox_push_for_question(id, question.mailbox_seq, "answer", answer)
+    }
+
+    /// Answer one pending question identified by its stable question id.
+    pub fn answer_question(
+        &self,
+        id: DelegationId,
+        question_id: QuestionId,
+        answer: &str,
+    ) -> Result<OpenQuestion, WorkError> {
+        let _question_guard = self.question_gate.lock();
+        self.require_known(id)?;
+        let pending = self.store.open_questions(id)?;
+        let Some(question) = pending
+            .into_iter()
+            .find(|question| question.question_id() == question_id)
+        else {
+            return Err(WorkError::NoOpenQuestion);
+        };
+        self.store
+            .mailbox_push_for_question(id, question.mailbox_seq, "answer", answer)?;
+        Ok(question)
+    }
+
+    /// Answer every pending question on a job with the same text.
+    pub fn answer_all_pending(
+        &self,
+        id: DelegationId,
+        answer: &str,
+    ) -> Result<Vec<OpenQuestion>, WorkError> {
+        let _question_guard = self.question_gate.lock();
+        self.require_known(id)?;
+        let pending = self.store.open_questions(id)?;
+        if pending.is_empty() {
+            return Err(WorkError::NoOpenQuestion);
+        }
+        for question in &pending {
+            self.store
+                .mailbox_push_for_question(id, question.mailbox_seq, "answer", answer)?;
+        }
+        Ok(pending)
+    }
+
+    /// Answer all pending questions in mailbox order.
+    pub fn answer_pending(
+        &self,
+        id: DelegationId,
+        answers: &[String],
+    ) -> Result<Vec<OpenQuestion>, WorkError> {
+        let _question_guard = self.question_gate.lock();
+        self.require_known(id)?;
+        let pending = self.store.open_questions(id)?;
+        if pending.is_empty() {
+            return Err(WorkError::NoOpenQuestion);
+        }
+        if pending.len() != answers.len() {
+            return Err(WorkError::QuestionAnswerCount {
+                expected: pending.len(),
+                actual: answers.len(),
+            });
+        }
+        for (question, answer) in pending.iter().zip(answers) {
+            self.store
+                .mailbox_push_for_question(id, question.mailbox_seq, "answer", answer)?;
+        }
+        Ok(pending)
     }
 
     pub fn instruct(&self, id: DelegationId, message: &str) -> Result<(), WorkError> {
@@ -682,6 +773,7 @@ impl DelegationHost {
         now: DateTime<Utc>,
         timeout: Option<Duration>,
     ) -> Result<Vec<CompanionReport>, WorkError> {
+        let _question_guard = self.question_gate.lock();
         let timeout = timeout.unwrap_or_else(|| {
             Duration::from_secs(u64::from(self.settings.question_timeout_hours) * 3_600)
         });
@@ -694,23 +786,26 @@ impl DelegationHost {
             ) {
                 continue;
             }
-            for question in self.store.open_questions(job.id)? {
-                let asked_at = DateTime::parse_from_rfc3339(&question.asked_at)
-                    .map_or(now, |ts| ts.with_timezone(&Utc));
-                if question_timed_out(asked_at, now, timeout) {
-                    let assumption = format!(
-                        "no answer after timeout — proceeding with best guess for: {}",
-                        truncate(&question.prompt, 48)
-                    );
-                    self.store.mailbox_push(
-                        job.id,
-                        "parent_to_child",
-                        "assumption",
-                        &assumption,
-                    )?;
-                    reports.push(self.progress(job.id, None, &assumption)?);
-                }
+            let pending = self.store.open_questions(job.id)?;
+            if pending.is_empty()
+                || pending.iter().any(|question| {
+                    let asked_at = DateTime::parse_from_rfc3339(&question.asked_at)
+                        .map_or(now, |ts| ts.with_timezone(&Utc));
+                    !question_timed_out(asked_at, now, timeout)
+                })
+            {
+                continue;
             }
+            let prompts = pending
+                .iter()
+                .map(|question| truncate(&question.prompt, 48))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let assumption =
+                format!("no answer after timeout — proceeding with best guess for: {prompts}");
+            self.store
+                .mailbox_push(job.id, "parent_to_child", "assumption", &assumption)?;
+            reports.push(self.progress(job.id, None, &assumption)?);
         }
         Ok(reports)
     }

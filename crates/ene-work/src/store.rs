@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS mailbox (
   direction TEXT NOT NULL,
   kind TEXT NOT NULL,
   body TEXT NOT NULL,
-  ts TEXT NOT NULL
+  ts TEXT NOT NULL,
+  question_seq INTEGER
 );
 CREATE TABLE IF NOT EXISTS tool_executions (
   execution_id TEXT PRIMARY KEY,
@@ -121,6 +122,12 @@ impl WorkStore {
                 "ALTER TABLE mcp_servers ADD COLUMN args TEXT NOT NULL DEFAULT '[]'",
                 [],
             )?;
+        }
+        let mailbox_question_seq_exists = conn
+            .prepare("SELECT question_seq FROM mailbox LIMIT 0")
+            .is_ok();
+        if !mailbox_question_seq_exists {
+            conn.execute("ALTER TABLE mailbox ADD COLUMN question_seq INTEGER", [])?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -512,9 +519,39 @@ impl WorkStore {
         body: &str,
         ts: &str,
     ) -> Result<(), WorkError> {
+        self.mailbox_push_at_for_question(id, None, direction, kind, body, ts)
+    }
+
+    pub fn mailbox_push_for_question(
+        &self,
+        id: DelegationId,
+        question_seq: i64,
+        kind: &str,
+        body: &str,
+    ) -> Result<(), WorkError> {
+        self.mailbox_push_at_for_question(
+            id,
+            Some(question_seq),
+            "parent_to_child",
+            kind,
+            body,
+            &Utc::now().to_rfc3339(),
+        )
+    }
+
+    fn mailbox_push_at_for_question(
+        &self,
+        id: DelegationId,
+        question_seq: Option<i64>,
+        direction: &str,
+        kind: &str,
+        body: &str,
+        ts: &str,
+    ) -> Result<(), WorkError> {
         self.conn.lock().execute(
-            "INSERT INTO mailbox (delegation_id, direction, kind, body, ts) VALUES (?1,?2,?3,?4,?5)",
-            params![id.to_string(), direction, kind, body, ts],
+            "INSERT INTO mailbox (delegation_id, direction, kind, body, ts, question_seq)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![id.to_string(), direction, kind, body, ts, question_seq],
         )?;
         Ok(())
     }
@@ -530,7 +567,8 @@ impl WorkStore {
     pub fn mailbox_entries(&self, id: DelegationId) -> Result<Vec<MailboxEntry>, WorkError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT seq, direction, kind, body, ts FROM mailbox WHERE delegation_id = ?1 ORDER BY seq",
+            "SELECT seq, direction, kind, body, ts, question_seq
+             FROM mailbox WHERE delegation_id = ?1 ORDER BY seq",
         )?;
         let rows = stmt.query_map(params![id.to_string()], |row| {
             Ok(MailboxEntry {
@@ -539,6 +577,7 @@ impl WorkStore {
                 kind: row.get(2)?,
                 body: row.get(3)?,
                 ts: row.get(4)?,
+                question_seq: row.get(5)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(WorkError::from)
@@ -586,7 +625,9 @@ impl WorkStore {
             if entry.direction == "child_to_parent" && entry.kind == "question" {
                 pending.push(entry);
             } else if entry.direction == "parent_to_child" && entry.kind == "answer" {
-                if !pending.is_empty() {
+                if let Some(question_seq) = entry.question_seq {
+                    pending.retain(|question| question.seq != question_seq);
+                } else if !pending.is_empty() {
                     pending.remove(0);
                 }
             } else if entry.direction == "parent_to_child" && entry.kind == "assumption" {
@@ -763,6 +804,7 @@ pub struct MailboxEntry {
     pub kind: String,
     pub body: String,
     pub ts: String,
+    pub question_seq: Option<i64>,
 }
 
 pub fn next_fire(spec: &str, tz_name: &str, from: DateTime<Utc>) -> Result<String, WorkError> {

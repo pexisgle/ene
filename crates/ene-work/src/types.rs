@@ -1,4 +1,4 @@
-use ene_session::{DelegationId, SoulId};
+use ene_session::{DelegationId, QuestionId, SoulId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +236,14 @@ pub struct OpenQuestion {
     pub mailbox_seq: i64,
     pub prompt: String,
     pub asked_at: String,
+}
+
+impl OpenQuestion {
+    /// Stable identity derived from the append-only mailbox row.
+    #[must_use]
+    pub fn question_id(&self) -> QuestionId {
+        QuestionId::from_mailbox(self.delegation_id, self.mailbox_seq)
+    }
 }
 
 /// Parent-facing combined ask-user turn for one or more child questions.

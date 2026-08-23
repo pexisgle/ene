@@ -232,7 +232,7 @@ fn parse_live_event(value: &Value) -> Option<LiveEvent> {
             id: string_field(value, "id"),
             decision: string_field(value, "decision"),
         }),
-        "question.asked" => Some(LiveEvent::QuestionAsked {
+        ene_api::QUESTION_ASKED_EVENT => Some(LiveEvent::QuestionAsked {
             id: string_field(value, "id"),
             prompt: value
                 .get("prompt")

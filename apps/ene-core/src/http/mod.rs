@@ -434,6 +434,10 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/jobs/{id}/cancel", post(routes::cancel_job))
         .route("/api/v1/jobs/{id}/answer", post(routes::answer_job))
         .route(
+            "/api/v1/jobs/{id}/questions/{question_id}/answer",
+            post(routes::answer_question),
+        )
+        .route(
             "/api/v1/schedules",
             get(routes::list_schedules).post(routes::create_schedule),
         )
