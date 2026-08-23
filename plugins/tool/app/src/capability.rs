@@ -364,8 +364,8 @@ pub(crate) fn fail(
 
 #[cfg(test)]
 mod tests {
+    use super::super::cap_from_availability;
     use super::{DesktopKind, PlatformCaps, SessionKind, window_availability_for_session_with};
-    use crate::logic::cap_from_availability;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
