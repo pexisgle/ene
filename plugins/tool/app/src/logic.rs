@@ -150,13 +150,24 @@ fn window_list(
     run_backend: impl Fn(&Backend) -> Result<String, String>,
 ) -> Result<Value, String> {
     if !caps.window_list.available {
-        return Err(fail(
-            "unsupported",
-            caps.window_list.backend,
-            caps.window_list
-                .reason
-                .unwrap_or("window list is not available"),
-        ));
+        let (code, backend, reason) = match availability {
+            BackendAvailability::Missing(backend) => (
+                "dependency_missing",
+                backend.name,
+                availability
+                    .reason()
+                    .unwrap_or("window-list backend is missing"),
+            ),
+            BackendAvailability::Unsupported(backend, reason) => {
+                ("unsupported", backend.name, *reason)
+            }
+            BackendAvailability::Available(backend) => (
+                "unavailable",
+                backend.name,
+                "window-list capability changed before execution",
+            ),
+        };
+        return Err(fail(code, backend, reason));
     }
     run_window_list(availability, run_backend)
 }
@@ -333,10 +344,11 @@ fn key(caps: &PlatformCaps, combo: &str) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::backend::{BackendAvailability, HYPRLAND};
+    use super::backend::{BackendAvailability, HYPRLAND, WMCTRL};
     use super::capability::PlatformCaps;
     use super::{
-        collect_sway_windows, parse_hypr_clients, parse_wmctrl, run_window_list, specs_for,
+        cap_from_availability, collect_sway_windows, parse_hypr_clients, parse_wmctrl,
+        run_window_list, specs_for, window_list,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -389,6 +401,21 @@ mod tests {
         assert_eq!(error["code"], "dependency_missing");
         assert_eq!(error["backend"], "hyprctl");
         assert!(error["message"].as_str().unwrap().contains("status 1"));
+    }
+
+    #[test]
+    fn missing_window_backend_is_a_dependency_error_before_execution() {
+        let availability = BackendAvailability::Missing(WMCTRL);
+        let mut caps = PlatformCaps::from_env(&HashMap::new());
+        caps.window_list = cap_from_availability(&availability);
+        let error = window_list(&caps, &availability, |_| {
+            Err("backend should not run".to_owned())
+        })
+        .unwrap_err();
+        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["code"], "dependency_missing");
+        assert_eq!(error["backend"], "wmctrl");
+        assert!(error["message"].as_str().unwrap().contains("not installed"));
     }
 
     #[cfg(not(windows))]
