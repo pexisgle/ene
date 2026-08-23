@@ -1,0 +1,324 @@
+conflicted files:
+apps/ene-core/src/http/routes.rs
+crates/ene-api/src/client.rs
+crates/ene-api/src/lib.rs
+crates/ene-work/src/router.rs
+
+===== apps/ene-core/src/http/routes.rs =====
+1-use std::fs;
+2-use std::path::PathBuf;
+3-use std::str::FromStr;
+4-
+5-use axum::Json;
+6-use axum::extract::{Path, Query, State};
+7-use axum::http::HeaderMap;
+8-use base64::Engine;
+9-use ene_api::{
+10:<<<<<<< HEAD
+11-    AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
+12-    BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
+13-    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse, JobView,
+14:=======
+15-    AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
+16-    ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
+17-    EndSessionRequest, ExclusiveSnapshot, GreetingView, Health, HistoryResponse, JobView,
+18:>>>>>>> origin/codex/approval-before-dispatch
+19-    ListProviderModelsRequest, ListProviderModelsResponse, McpDocument, McpServerView, MemoryPatch,
+20-    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
+21-    PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
+22-    PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResourceKind, RestoreRequest,
+23-    ScheduleView, SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch,
+24-    SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView,
+25-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+26-};
+27-use ene_body::{InputEffect, VoiceRuntime};
+28-use ene_companion::{
+29-    JournalAction, MemoryId, MemoryScope, avatar_path_for_install, export_dir,
+30-    greeting_options_for_install, import_v3, install_archive, looks_like_package_zip,
+31-    soul_from_install,
+32-};
+33-use ene_kernel::DisplayDepth;
+34-use ene_plane::PopupDecision;
+35-use ene_registry::{Layer, PipelineError};
+36-use ene_session::{
+37-    Block, ClientId, DelegationId, EventKind, EventPayload, NewEvent, NewSession, QuestionId,
+38-    SessionCreatedBy, SessionEndReason, SessionId, SessionKind, SessionMeta, SoulId, Transaction,
+39-    TurnId, v1,
+40-};
+41-use ene_work::{CompanionReport, NewSchedule, ScheduleAction};
+42-use serde::Deserialize;
+43-use serde_json::{Value, json};
+44-
+45-use super::AppState;
+46-use super::client_id::{client_id_from_headers, web_mutate_forbidden};
+47-use super::error::{ApiReject, bad_request, conflict, forbidden, map_kernel, not_found};
+48-use crate::CoreError;
+49-
+50-#[derive(Debug, Deserialize)]
+51-pub struct SoulFilter {
+52-    pub soul_id: Option<String>,
+53-    pub scope: Option<String>,
+54-    pub depth: Option<String>,
+55-    pub session_id: Option<String>,
+56-    pub q: Option<String>,
+57-}
+58-
+59-pub async fn health(State(state): State<AppState>) -> Json<Health> {
+60-    Json(Health {
+61-        status: "ok".to_owned(),
+62-        bind: state.bind.to_string(),
+63-    })
+64-}
+65-
+66-pub async fn openapi() -> Json<Value> {
+67-    Json(serde_json::from_str(ene_api::openapi_json()).unwrap_or_else(|_| json!({})))
+68-}
+69-
+70-pub async fn list_souls(State(state): State<AppState>) -> Result<Json<Page<SoulView>>, ApiReject> {
+71-    let store = state.core.companions();
+72-    let items = store
+73-        .list_souls()
+
+===== crates/ene-api/src/client.rs =====
+1-use crate::error::ApiError;
+2-use crate::pcm::{PCM_S16LE, encode_pcm_s16le};
+3-use crate::types::{
+4:<<<<<<< HEAD
+5-    AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
+6-    BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
+7-    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse,
+8:=======
+9-    AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
+10-    ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
+11-    EndSessionRequest, ExclusiveSnapshot, GreetingView, Health, HistoryResponse,
+12:>>>>>>> origin/codex/approval-before-dispatch
+13-    InstallProviderAssetRequest, InstallProviderAssetResponse, JobView, ListProviderAssetsRequest,
+14-    ListProviderAssetsResponse, ListProviderModelsRequest, ListProviderModelsResponse,
+15-    ListenRequest, McpDocument, MemoryPatch, MemoryView, MessageRequest, Page, PluginConfigField,
+16-    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
+17-    PluginView, Problem, ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse,
+18-    QueuedCancel, RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse,
+19:<<<<<<< HEAD
+20-    ResourceKind, RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView,
+21-    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch,
+22-    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+23:=======
+24-    ResourceKind, RestoreRequest, ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
+25-    SendMessageResponse, SessionPatch, SessionView, SetActiveProviderAssetRequest,
+26-    SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch, SoulView, SpanView,
+27-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+28:>>>>>>> origin/codex/approval-before-dispatch
+29-};
+30-use futures::{SinkExt, StreamExt};
+31-use reqwest::{Client, Method, RequestBuilder};
+32-use serde::de::DeserializeOwned;
+33-use serde_json::Value;
+34-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+35-use tokio_tungstenite::{connect_async, tungstenite::Message};
+36-use url::Url;
+37-
+38-/// Typed HTTP + WebSocket client for `/api/v1`.
+39-#[derive(Clone)]
+40-pub struct ApiClient {
+41-    http: Client,
+42-    base: String,
+43-    token: String,
+44-    client_id: String,
+45-}
+46-
+47-impl ApiClient {
+48-    #[must_use]
+49-    pub fn new(
+50-        base: impl Into<String>,
+51-        token: impl Into<String>,
+52-        client_id: impl Into<String>,
+53-    ) -> Self {
+54-        Self {
+55-            http: Client::new(),
+56-            base: base.into().trim_end_matches('/').to_owned(),
+57-            token: token.into(),
+58-            client_id: client_id.into(),
+59-        }
+60-    }
+61-
+62-    #[must_use]
+63-    pub fn base(&self) -> &str {
+64-        &self.base
+65-    }
+66-
+67-    #[must_use]
+68-    pub fn client_id(&self) -> &str {
+69-        &self.client_id
+70-    }
+71-
+72-    #[must_use]
+73-    pub fn token(&self) -> &str {
+74-        &self.token
+75-    }
+76-
+77-    fn request(&self, method: Method, path: &str) -> RequestBuilder {
+78-        self.http
+79-            .request(method, format!("{}{path}", self.base))
+80-            .bearer_auth(&self.token)
+81-            .header("X-Client-Id", &self.client_id)
+82-    }
+83-
+
+===== crates/ene-api/src/lib.rs =====
+1-//! HTTP/WS contract for `ene-core`. Transport only — no daemon types.
+2-
+3-#![deny(unsafe_code)]
+4-#![cfg_attr(test, expect(clippy::expect_used, reason = "tests"))]
+5-
+6-mod client;
+7-mod error;
+8-mod pcm;
+9-mod types;
+10-
+11-pub use client::{ApiClient, EventSocket, ListenStream};
+12-pub use error::ApiError;
+13-pub use pcm::{LISTEN_SAMPLE_RATE, PCM_S16LE, decode_pcm_s16le, encode_pcm_s16le};
+14-pub use types::{
+15:<<<<<<< HEAD
+16-    AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
+17-    BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
+18-    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse,
+19-    IdempotentMessage, InstallProviderAssetRequest, InstallProviderAssetResponse, JobView,
+20-    ListProviderAssetsRequest, ListProviderAssetsResponse, ListProviderModelsRequest,
+21-    ListProviderModelsResponse, ListenRequest, McpDocument, McpServerView, MemoryPatch, MemoryView,
+22-    MessageMode, MessageRequest, MessageResponse, OccupantView, Page, PluginConfigErrorView,
+23-    PluginConfigField, PluginConfigOptionView, PluginConfigOptionsView, PluginConfigValidateView,
+24-    PluginConfigValues, PluginConfigView, PluginView, Problem, ProviderAssetInstallPhase,
+25:=======
+26-    AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
+27-    ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
+28-    EndSessionRequest, ExclusiveSnapshot, GreetingView, Health, HistoryResponse, IdempotentMessage,
+29-    InstallProviderAssetRequest, InstallProviderAssetResponse, JobView, ListProviderAssetsRequest,
+30-    ListProviderAssetsResponse, ListProviderModelsRequest, ListProviderModelsResponse,
+31-    ListenRequest, McpDocument, McpServerView, MemoryPatch, MemoryView, MessageMode,
+32-    MessageRequest, MessageResponse, OccupantView, Page, PluginConfigErrorView, PluginConfigField,
+33-    PluginConfigOptionView, PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues,
+34-    PluginConfigView, PluginView, Problem, ProviderAssetInstallPhase,
+35:>>>>>>> origin/codex/approval-before-dispatch
+36-    ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse,
+37-    ProviderAssetVersionView, ProviderAssetView, QueuedCancel, RefreshProviderAssetsCatalogRequest,
+38-    RefreshProviderAssetsCatalogResponse, ResourceKind, RestoreRequest, ScheduleView,
+39-    SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
+40-    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SettingsPatch, SoulPatch,
+41-    SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest,
+42-    ToolView, UsageView,
+43-};
+44-
+45-/// `OpenAPI` 3.1 document. Served at `GET /api/v1/openapi.json`.
+46-pub const OPENAPI_JSON: &str = include_str!("../openapi.json");
+47-
+48-/// Canonical live-bus event emitted when a job needs a user answer.
+49-pub const QUESTION_ASKED_EVENT: &str = "question.asked";
+50-
+51-#[must_use]
+52-pub fn openapi_json() -> &'static str {
+53-    OPENAPI_JSON
+54-}
+
+===== crates/ene-work/src/router.rs =====
+51-    ) -> Result<SurfaceToolOutcome, KernelError> {
+52-        let kind = surface_call_kind(&self.registry, name);
+53-        let budget = should_upgrade_steps(step, self.max_steps);
+54-        if budget || kind == SurfaceCallKind::Upgrade {
+55-            let learned = self.learned.lock().clone();
+56-            let brief = fold_brief(&learned, Some(name));
+57-            let goal = args
+58-                .get("goal")
+59-                .and_then(Value::as_str)
+60-                .map_or_else(|| format!("continue after {name}"), str::to_owned);
+61-            let value = self
+62-                .registry
+63-                .execute(
+64-                    "delegate.start",
+65-                    json!({
+66-                        "goal": goal,
+67-                        "mode": "public",
+68-                        "soul_id": self.soul.to_string(),
+69-                        "title": "task",
+70-                        "excerpt": brief,
+71-                    }),
+72-                    Layer::Surface,
+73-                )
+74-                .await
+75-                .map_err(|err| KernelError::Tool(err.to_string()))?;
+76:<<<<<<< HEAD
+77-            let job_id = value
+78-                .get("delegation_id")
+79-                .and_then(Value::as_str)
+80-                .ok_or_else(|| {
+81-                    KernelError::Tool("delegate.start did not return a delegation_id".to_owned())
+82-                })?;
+83-            return Ok(SurfaceToolOutcome::Delegated {
+84-                speech: "I'll look into that.".to_owned(),
+85-                job_id: job_id.to_owned(),
+86:=======
+87-            let speech = if kind == SurfaceCallKind::Upgrade {
+88-                format!("That action requires a Work job, so I started one for `{name}`.")
+89-            } else {
+90-                "I'll look into that.".to_owned()
+91-            };
+92-            return Ok(SurfaceToolOutcome::Delegated {
+93-                speech,
+94-                job_id: job.id.to_string(),
+95:>>>>>>> origin/codex/approval-before-dispatch
+96-            });
+97-        }
+98-        match kind {
+99-            SurfaceCallKind::Run => {
+100-                if self.registry.get(name).is_some_and(|def| def.background) {
+101-                    return start_background_outcome(BgStart {
+102-                        host: &self.host,
+103-                        registry: &self.registry,
+104-                        soul: self.soul,
+105-                        job_id: None,
+106-                        name,
+107-                        args: bind_soul_arg(args, self.soul),
+108-                        layer: Layer::Surface,
+109-                        workspace: None,
+110-                    })
+111-                    .await;
+112-                }
+113-                let value = self
+114-                    .registry
+115-                    .execute(name, bind_soul_arg(args, self.soul), Layer::Surface)
+116-                    .await
+117-                    .map_err(|err| KernelError::Tool(err.to_string()))?;
+118-                self.learned.lock().push(name.to_owned());
+119-                Ok(SurfaceToolOutcome::Result(value))
+120-            }
+121-            SurfaceCallKind::Unknown => Err(KernelError::Tool(format!("unknown tool {name}"))),
+122-            SurfaceCallKind::Upgrade => Err(KernelError::Tool(format!(
+123-                "side-effect tool {name} must not run on the surface"
+124-            ))),
+125-        }
+126-    }
+127-}
+128-
+129-/// Job-lane router: side-effect tools run here (plan-gated). Never upgrades.
+130-pub struct JobLayerRouter {
+131-    host: Arc<DelegationHost>,
+132-    registry: Arc<ToolRegistry>,
+133-    soul: SoulId,
+134-    job_id: DelegationId,
+135-    workspace_dir: PathBuf,
+136-}
+137-
+138-impl JobLayerRouter {
+139-    #[must_use]
+140-    pub fn new(
+141-        host: Arc<DelegationHost>,
+142-        registry: Arc<ToolRegistry>,
+143-        soul: SoulId,
+144-        job_id: DelegationId,
+145-        workspace_dir: impl Into<PathBuf>,
+146-    ) -> Self {
+147-        Self {
+148-            host,
+149-            registry,
+150-            soul,
+
