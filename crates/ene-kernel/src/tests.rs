@@ -11,9 +11,9 @@ use crate::{
 use async_trait::async_trait;
 use base64::Engine;
 use ene_session::{
-    Block, ClientId, DelegationId, InnerAspect, NewEvent, NewSession, SessionCreatedBy,
-    SessionKind, SessionStore, SoulId, Transaction, TurnOrigin, TurnOutcome, TurnTrigger,
-    abandoned_inbox, open_turns, unclaimed_inbox, v1,
+    Block, CallId, ClientId, DelegationId, InnerAspect, NewEvent, NewSession, SessionCreatedBy,
+    SessionKind, SessionStore, SoulId, ToolStatus, Transaction, TurnOrigin, TurnOutcome,
+    TurnTrigger, abandoned_inbox, open_turns, unclaimed_inbox, v1,
 };
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -858,6 +858,119 @@ async fn model_visible_hash_matches_logged_projection() {
         hash_model_visible(&captured.messages).unwrap()
     );
     assert_eq!(replayed.messages, captured.messages);
+}
+
+#[tokio::test]
+async fn wedged_tool_call_is_not_replayed_after_restart() {
+    let (_dir, store, lane, model) = open_lane().await;
+    let turn = TurnId::new();
+    let call_id = CallId::new();
+    store
+        .commit(Transaction {
+            entries: vec![
+                NewEvent::new(
+                    lane.session_id(),
+                    EventKind::UserMessage,
+                    EventPayload::UserMessage {
+                        v: v1(),
+                        turn_id: Some(turn),
+                        blocks: vec![Block::text("search")],
+                        input_modality: "text".to_owned(),
+                        client_id: ClientId::new(),
+                    },
+                ),
+                NewEvent::new(
+                    lane.session_id(),
+                    EventKind::ToolCall,
+                    EventPayload::ToolCall {
+                        v: v1(),
+                        turn_id: turn,
+                        step_index: 0,
+                        call_id,
+                        tool_name: "web.search".to_owned(),
+                        source: "surface".to_owned(),
+                        args: serde_json::json!({"query": "large"}),
+                    },
+                ),
+            ],
+            usage: Vec::new(),
+        })
+        .await
+        .unwrap();
+    lane.prompt("continue").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+
+    let captured = model.last.lock().clone().expect("model saw a request");
+    assert!(
+        captured
+            .messages
+            .iter()
+            .all(|message| message.role != ene_session::Role::Tool)
+    );
+}
+
+#[tokio::test]
+async fn complete_tool_exchange_is_replayed_after_restart() {
+    let (_dir, store, lane, model) = open_lane().await;
+    let turn = TurnId::new();
+    let call_id = CallId::new();
+    store
+        .commit(Transaction {
+            entries: vec![
+                NewEvent::new(
+                    lane.session_id(),
+                    EventKind::UserMessage,
+                    EventPayload::UserMessage {
+                        v: v1(),
+                        turn_id: Some(turn),
+                        blocks: vec![Block::text("search")],
+                        input_modality: "text".to_owned(),
+                        client_id: ClientId::new(),
+                    },
+                ),
+                NewEvent::new(
+                    lane.session_id(),
+                    EventKind::ToolCall,
+                    EventPayload::ToolCall {
+                        v: v1(),
+                        turn_id: turn,
+                        step_index: 0,
+                        call_id,
+                        tool_name: "web.search".to_owned(),
+                        source: "surface".to_owned(),
+                        args: serde_json::json!({"query": "large"}),
+                    },
+                ),
+                NewEvent::new(
+                    lane.session_id(),
+                    EventKind::ToolResult,
+                    EventPayload::ToolResult {
+                        v: v1(),
+                        call_id,
+                        status: ToolStatus::Ok,
+                        blocks: vec![Block::text("result")],
+                        spill_ref: None,
+                        error_class: None,
+                        duration_ms: 1,
+                    },
+                ),
+            ],
+            usage: Vec::new(),
+        })
+        .await
+        .unwrap();
+    lane.prompt("continue").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+
+    let captured = model.last.lock().clone().expect("model saw a request");
+    assert_eq!(
+        captured
+            .messages
+            .iter()
+            .filter(|message| message.role == ene_session::Role::Tool)
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 //! Effective context-window budget and prompt packing.
 
 use crate::config::TokenEstimation;
+use ene_plugin_ipc::{LlmMessage, LlmRole};
 
 /// Conservative window when neither the provider nor the operator names one.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 8192;
@@ -108,7 +109,7 @@ const fn is_cjk(ch: char) -> bool {
     )
 }
 
-/// Drop oldest unpinned messages until the estimate fits `available_tokens`.
+/// Drop oldest unpinned groups until the estimate fits `available_tokens`.
 ///
 /// Pinned messages (system) are always kept. The newest unpinned message is
 /// kept even when it alone exceeds the remaining budget.
@@ -151,10 +152,132 @@ pub fn fit_prompt<T>(
     pinned_msgs
 }
 
+/// Pack provider messages without splitting a tool call from any result.
+///
+/// A malformed exchange is dropped entirely: a tool result with no preceding
+/// matching call cannot be sent to OpenAI-style providers, and an unanswered
+/// call must not wedge the following turn.
+#[must_use]
+pub fn fit_prompt_llm(
+    messages: Vec<LlmMessage>,
+    available_tokens: u32,
+    tokens_of: impl Fn(&LlmMessage) -> u32,
+) -> Vec<LlmMessage> {
+    let groups = group_tool_exchanges(messages);
+    let valid_groups = groups
+        .into_iter()
+        .filter(ToolExchangeGroup::is_complete)
+        .map(|group| group.messages)
+        .collect::<Vec<Vec<LlmMessage>>>();
+
+    let group_tokens =
+        |group: &[LlmMessage]| group.iter().map(&tokens_of).fold(0, u32::saturating_add);
+    let mut pinned = Vec::new();
+    let mut rest = Vec::new();
+    for group in valid_groups {
+        if group
+            .first()
+            .is_some_and(|message| message.role == LlmRole::System)
+        {
+            pinned.push(group);
+        } else {
+            rest.push(group);
+        }
+    }
+    let mut remaining = available_tokens.saturating_sub(
+        pinned
+            .iter()
+            .map(|group| group_tokens(group))
+            .fold(0, u32::saturating_add),
+    );
+    let mut packed = Vec::new();
+    for group in rest.into_iter().rev() {
+        let cost = group_tokens(&group);
+        // Unlike the generic packer, an entire oversized exchange is dropped,
+        // including when it is the newest non-system group.
+        if cost > remaining {
+            continue;
+        }
+        remaining = remaining.saturating_sub(cost);
+        packed.push(group);
+    }
+    packed.reverse();
+    let mut messages = Vec::with_capacity(packed.iter().map(Vec::len).sum());
+    for group in pinned.into_iter().chain(packed) {
+        messages.extend(group);
+    }
+    messages
+}
+
+struct ToolExchangeGroup {
+    messages: Vec<LlmMessage>,
+}
+
+impl ToolExchangeGroup {
+    fn is_complete(&self) -> bool {
+        if !self
+            .messages
+            .iter()
+            .any(|message| message.role == LlmRole::Tool)
+        {
+            return true;
+        }
+        let Some(call_message) = self
+            .messages
+            .iter()
+            .find(|message| !message.tool_calls.is_empty())
+        else {
+            // A result was grouped but its call is absent or out of order.
+            return false;
+        };
+        let mut answered_ids = std::collections::HashSet::new();
+        for result in self.messages.iter().filter(|m| m.role == LlmRole::Tool) {
+            let Some(id) = &result.tool_call_id else {
+                return false;
+            };
+            if !answered_ids.insert(id.clone()) {
+                return false;
+            }
+            if !call_message.tool_calls.iter().any(|call| call.id == *id) {
+                return false;
+            }
+        }
+        answered_ids.len() == call_message.tool_calls.len()
+    }
+
+    fn accepts_result(&self) -> bool {
+        self.messages
+            .first()
+            .is_some_and(|first| first.role == LlmRole::Assistant && !first.tool_calls.is_empty())
+    }
+}
+
+fn group_tool_exchanges(messages: Vec<LlmMessage>) -> Vec<ToolExchangeGroup> {
+    let mut groups: Vec<ToolExchangeGroup> = Vec::new();
+    for message in messages {
+        let starts_exchange = message.role == LlmRole::Assistant && !message.tool_calls.is_empty();
+        if starts_exchange || groups.last().is_none_or(|last| !last.accepts_result()) {
+            groups.push(ToolExchangeGroup {
+                messages: vec![message],
+            });
+        } else if let Some(last) = groups.last_mut() {
+            last.messages.push(message);
+        } else {
+            unreachable!();
+        }
+    }
+    groups.retain(|group| !group.messages.is_empty());
+    groups
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_CONTEXT_WINDOW, effective_window, estimate_tokens, fit_prompt};
+    use super::{
+        DEFAULT_CONTEXT_WINDOW, ToolExchangeGroup, effective_window, estimate_tokens, fit_prompt,
+        fit_prompt_llm, group_tool_exchanges,
+    };
     use crate::config::TokenEstimation;
+    use ene_plugin_ipc::{LlmMessage, LlmRole, LlmToolCall};
 
     #[test]
     fn unknown_window_uses_conservative_default() {
@@ -224,5 +347,124 @@ mod tests {
             |_| false,
         );
         assert_eq!(packed, vec!["a", "b"]);
+    }
+
+    fn tool_call(id: &str) -> LlmToolCall {
+        LlmToolCall {
+            id: id.to_owned(),
+            name: "web__search".to_owned(),
+            arguments: serde_json::json!({"query": "large"}),
+        }
+    }
+
+    fn tool_message(id: &str, payload: &str) -> LlmMessage {
+        let mut message = LlmMessage::new(LlmRole::Tool, payload);
+        message.tool_call_id = Some(id.to_owned());
+        message
+    }
+
+    fn message_tokens(message: &LlmMessage) -> u32 {
+        u32::try_from(message.text.chars().count()).unwrap_or(u32::MAX)
+    }
+
+    #[test]
+    fn llm_fit_keeps_large_tool_result_with_its_call() {
+        let messages = vec![
+            LlmMessage::new(LlmRole::User, "search"),
+            LlmMessage {
+                role: LlmRole::Assistant,
+                text: String::new(),
+                tool_calls: vec![tool_call("call-1")],
+                tool_call_id: None,
+                tool_name: None,
+                images: Vec::new(),
+            },
+            tool_message("call-1", &"x".repeat(100)),
+            LlmMessage::new(LlmRole::User, "latest"),
+        ];
+        let packed = fit_prompt_llm(messages, 1, message_tokens);
+        let tool_results = packed
+            .iter()
+            .filter(|message| message.role == LlmRole::Tool)
+            .count();
+        let calls = packed
+            .iter()
+            .filter(|message| !message.tool_calls.is_empty())
+            .count();
+
+        assert_eq!(
+            tool_results + calls,
+            0,
+            "oversized exchange must be dropped"
+        );
+        assert_eq!(packed.last().map(|m| m.text.clone()), None);
+    }
+
+    #[test]
+    fn llm_fit_drops_orphan_tool_result() {
+        let messages = vec![
+            LlmMessage::new(LlmRole::User, "before"),
+            tool_message("missing", "orphan"),
+            LlmMessage::new(LlmRole::User, "latest"),
+        ];
+        let packed = fit_prompt_llm(messages, 100, message_tokens);
+
+        assert_eq!(
+            packed
+                .iter()
+                .map(|message| message.role)
+                .collect::<Vec<_>>(),
+            vec![LlmRole::User, LlmRole::User]
+        );
+    }
+
+    #[test]
+    fn every_tool_group_is_atomic_under_random_budgets() {
+        let messages = vec![
+            LlmMessage::new(LlmRole::System, "contract"),
+            LlmMessage::new(LlmRole::User, "old-turn-".repeat(20)),
+            LlmMessage {
+                role: LlmRole::Assistant,
+                text: String::new(),
+                tool_calls: vec![tool_call("old-call"), tool_call("old-call-2")],
+                tool_call_id: None,
+                tool_name: None,
+                images: Vec::new(),
+            },
+            tool_message("old-call", "old-result"),
+            tool_message("old-call-2", &"x".repeat(80)),
+            LlmMessage::new(LlmRole::User, "latest"),
+        ];
+
+        for budget in 1..=120_u32 {
+            let packed = fit_prompt_llm(messages.clone(), budget, message_tokens);
+            let call_ids: std::collections::HashSet<_> = packed
+                .iter()
+                .flat_map(|message| message.tool_calls.iter().map(|call| call.id.clone()))
+                .collect();
+            for result in packed
+                .iter()
+                .filter(|message| message.role == LlmRole::Tool)
+            {
+                assert!(
+                    result
+                        .tool_call_id
+                        .as_deref()
+                        .is_some_and(|id| call_ids.contains(id)),
+                    "budget {budget} orphaned {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_result_after_plain_assistant_is_invalid() {
+        let group = group_tool_exchanges(vec![
+            LlmMessage::new(LlmRole::Assistant, "plain"),
+            tool_message("missing", "orphan"),
+        ]);
+        assert_eq!(group.len(), 2);
+        assert!(!group[1].messages.is_empty());
+        assert!(!ToolExchangeGroup::is_complete(&group[1]));
     }
 }

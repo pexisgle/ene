@@ -11,6 +11,7 @@ publish.workspace = true
 async-trait = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 ene-config = { workspace = true }
+ene-plugin-ipc = { workspace = true, features = ["net"] }
 ene-session = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

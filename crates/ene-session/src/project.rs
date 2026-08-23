@@ -3,6 +3,7 @@ use crate::error::SessionError;
 use crate::event::{EventKind, EventPayload, LoggedEvent, TurnOutcome};
 use crate::ids::TurnId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// How inner messages appear in a projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +127,10 @@ pub struct ProjectOptions {
     pub include_tool_args: bool,
     pub self_reference_window: u32,
     pub include_turn_failures: bool,
+    /// Exclude incomplete tool-call/result exchanges from provider-visible history.
+    ///
+    /// Surface and export projections keep them visible for diagnostics.
+    pub isolate_incomplete_tool_groups: bool,
 }
 
 impl ProjectOptions {
@@ -138,6 +143,7 @@ impl ProjectOptions {
             include_tool_args: depth.include_tool_args(),
             self_reference_window,
             include_turn_failures: true,
+            isolate_incomplete_tool_groups: false,
         }
     }
 
@@ -150,6 +156,7 @@ impl ProjectOptions {
             include_tool_args: true,
             self_reference_window,
             include_turn_failures: false,
+            isolate_incomplete_tool_groups: true,
         }
     }
 }
@@ -327,11 +334,53 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
         }
     }
 
+    if options.isolate_incomplete_tool_groups {
+        let complete = complete_tool_call_seqs(&messages);
+        let mut keep = false;
+        messages.retain(|message| {
+            if message.role != Role::Tool {
+                return true;
+            }
+            if message.tool_args.is_some() {
+                let call_complete = message
+                    .tool_call_id
+                    .as_deref()
+                    .is_some_and(|call_id| complete.contains(call_id));
+                keep = call_complete;
+                return call_complete;
+            }
+            let result_complete = keep
+                && message
+                    .tool_call_id
+                    .as_deref()
+                    .is_some_and(|call_id| complete.contains(call_id));
+            keep = false;
+            result_complete
+        });
+    }
     append_inner(&mut messages, pending_inner, options);
     ProjectedHistory {
         messages,
         truncated_prefix: !compacted.is_empty(),
     }
+}
+
+fn complete_tool_call_seqs(messages: &[ProjectedMessage]) -> HashSet<String> {
+    let mut call_ids = HashSet::new();
+    let mut answered = HashSet::new();
+    for message in messages {
+        if message.role == Role::Tool && message.tool_args.is_some() {
+            if let Some(call_id) = &message.tool_call_id {
+                call_ids.insert(call_id.clone());
+            }
+        } else if message.role == Role::Tool
+            && let Some(call_id) = &message.tool_call_id
+        {
+            answered.insert(call_id.clone());
+        }
+    }
+    call_ids.retain(|call_id| answered.contains(call_id));
+    call_ids
 }
 
 fn collect_redactions(events: &[LoggedEvent], apply: bool) -> Vec<u64> {

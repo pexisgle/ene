@@ -35,6 +35,7 @@ pub use config::{
 pub use context::{ContextRegistry, SOURCE_ORDER, canonicalize_source_key, format_recovery_note};
 pub use context_window::{
     DEFAULT_CONTEXT_WINDOW, EffectiveWindow, effective_window, estimate_tokens, fit_prompt,
+    fit_prompt_llm,
 };
 pub use error::{CancelQueued, KernelError, RunOutcome};
 pub use inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
