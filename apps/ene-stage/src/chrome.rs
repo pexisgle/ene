@@ -124,6 +124,10 @@ impl ChromeWindow {
         self.window.id()
     }
 
+    pub fn request_redraw(&self) {
+        self.window.request_redraw();
+    }
+
     pub fn sync_title(&self) {
         self.window.set_title(&self.kind.title());
     }

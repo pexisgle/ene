@@ -256,6 +256,9 @@ impl StageApp {
                     self.session.replace_history(history.clone());
                     self.surface.history = history;
                     self.surface.streaming_text.clear();
+                    if let Some(chat) = &self.chat {
+                        chat.request_redraw();
+                    }
                 }
                 Err(err) => self.surface.status = err,
             },
