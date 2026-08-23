@@ -93,6 +93,12 @@ jobs:
       # intra-doc links would fail unrelated work.
       - name: Build docs
         run: cargo doc --locked --workspace --no-deps
+      - name: Install mdBook
+        run: cargo install mdbook --locked --version 0.5.4
+      - name: Build English book
+        run: mdbook build docs
+      - name: Build Japanese book
+        run: mdbook build docs/ja
 
   windows-native:
     name: Native Windows check
