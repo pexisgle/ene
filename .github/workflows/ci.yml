@@ -62,6 +62,22 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+  feature-matrix:
+    name: Cargo feature matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: ./.github/actions/rust-build-env
+      - name: Check stage without voice
+        run: cargo check --locked -p ene-stage --no-default-features
+      - name: Check stage with voice
+        run: cargo check --locked -p ene-stage --all-features
+      - name: Check plugin IPC without network feature
+        run: cargo check --locked -p ene-plugin-ipc
+      - name: Check plugin IPC with network feature
+        run: cargo check --locked -p ene-plugin-ipc --features net
 
   workspace-matrix:
     name: Workspace test matrix
@@ -155,7 +171,7 @@ jobs:
   cache-prune:
     name: Prune rust caches
     if: github.ref == 'refs/heads/main'
-    needs: [clippy, workspace-matrix, test, docs, windows-native]
+    needs: [clippy, feature-matrix, test, docs, windows-native]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
