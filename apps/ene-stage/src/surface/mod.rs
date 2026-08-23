@@ -5,7 +5,7 @@ pub(crate) mod caption;
 mod chat;
 mod spotlight;
 
-use ene_api::{HistoryResponse, MessageMode};
+use ene_api::{GreetingView, HistoryResponse, MessageMode};
 
 use crate::detail::DetailTab;
 use crate::i18n;
@@ -24,6 +24,8 @@ const _: () = {
 #[derive(Debug, Clone)]
 pub enum SurfaceAction {
     SendChat,
+    NewSession,
+    SelectGreeting { index: u32 },
     BargeIn,
     CancelTurn,
     ToggleMic,
@@ -46,6 +48,9 @@ pub struct SurfaceUiState {
     pub focus_chat: bool,
     pub chat_input_focused: bool,
     pub history: HistoryResponse,
+    pub greetings: Vec<GreetingView>,
+    pub greeting_inflight: bool,
+    pub greeting_status: String,
     pub streaming_text: String,
     pub caption: String,
     pub pending_approval: Option<PendingApproval>,
@@ -60,6 +65,7 @@ pub struct SurfaceUiState {
     pub character_pos: [f32; 2],
     pub dragging_character: bool,
     pub pending_actions: Vec<SurfaceAction>,
+    pub(crate) new_session_inflight: bool,
     pub message_mode: MessageMode,
     pub turn_active: bool,
 }
@@ -74,6 +80,9 @@ impl Default for SurfaceUiState {
                 messages: Vec::new(),
                 depth: "surface".to_owned(),
             },
+            greetings: Vec::new(),
+            greeting_inflight: false,
+            greeting_status: String::new(),
             streaming_text: String::new(),
             caption: String::new(),
             pending_approval: None,
@@ -88,6 +97,7 @@ impl Default for SurfaceUiState {
             character_pos: [0.78, 0.5],
             dragging_character: false,
             pending_actions: Vec::new(),
+            new_session_inflight: false,
             message_mode: MessageMode::Prompt,
             turn_active: false,
         }
@@ -96,6 +106,9 @@ impl Default for SurfaceUiState {
 
 impl SurfaceUiState {
     pub fn push_action(&mut self, action: SurfaceAction) {
+        if matches!(action, SurfaceAction::NewSession) && self.new_session_inflight {
+            return;
+        }
         self.pending_actions.push(action);
     }
 
@@ -143,19 +156,6 @@ impl SurfaceUiState {
     pub(crate) fn caption_visible(&self) -> bool {
         self.caption_open && caption::is_speech_caption(&self.caption)
     }
-
-    #[must_use]
-    pub(crate) fn terminal_error(&self) -> Option<&str> {
-        let text = self
-            .history
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "status")?
-            .text
-            .trim();
-        (!text.is_empty()).then_some(text)
-    }
 }
 
 pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
@@ -202,7 +202,7 @@ pub fn show_spotlight(ctx: &egui::Context, state: &mut SurfaceUiState) -> Option
 
 #[cfg(test)]
 mod tests {
-    use super::SurfaceUiState;
+    use super::{SurfaceAction, SurfaceUiState};
 
     #[test]
     fn a_new_send_clears_the_previous_turn_status() {
@@ -226,23 +226,6 @@ mod tests {
 
         assert!(state.status.is_empty());
         assert!(!state.turn_active);
-    }
-
-    #[test]
-    fn terminal_error_reads_latest_surface_status_message() {
-        let mut state = SurfaceUiState::default();
-        assert!(state.terminal_error().is_none());
-
-        state.history.messages.push(ene_api::MessageResponse {
-            seq: 1,
-            role: "status".to_owned(),
-            text: "model: call failed: 400 Bad Request: Invalid tool schema".to_owned(),
-        });
-
-        assert_eq!(
-            state.terminal_error(),
-            Some("model: call failed: 400 Bad Request: Invalid tool schema")
-        );
     }
 
     #[test]
@@ -286,5 +269,20 @@ mod tests {
             !state.chat_input_focused,
             "overlay shortcuts must not stay blocked after Chat closes"
         );
+    }
+
+    #[test]
+    fn new_chat_actions_are_deduplicated_while_inflight() {
+        let mut state = SurfaceUiState::default();
+        state.push_action(SurfaceAction::NewSession);
+        state.new_session_inflight = true;
+        state.push_action(SurfaceAction::NewSession);
+
+        let actions: Vec<_> = state
+            .pending_actions
+            .iter()
+            .filter(|action| matches!(action, SurfaceAction::NewSession))
+            .collect();
+        assert_eq!(actions.len(), 1);
     }
 }

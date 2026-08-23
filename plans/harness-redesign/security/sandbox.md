@@ -12,9 +12,10 @@
   ([../tools/registry.md §0](../tools/registry.md#0-2軸の分類d-10))。
   ホスト自身のコードを隔離しても意味がなく、隔離すべき「他人のコード」は
   すべてプロセス境界の向こうにある。
-- 現行の成果(`plans/sandbox-and-downloads.md`、`plans/windows-appcontainer.md`、
-  `crates/ene-sandbox`)を継承し、新 IPC([../plugins/ipc.md](../plugins/ipc.md))に
-  合わせて整理する。
+- Windows の現行状態と今後の強化方針は、この文書と
+  `crates/ene-sandbox` を正とする。`plans/sandbox-and-downloads.md` は
+  ダウンロードと Broker の上位要件だけを扱い、新 IPC([../plugins/ipc.md](../plugins/ipc.md))
+  に合わせて整理する。
 - サンドボックスは「プロセスの隔離」、Broker は「資源の仲介」、
   ファイバー合成は「ホスト文脈の回収」。3つが揃って初めて安全になる
   (多層防御)。`requires` の静的審査は起動前に要求を見せるだけで、
@@ -29,13 +30,24 @@
 | プラットフォーム | 手段 | 内容 |
 |---|---|---|
 | Linux | **Landlock**(主)+ **bubblewrap**(補強) | Landlock で FS アクセスのルールセットを適用。bubblewrap は名前空間分離(mount/pid/net)で補強。両方が使える環境を推奨 |
-| Windows(クロス配布) | **AppContainer**+ Low Integrity + Job Object | Restricted-token / AppContainer で低権限化。Job Object で資源制限。ネットワーク Capability なし |
+| Windows(クロス配布) | **Job Object** (現行) | `crates/ene-sandbox` は Job Object でプロセス・メモリ・CPU を制限する。AppContainer + Low Integrity とネットワーク Capability なしは設計目標だが、現行の起動経路には未配線 |
 | (macOS) | 非対象 | macOS はサポート対象外 |
 
 - 検出: 起動時に利用可能な手段を検出し、最善の組合せを選ぶ。
   Landlock 不可+bwrap 不可 → `sandbox.required` プラグインは起動しない。
 - サンドボックスの**種類と強度はプラグインに通知しない**
   (回避の材料を与えない)。
+
+### Windows の現状と次段階
+
+- 現行実装は `CREATE_SUSPENDED`、Job Object への割り当て、プロセスの再開、
+  kill-on-close までを提供する。AppContainer の SID・トークン・ACL を使う起動経路は
+  まだ存在しない。
+- AppContainer + Low Integrity、ネットワーク Capability なし、ユーザーファイルと
+  資格情報領域への明示的な拒否 ACL は次段階の設計目標である。実装時には
+  AppContainer と Broker IPC のパイプ ACL、ローカルサイドカーのループバック要件を
+  Windows 実機で検証し、この文書の現状欄と受入条件を同じ変更で更新する。
+- 過去の branch・commit・crate 構成に依存する引き継ぎメモは設計仕様ではない。
 
 ## 3. プラグインに見える世界
 
@@ -107,4 +119,3 @@
 ---
 
 - 次: [approval.md](approval.md)
-

@@ -97,7 +97,14 @@ async fn surface_cannot_execute_fs_write() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, PipelineError::NotOnSurface(_)));
+    assert!(matches!(
+        err,
+        PipelineError::WrongLayer {
+            requested: Layer::Surface,
+            required: Layer::Job,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -230,6 +237,17 @@ fn exec_tools_stay_off_surface_schema() {
         .collect();
     assert!(job.contains(&"exec.run"));
     assert!(job.contains(&"fs.write"));
+    assert_eq!(
+        registry.get("exec.run").unwrap().primary_layer(),
+        Layer::Job
+    );
+}
+
+#[test]
+fn layer_names_are_stable_for_capability_results() {
+    assert_eq!(Layer::Surface.as_str(), "surface");
+    assert_eq!(Layer::Job.as_str(), "job");
+    assert_eq!(Layer::Surface.to_string(), "surface");
 }
 
 #[test]

@@ -387,6 +387,10 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/openapi.json", get(routes::openapi))
         .route("/api/v1/souls", get(routes::list_souls))
         .route("/api/v1/souls/{id}", get(routes::get_soul))
+        .route(
+            "/api/v1/souls/{id}/greetings",
+            get(routes::list_greetings),
+        )
         .route("/api/v1/souls/{id}/body", patch(routes::patch_soul_body))
         .route(
             "/api/v1/souls/{id}/skills",
@@ -414,6 +418,10 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/v1/sessions/{id}/export", post(routes::export_session))
         .route("/api/v1/sessions/{id}/messages", post(routes::send_message))
+        .route(
+            "/api/v1/sessions/{id}/greeting",
+            post(routes::select_greeting),
+        )
         .route("/api/v1/sessions/{id}/history", get(routes::history))
         .route(
             "/api/v1/sessions/{id}/queued/{entry_id}",

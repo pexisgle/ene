@@ -239,7 +239,14 @@ async fn surface_fs_write_upgrades_without_invoking() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, ene_registry::PipelineError::NotOnSurface(_)));
+    assert!(matches!(
+        err,
+        ene_registry::PipelineError::WrongLayer {
+            requested: Layer::Surface,
+            required: Layer::Job,
+            ..
+        }
+    ));
     let job = host
         .auto_upgrade(UpgradeRequest {
             soul_id: soul,
@@ -345,7 +352,10 @@ async fn surface_router_upgrades_fs_write_without_spy() {
         .on_tool("fs.write", json!({"path":"a","text":"b"}), 0)
         .await
         .unwrap();
-    assert!(matches!(outcome, SurfaceToolOutcome::Delegated { .. }));
+    let SurfaceToolOutcome::Delegated { speech, .. } = outcome else {
+        panic!("side-effect tool must be delegated");
+    };
+    assert!(speech.contains("Work job"), "unexpected speech: {speech}");
     assert!(!hit.load(Ordering::SeqCst));
     assert_eq!(store.list_jobs(soul).unwrap().len(), 1);
 }

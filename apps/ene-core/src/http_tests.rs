@@ -1762,6 +1762,11 @@ fn web_ui_is_read_only_in_source() {
     let html = include_str!("../web/index.html");
     assert!(html.contains("/api/v1/souls"));
     assert!(html.contains("display_name"));
+    assert!(html.contains("const protocols = token ? [\"bearer.\" + token] : [];"));
+    assert!(
+        !html.contains("access_token"),
+        "WebSocket tokens must not be placed in the URL query"
+    );
     assert!(
         !html.contains("method: \"PATCH\"") && !html.contains("method: \"DELETE\""),
         "Web UI must not PATCH/DELETE in page scripts"
@@ -2435,6 +2440,24 @@ fn sample_char_files() -> BTreeMap<String, Vec<u8>> {
     files
 }
 
+fn sample_vrm_char_files(id: &str, marker: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    let mut files = sample_char_files();
+    let manifest = String::from_utf8(files.remove("manifest.toml").unwrap()).unwrap();
+    files.insert(
+        "manifest.toml".into(),
+        manifest
+            .replace("char.mychar", id)
+            .replace("My Character", id)
+            .into_bytes(),
+    );
+    files.insert(
+        "body/body.toml".into(),
+        b"[body]\nkind = \"vrm\"\navatar = \"avatar/model.vrm\"\n".to_vec(),
+    );
+    files.insert("body/avatar/model.vrm".into(), marker.to_vec());
+    files
+}
+
 fn stamp_digest(mut files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
     let digest = content_digest(&files);
     let manifest = String::from_utf8(files.get("manifest.toml").unwrap().clone()).unwrap();
@@ -2602,6 +2625,95 @@ async fn import_vrm_package_exposes_avatar_path_on_soul_and_stage() {
         "stage occupants: {:?}",
         stage.occupants
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn prefixed_character_packages_keep_avatar_paths_paired() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let cases: [(&str, &[u8]); 2] = [
+        ("char.alicia", b"alicia-avatar"),
+        ("char.alicia-b", b"alicia-b-avatar"),
+    ];
+    let mut expected = Vec::new();
+    for (id, marker) in cases {
+        let zip = pack_archive(&stamp_digest(sample_vrm_char_files(id, marker))).unwrap();
+        let imported = client
+            .import_character_archive_b64(&base64::engine::general_purpose::STANDARD.encode(&zip))
+            .await
+            .unwrap();
+        expected.push((
+            imported
+                .soul_id
+                .expect("character package must activate a soul"),
+            format!("{id}@1.0.0"),
+            marker.to_vec(),
+        ));
+    }
+
+    for (soul_id, package_ref, marker) in &expected {
+        let soul = client.get_soul(soul_id).await.unwrap();
+        assert_eq!(soul.package_id.as_deref(), Some(package_ref.as_str()));
+        let avatar = soul.avatar_path.expect("avatar_path");
+        assert!(
+            avatar.contains(package_ref.as_str()),
+            "avatar path: {avatar}"
+        );
+        assert_eq!(std::fs::read(&avatar).unwrap(), *marker);
+    }
+
+    let listed = client.list_characters().await.unwrap();
+    for (_, package_ref, _) in &expected {
+        let (id, version) = package_ref.split_once('@').expect("package ref");
+        let character = listed
+            .items
+            .iter()
+            .find(|character| character.id == id && character.version == version)
+            .expect("imported character must be listed");
+        assert!(
+            character.path.contains(package_ref),
+            "character path: {}",
+            character.path
+        );
+    }
+
+    let activated = client.activate_character("char.alicia-b").await.unwrap();
+    assert_eq!(activated.id, "char.alicia-b");
+    assert_eq!(activated.version, "1.0.0");
+    assert!(activated.path.contains("char.alicia-b@1.0.0"));
+    assert_eq!(
+        activated.soul_id.as_deref(),
+        expected
+            .iter()
+            .find(|(_, package_ref, _)| package_ref == "char.alicia-b@1.0.0")
+            .map(|(soul_id, _, _)| soul_id.as_str())
+    );
+    let relisted = client.list_characters().await.unwrap();
+    let relisted_b = relisted
+        .items
+        .iter()
+        .find(|character| character.id == "char.alicia-b")
+        .expect("activated character must remain listed");
+    assert!(relisted_b.path.contains("char.alicia-b@1.0.0"));
+
+    let stage = client.stage().await.unwrap();
+    for (soul_id, package_ref, marker) in &expected {
+        let occupant = stage
+            .occupants
+            .iter()
+            .find(|occupant| occupant.soul_id == *soul_id)
+            .expect("activated character must be a stage occupant");
+        assert_eq!(occupant.package_id.as_deref(), Some(package_ref.as_str()));
+        let avatar = occupant
+            .avatar_path
+            .as_deref()
+            .expect("stage occupant must expose avatar");
+        assert!(
+            avatar.contains(package_ref.as_str()),
+            "avatar path: {avatar}"
+        );
+        assert_eq!(std::fs::read(avatar).unwrap(), *marker);
+    }
     server.shutdown().await;
 }
 

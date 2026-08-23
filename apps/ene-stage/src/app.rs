@@ -104,6 +104,7 @@ pub fn run() -> Result<(), AppError> {
         detail_win: None,
         caption: None,
         spotlight: None,
+        chrome_focused: false,
         last_cursor: None,
         last_tick: Instant::now(),
         last_approval_poll: Instant::now(),
@@ -111,6 +112,7 @@ pub fn run() -> Result<(), AppError> {
     };
     app.surface.character_pos = [app.settings.character_x, app.settings.character_y];
     app.surface.history = app.session.history();
+    app.surface.greetings = app.session.greetings().to_vec();
     detail::ensure_settings(
         &mut app.detail,
         &app.client,
@@ -158,6 +160,7 @@ struct StageApp {
     detail_win: Option<ChromeWindow>,
     caption: Option<ChromeWindow>,
     spotlight: Option<ChromeWindow>,
+    chrome_focused: bool,
     last_cursor: Option<LogicalPosition<f32>>,
     last_tick: Instant,
     last_approval_poll: Instant,
@@ -165,6 +168,120 @@ struct StageApp {
 }
 
 impl StageApp {
+    #[cfg(test)]
+    fn new_for_test() -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = runtime.enter();
+        let client = Arc::new(ene_api::ApiClient::new(
+            "http://127.0.0.1:9",
+            "token",
+            "stage",
+        ));
+        let rt_handle = runtime.handle().clone();
+        Self {
+            settings: DesktopSettings::default(),
+            local_settings: DesktopSettings::default(),
+            core: StageCore::detached(),
+            session: StageSession::new_for_test(
+                Arc::clone(&client),
+                "soul",
+                "old-session",
+                ene_api::HistoryResponse {
+                    messages: Vec::new(),
+                    depth: "surface".to_owned(),
+                },
+            ),
+            client,
+            runtime,
+            rt_handle,
+            feeds: EventFeeds::new_for_test(),
+            audio: AudioHub::new(),
+            viseme: VisemeAnalyzer::new(AudioHub::new().sample_rate()),
+            look_at_state: look_at::LookAtState::default(),
+            tray: None,
+            hotkeys: None,
+            surface: SurfaceUiState::default(),
+            detail: DetailUiState::default(),
+            async_results: Arc::new(Mutex::new(Vec::new())),
+            mic_active: false,
+            listen: MicListen::new(),
+            notify_claimed: false,
+            speaker_claimed: false,
+            gpu: None,
+            overlay: None,
+            chat: None,
+            detail_win: None,
+            caption: None,
+            spotlight: None,
+            chrome_focused: false,
+            last_cursor: None,
+            last_tick: Instant::now(),
+            last_approval_poll: Instant::now(),
+            approval_poll_inflight: false,
+        }
+    }
+
+    fn chrome_window_exists(&self) -> bool {
+        self.chat.is_some()
+            || self.detail_win.is_some()
+            || self.caption.is_some()
+            || self.spotlight.is_some()
+    }
+
+    fn sync_overlay_interaction(&mut self) {
+        let protect_chrome = self.chrome_focused && self.chrome_window_exists();
+        let always_on_top = self.local_settings.always_on_top;
+        let click_through = self.local_settings.overlay_click_through;
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        let level = overlay_window_level(protect_chrome, always_on_top);
+        let click_through = protect_chrome || (overlay.transparent && click_through);
+        overlay.window.set_window_level(level);
+        overlay.set_click_through(click_through);
+    }
+
+    fn open_chat(&mut self, event_loop: &ActiveEventLoop) {
+        self.surface.chat_open = true;
+        self.surface.focus_chat = true;
+        self.chrome_focused = true;
+        self.sync_overlay_interaction();
+        if let Some(chat) = self.chat.as_ref() {
+            chat.show_and_focus();
+            return;
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            self.chrome_focused = false;
+            self.sync_overlay_interaction();
+            return;
+        };
+        match ChromeWindow::create(
+            event_loop,
+            gpu,
+            ChromeKind::Chat,
+            PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
+            true,
+        ) {
+            Ok(win) => {
+                self.chat = Some(win);
+                self.sync_overlay_interaction();
+                if let Some(chat) = self.chat.as_ref() {
+                    chat.show_and_focus();
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "chat window failed");
+                if !self.chrome_window_exists() {
+                    self.chrome_focused = false;
+                    self.sync_overlay_interaction();
+                }
+            }
+        }
+    }
+
     fn spawn<F>(&self, task: F)
     where
         F: std::future::Future<Output = AsyncOutcome> + Send + 'static,
@@ -216,7 +333,10 @@ impl StageApp {
     #[expect(clippy::too_many_lines, reason = "outcome dispatch is a flat match")]
     fn apply_async_outcome(&mut self, outcome: AsyncOutcome) {
         match outcome {
-            AsyncOutcome::SendMessage(result) => {
+            AsyncOutcome::SendMessage { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
                 if let Err(err) = result {
                     self.surface.status = err;
                 } else {
@@ -225,12 +345,34 @@ impl StageApp {
                     self.request_history_refresh();
                 }
             }
-            AsyncOutcome::BargeIn(result) | AsyncOutcome::CancelTurn(result) => {
+            AsyncOutcome::SelectGreeting { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
+                self.surface.greeting_inflight = false;
+                match result {
+                    Ok(history) => {
+                        self.session.replace_history(history.clone());
+                        self.surface.history = history;
+                        self.surface.greetings.clear();
+                        self.surface.greeting_status.clear();
+                    }
+                    Err(err) => self.surface.greeting_status = err,
+                }
+            }
+            AsyncOutcome::BargeIn { session_id, result }
+            | AsyncOutcome::CancelTurn { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
                 if let Err(err) = result {
                     self.surface.status = err;
                 }
             }
-            AsyncOutcome::Approval(result) => {
+            AsyncOutcome::Approval { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
                 self.surface.pending_approval = None;
                 if let Err(err) = result {
                     self.surface.status = err;
@@ -245,29 +387,34 @@ impl StageApp {
                     .on_done(generation, self.mic_active, Instant::now());
                 self.spawn_listen(action);
             }
-            AsyncOutcome::RefreshHistory(result) => match result {
-                Ok(history) => {
-                    if let Some(message) = history
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|message| message.role == "status")
-                    {
-                        let mapped = map_turn_err(&message.text);
-                        if auth_failure(&mapped) || auth_failure(&message.text) {
-                            self.detail.core_status = i18n::fl("chat-auth-failed");
-                        }
-                        mapped.clone_into(&mut self.surface.status);
-                    }
-                    self.session.replace_history(history.clone());
-                    self.surface.history = history;
-                    self.surface.streaming_text.clear();
-                    if let Some(chat) = &self.chat {
-                        chat.request_redraw();
-                    }
+            AsyncOutcome::RefreshHistory { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
                 }
-                Err(err) => self.surface.status = err,
-            },
+                match result {
+                    Ok(history) => {
+                        if let Some(message) = history
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|message| message.role == "status")
+                        {
+                            let mapped = map_turn_err(&message.text);
+                            if auth_failure(&mapped) || auth_failure(&message.text) {
+                                self.detail.core_status = i18n::fl("chat-auth-failed");
+                            }
+                            mapped.clone_into(&mut self.surface.status);
+                        }
+                        self.session.replace_history(history.clone());
+                        self.surface.history = history;
+                        self.surface.streaming_text.clear();
+                        if let Some(chat) = &self.chat {
+                            chat.request_redraw();
+                        }
+                    }
+                    Err(err) => self.surface.status = err,
+                }
+            }
             AsyncOutcome::SaveLocalSettings(result) => {
                 self.detail.core_status = match result {
                     Ok(()) => i18n::fl("settings-saved"),
@@ -339,15 +486,29 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::ImportCharacter(result) | AsyncOutcome::ActivateCharacter(result) => {
+            AsyncOutcome::ImportCharacter { generation, result }
+            | AsyncOutcome::ActivateCharacter { generation, result } => {
+                if !self.detail.activation_is_current(generation) {
+                    return;
+                }
                 match result {
-                    Ok(character) => {
-                        self.detail.core_status =
-                            format!("{}: {}", i18n::fl("character-imported"), character.id);
-                        self.request_characters();
+                    Ok(activated) => {
+                        if let Some(target) = activated.target {
+                            self.commit_session_target(target);
+                        }
                         self.reload_avatar();
+                        self.detail.invalidate_character();
+                        self.detail.core_status = format!(
+                            "{}: {}",
+                            i18n::fl("character-imported"),
+                            activated.character.id
+                        );
+                        self.request_characters();
                     }
-                    Err(err) => self.detail.core_status = err,
+                    Err(err) => {
+                        self.surface.status = err.clone();
+                        self.detail.core_status = err;
+                    }
                 }
             }
             AsyncOutcome::ListCharacters(result) => match result {
@@ -563,6 +724,30 @@ impl StageApp {
                     Err(err) => err,
                 };
             }
+            AsyncOutcome::NewSession(result) => match result {
+                Ok(split) => {
+                    self.session.adopt_new_session(&split);
+                    self.feeds =
+                        spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
+                    self.detail.set_session_id(self.session.session_id());
+                    self.surface.history = self.session.history();
+                    self.surface.greetings = self.session.greetings().to_vec();
+                    self.surface.greeting_inflight = false;
+                    self.surface.greeting_status.clear();
+                    self.surface.streaming_text.clear();
+                    self.surface.pending_approval = None;
+                    self.surface.pending_question = None;
+                    self.surface.status = i18n::fl("chat-new-session-ready");
+                    self.request_history_refresh();
+                    self.detail.new_session_inflight = false;
+                    self.surface.new_session_inflight = false;
+                }
+                Err(err) => {
+                    self.detail.new_session_inflight = false;
+                    self.surface.new_session_inflight = false;
+                    self.surface.status = err;
+                }
+            },
             AsyncOutcome::CompactSession(result) => {
                 self.detail.core_status = match result {
                     Ok(id) => format!("{}: {id}", i18n::fl("jobs-compacted")),
@@ -663,10 +848,30 @@ impl StageApp {
 
     fn request_history_refresh(&self) {
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::RefreshHistory(
-                session
+            AsyncOutcome::RefreshHistory {
+                session_id,
+                result: session
                     .refresh_history()
+                    .await
+                    .map_err(|err| err.to_string()),
+            }
+        });
+    }
+
+    fn start_new_session(&mut self) {
+        if self.detail.new_session_inflight {
+            return;
+        }
+        self.detail.new_session_inflight = true;
+        self.surface.new_session_inflight = true;
+        let client = Arc::clone(&self.client);
+        let session_id = self.session.session_id().to_owned();
+        self.spawn(async move {
+            AsyncOutcome::NewSession(
+                client
+                    .split_session(&session_id)
                     .await
                     .map_err(|err| err.to_string()),
             )
@@ -721,16 +926,37 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         let mode = self.surface.message_mode;
         self.surface.begin_send();
         self.spawn(async move {
-            AsyncOutcome::SendMessage(
-                session
+            AsyncOutcome::SendMessage {
+                session_id,
+                result: session
                     .send(&text, mode)
                     .await
                     .map(|_| ())
                     .map_err(|err| map_turn_err(&err.to_string())),
-            )
+            }
+        });
+    }
+
+    fn select_greeting(&mut self, index: u32) {
+        if self.surface.greeting_inflight {
+            return;
+        }
+        self.surface.greeting_inflight = true;
+        self.surface.greeting_status.clear();
+        let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
+        self.spawn(async move {
+            AsyncOutcome::SelectGreeting {
+                session_id,
+                result: session
+                    .select_greeting(index)
+                    .await
+                    .map_err(|err| err.to_string()),
+            }
         });
     }
 
@@ -745,13 +971,15 @@ impl StageApp {
         };
         self.surface.chat_draft.clear();
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::SendMessage(
-                session
+            AsyncOutcome::SendMessage {
+                session_id,
+                result: session
                     .answer_job(&question.id, &text)
                     .await
                     .map_err(|err| err.to_string()),
-            )
+            }
         });
     }
 
@@ -761,14 +989,16 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::BargeIn(
-                session
+            AsyncOutcome::BargeIn {
+                session_id,
+                result: session
                     .barge_in()
                     .await
                     .map(|_| ())
                     .map_err(|e| map_turn_err(&e.to_string())),
-            )
+            }
         });
     }
 
@@ -778,14 +1008,16 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::CancelTurn(
-                session
+            AsyncOutcome::CancelTurn {
+                session_id,
+                result: session
                     .cancel_turn()
                     .await
                     .map(|_| ())
                     .map_err(|e| map_turn_err(&e.to_string())),
-            )
+            }
         });
     }
 
@@ -794,15 +1026,17 @@ impl StageApp {
             return;
         };
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         let decision = decision.to_owned();
         self.spawn(async move {
-            AsyncOutcome::Approval(
-                session
+            AsyncOutcome::Approval {
+                session_id,
+                result: session
                     .respond_approval(&pending.id, &decision)
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
-            )
+            }
         });
     }
 
@@ -814,14 +1048,7 @@ impl StageApp {
         if let Some(caption) = &self.caption {
             caption.place_caption(&settings.caption_position);
         }
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay
-                .window
-                .set_window_level(window_level(settings.always_on_top));
-            if overlay.transparent {
-                overlay.set_click_through(settings.overlay_click_through);
-            }
-        }
+        self.sync_overlay_interaction();
         self.spawn(async move {
             AsyncOutcome::SaveLocalSettings(
                 save_desktop_settings(&settings).map_err(|err| err.to_string()),
@@ -845,19 +1072,18 @@ impl StageApp {
     }
 
     fn toggle_overlay_chrome(&mut self) {
-        let preferred = self.local_settings.overlay_click_through;
         let size = {
             let Some(overlay) = self.overlay.as_mut() else {
                 return;
             };
             overlay.toggle_chrome();
-            overlay.apply_click_through(preferred);
             overlay.window.inner_size()
         };
         let gpu = self.gpu.as_ref();
         if let (Some(gpu), Some(overlay)) = (gpu, self.overlay.as_mut()) {
             overlay.resize(gpu, size);
         }
+        self.sync_overlay_interaction();
     }
 
     fn raise_chrome(&self) {
@@ -895,11 +1121,7 @@ impl StageApp {
         for action in tray_actions {
             match action {
                 TrayAction::OpenDetail => self.open_detail(event_loop, DetailTab::Home),
-                TrayAction::OpenChatFocus => {
-                    self.surface.chat_open = true;
-                    self.surface.focus_chat = true;
-                    self.ensure_chat(event_loop);
-                }
+                TrayAction::OpenChatFocus => self.open_chat(event_loop),
                 TrayAction::ToggleMic => self.toggle_mic(),
                 TrayAction::Quit => self.surface.quit = true,
             }
@@ -928,6 +1150,8 @@ impl StageApp {
         for action in actions {
             match action {
                 SurfaceAction::SendChat => self.send_chat(),
+                SurfaceAction::NewSession => self.start_new_session(),
+                SurfaceAction::SelectGreeting { index } => self.select_greeting(index),
                 SurfaceAction::BargeIn => self.barge_in(),
                 SurfaceAction::CancelTurn => self.cancel_turn(),
                 SurfaceAction::ToggleMic => self.toggle_mic(),
@@ -945,6 +1169,9 @@ impl StageApp {
         if self.detail.save_local_pending {
             self.detail.save_local_pending = false;
             self.save_local_settings();
+        }
+        if std::mem::take(&mut self.detail.request_chat_open) {
+            self.open_chat(event_loop);
         }
     }
 
@@ -1164,6 +1391,13 @@ impl StageApp {
         }
         self.feeds = spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
         self.surface.history = self.session.history();
+        self.surface.greetings = self.session.greetings().to_vec();
+        self.surface.greeting_inflight = false;
+        self.surface.greeting_status.clear();
+        self.surface.pending_approval = None;
+        self.surface.pending_question = None;
+        self.detail.next_activation_generation();
+        self.detail.invalidate_character();
         if self
             .overlay
             .as_ref()
@@ -1173,13 +1407,31 @@ impl StageApp {
         }
     }
 
+    fn commit_session_target(&mut self, target: crate::core::session::PreparedSessionTarget) {
+        let feeds = spawn_event_feeds(&self.rt_handle, &self.client, target.session_id());
+        self.session.commit_retarget(target);
+        self.feeds = feeds;
+        self.surface.history = self.session.history();
+        self.surface.greetings = self.session.greetings().to_vec();
+        self.surface.greeting_inflight = false;
+        self.surface.greeting_status.clear();
+        self.surface.streaming_text.clear();
+        self.surface.turn_active = false;
+        self.surface.pending_approval = None;
+        self.surface.pending_question = None;
+    }
+
     fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
         self.detail.visible = true;
         self.detail.refresh_settings_on_open();
         self.detail.select_tab(tab);
-        if self.detail_win.is_none()
-            && let Some(gpu) = self.gpu.as_ref()
-        {
+        self.chrome_focused = true;
+        self.sync_overlay_interaction();
+        if let Some(detail) = self.detail_win.as_ref() {
+            detail.show_and_focus();
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_ref() {
             match ChromeWindow::create(
                 event_loop,
                 gpu,
@@ -1187,28 +1439,24 @@ impl StageApp {
                 PhysicalSize::new(960, 680),
                 true,
             ) {
-                Ok(win) => self.detail_win = Some(win),
-                Err(err) => tracing::warn!(error = %err, "detail window failed"),
+                Ok(win) => {
+                    self.detail_win = Some(win);
+                    self.sync_overlay_interaction();
+                    if let Some(detail) = self.detail_win.as_ref() {
+                        detail.show_and_focus();
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "detail window failed");
+                    if !self.chrome_window_exists() {
+                        self.chrome_focused = false;
+                        self.sync_overlay_interaction();
+                    }
+                }
             }
-        }
-    }
-
-    fn ensure_chat(&mut self, event_loop: &ActiveEventLoop) {
-        if self.chat.is_some() {
-            return;
-        }
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        match ChromeWindow::create(
-            event_loop,
-            gpu,
-            ChromeKind::Chat,
-            PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
-            true,
-        ) {
-            Ok(win) => self.chat = Some(win),
-            Err(err) => tracing::warn!(error = %err, "chat window failed"),
+        } else {
+            self.chrome_focused = false;
+            self.sync_overlay_interaction();
         }
     }
 
@@ -1263,10 +1511,7 @@ impl StageApp {
         match key {
             Key::Named(NamedKey::Escape) => self.surface.quit = true,
             Key::Named(NamedKey::F1) => self.open_detail(event_loop, DetailTab::Companion),
-            Key::Named(NamedKey::F2) => {
-                self.surface.chat_open = true;
-                self.ensure_chat(event_loop);
-            }
+            Key::Named(NamedKey::F2) => self.open_chat(event_loop),
             Key::Named(NamedKey::F3) => {
                 if let Some(overlay) = self.overlay.as_mut() {
                     overlay.collider_debug = !overlay.collider_debug;
@@ -1373,8 +1618,10 @@ impl StageApp {
     }
 
     fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {
-        if self.surface.chat_open {
-            self.ensure_chat(event_loop);
+        if chat_window_action(self.surface.chat_open, self.chat.is_some())
+            == ChatWindowAction::Create
+        {
+            self.open_chat(event_loop);
         }
         if self.settings.caption_enabled && self.surface.caption_visible() {
             self.ensure_caption(event_loop);
@@ -1487,6 +1734,21 @@ mod chat_tests {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatWindowAction {
+    None,
+    Create,
+}
+
+#[must_use]
+fn chat_window_action(chat_open: bool, chat_exists: bool) -> ChatWindowAction {
+    if chat_open && !chat_exists {
+        ChatWindowAction::Create
+    } else {
+        ChatWindowAction::None
+    }
+}
+
 impl ApplicationHandler for StageApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_some() {
@@ -1538,13 +1800,17 @@ impl ApplicationHandler for StageApp {
         self.gpu = Some(gpu);
         self.reload_avatar();
         if self.surface.chat_open {
-            self.ensure_chat(event_loop);
+            self.open_chat(event_loop);
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let overlay_id = self.overlay.as_ref().map(OverlayWindow::id);
         if overlay_id == Some(id) {
+            if matches!(event, WindowEvent::Focused(true)) {
+                self.chrome_focused = false;
+                self.sync_overlay_interaction();
+            }
             match event {
                 WindowEvent::CloseRequested => self.surface.quit = true,
                 WindowEvent::Resized(size) => {
@@ -1606,6 +1872,7 @@ impl ApplicationHandler for StageApp {
         let mut close_caption = false;
         let mut close_spotlight = false;
         let mut overlay_from_chrome = None;
+        let mut chrome_focus_state = None;
         if let Some(chat) = self.chat.as_mut()
             && chat.id() == id
         {
@@ -1616,6 +1883,7 @@ impl ApplicationHandler for StageApp {
                 chat.resize(gpu, *size);
             }
             overlay_from_chrome = Some(chat.owns_input());
+            chrome_focus_state = window_focus_state(&event);
             close_chat = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(detail) = self.detail_win.as_mut()
@@ -1628,19 +1896,26 @@ impl ApplicationHandler for StageApp {
                 detail.resize(gpu, *size);
             }
             overlay_from_chrome = Some(detail.owns_input());
+            chrome_focus_state = window_focus_state(&event);
             close_detail = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(caption) = self.caption.as_mut()
             && caption.id() == id
         {
             caption.on_window_event(&event);
+            chrome_focus_state = window_focus_state(&event);
             close_caption = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(spotlight) = self.spotlight.as_mut()
             && spotlight.id() == id
         {
             spotlight.on_window_event(&event);
+            chrome_focus_state = window_focus_state(&event);
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
+        }
+        if let Some(focused) = chrome_focus_state {
+            self.chrome_focused = focused;
+            self.sync_overlay_interaction();
         }
         if !self.surface.chat_input_focused
             && overlay_from_chrome.is_none_or(|wants| !wants)
@@ -1666,6 +1941,12 @@ impl ApplicationHandler for StageApp {
         if close_spotlight {
             self.spotlight = None;
             self.surface.spotlight_open = false;
+        }
+        if !self.chrome_window_exists() {
+            self.chrome_focused = false;
+        }
+        if close_chat || close_detail || close_caption || close_spotlight {
+            self.sync_overlay_interaction();
         }
     }
 
@@ -1715,6 +1996,23 @@ fn window_level(always_on_top: bool) -> WindowLevel {
     }
 }
 
+#[must_use]
+fn overlay_window_level(chrome_focused: bool, always_on_top: bool) -> WindowLevel {
+    if chrome_focused {
+        WindowLevel::Normal
+    } else {
+        window_level(always_on_top)
+    }
+}
+
+#[must_use]
+fn window_focus_state(event: &WindowEvent) -> Option<bool> {
+    match event {
+        WindowEvent::Focused(focused) => Some(*focused),
+        _ => None,
+    }
+}
+
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
         "(empty)"
@@ -1732,15 +2030,110 @@ fn map_turn_err(err: &str) -> String {
         err.to_owned()
     }
 }
-
 #[cfg(test)]
 mod tests {
-    use super::{format_log_text, provider_asset_load_status, window_level};
+    use super::{
+        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
+        overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
+    };
+    use crate::core::session::PreparedSessionTarget;
+    use crate::surface::{PendingApproval, PendingQuestion};
+    use ene_api::HistoryResponse;
+    use std::sync::Arc;
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
         assert_eq!(window_level(true), winit::window::WindowLevel::AlwaysOnTop);
         assert_eq!(window_level(false), winit::window::WindowLevel::Normal);
+    }
+
+    #[test]
+    fn focused_chrome_lowers_overlay_until_focus_returns() {
+        assert_eq!(
+            overlay_window_level(true, true),
+            winit::window::WindowLevel::Normal
+        );
+        assert_eq!(
+            overlay_window_level(false, true),
+            winit::window::WindowLevel::AlwaysOnTop
+        );
+        assert_eq!(
+            overlay_window_level(false, false),
+            winit::window::WindowLevel::Normal
+        );
+    }
+
+    #[test]
+    fn chrome_focus_state_includes_focus_loss() {
+        assert_eq!(
+            window_focus_state(&winit::event::WindowEvent::Focused(true)),
+            Some(true)
+        );
+        assert_eq!(
+            window_focus_state(&winit::event::WindowEvent::Focused(false)),
+            Some(false)
+        );
+        assert_eq!(
+            window_focus_state(&winit::event::WindowEvent::CloseRequested),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_approval_result_keeps_new_session_approval() {
+        let mut app = StageApp::new_for_test();
+        app.session.set_for_test(
+            Arc::clone(&app.client),
+            "soul",
+            "new-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        );
+        app.surface.pending_approval = Some(PendingApproval {
+            id: "new-approval".to_owned(),
+            tool: "fs.read".to_owned(),
+            target: "/tmp/new".to_owned(),
+        });
+
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: "old-session".to_owned(),
+            result: Ok(()),
+        });
+
+        assert_eq!(
+            app.surface
+                .pending_approval
+                .as_ref()
+                .map(|item| item.id.as_str()),
+            Some("new-approval")
+        );
+    }
+
+    #[test]
+    fn retarget_clears_session_scoped_questions_and_approvals() {
+        let mut app = StageApp::new_for_test();
+        app.surface.pending_approval = Some(PendingApproval {
+            id: "old-approval".to_owned(),
+            tool: "fs.read".to_owned(),
+            target: "/tmp/old".to_owned(),
+        });
+        app.surface.pending_question = Some(PendingQuestion {
+            id: "old-question".to_owned(),
+            prompt: "old".to_owned(),
+        });
+        app.commit_session_target(PreparedSessionTarget::new_for_test(
+            "new-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        ));
+
+        assert_eq!(app.session.session_id(), "new-session");
+        assert!(app.surface.pending_approval.is_none());
+        assert!(app.surface.pending_question.is_none());
     }
 
     #[test]
@@ -1753,5 +2146,12 @@ mod tests {
     fn provider_asset_load_status_reports_success_and_empty_results() {
         assert!(provider_asset_load_status(2).ends_with(": 2"));
         assert!(provider_asset_load_status(0).ends_with(": 0"));
+    }
+
+    #[test]
+    fn chat_paint_does_not_raise_an_existing_window() {
+        assert_eq!(chat_window_action(true, true), ChatWindowAction::None);
+        assert_eq!(chat_window_action(true, false), ChatWindowAction::Create);
+        assert_eq!(chat_window_action(false, false), ChatWindowAction::None);
     }
 }

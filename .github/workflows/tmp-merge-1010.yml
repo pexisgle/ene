@@ -1,0 +1,46 @@
+name: tmp-merge-1010
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/tmp-merge-1010.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: codex/approval-before-dispatch
+          fetch-depth: 0
+      - name: Merge current main or publish conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch origin main
+          if git merge --no-edit origin/main; then
+            git push origin HEAD:codex/approval-before-dispatch
+            exit 0
+          fi
+          report=/tmp/merge-1010-conflicts.txt
+          {
+            echo 'conflicted files:'
+            git diff --name-only --diff-filter=U
+            echo
+            for f in $(git diff --name-only --diff-filter=U); do
+              echo "===== $f ====="
+              grep -n -B20 -A40 -E '^(<<<<<<<|=======|>>>>>>>)' "$f" || true
+              echo
+            done
+          } > "$report"
+          git merge --abort
+          mkdir -p tmp
+          cp "$report" tmp/merge-1010-conflicts.txt
+          git add tmp/merge-1010-conflicts.txt
+          git commit -m 'chore: report #1010 merge conflicts'
+          git push origin HEAD:codex/approval-before-dispatch

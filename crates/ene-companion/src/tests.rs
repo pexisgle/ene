@@ -11,9 +11,9 @@ use crate::memory::{
     NewMemory, arbitrate, deterministic_extract, extract_turn,
 };
 use crate::package::{
-    avatar_path_for_install, compose_soul_and_body, content_digest, export_dir, import_v3,
-    install_archive, localized_display_name, looks_like_package_zip, looks_like_zip, pack_archive,
-    soul_from_install,
+    avatar_path_for_install, compose_soul_and_body, content_digest, export_dir,
+    greeting_options_for_install, import_v3, install_archive, localized_display_name,
+    looks_like_package_zip, looks_like_zip, pack_archive, soul_from_install,
 };
 use crate::proactive::{
     ActivitySnapshot, GateRejectReason, ProactiveConfirmation, ProactiveObservation,
@@ -1186,12 +1186,19 @@ fn v3_json_imports_as_enechar() {
         "data": {
             "name": "Imported",
             "description": "A visitor.",
-            "personality": "kind"
+            "personality": "kind",
+            "first_mes": "Welcome.",
+            "alternate_greetings": ["Hello again.", ""]
         }
     });
     let bytes = serde_json::to_vec(&card).unwrap();
     let installed = import_v3(&store, &dir.path().join("characters"), &bytes, 10_000_000).unwrap();
     assert!(installed.path.join("soul/persona.md").exists());
+    assert!(installed.path.join("soul/character.json").exists());
+    assert_eq!(
+        greeting_options_for_install(&installed.path).unwrap(),
+        [(0, "Welcome.".to_owned()), (1, "Hello again.".to_owned())]
+    );
     assert!(
         std::fs::read_to_string(installed.path.join("soul/persona.md"))
             .unwrap()

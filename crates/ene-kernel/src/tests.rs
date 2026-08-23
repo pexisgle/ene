@@ -158,6 +158,19 @@ async fn open_lane() -> (TempDir, Arc<SessionStore>, LaneHandle, Arc<RecordingMo
 }
 
 #[tokio::test]
+async fn greeting_is_persisted_once_for_an_empty_session() {
+    let (_dir, _store, lane, _model) = open_lane().await;
+
+    assert!(lane.record_greeting("Welcome!").await.unwrap());
+    assert!(!lane.record_greeting("A duplicate").await.unwrap());
+
+    let history = lane.project(DisplayDepth::Surface).unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].role, ene_session::Role::Assistant);
+    assert_eq!(history.messages[0].text(), "Welcome!");
+}
+
+#[tokio::test]
 async fn provider_failure_is_not_assistant_speech() {
     struct FailingModel;
     #[async_trait]

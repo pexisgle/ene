@@ -1,4 +1,7 @@
 /target
+/dist
+/result
+/result-*
 .direnv
 .idea
 .vscode
@@ -6,6 +9,7 @@
 .fastembed_cache
 .claude/
 .agents/
+.ci-trigger-*
 
 assets/models/
 
@@ -21,15 +25,9 @@ settings.json.v*.bak
 .env
 
 # Generated settings schemas
-assets/schema/settings.schema.json
-assets/schema/character_settings.schema.json
-assets/schema/character.schema.json
+/assets/schema/
 
 # Debug runtime (data dir == source-tree assets/). Never commit.
-assets/sessions.db*
-assets/companions.db*
-assets/audit.db*
-assets/vault.bin
 assets/vault.key
 assets/api.json
 assets/api.token

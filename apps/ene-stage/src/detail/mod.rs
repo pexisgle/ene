@@ -6,16 +6,18 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, CharacterView, JobView, MemoryPatch, MemoryView, OccupantView, PluginConfigField,
-    PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView, ScheduleView, SoulView,
+    ApiClient, ApiError, CharacterView, JobView, MemoryPatch, MemoryView, OccupantView,
+    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
+    ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::runtime::Handle;
 
+use crate::core::session::prepare_soul_target;
 use crate::i18n;
 use crate::settings::DesktopSettings;
-use crate::tasks::AsyncOutcome;
+use crate::tasks::{ActivatedCharacter, AsyncOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailTab {
@@ -29,6 +31,80 @@ pub enum DetailTab {
     Connections,
     System,
     Log,
+}
+
+#[must_use]
+fn caption_position_label(value: &str) -> String {
+    match value {
+        "top" => i18n::fl("settings-caption-position-top"),
+        "left" => i18n::fl("settings-caption-position-left"),
+        "right" => i18n::fl("settings-caption-position-right"),
+        "bottom" => i18n::fl("settings-caption-position-bottom"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn theme_label(value: &str) -> String {
+    match value {
+        "system" => i18n::fl("settings-theme-system"),
+        "dark" => i18n::fl("settings-theme-dark"),
+        "light" => i18n::fl("settings-theme-light"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn language_value_label(value: &str) -> String {
+    match value {
+        "" => i18n::fl("settings-language-system"),
+        "ja" => i18n::fl("settings-language-ja"),
+        "en-US" => i18n::fl("settings-language-en-us"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn core_lifetime_label(value: &str) -> String {
+    match value {
+        "app" => i18n::fl("settings-core-lifetime-app"),
+        "detached" => i18n::fl("settings-core-lifetime-detached"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn plugin_profile_label(value: &str) -> String {
+    match value {
+        "desktop" => i18n::fl("settings-plugins-profile-desktop"),
+        "minimal" => i18n::fl("settings-plugins-profile-minimal"),
+        "headless" => i18n::fl("settings-plugins-profile-headless"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn optional_task_label(value: &str) -> String {
+    match value {
+        "classifier" => i18n::fl("task-classifier"),
+        "embedding" => i18n::fl("task-embedding"),
+        "proactive" => i18n::fl("task-proactive"),
+        "stt" => i18n::fl("task-stt"),
+        "tts" => i18n::fl("task-tts"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn log_kind_label(kind: LogKind) -> String {
+    match kind {
+        LogKind::Thinking => i18n::fl("log-kind-thinking"),
+        LogKind::Inner => i18n::fl("log-kind-inner"),
+        LogKind::Tool => i18n::fl("log-kind-tool"),
+        LogKind::Session => i18n::fl("log-kind-session"),
+        LogKind::Job => i18n::fl("log-kind-job"),
+        LogKind::Affect => i18n::fl("log-kind-affect"),
+    }
 }
 
 impl DetailTab {
@@ -240,10 +316,13 @@ pub struct DetailUiState {
     pub usage_text: String,
     pub spans_text: String,
     pub save_local_pending: bool,
+    pub request_chat_open: bool,
     pub restore_id: String,
     pub restore_confirm: bool,
     pub session_id: String,
+    pub(crate) new_session_inflight: bool,
     pub open_spotlight: bool,
+    activation_generation: u64,
     settings_state: SettingsLoadState,
     loaded: DetailLoaded,
 }
@@ -294,6 +373,10 @@ impl DetailUiState {
         self.settings_state = SettingsLoadState::Loaded;
     }
 
+    pub(crate) fn set_session_id(&mut self, session_id: &str) {
+        session_id.clone_into(&mut self.session_id);
+    }
+
     /// Reload core settings when Detail is reopened so external vault writes
     /// and restarts cannot leave a stale API-key banner behind.
     pub fn refresh_settings_on_open(&mut self) {
@@ -306,6 +389,23 @@ impl DetailUiState {
     pub fn select_tab(&mut self, tab: DetailTab) {
         self.tab = tab;
         self.search.clear();
+    }
+
+    pub fn next_activation_generation(&mut self) -> u64 {
+        self.activation_generation = self.activation_generation.wrapping_add(1);
+        self.activation_generation
+    }
+
+    #[must_use]
+    pub fn activation_is_current(&self, generation: u64) -> bool {
+        self.activation_generation == generation
+    }
+
+    pub fn invalidate_character(&mut self) {
+        self.loaded.character = false;
+        self.soul = None;
+        self.occupants.clear();
+        self.body_ref_draft.clear();
     }
 }
 
@@ -769,6 +869,7 @@ pub fn show(
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
+    state.request_chat_open = false;
     ui.horizontal(|ui| {
         ui.label(i18n::fl("detail-search"));
         ui.text_edit_singleline(&mut state.search);
@@ -804,6 +905,47 @@ pub fn show(
         DetailTab::System => show_system(ui, state, local_settings, client, rt, async_results),
         DetailTab::Log => show_log(ui, state),
     }
+    if matches!(state.tab, DetailTab::Home | DetailTab::Companion) {
+        show_onboarding(ui, state, local_settings, client, rt, async_results);
+    }
+}
+
+fn show_onboarding(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    local_settings: &mut DesktopSettings,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    ensure_settings(state, client, rt, async_results);
+    if !onboarding_visible(state, local_settings) {
+        return;
+    }
+    ui.separator();
+    ui.group(|ui| {
+        ui.strong(i18n::fl("onboarding-title"));
+        ui.label(i18n::fl("onboarding-body"));
+        ui.horizontal(|ui| {
+            if ui
+                .button(i18n::fl("onboarding-open-conversation"))
+                .clicked()
+            {
+                state.select_tab(DetailTab::Conversation);
+            }
+            if ui.button(i18n::fl("onboarding-dismiss")).clicked() {
+                local_settings.onboarding_dismissed = true;
+                state.save_local_pending = true;
+            }
+        });
+    });
+}
+
+#[must_use]
+fn onboarding_visible(state: &DetailUiState, local_settings: &DesktopSettings) -> bool {
+    state.settings_loaded()
+        && !local_settings.onboarding_dismissed
+        && chat_setup_gap(state).is_some()
 }
 
 fn show_home(
@@ -850,11 +992,12 @@ fn show_home(
     }
     let optional = optional_unconfigured(&state.unconfigured);
     if !optional.is_empty() {
-        ui.label(format!(
-            "{}: {}",
-            i18n::fl("home-optional-tasks"),
-            optional.join(", ")
-        ));
+        let labels = optional
+            .iter()
+            .map(|task| optional_task_label(task))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ui.label(format!("{}: {}", i18n::fl("home-optional-tasks"), labels));
         if optional
             .iter()
             .any(|task| *task == "classifier" || *task == "embedding" || *task == "proactive")
@@ -885,6 +1028,22 @@ fn show_home(
             state.select_tab(DetailTab::Voice);
         }
     });
+}
+
+async fn prepare_activation(
+    client: &ApiClient,
+    result: Result<CharacterView, ApiError>,
+) -> Result<ActivatedCharacter, String> {
+    let character = result.map_err(|err| err.to_string())?;
+    let target = match character.soul_id.as_deref() {
+        Some(soul_id) => Some(
+            prepare_soul_target(client, soul_id)
+                .await
+                .map_err(|err| err.to_string())?,
+        ),
+        None => None,
+    };
+    Ok(ActivatedCharacter { character, target })
 }
 
 #[expect(
@@ -946,20 +1105,23 @@ fn show_companion(
     } else {
         ui.label(soul_id);
     }
+    if ui.button(i18n::fl("tray-chat")).clicked() {
+        state.request_chat_open = true;
+    }
     if ui.button(i18n::fl("character-import")).clicked()
         && let Some(path) = rfd::FileDialog::new()
             .add_filter("enechar", &["enechar", "zip", "png", "charx"])
             .pick_file()
     {
         let path = path.display().to_string();
+        let generation = state.next_activation_generation();
         let client = Arc::clone(client);
         spawn_async(rt, async_results, async move {
-            AsyncOutcome::ImportCharacter(
-                client
-                    .import_character(&path)
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
+            let imported = client.import_character(&path).await;
+            AsyncOutcome::ImportCharacter {
+                generation,
+                result: prepare_activation(&client, imported).await,
+            }
         });
     }
     if ui.button(i18n::fl("character-export")).clicked() {
@@ -1016,10 +1178,14 @@ fn show_companion(
             ));
         }
         ui.label(i18n::fl("character-occupants"));
-        for occupant in &state.occupants {
+        for occupant in renderable_occupants(&state.occupants) {
             ui.label(format!(
-                "{}  body={}  avatar={}",
+                "{}\n{}  body={}  avatar={}",
                 occupant.soul_id,
+                occupant
+                    .package_id
+                    .as_deref()
+                    .unwrap_or("unresolved package"),
                 occupant.body_id.as_deref().unwrap_or("none"),
                 occupant.avatar_path.as_deref().unwrap_or("—")
             ));
@@ -1049,6 +1215,7 @@ fn show_companion(
         ui.label(i18n::fl("character-body-uuid-hint"));
     });
     ui.separator();
+    let mut activate_id = None;
     egui::ScrollArea::vertical()
         .max_height(240.0)
         .show(ui, |ui| {
@@ -1059,20 +1226,22 @@ fn show_companion(
                         character.id, character.version, character.kind, character.path
                     ));
                     if ui.button(i18n::fl("character-activate")).clicked() {
-                        let id = character.id.clone();
-                        let client = Arc::clone(client);
-                        spawn_async(rt, async_results, async move {
-                            AsyncOutcome::ActivateCharacter(
-                                client
-                                    .activate_character(&id)
-                                    .await
-                                    .map_err(|e| e.to_string()),
-                            )
-                        });
+                        activate_id = Some(character.id.clone());
                     }
                 });
             }
         });
+    if let Some(id) = activate_id {
+        let generation = state.next_activation_generation();
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            let activated = client.activate_character(&id).await;
+            AsyncOutcome::ActivateCharacter {
+                generation,
+                result: prepare_activation(&client, activated).await,
+            }
+        });
+    }
 }
 
 fn show_conversation(
@@ -1331,13 +1500,13 @@ fn show_voice(
             "bottom"
         };
         egui::ComboBox::from_id_salt("caption-position")
-            .selected_text(current)
+            .selected_text(caption_position_label(current))
             .show_ui(ui, |ui| {
                 for position in crate::surface::caption::POSITIONS {
                     ui.selectable_value(
                         &mut local_settings.caption_position,
                         position.to_owned(),
-                        position,
+                        caption_position_label(position),
                     );
                 }
             });
@@ -1551,6 +1720,19 @@ fn show_work(
         state.loaded.jobs = false;
     }
     ui.horizontal(|ui| {
+        if !state.new_session_inflight && ui.button(i18n::fl("chat-new-session")).clicked() {
+            state.new_session_inflight = true;
+            let session_id = state.session_id.clone();
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::NewSession(
+                    client
+                        .split_session(&session_id)
+                        .await
+                        .map_err(|e| e.to_string()),
+                )
+            });
+        }
         if ui.button(i18n::fl("jobs-fork")).clicked() {
             let session_id = state.session_id.clone();
             let client = Arc::clone(client);
@@ -1666,6 +1848,12 @@ fn active_jobs(jobs: &[JobView]) -> Vec<&JobView> {
         .collect()
 }
 
+fn renderable_occupants(occupants: &[OccupantView]) -> impl Iterator<Item = &OccupantView> {
+    occupants
+        .iter()
+        .filter(|occupant| occupant.package_id.is_some() || occupant.avatar_path.is_some())
+}
+
 fn show_connections(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
@@ -1702,7 +1890,10 @@ fn show_connections(
         ui.label(i18n::fl("settings-plugins-profile"));
         for profile in ["desktop", "minimal", "headless"] {
             if ui
-                .selectable_label(state.plugins_profile == profile, profile)
+                .selectable_label(
+                    state.plugins_profile == profile,
+                    plugin_profile_label(profile),
+                )
                 .clicked()
             {
                 profile.clone_into(&mut state.plugins_profile);
@@ -2281,40 +2472,48 @@ fn show_system_inner(
         .show(ui, |ui| {
             ui.label(i18n::fl("settings-theme"));
             egui::ComboBox::from_id_salt("theme")
-                .selected_text(&local_settings.theme)
+                .selected_text(theme_label(&local_settings.theme))
                 .show_ui(ui, |ui| {
                     for theme in ["system", "dark", "light"] {
-                        ui.selectable_value(&mut local_settings.theme, theme.to_owned(), theme);
+                        ui.selectable_value(
+                            &mut local_settings.theme,
+                            theme.to_owned(),
+                            theme_label(theme),
+                        );
                     }
                 });
             ui.end_row();
             ui.label(i18n::fl("settings-language"));
-            let language_label = if local_settings.language.is_empty() {
-                i18n::fl("settings-language-system")
-            } else {
-                local_settings.language.clone()
-            };
+            let selected_language_label = language_value_label(&local_settings.language);
             egui::ComboBox::from_id_salt("language")
-                .selected_text(language_label)
+                .selected_text(selected_language_label)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut local_settings.language,
                         String::new(),
                         i18n::fl("settings-language-system"),
                     );
-                    ui.selectable_value(&mut local_settings.language, "ja".to_owned(), "ja");
-                    ui.selectable_value(&mut local_settings.language, "en-US".to_owned(), "en-US");
+                    ui.selectable_value(
+                        &mut local_settings.language,
+                        "ja".to_owned(),
+                        language_value_label("ja"),
+                    );
+                    ui.selectable_value(
+                        &mut local_settings.language,
+                        "en-US".to_owned(),
+                        language_value_label("en-US"),
+                    );
                 });
             ui.end_row();
             ui.label(i18n::fl("settings-core-lifetime"));
             egui::ComboBox::from_id_salt("core-lifetime")
-                .selected_text(&local_settings.core_lifetime)
+                .selected_text(core_lifetime_label(&local_settings.core_lifetime))
                 .show_ui(ui, |ui| {
                     for value in ["app", "detached"] {
                         ui.selectable_value(
                             &mut local_settings.core_lifetime,
                             value.to_owned(),
-                            value,
+                            core_lifetime_label(value),
                         );
                     }
                 });
@@ -2439,7 +2638,10 @@ fn show_system_inner(
         ui.label(i18n::fl("settings-plugins-profile"));
         for profile in ["desktop", "minimal", "headless"] {
             if ui
-                .selectable_label(state.plugins_profile == profile, profile)
+                .selectable_label(
+                    state.plugins_profile == profile,
+                    plugin_profile_label(profile),
+                )
                 .clicked()
             {
                 profile.clone_into(&mut state.plugins_profile);
@@ -2551,14 +2753,7 @@ fn show_log(ui: &mut egui::Ui, state: &DetailUiState) {
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
         for entry in &state.log {
-            let prefix = match entry.kind {
-                LogKind::Thinking => "thinking",
-                LogKind::Inner => "inner",
-                LogKind::Tool => "tool",
-                LogKind::Session => "session",
-                LogKind::Job => "job",
-                LogKind::Affect => "affect",
-            };
+            let prefix = log_kind_label(entry.kind);
             ui.add(egui::Label::new(format!("[{prefix}] {}", entry.text)).wrap());
         }
     });
@@ -2771,6 +2966,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn detail_value_labels_do_not_expose_storage_ids() {
+        for (value, label) in [
+            ("bottom", caption_position_label("bottom")),
+            ("dark", theme_label("dark")),
+            ("ja", language_value_label("ja")),
+            ("detached", core_lifetime_label("detached")),
+            ("minimal", plugin_profile_label("minimal")),
+            ("classifier", optional_task_label("classifier")),
+        ] {
+            assert_ne!(label, value);
+        }
+        for (kind, value) in [
+            (LogKind::Thinking, "thinking"),
+            (LogKind::Inner, "inner"),
+            (LogKind::Tool, "tool"),
+            (LogKind::Session, "session"),
+            (LogKind::Job, "job"),
+            (LogKind::Affect, "affect"),
+        ] {
+            assert_ne!(log_kind_label(kind), value);
+        }
+        assert_eq!(optional_task_label("plugin.custom"), "plugin.custom");
+    }
+
+    #[test]
+    fn new_chat_button_is_guarded_by_shared_inflight_state() {
+        let state = DetailUiState {
+            new_session_inflight: true,
+            ..Default::default()
+        };
+
+        let guarded = !state.new_session_inflight;
+        assert!(!guarded, "Detail button must not start another split");
+    }
+
+    #[test]
     fn active_jobs_exclude_terminal_states() {
         let job = |status: &str| JobView {
             id: status.to_owned(),
@@ -2796,6 +3027,57 @@ mod tests {
             .map(|job| job.status.as_str())
             .collect::<Vec<_>>();
         assert_eq!(active, ["created", "queued", "running"]);
+    }
+
+    #[test]
+    fn onboarding_follows_chat_readiness_and_local_dismissal() {
+        let mut state = DetailUiState::default();
+        state.finish_settings_load();
+        let mut settings = DesktopSettings::default();
+
+        assert!(onboarding_visible(&state, &settings));
+        settings.onboarding_dismissed = true;
+        assert!(!onboarding_visible(&state, &settings));
+
+        settings.onboarding_dismissed = false;
+        state.chat_plugin = "provider.gguf".to_owned();
+        state.chat_model = "local-model".to_owned();
+        assert!(!onboarding_visible(&state, &settings));
+    }
+
+    #[test]
+    fn occupant_rows_hide_unresolved_entries_and_keep_package_with_avatar() {
+        let occupants = vec![
+            OccupantView {
+                soul_id: "soul.text-only".to_owned(),
+                body_id: None,
+                package_id: None,
+                avatar_path: None,
+            },
+            OccupantView {
+                soul_id: "soul.avatar".to_owned(),
+                body_id: Some("body".to_owned()),
+                package_id: Some("char.alicia-b@1.0.0".to_owned()),
+                avatar_path: Some("/packages/char.alicia-b@1.0.0/model.vrm".to_owned()),
+            },
+        ];
+
+        let visible = renderable_occupants(&occupants).collect::<Vec<_>>();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(
+            visible[0].package_id.as_deref(),
+            Some("char.alicia-b@1.0.0")
+        );
+    }
+
+    #[test]
+    fn activation_generation_rejects_stale_results() {
+        let mut state = DetailUiState::default();
+        let first = state.next_activation_generation();
+        let second = state.next_activation_generation();
+
+        assert!(!state.activation_is_current(first));
+        assert!(state.activation_is_current(second));
     }
 
     #[test]

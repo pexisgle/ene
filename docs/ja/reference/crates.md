@@ -26,6 +26,7 @@
 | `ene-fiber` | プラグインファイバー合成: 巻き戻し可能な effect、プロファイル reconcile、サンドボックス spawn | plugin-ipc, registry, sandbox, kernel |
 | `ene-registry` | 統一ツールレジストリ: side_effects フィルタ、deny-by-default パイプライン | plugin-ipc, plane |
 | `ene-plugin-ipc` | 分割 IPC: core / tool 副プロトコルの length-prefixed MessagePack | （内部依存なし） |
+| `ene-provider-assets` | provider 向け共有アセットカタログ、manifest、検証付きダウンロード | config, plugin-ipc |
 | `ene-api` | HTTP/WS 型、OpenAPI、Rust クライアント | （内部依存なし） |
 | `ene-card` | Character Card V3 / PNG / CHARX インポート | config |
 | `ene-config` | 設定の load/save/schema、パス、`define_config!` | （内部依存なし） |
@@ -56,8 +57,15 @@ ene-api         ↛ daemon types
 
 ### ツールプラグイン (`plugins/tool/*`)
 
-`fs`、`exec`、`web`、`utility`、`app` — [同梱ツール](../guides/tools/builtin-tools.md)。
+`fs`、`exec`、`web`、`utility`、`app`、`mcp` — [同梱ツール](../guides/tools/builtin-tools.md) と
+[MCP サーバー](../guides/tools/mcp-servers.md) を参照してください。
 `exec` は `fs` とは別プラグインです（D-24）。
 
 Python のダミー (`plugins/tool/dummy-py`) は IPC 用フィクスチャのみで、Cargo
 ワークスペースからは除外されています。
+
+### Provider プラグイン (`plugins/provider/*`)
+
+現在のワークスペースには `openai-compat`、`anthropic`、`gguf`、`elevenlabs`、
+`voicevox`、`edge-tts` が含まれます。いずれも同じ plugin IPC を介して
+out-of-process で動作し、LLM・embedding・TTS・STT などの seam を公開します。

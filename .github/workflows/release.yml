@@ -30,6 +30,15 @@ jobs:
       - name: Derive version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
+      - name: Verify tag matches workspace version
+        run: |
+          package_id="$(nix develop --command cargo pkgid -p ene-daemon)"
+          cargo_version="${package_id##*@}"
+          if [ "$cargo_version" != "$VERSION" ]; then
+            echo "error: tag version $VERSION does not match Cargo workspace version $cargo_version" >&2
+            exit 1
+          fi
+
       - name: Build release binaries
         run: |
           nix develop --command cargo build --release \
@@ -54,6 +63,13 @@ jobs:
           chmod +x scripts/package-linux-release.sh
           nix develop --command bash scripts/package-linux-release.sh "$VERSION"
 
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum \
+            "ene-ctl-${VERSION}-linux-x86_64.tar.gz" \
+            "ene-stage_${VERSION}_amd64.deb" > SHA256SUMS
+
       - name: Generate changelog
         run: |
           nix develop --command git cliff --latest --strip header \
@@ -70,3 +86,4 @@ jobs:
           files: |
             dist/ene-ctl-${{ env.VERSION }}-linux-x86_64.tar.gz
             dist/ene-stage_${{ env.VERSION }}_amd64.deb
+            dist/SHA256SUMS

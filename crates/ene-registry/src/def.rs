@@ -1,5 +1,6 @@
 use ene_plane::Sensitivity;
 use ene_plugin_ipc::ToolSpecWire;
+use std::fmt;
 
 use crate::builtins::host_spec_for;
 
@@ -76,6 +77,23 @@ impl ToolDefinition {
     }
 
     #[must_use]
+    pub fn available_on(&self, layer: Layer) -> bool {
+        match layer {
+            Layer::Surface => self.surface_visible(),
+            Layer::Job => true,
+        }
+    }
+
+    #[must_use]
+    pub fn primary_layer(&self) -> Layer {
+        if self.surface_visible() {
+            Layer::Surface
+        } else {
+            Layer::Job
+        }
+    }
+
+    #[must_use]
     pub fn model_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "name": self.name,
@@ -90,4 +108,20 @@ impl ToolDefinition {
 pub enum Layer {
     Surface,
     Job,
+}
+
+impl Layer {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Surface => "surface",
+            Self::Job => "job",
+        }
+    }
+}
+
+impl fmt::Display for Layer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }

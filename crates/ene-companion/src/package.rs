@@ -412,6 +412,18 @@ pub fn display_name_for_install(dir: &Path, locale: &str) -> Result<String, Comp
     Ok(name)
 }
 
+/// Resolve opening greetings retained from a character card in an installed package.
+pub fn greeting_options_for_install(dir: &Path) -> Result<Vec<(u32, String)>, CompanionError> {
+    let path = dir.join("soul/character.json");
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(&path)?;
+    let card = ene_card::load_card_from_bytes(&bytes)
+        .map_err(|err| CompanionError::package(err.to_string()))?;
+    Ok(card.data.greeting_options())
+}
+
 /// Bind an installed soul package to an installed body package (P-402 / P-8xx).
 pub fn compose_soul_and_body(
     store: &CompanionStore,
@@ -479,6 +491,10 @@ pub fn import_v3(
     );
     files.insert("soul/soul.toml".to_owned(), soul_toml.into_bytes());
     files.insert("soul/persona.md".to_owned(), persona.into_bytes());
+    files.insert(
+        "soul/character.json".to_owned(),
+        serde_json::to_vec(&card).map_err(|err| CompanionError::package(err.to_string()))?,
+    );
     files.insert("body/body.toml".to_owned(), body_toml.bytes().collect());
     files.insert(
         "body/emotion_map.toml".to_owned(),
