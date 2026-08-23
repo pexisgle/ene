@@ -2657,6 +2657,40 @@ async fn prefixed_character_packages_keep_avatar_paths_paired() {
         assert_eq!(std::fs::read(&avatar).unwrap(), *marker);
     }
 
+    let listed = client.list_characters().await.unwrap();
+    for (_, package_ref, _) in &expected {
+        let (id, version) = package_ref.split_once('@').expect("package ref");
+        let character = listed
+            .items
+            .iter()
+            .find(|character| character.id == id && character.version == version)
+            .expect("imported character must be listed");
+        assert!(
+            character.path.contains(package_ref),
+            "character path: {}",
+            character.path
+        );
+    }
+
+    let activated = client.activate_character("char.alicia-b").await.unwrap();
+    assert_eq!(activated.id, "char.alicia-b");
+    assert_eq!(activated.version, "1.0.0");
+    assert!(activated.path.contains("char.alicia-b@1.0.0"));
+    assert_eq!(
+        activated.soul_id.as_deref(),
+        expected
+            .iter()
+            .find(|(_, package_ref, _)| package_ref == "char.alicia-b@1.0.0")
+            .map(|(soul_id, _, _)| soul_id.as_str())
+    );
+    let relisted = client.list_characters().await.unwrap();
+    let relisted_b = relisted
+        .items
+        .iter()
+        .find(|character| character.id == "char.alicia-b")
+        .expect("activated character must remain listed");
+    assert!(relisted_b.path.contains("char.alicia-b@1.0.0"));
+
     let stage = client.stage().await.unwrap();
     for (soul_id, package_ref, marker) in &expected {
         let occupant = stage
