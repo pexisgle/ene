@@ -46,3 +46,25 @@ jobs:
           branch: "deps/update-cargo-${{ env.CURRENT_DATE }}"
           title: "Update Cargo.lock"
           labels: dependencies
+
+  update-rust-toolchain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - name: Generate branch date
+        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+      - name: Update Rust toolchain sources
+        run: |
+          scripts/update-rust-toolchain.sh
+          nix flake lock --update-input rust-overlay
+          nix develop --command rustc --version
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.DEPENDENCIES_PAT }}
+          commit-message: "chore(toolchain): update Rust version"
+          branch: "deps/update-rust-toolchain-${{ env.CURRENT_DATE }}"
+          title: "chore(toolchain): update Rust version"
+          labels: dependencies

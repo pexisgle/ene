@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
       - name: Check formatting
@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: clippy
       - uses: ./.github/actions/rust-build-env
@@ -71,7 +71,7 @@ jobs:
               -p ene-provider-edge-tts -p ene-provider-gguf
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
       - uses: ./.github/actions/rust-build-env
       - name: Install ripgrep
         run: sudo apt-get install -y --no-install-recommends ripgrep
@@ -84,7 +84,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
       - uses: ./.github/actions/rust-build-env
       # Not run with RUSTDOCFLAGS=-D warnings: pre-existing broken
       # intra-doc links would fail unrelated work.
@@ -97,7 +97,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
