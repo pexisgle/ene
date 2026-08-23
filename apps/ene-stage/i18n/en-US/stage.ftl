@@ -65,6 +65,7 @@ home-optional-internal = Classifier, embedding, and proactive can stay on echo. 
 home-optional-tasks = Optional tasks
 chat-unconfigured = Set a chat plugin and model in Conversation before sending.
 chat-missing-key = This provider needs an API key. Open Conversation, save one, then send again.
+chat-settings-loading = Chat settings are still loading. Try again shortly.
 chat-no-active-turn = No active turn. Send a Prompt first.
 chat-auth-failed = The chat provider rejected the credentials (401). Open Conversation, save an API key, and try again.
 settings-chat-base-url = Chat base URL
