@@ -1,8 +1,10 @@
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use i18n_embed::DesktopLanguageRequester;
+use i18n_embed::LanguageLoader;
 use i18n_embed::fluent::{FluentLanguageLoader, fluent_language_loader};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rust_embed::RustEmbed;
 use unic_langid::LanguageIdentifier;
 
@@ -11,6 +13,7 @@ use unic_langid::LanguageIdentifier;
 struct Localizations;
 
 static LOADER: OnceLock<RwLock<FluentLanguageLoader>> = OnceLock::new();
+static MISSING_KEYS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
 
 fn loader_lock() -> &'static RwLock<FluentLanguageLoader> {
     LOADER.get_or_init(|| {
@@ -19,6 +22,13 @@ fn loader_lock() -> &'static RwLock<FluentLanguageLoader> {
         let _selected = i18n_embed::select(&language_loader, &Localizations, &requested);
         RwLock::new(language_loader)
     })
+}
+
+fn should_report_missing(language: &str, key: &str) -> bool {
+    MISSING_KEYS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .insert((language.to_owned(), key.to_owned()))
 }
 
 /// Apply a BCP-47 tag (`en-US`, `ja`). Empty string follows the OS default.
@@ -39,7 +49,19 @@ pub fn select_language(tag: &str) {
 
 #[must_use]
 pub fn fl(key: &str) -> String {
-    loader_lock().read().get(key)
+    let loader = loader_lock();
+    let guard = loader.read();
+    let value = guard.get(key);
+    if !guard.has(key) {
+        let language = guard.current_languages().first().map_or_else(
+            || guard.fallback_language().to_string(),
+            ToString::to_string,
+        );
+        if should_report_missing(&language, key) {
+            tracing::warn!(key, language = %language, "localization key is missing");
+        }
+    }
+    value
 }
 
 #[cfg(test)]
@@ -69,5 +91,13 @@ mod tests {
                 .collect()
         }
         assert_eq!(keys(en), keys(ja));
+    }
+
+    #[test]
+    fn missing_key_diagnostics_are_deduplicated_by_language_and_key() {
+        assert!(should_report_missing("ja", "test-missing-key"));
+        assert!(!should_report_missing("ja", "test-missing-key"));
+        assert!(should_report_missing("ja", "another-missing-key"));
+        assert!(should_report_missing("en-US", "test-missing-key"));
     }
 }
