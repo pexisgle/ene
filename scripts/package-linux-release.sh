@@ -41,9 +41,12 @@ done
 
 CLI_ROOT="$DIST_DIR/ene-ctl-${VERSION}-linux-x86_64"
 rm -rf "$CLI_ROOT"
-mkdir -p "$CLI_ROOT/plugins"
+mkdir -p "$CLI_ROOT/plugins" "$CLI_ROOT/third_party/licenses"
 cp "$TARGET_DIR/ene-ctl" "$CLI_ROOT/"
 cp "$TARGET_DIR/ene-core" "$CLI_ROOT/"
+cp "$REPO_ROOT/LICENSE" "$CLI_ROOT/"
+cp "$REPO_ROOT/THIRD_PARTY_LICENSES.md" "$CLI_ROOT/"
+cp "$REPO_ROOT/third_party/licenses/"* "$CLI_ROOT/third_party/licenses/"
 for plugin in "${PLUGINS[@]}"; do
   cp "$TARGET_DIR/$plugin" "$CLI_ROOT/plugins/"
 done
@@ -55,11 +58,16 @@ rm -rf "$DEB_ROOT"
 mkdir -p "$DEB_ROOT/DEBIAN" \
   "$DEB_ROOT/usr/bin/plugins" \
   "$DEB_ROOT/usr/share/applications" \
-  "$DEB_ROOT/usr/share/pixmaps"
+  "$DEB_ROOT/usr/share/pixmaps" \
+  "$DEB_ROOT/usr/share/doc/ene-stage/third_party/licenses"
 
 cp "$TARGET_DIR/ene-stage" "$DEB_ROOT/usr/bin/ene-stage"
 cp "$TARGET_DIR/ene-core" "$DEB_ROOT/usr/bin/ene-core"
 cp "$REPO_ROOT/assets/icon.png" "$DEB_ROOT/usr/share/pixmaps/ene.png"
+cp "$REPO_ROOT/LICENSE" "$DEB_ROOT/usr/share/doc/ene-stage/copyright"
+cp "$REPO_ROOT/THIRD_PARTY_LICENSES.md" "$DEB_ROOT/usr/share/doc/ene-stage/"
+cp "$REPO_ROOT/third_party/licenses/"* \
+  "$DEB_ROOT/usr/share/doc/ene-stage/third_party/licenses/"
 chmod 755 "$DEB_ROOT/usr/bin/ene-stage" "$DEB_ROOT/usr/bin/ene-core"
 chmod 644 "$DEB_ROOT/usr/share/pixmaps/ene.png"
 for plugin in "${PLUGINS[@]}"; do
