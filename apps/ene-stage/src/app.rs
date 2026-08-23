@@ -104,6 +104,7 @@ pub fn run() -> Result<(), AppError> {
         detail_win: None,
         caption: None,
         spotlight: None,
+        chrome_focused: false,
         last_cursor: None,
         last_tick: Instant::now(),
         last_approval_poll: Instant::now(),
@@ -158,6 +159,7 @@ struct StageApp {
     detail_win: Option<ChromeWindow>,
     caption: Option<ChromeWindow>,
     spotlight: Option<ChromeWindow>,
+    chrome_focused: bool,
     last_cursor: Option<LogicalPosition<f32>>,
     last_tick: Instant,
     last_approval_poll: Instant,
@@ -165,14 +167,38 @@ struct StageApp {
 }
 
 impl StageApp {
+    fn chrome_window_exists(&self) -> bool {
+        self.chat.is_some()
+            || self.detail_win.is_some()
+            || self.caption.is_some()
+            || self.spotlight.is_some()
+    }
+
+    fn sync_overlay_interaction(&mut self) {
+        let protect_chrome = self.chrome_focused && self.chrome_window_exists();
+        let always_on_top = self.local_settings.always_on_top;
+        let click_through = self.local_settings.overlay_click_through;
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        let level = overlay_window_level(protect_chrome, always_on_top);
+        let click_through = protect_chrome || (overlay.transparent && click_through);
+        overlay.window.set_window_level(level);
+        overlay.set_click_through(click_through);
+    }
+
     fn open_chat(&mut self, event_loop: &ActiveEventLoop) {
         self.surface.chat_open = true;
         self.surface.focus_chat = true;
+        self.chrome_focused = true;
+        self.sync_overlay_interaction();
         if let Some(chat) = self.chat.as_ref() {
             chat.show_and_focus();
             return;
         }
         let Some(gpu) = self.gpu.as_ref() else {
+            self.chrome_focused = false;
+            self.sync_overlay_interaction();
             return;
         };
         match ChromeWindow::create(
@@ -182,8 +208,20 @@ impl StageApp {
             PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
             true,
         ) {
-            Ok(win) => self.chat = Some(win),
-            Err(err) => tracing::warn!(error = %err, "chat window failed"),
+            Ok(win) => {
+                self.chat = Some(win);
+                self.sync_overlay_interaction();
+                if let Some(chat) = self.chat.as_ref() {
+                    chat.show_and_focus();
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "chat window failed");
+                if !self.chrome_window_exists() {
+                    self.chrome_focused = false;
+                    self.sync_overlay_interaction();
+                }
+            }
         }
     }
 
@@ -836,14 +874,7 @@ impl StageApp {
         if let Some(caption) = &self.caption {
             caption.place_caption(&settings.caption_position);
         }
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay
-                .window
-                .set_window_level(window_level(settings.always_on_top));
-            if overlay.transparent {
-                overlay.set_click_through(settings.overlay_click_through);
-            }
-        }
+        self.sync_overlay_interaction();
         self.spawn(async move {
             AsyncOutcome::SaveLocalSettings(
                 save_desktop_settings(&settings).map_err(|err| err.to_string()),
@@ -867,19 +898,18 @@ impl StageApp {
     }
 
     fn toggle_overlay_chrome(&mut self) {
-        let preferred = self.local_settings.overlay_click_through;
         let size = {
             let Some(overlay) = self.overlay.as_mut() else {
                 return;
             };
             overlay.toggle_chrome();
-            overlay.apply_click_through(preferred);
             overlay.window.inner_size()
         };
         let gpu = self.gpu.as_ref();
         if let (Some(gpu), Some(overlay)) = (gpu, self.overlay.as_mut()) {
             overlay.resize(gpu, size);
         }
+        self.sync_overlay_interaction();
     }
 
     fn raise_chrome(&self) {
@@ -1198,6 +1228,8 @@ impl StageApp {
         self.detail.visible = true;
         self.detail.refresh_settings_on_open();
         self.detail.select_tab(tab);
+        self.chrome_focused = true;
+        self.sync_overlay_interaction();
         if let Some(detail) = self.detail_win.as_ref() {
             detail.show_and_focus();
             return;
@@ -1210,9 +1242,24 @@ impl StageApp {
                 PhysicalSize::new(960, 680),
                 true,
             ) {
-                Ok(win) => self.detail_win = Some(win),
-                Err(err) => tracing::warn!(error = %err, "detail window failed"),
+                Ok(win) => {
+                    self.detail_win = Some(win);
+                    self.sync_overlay_interaction();
+                    if let Some(detail) = self.detail_win.as_ref() {
+                        detail.show_and_focus();
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "detail window failed");
+                    if !self.chrome_window_exists() {
+                        self.chrome_focused = false;
+                        self.sync_overlay_interaction();
+                    }
+                }
             }
+        } else {
+            self.chrome_focused = false;
+            self.sync_overlay_interaction();
         }
     }
 
@@ -1563,6 +1610,10 @@ impl ApplicationHandler for StageApp {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let overlay_id = self.overlay.as_ref().map(OverlayWindow::id);
         if overlay_id == Some(id) {
+            if matches!(event, WindowEvent::Focused(true)) {
+                self.chrome_focused = false;
+                self.sync_overlay_interaction();
+            }
             match event {
                 WindowEvent::CloseRequested => self.surface.quit = true,
                 WindowEvent::Resized(size) => {
@@ -1624,6 +1675,7 @@ impl ApplicationHandler for StageApp {
         let mut close_caption = false;
         let mut close_spotlight = false;
         let mut overlay_from_chrome = None;
+        let mut chrome_gained_focus = false;
         if let Some(chat) = self.chat.as_mut()
             && chat.id() == id
         {
@@ -1634,6 +1686,7 @@ impl ApplicationHandler for StageApp {
                 chat.resize(gpu, *size);
             }
             overlay_from_chrome = Some(chat.owns_input());
+            chrome_gained_focus = matches!(event, WindowEvent::Focused(true));
             close_chat = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(detail) = self.detail_win.as_mut()
@@ -1646,19 +1699,26 @@ impl ApplicationHandler for StageApp {
                 detail.resize(gpu, *size);
             }
             overlay_from_chrome = Some(detail.owns_input());
+            chrome_gained_focus = matches!(event, WindowEvent::Focused(true));
             close_detail = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(caption) = self.caption.as_mut()
             && caption.id() == id
         {
             caption.on_window_event(&event);
+            chrome_gained_focus = matches!(event, WindowEvent::Focused(true));
             close_caption = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(spotlight) = self.spotlight.as_mut()
             && spotlight.id() == id
         {
             spotlight.on_window_event(&event);
+            chrome_gained_focus = matches!(event, WindowEvent::Focused(true));
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
+        }
+        if chrome_gained_focus {
+            self.chrome_focused = true;
+            self.sync_overlay_interaction();
         }
         if !self.surface.chat_input_focused
             && overlay_from_chrome.is_none_or(|wants| !wants)
@@ -1684,6 +1744,12 @@ impl ApplicationHandler for StageApp {
         if close_spotlight {
             self.spotlight = None;
             self.surface.spotlight_open = false;
+        }
+        if !self.chrome_window_exists() {
+            self.chrome_focused = false;
+        }
+        if close_chat || close_detail || close_caption || close_spotlight {
+            self.sync_overlay_interaction();
         }
     }
 
@@ -1733,6 +1799,15 @@ fn window_level(always_on_top: bool) -> WindowLevel {
     }
 }
 
+#[must_use]
+fn overlay_window_level(chrome_focused: bool, always_on_top: bool) -> WindowLevel {
+    if chrome_focused {
+        WindowLevel::Normal
+    } else {
+        window_level(always_on_top)
+    }
+}
+
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
         "(empty)"
@@ -1753,14 +1828,30 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatWindowAction, chat_window_action, format_log_text, provider_asset_load_status,
-        window_level,
+        ChatWindowAction, chat_window_action, format_log_text, overlay_window_level,
+        provider_asset_load_status, window_level,
     };
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
         assert_eq!(window_level(true), winit::window::WindowLevel::AlwaysOnTop);
         assert_eq!(window_level(false), winit::window::WindowLevel::Normal);
+    }
+
+    #[test]
+    fn focused_chrome_lowers_overlay_until_focus_returns() {
+        assert_eq!(
+            overlay_window_level(true, true),
+            winit::window::WindowLevel::Normal
+        );
+        assert_eq!(
+            overlay_window_level(false, true),
+            winit::window::WindowLevel::AlwaysOnTop
+        );
+        assert_eq!(
+            overlay_window_level(false, false),
+            winit::window::WindowLevel::Normal
+        );
     }
 
     #[test]
