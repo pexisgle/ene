@@ -1,7 +1,9 @@
 name: dependencies
+
+# A repository-scoped fine-grained PAT is passed only to the PR actions below.
+# Unlike GITHUB_TOKEN, its PRs trigger the normal validation workflows.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 on:
   schedule:
