@@ -889,13 +889,6 @@ impl StageApp {
                         self.ensure_spotlight(event_loop);
                     }
                 }
-                ShellAction::OpenDetail => self.open_detail(event_loop, DetailTab::Home),
-                ShellAction::OpenLog => self.open_detail(event_loop, DetailTab::Log),
-                ShellAction::FocusChat => {
-                    self.surface.chat_open = true;
-                    self.surface.focus_chat = true;
-                    self.ensure_chat(event_loop);
-                }
                 ShellAction::ToggleMic => self.toggle_mic(),
                 ShellAction::Quit => self.surface.quit = true,
             }
@@ -1566,7 +1559,7 @@ impl ApplicationHandler for StageApp {
             {
                 chat.resize(gpu, *size);
             }
-            overlay_from_chrome = Some(chat.wants_keyboard_input());
+            overlay_from_chrome = Some(chat.owns_input());
             close_chat = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(detail) = self.detail_win.as_mut()
@@ -1578,7 +1571,7 @@ impl ApplicationHandler for StageApp {
             {
                 detail.resize(gpu, *size);
             }
-            overlay_from_chrome = Some(detail.wants_keyboard_input());
+            overlay_from_chrome = Some(detail.owns_input());
             close_detail = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(caption) = self.caption.as_mut()
