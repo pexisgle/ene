@@ -208,6 +208,14 @@ pub struct JobView {
     pub progress_note: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateJobRequest {
+    pub soul_id: String,
+    pub goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AnswerJobRequest {
     #[serde(default)]
