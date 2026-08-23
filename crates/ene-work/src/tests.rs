@@ -4,7 +4,7 @@ use crate::host::{
 };
 use crate::mcp::{McpProfile, McpTool, ScriptedMcp, register_mcp_tools};
 use crate::observe::{ObservationPipeline, ObserveAction, contains_raw_screenshot};
-use crate::router::WorkSurfaceRouter;
+use crate::router::{JobLayerRouter, WorkSurfaceRouter};
 use crate::runner::{JobDrive, drive_job};
 use crate::schedule::{QuietWindow, catch_up_missed, fire_due, reminder_report};
 use crate::skill::{
@@ -266,6 +266,70 @@ async fn empty_side_effect_tool_runs_on_surface_router() {
 }
 
 #[tokio::test]
+async fn surface_delegate_start_is_approval_gated_before_job_insert() {
+    let (dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        Arc::new(ene_plane::ScriptedPopup::new([
+            ene_plane::PopupDecision::Deny,
+        ])),
+        None,
+    ));
+    plane.set_mode(ene_plane::ApprovalMode::AskAll).unwrap();
+    registry.set_plane(plane);
+    let router = WorkSurfaceRouter::new(host, registry, soul, 4);
+
+    let err = router
+        .on_tool(
+            "delegate.start",
+            json!({"goal": "Reply with exactly: five"}),
+            0,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("denied"));
+    assert!(store.list_jobs(soul).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn surface_delegate_start_inserts_one_job_after_approval() {
+    let (dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        Arc::new(ene_plane::ScriptedPopup::new([
+            ene_plane::PopupDecision::Allow,
+        ])),
+        None,
+    ));
+    plane.set_mode(ene_plane::ApprovalMode::AskAll).unwrap();
+    registry.set_plane(plane);
+    let router = WorkSurfaceRouter::new(host, registry, soul, 4);
+
+    let outcome = router
+        .on_tool(
+            "delegate.start",
+            json!({"goal": "Reply with exactly: five"}),
+            0,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, SurfaceToolOutcome::Result(value) if value["accepted"] == json!(true))
+    );
+    let jobs = store.list_jobs(soul).unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].goal, "Reply with exactly: five");
+}
+
+#[tokio::test]
 async fn surface_router_upgrades_fs_write_without_spy() {
     let (_dir, store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
@@ -296,6 +360,40 @@ async fn step_budget_upgrades_even_for_empty_side_effects() {
     let outcome = router.on_tool("utility.time", json!({}), 1).await.unwrap();
     assert!(matches!(outcome, SurfaceToolOutcome::Delegated { .. }));
     assert_eq!(store.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn child_reports_do_not_require_tool_approval() {
+    let (dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "report progress");
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        ene_plane::ScriptedPopup::deny_all(),
+        None,
+    ));
+    plane.set_mode(ene_plane::ApprovalMode::AskAll).unwrap();
+    registry.set_plane(plane);
+    let router = JobLayerRouter::new(host, registry, soul, job.id, &job.workspace_dir);
+
+    let outcome = router
+        .on_tool(
+            "delegation.send",
+            json!({"kind": "progress", "body": "working"}),
+            0,
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, SurfaceToolOutcome::Result(_)));
+    let mailbox = store.mailbox(job.id).unwrap();
+    assert!(
+        mailbox
+            .iter()
+            .any(|(_, kind, body)| { kind == "progress" && body == "working" })
+    );
 }
 
 #[tokio::test]
