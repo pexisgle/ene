@@ -464,18 +464,28 @@ impl StageApp {
                 Err(err) => self.detail.core_status = err,
             },
             AsyncOutcome::ListPendingMemories(result) => match result {
-                Ok(items) => self.detail.pending_memories = items,
+                Ok(items) => {
+                    self.detail.sync_candidate_drafts(&items);
+                    self.detail.pending_memories = items;
+                }
+                Err(err) => self.detail.core_status = err,
+            },
+            AsyncOutcome::ListMemoryJournal(result) => match result {
+                Ok(items) => self.detail.memory_journal = items,
                 Err(err) => self.detail.core_status = err,
             },
             AsyncOutcome::ResolveMemory { result, .. }
             | AsyncOutcome::DeleteMemory { result, .. }
-            | AsyncOutcome::CompleteMemory { result, .. } => {
-                if result.is_ok() {
-                    self.request_memories();
-                } else if let Err(err) = result {
+            | AsyncOutcome::CompleteMemory { result, .. } => match result {
+                Ok(()) => self.request_memories(),
+                Err(err) => {
+                    let stale_candidate = err.contains("candidate_conflict");
                     self.detail.core_status = err;
+                    if stale_candidate {
+                        self.request_memories();
+                    }
                 }
-            }
+            },
             AsyncOutcome::LoadSoul(result) => match result {
                 Ok(soul) => {
                     self.detail.body_ref_draft = soul.body_ref.clone().unwrap_or_default();
@@ -827,12 +837,34 @@ impl StageApp {
     }
 
     fn request_memories(&self) {
-        let soul_id = self.session.soul_id().to_owned();
+        let soul_id_memories = self.session.soul_id().to_owned();
         let client = Arc::clone(&self.client);
         self.spawn(async move {
             AsyncOutcome::ListMemories(
                 client
-                    .list_memories(&soul_id, None)
+                    .list_memories(&soul_id_memories, None)
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
+        });
+        let soul_id_pending = self.session.soul_id().to_owned();
+        let client_pending = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::ListPendingMemories(
+                client_pending
+                    .list_pending_memories(&soul_id_pending)
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
+        });
+        let soul_id_journal = self.session.soul_id().to_owned();
+        let client_journal = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::ListMemoryJournal(
+                client_journal
+                    .list_memory_journal(&soul_id_journal)
                     .await
                     .map(|page| page.items)
                     .map_err(|err| err.to_string()),
