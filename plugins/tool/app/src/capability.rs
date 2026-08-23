@@ -248,7 +248,18 @@ fn window_cap(session: SessionKind, desktop: DesktopKind, path: Option<&str>) ->
                 None => ActionCap {
                     available: false,
                     backend: "none",
-                    reason: Some("window-list helper is missing or not executable on PATH"),
+                    reason: Some(match (session, desktop) {
+                        (SessionKind::X11, _) => {
+                            "install wmctrl and ensure it is executable on PATH"
+                        }
+                        (SessionKind::Wayland, DesktopKind::Hyprland) => {
+                            "install hyprctl and ensure it is executable on PATH"
+                        }
+                        (SessionKind::Wayland, DesktopKind::Sway) => {
+                            "install swaymsg and ensure it is executable on PATH"
+                        }
+                        _ => "window-list helper is missing or not executable on PATH",
+                    }),
                 },
             }
         }
