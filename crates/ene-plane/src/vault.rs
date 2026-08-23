@@ -97,6 +97,14 @@ impl Vault {
         })
     }
 
+    pub fn remove(&self, id: &str) -> Result<(), VaultError> {
+        let mut map = self.load()?;
+        if map.remove(id).is_some() {
+            self.save(&map)?;
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn inject_ref(id: impl Into<String>) -> InjectRef {
         InjectRef {

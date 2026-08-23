@@ -206,11 +206,13 @@ pub struct DetailUiState {
     pub tts_voice: String,
     pub tts_api_key: String,
     pub ai_tts_key_set: bool,
+    pub tts_api_key_clear_pending: bool,
     pub stt_plugin: String,
     pub stt_model: String,
     pub stt_base_url: String,
     pub stt_api_key: String,
     pub ai_stt_key_set: bool,
+    pub stt_api_key_clear_pending: bool,
     pub plugins_profile: String,
     pub approval_mode: String,
     pub observation_title_mode: String,
@@ -233,6 +235,8 @@ pub struct DetailUiState {
     pub provider_install_jobs: HashMap<String, String>,
     pub provider_models: Vec<String>,
     pub provider_model_filter: String,
+    pub mic_devices: Vec<String>,
+    pub mic_devices_loaded: bool,
     pub mcp_json: String,
     pub mcp_servers: Vec<ene_api::McpServerView>,
     pub plugin_config_id: String,
@@ -350,6 +354,7 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
         .get("ai_tts_key_set")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    state.tts_api_key_clear_pending = false;
     state.stt_plugin = nested_string(effective, &["ai", "tasks", "stt", "plugin"]);
     state.stt_model = nested_string(effective, &["ai", "tasks", "stt", "model"]);
     state.stt_base_url = nested_string(effective, &["ai", "tasks", "stt", "base_url"]);
@@ -357,6 +362,7 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
         .get("ai_stt_key_set")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    state.stt_api_key_clear_pending = false;
     state.plugins_profile = nested_string(effective, &["plugins", "profile"]);
     state.approval_mode = normalize_approval_mode(&nested_string(effective, &["approval", "mode"]));
     state.observation_title_mode = normalize_title_mode(&nested_string(
@@ -1360,6 +1366,23 @@ fn show_voice(
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     ensure_settings(state, client, rt, async_results);
+    if !state.loaded.plugins {
+        state.loaded.plugins = true;
+        let client_list = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::ListPlugins(
+                client_list
+                    .list_plugins()
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+    if !state.mic_devices_loaded {
+        state.mic_devices = crate::audio::AudioHub::list_input_device_names();
+        state.mic_devices_loaded = true;
+    }
     ui.heading(i18n::fl("detail-tab-voice"));
     ui.label(i18n::fl("settings-voice-guide"));
     let providers = state.providers.clone();
@@ -1376,7 +1399,17 @@ fn show_voice(
             voice: Some(&mut state.tts_voice),
             api_key: &mut state.tts_api_key,
             key_set: &mut state.ai_tts_key_set,
+            clear_pending: &mut state.tts_api_key_clear_pending,
         },
+    );
+    show_voice_provider_config_button(
+        ui,
+        state,
+        client,
+        rt,
+        async_results,
+        "tts",
+        &state.tts_plugin.clone(),
     );
     ui.separator();
     show_voice_task(
@@ -1392,12 +1425,65 @@ fn show_voice(
             voice: None,
             api_key: &mut state.stt_api_key,
             key_set: &mut state.ai_stt_key_set,
+            clear_pending: &mut state.stt_api_key_clear_pending,
         },
     );
+    show_voice_provider_config_button(
+        ui,
+        state,
+        client,
+        rt,
+        async_results,
+        "stt",
+        &state.stt_plugin.clone(),
+    );
+    show_plugin_config(ui, state, client, rt, async_results);
     ui.horizontal(|ui| {
         ui.label(i18n::fl("settings-mic-device"));
-        ui.label(i18n::fl("settings-mic-system-default"));
+        let stored_missing = !local_settings.mic_device.is_empty()
+            && !state
+                .mic_devices
+                .iter()
+                .any(|name| name == &local_settings.mic_device);
+        let selected = if local_settings.mic_device.is_empty() {
+            i18n::fl("settings-mic-system-default")
+        } else if stored_missing {
+            format!(
+                "{}: {}",
+                i18n::fl("settings-mic-missing"),
+                local_settings.mic_device
+            )
+        } else {
+            local_settings.mic_device.clone()
+        };
+        egui::ComboBox::from_id_salt("stage-mic-device")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut local_settings.mic_device,
+                    String::new(),
+                    i18n::fl("settings-mic-system-default"),
+                );
+                for name in &state.mic_devices {
+                    ui.selectable_value(&mut local_settings.mic_device, name.clone(), name);
+                }
+            });
+        if ui.button(i18n::fl("settings-mic-refresh")).clicked() {
+            state.mic_devices_loaded = false;
+        }
     });
+    if state.mic_devices.is_empty() {
+        ui.colored_label(egui::Color32::YELLOW, i18n::fl("settings-mic-unavailable"));
+    } else if !local_settings.mic_device.is_empty()
+        && !state
+            .mic_devices
+            .iter()
+            .any(|name| name == &local_settings.mic_device)
+    {
+        ui.colored_label(egui::Color32::YELLOW, i18n::fl("settings-mic-missing-hint"));
+    } else {
+        ui.label(i18n::fl("settings-mic-ready"));
+    }
     ui.checkbox(
         &mut local_settings.caption_enabled,
         i18n::fl("settings-captions"),
@@ -1452,6 +1538,7 @@ struct VoiceTaskForm<'a> {
     voice: Option<&'a mut String>,
     api_key: &'a mut String,
     key_set: &'a mut bool,
+    clear_pending: &'a mut bool,
 }
 
 fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm<'_>) {
@@ -1480,6 +1567,7 @@ fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm
                         }
                         form.api_key.clear();
                         *form.key_set = false;
+                        *form.clear_pending = true;
                     }
                 }
             });
@@ -1499,10 +1587,19 @@ fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm
     if plugin_needs_key(form.plugin, providers) {
         ui.horizontal(|ui| {
             ui.label(i18n::fl("settings-voice-api-key"));
-            ui.add(egui::TextEdit::singleline(form.api_key).password(true));
+            let changed = ui
+                .add(egui::TextEdit::singleline(form.api_key).password(true))
+                .changed();
+            if changed && !form.api_key.is_empty() {
+                *form.clear_pending = false;
+            }
         });
         if *form.key_set {
             ui.label(i18n::fl("settings-voice-key-set"));
+            if ui.button(i18n::fl("settings-voice-clear-key")).clicked() {
+                *form.key_set = false;
+                *form.clear_pending = true;
+            }
         } else {
             ui.colored_label(
                 egui::Color32::YELLOW,
@@ -1517,6 +1614,50 @@ fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm
         i18n::fl("settings-voice-ready")
     } else {
         i18n::fl("settings-voice-not-configured")
+    });
+}
+
+fn show_voice_provider_config_button(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+    task: &str,
+    plugin: &str,
+) {
+    if plugin.is_empty() || plugin == "echo" {
+        return;
+    }
+    let row_id = format!("ai.tasks.{task}");
+    let Some(row_id) = state
+        .plugins
+        .iter()
+        .find(|row| row.row_id == row_id && row.plugin == plugin)
+        .map(|row| row.row_id.clone())
+    else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-voice-provider-config"));
+        if ui
+            .button(i18n::fl("settings-voice-provider-configure"))
+            .clicked()
+        {
+            let id = row_id.clone();
+            let request_id = begin_plugin_config_load(state, &id);
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::LoadPluginConfig {
+                    request_id,
+                    id: id.clone(),
+                    result: client
+                        .plugin_config(&id)
+                        .await
+                        .map_err(|err| err.to_string()),
+                }
+            });
+        }
     });
 }
 
@@ -2924,6 +3065,10 @@ fn voice_settings_patch(state: &mut DetailUiState) -> Value {
             "api_key".to_owned(),
             Value::String(std::mem::take(&mut state.tts_api_key)),
         );
+    } else if state.tts_api_key_clear_pending
+        && let Some(object) = tts.as_object_mut()
+    {
+        object.insert("api_key".to_owned(), Value::Null);
     }
     let mut stt = serde_json::json!({
         "plugin": state.stt_plugin,
@@ -2937,6 +3082,10 @@ fn voice_settings_patch(state: &mut DetailUiState) -> Value {
             "api_key".to_owned(),
             Value::String(std::mem::take(&mut state.stt_api_key)),
         );
+    } else if state.stt_api_key_clear_pending
+        && let Some(object) = stt.as_object_mut()
+    {
+        object.insert("api_key".to_owned(), Value::Null);
     }
     serde_json::json!({
         "ai": {
@@ -3215,6 +3364,22 @@ mod tests {
             Some(&serde_json::json!("stt-secret"))
         );
         assert!(state.stt_api_key.is_empty());
+    }
+
+    #[test]
+    fn switching_voice_provider_emits_an_explicit_secret_clear() {
+        let mut state = DetailUiState {
+            tts_plugin: "provider.new".to_owned(),
+            tts_api_key_clear_pending: true,
+            stt_plugin: "provider.stt".to_owned(),
+            ..DetailUiState::default()
+        };
+        let patch = voice_settings_patch(&mut state);
+        assert_eq!(
+            patch.pointer("/ai/tasks/tts/api_key"),
+            Some(&serde_json::Value::Null)
+        );
+        assert!(patch.pointer("/ai/tasks/stt/api_key").is_none());
     }
 
     #[test]

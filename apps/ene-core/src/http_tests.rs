@@ -3018,6 +3018,35 @@ async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
 }
 
 #[tokio::test]
+async fn switching_voice_provider_clears_the_previous_task_secret() {
+    let (_dir, client, core, server) = boot_server().await;
+    client
+        .patch_settings(&serde_json::json!({
+            "ai": { "tasks": { "tts": {
+                "plugin": "provider.elevenlabs",
+                "api_key": "old-voice-secret"
+            } } }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(core.secret_for("tts"), "old-voice-secret");
+    assert!(core.task_key_set("tts"));
+
+    client
+        .patch_settings(&serde_json::json!({
+            "ai": { "tasks": { "tts": {
+                "plugin": "provider.voicevox",
+                "api_key": null
+            } } }
+        }))
+        .await
+        .unwrap();
+    assert!(!core.task_key_set("tts"));
+    assert!(core.vault().export("ai.tts").is_err());
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn listen_feeds_duplex_machine_without_stt() {
     let (_dir, client, core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;

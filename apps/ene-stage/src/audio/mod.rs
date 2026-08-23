@@ -10,7 +10,7 @@ mod capture;
 mod playback;
 
 #[cfg(feature = "voice")]
-pub use capture::MicCapture;
+pub use capture::{MicCapture, list_input_device_names};
 #[cfg(feature = "voice")]
 pub use playback::AudioPlayback;
 
@@ -38,6 +38,52 @@ impl AudioHub {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn new_with_mic_device(device_name: &str) -> Self {
+        #[cfg(feature = "voice")]
+        {
+            let playback = AudioPlayback::new();
+            let selected = (!device_name.is_empty()).then_some(device_name);
+            let capture = MicCapture::new_with_device(None, playback.tts_playing_flag(), selected);
+            Self {
+                capture,
+                playback,
+                pending: Vec::new(),
+            }
+        }
+        #[cfg(not(feature = "voice"))]
+        {
+            let _ = device_name;
+            Self::default()
+        }
+    }
+
+    pub fn set_mic_device(&mut self, device_name: &str) {
+        #[cfg(feature = "voice")]
+        {
+            let selected = (!device_name.is_empty()).then_some(device_name);
+            self.capture =
+                MicCapture::new_with_device(None, self.playback.tts_playing_flag(), selected);
+            self.pending.clear();
+        }
+        #[cfg(not(feature = "voice"))]
+        {
+            let _ = device_name;
+        }
+    }
+
+    #[must_use]
+    pub fn list_input_device_names() -> Vec<String> {
+        #[cfg(feature = "voice")]
+        {
+            list_input_device_names()
+        }
+        #[cfg(not(feature = "voice"))]
+        {
+            Vec::new()
+        }
     }
 
     /// Coalesced 16 kHz frames for the listen stream (~100 ms each).
@@ -193,6 +239,15 @@ impl MicCapture {
         _tts_playing: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self
+    }
+
+    #[must_use]
+    pub fn new_with_device(
+        energy_threshold: Option<f32>,
+        tts_playing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        _device_name: Option<&str>,
+    ) -> Self {
+        Self::new(energy_threshold, tts_playing)
     }
 
     pub fn try_recv(&self) -> Option<Vec<f32>> {

@@ -2372,6 +2372,15 @@ fn take_task_secret(
     let Some(value) = fields.pointer(pointer) else {
         return Ok(());
     };
+    if value.is_null() {
+        state
+            .core
+            .vault()
+            .remove(vault_key)
+            .map_err(|err| bad_request("fault", &err.to_string()))?;
+        *slot = Some(String::new());
+        return Ok(());
+    }
     let Some(secret) = value.as_str() else {
         return Ok(());
     };
