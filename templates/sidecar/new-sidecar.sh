@@ -4,8 +4,7 @@
 # Usage: templates/sidecar/new-sidecar.sh <plugin-name>
 #
 # Creates plugins/provider/<plugin-name>/src/sidecar/ with placeholder names
-# replaced. The plugin crate must already exist (see templates/tool for the
-# plugin scaffolding pattern).
+# replaced. The provider plugin crate must already exist.
 set -euo pipefail
 
 NAME="${1:?usage: $0 <plugin-name>}"
