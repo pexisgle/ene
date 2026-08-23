@@ -20,7 +20,7 @@ ene は、ローカルで動く AI コンパニオン型エージェントハー
 - `apps/ene-core/` — コアデーモン
 - `apps/ene-stage/` — stage クライアント
 - `apps/ene-ctl/` — CLI
-- `plugins/tool/` — 同梱ツール (`fs` / `exec` / `web` / `utility`)
+- `plugins/tool/` — 同梱ツール (`fs` / `exec` / `web` / `utility` / `app` / `mcp`)
 - `assets/` — サンプルキャラクターやアセット
 
 ## 前提条件
