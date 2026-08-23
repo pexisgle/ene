@@ -10,6 +10,12 @@ use std::time::Duration;
 
 const SCREENSHOT_CLI_BACKENDS: &[&str] =
     &["grim", "import", "gnome-screenshot", "spectacle", "scrot"];
+#[cfg(target_os = "linux")]
+const PORTAL_SERVICE: &str = "org.freedesktop.portal.Desktop";
+#[cfg(target_os = "linux")]
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+#[cfg(target_os = "linux")]
+const PORTAL_SCREENSHOT_INTERFACE: &str = "org.freedesktop.portal.Screenshot";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionKind {
@@ -210,12 +216,9 @@ fn portal_service_available(env: &HashMap<String, String>) -> bool {
                     return false;
                 };
                 runtime.block_on(async {
-                    tokio::time::timeout(
-                        Duration::from_millis(500),
-                        ashpd::desktop::screenshot::ScreenshotProxy::new(),
-                    )
-                    .await
-                    .is_ok_and(|result| result.is_ok())
+                    tokio::time::timeout(Duration::from_millis(500), portal_service_probe())
+                        .await
+                        .is_ok_and(|available| available)
                 })
             }) {
             Ok(thread) => thread.join().unwrap_or(false),
@@ -226,6 +229,39 @@ fn portal_service_available(env: &HashMap<String, String>) -> bool {
     {
         false
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn portal_service_probe() -> bool {
+    let Ok(connection) = ashpd::zbus::Connection::session().await else {
+        return false;
+    };
+    let Ok(dbus) = ashpd::zbus::fdo::DBusProxy::new(&connection).await else {
+        return false;
+    };
+    let Ok(service_name) = PORTAL_SERVICE.try_into() else {
+        return false;
+    };
+    if !dbus
+        .name_has_owner(service_name)
+        .await
+        .is_ok_and(|has_owner| has_owner)
+    {
+        return false;
+    }
+    let Ok(builder) = ashpd::zbus::fdo::IntrospectableProxy::builder(&connection)
+        .destination(PORTAL_SERVICE)
+        .and_then(|builder| builder.path(PORTAL_PATH))
+    else {
+        return false;
+    };
+    let Ok(proxy) = builder.build().await else {
+        return false;
+    };
+    let Ok(xml) = proxy.introspect().await else {
+        return false;
+    };
+    xml.contains(&format!("name=\"{PORTAL_SCREENSHOT_INTERFACE}\""))
 }
 
 pub(crate) fn screenshot_cli_backend(path: Option<&str>) -> Option<&'static str> {
