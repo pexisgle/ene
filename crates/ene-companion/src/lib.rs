@@ -47,8 +47,9 @@ pub use memory::{
 };
 pub use package::{
     InstalledPackage, PackageKind, avatar_path_for_install, compose_soul_and_body, content_digest,
-    display_name_for_install, export_dir, import_v3, install_archive, localized_display_name,
-    looks_like_package_zip, looks_like_zip, pack_archive, soul_from_install,
+    display_name_for_install, export_dir, greeting_options_for_install, import_v3, install_archive,
+    localized_display_name, looks_like_package_zip, looks_like_zip, pack_archive,
+    soul_from_install,
 };
 pub use proactive::{
     ActivitySnapshot, GateRejectReason, ProactiveConfirmation, ProactiveContext, ProactiveDecision,

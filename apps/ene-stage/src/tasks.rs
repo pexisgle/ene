@@ -24,6 +24,10 @@ pub enum AsyncOutcome {
         session_id: String,
         result: Result<(), String>,
     },
+    SelectGreeting {
+        session_id: String,
+        result: Result<ene_api::HistoryResponse, String>,
+    },
     Listen {
         generation: u64,
         result: Result<(), String>,

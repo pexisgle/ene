@@ -78,6 +78,10 @@ source = "persona.md"
         b"You are Alicia, a desktop companion. Keep responses relatively short and sweet, suitable for displaying on a screen overlay.\n"
             .to_vec(),
     );
+    let card_path = root.join("character.json");
+    if let Ok(card) = std::fs::read(card_path) {
+        files.insert("soul/character.json".to_owned(), card);
+    }
     files.insert(
         "body/body.toml".to_owned(),
         br#"[body]

@@ -5,7 +5,7 @@ pub(crate) mod caption;
 mod chat;
 mod spotlight;
 
-use ene_api::{HistoryResponse, MessageMode};
+use ene_api::{GreetingView, HistoryResponse, MessageMode};
 
 use crate::detail::DetailTab;
 use crate::i18n;
@@ -25,6 +25,7 @@ const _: () = {
 pub enum SurfaceAction {
     SendChat,
     NewSession,
+    SelectGreeting { index: u32 },
     BargeIn,
     CancelTurn,
     ToggleMic,
@@ -47,6 +48,9 @@ pub struct SurfaceUiState {
     pub focus_chat: bool,
     pub chat_input_focused: bool,
     pub history: HistoryResponse,
+    pub greetings: Vec<GreetingView>,
+    pub greeting_inflight: bool,
+    pub greeting_status: String,
     pub streaming_text: String,
     pub caption: String,
     pub pending_approval: Option<PendingApproval>,
@@ -76,6 +80,9 @@ impl Default for SurfaceUiState {
                 messages: Vec::new(),
                 depth: "surface".to_owned(),
             },
+            greetings: Vec::new(),
+            greeting_inflight: false,
+            greeting_status: String::new(),
             streaming_text: String::new(),
             caption: String::new(),
             pending_approval: None,

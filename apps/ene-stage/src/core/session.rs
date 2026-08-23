@@ -4,8 +4,9 @@ use std::sync::Arc;
 use base64::Engine as _;
 use ene_api::{
     AnswerJobRequest, ApiClient, ApiError, CharacterView, ClaimResourceRequest,
-    CreateSessionRequest, HistoryResponse, MessageMode, MessageRequest, OccupantView, ResourceKind,
-    SendMessageResponse, SoulPatch, SoulView, SplitSessionResponse,
+    CreateSessionRequest, GreetingView, HistoryResponse, MessageMode, MessageRequest, OccupantView,
+    ResourceKind, SelectGreetingResponse, SendMessageResponse, SoulPatch, SoulView,
+    SplitSessionResponse,
 };
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -22,6 +23,7 @@ pub struct StageSession {
     session_id: String,
     turn_id: Arc<Mutex<Option<String>>>,
     history: Arc<Mutex<HistoryResponse>>,
+    greetings: Vec<GreetingView>,
     occupants: Vec<OccupantView>,
     avatar_path: Option<PathBuf>,
     motions_dir: Option<PathBuf>,
@@ -32,6 +34,7 @@ pub(crate) struct PreparedSessionTarget {
     soul_id: String,
     session_id: String,
     history: HistoryResponse,
+    greetings: Vec<GreetingView>,
     occupants: Vec<OccupantView>,
     avatar_path: Option<PathBuf>,
     motions_dir: Option<PathBuf>,
@@ -44,6 +47,7 @@ impl PreparedSessionTarget {
             soul_id: "soul".to_owned(),
             session_id: session_id.to_owned(),
             history,
+            greetings: Vec::new(),
             occupants: Vec::new(),
             avatar_path: None,
             motions_dir: None,
@@ -98,6 +102,7 @@ impl StageSession {
             session_id: session_id.to_owned(),
             turn_id: Arc::new(Mutex::new(None)),
             history: Arc::new(Mutex::new(history)),
+            greetings: Vec::new(),
             occupants: Vec::new(),
             avatar_path: None,
             motions_dir: None,
@@ -139,6 +144,11 @@ impl StageSession {
         self.history.lock().clone()
     }
 
+    #[must_use]
+    pub fn greetings(&self) -> &[GreetingView] {
+        &self.greetings
+    }
+
     pub fn replace_history(&self, history: HistoryResponse) {
         *self.history.lock() = history;
     }
@@ -175,12 +185,14 @@ impl StageSession {
             resolve_stage(&client, MAX_OVERLAY_BODIES).await?;
         let session_id = resolve_session_id(&client, &soul_id).await?;
         let history = normalize_history(client.history(&session_id, "surface").await?);
+        let greetings = client.list_greetings(&soul_id).await?.items;
         Ok(Self {
             client,
             soul_id,
             session_id,
             turn_id: Arc::new(Mutex::new(None)),
             history: Arc::new(Mutex::new(history)),
+            greetings,
             occupants,
             avatar_path,
             motions_dir,
@@ -198,6 +210,7 @@ impl StageSession {
         self.session_id = target.session_id;
         self.turn_id = Arc::new(Mutex::new(None));
         self.history = Arc::new(Mutex::new(target.history));
+        self.greetings = target.greetings;
         self.occupants = target.occupants;
         self.avatar_path = target.avatar_path;
         self.motions_dir = target.motions_dir;
@@ -286,6 +299,14 @@ impl StageSession {
         Ok(history)
     }
 
+    pub async fn select_greeting(&self, index: u32) -> Result<SelectGreetingResponse, ApiError> {
+        let response = self.client.select_greeting(&self.session_id, index).await?;
+        if response.committed {
+            let _ = self.refresh_history().await?;
+        }
+        Ok(response)
+    }
+
     pub async fn respond_approval(
         &self,
         id: &str,
@@ -330,6 +351,11 @@ impl SessionHandle {
         let history = normalize_history(self.client.history(&self.session_id, "surface").await?);
         *self.history.lock() = history.clone();
         Ok(history)
+    }
+
+    pub async fn select_greeting(&self, index: u32) -> Result<HistoryResponse, ApiError> {
+        self.client.select_greeting(&self.session_id, index).await?;
+        self.refresh_history().await
     }
 
     pub async fn send(
@@ -614,6 +640,7 @@ pub(crate) async fn prepare_soul_target(
 ) -> Result<PreparedSessionTarget, ApiError> {
     let session_id = resolve_session_id(client, soul_id).await?;
     let history = normalize_history(client.history(&session_id, "surface").await?);
+    let greetings = client.list_greetings(soul_id).await?.items;
     let occupants = client.stage().await?.occupants;
     let occupant = occupants.iter().find(|item| item.soul_id == soul_id);
     let avatar_path = occupant.and_then(|item| item.avatar_path.as_ref().map(PathBuf::from));
@@ -622,6 +649,7 @@ pub(crate) async fn prepare_soul_target(
         soul_id: soul_id.to_owned(),
         session_id,
         history,
+        greetings,
         occupants,
         avatar_path,
         motions_dir,

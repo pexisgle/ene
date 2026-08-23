@@ -126,6 +126,30 @@ fn render_transcript_row(ui: &mut egui::Ui, row: TranscriptRow<'_>) {
     ui.add_space(6.0);
 }
 
+fn render_greeting_picker(ui: &mut egui::Ui, state: &mut SurfaceUiState) {
+    if state.greetings.is_empty() {
+        ui.weak(i18n::fl("chat-empty-history"));
+        return;
+    }
+    ui.label(i18n::fl("chat-greeting-prompt"));
+    for greeting in state.greetings.clone() {
+        let first_line = greeting.text.lines().next().unwrap_or_default();
+        let preview: String = first_line.chars().take(48).collect();
+        let label = format!("[{}] {preview}", greeting.index);
+        if ui
+            .add_enabled(!state.greeting_inflight, egui::Button::new(label))
+            .clicked()
+        {
+            state.push_action(SurfaceAction::SelectGreeting {
+                index: greeting.index,
+            });
+        }
+    }
+    if !state.greeting_status.is_empty() {
+        ui.colored_label(egui::Color32::LIGHT_RED, &state.greeting_status);
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> egui::Response {
     let output = ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
         ui.horizontal(|ui| {
@@ -236,8 +260,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
             .max_height(ui.available_height() - 8.0)
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for row in normalize_transcript(&state.history, &state.streaming_text) {
-                    render_transcript_row(ui, row);
+                let rows = normalize_transcript(&state.history, &state.streaming_text);
+                if rows.is_empty() {
+                    render_greeting_picker(ui, state);
+                } else {
+                    for row in rows {
+                        render_transcript_row(ui, row);
+                    }
                 }
             });
 

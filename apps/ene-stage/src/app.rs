@@ -112,6 +112,7 @@ pub fn run() -> Result<(), AppError> {
     };
     app.surface.character_pos = [app.settings.character_x, app.settings.character_y];
     app.surface.history = app.session.history();
+    app.surface.greetings = app.session.greetings().to_vec();
     detail::ensure_settings(
         &mut app.detail,
         &app.client,
@@ -342,6 +343,21 @@ impl StageApp {
                     self.surface.chat_draft.clear();
                     self.surface.streaming_text.clear();
                     self.request_history_refresh();
+                }
+            }
+            AsyncOutcome::SelectGreeting { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
+                self.surface.greeting_inflight = false;
+                match result {
+                    Ok(history) => {
+                        self.session.replace_history(history.clone());
+                        self.surface.history = history;
+                        self.surface.greetings.clear();
+                        self.surface.greeting_status.clear();
+                    }
+                    Err(err) => self.surface.greeting_status = err,
                 }
             }
             AsyncOutcome::BargeIn { session_id, result }
@@ -715,6 +731,9 @@ impl StageApp {
                         spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
                     self.detail.set_session_id(self.session.session_id());
                     self.surface.history = self.session.history();
+                    self.surface.greetings = self.session.greetings().to_vec();
+                    self.surface.greeting_inflight = false;
+                    self.surface.greeting_status.clear();
                     self.surface.streaming_text.clear();
                     self.surface.pending_approval = None;
                     self.surface.pending_question = None;
@@ -922,6 +941,25 @@ impl StageApp {
         });
     }
 
+    fn select_greeting(&mut self, index: u32) {
+        if self.surface.greeting_inflight {
+            return;
+        }
+        self.surface.greeting_inflight = true;
+        self.surface.greeting_status.clear();
+        let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
+        self.spawn(async move {
+            AsyncOutcome::SelectGreeting {
+                session_id,
+                result: session
+                    .select_greeting(index)
+                    .await
+                    .map_err(|err| err.to_string()),
+            }
+        });
+    }
+
     fn answer_question(&mut self) {
         let Some(question) = self.surface.pending_question.take() else {
             return;
@@ -1113,6 +1151,7 @@ impl StageApp {
             match action {
                 SurfaceAction::SendChat => self.send_chat(),
                 SurfaceAction::NewSession => self.start_new_session(),
+                SurfaceAction::SelectGreeting { index } => self.select_greeting(index),
                 SurfaceAction::BargeIn => self.barge_in(),
                 SurfaceAction::CancelTurn => self.cancel_turn(),
                 SurfaceAction::ToggleMic => self.toggle_mic(),
@@ -1352,6 +1391,9 @@ impl StageApp {
         }
         self.feeds = spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
         self.surface.history = self.session.history();
+        self.surface.greetings = self.session.greetings().to_vec();
+        self.surface.greeting_inflight = false;
+        self.surface.greeting_status.clear();
         self.surface.pending_approval = None;
         self.surface.pending_question = None;
         self.detail.next_activation_generation();
@@ -1370,6 +1412,9 @@ impl StageApp {
         self.session.commit_retarget(target);
         self.feeds = feeds;
         self.surface.history = self.session.history();
+        self.surface.greetings = self.session.greetings().to_vec();
+        self.surface.greeting_inflight = false;
+        self.surface.greeting_status.clear();
         self.surface.streaming_text.clear();
         self.surface.turn_active = false;
         self.surface.pending_approval = None;
