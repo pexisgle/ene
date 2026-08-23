@@ -381,6 +381,16 @@ pub(crate) fn fail(
     .to_string()
 }
 
+pub(crate) fn dependency_missing(backend: &'static str, package: &'static str) -> String {
+    json!({
+        "code": "dependency_missing",
+        "backend": backend,
+        "package": package,
+        "message": format!("install {package} and ensure it is executable on PATH"),
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DesktopKind, PlatformCaps, SessionKind, screenshot_cli_backend};
