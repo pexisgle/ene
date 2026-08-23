@@ -48,7 +48,10 @@ pub enum AsyncOutcome {
         id: String,
         result: Result<(), String>,
     },
-    LoadPluginConfig(Result<ene_api::PluginConfigView, String>),
+    LoadPluginConfig {
+        id: String,
+        result: Result<ene_api::PluginConfigView, String>,
+    },
     ValidatePluginConfig(Result<ene_api::PluginConfigValidateView, String>),
     ApplyPluginConfig(Result<ene_api::PluginConfigValidateView, String>),
     PluginConfigOptions(Result<ene_api::PluginConfigOptionsView, String>),

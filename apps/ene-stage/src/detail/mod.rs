@@ -1715,12 +1715,14 @@ fn show_connections(
             }
             if ui.button(i18n::fl("plugins-config")).clicked() {
                 let id = plugin.row_id.clone();
+                state.plugin_config_id.clone_from(&id);
                 state.plugin_config_open = true;
                 let client = Arc::clone(client);
                 spawn_async(rt, async_results, async move {
-                    AsyncOutcome::LoadPluginConfig(
-                        client.plugin_config(&id).await.map_err(|e| e.to_string()),
-                    )
+                    AsyncOutcome::LoadPluginConfig {
+                        id: id.clone(),
+                        result: client.plugin_config(&id).await.map_err(|e| e.to_string()),
+                    }
                 });
             }
         });
@@ -1900,6 +1902,11 @@ pub fn apply_plugin_config_view(state: &mut DetailUiState, view: PluginConfigVie
         serde_json::to_string_pretty(&view.schema).unwrap_or_else(|_| view.schema.to_string());
     state.plugin_config_values =
         serde_json::to_string_pretty(&view.values).unwrap_or_else(|_| view.values.to_string());
+}
+
+#[must_use]
+pub fn plugin_config_request_is_current(current_id: &str, requested_id: &str) -> bool {
+    !current_id.is_empty() && current_id == requested_id
 }
 
 pub fn plugin_config_status(view: &ene_api::PluginConfigValidateView) -> String {
@@ -3189,5 +3196,34 @@ mod tests {
             restart_required: false,
         };
         assert!(plugin_config_status(&failed).contains("model"));
+    }
+
+    #[test]
+    fn stale_plugin_config_response_cannot_replace_newer_request() {
+        let mut detail = DetailUiState {
+            plugin_config_id: "plugin.b".to_owned(),
+            ..Default::default()
+        };
+        let view = |id: &str, value: &str| PluginConfigView {
+            row_id: id.to_owned(),
+            plugin: id.to_owned(),
+            has_config: true,
+            schema: serde_json::json!({"type":"object"}),
+            values: serde_json::json!({"value": value}),
+            secret_keys: Vec::new(),
+        };
+
+        let stale = view("plugin.a", "old");
+        if plugin_config_request_is_current(&detail.plugin_config_id, &stale.row_id) {
+            apply_plugin_config_view(&mut detail, stale);
+        }
+        assert!(detail.plugin_config_values.is_empty());
+
+        let current = view("plugin.b", "new");
+        if plugin_config_request_is_current(&detail.plugin_config_id, &current.row_id) {
+            apply_plugin_config_view(&mut detail, current);
+        }
+        assert!(detail.plugin_config_values.contains("new"));
+        assert!(!detail.plugin_config_values.contains("old"));
     }
 }

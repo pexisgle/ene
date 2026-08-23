@@ -374,13 +374,18 @@ impl StageApp {
                 Ok(items) => self.detail.plugins = items,
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::LoadPluginConfig(result) => match result {
-                Ok(view) => {
-                    detail::apply_plugin_config_view(&mut self.detail, view);
-                    self.detail.connections_status.clear();
+            AsyncOutcome::LoadPluginConfig { id, result } => {
+                if !detail::plugin_config_request_is_current(&self.detail.plugin_config_id, &id) {
+                    return;
                 }
-                Err(err) => self.detail.connections_status = err,
-            },
+                match result {
+                    Ok(view) => {
+                        detail::apply_plugin_config_view(&mut self.detail, view);
+                        self.detail.connections_status.clear();
+                    }
+                    Err(err) => self.detail.connections_status = err,
+                }
+            }
             AsyncOutcome::ValidatePluginConfig(result)
             | AsyncOutcome::ApplyPluginConfig(result) => match result {
                 Ok(view) => {
