@@ -5,6 +5,14 @@ use crate::i18n;
 use crate::surface::{SurfaceAction, SurfaceUiState};
 use ene_api::MessageMode;
 
+fn role_label(role: &str) -> String {
+    match role {
+        "user" => i18n::fl("chat-role-user"),
+        "assistant" => i18n::fl("chat-role-assistant"),
+        other => other.to_owned(),
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> egui::Response {
     let output = ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
         ui.horizontal(|ui| {
@@ -126,12 +134,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                     if message.role != "user" && message.role != "assistant" {
                         continue;
                     }
-                    ui.label(format!("{}: {}", message.role, message.text));
+                    ui.label(format!("{}: {}", role_label(&message.role), message.text));
                 }
                 if !state.streaming_text.is_empty() {
                     ui.colored_label(
                         egui::Color32::LIGHT_GREEN,
-                        format!("assistant: {}", state.streaming_text),
+                        format!("{}: {}", role_label("assistant"), state.streaming_text),
                     );
                 }
             });
@@ -140,4 +148,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
     });
 
     output.inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::role_label;
+
+    #[test]
+    fn known_chat_roles_are_localized() {
+        assert_ne!(role_label("user"), "user");
+        assert_ne!(role_label("assistant"), "assistant");
+    }
 }

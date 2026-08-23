@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use i18n_embed::DesktopLanguageRequester;
+use i18n_embed::LanguageLoader;
 use i18n_embed::fluent::{FluentLanguageLoader, fluent_language_loader};
 use parking_lot::RwLock;
 use rust_embed::RustEmbed;
@@ -39,7 +40,17 @@ pub fn select_language(tag: &str) {
 
 #[must_use]
 pub fn fl(key: &str) -> String {
-    loader_lock().read().get(key)
+    let loader = loader_lock();
+    let guard = loader.read();
+    let value = guard.get(key);
+    if !guard.has(key) {
+        let language = guard.current_languages().first().map_or_else(
+            || guard.fallback_language().to_string(),
+            ToString::to_string,
+        );
+        tracing::warn!(key, language = %language, "localization key is missing");
+    }
+    value
 }
 
 #[cfg(test)]
