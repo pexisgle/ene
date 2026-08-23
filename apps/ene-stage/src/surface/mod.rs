@@ -106,6 +106,12 @@ impl SurfaceUiState {
         self.chat_input_focused = false;
     }
 
+    /// A new turn supersedes the previous turn's composer feedback.
+    pub(crate) fn begin_send(&mut self) {
+        self.status.clear();
+        self.turn_active = true;
+    }
+
     pub(crate) fn apply_text_delta(&mut self, text: &str, captions: bool) {
         if caption::is_speech_caption(text) {
             self.streaming_text.push_str(text);
@@ -124,6 +130,7 @@ impl SurfaceUiState {
     pub(crate) fn on_turn_ended(&mut self) {
         self.streaming_text.clear();
         self.turn_active = false;
+        self.status.clear();
         self.dismiss_caption();
     }
 
@@ -196,6 +203,30 @@ pub fn show_spotlight(ctx: &egui::Context, state: &mut SurfaceUiState) -> Option
 #[cfg(test)]
 mod tests {
     use super::SurfaceUiState;
+
+    #[test]
+    fn a_new_send_clears_the_previous_turn_status() {
+        let mut state = SurfaceUiState {
+            status: "tool: execute: unknown skill skill".to_owned(),
+            ..Default::default()
+        };
+
+        state.begin_send();
+
+        assert!(state.status.is_empty());
+        assert!(state.turn_active);
+    }
+
+    #[test]
+    fn ending_a_turn_clears_progress_and_terminal_composer_feedback() {
+        let mut state = SurfaceUiState::default();
+        state.apply_text_delta("Hello from the companion.", false);
+
+        state.on_turn_ended();
+
+        assert!(state.status.is_empty());
+        assert!(!state.turn_active);
+    }
 
     #[test]
     fn terminal_error_reads_latest_surface_status_message() {
