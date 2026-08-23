@@ -1,6 +1,6 @@
 use crate::error::WorkError;
 use crate::host::{DelegationHost, StartDelegation};
-use crate::skill::{load_skill, read_skill_file};
+use crate::skill::{catalog, load_skill, read_skill_file};
 use crate::types::{Artifact, ArtifactKind, DelegationMode};
 use crate::workflow::{BookmarkFill, fill_bookmark_job};
 use async_trait::async_trait;
@@ -120,11 +120,24 @@ fn delegate_defs() -> Vec<ToolDefinition> {
         ),
         harness(
             "skill.load",
-            "Load a skill body into context.",
+            "Load an installed skill body. Call skill.list first when the exact name is unknown.",
             json!({
                 "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
+                "properties": {
+                    "soul_id": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["soul_id", "name"]
+            }),
+            Vec::new(),
+        ),
+        harness(
+            "skill.list",
+            "List skill names and descriptions available to a soul.",
+            json!({
+                "type": "object",
+                "properties": { "soul_id": { "type": "string" } },
+                "required": ["soul_id"]
             }),
             Vec::new(),
         ),
@@ -281,13 +294,38 @@ impl ToolInvoke for WorkInvoker {
                 Ok(json!({ "ok": true }))
             }
             "skill.load" => {
-                let skill_name = str_arg(&args, "name")?;
-                let meta =
-                    load_skill(&self.skills_home, skill_name).map_err(|err| err.to_string())?;
+                let soul_id = soul_arg(&args)?;
+                let skill_name = args
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "invalid_arguments: missing name".to_owned())?;
+                let enabled = soul_skill_refs(&self.host, soul_id);
+                let available =
+                    catalog(&self.skills_home, &enabled).map_err(|err| err.to_string())?;
+                if !available.iter().any(|(name, _)| name == skill_name) {
+                    return Err(unknown_skill_message(skill_name, &available));
+                }
+                let meta = load_skill(&self.skills_home, skill_name).map_err(|err| match err {
+                    WorkError::UnknownSkill(_) => unknown_skill_message(skill_name, &available),
+                    other => other.to_string(),
+                })?;
                 Ok(json!({
                     "name": meta.name,
                     "description": meta.description,
                     "body": meta.body,
+                }))
+            }
+            "skill.list" => {
+                let soul_id = soul_arg(&args)?;
+                let enabled = soul_skill_refs(&self.host, soul_id);
+                let rows = catalog(&self.skills_home, &enabled).map_err(|err| err.to_string())?;
+                Ok(json!({
+                    "skills": rows
+                        .into_iter()
+                        .map(|(name, description)| {
+                            json!({ "name": name, "description": description })
+                        })
+                        .collect::<Vec<_>>(),
                 }))
             }
             "skill.read" => {
@@ -343,6 +381,20 @@ impl ToolInvoke for WorkInvoker {
             other => Err(format!("unknown work tool {other}")),
         }
     }
+}
+
+fn unknown_skill_message(skill_name: &str, available: &[(String, String)]) -> String {
+    let mut names: Vec<&str> = available.iter().map(|(name, _)| name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    format!(
+        "unknown_skill: unknown skill {skill_name}; call skill.list to discover installed skills{}",
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!(" (available skills: {})", names.join(", "))
+        }
+    )
 }
 
 fn start(invoker: &WorkInvoker, args: &Value) -> Result<Value, String> {

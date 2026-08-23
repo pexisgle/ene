@@ -1473,7 +1473,7 @@ async fn matching_skill_body_is_injected_as_skills_active() {
         .test_tool(
             "skill.load",
             &ToolTestRequest {
-                arguments: serde_json::json!({ "name": "travel" }),
+                arguments: serde_json::json!({ "soul_id": soul_id.clone(), "name": "travel" }),
             },
         )
         .await

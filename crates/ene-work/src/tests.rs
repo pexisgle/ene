@@ -22,7 +22,7 @@ use crate::vision::{
 };
 use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};
-use ene_companion::{WorldStateMemory, WorldStateSettings};
+use ene_companion::{CompanionStore, NewSoul, WorldStateMemory, WorldStateSettings};
 use ene_kernel::{
     ConversationModel, DisplayDepth, EchoModel, EventKind, HarnessSettings, KernelError,
     LaneHandle, LaneMindSettings, LaneOptions, ModelGeneration, ModelRequest, SurfaceRouter,
@@ -1454,10 +1454,20 @@ fn work_tools_cover_delegate_surface() {
     assert!(names.iter().any(|n| n == "delegate.start"));
     assert!(names.iter().any(|n| n == "delegate.approve_plan"));
     assert!(names.iter().any(|n| n == "skill.load"));
+    assert!(names.iter().any(|n| n == "skill.list"));
     assert!(names.iter().any(|n| n == "skill.read"));
     assert!(!names.iter().any(|n| n == "delegation.send"));
     assert!(!names.iter().any(|n| n == "artifact.register"));
     assert!(!names.iter().any(|n| n == "workflow.bookmark"));
+    let schemas = registry.schemas(Layer::Surface);
+    for name in ["skill.load", "skill.list"] {
+        let schema = schemas
+            .iter()
+            .find(|schema| schema.get("name").and_then(Value::as_str) == Some(name))
+            .unwrap();
+        let required = schema["parameters"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|value| value == "soul_id"));
+    }
     let job_names: Vec<String> = registry
         .schemas(Layer::Job)
         .iter()
@@ -1469,6 +1479,129 @@ fn work_tools_cover_delegate_surface() {
         })
         .collect();
     assert!(job_names.iter().any(|n| n == "workflow.bookmark"));
+}
+
+#[tokio::test]
+async fn skill_list_and_load_round_trip() {
+    let (dir, _store, host, soul) = open_work();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: travel\ndescription: plan a trip\n---\n\n# Travel\npack light\n",
+    )
+    .unwrap();
+    install_skill_dir(&dir.path().join("skills"), &src).unwrap();
+
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    let listed = registry
+        .execute(
+            "skill.list",
+            json!({ "soul_id": soul.to_string() }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        listed["skills"][0]["name"],
+        json!("travel"),
+        "skill.list must expose the canonical ID used by skill.load"
+    );
+    let loaded = registry
+        .execute(
+            "skill.load",
+            json!({ "soul_id": soul.to_string(), "name": "travel" }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded["body"], json!("# Travel\npack light"));
+}
+
+#[tokio::test]
+async fn unknown_skill_error_suggests_discovery() {
+    let (dir, _store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, host, dir.path().join("skills"));
+    let err = registry
+        .execute(
+            "skill.load",
+            json!({ "soul_id": soul.to_string(), "name": "skill" }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("unknown_skill"));
+    assert!(err.to_string().contains("skill skill"));
+    assert!(err.to_string().contains("skill.list"));
+}
+
+#[tokio::test]
+async fn skill_list_respects_soul_allowlist() {
+    let dir = TempDir::new().unwrap();
+    let work_store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let companions = CompanionStore::open(dir.path().join("companions.db")).unwrap();
+    let soul_row = companions
+        .create_soul(&NewSoul {
+            skill_refs: vec!["allowed".into()],
+            ..NewSoul::text_only("char.ene@1")
+        })
+        .unwrap();
+    let soul = soul_row.id;
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&work_store),
+        dir.path().to_path_buf(),
+    ));
+    for name in ["allowed", "hidden"] {
+        let src = dir.path().join(name);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} skill\n---\n\nBody\n"),
+        )
+        .unwrap();
+        install_skill_dir(&dir.path().join("skills"), &src).unwrap();
+    }
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, host, dir.path().join("skills"));
+    let listed = registry
+        .execute(
+            "skill.list",
+            json!({ "soul_id": soul.to_string() }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    let names: Vec<_> = listed["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row.get("name").and_then(Value::as_str))
+        .collect();
+    assert_eq!(names, ["allowed"]);
+
+    let hidden = registry
+        .execute(
+            "skill.load",
+            json!({ "soul_id": soul.to_string(), "name": "hidden" }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(hidden.to_string().contains("unknown_skill"));
+
+    let unknown = registry
+        .execute(
+            "skill.load",
+            json!({ "soul_id": soul.to_string(), "name": "missing" }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    let message = unknown.to_string();
+    assert!(message.contains("available skills: allowed"));
+    assert!(!message.contains("hidden"));
 }
 
 #[test]
