@@ -1153,10 +1153,6 @@ where
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "test-only set_var/remove_var under a process-global mutex"
-)]
 mod tests {
     use super::*;
     use figment::{
@@ -1218,6 +1214,7 @@ mod tests {
         let fig = figment_with_settings_json(&path);
         let cfg: EneConfig = fig.extract().expect("empty settings extracts defaults");
 
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
             std::env::remove_var("ENE_TEST_PROVIDER__API_KEY");
         }
@@ -1240,6 +1237,7 @@ mod tests {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
             std::env::set_var("ENE_TEST_provider__api_key", "sk-lowercase");
         }
@@ -1252,6 +1250,7 @@ mod tests {
             .extract()
             .expect("env-var override merges into defaults");
 
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
             std::env::remove_var("ENE_TEST_provider__api_key");
         }
@@ -1586,6 +1585,7 @@ mod tests {
         );
 
         let json = serialize_json_layer(&config, &path).expect("serialize");
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
             std::env::remove_var("ENE_AI__TASKS__CHAT__MODEL");
         }
@@ -1618,6 +1618,7 @@ mod tests {
         config.user_name = "ChangedByUser".to_string();
 
         let json = serialize_json_layer(&config, &path).expect("serialize");
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
             std::env::remove_var("ENE_AI__TASKS__CHAT__MODEL");
         }
@@ -1848,6 +1849,7 @@ mod tests {
             std::env::set_var("ENE_PLUGINS__PROFILE", "headless");
         }
         let config = extract_layered_config(&path).expect("load");
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
             std::env::remove_var("ENE_PLUGINS__PROFILE");
         }

@@ -49,7 +49,8 @@ mod tests {
     #[test]
     fn reads_injected_sidecar_base_url() {
         let original = std::env::var_os("ENE_PROVIDER_CONFIG");
-        // SAFETY: test restores env before returning.
+        // SAFETY: this test owns the `ENE_PROVIDER_CONFIG` mutation and restores
+        // the original value before returning.
         unsafe {
             std::env::set_var(
                 "ENE_PROVIDER_CONFIG",
@@ -59,12 +60,20 @@ mod tests {
         let _guard = maybe_start().expect("start");
         assert_eq!(managed_base(), Some("http://127.0.0.1:9/v1"));
         match original {
-            Some(value) => unsafe {
-                std::env::set_var("ENE_PROVIDER_CONFIG", value);
-            },
-            None => unsafe {
-                std::env::remove_var("ENE_PROVIDER_CONFIG");
-            },
+            Some(value) => {
+                // SAFETY: This test owns the `ENE_PROVIDER_CONFIG` mutation and
+                // restores the value captured before the test changed it.
+                unsafe {
+                    std::env::set_var("ENE_PROVIDER_CONFIG", value);
+                }
+            }
+            None => {
+                // SAFETY: This test owns the `ENE_PROVIDER_CONFIG` mutation and
+                // removes the variable after the test changed it.
+                unsafe {
+                    std::env::remove_var("ENE_PROVIDER_CONFIG");
+                }
+            }
         }
     }
 }

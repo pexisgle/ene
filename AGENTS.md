@@ -42,8 +42,11 @@ CI additionally runs `cargo doc --workspace --no-deps`. It is deliberately *not*
 `[workspace.lints.clippy]` in the root `Cargo.toml` denies `all`, `pedantic`, and `cargo` as
 whole groups, plus these individually: `unwrap_used`, `expect_used`, `panic`, `todo`,
 `unimplemented`, `dbg_macro`, `mem_forget`, `let_underscore_must_use`, `print_stdout`,
-`print_stderr`, `allow_attributes`, `allow_attributes_without_reason`. Clippy failures are
-build failures.
+`print_stderr`, `allow_attributes`, `allow_attributes_without_reason`,
+`undocumented_unsafe_blocks`. Clippy failures are build failures.
+
+- Every `unsafe` block needs a preceding `// SAFETY:` comment that states the invariant
+  making the operation sound. This is enforced by `clippy::undocumented_unsafe_blocks`.
 
 - No `unwrap`/`expect`/panic paths in production code. Tests opt out per-crate via
   `#![cfg_attr(test, expect(clippy::unwrap_used, ...))]` — see `crates/ene-session/src/lib.rs`.
