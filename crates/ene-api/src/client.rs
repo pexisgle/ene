@@ -3,6 +3,7 @@ use crate::pcm::{PCM_S16LE, encode_pcm_s16le};
 use crate::types::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
+    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, GreetingView, Health,
     HistoryResponse, InstallProviderAssetRequest, InstallProviderAssetResponse, JobView,
     ListProviderAssetsRequest, ListProviderAssetsResponse, ListProviderModelsRequest,
     ListProviderModelsResponse, ListenRequest, McpDocument, MemoryCandidateView, MemoryJournalView,
