@@ -9,7 +9,6 @@ use ene_plane::Sensitivity;
 use ene_registry::{ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use ene_session::{DelegationId, SoulId};
 use serde_json::{Value, json};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
@@ -124,15 +123,22 @@ fn delegate_defs() -> Vec<ToolDefinition> {
             "Load an installed skill body. Call skill.list first when the exact name is unknown.",
             json!({
                 "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
+                "properties": {
+                    "soul_id": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["soul_id", "name"]
             }),
             Vec::new(),
         ),
         harness(
             "skill.list",
-            "List installed skill names and descriptions.",
-            json!({ "type": "object", "properties": {} }),
+            "List skill names and descriptions available to a soul.",
+            json!({
+                "type": "object",
+                "properties": { "soul_id": { "type": "string" } },
+                "required": ["soul_id"]
+            }),
             Vec::new(),
         ),
         harness(
@@ -288,25 +294,19 @@ impl ToolInvoke for WorkInvoker {
                 Ok(json!({ "ok": true }))
             }
             "skill.load" => {
+                let soul_id = soul_arg(&args)?;
                 let skill_name = args
                     .get("name")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "invalid_arguments: missing name".to_owned())?;
+                let enabled = soul_skill_refs(&self.host, soul_id);
+                let available =
+                    catalog(&self.skills_home, &enabled).map_err(|err| err.to_string())?;
+                if !available.iter().any(|(name, _)| name == skill_name) {
+                    return Err(unknown_skill_message(skill_name, &available));
+                }
                 let meta = load_skill(&self.skills_home, skill_name).map_err(|err| match err {
-                    WorkError::UnknownSkill(_) => {
-                        let mut available =
-                            skill_catalog_names(&self.skills_home).unwrap_or_default();
-                        available.sort();
-                        let names: Vec<String> = available;
-                        format!(
-                            "unknown_skill: unknown skill {skill_name}; call skill.list to discover installed skills{}",
-                            if names.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" (available skills: {})", names.join(", "))
-                            }
-                        )
-                    }
+                    WorkError::UnknownSkill(_) => unknown_skill_message(skill_name, &available),
                     other => other.to_string(),
                 })?;
                 Ok(json!({
@@ -383,15 +383,18 @@ impl ToolInvoke for WorkInvoker {
     }
 }
 
-fn skill_catalog_names(home: &Path) -> Result<Vec<String>, std::io::Error> {
-    if !home.exists() {
-        return Ok(Vec::new());
-    }
-    Ok(fs::read_dir(home)?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect())
+fn unknown_skill_message(skill_name: &str, available: &[(String, String)]) -> String {
+    let mut names: Vec<&str> = available.iter().map(|(name, _)| name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    format!(
+        "unknown_skill: unknown skill {skill_name}; call skill.list to discover installed skills{}",
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!(" (available skills: {})", names.join(", "))
+        }
+    )
 }
 
 fn start(invoker: &WorkInvoker, args: &Value) -> Result<Value, String> {

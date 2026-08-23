@@ -71,8 +71,9 @@ catalog as `skills.catalog` and injects matching bodies as `skills.active`.
 `ene.proactive_hint` / `ene.emotion_note` frontmatter feed proactive
 decisions and affect classification. Each soul has a skill allowlist
 (`PATCH /api/v1/souls/{id}/skills`; empty means all installed skills).
-Tools discover bodies with `skill.list` and load the exact returned ID with
-`skill.load`; unknown names report `unknown_skill`.
+Tools discover bodies with `skill.list` for a soul and load the exact returned ID
+with `skill.load` for that same soul; unknown or unavailable names report
+`unknown_skill`.
 `workflow.bookmark` on the job layer researches a theme and delivers Markdown.
 
 ## Background tools

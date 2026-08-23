@@ -1459,6 +1459,15 @@ fn work_tools_cover_delegate_surface() {
     assert!(!names.iter().any(|n| n == "delegation.send"));
     assert!(!names.iter().any(|n| n == "artifact.register"));
     assert!(!names.iter().any(|n| n == "workflow.bookmark"));
+    let schemas = registry.schemas(Layer::Surface);
+    for name in ["skill.load", "skill.list"] {
+        let schema = schemas
+            .iter()
+            .find(|schema| schema.get("name").and_then(Value::as_str) == Some(name))
+            .unwrap();
+        let required = schema["parameters"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|value| value == "soul_id"));
+    }
     let job_names: Vec<String> = registry
         .schemas(Layer::Job)
         .iter()
@@ -1512,9 +1521,9 @@ async fn skill_list_and_load_round_trip() {
 
 #[tokio::test]
 async fn unknown_skill_error_suggests_discovery() {
-    let (_dir, _store, host, soul) = open_work();
+    let (dir, _store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
-    register_work_tools(&registry, host, PathBuf::from("/tmp/skills"));
+    register_work_tools(&registry, host, dir.path().join("skills"));
     let err = registry
         .execute(
             "skill.load",
@@ -1571,6 +1580,28 @@ async fn skill_list_respects_soul_allowlist() {
         .filter_map(|row| row.get("name").and_then(Value::as_str))
         .collect();
     assert_eq!(names, ["allowed"]);
+
+    let hidden = registry
+        .execute(
+            "skill.load",
+            json!({ "soul_id": soul.to_string(), "name": "hidden" }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(hidden.to_string().contains("unknown_skill"));
+
+    let unknown = registry
+        .execute(
+            "skill.load",
+            json!({ "soul_id": soul.to_string(), "name": "missing" }),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    let message = unknown.to_string();
+    assert!(message.contains("available skills: allowed"));
+    assert!(!message.contains("hidden"));
 }
 
 #[test]
