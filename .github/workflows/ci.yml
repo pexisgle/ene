@@ -124,8 +124,13 @@ jobs:
       - name: Install ripgrep
         shell: pwsh
         run: choco install ripgrep -y --no-progress
-      - name: Lint native Windows applications
-        run: cargo clippy --locked -p ene-daemon -p ene-stage --all-targets -- -D warnings
+      - name: Verify Windows-specific package inventory
+        shell: pwsh
+        run: ./scripts/check-windows-ci-coverage.ps1
+      - name: Lint native Windows applications and sandbox
+        run: cargo clippy --locked -p ene-daemon -p ene-stage -p ene-desktop -p ene-sandbox -p ene-registry -p ene-tool-app --all-targets -- -D warnings
+      - name: Lint Windows job-object plugin
+        run: cargo clippy --locked -p ene-tool-exec --features win32-job --all-targets -- -D warnings
       - name: Test Windows-compatible libraries
         run: cargo test --locked -p ene-config -p ene-plane -p ene-fiber
 
