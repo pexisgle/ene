@@ -167,6 +167,62 @@ struct StageApp {
 }
 
 impl StageApp {
+    #[cfg(test)]
+    fn new_for_test() -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = runtime.enter();
+        let client = Arc::new(ene_api::ApiClient::new(
+            "http://127.0.0.1:9",
+            "token",
+            "stage",
+        ));
+        let rt_handle = runtime.handle().clone();
+        Self {
+            settings: DesktopSettings::default(),
+            local_settings: DesktopSettings::default(),
+            core: StageCore::detached(),
+            session: StageSession::new_for_test(
+                Arc::clone(&client),
+                "soul",
+                "old-session",
+                ene_api::HistoryResponse {
+                    messages: Vec::new(),
+                    depth: "surface".to_owned(),
+                },
+            ),
+            client,
+            runtime,
+            rt_handle,
+            feeds: EventFeeds::new_for_test(),
+            audio: AudioHub::new(),
+            viseme: VisemeAnalyzer::new(AudioHub::new().sample_rate()),
+            look_at_state: look_at::LookAtState::default(),
+            tray: None,
+            hotkeys: None,
+            surface: SurfaceUiState::default(),
+            detail: DetailUiState::default(),
+            async_results: Arc::new(Mutex::new(Vec::new())),
+            mic_active: false,
+            listen: MicListen::new(),
+            notify_claimed: false,
+            speaker_claimed: false,
+            gpu: None,
+            overlay: None,
+            chat: None,
+            detail_win: None,
+            caption: None,
+            spotlight: None,
+            chrome_focused: false,
+            last_cursor: None,
+            last_tick: Instant::now(),
+            last_approval_poll: Instant::now(),
+            approval_poll_inflight: false,
+        }
+    }
+
     fn chrome_window_exists(&self) -> bool {
         self.chat.is_some()
             || self.detail_win.is_some()
@@ -276,7 +332,10 @@ impl StageApp {
     #[expect(clippy::too_many_lines, reason = "outcome dispatch is a flat match")]
     fn apply_async_outcome(&mut self, outcome: AsyncOutcome) {
         match outcome {
-            AsyncOutcome::SendMessage(result) => {
+            AsyncOutcome::SendMessage { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
                 if let Err(err) = result {
                     self.surface.status = err;
                 } else {
@@ -285,12 +344,19 @@ impl StageApp {
                     self.request_history_refresh();
                 }
             }
-            AsyncOutcome::BargeIn(result) | AsyncOutcome::CancelTurn(result) => {
+            AsyncOutcome::BargeIn { session_id, result }
+            | AsyncOutcome::CancelTurn { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
                 if let Err(err) = result {
                     self.surface.status = err;
                 }
             }
-            AsyncOutcome::Approval(result) => {
+            AsyncOutcome::Approval { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
                 self.surface.pending_approval = None;
                 if let Err(err) = result {
                     self.surface.status = err;
@@ -305,29 +371,34 @@ impl StageApp {
                     .on_done(generation, self.mic_active, Instant::now());
                 self.spawn_listen(action);
             }
-            AsyncOutcome::RefreshHistory(result) => match result {
-                Ok(history) => {
-                    if let Some(message) = history
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|message| message.role == "status")
-                    {
-                        let mapped = map_turn_err(&message.text);
-                        if auth_failure(&mapped) || auth_failure(&message.text) {
-                            self.detail.core_status = i18n::fl("chat-auth-failed");
-                        }
-                        mapped.clone_into(&mut self.surface.status);
-                    }
-                    self.session.replace_history(history.clone());
-                    self.surface.history = history;
-                    self.surface.streaming_text.clear();
-                    if let Some(chat) = &self.chat {
-                        chat.request_redraw();
-                    }
+            AsyncOutcome::RefreshHistory { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
                 }
-                Err(err) => self.surface.status = err,
-            },
+                match result {
+                    Ok(history) => {
+                        if let Some(message) = history
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|message| message.role == "status")
+                        {
+                            let mapped = map_turn_err(&message.text);
+                            if auth_failure(&mapped) || auth_failure(&message.text) {
+                                self.detail.core_status = i18n::fl("chat-auth-failed");
+                            }
+                            mapped.clone_into(&mut self.surface.status);
+                        }
+                        self.session.replace_history(history.clone());
+                        self.surface.history = history;
+                        self.surface.streaming_text.clear();
+                        if let Some(chat) = &self.chat {
+                            chat.request_redraw();
+                        }
+                    }
+                    Err(err) => self.surface.status = err,
+                }
+            }
             AsyncOutcome::SaveLocalSettings(result) => {
                 self.detail.core_status = match result {
                     Ok(()) => i18n::fl("settings-saved"),
@@ -399,15 +470,29 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::ImportCharacter(result) | AsyncOutcome::ActivateCharacter(result) => {
+            AsyncOutcome::ImportCharacter { generation, result }
+            | AsyncOutcome::ActivateCharacter { generation, result } => {
+                if !self.detail.activation_is_current(generation) {
+                    return;
+                }
                 match result {
-                    Ok(character) => {
-                        self.detail.core_status =
-                            format!("{}: {}", i18n::fl("character-imported"), character.id);
-                        self.request_characters();
+                    Ok(activated) => {
+                        if let Some(target) = activated.target {
+                            self.commit_session_target(target);
+                        }
                         self.reload_avatar();
+                        self.detail.invalidate_character();
+                        self.detail.core_status = format!(
+                            "{}: {}",
+                            i18n::fl("character-imported"),
+                            activated.character.id
+                        );
+                        self.request_characters();
                     }
-                    Err(err) => self.detail.core_status = err,
+                    Err(err) => {
+                        self.surface.status = err.clone();
+                        self.detail.core_status = err;
+                    }
                 }
             }
             AsyncOutcome::ListCharacters(result) => match result {
@@ -623,6 +708,27 @@ impl StageApp {
                     Err(err) => err,
                 };
             }
+            AsyncOutcome::NewSession(result) => match result {
+                Ok(split) => {
+                    self.session.adopt_new_session(&split);
+                    self.feeds =
+                        spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
+                    self.detail.set_session_id(self.session.session_id());
+                    self.surface.history = self.session.history();
+                    self.surface.streaming_text.clear();
+                    self.surface.pending_approval = None;
+                    self.surface.pending_question = None;
+                    self.surface.status = i18n::fl("chat-new-session-ready");
+                    self.request_history_refresh();
+                    self.detail.new_session_inflight = false;
+                    self.surface.new_session_inflight = false;
+                }
+                Err(err) => {
+                    self.detail.new_session_inflight = false;
+                    self.surface.new_session_inflight = false;
+                    self.surface.status = err;
+                }
+            },
             AsyncOutcome::CompactSession(result) => {
                 self.detail.core_status = match result {
                     Ok(id) => format!("{}: {id}", i18n::fl("jobs-compacted")),
@@ -723,10 +829,30 @@ impl StageApp {
 
     fn request_history_refresh(&self) {
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::RefreshHistory(
-                session
+            AsyncOutcome::RefreshHistory {
+                session_id,
+                result: session
                     .refresh_history()
+                    .await
+                    .map_err(|err| err.to_string()),
+            }
+        });
+    }
+
+    fn start_new_session(&mut self) {
+        if self.detail.new_session_inflight {
+            return;
+        }
+        self.detail.new_session_inflight = true;
+        self.surface.new_session_inflight = true;
+        let client = Arc::clone(&self.client);
+        let session_id = self.session.session_id().to_owned();
+        self.spawn(async move {
+            AsyncOutcome::NewSession(
+                client
+                    .split_session(&session_id)
                     .await
                     .map_err(|err| err.to_string()),
             )
@@ -781,16 +907,18 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         let mode = self.surface.message_mode;
         self.surface.begin_send();
         self.spawn(async move {
-            AsyncOutcome::SendMessage(
-                session
+            AsyncOutcome::SendMessage {
+                session_id,
+                result: session
                     .send(&text, mode)
                     .await
                     .map(|_| ())
                     .map_err(|err| map_turn_err(&err.to_string())),
-            )
+            }
         });
     }
 
@@ -805,13 +933,15 @@ impl StageApp {
         };
         self.surface.chat_draft.clear();
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::SendMessage(
-                session
+            AsyncOutcome::SendMessage {
+                session_id,
+                result: session
                     .answer_job(&question.id, &text)
                     .await
                     .map_err(|err| err.to_string()),
-            )
+            }
         });
     }
 
@@ -821,14 +951,16 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::BargeIn(
-                session
+            AsyncOutcome::BargeIn {
+                session_id,
+                result: session
                     .barge_in()
                     .await
                     .map(|_| ())
                     .map_err(|e| map_turn_err(&e.to_string())),
-            )
+            }
         });
     }
 
@@ -838,14 +970,16 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::CancelTurn(
-                session
+            AsyncOutcome::CancelTurn {
+                session_id,
+                result: session
                     .cancel_turn()
                     .await
                     .map(|_| ())
                     .map_err(|e| map_turn_err(&e.to_string())),
-            )
+            }
         });
     }
 
@@ -854,15 +988,17 @@ impl StageApp {
             return;
         };
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         let decision = decision.to_owned();
         self.spawn(async move {
-            AsyncOutcome::Approval(
-                session
+            AsyncOutcome::Approval {
+                session_id,
+                result: session
                     .respond_approval(&pending.id, &decision)
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
-            )
+            }
         });
     }
 
@@ -976,6 +1112,7 @@ impl StageApp {
         for action in actions {
             match action {
                 SurfaceAction::SendChat => self.send_chat(),
+                SurfaceAction::NewSession => self.start_new_session(),
                 SurfaceAction::BargeIn => self.barge_in(),
                 SurfaceAction::CancelTurn => self.cancel_turn(),
                 SurfaceAction::ToggleMic => self.toggle_mic(),
@@ -1215,6 +1352,10 @@ impl StageApp {
         }
         self.feeds = spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
         self.surface.history = self.session.history();
+        self.surface.pending_approval = None;
+        self.surface.pending_question = None;
+        self.detail.next_activation_generation();
+        self.detail.invalidate_character();
         if self
             .overlay
             .as_ref()
@@ -1222,6 +1363,17 @@ impl StageApp {
         {
             self.surface.status = format!("{}: {label}", i18n::fl("overlay-showing"));
         }
+    }
+
+    fn commit_session_target(&mut self, target: crate::core::session::PreparedSessionTarget) {
+        let feeds = spawn_event_feeds(&self.rt_handle, &self.client, target.session_id());
+        self.session.commit_retarget(target);
+        self.feeds = feeds;
+        self.surface.history = self.session.history();
+        self.surface.streaming_text.clear();
+        self.surface.turn_active = false;
+        self.surface.pending_approval = None;
+        self.surface.pending_question = None;
     }
 
     fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
@@ -1836,9 +1988,13 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatWindowAction, chat_window_action, format_log_text, overlay_window_level,
-        provider_asset_load_status, window_focus_state, window_level,
+        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
+        overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
     };
+    use crate::core::session::PreparedSessionTarget;
+    use crate::surface::{PendingApproval, PendingQuestion};
+    use ene_api::HistoryResponse;
+    use std::sync::Arc;
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
@@ -1876,6 +2032,63 @@ mod tests {
             window_focus_state(&winit::event::WindowEvent::CloseRequested),
             None
         );
+    }
+
+    #[test]
+    fn stale_approval_result_keeps_new_session_approval() {
+        let mut app = StageApp::new_for_test();
+        app.session.set_for_test(
+            Arc::clone(&app.client),
+            "soul",
+            "new-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        );
+        app.surface.pending_approval = Some(PendingApproval {
+            id: "new-approval".to_owned(),
+            tool: "fs.read".to_owned(),
+            target: "/tmp/new".to_owned(),
+        });
+
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: "old-session".to_owned(),
+            result: Ok(()),
+        });
+
+        assert_eq!(
+            app.surface
+                .pending_approval
+                .as_ref()
+                .map(|item| item.id.as_str()),
+            Some("new-approval")
+        );
+    }
+
+    #[test]
+    fn retarget_clears_session_scoped_questions_and_approvals() {
+        let mut app = StageApp::new_for_test();
+        app.surface.pending_approval = Some(PendingApproval {
+            id: "old-approval".to_owned(),
+            tool: "fs.read".to_owned(),
+            target: "/tmp/old".to_owned(),
+        });
+        app.surface.pending_question = Some(PendingQuestion {
+            id: "old-question".to_owned(),
+            prompt: "old".to_owned(),
+        });
+        app.commit_session_target(PreparedSessionTarget::new_for_test(
+            "new-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        ));
+
+        assert_eq!(app.session.session_id(), "new-session");
+        assert!(app.surface.pending_approval.is_none());
+        assert!(app.surface.pending_question.is_none());
     }
 
     #[test]

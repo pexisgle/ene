@@ -6,16 +6,18 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, CharacterView, JobView, MemoryPatch, MemoryView, OccupantView, PluginConfigField,
-    PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView, ScheduleView, SoulView,
+    ApiClient, ApiError, CharacterView, JobView, MemoryPatch, MemoryView, OccupantView,
+    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
+    ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::runtime::Handle;
 
+use crate::core::session::prepare_soul_target;
 use crate::i18n;
 use crate::settings::DesktopSettings;
-use crate::tasks::AsyncOutcome;
+use crate::tasks::{ActivatedCharacter, AsyncOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailTab {
@@ -246,6 +248,7 @@ pub struct DetailUiState {
     pub session_id: String,
     pub(crate) new_session_inflight: bool,
     pub open_spotlight: bool,
+    activation_generation: u64,
     settings_state: SettingsLoadState,
     loaded: DetailLoaded,
 }
@@ -312,6 +315,23 @@ impl DetailUiState {
     pub fn select_tab(&mut self, tab: DetailTab) {
         self.tab = tab;
         self.search.clear();
+    }
+
+    pub fn next_activation_generation(&mut self) -> u64 {
+        self.activation_generation = self.activation_generation.wrapping_add(1);
+        self.activation_generation
+    }
+
+    #[must_use]
+    pub fn activation_is_current(&self, generation: u64) -> bool {
+        self.activation_generation == generation
+    }
+
+    pub fn invalidate_character(&mut self) {
+        self.loaded.character = false;
+        self.soul = None;
+        self.occupants.clear();
+        self.body_ref_draft.clear();
     }
 }
 
@@ -935,6 +955,22 @@ fn show_home(
     });
 }
 
+async fn prepare_activation(
+    client: &ApiClient,
+    result: Result<CharacterView, ApiError>,
+) -> Result<ActivatedCharacter, String> {
+    let character = result.map_err(|err| err.to_string())?;
+    let target = match character.soul_id.as_deref() {
+        Some(soul_id) => Some(
+            prepare_soul_target(client, soul_id)
+                .await
+                .map_err(|err| err.to_string())?,
+        ),
+        None => None,
+    };
+    Ok(ActivatedCharacter { character, target })
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "companion tab owns import/export/activate"
@@ -1003,14 +1039,14 @@ fn show_companion(
             .pick_file()
     {
         let path = path.display().to_string();
+        let generation = state.next_activation_generation();
         let client = Arc::clone(client);
         spawn_async(rt, async_results, async move {
-            AsyncOutcome::ImportCharacter(
-                client
-                    .import_character(&path)
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
+            let imported = client.import_character(&path).await;
+            AsyncOutcome::ImportCharacter {
+                generation,
+                result: prepare_activation(&client, imported).await,
+            }
         });
     }
     if ui.button(i18n::fl("character-export")).clicked() {
@@ -1104,6 +1140,7 @@ fn show_companion(
         ui.label(i18n::fl("character-body-uuid-hint"));
     });
     ui.separator();
+    let mut activate_id = None;
     egui::ScrollArea::vertical()
         .max_height(240.0)
         .show(ui, |ui| {
@@ -1114,20 +1151,22 @@ fn show_companion(
                         character.id, character.version, character.kind, character.path
                     ));
                     if ui.button(i18n::fl("character-activate")).clicked() {
-                        let id = character.id.clone();
-                        let client = Arc::clone(client);
-                        spawn_async(rt, async_results, async move {
-                            AsyncOutcome::ActivateCharacter(
-                                client
-                                    .activate_character(&id)
-                                    .await
-                                    .map_err(|e| e.to_string()),
-                            )
-                        });
+                        activate_id = Some(character.id.clone());
                     }
                 });
             }
         });
+    if let Some(id) = activate_id {
+        let generation = state.next_activation_generation();
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            let activated = client.activate_character(&id).await;
+            AsyncOutcome::ActivateCharacter {
+                generation,
+                result: prepare_activation(&client, activated).await,
+            }
+        });
+    }
 }
 
 fn show_conversation(
@@ -2922,6 +2961,16 @@ mod tests {
             visible[0].package_id.as_deref(),
             Some("char.alicia-b@1.0.0")
         );
+    }
+
+    #[test]
+    fn activation_generation_rejects_stale_results() {
+        let mut state = DetailUiState::default();
+        let first = state.next_activation_generation();
+        let second = state.next_activation_generation();
+
+        assert!(!state.activation_is_current(first));
+        assert!(state.activation_is_current(second));
     }
 
     #[test]
