@@ -27,9 +27,7 @@ use crate::i18n;
 use crate::overlay::{OverlayError, OverlayWindow};
 use crate::settings::{DesktopSettings, load_desktop_settings, save_desktop_settings};
 use crate::shell::tray::TrayError;
-use crate::shell::{
-    HotkeyManager, ShellAction, ShellError, TrayAction, TrayManager, show_notification,
-};
+use crate::shell::{HotkeyManager, ShellCommand, ShellError, TrayManager, show_notification};
 use crate::surface::{self, SpotlightAction, SurfaceAction, SurfaceUiState};
 use crate::tasks::AsyncOutcome;
 
@@ -1105,6 +1103,21 @@ impl StageApp {
         }
     }
 
+    fn dispatch_shell_command(&mut self, event_loop: &ActiveEventLoop, command: ShellCommand) {
+        match command {
+            ShellCommand::OpenSpotlight => {
+                if self.settings.spotlight_enabled {
+                    self.surface.spotlight_open = true;
+                    self.ensure_spotlight(event_loop);
+                }
+            }
+            ShellCommand::OpenDetail(tab) => self.open_detail(event_loop, tab),
+            ShellCommand::OpenChat => self.open_chat(event_loop),
+            ShellCommand::ToggleMic => self.toggle_mic(),
+            ShellCommand::Quit => self.surface.quit = true,
+        }
+    }
+
     fn poll_shell(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "linux")]
         {
@@ -1112,38 +1125,23 @@ impl StageApp {
                 let _ = gtk::main_iteration_do(false);
             }
         }
-        let tray_actions: Vec<TrayAction> = self
+        let tray_commands: Vec<ShellCommand> = self
             .tray
             .as_ref()
             .map(|tray| {
-                let mut actions = Vec::new();
-                while let Some(action) = tray.try_recv() {
-                    actions.push(action);
+                let mut commands = Vec::new();
+                while let Some(command) = tray.try_recv() {
+                    commands.push(command);
                 }
-                actions
+                commands
             })
             .unwrap_or_default();
-        for action in tray_actions {
-            match action {
-                TrayAction::OpenDetail => self.open_detail(event_loop, DetailTab::Home),
-                TrayAction::OpenChatFocus => self.open_chat(event_loop),
-                TrayAction::ToggleMic => self.toggle_mic(),
-                TrayAction::Quit => self.surface.quit = true,
-            }
+        for command in tray_commands {
+            self.dispatch_shell_command(event_loop, command);
         }
-        if let Some(hotkeys) = self.hotkeys.as_mut()
-            && let Some(action) = hotkeys.poll()
-        {
-            match action {
-                ShellAction::OpenSpotlight => {
-                    if self.settings.spotlight_enabled {
-                        self.surface.spotlight_open = true;
-                        self.ensure_spotlight(event_loop);
-                    }
-                }
-                ShellAction::ToggleMic => self.toggle_mic(),
-                ShellAction::Quit => self.surface.quit = true,
-            }
+        let hotkey_command = self.hotkeys.as_mut().and_then(HotkeyManager::poll);
+        if let Some(command) = hotkey_command {
+            self.dispatch_shell_command(event_loop, command);
         }
         if self.surface.quit {
             event_loop.exit();
@@ -1699,9 +1697,9 @@ impl StageApp {
             self.surface.spotlight_open = false;
             self.spotlight = None;
             match action {
-                SpotlightAction::OpenDetail(tab) => self.open_detail(event_loop, tab),
-                SpotlightAction::ToggleMic => self.toggle_mic(),
-                SpotlightAction::Quit => self.surface.quit = true,
+                SpotlightAction::Command(command) => {
+                    self.dispatch_shell_command(event_loop, command);
+                }
                 SpotlightAction::Close => {}
             }
         }
