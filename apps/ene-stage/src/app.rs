@@ -620,25 +620,16 @@ impl StageApp {
             }
             AsyncOutcome::NewSession(result) => match result {
                 Ok(split) => {
-                    match self.runtime.block_on(self.session.apply_new_session(split)) {
-                        Ok(()) => {
-                            self.feeds = spawn_event_feeds(
-                                &self.rt_handle,
-                                &self.client,
-                                self.session.session_id(),
-                            );
-                            self.detail.set_session_id(self.session.session_id());
-                            self.surface.history = self.session.history();
-                            self.surface.streaming_text.clear();
-                            self.surface.pending_approval = None;
-                            self.surface.pending_question = None;
-                            self.surface.status = i18n::fl("chat-new-session-ready");
-                        }
-                        Err(err) => {
-                            self.detail.set_session_id(self.session.session_id());
-                            self.surface.status = err.to_string();
-                        }
-                    }
+                    self.session.adopt_new_session(&split);
+                    self.feeds =
+                        spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
+                    self.detail.set_session_id(self.session.session_id());
+                    self.surface.history = self.session.history();
+                    self.surface.streaming_text.clear();
+                    self.surface.pending_approval = None;
+                    self.surface.pending_question = None;
+                    self.surface.status = i18n::fl("chat-new-session-ready");
+                    self.request_history_refresh();
                     self.detail.new_session_inflight = false;
                     self.surface.new_session_inflight = false;
                 }
@@ -1881,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_new_session_apply_rolls_back_visible_state() {
+    fn failed_new_session_split_keeps_visible_state() {
         let mut app = StageApp::new_for_test();
         app.surface.new_session_inflight = true;
         app.detail.new_session_inflight = true;
@@ -1900,19 +1891,19 @@ mod tests {
             text: "old".to_owned(),
         });
 
-        app.apply_async_outcome(AsyncOutcome::NewSession(Err(
-            "history unavailable".to_owned()
-        )));
+        app.apply_async_outcome(AsyncOutcome::NewSession(
+            Err("split unavailable".to_owned()),
+        ));
 
         assert!(!app.detail.new_session_inflight);
         assert!(!app.surface.new_session_inflight);
         assert_eq!(app.surface.history.messages.len(), 1);
         assert_eq!(app.surface.history.messages[0].text, "old");
-        assert_eq!(app.surface.status, "history unavailable");
+        assert_eq!(app.surface.status, "split unavailable");
     }
 
     #[test]
-    fn successful_new_session_apply_updates_shared_state() {
+    fn successful_new_session_adopts_before_refresh_failure() {
         let mut app = StageApp::new_for_test();
         app.surface.new_session_inflight = true;
         app.detail.new_session_inflight = true;
@@ -1920,11 +1911,11 @@ mod tests {
             previous: session_view("old-session"),
             session: session_view("new-session"),
         };
-        let history = HistoryResponse {
+        let old_history = HistoryResponse {
             messages: vec![MessageResponse {
                 seq: 1,
                 role: "assistant".to_owned(),
-                text: "new".to_owned(),
+                text: "old".to_owned(),
             }],
             depth: "surface".to_owned(),
         };
@@ -1932,24 +1923,26 @@ mod tests {
             Arc::clone(&app.client),
             "soul",
             "old-session",
-            history.clone(),
+            old_history.clone(),
         );
-        app.surface.history = history;
+        app.surface.history = old_history;
 
         app.apply_async_outcome(AsyncOutcome::NewSession(Ok(split)));
 
         assert!(!app.detail.new_session_inflight);
         assert!(!app.surface.new_session_inflight);
-        assert_eq!(app.session.session_id(), "old-session");
-        assert_eq!(app.detail.session_id, "old-session");
-        assert_eq!(
-            app.surface
-                .history
-                .messages
-                .first()
-                .map(|m| m.text.as_str()),
-            Some("new")
-        );
+        assert_eq!(app.session.session_id(), "new-session");
+        assert_eq!(app.detail.session_id, "new-session");
+        assert!(app.surface.history.messages.is_empty());
+
+        app.apply_async_outcome(AsyncOutcome::RefreshHistory(Err(
+            "history unavailable".to_owned()
+        )));
+
+        assert_eq!(app.session.session_id(), "new-session");
+        assert_eq!(app.detail.session_id, "new-session");
+        assert!(app.surface.history.messages.is_empty());
+        assert_eq!(app.surface.status, "history unavailable");
     }
 
     #[test]

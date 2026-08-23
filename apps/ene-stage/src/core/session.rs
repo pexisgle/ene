@@ -47,12 +47,13 @@ impl StageSession {
         &self.client
     }
 
-    pub async fn apply_new_session(&mut self, split: SplitSessionResponse) -> Result<(), ApiError> {
-        let history = self.client.history(&split.session.id, "surface").await?;
+    pub fn adopt_new_session(&mut self, split: &SplitSessionResponse) {
         self.session_id.clone_from(&split.session.id);
         *self.turn_id.lock() = None;
-        *self.history.lock() = history;
-        Ok(())
+        *self.history.lock() = HistoryResponse {
+            messages: Vec::new(),
+            depth: "surface".to_owned(),
+        };
     }
 
     #[cfg(test)]
@@ -624,8 +625,8 @@ mod tests {
         assert_eq!(normalized.depth, "surface");
     }
 
-    #[tokio::test]
-    async fn apply_new_session_updates_state_only_after_history_loads() {
+    #[test]
+    fn adopt_new_session_switches_before_history_refresh() {
         let client = Arc::new(ApiClient::new("http://127.0.0.1:9", "token", "stage"));
         let old_history = HistoryResponse {
             messages: vec![MessageResponse {
@@ -642,45 +643,16 @@ mod tests {
             old_history.clone(),
         );
 
-        let failure = session
-            .apply_new_session(SplitSessionResponse {
-                previous: session_view("old-session"),
-                session: session_view("new-session"),
-            })
-            .await
-            .expect_err("history request fails without a server");
-        assert_eq!(failure.error_class(), "transport");
-        assert_eq!(session.session_id(), "old-session");
-        let unchanged = session.history();
-        assert_eq!(unchanged.messages.len(), old_history.messages.len());
-        assert_eq!(unchanged.messages[0].text, "old");
-        assert_eq!(unchanged.depth, old_history.depth);
-
-        let addr = crate::core::session_test_server::spawn(&tokio::runtime::Handle::current());
-        let client_url = format!("http://{addr}");
-        let mut session = StageSession::new_for_test(
-            Arc::new(ApiClient::new(client_url, "token", "stage")),
-            "soul",
-            "old-session",
-            HistoryResponse {
-                messages: Vec::new(),
-                depth: "surface".to_owned(),
-            },
-        );
         let split = SplitSessionResponse {
             previous: session_view("old-session"),
             session: session_view("new-session"),
         };
-        session
-            .apply_new_session(split)
-            .await
-            .expect("history loads");
+        session.adopt_new_session(&split);
         assert_eq!(session.session_id(), "new-session");
         assert_eq!(session.turn_id(), None);
-        assert_eq!(
-            session.history().messages.first().map(|m| m.text.as_str()),
-            Some("new")
-        );
+        assert!(session.history().messages.is_empty());
+        assert_eq!(session.history().depth, "surface");
+        assert_eq!(old_history.messages[0].text, "old");
     }
 
     #[test]
