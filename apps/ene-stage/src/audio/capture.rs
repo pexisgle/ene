@@ -24,11 +24,26 @@ pub struct MicCapture {
 impl MicCapture {
     /// Open the default input device. `energy_threshold` overrides the barge-in RMS gate.
     pub fn new(energy_threshold: Option<f32>, tts_playing: Arc<AtomicBool>) -> Self {
+        Self::new_with_device(energy_threshold, tts_playing, None)
+    }
+
+    /// Open the configured input device, falling back to the system default when it is absent.
+    pub fn new_with_device(
+        energy_threshold: Option<f32>,
+        tts_playing: Arc<AtomicBool>,
+        device_name: Option<&str>,
+    ) -> Self {
         let threshold = energy_threshold.unwrap_or(DEFAULT_BARGE_IN_THRESHOLD);
         let (tx, rx) = unbounded();
         let barge_in = Arc::new(Mutex::new(false));
 
-        match open_stream(tx, Arc::clone(&barge_in), threshold, tts_playing) {
+        match open_stream(
+            tx,
+            Arc::clone(&barge_in),
+            threshold,
+            tts_playing,
+            device_name,
+        ) {
             Ok(stream) => Self {
                 _stream: Some(stream),
                 rx,
@@ -61,10 +76,12 @@ fn open_stream(
     barge_in: Arc<Mutex<bool>>,
     threshold: f32,
     tts_playing: Arc<AtomicBool>,
+    device_name: Option<&str>,
 ) -> Result<Stream, AudioError> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
+    let device = device_name
+        .and_then(|name| select_device_by_name(&host, name))
+        .or_else(|| host.default_input_device())
         .ok_or_else(|| AudioError::Device("no input device".to_owned()))?;
     let config = device
         .default_input_config()
@@ -111,6 +128,31 @@ fn open_stream(
         .play()
         .map_err(|err| AudioError::Device(err.to_string()))?;
     Ok(stream)
+}
+
+fn select_device_by_name(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
+    host.input_devices().ok()?.find(|device| {
+        device
+            .description()
+            .is_ok_and(|description| description.name() == name)
+    })
+}
+
+/// Snapshot the names of currently available input devices for the settings UI.
+pub fn list_input_device_names() -> Vec<String> {
+    let host = cpal::default_host();
+    let mut names: Vec<String> = host
+        .input_devices()
+        .map(|devices| {
+            devices
+                .filter_map(|device| device.description().ok())
+                .map(|description| description.name().to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn build_stream<T>(

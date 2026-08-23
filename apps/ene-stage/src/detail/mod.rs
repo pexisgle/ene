@@ -277,7 +277,18 @@ pub struct DetailUiState {
     pub embedding_plugin: String,
     pub proactive_plugin: String,
     pub tts_plugin: String,
+    pub tts_model: String,
+    pub tts_base_url: String,
+    pub tts_voice: String,
+    pub tts_api_key: String,
+    pub ai_tts_key_set: bool,
+    pub tts_api_key_clear_pending: bool,
     pub stt_plugin: String,
+    pub stt_model: String,
+    pub stt_base_url: String,
+    pub stt_api_key: String,
+    pub ai_stt_key_set: bool,
+    pub stt_api_key_clear_pending: bool,
     pub plugins_profile: String,
     pub approval_mode: String,
     pub observation_title_mode: String,
@@ -300,6 +311,8 @@ pub struct DetailUiState {
     pub provider_install_jobs: HashMap<String, String>,
     pub provider_models: Vec<String>,
     pub provider_model_filter: String,
+    pub mic_devices: Vec<String>,
+    pub mic_devices_loaded: bool,
     pub mcp_json: String,
     pub mcp_servers: Vec<ene_api::McpServerView>,
     pub plugin_config_id: String,
@@ -429,7 +442,22 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
     state.embedding_plugin = nested_string(effective, &["ai", "tasks", "embedding", "plugin"]);
     state.proactive_plugin = nested_string(effective, &["ai", "tasks", "proactive", "plugin"]);
     state.tts_plugin = nested_string(effective, &["ai", "tasks", "tts", "plugin"]);
+    state.tts_model = nested_string(effective, &["ai", "tasks", "tts", "model"]);
+    state.tts_base_url = nested_string(effective, &["ai", "tasks", "tts", "base_url"]);
+    state.tts_voice = nested_string(effective, &["ai", "tasks", "tts", "voice"]);
+    state.ai_tts_key_set = effective
+        .get("ai_tts_key_set")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    state.tts_api_key_clear_pending = false;
     state.stt_plugin = nested_string(effective, &["ai", "tasks", "stt", "plugin"]);
+    state.stt_model = nested_string(effective, &["ai", "tasks", "stt", "model"]);
+    state.stt_base_url = nested_string(effective, &["ai", "tasks", "stt", "base_url"]);
+    state.ai_stt_key_set = effective
+        .get("ai_stt_key_set")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    state.stt_api_key_clear_pending = false;
     state.plugins_profile = nested_string(effective, &["plugins", "profile"]);
     state.approval_mode = normalize_approval_mode(&nested_string(effective, &["approval", "mode"]));
     state.observation_title_mode = normalize_title_mode(&nested_string(
@@ -631,6 +659,32 @@ pub fn chat_provider_choices(providers: &Value) -> Vec<ProviderChoice> {
                 return None;
             }
             Some(ProviderChoice {
+                id: id.to_owned(),
+                label: provider_display_name(id),
+            })
+        })
+        .collect();
+    rows.sort_by(|left, right| left.label.cmp(&right.label));
+    rows
+}
+
+#[must_use]
+pub fn provider_choices_for_seam(providers: &Value, seam: &str) -> Vec<ProviderChoice> {
+    let mut rows: Vec<ProviderChoice> = providers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let id = row.get("id").and_then(Value::as_str)?;
+            let installed = row
+                .get("installed")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let has_seam = row
+                .get("seams")
+                .and_then(Value::as_array)
+                .is_some_and(|seams| seams.iter().any(|item| item.as_str() == Some(seam)));
+            (installed && !id.is_empty() && has_seam).then(|| ProviderChoice {
                 id: id.to_owned(),
                 label: provider_display_name(id),
             })
@@ -1472,13 +1526,124 @@ fn show_voice(
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     ensure_settings(state, client, rt, async_results);
+    if !state.loaded.plugins {
+        state.loaded.plugins = true;
+        let client_list = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::ListPlugins(
+                client_list
+                    .list_plugins()
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+    if !state.mic_devices_loaded {
+        state.mic_devices = crate::audio::AudioHub::list_input_device_names();
+        state.mic_devices_loaded = true;
+    }
     ui.heading(i18n::fl("detail-tab-voice"));
-    task_row(ui, i18n::fl("settings-tts-plugin"), &mut state.tts_plugin);
-    task_row(ui, i18n::fl("settings-stt-plugin"), &mut state.stt_plugin);
+    ui.label(i18n::fl("settings-voice-guide"));
+    let providers = state.providers.clone();
+    show_voice_task(
+        ui,
+        &providers,
+        VoiceTaskForm {
+            id: "tts",
+            label: i18n::fl("settings-tts-plugin"),
+            seam: "seam.tts",
+            plugin: &mut state.tts_plugin,
+            model: &mut state.tts_model,
+            base_url: &mut state.tts_base_url,
+            voice: Some(&mut state.tts_voice),
+            api_key: &mut state.tts_api_key,
+            key_set: &mut state.ai_tts_key_set,
+            clear_pending: &mut state.tts_api_key_clear_pending,
+        },
+    );
+    show_voice_provider_config_button(
+        ui,
+        state,
+        client,
+        rt,
+        async_results,
+        "tts",
+        &state.tts_plugin.clone(),
+    );
+    ui.separator();
+    show_voice_task(
+        ui,
+        &providers,
+        VoiceTaskForm {
+            id: "stt",
+            label: i18n::fl("settings-stt-plugin"),
+            seam: "seam.stt",
+            plugin: &mut state.stt_plugin,
+            model: &mut state.stt_model,
+            base_url: &mut state.stt_base_url,
+            voice: None,
+            api_key: &mut state.stt_api_key,
+            key_set: &mut state.ai_stt_key_set,
+            clear_pending: &mut state.stt_api_key_clear_pending,
+        },
+    );
+    show_voice_provider_config_button(
+        ui,
+        state,
+        client,
+        rt,
+        async_results,
+        "stt",
+        &state.stt_plugin.clone(),
+    );
+    show_plugin_config(ui, state, client, rt, async_results);
     ui.horizontal(|ui| {
         ui.label(i18n::fl("settings-mic-device"));
-        ui.text_edit_singleline(&mut local_settings.mic_device);
+        let stored_missing = !local_settings.mic_device.is_empty()
+            && !state
+                .mic_devices
+                .iter()
+                .any(|name| name == &local_settings.mic_device);
+        let selected = if local_settings.mic_device.is_empty() {
+            i18n::fl("settings-mic-system-default")
+        } else if stored_missing {
+            format!(
+                "{}: {}",
+                i18n::fl("settings-mic-missing"),
+                local_settings.mic_device
+            )
+        } else {
+            local_settings.mic_device.clone()
+        };
+        egui::ComboBox::from_id_salt("stage-mic-device")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut local_settings.mic_device,
+                    String::new(),
+                    i18n::fl("settings-mic-system-default"),
+                );
+                for name in &state.mic_devices {
+                    ui.selectable_value(&mut local_settings.mic_device, name.clone(), name);
+                }
+            });
+        if ui.button(i18n::fl("settings-mic-refresh")).clicked() {
+            state.mic_devices_loaded = false;
+        }
     });
+    if state.mic_devices.is_empty() {
+        ui.colored_label(egui::Color32::YELLOW, i18n::fl("settings-mic-unavailable"));
+    } else if !local_settings.mic_device.is_empty()
+        && !state
+            .mic_devices
+            .iter()
+            .any(|name| name == &local_settings.mic_device)
+    {
+        ui.colored_label(egui::Color32::YELLOW, i18n::fl("settings-mic-missing-hint"));
+    } else {
+        ui.label(i18n::fl("settings-mic-ready"));
+    }
     ui.checkbox(
         &mut local_settings.caption_enabled,
         i18n::fl("settings-captions"),
@@ -1515,12 +1680,145 @@ fn show_voice(
         &mut local_settings.caption_pinned,
         i18n::fl("settings-caption-pin"),
     );
-    if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
-        apply_ai_patch(state, client, rt, async_results, false);
+    if ui.button(i18n::fl("settings-voice-apply")).clicked() {
+        apply_voice_patch(state, client, rt, async_results);
     }
     if ui.button(i18n::fl("settings-save-local")).clicked() {
         state.save_local_pending = true;
     }
+}
+
+struct VoiceTaskForm<'a> {
+    id: &'static str,
+    label: String,
+    seam: &'static str,
+    plugin: &'a mut String,
+    model: &'a mut String,
+    base_url: &'a mut String,
+    voice: Option<&'a mut String>,
+    api_key: &'a mut String,
+    key_set: &'a mut bool,
+    clear_pending: &'a mut bool,
+}
+
+fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm<'_>) {
+    ui.heading(form.label);
+    let choices = provider_choices_for_seam(providers, form.seam);
+    let selected = if form.plugin.is_empty() || form.plugin == "echo" {
+        i18n::fl("settings-voice-provider-none")
+    } else {
+        provider_display_name(form.plugin)
+    };
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-voice-provider"));
+        egui::ComboBox::from_id_salt(("voice-provider", form.id))
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for choice in &choices {
+                    if ui
+                        .selectable_label(*form.plugin == choice.id, &choice.label)
+                        .clicked()
+                    {
+                        form.plugin.clone_from(&choice.id);
+                        form.model.clear();
+                        form.base_url.clear();
+                        if let Some(voice) = form.voice.as_deref_mut() {
+                            voice.clear();
+                        }
+                        form.api_key.clear();
+                        *form.key_set = false;
+                        *form.clear_pending = true;
+                    }
+                }
+            });
+    });
+    if choices.is_empty() {
+        ui.label(i18n::fl("settings-voice-provider-empty"));
+    }
+    if plugin_is_local(form.plugin, providers) {
+        ui.label(i18n::fl("settings-voice-local-hint"));
+    } else if !form.plugin.is_empty() && form.plugin != "echo" {
+        task_row(ui, i18n::fl("settings-voice-base-url"), form.base_url);
+    }
+    task_row(ui, i18n::fl("settings-voice-model"), form.model);
+    if let Some(voice) = form.voice {
+        task_row(ui, i18n::fl("settings-voice-voice"), voice);
+    }
+    if plugin_needs_key(form.plugin, providers) {
+        ui.horizontal(|ui| {
+            ui.label(i18n::fl("settings-voice-api-key"));
+            let changed = ui
+                .add(egui::TextEdit::singleline(form.api_key).password(true))
+                .changed();
+            if changed && !form.api_key.is_empty() {
+                *form.clear_pending = false;
+            }
+        });
+        if *form.key_set {
+            ui.label(i18n::fl("settings-voice-key-set"));
+            if ui.button(i18n::fl("settings-voice-clear-key")).clicked() {
+                *form.key_set = false;
+                *form.clear_pending = true;
+            }
+        } else {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                i18n::fl("settings-voice-key-required"),
+            );
+        }
+    }
+    let ready = !form.plugin.is_empty()
+        && form.plugin != "echo"
+        && (!plugin_needs_key(form.plugin, providers) || *form.key_set || !form.api_key.is_empty());
+    ui.label(if ready {
+        i18n::fl("settings-voice-ready")
+    } else {
+        i18n::fl("settings-voice-not-configured")
+    });
+}
+
+fn show_voice_provider_config_button(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+    task: &str,
+    plugin: &str,
+) {
+    if plugin.is_empty() || plugin == "echo" {
+        return;
+    }
+    let row_id = format!("ai.tasks.{task}");
+    let Some(row_id) = state
+        .plugins
+        .iter()
+        .find(|row| row.row_id == row_id && row.plugin == plugin)
+        .map(|row| row.row_id.clone())
+    else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-voice-provider-config"));
+        if ui
+            .button(i18n::fl("settings-voice-provider-configure"))
+            .clicked()
+        {
+            let id = row_id.clone();
+            let request_id = begin_plugin_config_load(state, &id);
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::LoadPluginConfig {
+                    request_id,
+                    id: id.clone(),
+                    result: client
+                        .plugin_config(&id)
+                        .await
+                        .map_err(|err| err.to_string()),
+                }
+            });
+        }
+    });
 }
 
 fn show_memory(
@@ -2920,6 +3218,71 @@ fn apply_ai_patch(
     });
 }
 
+fn voice_settings_patch(state: &mut DetailUiState) -> Value {
+    let mut tts = serde_json::json!({
+        "plugin": state.tts_plugin,
+        "model": state.tts_model,
+        "base_url": state.tts_base_url,
+        "voice": state.tts_voice,
+    });
+    if !state.tts_api_key.is_empty()
+        && let Some(object) = tts.as_object_mut()
+    {
+        object.insert(
+            "api_key".to_owned(),
+            Value::String(std::mem::take(&mut state.tts_api_key)),
+        );
+    } else if state.tts_api_key_clear_pending
+        && let Some(object) = tts.as_object_mut()
+    {
+        object.insert("api_key".to_owned(), Value::Null);
+    }
+    let mut stt = serde_json::json!({
+        "plugin": state.stt_plugin,
+        "model": state.stt_model,
+        "base_url": state.stt_base_url,
+    });
+    if !state.stt_api_key.is_empty()
+        && let Some(object) = stt.as_object_mut()
+    {
+        object.insert(
+            "api_key".to_owned(),
+            Value::String(std::mem::take(&mut state.stt_api_key)),
+        );
+    } else if state.stt_api_key_clear_pending
+        && let Some(object) = stt.as_object_mut()
+    {
+        object.insert("api_key".to_owned(), Value::Null);
+    }
+    serde_json::json!({
+        "ai": {
+            "tasks": {
+                "tts": tts,
+                "stt": stt,
+            }
+        }
+    })
+}
+
+fn apply_voice_patch(
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    let patch = voice_settings_patch(state);
+    let client = Arc::clone(client);
+    spawn_async(rt, async_results, async move {
+        AsyncOutcome::ApplyCoreSettings(
+            client
+                .patch_settings(&patch)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        )
+    });
+}
+
 fn apply_observation_patch(
     state: &mut DetailUiState,
     client: &Arc<ApiClient>,
@@ -3088,11 +3451,15 @@ mod tests {
                 "ai": {
                     "tasks": {
                         "chat": { "plugin": "openai", "model": "gpt", "base_url": "https://example.invalid/v1" },
+                        "tts": { "plugin": "provider.elevenlabs", "model": "eleven", "base_url": "https://tts.example.invalid", "voice": "alloy" },
+                        "stt": { "plugin": "provider.whisper", "model": "small", "base_url": "https://stt.example.invalid" },
                         "classifier": { "plugin": "echo" }
                     }
                 },
                 "plugins": { "profile": "desktop" },
-                "ai_chat_key_set": true
+                "ai_chat_key_set": true,
+                "ai_tts_key_set": true,
+                "ai_stt_key_set": false
             }
         }"#;
         let mut state = DetailUiState::default();
@@ -3101,13 +3468,22 @@ mod tests {
         assert_eq!(state.chat_model, "gpt");
         assert_eq!(state.chat_base_url, "https://example.invalid/v1");
         assert!(state.ai_chat_key_set);
+        assert_eq!(state.tts_plugin, "provider.elevenlabs");
+        assert_eq!(state.tts_model, "eleven");
+        assert_eq!(state.tts_base_url, "https://tts.example.invalid");
+        assert_eq!(state.tts_voice, "alloy");
+        assert!(state.ai_tts_key_set);
+        assert_eq!(state.stt_plugin, "provider.whisper");
+        assert_eq!(state.stt_model, "small");
+        assert_eq!(state.stt_base_url, "https://stt.example.invalid");
+        assert!(!state.ai_stt_key_set);
         assert_eq!(state.plugins_profile, "desktop");
         assert_eq!(state.approval_mode, "policy");
         assert_eq!(state.observation_title_mode, "app_only");
         assert!(!state.observation_ocr_hint);
         assert!(!state.unconfigured.iter().any(|task| task == "chat"));
         assert!(state.unconfigured.iter().any(|task| task == "classifier"));
-        assert!(state.unconfigured.iter().any(|task| task == "stt"));
+        assert!(!state.unconfigured.iter().any(|task| task == "stt"));
         assert!(blocking_unconfigured(&state.unconfigured).is_empty());
         assert!(optional_unconfigured(&state.unconfigured).contains(&"classifier"));
     }
@@ -3142,6 +3518,86 @@ mod tests {
         assert_eq!(choices[0].label, i18n::fl("provider-openai-compat"));
         assert_ne!(choices[0].label, "provider.openai_compat");
         assert_eq!(provider_display_name("provider.custom_llm"), "custom llm");
+    }
+
+    #[test]
+    fn voice_provider_choices_filter_by_seam_and_install_state() {
+        let providers = serde_json::json!([
+            {
+                "id": "provider.elevenlabs",
+                "seams": ["seam.tts"],
+                "needs_key": true,
+                "installed": true
+            },
+            {
+                "id": "provider.whisper",
+                "seams": ["seam.stt"],
+                "needs_key": false,
+                "installed": true
+            },
+            {
+                "id": "provider.missing",
+                "seams": ["seam.tts", "seam.stt"],
+                "installed": false
+            },
+            {
+                "id": "provider.llm",
+                "seams": ["seam.llm"],
+                "installed": true
+            }
+        ]);
+        assert_eq!(
+            provider_choices_for_seam(&providers, "seam.tts")[0].id,
+            "provider.elevenlabs"
+        );
+        assert_eq!(
+            provider_choices_for_seam(&providers, "seam.stt")[0].id,
+            "provider.whisper"
+        );
+        assert!(provider_choices_for_seam(&providers, "seam.embed").is_empty());
+    }
+
+    #[test]
+    fn voice_patch_is_scoped_and_does_not_send_empty_secrets() {
+        let mut state = DetailUiState {
+            chat_plugin: "provider.chat".to_owned(),
+            tts_plugin: "provider.elevenlabs".to_owned(),
+            tts_model: "eleven".to_owned(),
+            tts_base_url: "https://tts.example.invalid".to_owned(),
+            tts_voice: "alloy".to_owned(),
+            stt_plugin: "provider.whisper".to_owned(),
+            stt_model: "small".to_owned(),
+            stt_api_key: "stt-secret".to_owned(),
+            ..DetailUiState::default()
+        };
+        let patch = voice_settings_patch(&mut state);
+        assert!(patch.pointer("/ai/tasks/chat").is_none());
+        assert_eq!(
+            patch.pointer("/ai/tasks/tts/plugin"),
+            Some(&serde_json::json!("provider.elevenlabs"))
+        );
+        assert!(patch.pointer("/ai/tasks/tts/api_key").is_none());
+        assert_eq!(
+            patch.pointer("/ai/tasks/stt/api_key"),
+            Some(&serde_json::json!("stt-secret"))
+        );
+        assert!(state.stt_api_key.is_empty());
+    }
+
+    #[test]
+    fn switching_voice_provider_emits_an_explicit_secret_clear() {
+        let mut state = DetailUiState {
+            tts_plugin: "provider.new".to_owned(),
+            tts_api_key_clear_pending: true,
+            stt_plugin: "provider.stt".to_owned(),
+            ..DetailUiState::default()
+        };
+        let patch = voice_settings_patch(&mut state);
+        assert_eq!(
+            patch.pointer("/ai/tasks/tts/api_key"),
+            Some(&serde_json::Value::Null)
+        );
+        assert!(patch.pointer("/ai/tasks/stt/api_key").is_none());
     }
 
     #[test]

@@ -77,6 +77,8 @@ pub fn run() -> Result<(), AppError> {
         }
     };
 
+    let audio = AudioHub::new_with_mic_device(&settings.mic_device);
+    let sample_rate = audio.sample_rate();
     let mut app = StageApp {
         settings: settings.clone(),
         local_settings: settings,
@@ -86,8 +88,8 @@ pub fn run() -> Result<(), AppError> {
         runtime,
         rt_handle,
         feeds,
-        audio: AudioHub::new(),
-        viseme: VisemeAnalyzer::new(AudioHub::new().sample_rate()),
+        audio,
+        viseme: VisemeAnalyzer::new(sample_rate),
         look_at_state: look_at::LookAtState::default(),
         tray,
         hotkeys,
@@ -1042,6 +1044,9 @@ impl StageApp {
 
     fn save_local_settings(&mut self) {
         let settings = self.local_settings.clone();
+        if settings.mic_device != self.settings.mic_device {
+            self.audio.set_mic_device(&settings.mic_device);
+        }
         self.settings = settings.clone();
         i18n::select_language(&settings.language);
         self.sync_chrome_titles();

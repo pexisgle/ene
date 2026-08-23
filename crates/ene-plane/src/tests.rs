@@ -281,6 +281,11 @@ fn vault_open_or_create_keyfile_roundtrip() {
         .unwrap();
     let inject = vault.put("demo", b"secret-bytes").unwrap();
     assert_eq!(vault.inject(&inject).unwrap(), b"secret-bytes");
+    vault.remove("demo").unwrap();
+    assert!(matches!(
+        vault.inject(&inject),
+        Err(crate::VaultError::Unknown(_))
+    ));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
