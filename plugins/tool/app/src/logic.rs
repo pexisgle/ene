@@ -30,12 +30,6 @@ pub(crate) fn specs_for(caps: &PlatformCaps) -> Vec<ToolSpecWire> {
             Vec::new(),
         ),
         spec(
-            "app.screenshot",
-            "Capture a display as PNG (portal on Wayland, CLI fallback, GDI on Windows)",
-            json!({"type":"object","additionalProperties":false}),
-            Vec::new(),
-        ),
-        spec(
             "app.list_monitors",
             "List monitors with pixel size and scale",
             json!({"type":"object","additionalProperties":false}),
@@ -66,6 +60,17 @@ pub(crate) fn specs_for(caps: &PlatformCaps) -> Vec<ToolSpecWire> {
             vec!["input".to_owned()],
         ),
     ];
+    if caps.screenshot.available {
+        out.insert(
+            1,
+            spec(
+                "app.screenshot",
+                "Capture a display as PNG (portal on Wayland, CLI fallback, GDI on Windows)",
+                json!({"type":"object","additionalProperties":false}),
+                Vec::new(),
+            ),
+        );
+    }
     if caps.advertise_input() {
         out.extend([
             spec(
@@ -332,5 +337,19 @@ mod tests {
         assert!(names.contains(&"app.capabilities".to_owned()));
         assert!(names.contains(&"app.list_monitors".to_owned()));
         assert!(!names.iter().any(|n| n == "app.click"));
+    }
+
+    #[test]
+    fn unavailable_screenshot_is_not_advertised() {
+        let env = HashMap::from([
+            ("XDG_SESSION_TYPE".to_owned(), "x11".to_owned()),
+            ("DISPLAY".to_owned(), ":1".to_owned()),
+            ("PATH".to_owned(), "/definitely/missing".to_owned()),
+        ]);
+        let caps = PlatformCaps::from_env(&env);
+        let names: Vec<_> = specs_for(&caps).into_iter().map(|s| s.name).collect();
+
+        assert!(!names.iter().any(|name| name == "app.screenshot"));
+        assert!(names.iter().any(|name| name == "app.capabilities"));
     }
 }
