@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Generate branch date
-        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/update-flake-lock@834c491b2ece4de0bbd00d85214bb5e83b4da5c6 # v28
         with:
           pr-title: "Update flake.lock"
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Generate branch date
-        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> "$GITHUB_ENV"
       - name: Run cargo update
         run: nix develop --command cargo update
       - name: Create PR
@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Generate branch date
-        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> "$GITHUB_ENV"
       - name: Update Rust toolchain sources
         run: |
           scripts/update-rust-toolchain.sh
