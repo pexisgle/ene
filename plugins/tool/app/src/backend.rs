@@ -25,21 +25,49 @@ pub(crate) const SWAY: Backend = Backend {
     install_hint: "install Sway's swaymsg client",
 };
 
+pub(crate) const WIN32: Backend = Backend {
+    name: "win32",
+    executable: "win32",
+    install_hint: "the Win32 window API is unavailable",
+};
+
+pub(crate) const UNSUPPORTED: Backend = Backend {
+    name: "none",
+    executable: "",
+    install_hint: "window listing is unsupported",
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BackendAvailability {
     Available(Backend),
     Missing(Backend),
+    Unsupported(Backend, &'static str),
 }
 
 impl BackendAvailability {
     pub(crate) const fn backend(&self) -> &Backend {
         match self {
-            Self::Available(backend) | Self::Missing(backend) => backend,
+            Self::Available(backend) | Self::Missing(backend) | Self::Unsupported(backend, _) => {
+                backend
+            }
         }
     }
 
     pub(crate) const fn available(&self) -> bool {
         matches!(self, Self::Available(_))
+    }
+
+    pub(crate) fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Available(_) => None,
+            Self::Missing(backend) => Some(match backend.name {
+                "wmctrl" => "wmctrl is not installed",
+                "hyprctl" => "hyprctl is not installed",
+                "swaymsg" => "swaymsg is not installed",
+                _ => "window-list backend is missing",
+            }),
+            Self::Unsupported(_, reason) => Some(*reason),
+        }
     }
 }
 
