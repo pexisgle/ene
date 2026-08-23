@@ -62,12 +62,13 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1786849542,
-        "narHash": "sha256-MS8cOa/ii1+QA8R3JWVzqEIoXimu9n50GwQDiBVTFOM=",
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "rev": "b211eadeba8b180da9453ec3413a8a3535c85b3f",
-        "type": "github"
+        "lastModified": 1787454509,
+        "narHash": "sha256-r4LDUF+zmJnkftvCVkCrUhSJazsf6EVJF+V2l4/MYbI=",
+        "ref": "refs/heads/master",
+        "rev": "f60c1b57ff805a46b5175c76fc981fb4f81efbcc",
+        "revCount": 2281,
+        "type": "git",
+        "url": "https://github.com/oxalica/rust-overlay"
       },
       "original": {
         "owner": "oxalica",

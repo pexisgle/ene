@@ -45,17 +45,16 @@
             withGitCliff ? false,
             withVulkanTools ? false,
           }:
+          let
+            rustToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
+              targets = lib.optionals withCrossWindows [ "x86_64-pc-windows-gnu" ];
+            };
+          in
           pkgs.mkShell (
             {
               buildInputs =
                 [
-                  (pkgs.rust-bin.stable.latest.default.override {
-                    extensions = [
-                      "rust-src"
-                      "clippy"
-                    ];
-                    targets = lib.optionals withCrossWindows [ "x86_64-pc-windows-gnu" ];
-                  })
+                  rustToolchain
                   pkgs.pkg-config
                   pkgs.rustPlatform.bindgenHook
                   pkgs.openssl
@@ -97,7 +96,7 @@
                   ++ lib.optionals withChromium [ pkgs.chromium ]
                 );
 
-              RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
+              RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
               LD_LIBRARY_PATH = lib.makeLibraryPath (
                 [
                   pkgs.mesa
