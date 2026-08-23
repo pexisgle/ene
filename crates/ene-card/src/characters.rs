@@ -1026,4 +1026,53 @@ mod tests {
                 .expect("export parses as CCv3");
         assert_eq!(exported.data.description, "Base description");
     }
+
+    #[test]
+    fn export_preserves_lorebook_vendor_fields() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let card_dir = tmp.path().join("Ada");
+        write_card(
+            &card_dir,
+            r#"{
+                "spec":"chara_card_v3",
+                "spec_version":"3.0",
+                "data":{
+                    "name":"Ada",
+                    "character_book":{
+                        "scan_depth":4,
+                        "vendor_book":{"mode":"selective"},
+                        "entries":[{
+                            "id":"lore-1",
+                            "keys":["cat"],
+                            "content":"A cat.",
+                            "enabled":true,
+                            "insertion_order":0,
+                            "use_regex":false,
+                            "vendor_entry":{"probability":0.5}
+                        }]
+                    }
+                }
+            }"#,
+        );
+        let out = tmp.path().join("ada.json");
+
+        export_character_card(
+            &card_dir.join("character.json").to_string_lossy(),
+            "en",
+            &out,
+        )
+        .expect("exports");
+
+        let exported: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out).expect("read export"))
+                .expect("export is JSON");
+        assert_eq!(
+            exported.pointer("/data/character_book/vendor_book"),
+            Some(&serde_json::json!({"mode": "selective"}))
+        );
+        assert_eq!(
+            exported.pointer("/data/character_book/entries/0/vendor_entry"),
+            Some(&serde_json::json!({"probability": 0.5}))
+        );
+    }
 }
