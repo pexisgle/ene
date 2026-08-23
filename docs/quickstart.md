@@ -59,7 +59,7 @@ On native Windows, run the same command from PowerShell after building both
 binary is stored outside `target/debug`.
 
 Stage starts `ene-core` as a child when needed, shows the character overlay
-and chat on the surface depth, and opens a separate detail window (F1 / tray)
+and chat on the surface depth, and opens a separate detail window (tray)
 for settings, memory, character, jobs, and internals.
 
 Chat has no default model — pick one in the detail **Conversation** tab before

@@ -129,8 +129,8 @@ impl ChromeWindow {
     }
 
     #[must_use]
-    pub fn wants_keyboard_input(&self) -> bool {
-        self.egui_ctx.egui_wants_keyboard_input()
+    pub fn owns_input(&self) -> bool {
+        self.egui_ctx.egui_wants_pointer_input() || self.egui_ctx.egui_wants_keyboard_input()
     }
 
     pub fn place_caption(&self, position: &str) {
