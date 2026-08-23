@@ -429,7 +429,10 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/v1/sessions/{id}/compact", post(routes::compact))
         .route("/api/v1/turns/{id}/cancel", post(routes::cancel_turn))
-        .route("/api/v1/jobs", get(routes::list_jobs))
+        .route(
+            "/api/v1/jobs",
+            get(routes::list_jobs).post(routes::create_job),
+        )
         .route("/api/v1/jobs/{id}", get(routes::get_job))
         .route("/api/v1/jobs/{id}/cancel", post(routes::cancel_job))
         .route("/api/v1/jobs/{id}/answer", post(routes::answer_job))

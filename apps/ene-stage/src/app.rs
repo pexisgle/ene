@@ -568,6 +568,19 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
+            AsyncOutcome::CreateJob(result) => {
+                self.detail.new_job_inflight = false;
+                match result {
+                    Ok(job) => {
+                        self.detail.jobs.retain(|item| item.id != job.id);
+                        self.detail.jobs.insert(0, job);
+                        self.detail.new_job_title.clear();
+                        self.detail.new_job_goal.clear();
+                        self.detail.core_status = i18n::fl("jobs-created");
+                    }
+                    Err(err) => self.detail.core_status = err,
+                }
+            }
             AsyncOutcome::CancelJob { result, .. }
             | AsyncOutcome::ToggleSchedule { result, .. } => {
                 if result.is_ok() {
