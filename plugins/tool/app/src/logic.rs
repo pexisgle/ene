@@ -178,11 +178,19 @@ fn run_window_list(
 ) -> Result<Value, String> {
     match run_backend(availability.backend()) {
         Ok(text) => Ok(parse_backend_windows(availability.backend(), &text)),
-        Err(err) => Err(fail(
-            "dependency_missing",
-            availability.backend().name,
-            format!("{} ({})", availability.backend().install_hint, err),
-        )),
+        Err(err) => {
+            let (code, message) = match availability {
+                BackendAvailability::Missing(backend) => (
+                    "dependency_missing",
+                    format!("{} ({err})", backend.install_hint),
+                ),
+                BackendAvailability::Unsupported(_, reason) => {
+                    ("unsupported", (*reason).to_owned())
+                }
+                BackendAvailability::Available(_) => ("backend_failed", err),
+            };
+            Err(fail(code, availability.backend().name, message))
+        }
     }
 }
 
@@ -392,13 +400,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_window_backend_failure_is_a_dependency_error() {
+    fn runtime_window_backend_failure_is_not_a_dependency_error() {
         let error = run_window_list(&BackendAvailability::Available(HYPRLAND), |_| {
             Err("command exited with status 1".to_owned())
         })
         .unwrap_err();
         let error: serde_json::Value = serde_json::from_str(&error).unwrap();
-        assert_eq!(error["code"], "dependency_missing");
+        assert_eq!(error["code"], "backend_failed");
         assert_eq!(error["backend"], "hyprctl");
         assert!(error["message"].as_str().unwrap().contains("status 1"));
     }
