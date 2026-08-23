@@ -701,6 +701,7 @@ impl StageApp {
         }
         let session = self.session.clone_handle();
         let mode = self.surface.message_mode;
+        self.surface.begin_send();
         self.spawn(async move {
             AsyncOutcome::SendMessage(
                 session
