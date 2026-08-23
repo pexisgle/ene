@@ -1,0 +1,46 @@
+name: tmp-merge-1011
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/tmp-merge-1011.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: codex/ask-user-protocol
+          fetch-depth: 0
+      - name: Merge current parent or publish conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch origin codex/approval-before-dispatch
+          if git merge --no-edit origin/codex/approval-before-dispatch; then
+            git push origin HEAD:codex/ask-user-protocol
+            exit 0
+          fi
+          report=/tmp/merge-1011-conflicts.txt
+          {
+            echo 'conflicted files:'
+            git diff --name-only --diff-filter=U
+            echo
+            for f in $(git diff --name-only --diff-filter=U); do
+              echo "===== $f ====="
+              grep -n -B25 -A55 -E '^(<<<<<<<|=======|>>>>>>>)' "$f" || true
+              echo
+            done
+          } > "$report"
+          git merge --abort
+          mkdir -p tmp
+          cp "$report" tmp/merge-1011-conflicts.txt
+          git add tmp/merge-1011-conflicts.txt
+          git commit -m 'chore: report #1011 merge conflicts'
+          git push origin HEAD:codex/ask-user-protocol
