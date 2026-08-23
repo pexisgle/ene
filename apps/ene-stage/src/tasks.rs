@@ -1,15 +1,34 @@
 use ene_api::{JobView, MemoryView, PluginView, ProviderAssetView, ScheduleView};
 
+use crate::core::session::PreparedSessionTarget;
+
+pub struct ActivatedCharacter {
+    pub(crate) character: ene_api::CharacterView,
+    pub(crate) target: Option<PreparedSessionTarget>,
+}
+
 pub enum AsyncOutcome {
-    SendMessage(Result<(), String>),
-    BargeIn(Result<(), String>),
-    CancelTurn(Result<(), String>),
+    SendMessage {
+        session_id: String,
+        result: Result<(), String>,
+    },
+    BargeIn {
+        session_id: String,
+        result: Result<(), String>,
+    },
+    CancelTurn {
+        session_id: String,
+        result: Result<(), String>,
+    },
     Approval(Result<(), String>),
     Listen {
         generation: u64,
         result: Result<(), String>,
     },
-    RefreshHistory(Result<ene_api::HistoryResponse, String>),
+    RefreshHistory {
+        session_id: String,
+        result: Result<ene_api::HistoryResponse, String>,
+    },
     SaveLocalSettings(Result<(), String>),
     LoadCoreSettings(Result<String, String>),
     ApplyCoreSettings(Result<(), String>),
@@ -29,8 +48,14 @@ pub enum AsyncOutcome {
     },
     LoadSoul(Result<ene_api::SoulView, String>),
     PatchBody(Result<ene_api::SoulView, String>),
-    ImportCharacter(Result<ene_api::CharacterView, String>),
-    ActivateCharacter(Result<ene_api::CharacterView, String>),
+    ImportCharacter {
+        generation: u64,
+        result: Result<ActivatedCharacter, String>,
+    },
+    ActivateCharacter {
+        generation: u64,
+        result: Result<ActivatedCharacter, String>,
+    },
     ListCharacters(Result<Vec<ene_api::CharacterView>, String>),
     ListOccupants(Result<Vec<ene_api::OccupantView>, String>),
     ListJobs(Result<(Vec<JobView>, Vec<ScheduleView>), String>),

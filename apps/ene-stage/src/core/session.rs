@@ -27,6 +27,23 @@ pub struct StageSession {
     motions_dir: Option<PathBuf>,
 }
 
+/// Session state fetched before changing the stage's active dialogue lane.
+pub(crate) struct PreparedSessionTarget {
+    soul_id: String,
+    session_id: String,
+    history: HistoryResponse,
+    occupants: Vec<OccupantView>,
+    avatar_path: Option<PathBuf>,
+    motions_dir: Option<PathBuf>,
+}
+
+impl PreparedSessionTarget {
+    #[must_use]
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
 /// Cheap clone used by async tasks spawned from the UI thread.
 #[derive(Clone)]
 pub struct SessionHandle {
@@ -159,17 +176,19 @@ impl StageSession {
     }
 
     pub async fn retarget_soul(&mut self, soul_id: &str) -> Result<(), ApiError> {
-        let session_id = resolve_session_id(&self.client, soul_id).await?;
-        let history = normalize_history(self.client.history(&session_id, "surface").await?);
-        soul_id.clone_into(&mut self.soul_id);
-        self.session_id = session_id;
-        *self.turn_id.lock() = None;
-        *self.history.lock() = history;
-        if let Some(occupant) = self.occupants.iter().find(|item| item.soul_id == soul_id) {
-            self.avatar_path = occupant.avatar_path.as_ref().map(PathBuf::from);
-            self.motions_dir = motions_dir_for_occupant(occupant);
-        }
+        let target = prepare_soul_target(&self.client, soul_id).await?;
+        self.commit_retarget(target);
         Ok(())
+    }
+
+    pub(crate) fn commit_retarget(&mut self, target: PreparedSessionTarget) {
+        target.soul_id.clone_into(&mut self.soul_id);
+        self.session_id = target.session_id;
+        self.turn_id = Arc::new(Mutex::new(None));
+        self.history = Arc::new(Mutex::new(target.history));
+        self.occupants = target.occupants;
+        self.avatar_path = target.avatar_path;
+        self.motions_dir = target.motions_dir;
     }
 
     #[must_use]
@@ -575,6 +594,26 @@ async fn resolve_session_id(client: &ApiClient, soul_id: &str) -> Result<String,
         })
         .await?;
     Ok(created.id)
+}
+
+pub(crate) async fn prepare_soul_target(
+    client: &ApiClient,
+    soul_id: &str,
+) -> Result<PreparedSessionTarget, ApiError> {
+    let session_id = resolve_session_id(client, soul_id).await?;
+    let history = normalize_history(client.history(&session_id, "surface").await?);
+    let occupants = client.stage().await?.occupants;
+    let occupant = occupants.iter().find(|item| item.soul_id == soul_id);
+    let avatar_path = occupant.and_then(|item| item.avatar_path.as_ref().map(PathBuf::from));
+    let motions_dir = occupant.and_then(motions_dir_for_occupant);
+    Ok(PreparedSessionTarget {
+        soul_id: soul_id.to_owned(),
+        session_id,
+        history,
+        occupants,
+        avatar_path,
+        motions_dir,
+    })
 }
 
 /// Keep the chat transcript in chronological order regardless of API ordering.

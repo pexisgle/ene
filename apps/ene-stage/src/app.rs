@@ -276,7 +276,10 @@ impl StageApp {
     #[expect(clippy::too_many_lines, reason = "outcome dispatch is a flat match")]
     fn apply_async_outcome(&mut self, outcome: AsyncOutcome) {
         match outcome {
-            AsyncOutcome::SendMessage(result) => {
+            AsyncOutcome::SendMessage { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
                 if let Err(err) = result {
                     self.surface.status = err;
                 } else {
@@ -285,7 +288,11 @@ impl StageApp {
                     self.request_history_refresh();
                 }
             }
-            AsyncOutcome::BargeIn(result) | AsyncOutcome::CancelTurn(result) => {
+            AsyncOutcome::BargeIn { session_id, result }
+            | AsyncOutcome::CancelTurn { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
                 if let Err(err) = result {
                     self.surface.status = err;
                 }
@@ -305,29 +312,34 @@ impl StageApp {
                     .on_done(generation, self.mic_active, Instant::now());
                 self.spawn_listen(action);
             }
-            AsyncOutcome::RefreshHistory(result) => match result {
-                Ok(history) => {
-                    if let Some(message) = history
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|message| message.role == "status")
-                    {
-                        let mapped = map_turn_err(&message.text);
-                        if auth_failure(&mapped) || auth_failure(&message.text) {
-                            self.detail.core_status = i18n::fl("chat-auth-failed");
-                        }
-                        mapped.clone_into(&mut self.surface.status);
-                    }
-                    self.session.replace_history(history.clone());
-                    self.surface.history = history;
-                    self.surface.streaming_text.clear();
-                    if let Some(chat) = &self.chat {
-                        chat.request_redraw();
-                    }
+            AsyncOutcome::RefreshHistory { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
                 }
-                Err(err) => self.surface.status = err,
-            },
+                match result {
+                    Ok(history) => {
+                        if let Some(message) = history
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|message| message.role == "status")
+                        {
+                            let mapped = map_turn_err(&message.text);
+                            if auth_failure(&mapped) || auth_failure(&message.text) {
+                                self.detail.core_status = i18n::fl("chat-auth-failed");
+                            }
+                            mapped.clone_into(&mut self.surface.status);
+                        }
+                        self.session.replace_history(history.clone());
+                        self.surface.history = history;
+                        self.surface.streaming_text.clear();
+                        if let Some(chat) = &self.chat {
+                            chat.request_redraw();
+                        }
+                    }
+                    Err(err) => self.surface.status = err,
+                }
+            }
             AsyncOutcome::SaveLocalSettings(result) => {
                 self.detail.core_status = match result {
                     Ok(()) => i18n::fl("settings-saved"),
@@ -399,15 +411,30 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::ImportCharacter(result) | AsyncOutcome::ActivateCharacter(result) => {
+            AsyncOutcome::ImportCharacter { generation, result }
+            | AsyncOutcome::ActivateCharacter { generation, result } => {
+                if !self.detail.activation_is_current(generation) {
+                    return;
+                }
                 match result {
-                    Ok(character) => {
-                        self.detail.core_status =
-                            format!("{}: {}", i18n::fl("character-imported"), character.id);
+                    Ok(activated) => {
+                        if let Some(target) = activated.target {
+                            self.commit_session_target(target);
+                        } else {
+                            self.reload_avatar();
+                        }
+                        self.detail.invalidate_character();
+                        self.detail.core_status = format!(
+                            "{}: {}",
+                            i18n::fl("character-imported"),
+                            activated.character.id
+                        );
                         self.request_characters();
-                        self.reload_avatar();
                     }
-                    Err(err) => self.detail.core_status = err,
+                    Err(err) => {
+                        self.surface.status = err.clone();
+                        self.detail.core_status = err;
+                    }
                 }
             }
             AsyncOutcome::ListCharacters(result) => match result {
@@ -723,13 +750,15 @@ impl StageApp {
 
     fn request_history_refresh(&self) {
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::RefreshHistory(
-                session
+            AsyncOutcome::RefreshHistory {
+                session_id,
+                result: session
                     .refresh_history()
                     .await
                     .map_err(|err| err.to_string()),
-            )
+            }
         });
     }
 
@@ -781,16 +810,18 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         let mode = self.surface.message_mode;
         self.surface.begin_send();
         self.spawn(async move {
-            AsyncOutcome::SendMessage(
-                session
+            AsyncOutcome::SendMessage {
+                session_id,
+                result: session
                     .send(&text, mode)
                     .await
                     .map(|_| ())
                     .map_err(|err| map_turn_err(&err.to_string())),
-            )
+            }
         });
     }
 
@@ -805,13 +836,15 @@ impl StageApp {
         };
         self.surface.chat_draft.clear();
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::SendMessage(
-                session
+            AsyncOutcome::SendMessage {
+                session_id,
+                result: session
                     .answer_job(&question.id, &text)
                     .await
                     .map_err(|err| err.to_string()),
-            )
+            }
         });
     }
 
@@ -821,14 +854,16 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::BargeIn(
-                session
+            AsyncOutcome::BargeIn {
+                session_id,
+                result: session
                     .barge_in()
                     .await
                     .map(|_| ())
                     .map_err(|e| map_turn_err(&e.to_string())),
-            )
+            }
         });
     }
 
@@ -838,14 +873,16 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         self.spawn(async move {
-            AsyncOutcome::CancelTurn(
-                session
+            AsyncOutcome::CancelTurn {
+                session_id,
+                result: session
                     .cancel_turn()
                     .await
                     .map(|_| ())
                     .map_err(|e| map_turn_err(&e.to_string())),
-            )
+            }
         });
     }
 
@@ -1215,6 +1252,9 @@ impl StageApp {
         }
         self.feeds = spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
         self.surface.history = self.session.history();
+        self.surface.pending_approval = None;
+        self.detail.next_activation_generation();
+        self.detail.invalidate_character();
         if self
             .overlay
             .as_ref()
@@ -1222,6 +1262,16 @@ impl StageApp {
         {
             self.surface.status = format!("{}: {label}", i18n::fl("overlay-showing"));
         }
+    }
+
+    fn commit_session_target(&mut self, target: crate::core::session::PreparedSessionTarget) {
+        let feeds = spawn_event_feeds(&self.rt_handle, &self.client, target.session_id());
+        self.session.commit_retarget(target);
+        self.feeds = feeds;
+        self.surface.history = self.session.history();
+        self.surface.streaming_text.clear();
+        self.surface.turn_active = false;
+        self.surface.pending_approval = None;
     }
 
     fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
