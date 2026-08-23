@@ -2,12 +2,11 @@
 
 use crate::detail::DetailTab;
 use crate::i18n;
+use crate::shell::ShellCommand;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpotlightAction {
-    OpenDetail(DetailTab),
-    ToggleMic,
-    Quit,
+    Command(ShellCommand),
     Close,
 }
 
@@ -16,7 +15,7 @@ impl SpotlightAction {
     #[must_use]
     pub const fn dismisses_palette(self) -> bool {
         match self {
-            Self::OpenDetail(_) | Self::ToggleMic | Self::Quit | Self::Close => true,
+            Self::Command(_) | Self::Close => true,
         }
     }
 }
@@ -32,14 +31,14 @@ pub fn show(ctx: &egui::Context) -> Option<SpotlightAction> {
             ui.separator();
             for tab in DetailTab::ALL {
                 if ui.button(tab.label()).clicked() {
-                    action = Some(SpotlightAction::OpenDetail(tab));
+                    action = Some(SpotlightAction::Command(ShellCommand::OpenDetail(tab)));
                 }
             }
             if ui.button(i18n::fl("spotlight-toggle-mic")).clicked() {
-                action = Some(SpotlightAction::ToggleMic);
+                action = Some(SpotlightAction::Command(ShellCommand::ToggleMic));
             }
             if ui.button(i18n::fl("spotlight-quit")).clicked() {
-                action = Some(SpotlightAction::Quit);
+                action = Some(SpotlightAction::Command(ShellCommand::Quit));
             }
             if ui.button(i18n::fl("spotlight-close")).clicked() {
                 action = Some(SpotlightAction::Close);
@@ -55,10 +54,10 @@ mod tests {
     #[test]
     fn every_quick_command_dismisses_the_palette() {
         for tab in DetailTab::ALL {
-            assert!(SpotlightAction::OpenDetail(tab).dismisses_palette());
+            assert!(SpotlightAction::Command(ShellCommand::OpenDetail(tab)).dismisses_palette());
         }
-        assert!(SpotlightAction::ToggleMic.dismisses_palette());
-        assert!(SpotlightAction::Quit.dismisses_palette());
+        assert!(SpotlightAction::Command(ShellCommand::ToggleMic).dismisses_palette());
+        assert!(SpotlightAction::Command(ShellCommand::Quit).dismisses_palette());
         assert!(SpotlightAction::Close.dismisses_palette());
     }
 }
