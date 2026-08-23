@@ -1,5 +1,6 @@
 use ene_api::{
-    JobView, MemoryCandidateView, MemoryView, PluginView, ProviderAssetView, ScheduleView,
+    JobView, MemoryCandidateView, MemoryJournalView, MemoryView, PluginView, ProviderAssetView,
+    ScheduleView,
 };
 
 use crate::core::session::PreparedSessionTarget;
@@ -43,6 +44,7 @@ pub enum AsyncOutcome {
     ApplyCoreSettings(Result<(), String>),
     ListMemories(Result<Vec<MemoryView>, String>),
     ListPendingMemories(Result<Vec<MemoryCandidateView>, String>),
+    ListMemoryJournal(Result<Vec<MemoryJournalView>, String>),
     ResolveMemory {
         id: String,
         result: Result<(), String>,
