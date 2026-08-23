@@ -2,6 +2,11 @@
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::Path;
+
+const SCREENSHOT_CLI_BACKENDS: &[&str] =
+    &["grim", "import", "gnome-screenshot", "spectacle", "scrot"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionKind {
@@ -59,7 +64,7 @@ impl PlatformCaps {
         Self {
             session,
             desktop,
-            screenshot: screenshot_cap(session),
+            screenshot: screenshot_cap(session, env),
             clipboard: ActionCap {
                 available: true,
                 backend: if cfg!(windows) {
@@ -137,18 +142,14 @@ fn desktop_kind(env: &HashMap<String, String>) -> DesktopKind {
     }
 }
 
-fn screenshot_cap(session: SessionKind) -> ActionCap {
+fn screenshot_cap(session: SessionKind, env: &HashMap<String, String>) -> ActionCap {
     match session {
-        SessionKind::Wayland => ActionCap {
+        SessionKind::Wayland if portal_session_available(env) => ActionCap {
             available: true,
             backend: "portal",
-            reason: Some("XDG Desktop Portal first; grim/import only as explicit CLI fallback"),
+            reason: None,
         },
-        SessionKind::X11 => ActionCap {
-            available: true,
-            backend: "cli",
-            reason: Some("X11 capture via import/grim; portal used when a session bus exists"),
-        },
+        SessionKind::Wayland | SessionKind::X11 => screenshot_cli_cap(env),
         SessionKind::Windows => ActionCap {
             available: true,
             backend: "gdi",
@@ -159,6 +160,52 @@ fn screenshot_cap(session: SessionKind) -> ActionCap {
             backend: "none",
             reason: Some("no display session (WAYLAND_DISPLAY / DISPLAY / Windows)"),
         },
+    }
+}
+
+fn screenshot_cli_cap(env: &HashMap<String, String>) -> ActionCap {
+    match screenshot_cli_backend(env.get("PATH").map(String::as_str)) {
+        Some(backend) => ActionCap {
+            available: true,
+            backend,
+            reason: None,
+        },
+        None => ActionCap {
+            available: false,
+            backend: "none",
+            reason: Some(
+                "no screenshot backend (grim, ImageMagick import, gnome-screenshot, spectacle, or scrot)",
+            ),
+        },
+    }
+}
+
+fn portal_session_available(env: &HashMap<String, String>) -> bool {
+    env.get("DBUS_SESSION_BUS_ADDRESS")
+        .is_some_and(|value| !value.is_empty())
+}
+
+pub(crate) fn screenshot_cli_backend(path: Option<&str>) -> Option<&'static str> {
+    let path = OsStr::new(path?);
+    SCREENSHOT_CLI_BACKENDS.iter().copied().find(|backend| {
+        std::env::split_paths(path).any(|directory| executable_file(&directory.join(backend)))
+    })
+}
+
+fn executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        path.metadata()
+            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -336,7 +383,7 @@ pub(crate) fn fail(
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopKind, PlatformCaps, SessionKind};
+    use super::{DesktopKind, PlatformCaps, SessionKind, screenshot_cli_backend};
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -353,6 +400,7 @@ mod tests {
             ("XDG_SESSION_TYPE", "wayland"),
             ("WAYLAND_DISPLAY", "wayland-0"),
             ("XDG_CURRENT_DESKTOP", "GNOME"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/session-bus"),
         ]));
         assert_eq!(caps.session, SessionKind::Wayland);
         assert_eq!(caps.desktop, DesktopKind::Gnome);
@@ -376,5 +424,33 @@ mod tests {
         assert_eq!(caps.session, SessionKind::X11);
         assert!(caps.advertise_input());
         assert_eq!(caps.input.backend, "xdotool");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn screenshot_cli_probe_requires_an_executable_backend() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = dir.path().join("grim");
+        std::fs::write(&backend, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        assert_eq!(screenshot_cli_backend(Some(path)), Some("grim"));
+        assert_eq!(screenshot_cli_backend(Some("/definitely/missing")), None);
+    }
+
+    #[test]
+    fn x11_without_a_screenshot_backend_is_unavailable() {
+        let caps = PlatformCaps::from_env(&env(&[
+            ("XDG_SESSION_TYPE", "x11"),
+            ("DISPLAY", ":1"),
+            ("PATH", "/definitely/missing"),
+        ]));
+
+        assert!(!caps.screenshot.available);
+        assert_eq!(caps.screenshot.backend, "none");
+        assert!(caps.screenshot.reason.is_some());
     }
 }
