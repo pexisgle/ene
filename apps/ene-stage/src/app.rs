@@ -623,6 +623,27 @@ impl StageApp {
                     Err(err) => err,
                 };
             }
+            AsyncOutcome::NewSession(result) => match result {
+                Ok(split) => {
+                    self.session.adopt_new_session(&split);
+                    self.feeds =
+                        spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
+                    self.detail.set_session_id(self.session.session_id());
+                    self.surface.history = self.session.history();
+                    self.surface.streaming_text.clear();
+                    self.surface.pending_approval = None;
+                    self.surface.pending_question = None;
+                    self.surface.status = i18n::fl("chat-new-session-ready");
+                    self.request_history_refresh();
+                    self.detail.new_session_inflight = false;
+                    self.surface.new_session_inflight = false;
+                }
+                Err(err) => {
+                    self.detail.new_session_inflight = false;
+                    self.surface.new_session_inflight = false;
+                    self.surface.status = err;
+                }
+            },
             AsyncOutcome::CompactSession(result) => {
                 self.detail.core_status = match result {
                     Ok(id) => format!("{}: {id}", i18n::fl("jobs-compacted")),
@@ -727,6 +748,24 @@ impl StageApp {
             AsyncOutcome::RefreshHistory(
                 session
                     .refresh_history()
+                    .await
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+
+    fn start_new_session(&mut self) {
+        if self.detail.new_session_inflight {
+            return;
+        }
+        self.detail.new_session_inflight = true;
+        self.surface.new_session_inflight = true;
+        let client = Arc::clone(&self.client);
+        let session_id = self.session.session_id().to_owned();
+        self.spawn(async move {
+            AsyncOutcome::NewSession(
+                client
+                    .split_session(&session_id)
                     .await
                     .map_err(|err| err.to_string()),
             )
@@ -976,6 +1015,7 @@ impl StageApp {
         for action in actions {
             match action {
                 SurfaceAction::SendChat => self.send_chat(),
+                SurfaceAction::NewSession => self.start_new_session(),
                 SurfaceAction::BargeIn => self.barge_in(),
                 SurfaceAction::CancelTurn => self.cancel_turn(),
                 SurfaceAction::ToggleMic => self.toggle_mic(),
