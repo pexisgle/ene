@@ -66,6 +66,7 @@ pub enum AsyncOutcome {
     ListCharacters(Result<Vec<ene_api::CharacterView>, String>),
     ListOccupants(Result<Vec<ene_api::OccupantView>, String>),
     ListJobs(Result<(Vec<JobView>, Vec<ScheduleView>), String>),
+    CreateJob(Result<JobView, String>),
     CancelJob {
         id: String,
         result: Result<(), String>,

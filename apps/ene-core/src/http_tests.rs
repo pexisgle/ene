@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use chrono::TimeZone;
 use ene_api::{
-    AnswerJobRequest, AnswerQuestionRequest, ApiClient, ClaimResourceRequest,
+    AnswerJobRequest, AnswerQuestionRequest, ApiClient, ClaimResourceRequest, CreateJobRequest,
     CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse, MessageMode,
     MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
 };
@@ -15,7 +15,7 @@ use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
     ToolCallingModel, spans_leak_content,
 };
-use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
+use ene_plane::{ApprovalMode, AuthzRequest, PolicyDecision, PolicyFile, PolicyRule, Sensitivity};
 use ene_session::{EventKind, EventPayload, SessionId, TurnOrigin, TurnOutcome};
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -726,6 +726,62 @@ async fn job_runner_completes_queued_work_on_its_own_lane() {
         mail.iter()
             .any(|(direction, kind, _)| direction == "child_to_parent" && kind == "complete"),
         "runner must complete via the job lane, got {mail:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn create_job_denial_happens_before_job_insertion() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let soul_id = ene_session::SoulId::from_str(&soul).unwrap();
+    core.plane().set_mode(ApprovalMode::Policy).unwrap();
+    core.plane().set_policy(PolicyFile {
+        rules: vec![PolicyRule {
+            tool: "delegate.start".into(),
+            scope: None,
+            decision: PolicyDecision::Deny,
+        }],
+    });
+
+    let err = client
+        .create_job(&CreateJobRequest {
+            soul_id: soul.clone(),
+            goal: "should not be inserted".into(),
+            title: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_class(), "forbidden");
+    assert!(core.work().list_jobs(soul_id).unwrap().is_empty());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn create_job_returns_the_approved_job() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let soul_id = ene_session::SoulId::from_str(&soul).unwrap();
+    core.plane().set_mode(ApprovalMode::Auto).unwrap();
+
+    let job = client
+        .create_job(&CreateJobRequest {
+            soul_id: soul,
+            goal: "collect the approved notes".into(),
+            title: Some("Approved notes".into()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(job.title, "Approved notes");
+    assert_eq!(job.goal, "collect the approved notes");
+    assert_eq!(job.soul_id, soul_id.to_string());
+    assert!(
+        core.work()
+            .get_job(job.id.parse().unwrap())
+            .unwrap()
+            .is_some()
     );
     server.shutdown().await;
 }
