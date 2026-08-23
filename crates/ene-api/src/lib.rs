@@ -25,9 +25,9 @@ pub use types::{
     ProviderAssetInstallStatusResponse, ProviderAssetVersionView, ProviderAssetView, QueuedCancel,
     RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse,
     ResolveMemoryCandidateRequest, ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest,
-    ScheduleView, SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse,
-    SessionPatch, SessionView, SetActiveProviderAssetRequest, SetActiveProviderAssetResponse,
-    SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView,
+    ScheduleView, SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch,
+    SessionView, SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SettingsPatch,
+    SoulPatch, SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView,
     ToolTestRequest, ToolView, UsageView,
 };
 

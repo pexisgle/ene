@@ -7,15 +7,14 @@ use crate::types::{
     InstallProviderAssetRequest, InstallProviderAssetResponse, JobView, ListProviderAssetsRequest,
     ListProviderAssetsResponse, ListProviderModelsRequest, ListProviderModelsResponse,
     ListenRequest, McpDocument, MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView,
-    MessageRequest, Page, PluginConfigField,
-    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
-    PluginView, Problem, ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse,
-    QueuedCancel, RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse,
-    ResourceKind, ResolveMemoryCandidateRequest, ResolveMemoryCandidateResponse, RestoreRequest,
-    ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
-    SendMessageResponse, SessionPatch, SessionView, SetActiveProviderAssetRequest,
-    SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch, SoulView, SpanView,
-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    MessageRequest, Page, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
+    PluginConfigValues, PluginConfigView, PluginView, Problem, ProviderAssetInstallStatusRequest,
+    ProviderAssetInstallStatusResponse, QueuedCancel, RefreshProviderAssetsCatalogRequest,
+    RefreshProviderAssetsCatalogResponse, ResolveMemoryCandidateRequest,
+    ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
+    SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
+    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
