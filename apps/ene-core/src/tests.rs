@@ -553,6 +553,9 @@ async fn harness_max_steps_one_auto_delegates_the_second_step() {
     let core = CoreDaemon::boot(BootOptions::new(dir.path()))
         .await
         .unwrap();
+    core.plane()
+        .set_mode(ene_plane::ApprovalMode::Auto)
+        .unwrap();
     assert_eq!(core.harness().loop_cfg.max_steps_per_turn, 1);
     let soul = core.occupants()[0].0;
     let session = core

@@ -201,6 +201,11 @@ pub struct AnswerJobRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnswerQuestionRequest {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleView {
     pub id: String,
     pub soul_id: String,

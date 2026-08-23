@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use base64::Engine;
 use chrono::TimeZone;
 use ene_api::{
-    AnswerJobRequest, ApiClient, ClaimResourceRequest, CreateScheduleRequest, CreateSessionRequest,
-    EndSessionRequest, HistoryResponse, MessageMode, MessageRequest, ResourceKind, RestoreRequest,
-    SoulSkillsPatch, ToolTestRequest,
+    AnswerJobRequest, AnswerQuestionRequest, ApiClient, ClaimResourceRequest,
+    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse, MessageMode,
+    MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
 };
 use ene_companion::{
     CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, ScriptedClassify,
@@ -751,7 +751,7 @@ async fn job_question_answer_reaches_mailbox() {
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, surface.recv_json()).await {
-            Ok(Ok(Some(value))) if value["type"] == "question.asked" => {
+            Ok(Ok(Some(value))) if value["type"] == ene_api::QUESTION_ASKED_EVENT => {
                 asked = Some(value);
                 break;
             }
@@ -763,6 +763,7 @@ async fn job_question_answer_reaches_mailbox() {
     assert_eq!(asked["id"], job.id.to_string());
     assert_eq!(asked["prompt"], "which city?");
     assert_eq!(asked["questions"][0], "which city?");
+    assert_eq!(asked["question_ids"].as_array().map(Vec::len), Some(1));
     client
         .answer_job(
             &job.id.to_string(),
@@ -829,6 +830,109 @@ async fn job_question_answer_reaches_mailbox() {
             )
         }),
         "delegation answer must correlate question_id: {events:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn identified_job_question_answer_reaches_mailbox() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "identify a city");
+    core.host().question(job.id, "which city?").unwrap();
+    let question_id = core.host().open_questions(job.id).unwrap()[0]
+        .question_id()
+        .to_string();
+    client
+        .answer_question(
+            &job.id.to_string(),
+            &question_id,
+            &AnswerQuestionRequest {
+                text: "Tokyo".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let mail = core.work().mailbox(job.id).unwrap();
+    assert!(mail.iter().any(|(direction, kind, body)| {
+        direction == "parent_to_child" && kind == "answer" && body == "Tokyo"
+    }));
+    assert!(core.host().open_questions(job.id).unwrap().is_empty());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn identified_answer_resolves_the_selected_question() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "identify two answers");
+    core.host().question(job.id, "first?").unwrap();
+    core.host().question(job.id, "second?").unwrap();
+    let questions = core.host().open_questions(job.id).unwrap();
+    let first_id = questions[0].question_id().to_string();
+    let second_id = questions[1].question_id().to_string();
+
+    client
+        .answer_question(
+            &job.id.to_string(),
+            &second_id,
+            &AnswerQuestionRequest {
+                text: "second answer".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let remaining = core.host().open_questions(job.id).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].question_id().to_string(), first_id);
+
+    client
+        .answer_question(
+            &job.id.to_string(),
+            &first_id,
+            &AnswerQuestionRequest {
+                text: "first answer".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(core.host().open_questions(job.id).unwrap().is_empty());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn combined_job_answer_rejects_wrong_count_without_consuming_questions() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a trip");
+    core.host().question(job.id, "which city?").unwrap();
+    core.host().question(job.id, "how many days?").unwrap();
+    let err = client
+        .answer_job(
+            &job.id.to_string(),
+            &AnswerJobRequest {
+                text: String::new(),
+                answers: vec!["Tokyo".into()],
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ene_api::ApiError::Problem {
+            status: 400,
+            error_class,
+            ..
+        } if error_class == "invalid_message"
+    ));
+    assert_eq!(core.host().open_questions(job.id).unwrap().len(), 2);
+    assert!(
+        !core
+            .work()
+            .mailbox(job.id)
+            .unwrap()
+            .iter()
+            .any(|(direction, kind, _)| direction == "parent_to_child" && kind == "answer")
     );
     server.shutdown().await;
 }
@@ -984,6 +1088,70 @@ async fn job_question_timeout_loop_writes_assumption() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn job_answer_after_timeout_is_rejected_without_mailbox_answer() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "pick an airline");
+    core.work()
+        .set_status(job.id, ene_work::JobStatus::Running, None)
+        .unwrap();
+    let asked = chrono::Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+    core.work()
+        .mailbox_push_at(
+            job.id,
+            "child_to_parent",
+            "question",
+            "which airline?",
+            &asked.to_rfc3339(),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let mail = core.work().mailbox(job.id).unwrap();
+        if mail
+            .iter()
+            .any(|(_, kind, body)| kind == "assumption" && body.contains("timeout"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon timeout loop did not close the question, mailbox={mail:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let err = client
+        .answer_job(
+            &job.id.to_string(),
+            &AnswerJobRequest {
+                text: "Tokyo".into(),
+                answers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ene_api::ApiError::Problem {
+            status: 409,
+            error_class,
+            ..
+        } if error_class == "question_closed"
+    ));
+    assert!(
+        !core
+            .work()
+            .mailbox(job.id)
+            .unwrap()
+            .iter()
+            .any(|(direction, kind, body)| direction == "parent_to_child"
+                && kind == "answer"
+                && body == "Tokyo")
+    );
     server.shutdown().await;
 }
 
@@ -3550,6 +3718,7 @@ async fn settings_json_max_steps_one_delegates_through_http() {
             .await
             .unwrap(),
     );
+    core.plane().set_mode(ApprovalMode::Auto).unwrap();
     let server = core
         .clone()
         .serve_at(

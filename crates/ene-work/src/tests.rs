@@ -28,7 +28,9 @@ use ene_kernel::{
     LaneHandle, LaneMindSettings, LaneOptions, ModelGeneration, ModelRequest, SurfaceRouter,
     SurfaceToolOutcome, ToolCall,
 };
-use ene_plane::Sensitivity;
+use ene_plane::{
+    ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, ScriptedPopup, Sensitivity,
+};
 use ene_registry::{BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use ene_session::{
     NewSession, SessionCreatedBy, SessionKind, SessionStore, SoulId, derive_messages,
@@ -186,6 +188,19 @@ fn open_work() -> (TempDir, Arc<WorkStore>, Arc<DelegationHost>, SoulId) {
     (dir, store, host, SoulId::new())
 }
 
+fn allow_all_plane(dir: &TempDir) -> Arc<ApprovalPlane> {
+    let audit = AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let popup = ScriptedPopup::deny_all();
+    let plane = Arc::new(ApprovalPlane::new(
+        ApprovalSettings::default(),
+        audit,
+        popup,
+        None,
+    ));
+    plane.set_mode(ApprovalMode::Auto).unwrap();
+    plane
+}
+
 fn public_start(host: &DelegationHost, soul: SoulId, goal: &str) -> crate::types::Job {
     host.start(StartDelegation {
         soul_id: soul,
@@ -331,15 +346,17 @@ async fn surface_delegate_start_inserts_one_job_after_approval() {
 
 #[tokio::test]
 async fn surface_router_upgrades_fs_write_without_spy() {
-    let (_dir, store, host, soul) = open_work();
+    let (dir, store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
     let hit = Arc::new(AtomicBool::new(false));
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
     registry.register_with(
         fs_write_def(),
         Arc::new(SpyInvoke {
             hit: Arc::clone(&hit),
         }),
     );
+    registry.set_plane(allow_all_plane(&dir));
     let router = WorkSurfaceRouter::new(host, registry, soul, 4);
     let outcome = router
         .on_tool("fs.write", json!({"path":"a","text":"b"}), 0)
@@ -352,9 +369,11 @@ async fn surface_router_upgrades_fs_write_without_spy() {
 
 #[tokio::test]
 async fn step_budget_upgrades_even_for_empty_side_effects() {
-    let (_dir, store, host, soul) = open_work();
+    let (dir, store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
     registry.register(utility_time_def());
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    registry.set_plane(allow_all_plane(&dir));
     let router = WorkSurfaceRouter::new(host, registry, soul, 2);
     assert!(should_upgrade_steps(1, 2));
     let outcome = router.on_tool("utility.time", json!({}), 1).await.unwrap();
@@ -394,6 +413,68 @@ async fn child_reports_do_not_require_tool_approval() {
             .iter()
             .any(|(_, kind, body)| { kind == "progress" && body == "working" })
     );
+}
+
+#[tokio::test]
+async fn job_upgrade_is_denied_before_any_job_row_is_written() {
+    let (dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    let audit = AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ApprovalPlane::new(
+        ApprovalSettings::default(),
+        audit,
+        Arc::new(ScriptedPopup::new([ene_plane::PopupDecision::Deny])),
+        None,
+    ));
+    plane.set_mode(ApprovalMode::AskAll).unwrap();
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    registry.register_with(
+        fs_write_def(),
+        Arc::new(SpyInvoke {
+            hit: Arc::new(AtomicBool::new(false)),
+        }),
+    );
+    registry.set_plane(plane);
+    let router = WorkSurfaceRouter::new(host, Arc::clone(&registry), soul, 4);
+    let task = tokio::spawn(async move {
+        router
+            .on_tool("fs.write", json!({"path":"a","text":"b"}), 0)
+            .await
+    });
+    let err = task.await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("denied"));
+    assert!(store.list_jobs(soul).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn job_upgrade_creates_exactly_one_job_after_allow() {
+    let (dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    let audit = AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ApprovalPlane::new(
+        ApprovalSettings::default(),
+        audit,
+        Arc::new(ScriptedPopup::new([ene_plane::PopupDecision::Allow])),
+        None,
+    ));
+    plane.set_mode(ApprovalMode::AskAll).unwrap();
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    registry.register_with(
+        fs_write_def(),
+        Arc::new(SpyInvoke {
+            hit: Arc::new(AtomicBool::new(false)),
+        }),
+    );
+    registry.set_plane(plane);
+    let router = WorkSurfaceRouter::new(host, Arc::clone(&registry), soul, 4);
+    let task = tokio::spawn(async move {
+        router
+            .on_tool("fs.write", json!({"path":"a","text":"b"}), 0)
+            .await
+    });
+    let outcome = task.await.unwrap().unwrap();
+    assert!(matches!(outcome, SurfaceToolOutcome::Delegated { .. }));
+    assert_eq!(store.list_jobs(soul).unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -461,12 +542,14 @@ async fn lane_auto_upgrade_does_not_execute_fs_write() {
     let soul = SoulId::new();
     let registry = Arc::new(ToolRegistry::new());
     let hit = Arc::new(AtomicBool::new(false));
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
     registry.register_with(
         fs_write_def(),
         Arc::new(SpyInvoke {
             hit: Arc::clone(&hit),
         }),
     );
+    registry.set_plane(allow_all_plane(&dir));
     let router = Arc::new(WorkSurfaceRouter::new(
         Arc::clone(&host),
         Arc::clone(&registry),
@@ -1855,6 +1938,39 @@ fn question_timeout_proceeds_with_assumption() {
     assert!(!reports[0].starts_conversation);
     let mailbox = store.mailbox(job.id).unwrap();
     assert!(mailbox.iter().any(|(_, kind, _)| kind == "assumption"));
+}
+
+#[test]
+fn answer_after_question_timeout_is_rejected() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "planning");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    let asked = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+    store
+        .mailbox_push_at(
+            job.id,
+            "child_to_parent",
+            "question",
+            "which airline?",
+            &asked.to_rfc3339(),
+        )
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2020, 1, 2, 0, 0, 1).unwrap();
+    host.resolve_question_timeouts(now, Some(StdDuration::from_hours(24)))
+        .unwrap();
+    assert!(matches!(
+        host.answer(job.id, "Tokyo"),
+        Err(crate::WorkError::NoOpenQuestion)
+    ));
+    assert!(
+        !store
+            .mailbox(job.id)
+            .unwrap()
+            .iter()
+            .any(|(direction, kind, body)| direction == "parent_to_child"
+                && kind == "answer"
+                && body == "Tokyo")
+    );
 }
 
 #[test]

@@ -1,16 +1,16 @@
 use crate::error::ApiError;
 use crate::pcm::{PCM_S16LE, encode_pcm_s16le};
 use crate::types::{
-    AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
-    ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
-    EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse, InstallProviderAssetRequest,
-    InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
-    ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument, MemoryPatch,
-    MemoryView, MessageRequest, Page, PluginConfigField, PluginConfigOptionsView,
-    PluginConfigValidateView, PluginConfigValues, PluginConfigView, PluginView, Problem,
-    ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse, QueuedCancel,
-    RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse, ResourceKind,
-    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView,
+    AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
+    BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
+    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse,
+    InstallProviderAssetRequest, InstallProviderAssetResponse, JobView, ListProviderAssetsRequest,
+    ListProviderAssetsResponse, ListProviderModelsRequest, ListProviderModelsResponse,
+    ListenRequest, McpDocument, MemoryPatch, MemoryView, MessageRequest, Page, PluginConfigField,
+    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
+    PluginView, Problem, ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse,
+    QueuedCancel, RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse,
+    ResourceKind, RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView,
     SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch,
     SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
@@ -329,6 +329,22 @@ impl ApiClient {
         self.send_json(
             self.request(Method::POST, &format!("/api/v1/jobs/{id}/answer"))
                 .json(req),
+        )
+        .await
+    }
+
+    pub async fn answer_question(
+        &self,
+        job_id: &str,
+        question_id: &str,
+        req: &AnswerQuestionRequest,
+    ) -> Result<JobView, ApiError> {
+        self.send_json(
+            self.request(
+                Method::POST,
+                &format!("/api/v1/jobs/{job_id}/questions/{question_id}/answer"),
+            )
+            .json(req),
         )
         .await
     }

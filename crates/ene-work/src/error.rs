@@ -20,6 +20,10 @@ pub enum WorkError {
     UnknownDelegation(String),
     #[error("unknown execution {0}")]
     UnknownExecution(String),
+    #[error("no open question")]
+    NoOpenQuestion,
+    #[error("expected {expected} answers, got {actual}")]
+    QuestionAnswerCount { expected: usize, actual: usize },
     #[error("schedule: {0}")]
     Schedule(String),
     #[error("already completed")]
