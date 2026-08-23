@@ -441,6 +441,7 @@ impl ToolRegistry {
         }
         let workspace = workspace_override.or_else(|| self.workspace.lock().clone());
         let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+        let target = authorization_target(name, &args);
         let in_workspace = path_in_workspace(workspace.as_deref(), path);
         if !host {
             let plane = self.plane.lock().clone();
@@ -449,7 +450,7 @@ impl ToolRegistry {
                     tool: name.to_owned(),
                     side_effects: def.side_effects.clone(),
                     sensitivity: def.sensitivity,
-                    target: path.to_owned(),
+                    target: target.to_owned(),
                     in_workspace,
                 };
                 plane.authorize(&req).await?;
@@ -463,6 +464,13 @@ impl ToolRegistry {
         confine_fs_args(name, &mut args, workspace.as_deref())?;
         Ok((def, invoke, args))
     }
+}
+
+fn authorization_target<'a>(name: &str, args: &'a Value) -> &'a str {
+    if name == "delegate.start" {
+        return args.get("goal").and_then(Value::as_str).unwrap_or("");
+    }
+    args.get("path").and_then(Value::as_str).unwrap_or("")
 }
 
 fn confine_fs_args(

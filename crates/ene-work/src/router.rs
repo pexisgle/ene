@@ -172,16 +172,15 @@ impl SurfaceRouter for JobLayerRouter {
             })
             .await;
         }
-        let value = self
-            .registry
-            .execute_in_workspace(
-                name,
-                bind_job_arg(args, self.soul, self.job_id, name),
-                Layer::Job,
-                &self.workspace_dir,
-            )
-            .await
-            .map_err(|err| KernelError::Tool(err.to_string()))?;
+        let bound = bind_job_arg(args, self.soul, self.job_id, name);
+        let value = if name == "delegation.send" {
+            self.registry.execute_host(name, bound).await
+        } else {
+            self.registry
+                .execute_in_workspace(name, bound, Layer::Job, &self.workspace_dir)
+                .await
+        }
+        .map_err(|err| KernelError::Tool(err.to_string()))?;
         Ok(SurfaceToolOutcome::Result(value))
     }
 }
