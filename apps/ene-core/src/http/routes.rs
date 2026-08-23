@@ -7,16 +7,16 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use base64::Engine;
 use ene_api::{
-    AffectView, AnswerJobRequest, ApprovalView, ArtifactView, BackupResponse, CharacterView,
-    ClaimResourceRequest, CompactResponse, CreateScheduleRequest, CreateSessionRequest,
-    EndSessionRequest, ExclusiveSnapshot, GreetingView, Health, HistoryResponse, JobView,
-    ListProviderModelsRequest, ListProviderModelsResponse, McpDocument, McpServerView, MemoryPatch,
-    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
-    PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
-    PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResourceKind, RestoreRequest,
-    ScheduleView, SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch,
-    SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView,
-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
+    BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
+    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, GreetingView, Health,
+    HistoryResponse, JobView, ListProviderModelsRequest, ListProviderModelsResponse, McpDocument,
+    McpServerView, MemoryPatch, MemoryView, MessageMode, MessageRequest, MessageResponse,
+    OccupantView, Page, PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView,
+    PluginConfigValidateView, PluginConfigValues, PluginConfigView, PluginView, QueuedCancel,
+    ResourceKind, RestoreRequest, ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
+    SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
@@ -785,48 +785,57 @@ pub async fn answer_job(
         .parse()
         .map_err(|_| bad_request("invalid_message", "bad job id"))?;
     let host = state.core.host();
-    let pending = host.open_questions(job).map_err(map_work)?;
     let answered = if req.answers.is_empty() {
         let text = req.text.trim();
         if text.is_empty() {
             return Err(bad_request("invalid_message", "empty answer"));
         }
-        if pending.is_empty() {
-            host.answer(job, text).map_err(map_work)?;
-            Vec::new()
-        } else {
-            let pairs = pending
-                .iter()
-                .map(|question| {
-                    (
-                        QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq),
-                        text.to_owned(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            for _ in &pending {
-                host.answer(job, text).map_err(map_work)?;
-            }
-            pairs
-        }
+        let questions = host.answer_all_pending(job, text).map_err(map_work)?;
+        questions
+            .into_iter()
+            .map(|question| (question.question_id(), text.to_owned()))
+            .collect::<Vec<_>>()
     } else {
-        let turn = host.combine_pending_questions(job).map_err(map_work)?;
-        let pairs = turn
-            .questions
+        let answers = req
+            .answers
             .iter()
-            .zip(req.answers.iter())
-            .map(|(question, answer)| {
-                (
-                    QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq),
-                    answer.trim().to_owned(),
-                )
-            })
+            .map(|answer| answer.trim().to_owned())
             .collect::<Vec<_>>();
-        host.apply_combined_answers(&turn, &req.answers)
-            .map_err(map_work)?;
-        pairs
+        if answers.iter().any(String::is_empty) {
+            return Err(bad_request("invalid_message", "empty answer"));
+        }
+        let questions = host.answer_pending(job, &answers).map_err(map_work)?;
+        questions
+            .into_iter()
+            .zip(answers)
+            .map(|(question, answer)| (question.question_id(), answer))
+            .collect::<Vec<_>>()
     };
     persist_job_answer(&state, job, &answered).await;
+    get_job(State(state), Path(id)).await
+}
+
+pub async fn answer_question(
+    State(state): State<AppState>,
+    Path((id, raw_question_id)): Path<(String, String)>,
+    Json(req): Json<AnswerQuestionRequest>,
+) -> Result<Json<JobView>, ApiReject> {
+    let job = id
+        .parse()
+        .map_err(|_| bad_request("invalid_message", "bad job id"))?;
+    let question_id = raw_question_id
+        .parse()
+        .map_err(|_| bad_request("invalid_message", "bad question id"))?;
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(bad_request("invalid_message", "empty answer"));
+    }
+    let question = state
+        .core
+        .host()
+        .answer_question(job, question_id, text)
+        .map_err(map_work)?;
+    persist_job_answer(&state, job, &[(question.question_id(), text.to_owned())]).await;
     get_job(State(state), Path(id)).await
 }
 
@@ -2615,6 +2624,10 @@ fn map_work(err: ene_work::WorkError) -> ApiReject {
         ene_work::WorkError::UnknownJob(_) | ene_work::WorkError::UnknownSchedule(_) => {
             not_found(&err.to_string())
         }
+        ene_work::WorkError::NoOpenQuestion => conflict("question_closed", &err.to_string()),
+        ene_work::WorkError::QuestionAnswerCount { .. } => {
+            bad_request("invalid_message", &err.to_string())
+        }
         ene_work::WorkError::AlreadyCompleted | ene_work::WorkError::Cancelled => {
             conflict("already_completed", &err.to_string())
         }
@@ -2640,19 +2653,20 @@ pub(crate) fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
             continue;
         }
         if report.inner_intent.as_deref() == Some("ask_user") {
-            let (prompt, questions) = ask_user_prompt(state, report);
+            let (prompt, questions, question_ids) = ask_user_prompt(state, report);
             let id = report
                 .job_id
                 .map_or_else(|| report.soul_id.to_string(), |id| id.to_string());
             state.events.emit(
                 DisplayDepth::Surface,
                 json!({
-                    "type": "question.asked",
+                    "type": ene_api::QUESTION_ASKED_EVENT,
                     "id": id,
                     "soul_id": report.soul_id.to_string(),
                     "prompt": prompt,
                     "text": prompt,
                     "questions": questions,
+                    "question_ids": question_ids,
                 }),
             );
         }
@@ -2670,20 +2684,36 @@ pub(crate) fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
     }
 }
 
-fn ask_user_prompt(state: &AppState, report: &CompanionReport) -> (String, Vec<String>) {
+fn ask_user_prompt(
+    state: &AppState,
+    report: &CompanionReport,
+) -> (String, Vec<String>, Vec<String>) {
     let Some(job_id) = report.job_id else {
-        return (report.speech.clone(), vec![report.speech.clone()]);
+        return (
+            report.speech.clone(),
+            vec![report.speech.clone()],
+            Vec::new(),
+        );
     };
     match state.core.host().combine_pending_questions(job_id) {
         Ok(turn) if !turn.questions.is_empty() => {
             let questions = turn
                 .questions
-                .into_iter()
-                .map(|question| question.prompt)
+                .iter()
+                .map(|question| question.prompt.clone())
                 .collect();
-            (turn.speech, questions)
+            let question_ids = turn
+                .questions
+                .iter()
+                .map(|question| question.question_id().to_string())
+                .collect();
+            (turn.speech, questions, question_ids)
         }
-        _ => (report.speech.clone(), vec![report.speech.clone()]),
+        _ => (
+            report.speech.clone(),
+            vec![report.speech.clone()],
+            Vec::new(),
+        ),
     }
 }
 
