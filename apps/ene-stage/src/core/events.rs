@@ -79,7 +79,6 @@ pub struct EventFeeds {
 
 #[cfg(test)]
 impl EventFeeds {
-    #[expect(dead_code, reason = "app-level new-session tests construct feeds")]
     pub(crate) fn new_for_test() -> Self {
         let (surface_tx, surface_rx) = crossbeam_channel::unbounded();
         let (detail_tx, detail_rx) = crossbeam_channel::unbounded();
