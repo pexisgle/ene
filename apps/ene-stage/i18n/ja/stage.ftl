@@ -295,6 +295,7 @@ jobs-new-goal = 目的
 jobs-create = ジョブを作成
 jobs-created = ジョブを作成しました
 jobs-active = アクティブジョブ
+jobs-recent = 最近のジョブ
 jobs-cancel = キャンセル
 jobs-schedules = スケジュール
 schedule-enable = 有効化
