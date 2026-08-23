@@ -215,7 +215,7 @@ fn install_event_pump(event_tx: AppEventSender) {
                 clippy::expect_used,
                 reason = "tray icon builder must succeed on Windows"
             )]
-            let _tray_icon = TrayIconBuilder::new()
+            let tray_icon = TrayIconBuilder::new()
                 .with_menu(Box::new(build_menu()))
                 .with_tooltip(TOOLTIP)
                 .with_icon(build_icon().unwrap_or_else(synthetic_icon))
@@ -226,7 +226,7 @@ fn install_event_pump(event_tx: AppEventSender) {
                 clippy::mem_forget,
                 reason = "keeps the tray icon HWND alive for the life of the message-pump thread; see comment above"
             )]
-            std::mem::forget(_tray_icon);
+            std::mem::forget(tray_icon);
         });
         std::thread::spawn(move || {
             pump_tray_events(&event_tx);
@@ -260,9 +260,9 @@ fn pump_win32_messages() {
         // `DispatchMessageW` are invoked with `hWnd = null_mut()`, which
         // retrieves / dispatches messages for the current thread only.
         let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        while GetMessageW(&raw mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&raw const msg);
+            DispatchMessageW(&raw const msg);
         }
     }
 }

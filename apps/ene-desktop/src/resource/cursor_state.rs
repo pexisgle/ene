@@ -9,5 +9,12 @@ pub struct CursorState {
     /// Last observed physical cursor position, in window-local
     /// pixel space. `None` until the first `CursorMoved` event
     /// arrives.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "CursorState::physical is consumed by the Linux click-through system"
+        )
+    )]
     pub physical: Option<PhysicalPosition<f64>>,
 }

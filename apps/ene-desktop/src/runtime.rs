@@ -1793,9 +1793,19 @@ impl Runtime {
                 let camera_distance = (camera_eye - camera_target).length();
                 #[cfg_attr(
                     target_os = "windows",
-                    expect(unused_variables, reason = "documented exception for this lint")
+                    expect(
+                        unused_variables,
+                        reason = "mask/input-region debug gizmo is Linux-only"
+                    )
                 )]
                 let view_z = -camera_distance;
+                #[cfg_attr(
+                    target_os = "windows",
+                    expect(
+                        unused_variables,
+                        reason = "mask/input-region debug gizmo is Linux-only"
+                    )
+                )]
                 let cam_view = glam::camera::rh::view::look_at_mat4(
                     camera_eye,
                     camera_target,
@@ -2218,9 +2228,9 @@ fn update_char_window_cursor_and_hittest(
         #[cfg(target_os = "windows")]
         let inner = cw.window.inner_size();
         #[cfg(target_os = "windows")]
-        let logical_w = (inner.width as f64 / scale).max(1.0);
+        let logical_w = (f64::from(inner.width) / scale).max(1.0);
         #[cfg(target_os = "windows")]
-        let logical_h = (inner.height as f64 / scale).max(1.0);
+        let logical_h = (f64::from(inner.height) / scale).max(1.0);
         #[cfg(target_os = "windows")]
         let ndc_x = (logical_x / logical_w) * 2.0 - 1.0;
         #[cfg(target_os = "windows")]
@@ -2276,7 +2286,9 @@ fn update_char_window_cursor_and_hittest(
 
     #[cfg(target_os = "windows")]
     {
-        let _ = cw.window.set_cursor_hittest(allows_input);
+        if let Err(err) = cw.window.set_cursor_hittest(allows_input) {
+            tracing::debug!(error = %err, "cursor hittest unsupported");
+        }
     }
 
     hit
