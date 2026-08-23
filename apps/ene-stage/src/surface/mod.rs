@@ -177,7 +177,7 @@ pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool
     if state.focus_chat {
         state.focus_chat = false;
         ui.ctx()
-            .memory_mut(|mem| mem.request_focus(egui::Id::new("stage-chat-input")));
+            .memory_mut(|mem| mem.request_focus(egui::Id::new(chat::CHAT_INPUT_ID)));
     }
     state.chat_input_focused = response.has_focus();
 }

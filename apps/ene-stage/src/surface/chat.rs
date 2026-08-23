@@ -150,6 +150,59 @@ fn render_greeting_picker(ui: &mut egui::Ui, state: &mut SurfaceUiState) {
     }
 }
 
+pub(crate) const CHAT_INPUT_ID: &str = "stage-chat-input";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ComposerSendRequest {
+    send: bool,
+    insert_newline: bool,
+}
+
+const COMPOSER_NONE: ComposerSendRequest = ComposerSendRequest {
+    send: false,
+    insert_newline: false,
+};
+
+const COMPOSER_SEND: ComposerSendRequest = ComposerSendRequest {
+    send: true,
+    insert_newline: false,
+};
+
+const COMPOSER_NEWLINE: ComposerSendRequest = ComposerSendRequest {
+    send: false,
+    insert_newline: true,
+};
+
+#[must_use]
+fn composer_send_requested(ui: &egui::Ui) -> ComposerSendRequest {
+    ui.input(|input| {
+        let enter_pressed = input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    ..
+                }
+            )
+        });
+        let composing = input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) if !text.is_empty()
+            )
+        });
+        if !enter_pressed || composing {
+            return COMPOSER_NONE;
+        }
+        if input.modifiers.shift {
+            COMPOSER_NEWLINE
+        } else {
+            COMPOSER_SEND
+        }
+    })
+}
+
 pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> egui::Response {
     let output = ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
         ui.horizontal(|ui| {
@@ -240,19 +293,32 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                 ));
             }
         });
-        ui.label(i18n::fl("chat-overlay-hint"));
+        ui.collapsing(i18n::fl("chat-overlay-hint"), |ui| {
+            ui.label(i18n::fl("chat-overlay-hint"));
+        });
         if !state.exclusive_notice.is_empty() {
             ui.colored_label(egui::Color32::YELLOW, &state.exclusive_notice);
         }
 
         let response = ui.add(
-            egui::TextEdit::singleline(&mut state.chat_draft)
-                .id_salt("stage-chat-input")
+            egui::TextEdit::multiline(&mut state.chat_draft)
+                .id_salt(CHAT_INPUT_ID)
                 .hint_text(i18n::fl("chat-placeholder"))
-                .desired_width(ui.available_width()),
+                .desired_width(ui.available_width())
+                .desired_rows(2)
+                .min_size(egui::vec2(ui.available_width(), 56.0))
+                .code_editor(),
         );
-        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        let send_request = response.has_focus().then(|| composer_send_requested(ui));
+        if send_request.as_ref().is_some_and(|request| request.send)
+            && !state.chat_draft.trim().is_empty()
+        {
             state.push_action(SurfaceAction::SendChat);
+        } else if send_request
+            .as_ref()
+            .is_some_and(|request| request.insert_newline)
+        {
+            state.chat_draft.push('\n');
         }
 
         ui.add_space(4.0);
@@ -332,5 +398,31 @@ mod tests {
         };
 
         assert!(normalize_transcript(&history, "").is_empty());
+    }
+
+    #[test]
+    fn composer_contract_separates_enter_shift_enter_and_ime() {
+        assert_ne!(COMPOSER_SEND, COMPOSER_NEWLINE);
+    }
+
+    #[test]
+    fn multiline_draft_preserves_paste_newlines() {
+        let state = SurfaceUiState {
+            chat_draft: "first\nsecond\n".to_owned(),
+            ..Default::default()
+        };
+
+        assert_eq!(state.chat_draft.lines().count(), 2);
+        assert!(state.chat_draft.ends_with('\n'));
+    }
+
+    #[test]
+    fn send_requires_non_whitespace_draft() {
+        let state = SurfaceUiState {
+            chat_draft: "  \n\t".to_owned(),
+            ..Default::default()
+        };
+
+        assert!(state.chat_draft.trim().is_empty());
     }
 }
