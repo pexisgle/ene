@@ -9,24 +9,258 @@ permissions:
   contents: write
 
 jobs:
-  rebase:
+  fix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           ref: codex/activate-session-transaction
           fetch-depth: 0
-      - name: Merge current main preferring PR test hunks
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Repair merged Stage regression tests
         shell: bash
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('apps/ene-stage/src/app.rs')
+          text = p.read_text()
+          marker = '#[cfg(test)]\nmod tests {'
+          start = text.index(marker)
+          module = r'''#[cfg(test)]
+          mod tests {
+              use super::{
+                  AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
+                  overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
+              };
+              use crate::surface::{PendingApproval, PendingQuestion};
+              use ene_api::{HistoryResponse, MessageResponse, SessionView, SplitSessionResponse};
+              use std::sync::Arc;
+
+              fn session_view(id: &str) -> SessionView {
+                  SessionView {
+                      id: id.to_owned(),
+                      soul_id: "soul".to_owned(),
+                      kind: "conversation".to_owned(),
+                      title: None,
+                      created_at: "2026-01-01T00:00:00Z".to_owned(),
+                      archived: false,
+                      next_seq: 0,
+                      ended_at: None,
+                      end_reason: None,
+                      delegation_id: None,
+                  }
+              }
+
+              #[test]
+              fn save_applies_window_level_for_transparent_and_opaque_overlays() {
+                  assert_eq!(window_level(true), winit::window::WindowLevel::AlwaysOnTop);
+                  assert_eq!(window_level(false), winit::window::WindowLevel::Normal);
+              }
+
+              #[test]
+              fn focused_chrome_lowers_overlay_until_focus_returns() {
+                  assert_eq!(
+                      overlay_window_level(true, true),
+                      winit::window::WindowLevel::Normal
+                  );
+                  assert_eq!(
+                      overlay_window_level(false, true),
+                      winit::window::WindowLevel::AlwaysOnTop
+                  );
+                  assert_eq!(
+                      overlay_window_level(false, false),
+                      winit::window::WindowLevel::Normal
+                  );
+              }
+
+              #[test]
+              fn chrome_focus_state_includes_focus_loss() {
+                  assert_eq!(
+                      window_focus_state(&winit::event::WindowEvent::Focused(true)),
+                      Some(true)
+                  );
+                  assert_eq!(
+                      window_focus_state(&winit::event::WindowEvent::Focused(false)),
+                      Some(false)
+                  );
+                  assert_eq!(
+                      window_focus_state(&winit::event::WindowEvent::CloseRequested),
+                      None
+                  );
+              }
+
+              #[test]
+              fn new_chat_start_is_deduplicated_by_shared_inflight_guard() {
+                  let mut app = StageApp::new_for_test();
+                  app.detail.new_session_inflight = true;
+                  app.surface.new_session_inflight = true;
+                  let before = app.async_results.lock().len();
+
+                  app.start_new_session();
+
+                  assert_eq!(app.async_results.lock().len(), before);
+                  assert!(app.detail.new_session_inflight);
+                  assert!(app.surface.new_session_inflight);
+              }
+
+              #[test]
+              fn failed_new_session_split_keeps_visible_state() {
+                  let mut app = StageApp::new_for_test();
+                  app.surface.new_session_inflight = true;
+                  app.detail.new_session_inflight = true;
+                  app.session.set_for_test(
+                      Arc::clone(&app.client),
+                      "soul",
+                      "old-session",
+                      HistoryResponse {
+                          messages: Vec::new(),
+                          depth: "surface".to_owned(),
+                      },
+                  );
+                  app.surface.history.messages.push(MessageResponse {
+                      seq: 1,
+                      role: "assistant".to_owned(),
+                      text: "old".to_owned(),
+                  });
+
+                  app.apply_async_outcome(AsyncOutcome::NewSession(Err(
+                      "split unavailable".to_owned(),
+                  )));
+
+                  assert!(!app.detail.new_session_inflight);
+                  assert!(!app.surface.new_session_inflight);
+                  assert_eq!(app.surface.history.messages.len(), 1);
+                  assert_eq!(app.surface.history.messages[0].text, "old");
+                  assert_eq!(app.surface.status, "split unavailable");
+              }
+
+              #[test]
+              fn successful_new_session_adopts_before_refresh_failure() {
+                  let mut app = StageApp::new_for_test();
+                  app.surface.new_session_inflight = true;
+                  app.detail.new_session_inflight = true;
+                  let split = SplitSessionResponse {
+                      previous: session_view("old-session"),
+                      session: session_view("new-session"),
+                  };
+                  let old_history = HistoryResponse {
+                      messages: vec![MessageResponse {
+                          seq: 1,
+                          role: "assistant".to_owned(),
+                          text: "old".to_owned(),
+                      }],
+                      depth: "surface".to_owned(),
+                  };
+                  app.session.set_for_test(
+                      Arc::clone(&app.client),
+                      "soul",
+                      "old-session",
+                      old_history.clone(),
+                  );
+                  app.surface.history = old_history;
+
+                  app.apply_async_outcome(AsyncOutcome::NewSession(Ok(split)));
+
+                  assert!(!app.detail.new_session_inflight);
+                  assert!(!app.surface.new_session_inflight);
+                  assert_eq!(app.session.session_id(), "new-session");
+                  assert_eq!(app.detail.session_id, "new-session");
+                  assert!(app.surface.history.messages.is_empty());
+
+                  app.apply_async_outcome(AsyncOutcome::RefreshHistory {
+                      session_id: "new-session".to_owned(),
+                      result: Err("history unavailable".to_owned()),
+                  });
+
+                  assert_eq!(app.session.session_id(), "new-session");
+                  assert_eq!(app.detail.session_id, "new-session");
+                  assert!(app.surface.history.messages.is_empty());
+                  assert_eq!(app.surface.status, "history unavailable");
+              }
+
+              #[test]
+              fn stale_approval_result_keeps_new_session_approval() {
+                  let mut app = StageApp::new_for_test();
+                  app.session.set_for_test(
+                      Arc::clone(&app.client),
+                      "soul",
+                      "new-session",
+                      HistoryResponse {
+                          messages: Vec::new(),
+                          depth: "surface".to_owned(),
+                      },
+                  );
+                  app.surface.pending_approval = Some(PendingApproval {
+                      id: "new-approval".to_owned(),
+                      tool: "fs.read".to_owned(),
+                      target: "/tmp/new".to_owned(),
+                  });
+
+                  app.apply_async_outcome(AsyncOutcome::Approval {
+                      session_id: "old-session".to_owned(),
+                      result: Ok(()),
+                  });
+
+                  assert_eq!(
+                      app.surface
+                          .pending_approval
+                          .as_ref()
+                          .map(|item| item.id.as_str()),
+                      Some("new-approval")
+                  );
+              }
+
+              #[test]
+              fn retarget_clears_session_scoped_questions_and_approvals() {
+                  let mut app = StageApp::new_for_test();
+                  app.surface.pending_approval = Some(PendingApproval {
+                      id: "old-approval".to_owned(),
+                      tool: "fs.read".to_owned(),
+                      target: "/tmp/old".to_owned(),
+                  });
+                  app.surface.pending_question = Some(PendingQuestion {
+                      id: "old-question".to_owned(),
+                      prompt: "old".to_owned(),
+                  });
+                  let split = SplitSessionResponse {
+                      previous: session_view("old-session"),
+                      session: session_view("new-session"),
+                  };
+
+                  app.apply_async_outcome(AsyncOutcome::NewSession(Ok(split)));
+
+                  assert!(app.surface.pending_approval.is_none());
+                  assert!(app.surface.pending_question.is_none());
+              }
+
+              #[test]
+              fn empty_log_payload_is_labeled_instead_of_hidden() {
+                  assert_eq!(format_log_text("turn completed"), "turn completed");
+                  assert_eq!(format_log_text("   "), "(empty)");
+              }
+
+              #[test]
+              fn provider_asset_load_status_reports_success_and_empty_results() {
+                  assert!(provider_asset_load_status(2).ends_with(": 2"));
+                  assert!(provider_asset_load_status(0).ends_with(": 0"));
+              }
+
+              #[test]
+              fn chat_paint_does_not_raise_an_existing_window() {
+                  assert_eq!(chat_window_action(true, true), ChatWindowAction::None);
+                  assert_eq!(chat_window_action(true, false), ChatWindowAction::Create);
+                  assert_eq!(chat_window_action(false, false), ChatWindowAction::None);
+              }
+          }
+          '''
+          p.write_text(text[:start] + module)
+          PY
+          cargo fmt --all
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git fetch origin main
-          git merge --no-edit -Xours origin/main
-          rm -f .github/workflows/tmp-rebase-1013.yml .github/workflows/tmp-rebase-1013-run.yml tmp/rebase-1013-conflicts.txt
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m 'chore: remove temporary rebase helpers'
-          fi
+          git add apps/ene-stage/src/app.rs
+          git commit -m 'fix(stage): repair merged session and focus regressions'
           git push origin HEAD:codex/activate-session-transaction
