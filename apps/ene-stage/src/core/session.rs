@@ -76,6 +76,7 @@ impl StageSession {
     }
 
     #[cfg(test)]
+    #[expect(dead_code, reason = "app-level new-session tests reset session")]
     pub(crate) fn set_for_test(
         &mut self,
         client: Arc<ApiClient>,
