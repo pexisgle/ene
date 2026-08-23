@@ -678,6 +678,9 @@ impl StageApp {
             AsyncOutcome::MicClaim(result) => match result {
                 Ok(active) => {
                     self.mic_active = active;
+                    if let Some(tray) = self.tray.as_ref() {
+                        tray.set_mic_active(active);
+                    }
                     if active {
                         let action = self.listen.start();
                         self.spawn_listen(action);
@@ -2114,7 +2117,7 @@ fn overlay_window_level(chrome_focused: bool, always_on_top: bool) -> WindowLeve
 #[must_use]
 fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     match event {
-        WindowEvent::Focused(focused) => Some(*focused),
+        WindowEvent::Focused(true) => Some(true),
         _ => None,
     }
 }
@@ -2171,14 +2174,14 @@ mod tests {
     }
 
     #[test]
-    fn chrome_focus_state_includes_focus_loss() {
+    fn chrome_focus_state_ignores_transient_focus_loss() {
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::Focused(true)),
             Some(true)
         );
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::Focused(false)),
-            Some(false)
+            None
         );
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::CloseRequested),

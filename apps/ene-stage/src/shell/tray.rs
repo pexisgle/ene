@@ -32,6 +32,7 @@ const QUIT_ID: &str = "ene-stage.tray.quit";
 pub struct TrayManager {
     _icon: TrayIcon,
     action_rx: Receiver<ShellCommand>,
+    mic_item: MenuItem,
 }
 
 #[derive(Debug, Error)]
@@ -47,7 +48,7 @@ impl TrayManager {
     pub fn new() -> Result<Self, TrayError> {
         let (action_tx, action_rx) = unbounded();
         let icon = build_icon()?;
-        let menu = build_menu()?;
+        let (menu, mic_item) = build_menu()?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("ene-stage")
@@ -60,15 +61,21 @@ impl TrayManager {
         Ok(Self {
             _icon: tray,
             action_rx,
+            mic_item,
         })
     }
 
     pub fn try_recv(&self) -> Option<ShellCommand> {
         self.action_rx.try_recv().ok()
     }
+
+    pub fn set_mic_active(&self, active: bool) {
+        self.mic_item
+            .set_text(crate::i18n::fl(mic_menu_label(active)));
+    }
 }
 
-fn build_menu() -> Result<Menu, TrayError> {
+fn build_menu() -> Result<(Menu, MenuItem), TrayError> {
     let settings = MenuItem::with_id(
         MenuId::new(SETTINGS_ID),
         crate::i18n::fl("tray-settings"),
@@ -87,14 +94,19 @@ fn build_menu() -> Result<Menu, TrayError> {
         true,
         None,
     );
-    let mic = MenuItem::with_id(MenuId::new(MIC_ID), crate::i18n::fl("mic-on"), true, None);
+    let mic = MenuItem::with_id(
+        MenuId::new(MIC_ID),
+        crate::i18n::fl(mic_menu_label(false)),
+        true,
+        None,
+    );
     let quit = MenuItem::with_id(
         MenuId::new(QUIT_ID),
         crate::i18n::fl("tray-quit"),
         true,
         None,
     );
-    Menu::with_items(&[
+    let menu = Menu::with_items(&[
         &settings,
         &chat,
         &detail,
@@ -103,7 +115,12 @@ fn build_menu() -> Result<Menu, TrayError> {
         &PredefinedMenuItem::separator(),
         &quit,
     ])
-    .map_err(|err| TrayError::Build(err.to_string()))
+    .map_err(|err| TrayError::Build(err.to_string()))?;
+    Ok((menu, mic))
+}
+
+fn mic_menu_label(active: bool) -> &'static str {
+    if active { "mic-on" } else { "mic-off" }
 }
 
 fn build_icon() -> Result<Icon, TrayError> {
@@ -147,14 +164,7 @@ fn poll_tray_events(action_tx: &Sender<ShellCommand>) {
             return;
         }
         if let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            let open_detail = matches!(
-                event,
-                TrayIconEvent::DoubleClick { .. }
-                    | TrayIconEvent::Click {
-                        button: tray_icon::MouseButton::Left,
-                        ..
-                    }
-            );
+            let open_detail = matches!(event, TrayIconEvent::DoubleClick { .. });
             if open_detail
                 && action_tx
                     .send(ShellCommand::OpenDetail(DetailTab::Home))
@@ -214,5 +224,11 @@ mod tests {
     #[test]
     fn synthetic_icon_is_valid() {
         assert!(synthetic_icon().is_ok());
+    }
+
+    #[test]
+    fn mic_menu_label_is_the_next_action() {
+        assert_eq!(mic_menu_label(false), "mic-off");
+        assert_eq!(mic_menu_label(true), "mic-on");
     }
 }
