@@ -809,6 +809,47 @@ pub fn show(
         DetailTab::System => show_system(ui, state, local_settings, client, rt, async_results),
         DetailTab::Log => show_log(ui, state),
     }
+    if matches!(state.tab, DetailTab::Home | DetailTab::Companion) {
+        show_onboarding(ui, state, local_settings, client, rt, async_results);
+    }
+}
+
+fn show_onboarding(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    local_settings: &mut DesktopSettings,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    ensure_settings(state, client, rt, async_results);
+    if !onboarding_visible(state, local_settings) {
+        return;
+    }
+    ui.separator();
+    ui.group(|ui| {
+        ui.strong(i18n::fl("onboarding-title"));
+        ui.label(i18n::fl("onboarding-body"));
+        ui.horizontal(|ui| {
+            if ui
+                .button(i18n::fl("onboarding-open-conversation"))
+                .clicked()
+            {
+                state.select_tab(DetailTab::Conversation);
+            }
+            if ui.button(i18n::fl("onboarding-dismiss")).clicked() {
+                local_settings.onboarding_dismissed = true;
+                state.save_local_pending = true;
+            }
+        });
+    });
+}
+
+#[must_use]
+fn onboarding_visible(state: &DetailUiState, local_settings: &DesktopSettings) -> bool {
+    state.settings_loaded()
+        && !local_settings.onboarding_dismissed
+        && chat_setup_gap(state).is_some()
 }
 
 fn show_home(
@@ -2835,6 +2876,22 @@ mod tests {
             .map(|job| job.status.as_str())
             .collect::<Vec<_>>();
         assert_eq!(active, ["created", "queued", "running"]);
+    }
+
+    #[test]
+    fn onboarding_follows_chat_readiness_and_local_dismissal() {
+        let mut state = DetailUiState::default();
+        state.finish_settings_load();
+        let mut settings = DesktopSettings::default();
+
+        assert!(onboarding_visible(&state, &settings));
+        settings.onboarding_dismissed = true;
+        assert!(!onboarding_visible(&state, &settings));
+
+        settings.onboarding_dismissed = false;
+        state.chat_plugin = "provider.gguf".to_owned();
+        state.chat_model = "local-model".to_owned();
+        assert!(!onboarding_visible(&state, &settings));
     }
 
     #[test]
