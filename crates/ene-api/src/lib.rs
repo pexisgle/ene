@@ -14,9 +14,9 @@ pub use pcm::{LISTEN_SAMPLE_RATE, PCM_S16LE, decode_pcm_s16le, encode_pcm_s16le}
 pub use types::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
-    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, Health, HistoryResponse,
-    IdempotentMessage, InstallProviderAssetRequest, InstallProviderAssetResponse, JobView,
-    ListProviderAssetsRequest, ListProviderAssetsResponse, ListProviderModelsRequest,
+    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, GreetingView, Health,
+    HistoryResponse, IdempotentMessage, InstallProviderAssetRequest, InstallProviderAssetResponse,
+    JobView, ListProviderAssetsRequest, ListProviderAssetsResponse, ListProviderModelsRequest,
     ListProviderModelsResponse, ListenRequest, McpDocument, McpServerView, MemoryPatch, MemoryView,
     MessageMode, MessageRequest, MessageResponse, OccupantView, Page, PluginConfigErrorView,
     PluginConfigField, PluginConfigOptionView, PluginConfigOptionsView, PluginConfigValidateView,

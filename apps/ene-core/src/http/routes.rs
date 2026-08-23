@@ -10,14 +10,13 @@ use ene_api::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
     CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, GreetingView, Health,
-    HistoryResponse, JobView,
-    ListProviderModelsRequest, ListProviderModelsResponse, McpDocument, McpServerView, MemoryPatch,
-    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
-    PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
-    PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResourceKind, RestoreRequest,
-    ScheduleView, SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch,
-    SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView,
-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    HistoryResponse, JobView, ListProviderModelsRequest, ListProviderModelsResponse, McpDocument,
+    McpServerView, MemoryPatch, MemoryView, MessageMode, MessageRequest, MessageResponse,
+    OccupantView, Page, PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView,
+    PluginConfigValidateView, PluginConfigValues, PluginConfigView, PluginView, QueuedCancel,
+    ResourceKind, RestoreRequest, ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
+    SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
