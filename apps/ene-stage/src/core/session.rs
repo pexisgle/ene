@@ -38,6 +38,18 @@ pub(crate) struct PreparedSessionTarget {
 }
 
 impl PreparedSessionTarget {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(session_id: &str, history: HistoryResponse) -> Self {
+        Self {
+            soul_id: "soul".to_owned(),
+            session_id: session_id.to_owned(),
+            history,
+            occupants: Vec::new(),
+            avatar_path: None,
+            motions_dir: None,
+        }
+    }
+
     #[must_use]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id

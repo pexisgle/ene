@@ -167,6 +167,62 @@ struct StageApp {
 }
 
 impl StageApp {
+    #[cfg(test)]
+    fn new_for_test() -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = runtime.enter();
+        let client = Arc::new(ene_api::ApiClient::new(
+            "http://127.0.0.1:9",
+            "token",
+            "stage",
+        ));
+        let rt_handle = runtime.handle().clone();
+        Self {
+            settings: DesktopSettings::default(),
+            local_settings: DesktopSettings::default(),
+            core: StageCore::detached(),
+            session: StageSession::new_for_test(
+                Arc::clone(&client),
+                "soul",
+                "old-session",
+                ene_api::HistoryResponse {
+                    messages: Vec::new(),
+                    depth: "surface".to_owned(),
+                },
+            ),
+            client,
+            runtime,
+            rt_handle,
+            feeds: EventFeeds::new_for_test(),
+            audio: AudioHub::new(),
+            viseme: VisemeAnalyzer::new(AudioHub::new().sample_rate()),
+            look_at_state: look_at::LookAtState::default(),
+            tray: None,
+            hotkeys: None,
+            surface: SurfaceUiState::default(),
+            detail: DetailUiState::default(),
+            async_results: Arc::new(Mutex::new(Vec::new())),
+            mic_active: false,
+            listen: MicListen::new(),
+            notify_claimed: false,
+            speaker_claimed: false,
+            gpu: None,
+            overlay: None,
+            chat: None,
+            detail_win: None,
+            caption: None,
+            spotlight: None,
+            chrome_focused: false,
+            last_cursor: None,
+            last_tick: Instant::now(),
+            last_approval_poll: Instant::now(),
+            approval_poll_inflight: false,
+        }
+    }
+
     fn chrome_window_exists(&self) -> bool {
         self.chat.is_some()
             || self.detail_win.is_some()
@@ -297,7 +353,10 @@ impl StageApp {
                     self.surface.status = err;
                 }
             }
-            AsyncOutcome::Approval(result) => {
+            AsyncOutcome::Approval { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
                 self.surface.pending_approval = None;
                 if let Err(err) = result {
                     self.surface.status = err;
@@ -420,9 +479,8 @@ impl StageApp {
                     Ok(activated) => {
                         if let Some(target) = activated.target {
                             self.commit_session_target(target);
-                        } else {
-                            self.reload_avatar();
                         }
+                        self.reload_avatar();
                         self.detail.invalidate_character();
                         self.detail.core_status = format!(
                             "{}: {}",
@@ -891,15 +949,17 @@ impl StageApp {
             return;
         };
         let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
         let decision = decision.to_owned();
         self.spawn(async move {
-            AsyncOutcome::Approval(
-                session
+            AsyncOutcome::Approval {
+                session_id,
+                result: session
                     .respond_approval(&pending.id, &decision)
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
-            )
+            }
         });
     }
 
@@ -1253,6 +1313,7 @@ impl StageApp {
         self.feeds = spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
         self.surface.history = self.session.history();
         self.surface.pending_approval = None;
+        self.surface.pending_question = None;
         self.detail.next_activation_generation();
         self.detail.invalidate_character();
         if self
@@ -1272,6 +1333,7 @@ impl StageApp {
         self.surface.streaming_text.clear();
         self.surface.turn_active = false;
         self.surface.pending_approval = None;
+        self.surface.pending_question = None;
     }
 
     fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
@@ -1886,9 +1948,13 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatWindowAction, chat_window_action, format_log_text, overlay_window_level,
-        provider_asset_load_status, window_focus_state, window_level,
+        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
+        overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
     };
+    use crate::core::session::PreparedSessionTarget;
+    use crate::surface::{PendingApproval, PendingQuestion};
+    use ene_api::HistoryResponse;
+    use std::sync::Arc;
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
@@ -1926,6 +1992,63 @@ mod tests {
             window_focus_state(&winit::event::WindowEvent::CloseRequested),
             None
         );
+    }
+
+    #[test]
+    fn stale_approval_result_keeps_new_session_approval() {
+        let mut app = StageApp::new_for_test();
+        app.session.set_for_test(
+            Arc::clone(&app.client),
+            "soul",
+            "new-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        );
+        app.surface.pending_approval = Some(PendingApproval {
+            id: "new-approval".to_owned(),
+            tool: "fs.read".to_owned(),
+            target: "/tmp/new".to_owned(),
+        });
+
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: "old-session".to_owned(),
+            result: Ok(()),
+        });
+
+        assert_eq!(
+            app.surface
+                .pending_approval
+                .as_ref()
+                .map(|item| item.id.as_str()),
+            Some("new-approval")
+        );
+    }
+
+    #[test]
+    fn retarget_clears_session_scoped_questions_and_approvals() {
+        let mut app = StageApp::new_for_test();
+        app.surface.pending_approval = Some(PendingApproval {
+            id: "old-approval".to_owned(),
+            tool: "fs.read".to_owned(),
+            target: "/tmp/old".to_owned(),
+        });
+        app.surface.pending_question = Some(PendingQuestion {
+            id: "old-question".to_owned(),
+            prompt: "old".to_owned(),
+        });
+        app.commit_session_target(PreparedSessionTarget::new_for_test(
+            "new-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        ));
+
+        assert_eq!(app.session.session_id(), "new-session");
+        assert!(app.surface.pending_approval.is_none());
+        assert!(app.surface.pending_question.is_none());
     }
 
     #[test]

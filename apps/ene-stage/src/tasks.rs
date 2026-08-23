@@ -20,7 +20,10 @@ pub enum AsyncOutcome {
         session_id: String,
         result: Result<(), String>,
     },
-    Approval(Result<(), String>),
+    Approval {
+        session_id: String,
+        result: Result<(), String>,
+    },
     Listen {
         generation: u64,
         result: Result<(), String>,
