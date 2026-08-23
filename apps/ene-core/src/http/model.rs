@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ene_kernel::{
     ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, TextDeltaSink,
-    TokenEstimation, ToolCall, effective_window, estimate_tokens, fit_prompt,
+    TokenEstimation, ToolCall, effective_window, estimate_tokens, fit_prompt_llm,
 };
 use ene_plugin_ipc::{
     LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
@@ -116,11 +116,10 @@ impl SeamedModel {
                 "context window exhausted by tool definitions".to_owned(),
             ));
         }
-        let messages = fit_prompt(
+        let messages = fit_prompt_llm(
             fold_history(&request.messages, vision_store),
             message_budget,
             |message| estimate_message_tokens(message, estimation),
-            |message| matches!(message.role, LlmRole::System),
         );
         let llm_request = map_request(
             messages,
@@ -653,19 +652,14 @@ mod tests {
         assert!(overhead > 100);
         let messages = vec![LlmMessage::new(LlmRole::User, "short")];
         let msg_cost = estimate_message_tokens(&messages[0], ene_kernel::TokenEstimation::Chars4);
-        let packed = ene_kernel::fit_prompt(
-            messages,
-            msg_cost,
-            |message| estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4),
-            |_| false,
-        );
+        let packed = ene_kernel::fit_prompt_llm(messages, msg_cost, |message| {
+            estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4)
+        });
         assert_eq!(packed.len(), 1);
-        let packed_with_overhead = ene_kernel::fit_prompt(
-            packed,
-            msg_cost.saturating_sub(overhead),
-            |message| estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4),
-            |_| false,
-        );
+        let packed_with_overhead =
+            ene_kernel::fit_prompt_llm(packed, msg_cost.saturating_sub(overhead), |message| {
+                estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4)
+            });
         assert!(packed_with_overhead.is_empty() || overhead >= msg_cost);
     }
 
@@ -677,12 +671,9 @@ mod tests {
             LlmMessage::new(LlmRole::Assistant, "ack-old"),
             LlmMessage::new(LlmRole::User, "latest-turn"),
         ];
-        let packed = ene_kernel::fit_prompt(
-            messages,
-            8,
-            |message| estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4),
-            |message| matches!(message.role, LlmRole::System),
-        );
+        let packed = ene_kernel::fit_prompt_llm(messages, 8, |message| {
+            estimate_message_tokens(message, ene_kernel::TokenEstimation::Chars4)
+        });
         assert_eq!(packed[0].text, "contract");
         assert_eq!(
             packed.last().map(|message| message.text.as_str()),

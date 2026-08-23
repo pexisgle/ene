@@ -3,6 +3,7 @@ use crate::error::SessionError;
 use crate::event::{EventKind, EventPayload, LoggedEvent, TurnOutcome};
 use crate::ids::TurnId;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// How inner messages appear in a projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +127,10 @@ pub struct ProjectOptions {
     pub include_tool_args: bool,
     pub self_reference_window: u32,
     pub include_turn_failures: bool,
+    /// Exclude incomplete tool-call/result exchanges from provider-visible history.
+    ///
+    /// Surface and export projections keep them visible for diagnostics.
+    pub isolate_incomplete_tool_groups: bool,
 }
 
 impl ProjectOptions {
@@ -138,6 +143,7 @@ impl ProjectOptions {
             include_tool_args: depth.include_tool_args(),
             self_reference_window,
             include_turn_failures: true,
+            isolate_incomplete_tool_groups: false,
         }
     }
 
@@ -150,6 +156,7 @@ impl ProjectOptions {
             include_tool_args: true,
             self_reference_window,
             include_turn_failures: false,
+            isolate_incomplete_tool_groups: true,
         }
     }
 }
@@ -327,11 +334,122 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
         }
     }
 
+    if options.isolate_incomplete_tool_groups {
+        isolate_incomplete_tool_groups(&mut messages);
+    }
     append_inner(&mut messages, pending_inner, options);
     ProjectedHistory {
         messages,
         truncated_prefix: !compacted.is_empty(),
     }
+}
+
+struct ToolProjectionGroup {
+    call_ids: HashSet<String>,
+    result_ids: HashSet<String>,
+    first_index: usize,
+    last_index: usize,
+    valid: bool,
+}
+
+fn isolate_incomplete_tool_groups(messages: &mut Vec<ProjectedMessage>) {
+    let mut groups = Vec::new();
+    let mut groups_by_key = HashMap::new();
+    let mut groups_by_call_id = HashMap::new();
+    let mut message_groups = vec![None; messages.len()];
+    let mut keep_result = vec![false; messages.len()];
+
+    for (index, message) in messages.iter().enumerate() {
+        if message.role != Role::Tool || message.tool_args.is_none() {
+            continue;
+        }
+        let Some(call_id) = message.tool_call_id.clone() else {
+            continue;
+        };
+        let Some(turn_id) = message.turn_id else {
+            continue;
+        };
+        let Some(step_index) = message.step_index else {
+            continue;
+        };
+        let group_index = *groups_by_key
+            .entry((turn_id, step_index))
+            .or_insert_with(|| {
+                let group_index = groups.len();
+                groups.push(ToolProjectionGroup {
+                    call_ids: HashSet::new(),
+                    result_ids: HashSet::new(),
+                    first_index: index,
+                    last_index: index,
+                    valid: true,
+                });
+                group_index
+            });
+        groups[group_index].first_index = groups[group_index].first_index.min(index);
+        groups[group_index].last_index = groups[group_index].last_index.max(index);
+        if !groups[group_index].call_ids.insert(call_id.clone()) {
+            groups[group_index].valid = false;
+        }
+        if let Some(previous) = groups_by_call_id.insert(call_id, group_index) {
+            groups[previous].valid = false;
+            groups[group_index].valid = false;
+        }
+        message_groups[index] = Some(group_index);
+    }
+
+    for (index, message) in messages.iter().enumerate() {
+        if message.role != Role::Tool || message.tool_args.is_some() {
+            continue;
+        }
+        let Some(call_id) = message.tool_call_id.as_deref() else {
+            continue;
+        };
+        let Some(&group_index) = groups_by_call_id.get(call_id) else {
+            continue;
+        };
+        groups[group_index].first_index = groups[group_index].first_index.min(index);
+        groups[group_index].last_index = groups[group_index].last_index.max(index);
+        message_groups[index] = Some(group_index);
+        if groups[group_index].result_ids.insert(call_id.to_owned()) {
+            keep_result[index] = true;
+        }
+    }
+
+    for (group_index, group) in groups.iter_mut().enumerate() {
+        if group.call_ids.is_empty() || group.call_ids != group.result_ids {
+            group.valid = false;
+        }
+        if group.valid
+            && (group.first_index..=group.last_index).any(|index| {
+                messages[index].role != Role::Tool || message_groups[index] != Some(group_index)
+            })
+        {
+            group.valid = false;
+        }
+    }
+
+    let valid_groups: HashSet<usize> = groups
+        .iter()
+        .enumerate()
+        .filter_map(|(index, group)| group.valid.then_some(index))
+        .collect();
+    let mut keep = vec![false; messages.len()];
+    for (index, message) in messages.iter().enumerate() {
+        keep[index] = if message.role == Role::Tool {
+            message_groups[index].is_some_and(|group_index| {
+                valid_groups.contains(&group_index)
+                    && (message.tool_args.is_some() || keep_result[index])
+            })
+        } else {
+            true
+        };
+    }
+    let original = std::mem::take(messages);
+    *messages = original
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, message)| keep[index].then_some(message))
+        .collect();
 }
 
 fn collect_redactions(events: &[LoggedEvent], apply: bool) -> Vec<u64> {
