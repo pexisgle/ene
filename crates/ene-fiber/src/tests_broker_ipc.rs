@@ -53,6 +53,7 @@ async fn broker_client_round_trips_fs_read_and_denies_undeclared_ops() {
     assert!(matches!(denied, BrokerResponse::Error { .. }));
     assert!(!dir.path().join("output.txt").exists());
 
+    #[cfg(unix)]
     let socket = std::path::PathBuf::from(&path);
     drop(server);
     #[cfg(unix)]
