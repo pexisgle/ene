@@ -128,11 +128,11 @@ jobs:
         shell: pwsh
         run: ./scripts/check-windows-ci-coverage.ps1
       - name: Lint native Windows applications and sandbox
-        run: cargo clippy --locked -p ene-daemon -p ene-stage -p ene-desktop -p ene-sandbox -p ene-registry -p ene-tool-app --all-targets -- -D warnings
+        run: cargo clippy --locked -p ene-daemon -p ene-stage -p ene-desktop -p ene-sandbox -p ene-registry -p ene-fiber -p ene-plugin-ipc -p ene-tool-app -p ene-tool-fs --all-targets -- -D warnings
       - name: Lint Windows job-object plugin
         run: cargo clippy --locked -p ene-tool-exec --features win32-job --all-targets -- -D warnings
       - name: Test Windows-compatible libraries
-        run: cargo test --locked -p ene-config -p ene-plane -p ene-fiber
+        run: cargo test --locked -p ene-config -p ene-plane -p ene-fiber -p ene-plugin-ipc -p ene-tool-fs
 
   # Keep the two newest rust-cache generations per job, run after the
   # caching jobs save theirs.

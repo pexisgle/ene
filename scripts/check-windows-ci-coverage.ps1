@@ -17,11 +17,14 @@ foreach ($package in $metadata.packages) {
 
 $expected = @(
     "ene-desktop",
+    "ene-fiber",
+    "ene-plugin-ipc",
     "ene-registry",
     "ene-sandbox",
     "ene-stage",
     "ene-tool-app",
-    "ene-tool-exec"
+    "ene-tool-exec",
+    "ene-tool-fs"
 )
 $missing = @($expected | Where-Object { $_ -notin $discovered })
 $unexpected = @($discovered | Where-Object { $_ -notin $expected })
