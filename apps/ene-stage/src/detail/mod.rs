@@ -33,6 +33,80 @@ pub enum DetailTab {
     Log,
 }
 
+#[must_use]
+fn caption_position_label(value: &str) -> String {
+    match value {
+        "top" => i18n::fl("settings-caption-position-top"),
+        "left" => i18n::fl("settings-caption-position-left"),
+        "right" => i18n::fl("settings-caption-position-right"),
+        "bottom" => i18n::fl("settings-caption-position-bottom"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn theme_label(value: &str) -> String {
+    match value {
+        "system" => i18n::fl("settings-theme-system"),
+        "dark" => i18n::fl("settings-theme-dark"),
+        "light" => i18n::fl("settings-theme-light"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn language_value_label(value: &str) -> String {
+    match value {
+        "" => i18n::fl("settings-language-system"),
+        "ja" => i18n::fl("settings-language-ja"),
+        "en-US" => i18n::fl("settings-language-en-us"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn core_lifetime_label(value: &str) -> String {
+    match value {
+        "app" => i18n::fl("settings-core-lifetime-app"),
+        "detached" => i18n::fl("settings-core-lifetime-detached"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn plugin_profile_label(value: &str) -> String {
+    match value {
+        "desktop" => i18n::fl("settings-plugins-profile-desktop"),
+        "minimal" => i18n::fl("settings-plugins-profile-minimal"),
+        "headless" => i18n::fl("settings-plugins-profile-headless"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn optional_task_label(value: &str) -> String {
+    match value {
+        "classifier" => i18n::fl("task-classifier"),
+        "embedding" => i18n::fl("task-embedding"),
+        "proactive" => i18n::fl("task-proactive"),
+        "stt" => i18n::fl("task-stt"),
+        "tts" => i18n::fl("task-tts"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn log_kind_label(kind: LogKind) -> String {
+    match kind {
+        LogKind::Thinking => i18n::fl("log-kind-thinking"),
+        LogKind::Inner => i18n::fl("log-kind-inner"),
+        LogKind::Tool => i18n::fl("log-kind-tool"),
+        LogKind::Session => i18n::fl("log-kind-session"),
+        LogKind::Job => i18n::fl("log-kind-job"),
+        LogKind::Affect => i18n::fl("log-kind-affect"),
+    }
+}
+
 impl DetailTab {
     pub const ALL: [DetailTab; 9] = [
         DetailTab::Home,
@@ -918,11 +992,12 @@ fn show_home(
     }
     let optional = optional_unconfigured(&state.unconfigured);
     if !optional.is_empty() {
-        ui.label(format!(
-            "{}: {}",
-            i18n::fl("home-optional-tasks"),
-            optional.join(", ")
-        ));
+        let labels = optional
+            .iter()
+            .map(|task| optional_task_label(task))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ui.label(format!("{}: {}", i18n::fl("home-optional-tasks"), labels));
         if optional
             .iter()
             .any(|task| *task == "classifier" || *task == "embedding" || *task == "proactive")
@@ -1425,13 +1500,13 @@ fn show_voice(
             "bottom"
         };
         egui::ComboBox::from_id_salt("caption-position")
-            .selected_text(current)
+            .selected_text(caption_position_label(current))
             .show_ui(ui, |ui| {
                 for position in crate::surface::caption::POSITIONS {
                     ui.selectable_value(
                         &mut local_settings.caption_position,
                         position.to_owned(),
-                        position,
+                        caption_position_label(position),
                     );
                 }
             });
@@ -1815,7 +1890,10 @@ fn show_connections(
         ui.label(i18n::fl("settings-plugins-profile"));
         for profile in ["desktop", "minimal", "headless"] {
             if ui
-                .selectable_label(state.plugins_profile == profile, profile)
+                .selectable_label(
+                    state.plugins_profile == profile,
+                    plugin_profile_label(profile),
+                )
                 .clicked()
             {
                 profile.clone_into(&mut state.plugins_profile);
@@ -2394,40 +2472,48 @@ fn show_system_inner(
         .show(ui, |ui| {
             ui.label(i18n::fl("settings-theme"));
             egui::ComboBox::from_id_salt("theme")
-                .selected_text(&local_settings.theme)
+                .selected_text(theme_label(&local_settings.theme))
                 .show_ui(ui, |ui| {
                     for theme in ["system", "dark", "light"] {
-                        ui.selectable_value(&mut local_settings.theme, theme.to_owned(), theme);
+                        ui.selectable_value(
+                            &mut local_settings.theme,
+                            theme.to_owned(),
+                            theme_label(theme),
+                        );
                     }
                 });
             ui.end_row();
             ui.label(i18n::fl("settings-language"));
-            let language_label = if local_settings.language.is_empty() {
-                i18n::fl("settings-language-system")
-            } else {
-                local_settings.language.clone()
-            };
+            let selected_language_label = language_value_label(&local_settings.language);
             egui::ComboBox::from_id_salt("language")
-                .selected_text(language_label)
+                .selected_text(selected_language_label)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut local_settings.language,
                         String::new(),
                         i18n::fl("settings-language-system"),
                     );
-                    ui.selectable_value(&mut local_settings.language, "ja".to_owned(), "ja");
-                    ui.selectable_value(&mut local_settings.language, "en-US".to_owned(), "en-US");
+                    ui.selectable_value(
+                        &mut local_settings.language,
+                        "ja".to_owned(),
+                        language_value_label("ja"),
+                    );
+                    ui.selectable_value(
+                        &mut local_settings.language,
+                        "en-US".to_owned(),
+                        language_value_label("en-US"),
+                    );
                 });
             ui.end_row();
             ui.label(i18n::fl("settings-core-lifetime"));
             egui::ComboBox::from_id_salt("core-lifetime")
-                .selected_text(&local_settings.core_lifetime)
+                .selected_text(core_lifetime_label(&local_settings.core_lifetime))
                 .show_ui(ui, |ui| {
                     for value in ["app", "detached"] {
                         ui.selectable_value(
                             &mut local_settings.core_lifetime,
                             value.to_owned(),
-                            value,
+                            core_lifetime_label(value),
                         );
                     }
                 });
@@ -2552,7 +2638,10 @@ fn show_system_inner(
         ui.label(i18n::fl("settings-plugins-profile"));
         for profile in ["desktop", "minimal", "headless"] {
             if ui
-                .selectable_label(state.plugins_profile == profile, profile)
+                .selectable_label(
+                    state.plugins_profile == profile,
+                    plugin_profile_label(profile),
+                )
                 .clicked()
             {
                 profile.clone_into(&mut state.plugins_profile);
@@ -2664,14 +2753,7 @@ fn show_log(ui: &mut egui::Ui, state: &DetailUiState) {
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
         for entry in &state.log {
-            let prefix = match entry.kind {
-                LogKind::Thinking => "thinking",
-                LogKind::Inner => "inner",
-                LogKind::Tool => "tool",
-                LogKind::Session => "session",
-                LogKind::Job => "job",
-                LogKind::Affect => "affect",
-            };
+            let prefix = log_kind_label(entry.kind);
             ui.add(egui::Label::new(format!("[{prefix}] {}", entry.text)).wrap());
         }
     });
@@ -2882,6 +2964,31 @@ fn spawn_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_value_labels_do_not_expose_storage_ids() {
+        for (value, label) in [
+            ("bottom", caption_position_label("bottom")),
+            ("dark", theme_label("dark")),
+            ("ja", language_value_label("ja")),
+            ("detached", core_lifetime_label("detached")),
+            ("minimal", plugin_profile_label("minimal")),
+            ("classifier", optional_task_label("classifier")),
+        ] {
+            assert_ne!(label, value);
+        }
+        for (kind, value) in [
+            (LogKind::Thinking, "thinking"),
+            (LogKind::Inner, "inner"),
+            (LogKind::Tool, "tool"),
+            (LogKind::Session, "session"),
+            (LogKind::Job, "job"),
+            (LogKind::Affect, "affect"),
+        ] {
+            assert_ne!(log_kind_label(kind), value);
+        }
+        assert_eq!(optional_task_label("plugin.custom"), "plugin.custom");
+    }
 
     #[test]
     fn new_chat_button_is_guarded_by_shared_inflight_state() {
