@@ -44,6 +44,7 @@ pub struct PendingQuestion {
 pub struct SurfaceUiState {
     pub chat_draft: String,
     pub focus_chat: bool,
+    pub chat_input_focused: bool,
     pub history: HistoryResponse,
     pub streaming_text: String,
     pub caption: String,
@@ -68,6 +69,7 @@ impl Default for SurfaceUiState {
         Self {
             chat_draft: String::new(),
             focus_chat: false,
+            chat_input_focused: false,
             history: HistoryResponse {
                 messages: Vec::new(),
                 depth: "surface".to_owned(),
@@ -95,6 +97,13 @@ impl Default for SurfaceUiState {
 impl SurfaceUiState {
     pub fn push_action(&mut self, action: SurfaceAction) {
         self.pending_actions.push(action);
+    }
+
+    /// Closing the Chat window removes the redraw that would normally clear
+    /// input focus, so the flag must be reset alongside `chat_open`.
+    pub fn close_chat(&mut self) {
+        self.chat_open = false;
+        self.chat_input_focused = false;
     }
 
     pub(crate) fn apply_text_delta(&mut self, text: &str, captions: bool) {
@@ -143,7 +152,7 @@ impl SurfaceUiState {
 }
 
 pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
-    chat::show(ui, state, mic_active);
+    let response = chat::show(ui, state, mic_active);
     if state.pending_approval.is_some() {
         approvals::show(ui.ctx(), state);
     }
@@ -163,6 +172,7 @@ pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool
         ui.ctx()
             .memory_mut(|mem| mem.request_focus(egui::Id::new("stage-chat-input")));
     }
+    state.chat_input_focused = response.has_focus();
 }
 
 pub fn show_caption(
@@ -230,5 +240,20 @@ mod tests {
         state.apply_text_delta("Next turn.", true);
         assert!(state.caption_visible());
         assert_eq!(state.caption, "Next turn.");
+    }
+
+    #[test]
+    fn closing_chat_clears_stale_input_focus() {
+        let mut state = SurfaceUiState::default();
+        assert!(state.chat_open);
+        state.chat_input_focused = true;
+
+        state.close_chat();
+
+        assert!(!state.chat_open);
+        assert!(
+            !state.chat_input_focused,
+            "overlay shortcuts must not stay blocked after Chat closes"
+        );
     }
 }
