@@ -1021,10 +1021,14 @@ fn show_companion(
             ));
         }
         ui.label(i18n::fl("character-occupants"));
-        for occupant in &state.occupants {
+        for occupant in renderable_occupants(&state.occupants) {
             ui.label(format!(
-                "{}  body={}  avatar={}",
+                "{}\n{}  body={}  avatar={}",
                 occupant.soul_id,
+                occupant
+                    .package_id
+                    .as_deref()
+                    .unwrap_or("unresolved package"),
                 occupant.body_id.as_deref().unwrap_or("none"),
                 occupant.avatar_path.as_deref().unwrap_or("—")
             ));
@@ -1682,6 +1686,12 @@ fn active_jobs(jobs: &[JobView]) -> Vec<&JobView> {
     jobs.iter()
         .filter(|job| matches!(job.status.as_str(), "created" | "queued" | "running"))
         .collect()
+}
+
+fn renderable_occupants(occupants: &[OccupantView]) -> impl Iterator<Item = &OccupantView> {
+    occupants
+        .iter()
+        .filter(|occupant| occupant.package_id.is_some() || occupant.avatar_path.is_some())
 }
 
 fn show_connections(
@@ -2825,6 +2835,31 @@ mod tests {
             .map(|job| job.status.as_str())
             .collect::<Vec<_>>();
         assert_eq!(active, ["created", "queued", "running"]);
+    }
+
+    #[test]
+    fn occupant_rows_hide_unresolved_entries_and_keep_package_with_avatar() {
+        let occupants = vec![
+            OccupantView {
+                soul_id: "soul.text-only".to_owned(),
+                body_id: None,
+                package_id: None,
+                avatar_path: None,
+            },
+            OccupantView {
+                soul_id: "soul.avatar".to_owned(),
+                body_id: Some("body".to_owned()),
+                package_id: Some("char.alicia-b@1.0.0".to_owned()),
+                avatar_path: Some("/packages/char.alicia-b@1.0.0/model.vrm".to_owned()),
+            },
+        ];
+
+        let visible = renderable_occupants(&occupants).collect::<Vec<_>>();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(
+            visible[0].package_id.as_deref(),
+            Some("char.alicia-b@1.0.0")
+        );
     }
 
     #[test]
