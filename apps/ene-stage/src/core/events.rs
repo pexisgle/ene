@@ -57,6 +57,8 @@ pub enum LiveEvent {
         sample_rate: u32,
         abort: bool,
         is_final: bool,
+        soul_id: Option<String>,
+        expression: Option<String>,
     },
     VoiceState {
         state: String,
@@ -284,11 +286,23 @@ fn parse_live_event(value: &Value) -> Option<LiveEvent> {
                 .get("sample_rate")
                 .and_then(Value::as_u64)
                 .unwrap_or(44_100) as u32;
+            let soul_id = value
+                .get("soul_id")
+                .and_then(Value::as_str)
+                .filter(|soul| !soul.is_empty())
+                .map(str::to_owned);
+            let expression = value
+                .get("expression")
+                .and_then(Value::as_str)
+                .filter(|label| !label.is_empty())
+                .map(str::to_owned);
             Some(LiveEvent::AudioChunk {
                 pcm,
                 sample_rate,
                 abort: bool_field(value, "abort"),
                 is_final: bool_field(value, "is_final"),
+                soul_id,
+                expression,
             })
         }
         "voice.state" => Some(LiveEvent::VoiceState {
@@ -435,6 +449,8 @@ mod tests {
                 sample_rate: 16_000,
                 abort: true,
                 is_final: true,
+                soul_id: None,
+                expression: None,
             }
         );
     }
@@ -454,6 +470,31 @@ mod tests {
                 sample_rate: 16_000,
                 abort: false,
                 is_final: false,
+                soul_id: None,
+                expression: None,
+            }
+        );
+    }
+
+    #[test]
+    fn audio_chunk_parses_expression_and_soul() {
+        let event = parse_live_event(&json!({
+            "type": "audio.chunk",
+            "pcm": [0.1],
+            "sample_rate": 24_000,
+            "soul_id": "01j",
+            "expression": "happy"
+        }))
+        .expect("event");
+        assert_eq!(
+            event,
+            LiveEvent::AudioChunk {
+                pcm: vec![0.1],
+                sample_rate: 24_000,
+                abort: false,
+                is_final: false,
+                soul_id: Some("01j".to_owned()),
+                expression: Some("happy".to_owned()),
             }
         );
     }

@@ -28,6 +28,9 @@ pub enum AvatarError {
     Io(#[from] std::io::Error),
 }
 
+const EXPRESSION_CUE_HOLD: f32 = 4.0;
+const EXPRESSION_CUE_FADE: f32 = 0.3;
+
 /// GPU-resident companion avatar drawn directly into the overlay swapchain.
 pub struct CompanionAvatar {
     model: VrmModel,
@@ -40,6 +43,7 @@ pub struct CompanionAvatar {
     motion_idx: usize,
     look_at_target: Option<Vec3>,
     pending_visemes: Option<VisemeWeights>,
+    expression_cue: Option<(String, f32)>,
     blink_accum: f32,
     blinking: f32,
     last_hips: Option<Vec3>,
@@ -72,6 +76,7 @@ impl CompanionAvatar {
             motion_idx: 0,
             look_at_target: None,
             pending_visemes: None,
+            expression_cue: None,
             blink_accum: 0.0,
             blinking: 0.0,
             last_hips: None,
@@ -157,9 +162,58 @@ impl CompanionAvatar {
     }
 
     pub fn apply_expression(&mut self, label: &str) {
+        self.clear_expression_cue();
         let name = ExpressionName::new(label);
         if !self.model.expressions.set_expression(&name, 1.0) {
             tracing::debug!(label, "unknown expression discarded");
+        }
+    }
+
+    pub fn apply_expression_cue(&mut self, label: &str) {
+        if !self.apply_expression_weighted(label, 1.0) {
+            return;
+        }
+        self.expression_cue = Some((label.to_owned(), 0.0));
+    }
+
+    fn apply_expression_weighted(&mut self, label: &str, weight: f32) -> bool {
+        let name = ExpressionName::new(label);
+        if self.model.expressions.set_expression(&name, weight) {
+            true
+        } else {
+            tracing::debug!(label, "unknown expression discarded");
+            false
+        }
+    }
+
+    pub fn tick_expression_cue(&mut self, dt: f32) {
+        let Some((label, elapsed)) = self.expression_cue.as_mut() else {
+            return;
+        };
+        *elapsed += dt;
+        let remaining = EXPRESSION_CUE_HOLD - *elapsed;
+        let label = label.clone();
+        if remaining <= 0.0 {
+            let _ = self
+                .model
+                .expressions
+                .set_expression(&ExpressionName::new(label), 0.0);
+            self.expression_cue = None;
+        } else if remaining < EXPRESSION_CUE_FADE {
+            let weight = (remaining / EXPRESSION_CUE_FADE).clamp(0.0, 1.0);
+            let _ = self
+                .model
+                .expressions
+                .set_expression(&ExpressionName::new(label), weight);
+        }
+    }
+
+    pub fn clear_expression_cue(&mut self) {
+        if let Some((label, _)) = self.expression_cue.take() {
+            let _ = self
+                .model
+                .expressions
+                .set_expression(&ExpressionName::new(&label), 0.0);
         }
     }
 
@@ -377,6 +431,24 @@ impl CompanionAvatar {
         (model_mat, scale)
     }
 
+    /// World-space AABB of the rendered body for hit-testing.
+    ///
+    /// The render matrix subtracts the model center before scaling; applying
+    /// it directly would double-subtract the center. Scaling the normalized
+    /// AABB alone reproduces the same world extent because the normalized
+    /// space is already centered.
+    #[must_use]
+    pub fn world_aabb(&self) -> (Vec3, Vec3) {
+        let (nmin, nmax) = self.model.normalized_aabb();
+        let auto = self.camera.compute_auto_fit_scale(nmin, nmax, 0.9);
+        let scale = auto * self.model_scale * self.model.normalize_scale();
+        let offset = Vec3::from(self.world_offset);
+        (
+            Vec3::from(nmin) * scale + offset,
+            Vec3::from(nmax) * scale + offset,
+        )
+    }
+
     pub(crate) fn push_spring_collider_wires(&self, debug: &mut DebugRenderer) {
         let Some(props) = self.model.spring_bones.as_ref() else {
             return;
@@ -499,6 +571,42 @@ fn discover_motions(dir: &Path) -> Vec<(String, PathBuf)> {
 mod tests {
     use super::*;
 
+    fn try_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::PRIMARY,
+                backend_options: wgpu::BackendOptions::default(),
+                flags: wgpu::InstanceFlags::default(),
+                display: None,
+                memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            });
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: None,
+                    force_fallback_adapter: true,
+                })
+                .await
+                .ok()?;
+            adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("ene-stage-avatar-test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: {
+                        let mut limits =
+                            wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits());
+                        limits.max_bind_groups = adapter.limits().max_bind_groups;
+                        limits
+                    },
+                    memory_hints: wgpu::MemoryHints::default(),
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                    trace: wgpu::Trace::Off,
+                })
+                .await
+                .ok()
+        })
+    }
+
     #[test]
     fn unknown_expression_is_not_stored() {
         let value = serde_json::json!({ "type": "body.posture", "name": "sit" });
@@ -515,6 +623,43 @@ mod tests {
         assert!(
             bytes.windows(8).any(|window| window == b"VRMC_vrm"),
             "minimal fixture must declare VRMC_vrm"
+        );
+    }
+
+    #[test]
+    fn explicit_expression_cancels_pending_auto_cue() {
+        let Some((device, queue)) = try_test_device() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("minimal.vrm");
+        CompanionAvatar::write_default_minimal_vrm(&path).unwrap();
+        // The minimal fixture defines no expressions; inject a synthetic
+        // "happy" definition so cue state transitions are observable without
+        // depending on the license-restricted Alicia asset.
+        let mut avatar =
+            CompanionAvatar::load(&path, &device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb)
+                .unwrap();
+        avatar
+            .model
+            .expressions
+            .weights
+            .insert(ExpressionName::new("happy"), 0.0);
+
+        avatar.apply_expression_cue("happy");
+        assert!(avatar.expression_cue.is_some(), "cue should start");
+
+        avatar.tick_expression_cue(0.1);
+        avatar.apply_expression("happy");
+        assert!(
+            avatar.expression_cue.is_none(),
+            "explicit expression must clear the auto cue"
+        );
+
+        avatar.tick_expression_cue(f32::MAX);
+        assert!(
+            avatar.expression_cue.is_none(),
+            "ticking after explicit override must not resurrect the cue"
         );
     }
 }

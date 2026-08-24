@@ -25,6 +25,14 @@ pub(crate) struct Envelope {
     payload: Value,
 }
 
+impl Envelope {
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn into_payload(self) -> Value {
+        self.payload
+    }
+}
+
 impl CoreBus {
     #[must_use]
     pub fn new(capacity: u32) -> Self {
@@ -35,7 +43,18 @@ impl CoreBus {
     pub fn emit(&self, min_depth: DisplayDepth, payload: Value) {
         drop(self.tx.send(Envelope { min_depth, payload }));
     }
+}
 
+#[cfg(test)]
+pub(crate) fn tests_drain(rx: &mut broadcast::Receiver<Envelope>) -> Vec<Value> {
+    let mut out = Vec::new();
+    while let Ok(envelope) = rx.try_recv() {
+        out.push(envelope.into_payload());
+    }
+    out
+}
+
+impl CoreBus {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<Envelope> {
         self.tx.subscribe()

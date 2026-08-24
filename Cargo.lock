@@ -2457,6 +2457,7 @@ dependencies = [
  "indexmap",
  "notify-rust",
  "parking_lot",
+ "pollster 1.0.1",
  "rfd",
  "rodio",
  "rust-embed",
@@ -2474,6 +2475,7 @@ dependencies = [
  "wgpu",
  "windows-sys 0.61.2",
  "winit",
+ "x11rb",
  "zip",
 ]
 

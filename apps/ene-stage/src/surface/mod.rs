@@ -5,6 +5,8 @@ pub(crate) mod caption;
 mod chat;
 mod spotlight;
 
+use std::collections::BTreeMap;
+
 use ene_api::{GreetingView, HistoryResponse, MessageMode};
 
 use crate::detail::DetailTab;
@@ -34,7 +36,7 @@ pub enum SurfaceAction {
     AnswerQuestion,
     OpenDetail(DetailTab),
     Quit,
-    PersistCharacterPos,
+    PersistBodyPosition { soul_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -69,8 +71,9 @@ pub struct SurfaceUiState {
     pub voice_state: String,
     pub exclusive_notice: String,
     pub quit: bool,
-    pub character_pos: [f32; 2],
-    pub dragging_character: bool,
+    pub positions: BTreeMap<String, [f32; 2]>,
+    pub drag: Option<crate::drag::BodyDrag>,
+    pub hover_soul: Option<String>,
     pub pending_actions: Vec<SurfaceAction>,
     pub(crate) new_session_inflight: bool,
     pub message_mode: MessageMode,
@@ -105,8 +108,9 @@ impl Default for SurfaceUiState {
             voice_state: String::new(),
             exclusive_notice: String::new(),
             quit: false,
-            character_pos: [0.78, 0.5],
-            dragging_character: false,
+            positions: BTreeMap::new(),
+            drag: None,
+            hover_soul: None,
             pending_actions: Vec::new(),
             new_session_inflight: false,
             message_mode: MessageMode::Prompt,

@@ -29,6 +29,7 @@ egui-winit = "0.35"
 glam = { version = "0.33", features = ["bytemuck"] }
 gltf = { version = "1.4", default-features = false }
 image = { version = "0.25", default-features = false }
+pollster = "1.0"
 wgpu = "29"
 rustfft = "6"
 
