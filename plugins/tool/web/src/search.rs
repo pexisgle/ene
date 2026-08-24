@@ -163,11 +163,10 @@ fn collapse(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::credentials::with_credentials;
     use super::{
         SearchBackend, WebCredentials, catalog, parse_arxiv_atom, parse_backend, require_available,
     };
-    use super::credentials::with_credentials;
-    use serde_json::json;
 
     fn creds(tavily: bool, exa: bool) -> WebCredentials {
         WebCredentials {

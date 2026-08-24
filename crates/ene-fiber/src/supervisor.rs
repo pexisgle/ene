@@ -17,7 +17,7 @@ use ene_plugin_ipc::{
 use ene_provider_assets::CatalogRegistry;
 use ene_registry::{
     BuiltinExecutor, BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource,
-    definitions_for, with_http_fetch,
+    definitions_for, with_http_fetch, with_post_json,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -223,15 +223,27 @@ impl ToolInvoke for HostWebInvoker {
         }
         let uid = self.uid;
         let inner = Arc::clone(&self.inner);
-        with_http_fetch(
-            move |url| {
-                inner
+        let post_inner = Arc::clone(&inner);
+        with_post_json(
+            move |url, body, bearer| {
+                post_inner
                     .broker
                     .lock()
-                    .net_fetch(uid, url)
+                    .net_post_json(uid, url, body, Some(bearer))
                     .map_err(|err| err.to_string())
             },
-            || BuiltinExecutor.execute(name, &args),
+            || {
+                with_http_fetch(
+                    move |url| {
+                        inner
+                            .broker
+                            .lock()
+                            .net_fetch(uid, url)
+                            .map_err(|err| err.to_string())
+                    },
+                    || BuiltinExecutor.execute(name, &args),
+                )
+            },
         )
     }
 }

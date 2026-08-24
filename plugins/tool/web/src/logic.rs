@@ -1,11 +1,10 @@
 use ene_plugin_ipc::ToolSpecWire;
-use ene_registry::{arg_str, spec, try_host_fetch};
+use ene_registry::{arg_str, spec, try_host_fetch, try_host_post_json};
 use serde_json::{Value, json};
 use std::net::IpAddr;
 use url::Url;
 
 #[path = "credentials.rs"]
-#[cfg_attr(not(test), expect(dead_code, reason = "host-side injection lands with the vault wiring"))]
 mod credentials;
 #[path = "html.rs"]
 mod html;
@@ -240,8 +239,8 @@ fn rows_from_payload(
 
 #[cfg(test)]
 mod backend_tests {
-    use super::execute;
     use super::credentials::{WebCredentials, with_credentials};
+    use super::execute;
     use ene_registry::with_post_json;
     use serde_json::json;
 
@@ -359,7 +358,7 @@ fn host_post_json(raw: &str, body: &Value) -> Result<Value, String> {
 
 fn host_post_json_with_bearer(raw: &str, body: &Value, bearer: &str) -> Result<Value, String> {
     deny_ssrf(raw)?;
-    ene_registry::try_host_post_json(raw, body, bearer)
+    try_host_post_json(raw, body, bearer)
         .unwrap_or_else(|| Err("web tools require the host net broker".to_owned()))
 }
 
