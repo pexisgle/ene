@@ -5,25 +5,27 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_RUSTC_WRAPPER: ""
 
 jobs:
-  release:
-    name: Build and publish release
+  build:
+    name: Build release
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: Swatinem/rust-cache@v2
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/magic-nix-cache-action@55718cd9ebf1737a061487d5ada21abf31e99a98 # main
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: "nix develop --command {0}"
 
@@ -76,14 +78,45 @@ jobs:
             --config cliff.toml \
             --output CHANGELOG.release.md
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: "ene v${{ env.VERSION }}"
-          body_path: CHANGELOG.release.md
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            dist/ene-ctl-${{ env.VERSION }}-linux-x86_64.tar.gz
-            dist/ene-stage_${{ env.VERSION }}_amd64.deb
-            dist/SHA256SUMS
+          name: release-artifacts
+          if-no-files-found: error
+          path: |
+            dist
+            CHANGELOG.release.md
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download release artifacts
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name release-artifacts --dir release-artifacts
+
+      - name: Create GitHub Release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          release_args=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "ene v${version}" \
+            --notes-file release-artifacts/CHANGELOG.release.md \
+            --verify-tag \
+            "${release_args[@]}" \
+            "release-artifacts/dist/ene-ctl-${version}-linux-x86_64.tar.gz" \
+            "release-artifacts/dist/ene-stage_${version}_amd64.deb" \
+            release-artifacts/dist/SHA256SUMS

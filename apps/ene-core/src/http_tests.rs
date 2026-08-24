@@ -4,12 +4,13 @@ use base64::Engine;
 use chrono::TimeZone;
 use ene_api::{
     AnswerJobRequest, AnswerQuestionRequest, ApiClient, ClaimResourceRequest,
-    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse, MessageMode,
-    MessageRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
+    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
+    MemoryCandidateDecision, MessageMode, MessageRequest, ResolveMemoryCandidateRequest,
+    ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
 };
 use ene_companion::{
-    CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, ScriptedClassify,
-    content_digest, install_archive, pack_archive,
+    CandidateId, CompanionStore, MemoryCandidate, MemoryKind, MemoryScope, MemorySource, NewMemory,
+    ScriptedClassify, content_digest, install_archive, pack_archive,
 };
 use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
@@ -835,6 +836,108 @@ async fn job_question_answer_reaches_mailbox() {
 }
 
 #[tokio::test]
+async fn answering_the_last_question_emits_question_resolved() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let mut surface = client.events("surface", Some(&session.id)).await.unwrap();
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a city");
+    core.host().question(job.id, "which city?").unwrap();
+    let asked_type = ene_api::QUESTION_ASKED_EVENT;
+    let resolved_type = ene_api::QUESTION_RESOLVED_EVENT;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, surface.recv_json()).await {
+            Ok(Ok(Some(value))) if value["type"] == asked_type => break,
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None) | Err(_)) | Err(_) => {
+                panic!("live bus must emit {asked_type}");
+            }
+        }
+    }
+    client
+        .answer_job(
+            &job.id.to_string(),
+            &AnswerJobRequest {
+                text: "Tokyo".into(),
+                answers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let resolved = wait_event_type(&mut surface, resolved_type, Duration::from_secs(3)).await;
+    assert_eq!(resolved["id"], job.id.to_string());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn partial_answer_does_not_emit_question_resolved() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let mut surface = client.events("surface", Some(&session.id)).await.unwrap();
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a trip");
+    core.host().question(job.id, "which city?").unwrap();
+    core.host().question(job.id, "how many days?").unwrap();
+    let asked_type = ene_api::QUESTION_ASKED_EVENT;
+    let resolved_type = ene_api::QUESTION_RESOLVED_EVENT;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, surface.recv_json()).await {
+            Ok(Ok(Some(value))) if value["type"] == asked_type => break,
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None) | Err(_)) | Err(_) => {
+                panic!("live bus must emit {asked_type}");
+            }
+        }
+    }
+    let questions = core.host().open_questions(job.id).unwrap();
+    let first_id = questions[0].question_id().to_string();
+    client
+        .answer_question(
+            &job.id.to_string(),
+            &first_id,
+            &AnswerQuestionRequest {
+                text: "Tokyo".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(core.host().open_questions(job.id).unwrap().len(), 1);
+    let window = Duration::from_millis(300);
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, surface.recv_json()).await {
+            Ok(Ok(Some(event))) => {
+                assert_ne!(
+                    event.get("type").and_then(serde_json::Value::as_str),
+                    Some(resolved_type)
+                );
+            }
+            _ => break,
+        }
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn identified_job_question_answer_reaches_mailbox() {
     let (_dir, client, core, server) = boot_server().await;
     let soul = core.occupants()[0].0;
@@ -1231,6 +1334,75 @@ async fn http_forget_memory_is_audited() {
         blob.contains("forget") || blob.contains(&memory.id.to_string()),
         "forget must be audited: {blob}"
     );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn http_memory_candidate_resolution_edits_and_rejects_stale_writes() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul_id = ene_session::SoulId::from_str(&souls.items[0].id).unwrap();
+    let candidate = MemoryCandidate {
+        id: CandidateId::new(),
+        soul_id,
+        kind: MemoryKind::Semantic,
+        title: "candidate title".into(),
+        content: "candidate content".into(),
+        scope: MemoryScope::Private,
+        confidence: 0.42,
+        salience: 0.7,
+        sensitive: true,
+        expires_at: None,
+    };
+    core.companions().insert_candidate(&candidate).unwrap();
+    let pending = client
+        .list_pending_memories(&souls.items[0].id)
+        .await
+        .unwrap();
+    assert!((pending.items[0].confidence - 0.42).abs() < f32::EPSILON);
+    assert!(pending.items[0].sensitive);
+    let request = ResolveMemoryCandidateRequest {
+        decision: MemoryCandidateDecision::Accept,
+        title: Some("edited title".into()),
+        content: Some("edited content".into()),
+        kind: Some("preference".into()),
+        scope: Some("shared".into()),
+    };
+    let accepted = client
+        .resolve_memory_candidate(&candidate.id.to_string(), &request)
+        .await
+        .unwrap();
+    let memory = accepted.memory.expect("accepted candidate creates memory");
+    assert_eq!(accepted.status, "accepted");
+    assert_eq!(memory.title, "edited title");
+    assert_eq!(memory.scope, "shared");
+    let history = client
+        .list_memory_journal(&souls.items[0].id)
+        .await
+        .unwrap();
+    assert!(
+        history
+            .items
+            .iter()
+            .any(|entry| entry.action == "candidate_accepted")
+    );
+    let stale = client
+        .resolve_memory_candidate(
+            &candidate.id.to_string(),
+            &ResolveMemoryCandidateRequest {
+                decision: MemoryCandidateDecision::Reject,
+                title: None,
+                content: None,
+                kind: None,
+                scope: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale,
+        ene_api::ApiError::Problem { status: 409, .. }
+    ));
     server.shutdown().await;
 }
 

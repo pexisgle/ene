@@ -492,9 +492,26 @@ pub(crate) fn dependency_missing(backend: &'static str, package: &'static str) -
         "code": "dependency_missing",
         "backend": backend,
         "package": package,
-        "message": format!("install {package} and ensure it is executable on PATH"),
+        "message": format!(
+            "install {package} and ensure it is executable on PATH; for example: {}",
+            install_hint(package)
+        ),
     })
     .to_string()
+}
+
+fn install_hint(package: &str) -> String {
+    match package {
+        "grim" => "sudo apt install grim / sudo dnf install grim / pacman -S grim".to_owned(),
+        "import" => {
+            "sudo apt install imagemagick / sudo dnf install ImageMagick / pacman -S imagemagick"
+                .to_owned()
+        }
+        "gnome-screenshot" => "sudo apt install gnome-screenshot (GNOME)".to_owned(),
+        "spectacle" => "sudo apt install spectacle / sudo dnf install spectacle (KDE)".to_owned(),
+        "scrot" => "sudo apt install scrot / sudo dnf install scrot / pacman -S scrot".to_owned(),
+        _ => format!("install {package} via your distribution's package manager"),
+    }
 }
 
 #[cfg(test)]
@@ -503,6 +520,8 @@ mod tests {
     #[cfg(unix)]
     use super::screenshot_cli_backend;
     use super::{DesktopKind, PlatformCaps, SessionKind, window_availability_for_session_with};
+    #[cfg(test)]
+    use super::{dependency_missing, install_hint};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -655,5 +674,21 @@ mod tests {
 
         assert!(!caps.available);
         assert_eq!(caps.backend, "none");
+    }
+
+    #[test]
+    fn missing_dependency_error_includes_distro_install_hint() {
+        let err = dependency_missing("grim", "grim");
+        let value: serde_json::Value = serde_json::from_str(&err).unwrap();
+        assert_eq!(value["code"], "dependency_missing");
+        assert_eq!(value["package"], "grim");
+        let message = value["message"].as_str().unwrap();
+        assert!(message.contains("apt install grim"), "{message}");
+        assert!(message.contains("dnf install grim"), "{message}");
+    }
+
+    #[test]
+    fn imagemagick_import_maps_to_imagemagick_package() {
+        assert!(install_hint("import").contains("imagemagick"));
     }
 }

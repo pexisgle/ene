@@ -117,6 +117,9 @@ Several open questions on one job are merged with `combine_pending_questions`
 before emit; a single `text` answers every still-open question on that job.
 Unanswered questions older than `question_timeout_hours` (default 24h) are
 closed by a daemon tick that writes an `assumption` mailbox note.
+When every open question on that job is gone — answered from any client or
+closed by the timeout tick — core emits `question.resolved` (`id` is the job /
+delegation id) so clients can close their ask-user form.
 
 ## Sessions
 

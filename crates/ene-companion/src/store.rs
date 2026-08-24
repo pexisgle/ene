@@ -2,7 +2,8 @@ use crate::affect::{AffectBaseline, AffectState};
 use crate::error::CompanionError;
 use crate::ids::{CandidateId, MemoryId};
 use crate::memory::{
-    JournalAction, MemoryKind, MemoryRecord, MemoryScope, MemorySource, NewMemory, RecalledMemory,
+    CandidateResolution, JournalAction, MemoryJournalEntry, MemoryKind, MemoryRecord, MemoryScope,
+    MemorySource, NewMemory, RecalledMemory,
 };
 use crate::soul::{NewSoul, Soul, parse_skill_refs};
 use chrono::Utc;
@@ -790,12 +791,177 @@ impl CompanionStore {
             .map_err(CompanionError::from)
     }
 
-    pub fn resolve_candidate(&self, id: CandidateId, status: &str) -> Result<(), CompanionError> {
-        self.conn.lock().execute(
-            "UPDATE memory_candidates SET status = ?1 WHERE id = ?2",
-            params![status, id.to_string()],
+    pub fn resolve_candidate(
+        &self,
+        id: CandidateId,
+        resolution: CandidateResolution,
+    ) -> Result<Option<MemoryRecord>, CompanionError> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let candidate = tx
+            .query_row(
+                "SELECT soul_id, kind, title, content, scope, confidence, salience, sensitive, expires_at
+                 FROM memory_candidates WHERE id = ?1 AND status = 'pending'",
+                params![id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, f32>(5)?,
+                        row.get::<_, f32>(6)?,
+                        row.get::<_, i32>(7)? != 0,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            soul_raw,
+            kind_raw,
+            title_raw,
+            content_raw,
+            scope_raw,
+            confidence,
+            salience,
+            sensitive,
+            expires_at,
+        )) = candidate
+        else {
+            return Err(CompanionError::CandidateConflict(id.to_string()));
+        };
+        let soul_id = SoulId::from_str(&soul_raw)
+            .map_err(|err| CompanionError::InvalidId(err.to_string()))?;
+        let original = serde_json::json!({
+            "title": title_raw,
+            "content": content_raw,
+            "kind": kind_raw,
+            "scope": scope_raw,
+        });
+
+        if !resolution.accept {
+            let changed = tx.execute(
+                "UPDATE memory_candidates SET status = 'rejected'
+                 WHERE id = ?1 AND status = 'pending'",
+                params![id.to_string()],
+            )?;
+            if changed == 0 {
+                return Err(CompanionError::CandidateConflict(id.to_string()));
+            }
+            insert_journal_tx(
+                &tx,
+                None,
+                soul_id,
+                JournalAction::CandidateRejected,
+                &serde_json::json!({
+                    "candidate_id": id.to_string(),
+                    "decision": "rejected",
+                    "original": original,
+                }),
+            )?;
+            tx.commit()?;
+            return Ok(None);
+        }
+
+        let title = resolution.title.unwrap_or(title_raw).trim().to_owned();
+        let content = resolution.content.unwrap_or(content_raw).trim().to_owned();
+        if title.is_empty() {
+            return Err(CompanionError::InvalidCandidate(
+                "candidate title must not be empty".to_owned(),
+            ));
+        }
+        if content.is_empty() {
+            return Err(CompanionError::InvalidCandidate(
+                "candidate content must not be empty".to_owned(),
+            ));
+        }
+        let kind = resolution
+            .kind
+            .as_deref()
+            .map_or_else(|| MemoryKind::parse(&kind_raw), MemoryKind::parse);
+        let scope = resolution
+            .scope
+            .as_deref()
+            .map_or_else(|| MemoryScope::parse(&scope_raw), MemoryScope::parse);
+        let memory_id = MemoryId::new();
+        let now = Utc::now().to_rfc3339();
+        let source = if scope == MemoryScope::Shared {
+            MemorySource::Shared
+        } else {
+            MemorySource::Extraction
+        };
+        tx.execute(
+            "INSERT INTO memories (
+                id, soul_id, scope, kind, title, content, confidence, salience,
+                source, source_seq, created_at, last_access, access_count, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?10, 0, ?11)",
+            params![
+                memory_id.to_string(),
+                soul_id.to_string(),
+                scope.as_str(),
+                kind.as_str(),
+                title,
+                content,
+                confidence,
+                salience,
+                source.as_str(),
+                now,
+                expires_at,
+            ],
         )?;
-        Ok(())
+        tx.execute(
+            "INSERT INTO mem_fts (id, title, content) VALUES (?1, ?2, ?3)",
+            params![memory_id.to_string(), title, content],
+        )?;
+        let changed = tx.execute(
+            "UPDATE memory_candidates SET status = 'accepted'
+             WHERE id = ?1 AND status = 'pending'",
+            params![id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(CompanionError::CandidateConflict(id.to_string()));
+        }
+        let accepted = serde_json::json!({
+            "title": title,
+            "content": content,
+            "kind": kind.as_str(),
+            "scope": scope.as_str(),
+        });
+        insert_journal_tx(
+            &tx,
+            Some(memory_id),
+            soul_id,
+            JournalAction::CandidateAccepted,
+            &serde_json::json!({
+                "candidate_id": id.to_string(),
+                "decision": "accepted",
+                "original": original,
+                "accepted": accepted,
+                "sensitive": sensitive,
+            }),
+        )?;
+        tx.commit()?;
+        Ok(Some(MemoryRecord {
+            id: memory_id,
+            soul_id,
+            scope,
+            kind,
+            title,
+            content,
+            confidence,
+            salience,
+            source,
+            source_seq: None,
+            created_at: now.clone(),
+            last_access: now,
+            access_count: 0,
+            superseded_by: None,
+            expires_at,
+            schedule_id: None,
+            forgotten: false,
+        }))
     }
 
     pub fn journal(
@@ -805,20 +971,40 @@ impl CompanionStore {
         action: JournalAction,
         payload: &serde_json::Value,
     ) -> Result<(), CompanionError> {
-        let blob =
-            serde_json::to_string(payload).map_err(|err| CompanionError::codec(err.to_string()))?;
-        self.conn.lock().execute(
-            "INSERT INTO memory_journal (ts, memory_id, soul_id, action, payload)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                Utc::now().to_rfc3339(),
-                memory_id.map(|id| id.to_string()),
-                soul_id.to_string(),
-                action.as_str(),
-                blob,
-            ],
+        insert_journal_tx(&self.conn.lock(), memory_id, soul_id, action, payload)
+    }
+
+    pub fn list_journal(&self, soul_id: SoulId) -> Result<Vec<MemoryJournalEntry>, CompanionError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, memory_id, soul_id, action, payload
+             FROM memory_journal WHERE soul_id = ?1 ORDER BY seq DESC",
         )?;
-        Ok(())
+        let rows = stmt.query_map(params![soul_id.to_string()], |row| {
+            let payload = serde_json::from_str(&row.get::<_, String>(5)?).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            let memory_id = row
+                .get::<_, Option<String>>(2)?
+                .map(|raw| MemoryId::from_str(&raw).map_err(|err| sql_id(2, err)))
+                .transpose()?;
+            let row_soul =
+                SoulId::from_str(&row.get::<_, String>(3)?).map_err(|err| sql_id(3, err))?;
+            Ok(MemoryJournalEntry {
+                seq: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                ts: row.get(1)?,
+                memory_id,
+                soul_id: row_soul,
+                action: row.get(4)?,
+                payload,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(CompanionError::from)
     }
 
     pub fn journal_len(&self) -> Result<u64, CompanionError> {
@@ -1034,6 +1220,29 @@ fn sql_id(idx: usize, err: impl std::fmt::Display) -> rusqlite::Error {
         rusqlite::types::Type::Text,
         Box::new(std::io::Error::other(err.to_string())),
     )
+}
+
+fn insert_journal_tx(
+    conn: &Connection,
+    memory_id: Option<MemoryId>,
+    soul_id: SoulId,
+    action: JournalAction,
+    payload: &serde_json::Value,
+) -> Result<(), CompanionError> {
+    let blob =
+        serde_json::to_string(payload).map_err(|err| CompanionError::codec(err.to_string()))?;
+    conn.execute(
+        "INSERT INTO memory_journal (ts, memory_id, soul_id, action, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            Utc::now().to_rfc3339(),
+            memory_id.map(|id| id.to_string()),
+            soul_id.to_string(),
+            action.as_str(),
+            blob,
+        ],
+    )?;
+    Ok(())
 }
 
 fn lexical_score(query: &str, title: &str, content: &str) -> f32 {

@@ -111,6 +111,7 @@ pub fn run() -> Result<(), AppError> {
         last_tick: Instant::now(),
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
+        approval_needs_reveal: false,
     };
     app.surface.character_pos = [app.settings.character_x, app.settings.character_y];
     app.surface.history = app.session.history();
@@ -167,6 +168,7 @@ struct StageApp {
     last_tick: Instant,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
+    approval_needs_reveal: bool,
 }
 
 impl StageApp {
@@ -223,6 +225,7 @@ impl StageApp {
             last_tick: Instant::now(),
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
+            approval_needs_reveal: false,
         }
     }
 
@@ -376,6 +379,7 @@ impl StageApp {
                     return;
                 }
                 self.surface.pending_approval = None;
+                self.approval_needs_reveal = false;
                 if let Err(err) = result {
                     self.surface.status = err;
                 }
@@ -455,21 +459,57 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::ListMemories(result) => match result {
-                Ok(items) => self.detail.memories = items,
-                Err(err) => self.detail.core_status = err,
-            },
-            AsyncOutcome::ListPendingMemories(result) => match result {
-                Ok(items) => self.detail.pending_memories = items,
-                Err(err) => self.detail.core_status = err,
-            },
-            AsyncOutcome::ResolveMemory { result, .. }
-            | AsyncOutcome::DeleteMemory { result, .. }
-            | AsyncOutcome::CompleteMemory { result, .. } => {
-                if result.is_ok() {
-                    self.request_memories();
-                } else if let Err(err) = result {
-                    self.detail.core_status = err;
+            AsyncOutcome::ListMemories { soul_id, result } => {
+                if soul_id != self.session.soul_id() {
+                    return;
+                }
+                match result {
+                    Ok(items) => self.detail.memories = items,
+                    Err(err) => self.detail.core_status = err,
+                }
+            }
+            AsyncOutcome::ListPendingMemories { soul_id, result } => {
+                if soul_id != self.session.soul_id() {
+                    return;
+                }
+                match result {
+                    Ok(items) => {
+                        self.detail.sync_candidate_drafts(&items);
+                        self.detail.pending_memories = items;
+                    }
+                    Err(err) => self.detail.core_status = err,
+                }
+            }
+            AsyncOutcome::ListMemoryJournal { soul_id, result } => {
+                if soul_id != self.session.soul_id() {
+                    return;
+                }
+                match result {
+                    Ok(items) => self.detail.memory_journal = items,
+                    Err(err) => self.detail.core_status = err,
+                }
+            }
+            AsyncOutcome::ResolveMemory {
+                soul_id, result, ..
+            }
+            | AsyncOutcome::DeleteMemory {
+                soul_id, result, ..
+            }
+            | AsyncOutcome::CompleteMemory {
+                soul_id, result, ..
+            } => {
+                if soul_id != self.session.soul_id() {
+                    return;
+                }
+                match result {
+                    Ok(()) => self.request_memories(),
+                    Err(err) => {
+                        let stale_candidate = err.contains("candidate_conflict");
+                        self.detail.core_status = err;
+                        if stale_candidate {
+                            self.request_memories();
+                        }
+                    }
                 }
             }
             AsyncOutcome::LoadSoul(result) => match result {
@@ -738,6 +778,7 @@ impl StageApp {
                     self.surface.greeting_status.clear();
                     self.surface.streaming_text.clear();
                     self.surface.pending_approval = None;
+                    self.approval_needs_reveal = false;
                     self.surface.pending_question = None;
                     self.surface.status = i18n::fl("chat-new-session-ready");
                     self.request_history_refresh();
@@ -775,14 +816,29 @@ impl StageApp {
         ) {
             (Some(id), Some(item)) if id == item.id => {}
             (_, Some(item)) => {
-                self.surface.pending_approval = Some(surface::PendingApproval {
+                self.set_pending_approval(surface::PendingApproval {
                     id: item.id.clone(),
                     tool: item.tool.clone(),
                     target: item.target.clone(),
                 });
-                self.surface.chat_open = true;
             }
-            (_, None) => self.surface.pending_approval = None,
+            (_, None) => {
+                self.surface.pending_approval = None;
+                self.approval_needs_reveal = false;
+            }
+        }
+    }
+
+    fn set_pending_approval(&mut self, approval: surface::PendingApproval) {
+        let is_new = self
+            .surface
+            .pending_approval
+            .as_ref()
+            .is_none_or(|current| current.id != approval.id);
+        self.surface.pending_approval = Some(approval);
+        if is_new {
+            self.surface.chat_open = true;
+            self.approval_needs_reveal = true;
         }
     }
 
@@ -807,16 +863,41 @@ impl StageApp {
     }
 
     fn request_memories(&self) {
-        let soul_id = self.session.soul_id().to_owned();
+        let soul_id_memories = self.session.soul_id().to_owned();
         let client = Arc::clone(&self.client);
         self.spawn(async move {
-            AsyncOutcome::ListMemories(
-                client
-                    .list_memories(&soul_id, None)
+            AsyncOutcome::ListMemories {
+                soul_id: soul_id_memories.clone(),
+                result: client
+                    .list_memories(&soul_id_memories, None)
                     .await
                     .map(|page| page.items)
                     .map_err(|err| err.to_string()),
-            )
+            }
+        });
+        let soul_id_pending = self.session.soul_id().to_owned();
+        let client_pending = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::ListPendingMemories {
+                soul_id: soul_id_pending.clone(),
+                result: client_pending
+                    .list_pending_memories(&soul_id_pending)
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            }
+        });
+        let soul_id_journal = self.session.soul_id().to_owned();
+        let client_journal = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::ListMemoryJournal {
+                soul_id: soul_id_journal.clone(),
+                result: client_journal
+                    .list_memory_journal(&soul_id_journal)
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            }
         });
     }
 
@@ -1182,92 +1263,107 @@ impl StageApp {
 
     fn drain_surface_events(&mut self) {
         while let Ok(event) = self.feeds.surface.try_recv() {
-            match event {
-                LiveEvent::TextDelta { text, .. } => {
-                    self.surface
-                        .apply_text_delta(&text, self.settings.caption_enabled);
-                    self.sync_caption_window();
-                }
-                LiveEvent::SessionEvent { kind, text } => {
-                    if kind == "turn/end" || kind.ends_with("/end") {
-                        self.session.clear_turn();
-                        self.request_history_refresh();
-                        self.surface.on_turn_ended();
-                        self.sync_caption_window();
-                        if !text.is_empty() {
-                            let mapped = map_turn_err(&text);
-                            if auth_failure(&mapped) || auth_failure(&text) {
-                                self.detail.core_status = i18n::fl("chat-auth-failed");
-                            }
-                            mapped.clone_into(&mut self.surface.status);
-                        }
-                    }
-                    tracing::debug!(kind, text, "surface session event");
-                }
-                LiveEvent::ApprovalAsked { id, tool, target } => {
-                    self.surface.pending_approval =
-                        Some(surface::PendingApproval { id, tool, target });
-                    self.surface.chat_open = true;
-                }
-                LiveEvent::ApprovalResolved { .. } => self.surface.pending_approval = None,
-                LiveEvent::QuestionAsked { id, prompt } => {
-                    self.surface.pending_question = Some(surface::PendingQuestion { id, prompt });
-                    self.surface.chat_open = true;
-                }
-                LiveEvent::NotifyHint { title, body } => {
-                    if let Err(err) = show_notification(&title, &body, "ene-stage") {
-                        tracing::debug!(error = %err, "notification failed");
-                    }
-                }
-                LiveEvent::BodyCommand { value } => {
-                    let Some(overlay) = self.overlay.as_mut() else {
-                        continue;
-                    };
-                    let session_soul = self.session.soul_id().to_owned();
-                    let event_soul = value.get("soul_id").and_then(serde_json::Value::as_str);
-                    let avatar = match event_soul {
-                        Some(soul) => overlay.avatar_mut(soul),
-                        None => overlay.avatar_or_first_mut(&session_soul),
-                    };
-                    if let Some(avatar) = avatar {
-                        avatar.apply_body_event(&value);
-                    }
-                }
-                LiveEvent::AudioChunk {
-                    pcm,
-                    sample_rate,
-                    abort,
-                    ..
-                } => {
-                    if abort {
-                        self.abort_audio_playback();
-                    } else if let Err(err) = self.audio.play_pcm(&pcm, sample_rate) {
-                        tracing::debug!(error = %err, "audio playback failed");
-                    }
-                }
-                LiveEvent::VoiceState { state, barge_in } => {
-                    self.surface.voice_state.clone_from(&state);
-                    if barge_in {
-                        tracing::debug!("core barge-in (voice.state)");
-                    }
-                }
-                LiveEvent::ExclusiveHeld {
-                    resource,
-                    client_id,
-                } => {
-                    if client_id != "stage" && !client_id.is_empty() {
-                        self.surface.exclusive_notice = format!("{resource}: {client_id}");
-                    }
-                }
-                LiveEvent::Disconnected => {
-                    self.surface.status = i18n::fl("status-disconnected");
-                }
-                LiveEvent::ThinkingDelta { .. }
-                | LiveEvent::InnerMessage { .. }
-                | LiveEvent::ToolCall { .. }
-                | LiveEvent::AffectState { .. }
-                | LiveEvent::JobReport { .. } => {}
+            self.apply_live_event(event);
+        }
+    }
+
+    fn apply_live_event(&mut self, event: LiveEvent) {
+        match event {
+            LiveEvent::TextDelta { text, .. } => {
+                self.surface
+                    .apply_text_delta(&text, self.settings.caption_enabled);
+                self.sync_caption_window();
             }
+            LiveEvent::SessionEvent { kind, text } => {
+                if kind == "turn/end" || kind.ends_with("/end") {
+                    self.session.clear_turn();
+                    self.request_history_refresh();
+                    self.surface.on_turn_ended();
+                    self.sync_caption_window();
+                    if !text.is_empty() {
+                        let mapped = map_turn_err(&text);
+                        if auth_failure(&mapped) || auth_failure(&text) {
+                            self.detail.core_status = i18n::fl("chat-auth-failed");
+                        }
+                        mapped.clone_into(&mut self.surface.status);
+                    }
+                }
+                tracing::debug!(kind, text, "surface session event");
+            }
+            LiveEvent::ApprovalAsked { id, tool, target } => {
+                self.set_pending_approval(surface::PendingApproval { id, tool, target });
+            }
+            LiveEvent::ApprovalResolved { .. } => {
+                self.surface.pending_approval = None;
+                self.approval_needs_reveal = false;
+            }
+            LiveEvent::QuestionAsked { id, prompt } => {
+                self.surface.pending_question = Some(surface::PendingQuestion { id, prompt });
+                self.surface.chat_open = true;
+            }
+            LiveEvent::QuestionResolved { id } => {
+                if self
+                    .surface
+                    .pending_question
+                    .as_ref()
+                    .is_some_and(|question| question.id == id)
+                {
+                    self.surface.pending_question = None;
+                }
+            }
+            LiveEvent::NotifyHint { title, body } => {
+                if let Err(err) = show_notification(&title, &body, "ene-stage") {
+                    tracing::debug!(error = %err, "notification failed");
+                }
+            }
+            LiveEvent::BodyCommand { value } => {
+                let Some(overlay) = self.overlay.as_mut() else {
+                    return;
+                };
+                let session_soul = self.session.soul_id().to_owned();
+                let event_soul = value.get("soul_id").and_then(serde_json::Value::as_str);
+                let avatar = match event_soul {
+                    Some(soul) => overlay.avatar_mut(soul),
+                    None => overlay.avatar_or_first_mut(&session_soul),
+                };
+                if let Some(avatar) = avatar {
+                    avatar.apply_body_event(&value);
+                }
+            }
+            LiveEvent::AudioChunk {
+                pcm,
+                sample_rate,
+                abort,
+                ..
+            } => {
+                if abort {
+                    self.abort_audio_playback();
+                } else if let Err(err) = self.audio.play_pcm(&pcm, sample_rate) {
+                    tracing::debug!(error = %err, "audio playback failed");
+                }
+            }
+            LiveEvent::VoiceState { state, barge_in } => {
+                self.surface.voice_state.clone_from(&state);
+                if barge_in {
+                    tracing::debug!("core barge-in (voice.state)");
+                }
+            }
+            LiveEvent::ExclusiveHeld {
+                resource,
+                client_id,
+            } => {
+                if client_id != "stage" && !client_id.is_empty() {
+                    self.surface.exclusive_notice = format!("{resource}: {client_id}");
+                }
+            }
+            LiveEvent::Disconnected => {
+                self.surface.status = i18n::fl("status-disconnected");
+            }
+            LiveEvent::ThinkingDelta { .. }
+            | LiveEvent::InnerMessage { .. }
+            | LiveEvent::ToolCall { .. }
+            | LiveEvent::AffectState { .. }
+            | LiveEvent::JobReport { .. } => {}
         }
     }
 
@@ -1400,9 +1496,11 @@ impl StageApp {
         self.surface.greeting_inflight = false;
         self.surface.greeting_status.clear();
         self.surface.pending_approval = None;
+        self.approval_needs_reveal = false;
         self.surface.pending_question = None;
         self.detail.next_activation_generation();
         self.detail.invalidate_character();
+        self.detail.invalidate_memory();
         if self
             .overlay
             .as_ref()
@@ -1423,7 +1521,9 @@ impl StageApp {
         self.surface.streaming_text.clear();
         self.surface.turn_active = false;
         self.surface.pending_approval = None;
+        self.approval_needs_reveal = false;
         self.surface.pending_question = None;
+        self.detail.invalidate_memory();
     }
 
     fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
@@ -1623,6 +1723,9 @@ impl StageApp {
     }
 
     fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {
+        if std::mem::take(&mut self.approval_needs_reveal) {
+            self.open_chat(event_loop);
+        }
         if chat_window_action(self.surface.chat_open, self.chat.is_some())
             == ChatWindowAction::Create
         {
@@ -2041,9 +2144,10 @@ mod tests {
         AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
         overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
     };
+    use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
     use crate::surface::{PendingApproval, PendingQuestion};
-    use ene_api::HistoryResponse;
+    use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
     use std::sync::Arc;
 
     #[test]
@@ -2117,6 +2221,26 @@ mod tests {
     }
 
     #[test]
+    fn a_new_approval_schedules_one_chat_reveal() {
+        let mut app = StageApp::new_for_test();
+        app.surface.chat_open = false;
+        let approval = PendingApproval {
+            id: "approval".to_owned(),
+            tool: "fs.read".to_owned(),
+            target: "/tmp/file".to_owned(),
+        };
+
+        app.set_pending_approval(approval.clone());
+
+        assert!(app.surface.chat_open);
+        assert!(std::mem::take(&mut app.approval_needs_reveal));
+
+        app.set_pending_approval(approval);
+
+        assert!(!app.approval_needs_reveal);
+    }
+
+    #[test]
     fn retarget_clears_session_scoped_questions_and_approvals() {
         let mut app = StageApp::new_for_test();
         app.surface.pending_approval = Some(PendingApproval {
@@ -2139,6 +2263,136 @@ mod tests {
         assert_eq!(app.session.session_id(), "new-session");
         assert!(app.surface.pending_approval.is_none());
         assert!(app.surface.pending_question.is_none());
+    }
+
+    #[test]
+    fn question_resolved_closes_only_the_matching_question() {
+        let mut app = StageApp::new_for_test();
+        app.surface.pending_question = Some(PendingQuestion {
+            id: "job-1".to_owned(),
+            prompt: "which city?".to_owned(),
+        });
+
+        app.apply_live_event(LiveEvent::QuestionResolved {
+            id: "other-job".to_owned(),
+        });
+        assert_eq!(
+            app.surface.pending_question.as_ref().map(|q| q.id.as_str()),
+            Some("job-1")
+        );
+
+        app.apply_live_event(LiveEvent::QuestionResolved {
+            id: "job-1".to_owned(),
+        });
+
+        assert!(app.surface.pending_question.is_none());
+    }
+
+    #[test]
+    fn resolving_memory_refreshes_memories_and_pending_candidates() {
+        let mut app = StageApp::new_for_test();
+        app.apply_async_outcome(AsyncOutcome::ResolveMemory {
+            soul_id: app.session.soul_id().to_owned(),
+            id: "candidate-1".to_owned(),
+            result: Ok(()),
+        });
+
+        app.runtime.block_on(async {
+            for _ in 0..200 {
+                if app.async_results.lock().len() >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let refresh_count = app
+            .async_results
+            .lock()
+            .iter()
+            .filter(|outcome| {
+                matches!(
+                    outcome,
+                    AsyncOutcome::ListMemories { .. } | AsyncOutcome::ListPendingMemories { .. }
+                )
+            })
+            .count();
+        assert_eq!(refresh_count, 2);
+    }
+
+    #[test]
+    fn stale_memory_results_are_ignored_after_soul_retarget() {
+        let mut app = StageApp::new_for_test();
+        app.session.set_for_test(
+            Arc::clone(&app.client),
+            "soul-a",
+            "old-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        );
+        app.commit_session_target(PreparedSessionTarget::new_for_test_with_soul(
+            "soul-b",
+            "new-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        ));
+        app.detail.memories = vec![MemoryView {
+            id: "memory-b".to_owned(),
+            soul_id: "soul-b".to_owned(),
+            scope: "private".to_owned(),
+            kind: "semantic".to_owned(),
+            title: "B memory".to_owned(),
+            content: "B".to_owned(),
+            expires_at: None,
+            schedule_id: None,
+        }];
+        app.detail.pending_memories = vec![MemoryCandidateView {
+            id: "candidate-b".to_owned(),
+            soul_id: "soul-b".to_owned(),
+            scope: "private".to_owned(),
+            kind: "semantic".to_owned(),
+            title: "B candidate".to_owned(),
+            content: "B".to_owned(),
+            confidence: 0.9,
+            sensitive: false,
+            expires_at: None,
+        }];
+        app.detail.memory_journal = vec![MemoryJournalView {
+            seq: 1,
+            ts: "now".to_owned(),
+            memory_id: None,
+            soul_id: "soul-b".to_owned(),
+            action: "candidate_accepted".to_owned(),
+            payload: serde_json::json!({}),
+        }];
+
+        app.apply_async_outcome(AsyncOutcome::ListMemories {
+            soul_id: "soul-a".to_owned(),
+            result: Ok(Vec::new()),
+        });
+        app.apply_async_outcome(AsyncOutcome::ListPendingMemories {
+            soul_id: "soul-a".to_owned(),
+            result: Ok(Vec::new()),
+        });
+        app.apply_async_outcome(AsyncOutcome::ListMemoryJournal {
+            soul_id: "soul-a".to_owned(),
+            result: Ok(Vec::new()),
+        });
+        app.apply_async_outcome(AsyncOutcome::ResolveMemory {
+            soul_id: "soul-a".to_owned(),
+            id: "candidate-a".to_owned(),
+            result: Err("old soul failed".to_owned()),
+        });
+
+        assert_eq!(app.session.soul_id(), "soul-b");
+        assert_eq!(app.detail.memories[0].id, "memory-b");
+        assert_eq!(app.detail.pending_memories[0].id, "candidate-b");
+        assert_eq!(app.detail.memory_journal[0].soul_id, "soul-b");
+        assert!(app.detail.core_status.is_empty());
     }
 
     #[test]

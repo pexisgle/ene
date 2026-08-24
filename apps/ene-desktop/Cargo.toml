@@ -23,9 +23,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 rfd = { workspace = true }
-egui = "0.35"
-egui-wgpu = "0.35"
-egui-winit = "0.35"
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
 ene-api = { workspace = true }
 ene-config = { workspace = true }
 ene-card = { workspace = true }
@@ -36,7 +36,7 @@ parking_lot = { workspace = true }
 png = "0.18"
 image = { workspace = true, features = ["png"] }
 xcap = "0.9.6"
-tray-icon = { version = "0.24", default-features = false }
+tray-icon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -44,10 +44,10 @@ rapier3d = { version = "0.34", features = ["simd-stable"] }
 bevy_ecs = { version = "0.19", default-features = false }
 bevy_app = { version = "0.19", default-features = false }
 device_query = "4"
-rust-embed = "8.11"
+rust-embed = { workspace = true }
 fluent-bundle = { workspace = true }
-i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
-i18n-embed-fl = "0.10"
+i18n-embed = { workspace = true }
+i18n-embed-fl = { workspace = true }
 active-win-pos-rs = "0.11.0"
 crossbeam-channel = { workspace = true }
 regex = { workspace = true }
@@ -58,8 +58,8 @@ rodio = { workspace = true, optional = true }
 rustfft = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18.2"
-tray-icon = { version = "0.24", default-features = false, features = ["gtk"] }
+gtk = { workspace = true }
+tray-icon = { workspace = true, features = ["gtk"] }
 wayland-client = { version = "0.31", default-features = false }
 wayland-protocols = { version = "0.32", default-features = false, features = ["staging", "client"] }
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
@@ -70,7 +70,7 @@ pipewire = "0.9"
 futures = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+windows-sys = { workspace = true }
 
 [dev-dependencies]
 fluent-syntax = { workspace = true }

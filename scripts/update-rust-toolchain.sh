@@ -23,13 +23,31 @@ if [[ ! "$stable_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
+rust_toolchain_action_sha="$(
+  git ls-remote https://github.com/dtolnay/rust-toolchain.git \
+    "refs/tags/$stable_version" "refs/tags/$stable_version^{}" \
+    | awk -v peeled="refs/tags/$stable_version^{}" '
+        $2 == peeled { print $1; resolved = 1; exit }
+        NR == 1 { fallback = $1 }
+        END { if (!resolved && fallback != "") print fallback }
+      '
+)"
+if [[ ! "$rust_toolchain_action_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'Could not resolve dtolnay/rust-toolchain tag %s to a commit SHA.\n' "$stable_version" >&2
+  exit 1
+fi
+
 sed -i -E \
   "s/^channel = \"[0-9]+\.[0-9]+\.[0-9]+\"/channel = \"$stable_version\"/" \
   rust-toolchain.toml
 
-sed -i -E \
-  "s#dtolnay/rust-toolchain@[0-9]+\.[0-9]+\.[0-9]+#dtolnay/rust-toolchain@$stable_version#g" \
-  .github/workflows/ci.yml .github/workflows/tmp-merge-1011.yml
+workflow_files=(.github/workflows/ci.yml)
+for workflow in "${workflow_files[@]}"; do
+  sed -i -E \
+    -e "s#dtolnay/rust-toolchain@[0-9a-f]{40}( # [0-9]+\.[0-9]+\.[0-9]+)?#dtolnay/rust-toolchain@$rust_toolchain_action_sha # $stable_version#g" \
+    -e "s#dtolnay/rust-toolchain@[0-9]+\.[0-9]+\.[0-9]+#dtolnay/rust-toolchain@$rust_toolchain_action_sha # $stable_version#g" \
+    "$workflow"
+done
 
 for file in README.md docs/quickstart.md docs/ja/quickstart.md \
   docs/guides/rust-toolchain.md docs/ja/guides/rust-toolchain.md; do
@@ -42,9 +60,17 @@ if [[ "$pinned_version" != "$stable_version" ]]; then
   exit 1
 fi
 
-if rg -n 'dtolnay/rust-toolchain@stable' .github/workflows/ci.yml .github/workflows/tmp-merge-1011.yml; then
-  printf 'A CI workflow still uses the mutable stable toolchain reference.\n' >&2
-  exit 1
-fi
+for workflow in "${workflow_files[@]}"; do
+  expected="dtolnay/rust-toolchain@$rust_toolchain_action_sha # $stable_version"
+  if ! grep -Fq "$expected" "$workflow"; then
+    printf 'CI workflow %s was not updated to the pinned Rust toolchain Action.\n' "$workflow" >&2
+    exit 1
+  fi
+  if rg -n 'dtolnay/rust-toolchain@(stable|[0-9]+\.[0-9]+\.[0-9]+)' "$workflow"; then
+    printf 'CI workflow %s still uses a mutable Rust toolchain Action reference.\n' "$workflow" >&2
+    exit 1
+  fi
+done
 
-printf 'Updated repository Rust toolchain to %s.\n' "$stable_version"
+printf 'Updated repository Rust toolchain to %s (%s).\n' \
+  "$stable_version" "$rust_toolchain_action_sha"

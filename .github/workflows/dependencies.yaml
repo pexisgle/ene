@@ -1,7 +1,9 @@
 name: dependencies
+
+# A repository-scoped fine-grained PAT is passed only to the PR actions below.
+# Unlike GITHUB_TOKEN, its PRs trigger the normal validation workflows.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 on:
   schedule:
@@ -13,12 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Generate branch date
-        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
-      - uses: DeterminateSystems/update-flake-lock@v28
+        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> "$GITHUB_ENV"
+      - uses: DeterminateSystems/update-flake-lock@834c491b2ece4de0bbd00d85214bb5e83b4da5c6 # v28
         with:
+          token: ${{ secrets.DEPENDENCIES_PAT }}
           pr-title: "Update flake.lock"
           pr-labels: |
             dependencies
@@ -26,20 +29,19 @@ jobs:
           branch: "deps/update-flake-lock-${{ env.CURRENT_DATE }}"
           commit-msg: "deps: Update flake.lock"
           path-to-flake-dir: ./
-          token: ${{ secrets.DEPENDENCIES_PAT }}
 
   update-cargo:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Generate branch date
-        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> "$GITHUB_ENV"
       - name: Run cargo update
         run: nix develop --command cargo update
       - name: Create PR
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ secrets.DEPENDENCIES_PAT }}
           commit-message: "deps: Update Cargo.lock"
@@ -51,17 +53,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Generate branch date
-        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> "$GITHUB_ENV"
       - name: Update Rust toolchain sources
         run: |
           scripts/update-rust-toolchain.sh
           nix flake lock --update-input rust-overlay
           nix develop --command rustc --version
       - name: Create PR
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ secrets.DEPENDENCIES_PAT }}
           commit-message: "chore(toolchain): update Rust version"
