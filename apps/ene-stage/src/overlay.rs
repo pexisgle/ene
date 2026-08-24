@@ -128,9 +128,11 @@ impl OverlayWindow {
     }
 
     pub fn set_click_through(&mut self, enabled: bool) {
-        self.click_through = enabled;
-        if let Err(err) = self.window.set_cursor_hittest(!enabled) {
-            tracing::debug!(error = %err, "cursor hittest unsupported");
+        if self.click_through != enabled {
+            self.click_through = enabled;
+            if let Err(err) = self.window.set_cursor_hittest(!enabled) {
+                tracing::debug!(error = %err, "cursor hittest unsupported");
+            }
         }
     }
 
@@ -288,43 +290,10 @@ fn load_one(
     Ok(avatar)
 }
 
-/// World X offset so concurrent bodies stand apart around `base`.
-#[must_use]
-pub fn overlay_slot_offset(index: usize, count: usize, base: [f32; 3]) -> [f32; 3] {
-    if count <= 1 {
-        return base;
-    }
-    let last = count.saturating_sub(1);
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "overlay body count is 1..=2; indices fit f32 exactly"
-    )]
-    let t = index as f32 / last as f32;
-    [base[0] + (t - 0.5) * 0.55, base[1], base[2]]
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum OverlayError {
     #[error("surface: {0}")]
     Surface(String),
     #[error(transparent)]
     Avatar(#[from] crate::avatar::AvatarError),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::overlay_slot_offset;
-
-    #[test]
-    fn overlay_slot_offsets_place_two_bodies_apart() {
-        let base = [0.0, 0.1, 0.0];
-        let left = overlay_slot_offset(0, 2, base);
-        let right = overlay_slot_offset(1, 2, base);
-        assert!(right[0] > left[0]);
-        assert!((left[1] - base[1]).abs() < f32::EPSILON);
-        let single = overlay_slot_offset(0, 1, base);
-        assert!((single[0] - base[0]).abs() < f32::EPSILON);
-        assert!((single[1] - base[1]).abs() < f32::EPSILON);
-        assert!((single[2] - base[2]).abs() < f32::EPSILON);
-    }
 }

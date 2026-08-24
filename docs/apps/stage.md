@@ -23,7 +23,7 @@ SDK.
 
 | Window | Depth | Contents |
 |---|---|---|
-| Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Click-through is System → Overlay click-through (on by default). Esc quits. Up to two VRM bodies stay on the overlay at once (`body.render.max_concurrent`, default 2). A/D switch which soul the chat session targets; W/S change motion on the active body. F3 toggles spring-bone collider wireframes. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
+| Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Left-drag a body silhouette to move it; each body keeps its own saved position and clicks on the background pass through to windows below. Click-through is System → Overlay click-through (on by default); with it on, dragging needs the cursor over a body (Windows/X11 open an input hole over the silhouette). On Wayland the overlay receives no pointer events while click-through is on, so turn it off first (Space shows the frame as a fallback) and then drag. Esc quits. Positions persist per soul in `desktop.character_positions` and survive restarts. Up to two VRM bodies stay on the overlay at once (`body.render.max_concurrent`, default 2). A/D switch which soul the chat session targets; W/S change motion on the active body. F3 toggles spring-bone collider wireframes. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
 | Chat | `surface` | Prompt / Steer / Follow-up (hover for meaning), New chat, approvals (Allow / Always / Deny), ask-user (`question.asked` opens the form; `POST /jobs/{id}/answer` or `question.resolved` closes it), mic PCM relay, Detail button (same as the tray). New chat ends the current lane and switches every stage subscription and pending prompt to a fresh session only after the core creates it; the old conversation remains in the log. Status wraps on its own line so setup errors stay readable in a narrow window. |
 | Caption | `surface` | Spoken captions. Voice → Caption position (`top` / `bottom` / `left` / `right`) places the window; Pin caption stops it being dragged. Provider and HTTP errors stay on the chat status line (wrapped), not as spoken captions. The overlay closes when the turn ends. Long spoken lines wrap inside the overlay. |
 | Spotlight (Alt+Space) | local | Searchable command palette: type to filter, ↑/↓ move, Enter runs, Esc closes (clicking an entry also runs it). Covers detail tabs, mic, chat, and quit. If Alt+Space fails to register, Voice shows a warning and a highlighted Open Spotlight button. |
@@ -45,7 +45,8 @@ session export open a save dialog in Documents or Downloads with a typed file na
 (`.enechar` / `.json`).
 
 Local `desktop.*` keys (theme, language, mic, captions, beat sync, graphics
-quality, core lifetime, overlay placement) stay on the client. Theme (`light` /
+quality, core lifetime, per-body overlay placement in `character_positions`)
+stay on the client. Theme (`light` /
 `dark` / `system`) applies to both the wgpu window clear color and egui widget
 colors, so light mode keeps readable contrast. Japanese UI text uses an OS CJK
 font (Yu Gothic / Meiryo on Windows, Noto or Droid on Linux), or
