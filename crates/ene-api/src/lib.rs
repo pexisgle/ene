@@ -2,6 +2,7 @@
 
 #![deny(unsafe_code)]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "tests"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests"))]
 
 mod client;
 mod error;

@@ -150,7 +150,9 @@ mod tests {
         assert_eq!(raw["soul_id"], "soul-9");
         assert_eq!(raw["prompt"], "which city?");
         assert_eq!(raw["question_ids"][0], "q-1");
-        let (kind, parsed) = QuestionEvent::parse(&raw).unwrap();
+        let Some((kind, parsed)) = QuestionEvent::parse(&raw) else {
+            unreachable!("round trip of a constructed event always parses");
+        };
         assert_eq!(kind, QuestionEventKind::Asked);
         assert_eq!(parsed, event);
     }
