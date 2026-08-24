@@ -1317,7 +1317,7 @@ async fn memory_tools_surface_omits_write_shared() {
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
         ene_plane::ApprovalSettings::default(),
         audit,
-        ene_plane::ScriptedPopup::deny_all(),
+        Arc::new(ene_plane::ScriptedPopup::deny_all()),
         None,
     ));
     plane.set_policy(ene_plane::PolicyFile {

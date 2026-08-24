@@ -18,7 +18,7 @@ fn req(tool: &str, se: &[&str], sensitivity: Sensitivity, in_workspace: bool) ->
 }
 
 fn make_plane(
-    popup: Arc<ScriptedPopup>,
+    popup: Arc<dyn PopupSink>,
     ai: Option<Arc<dyn crate::ApproveModel>>,
 ) -> (TempDir, ApprovalPlane) {
     let dir = TempDir::new().unwrap();
@@ -29,7 +29,7 @@ fn make_plane(
 
 #[tokio::test]
 async fn policy_allows_workspace_write() {
-    let (_dir, plane) = make_plane(ScriptedPopup::deny_all(), None);
+    let (_dir, plane) = make_plane(Arc::new(ScriptedPopup::deny_all()), None);
     plane.set_policy(PolicyFile {
         rules: vec![PolicyRule {
             tool: "fs.*".to_owned(),
@@ -45,7 +45,7 @@ async fn policy_allows_workspace_write() {
 
 #[tokio::test]
 async fn screenshot_with_empty_side_effects_still_asks() {
-    let popup = Arc::new(ScriptedPopup::new([PopupDecision::Deny]));
+    let popup: Arc<dyn PopupSink> = Arc::new(ScriptedPopup::new([PopupDecision::Deny]));
     let (_dir, plane) = make_plane(popup, None);
     let err = plane
         .authorize(&req("app.screenshot", &[], Sensitivity::High, true))
@@ -56,7 +56,7 @@ async fn screenshot_with_empty_side_effects_still_asks() {
 
 #[tokio::test]
 async fn implicit_side_effect_without_popup_is_denied() {
-    let (_dir, plane) = make_plane(ScriptedPopup::deny_all(), None);
+    let (_dir, plane) = make_plane(Arc::new(ScriptedPopup::deny_all()), None);
     let err = plane
         .authorize(&req("fs.write", &["fs.write"], Sensitivity::None, true))
         .await
@@ -66,7 +66,7 @@ async fn implicit_side_effect_without_popup_is_denied() {
 
 #[tokio::test]
 async fn audit_hash_chain_verifies() {
-    let (dir, plane) = make_plane(ScriptedPopup::deny_all(), None);
+    let (dir, plane) = make_plane(Arc::new(ScriptedPopup::deny_all()), None);
     drop(
         plane
             .authorize(&req("utility.hash", &[], Sensitivity::None, true))
@@ -84,7 +84,7 @@ async fn audit_hash_chain_verifies() {
 
 #[tokio::test]
 async fn policy_add_requires_confirmation() {
-    let popup = Arc::new(ScriptedPopup::new([PopupDecision::Deny]));
+    let popup: Arc<dyn PopupSink> = Arc::new(ScriptedPopup::new([PopupDecision::Deny]));
     let (_dir, plane) = make_plane(popup, None);
     let err = plane
         .policy_add(
@@ -100,7 +100,7 @@ async fn policy_add_requires_confirmation() {
     assert!(matches!(err, crate::PlaneError::Denied { .. }));
     assert!(plane.policy().rules.is_empty());
 
-    let popup = Arc::new(ScriptedPopup::new([PopupDecision::Allow]));
+    let popup: Arc<dyn PopupSink> = Arc::new(ScriptedPopup::new([PopupDecision::Allow]));
     let (_dir, plane) = make_plane(popup, None);
     plane
         .policy_add(
@@ -124,7 +124,7 @@ async fn ai_judgement_reason_is_audited() {
             reason: "workspace write looks safe".to_owned(),
         }),
     });
-    let (_dir, plane) = make_plane(ScriptedPopup::deny_all(), Some(ai));
+    let (_dir, plane) = make_plane(Arc::new(ScriptedPopup::deny_all()), Some(ai));
     plane.set_mode(ApprovalMode::AiAuto).unwrap();
     plane
         .authorize(&req("fs.write", &["fs.write"], Sensitivity::None, true))
@@ -140,7 +140,7 @@ async fn ai_judgement_reason_is_audited() {
 
 #[tokio::test]
 async fn set_ai_after_new_is_used_in_ai_auto() {
-    let (_dir, plane) = make_plane(ScriptedPopup::deny_all(), None);
+    let (_dir, plane) = make_plane(Arc::new(ScriptedPopup::deny_all()), None);
     assert!(!plane.has_approve_model());
     plane.set_ai(Arc::new(ScriptedAi {
         judgement: Ok(AiJudgement {
@@ -169,7 +169,7 @@ async fn high_risk_skips_ai_and_pops() {
             reason: "should not run".to_owned(),
         }),
     });
-    let (_dir, plane) = make_plane(ScriptedPopup::deny_all(), Some(ai));
+    let (_dir, plane) = make_plane(Arc::new(ScriptedPopup::deny_all()), Some(ai));
     plane.set_mode(ApprovalMode::AiAuto).unwrap();
     let err = plane
         .authorize(&req("exec.run", &["exec"], Sensitivity::None, true))

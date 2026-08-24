@@ -249,6 +249,19 @@ async fn start_background_outcome(start: BgStart<'_>) -> Result<SurfaceToolOutco
         .registry
         .get(start.name)
         .ok_or_else(|| KernelError::Tool(format!("unknown tool {}", start.name)))?;
+    // Approval must hold the dispatch, not undo it: authorize before any job
+    // row or execution record exists so Deny leaves no side effects behind.
+    start
+        .registry
+        .authorize_background(
+            start.name,
+            &start.args,
+            start.layer,
+            start.workspace,
+            start.call_id,
+        )
+        .await
+        .map_err(|err| KernelError::Tool(err.to_string()))?;
     let job_id = if let Some(job_id) = start.job_id {
         job_id
     } else {
@@ -285,30 +298,17 @@ async fn start_background_outcome(start: BgStart<'_>) -> Result<SurfaceToolOutco
             call_id: start.call_id.to_owned(),
         })
         .map_err(|err| KernelError::Tool(err.to_string()))?;
-    let started = if let Some(workspace) = start.workspace {
-        start
-            .registry
-            .start_background_in_workspace(
-                start.name,
-                start.args,
-                &execution_id,
-                start.layer,
-                def.timeout_ms.map(u64::from),
-                workspace,
-            )
-            .await
-    } else {
-        start
-            .registry
-            .start_background(
-                start.name,
-                start.args,
-                &execution_id,
-                start.layer,
-                def.timeout_ms.map(u64::from),
-            )
-            .await
-    };
+    let started = start
+        .registry
+        .start_background_pre_authorized(
+            start.name,
+            start.args,
+            &execution_id,
+            start.layer,
+            def.timeout_ms.map(u64::from),
+            start.workspace,
+        )
+        .await;
     if let Err(err) = started {
         drop(
             start

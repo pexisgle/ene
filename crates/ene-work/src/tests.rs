@@ -29,7 +29,8 @@ use ene_kernel::{
     SurfaceToolOutcome, ToolCall,
 };
 use ene_plane::{
-    ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, ScriptedPopup, Sensitivity,
+    ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PopupSettings, PopupSink,
+    ScriptedPopup, Sensitivity,
 };
 use ene_registry::{BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use ene_session::{
@@ -38,7 +39,7 @@ use ene_session::{
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration as StdDuration;
 use tempfile::TempDir;
 
@@ -190,7 +191,7 @@ fn open_work() -> (TempDir, Arc<WorkStore>, Arc<DelegationHost>, SoulId) {
 
 fn allow_all_plane(dir: &TempDir) -> Arc<ApprovalPlane> {
     let audit = AuditLog::open(dir.path().join("audit.db")).unwrap();
-    let popup = ScriptedPopup::deny_all();
+    let popup = Arc::new(ScriptedPopup::deny_all());
     let plane = Arc::new(ApprovalPlane::new(
         ApprovalSettings::default(),
         audit,
@@ -203,7 +204,7 @@ fn allow_all_plane(dir: &TempDir) -> Arc<ApprovalPlane> {
 
 fn deny_all_plane(dir: &TempDir) -> Arc<ApprovalPlane> {
     let audit = AuditLog::open(dir.path().join("audit-deny.db")).unwrap();
-    let popup = ScriptedPopup::deny_all();
+    let popup = Arc::new(ScriptedPopup::deny_all());
     let plane = Arc::new(ApprovalPlane::new(
         ApprovalSettings::default(),
         audit,
@@ -346,7 +347,10 @@ async fn surface_delegate_start_is_approval_gated_before_job_insert() {
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
+        ene_plane::ApprovalSettings {
+            popup: PopupSettings { timeout_ms: 5_000 },
+            ..ApprovalSettings::default()
+        },
         ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap(),
         Arc::new(ene_plane::ScriptedPopup::new([
             ene_plane::PopupDecision::Deny,
@@ -405,6 +409,205 @@ async fn surface_delegate_start_inserts_one_job_after_approval() {
 }
 
 #[tokio::test]
+async fn background_tool_timeout_denies_before_any_job_or_execution_row() {
+    let (dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    let invoke = Arc::new(BgInvoke {
+        phase: parking_lot::Mutex::new(std::collections::HashMap::new()),
+    });
+    registry.register_with(
+        ToolDefinition {
+            side_effects: vec!["exec".to_owned()],
+            ..bg_def()
+        },
+        Arc::clone(&invoke) as Arc<dyn ToolInvoke>,
+    );
+    let plane = Arc::new(ApprovalPlane::new(
+        ApprovalSettings {
+            popup: PopupSettings { timeout_ms: 20 },
+            ..ApprovalSettings::default()
+        },
+        AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        Arc::new(TimedPopup),
+        None,
+    ));
+    plane.set_mode(ApprovalMode::AskAll).unwrap();
+    registry.set_plane(plane);
+    let router = WorkSurfaceRouter::new(host, Arc::clone(&registry), soul, 8);
+
+    let outcome = router.on_tool("bg.sleep", json!({"ms": 1}), 0).await;
+
+    assert!(outcome.is_err(), "timeout must deny the dispatch");
+    assert!(
+        store.list_jobs(soul).unwrap().is_empty(),
+        "timed-out approval must not leave a job row",
+    );
+}
+
+#[tokio::test]
+async fn duplicate_approval_response_dispatches_exactly_once() {
+    let (dir, _store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    let invoke = Arc::new(BgInvoke {
+        phase: parking_lot::Mutex::new(std::collections::HashMap::new()),
+    });
+    registry.register_with(
+        ToolDefinition {
+            side_effects: vec!["exec".to_owned()],
+            ..bg_def()
+        },
+        invoke,
+    );
+    let popup = Arc::new(ene_plane::PendingPopup::new());
+    let asked = Arc::new(tokio::sync::Notify::new());
+    popup.set_on_ask({
+        let asked = Arc::clone(&asked);
+        Arc::new(move |_view| {
+            asked.notify_one();
+        })
+    });
+    let sink: Arc<dyn PopupSink> = popup.clone();
+    let plane = Arc::new(ApprovalPlane::new(
+        ene_plane::ApprovalSettings {
+            popup: PopupSettings { timeout_ms: 5_000 },
+            ..ApprovalSettings::default()
+        },
+        AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        sink,
+        None,
+    ));
+    plane.set_mode(ApprovalMode::AskAll).unwrap();
+    registry.set_plane(plane);
+    let job = public_start(&host, soul, "duplicate approval probe");
+    host.present_plan(job.id, "run the background tool")
+        .unwrap();
+    host.approve_plan(job.id).unwrap();
+    let router = Arc::new(JobLayerRouter::new(
+        host,
+        Arc::clone(&registry),
+        soul,
+        job.id,
+        &job.workspace_dir,
+    ));
+
+    let first = tokio::spawn({
+        let router = Arc::clone(&router);
+        async move { router.on_tool("bg.sleep", json!({"ms": 1}), 0).await }
+    });
+    let second = tokio::spawn({
+        let router = Arc::clone(&router);
+        async move { router.on_tool("bg.sleep", json!({"ms": 1}), 0).await }
+    });
+    while popup.list().len() < 2 {
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+    let ids: Vec<_> = popup.list().iter().map(|v| v.id.clone()).collect();
+    assert!(
+        popup
+            .respond(&ids[0], ene_plane::PopupDecision::Allow)
+            .is_ok()
+    );
+    assert!(
+        popup
+            .respond(&ids[1], ene_plane::PopupDecision::Deny)
+            .is_ok()
+    );
+
+    let outcomes = tokio::join!(first, second);
+    let started = outcomes
+        .0
+        .ok()
+        .and_then(std::result::Result::ok)
+        .into_iter()
+        .chain(outcomes.1.ok().and_then(std::result::Result::ok))
+        .filter_map(|outcome| match outcome {
+            SurfaceToolOutcome::Result(value) => Some(value),
+            _ => None,
+        })
+        .count();
+    assert_eq!(started, 1, "exactly one dispatch may start");
+}
+
+#[tokio::test]
+async fn ask_all_background_call_prompts_exactly_once() {
+    let (dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    let invoke = Arc::new(BgInvoke {
+        phase: parking_lot::Mutex::new(std::collections::HashMap::new()),
+    });
+    // bg_def() alone has no side effects, so AskAll would auto-allow without
+    // ever opening a popup; give the tool the same exec side effect the
+    // neighboring background tests use.
+    registry.register_with(
+        ToolDefinition {
+            side_effects: vec!["exec".to_owned()],
+            ..bg_def()
+        },
+        Arc::clone(&invoke) as Arc<dyn ToolInvoke>,
+    );
+    let popup = Arc::new(ene_plane::PendingPopup::new());
+    let asks = Arc::new(AtomicUsize::new(0));
+    popup.set_on_ask({
+        let asks = Arc::clone(&asks);
+        Arc::new(move |_view| {
+            asks.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+    let sink: Arc<dyn PopupSink> = popup.clone();
+    let plane = Arc::new(ApprovalPlane::new(
+        ene_plane::ApprovalSettings {
+            popup: PopupSettings { timeout_ms: 5_000 },
+            ..ApprovalSettings::default()
+        },
+        AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        sink,
+        None,
+    ));
+    plane.set_mode(ApprovalMode::AskAll).unwrap();
+    registry.set_plane(plane);
+    let job = public_start(&host, soul, "approval gate probe");
+    host.present_plan(job.id, "run the background tool")
+        .unwrap();
+    host.approve_plan(job.id).unwrap();
+    let router = JobLayerRouter::new(
+        host,
+        Arc::clone(&registry),
+        soul,
+        job.id,
+        &job.workspace_dir,
+    );
+
+    let dispatched = tokio::spawn({
+        let router = Arc::new(router);
+        async move { router.on_tool("bg.sleep", json!({"ms": 1}), 0).await }
+    });
+    while popup.list().is_empty() {
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+    assert_eq!(
+        asks.load(Ordering::SeqCst),
+        1,
+        "AskAll background dispatch must produce exactly one approval",
+    );
+    assert!(
+        store.list_jobs(soul).unwrap().len() == 1,
+        "approval must not create an extra job row",
+    );
+    assert!(
+        store.list_running_tool_executions().unwrap().is_empty(),
+        "no execution row may exist before approval resolves",
+    );
+    let id = popup.list()[0].id.clone();
+    assert!(popup.respond(&id, ene_plane::PopupDecision::Allow).is_ok());
+
+    let outcome = dispatched.await.unwrap().unwrap();
+    let SurfaceToolOutcome::Result(value) = outcome else {
+        panic!("expected started result, got {outcome:?}");
+    };
+    assert_eq!(value["status"], "started");
+}
+
+#[tokio::test]
 async fn surface_router_upgrades_fs_write_without_spy() {
     let (dir, store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
@@ -453,7 +656,7 @@ async fn child_reports_do_not_require_tool_approval() {
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
         ene_plane::ApprovalSettings::default(),
         ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap(),
-        ene_plane::ScriptedPopup::deny_all(),
+        Arc::new(ene_plane::ScriptedPopup::deny_all()),
         None,
     ));
     plane.set_mode(ene_plane::ApprovalMode::AskAll).unwrap();
@@ -847,7 +1050,7 @@ async fn drive_job_executes_tools_and_delegation_send() {
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
         ene_plane::ApprovalSettings::default(),
         audit,
-        ene_plane::ScriptedPopup::deny_all(),
+        Arc::new(ene_plane::ScriptedPopup::deny_all()),
         None,
     ));
     plane.set_mode(ene_plane::ApprovalMode::Auto).unwrap();
@@ -1385,7 +1588,7 @@ async fn artifact_register_and_deliver() {
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
         ene_plane::ApprovalSettings::default(),
         audit,
-        ene_plane::ScriptedPopup::deny_all(),
+        Arc::new(ene_plane::ScriptedPopup::deny_all()),
         None,
     ));
     plane.set_policy(ene_plane::PolicyFile {
@@ -1450,7 +1653,7 @@ async fn artifact_register_rejects_path_outside_workspace() {
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
         ene_plane::ApprovalSettings::default(),
         audit,
-        ene_plane::ScriptedPopup::deny_all(),
+        Arc::new(ene_plane::ScriptedPopup::deny_all()),
         None,
     ));
     plane.set_policy(ene_plane::PolicyFile {
@@ -1495,7 +1698,7 @@ async fn artifact_register_requires_job_id() {
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
         ene_plane::ApprovalSettings::default(),
         audit,
-        ene_plane::ScriptedPopup::deny_all(),
+        Arc::new(ene_plane::ScriptedPopup::deny_all()),
         None,
     ));
     plane.set_policy(ene_plane::PolicyFile {
@@ -2393,6 +2596,18 @@ struct BgInvoke {
     phase: parking_lot::Mutex<std::collections::HashMap<String, String>>,
 }
 
+/// Popup sink that never answers, forcing the plane's timeout path.
+struct TimedPopup;
+
+#[async_trait]
+impl ene_plane::PopupSink for TimedPopup {
+    async fn ask(&self, _req: &ene_plane::AuthzRequest) -> ene_plane::PopupDecision {
+        loop {
+            tokio::time::sleep(StdDuration::from_secs(3600)).await;
+        }
+    }
+}
+
 #[async_trait]
 impl ToolInvoke for BgInvoke {
     async fn invoke(&self, name: &str, _args: Value) -> Result<Value, String> {
@@ -2460,7 +2675,7 @@ fn bg_def() -> ToolDefinition {
 
 #[tokio::test]
 async fn background_tool_releases_the_turn_and_reports_once() {
-    let (_dir, _store, host, soul) = open_work();
+    let (dir, _store, host, soul) = open_work();
     host.set_report_sink({
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         tx
@@ -2470,6 +2685,8 @@ async fn background_tool_releases_the_turn_and_reports_once() {
         phase: parking_lot::Mutex::new(std::collections::HashMap::new()),
     });
     registry.register_with(bg_def(), Arc::clone(&invoke) as Arc<dyn ToolInvoke>);
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    registry.set_plane(allow_all_plane(&dir));
     let router = WorkSurfaceRouter::new(Arc::clone(&host), Arc::clone(&registry), soul, 8);
     let outcome = router
         .on_tool("bg.sleep", json!({"ms": 1}), 0)

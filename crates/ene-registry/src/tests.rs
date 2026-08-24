@@ -292,7 +292,7 @@ async fn plane_denies_side_effects_and_sensitive_reads() {
     let plane = Arc::new(ApprovalPlane::new(
         ApprovalSettings::default(),
         audit,
-        ScriptedPopup::deny_all(),
+        Arc::new(ScriptedPopup::deny_all()),
         None,
     ));
     registry.set_plane(plane);
