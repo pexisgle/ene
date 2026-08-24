@@ -1263,93 +1263,107 @@ impl StageApp {
 
     fn drain_surface_events(&mut self) {
         while let Ok(event) = self.feeds.surface.try_recv() {
-            match event {
-                LiveEvent::TextDelta { text, .. } => {
-                    self.surface
-                        .apply_text_delta(&text, self.settings.caption_enabled);
-                    self.sync_caption_window();
-                }
-                LiveEvent::SessionEvent { kind, text } => {
-                    if kind == "turn/end" || kind.ends_with("/end") {
-                        self.session.clear_turn();
-                        self.request_history_refresh();
-                        self.surface.on_turn_ended();
-                        self.sync_caption_window();
-                        if !text.is_empty() {
-                            let mapped = map_turn_err(&text);
-                            if auth_failure(&mapped) || auth_failure(&text) {
-                                self.detail.core_status = i18n::fl("chat-auth-failed");
-                            }
-                            mapped.clone_into(&mut self.surface.status);
-                        }
-                    }
-                    tracing::debug!(kind, text, "surface session event");
-                }
-                LiveEvent::ApprovalAsked { id, tool, target } => {
-                    self.set_pending_approval(surface::PendingApproval { id, tool, target });
-                }
-                LiveEvent::ApprovalResolved { .. } => {
-                    self.surface.pending_approval = None;
-                    self.approval_needs_reveal = false;
-                }
-                LiveEvent::QuestionAsked { id, prompt } => {
-                    self.surface.pending_question = Some(surface::PendingQuestion { id, prompt });
-                    self.surface.chat_open = true;
-                }
-                LiveEvent::NotifyHint { title, body } => {
-                    if let Err(err) = show_notification(&title, &body, "ene-stage") {
-                        tracing::debug!(error = %err, "notification failed");
-                    }
-                }
-                LiveEvent::BodyCommand { value } => {
-                    let Some(overlay) = self.overlay.as_mut() else {
-                        continue;
-                    };
-                    let session_soul = self.session.soul_id().to_owned();
-                    let event_soul = value.get("soul_id").and_then(serde_json::Value::as_str);
-                    let avatar = match event_soul {
-                        Some(soul) => overlay.avatar_mut(soul),
-                        None => overlay.avatar_or_first_mut(&session_soul),
-                    };
-                    if let Some(avatar) = avatar {
-                        avatar.apply_body_event(&value);
-                    }
-                }
-                LiveEvent::AudioChunk {
-                    pcm,
-                    sample_rate,
-                    abort,
-                    ..
-                } => {
-                    if abort {
-                        self.abort_audio_playback();
-                    } else if let Err(err) = self.audio.play_pcm(&pcm, sample_rate) {
-                        tracing::debug!(error = %err, "audio playback failed");
-                    }
-                }
-                LiveEvent::VoiceState { state, barge_in } => {
-                    self.surface.voice_state.clone_from(&state);
-                    if barge_in {
-                        tracing::debug!("core barge-in (voice.state)");
-                    }
-                }
-                LiveEvent::ExclusiveHeld {
-                    resource,
-                    client_id,
-                } => {
-                    if client_id != "stage" && !client_id.is_empty() {
-                        self.surface.exclusive_notice = format!("{resource}: {client_id}");
-                    }
-                }
-                LiveEvent::Disconnected => {
-                    self.surface.status = i18n::fl("status-disconnected");
-                }
-                LiveEvent::ThinkingDelta { .. }
-                | LiveEvent::InnerMessage { .. }
-                | LiveEvent::ToolCall { .. }
-                | LiveEvent::AffectState { .. }
-                | LiveEvent::JobReport { .. } => {}
+            self.apply_live_event(event);
+        }
+    }
+
+    fn apply_live_event(&mut self, event: LiveEvent) {
+        match event {
+            LiveEvent::TextDelta { text, .. } => {
+                self.surface
+                    .apply_text_delta(&text, self.settings.caption_enabled);
+                self.sync_caption_window();
             }
+            LiveEvent::SessionEvent { kind, text } => {
+                if kind == "turn/end" || kind.ends_with("/end") {
+                    self.session.clear_turn();
+                    self.request_history_refresh();
+                    self.surface.on_turn_ended();
+                    self.sync_caption_window();
+                    if !text.is_empty() {
+                        let mapped = map_turn_err(&text);
+                        if auth_failure(&mapped) || auth_failure(&text) {
+                            self.detail.core_status = i18n::fl("chat-auth-failed");
+                        }
+                        mapped.clone_into(&mut self.surface.status);
+                    }
+                }
+                tracing::debug!(kind, text, "surface session event");
+            }
+            LiveEvent::ApprovalAsked { id, tool, target } => {
+                self.set_pending_approval(surface::PendingApproval { id, tool, target });
+            }
+            LiveEvent::ApprovalResolved { .. } => {
+                self.surface.pending_approval = None;
+                self.approval_needs_reveal = false;
+            }
+            LiveEvent::QuestionAsked { id, prompt } => {
+                self.surface.pending_question = Some(surface::PendingQuestion { id, prompt });
+                self.surface.chat_open = true;
+            }
+            LiveEvent::QuestionResolved { id } => {
+                if self
+                    .surface
+                    .pending_question
+                    .as_ref()
+                    .is_some_and(|question| question.id == id)
+                {
+                    self.surface.pending_question = None;
+                }
+            }
+            LiveEvent::NotifyHint { title, body } => {
+                if let Err(err) = show_notification(&title, &body, "ene-stage") {
+                    tracing::debug!(error = %err, "notification failed");
+                }
+            }
+            LiveEvent::BodyCommand { value } => {
+                let Some(overlay) = self.overlay.as_mut() else {
+                    return;
+                };
+                let session_soul = self.session.soul_id().to_owned();
+                let event_soul = value.get("soul_id").and_then(serde_json::Value::as_str);
+                let avatar = match event_soul {
+                    Some(soul) => overlay.avatar_mut(soul),
+                    None => overlay.avatar_or_first_mut(&session_soul),
+                };
+                if let Some(avatar) = avatar {
+                    avatar.apply_body_event(&value);
+                }
+            }
+            LiveEvent::AudioChunk {
+                pcm,
+                sample_rate,
+                abort,
+                ..
+            } => {
+                if abort {
+                    self.abort_audio_playback();
+                } else if let Err(err) = self.audio.play_pcm(&pcm, sample_rate) {
+                    tracing::debug!(error = %err, "audio playback failed");
+                }
+            }
+            LiveEvent::VoiceState { state, barge_in } => {
+                self.surface.voice_state.clone_from(&state);
+                if barge_in {
+                    tracing::debug!("core barge-in (voice.state)");
+                }
+            }
+            LiveEvent::ExclusiveHeld {
+                resource,
+                client_id,
+            } => {
+                if client_id != "stage" && !client_id.is_empty() {
+                    self.surface.exclusive_notice = format!("{resource}: {client_id}");
+                }
+            }
+            LiveEvent::Disconnected => {
+                self.surface.status = i18n::fl("status-disconnected");
+            }
+            LiveEvent::ThinkingDelta { .. }
+            | LiveEvent::InnerMessage { .. }
+            | LiveEvent::ToolCall { .. }
+            | LiveEvent::AffectState { .. }
+            | LiveEvent::JobReport { .. } => {}
         }
     }
 
@@ -2130,6 +2144,7 @@ mod tests {
         AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
         overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
     };
+    use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
     use crate::surface::{PendingApproval, PendingQuestion};
     use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
@@ -2247,6 +2262,29 @@ mod tests {
 
         assert_eq!(app.session.session_id(), "new-session");
         assert!(app.surface.pending_approval.is_none());
+        assert!(app.surface.pending_question.is_none());
+    }
+
+    #[test]
+    fn question_resolved_closes_only_the_matching_question() {
+        let mut app = StageApp::new_for_test();
+        app.surface.pending_question = Some(PendingQuestion {
+            id: "job-1".to_owned(),
+            prompt: "which city?".to_owned(),
+        });
+
+        app.apply_live_event(LiveEvent::QuestionResolved {
+            id: "other-job".to_owned(),
+        });
+        assert_eq!(
+            app.surface.pending_question.as_ref().map(|q| q.id.as_str()),
+            Some("job-1")
+        );
+
+        app.apply_live_event(LiveEvent::QuestionResolved {
+            id: "job-1".to_owned(),
+        });
+
         assert!(app.surface.pending_question.is_none());
     }
 

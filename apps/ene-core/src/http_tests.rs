@@ -836,6 +836,108 @@ async fn job_question_answer_reaches_mailbox() {
 }
 
 #[tokio::test]
+async fn answering_the_last_question_emits_question_resolved() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let mut surface = client.events("surface", Some(&session.id)).await.unwrap();
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a city");
+    core.host().question(job.id, "which city?").unwrap();
+    let asked_type = ene_api::QUESTION_ASKED_EVENT;
+    let resolved_type = ene_api::QUESTION_RESOLVED_EVENT;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, surface.recv_json()).await {
+            Ok(Ok(Some(value))) if value["type"] == asked_type => break,
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None) | Err(_)) | Err(_) => {
+                panic!("live bus must emit {asked_type}");
+            }
+        }
+    }
+    client
+        .answer_job(
+            &job.id.to_string(),
+            &AnswerJobRequest {
+                text: "Tokyo".into(),
+                answers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let resolved = wait_event_type(&mut surface, resolved_type, Duration::from_secs(3)).await;
+    assert_eq!(resolved["id"], job.id.to_string());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn partial_answer_does_not_emit_question_resolved() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let mut surface = client.events("surface", Some(&session.id)).await.unwrap();
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "research a trip");
+    core.host().question(job.id, "which city?").unwrap();
+    core.host().question(job.id, "how many days?").unwrap();
+    let asked_type = ene_api::QUESTION_ASKED_EVENT;
+    let resolved_type = ene_api::QUESTION_RESOLVED_EVENT;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, surface.recv_json()).await {
+            Ok(Ok(Some(value))) if value["type"] == asked_type => break,
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None) | Err(_)) | Err(_) => {
+                panic!("live bus must emit {asked_type}");
+            }
+        }
+    }
+    let questions = core.host().open_questions(job.id).unwrap();
+    let first_id = questions[0].question_id().to_string();
+    client
+        .answer_question(
+            &job.id.to_string(),
+            &first_id,
+            &AnswerQuestionRequest {
+                text: "Tokyo".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(core.host().open_questions(job.id).unwrap().len(), 1);
+    let window = Duration::from_millis(300);
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, surface.recv_json()).await {
+            Ok(Ok(Some(event))) => {
+                assert_ne!(
+                    event.get("type").and_then(serde_json::Value::as_str),
+                    Some(resolved_type)
+                );
+            }
+            _ => break,
+        }
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn identified_job_question_answer_reaches_mailbox() {
     let (_dir, client, core, server) = boot_server().await;
     let soul = core.occupants()[0].0;

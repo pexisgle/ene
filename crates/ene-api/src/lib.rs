@@ -38,6 +38,10 @@ pub const OPENAPI_JSON: &str = include_str!("../openapi.json");
 /// Canonical live-bus event emitted when a job needs a user answer.
 pub const QUESTION_ASKED_EVENT: &str = "question.asked";
 
+/// Live-bus event emitted when every open question on a job is closed by an
+/// answer or the timeout tick.
+pub const QUESTION_RESOLVED_EVENT: &str = "question.resolved";
+
 #[must_use]
 pub fn openapi_json() -> &'static str {
     OPENAPI_JSON
