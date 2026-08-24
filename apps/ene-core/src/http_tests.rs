@@ -808,7 +808,7 @@ async fn job_question_answer_reaches_mailbox() {
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, surface.recv_json()).await {
-            Ok(Ok(Some(value))) if value["type"] == ene_api::QUESTION_ASKED_EVENT => {
+            Ok(Ok(Some(value))) if value["type"] == ene_api::QuestionEventKind::Asked.as_str() => {
                 asked = Some(value);
                 break;
             }
@@ -906,8 +906,8 @@ async fn answering_the_last_question_emits_question_resolved() {
     let soul = core.occupants()[0].0;
     let job = start_job(&core, soul, "research a city");
     core.host().question(job.id, "which city?").unwrap();
-    let asked_type = ene_api::QUESTION_ASKED_EVENT;
-    let resolved_type = ene_api::QUESTION_RESOLVED_EVENT;
+    let asked_type = ene_api::QuestionEventKind::Asked.as_str();
+    let resolved_type = ene_api::QuestionEventKind::Resolved.as_str();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -950,8 +950,8 @@ async fn partial_answer_does_not_emit_question_resolved() {
     let job = start_job(&core, soul, "research a trip");
     core.host().question(job.id, "which city?").unwrap();
     core.host().question(job.id, "how many days?").unwrap();
-    let asked_type = ene_api::QUESTION_ASKED_EVENT;
-    let resolved_type = ene_api::QUESTION_RESOLVED_EVENT;
+    let asked_type = ene_api::QuestionEventKind::Asked.as_str();
+    let resolved_type = ene_api::QuestionEventKind::Resolved.as_str();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1056,6 +1056,47 @@ async fn identified_answer_resolves_the_selected_question() {
         .await
         .unwrap();
     assert!(core.host().open_questions(job.id).unwrap().is_empty());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn duplicate_identified_answer_maps_to_question_closed_conflict() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "identify a city");
+    core.host().question(job.id, "which city?").unwrap();
+    let question_id = core.host().open_questions(job.id).unwrap()[0]
+        .question_id()
+        .to_string();
+    client
+        .answer_question(
+            &job.id.to_string(),
+            &question_id,
+            &AnswerQuestionRequest {
+                text: "Tokyo".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let err = client
+        .answer_question(
+            &job.id.to_string(),
+            &question_id,
+            &AnswerQuestionRequest {
+                text: "Tokyo again".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ene_api::ApiError::Problem {
+            status: 409,
+            error_class,
+            ..
+        } if error_class == "question_closed"
+    ));
     server.shutdown().await;
 }
 

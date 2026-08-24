@@ -9,6 +9,11 @@ const TICK: Duration = Duration::from_millis(50);
 const TICK: Duration = Duration::from_secs(30);
 
 /// Drive unanswered ask-user timeouts until serve shutdown aborts this task.
+///
+/// Deadlines are wall-clock timestamps on the mailbox question row, so a
+/// core restart mid-question neither resets nor doubles the wait: the tick
+/// compares `Utc::now` against the original `asked_at`, and the assumption
+/// push closes the question exactly once.
 pub async fn run_loop(state: AppState) {
     loop {
         tokio::time::sleep(TICK).await;
