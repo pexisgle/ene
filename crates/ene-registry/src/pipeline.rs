@@ -360,6 +360,31 @@ impl ToolRegistry {
         .await
     }
 
+    /// Start a background tool whose approval already happened through
+    /// `authorize_background`. Validation, confinement, and invoke run as in
+    /// `prepare`, but the approval plane is never consulted again so an Allow
+    /// decision dispatches exactly once.
+    pub async fn start_background_pre_authorized(
+        &self,
+        name: &str,
+        args: Value,
+        execution_id: &str,
+        layer: Layer,
+        deadline_ms: Option<u64>,
+        workspace: Option<&Path>,
+    ) -> Result<(), PipelineError> {
+        let (def, invoke, prepared) = self
+            .prepare_without_authorize(name, args, layer, workspace.map(Path::to_path_buf))
+            .await?;
+        if !def.background {
+            return Err(PipelineError::NotBackground(name.to_owned()));
+        }
+        invoke
+            .start_background(execution_id, name, prepared, deadline_ms)
+            .await
+            .map_err(PipelineError::Execute)
+    }
+
     async fn start_background_inner(
         &self,
         name: &str,
@@ -379,6 +404,27 @@ impl ToolRegistry {
             .start_background(execution_id, name, prepared, deadline_ms)
             .await
             .map_err(PipelineError::Execute)
+    }
+
+    async fn prepare_without_authorize(
+        &self,
+        name: &str,
+        args: Value,
+        layer: Layer,
+        workspace_override: Option<PathBuf>,
+    ) -> Result<(ToolDefinition, Arc<dyn ToolInvoke>, Value), PipelineError> {
+        let (def, invoke) = row_lookup(&self.tools, name)?;
+        if !def.available_on(layer) {
+            return Err(PipelineError::WrongLayer {
+                name: name.to_owned(),
+                requested: layer,
+                required: def.primary_layer(),
+            });
+        }
+        let mut args = args;
+        let workspace = workspace_override.or_else(|| self.workspace.lock().clone());
+        confine_fs_args(name, &mut args, workspace.as_deref())?;
+        Ok((def, invoke, args))
     }
 
     /// Run only the approval half of a background dispatch. Callers that must
