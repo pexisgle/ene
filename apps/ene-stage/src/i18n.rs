@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use fluent_bundle::FluentArgs;
 use i18n_embed::DesktopLanguageRequester;
 use i18n_embed::LanguageLoader;
 use i18n_embed::fluent::{FluentLanguageLoader, fluent_language_loader};
@@ -18,6 +19,8 @@ static MISSING_KEYS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new(
 fn loader_lock() -> &'static RwLock<FluentLanguageLoader> {
     LOADER.get_or_init(|| {
         let language_loader = fluent_language_loader!();
+        // Unicode isolation marks would leak into egui labels and search matching.
+        language_loader.set_use_isolating(false);
         let requested = DesktopLanguageRequester::requested_languages();
         let _selected = i18n_embed::select(&language_loader, &Localizations, &requested);
         RwLock::new(language_loader)
@@ -62,6 +65,18 @@ pub fn fl(key: &str) -> String {
         }
     }
     value
+}
+
+/// Resolve a message with named placeholders, e.g. `{ $tab }` in the FTL source.
+#[must_use]
+pub fn format(key: &str, args: &[(&str, &str)]) -> String {
+    let loader = loader_lock();
+    let guard = loader.read();
+    let mut fluent_args = FluentArgs::new();
+    for (name, value) in args {
+        fluent_args.set(*name, *value);
+    }
+    guard.get_args_fluent(key, Some(&fluent_args))
 }
 
 #[cfg(test)]
