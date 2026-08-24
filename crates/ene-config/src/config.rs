@@ -213,7 +213,7 @@ impl EneConfig {
     ///
     /// Refuses types whose `TARGET` is `Character`; those
     /// sections live in `CharacterConfig::extra` and must
-    /// go through [`CharacterConfig::get_section`]. The
+    /// go through `CharacterConfig::get_section`. The
     /// previous `debug_assert` silently read from the wrong
     /// map in release builds.
     pub fn get_section<T>(&self) -> Result<T, EneConfigError>
@@ -269,7 +269,7 @@ impl EneConfig {
     ///
     /// Refuses types whose `TARGET` is `Character`; those
     /// sections live in `CharacterConfig::extra` and must
-    /// go through [`CharacterConfig::set_section`]. The
+    /// go through `CharacterConfig::set_section`. The
     /// previous `debug_assert` silently wrote to the wrong
     /// map in release builds.
     pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
