@@ -26,6 +26,7 @@ pub use host_http::{
 };
 pub use pipeline::intent_digest;
 pub use pipeline::{BuiltinInvoker, PipelineError, ToolInvoke, ToolRegistry, confine_tool_path};
+pub use pipeline::intent_digest;
 
 #[cfg(test)]
 mod tests;
