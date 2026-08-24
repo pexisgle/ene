@@ -2357,6 +2357,13 @@ fn show_work(
             }
         });
     }
+    let recent_jobs = recent_jobs(&state.jobs);
+    if !recent_jobs.is_empty() {
+        ui.heading(i18n::fl("jobs-recent"));
+        for job in recent_jobs {
+            ui.label(format!("{} [{}] {}", job.title, job.status, job.id));
+        }
+    }
     ui.heading(i18n::fl("jobs-schedules"));
     for schedule in &state.schedules {
         ui.horizontal(|ui| {
@@ -2392,6 +2399,18 @@ fn show_work(
 fn active_jobs(jobs: &[JobView]) -> Vec<&JobView> {
     jobs.iter()
         .filter(|job| matches!(job.status.as_str(), "created" | "queued" | "running"))
+        .collect()
+}
+
+fn recent_jobs(jobs: &[JobView]) -> Vec<&JobView> {
+    jobs.iter()
+        .filter(|job| {
+            matches!(
+                job.status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            )
+        })
+        .take(5)
         .collect()
 }
 
@@ -3673,6 +3692,35 @@ mod tests {
             .map(|job| job.status.as_str())
             .collect::<Vec<_>>();
         assert_eq!(active, ["created", "queued", "running"]);
+    }
+
+    #[test]
+    fn recent_jobs_keeps_terminal_jobs_in_api_order_and_caps_the_list() {
+        let job = |id: usize, status: &str| JobView {
+            id: id.to_string(),
+            soul_id: "soul".to_owned(),
+            title: "task".to_owned(),
+            goal: String::new(),
+            status: status.to_owned(),
+            progress_fraction: None,
+            progress_note: None,
+        };
+        let jobs = vec![
+            job(0, "completed"),
+            job(1, "running"),
+            job(2, "failed"),
+            job(3, "cancelled"),
+            job(4, "interrupted"),
+            job(5, "completed"),
+            job(6, "failed"),
+        ];
+
+        let recent = recent_jobs(&jobs)
+            .into_iter()
+            .map(|job| job.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(recent, ["0", "2", "3", "4", "5"]);
     }
 
     #[test]

@@ -296,6 +296,7 @@ jobs-new-goal = Goal
 jobs-create = Create job
 jobs-created = Job created
 jobs-active = Active jobs
+jobs-recent = Recent jobs
 jobs-cancel = Cancel
 jobs-schedules = Schedules
 schedule-enable = Enable
