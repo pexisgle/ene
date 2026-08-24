@@ -29,10 +29,11 @@ mod plugin;
 mod protocol;
 mod provider;
 
+#[cfg(feature = "net")]
+pub use broker::BrokerClientTransport;
 pub use broker::{
-    BrokerClient, BrokerClientTransport, BrokerErrorCode, BrokerRequest, BrokerResponse,
-    BrokerSession, read_broker_request, read_broker_response, write_broker_request,
-    write_broker_response,
+    BrokerClient, BrokerErrorCode, BrokerRequest, BrokerResponse, BrokerSession,
+    read_broker_request, read_broker_response, write_broker_request, write_broker_response,
 };
 #[cfg(not(unix))]
 pub use bulk::should_spill;

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -62,6 +63,22 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+  feature-matrix:
+    name: Cargo feature matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: ./.github/actions/rust-build-env
+      - name: Check stage without voice
+        run: cargo check --locked -p ene-stage --no-default-features
+      - name: Check stage with voice
+        run: cargo check --locked -p ene-stage --all-features
+      - name: Check plugin IPC without network feature
+        run: cargo check --locked -p ene-plugin-ipc
+      - name: Check plugin IPC with network feature
+        run: cargo check --locked -p ene-plugin-ipc --features net
 
   workspace-matrix:
     name: Workspace test matrix
@@ -150,12 +167,41 @@ jobs:
       - name: Test Windows-compatible libraries
         run: cargo test --locked -p ene-config -p ene-plane -p ene-fiber
 
+  gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs: [fmt, clippy, test, docs, windows-native, workspace-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required jobs succeeded
+        env:
+          FMT_RESULT: ${{ needs.fmt.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          DOCS_RESULT: ${{ needs.docs.result }}
+          WINDOWS_RESULT: ${{ needs.windows-native.result }}
+          WORKSPACE_MATRIX_RESULT: ${{ needs.workspace-matrix.result }}
+        run: |
+          if [[ "$FMT_RESULT" != "success" || \
+            "$CLIPPY_RESULT" != "success" || \
+            "$TEST_RESULT" != "success" || \
+            "$DOCS_RESULT" != "success" || \
+            "$WINDOWS_RESULT" != "success" || \
+            "$WORKSPACE_MATRIX_RESULT" != "success" ]]; then
+            printf 'CI gate failed: fmt=%s clippy=%s tests=%s docs=%s windows=%s workspace-matrix=%s\n' \
+              "$FMT_RESULT" "$CLIPPY_RESULT" "$TEST_RESULT" "$DOCS_RESULT" "$WINDOWS_RESULT" \
+              "$WORKSPACE_MATRIX_RESULT" >&2
+            exit 1
+          fi
+          printf 'CI gate passed.\n'
+
   # Keep the two newest rust-cache generations per job, run after the
   # caching jobs save theirs.
   cache-prune:
     name: Prune rust caches
     if: github.ref == 'refs/heads/main'
-    needs: [clippy, workspace-matrix, test, docs, windows-native]
+    needs: [clippy, feature-matrix, workspace-matrix, test, docs, windows-native]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, ApiError, CharacterView, JobView, MemoryCandidateDecision, MemoryCandidateView,
-    MemoryJournalView, MemoryPatch, MemoryView, OccupantView, PluginConfigField,
-    PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
+    ApiClient, ApiError, CharacterView, CreateJobRequest, JobView, MemoryCandidateDecision,
+    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, OccupantView,
+    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
     ResolveMemoryCandidateRequest, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
@@ -327,6 +327,9 @@ pub struct DetailUiState {
     pub body_ref_draft: String,
     pub jobs: Vec<JobView>,
     pub schedules: Vec<ScheduleView>,
+    pub new_job_title: String,
+    pub new_job_goal: String,
+    pub new_job_inflight: bool,
     pub plugins: Vec<PluginView>,
     pub provider_assets_plugin: String,
     pub provider_assets: Vec<ProviderAssetView>,
@@ -2303,6 +2306,33 @@ fn show_work(
         }
     });
     ui.label(i18n::fl("jobs-export-hint"));
+    ui.heading(i18n::fl("jobs-new"));
+    ui.label(i18n::fl("jobs-new-hint"));
+    ui.add(
+        egui::TextEdit::singleline(&mut state.new_job_title).hint_text(i18n::fl("jobs-new-title")),
+    );
+    ui.add(
+        egui::TextEdit::multiline(&mut state.new_job_goal)
+            .desired_rows(3)
+            .hint_text(i18n::fl("jobs-new-goal")),
+    );
+    let can_create = !state.new_job_inflight && !state.new_job_goal.trim().is_empty();
+    if ui
+        .add_enabled(can_create, egui::Button::new(i18n::fl("jobs-create")))
+        .clicked()
+    {
+        state.new_job_inflight = true;
+        let request = CreateJobRequest {
+            soul_id: soul_id.to_owned(),
+            goal: state.new_job_goal.trim().to_owned(),
+            title: (!state.new_job_title.trim().is_empty())
+                .then(|| state.new_job_title.trim().to_owned()),
+        };
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::CreateJob(client.create_job(&request).await.map_err(|e| e.to_string()))
+        });
+    }
     ui.heading(i18n::fl("jobs-active"));
     let active_jobs = active_jobs(&state.jobs);
     if active_jobs.is_empty() {
@@ -2326,6 +2356,13 @@ fn show_work(
                 });
             }
         });
+    }
+    let recent_jobs = recent_jobs(&state.jobs);
+    if !recent_jobs.is_empty() {
+        ui.heading(i18n::fl("jobs-recent"));
+        for job in recent_jobs {
+            ui.label(format!("{} [{}] {}", job.title, job.status, job.id));
+        }
     }
     ui.heading(i18n::fl("jobs-schedules"));
     for schedule in &state.schedules {
@@ -2362,6 +2399,18 @@ fn show_work(
 fn active_jobs(jobs: &[JobView]) -> Vec<&JobView> {
     jobs.iter()
         .filter(|job| matches!(job.status.as_str(), "created" | "queued" | "running"))
+        .collect()
+}
+
+fn recent_jobs(jobs: &[JobView]) -> Vec<&JobView> {
+    jobs.iter()
+        .filter(|job| {
+            matches!(
+                job.status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            )
+        })
+        .take(5)
         .collect()
 }
 
@@ -3643,6 +3692,35 @@ mod tests {
             .map(|job| job.status.as_str())
             .collect::<Vec<_>>();
         assert_eq!(active, ["created", "queued", "running"]);
+    }
+
+    #[test]
+    fn recent_jobs_keeps_terminal_jobs_in_api_order_and_caps_the_list() {
+        let job = |id: usize, status: &str| JobView {
+            id: id.to_string(),
+            soul_id: "soul".to_owned(),
+            title: "task".to_owned(),
+            goal: String::new(),
+            status: status.to_owned(),
+            progress_fraction: None,
+            progress_note: None,
+        };
+        let jobs = vec![
+            job(0, "completed"),
+            job(1, "running"),
+            job(2, "failed"),
+            job(3, "cancelled"),
+            job(4, "interrupted"),
+            job(5, "completed"),
+            job(6, "failed"),
+        ];
+
+        let recent = recent_jobs(&jobs)
+            .into_iter()
+            .map(|job| job.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(recent, ["0", "2", "3", "4", "5"]);
     }
 
     #[test]

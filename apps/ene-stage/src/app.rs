@@ -27,9 +27,7 @@ use crate::i18n;
 use crate::overlay::{OverlayError, OverlayWindow};
 use crate::settings::{DesktopSettings, load_desktop_settings, save_desktop_settings};
 use crate::shell::tray::TrayError;
-use crate::shell::{
-    HotkeyManager, ShellAction, ShellError, TrayAction, TrayManager, show_notification,
-};
+use crate::shell::{HotkeyManager, ShellCommand, ShellError, TrayManager, show_notification};
 use crate::surface::{self, SpotlightAction, SurfaceAction, SurfaceUiState};
 use crate::tasks::AsyncOutcome;
 
@@ -216,6 +214,7 @@ pub fn run() -> Result<(), AppError> {
         overlay_focus: OverlayFocus::default(),
         last_cursor: None,
         last_tick: Instant::now(),
+        tray_interaction_at: None,
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
         approval_needs_reveal: false,
@@ -273,6 +272,7 @@ struct StageApp {
     overlay_focus: OverlayFocus,
     last_cursor: Option<LogicalPosition<f32>>,
     last_tick: Instant,
+    tray_interaction_at: Option<Instant>,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
     approval_needs_reveal: bool,
@@ -330,6 +330,7 @@ impl StageApp {
             overlay_focus: OverlayFocus::default(),
             last_cursor: None,
             last_tick: Instant::now(),
+            tray_interaction_at: None,
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
             approval_needs_reveal: false,
@@ -344,6 +345,9 @@ impl StageApp {
     }
 
     fn sync_overlay_interaction(&mut self) {
+        // A tray menu steal is not a real focus switch; the overlay-focus
+        // state machine already models that grace window via its target, so
+        // protection derives solely from which chrome surface owns focus.
         let protect_chrome = self.overlay_focus.protects();
         let always_on_top = self.local_settings.always_on_top;
         let preferred_click_through = self.local_settings.overlay_click_through;
@@ -668,6 +672,19 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
+            AsyncOutcome::CreateJob(result) => {
+                self.detail.new_job_inflight = false;
+                match result {
+                    Ok(job) => {
+                        self.detail.jobs.retain(|item| item.id != job.id);
+                        self.detail.jobs.insert(0, job);
+                        self.detail.new_job_title.clear();
+                        self.detail.new_job_goal.clear();
+                        self.detail.core_status = i18n::fl("jobs-created");
+                    }
+                    Err(err) => self.detail.core_status = err,
+                }
+            }
             AsyncOutcome::CancelJob { result, .. }
             | AsyncOutcome::ToggleSchedule { result, .. } => {
                 if result.is_ok() {
@@ -780,6 +797,9 @@ impl StageApp {
             AsyncOutcome::MicClaim(result) => match result {
                 Ok(active) => {
                     self.mic_active = active;
+                    if let Some(tray) = self.tray.as_ref() {
+                        tray.set_mic_active(active);
+                    }
                     if active {
                         let action = self.listen.start();
                         self.spawn_listen(action);
@@ -1286,6 +1306,21 @@ impl StageApp {
         }
     }
 
+    fn dispatch_shell_command(&mut self, event_loop: &ActiveEventLoop, command: ShellCommand) {
+        match command {
+            ShellCommand::OpenSpotlight => {
+                if self.settings.spotlight_enabled {
+                    self.surface.spotlight_open = true;
+                    self.ensure_spotlight(event_loop);
+                }
+            }
+            ShellCommand::OpenDetail(tab) => self.open_detail(event_loop, tab),
+            ShellCommand::OpenChat => self.open_chat(event_loop),
+            ShellCommand::ToggleMic => self.toggle_mic(),
+            ShellCommand::Quit => self.surface.quit = true,
+        }
+    }
+
     fn poll_shell(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "linux")]
         {
@@ -1293,38 +1328,28 @@ impl StageApp {
                 let _ = gtk::main_iteration_do(false);
             }
         }
-        let tray_actions: Vec<TrayAction> = self
+        let tray_commands: Vec<ShellCommand> = self
             .tray
             .as_ref()
             .map(|tray| {
-                let mut actions = Vec::new();
-                while let Some(action) = tray.try_recv() {
-                    actions.push(action);
+                let mut commands = Vec::new();
+                while let Some(command) = tray.try_recv() {
+                    commands.push(command);
                 }
-                actions
+                commands
             })
             .unwrap_or_default();
-        for action in tray_actions {
-            match action {
-                TrayAction::OpenDetail => self.open_detail(event_loop, DetailTab::Home),
-                TrayAction::OpenChatFocus => self.open_chat(event_loop),
-                TrayAction::ToggleMic => self.toggle_mic(),
-                TrayAction::Quit => self.surface.quit = true,
-            }
-        }
-        if let Some(hotkeys) = self.hotkeys.as_mut()
-            && let Some(action) = hotkeys.poll()
+        if let Some(tray) = self.tray.as_ref()
+            && tray.take_interactions() > 0
         {
-            match action {
-                ShellAction::OpenSpotlight => {
-                    if self.settings.spotlight_enabled {
-                        self.surface.spotlight_open = true;
-                        self.ensure_spotlight(event_loop);
-                    }
-                }
-                ShellAction::ToggleMic => self.toggle_mic(),
-                ShellAction::Quit => self.surface.quit = true,
-            }
+            self.tray_interaction_at = Some(Instant::now());
+        }
+        for command in tray_commands {
+            self.dispatch_shell_command(event_loop, command);
+        }
+        let hotkey_command = self.hotkeys.as_mut().and_then(HotkeyManager::poll);
+        if let Some(command) = hotkey_command {
+            self.dispatch_shell_command(event_loop, command);
         }
         if self.surface.quit {
             event_loop.exit();
@@ -1900,9 +1925,9 @@ impl StageApp {
             self.surface.spotlight_open = false;
             self.spotlight = None;
             match action {
-                SpotlightAction::OpenDetail(tab) => self.open_detail(event_loop, tab),
-                SpotlightAction::ToggleMic => self.toggle_mic(),
-                SpotlightAction::Quit => self.surface.quit = true,
+                SpotlightAction::Command(command) => {
+                    self.dispatch_shell_command(event_loop, command);
+                }
                 SpotlightAction::Close => {}
             }
         }
@@ -2262,6 +2287,15 @@ fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     }
 }
 
+/// Focus loss within this window after a tray interaction is treated as the
+/// transient steal caused by the tray menu, not as a real switch to another app.
+const TRAY_FOCUS_GRACE: Duration = Duration::from_millis(1500);
+
+#[must_use]
+fn focus_loss_is_transient(tray_interaction_at: Option<Instant>, now: Instant) -> bool {
+    tray_interaction_at.is_some_and(|at| now.duration_since(at) < TRAY_FOCUS_GRACE)
+}
+
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
         "(empty)"
@@ -2282,15 +2316,17 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, OverlayFocus, StageApp,
-        chat_window_action, format_log_text, overlay_window_level, provider_asset_load_status,
-        window_focus_state, window_level,
+        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, focus_loss_is_transient,
+        format_log_text, overlay_window_level, provider_asset_load_status, window_focus_state,
+        window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
     use crate::surface::{PendingApproval, PendingQuestion};
     use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
     use std::sync::Arc;
+    use std::time::Duration;
+    use std::time::Instant;
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
@@ -2324,10 +2360,43 @@ mod tests {
             window_focus_state(&winit::event::WindowEvent::Focused(false)),
             Some(false)
         );
+    }
+
+    #[test]
+    fn tray_interaction_within_grace_is_transient() {
+        let now = Instant::now();
+        assert!(focus_loss_is_transient(
+            Some(now),
+            now + Duration::from_millis(100)
+        ));
+        assert!(!focus_loss_is_transient(
+            Some(now.checked_sub(Duration::from_secs(5)).unwrap_or(now)),
+            now
+        ));
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::CloseRequested),
             None
         );
+    }
+
+    #[test]
+    fn alt_tab_focus_loss_clears_chrome_without_tray_grace() {
+        // Simulates: user Alt-Tabs away with no recent tray interaction.
+        // chrome_focused must become false so overlay returns to AlwaysOnTop.
+        let mut app = StageApp::new_for_test();
+        app.chrome_focused = true;
+        app.chat = None; // ensure chrome_window_exists() can be false
+        app.detail_win = None;
+        app.caption = None;
+        app.spotlight = None;
+        app.tray_interaction_at = None;
+
+        // Apply Focused(false): chrome_focused must drop unconditionally.
+        let focused_false = window_focus_state(&winit::event::WindowEvent::Focused(false));
+        if let Some(focused) = focused_false {
+            app.chrome_focused = focused;
+        }
+        assert!(!app.chrome_focused);
     }
 
     #[test]

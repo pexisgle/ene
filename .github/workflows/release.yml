@@ -12,8 +12,15 @@ env:
   CARGO_BUILD_RUSTC_WRAPPER: ""
 
 jobs:
-  build:
+  quality-gate:
+    name: CI quality gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build-package:
     name: Build release
+    needs: quality-gate
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -28,6 +35,15 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: "nix develop --command {0}"
+
+      - name: Verify tag commit is on main
+        run: |
+          git fetch origin main --no-tags
+          tag_commit="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
+            echo "error: tag commit $tag_commit is not on origin/main" >&2
+            exit 1
+          fi
 
       - name: Derive version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
@@ -87,9 +103,27 @@ jobs:
             dist
             CHANGELOG.release.md
 
+  package-smoke:
+    name: Smoke test Linux package
+    needs: build-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download release artifacts
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name release-artifacts --dir release-artifacts
+      - name: Validate package and archive
+        run: bash scripts/check-linux-package.sh "${GITHUB_REF_NAME#v}" release-artifacts/dist
+
   publish:
     name: Publish release
-    needs: build
+    needs: [build-package, package-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
