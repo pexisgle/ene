@@ -60,8 +60,41 @@ pub fn try_host_post_json(url: &str, body: &Value, bearer: &str) -> Option<Resul
     HOST_POST.with(|cell| cell.borrow().as_ref().map(|post| post(url, body, bearer)))
 }
 
+/// Install the vault-backed search credentials for `run`. The fiber
+/// supervisor scopes this to each bundled `web.*` execution; the spawned
+/// plugin process instead seeds the same storage once from its spawn config.
+pub(crate) mod web_credentials {
+    use super::Value;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static WEB_CREDENTIALS: RefCell<Option<Value>> = const { RefCell::new(None) };
+    }
+
+    /// Run `run` with `creds` as the only credential source for bundled
+    /// `web.*` tools.
+    pub fn with_web_credentials<T>(creds: Value, run: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                WEB_CREDENTIALS.with(|cell| cell.replace(None));
+            }
+        }
+        WEB_CREDENTIALS.with(|cell| cell.replace(Some(creds)));
+        let _reset = Reset;
+        run()
+    }
+
+    /// Credentials installed by the host for this execution, if any.
+    #[must_use]
+    pub fn try_web_credentials() -> Option<Value> {
+        WEB_CREDENTIALS.with(|cell| cell.borrow().clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::web_credentials::{try_web_credentials, with_web_credentials};
     use super::{try_host_fetch, try_host_post_json, with_http_fetch, with_post_json};
     use serde_json::json;
 
@@ -100,5 +133,14 @@ mod tests {
         .unwrap();
         assert_eq!(value["status"], 200);
         assert!(try_host_post_json("https://example.invalid/api", &json!({}), "").is_none());
+    }
+
+    #[test]
+    fn web_credentials_are_scoped_to_closure() {
+        let seen = with_web_credentials(json!({"tavily_api_key": "tvly-test"}), || {
+            try_web_credentials()
+        });
+        assert_eq!(seen.unwrap()["tavily_api_key"], "tvly-test");
+        assert!(try_web_credentials().is_none());
     }
 }

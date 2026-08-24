@@ -20,6 +20,9 @@ const USER_AGENT: &str = "ene-web/0.1";
 type FetchStub = fn(&str) -> Result<Value, BrokerError>;
 
 #[cfg(test)]
+type PostStub = fn(&str, &Value, Option<&str>) -> Value;
+
+#[cfg(test)]
 type HopStub = fn(&str, Option<&str>) -> Result<HopResponse, BrokerError>;
 
 #[cfg(test)]
@@ -28,6 +31,7 @@ type DnsStub = fn(&str) -> Vec<IpAddr>;
 #[cfg(test)]
 thread_local! {
     static FETCH_STUB: std::cell::RefCell<Option<FetchStub>> = const { std::cell::RefCell::new(None) };
+    static POST_STUB: std::cell::RefCell<Option<PostStub>> = const { std::cell::RefCell::new(None) };
     static HOP_STUB: std::cell::RefCell<Option<HopStub>> = const { std::cell::RefCell::new(None) };
     static DNS_STUB: std::cell::RefCell<Option<DnsStub>> = const { std::cell::RefCell::new(None) };
 }
@@ -44,6 +48,12 @@ pub(crate) fn with_fetch_stub<T>(stub: FetchStub, run: impl FnOnce() -> T) -> T 
     }
     FETCH_STUB.with(|cell| cell.replace(Some(stub)));
     let _reset = Reset;
+    run()
+}
+
+#[cfg(test)]
+pub(crate) fn with_post_stub<T>(stub: PostStub, run: impl FnOnce() -> T) -> T {
+    POST_STUB.with(|cell| cell.replace(Some(stub)));
     run()
 }
 
@@ -103,6 +113,10 @@ pub(crate) fn post_json(
     bearer: Option<&str>,
 ) -> Result<Value, BrokerError> {
     let url = deny_ssrf(raw)?;
+    #[cfg(test)]
+    if let Some(stub) = POST_STUB.with(|cell| *cell.borrow()) {
+        return Ok(stub(url.as_str(), body, bearer));
+    }
     #[cfg(test)]
     if let Some(stub) = FETCH_STUB.with(|cell| *cell.borrow()) {
         let _ = body;

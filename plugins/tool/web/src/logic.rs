@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use url::Url;
 
 #[path = "credentials.rs"]
-mod credentials;
+pub(crate) mod credentials;
 #[path = "html.rs"]
 mod html;
 #[path = "search.rs"]
@@ -54,7 +54,7 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
 }
 
 pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
-    match name {
+    credentials::install_host_credentials(ene_registry::try_web_credentials(), || match name {
         "web.fetch" => {
             let format = parse_format(args.get("format").and_then(Value::as_str))?;
             fetch(arg_str(args, "url")?, format)
@@ -65,7 +65,7 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
         }
         "web.search_backends" => Ok(search::catalog(credentials::try_credentials().as_ref())),
         other => Err(format!("unknown builtin {other}")),
-    }
+    })
 }
 
 fn fetch(raw: &str, format: html::FetchFormat) -> Result<Value, String> {
