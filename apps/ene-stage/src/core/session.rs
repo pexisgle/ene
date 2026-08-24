@@ -11,7 +11,7 @@ use ene_api::{
 use parking_lot::Mutex;
 use uuid::Uuid;
 
-use crate::bundle::{self, motions_dir_for_package};
+use crate::bundle::{self, BundleError, motions_dir_for_package};
 
 /// Overlay draws at most this many VRM bodies (`body.render.max_concurrent` default).
 pub const MAX_OVERLAY_BODIES: usize = 2;
@@ -454,12 +454,15 @@ impl SessionHandle {
 }
 
 /// Import or activate Alicia so a stage occupant exposes `avatar_path`.
-pub async fn ensure_alicia(client: &ApiClient) -> Result<Option<OccupantView>, ApiError> {
+pub async fn ensure_alicia(
+    client: &ApiClient,
+    bundle: impl Fn(&str, &str) -> Result<Vec<u8>, BundleError>,
+) -> Result<Option<OccupantView>, ApiError> {
     let occupants = client.stage().await?.occupants;
     if let Some(occupant) = occupant_with_avatar(&occupants) {
         return Ok(Some(occupant));
     }
-    import_named_companion(client, "char.alicia", "Alicia").await?;
+    import_named_companion(client, "char.alicia", "Alicia", &bundle).await?;
     Ok(occupant_with_avatar(&client.stage().await?.occupants))
 }
 
@@ -468,12 +471,21 @@ pub async fn ensure_avatar_occupants(
     client: &ApiClient,
     want: usize,
 ) -> Result<Vec<OccupantView>, ApiError> {
-    let _ = ensure_alicia(client).await?;
+    ensure_avatar_occupants_with(client, want, bundle::pack_bundled_named).await
+}
+
+/// Test seam over the bundled-character pack step.
+async fn ensure_avatar_occupants_with(
+    client: &ApiClient,
+    want: usize,
+    bundle: impl Fn(&str, &str) -> Result<Vec<u8>, BundleError>,
+) -> Result<Vec<OccupantView>, ApiError> {
+    let _ = ensure_alicia(client, &bundle).await?;
     let occupants = client.stage().await?.occupants;
     if avatar_slots(&occupants).len() >= want {
         return Ok(occupants);
     }
-    import_named_companion(client, "char.alicia-b", "Alicia B").await?;
+    import_named_companion(client, "char.alicia-b", "Alicia B", &bundle).await?;
     Ok(client.stage().await?.occupants)
 }
 
@@ -481,6 +493,7 @@ async fn import_named_companion(
     client: &ApiClient,
     id: &str,
     display_name: &str,
+    bundle: &impl Fn(&str, &str) -> Result<Vec<u8>, BundleError>,
 ) -> Result<(), ApiError> {
     let packages = client.list_characters().await?.items;
     let existing = packages.iter().find(|pkg| pkg.id == id).or_else(|| {
@@ -495,7 +508,7 @@ async fn import_named_companion(
         let _ = client.activate_character(&pkg.id).await?;
         return Ok(());
     }
-    match bundle::pack_bundled_named(id, display_name) {
+    match bundle(id, display_name) {
         Ok(bytes) => {
             tracing::info!(id, bytes = bytes.len(), "importing bundled VRM .enechar");
             let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -505,10 +518,7 @@ async fn import_named_companion(
             }
             Ok(())
         }
-        Err(err) => {
-            tracing::warn!(error = %err, id, "bundled VRM package unavailable");
-            Ok(())
-        }
+        Err(err) => Err(ApiError::Transport(err.to_string())),
     }
 }
 
@@ -517,6 +527,38 @@ fn find_alicia_package(packages: &[CharacterView]) -> Option<&CharacterView> {
         let id = pkg.id.to_ascii_lowercase();
         id == "char.alicia" || id == "alicia"
     })
+}
+
+#[cfg(test)]
+mod bundle_seam_tests {
+    #![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests"))]
+    use super::*;
+
+    fn recording_client() -> ApiClient {
+        ApiClient::new("http://127.0.0.1:9", "token", "stage")
+    }
+
+    fn failing_bundle(_id: &str, _name: &str) -> Result<Vec<u8>, BundleError> {
+        Err(BundleError::Missing("/no/AliciaSolid.vrm".to_owned()))
+    }
+
+    #[tokio::test]
+    async fn missing_bundle_is_reported_not_swallowed() {
+        let client = recording_client();
+        let err = import_named_companion(&client, "char.alicia", "Alicia", &failing_bundle)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn ensure_avatar_occupants_surfaces_missing_bundle() {
+        let client = recording_client();
+        let err = ensure_avatar_occupants_with(&client, 1, failing_bundle)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Transport(_)));
+    }
 }
 
 #[must_use]
