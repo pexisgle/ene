@@ -162,6 +162,7 @@ impl CompanionAvatar {
     }
 
     pub fn apply_expression(&mut self, label: &str) {
+        self.clear_expression_cue();
         let name = ExpressionName::new(label);
         if !self.model.expressions.set_expression(&name, 1.0) {
             tracing::debug!(label, "unknown expression discarded");
@@ -552,6 +553,42 @@ fn discover_motions(dir: &Path) -> Vec<(String, PathBuf)> {
 mod tests {
     use super::*;
 
+    fn try_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::PRIMARY,
+                backend_options: wgpu::BackendOptions::default(),
+                flags: wgpu::InstanceFlags::default(),
+                display: None,
+                memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            });
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: None,
+                    force_fallback_adapter: true,
+                })
+                .await
+                .ok()?;
+            adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("ene-stage-avatar-test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: {
+                        let mut limits =
+                            wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits());
+                        limits.max_bind_groups = adapter.limits().max_bind_groups;
+                        limits
+                    },
+                    memory_hints: wgpu::MemoryHints::default(),
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                    trace: wgpu::Trace::Off,
+                })
+                .await
+                .ok()
+        })
+    }
+
     #[test]
     fn unknown_expression_is_not_stored() {
         let value = serde_json::json!({ "type": "body.posture", "name": "sit" });
@@ -568,6 +605,43 @@ mod tests {
         assert!(
             bytes.windows(8).any(|window| window == b"VRMC_vrm"),
             "minimal fixture must declare VRMC_vrm"
+        );
+    }
+
+    #[test]
+    fn explicit_expression_cancels_pending_auto_cue() {
+        let Some((device, queue)) = try_test_device() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("minimal.vrm");
+        CompanionAvatar::write_default_minimal_vrm(&path).unwrap();
+        // The minimal fixture defines no expressions; inject a synthetic
+        // "happy" definition so cue state transitions are observable without
+        // depending on the license-restricted Alicia asset.
+        let mut avatar =
+            CompanionAvatar::load(&path, &device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb)
+                .unwrap();
+        avatar
+            .model
+            .expressions
+            .weights
+            .insert(ExpressionName::new("happy"), 0.0);
+
+        avatar.apply_expression_cue("happy");
+        assert!(avatar.expression_cue.is_some(), "cue should start");
+
+        avatar.tick_expression_cue(0.1);
+        avatar.apply_expression("happy");
+        assert!(
+            avatar.expression_cue.is_none(),
+            "explicit expression must clear the auto cue"
+        );
+
+        avatar.tick_expression_cue(f32::MAX);
+        assert!(
+            avatar.expression_cue.is_none(),
+            "ticking after explicit override must not resurrect the cue"
         );
     }
 }
