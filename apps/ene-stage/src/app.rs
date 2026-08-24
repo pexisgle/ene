@@ -865,7 +865,6 @@ impl StageApp {
     fn request_memories(&self) {
         let soul_id_memories = self.session.soul_id().to_owned();
         let client = Arc::clone(&self.client);
-        let client_pending = Arc::clone(&client);
         self.spawn(async move {
             AsyncOutcome::ListMemories {
                 soul_id: soul_id_memories.clone(),
@@ -899,16 +898,6 @@ impl StageApp {
                     .map(|page| page.items)
                     .map_err(|err| err.to_string()),
             }
-        });
-        let soul_id_pending = self.session.soul_id().to_owned();
-        self.spawn(async move {
-            AsyncOutcome::ListPendingMemories(
-                client_pending
-                    .list_pending_memories(&soul_id_pending)
-                    .await
-                    .map(|page| page.items)
-                    .map_err(|err| err.to_string()),
-            )
         });
     }
 
@@ -2265,6 +2254,7 @@ mod tests {
     fn resolving_memory_refreshes_memories_and_pending_candidates() {
         let mut app = StageApp::new_for_test();
         app.apply_async_outcome(AsyncOutcome::ResolveMemory {
+            soul_id: app.session.soul_id().to_owned(),
             id: "candidate-1".to_owned(),
             result: Ok(()),
         });
@@ -2285,7 +2275,7 @@ mod tests {
             .filter(|outcome| {
                 matches!(
                     outcome,
-                    AsyncOutcome::ListMemories(_) | AsyncOutcome::ListPendingMemories(_)
+                    AsyncOutcome::ListMemories { .. } | AsyncOutcome::ListPendingMemories { .. }
                 )
             })
             .count();
