@@ -42,13 +42,14 @@ enum FocusTarget {
 
 /// Which window currently owns keyboard focus, driving overlay z-order and
 /// click-through as one derived state instead of independent booleans.
-///
-/// `Focused(false)` clears optimistically; a following `Focused(true)`
-/// from another of our windows re-establishes protection before the next
-/// interaction sync, so brief focus handoffs never expose the overlay.
+/// A chrome `Focused(false)` starts a short grace period during which the
+/// overlay stays protected; another chrome `Focused(true)` cancels it, so a
+/// normal chrome-to-chrome/OS focus handoff never exposes the overlay even
+/// though the loss event always arrives before the next gain event.
 #[derive(Debug, Default)]
 struct OverlayFocus {
     target: Option<FocusTarget>,
+    pending_loss_until: Option<Instant>,
 }
 
 impl OverlayFocus {
@@ -69,28 +70,28 @@ impl OverlayFocus {
                 if focused {
                     self.set(FocusTarget::Chat)
                 } else {
-                    self.clear_if(FocusTarget::Chat)
+                    self.mark_pending_loss()
                 }
             }
             FocusOwner::Detail => {
                 if focused {
                     self.set(FocusTarget::Detail)
                 } else {
-                    self.clear_if(FocusTarget::Detail)
+                    self.mark_pending_loss()
                 }
             }
             FocusOwner::Caption => {
                 if focused {
                     self.set(FocusTarget::Caption)
                 } else {
-                    self.clear_if(FocusTarget::Caption)
+                    self.mark_pending_loss()
                 }
             }
             FocusOwner::Spotlight => {
                 if focused {
                     self.set(FocusTarget::Spotlight)
                 } else {
-                    self.clear_if(FocusTarget::Spotlight)
+                    self.mark_pending_loss()
                 }
             }
         }
@@ -99,27 +100,50 @@ impl OverlayFocus {
     fn set(&mut self, target: FocusTarget) -> bool {
         let changed = self.target != Some(target);
         self.target = Some(target);
+        self.cancel_pending_loss();
         changed
+    }
+
+    fn mark_pending_loss(&mut self) -> bool {
+        if self.target.is_none() {
+            return false;
+        }
+        self.pending_loss_until = Some(Instant::now() + FOCUS_LOSS_GRACE);
+        // Protection intentionally stays until the grace expires or another
+        // chrome claim cancels it; no interaction sync must run yet.
+        false
+    }
+
+    /// Drop protection once a pending focus loss outlives its grace period.
+    /// Returns whether the state changed and a sync is required.
+    fn expire_pending_loss(&mut self, now: Instant) -> bool {
+        let Some(deadline) = self.pending_loss_until else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.pending_loss_until = None;
+        self.clear()
     }
 
     fn clear(&mut self) -> bool {
         let had = self.target.is_some();
+        self.pending_loss_until = None;
         self.target = None;
         had
     }
 
     fn clear_target(&mut self, target: FocusTarget) {
         if self.target == Some(target) {
-            self.target = None;
+            self.clear();
+        } else {
+            self.cancel_pending_loss();
         }
     }
 
-    fn clear_if(&mut self, target: FocusTarget) -> bool {
-        if self.target == Some(target) {
-            self.clear()
-        } else {
-            false
-        }
+    fn cancel_pending_loss(&mut self) {
+        self.pending_loss_until = None;
     }
 
     #[must_use]
@@ -214,7 +238,6 @@ pub fn run() -> Result<(), AppError> {
         overlay_focus: OverlayFocus::default(),
         last_cursor: None,
         last_tick: Instant::now(),
-        tray_interaction_at: None,
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
         approval_needs_reveal: false,
@@ -272,7 +295,6 @@ struct StageApp {
     overlay_focus: OverlayFocus,
     last_cursor: Option<LogicalPosition<f32>>,
     last_tick: Instant,
-    tray_interaction_at: Option<Instant>,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
     approval_needs_reveal: bool,
@@ -330,7 +352,6 @@ impl StageApp {
             overlay_focus: OverlayFocus::default(),
             last_cursor: None,
             last_tick: Instant::now(),
-            tray_interaction_at: None,
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
             approval_needs_reveal: false,
@@ -1342,7 +1363,7 @@ impl StageApp {
         if let Some(tray) = self.tray.as_ref()
             && tray.take_interactions() > 0
         {
-            self.tray_interaction_at = Some(Instant::now());
+            let _ = tray;
         }
         for command in tray_commands {
             self.dispatch_shell_command(event_loop, command);
@@ -2226,6 +2247,9 @@ impl ApplicationHandler for StageApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
+        if self.overlay_focus.expire_pending_loss(Instant::now()) {
+            self.sync_overlay_interaction();
+        }
         self.drain_async_results();
         self.poll_pending_approvals();
         self.drain_surface_events();
@@ -2287,14 +2311,9 @@ fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     }
 }
 
-/// Focus loss within this window after a tray interaction is treated as the
-/// transient steal caused by the tray menu, not as a real switch to another app.
-const TRAY_FOCUS_GRACE: Duration = Duration::from_millis(1500);
-
-#[must_use]
-fn focus_loss_is_transient(tray_interaction_at: Option<Instant>, now: Instant) -> bool {
-    tray_interaction_at.is_some_and(|at| now.duration_since(at) < TRAY_FOCUS_GRACE)
-}
+/// How long overlay protection survives a chrome Focused(false) while waiting
+/// for another chrome window to claim focus during a normal handoff.
+const FOCUS_LOSS_GRACE: Duration = Duration::from_millis(200);
 
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
@@ -2316,9 +2335,9 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, focus_loss_is_transient,
-        format_log_text, overlay_window_level, provider_asset_load_status, window_focus_state,
-        window_level,
+        AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, OverlayFocus, StageApp,
+        chat_window_action, format_log_text, overlay_window_level, provider_asset_load_status,
+        window_focus_state, window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -2363,16 +2382,7 @@ mod tests {
     }
 
     #[test]
-    fn tray_interaction_within_grace_is_transient() {
-        let now = Instant::now();
-        assert!(focus_loss_is_transient(
-            Some(now),
-            now + Duration::from_millis(100)
-        ));
-        assert!(!focus_loss_is_transient(
-            Some(now.checked_sub(Duration::from_secs(5)).unwrap_or(now)),
-            now
-        ));
+    fn window_focus_state_ignores_non_focus_events() {
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::CloseRequested),
             None
@@ -2380,23 +2390,31 @@ mod tests {
     }
 
     #[test]
-    fn alt_tab_focus_loss_clears_chrome_without_tray_grace() {
-        // Simulates: user Alt-Tabs away with no recent tray interaction.
-        // chrome_focused must become false so overlay returns to AlwaysOnTop.
+    fn alt_tab_focus_loss_drops_protection_after_grace() {
+        // Simulates: user Alt-Tabs away with no recent tray interaction and
+        // no other chrome window claiming focus. Protection must drop once
+        // the handoff grace expires so the overlay returns to AlwaysOnTop.
         let mut app = StageApp::new_for_test();
-        app.chrome_focused = true;
         app.chat = None; // ensure chrome_window_exists() can be false
         app.detail_win = None;
         app.caption = None;
         app.spotlight = None;
-        app.tray_interaction_at = None;
+        app.overlay_focus.transition(FocusTarget::Chat);
+        assert!(app.overlay_focus.protects());
 
-        // Apply Focused(false): chrome_focused must drop unconditionally.
+        // Focused(false) starts the grace; protection stays during the window.
         let focused_false = window_focus_state(&winit::event::WindowEvent::Focused(false));
-        if let Some(focused) = focused_false {
-            app.chrome_focused = focused;
+        if focused_false == Some(false) {
+            app.overlay_focus.on_focus_event(FocusOwner::Chat, false);
         }
-        assert!(!app.chrome_focused);
+        assert!(app.overlay_focus.protects());
+
+        // Once the grace expires with no other claim, protection drops.
+        assert!(
+            app.overlay_focus
+                .expire_pending_loss(Instant::now() + Duration::from_secs(1))
+        );
+        assert!(!app.overlay_focus.protects());
     }
 
     #[test]
@@ -2647,7 +2665,7 @@ mod tests {
     }
 
     #[test]
-    fn chrome_focus_loss_clears_matching_target_only() {
+    fn chrome_focus_loss_keeps_protection_until_grace_expires() {
         let mut focus = OverlayFocus::default();
         focus.transition(FocusTarget::Chat);
 
@@ -2655,11 +2673,39 @@ mod tests {
         assert!(focus.on_focus_event(FocusOwner::Detail, true));
         assert!(focus.protects());
 
-        // Detail losing focus clears it; a stale Chat loss must not.
-        assert!(focus.on_focus_event(FocusOwner::Detail, false));
-        assert!(!focus.protects());
+        // Detail losing focus starts the grace period; protection stays up and
+        // no interaction sync is reported because the overlay must not flip.
+        assert!(!focus.on_focus_event(FocusOwner::Detail, false));
+        assert!(focus.protects());
+
+        // A stale Chat loss must not disturb the pending handoff.
         assert!(!focus.on_focus_event(FocusOwner::Chat, false));
+        assert!(focus.protects());
+
+        // After the grace expires, protection drops.
+        assert!(focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
         assert!(!focus.protects());
+    }
+
+    #[test]
+    fn ordered_chrome_handoff_never_drops_protection() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Chat);
+        assert!(focus.protects());
+
+        // Ordered Chat false -> Detail true: the normal OS event order.
+        // Protection must remain continuously true across both events.
+        assert!(!focus.on_focus_event(FocusOwner::Chat, false));
+        assert!(
+            focus.protects(),
+            "protection must survive transient focus loss"
+        );
+        assert!(focus.on_focus_event(FocusOwner::Detail, true));
+        assert!(focus.protects());
+
+        // The new claim cancels the pending-loss grace; expiring later is a no-op.
+        assert!(!focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
+        assert!(focus.protects());
     }
 
     #[test]
