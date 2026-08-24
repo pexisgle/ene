@@ -120,8 +120,21 @@ jobs:
       - name: Install ripgrep
         shell: pwsh
         run: choco install ripgrep -y --no-progress
+      # Compile every workspace member that carries Windows-only code paths
+      # or target-gated dependencies: the two served applications, the tool
+      # plugin binaries (Win32 window/capture code in ene-tool-app, Job
+      # Object teardown in ene-tool-exec, reparse-point handling in
+      # ene-tool-fs), and the sandbox/IPC/registry libraries their Windows
+      # builds link against. ene-fiber's Windows branches are compiled by
+      # the test step below instead of clippy. ene-desktop is excluded: it
+      # is a frozen legacy application with no active Windows support.
       - name: Lint native Windows applications
-        run: cargo clippy --locked -p ene-daemon -p ene-stage --all-targets -- -D warnings
+        run: >-
+          cargo clippy --locked
+          -p ene-daemon -p ene-stage
+          -p ene-tool-app -p ene-tool-exec -p ene-tool-fs
+          -p ene-sandbox -p ene-plugin-ipc -p ene-registry
+          --all-targets -- -D warnings
       - name: Test Windows-compatible libraries
         run: cargo test --locked -p ene-config -p ene-plane -p ene-fiber
 
