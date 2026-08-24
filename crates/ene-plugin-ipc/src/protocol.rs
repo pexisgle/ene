@@ -223,7 +223,7 @@ pub struct ToolBackgroundStatusResult {
     pub error_class: Option<String>,
 }
 
-/// Plugin → host completion notification (no `id`, like [`Message::Log`]).
+/// Plugin → host completion notification (no `id`, like `Message::Log`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolExecutionComplete {
     pub execution_id: String,
