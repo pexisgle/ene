@@ -109,17 +109,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      actions: read
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Download release artifacts
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-        run: gh run download "$GITHUB_RUN_ID" --name release-artifacts --dir release-artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-artifacts
+          path: release-artifacts
       - name: Validate package and archive
-        run: bash scripts/check-linux-package.sh "${GITHUB_REF_NAME#v}" release-artifacts/dist
+        run: bash scripts/ci/smoke-linux-package.sh release-artifacts/dist
 
   publish:
     name: Publish release
@@ -127,14 +125,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      actions: read
       contents: write
     steps:
-      - name: Download release artifacts
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-        run: gh run download "$GITHUB_RUN_ID" --name release-artifacts --dir release-artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-artifacts
+          path: release-artifacts
 
       - name: Create GitHub Release
         env:
