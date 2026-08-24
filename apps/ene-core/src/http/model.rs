@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ene_kernel::{
-    ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding, TextDeltaSink,
-    TokenEstimation, ToolCall, effective_window, estimate_tokens, fit_prompt_llm,
+    AiTaskKind, ConversationModel, KernelError, ModelGeneration, ModelRequest, TaskBinding,
+    TextDeltaSink, TokenEstimation, ToolCall, effective_window, estimate_tokens, fit_prompt_llm,
 };
 use ene_plugin_ipc::{
     LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
@@ -18,52 +18,31 @@ const IMAGE_TOKEN_ESTIMATE: u32 = 4096;
 /// Dialogue / job model that binds `ai.tasks.<task>` to a configured provider plugin.
 pub struct SeamedModel {
     core: Arc<CoreDaemon>,
-    task: &'static str,
+    kind: AiTaskKind,
 }
 
 impl SeamedModel {
     #[must_use]
     pub fn new(core: Arc<CoreDaemon>) -> Self {
-        Self { core, task: "chat" }
+        Self {
+            core,
+            kind: AiTaskKind::Chat,
+        }
     }
 
     #[must_use]
     pub fn job(core: Arc<CoreDaemon>) -> Self {
-        Self { core, task: "job" }
-    }
-
-    fn binding(&self) -> TaskBinding {
-        let guard = self.core.ai();
-        let ai = guard.lock();
-        let specific = match self.task {
-            "job" => &ai.tasks.job,
-            _ => &ai.tasks.chat,
-        };
-        if specific.is_unconfigured() {
-            ai.tasks.chat.clone()
-        } else {
-            specific.clone()
+        Self {
+            core,
+            kind: AiTaskKind::Job,
         }
     }
 
     fn layer(&self) -> Layer {
-        if self.task == "job" {
+        if self.kind == AiTaskKind::Job {
             Layer::Job
         } else {
             Layer::Surface
-        }
-    }
-
-    fn fiber_task(&self) -> &'static str {
-        if self.task != "job" {
-            return "chat";
-        }
-        let guard = self.core.ai();
-        let ai = guard.lock();
-        if ai.tasks.job.is_unconfigured() {
-            "chat"
-        } else {
-            "job"
         }
     }
 }
@@ -89,13 +68,13 @@ impl SeamedModel {
         request: ModelRequest,
         sink: Option<&mut dyn TextDeltaSink>,
     ) -> Result<ModelGeneration, KernelError> {
-        let binding = self.binding();
-        if binding.is_unconfigured() {
+        let Some(task) = crate::seam_client::resolve_task(&self.core, self.kind) else {
             return Err(KernelError::Model(format!(
                 "{} model is not configured",
-                self.task
+                self.kind.name()
             )));
-        }
+        };
+        let binding = task.binding.clone();
         let harness = self.core.harness();
         let reserve = binding
             .max_tokens
@@ -124,16 +103,15 @@ impl SeamedModel {
         let llm_request = map_request(
             messages,
             &binding,
-            &self.core.secret_for(self.task),
+            &task.api_key,
             &self.core,
             self.layer(),
             reserve,
         );
-        let row_id = crate::plugin_profile::task_row_id(self.fiber_task());
         let generation = if let Some(sink) = sink {
-            super::llm::generate_llm_streaming(&self.core, &row_id, llm_request, sink).await
+            crate::seam_client::generate_llm_streaming(&self.core, &task, llm_request, sink).await
         } else {
-            super::llm::generate_llm(&self.core, &row_id, llm_request).await
+            crate::seam_client::generate_llm(&self.core, &task, llm_request).await
         }
         .map_err(KernelError::Model)?;
         Ok(map_generation(generation))

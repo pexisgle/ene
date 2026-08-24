@@ -1,7 +1,7 @@
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use ene_kernel::TaskBinding;
+use ene_kernel::AiTaskKind;
 use ene_plane::{AiJudgement, ApproveModel, AuthzRequest};
 use ene_plugin_ipc::{LlmGenerateRequest, LlmMessage, LlmRole, ProviderAuth};
 
@@ -19,26 +19,6 @@ impl SeamedApprove {
             core: Arc::downgrade(core),
         }
     }
-
-    fn binding(core: &CoreDaemon) -> TaskBinding {
-        let guard = core.ai();
-        let ai = guard.lock();
-        if ai.tasks.approve.is_unconfigured() {
-            ai.tasks.chat.clone()
-        } else {
-            ai.tasks.approve.clone()
-        }
-    }
-
-    fn row_id(core: &CoreDaemon) -> String {
-        let guard = core.ai();
-        let ai = guard.lock();
-        if ai.tasks.approve.is_unconfigured() {
-            crate::plugin_profile::task_row_id("chat")
-        } else {
-            crate::plugin_profile::task_row_id("approve")
-        }
-    }
 }
 
 #[async_trait]
@@ -48,10 +28,8 @@ impl ApproveModel for SeamedApprove {
             .core
             .upgrade()
             .ok_or_else(|| "core stopped".to_owned())?;
-        let binding = Self::binding(&core);
-        if binding.is_unconfigured() {
-            return Err("approve task is not configured".to_owned());
-        }
+        let task = crate::seam_client::resolve_task(&core, AiTaskKind::Approve)
+            .ok_or_else(|| "approve task is not configured".to_owned())?;
         let request = LlmGenerateRequest {
             messages: vec![
                 LlmMessage::new(
@@ -84,14 +62,14 @@ impl ApproveModel for SeamedApprove {
                 }),
             ],
             tools: Vec::new(),
-            model: binding.model,
-            max_tokens: binding.max_tokens.or(Some(256)),
-            base_url: binding.base_url,
+            model: task.binding.model.clone(),
+            max_tokens: task.binding.max_tokens.or(Some(256)),
+            base_url: task.binding.base_url.clone(),
             auth: ProviderAuth {
-                api_key: core.secret_for("approve"),
+                api_key: task.api_key.clone(),
             },
         };
-        let generation = super::llm::generate_llm(&core, &Self::row_id(&core), request).await?;
+        let generation = crate::seam_client::generate_llm(&core, &task, request).await?;
         parse_ai_judgement(&generation.text)
     }
 }

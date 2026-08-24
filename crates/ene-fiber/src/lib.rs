@@ -24,7 +24,7 @@ pub use broker_ipc::{BrokerIpcError, BrokerServer};
 pub use fiber::{Effect, Fiber, FiberState, FiberUid};
 pub use profile::ProfileApplyReport;
 pub use providers::{
-    PROVIDER_PLUGINS, ProviderPlugin, provider_catalog, provider_plugin, task_seam,
+    PROVIDER_PLUGINS, ProviderPlugin, provider_catalog, provider_plugin, task_seam, task_seam_kind,
 };
 pub use sidecar::{SidecarHealth, SidecarId, SidecarRequest};
 pub use spawn::{

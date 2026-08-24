@@ -14,6 +14,7 @@
 mod boot;
 mod http;
 mod plugin_profile;
+mod seam_client;
 
 pub use boot::{BootOptions, CoreDaemon, CoreError, TaskSecrets};
 pub(crate) use boot::{overlay_ai, overlay_plugins};

@@ -3,8 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ene_body::{DuplexState, VoiceRuntime};
-use ene_kernel::{DisplayDepth, SpeechPresenter, TaskBinding};
-use ene_plugin_ipc::{ProviderAuth, TtsRequest};
+use ene_kernel::{DisplayDepth, SpeechPresenter};
 use ene_session::BodyId;
 use serde_json::json;
 
@@ -27,10 +26,6 @@ impl PluginSpeech {
             events,
         }
     }
-
-    fn tts_binding(core: &CoreDaemon) -> TaskBinding {
-        core.ai().lock().tasks.tts.clone()
-    }
 }
 
 #[async_trait]
@@ -39,30 +34,11 @@ impl SpeechPresenter for PluginSpeech {
         let Some(core) = self.core.upgrade() else {
             return;
         };
-        let binding = Self::tts_binding(&core);
-        if binding.is_unconfigured() {
+        let Some(audio) = crate::seam_client::synthesize_tts(&core, text.to_owned()).await else {
             return;
-        }
-        let request = TtsRequest {
-            text: text.to_owned(),
-            voice: binding.voice.clone(),
-            model: binding.model.clone(),
-            base_url: binding.base_url.clone(),
-            auth: ProviderAuth {
-                api_key: core.secret_for("tts"),
-            },
         };
-        match core
-            .supervisor()
-            .synthesize_tts(&crate::plugin_profile::task_row_id("tts"), request)
-            .await
-        {
-            Ok(audio) => {
-                feed_playback(&core, &self.events, &audio.pcm, audio.sample_rate);
-                emit_pcm(&self.events, &audio.pcm, audio.sample_rate);
-            }
-            Err(err) => tracing::warn!(error = %err, "tts provider failed"),
-        }
+        feed_playback(&core, &self.events, &audio.pcm, audio.sample_rate);
+        emit_pcm(&self.events, &audio.pcm, audio.sample_rate);
     }
 }
 

@@ -14,9 +14,9 @@ use ene_companion::{
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{
-    AiSettings, ConversationModel, CoreSettings, HarnessSettings, LaneHandle, LaneMindSettings,
-    LaneOptions, LoopHooks, PluginSettings, SpeechPresenter, SurfaceRouter, TaskBinding,
-    TurnFinalizer, TurnPrefetch, format_recovery_note,
+    AiSettings, AiTaskKind, ConversationModel, CoreSettings, HarnessSettings, LaneHandle,
+    LaneMindSettings, LaneOptions, LoopHooks, PluginSettings, SpeechPresenter, SurfaceRouter,
+    TaskBinding, TurnFinalizer, TurnPrefetch, format_recovery_note,
 };
 use ene_plane::{
     ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink,
@@ -104,14 +104,7 @@ pub struct CoreDaemon {
     settings: CoreSettings,
     ai: Arc<parking_lot::Mutex<ene_kernel::AiSettings>>,
     plugins: Arc<parking_lot::Mutex<PluginSettings>>,
-    chat_secret: Arc<parking_lot::Mutex<String>>,
-    classifier_secret: Arc<parking_lot::Mutex<String>>,
-    embedding_secret: Arc<parking_lot::Mutex<String>>,
-    proactive_secret: Arc<parking_lot::Mutex<String>>,
-    tts_secret: Arc<parking_lot::Mutex<String>>,
-    stt_secret: Arc<parking_lot::Mutex<String>>,
-    approve_secret: Arc<parking_lot::Mutex<String>>,
-    job_secret: Arc<parking_lot::Mutex<String>>,
+    task_secrets: [Arc<parking_lot::Mutex<String>>; AiTaskKind::ALL.len()],
     job_model: parking_lot::Mutex<Option<Arc<dyn ConversationModel>>>,
     speech: parking_lot::Mutex<Option<Arc<dyn SpeechPresenter>>>,
     finalizer: parking_lot::Mutex<Option<Arc<dyn ene_kernel::TurnFinalizer>>>,
@@ -211,21 +204,15 @@ impl CoreDaemon {
         #[cfg(test)]
         supervisor.set_prefer_in_process_builtins(true);
         seed_default_occupants(&companions, &stage)?;
-        let chat_secret = load_named_secret(&vault, "ENE_AI__TASKS__CHAT__API_KEY", "ai.chat");
-        let classifier_secret = load_named_secret(
-            &vault,
-            "ENE_AI__TASKS__CLASSIFIER__API_KEY",
-            "ai.classifier",
-        );
-        let embedding_secret =
-            load_named_secret(&vault, "ENE_AI__TASKS__EMBEDDING__API_KEY", "ai.embedding");
-        let proactive_secret =
-            load_named_secret(&vault, "ENE_AI__TASKS__PROACTIVE__API_KEY", "ai.proactive");
-        let tts_secret = load_named_secret(&vault, "ENE_AI__TASKS__TTS__API_KEY", "ai.tts");
-        let stt_secret = load_named_secret(&vault, "ENE_AI__TASKS__STT__API_KEY", "ai.stt");
-        let approve_secret =
-            load_named_secret(&vault, "ENE_AI__TASKS__APPROVE__API_KEY", "ai.approve");
-        let job_secret = load_named_secret(&vault, "ENE_AI__TASKS__JOB__API_KEY", "ai.job");
+        let task_secrets: [Arc<parking_lot::Mutex<String>>; AiTaskKind::ALL.len()] =
+            std::array::from_fn(|index| {
+                let kind = AiTaskKind::ALL[index];
+                let env_key = format!("ENE_AI__TASKS__{}__API_KEY", kind.name().to_uppercase());
+                let vault_key = format!("ai.{}", kind.name());
+                Arc::new(parking_lot::Mutex::new(load_named_secret(
+                    &vault, &env_key, &vault_key,
+                )))
+            });
         Ok(Self {
             data_dir: opts.data_dir,
             _lock: lock,
@@ -244,14 +231,7 @@ impl CoreDaemon {
             settings,
             ai: Arc::new(parking_lot::Mutex::new(ai)),
             plugins: Arc::new(parking_lot::Mutex::new(plugins)),
-            chat_secret: Arc::new(parking_lot::Mutex::new(chat_secret)),
-            classifier_secret: Arc::new(parking_lot::Mutex::new(classifier_secret)),
-            embedding_secret: Arc::new(parking_lot::Mutex::new(embedding_secret)),
-            proactive_secret: Arc::new(parking_lot::Mutex::new(proactive_secret)),
-            tts_secret: Arc::new(parking_lot::Mutex::new(tts_secret)),
-            stt_secret: Arc::new(parking_lot::Mutex::new(stt_secret)),
-            approve_secret: Arc::new(parking_lot::Mutex::new(approve_secret)),
-            job_secret: Arc::new(parking_lot::Mutex::new(job_secret)),
+            task_secrets,
             job_model: parking_lot::Mutex::new(None),
             speech: parking_lot::Mutex::new(None),
             finalizer: parking_lot::Mutex::new(None),
@@ -309,19 +289,18 @@ impl CoreDaemon {
     /// Vault value for `ai.tasks.<task>`, falling back to the chat key.
     #[must_use]
     pub fn secret_for(&self, task: &str) -> String {
-        let named = match task {
-            "classifier" => self.classifier_secret.lock().clone(),
-            "embedding" => self.embedding_secret.lock().clone(),
-            "proactive" => self.proactive_secret.lock().clone(),
-            "tts" => self.tts_secret.lock().clone(),
-            "stt" => self.stt_secret.lock().clone(),
-            "approve" => self.approve_secret.lock().clone(),
-            "job" => self.job_secret.lock().clone(),
-            "chat" => self.chat_secret.lock().clone(),
-            _ => String::new(),
-        };
-        if named.is_empty() && task != "chat" {
-            self.chat_secret.lock().clone()
+        match task.parse::<AiTaskKind>() {
+            Ok(kind) => self.secret_for_kind(kind),
+            Err(()) => String::new(),
+        }
+    }
+
+    /// Vault value for one lane, falling back to the chat key.
+    #[must_use]
+    pub fn secret_for_kind(&self, kind: AiTaskKind) -> String {
+        let named = self.task_secrets[kind.index()].lock().clone();
+        if named.is_empty() && kind != AiTaskKind::Chat {
+            self.task_secrets[AiTaskKind::Chat.index()].lock().clone()
         } else {
             named
         }
@@ -329,17 +308,10 @@ impl CoreDaemon {
 
     #[must_use]
     pub fn task_key_set(&self, task: &str) -> bool {
-        let named = match task {
-            "classifier" => self.classifier_secret.lock().clone(),
-            "embedding" => self.embedding_secret.lock().clone(),
-            "proactive" => self.proactive_secret.lock().clone(),
-            "tts" => self.tts_secret.lock().clone(),
-            "stt" => self.stt_secret.lock().clone(),
-            "approve" => self.approve_secret.lock().clone(),
-            "job" => self.job_secret.lock().clone(),
-            _ => self.chat_secret.lock().clone(),
-        };
-        !named.is_empty()
+        match task.parse::<AiTaskKind>() {
+            Ok(kind) => !self.task_secrets[kind.index()].lock().is_empty(),
+            Err(()) => false,
+        }
     }
 
     pub fn set_speech(&self, speech: Arc<dyn SpeechPresenter>) {
@@ -511,16 +483,11 @@ impl CoreDaemon {
         Ok(())
     }
 
-    pub fn replace_ai(&self, ai: AiSettings, secrets: TaskSecrets) {
+    pub fn replace_ai(&self, ai: AiSettings, mut secrets: TaskSecrets) {
         *self.ai.lock() = ai;
-        store_secret(&self.chat_secret, secrets.chat);
-        store_secret(&self.classifier_secret, secrets.classifier);
-        store_secret(&self.embedding_secret, secrets.embedding);
-        store_secret(&self.proactive_secret, secrets.proactive);
-        store_secret(&self.tts_secret, secrets.tts);
-        store_secret(&self.stt_secret, secrets.stt);
-        store_secret(&self.approve_secret, secrets.approve);
-        store_secret(&self.job_secret, secrets.job);
+        for kind in AiTaskKind::ALL {
+            store_secret(&self.task_secrets[kind.index()], secrets.take(*kind));
+        }
     }
 
     pub fn replace_plugins(&self, plugins: PluginSettings) {
@@ -965,14 +932,17 @@ fn load_named_secret(vault: &Vault, env_key: &str, vault_key: &str) -> String {
 /// Secrets stripped from a settings PATCH.
 #[derive(Debug, Clone, Default)]
 pub struct TaskSecrets {
-    pub chat: Option<String>,
-    pub classifier: Option<String>,
-    pub embedding: Option<String>,
-    pub proactive: Option<String>,
-    pub tts: Option<String>,
-    pub stt: Option<String>,
-    pub approve: Option<String>,
-    pub job: Option<String>,
+    values: [Option<String>; AiTaskKind::ALL.len()],
+}
+
+impl TaskSecrets {
+    pub(crate) fn take(&mut self, kind: AiTaskKind) -> Option<String> {
+        self.values[kind.index()].take()
+    }
+
+    pub(crate) fn slot_mut(&mut self, kind: AiTaskKind) -> &mut Option<String> {
+        &mut self.values[kind.index()]
+    }
 }
 
 fn store_secret(slot: &parking_lot::Mutex<String>, value: Option<String>) {
@@ -982,23 +952,12 @@ fn store_secret(slot: &parking_lot::Mutex<String>, value: Option<String>) {
 }
 
 pub(crate) fn overlay_ai(live: &mut AiSettings, incoming: &serde_json::Value) {
-    overlay_task(&mut live.tasks.chat, incoming.pointer("/tasks/chat"));
-    overlay_task(
-        &mut live.tasks.classifier,
-        incoming.pointer("/tasks/classifier"),
-    );
-    overlay_task(
-        &mut live.tasks.embedding,
-        incoming.pointer("/tasks/embedding"),
-    );
-    overlay_task(
-        &mut live.tasks.proactive,
-        incoming.pointer("/tasks/proactive"),
-    );
-    overlay_task(&mut live.tasks.tts, incoming.pointer("/tasks/tts"));
-    overlay_task(&mut live.tasks.stt, incoming.pointer("/tasks/stt"));
-    overlay_task(&mut live.tasks.approve, incoming.pointer("/tasks/approve"));
-    overlay_task(&mut live.tasks.job, incoming.pointer("/tasks/job"));
+    for kind in AiTaskKind::ALL {
+        overlay_task(
+            live.tasks.binding_mut(*kind),
+            incoming.pointer(&format!("/tasks/{}", kind.name())),
+        );
+    }
 }
 
 pub(crate) fn overlay_plugins(live: &mut PluginSettings, incoming: &serde_json::Value) {

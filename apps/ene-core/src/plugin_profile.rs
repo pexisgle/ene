@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use ene_fiber::{ProfileRow, discover_plugin_executable_in, provider_plugin, task_seam};
-use ene_kernel::{AiSettings, PluginProfileKind, PluginSettings, TaskBinding};
+use ene_kernel::{AiSettings, AiTaskKind, PluginProfileKind, PluginSettings, TaskBinding};
 use ene_plane::Vault;
 use ene_work::{McpServer, WorkError, WorkStore};
 use serde::{Deserialize, Serialize};
@@ -275,26 +275,19 @@ fn harness_row(plugin: &str, home: &Path) -> ProfileRow {
 }
 
 fn provider_rows(ai: &AiSettings, home: &Path) -> Vec<ProfileRow> {
-    [
-        ("chat", &ai.tasks.chat),
-        ("classifier", &ai.tasks.classifier),
-        ("embedding", &ai.tasks.embedding),
-        ("proactive", &ai.tasks.proactive),
-        ("tts", &ai.tasks.tts),
-        ("stt", &ai.tasks.stt),
-        ("approve", &ai.tasks.approve),
-        ("job", &ai.tasks.job),
-    ]
-    .into_iter()
-    .filter_map(|(task, binding)| {
-        let row = provider_row(task, binding)?;
-        if discover_plugin_executable_in(&row.plugin, Some(home)).is_none() {
-            tracing::warn!(plugin = %row.plugin, "provider binary missing; skipping");
-            return None;
-        }
-        Some(row)
-    })
-    .collect()
+    AiTaskKind::ALL
+        .iter()
+        .filter_map(|kind| {
+            let task = kind.name();
+            let binding = ai.tasks.binding(*kind);
+            let row = provider_row(task, binding)?;
+            if discover_plugin_executable_in(&row.plugin, Some(home)).is_none() {
+                tracing::warn!(plugin = %row.plugin, "provider binary missing; skipping");
+                return None;
+            }
+            Some(row)
+        })
+        .collect()
 }
 
 fn provider_row(task: &str, binding: &TaskBinding) -> Option<ProfileRow> {
@@ -496,6 +489,29 @@ mod tests {
     fn unconfigured_task_does_not_spawn_a_provider() {
         assert!(super::provider_row("chat", &TaskBinding::default()).is_none());
         assert!(super::provider_row("chat", &TaskBinding::echo()).is_none());
+    }
+
+    #[test]
+    fn provider_rows_cover_all_tasks_in_kind_order() {
+        let mut ai = AiSettings::default();
+        for kind in AiTaskKind::ALL {
+            let binding = ai.tasks.binding_mut(*kind);
+            binding.plugin = "provider.gguf".to_owned();
+            binding.model = kind.name().to_owned();
+        }
+        let built: Vec<String> = AiTaskKind::ALL
+            .iter()
+            .filter_map(|kind| {
+                super::provider_row(kind.name(), ai.tasks.binding(*kind)).map(|row| row.row_id)
+            })
+            .collect();
+        assert_eq!(
+            built,
+            AiTaskKind::ALL
+                .iter()
+                .map(|kind| format!("ai.tasks.{}", kind.name()))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

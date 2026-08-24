@@ -2,7 +2,7 @@ use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use ene_companion::{ArbitrateOutcome, ClassifyModel, ClassifyTask, CompanionError};
-use ene_kernel::{TaskBinding, TurnFinalizer};
+use ene_kernel::{AiTaskKind, TurnFinalizer};
 use ene_plugin_ipc::{LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, ProviderAuth};
 use ene_session::SoulId;
 
@@ -27,43 +27,27 @@ impl SeamedClassify {
             .ok_or_else(|| CompanionError::Classify("core stopped".to_owned()))
     }
 
-    fn binding_for(core: &CoreDaemon, task: ClassifyTask) -> TaskBinding {
-        let guard = core.ai();
-        let ai = guard.lock();
-        let specific = match task {
-            ClassifyTask::ProactiveDecision | ClassifyTask::ScreenSummary => &ai.tasks.proactive,
-            _ => &ai.tasks.classifier,
-        };
-        if !specific.is_unconfigured() {
-            return specific.clone();
-        }
-        ai.tasks.chat.clone()
+    fn resolved(core: &CoreDaemon, task: ClassifyTask) -> crate::seam_client::ResolvedTask {
+        classify_kind(core, task)
     }
+}
 
-    fn row_id_for(core: &CoreDaemon, task: ClassifyTask) -> String {
-        let guard = core.ai();
-        let ai = guard.lock();
-        let (name, specific) = match task {
-            ClassifyTask::ProactiveDecision | ClassifyTask::ScreenSummary => {
-                ("proactive", &ai.tasks.proactive)
-            }
-            _ => ("classifier", &ai.tasks.classifier),
-        };
-        if specific.is_unconfigured() {
-            crate::plugin_profile::task_row_id("chat")
-        } else {
-            crate::plugin_profile::task_row_id(name)
+/// Map a classify request onto its `ai.tasks.*` lane and resolved provider row.
+fn classify_kind(core: &CoreDaemon, task: ClassifyTask) -> crate::seam_client::ResolvedTask {
+    let kind = match task {
+        ClassifyTask::ProactiveDecision | ClassifyTask::ScreenSummary => AiTaskKind::Proactive,
+        _ => AiTaskKind::Classifier,
+    };
+    // Chat is the fallback lane for every classifier task, so the sentinel
+    // below only surfaces when no chat provider is configured at all; the
+    // callers then reject with their own "not configured" error.
+    crate::seam_client::resolve_task(core, kind).unwrap_or_else(|| {
+        crate::seam_client::ResolvedTask {
+            binding: ene_kernel::TaskBinding::default(),
+            row_id: String::new(),
+            api_key: String::new(),
         }
-    }
-
-    fn secret_for(core: &CoreDaemon, task: ClassifyTask) -> String {
-        match task {
-            ClassifyTask::ProactiveDecision | ClassifyTask::ScreenSummary => {
-                core.secret_for("proactive")
-            }
-            _ => core.secret_for("classifier"),
-        }
-    }
+    })
 }
 
 #[async_trait]
@@ -74,8 +58,8 @@ impl ClassifyModel for SeamedClassify {
         input: &str,
     ) -> Result<String, CompanionError> {
         let core = self.core()?;
-        let binding = Self::binding_for(&core, task);
-        if binding.is_unconfigured() {
+        let resolved = Self::resolved(&core, task);
+        if resolved.binding.is_unconfigured() {
             return Err(CompanionError::Classify(
                 "classifier is not configured".to_owned(),
             ));
@@ -100,14 +84,14 @@ impl ClassifyModel for SeamedClassify {
                 },
             ],
             tools: Vec::new(),
-            model: binding.model,
-            max_tokens: binding.max_tokens.or(Some(512)),
-            base_url: binding.base_url,
+            model: resolved.binding.model.clone(),
+            max_tokens: resolved.binding.max_tokens.or(Some(512)),
+            base_url: resolved.binding.base_url.clone(),
             auth: ProviderAuth {
-                api_key: Self::secret_for(&core, task),
+                api_key: resolved.api_key.clone(),
             },
         };
-        let generation = super::llm::generate_llm(&core, &Self::row_id_for(&core, task), request)
+        let generation = crate::seam_client::generate_llm(&core, &resolved, request)
             .await
             .map_err(CompanionError::Classify)?;
         let text = generation.text.trim();
@@ -155,8 +139,8 @@ impl SeamedClassify {
     ) -> Result<String, CompanionError> {
         let core = self.core()?;
         let task = ClassifyTask::ScreenSummary;
-        let binding = Self::binding_for(&core, task);
-        if binding.is_unconfigured() {
+        let resolved = Self::resolved(&core, task);
+        if resolved.binding.is_unconfigured() {
             return Err(CompanionError::Classify(
                 "classifier is not configured".to_owned(),
             ));
@@ -187,14 +171,14 @@ impl SeamedClassify {
                 },
             ],
             tools: Vec::new(),
-            model: binding.model,
-            max_tokens: binding.max_tokens.or(Some(256)),
-            base_url: binding.base_url,
+            model: resolved.binding.model.clone(),
+            max_tokens: resolved.binding.max_tokens.or(Some(256)),
+            base_url: resolved.binding.base_url.clone(),
             auth: ProviderAuth {
-                api_key: Self::secret_for(&core, task),
+                api_key: resolved.api_key.clone(),
             },
         };
-        let generation = super::llm::generate_llm(&core, &Self::row_id_for(&core, task), request)
+        let generation = crate::seam_client::generate_llm(&core, &resolved, request)
             .await
             .map_err(CompanionError::Classify)?;
         let text = generation.text.trim();
@@ -270,40 +254,11 @@ async fn embed_memory(
     id: ene_companion::MemoryId,
     text: &str,
 ) -> Result<(), String> {
-    let (binding, row_id) = {
-        let guard = core.ai();
-        let ai = guard.lock();
-        if ai.tasks.embedding.is_unconfigured() {
-            (
-                ai.tasks.chat.clone(),
-                crate::plugin_profile::task_row_id("chat"),
-            )
-        } else {
-            (
-                ai.tasks.embedding.clone(),
-                crate::plugin_profile::task_row_id("embedding"),
-            )
-        }
+    let vectors = match crate::seam_client::embed_texts(core, vec![text.to_owned()]).await {
+        Ok(vectors) => vectors,
+        Err(err) => return Err(err),
     };
-    if binding.is_unconfigured() {
-        return Ok(());
-    }
-    let result = core
-        .supervisor()
-        .embed(
-            &row_id,
-            ene_plugin_ipc::EmbedRequest {
-                texts: vec![text.to_owned()],
-                model: binding.model,
-                base_url: binding.base_url,
-                auth: ProviderAuth {
-                    api_key: core.secret_for("embedding"),
-                },
-            },
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    let Some(vector) = result.vectors.into_iter().next() else {
+    let Some(vector) = vectors.into_iter().next() else {
         return Ok(());
     };
     core.companions()

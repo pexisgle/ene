@@ -499,24 +499,28 @@ async fn transcribe_listen(
     pcm: Vec<f32>,
     sample_rate: u32,
 ) -> Result<SendMessageResponse, ApiReject> {
-    let binding = state.core.ai().lock().tasks.stt.clone();
-    if binding.is_unconfigured() || pcm.is_empty() {
+    if pcm.is_empty() {
         state.core.with_voice(VoiceRuntime::mark_idle);
         return Ok(empty_listen());
     }
+    let Some(task) = crate::seam_client::resolve_task(&state.core, ene_kernel::AiTaskKind::Stt)
+    else {
+        state.core.with_voice(VoiceRuntime::mark_idle);
+        return Ok(empty_listen());
+    };
     let result = state
         .core
         .supervisor()
         .transcribe(
-            &crate::plugin_profile::task_row_id("stt"),
+            &task.row_id,
             ene_plugin_ipc::SttRequest {
                 pcm,
                 sample_rate: sample_rate.max(1),
                 language: None,
-                model: binding.model,
-                base_url: binding.base_url,
+                model: task.binding.model,
+                base_url: task.binding.base_url,
                 auth: ene_plugin_ipc::ProviderAuth {
-                    api_key: state.core.secret_for("stt"),
+                    api_key: task.api_key,
                 },
             },
         )
@@ -1891,16 +1895,12 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
         "body": state.core.body_settings(),
         "voice": state.core.voice_settings(),
         "characters": state.core.character_settings(),
-        "ai_chat_key_set": state.core.task_key_set("chat"),
-        "ai_classifier_key_set": state.core.task_key_set("classifier"),
-        "ai_embedding_key_set": state.core.task_key_set("embedding"),
-        "ai_proactive_key_set": state.core.task_key_set("proactive"),
-        "ai_tts_key_set": state.core.task_key_set("tts"),
-        "ai_stt_key_set": state.core.task_key_set("stt"),
-        "ai_approve_key_set": state.core.task_key_set("approve"),
-        "ai_job_key_set": state.core.task_key_set("job"),
         "observation_scope": state.core.mind().proactive.world_state.send_scope(),
     });
+    for kind in ene_kernel::AiTaskKind::ALL {
+        effective[format!("ai_{}_key_set", kind.name())] =
+            json!(state.core.task_key_set(kind.name()));
+    }
     let overlay = {
         let settings_path = state.core.data_dir().join("settings.json");
         if settings_path.exists()
@@ -1945,68 +1945,23 @@ pub async fn patch_settings(
         }
     }
     let mut secrets = crate::TaskSecrets::default();
-    take_task_secret(
-        &state,
-        &patch.fields,
-        "/ai/tasks/chat/api_key",
-        "ai.chat",
-        &mut secrets.chat,
-    )?;
+    for kind in ene_kernel::AiTaskKind::ALL {
+        take_task_secret(
+            &state,
+            &patch.fields,
+            &format!("/ai/tasks/{}/api_key", kind.name()),
+            &format!("ai.{}", kind.name()),
+            secrets.slot_mut(*kind),
+        )?;
+    }
+    // Legacy `/ai/api_key` alias keeps writing the chat key; running it after
+    // the loop preserves the old override order when both forms are patched.
     take_task_secret(
         &state,
         &patch.fields,
         "/ai/api_key",
         "ai.chat",
-        &mut secrets.chat,
-    )?;
-    take_task_secret(
-        &state,
-        &patch.fields,
-        "/ai/tasks/classifier/api_key",
-        "ai.classifier",
-        &mut secrets.classifier,
-    )?;
-    take_task_secret(
-        &state,
-        &patch.fields,
-        "/ai/tasks/embedding/api_key",
-        "ai.embedding",
-        &mut secrets.embedding,
-    )?;
-    take_task_secret(
-        &state,
-        &patch.fields,
-        "/ai/tasks/proactive/api_key",
-        "ai.proactive",
-        &mut secrets.proactive,
-    )?;
-    take_task_secret(
-        &state,
-        &patch.fields,
-        "/ai/tasks/tts/api_key",
-        "ai.tts",
-        &mut secrets.tts,
-    )?;
-    take_task_secret(
-        &state,
-        &patch.fields,
-        "/ai/tasks/stt/api_key",
-        "ai.stt",
-        &mut secrets.stt,
-    )?;
-    take_task_secret(
-        &state,
-        &patch.fields,
-        "/ai/tasks/approve/api_key",
-        "ai.approve",
-        &mut secrets.approve,
-    )?;
-    take_task_secret(
-        &state,
-        &patch.fields,
-        "/ai/tasks/job/api_key",
-        "ai.job",
-        &mut secrets.job,
+        secrets.slot_mut(ene_kernel::AiTaskKind::Chat),
     )?;
     let settings_path = state.core.data_dir().join("settings.json");
     let mut current = if settings_path.exists() {
@@ -2029,16 +1984,7 @@ pub async fn patch_settings(
             }
         }
     }
-    for task in [
-        "chat",
-        "classifier",
-        "embedding",
-        "proactive",
-        "tts",
-        "stt",
-        "approve",
-        "job",
-    ] {
+    for task in ene_kernel::AiTaskKind::ALL.iter().map(|kind| kind.name()) {
         if let Some(binding) = current
             .pointer_mut(&format!("/ai/tasks/{task}"))
             .and_then(Value::as_object_mut)

@@ -296,6 +296,81 @@ ene_config::define_config!(
     }
 );
 
+/// One `ai.tasks.*` lane.
+///
+/// Adding a task: append a variant here and a matching named field on
+/// [`AiTasks`] - the drift test in this module fails when the two diverge,
+/// `ene_fiber::task_seam` must then cover the new variant (exhaustive
+/// match), and desktop/stage UI pages follow only if operators need to bind
+/// it there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AiTaskKind {
+    Chat,
+    Classifier,
+    Embedding,
+    Proactive,
+    Tts,
+    Stt,
+    Approve,
+    Job,
+}
+
+impl AiTaskKind {
+    /// Every lane in `AiTasks` field order.
+    pub const ALL: &'static [Self] = &[
+        Self::Chat,
+        Self::Classifier,
+        Self::Embedding,
+        Self::Proactive,
+        Self::Tts,
+        Self::Stt,
+        Self::Approve,
+        Self::Job,
+    ];
+
+    /// `ai.tasks.<name>` segment and vault key suffix (`ai.<name>`).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Classifier => "classifier",
+            Self::Embedding => "embedding",
+            Self::Proactive => "proactive",
+            Self::Tts => "tts",
+            Self::Stt => "stt",
+            Self::Approve => "approve",
+            Self::Job => "job",
+        }
+    }
+
+    /// Index into fixed-size per-lane storage sized to `ALL`.
+    #[must_use]
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0)
+    }
+
+    /// Whether an unconfigured binding falls back to the chat lane.
+    #[must_use]
+    pub fn falls_back_to_chat(self) -> bool {
+        matches!(
+            self,
+            Self::Classifier | Self::Embedding | Self::Proactive | Self::Approve | Self::Job
+        )
+    }
+}
+
+impl std::str::FromStr for AiTaskKind {
+    type Err = ();
+
+    fn from_str(task: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.name() == task)
+            .ok_or(())
+    }
+}
+
 /// Per-task provider binding (`ai.tasks.<name>`).
 #[derive(
     Debug, Clone, Default, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema,
@@ -311,6 +386,49 @@ pub struct AiTasks {
     pub stt: TaskBinding,
     pub approve: TaskBinding,
     pub job: TaskBinding,
+}
+
+impl AiTasks {
+    /// Binding for one lane.
+    #[must_use]
+    pub fn binding(&self, kind: AiTaskKind) -> &TaskBinding {
+        match kind {
+            AiTaskKind::Chat => &self.chat,
+            AiTaskKind::Classifier => &self.classifier,
+            AiTaskKind::Embedding => &self.embedding,
+            AiTaskKind::Proactive => &self.proactive,
+            AiTaskKind::Tts => &self.tts,
+            AiTaskKind::Stt => &self.stt,
+            AiTaskKind::Approve => &self.approve,
+            AiTaskKind::Job => &self.job,
+        }
+    }
+
+    /// Mutable binding for one lane.
+    pub fn binding_mut(&mut self, kind: AiTaskKind) -> &mut TaskBinding {
+        match kind {
+            AiTaskKind::Chat => &mut self.chat,
+            AiTaskKind::Classifier => &mut self.classifier,
+            AiTaskKind::Embedding => &mut self.embedding,
+            AiTaskKind::Proactive => &mut self.proactive,
+            AiTaskKind::Tts => &mut self.tts,
+            AiTaskKind::Stt => &mut self.stt,
+            AiTaskKind::Approve => &mut self.approve,
+            AiTaskKind::Job => &mut self.job,
+        }
+    }
+
+    /// Configured binding for the lane, or chat plus the resolved origin lane
+    /// when the lane is unconfigured and allowed to fall back. TTS/STT have no
+    /// fallback: their unconfigured bindings are returned as-is.
+    #[must_use]
+    pub fn effective_binding(&self, kind: AiTaskKind) -> (TaskBinding, AiTaskKind) {
+        let specific = self.binding(kind);
+        if !specific.is_unconfigured() || kind == AiTaskKind::Chat || !kind.falls_back_to_chat() {
+            return (specific.clone(), kind);
+        }
+        (self.chat.clone(), AiTaskKind::Chat)
+    }
 }
 
 /// One `ai.tasks.*` row. `plugin` is a `provider.*` id when configured.
@@ -485,7 +603,9 @@ impl PluginProfileKind {
 
 #[cfg(test)]
 mod tests {
-    use super::TaskBinding;
+    use std::collections::BTreeSet;
+
+    use super::{AiTaskKind, AiTasks, TaskBinding};
 
     #[test]
     fn accepts_images_requires_configured_vision_flag() {
@@ -518,5 +638,68 @@ mod tests {
             serde_json::from_str(r#"{"plugin":"provider.x","model":"m"}"#).unwrap();
         assert!(!binding.supports_images);
         assert!(!binding.accepts_images());
+    }
+
+    #[test]
+    fn json_keys_match_task_kinds() {
+        let keys: BTreeSet<String> = serde_json::to_value(AiTasks::default())
+            .unwrap_or_default()
+            .as_object()
+            .map(|fields| fields.keys().cloned().collect())
+            .unwrap_or_default();
+        assert_eq!(keys.len(), AiTaskKind::ALL.len());
+        for kind in AiTaskKind::ALL {
+            assert!(
+                keys.contains(kind.name()),
+                "missing tasks field: {}",
+                kind.name()
+            );
+        }
+    }
+
+    #[test]
+    fn binding_accessor_round_trips() {
+        let mut tasks = AiTasks::default();
+        for kind in AiTaskKind::ALL {
+            tasks.binding_mut(*kind).model = kind.name().to_owned();
+        }
+        assert_eq!(tasks.chat.model, "chat");
+        assert_eq!(tasks.job.model, "job");
+        for kind in AiTaskKind::ALL {
+            assert_eq!(tasks.binding(*kind).model, kind.name());
+        }
+        assert_eq!(AiTaskKind::Chat.index(), 0);
+        assert_eq!(AiTaskKind::Job.index(), AiTaskKind::ALL.len() - 1);
+    }
+
+    #[test]
+    fn effective_binding_falls_back_like_the_daemon_contract() {
+        let mut tasks = AiTasks::default();
+        tasks.classifier.plugin = "provider.x".to_owned();
+        tasks.tts.plugin = "provider.tts".to_owned();
+
+        let (binding, origin) = tasks.effective_binding(AiTaskKind::Classifier);
+        assert_eq!(origin, AiTaskKind::Classifier);
+        assert!(!binding.is_unconfigured());
+
+        // Unconfigured fallback lanes resolve to chat.
+        for kind in [
+            AiTaskKind::Proactive,
+            AiTaskKind::Embedding,
+            AiTaskKind::Approve,
+            AiTaskKind::Job,
+        ] {
+            let (binding, origin) = tasks.effective_binding(kind);
+            assert_eq!(origin, AiTaskKind::Chat);
+            assert!(binding.is_unconfigured());
+        }
+
+        // Voice lanes never fall back.
+        let (binding, origin) = tasks.effective_binding(AiTaskKind::Tts);
+        assert_eq!(origin, AiTaskKind::Tts);
+        assert_eq!(binding.plugin, "provider.tts");
+
+        let (_, origin) = tasks.effective_binding(AiTaskKind::Chat);
+        assert_eq!(origin, AiTaskKind::Chat);
     }
 }

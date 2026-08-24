@@ -3501,6 +3501,92 @@ async fn switching_voice_provider_clears_the_previous_task_secret() {
 }
 
 #[tokio::test]
+async fn every_task_api_key_patch_reaches_vault_and_flag() {
+    let (_dir, client, core, server) = boot_server().await;
+    for kind in ene_kernel::AiTaskKind::ALL {
+        client
+            .patch_settings(&serde_json::json!({
+                "ai": { "tasks": { (kind.name()): {
+                    "plugin": "provider.openai_compat",
+                    "model": "m",
+                    "api_key": format!("sk-{}", kind.name())
+                } } }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            core.secret_for_kind(*kind),
+            format!("sk-{}", kind.name()),
+            "{} lane secret",
+            kind.name()
+        );
+        assert!(core.task_key_set(kind.name()));
+        let settings = client.settings().await.unwrap();
+        assert_eq!(
+            settings.pointer(&format!("/effective/ai_{}_key_set", kind.name())),
+            Some(&serde_json::json!(true))
+        );
+    }
+    // Within one patch the legacy alias runs after the per-task loop, so the
+    // alias wins when both appear in the same payload.
+    client
+        .patch_settings(&serde_json::json!({
+            "ai": {
+                "api_key": "sk-legacy-chat",
+                "tasks": { "chat": { "api_key": "sk-chat-direct" } }
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(core.secret_for("chat"), "sk-legacy-chat");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn resolve_task_fallback_matrix_matches_daemon_contract() {
+    let (dir, _client, core, server) = boot_server().await;
+    use crate::seam_client::resolve_task;
+    use ene_kernel::{AiTaskKind, TaskBinding};
+    // Fresh boot: only the chat fallback lanes resolve (to an unconfigured chat
+    // binding is impossible — chat itself is unconfigured), so everything is None.
+    for kind in AiTaskKind::ALL {
+        assert!(
+            resolve_task(&core, *kind).is_none(),
+            "{kind:?} must be unresolved before any binding"
+        );
+    }
+    // Configure only chat; classifier-family lanes inherit it, voice stays None.
+    let mut ai = core.ai().lock().clone();
+    ai.tasks.chat = TaskBinding {
+        plugin: "provider.openai_compat".to_owned(),
+        model: "chat-model".to_owned(),
+        ..TaskBinding::default()
+    };
+    core.replace_ai(ai, crate::TaskSecrets::default());
+    for kind in [
+        AiTaskKind::Chat,
+        AiTaskKind::Classifier,
+        AiTaskKind::Embedding,
+        AiTaskKind::Proactive,
+        AiTaskKind::Approve,
+        AiTaskKind::Job,
+    ] {
+        let task =
+            resolve_task(&core, kind).unwrap_or_else(|| panic!("{kind:?} must fall back to chat"));
+        assert_eq!(task.row_id, "ai.tasks.chat");
+        assert_eq!(task.binding.model, "chat-model");
+    }
+    for kind in [AiTaskKind::Tts, AiTaskKind::Stt] {
+        assert!(
+            resolve_task(&core, kind).is_none(),
+            "{kind:?} never falls back"
+        );
+    }
+    drop(dir);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn listen_feeds_duplex_machine_without_stt() {
     let (_dir, client, core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;

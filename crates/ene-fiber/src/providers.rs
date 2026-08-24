@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use ene_kernel::AiTaskKind;
 use serde_json::{Value, json};
 
 use crate::spawn::discover_plugin_executable_in;
@@ -72,16 +73,27 @@ pub fn provider_plugin(id: &str) -> Option<&'static ProviderPlugin> {
     PROVIDER_PLUGINS.iter().find(|plugin| plugin.id == id)
 }
 
-/// Seam required by an `ai.tasks.*` row.
+/// Seam required by an `ai.tasks.*` lane. Exhaustive so adding an
+/// `AiTaskKind` variant fails to compile until its seam is declared.
+#[must_use]
+pub fn task_seam_kind(kind: AiTaskKind) -> &'static str {
+    match kind {
+        AiTaskKind::Chat
+        | AiTaskKind::Classifier
+        | AiTaskKind::Proactive
+        | AiTaskKind::Approve
+        | AiTaskKind::Job => "seam.llm",
+        AiTaskKind::Embedding => "seam.embed",
+        AiTaskKind::Tts => "seam.tts",
+        AiTaskKind::Stt => "seam.stt",
+    }
+}
+
+/// Seam required by an `ai.tasks.<task>` name from operator input.
 #[must_use]
 pub fn task_seam(task: &str) -> Option<&'static str> {
-    match task {
-        "chat" | "classifier" | "proactive" | "approve" | "job" => Some("seam.llm"),
-        "embedding" => Some("seam.embed"),
-        "tts" => Some("seam.tts"),
-        "stt" => Some("seam.stt"),
-        _ => None,
-    }
+    let kind = task.parse::<AiTaskKind>().ok()?;
+    Some(task_seam_kind(kind))
 }
 
 /// Catalog with `installed` reflecting a binary on the plugin search path.
@@ -126,11 +138,9 @@ mod tests {
 
     #[test]
     fn task_seams_cover_ai_tasks() {
-        assert_eq!(task_seam("chat"), Some("seam.llm"));
-        assert_eq!(task_seam("embedding"), Some("seam.embed"));
-        assert_eq!(task_seam("tts"), Some("seam.tts"));
-        assert_eq!(task_seam("approve"), Some("seam.llm"));
-        assert_eq!(task_seam("job"), Some("seam.llm"));
+        for kind in AiTaskKind::ALL {
+            assert_eq!(task_seam(kind.name()), Some(task_seam_kind(*kind)));
+        }
         assert_eq!(task_seam("unknown"), None);
     }
 }
