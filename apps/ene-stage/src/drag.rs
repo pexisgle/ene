@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3, Vec3Swizzles};
 
 /// Lower bound for a normalized body position.
 pub const POSITION_MIN: f32 = 0.05;
@@ -37,6 +37,8 @@ pub fn world_to_normalized(world: Vec2) -> [f32; 2] {
 #[derive(Debug, Clone)]
 pub struct HitCandidate {
     pub soul_id: String,
+    /// World-space center of the body, used to break equal-depth ties.
+    pub world_center: Vec3,
     pub aabb_min: Vec3,
     pub aabb_max: Vec3,
 }
@@ -261,19 +263,30 @@ pub fn hit_test(
     let origin = ene_vrm::view_pos_to_world(view_pos, view);
     let direction = (camera_target - camera_eye).normalize();
 
-    let mut best: Option<(f32, &HitCandidate)> = None;
+    let cursor_world = {
+        // Project the cursor onto the camera focal plane for center-distance
+        // tie-breaking in orthographic view where all bodies share a depth.
+        let view_pos = ene_vrm::ndc_to_view_pos(ndc, viewport, 0.0);
+        let view = glam::camera::rh::view::look_at_mat4(camera_eye, camera_target, camera_up);
+        let world = ene_vrm::view_pos_to_world(view_pos, view);
+        Vec3::new(world.x, world.y, 0.0)
+    };
+    let mut best: Option<(f32, f32, &HitCandidate)> = None;
     for candidate in candidates {
         let Some(entry) = ray_aabb_entry(origin, direction, candidate.aabb_min, candidate.aabb_max)
         else {
             continue;
         };
-        // A later candidate at equal depth replaces an earlier one so the
-        // visually topmost body wins ties.
-        if best.is_none_or(|(best_t, _)| entry <= best_t) {
-            best = Some((entry, candidate));
+        let center_dist = (candidate.world_center - cursor_world).xy().length();
+        let replace = best.is_none_or(|(best_t, best_dist, _)| {
+            const DEPTH_EPSILON: f32 = 1e-4;
+            entry < best_t || ((entry - best_t).abs() < DEPTH_EPSILON && center_dist < best_dist)
+        });
+        if replace {
+            best = Some((entry, center_dist, candidate));
         }
     }
-    best.map(|(_, candidate)| candidate.soul_id.clone())
+    best.map(|(_, _, candidate)| candidate.soul_id.clone())
 }
 
 #[cfg(test)]
@@ -287,6 +300,7 @@ mod tests {
     fn candidate(soul: &str, min: Vec3, max: Vec3) -> HitCandidate {
         HitCandidate {
             soul_id: soul.to_owned(),
+            world_center: (min + max) / 2.0,
             aabb_min: min,
             aabb_max: max,
         }
@@ -500,10 +514,18 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_prefers_later_draw_order_at_equal_depth() {
+    fn hit_test_prefers_nearest_center_at_equal_depth() {
         let candidates = vec![
-            centered_candidate("first", 0.5),
-            centered_candidate("second", 0.5),
+            candidate(
+                "centered",
+                Vec3::new(-0.4, -0.5, -0.1),
+                Vec3::new(0.4, 0.5, 0.1),
+            ),
+            candidate(
+                "offset",
+                Vec3::new(-0.2, -0.5, -0.1),
+                Vec3::new(0.6, 0.5, 0.1),
+            ),
         ];
         let hit = hit_test(
             &candidates,
@@ -513,7 +535,9 @@ mod tests {
             UP,
             Vec2::new(320.0, 240.0),
         );
-        assert_eq!(hit.as_deref(), Some("second"));
+        // Cursor sits at world origin; "centered" spans it symmetrically while
+        // "offset" centers at +0.2, so proximity picks the centered body.
+        assert_eq!(hit.as_deref(), Some("centered"));
     }
 
     #[test]

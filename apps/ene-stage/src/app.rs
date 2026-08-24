@@ -246,6 +246,7 @@ pub fn run() -> Result<(), AppError> {
         spotlight: None,
         overlay_focus: OverlayFocus::default(),
         last_cursor: None,
+        cursor_poll: None,
         last_tick: Instant::now(),
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
@@ -303,6 +304,7 @@ struct StageApp {
     spotlight: Option<ChromeWindow>,
     overlay_focus: OverlayFocus,
     last_cursor: Option<LogicalPosition<f32>>,
+    cursor_poll: Option<crossbeam_channel::Receiver<crate::cursor_poll::GlobalCursor>>,
     last_tick: Instant,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
@@ -360,6 +362,7 @@ impl StageApp {
             spotlight: None,
             overlay_focus: OverlayFocus::default(),
             last_cursor: None,
+            cursor_poll: None,
             last_tick: Instant::now(),
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
@@ -374,6 +377,22 @@ impl StageApp {
             || self.spotlight.is_some()
     }
 
+    /// Converts a screen-space pointer position to overlay-local logical
+    /// coordinates using the overlay window's outer position and scale factor.
+    /// Returns `None` when the overlay window is gone.
+    fn global_cursor_to_logical(
+        &self,
+        cursor: crate::cursor_poll::GlobalCursor,
+    ) -> Option<LogicalPosition<f32>> {
+        let overlay = self.overlay.as_ref()?;
+        let pos = overlay.window.outer_position().ok()?;
+        let scale = overlay.window.scale_factor();
+        Some(LogicalPosition::new(
+            ((cursor.x - f64::from(pos.x)) / scale).max(0.0) as f32,
+            ((cursor.y - f64::from(pos.y)) / scale).max(0.0) as f32,
+        ))
+    }
+
     fn sync_overlay_interaction(&mut self) {
         // A tray menu steal is not a real focus switch; the overlay-focus
         // state machine already models that grace window via its target, so
@@ -381,20 +400,51 @@ impl StageApp {
         let protect_chrome = self.overlay_focus.protects();
         let always_on_top = self.local_settings.always_on_top;
         let preferred_click_through = self.local_settings.overlay_click_through;
-        let Some(overlay) = self.overlay.as_mut() else {
-            return;
-        };
-        let level = overlay_window_level(protect_chrome, always_on_top);
-        overlay.window.set_window_level(level);
+        let overlay_transparent = self.overlay.as_ref().is_some_and(|o| o.transparent);
         let input_state = crate::drag::OverlayInputState {
             click_through_preferred: preferred_click_through,
             chrome_protected: protect_chrome,
             hovering_body: self.surface.hover_soul.is_some(),
             dragging: self.surface.drag.is_some(),
         };
+
+        // On X11 an empty input shape stops all pointer events, so a disabled
+        // overlay cannot detect hover on its own. The global cursor poll keeps
+        // the silhouette hole armed by re-checking the pointer against body
+        // AABBs even while input is transparent.
+        let mut allows = crate::drag::allows_input(overlay_transparent, input_state);
+        if !allows {
+            let polled = self
+                .cursor_poll
+                .as_ref()
+                .and_then(|rx| rx.try_recv().ok())
+                .and_then(|cursor| self.global_cursor_to_logical(cursor));
+            if let Some(logical) = polled {
+                self.last_cursor = Some(logical);
+                if let Some((eye, target, up, vw, vh)) = self.camera_basis() {
+                    let candidates = self.overlay_hit_candidates();
+                    let hit = crate::drag::hit_test(
+                        &candidates,
+                        (vw, vh),
+                        eye,
+                        target,
+                        up,
+                        glam::Vec2::new(logical.x, logical.y),
+                    );
+                    self.surface.hover_soul.clone_from(&hit);
+                    allows = hit.is_some() || self.surface.drag.is_some();
+                }
+            }
+        }
+
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        let level = overlay_window_level(protect_chrome, always_on_top);
+        overlay.window.set_window_level(level);
+
         // The silhouette hole stays open during chrome protection because the
         // raised chat window still receives its own clicks above the overlay.
-        let allows = crate::drag::allows_input(overlay.transparent, input_state);
         overlay.set_click_through(!allows);
     }
 
@@ -1947,6 +1997,7 @@ impl StageApp {
                         let (min, max) = slot.avatar.world_aabb();
                         crate::drag::HitCandidate {
                             soul_id: slot.soul_id.clone(),
+                            world_center: (min + max) / 2.0,
                             aabb_min: min,
                             aabb_max: max,
                         }
@@ -2275,6 +2326,9 @@ impl ApplicationHandler for StageApp {
         match OverlayWindow::create(window, &gpu, self.settings.transparent_overlay) {
             Ok(mut overlay) => {
                 overlay.apply_click_through(self.local_settings.overlay_click_through);
+                if let Some((_, rx)) = crate::cursor_poll::spawn(50) {
+                    self.cursor_poll = Some(rx);
+                }
                 self.overlay = Some(overlay);
             }
             Err(err) => {

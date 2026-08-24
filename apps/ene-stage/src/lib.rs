@@ -16,6 +16,7 @@ pub mod avatar;
 pub mod bundle;
 pub mod chrome;
 pub mod core;
+pub mod cursor_poll;
 pub mod detail;
 pub mod drag;
 pub mod fonts;
