@@ -5,7 +5,7 @@
 //! It owns the GPU context, settings, AI bridge, optional tray, the
 //! event receiver, and the character renderer.
 //!
-//! Senders (clones of [`AppEventSender`](crate::events::AppEventSender))
+//! Senders (clones of [`AppEventSender`])
 //! are passed to producers at construction time so they can push
 //! without holding a reference to the state.
 //!
@@ -52,7 +52,7 @@ pub struct AppState {
     pub character_physics_registration: Option<crate::physics::CharacterColliderRegistration>,
     pub debug: DebugState,
     /// The new `bevy_ecs` [`App`]. Its schedule is run by
-    /// [`crate::runtime::Runtime::about_to_wait`] on every frame.
+    /// the runtime's per-frame tick on every frame.
     pub app: App,
     /// Kept-alive sender for the TTS playback channel. Cloned into each
     /// `CoreSession` so the playback thread survives bridge reconnects (the
@@ -78,8 +78,8 @@ impl AppState {
     /// creates the surface — it needs the actual surface format to
     /// build a compatible render pipeline. `with_channel` produces a
     /// `CharacterRenderer` that hasn't been `init`-ed yet;
-    /// [`crate::runtime::Runtime::resumed`] calls
-    /// [`CharacterRenderer::init`] right after the surface exists.
+    /// the runtime's `resumed` handler calls
+    /// `CharacterRenderer::init` right after the surface exists.
     pub fn with_channel(
         gpu: GpuContext,
         settings: CharacterSettings,

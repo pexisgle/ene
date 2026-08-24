@@ -1,6 +1,6 @@
 //! Winit + wgpu shell for the ene AI character platform. Owns the
 //! `CoreSession`, system tray, character renderer, and the cross-subsystem
-//! [`AppEvent`] bus.
+//! `AppEvent` bus.
 #![expect(
     clippy::option_if_let_else,
     clippy::unused_self,

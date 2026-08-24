@@ -11,7 +11,7 @@ pub struct ChatWindow;
 #[derive(Component, Default)]
 pub struct ChatStateComponent(pub ChatState);
 
-/// Bundle spawned by [`crate::plugin::chat_plugin::spawn_chat_window`].
+/// Bundle assembled by the chat plugin when the chat window is built.
 #[derive(Bundle, Default)]
 pub struct ChatUiBundle {
     pub window: ChatWindow,

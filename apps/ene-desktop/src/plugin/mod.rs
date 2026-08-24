@@ -1,6 +1,6 @@
 //! Each plugin owns the resources, components, messages, and
 //! systems for one slice of the application. They are added to the
-//! `App` in [`crate::app::CorePlugin::build`].
+//! `App` by the plugin group's build step.
 //!
 //! The render path stays on the `Runtime`: `CharacterRenderer` and
 //! `wgpu::Device` / `wgpu::Queue` are `!Send + !Sync`, so the

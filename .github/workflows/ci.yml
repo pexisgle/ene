@@ -135,9 +135,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
       - uses: ./.github/actions/rust-build-env
-      # Not run with RUSTDOCFLAGS=-D warnings: pre-existing broken
-      # intra-doc links would fail unrelated work.
+      - name: Check documentation links
+        run: bash scripts/check-docs-links.sh
       - name: Build docs
+        env:
+          RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --locked --workspace --no-deps
       - name: Install mdBook
         run: cargo install mdbook --locked --version 0.5.4

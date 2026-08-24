@@ -45,7 +45,7 @@
 //! ## Consumers
 //!
 //! The desktop runtime
-//! ([`apps/ene-desktop-v2/src/character/mod.rs`]) calls
+//! (the legacy desktop character module) calls
 //! [`LookAtEvaluator::evaluate`] every frame after the cursor
 //! has been projected to a world target. For `"expression"`
 //! models the result is written straight into
@@ -330,8 +330,7 @@ impl LookAtEvaluator {
     /// from the humanoid registry + the current model
     /// transform); `target_world` is the cursor-projected
     /// world point the model should look at (the desktop
-    /// runtime computes this in
-    /// [`apps/ene-desktop-v2/src/look_at.rs::compute_world_target`]).
+    /// runtime computes this in the legacy desktop's world-target helper).
     ///
     /// `head_rest_rotation` is the head bone's rest rotation
     /// (the local-to-parent quaternion from the humanoid

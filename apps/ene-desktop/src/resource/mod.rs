@@ -2,7 +2,7 @@
 //!
 //! This module holds the singleton resources that the [`App`](bevy_app::App)
 //! world owns. Global state that systems need lives in a separate
-//! resource here so they can pull it via [`Res<T>`] / [`ResMut<T>`]
+//! resource here so they can pull it via bevy `Res` / `ResMut`
 //! instead of reaching through `AppState` fields.
 //!
 //! The new resources coexist with `AppState`: `AppState` keeps a
@@ -18,7 +18,7 @@
 //!   in `First`.
 //! - [`emotion_pipeline::EmotionPipelineState`] — drained by
 //!   `apply_emotions_system` and read by the render path.
-//! - [`tray::TrayHandleResource`] — Linux-only `NonSend`-friendly
+//! - `resource::tray::GtkReady` — Linux-only `NonSend`-friendly
 //!   wrapper around the tray handle, consumed by `tick_gtk_system`.
 //! - [`tokio::TokioHandle`] — the tokio runtime handle used to spawn
 //!   async subsystems (AI bridge, tray pump).

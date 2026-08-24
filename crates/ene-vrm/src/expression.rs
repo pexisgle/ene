@@ -229,7 +229,7 @@ impl PrimitiveMorphs {
     }
 }
 
-/// Top-level expression layer attached to a [`VrmModel`].
+/// Top-level expression layer attached to a `VrmModel`.
 ///
 /// One instance per model. The runtime mutates `weights`; the
 /// renderer reads it.
@@ -243,7 +243,7 @@ pub struct ExpressionLayer {
     /// Current per-expression weight in `[0, 1]`. The runtime
     /// writes here; the renderer reads it. Names that are not in
     /// the model's expression list are **dropped** by
-    /// [`ExpressionLayer::set_expression`] / [`apply_weights`]
+    /// [`ExpressionLayer::set_expression`] / `apply_weights`
     /// — the layer only stores weights for expressions the
     /// model actually defines, so a misspelled AI token or a
     /// UI slider pointed at a non-existent preset cannot

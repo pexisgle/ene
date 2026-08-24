@@ -25,7 +25,7 @@
 //! | `Last`         | Acquire the surface, encode passes, submit, present.             |
 //!
 //! Systems that must touch non-`Send` resources (e.g. `wgpu::Surface`,
-//! `egui::Context`) use [`NonSendMut`](bevy_ecs::system::NonSendMut) so the
+//! `egui::Context`) use [`NonSendMut`] so the
 //! executor keeps them on the main thread.
 use bevy_app::{App, First, Last, PostUpdate, Startup, Update};
 use bevy_ecs::prelude::*;

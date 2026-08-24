@@ -1,5 +1,5 @@
 //! The per-handle Linux display-server state lives in bevy
-//! [`Resource`]s (one `Resource` per handle). The winit
+//! bevy `Resource`s (one per handle). The winit
 //! runtime inserts these resources in `Runtime::resumed` and the
 //! bevy systems read / write them through the bevy `World`.
 //! `LastAppliedInputRects` / `LastInputSource` are the same
