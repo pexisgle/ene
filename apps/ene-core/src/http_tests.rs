@@ -611,6 +611,7 @@ async fn approval_first_writer_wins() {
                 sensitivity: Sensitivity::High,
                 target: "notes.md".into(),
                 in_workspace: false,
+                call_id: "test-call-1".into(),
             })
             .await
     });
@@ -3153,6 +3154,7 @@ async fn web_cannot_resolve_approval() {
                 sensitivity: Sensitivity::High,
                 target: "notes.md".into(),
                 in_workspace: false,
+                call_id: "test-call-2".into(),
             })
             .await
     });
