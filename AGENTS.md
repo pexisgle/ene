@@ -54,7 +54,7 @@ build failures.
 - `clippy::restriction` is intentionally *not* blanket-enabled; adopt lints from it one at a
   time with a reason comment.
 
-## Rust conventions (review-enforced, not caught by clippy)
+## Rust conventions
 
 - Async is Tokio. Library errors are `thiserror` — never expose `anyhow`, bare `String`, or
   `Box<dyn Error>` at a library boundary.
@@ -62,8 +62,10 @@ build failures.
   crate level only for `apps/ene-ctl`, plugin binaries' fatal-error paths, and examples.
 - Prefer `parking_lot` locks, `OnceLock` for one-time init, and the narrowest visibility
   (`pub(crate)` by default).
-- Keep deps in root `[workspace.dependencies]` and reference them as `{ workspace = true }`.
-  Don't bump versions as a side effect of unrelated work.
+- Keep shared dependencies in root `[workspace.dependencies]` and reference them as
+  `{ workspace = true }`. A dependency used by only one package may stay local; promote it
+  to the workspace table when another member reuses it or when its version needs coordinated
+  policy. Don't bump versions as a side effect of unrelated work.
 
 ## Comments
 
@@ -193,9 +195,10 @@ MessagePack frames). `id` is required on every request/response. Prefer adding
 ## Repo etiquette
 
 - Conventional Commits — `cliff.toml` generates the changelog from them.
-- `cargo-husky` installs a pre-commit hook that runs `cargo fmt --all` (whole tree, not just
-  staged files) and re-stages formatted files. Inspect the resulting diff. Never use
-  `--no-verify` to get past a failing check.
+- `cargo-husky` installs a pre-commit hook that runs `cargo fmt --all -- --check` when staged
+  Rust files exist. The hook never rewrites or stages files; if it fails, run `cargo fmt --all`
+  yourself and stage only the intended changes. Never use `--no-verify` to get past a failing
+  check.
 - Never commit or log secrets, `.env`, `sessions.db*`, `companions.db*`,
   `audit.db*`, `vault.bin`, model weights, or anything under `assets/models/`.
 - Report the failing package and root cause rather than relaxing a lint. Don't claim a check

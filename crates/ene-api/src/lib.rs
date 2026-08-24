@@ -17,13 +17,15 @@ pub use types::{
     CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, GreetingView, Health,
     HistoryResponse, IdempotentMessage, InstallProviderAssetRequest, InstallProviderAssetResponse,
     JobView, ListProviderAssetsRequest, ListProviderAssetsResponse, ListProviderModelsRequest,
-    ListProviderModelsResponse, ListenRequest, McpDocument, McpServerView, MemoryPatch, MemoryView,
-    MessageMode, MessageRequest, MessageResponse, OccupantView, Page, PluginConfigErrorView,
-    PluginConfigField, PluginConfigOptionView, PluginConfigOptionsView, PluginConfigValidateView,
-    PluginConfigValues, PluginConfigView, PluginView, Problem, ProviderAssetInstallPhase,
+    ListProviderModelsResponse, ListenRequest, McpDocument, McpServerView, MemoryCandidateDecision,
+    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, MessageMode, MessageRequest,
+    MessageResponse, OccupantView, Page, PluginConfigErrorView, PluginConfigField,
+    PluginConfigOptionView, PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues,
+    PluginConfigView, PluginView, Problem, ProviderAssetInstallPhase,
     ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse,
     ProviderAssetVersionView, ProviderAssetView, QueuedCancel, RefreshProviderAssetsCatalogRequest,
-    RefreshProviderAssetsCatalogResponse, ResourceKind, RestoreRequest, ScheduleView,
+    RefreshProviderAssetsCatalogResponse, ResolveMemoryCandidateRequest,
+    ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
     SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
     SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SettingsPatch, SoulPatch,
     SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest,
@@ -35,6 +37,10 @@ pub const OPENAPI_JSON: &str = include_str!("../openapi.json");
 
 /// Canonical live-bus event emitted when a job needs a user answer.
 pub const QUESTION_ASKED_EVENT: &str = "question.asked";
+
+/// Live-bus event emitted when every open question on a job is closed by an
+/// answer or the timeout tick.
+pub const QUESTION_RESOLVED_EVENT: &str = "question.resolved";
 
 #[must_use]
 pub fn openapi_json() -> &'static str {

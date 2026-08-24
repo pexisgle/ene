@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, ApiError, CharacterView, JobView, MemoryPatch, MemoryView, OccupantView,
-    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
-    ScheduleView, SoulView,
+    ApiClient, ApiError, CharacterView, JobView, MemoryCandidateDecision, MemoryCandidateView,
+    MemoryJournalView, MemoryPatch, MemoryView, OccupantView, PluginConfigField,
+    PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
+    ResolveMemoryCandidateRequest, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -251,6 +252,25 @@ pub struct LogEntry {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MemoryCandidateDraft {
+    pub title: String,
+    pub content: String,
+    pub kind: String,
+    pub scope: String,
+}
+
+impl From<&MemoryCandidateView> for MemoryCandidateDraft {
+    fn from(candidate: &MemoryCandidateView) -> Self {
+        Self {
+            title: candidate.title.clone(),
+            content: candidate.content.clone(),
+            kind: candidate.kind.clone(),
+            scope: candidate.scope.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum SettingsLoadState {
     #[default]
@@ -298,7 +318,9 @@ pub struct DetailUiState {
     pub health: String,
     pub unconfigured: Vec<String>,
     pub memories: Vec<MemoryView>,
-    pub pending_memories: Vec<MemoryView>,
+    pub pending_memories: Vec<MemoryCandidateView>,
+    pub memory_journal: Vec<MemoryJournalView>,
+    pub candidate_drafts: HashMap<String, MemoryCandidateDraft>,
     pub soul: Option<SoulView>,
     pub characters: Vec<CharacterView>,
     pub occupants: Vec<OccupantView>,
@@ -419,6 +441,24 @@ impl DetailUiState {
         self.soul = None;
         self.occupants.clear();
         self.body_ref_draft.clear();
+    }
+
+    pub fn invalidate_memory(&mut self) {
+        self.loaded.memory = false;
+        self.memories.clear();
+        self.pending_memories.clear();
+        self.memory_journal.clear();
+        self.candidate_drafts.clear();
+    }
+
+    pub(crate) fn sync_candidate_drafts(&mut self, candidates: &[MemoryCandidateView]) {
+        self.candidate_drafts
+            .retain(|id, _| candidates.iter().any(|candidate| candidate.id == *id));
+        for candidate in candidates {
+            self.candidate_drafts
+                .entry(candidate.id.clone())
+                .or_insert_with(|| MemoryCandidateDraft::from(candidate));
+        }
     }
 }
 
@@ -1834,49 +1874,185 @@ fn show_memory(
         let soul_id_mem = soul_id.to_owned();
         let client_m = Arc::clone(client);
         spawn_async(rt, async_results, async move {
-            AsyncOutcome::ListMemories(
-                client_m
+            AsyncOutcome::ListMemories {
+                soul_id: soul_id_mem.clone(),
+                result: client_m
                     .list_memories(&soul_id_mem, None)
                     .await
                     .map(|p| p.items)
                     .map_err(|e| e.to_string()),
-            )
+            }
         });
         let soul_id_pending = soul_id.to_owned();
         let client_p = Arc::clone(client);
         spawn_async(rt, async_results, async move {
-            AsyncOutcome::ListPendingMemories(
-                client_p
+            AsyncOutcome::ListPendingMemories {
+                soul_id: soul_id_pending.clone(),
+                result: client_p
                     .list_pending_memories(&soul_id_pending)
                     .await
                     .map(|p| p.items)
                     .map_err(|e| e.to_string()),
-            )
+            }
+        });
+        let soul_id_journal = soul_id.to_owned();
+        let client_journal = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::ListMemoryJournal {
+                soul_id: soul_id_journal.clone(),
+                result: client_journal
+                    .list_memory_journal(&soul_id_journal)
+                    .await
+                    .map(|p| p.items)
+                    .map_err(|e| e.to_string()),
+            }
         });
     }
     if ui.button(i18n::fl("memory-refresh")).clicked() {
         state.loaded.memory = false;
     }
-    ui.heading(i18n::fl("memory-candidates"));
-    if state.pending_memories.is_empty() {
+    let pending = state.pending_memories.clone();
+    ui.heading(format!(
+        "{} ({})",
+        i18n::fl("memory-candidates"),
+        pending.len()
+    ));
+    if pending.is_empty() {
         ui.label(i18n::fl("memory-pending-empty"));
     }
-    for memory in &state.pending_memories {
+    for candidate in pending {
+        let draft = state
+            .candidate_drafts
+            .entry(candidate.id.clone())
+            .or_insert_with(|| MemoryCandidateDraft::from(&candidate));
+        let mut accept = false;
+        let mut reject = false;
         ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(i18n::fl("memory-title"));
+                ui.text_edit_singleline(&mut draft.title);
+            });
+            ui.label(i18n::fl("memory-content"));
+            ui.add(
+                egui::TextEdit::multiline(&mut draft.content)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.horizontal(|ui| {
+                ui.label(i18n::fl("memory-kind"));
+                egui::ComboBox::from_id_salt(format!("memory-kind-{}", candidate.id))
+                    .selected_text(memory_kind_label(&draft.kind))
+                    .show_ui(ui, |ui| {
+                        for kind in [
+                            "episodic",
+                            "semantic",
+                            "user_profile",
+                            "preference",
+                            "commitment",
+                        ] {
+                            ui.selectable_value(
+                                &mut draft.kind,
+                                kind.to_owned(),
+                                memory_kind_label(kind),
+                            );
+                        }
+                    });
+                ui.label(i18n::fl("memory-scope"));
+                egui::ComboBox::from_id_salt(format!("memory-scope-{}", candidate.id))
+                    .selected_text(memory_scope_label(&draft.scope))
+                    .show_ui(ui, |ui| {
+                        for scope in ["private", "shared"] {
+                            ui.selectable_value(
+                                &mut draft.scope,
+                                scope.to_owned(),
+                                memory_scope_label(scope),
+                            );
+                        }
+                    });
+            });
             ui.label(format!(
-                "{} [{}] ({})",
-                memory.title, memory.kind, memory.scope
+                "{}: {:.0}%",
+                i18n::fl("memory-confidence"),
+                candidate.confidence * 100.0
             ));
-            ui.label(&memory.content);
+            if candidate.sensitive {
+                ui.colored_label(egui::Color32::YELLOW, i18n::fl("memory-sensitive"));
+            }
+            if candidate.scope == "shared" || draft.scope == "shared" {
+                ui.colored_label(egui::Color32::YELLOW, i18n::fl("memory-shared-warning"));
+            }
             ui.horizontal(|ui| {
                 if ui.button(i18n::fl("memory-accept")).clicked() {
-                    resolve_memory(&memory.id, true, client, rt, async_results);
+                    accept = true;
                 }
                 if ui.button(i18n::fl("memory-reject")).clicked() {
-                    resolve_memory(&memory.id, false, client, rt, async_results);
+                    reject = true;
                 }
             });
         });
+        if accept {
+            resolve_memory(
+                &candidate.id,
+                ResolveMemoryCandidateRequest {
+                    decision: MemoryCandidateDecision::Accept,
+                    title: Some(draft.title.clone()),
+                    content: Some(draft.content.clone()),
+                    kind: Some(draft.kind.clone()),
+                    scope: Some(draft.scope.clone()),
+                },
+                soul_id,
+                client,
+                rt,
+                async_results,
+            );
+        } else if reject {
+            resolve_memory(
+                &candidate.id,
+                ResolveMemoryCandidateRequest {
+                    decision: MemoryCandidateDecision::Reject,
+                    title: None,
+                    content: None,
+                    kind: None,
+                    scope: None,
+                },
+                soul_id,
+                client,
+                rt,
+                async_results,
+            );
+        }
+    }
+    ui.heading(i18n::fl("memory-history"));
+    let decisions: Vec<&MemoryJournalView> = state
+        .memory_journal
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.action.as_str(),
+                "candidate_accepted" | "candidate_rejected"
+            )
+        })
+        .take(20)
+        .collect();
+    if decisions.is_empty() {
+        ui.label(i18n::fl("memory-history-empty"));
+    }
+    for entry in decisions {
+        let action = memory_journal_action_label(&entry.action);
+        let title = entry
+            .payload
+            .get("accepted")
+            .and_then(|value| value.get("title"))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                entry
+                    .payload
+                    .get("original")
+                    .and_then(|value| value.get("title"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or_default();
+        ui.label(format!("{action} — {title} ({})", entry.ts));
     }
     ui.heading(i18n::fl("memory-commitments"));
     let commitments: Vec<&MemoryView> = state
@@ -1891,7 +2067,9 @@ fn show_memory(
         ui.group(|ui| {
             ui.label(format!(
                 "{} [{}] ({})",
-                memory.title, memory.kind, memory.scope
+                memory.title,
+                memory_kind_label(&memory.kind),
+                memory_scope_label(&memory.scope)
             ));
             ui.label(&memory.content);
             if let Some(due) = memory.expires_at.as_deref() {
@@ -1903,9 +2081,11 @@ fn show_memory(
             ui.horizontal(|ui| {
                 if ui.button(i18n::fl("memory-complete")).clicked() {
                     let id = memory.id.clone();
+                    let soul_id = soul_id.to_owned();
                     let client = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
                         AsyncOutcome::CompleteMemory {
+                            soul_id,
                             id: id.clone(),
                             result: client
                                 .patch_memory(
@@ -1923,9 +2103,11 @@ fn show_memory(
                 }
                 if ui.button(i18n::fl("memory-delete")).clicked() {
                     let id = memory.id.clone();
+                    let soul_id = soul_id.to_owned();
                     let client = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
                         AsyncOutcome::DeleteMemory {
+                            soul_id,
                             id: id.clone(),
                             result: client.delete_memory(&id).await.map_err(|e| e.to_string()),
                         }
@@ -1948,14 +2130,18 @@ fn show_memory(
             ui.group(|ui| {
                 ui.label(format!(
                     "{} [{}] ({})",
-                    memory.title, memory.kind, memory.scope
+                    memory.title,
+                    memory_kind_label(&memory.kind),
+                    memory_scope_label(&memory.scope)
                 ));
                 ui.label(&memory.content);
                 if ui.button(i18n::fl("memory-delete")).clicked() {
                     let id = memory.id.clone();
+                    let soul_id = soul_id.to_owned();
                     let client = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
                         AsyncOutcome::DeleteMemory {
+                            soul_id,
                             id: id.clone(),
                             result: client.delete_memory(&id).await.map_err(|e| e.to_string()),
                         }
@@ -1966,20 +2152,53 @@ fn show_memory(
     });
 }
 
+#[must_use]
+fn memory_kind_label(value: &str) -> String {
+    match value {
+        "episodic" => i18n::fl("memory-kind-episodic"),
+        "semantic" => i18n::fl("memory-kind-semantic"),
+        "user_profile" => i18n::fl("memory-kind-user-profile"),
+        "preference" => i18n::fl("memory-kind-preference"),
+        "commitment" => i18n::fl("memory-kind-commitment"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn memory_scope_label(value: &str) -> String {
+    match value {
+        "private" => i18n::fl("memory-scope-private"),
+        "shared" => i18n::fl("memory-scope-shared"),
+        _ => value.to_owned(),
+    }
+}
+
+#[must_use]
+fn memory_journal_action_label(value: &str) -> String {
+    match value {
+        "candidate_accepted" => i18n::fl("memory-history-accepted"),
+        "candidate_rejected" => i18n::fl("memory-history-rejected"),
+        _ => value.to_owned(),
+    }
+}
+
 fn resolve_memory(
     id: &str,
-    accept: bool,
+    request: ResolveMemoryCandidateRequest,
+    soul_id: &str,
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     let id = id.to_owned();
+    let soul_id = soul_id.to_owned();
     let client = Arc::clone(client);
     spawn_async(rt, async_results, async move {
         AsyncOutcome::ResolveMemory {
+            soul_id,
             id: id.clone(),
             result: client
-                .resolve_memory_candidate(&id, accept)
+                .resolve_memory_candidate(&id, &request)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
@@ -3351,6 +3570,40 @@ mod tests {
             assert_ne!(log_kind_label(kind), value);
         }
         assert_eq!(optional_task_label("plugin.custom"), "plugin.custom");
+    }
+
+    #[test]
+    fn candidate_drafts_follow_pending_identity_and_keep_edits() {
+        let candidate = MemoryCandidateView {
+            id: "candidate-1".to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: "shared".to_owned(),
+            kind: "semantic".to_owned(),
+            title: "Original title".to_owned(),
+            content: "Original content".to_owned(),
+            confidence: 0.8,
+            sensitive: false,
+            expires_at: None,
+        };
+        let mut state = DetailUiState::default();
+
+        state.sync_candidate_drafts(std::slice::from_ref(&candidate));
+        state
+            .candidate_drafts
+            .get_mut("candidate-1")
+            .expect("candidate draft is created with its pending row")
+            .title = "Edited title".to_owned();
+        state.sync_candidate_drafts(std::slice::from_ref(&candidate));
+
+        assert_eq!(
+            state
+                .candidate_drafts
+                .get("candidate-1")
+                .map(|draft| draft.title.as_str()),
+            Some("Edited title")
+        );
+        state.sync_candidate_drafts(&[]);
+        assert!(state.candidate_drafts.is_empty());
     }
 
     #[test]

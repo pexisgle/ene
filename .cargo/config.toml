@@ -1,6 +1,3 @@
-[future-incompat-report]
-frequency = "never"
-
 [env]
 # Bundled rusqlite compiles SQLite without the math extension by default.
 # Companion forgetting uses `exp()`; keep the flag so plain `cargo test`

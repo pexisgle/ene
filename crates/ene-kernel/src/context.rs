@@ -154,6 +154,14 @@ mod tests {
     use super::{ContextRegistry, SOURCE_ORDER, canonicalize_source_key};
 
     #[test]
+    fn source_order_has_no_lorebook_injection_point() {
+        assert!(
+            !SOURCE_ORDER.iter().any(|key| key.contains("lore")),
+            "lorebook must stay a storage-only card field"
+        );
+    }
+
+    #[test]
     fn identity_kernel_does_not_hardcode_ene() {
         let assembled = ContextRegistry::new().assemble();
         let identity = assembled

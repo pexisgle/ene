@@ -158,7 +158,7 @@ pub fn pick_free_port() -> Result<u16, std::io::Error> {
 
 /// Random 32-hex API key for engine authentication.
 pub fn random_api_key() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()

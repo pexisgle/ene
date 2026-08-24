@@ -201,6 +201,59 @@ fn allow_all_plane(dir: &TempDir) -> Arc<ApprovalPlane> {
     plane
 }
 
+fn deny_all_plane(dir: &TempDir) -> Arc<ApprovalPlane> {
+    let audit = AuditLog::open(dir.path().join("audit-deny.db")).unwrap();
+    let popup = ScriptedPopup::deny_all();
+    let plane = Arc::new(ApprovalPlane::new(
+        ApprovalSettings::default(),
+        audit,
+        popup,
+        None,
+    ));
+    plane.set_mode(ApprovalMode::AskAll).unwrap();
+    plane
+}
+
+#[tokio::test]
+async fn denied_delegate_start_never_inserts_job_rows() {
+    let dir = TempDir::new().unwrap();
+    let work = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&work),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let registry = Arc::new(ToolRegistry::new());
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    registry.set_plane(deny_all_plane(&dir));
+    let outcome = registry
+        .execute(
+            "delegate.start",
+            json!({"goal":"direct five","soul_id":soul.to_string(),"mode":"public","title":"task"}),
+            Layer::Surface,
+        )
+        .await;
+    assert!(
+        outcome.is_err(),
+        "denied delegate.start must fail instead of inserting a job",
+    );
+    assert!(
+        work.list_jobs(soul).unwrap().is_empty(),
+        "denied direct call must not create a job row",
+    );
+
+    let router = WorkSurfaceRouter::new(Arc::clone(&host), Arc::clone(&registry), soul, 4);
+    let upgrade = router.on_tool("utility.time", json!({}), 999).await;
+    assert!(
+        matches!(upgrade, Err(KernelError::Tool(ref msg)) if msg.contains("denied")),
+        "budget upgrade must surface the approval denial, got {upgrade:?}",
+    );
+    assert!(
+        work.list_jobs(soul).unwrap().is_empty(),
+        "denied upgrade must not create a job row",
+    );
+}
+
 fn public_start(host: &DelegationHost, soul: SoulId, goal: &str) -> crate::types::Job {
     host.start(StartDelegation {
         soul_id: soul,

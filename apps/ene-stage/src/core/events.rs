@@ -39,6 +39,9 @@ pub enum LiveEvent {
         id: String,
         prompt: String,
     },
+    QuestionResolved {
+        id: String,
+    },
     NotifyHint {
         title: String,
         body: String,
@@ -242,6 +245,9 @@ fn parse_live_event(value: &Value) -> Option<LiveEvent> {
                 .unwrap_or("")
                 .to_owned(),
         }),
+        ene_api::QUESTION_RESOLVED_EVENT => Some(LiveEvent::QuestionResolved {
+            id: string_field(value, "id"),
+        }),
         "notify.hint" => Some(LiveEvent::NotifyHint {
             title: string_field(value, "title"),
             body: value
@@ -398,6 +404,7 @@ mod tests {
             parse_surface_event(&json!({"type": "question.asked", "id": "q", "prompt": "ok?"}))
                 .is_some()
         );
+        assert!(parse_surface_event(&json!({"type": "question.resolved", "id": "q"})).is_some());
     }
 
     #[test]

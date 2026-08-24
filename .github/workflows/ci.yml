@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -22,10 +25,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
         with:
           components: rustfmt
+      - name: Check asset provenance
+        run: bash scripts/check-asset-provenance.sh
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -34,11 +39,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
         with:
           components: clippy
       - uses: ./.github/actions/rust-build-env
+      - name: Check sidecar template
+        run: bash scripts/check-sidecar-template.sh
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
@@ -59,9 +66,20 @@ jobs:
       - name: Check plugin IPC with network feature
         run: cargo check --locked -p ene-plugin-ipc --features net
 
+  workspace-matrix:
+    name: Workspace test matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - name: Check workspace test matrix
+        run: bash scripts/check-workspace-test-matrix.sh
+
   test:
     name: Tests (${{ matrix.group.name }})
     runs-on: ubuntu-latest
+    needs: [workspace-matrix]
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -87,8 +105,8 @@ jobs:
               -p ene-provider-elevenlabs -p ene-provider-voicevox
               -p ene-provider-edge-tts -p ene-provider-gguf
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
       - uses: ./.github/actions/rust-build-env
       - name: Install ripgrep
         run: sudo apt-get install -y --no-install-recommends ripgrep
@@ -100,24 +118,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
       - uses: ./.github/actions/rust-build-env
       # Not run with RUSTDOCFLAGS=-D warnings: pre-existing broken
       # intra-doc links would fail unrelated work.
       - name: Build docs
         run: cargo doc --locked --workspace --no-deps
+      - name: Install mdBook
+        run: cargo install mdbook --locked --version 0.5.4
+      - name: Build English book
+        run: mdbook build docs
+      - name: Build Japanese book
+        run: mdbook build docs/ja
 
   windows-native:
     name: Native Windows check
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}

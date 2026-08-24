@@ -174,6 +174,18 @@ impl ChromeWindow {
         theme: Option<&str>,
         mut add_contents: impl FnMut(&mut egui::Ui),
     ) -> Result<(), GpuError> {
+        let window_size = self.window.inner_size();
+        if window_size.width == 0 || window_size.height == 0 {
+            return Ok(());
+        }
+        if self.config.width != window_size.width || self.config.height != window_size.height {
+            self.resize(gpu, window_size);
+        }
+        let frame = gpu::acquire_frame(&self.surface).map_err(GpuError::Surface)?;
+        let target_size = frame.texture.size();
+        if !surface_target_matches_window(target_size, window_size) {
+            return Ok(());
+        }
         if let Some(theme) = theme {
             apply_theme(&self.egui_ctx, theme);
         }
@@ -185,12 +197,8 @@ impl ChromeWindow {
         self.egui_state
             .handle_platform_output(&self.window, full.platform_output);
 
-        let size = self.window.inner_size();
         let pixels_per_point = self.window.scale_factor() as f32;
-        let screen = ScreenDescriptor {
-            size_in_pixels: [size.width.max(1), size.height.max(1)],
-            pixels_per_point,
-        };
+        let screen = screen_descriptor_for_target(target_size, pixels_per_point);
         let primitives = self.egui_ctx.tessellate(full.shapes, pixels_per_point);
         for (id, delta) in &full.textures_delta.set {
             self.renderer
@@ -208,7 +216,6 @@ impl ChromeWindow {
             &primitives,
             &screen,
         );
-        let frame = gpu::acquire_frame(&self.surface).map_err(GpuError::Surface)?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -241,6 +248,23 @@ impl ChromeWindow {
         frame.present();
         Ok(())
     }
+}
+
+fn screen_descriptor_for_target(
+    target_size: wgpu::Extent3d,
+    pixels_per_point: f32,
+) -> ScreenDescriptor {
+    ScreenDescriptor {
+        size_in_pixels: [target_size.width.max(1), target_size.height.max(1)],
+        pixels_per_point,
+    }
+}
+
+fn surface_target_matches_window(
+    target_size: wgpu::Extent3d,
+    window_size: PhysicalSize<u32>,
+) -> bool {
+    target_size.width == window_size.width && target_size.height == window_size.height
 }
 
 fn fill_opaque_panel(ui: &mut egui::Ui, kind: ChromeKind) {
@@ -302,25 +326,49 @@ fn clamp_to_monitor(window: &Window) {
         return;
     };
     let size = window.outer_size();
-    let visible = window.available_monitors().any(|monitor| {
-        let origin = monitor.position();
-        let bounds = monitor.size();
-        position.x < origin.x + i32::try_from(bounds.width).unwrap_or(i32::MAX)
-            && origin.x < position.x + i32::try_from(size.width).unwrap_or(i32::MAX)
-            && position.y < origin.y + i32::try_from(bounds.height).unwrap_or(i32::MAX)
-            && origin.y < position.y + i32::try_from(size.height).unwrap_or(i32::MAX)
-    });
-    if visible {
-        return;
-    }
     let monitor = window
-        .primary_monitor()
-        .or_else(|| window.current_monitor());
+        .available_monitors()
+        .find(|monitor| {
+            let origin = monitor.position();
+            let bounds = monitor.size();
+            let right = i64::from(position.x) + i64::from(size.width);
+            let bottom = i64::from(position.y) + i64::from(size.height);
+            let monitor_right = i64::from(origin.x) + i64::from(bounds.width);
+            let monitor_bottom = i64::from(origin.y) + i64::from(bounds.height);
+            i64::from(position.x) >= i64::from(origin.x)
+                && i64::from(position.y) >= i64::from(origin.y)
+                && right <= monitor_right
+                && bottom <= monitor_bottom
+        })
+        .or_else(|| window.current_monitor())
+        .or_else(|| window.primary_monitor())
+        .or_else(|| window.available_monitors().next());
     let Some(monitor) = monitor else {
         return;
     };
     let origin = monitor.position();
-    window.set_outer_position(PhysicalPosition::new(origin.x + 48, origin.y + 48));
+    let bounds = monitor.size();
+    let target = PhysicalPosition::new(
+        clamp_window_axis(position.x, origin.x, bounds.width, size.width),
+        clamp_window_axis(position.y, origin.y, bounds.height, size.height),
+    );
+    if target != position {
+        window.set_outer_position(target);
+    }
+}
+
+fn clamp_window_axis(position: i32, origin: i32, monitor_extent: u32, window_extent: u32) -> i32 {
+    let min = i64::from(origin) + 48;
+    let max =
+        (i64::from(origin) + i64::from(monitor_extent) - i64::from(window_extent) - 48).max(min);
+    let clamped = i64::from(position).clamp(min, max);
+    if clamped < i64::from(i32::MIN) {
+        i32::MIN
+    } else if clamped > i64::from(i32::MAX) {
+        i32::MAX
+    } else {
+        clamped as i32
+    }
 }
 
 #[cfg(test)]
@@ -359,5 +407,44 @@ mod tests {
         let spotlight = clear_color(ChromeKind::Spotlight, &egui::Visuals::dark());
         assert!((caption.a).abs() < f64::EPSILON);
         assert!((spotlight.a).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn screen_descriptor_uses_surface_target_dimensions() {
+        let screen = screen_descriptor_for_target(
+            wgpu::Extent3d {
+                width: 520,
+                height: 560,
+                depth_or_array_layers: 1,
+            },
+            1.5,
+        );
+        assert_eq!(screen.size_in_pixels, [520, 560]);
+        assert!((screen.pixels_per_point - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn stale_surface_frame_is_skipped_during_resize() {
+        let target = wgpu::Extent3d {
+            width: 520,
+            height: 560,
+            depth_or_array_layers: 1,
+        };
+        assert!(surface_target_matches_window(
+            target,
+            PhysicalSize::new(520, 560)
+        ));
+        assert!(!surface_target_matches_window(
+            target,
+            PhysicalSize::new(1280, 719)
+        ));
+    }
+
+    #[test]
+    fn clamp_window_axis_keeps_the_full_window_on_screen() {
+        assert_eq!(clamp_window_axis(-20, 0, 1_920, 520), 48);
+        assert_eq!(clamp_window_axis(1_800, 0, 1_920, 520), 1_352);
+        assert_eq!(clamp_window_axis(640, 0, 1_920, 520), 640);
+        assert_eq!(clamp_window_axis(-1_900, -1_920, 1_920, 520), -1_872);
     }
 }

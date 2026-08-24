@@ -31,7 +31,7 @@ runs:
           echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS"
         } >> "$GITHUB_ENV"
 
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       with:
         # Failed runs must not persist partial caches.
         cache-on-failure: false

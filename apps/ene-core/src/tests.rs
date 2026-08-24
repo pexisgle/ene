@@ -133,6 +133,34 @@ async fn exclusive_lock_rejects_second_boot() {
 }
 
 #[tokio::test]
+async fn job_workspace_stays_under_boot_data_dir() {
+    let dir = TempDir::new().unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    let soul = core.occupants()[0].0;
+    let job = core
+        .host()
+        .start(ene_work::StartDelegation {
+            soul_id: soul,
+            goal: "use the configured workspace".to_owned(),
+            mode: ene_work::DelegationMode::Public,
+            title: Some("workspace".to_owned()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+        })
+        .unwrap();
+
+    let expected_root = ene_work::workspace_root(dir.path())
+        .join("jobs")
+        .join(soul.to_string());
+    assert!(std::path::Path::new(&job.workspace_dir).starts_with(expected_root));
+}
+
+#[tokio::test]
 async fn disabling_one_fiber_does_not_restart_the_core() {
     let dir = TempDir::new().unwrap();
     let core = CoreDaemon::boot(BootOptions::new(dir.path()))
