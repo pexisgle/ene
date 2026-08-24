@@ -20,9 +20,9 @@ use windows_sys::core::BOOL;
 
 pub(crate) fn list_windows() -> Result<String, String> {
     let mut windows: Vec<Value> = Vec::new();
+    // SAFETY: EnumWindows calls the synchronous callback before this vector goes out of scope;
+    // the callback receives only the vector's valid mutable pointer.
     let result = unsafe {
-        // SAFETY: EnumWindows calls the synchronous callback before this vector goes out of scope;
-        // the callback receives only the vector's valid mutable pointer.
         EnumWindows(
             Some(enum_window),
             std::ptr::addr_of_mut!(windows).cast::<()>() as LPARAM,
@@ -36,25 +36,20 @@ pub(crate) fn list_windows() -> Result<String, String> {
 }
 
 unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    if unsafe {
-        // SAFETY: IsWindowVisible accepts the HWND supplied by EnumWindows.
-        IsWindowVisible(hwnd)
-    } == 0
-    {
+    // SAFETY: IsWindowVisible accepts the HWND supplied by EnumWindows.
+    if unsafe { IsWindowVisible(hwnd) } == 0 {
         return 1;
     }
-    let length = unsafe {
-        // SAFETY: GetWindowTextLengthW accepts the HWND supplied by EnumWindows.
-        GetWindowTextLengthW(hwnd)
-    };
+    // SAFETY: GetWindowTextLengthW accepts the HWND supplied by EnumWindows.
+    let length = unsafe { GetWindowTextLengthW(hwnd) };
     if length <= 0 {
         return 1;
     }
     let capacity = usize::try_from(length).unwrap_or(0).saturating_add(1);
     let mut title = vec![0u16; capacity];
+    // SAFETY: `title` is writable for `capacity` UTF-16 code units and its size is bounded by
+    // the i32 length passed to GetWindowTextW.
     let copied = unsafe {
-        // SAFETY: `title` is writable for `capacity` UTF-16 code units and its size is bounded by
-        // the i32 length passed to GetWindowTextW.
         GetWindowTextW(
             hwnd,
             title.as_mut_ptr(),
@@ -65,10 +60,8 @@ unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
         return 1;
     }
     title.truncate(usize::try_from(copied).unwrap_or(0));
-    let windows = unsafe {
-        // SAFETY: lparam is the mutable Vec pointer passed to EnumWindows above.
-        &mut *(lparam as *mut Vec<Value>)
-    };
+    // SAFETY: lparam is the mutable Vec pointer passed to EnumWindows above.
+    let windows = unsafe { &mut *(lparam as *mut Vec<Value>) };
     windows.push(json!({
         "id": format!("{hwnd:p}"),
         "title": String::from_utf16_lossy(&title),
@@ -82,14 +75,10 @@ pub(crate) fn capture_png() -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn list_monitors() -> Result<Vec<Value>, String> {
-    let width = unsafe {
-        // SAFETY: GetSystemMetrics is a documented user32 query with no pointer args.
-        GetSystemMetrics(SM_CXSCREEN)
-    };
-    let height = unsafe {
-        // SAFETY: same as width; primary screen size in pixels.
-        GetSystemMetrics(SM_CYSCREEN)
-    };
+    // SAFETY: GetSystemMetrics is a documented user32 query with no pointer args.
+    let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    // SAFETY: same as width; primary screen size in pixels.
+    let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     if width <= 0 || height <= 0 {
         return Err(fail(
             "unavailable",
@@ -107,10 +96,10 @@ pub(crate) fn list_monitors() -> Result<Vec<Value>, String> {
 }
 
 fn capture_bgra() -> Result<(u32, u32, Vec<u8>), String> {
+    // SAFETY: GDI screen capture of the primary monitor. All handles are
+    // released on this path; no aliasing of the selected bitmap after
+    // SelectObject restores `old`.
     unsafe {
-        // SAFETY: GDI screen capture of the primary monitor. All handles are
-        // released on this path; no aliasing of the selected bitmap after
-        // SelectObject restores `old`.
         let width = GetSystemMetrics(SM_CXSCREEN);
         let height = GetSystemMetrics(SM_CYSCREEN);
         if width <= 0 || height <= 0 {
