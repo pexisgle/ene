@@ -92,8 +92,5 @@ fi
 missing=0
 [[ "$vrm_present" -eq 1 ]] || missing=$((missing + 1))
 [[ "$motions_present" -eq 1 ]] || missing=$((missing + 1))
-if [[ "$missing" -gt 0 ]]; then
-  printf '\n%s asset group(s) still missing after following the steps above.\n' "$missing" >&2
-  exit 1
-fi
-printf 'All character assets are present.\n'
+[[ "$missing" -eq 0 ]] && exit 0
+printf '\n%s asset group(s) still missing; follow the steps above and rerun to verify.\n' "$missing" >&2

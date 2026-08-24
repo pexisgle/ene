@@ -20,10 +20,9 @@ prohibit redistributing them as standalone assets, and a public source tree
 counts as redistribution. Each user obtains them directly from the rights
 holder by following [`scripts/fetch-character-assets.sh`](scripts/fetch-character-assets.sh),
 which prints the manual agreement steps and verifies any placed files against
-the hashes recorded in this inventory when an entry exists. They must never be
-copied into a release artifact or committed back to this repository; local
-copies are covered by [.gitignore](.gitignore). A provenance entry is not a
-license grant.
+the hashes recorded in this inventory. They must never be copied into a
+release artifact or committed back to this repository; local copies are
+covered by [.gitignore](.gitignore). A provenance entry is not a license grant.
 
 ## Required attribution
 
@@ -40,5 +39,7 @@ notice and the embedded metadata differ.
 
 Run `bash scripts/check-asset-provenance.sh` from the repository root. The
 check compares the tracked binary/media inventory with the manifest and
-recomputes every SHA-256 hash. A binary replacement requires a new provenance
+recomputes every SHA-256 hash. Entries marked `distribution: "local-only"`
+describe files that stay out of git; they are verified only when placed, and
+missing ones are accepted. A binary replacement requires a new provenance
 review; changing only the manifest hash is not sufficient.
