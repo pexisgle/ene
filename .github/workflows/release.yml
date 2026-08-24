@@ -103,9 +103,37 @@ jobs:
             dist
             CHANGELOG.release.md
 
+  smoke-deb:
+    name: Deb smoke test
+    needs: build-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download release artifacts
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name release-artifacts --dir release-artifacts
+
+      - name: Install deb package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ./release-artifacts/dist/ene-stage_*_amd64.deb
+
+      - name: Smoke test installed binaries
+        run: |
+          ene-core --help >/dev/null
+          # ene-stage is a GUI client with no CLI arg parsing, so it cannot
+          # answer --help on a headless runner; verify the packaged binary
+          # instead.
+          test -x /usr/bin/ene-stage
+
   publish:
     name: Publish release
-    needs: build-package
+    needs: [build-package, smoke-deb]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
