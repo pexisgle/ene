@@ -23,15 +23,16 @@ pub fn maybe_start() -> Option<SidecarGuard> {
 }
 
 pub(crate) fn maybe_start_with(url_suffix: &str) -> Option<SidecarGuard> {
-    let raw = std::env::var("ENE_PROVIDER_CONFIG")
-        .ok()
-        .and_then(|encoded| serde_json::from_str::<serde_json::Value>(&encoded).ok())
-        .and_then(|value| {
-            value
-                .get("sidecar_base_url")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
+    let raw = std::env::var("ENE_PROVIDER_CONFIG").ok()?;
+    maybe_start_from_raw(&raw, url_suffix)
+}
+
+pub(crate) fn maybe_start_from_raw(raw: &str, url_suffix: &str) -> Option<SidecarGuard> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let raw = value
+        .get("sidecar_base_url")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
         .filter(|url| !url.trim().is_empty());
     let mut base = raw?;
     let suffix = url_suffix.trim_end_matches('/');
@@ -45,38 +46,12 @@ pub(crate) fn maybe_start_with(url_suffix: &str) -> Option<SidecarGuard> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn reads_injected_sidecar_base_url() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = std::env::var_os("ENE_PROVIDER_CONFIG");
-        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
-        unsafe {
-            std::env::set_var(
-                "ENE_PROVIDER_CONFIG",
-                r#"{"sidecar_base_url":"http://127.0.0.1:9"}"#,
-            );
-        }
-        let _guard = maybe_start().expect("start");
+        let guard =
+            maybe_start_from_raw(r#"{"sidecar_base_url":"http://127.0.0.1:9"}"#, "/v1");
+        guard.as_ref().expect("start");
         assert_eq!(managed_base(), Some("http://127.0.0.1:9/v1"));
-        match original {
-            Some(value) => {
-                // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
-                unsafe {
-                    std::env::set_var("ENE_PROVIDER_CONFIG", value);
-                }
-            }
-            None => {
-                // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
-                unsafe {
-                    std::env::remove_var("ENE_PROVIDER_CONFIG");
-                }
-            }
-        }
     }
 }
