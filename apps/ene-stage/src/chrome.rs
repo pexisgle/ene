@@ -47,7 +47,10 @@ pub struct ChromeWindow {
 
 impl ChromeWindow {
     /// Restore visibility even when the WM rejects programmatic focus.
-    pub fn show_and_focus(&self) {
+    ///
+    /// Hidden, minimized, and behind-other-windows states are all handled
+    /// here so every reopen entry point shares one lifecycle path.
+    pub fn restore(&self) {
         if self.window.is_minimized() == Some(true) {
             self.window.set_minimized(false);
         }
@@ -55,6 +58,28 @@ impl ChromeWindow {
         clamp_to_monitor(&self.window);
         self.raise();
         self.window.request_redraw();
+    }
+
+    /// Reuse an existing window (restoring it) or build a fresh one.
+    ///
+    /// Callers pass their `Option<ChromeWindow>` by value; a destroyed
+    /// window simply falls through to creation, so tray and hotkey actions
+    /// never need duplicated existence checks.
+    pub fn restore_or_create(
+        existing: Option<Self>,
+        event_loop: &ActiveEventLoop,
+        gpu: &GpuContext,
+        kind: ChromeKind,
+        inner: PhysicalSize<u32>,
+        decorations: bool,
+    ) -> Result<Self, GpuError> {
+        match existing {
+            Some(win) => {
+                win.restore();
+                Ok(win)
+            }
+            None => Self::create(event_loop, gpu, kind, inner, decorations),
+        }
     }
 
     pub fn raise(&self) {
