@@ -926,6 +926,9 @@ mod tests {
         write_localized_card(&card_dir);
         let path = card_dir.join("character.json");
 
+        let book_before: CharacterCardV3 =
+            serde_json::from_str(LOCALIZED_BASE_JSON).expect("base fixture parses");
+
         let card = load_character_card_localized(&path.to_string_lossy(), "ja")
             .expect("localized card loads");
         assert_eq!(card.data.description, "日本語の説明");
@@ -937,6 +940,40 @@ mod tests {
 
         let base = load_character_card(&path.to_string_lossy()).expect("base card loads");
         assert_eq!(base.data.description, "Base description");
+        let book_json =
+            serde_json::to_string(&base.data.character_book).expect("serialize loaded lorebook");
+        let before_json = serde_json::to_string(&book_before.data.character_book)
+            .expect("serialize fixture lorebook");
+        assert_eq!(
+            book_json, before_json,
+            "load must not mutate the stored lorebook"
+        );
+    }
+
+    #[test]
+    fn lorebook_survives_localized_load_and_export() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let card_dir = tmp.path().join("Ada");
+        write_localized_card(&card_dir);
+        let out = tmp.path().join("ada-export.json");
+
+        export_character_card(
+            &card_dir.join("character.json").to_string_lossy(),
+            "ja",
+            &out,
+        )
+        .expect("exports");
+
+        let exported: CharacterCardV3 =
+            serde_json::from_str(&std::fs::read_to_string(&out).expect("read export"))
+                .expect("export parses as CCv3");
+        let entry = &exported
+            .data
+            .character_book
+            .as_ref()
+            .expect("lorebook preserved through export")
+            .entries[0];
+        assert_eq!(entry.keys, ["猫", "ねこ"]);
     }
 
     #[test]

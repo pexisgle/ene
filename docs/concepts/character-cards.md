@@ -23,8 +23,10 @@ on import. Unknown fields round-trip in `ene-card`.
 ## Lorebook and templates
 
 Lorebook data is preserved for import/export compatibility, but Ene does not
-interpret, search, or inject it into model context. Stage v1 has no runtime
-lorebook editor. Card text may use Character Book Spec macros (`{{char}}`,
+interpret, search, or inject it into model context. It is a storage-only field:
+import and export round-trips keep every entry, while the kernel context has no
+lorebook source. Stage v1 has no runtime lorebook editor. Card text may use
+Character Book Spec macros (`{{char}}`,
 `{{user}}`, `{{random:…}}`, `{{date}}`, …). Persona text in W++ / AliChat /
 YAML is flattened into the identity kernel.
 
