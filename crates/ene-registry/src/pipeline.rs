@@ -373,8 +373,8 @@ impl ToolRegistry {
         deadline_ms: Option<u64>,
         workspace: Option<&Path>,
     ) -> Result<(), PipelineError> {
-        let (def, invoke, prepared) = self
-            .prepare_without_authorize(name, args, layer, workspace.map(Path::to_path_buf))?;
+        let (def, invoke, prepared) =
+            self.prepare_without_authorize(name, args, layer, workspace.map(Path::to_path_buf))?;
         if !def.background {
             return Err(PipelineError::NotBackground(name.to_owned()));
         }
