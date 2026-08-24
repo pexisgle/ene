@@ -418,6 +418,7 @@ async fn write_msg<S: AsyncWrite + Unpin>(
 }
 
 /// Connect to `ENE_PLUGIN_SOCKET` and serve until drain/shutdown.
+#[cfg(feature = "net")]
 pub async fn serve_from_env<H: ToolHandler>(handler: H) -> Result<(), IpcError> {
     let path = std::env::var("ENE_PLUGIN_SOCKET").map_err(|_| {
         IpcError::Io(std::io::Error::new(
@@ -443,4 +444,14 @@ pub async fn serve_from_env<H: ToolHandler>(handler: H) -> Result<(), IpcError> 
             "plugin IPC requires Unix domain sockets or Windows TCP",
         )))
     }
+}
+
+/// Report that the optional network transport was not compiled in.
+#[cfg(not(feature = "net"))]
+pub async fn serve_from_env<H: ToolHandler>(handler: H) -> Result<(), IpcError> {
+    let _ = handler;
+    Err(IpcError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "plugin IPC network transport is disabled",
+    )))
 }

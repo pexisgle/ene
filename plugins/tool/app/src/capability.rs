@@ -271,6 +271,18 @@ pub(crate) fn screenshot_cli_backend(path: Option<&str>) -> Option<&'static str>
     })
 }
 
+pub(crate) fn screenshot_cli_backend_on_path(backend: &str, path: Option<&str>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(OsStr::new(path))
+        .any(|directory| executable_file(&directory.join(backend)))
+}
+
+pub(crate) fn primary_screenshot_cli_backend() -> &'static str {
+    SCREENSHOT_CLI_BACKENDS.first().copied().unwrap_or("none")
+}
+
 fn executable_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -689,5 +701,26 @@ mod tests {
     #[test]
     fn imagemagick_import_maps_to_imagemagick_package() {
         assert!(install_hint("import").contains("imagemagick"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn x11_capability_and_capture_error_agree_when_no_backend_exists() {
+        let pairs = [
+            ("XDG_SESSION_TYPE", "x11"),
+            ("DISPLAY", ":1"),
+            ("PATH", "/definitely/missing"),
+        ];
+        let caps = PlatformCaps::from_env(&env(&pairs));
+
+        assert!(!caps.screenshot.available);
+        assert_eq!(caps.screenshot.backend, "none");
+
+        // capture::screenshot() re-runs the same detection; both sides must
+        // agree that no executable backend exists for this session.
+        let detected = super::screenshot_cli_backend(
+            pairs.iter().find(|(k, _)| *k == "PATH").map(|(_, v)| *v),
+        );
+        assert_eq!(caps.screenshot.available, detected.is_some());
     }
 }

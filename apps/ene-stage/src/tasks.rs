@@ -59,6 +59,11 @@ pub enum AsyncOutcome {
         id: String,
         result: Result<(), String>,
     },
+    ResolveMemoryFailedKeepCandidate {
+        soul_id: String,
+        original: MemoryCandidateView,
+        result: Result<(), String>,
+    },
     DeleteMemory {
         soul_id: String,
         id: String,

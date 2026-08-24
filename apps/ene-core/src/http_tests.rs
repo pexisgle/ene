@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use chrono::TimeZone;
 use ene_api::{
-    AnswerJobRequest, AnswerQuestionRequest, ApiClient, ClaimResourceRequest,
+    AnswerJobRequest, AnswerQuestionRequest, ApiClient, ClaimResourceRequest, CreateJobRequest,
     CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
     MemoryCandidateDecision, MessageMode, MessageRequest, ResolveMemoryCandidateRequest,
     ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
@@ -16,7 +16,7 @@ use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
     ToolCallingModel, spans_leak_content,
 };
-use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
+use ene_plane::{ApprovalMode, AuthzRequest, PolicyDecision, PolicyFile, PolicyRule, Sensitivity};
 use ene_session::{EventKind, EventPayload, SessionId, TurnOrigin, TurnOutcome};
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -611,6 +611,7 @@ async fn approval_first_writer_wins() {
                 sensitivity: Sensitivity::High,
                 target: "notes.md".into(),
                 in_workspace: false,
+                call_id: "test-call-1".into(),
             })
             .await
     });
@@ -732,6 +733,62 @@ async fn job_runner_completes_queued_work_on_its_own_lane() {
 }
 
 #[tokio::test]
+async fn create_job_denial_happens_before_job_insertion() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let soul_id = ene_session::SoulId::from_str(&soul).unwrap();
+    core.plane().set_mode(ApprovalMode::Policy).unwrap();
+    core.plane().set_policy(PolicyFile {
+        rules: vec![PolicyRule {
+            tool: "delegate.start".into(),
+            scope: None,
+            decision: PolicyDecision::Deny,
+        }],
+    });
+
+    let err = client
+        .create_job(&CreateJobRequest {
+            soul_id: soul.clone(),
+            goal: "should not be inserted".into(),
+            title: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_class(), "forbidden");
+    assert!(core.work().list_jobs(soul_id).unwrap().is_empty());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn create_job_returns_the_approved_job() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    let soul_id = ene_session::SoulId::from_str(&soul).unwrap();
+    core.plane().set_mode(ApprovalMode::Auto).unwrap();
+
+    let job = client
+        .create_job(&CreateJobRequest {
+            soul_id: soul,
+            goal: "collect the approved notes".into(),
+            title: Some("Approved notes".into()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(job.title, "Approved notes");
+    assert_eq!(job.goal, "collect the approved notes");
+    assert_eq!(job.soul_id, soul_id.to_string());
+    assert!(
+        core.work()
+            .get_job(job.id.parse().unwrap())
+            .unwrap()
+            .is_some()
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn job_question_answer_reaches_mailbox() {
     let (_dir, client, core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
@@ -752,7 +809,7 @@ async fn job_question_answer_reaches_mailbox() {
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, surface.recv_json()).await {
-            Ok(Ok(Some(value))) if value["type"] == ene_api::QUESTION_ASKED_EVENT => {
+            Ok(Ok(Some(value))) if value["type"] == ene_api::QuestionEventKind::Asked.as_str() => {
                 asked = Some(value);
                 break;
             }
@@ -850,8 +907,8 @@ async fn answering_the_last_question_emits_question_resolved() {
     let soul = core.occupants()[0].0;
     let job = start_job(&core, soul, "research a city");
     core.host().question(job.id, "which city?").unwrap();
-    let asked_type = ene_api::QUESTION_ASKED_EVENT;
-    let resolved_type = ene_api::QUESTION_RESOLVED_EVENT;
+    let asked_type = ene_api::QuestionEventKind::Asked.as_str();
+    let resolved_type = ene_api::QuestionEventKind::Resolved.as_str();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -894,8 +951,8 @@ async fn partial_answer_does_not_emit_question_resolved() {
     let job = start_job(&core, soul, "research a trip");
     core.host().question(job.id, "which city?").unwrap();
     core.host().question(job.id, "how many days?").unwrap();
-    let asked_type = ene_api::QUESTION_ASKED_EVENT;
-    let resolved_type = ene_api::QUESTION_RESOLVED_EVENT;
+    let asked_type = ene_api::QuestionEventKind::Asked.as_str();
+    let resolved_type = ene_api::QuestionEventKind::Resolved.as_str();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1000,6 +1057,47 @@ async fn identified_answer_resolves_the_selected_question() {
         .await
         .unwrap();
     assert!(core.host().open_questions(job.id).unwrap().is_empty());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn duplicate_identified_answer_maps_to_question_closed_conflict() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "identify a city");
+    core.host().question(job.id, "which city?").unwrap();
+    let question_id = core.host().open_questions(job.id).unwrap()[0]
+        .question_id()
+        .to_string();
+    client
+        .answer_question(
+            &job.id.to_string(),
+            &question_id,
+            &AnswerQuestionRequest {
+                text: "Tokyo".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let err = client
+        .answer_question(
+            &job.id.to_string(),
+            &question_id,
+            &AnswerQuestionRequest {
+                text: "Tokyo again".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ene_api::ApiError::Problem {
+            status: 409,
+            error_class,
+            ..
+        } if error_class == "question_closed"
+    ));
     server.shutdown().await;
 }
 
@@ -3097,6 +3195,7 @@ async fn web_cannot_resolve_approval() {
                 sensitivity: Sensitivity::High,
                 target: "notes.md".into(),
                 in_workspace: false,
+                call_id: "test-call-2".into(),
             })
             .await
     });

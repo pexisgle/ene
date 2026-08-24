@@ -338,6 +338,11 @@ impl ApiClient {
         self.send_json(self.request(Method::GET, &path)).await
     }
 
+    pub async fn create_job(&self, req: &CreateJobRequest) -> Result<JobView, ApiError> {
+        self.send_json(self.request(Method::POST, "/api/v1/jobs").json(req))
+            .await
+    }
+
     pub async fn get_job(&self, id: &str) -> Result<JobView, ApiError> {
         self.send_json(self.request(Method::GET, &format!("/api/v1/jobs/{id}")))
             .await

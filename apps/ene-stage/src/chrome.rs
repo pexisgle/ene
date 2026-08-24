@@ -47,7 +47,10 @@ pub struct ChromeWindow {
 
 impl ChromeWindow {
     /// Restore visibility even when the WM rejects programmatic focus.
-    pub fn show_and_focus(&self) {
+    ///
+    /// Hidden, minimized, and behind-other-windows states are all handled
+    /// here so every reopen entry point shares one lifecycle path.
+    pub fn restore(&self) {
         if self.window.is_minimized() == Some(true) {
             self.window.set_minimized(false);
         }
@@ -55,6 +58,28 @@ impl ChromeWindow {
         clamp_to_monitor(&self.window);
         self.raise();
         self.window.request_redraw();
+    }
+
+    /// Reuse an existing window (restoring it) or build a fresh one.
+    ///
+    /// Callers pass their `Option<ChromeWindow>` by value; a destroyed
+    /// window simply falls through to creation, so tray and hotkey actions
+    /// never need duplicated existence checks.
+    pub fn restore_or_create(
+        existing: Option<Self>,
+        event_loop: &ActiveEventLoop,
+        gpu: &GpuContext,
+        kind: ChromeKind,
+        inner: PhysicalSize<u32>,
+        decorations: bool,
+    ) -> Result<Self, GpuError> {
+        match existing {
+            Some(win) => {
+                win.restore();
+                Ok(win)
+            }
+            None => Self::create(event_loop, gpu, kind, inner, decorations),
+        }
     }
 
     pub fn raise(&self) {
@@ -146,6 +171,14 @@ impl ChromeWindow {
     #[must_use]
     pub fn owns_input(&self) -> bool {
         self.egui_ctx.egui_wants_pointer_input() || self.egui_ctx.egui_wants_keyboard_input()
+    }
+
+    /// Whether the chat composer currently owns the keyboard. While it does,
+    /// overlay shortcuts must not fire, or typing A/D/W/S into a message would
+    /// also switch bodies and motions.
+    #[must_use]
+    pub fn composer_owns_keyboard(composer_focused: bool) -> bool {
+        composer_focused
     }
 
     pub fn place_caption(&self, position: &str) {
@@ -446,5 +479,10 @@ mod tests {
         assert_eq!(clamp_window_axis(1_800, 0, 1_920, 520), 1_352);
         assert_eq!(clamp_window_axis(640, 0, 1_920, 520), 640);
         assert_eq!(clamp_window_axis(-1_900, -1_920, 1_920, 520), -1_872);
+    }
+
+    #[test]
+    fn composer_keyboard_ownership_blocks_overlay_shortcuts() {
+        assert!(ChromeWindow::composer_owns_keyboard(true));
     }
 }

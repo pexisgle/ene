@@ -27,6 +27,9 @@ settings.json.v*.bak
 # Generated settings schemas
 /assets/schema/
 
+# Open-PR monitor scratch output
+/.monitor-open-prs.json
+
 # Debug runtime (data dir == source-tree assets/). Never commit.
 assets/vault.key
 assets/api.json
