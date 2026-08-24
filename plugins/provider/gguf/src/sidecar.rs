@@ -45,12 +45,17 @@ pub(crate) fn maybe_start_with(url_suffix: &str) -> Option<SidecarGuard> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn reads_injected_sidecar_base_url() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let original = std::env::var_os("ENE_PROVIDER_CONFIG");
-        // SAFETY: this test owns the `ENE_PROVIDER_CONFIG` mutation and restores
-        // the original value before returning.
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
             std::env::set_var(
                 "ENE_PROVIDER_CONFIG",
@@ -61,15 +66,13 @@ mod tests {
         assert_eq!(managed_base(), Some("http://127.0.0.1:9/v1"));
         match original {
             Some(value) => {
-                // SAFETY: This test owns the `ENE_PROVIDER_CONFIG` mutation and
-                // restores the value captured before the test changed it.
+                // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
                 unsafe {
                     std::env::set_var("ENE_PROVIDER_CONFIG", value);
                 }
             }
             None => {
-                // SAFETY: This test owns the `ENE_PROVIDER_CONFIG` mutation and
-                // removes the variable after the test changed it.
+                // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
                 unsafe {
                     std::env::remove_var("ENE_PROVIDER_CONFIG");
                 }
