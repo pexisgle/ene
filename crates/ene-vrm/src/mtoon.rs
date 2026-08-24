@@ -28,7 +28,7 @@
 //!
 //! ## What this module does NOT do
 //!
-//! - GPU texture upload (the loader calls [`load_mtoon_textures`])
+//! - GPU texture upload (the loader calls `load_mtoon_textures`)
 //! - Shader-side evaluation (the WGSL fragment shader reads the
 //!   per-material uniform)
 //! - Outline render pass (the renderer handles that)
