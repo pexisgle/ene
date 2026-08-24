@@ -1294,6 +1294,74 @@ fn missed_remind_fires_once() {
 }
 
 #[test]
+fn interval_spec_converts_to_cron() {
+    let (_dir, store, _host, soul) = open_work();
+    let cases: &[(&str, &str)] = &[
+        ("every 15s", "*/15 * * * * *"),
+        ("every 10m", "0 */10 * * * *"),
+        ("every 1h", "0 0 */1 * * *"),
+        ("every 12h", "0 0 */12 * * *"),
+        ("every 1d", "0 0 0 */1 * *"),
+        ("Every 30m", "0 */30 * * * *"),
+    ];
+    for (input, expected) in cases {
+        let sched = store
+            .insert_schedule(&NewSchedule {
+                soul_id: soul,
+                name: format!("interval-{input}"),
+                spec: (*input).into(),
+                timezone: "UTC".into(),
+                action: ScheduleAction::Remind,
+                action_ref: Some("tick".into()),
+                important: false,
+            })
+            .unwrap();
+        assert_eq!(sched.spec, *expected, "input {input}");
+    }
+}
+
+#[test]
+fn invalid_interval_spec_rejected() {
+    let (_dir, store, _host, soul) = open_work();
+    for spec in ["every 90m", "every 5h", "every 7s", "every 0m", "every x"] {
+        let err = store
+            .insert_schedule(&NewSchedule {
+                soul_id: soul,
+                name: format!("bad-{spec}"),
+                spec: spec.into(),
+                timezone: "UTC".into(),
+                action: ScheduleAction::Remind,
+                action_ref: Some("tick".into()),
+                important: false,
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported interval"),
+            "spec {spec}: {err}"
+        );
+    }
+}
+
+#[test]
+fn cron_spec_stored_verbatim() {
+    let (_dir, store, _host, soul) = open_work();
+    for spec in ["0 9 * * *", "0 0 * * * *"] {
+        let sched = store
+            .insert_schedule(&NewSchedule {
+                soul_id: soul,
+                name: format!("cron-{spec}"),
+                spec: spec.into(),
+                timezone: "UTC".into(),
+                action: ScheduleAction::Remind,
+                action_ref: Some("tick".into()),
+                important: false,
+            })
+            .unwrap();
+        assert_eq!(sched.spec, spec);
+    }
+}
+
+#[test]
 fn skill_install_and_load() {
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("src");

@@ -258,8 +258,9 @@ impl WorkStore {
     }
 
     pub fn insert_schedule(&self, new: &NewSchedule) -> Result<Schedule, WorkError> {
+        let spec = interval_to_cron(&new.spec)?;
         let id = Uuid::now_v7().to_string();
-        let next = next_fire(&new.spec, &new.timezone, Utc::now())?;
+        let next = next_fire(&spec, &new.timezone, Utc::now())?;
         self.conn.lock().execute(
             "INSERT INTO schedules (
                 id, soul_id, name, spec, timezone, action_kind, action_ref,
@@ -269,7 +270,7 @@ impl WorkStore {
                 id,
                 new.soul_id.to_string(),
                 &new.name,
-                &new.spec,
+                &spec,
                 &new.timezone,
                 new.action.as_str(),
                 &new.action_ref,
@@ -822,6 +823,36 @@ pub fn next_fire(spec: &str, tz_name: &str, from: DateTime<Utc>) -> Result<Strin
         .next()
         .ok_or_else(|| WorkError::Schedule("no next fire".to_owned()))?;
     Ok(next.with_timezone(&Utc).to_rfc3339())
+}
+
+fn interval_to_cron(spec: &str) -> Result<String, WorkError> {
+    let trimmed = spec.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("every ") {
+        return Ok(spec.to_owned());
+    }
+    let value_part = trimmed[6..].trim();
+    if value_part.len() < 2 {
+        return Err(interval_error(trimmed));
+    }
+    let (digits, unit) = value_part.split_at(value_part.len() - 1);
+    let n: u32 = digits.parse().map_err(|_| interval_error(trimmed))?;
+    if n == 0 {
+        return Err(interval_error(trimmed));
+    }
+    let cron = match unit {
+        "s" if 60 % n == 0 => format!("*/{n} * * * * *"),
+        "m" if 60 % n == 0 => format!("0 */{n} * * * *"),
+        "h" if n <= 24 && 24 % n == 0 => format!("0 0 */{n} * * *"),
+        "d" => format!("0 0 0 */{n} * *"),
+        _ => return Err(interval_error(trimmed)),
+    };
+    Ok(cron)
+}
+
+fn interval_error(spec: &str) -> WorkError {
+    WorkError::Schedule(format!(
+        "unsupported interval '{spec}'. use e.g. every 15s, every 10m, every 1h, or every 1d"
+    ))
 }
 
 fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
