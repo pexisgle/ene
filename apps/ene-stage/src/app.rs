@@ -829,10 +829,21 @@ impl StageApp {
     fn request_memories(&self) {
         let soul_id = self.session.soul_id().to_owned();
         let client = Arc::clone(&self.client);
+        let client_pending = Arc::clone(&client);
         self.spawn(async move {
             AsyncOutcome::ListMemories(
                 client
                     .list_memories(&soul_id, None)
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
+        });
+        let soul_id_pending = self.session.soul_id().to_owned();
+        self.spawn(async move {
+            AsyncOutcome::ListPendingMemories(
+                client_pending
+                    .list_pending_memories(&soul_id_pending)
                     .await
                     .map(|page| page.items)
                     .map_err(|err| err.to_string()),
@@ -2185,6 +2196,37 @@ mod tests {
         assert_eq!(app.session.session_id(), "new-session");
         assert!(app.surface.pending_approval.is_none());
         assert!(app.surface.pending_question.is_none());
+    }
+
+    #[test]
+    fn resolving_memory_refreshes_memories_and_pending_candidates() {
+        let mut app = StageApp::new_for_test();
+        app.apply_async_outcome(AsyncOutcome::ResolveMemory {
+            id: "candidate-1".to_owned(),
+            result: Ok(()),
+        });
+
+        app.runtime.block_on(async {
+            for _ in 0..200 {
+                if app.async_results.lock().len() >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let refresh_count = app
+            .async_results
+            .lock()
+            .iter()
+            .filter(|outcome| {
+                matches!(
+                    outcome,
+                    AsyncOutcome::ListMemories(_) | AsyncOutcome::ListPendingMemories(_)
+                )
+            })
+            .count();
+        assert_eq!(refresh_count, 2);
     }
 
     #[test]
