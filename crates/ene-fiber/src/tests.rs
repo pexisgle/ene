@@ -4,10 +4,13 @@ use crate::{
     manifest_digest,
 };
 use ene_registry::{Layer, ToolRegistry};
+use parking_lot::Mutex;
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tempfile::TempDir;
+
+static POSTS: LazyLock<Mutex<Vec<serde_json::Value>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 fn supervisor() -> (TempDir, Supervisor) {
     let dir = TempDir::new().unwrap();
@@ -767,6 +770,75 @@ fn net_fetch_runs_after_grant() {
     .unwrap();
     assert_eq!(value["status"], 200);
     assert_eq!(value["text"], "ok");
+}
+
+#[tokio::test]
+async fn probe_search_backends_reports_injected_credentials() {
+    let (_dir, sup) = supervisor();
+    let mut r = row("r-web", "tool.web", &["net.fetch"]);
+    r.config = json!({"tavily_api_key": "tvly-live"});
+    sup.activate(&r).unwrap();
+    sup.grant_for_tests(sup.fiber("r-web").unwrap().uid, "net.fetch");
+    ene_registry::with_post_json(
+        move |_url, _body, _bearer| {
+            Ok(json!({"status": 200, "content_type": "application/json", "results": []}))
+        },
+        || async {
+            let v = sup
+                .registry()
+                .execute("web.search_backends", json!({}), Layer::Surface)
+                .await
+                .unwrap();
+            assert_eq!(v["backends"][2]["id"], "tavily");
+            assert_eq!(v["backends"][2]["available"], true);
+            Ok::<(), ene_registry::PipelineError>(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn host_web_invoker_injects_config_credentials_into_builtin_search() {
+    let (_dir, sup) = supervisor();
+    let mut r = row("r-web", "tool.web", &["net.fetch"]);
+    r.config = json!({"tavily_api_key": "tvly-live"});
+    sup.activate(&r).unwrap();
+    sup.grant_for_tests(sup.fiber("r-web").unwrap().uid, "net.fetch");
+
+    fn capture_post(
+        url: &str,
+        body: &serde_json::Value,
+        _bearer: Option<&str>,
+    ) -> serde_json::Value {
+        POSTS
+            .lock()
+            .push(json!({ "url": url, "body_api_key": body["api_key"] }));
+        json!({
+            "status": 200,
+            "content_type": "application/json",
+            "results": [
+                {"title": "Tokyo", "url": "https://example.invalid/tokyo", "content": "Capital"}
+            ]
+        })
+    }
+
+    let result = crate::net::with_post_stub(capture_post, || async {
+        sup.registry()
+            .execute(
+                "web.search",
+                json!({"query": "tokyo", "backend": "tavily"}),
+                Layer::Surface,
+            )
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(result["backend"], "tavily");
+    let captured = POSTS.lock();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0]["url"], "https://api.tavily.com/search");
+    assert_eq!(captured[0]["body_api_key"], "tvly-live");
 }
 
 #[test]

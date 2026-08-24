@@ -20,7 +20,10 @@ pub use builtins::{
 };
 pub use def::{Layer, ToolDefinition, ToolSource};
 pub use discovery::ToolHit;
-pub use host_http::{try_host_fetch, with_http_fetch};
+pub use host_http::{
+    try_host_fetch, try_host_post_json, web_credentials::try_web_credentials,
+    web_credentials::with_web_credentials, with_http_fetch, with_post_json,
+};
 pub use pipeline::{BuiltinInvoker, PipelineError, ToolInvoke, ToolRegistry, confine_tool_path};
 
 #[cfg(test)]

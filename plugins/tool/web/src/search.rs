@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 
+use super::credentials::WebCredentials;
 use super::html::fail;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,20 +50,22 @@ pub(crate) fn parse_backend(raw: Option<&str>) -> Result<SearchBackend, String> 
     SearchBackend::parse(raw.unwrap_or("duckduckgo"))
 }
 
-pub(crate) fn catalog() -> Value {
+/// Availability is a runtime property: the host injects vault credentials per
+/// call and reports them here instead of hardcoding paid backends as missing.
+pub(crate) fn catalog(creds: Option<&WebCredentials>) -> Value {
     json!({
         "backends": [
             cap(SearchBackend::DuckDuckGo, true, None),
             cap(SearchBackend::Arxiv, true, None),
-            cap(
-                SearchBackend::Tavily,
-                false,
-                Some("credential_missing"),
-            ),
-            cap(SearchBackend::Exa, false, Some("credential_missing")),
+            cap(SearchBackend::Tavily, backend_available(creds, SearchBackend::Tavily), None),
+            cap(SearchBackend::Exa, backend_available(creds, SearchBackend::Exa), None),
         ],
         "default": "duckduckgo",
     })
+}
+
+fn backend_available(creds: Option<&WebCredentials>, backend: SearchBackend) -> bool {
+    !backend.needs_credential() || creds.and_then(|creds| creds.for_backend(backend)).is_some()
 }
 
 fn cap(backend: SearchBackend, available: bool, code: Option<&str>) -> Value {
@@ -76,16 +79,25 @@ fn cap(backend: SearchBackend, available: bool, code: Option<&str>) -> Value {
 }
 
 pub(crate) fn require_available(backend: SearchBackend) -> Result<(), String> {
-    if backend.needs_credential() {
+    if !backend.needs_credential() {
+        return Ok(());
+    }
+    let installed =
+        credentials_installed().and_then(|creds| creds.for_backend(backend).map(str::to_owned));
+    if installed.is_none() {
         return Err(fail(
             "credential_missing",
             format!(
-                "{} needs a vault credential; it is not selected without host policy",
+                "{} needs an API key; configure it in plugin settings",
                 backend.id()
             ),
         ));
     }
     Ok(())
+}
+
+fn credentials_installed() -> Option<WebCredentials> {
+    super::credentials::try_credentials()
 }
 
 pub(crate) fn parse_arxiv_atom(xml: &str) -> Vec<Value> {
@@ -151,18 +163,55 @@ fn collapse(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SearchBackend, catalog, parse_arxiv_atom, parse_backend, require_available};
+    use super::super::credentials::with_credentials;
+    use super::{
+        SearchBackend, WebCredentials, catalog, parse_arxiv_atom, parse_backend, require_available,
+    };
+
+    fn creds(tavily: bool, exa: bool) -> WebCredentials {
+        WebCredentials {
+            tavily: tavily.then(|| "tvly-test".to_owned()),
+            exa: exa.then(|| "exa-test".to_owned()),
+        }
+    }
 
     #[test]
-    fn catalog_lists_ddg_and_paid_gaps() {
-        let value = catalog();
-        let rows = value["backends"].as_array().unwrap();
-        assert_eq!(rows[0]["id"], "duckduckgo");
-        assert_eq!(rows[0]["available"], true);
-        assert_eq!(rows[2]["id"], "tavily");
-        assert_eq!(rows[2]["available"], false);
-        assert_eq!(rows[2]["code"], "credential_missing");
-        assert!(require_available(SearchBackend::Tavily).is_err());
+    fn catalog_reflects_injected_credentials() {
+        let rows = |catalog: &serde_json::Value| {
+            catalog["backends"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| (row["id"].clone(), row["available"].clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows(&catalog(None)),
+            vec![
+                ("duckduckgo".into(), true.into()),
+                ("arxiv".into(), true.into()),
+                ("tavily".into(), false.into()),
+                ("exa".into(), false.into())
+            ],
+        );
+        let with_both = with_credentials(creds(true, true), || catalog(Some(&creds(true, true))));
+        assert_eq!(with_both["backends"][2]["available"], true);
+        assert_eq!(with_both["backends"][3]["available"], true);
+    }
+
+    #[test]
+    fn require_available_follows_runtime_credentials() {
+        with_credentials(creds(true, false), || {
+            assert!(require_available(SearchBackend::Tavily).is_ok());
+            let err = require_available(SearchBackend::Exa).unwrap_err();
+            assert!(err.contains("credential_missing"), "{err}");
+        });
+    }
+
+    #[test]
+    fn free_backends_need_no_credential() {
+        assert!(require_available(SearchBackend::DuckDuckGo).is_ok());
+        assert!(require_available(SearchBackend::Arxiv).is_ok());
         assert!(parse_backend(Some("arxiv")).is_ok());
     }
 
