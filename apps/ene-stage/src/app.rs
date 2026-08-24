@@ -2018,7 +2018,10 @@ impl ApplicationHandler for StageApp {
             {
                 chat.resize(gpu, *size);
             }
-            overlay_from_chrome = Some(chat.owns_input());
+            overlay_from_chrome = Some(
+                chat.owns_input()
+                    || ChromeWindow::composer_owns_keyboard(self.surface.chat_input_focused),
+            );
             chrome_focus_state = window_focus_state(&event);
             close_chat = matches!(event, WindowEvent::CloseRequested);
         }

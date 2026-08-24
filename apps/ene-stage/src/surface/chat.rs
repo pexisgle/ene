@@ -181,6 +181,12 @@ fn request_single_greeting_commit(state: &mut SurfaceUiState) {
 
 pub(crate) const CHAT_INPUT_ID: &str = "stage-chat-input";
 
+const COMPOSER_MIN_ROWS: usize = 3;
+const COMPOSER_MAX_ROWS: usize = 8;
+const COMPOSER_ROW_HEIGHT: f32 = 18.0;
+const COMPOSER_VERTICAL_PADDING: f32 = 14.0;
+const COMPOSER_MIN_HEIGHT: f32 = 64.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComposerSendRequest {
     send: bool,
@@ -189,6 +195,38 @@ struct ComposerSendRequest {
 const COMPOSER_NONE: ComposerSendRequest = ComposerSendRequest { send: false };
 
 const COMPOSER_SEND: ComposerSendRequest = ComposerSendRequest { send: true };
+
+/// Rows the composer shows for the current draft: grows with content up to
+/// the cap, past which the editor scrolls internally instead of pushing the
+/// rest of the panel off screen.
+#[must_use]
+fn composer_metrics(draft: &str) -> (usize, f32) {
+    let mut rows = draft.lines().count().max(1);
+    if draft.ends_with('\n') {
+        rows += 1;
+    }
+    rows = rows.clamp(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "row counts stay far below the f32 exact-integer range"
+    )]
+    let height = rows as f32 * COMPOSER_ROW_HEIGHT + COMPOSER_VERTICAL_PADDING;
+    (rows, height.max(COMPOSER_MIN_HEIGHT))
+}
+
+#[must_use]
+fn composer_send_allowed(state: &SurfaceUiState) -> bool {
+    !state.chat_draft.trim().is_empty()
+}
+
+/// The multiline editor inserts the newline for the same Enter press that
+/// requests the send; dropping it keeps blocked turns from collecting stray
+/// blank lines at the end of the draft.
+fn pop_enter_newline(draft: &mut String) {
+    if draft.ends_with('\n') {
+        draft.pop();
+    }
+}
 
 #[must_use]
 fn composer_request_for_key(
@@ -202,33 +240,45 @@ fn composer_request_for_key(
     COMPOSER_SEND
 }
 
+/// Reads the focused editor's key events for this frame instead of inferring
+/// intent from focus loss, so a focus race can never swallow or fake a send.
+/// Shift+Enter stays a newline and an active IME preedit claims Enter for
+/// the composition.
 #[must_use]
 fn composer_send_requested(ui: &egui::Ui) -> ComposerSendRequest {
     ui.input(|input| {
-        let enter_pressed = input.events.iter().any(|event| {
-            matches!(
-                event,
+        let mut request = COMPOSER_NONE;
+        let mut composing = false;
+        for event in &input.events {
+            match event {
+                egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) if !text.is_empty() => {
+                    composing = true;
+                }
                 egui::Event::Key {
                     key: egui::Key::Enter,
                     pressed: true,
+                    modifiers,
                     ..
+                } => {
+                    request = composer_request_for_key(true, modifiers.shift, false);
                 }
-            )
-        });
-        let composing = input.events.iter().any(|event| {
-            matches!(
-                event,
-                egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) if !text.is_empty()
-            )
-        });
-        composer_request_for_key(enter_pressed, input.modifiers.shift, composing)
+                _ => {}
+            }
+        }
+        if composing { COMPOSER_NONE } else { request }
     })
 }
 
 pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> egui::Response {
     let output = ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
         ui.horizontal(|ui| {
-            if ui.button(i18n::fl("chat-send")).clicked() {
+            if ui
+                .add_enabled(
+                    composer_send_allowed(state),
+                    egui::Button::new(i18n::fl("chat-send")),
+                )
+                .clicked()
+            {
                 state.push_action(SurfaceAction::SendChat);
             }
             if ui
@@ -270,15 +320,36 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                 state.push_action(SurfaceAction::OpenDetail(DetailTab::Home));
             }
         });
-        if !state.status.is_empty() {
-            ui.add(
-                egui::Label::new(egui::RichText::new(&state.status).small())
-                    .wrap()
-                    .selectable(true),
-            );
-        }
+
         ui.horizontal(|ui| {
-            ui.label(i18n::fl("chat-mode"));
+            ui.weak(i18n::fl("chat-send-keyboard-hint"));
+            if state.turn_active {
+                ui.weak(i18n::fl("chat-draft-editable-hint"));
+            }
+        });
+
+        let composer_width = ui.available_width();
+        let (rows, composer_min_height) = composer_metrics(&state.chat_draft);
+        let response = ui.add(
+            egui::TextEdit::multiline(&mut state.chat_draft)
+                .id_salt(CHAT_INPUT_ID)
+                .hint_text(i18n::fl("chat-placeholder"))
+                .desired_width(composer_width)
+                .desired_rows(rows)
+                .min_size(egui::vec2(composer_width, composer_min_height))
+                .return_key(Some(egui::KeyboardShortcut::new(
+                    egui::Modifiers::SHIFT,
+                    egui::Key::Enter,
+                ))),
+        );
+        let request = composer_send_requested(ui);
+        if request.send && composer_send_allowed(state) {
+            pop_enter_newline(&mut state.chat_draft);
+            state.push_action(SurfaceAction::SendChat);
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(i18n::fl("chat-input-label"));
             for (mode, label, hint) in [
                 (
                     MessageMode::Prompt,
@@ -308,38 +379,28 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                 });
             }
             if !state.voice_state.is_empty() {
-                ui.label(format!(
+                ui.weak(format!(
                     "{}: {}",
                     i18n::fl("voice-state"),
                     state.voice_state
                 ));
             }
         });
-        ui.collapsing(i18n::fl("chat-overlay-hint"), |ui| {
-            ui.label(i18n::fl("chat-overlay-hint"));
-        });
+
         if !state.exclusive_notice.is_empty() {
             ui.colored_label(egui::Color32::YELLOW, &state.exclusive_notice);
         }
 
-        let response = ui.add(
-            egui::TextEdit::multiline(&mut state.chat_draft)
-                .id_salt(CHAT_INPUT_ID)
-                .hint_text(i18n::fl("chat-placeholder"))
-                .desired_width(ui.available_width())
-                .desired_rows(2)
-                .min_size(egui::vec2(ui.available_width(), 56.0))
-                .return_key(Some(egui::KeyboardShortcut::new(
-                    egui::Modifiers::SHIFT,
-                    egui::Key::Enter,
-                )))
-                .code_editor(),
-        );
-        let send_request = response.has_focus().then(|| composer_send_requested(ui));
-        if send_request.as_ref().is_some_and(|request| request.send)
-            && !state.chat_draft.trim().is_empty()
-        {
-            state.push_action(SurfaceAction::SendChat);
+        ui.collapsing(i18n::fl("chat-overlay-hint"), |ui| {
+            ui.label(i18n::fl("chat-overlay-hint"));
+        });
+
+        if !state.status.is_empty() {
+            ui.add(
+                egui::Label::new(egui::RichText::new(&state.status).small())
+                    .wrap()
+                    .selectable(true),
+            );
         }
 
         ui.add_space(4.0);
@@ -497,6 +558,48 @@ mod tests {
     }
 
     #[test]
+    fn composer_height_grows_with_content_and_caps() {
+        let (min_rows, min_height) = composer_metrics("");
+        assert_eq!(min_rows, COMPOSER_MIN_ROWS);
+        assert!(min_height >= COMPOSER_MIN_HEIGHT);
+
+        let grown_draft = "one\n".repeat(COMPOSER_MAX_ROWS);
+        let (_, grown) = composer_metrics(grown_draft.trim_end());
+        assert!(grown > min_height);
+
+        let long = "line\n".repeat(COMPOSER_MAX_ROWS * 2);
+        let (capped_rows, capped_height) = composer_metrics(&long);
+        assert_eq!(capped_rows, COMPOSER_MAX_ROWS);
+        let (_, saturated_height) = composer_metrics("a\nb\nc\nd\ne\nf\ng\nh");
+        assert!((capped_height - saturated_height).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn whitespace_draft_blocks_send_but_keeps_typing() {
+        let mut state = SurfaceUiState {
+            chat_draft: "   \n\t ".to_owned(),
+            ..Default::default()
+        };
+
+        assert!(!composer_send_allowed(&state));
+        state.chat_draft = "real words".to_owned();
+        assert!(composer_send_allowed(&state));
+    }
+
+    #[test]
+    fn enter_newline_is_removed_before_sending() {
+        let mut draft = "hello\n".to_owned();
+        pop_enter_newline(&mut draft);
+        assert_eq!(draft, "hello");
+
+        pop_enter_newline(&mut draft);
+        assert_eq!(
+            draft, "hello",
+            "only one trailing newline is removed per send"
+        );
+    }
+
+    #[test]
     fn multiline_draft_preserves_paste_newlines() {
         let state = SurfaceUiState {
             chat_draft: "first\nsecond\n".to_owned(),
@@ -515,5 +618,14 @@ mod tests {
         };
 
         assert!(state.chat_draft.trim().is_empty());
+    }
+
+    #[test]
+    fn ime_preedit_blocks_send_even_when_enter_arrives_first() {
+        assert_eq!(
+            composer_request_for_key(true, false, true),
+            COMPOSER_NONE,
+            "active IME preedit must claim Enter for the composition"
+        );
     }
 }
