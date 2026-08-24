@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
       - name: Check asset provenance
@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: clippy
       - uses: ./.github/actions/rust-build-env
@@ -78,7 +78,7 @@ jobs:
               -p ene-provider-edge-tts -p ene-provider-gguf
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: ./.github/actions/setup-rust
       - uses: ./.github/actions/rust-build-env
       - name: Install ripgrep
         run: sudo apt-get install -y --no-install-recommends ripgrep
@@ -91,7 +91,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: ./.github/actions/setup-rust
       - uses: ./.github/actions/rust-build-env
       # Not run with RUSTDOCFLAGS=-D warnings: pre-existing broken
       # intra-doc links would fail unrelated work.
@@ -110,7 +110,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
