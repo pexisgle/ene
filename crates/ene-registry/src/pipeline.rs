@@ -402,7 +402,8 @@ impl ToolRegistry {
                 required: def.primary_layer(),
             });
         }
-        self.authorize_request(name, &def, args, workspace, call_id).await
+        self.authorize_request(name, &def, args, workspace, call_id)
+            .await
     }
 
     /// Build the shared `AuthzRequest` and consult the approval plane once.
@@ -528,10 +529,7 @@ impl ToolRegistry {
             if let Some(plane) = plane {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or("");
                 let target = authorization_target(name, &args).to_owned();
-                let in_workspace = path_in_workspace(
-                    workspace_override.as_deref(),
-                    path,
-                );
+                let in_workspace = path_in_workspace(workspace_override.as_deref(), path);
                 let req = AuthzRequest {
                     tool: name.to_owned(),
                     side_effects: def.side_effects.clone(),
