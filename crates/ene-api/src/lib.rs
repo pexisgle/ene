@@ -6,11 +6,13 @@
 mod client;
 mod error;
 mod pcm;
+mod question_event;
 mod types;
 
 pub use client::{ApiClient, EventSocket, ListenStream};
 pub use error::ApiError;
 pub use pcm::{LISTEN_SAMPLE_RATE, PCM_S16LE, decode_pcm_s16le, encode_pcm_s16le};
+pub use question_event::{QuestionEvent, QuestionEventKind};
 pub use types::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
@@ -34,13 +36,6 @@ pub use types::{
 
 /// `OpenAPI` 3.1 document. Served at `GET /api/v1/openapi.json`.
 pub const OPENAPI_JSON: &str = include_str!("../openapi.json");
-
-/// Canonical live-bus event emitted when a job needs a user answer.
-pub const QUESTION_ASKED_EVENT: &str = "question.asked";
-
-/// Live-bus event emitted when every open question on a job is closed by an
-/// answer or the timeout tick.
-pub const QUESTION_RESOLVED_EVENT: &str = "question.resolved";
 
 #[must_use]
 pub fn openapi_json() -> &'static str {

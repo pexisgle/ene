@@ -699,7 +699,7 @@ impl DelegationHost {
             .into_iter()
             .find(|question| question.question_id() == question_id)
         else {
-            return Err(WorkError::NoOpenQuestion);
+            return Err(WorkError::QuestionAlreadyResolved);
         };
         self.store
             .mailbox_push_for_question(id, question.mailbox_seq, "answer", answer)?;
@@ -716,7 +716,7 @@ impl DelegationHost {
         self.require_known(id)?;
         let pending = self.store.open_questions(id)?;
         if pending.is_empty() {
-            return Err(WorkError::NoOpenQuestion);
+            return Err(WorkError::QuestionAlreadyResolved);
         }
         for question in &pending {
             self.store
@@ -735,7 +735,7 @@ impl DelegationHost {
         self.require_known(id)?;
         let pending = self.store.open_questions(id)?;
         if pending.is_empty() {
-            return Err(WorkError::NoOpenQuestion);
+            return Err(WorkError::QuestionAlreadyResolved);
         }
         if pending.len() != answers.len() {
             return Err(WorkError::QuestionAnswerCount {
