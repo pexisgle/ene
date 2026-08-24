@@ -24,7 +24,7 @@ impl Plugin for TrayPlugin {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _app = app;
+            let _ = app;
         }
     }
 }
