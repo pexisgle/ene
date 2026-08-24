@@ -478,7 +478,17 @@ async fn duplicate_approval_response_dispatches_exactly_once() {
     ));
     plane.set_mode(ApprovalMode::AskAll).unwrap();
     registry.set_plane(plane);
-    let router = Arc::new(WorkSurfaceRouter::new(host, Arc::clone(&registry), soul, 8));
+    let job = public_start(&host, soul, "duplicate approval probe");
+    host.present_plan(job.id, "run the background tool")
+        .unwrap();
+    host.approve_plan(job.id).unwrap();
+    let router = Arc::new(JobLayerRouter::new(
+        host,
+        Arc::clone(&registry),
+        soul,
+        job.id,
+        &job.workspace_dir,
+    ));
 
     let first = tokio::spawn({
         let router = Arc::clone(&router);
@@ -488,15 +498,20 @@ async fn duplicate_approval_response_dispatches_exactly_once() {
         let router = Arc::clone(&router);
         async move { router.on_tool("bg.sleep", json!({"ms": 1}), 0).await }
     });
-    asked.notified().await;
-    let id = popup
-        .list()
-        .first()
-        .expect("approval popup should be listed")
-        .id
-        .clone();
-    assert!(popup.respond(&id, ene_plane::PopupDecision::Allow).is_ok());
-    assert!(popup.respond(&id, ene_plane::PopupDecision::Deny).is_err());
+    while popup.list().len() < 2 {
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+    let ids: Vec<_> = popup.list().iter().map(|v| v.id.clone()).collect();
+    assert!(
+        popup
+            .respond(&ids[0], ene_plane::PopupDecision::Allow)
+            .is_ok()
+    );
+    assert!(
+        popup
+            .respond(&ids[1], ene_plane::PopupDecision::Deny)
+            .is_ok()
+    );
 
     let outcomes = tokio::join!(first, second);
     let started = outcomes
@@ -550,7 +565,17 @@ async fn ask_all_background_call_prompts_exactly_once() {
     ));
     plane.set_mode(ApprovalMode::AskAll).unwrap();
     registry.set_plane(plane);
-    let router = WorkSurfaceRouter::new(Arc::clone(&host), Arc::clone(&registry), soul, 8);
+    let job = public_start(&host, soul, "approval gate probe");
+    host.present_plan(job.id, "run the background tool")
+        .unwrap();
+    host.approve_plan(job.id).unwrap();
+    let router = JobLayerRouter::new(
+        host,
+        Arc::clone(&registry),
+        soul,
+        job.id,
+        &job.workspace_dir,
+    );
 
     let dispatched = tokio::spawn({
         let router = Arc::new(router);
@@ -565,8 +590,8 @@ async fn ask_all_background_call_prompts_exactly_once() {
         "AskAll background dispatch must produce exactly one approval",
     );
     assert!(
-        store.list_jobs(soul).unwrap().is_empty(),
-        "no job row may exist before approval resolves",
+        store.list_jobs(soul).unwrap().len() == 1,
+        "approval must not create an extra job row",
     );
     assert!(
         store.list_running_tool_executions().unwrap().is_empty(),
