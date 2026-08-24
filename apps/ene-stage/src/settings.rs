@@ -128,6 +128,16 @@ mod tests {
     }
 
     #[test]
+    fn seed_prefers_preloaded_map_over_legacy_scalar() {
+        let mut positions = BTreeMap::from([("active".to_owned(), [0.11, 0.22])]);
+        let souls = ids(&["active"]);
+        seed_character_positions(&mut positions, &souls, "active", [0.8, 0.4]);
+        let [x, y] = positions["active"];
+        assert!((x - 0.11).abs() < f32::EPSILON);
+        assert!((y - 0.22).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn settings_roundtrip_preserves_positions_map() {
         let mut settings = DesktopSettings::default();
         settings

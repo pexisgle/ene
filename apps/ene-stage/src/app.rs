@@ -1748,6 +1748,15 @@ impl StageApp {
             Ok(count) => {
                 let active_soul = self.session.soul_id().to_owned();
                 let soul_ids: Vec<String> = specs.iter().map(|spec| spec.soul_id.clone()).collect();
+                let saved = &self.local_settings.character_positions;
+                let valid: std::collections::HashSet<&str> =
+                    soul_ids.iter().map(std::string::String::as_str).collect();
+                self.surface.positions.extend(
+                    saved
+                        .iter()
+                        .filter(|(k, _)| valid.contains(k.as_str()))
+                        .map(|(k, v)| (k.clone(), *v)),
+                );
                 let legacy_pos = [self.settings.character_x, self.settings.character_y];
                 crate::settings::seed_character_positions(
                     &mut self.surface.positions,
