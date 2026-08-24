@@ -1527,12 +1527,23 @@ impl StageApp {
                 pcm,
                 sample_rate,
                 abort,
+                soul_id,
+                expression,
                 ..
             } => {
                 if abort {
                     self.abort_audio_playback();
-                } else if let Err(err) = self.audio.play_pcm(&pcm, sample_rate) {
-                    tracing::debug!(error = %err, "audio playback failed");
+                } else {
+                    let played = match self.audio.play_pcm(&pcm, sample_rate) {
+                        Ok(()) => true,
+                        Err(err) => {
+                            tracing::debug!(error = %err, "audio playback failed");
+                            false
+                        }
+                    };
+                    if played && let Some(label) = expression.as_deref() {
+                        self.apply_expression_cue(soul_id.as_deref(), label);
+                    }
                 }
             }
             LiveEvent::VoiceState { state, barge_in } => {
@@ -1852,6 +1863,23 @@ impl StageApp {
         self.viseme.reset();
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.reset_visemes();
+            for slot in &mut overlay.slots {
+                slot.avatar.clear_expression_cue();
+            }
+        }
+    }
+
+    fn apply_expression_cue(&mut self, soul_id: Option<&str>, label: &str) {
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        let session_soul = self.session.soul_id().to_owned();
+        let avatar = match soul_id {
+            Some(soul) => overlay.avatar_mut(soul),
+            None => overlay.avatar_or_first_mut(&session_soul),
+        };
+        if let Some(avatar) = avatar {
+            avatar.apply_expression_cue(label);
         }
     }
 
@@ -1901,6 +1929,7 @@ impl StageApp {
         for (index, slot) in overlay.slots.iter_mut().enumerate() {
             slot.avatar.model_scale = scale;
             slot.avatar.world_offset = crate::overlay::overlay_slot_offset(index, count, base);
+            slot.avatar.tick_expression_cue(dt);
         }
         if let Err(err) = overlay.tick_and_render(gpu, look, Some(visemes), Some(soul.as_str())) {
             match err {

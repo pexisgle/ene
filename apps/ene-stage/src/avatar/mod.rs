@@ -28,6 +28,9 @@ pub enum AvatarError {
     Io(#[from] std::io::Error),
 }
 
+const EXPRESSION_CUE_HOLD: f32 = 4.0;
+const EXPRESSION_CUE_FADE: f32 = 0.3;
+
 /// GPU-resident companion avatar drawn directly into the overlay swapchain.
 pub struct CompanionAvatar {
     model: VrmModel,
@@ -40,6 +43,7 @@ pub struct CompanionAvatar {
     motion_idx: usize,
     look_at_target: Option<Vec3>,
     pending_visemes: Option<VisemeWeights>,
+    expression_cue: Option<(String, f32)>,
     blink_accum: f32,
     blinking: f32,
     last_hips: Option<Vec3>,
@@ -72,6 +76,7 @@ impl CompanionAvatar {
             motion_idx: 0,
             look_at_target: None,
             pending_visemes: None,
+            expression_cue: None,
             blink_accum: 0.0,
             blinking: 0.0,
             last_hips: None,
@@ -160,6 +165,54 @@ impl CompanionAvatar {
         let name = ExpressionName::new(label);
         if !self.model.expressions.set_expression(&name, 1.0) {
             tracing::debug!(label, "unknown expression discarded");
+        }
+    }
+
+    pub fn apply_expression_cue(&mut self, label: &str) {
+        if !self.apply_expression_weighted(label, 1.0) {
+            return;
+        }
+        self.expression_cue = Some((label.to_owned(), 0.0));
+    }
+
+    fn apply_expression_weighted(&mut self, label: &str, weight: f32) -> bool {
+        let name = ExpressionName::new(label);
+        if self.model.expressions.set_expression(&name, weight) {
+            true
+        } else {
+            tracing::debug!(label, "unknown expression discarded");
+            false
+        }
+    }
+
+    pub fn tick_expression_cue(&mut self, dt: f32) {
+        let Some((label, elapsed)) = self.expression_cue.as_mut() else {
+            return;
+        };
+        *elapsed += dt;
+        let remaining = EXPRESSION_CUE_HOLD - *elapsed;
+        let label = label.clone();
+        if remaining <= 0.0 {
+            let _ = self
+                .model
+                .expressions
+                .set_expression(&ExpressionName::new(label), 0.0);
+            self.expression_cue = None;
+        } else if remaining < EXPRESSION_CUE_FADE {
+            let weight = (remaining / EXPRESSION_CUE_FADE).clamp(0.0, 1.0);
+            let _ = self
+                .model
+                .expressions
+                .set_expression(&ExpressionName::new(label), weight);
+        }
+    }
+
+    pub fn clear_expression_cue(&mut self) {
+        if let Some((label, _)) = self.expression_cue.take() {
+            let _ = self
+                .model
+                .expressions
+                .set_expression(&ExpressionName::new(&label), 0.0);
         }
     }
 
