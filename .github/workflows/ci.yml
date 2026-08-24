@@ -140,7 +140,8 @@ jobs:
       - name: Build docs
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --locked --workspace --no-deps
+        # ene-desktop is frozen legacy code; its intra-doc links are not held to -D warnings.
+        run: cargo doc --locked --workspace --exclude ene-desktop --no-deps
       - name: Install mdBook
         run: cargo install mdbook --locked --version 0.5.4
       - name: Build English book
