@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, ApiError, CharacterView, JobView, MemoryCandidateDecision, MemoryCandidateView,
-    MemoryJournalView, MemoryPatch, MemoryView, OccupantView, PluginConfigField,
-    PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
+    ApiClient, ApiError, CharacterView, CreateJobRequest, JobView, MemoryCandidateDecision,
+    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, OccupantView,
+    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
     ResolveMemoryCandidateRequest, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
@@ -327,6 +327,9 @@ pub struct DetailUiState {
     pub body_ref_draft: String,
     pub jobs: Vec<JobView>,
     pub schedules: Vec<ScheduleView>,
+    pub new_job_title: String,
+    pub new_job_goal: String,
+    pub new_job_inflight: bool,
     pub plugins: Vec<PluginView>,
     pub provider_assets_plugin: String,
     pub provider_assets: Vec<ProviderAssetView>,
@@ -2303,6 +2306,33 @@ fn show_work(
         }
     });
     ui.label(i18n::fl("jobs-export-hint"));
+    ui.heading(i18n::fl("jobs-new"));
+    ui.label(i18n::fl("jobs-new-hint"));
+    ui.add(
+        egui::TextEdit::singleline(&mut state.new_job_title).hint_text(i18n::fl("jobs-new-title")),
+    );
+    ui.add(
+        egui::TextEdit::multiline(&mut state.new_job_goal)
+            .desired_rows(3)
+            .hint_text(i18n::fl("jobs-new-goal")),
+    );
+    let can_create = !state.new_job_inflight && !state.new_job_goal.trim().is_empty();
+    if ui
+        .add_enabled(can_create, egui::Button::new(i18n::fl("jobs-create")))
+        .clicked()
+    {
+        state.new_job_inflight = true;
+        let request = CreateJobRequest {
+            soul_id: soul_id.to_owned(),
+            goal: state.new_job_goal.trim().to_owned(),
+            title: (!state.new_job_title.trim().is_empty())
+                .then(|| state.new_job_title.trim().to_owned()),
+        };
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::CreateJob(client.create_job(&request).await.map_err(|e| e.to_string()))
+        });
+    }
     ui.heading(i18n::fl("jobs-active"));
     let active_jobs = active_jobs(&state.jobs);
     if active_jobs.is_empty() {
