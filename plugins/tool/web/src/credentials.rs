@@ -10,9 +10,9 @@ pub(crate) struct WebCredentials {
 }
 
 impl WebCredentials {
-    #[cfg_attr(
-        any(not(test), test),
-        expect(dead_code, reason = "host-only credential source; exercised by tests")
+    #[expect(
+        dead_code,
+        reason = "host-side config parsing lands with the vault wiring"
     )]
     pub(crate) fn from_config(value: &Value) -> Self {
         let key = |names: &[&str]| {
