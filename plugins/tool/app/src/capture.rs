@@ -1,5 +1,6 @@
 use super::capability::{
     PlatformCaps, dependency_missing, fail, primary_screenshot_cli_backend, screenshot_cli_backend,
+    screenshot_cli_backend_on_path,
 };
 use super::hostcmd::{pipe_bytes, run, stdout_bytes_timeout, stdout_text};
 use base64::Engine;
@@ -63,8 +64,8 @@ fn portal_fallback_backend(
     screenshot_cli_backend(path)
 }
 
-fn missing_screenshot_error() -> String {
-    dependency_missing("none", primary_screenshot_cli_backend())
+fn missing_screenshot_error(backend: &'static str) -> String {
+    dependency_missing(backend, backend)
 }
 
 fn portal_without_cli_guidance(portal_error: &str) -> Option<String> {
@@ -380,11 +381,14 @@ fn capture_png_file(backend: &'static str) -> Result<Vec<u8>, String> {
 
 fn cli_error(backend: &'static str, error: String) -> String {
     let path = std::env::var("PATH").ok();
-    if screenshot_cli_backend(path.as_deref()) == Some(backend) {
-        fail("backend_failed", backend, error)
-    } else {
-        missing_screenshot_error()
+    cli_error_for_path(backend, error, path.as_deref())
+}
+
+fn cli_error_for_path(backend: &'static str, error: String, path: Option<&str>) -> String {
+    if screenshot_cli_backend_on_path(backend, path) {
+        return fail("backend_failed", backend, error);
     }
+    missing_screenshot_error(backend)
 }
 
 fn cap_png(bytes: Vec<u8>, backend: &str) -> Result<Vec<u8>, String> {
@@ -532,15 +536,52 @@ mod tests {
 
     #[test]
     fn missing_cli_backend_maps_to_dependency_missing_with_hint() {
-        let err = super::missing_screenshot_error();
+        let err = super::missing_screenshot_error("scrot");
         let value: serde_json::Value = serde_json::from_str(&err).unwrap();
         assert_eq!(value["code"], "dependency_missing");
-        assert_eq!(value["package"], "grim");
+        assert_eq!(value["backend"], "scrot");
+        assert_eq!(value["package"], "scrot");
         let message = value["message"].as_str().unwrap();
         assert!(
-            message.contains("apt install grim"),
+            message.contains("apt install scrot"),
             "install hint must name a package manager: {message}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn x11_vanished_selected_backend_reports_itself_not_global_primary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let grim = dir.path().join("grim");
+        std::fs::write(&grim, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&grim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let err = super::cli_error_for_path(
+            "import",
+            super::fail("backend_failed", "import", "import disappeared"),
+            Some(path),
+        );
+        let value: serde_json::Value = serde_json::from_str(&err).unwrap();
+        assert_eq!(value["code"], "dependency_missing");
+        assert_eq!(value["backend"], "import");
+        assert_eq!(value["package"], "import");
+        assert!(!value["message"].as_str().unwrap().contains("grim"));
+
+        let scrot = dir.path().join("scrot");
+        std::fs::write(&scrot, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&scrot, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(std::fs::remove_file(&grim));
+        let still_installed = super::cli_error_for_path(
+            "scrot",
+            super::fail("backend_failed", "scrot", "scrot failed"),
+            Some(path),
+        );
+        let value: serde_json::Value = serde_json::from_str(&still_installed).unwrap();
+        assert_eq!(value["code"], "backend_failed");
+        assert_eq!(value["backend"], "scrot");
     }
 
     #[test]

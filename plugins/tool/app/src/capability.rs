@@ -271,6 +271,14 @@ pub(crate) fn screenshot_cli_backend(path: Option<&str>) -> Option<&'static str>
     })
 }
 
+pub(crate) fn screenshot_cli_backend_on_path(backend: &str, path: Option<&str>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(OsStr::new(path))
+        .any(|directory| executable_file(&directory.join(backend)))
+}
+
 pub(crate) fn primary_screenshot_cli_backend() -> &'static str {
     SCREENSHOT_CLI_BACKENDS.first().copied().unwrap_or("none")
 }
