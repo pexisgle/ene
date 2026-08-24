@@ -1,6 +1,6 @@
 //! Detail window: eight new-core IA sections plus a session log.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -321,6 +321,7 @@ pub struct DetailUiState {
     pub pending_memories: Vec<MemoryCandidateView>,
     pub memory_journal: Vec<MemoryJournalView>,
     pub candidate_drafts: HashMap<String, MemoryCandidateDraft>,
+    pub shared_accept_armed: HashSet<String>,
     pub soul: Option<SoulView>,
     pub characters: Vec<CharacterView>,
     pub occupants: Vec<OccupantView>,
@@ -449,16 +450,31 @@ impl DetailUiState {
         self.pending_memories.clear();
         self.memory_journal.clear();
         self.candidate_drafts.clear();
+        self.shared_accept_armed.clear();
     }
 
     pub(crate) fn sync_candidate_drafts(&mut self, candidates: &[MemoryCandidateView]) {
         self.candidate_drafts
             .retain(|id, _| candidates.iter().any(|candidate| candidate.id == *id));
+        self.shared_accept_armed
+            .retain(|id| candidates.iter().any(|candidate| candidate.id == *id));
         for candidate in candidates {
             self.candidate_drafts
                 .entry(candidate.id.clone())
                 .or_insert_with(|| MemoryCandidateDraft::from(candidate));
         }
+    }
+
+    pub(crate) fn pending_count(&self) -> usize {
+        self.pending_memories.len()
+    }
+
+    /// Resolve removes the row before the server answers; the follow-up
+    /// refresh is authoritative and restores the row when the resolve failed.
+    pub(crate) fn remove_candidate(&mut self, id: &str) {
+        self.pending_memories.retain(|candidate| candidate.id != id);
+        self.candidate_drafts.remove(id);
+        self.shared_accept_armed.remove(id);
     }
 }
 
@@ -1911,12 +1927,12 @@ fn show_memory(
     if ui.button(i18n::fl("memory-refresh")).clicked() {
         state.loaded.memory = false;
     }
-    let pending = state.pending_memories.clone();
     ui.heading(format!(
         "{} ({})",
         i18n::fl("memory-candidates"),
-        pending.len()
+        state.pending_count()
     ));
+    let pending = state.pending_memories.clone();
     if pending.is_empty() {
         ui.label(i18n::fl("memory-pending-empty"));
     }
@@ -1925,9 +1941,22 @@ fn show_memory(
             .candidate_drafts
             .entry(candidate.id.clone())
             .or_insert_with(|| MemoryCandidateDraft::from(&candidate));
+        let shared = candidate.scope == "shared" || draft.scope == "shared";
+        let armed = state.shared_accept_armed.contains(&candidate.id);
         let mut accept = false;
         let mut reject = false;
-        ui.group(|ui| {
+        let card = if shared {
+            egui::Frame::new()
+                .stroke(egui::Stroke::new(1.5, egui::Color32::YELLOW))
+                .inner_margin(egui::Margin::same(8))
+                .corner_radius(6.0)
+        } else {
+            egui::Frame::group(ui.style())
+        };
+        card.show(ui, |ui| {
+            if shared {
+                ui.colored_label(egui::Color32::YELLOW, i18n::fl("memory-shared-badge"));
+            }
             ui.horizontal(|ui| {
                 ui.label(i18n::fl("memory-title"));
                 ui.text_edit_singleline(&mut draft.title);
@@ -1971,50 +2000,59 @@ fn show_memory(
                     });
             });
             ui.label(format!(
-                "{}: {:.0}%",
+                "{} · {} · {}: {:.0}%",
+                memory_kind_label(&candidate.kind),
+                memory_scope_label(&candidate.scope),
                 i18n::fl("memory-confidence"),
                 candidate.confidence * 100.0
             ));
             if candidate.sensitive {
                 ui.colored_label(egui::Color32::YELLOW, i18n::fl("memory-sensitive"));
             }
-            if candidate.scope == "shared" || draft.scope == "shared" {
+            if shared {
                 ui.colored_label(egui::Color32::YELLOW, i18n::fl("memory-shared-warning"));
             }
             ui.horizontal(|ui| {
-                if ui.button(i18n::fl("memory-accept")).clicked() {
-                    accept = true;
+                if shared && !armed {
+                    if ui.button(i18n::fl("memory-accept-confirm")).clicked() {
+                        state.shared_accept_armed.insert(candidate.id.clone());
+                    }
+                } else {
+                    if ui.button(i18n::fl("memory-accept")).clicked() {
+                        accept = true;
+                    }
+                    if shared && ui.button(i18n::fl("memory-cancel")).clicked() {
+                        state.shared_accept_armed.remove(&candidate.id);
+                    }
                 }
                 if ui.button(i18n::fl("memory-reject")).clicked() {
                     reject = true;
                 }
             });
         });
-        if accept {
-            resolve_memory(
-                &candidate.id,
+        if accept || reject {
+            let payload = if accept {
                 ResolveMemoryCandidateRequest {
                     decision: MemoryCandidateDecision::Accept,
                     title: Some(draft.title.clone()),
                     content: Some(draft.content.clone()),
                     kind: Some(draft.kind.clone()),
                     scope: Some(draft.scope.clone()),
-                },
-                soul_id,
-                client,
-                rt,
-                async_results,
-            );
-        } else if reject {
-            resolve_memory(
-                &candidate.id,
+                }
+            } else {
                 ResolveMemoryCandidateRequest {
                     decision: MemoryCandidateDecision::Reject,
                     title: None,
                     content: None,
                     kind: None,
                     scope: None,
-                },
+                }
+            };
+            state.remove_candidate(&candidate.id);
+            resolve_memory(
+                &candidate.id,
+                payload,
+                &candidate,
                 soul_id,
                 client,
                 rt,
@@ -2185,6 +2223,7 @@ fn memory_journal_action_label(value: &str) -> String {
 fn resolve_memory(
     id: &str,
     request: ResolveMemoryCandidateRequest,
+    original: &MemoryCandidateView,
     soul_id: &str,
     client: &Arc<ApiClient>,
     rt: &Handle,
@@ -2192,16 +2231,26 @@ fn resolve_memory(
 ) {
     let id = id.to_owned();
     let soul_id = soul_id.to_owned();
+    let original = original.clone();
     let client = Arc::clone(client);
     spawn_async(rt, async_results, async move {
-        AsyncOutcome::ResolveMemory {
-            soul_id,
-            id: id.clone(),
-            result: client
-                .resolve_memory_candidate(&id, &request)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
+        let result = client
+            .resolve_memory_candidate(&id, &request)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        if result.is_ok() {
+            AsyncOutcome::ResolveMemory {
+                soul_id,
+                id: id.clone(),
+                result,
+            }
+        } else {
+            AsyncOutcome::ResolveMemoryFailedKeepCandidate {
+                soul_id,
+                original,
+                result,
+            }
         }
     });
 }
@@ -3604,6 +3653,80 @@ mod tests {
         );
         state.sync_candidate_drafts(&[]);
         assert!(state.candidate_drafts.is_empty());
+    }
+
+    #[test]
+    fn pending_count_matches_list_length_and_empty_state() {
+        let mut state = DetailUiState::default();
+        assert_eq!(state.pending_count(), 0);
+
+        let candidate = MemoryCandidateView {
+            id: "candidate-1".to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: "private".to_owned(),
+            kind: "semantic".to_owned(),
+            title: "T".to_owned(),
+            content: "C".to_owned(),
+            confidence: 0.5,
+            sensitive: false,
+            expires_at: None,
+        };
+        state.pending_memories.push(candidate.clone());
+        assert_eq!(state.pending_count(), 1);
+    }
+
+    #[test]
+    fn resolve_removes_candidate_optimistically_by_id() {
+        let mut state = DetailUiState::default();
+        let candidate = |id: &str| MemoryCandidateView {
+            id: id.to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: "shared".to_owned(),
+            kind: "semantic".to_owned(),
+            title: format!("Title {id}"),
+            content: "C".to_owned(),
+            confidence: 0.9,
+            sensitive: true,
+            expires_at: None,
+        };
+        let candidates = vec![candidate("a"), candidate("b")];
+        state.sync_candidate_drafts(&candidates);
+        state.pending_memories = candidates;
+        state.shared_accept_armed.insert("b".to_owned());
+        assert_eq!(state.pending_memories.len(), 2);
+
+        state.remove_candidate("a");
+        assert_eq!(
+            state
+                .pending_memories
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert!(state.shared_accept_armed.contains("b"));
+        state.remove_candidate("b");
+        assert!(state.pending_memories.is_empty());
+        assert!(state.candidate_drafts.is_empty());
+        assert!(!state.shared_accept_armed.contains("b"));
+    }
+
+    #[test]
+    fn shared_scope_is_detected_from_original_or_edit() {
+        let candidate = |scope: &str| MemoryCandidateView {
+            id: "candidate-1".to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: scope.to_owned(),
+            kind: "semantic".to_owned(),
+            title: "T".to_owned(),
+            content: "C".to_owned(),
+            confidence: 0.7,
+            sensitive: false,
+            expires_at: None,
+        };
+
+        assert_eq!(candidate("shared").scope, "shared");
+        assert_ne!(candidate("private").scope, "shared");
     }
 
     #[test]

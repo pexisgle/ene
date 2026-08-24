@@ -512,6 +512,21 @@ impl StageApp {
                     }
                 }
             }
+            AsyncOutcome::ResolveMemoryFailedKeepCandidate {
+                soul_id,
+                original,
+                result,
+            } => {
+                if soul_id == self.session.soul_id() {
+                    let Err(err) = result else {
+                        self.request_memories();
+                        return;
+                    };
+                    self.detail.pending_memories.push(original);
+                    self.detail.pending_memories.sort_by(|a, b| a.id.cmp(&b.id));
+                    self.detail.core_status = err;
+                }
+            }
             AsyncOutcome::LoadSoul(result) => match result {
                 Ok(soul) => {
                     self.detail.body_ref_draft = soul.body_ref.clone().unwrap_or_default();
@@ -2318,6 +2333,73 @@ mod tests {
             })
             .count();
         assert_eq!(refresh_count, 2);
+    }
+
+    #[test]
+    fn pending_list_and_badge_share_the_same_api_snapshot() {
+        let mut app = StageApp::new_for_test();
+        let candidate = |id: &str| MemoryCandidateView {
+            id: id.to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: "private".to_owned(),
+            kind: "semantic".to_owned(),
+            title: format!("T {id}"),
+            content: "C".to_owned(),
+            confidence: 0.8,
+            sensitive: false,
+            expires_at: None,
+        };
+
+        app.apply_async_outcome(AsyncOutcome::ListPendingMemories {
+            soul_id: "soul".to_owned(),
+            result: Ok(vec![candidate("a"), candidate("b")]),
+        });
+        assert_eq!(app.detail.pending_count(), 2);
+
+        // A later snapshot with fewer rows must shrink both list and badge together.
+        app.apply_async_outcome(AsyncOutcome::ListPendingMemories {
+            soul_id: "soul".to_owned(),
+            result: Ok(vec![candidate("b")]),
+        });
+        assert_eq!(
+            app.detail
+                .pending_memories
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert_eq!(app.detail.pending_count(), 1);
+    }
+
+    #[test]
+    fn failed_resolve_restores_the_original_candidate_row() {
+        let mut app = StageApp::new_for_test();
+        let original = MemoryCandidateView {
+            id: "candidate-1".to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: "shared".to_owned(),
+            kind: "semantic".to_owned(),
+            title: "Original title".to_owned(),
+            content: "Original content".to_owned(),
+            confidence: 0.9,
+            sensitive: true,
+            expires_at: None,
+        };
+        app.detail.pending_memories = vec![original.clone()];
+
+        // Simulates the optimistic removal the UI performs before dispatching resolve.
+        app.detail.remove_candidate("candidate-1");
+        assert!(app.detail.pending_memories.is_empty());
+
+        app.apply_async_outcome(AsyncOutcome::ResolveMemoryFailedKeepCandidate {
+            soul_id: app.session.soul_id().to_owned(),
+            original: original.clone(),
+            result: Err("server unavailable".to_owned()),
+        });
+
+        assert_eq!(app.detail.pending_memories.len(), 1);
+        assert_eq!(app.detail.pending_memories[0].title, "Original title");
     }
 
     #[test]
