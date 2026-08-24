@@ -12,6 +12,8 @@
 .ci-trigger-*
 
 assets/models/
+assets/characters/Alicia/AliciaSolid.vrm
+assets/characters/Alicia/motions/*.vrma
 
 # Runtime data files (WAL/SHM included)
 **/sessions.db*

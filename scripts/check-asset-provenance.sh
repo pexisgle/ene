@@ -14,6 +14,8 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 tracked_assets="$tmp_dir/tracked"
 manifest_assets="$tmp_dir/manifest"
+distributed_assets="$tmp_dir/distributed"
+local_only_assets="$tmp_dir/local-only"
 
 git -C "$REPO_ROOT" ls-files -z assets \
   | while IFS= read -r -d '' path; do
@@ -25,11 +27,22 @@ git -C "$REPO_ROOT" ls-files -z assets \
     done \
   | sort -u >"$tracked_assets"
 
-jq -e '.schema_version == 1 and (.assets | type == "array" and length > 0)' "$MANIFEST" >/dev/null
-jq -r '.assets[].path' "$MANIFEST" | sort -u >"$manifest_assets"
+jq -r '.assets[] | select(.distribution != "local-only") | .path' "$MANIFEST" | sort -u >"$distributed_assets"
+jq -r '.assets[] | select(.distribution == "local-only") | .path' "$MANIFEST" | sort -u >"$local_only_assets"
 
-if ! diff -u "$tracked_assets" "$manifest_assets"; then
+jq -e '.schema_version == 1 and (.assets | type == "array" and length > 0)' "$MANIFEST" >/dev/null
+sort -u "$distributed_assets" "$local_only_assets" >"$manifest_assets"
+
+if ! diff -u "$tracked_assets" "$distributed_assets"; then
   printf 'tracked binary/media assets and manifest entries differ\n' >&2
+  exit 1
+fi
+
+# local-only entries record provenance for files whose terms prohibit
+# redistribution, so they stay outside git; a committed file would be exactly
+# the redistribution the license forbids.
+if [[ -s "$local_only_assets" ]] && comm -12 "$local_only_assets" <(git -C "$REPO_ROOT" ls-files) | grep .; then
+  printf 'local-only asset must not be tracked by git\n' >&2
   exit 1
 fi
 
@@ -66,4 +79,16 @@ while IFS= read -r path; do
   fi
 done <"$tracked_assets"
 
-printf 'asset provenance manifest covers all tracked binary/media assets and notices.\n'
+while IFS= read -r path; do
+  if [[ ! -f "$REPO_ROOT/$path" ]]; then
+    continue
+  fi
+  expected="$(jq -er --arg path "$path" '.assets[] | select(.path == $path) | .sha256' "$MANIFEST")"
+  actual="$(sha256sum "$REPO_ROOT/$path" | awk '{print $1}')"
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'sha256 mismatch for %s: expected %s, got %s\n' "$path" "$expected" "$actual" >&2
+    exit 1
+  fi
+done <"$local_only_assets"
+
+printf 'asset provenance manifest covers all tracked binary/media assets and notices; placed local-only assets match their recorded hashes.\n'

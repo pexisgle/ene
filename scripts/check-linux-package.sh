@@ -47,7 +47,7 @@ for plugin in "${PLUGINS[@]}"; do
   fi
 done
 
-docker run --rm --pull=always \
+docker run --rm -i --pull=always \
   --env "ARCHIVE_ROOT=$archive_root" \
   --volume "$DEB_FILE:/tmp/ene-stage.deb:ro" \
   --volume "$TAR_FILE:/tmp/ene-release.tar.gz:ro" \

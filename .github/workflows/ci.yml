@@ -32,6 +32,8 @@ jobs:
           components: rustfmt
       - name: Check asset provenance
         run: bash scripts/check-asset-provenance.sh
+      - name: Test fetch character assets
+        run: bash scripts/test-fetch-character-assets.sh
       - name: Check formatting
         run: cargo fmt --all -- --check
 

@@ -20,6 +20,9 @@ const USER_AGENT: &str = "ene-web/0.1";
 type FetchStub = fn(&str) -> Result<Value, BrokerError>;
 
 #[cfg(test)]
+type PostStub = fn(&str, &Value, Option<&str>) -> Value;
+
+#[cfg(test)]
 type HopStub = fn(&str, Option<&str>) -> Result<HopResponse, BrokerError>;
 
 #[cfg(test)]
@@ -28,6 +31,7 @@ type DnsStub = fn(&str) -> Vec<IpAddr>;
 #[cfg(test)]
 thread_local! {
     static FETCH_STUB: std::cell::RefCell<Option<FetchStub>> = const { std::cell::RefCell::new(None) };
+    static POST_STUB: std::cell::RefCell<Option<PostStub>> = const { std::cell::RefCell::new(None) };
     static HOP_STUB: std::cell::RefCell<Option<HopStub>> = const { std::cell::RefCell::new(None) };
     static DNS_STUB: std::cell::RefCell<Option<DnsStub>> = const { std::cell::RefCell::new(None) };
 }
@@ -44,6 +48,12 @@ pub(crate) fn with_fetch_stub<T>(stub: FetchStub, run: impl FnOnce() -> T) -> T 
     }
     FETCH_STUB.with(|cell| cell.replace(Some(stub)));
     let _reset = Reset;
+    run()
+}
+
+#[cfg(test)]
+pub(crate) fn with_post_stub<T>(stub: PostStub, run: impl FnOnce() -> T) -> T {
+    POST_STUB.with(|cell| cell.replace(Some(stub)));
     run()
 }
 
@@ -93,6 +103,110 @@ pub(crate) fn get_inject(raw: &str, authorization: Option<&str>) -> Result<Value
         return fetch_follow(&url, authorization.as_deref());
     }
     off_runtime(move || fetch_follow(&url, authorization.as_deref()))
+}
+
+/// POST JSON with the same SSRF, redirect, and body-cap discipline as GET.
+/// `bearer` is sent only on same-origin hops.
+pub(crate) fn post_json(
+    raw: &str,
+    body: &Value,
+    bearer: Option<&str>,
+) -> Result<Value, BrokerError> {
+    let url = deny_ssrf(raw)?;
+    #[cfg(test)]
+    if let Some(stub) = POST_STUB.with(|cell| *cell.borrow()) {
+        return Ok(stub(url.as_str(), body, bearer));
+    }
+    #[cfg(test)]
+    if let Some(stub) = FETCH_STUB.with(|cell| *cell.borrow()) {
+        let _ = body;
+        return stub(url.as_str());
+    }
+    let bearer = bearer.map(str::to_owned);
+    #[cfg(test)]
+    if HOP_STUB.with(|cell| cell.borrow().is_some()) {
+        return post_follow(&url, body, bearer.as_deref());
+    }
+    off_runtime(move || post_follow(&url, body, bearer.as_deref()))
+}
+
+fn post_follow(start: &Url, body: &Value, bearer: Option<&str>) -> Result<Value, BrokerError> {
+    let mut current = start.clone();
+    let mut hops = 0_usize;
+    loop {
+        deny_ssrf(current.as_str())?;
+        let hop_auth = same_origin(start, &current).then_some(bearer).flatten();
+        let hop = perform_post(&current, body, hop_auth)?;
+        if (300..400).contains(&hop.status) {
+            hops = hops.saturating_add(1);
+            if hops > MAX_REDIRECTS {
+                return Err(BrokerError::RedirectLoop);
+            }
+            let location = hop
+                .location
+                .ok_or_else(|| BrokerError::Fetch("redirect missing location".to_owned()))?;
+            current = current
+                .join(&location)
+                .map_err(|err| BrokerError::InvalidUrl(err.to_string()))?;
+            continue;
+        }
+        return finalize_body(hop);
+    }
+}
+
+fn perform_post(
+    url: &Url,
+    body: &Value,
+    authorization: Option<&str>,
+) -> Result<HopResponse, BrokerError> {
+    #[cfg(test)]
+    if let Some(stub) = HOP_STUB.with(|cell| *cell.borrow()) {
+        return stub(url.as_str(), authorization);
+    }
+    let client = pinned_client(url)?;
+    let mut request = client
+        .post(url.clone())
+        .json(body)
+        .header(reqwest::header::USER_AGENT, USER_AGENT);
+    if let Some(value) = authorization {
+        request = request.header(reqwest::header::AUTHORIZATION, value);
+    }
+    let response = request.send().map_err(|err| classify_reqwest(&err))?;
+    let status = response.status().as_u16();
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    if (300..400).contains(&status) {
+        return Ok(HopResponse {
+            status,
+            location,
+            content_type,
+            body: Vec::new(),
+        });
+    }
+    let limit = u64::try_from(MAX_BODY_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
+    let mut payload = Vec::new();
+    response
+        .take(limit)
+        .read_to_end(&mut payload)
+        .map_err(|err| BrokerError::Fetch(err.to_string()))?;
+    if payload.len() > MAX_BODY_BYTES {
+        return Err(BrokerError::Oversize);
+    }
+    Ok(HopResponse {
+        status,
+        location,
+        content_type,
+        body: payload,
+    })
 }
 
 pub(crate) fn deny_ssrf(raw: &str) -> Result<Url, BrokerError> {

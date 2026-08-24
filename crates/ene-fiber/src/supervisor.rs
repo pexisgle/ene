@@ -17,7 +17,7 @@ use ene_plugin_ipc::{
 use ene_provider_assets::CatalogRegistry;
 use ene_registry::{
     BuiltinExecutor, BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource,
-    definitions_for, with_http_fetch,
+    definitions_for, with_http_fetch, with_post_json, with_web_credentials,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -115,6 +115,9 @@ struct PluginInvoker {
 struct HostWebInvoker {
     uid: FiberUid,
     inner: Arc<SupervisorInner>,
+    /// Profile-row config captured at activate time; carries vault-backed
+    /// search credentials for bundled web tools.
+    config: Value,
 }
 
 struct HostFsInvoker {
@@ -223,15 +226,28 @@ impl ToolInvoke for HostWebInvoker {
         }
         let uid = self.uid;
         let inner = Arc::clone(&self.inner);
-        with_http_fetch(
-            move |url| {
-                inner
+        let config = self.config.clone();
+        let post_inner = Arc::clone(&inner);
+        with_post_json(
+            move |url, body, bearer| {
+                post_inner
                     .broker
                     .lock()
-                    .net_fetch(uid, url)
+                    .net_post_json(uid, url, body, Some(bearer))
                     .map_err(|err| err.to_string())
             },
-            || BuiltinExecutor.execute(name, &args),
+            || {
+                with_http_fetch(
+                    move |url| {
+                        inner
+                            .broker
+                            .lock()
+                            .net_fetch(uid, url)
+                            .map_err(|err| err.to_string())
+                    },
+                    || with_web_credentials(config, || BuiltinExecutor.execute(name, &args)),
+                )
+            },
         )
     }
 }
@@ -708,6 +724,7 @@ impl Supervisor {
             "tool.web" => Some(Arc::new(HostWebInvoker {
                 uid: fiber.uid,
                 inner: Arc::clone(&self.inner),
+                config: row.config.clone(),
             })),
             "tool.fs" => Some(Arc::new(HostFsInvoker {
                 uid: fiber.uid,
@@ -861,6 +878,7 @@ impl Supervisor {
             Arc::new(HostWebInvoker {
                 uid: fiber.uid,
                 inner: Arc::clone(&self.inner),
+                config: row.config.clone(),
             })
         } else if row.plugin == "tool.fs" {
             Arc::new(HostFsInvoker {
@@ -1004,6 +1022,12 @@ impl Supervisor {
 
     pub fn broker_fs_read(&self, uid: FiberUid, path: &Path) -> Result<String, crate::BrokerError> {
         self.inner.broker.lock().fs_read(uid, path)
+    }
+
+    /// Grant a broker capability to a live fiber (tests only).
+    #[cfg(test)]
+    pub fn grant_for_tests(&self, uid: FiberUid, op: &str) {
+        self.inner.broker.lock().grant(uid, op);
     }
 
     #[must_use]
