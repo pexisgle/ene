@@ -5,6 +5,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VRM_PATH="$REPO_ROOT/assets/characters/Alicia/AliciaSolid.vrm"
 MOTIONS_DIR="$REPO_ROOT/assets/characters/Alicia/motions"
 MANIFEST="$REPO_ROOT/third_party/assets.json"
+REQUIRED_MOTIONS=(
+  "$MOTIONS_DIR/VRMA_01.vrma"
+  "$MOTIONS_DIR/VRMA_02.vrma"
+  "$MOTIONS_DIR/VRMA_03.vrma"
+  "$MOTIONS_DIR/VRMA_04.vrma"
+  "$MOTIONS_DIR/VRMA_05.vrma"
+  "$MOTIONS_DIR/VRMA_06.vrma"
+  "$MOTIONS_DIR/VRMA_07.vrma"
+)
 
 force=0
 for arg in "$@"; do
@@ -55,7 +64,7 @@ if [[ -f "$VRM_PATH" ]]; then
   verify "$VRM_PATH"
   vrm_present=1
 else
-  cat >&2 <<'EOF'
+  cat >&2 <<'VRM_HELP_END'
 AliciaSolid.vrm is NOT distributed with this repository.
 
 Its embedded VRM metadata declares allowRedistribution: false, so it must be
@@ -67,16 +76,23 @@ obtained from the official page by each user:
   3. Download the VRM file.
   4. Place it at:
        assets/characters/Alicia/AliciaSolid.vrm
-EOF
+VRM_HELP_END
 fi
 
-if compgen -G "$MOTIONS_DIR/VRMA_*.vrma" >/dev/null; then
-  for motion in "$MOTIONS_DIR"/VRMA_*.vrma; do
+# Each of the seven motion files is required by the manifest as part of one
+# set; checking them individually catches partial placement that a directory
+# glob would accept.
+missing_motions=()
+for motion in "${REQUIRED_MOTIONS[@]}"; do
+  if [[ -f "$motion" ]]; then
     verify "$motion"
-  done
-  motions_present=1
-else
-  cat >&2 <<'EOF'
+  else
+    missing_motions+=("$motion")
+  fi
+done
+
+if [[ ${#missing_motions[@]} -eq ${#REQUIRED_MOTIONS[@]} ]]; then
+  cat >&2 <<'MOTION_HELP_END'
 The VRMA motion files (VRMA_01 through VRMA_07) are NOT distributed with this
 repository. Extractable-file redistribution is prohibited by their terms:
 
@@ -86,7 +102,17 @@ repository. Extractable-file redistribution is prohibited by their terms:
   3. Download the 7-piece motion set and extract it.
   4. Place the .vrma files at:
        assets/characters/Alicia/motions/VRMA_01.vrma ... VRMA_07.vrma
-EOF
+MOTION_HELP_END
+elif [[ ${#missing_motions[@]} -gt 0 ]]; then
+  printf '\nThe motion set is incomplete; the following %d of %d files are missing:\n' \
+    "${#missing_motions[@]}" "${#REQUIRED_MOTIONS[@]}" >&2
+  for motion in "${missing_motions[@]}"; do
+    printf '  %s\n' "${motion#"$REPO_ROOT"/}" >&2
+  done
+  printf '\nA partially extracted set cannot be used; place all seven files and rerun.\n' >&2
+  exit 1
+else
+  motions_present=1
 fi
 
 missing=0
