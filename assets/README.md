@@ -32,10 +32,12 @@ the check recomputes every hash against the manifest.
   embedded VRM metadata declares `allowRedistribution: false`,
   `modification: prohibited`, `commercialUsage: personalProfit`, and
   `creditNotation: required`.
-- **Modification status**: unmodified original download.
-- **Distribution status**: development fixture only. Because the embedded
-  metadata disallows redistribution and modification, this file must not be
-  copied into a release artifact or redistributed as a standalone asset.
+- **Repository status**: NOT in this repository. The embedded metadata
+  disallows redistribution as a standalone asset, so committing the file to a
+  public source tree would itself be redistribution. Obtain it locally by
+  following the manual agreement steps printed by
+  [`scripts/fetch-character-assets.sh`](../scripts/fetch-character-assets.sh);
+  local copies are gitignored.
 
 ### `characters/Alicia/motions/VRMA_01.vrma` – `VRMA_07.vrma`
 
@@ -50,9 +52,11 @@ the check recomputes every hash against the manifest.
 
   Distributing the motion or an altered work in an extractable-file state is
   prohibited without permission.
-- **Modification status**: unmodified originals from the distributed set.
-- **Distribution status**: development fixture only; do not copy into a release
-  artifact or redistribute as standalone assets.
+- **Repository status**: NOT in this repository. Extractable-file
+  redistribution requires permission, which a public source tree cannot rely
+  on. Obtain them locally by following the manual agreement steps printed by
+  [`scripts/fetch-character-assets.sh`](../scripts/fetch-character-assets.sh);
+  local copies are gitignored.
 
 ## Project-owned assets
 
