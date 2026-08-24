@@ -2117,7 +2117,7 @@ fn overlay_window_level(chrome_focused: bool, always_on_top: bool) -> WindowLeve
 #[must_use]
 fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     match event {
-        WindowEvent::Focused(true) => Some(true),
+        WindowEvent::Focused(focused) => Some(*focused),
         _ => None,
     }
 }
@@ -2174,14 +2174,14 @@ mod tests {
     }
 
     #[test]
-    fn chrome_focus_state_ignores_transient_focus_loss() {
+    fn chrome_focus_state_includes_focus_loss() {
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::Focused(true)),
             Some(true)
         );
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::Focused(false)),
-            None
+            Some(false)
         );
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::CloseRequested),
