@@ -335,6 +335,9 @@ pub struct DetailUiState {
     pub new_job_title: String,
     pub new_job_goal: String,
     pub new_job_inflight: bool,
+    pub new_schedule_name: String,
+    pub new_schedule_spec: String,
+    pub new_schedule_inflight: bool,
     pub plugins: Vec<PluginView>,
     pub provider_assets_plugin: String,
     pub provider_assets: Vec<ProviderAssetView>,
@@ -2490,6 +2493,41 @@ fn show_work(
         }
     }
     ui.heading(i18n::fl("jobs-schedules"));
+    ui.add(
+        egui::TextEdit::singleline(&mut state.new_schedule_name)
+            .hint_text(i18n::fl("schedule-new-name")),
+    );
+    ui.add(
+        egui::TextEdit::singleline(&mut state.new_schedule_spec)
+            .hint_text(i18n::fl("schedule-new-spec")),
+    );
+    let can_create = !state.new_schedule_inflight
+        && !state.new_schedule_name.trim().is_empty()
+        && !state.new_schedule_spec.trim().is_empty();
+    if ui
+        .add_enabled(can_create, egui::Button::new(i18n::fl("schedule-create")))
+        .clicked()
+    {
+        state.new_schedule_inflight = true;
+        let request = ene_api::CreateScheduleRequest {
+            soul_id: soul_id.to_owned(),
+            name: state.new_schedule_name.trim().to_owned(),
+            spec: state.new_schedule_spec.trim().to_owned(),
+            timezone: "UTC".to_owned(),
+            action: "remind".to_owned(),
+            action_ref: None,
+            important: false,
+        };
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::CreateSchedule(
+                client
+                    .create_schedule(&request)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+        });
+    }
     for schedule in &state.schedules {
         ui.horizontal(|ui| {
             ui.label(format!(
