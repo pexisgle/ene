@@ -49,8 +49,7 @@ mod tests {
 
     #[test]
     fn reads_injected_sidecar_base_url() {
-        let guard =
-            maybe_start_from_raw(r#"{"sidecar_base_url":"http://127.0.0.1:9"}"#, "/v1");
+        let guard = maybe_start_from_raw(r#"{"sidecar_base_url":"http://127.0.0.1:9"}"#, "/v1");
         guard.as_ref().expect("start");
         assert_eq!(managed_base(), Some("http://127.0.0.1:9/v1"));
     }
