@@ -348,10 +348,6 @@ impl ApiClient {
             .await
     }
 
-    pub async fn create_job(&self, req: &CreateJobRequest) -> Result<JobView, ApiError> {
-        self.send_json(self.request(Method::POST, "/api/v1/jobs").json(req))
-            .await
-    }
 
     pub async fn cancel_job(&self, id: &str) -> Result<JobView, ApiError> {
         self.send_json(self.request(Method::POST, &format!("/api/v1/jobs/{id}/cancel")))
