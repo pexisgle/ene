@@ -2979,13 +2979,7 @@ var qrcode = function() {
       if (Array.isArray(sideEffects) && sideEffects.length) {
         banner.append(el("div", "meta", "side effects: " + sideEffects.join(", ")));
       }
-      const actions = el("div", "banner-actions");
-      const deny = el("button", "", "Deny");
-      deny.onclick = () => decideApproval(id, "deny").catch((err) => log($("surface-log"), "error " + problemText(err)));
-      const allow = el("button", "", "Allow");
-      allow.onclick = () => decideApproval(id, "allow").catch((err) => log($("surface-log"), "error " + problemText(err)));
-      actions.append(deny, allow);
-      banner.append(actions);
+      banner.append(el("div", "meta", "Approve or deny in the stage app — this web view is read-only."));
       $("detail-log").prepend(banner);
       state.pendingApprovals.set(id, banner);
     }
@@ -2996,14 +2990,6 @@ var qrcode = function() {
         banner.remove();
         state.pendingApprovals.delete(id);
       }
-    }
-
-    async function decideApproval(id, decision) {
-      await api("/api/v1/approvals/" + encodeURIComponent(id) + "/respond", {
-        method: "POST",
-        body: JSON.stringify({ decision }),
-      });
-      removeApprovalBanner(id);
     }
 
     // ---- wiring ----------------------------------------------------------------------

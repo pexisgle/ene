@@ -2168,6 +2168,10 @@ fn web_ui_is_read_only_in_source() {
         "Web UI must not PATCH/DELETE in page scripts"
     );
     assert!(
+        !html.contains("/respond") && !html.contains("decideApproval"),
+        "approvals are read-only in the web UI; resolve them in the stage app"
+    );
+    assert!(
         !html.contains("JSON.stringify(memories")
             && !html.contains("JSON.stringify(jobs")
             && !html.contains("JSON.stringify(affect")
