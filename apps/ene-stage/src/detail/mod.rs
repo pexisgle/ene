@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, ApiError, CharacterView, JobView, MemoryCandidateDecision, MemoryCandidateView,
-    MemoryJournalView, MemoryPatch, MemoryView, OccupantView, PluginConfigField,
-    PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
+    ApiClient, ApiError, CharacterView, CreateJobRequest, JobView, MemoryCandidateDecision,
+    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, OccupantView,
+    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
     ResolveMemoryCandidateRequest, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
@@ -327,6 +327,9 @@ pub struct DetailUiState {
     pub body_ref_draft: String,
     pub jobs: Vec<JobView>,
     pub schedules: Vec<ScheduleView>,
+    pub new_job_title: String,
+    pub new_job_goal: String,
+    pub new_job_inflight: bool,
     pub plugins: Vec<PluginView>,
     pub provider_assets_plugin: String,
     pub provider_assets: Vec<ProviderAssetView>,
@@ -2303,6 +2306,25 @@ fn show_work(
         }
     });
     ui.label(i18n::fl("jobs-export-hint"));
+    ui.heading(i18n::fl("jobs-create"));
+    ui.text_edit_singleline(&mut state.new_job_goal);
+    if ui
+        .add_enabled(
+            !state.new_job_goal.is_empty(),
+            egui::Button::new(i18n::fl("jobs-create-submit")),
+        )
+        .clicked()
+    {
+        let request = CreateJobRequest {
+            soul_id: soul_id.to_owned(),
+            goal: std::mem::take(&mut state.new_job_goal),
+            title: None,
+        };
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::CreateJob(client.create_job(&request).await.map_err(|e| e.to_string()))
+        });
+    }
     ui.heading(i18n::fl("jobs-active"));
     let active_jobs = active_jobs(&state.jobs);
     if active_jobs.is_empty() {

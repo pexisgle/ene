@@ -2,20 +2,20 @@ use crate::error::ApiError;
 use crate::pcm::{PCM_S16LE, encode_pcm_s16le};
 use crate::types::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
-    BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
-    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, GreetingView, Health,
-    HistoryResponse, InstallProviderAssetRequest, InstallProviderAssetResponse, JobView,
-    ListProviderAssetsRequest, ListProviderAssetsResponse, ListProviderModelsRequest,
-    ListProviderModelsResponse, ListenRequest, McpDocument, MemoryCandidateView, MemoryJournalView,
-    MemoryPatch, MemoryView, MessageRequest, Page, PluginConfigField, PluginConfigOptionsView,
-    PluginConfigValidateView, PluginConfigValues, PluginConfigView, PluginView, Problem,
-    ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse, QueuedCancel,
-    RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse,
-    ResolveMemoryCandidateRequest, ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest,
-    ScheduleView, SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch,
-    SessionView, SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch,
-    SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest,
-    ToolView, UsageView,
+    BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateJobRequest,
+    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot,
+    GreetingView, Health, HistoryResponse, InstallProviderAssetRequest,
+    InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
+    ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument,
+    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, MessageRequest, Page,
+    PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues,
+    PluginConfigView, PluginView, Problem, ProviderAssetInstallStatusRequest,
+    ProviderAssetInstallStatusResponse, QueuedCancel, RefreshProviderAssetsCatalogRequest,
+    RefreshProviderAssetsCatalogResponse, ResolveMemoryCandidateRequest,
+    ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
+    SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
+    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -340,6 +340,11 @@ impl ApiClient {
 
     pub async fn get_job(&self, id: &str) -> Result<JobView, ApiError> {
         self.send_json(self.request(Method::GET, &format!("/api/v1/jobs/{id}")))
+            .await
+    }
+
+    pub async fn create_job(&self, req: &CreateJobRequest) -> Result<JobView, ApiError> {
+        self.send_json(self.request(Method::POST, "/api/v1/jobs").json(req))
             .await
     }
 
