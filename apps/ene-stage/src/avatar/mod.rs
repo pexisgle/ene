@@ -431,6 +431,24 @@ impl CompanionAvatar {
         (model_mat, scale)
     }
 
+    /// World-space AABB of the rendered body for hit-testing.
+    ///
+    /// The render matrix subtracts the model center before scaling; applying
+    /// it directly would double-subtract the center. Scaling the normalized
+    /// AABB alone reproduces the same world extent because the normalized
+    /// space is already centered.
+    #[must_use]
+    pub fn world_aabb(&self) -> (Vec3, Vec3) {
+        let (nmin, nmax) = self.model.normalized_aabb();
+        let auto = self.camera.compute_auto_fit_scale(nmin, nmax, 0.9);
+        let scale = auto * self.model_scale * self.model.normalize_scale();
+        let offset = Vec3::from(self.world_offset);
+        (
+            Vec3::from(nmin) * scale + offset,
+            Vec3::from(nmax) * scale + offset,
+        )
+    }
+
     pub(crate) fn push_spring_collider_wires(&self, debug: &mut DebugRenderer) {
         let Some(props) = self.model.spring_bones.as_ref() else {
             return;

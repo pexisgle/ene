@@ -17,6 +17,7 @@ pub mod bundle;
 pub mod chrome;
 pub mod core;
 pub mod detail;
+pub mod drag;
 pub mod fonts;
 pub mod gpu;
 pub mod i18n;
