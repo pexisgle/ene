@@ -1084,6 +1084,11 @@ impl StageApp {
         if is_new {
             self.surface.chat_open = true;
             self.approval_needs_reveal = true;
+            // A hover hole left armed by a previous interaction keeps the
+            // overlay click-through disabled, which lets the WM stack it above
+            // the freshly opened chat window.
+            self.surface.hover_soul = None;
+            self.sync_overlay_interaction();
         }
     }
 
@@ -2721,6 +2726,7 @@ mod tests {
     fn a_new_approval_schedules_one_chat_reveal() {
         let mut app = StageApp::new_for_test();
         app.surface.chat_open = false;
+        app.surface.hover_soul = Some("soul".to_owned());
         let approval = PendingApproval {
             id: "approval".to_owned(),
             tool: "fs.read".to_owned(),
@@ -2731,6 +2737,7 @@ mod tests {
 
         assert!(app.surface.chat_open);
         assert!(std::mem::take(&mut app.approval_needs_reveal));
+        assert!(app.surface.hover_soul.is_none());
 
         app.set_pending_approval(approval);
 
