@@ -87,6 +87,8 @@ pub struct PendingApproval {
     pub tool: String,
     pub target: String,
     pub side_effects: Vec<String>,
+    /// Model call this approval gates.
+    pub call_id: String,
 }
 
 struct PendingSlot {
@@ -174,6 +176,7 @@ impl PopupSink for PendingPopup {
             tool: req.tool.clone(),
             target: req.target.clone(),
             side_effects: req.side_effects.clone(),
+            call_id: req.call_id.clone(),
         };
         self.inner.lock().insert(
             id.clone(),
@@ -200,6 +203,7 @@ impl PopupSink for PendingPopup {
             tool: req.tool.clone(),
             target: req.target.clone(),
             side_effects: req.side_effects.clone(),
+            call_id: req.call_id.clone(),
         };
         self.inner.lock().insert(
             id.clone(),

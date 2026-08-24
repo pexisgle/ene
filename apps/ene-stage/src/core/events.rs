@@ -35,6 +35,9 @@ pub enum LiveEvent {
         id: String,
         decision: String,
     },
+    SessionNote {
+        text: String,
+    },
     QuestionAsked {
         id: String,
         prompt: String,
@@ -217,14 +220,17 @@ fn parse_live_event(value: &Value) -> Option<LiveEvent> {
                 .to_owned(),
         }),
         "session.event" => {
+            let kind = string_field(value, "kind");
+            if kind == "tool/denied" {
+                return Some(LiveEvent::SessionNote {
+                    text: string_field(value, "text"),
+                });
+            }
             let mut text = string_field(value, "text");
             if text.is_empty() {
                 text = string_field(value, "error");
             }
-            Some(LiveEvent::SessionEvent {
-                kind: string_field(value, "kind"),
-                text,
-            })
+            Some(LiveEvent::SessionEvent { kind, text })
         }
         "approval.requested" | "approval.asked" => Some(LiveEvent::ApprovalAsked {
             id: string_field(value, "id"),

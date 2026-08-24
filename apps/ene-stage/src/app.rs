@@ -1142,18 +1142,24 @@ impl StageApp {
         });
     }
 
-    fn respond_approval(&mut self, decision: &str) {
-        let Some(pending) = self.surface.pending_approval.clone() else {
+    fn respond_approval(&mut self, id: &str, decision: &str) {
+        let Some(pending) = self
+            .surface
+            .pending_approval
+            .clone()
+            .filter(|pending| pending.id == id)
+        else {
             return;
         };
         let session = self.session.clone_handle();
         let session_id = self.session.session_id().to_owned();
+        let id = pending.id;
         let decision = decision.to_owned();
         self.spawn(async move {
             AsyncOutcome::Approval {
                 session_id,
                 result: session
-                    .respond_approval(&pending.id, &decision)
+                    .respond_approval(&id, &decision)
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
@@ -1284,7 +1290,7 @@ impl StageApp {
                 SurfaceAction::BargeIn => self.barge_in(),
                 SurfaceAction::CancelTurn => self.cancel_turn(),
                 SurfaceAction::ToggleMic => self.toggle_mic(),
-                SurfaceAction::Approval { decision } => self.respond_approval(&decision),
+                SurfaceAction::Approval { id, decision } => self.respond_approval(&id, &decision),
                 SurfaceAction::AnswerQuestion => self.answer_question(),
                 SurfaceAction::OpenDetail(tab) => self.open_detail(event_loop, tab),
                 SurfaceAction::Quit => self.surface.quit = true,
@@ -1332,6 +1338,12 @@ impl StageApp {
                     }
                 }
                 tracing::debug!(kind, text, "surface session event");
+            }
+            LiveEvent::SessionNote { text } => {
+                if !text.is_empty() {
+                    tracing::info!(%text, "tool denied by approval");
+                    self.detail.push_log(crate::detail::LogKind::Tool, text);
+                }
             }
             LiveEvent::ApprovalAsked { id, tool, target } => {
                 self.set_pending_approval(surface::PendingApproval { id, tool, target });

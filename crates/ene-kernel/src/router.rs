@@ -7,7 +7,14 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq)]
 pub enum SurfaceToolOutcome {
     Result(Value),
-    Delegated { speech: String, job_id: String },
+    Delegated {
+        speech: String,
+        job_id: String,
+    },
+    /// Approval plane refused the call; `reason` is user-displayable.
+    Denied {
+        reason: String,
+    },
 }
 
 /// Host callback used by the dialogue lane. Implemented in `ene-work`.

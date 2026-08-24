@@ -276,7 +276,20 @@ impl ToolRegistry {
         args: Value,
         layer: Layer,
     ) -> Result<Value, PipelineError> {
-        self.execute_inner(name, args, layer, false, None).await
+        self.execute_call(name, args, layer, "").await
+    }
+
+    /// Execute one model call. `call_id` flows into the approval popup so the
+    /// client resumes exactly this invocation after Allow.
+    pub async fn execute_call(
+        &self,
+        name: &str,
+        args: Value,
+        layer: Layer,
+        call_id: &str,
+    ) -> Result<Value, PipelineError> {
+        self.execute_inner(name, args, layer, false, None, call_id)
+            .await
     }
 
     /// Same as [`Self::execute`], confining filesystem tools to `workspace`.
@@ -287,13 +300,14 @@ impl ToolRegistry {
         layer: Layer,
         workspace: &Path,
     ) -> Result<Value, PipelineError> {
-        self.execute_inner(name, args, layer, false, Some(workspace.to_path_buf()))
+        self.execute_inner(name, args, layer, false, Some(workspace.to_path_buf()), "")
             .await
     }
 
     /// Host-initiated call (continuous observation). Enabling the setting is consent.
     pub async fn execute_host(&self, name: &str, args: Value) -> Result<Value, PipelineError> {
-        self.execute_inner(name, args, Layer::Job, true, None).await
+        self.execute_inner(name, args, Layer::Job, true, None, "")
+            .await
     }
 
     async fn execute_inner(
@@ -303,9 +317,10 @@ impl ToolRegistry {
         layer: Layer,
         host: bool,
         workspace_override: Option<PathBuf>,
+        call_id: &str,
     ) -> Result<Value, PipelineError> {
         let (_, invoke, prepared) = self
-            .prepare(name, args, layer, host, workspace_override)
+            .prepare(name, args, layer, host, workspace_override, call_id)
             .await?;
         invoke
             .invoke(name, prepared)
@@ -355,7 +370,7 @@ impl ToolRegistry {
         workspace_override: Option<PathBuf>,
     ) -> Result<(), PipelineError> {
         let (def, invoke, prepared) = self
-            .prepare(name, args, layer, false, workspace_override)
+            .prepare(name, args, layer, false, workspace_override, "")
             .await?;
         if !def.background {
             return Err(PipelineError::NotBackground(name.to_owned()));
@@ -423,6 +438,7 @@ impl ToolRegistry {
         layer: Layer,
         host: bool,
         workspace_override: Option<PathBuf>,
+        call_id: &str,
     ) -> Result<(ToolDefinition, Arc<dyn ToolInvoke>, Value), PipelineError> {
         let (def, invoke) = {
             let tools = self.tools.lock();
@@ -452,8 +468,14 @@ impl ToolRegistry {
                     sensitivity: def.sensitivity,
                     target: target.to_owned(),
                     in_workspace,
+                    call_id: call_id.to_owned(),
                 };
-                plane.authorize(&req).await?;
+                if let Err(err) = plane.authorize(&req).await {
+                    // Surface the refused intent in the transcript; without this
+                    // entry an Allow/Deny cycle leaves the turn with no record.
+                    tracing::info!(tool = %name, call_id = %call_id, "tool execution denied by approval plane");
+                    return Err(PipelineError::Plane(err));
+                }
             } else if !def.side_effects.is_empty() {
                 return Err(PipelineError::Denied {
                     name: name.to_owned(),

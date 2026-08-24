@@ -1336,6 +1336,28 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
         };
 
         let started = Instant::now();
+        // Log the intent before dispatch so an approval denial or execution
+        // failure still shows which call the model requested; the result
+        // record reuses this id so projection sees one complete exchange.
+        let intent_call_id = CallId::new();
+        ctx.store
+            .commit(Transaction {
+                entries: vec![NewEvent::new(
+                    ctx.session,
+                    EventKind::ToolCall,
+                    EventPayload::ToolCall {
+                        v: v1(),
+                        turn_id: ctx.turn,
+                        step_index,
+                        call_id: intent_call_id.clone(),
+                        tool_name: call.name.clone(),
+                        source: "model".to_owned(),
+                        args: call.arguments.clone(),
+                    },
+                )],
+                usage: Vec::new(),
+            })
+            .await?;
         match tokio::select! {
             () = ctx.cancel.notified() => {
                 finish_interrupted(&ctx, step_index).await?;
@@ -1367,12 +1389,31 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                     &ctx,
                     &call.name,
                     &call.arguments,
-                    value,
+                    intent_call_id.clone(),
+                    Ok(value),
                     step_index,
                     duration_ms,
                 )
                 .await?;
                 step_index = step_index.saturating_add(1);
+            }
+            SurfaceToolOutcome::Denied { reason } => {
+                let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                commit_denied_step(&ctx, &call.name, &reason, step_index, duration_ms).await?;
+                finish_speech(
+                    &ctx,
+                    &ModelGeneration {
+                        text: format!("I could not run {}: the request was denied.", call.name),
+                        finish_reason: "tool_denied".to_owned(),
+                        ..generation
+                    },
+                    step_index,
+                    None,
+                    StreamedLive::NONE,
+                )
+                .await?;
+                span.end();
+                return Ok(());
             }
         }
     }
@@ -1658,14 +1699,22 @@ async fn commit_tool_step(
     ctx: &TurnCtx,
     name: &str,
     args: &serde_json::Value,
-    mut value: serde_json::Value,
+    call_id: CallId,
+    outcome: Result<serde_json::Value, String>,
     step_index: u32,
     duration_ms: u64,
 ) -> Result<(), KernelError> {
+    let (status, mut value, error_class) = match outcome {
+        Ok(value) => (ToolStatus::Ok, value, None),
+        Err(err) => (
+            ToolStatus::Error,
+            serde_json::json!({ "error": err }),
+            Some("tool_failed".to_owned()),
+        ),
+    };
     if ctx.cancelled.load(Ordering::SeqCst) {
         return finish_interrupted(ctx, step_index).await;
     }
-    let call_id = CallId::new();
     let images = extract_images(&mut value);
     let mut blocks = Vec::new();
     for image in images {
@@ -1725,10 +1774,10 @@ async fn commit_tool_step(
             EventPayload::ToolResult {
                 v: v1(),
                 call_id,
-                status: ToolStatus::Ok,
+                status,
                 blocks,
                 spill_ref,
-                error_class: None,
+                error_class,
                 duration_ms,
             },
         ),
@@ -1768,6 +1817,58 @@ async fn commit_tool_step(
             usage: Vec::new(),
         })
         .await?;
+    Ok(())
+}
+
+/// Record a refused model call so the transcript shows why nothing ran.
+async fn commit_denied_step(
+    ctx: &TurnCtx,
+    name: &str,
+    reason: &str,
+    step_index: u32,
+    duration_ms: u64,
+) -> Result<(), KernelError> {
+    if ctx.cancelled.load(Ordering::SeqCst) {
+        return finish_interrupted(ctx, step_index).await;
+    }
+    ctx.store
+        .commit(Transaction {
+            entries: vec![
+                NewEvent::new(
+                    ctx.session,
+                    EventKind::ToolResult,
+                    EventPayload::ToolResult {
+                        v: v1(),
+                        call_id: CallId::new(),
+                        status: ToolStatus::Denied,
+                        blocks: vec![Block::text(format!("denied {name}: {reason}",))],
+                        spill_ref: None,
+                        error_class: Some("approval_denied".to_owned()),
+                        duration_ms,
+                    },
+                ),
+                NewEvent::new(
+                    ctx.session,
+                    EventKind::StepEnd,
+                    EventPayload::StepEnd {
+                        v: v1(),
+                        turn_id: ctx.turn,
+                        step_index,
+                        outcome: StepOutcome::Stop,
+                        finish_reason: Some("tool_denied".to_owned()),
+                    },
+                ),
+            ],
+            usage: Vec::new(),
+        })
+        .await?;
+    ctx.live.emit(
+        DisplayDepth::Surface,
+        LiveEvent::SessionNote {
+            turn_id: ctx.turn,
+            text: format!("Tool {name} was denied by approval."),
+        },
+    );
     Ok(())
 }
 

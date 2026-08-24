@@ -1726,6 +1726,7 @@ pub async fn list_approvals(State(state): State<AppState>) -> Json<Page<Approval
             tool: item.tool,
             target: item.target,
             side_effects: item.side_effects,
+            call_id: item.call_id,
         })
         .collect();
     Json(Page::of(items))

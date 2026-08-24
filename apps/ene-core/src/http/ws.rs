@@ -317,6 +317,12 @@ fn live_to_json(event: &LiveEvent) -> Value {
             "name": name,
             "args": args,
         }),
+        LiveEvent::SessionNote { turn_id, text } => json!({
+            "type": "session.event",
+            "kind": "tool/denied",
+            "turn_id": turn_id.to_string(),
+            "text": text,
+        }),
         LiveEvent::TurnEnded {
             turn_id,
             outcome,
