@@ -22,7 +22,7 @@ V3 の `data`（`name`、`description`、`personality` など）と
 
 ## lorebook とテンプレート
 
-lorebook データは import/export 互換のために保存しますが、Ene は内容を解釈・検索・model context への注入をしません。Stage v1 に実行用の lorebook エディタはありません。カード文は Character Book Spec マクロ（`{{char}}`、
+lorebook データは import/export 互換のために保存しますが、Ene は内容を解釈・検索・model context への注入をしません。これは保存専用フィールドです。インポートとエクスポートはすべてのエントリを保持し、カーネルのコンテキストに lorebook ソースは存在しません。Stage v1 に実行用の lorebook エディタはありません。カード文は Character Book Spec マクロ（`{{char}}`、
 `{{user}}`、`{{random:…}}`、`{{date}}` など）を使えます。W++ / AliChat /
 YAML のペルソナ文はアイデンティティカーネルに平坦化されます。
 
