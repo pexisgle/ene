@@ -60,6 +60,9 @@ pub struct SurfaceUiState {
     pub pending_approval: Option<PendingApproval>,
     pub pending_question: Option<PendingQuestion>,
     pub spotlight_open: bool,
+    pub spotlight_query: String,
+    pub spotlight_selected: usize,
+    pub spotlight_hotkey_ok: bool,
     pub chat_open: bool,
     pub caption_open: bool,
     pub status: String,
@@ -93,6 +96,9 @@ impl Default for SurfaceUiState {
             pending_approval: None,
             pending_question: None,
             spotlight_open: false,
+            spotlight_query: String::new(),
+            spotlight_selected: 0,
+            spotlight_hotkey_ok: false,
             chat_open: true,
             caption_open: false,
             status: i18n::fl("status-ready"),
@@ -204,9 +210,11 @@ pub fn show_caption(
 }
 
 pub fn show_spotlight(ctx: &egui::Context, state: &mut SurfaceUiState) -> Option<SpotlightAction> {
-    let action = spotlight::show(ctx);
+    let action = spotlight::show(ctx, state);
     if action.is_some() {
         state.spotlight_open = false;
+        state.spotlight_query.clear();
+        state.spotlight_selected = 0;
     }
     action
 }

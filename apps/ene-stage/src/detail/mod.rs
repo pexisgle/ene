@@ -368,6 +368,7 @@ pub struct DetailUiState {
     pub session_id: String,
     pub(crate) new_session_inflight: bool,
     pub open_spotlight: bool,
+    pub spotlight_hotkey_ok: bool,
     activation_generation: u64,
     settings_state: SettingsLoadState,
     loaded: DetailLoaded,
@@ -1760,7 +1761,17 @@ fn show_voice(
         &mut local_settings.spotlight_enabled,
         i18n::fl("settings-spotlight"),
     );
-    if ui.button(i18n::fl("settings-open-spotlight")).clicked() {
+    let hotkey_fallback = !state.spotlight_hotkey_ok && local_settings.spotlight_enabled;
+    if hotkey_fallback {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            i18n::fl("settings-spotlight-hotkey-fallback"),
+        );
+    }
+    if ui
+        .button(egui::RichText::new(i18n::fl("settings-open-spotlight")).strong())
+        .clicked()
+    {
         state.open_spotlight = true;
     }
     ui.horizontal(|ui| {

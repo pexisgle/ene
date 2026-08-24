@@ -1409,6 +1409,10 @@ impl StageApp {
         if let Some(command) = hotkey_command {
             self.dispatch_shell_command(event_loop, command);
         }
+        self.surface.spotlight_hotkey_ok = self
+            .hotkeys
+            .as_ref()
+            .is_some_and(HotkeyManager::spotlight_active);
         if self.surface.quit {
             event_loop.exit();
         }
@@ -1948,6 +1952,7 @@ impl StageApp {
             let results = Arc::clone(&self.async_results);
             let soul_id = self.session.soul_id().to_owned();
             self.session.session_id().clone_into(&mut detail.session_id);
+            detail.spotlight_hotkey_ok = self.surface.spotlight_hotkey_ok;
             let theme = local.theme.clone();
             let paint = detail_win.paint(gpu, Some(theme.as_str()), |ui| {
                 detail::show(
