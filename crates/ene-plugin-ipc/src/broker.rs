@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "net"))]
 type BrokerTransport = tokio::net::UnixStream;
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "net"))]
 type BrokerTransport = tokio::net::TcpStream;
 
 /// Client for the host broker socket injected into a plugin process.
