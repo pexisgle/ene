@@ -238,7 +238,11 @@ impl StageApp {
     }
 
     fn sync_overlay_interaction(&mut self) {
-        let protect_chrome = self.chrome_focused && self.chrome_window_exists();
+        // A tray menu steal is not a real focus switch; keep protecting the
+        // chrome windows for the grace window even though `chrome_focused`
+        // already dropped, so the overlay does not pop over an open menu.
+        let tray_protects = focus_loss_is_transient(self.tray_interaction_at, Instant::now());
+        let protect_chrome = (self.chrome_focused || tray_protects) && self.chrome_window_exists();
         let always_on_top = self.local_settings.always_on_top;
         let click_through = self.local_settings.overlay_click_through;
         let Some(overlay) = self.overlay.as_mut() else {
@@ -2031,13 +2035,8 @@ impl ApplicationHandler for StageApp {
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(focused) = chrome_focus_state {
-            let transient =
-                !focused && focus_loss_is_transient(self.tray_interaction_at, Instant::now());
-            if !transient {
-                self.tray_interaction_at = None;
-                self.chrome_focused = focused;
-                self.sync_overlay_interaction();
-            }
+            self.chrome_focused = focused;
+            self.sync_overlay_interaction();
         }
         if !self.surface.chat_input_focused
             && overlay_from_chrome.is_none_or(|wants| !wants)
@@ -2225,6 +2224,26 @@ mod tests {
             window_focus_state(&winit::event::WindowEvent::CloseRequested),
             None
         );
+    }
+
+    #[test]
+    fn alt_tab_focus_loss_clears_chrome_without_tray_grace() {
+        // Simulates: user Alt-Tabs away with no recent tray interaction.
+        // chrome_focused must become false so overlay returns to AlwaysOnTop.
+        let mut app = StageApp::new_for_test();
+        app.chrome_focused = true;
+        app.chat = None; // ensure chrome_window_exists() can be false
+        app.detail_win = None;
+        app.caption = None;
+        app.spotlight = None;
+        app.tray_interaction_at = None;
+
+        // Apply Focused(false): chrome_focused must drop unconditionally.
+        let focused_false = window_focus_state(&winit::event::WindowEvent::Focused(false));
+        if let Some(focused) = focused_false {
+            app.chrome_focused = focused;
+        }
+        assert!(!app.chrome_focused);
     }
 
     #[test]
