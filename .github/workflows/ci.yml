@@ -171,7 +171,7 @@ jobs:
   cache-prune:
     name: Prune rust caches
     if: github.ref == 'refs/heads/main'
-    needs: [clippy, feature-matrix, test, docs, windows-native]
+    needs: [clippy, workspace-matrix, test, docs, windows-native]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
