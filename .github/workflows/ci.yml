@@ -49,9 +49,20 @@ jobs:
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+  workspace-matrix:
+    name: Workspace test matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - name: Check workspace test matrix
+        run: bash scripts/check-workspace-test-matrix.sh
+
   test:
     name: Tests (${{ matrix.group.name }})
     runs-on: ubuntu-latest
+    needs: [workspace-matrix]
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -130,7 +141,7 @@ jobs:
   cache-prune:
     name: Prune rust caches
     if: github.ref == 'refs/heads/main'
-    needs: [clippy, test, docs, windows-native]
+    needs: [clippy, workspace-matrix, test, docs, windows-native]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
