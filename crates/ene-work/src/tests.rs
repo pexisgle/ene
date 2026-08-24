@@ -448,13 +448,15 @@ async fn background_tool_timeout_denies_before_any_job_or_execution_row() {
 async fn duplicate_approval_response_dispatches_exactly_once() {
     let (dir, _store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
-    let hits = Arc::new(AtomicBool::new(false));
+    let invoke = Arc::new(BgInvoke {
+        phase: parking_lot::Mutex::new(std::collections::HashMap::new()),
+    });
     registry.register_with(
         ToolDefinition {
             side_effects: vec!["exec".to_owned()],
             ..bg_def()
         },
-        Arc::new(SpyInvoke { hit: hits }) as Arc<dyn ToolInvoke>,
+        invoke,
     );
     let popup = Arc::new(ene_plane::PendingPopup::new());
     let asked = Arc::new(tokio::sync::Notify::new());
