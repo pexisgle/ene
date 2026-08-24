@@ -21,7 +21,6 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # The action fails critical vulnerabilities; unmaintained and other informational advisories remain visible without blocking while they are inventoried.
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -85,3 +84,30 @@ jobs:
           branch: "deps/update-rust-toolchain-${{ env.CURRENT_DATE }}"
           title: "chore(toolchain): update Rust version"
           labels: dependencies
+
+  cache-prune:
+    name: Prune rust caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Prune stale rust-cache entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          keep_per_job=2
+          deleted=0
+          gh api --paginate "repos/${{ github.repository }}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | startswith("v0-rust-")) | [.id, .key, .created_at] | @tsv' \
+          | sort -k3,3r \
+          | awk -v keep="$keep_per_job" '
+              { job = $2; sub(/^v0-rust-/, "", job); sub(/-(Linux|Windows)-.*/, "", job) }
+              count[job]++ < keep { next }
+              { print $1 }' \
+          | while read -r id; do
+              gh api -X DELETE "repos/${{ github.repository }}/actions/caches/$id" >/dev/null
+              deleted=$((deleted + 1))
+            done
+          echo "Pruned stale rust-cache entries."
