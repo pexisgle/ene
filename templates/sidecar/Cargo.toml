@@ -1,6 +1,7 @@
 # Dependency block for a sidecar-enabled provider plugin. Copy the entries
 # your engine actually uses into the plugin's [dependencies].
 [dependencies]
+ene-config = { workspace = true }
 tokio = { workspace = true, features = ["process", "time", "sync", "macros", "rt-multi-thread"] }
 reqwest = { workspace = true, default-features = false, features = ["rustls-no-provider"] }
 serde = { workspace = true }
