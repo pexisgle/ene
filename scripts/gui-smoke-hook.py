@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -23,6 +24,7 @@ STATE_DIR = Path(os.environ.get("STATE_DIR", ".gui-smoke-hook-state"))
 STATE_PATH = STATE_DIR / "state.json"
 ISSUES_LABEL = "gui-smoke-issues"
 GUI_PREFIXES = ("apps/ene-stage/", "apps/ene-desktop/")
+RETRY_BACKOFFS_SEC = (1, 2, 4)
 
 
 def gh_json(args: list[str]):
@@ -104,15 +106,50 @@ def should_fire(pr_num: int, head: str, has_issues: bool, state: dict) -> tuple[
     return False, "implicit_pass_skip"
 
 
+class WebhookTransientError(Exception):
+    """5xx / network / timeout after retries — skip this PR, keep the job green."""
+
+
 def post_webhook(url: str, key: str | None, payload: dict) -> None:
+    """POST the GUI webhook.
+
+    Retries HTTP 5xx, URLError, and timeout (~3 attempts, backoff 1s/2s/4s).
+    HTTP 4xx is raised immediately (config bug — fail the job).
+    After retries are exhausted, raises WebhookTransientError (caller must not
+    mark fired_green and must keep the job green).
+    """
     data = json.dumps(payload).encode()
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
         headers["X-Webhook-Key"] = key
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        resp.read()
+
+    attempts = len(RETRY_BACKOFFS_SEC)
+    last_err: Exception | None = None
+    for i in range(attempts):
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+            return
+        except urllib.error.HTTPError as e:
+            body = e.read()[:200]
+            print(f"webhook HTTP {e.code} (attempt {i + 1}/{attempts}): {body!r}", flush=True)
+            if 400 <= e.code < 500:
+                raise
+            last_err = e
+        except urllib.error.URLError as e:
+            print(f"webhook URLError (attempt {i + 1}/{attempts}): {e}", flush=True)
+            last_err = e
+        except TimeoutError as e:
+            print(f"webhook timeout (attempt {i + 1}/{attempts}): {e}", flush=True)
+            last_err = e
+        if i + 1 < attempts:
+            delay = RETRY_BACKOFFS_SEC[i]
+            print(f"retrying webhook in {delay}s", flush=True)
+            time.sleep(delay)
+    print(f"webhook failed after {attempts} attempts: {last_err}", flush=True)
+    raise WebhookTransientError(str(last_err))
 
 
 def clear_issues_label(pr_num: int) -> None:
@@ -188,16 +225,19 @@ def main() -> int:
         print(f"fire GUI webhook #{num} head={head[:8]} reason={reason}", flush=True)
         try:
             post_webhook(webhook, key, payload)
-            state.setdefault("fired_green", {})[str(num)] = head
-            if reason == "first_green_after_issues":
-                clear_issues_label(num)
-            fired_any = True
-        except urllib.error.HTTPError as e:
-            print(f"webhook HTTP {e.code}: {e.read()[:200]!r}", flush=True)
+        except urllib.error.HTTPError:
+            # 4xx already printed — auth / disabled automation / other config bugs
             return 1
+        except WebhookTransientError:
+            # 5xx / network after retries: do not mark fired_green; continue
+            continue
         except Exception as e:
             print(f"webhook error: {e}", flush=True)
             return 1
+        state.setdefault("fired_green", {})[str(num)] = head
+        if reason == "first_green_after_issues":
+            clear_issues_label(num)
+        fired_any = True
 
     save_state(state)
     if not fired_any:
