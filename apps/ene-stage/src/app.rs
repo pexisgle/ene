@@ -107,6 +107,7 @@ pub fn run() -> Result<(), AppError> {
         chrome_focused: false,
         last_cursor: None,
         last_tick: Instant::now(),
+        tray_interaction_at: None,
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
         approval_needs_reveal: false,
@@ -164,6 +165,7 @@ struct StageApp {
     chrome_focused: bool,
     last_cursor: Option<LogicalPosition<f32>>,
     last_tick: Instant,
+    tray_interaction_at: Option<Instant>,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
     approval_needs_reveal: bool,
@@ -221,6 +223,7 @@ impl StageApp {
             chrome_focused: false,
             last_cursor: None,
             last_tick: Instant::now(),
+            tray_interaction_at: None,
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
             approval_needs_reveal: false,
@@ -235,7 +238,11 @@ impl StageApp {
     }
 
     fn sync_overlay_interaction(&mut self) {
-        let protect_chrome = self.chrome_focused && self.chrome_window_exists();
+        // A tray menu steal is not a real focus switch; keep protecting the
+        // chrome windows for the grace window even though `chrome_focused`
+        // already dropped, so the overlay does not pop over an open menu.
+        let tray_protects = focus_loss_is_transient(self.tray_interaction_at, Instant::now());
+        let protect_chrome = (self.chrome_focused || tray_protects) && self.chrome_window_exists();
         let always_on_top = self.local_settings.always_on_top;
         let click_through = self.local_settings.overlay_click_through;
         let Some(overlay) = self.overlay.as_mut() else {
@@ -691,6 +698,9 @@ impl StageApp {
             AsyncOutcome::MicClaim(result) => match result {
                 Ok(active) => {
                     self.mic_active = active;
+                    if let Some(tray) = self.tray.as_ref() {
+                        tray.set_mic_active(active);
+                    }
                     if active {
                         let action = self.listen.start();
                         self.spawn_listen(action);
@@ -1230,6 +1240,11 @@ impl StageApp {
                 commands
             })
             .unwrap_or_default();
+        if let Some(tray) = self.tray.as_ref()
+            && tray.take_interactions() > 0
+        {
+            self.tray_interaction_at = Some(Instant::now());
+        }
         for command in tray_commands {
             self.dispatch_shell_command(event_loop, command);
         }
@@ -2132,6 +2147,15 @@ fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     }
 }
 
+/// Focus loss within this window after a tray interaction is treated as the
+/// transient steal caused by the tray menu, not as a real switch to another app.
+const TRAY_FOCUS_GRACE: Duration = Duration::from_millis(1500);
+
+#[must_use]
+fn focus_loss_is_transient(tray_interaction_at: Option<Instant>, now: Instant) -> bool {
+    tray_interaction_at.is_some_and(|at| now.duration_since(at) < TRAY_FOCUS_GRACE)
+}
+
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
         "(empty)"
@@ -2152,14 +2176,17 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
-        overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
+        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, focus_loss_is_transient,
+        format_log_text, overlay_window_level, provider_asset_load_status, window_focus_state,
+        window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
     use crate::surface::{PendingApproval, PendingQuestion};
     use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
     use std::sync::Arc;
+    use std::time::Duration;
+    use std::time::Instant;
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
@@ -2193,10 +2220,43 @@ mod tests {
             window_focus_state(&winit::event::WindowEvent::Focused(false)),
             Some(false)
         );
+    }
+
+    #[test]
+    fn tray_interaction_within_grace_is_transient() {
+        let now = Instant::now();
+        assert!(focus_loss_is_transient(
+            Some(now),
+            now + Duration::from_millis(100)
+        ));
+        assert!(!focus_loss_is_transient(
+            Some(now.checked_sub(Duration::from_secs(5)).unwrap_or(now)),
+            now
+        ));
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::CloseRequested),
             None
         );
+    }
+
+    #[test]
+    fn alt_tab_focus_loss_clears_chrome_without_tray_grace() {
+        // Simulates: user Alt-Tabs away with no recent tray interaction.
+        // chrome_focused must become false so overlay returns to AlwaysOnTop.
+        let mut app = StageApp::new_for_test();
+        app.chrome_focused = true;
+        app.chat = None; // ensure chrome_window_exists() can be false
+        app.detail_win = None;
+        app.caption = None;
+        app.spotlight = None;
+        app.tray_interaction_at = None;
+
+        // Apply Focused(false): chrome_focused must drop unconditionally.
+        let focused_false = window_focus_state(&winit::event::WindowEvent::Focused(false));
+        if let Some(focused) = focused_false {
+            app.chrome_focused = focused;
+        }
+        assert!(!app.chrome_focused);
     }
 
     #[test]

@@ -32,6 +32,8 @@ const QUIT_ID: &str = "ene-stage.tray.quit";
 pub struct TrayManager {
     _icon: TrayIcon,
     action_rx: Receiver<ShellCommand>,
+    interaction_rx: Receiver<()>,
+    mic_item: MenuItem,
 }
 
 #[derive(Debug, Error)]
@@ -46,8 +48,9 @@ impl TrayManager {
     /// Build the tray icon and wire menu events into an internal channel.
     pub fn new() -> Result<Self, TrayError> {
         let (action_tx, action_rx) = unbounded();
+        let (interaction_tx, interaction_rx) = unbounded();
         let icon = build_icon()?;
-        let menu = build_menu()?;
+        let (menu, mic_item) = build_menu()?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("ene-stage")
@@ -55,20 +58,39 @@ impl TrayManager {
             .build()
             .map_err(|err| TrayError::Build(err.to_string()))?;
 
-        std::thread::spawn(move || poll_tray_events(&action_tx));
+        std::thread::spawn(move || poll_tray_events(&action_tx, &interaction_tx));
 
         Ok(Self {
             _icon: tray,
             action_rx,
+            interaction_rx,
+            mic_item,
         })
     }
 
     pub fn try_recv(&self) -> Option<ShellCommand> {
         self.action_rx.try_recv().ok()
     }
+
+    /// Drain pending tray interactions (menu open/click). The app uses these
+    /// timestamps to distinguish transient focus loss caused by the tray menu
+    /// from a real focus switch to another application.
+    #[must_use]
+    pub fn take_interactions(&self) -> usize {
+        let mut drained = 0;
+        while self.interaction_rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        drained
+    }
+
+    pub fn set_mic_active(&self, active: bool) {
+        self.mic_item
+            .set_text(crate::i18n::fl(mic_menu_label(active)));
+    }
 }
 
-fn build_menu() -> Result<Menu, TrayError> {
+fn build_menu() -> Result<(Menu, MenuItem), TrayError> {
     let settings = MenuItem::with_id(
         MenuId::new(SETTINGS_ID),
         crate::i18n::fl("tray-settings"),
@@ -87,14 +109,19 @@ fn build_menu() -> Result<Menu, TrayError> {
         true,
         None,
     );
-    let mic = MenuItem::with_id(MenuId::new(MIC_ID), crate::i18n::fl("mic-on"), true, None);
+    let mic = MenuItem::with_id(
+        MenuId::new(MIC_ID),
+        crate::i18n::fl(mic_menu_label(false)),
+        true,
+        None,
+    );
     let quit = MenuItem::with_id(
         MenuId::new(QUIT_ID),
         crate::i18n::fl("tray-quit"),
         true,
         None,
     );
-    Menu::with_items(&[
+    let menu = Menu::with_items(&[
         &settings,
         &chat,
         &detail,
@@ -103,7 +130,12 @@ fn build_menu() -> Result<Menu, TrayError> {
         &PredefinedMenuItem::separator(),
         &quit,
     ])
-    .map_err(|err| TrayError::Build(err.to_string()))
+    .map_err(|err| TrayError::Build(err.to_string()))?;
+    Ok((menu, mic))
+}
+
+fn mic_menu_label(active: bool) -> &'static str {
+    if active { "mic-on" } else { "mic-off" }
 }
 
 fn build_icon() -> Result<Icon, TrayError> {
@@ -138,23 +170,27 @@ fn synthetic_icon() -> Result<Icon, TrayError> {
     Icon::from_rgba(rgba, width, height).map_err(|err| TrayError::Icon(err.to_string()))
 }
 
-fn poll_tray_events(action_tx: &Sender<ShellCommand>) {
+fn poll_tray_events(action_tx: &Sender<ShellCommand>, interaction_tx: &Sender<()>) {
     loop {
         if let Ok(event) = MenuEvent::receiver().try_recv()
             && let Some(action) = map_menu_id(&event.id)
-            && action_tx.send(action).is_err()
         {
-            return;
+            if interaction_tx.send(()).is_err() {
+                return;
+            }
+            if action_tx.send(action).is_err() {
+                return;
+            }
         }
         if let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            let open_detail = matches!(
+            let is_click = matches!(
                 event,
-                TrayIconEvent::DoubleClick { .. }
-                    | TrayIconEvent::Click {
-                        button: tray_icon::MouseButton::Left,
-                        ..
-                    }
+                TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }
             );
+            let open_detail = matches!(event, TrayIconEvent::DoubleClick { .. });
+            if is_click && interaction_tx.send(()).is_err() {
+                return;
+            }
             if open_detail
                 && action_tx
                     .send(ShellCommand::OpenDetail(DetailTab::Home))
@@ -214,5 +250,11 @@ mod tests {
     #[test]
     fn synthetic_icon_is_valid() {
         assert!(synthetic_icon().is_ok());
+    }
+
+    #[test]
+    fn mic_menu_label_is_the_next_action() {
+        assert_eq!(mic_menu_label(false), "mic-off");
+        assert_eq!(mic_menu_label(true), "mic-on");
     }
 }
