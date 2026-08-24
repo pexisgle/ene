@@ -89,6 +89,13 @@ playback sink and resets visemes when that abort chunk arrives; it does not use
 client RMS as the source of truth. Stage claims speaker/notify exclusive by
 default.
 
+TTS utterances carry automatic expressions. The first `audio.chunk` of each
+utterance includes the companion's current mood as an `expression` label plus
+the owning `soul_id`; stage applies that expression to the matching avatar,
+holds it for four seconds, fades it out over the last 0.3 seconds, and clears
+it on an abort chunk. Explicit `body.expression` commands from the model keep
+overriding this path unchanged.
+
 Audio device relay, approval popups, tray, and OS notifications (`notify.hint`)
 are stage's client-side jobs; the core owns policy and the live bus.
 

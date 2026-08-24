@@ -36,6 +36,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 parking_lot = { workspace = true }
+pollster = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 wgpu = { workspace = true }
 glam = { workspace = true }
