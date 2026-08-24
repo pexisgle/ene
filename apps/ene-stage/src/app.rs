@@ -111,6 +111,7 @@ pub fn run() -> Result<(), AppError> {
         last_tick: Instant::now(),
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
+        approval_needs_reveal: false,
     };
     app.surface.character_pos = [app.settings.character_x, app.settings.character_y];
     app.surface.history = app.session.history();
@@ -167,6 +168,7 @@ struct StageApp {
     last_tick: Instant,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
+    approval_needs_reveal: bool,
 }
 
 impl StageApp {
@@ -223,6 +225,7 @@ impl StageApp {
             last_tick: Instant::now(),
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
+            approval_needs_reveal: false,
         }
     }
 
@@ -376,6 +379,7 @@ impl StageApp {
                     return;
                 }
                 self.surface.pending_approval = None;
+                self.approval_needs_reveal = false;
                 if let Err(err) = result {
                     self.surface.status = err;
                 }
@@ -738,6 +742,7 @@ impl StageApp {
                     self.surface.greeting_status.clear();
                     self.surface.streaming_text.clear();
                     self.surface.pending_approval = None;
+                    self.approval_needs_reveal = false;
                     self.surface.pending_question = None;
                     self.surface.status = i18n::fl("chat-new-session-ready");
                     self.request_history_refresh();
@@ -775,14 +780,29 @@ impl StageApp {
         ) {
             (Some(id), Some(item)) if id == item.id => {}
             (_, Some(item)) => {
-                self.surface.pending_approval = Some(surface::PendingApproval {
+                self.set_pending_approval(surface::PendingApproval {
                     id: item.id.clone(),
                     tool: item.tool.clone(),
                     target: item.target.clone(),
                 });
-                self.surface.chat_open = true;
             }
-            (_, None) => self.surface.pending_approval = None,
+            (_, None) => {
+                self.surface.pending_approval = None;
+                self.approval_needs_reveal = false;
+            }
+        }
+    }
+
+    fn set_pending_approval(&mut self, approval: surface::PendingApproval) {
+        let is_new = self
+            .surface
+            .pending_approval
+            .as_ref()
+            .is_none_or(|current| current.id != approval.id);
+        self.surface.pending_approval = Some(approval);
+        if is_new {
+            self.surface.chat_open = true;
+            self.approval_needs_reveal = true;
         }
     }
 
@@ -1205,11 +1225,12 @@ impl StageApp {
                     tracing::debug!(kind, text, "surface session event");
                 }
                 LiveEvent::ApprovalAsked { id, tool, target } => {
-                    self.surface.pending_approval =
-                        Some(surface::PendingApproval { id, tool, target });
-                    self.surface.chat_open = true;
+                    self.set_pending_approval(surface::PendingApproval { id, tool, target });
                 }
-                LiveEvent::ApprovalResolved { .. } => self.surface.pending_approval = None,
+                LiveEvent::ApprovalResolved { .. } => {
+                    self.surface.pending_approval = None;
+                    self.approval_needs_reveal = false;
+                }
                 LiveEvent::QuestionAsked { id, prompt } => {
                     self.surface.pending_question = Some(surface::PendingQuestion { id, prompt });
                     self.surface.chat_open = true;
@@ -1400,6 +1421,7 @@ impl StageApp {
         self.surface.greeting_inflight = false;
         self.surface.greeting_status.clear();
         self.surface.pending_approval = None;
+        self.approval_needs_reveal = false;
         self.surface.pending_question = None;
         self.detail.next_activation_generation();
         self.detail.invalidate_character();
@@ -1423,6 +1445,7 @@ impl StageApp {
         self.surface.streaming_text.clear();
         self.surface.turn_active = false;
         self.surface.pending_approval = None;
+        self.approval_needs_reveal = false;
         self.surface.pending_question = None;
     }
 
@@ -1623,6 +1646,9 @@ impl StageApp {
     }
 
     fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {
+        if std::mem::take(&mut self.approval_needs_reveal) {
+            self.open_chat(event_loop);
+        }
         if chat_window_action(self.surface.chat_open, self.chat.is_some())
             == ChatWindowAction::Create
         {
@@ -2114,6 +2140,26 @@ mod tests {
                 .map(|item| item.id.as_str()),
             Some("new-approval")
         );
+    }
+
+    #[test]
+    fn a_new_approval_schedules_one_chat_reveal() {
+        let mut app = StageApp::new_for_test();
+        app.surface.chat_open = false;
+        let approval = PendingApproval {
+            id: "approval".to_owned(),
+            tool: "fs.read".to_owned(),
+            target: "/tmp/file".to_owned(),
+        };
+
+        app.set_pending_approval(approval.clone());
+
+        assert!(app.surface.chat_open);
+        assert!(std::mem::take(&mut app.approval_needs_reveal));
+
+        app.set_pending_approval(approval);
+
+        assert!(!app.approval_needs_reveal);
     }
 
     #[test]
