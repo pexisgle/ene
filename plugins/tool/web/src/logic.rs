@@ -5,7 +5,8 @@ use std::net::IpAddr;
 use url::Url;
 
 #[path = "credentials.rs"]
-pub(crate) mod credentials;
+#[cfg_attr(not(test), expect(dead_code, reason = "host-side injection lands with the vault wiring"))]
+mod credentials;
 #[path = "html.rs"]
 mod html;
 #[path = "search.rs"]
@@ -240,7 +241,7 @@ fn rows_from_payload(
 #[cfg(test)]
 mod backend_tests {
     use super::execute;
-    use crate::credentials::{WebCredentials, with_credentials};
+    use super::credentials::{WebCredentials, with_credentials};
     use ene_registry::with_post_json;
     use serde_json::json;
 

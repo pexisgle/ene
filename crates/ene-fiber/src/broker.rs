@@ -339,7 +339,7 @@ impl Broker {
         bearer: Option<&str>,
     ) -> Result<Value, BrokerError> {
         self.require(uid, "net.fetch")?;
-        net_post_json(url, body, bearer)
+        crate::net::post_json(url, body, bearer)
     }
 
     /// Search file contents with host-managed `rg`.

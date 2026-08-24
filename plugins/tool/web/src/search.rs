@@ -166,7 +166,7 @@ mod tests {
     use super::{
         SearchBackend, WebCredentials, catalog, parse_arxiv_atom, parse_backend, require_available,
     };
-    use crate::credentials::with_credentials;
+    use super::credentials::with_credentials;
     use serde_json::json;
 
     fn creds(tavily: bool, exa: bool) -> WebCredentials {
