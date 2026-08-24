@@ -381,6 +381,58 @@ impl ToolRegistry {
             .map_err(PipelineError::Execute)
     }
 
+    /// Run only the approval half of a background dispatch. Callers that must
+    /// create jobs or execution records authorize here first so a Deny never
+    /// leaves side effects to clean up.
+    pub async fn authorize_background(
+        &self,
+        name: &str,
+        args: &Value,
+        layer: Layer,
+        workspace: Option<&Path>,
+        call_id: &str,
+    ) -> Result<(), PipelineError> {
+        let def = self
+            .get(name)
+            .ok_or_else(|| PipelineError::Unknown(name.to_owned()))?;
+        if !def.available_on(layer) {
+            return Err(PipelineError::WrongLayer {
+                name: name.to_owned(),
+                requested: layer,
+                required: def.primary_layer(),
+            });
+        }
+        let Some(plane) = self.plane.lock().clone() else {
+            return Ok(());
+        };
+        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+        let target = authorization_target(name, args).to_owned();
+        let in_workspace = path_in_workspace(workspace, path);
+        let req = AuthzRequest {
+            tool: name.to_owned(),
+            side_effects: def.side_effects.clone(),
+            sensitivity: def.sensitivity,
+            target,
+            in_workspace,
+            call_id: call_id.to_owned(),
+        };
+        plane.authorize(&req).await?;
+        Ok(())
+    }
+}
+
+/// BLAKE3 digest of the canonical tool identity and serialized arguments. Two
+/// calls with the same digest carry the same side-effect intent.
+#[must_use]
+pub fn intent_digest(name: &str, args: &Value) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(name.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&serde_json::to_vec(args).unwrap_or_default());
+    hasher.finalize().to_hex().to_string()
+}
+
+impl ToolRegistry {
     pub async fn cancel_background(
         &self,
         name: &str,

@@ -21,7 +21,9 @@ pub use builtins::{
 pub use def::{Layer, ToolDefinition, ToolSource};
 pub use discovery::ToolHit;
 pub use host_http::{try_host_fetch, with_http_fetch};
-pub use pipeline::{BuiltinInvoker, PipelineError, ToolInvoke, ToolRegistry, confine_tool_path};
+pub use pipeline::{
+    BuiltinInvoker, PipelineError, ToolInvoke, ToolRegistry, confine_tool_path, intent_digest,
+};
 
 #[cfg(test)]
 mod tests;

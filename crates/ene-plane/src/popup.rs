@@ -65,8 +65,8 @@ impl ScriptedPopup {
     }
 
     #[must_use]
-    pub fn deny_all() -> Arc<Self> {
-        Arc::new(Self::default())
+    pub fn deny_all() -> Self {
+        Self::default()
     }
 }
 
