@@ -158,7 +158,9 @@ mod tests {
         if !path.is_file() {
             // The model is license-restricted and not distributed with the
             // repository; fetch it locally via scripts/fetch-character-assets.sh.
-            eprintln!("skipping: AliciaSolid.vrm not present (see scripts/fetch-character-assets.sh)");
+            eprintln!(
+                "skipping: AliciaSolid.vrm not present (see scripts/fetch-character-assets.sh)"
+            );
             return;
         }
         let bytes = std::fs::read(&path).expect("read AliciaSolid.vrm");
