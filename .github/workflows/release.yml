@@ -103,9 +103,27 @@ jobs:
             dist
             CHANGELOG.release.md
 
+  package-smoke:
+    name: Smoke test Linux package
+    needs: build-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download release artifacts
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name release-artifacts --dir release-artifacts
+      - name: Validate package and archive
+        run: bash scripts/check-linux-package.sh "${GITHUB_REF_NAME#v}" release-artifacts/dist
+
   publish:
     name: Publish release
-    needs: build-package
+    needs: [build-package, package-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
