@@ -723,6 +723,20 @@ impl StageApp {
                     Err(err) => self.detail.core_status = err,
                 }
             }
+            AsyncOutcome::CreateSchedule(result) => match result {
+                Ok(schedule) => {
+                    self.detail.new_schedule_inflight = false;
+                    self.detail.schedules.retain(|item| item.id != schedule.id);
+                    self.detail.schedules.push(schedule);
+                    self.detail.new_schedule_name.clear();
+                    self.detail.new_schedule_spec.clear();
+                    self.detail.core_status = i18n::fl("schedule-created");
+                }
+                Err(err) => {
+                    self.detail.new_schedule_inflight = false;
+                    self.detail.core_status = err;
+                }
+            },
             AsyncOutcome::CancelJob { result, .. }
             | AsyncOutcome::ToggleSchedule { result, .. } => {
                 if result.is_ok() {
