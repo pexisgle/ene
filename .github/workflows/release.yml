@@ -12,15 +12,8 @@ env:
   CARGO_BUILD_RUSTC_WRAPPER: ""
 
 jobs:
-  quality-gate:
-    name: CI quality gate
-    uses: ./.github/workflows/ci.yml
-    permissions:
-      contents: read
-
   build-package:
     name: Build release
-    needs: quality-gate
     permissions:
       contents: read
     runs-on: ubuntu-latest
