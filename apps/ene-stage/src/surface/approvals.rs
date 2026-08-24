@@ -18,19 +18,23 @@ pub fn show(ctx: &egui::Context, state: &mut SurfaceUiState) {
                 i18n::fl("approval-target"),
                 pending.target
             ));
+            let pending_id = pending.id.clone();
             ui.horizontal(|ui| {
                 if ui.button(i18n::fl("approval-allow")).clicked() {
                     state.push_action(SurfaceAction::Approval {
+                        id: pending_id.clone(),
                         decision: "allow".to_owned(),
                     });
                 }
                 if ui.button(i18n::fl("approval-always")).clicked() {
                     state.push_action(SurfaceAction::Approval {
+                        id: pending.id.clone(),
                         decision: "allow_and_remember".to_owned(),
                     });
                 }
                 if ui.button(i18n::fl("approval-deny")).clicked() {
                     state.push_action(SurfaceAction::Approval {
+                        id: pending.id.clone(),
                         decision: "deny".to_owned(),
                     });
                 }

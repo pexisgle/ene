@@ -29,7 +29,7 @@ pub enum SurfaceAction {
     BargeIn,
     CancelTurn,
     ToggleMic,
-    Approval { decision: String },
+    Approval { id: String, decision: String },
     AnswerQuestion,
     OpenDetail(DetailTab),
     Quit,

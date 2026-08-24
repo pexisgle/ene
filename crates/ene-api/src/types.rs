@@ -452,6 +452,10 @@ pub struct ApprovalView {
     pub tool: String,
     pub target: String,
     pub side_effects: Vec<String>,
+    /// Model call this approval gates; empty on records created before the
+    /// field existed.
+    #[serde(default)]
+    pub call_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
