@@ -20,9 +20,9 @@ default = ["voice"]
 voice = ["dep:cpal", "dep:rodio", "dep:rustfft"]
 
 [dependencies]
-egui = "0.35"
-egui-wgpu = "0.35"
-egui-winit = "0.35"
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11"] }
 ene-api = { workspace = true }
 ene-config = { workspace = true }
@@ -46,11 +46,11 @@ global-hotkey = { workspace = true }
 crossbeam-channel = { workspace = true }
 indexmap = { workspace = true }
 image = { workspace = true, features = ["png"] }
-tray-icon = { version = "0.24", default-features = false }
-rust-embed = "8.11"
+tray-icon = { workspace = true }
+rust-embed = { workspace = true }
 fluent-bundle = { workspace = true }
-i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
-i18n-embed-fl = "0.10"
+i18n-embed = { workspace = true }
+i18n-embed-fl = { workspace = true }
 unic-langid = "0.9"
 cpal = { workspace = true, optional = true }
 rodio = { workspace = true, optional = true, features = ["playback"] }
@@ -60,11 +60,11 @@ zip = { workspace = true, features = ["deflate"] }
 base64 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18.2"
-tray-icon = { version = "0.24", default-features = false, features = ["gtk"] }
+gtk = { workspace = true }
+tray-icon = { workspace = true, features = ["gtk"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+windows-sys = { workspace = true }
 
 [lints]
 workspace = true

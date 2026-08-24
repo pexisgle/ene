@@ -26,7 +26,7 @@ ashpd = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 image = { workspace = true, features = ["png"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true }
 
 [dev-dependencies]
 ene-fiber = { workspace = true }
