@@ -3000,7 +3000,16 @@ var qrcode = function() {
       return match ? decodeURIComponent(match[1]) : "";
     };
 
-    if (hashToken()) $("token-input").value = hashToken();
+    // A pairing token must leave the address bar/history as soon as it is
+    // consumed, not when the user later presses Connect.
+    const consumeHashToken = () => {
+      const token = hashToken();
+      if (token) history.replaceState(null, "", location.pathname + location.search);
+      return token;
+    };
+
+    const bootToken = consumeHashToken();
+    if (bootToken) $("token-input").value = bootToken;
 
     $("chat").onsubmit = async (e) => {
       e.preventDefault();
@@ -3065,11 +3074,10 @@ var qrcode = function() {
     }
 
     window.addEventListener("hashchange", () => {
-      const token = hashToken();
+      const token = consumeHashToken();
       if (!token || !state) return;
       teardown();
       $("token-input").value = token;
-      history.replaceState(null, "", location.pathname + location.search);
     });
 
     function drawQr(canvas, text) {
