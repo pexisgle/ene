@@ -1,7 +1,7 @@
 //! Raycast collider debug overlay glue.
 //!
 //! Walks the per-bone collider set owned by the character entity
-//! and pushes a [`DebugLine`] list ready for the [`DebugRenderer`]:
+//! and pushes a [`DebugLine`] list ready for the debug renderer:
 //!
 //! - one wireframe per bone collider — a sphere for
 //!   `BoneShape::Sphere` entries (head, jaw, eyes, ...) and a

@@ -1,5 +1,6 @@
 use crate::error::EneConfigError;
 use crate::user_persona::UserPersona;
+use figment::{Figment, providers::Env};
 use indexmap::IndexMap;
 use schemars::JsonSchema;
 use std::collections::HashMap;
@@ -213,7 +214,7 @@ impl EneConfig {
     ///
     /// Refuses types whose `TARGET` is `Character`; those
     /// sections live in `CharacterConfig::extra` and must
-    /// go through [`CharacterConfig::get_section`]. The
+    /// go through `CharacterConfig::get_section`. The
     /// previous `debug_assert` silently read from the wrong
     /// map in release builds.
     pub fn get_section<T>(&self) -> Result<T, EneConfigError>
@@ -269,7 +270,7 @@ impl EneConfig {
     ///
     /// Refuses types whose `TARGET` is `Character`; those
     /// sections live in `CharacterConfig::extra` and must
-    /// go through [`CharacterConfig::set_section`]. The
+    /// go through `CharacterConfig::set_section`. The
     /// previous `debug_assert` silently wrote to the wrong
     /// map in release builds.
     pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
@@ -641,6 +642,16 @@ fn three_way_merge(
 /// in-memory config onto the **raw** on-disk JSON, so only genuine user edits
 /// are persisted. See [`three_way_merge`] for the merge semantics.
 fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String, EneConfigError> {
+    serialize_json_layer_with_env(config, config_path, real_env_layer())
+}
+
+/// Variant of [`serialize_json_layer`] whose layered baseline uses an
+/// injected env layer instead of the process environment.
+fn serialize_json_layer_with_env(
+    config: &EneConfig,
+    config_path: &Path,
+    env_layer: Figment,
+) -> Result<String, EneConfigError> {
     // Run the same migration the loader runs, so the baseline and the raw
     // layer agree even when the file is behind the current version (on a
     // read-only filesystem the migration cannot persist, so reading the
@@ -649,7 +660,7 @@ fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String
     let raw_layer =
         serde_json::from_str::<serde_json::Value>(&migrate_settings_file(config_path)?)?;
 
-    let baseline = extract_layered_config(config_path)?;
+    let baseline = extract_layered_config_with_env(config_path, env_layer)?;
     let baseline_val = serde_json::to_value(&baseline)?;
     let mut current_val = serde_json::to_value(config)?;
 
@@ -679,14 +690,13 @@ fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String
             );
         }
         // Re-insert at the front so `$schema` always leads.
-        if let Some(schema_val) = obj.remove("$schema") {
-            let mut reordered = serde_json::Map::new();
-            reordered.insert("$schema".to_string(), schema_val);
-            for (k, v) in obj.iter() {
-                reordered.insert(k.clone(), v.clone());
-            }
-            *obj = reordered;
+        let schema_val = obj.remove("$schema").unwrap_or_default();
+        let mut reordered = serde_json::Map::new();
+        reordered.insert("$schema".to_string(), schema_val);
+        for (k, v) in obj.iter() {
+            reordered.insert(k.clone(), v.clone());
         }
+        *obj = reordered;
     }
 
     Ok(serde_json::to_string_pretty(&merged)?)
@@ -867,7 +877,7 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
 
 /// # Config-version migration
 ///
-/// Before the figment pipeline runs, [`migrate_settings_file`] reads the raw
+/// Before the figment pipeline runs, `migrate_settings_file` reads the raw
 /// file and applies any registered
 /// [config-version migrations](crate::migration), persisting the upgraded
 /// document. The (possibly migrated) JSON is then fed to figment as a string
@@ -888,28 +898,21 @@ pub fn load_full_config_from(config_path: &Path) -> Result<EneConfig, EneConfigE
     Ok(config)
 }
 
-/// Shared by [`load_full_config_from`] (the load path) and
-/// [`serialize_json_layer`] (the save path). The save path needs the
+/// Shared by `load_full_config_from` (the load path) and
+/// `serialize_json_layer` (the save path). The save path needs the
 /// exact same baseline the loader produced so it can isolate the user's
 /// in-session mutations from the defaults and env layers.
-fn extract_layered_config(config_path: &Path) -> Result<EneConfig, EneConfigError> {
-    use figment::{
-        Figment,
-        providers::{Env, Format, Json, Serialized},
-    };
+fn extract_layered_config_with_env(
+    config_path: &Path,
+    env_layer: Figment,
+) -> Result<EneConfig, EneConfigError> {
+    use figment::providers::{Format, Json, Serialized};
 
     let settings_json = migrate_settings_file(config_path)?;
 
     let figment = Figment::from(Serialized::defaults(EneConfig::default()))
         .merge(Json::string(&settings_json))
-        // `.map(...)` makes env vars case-insensitive against the
-        // lowercase config keys, matching the documented
-        // `ENE_AI__TASKS__CHAT__MODEL` examples.
-        .merge(
-            Env::prefixed("ENE_")
-                .split("__")
-                .map(|k| k.as_str().to_lowercase().into()),
-        );
+        .merge(env_layer);
 
     let mut config: EneConfig = figment.extract().map_err(|e| {
         EneConfigError::GenericConfigError(format!("configuration extract failed: {e}"))
@@ -927,6 +930,20 @@ fn extract_layered_config(config_path: &Path) -> Result<EneConfig, EneConfigErro
 
     update_global_config(config.clone());
     Ok(config)
+}
+
+/// The `.map(...)` makes env vars case-insensitive against the lowercase
+/// config keys, matching the documented `ENE_AI__TASKS__CHAT__MODEL` examples.
+fn real_env_layer() -> Figment {
+    Figment::from(
+        Env::prefixed("ENE_")
+            .split("__")
+            .map(|k| k.as_str().to_lowercase().into()),
+    )
+}
+
+fn extract_layered_config(config_path: &Path) -> Result<EneConfig, EneConfigError> {
+    extract_layered_config_with_env(config_path, real_env_layer())
 }
 
 /// Returns an empty `Vec` when the file is missing, unreadable, not valid
@@ -1120,7 +1137,7 @@ fn restore_top_level_order(extra: &mut IndexMap<String, serde_json::Value>, orde
 
 /// Only the JSON layer is persisted: `ENE_` env-var overrides and defaults are
 /// excluded so a transient env override never becomes permanent. See
-/// [`serialize_json_layer`] for the layer-reconstruction details.
+/// `serialize_json_layer` for the layer-reconstruction details.
 ///
 /// `$schema` is auto-filled on the serialised copy when empty so the persisted
 /// file always leads with the schema pointer.
@@ -1153,37 +1170,55 @@ where
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "test-only set_var/remove_var under a process-global mutex"
-)]
 mod tests {
     use super::*;
-    use figment::{
-        Figment,
-        providers::{Env, Format, Json, Serialized},
-    };
-    use std::sync::Mutex;
+    use figment::providers::{Format, Json, Serialized};
 
-    /// env-var tests in this module call `set_var`, which is process-global
-    /// and panics if invoked concurrently from multiple threads. A static
-    /// mutex serializes them. The `load_full_config_from` tests also take it:
-    /// their `ENE_`-prefixed provider would otherwise pick up a concurrent
-    /// test's `ENE_TEST_*` variable and grow `extra` with a stray key.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// Explicit-input replacement for mutating the process environment:
+    /// builds the same case-folded, `__`-split layer the real `ENE_` provider
+    /// produces, but from pairs passed by the test.
+    fn pairs_env_layer<const N: usize>(pairs: [(&str, &str); N]) -> Figment {
+        // Fold each pair the same way the real provider folds env-var names:
+        // lowercase the whole key, then split on `__` into a nested dict.
+        let mut data = figment::value::Dict::new();
+        for (key, value) in pairs {
+            let path: Vec<&str> = key.split("__").collect();
+            let mut node = figment::value::Value::from(value.to_string());
+            for component in path.iter().rev() {
+                let mut level = figment::value::Dict::new();
+                level.insert((*component).to_lowercase(), node);
+                node = figment::value::Value::from(level);
+            }
+            merge_nested_dict(&mut data, &node);
+        }
+        Figment::from(Serialized::defaults(data))
+    }
 
-    /// Direct re-implementation of the `load_full_config_from` env-var
-    /// merging logic, but with `assets_dir` and `config_path` injected
-    /// rather than read from the global paths, so we can test the
-    /// env-var folding in isolation.
-    fn figment_with_settings_json(config_path: &Path) -> Figment {
+    /// Merges `value` (a nested dict produced by [`pairs_env_layer`]) into
+    /// `data`, creating intermediate levels as needed so multiple pairs that
+    /// share a top-level section do not overwrite each other.
+    fn merge_nested_dict(data: &mut figment::value::Dict, value: &figment::value::Value) {
+        let figment::value::Value::Dict(_, nested) = value else {
+            return;
+        };
+        for (key, val) in nested {
+            match data.get_mut(key.as_str()) {
+                Some(figment::value::Value::Dict(_, existing)) => {
+                    merge_nested_dict(existing, val);
+                }
+                _ => {
+                    data.insert(key.clone(), val.clone());
+                }
+            }
+        }
+    }
+
+    /// Same layering as `extract_layered_config`, but with the env layer
+    /// injected instead of read from the process environment.
+    fn figment_with_settings_json_and_env(config_path: &Path, env_layer: Figment) -> Figment {
         Figment::from(Serialized::defaults(EneConfig::default()))
             .merge(Json::file(config_path))
-            .merge(
-                Env::prefixed("ENE_TEST_")
-                    .split("__")
-                    .map(|k| k.as_str().to_lowercase().into()),
-            )
+            .merge(env_layer)
     }
 
     /// Inspect the env-var-derived `extra` map directly, instead of
@@ -1204,23 +1239,15 @@ mod tests {
     /// silently got nothing. (Same folding applies to `ENE_AI__…` paths.)
     #[test]
     fn env_uppercase_folds_to_lowercase_path() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
-        unsafe {
-            std::env::set_var("ENE_TEST_PROVIDER__API_KEY", "sk-test-1234");
-        }
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, "{}").expect("write empty settings fixture");
 
-        let fig = figment_with_settings_json(&path);
+        let fig = figment_with_settings_json_and_env(
+            &path,
+            pairs_env_layer([("PROVIDER__API_KEY", "sk-test-1234")]),
+        );
         let cfg: EneConfig = fig.extract().expect("empty settings extracts defaults");
-
-        unsafe {
-            std::env::remove_var("ENE_TEST_PROVIDER__API_KEY");
-        }
 
         let keys = extra_keys(&cfg);
         assert!(
@@ -1237,24 +1264,17 @@ mod tests {
     /// idempotent for already-lowercase input.
     #[test]
     fn env_lowercase_works() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("ENE_TEST_provider__api_key", "sk-lowercase");
-        }
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, "{}").expect("write empty settings fixture");
 
-        let fig = figment_with_settings_json(&path);
+        let fig = figment_with_settings_json_and_env(
+            &path,
+            pairs_env_layer([("provider__api_key", "sk-lowercase")]),
+        );
         let cfg: EneConfig = fig
             .extract()
             .expect("env-var override merges into defaults");
-
-        unsafe {
-            std::env::remove_var("ENE_TEST_provider__api_key");
-        }
 
         let keys = extra_keys(&cfg);
         assert!(
@@ -1566,29 +1586,20 @@ mod tests {
     #[test]
     fn env_override_not_persisted_on_save() {
         let _guard = migration_guard();
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, "{}").expect("seed empty settings");
 
-        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
-        unsafe {
-            std::env::set_var("ENE_AI__TASKS__CHAT__MODEL", "gpt-env-override");
-        }
+        let env = pairs_env_layer([("AI__TASKS__CHAT__MODEL", "gpt-env-override")]);
 
-        let config = extract_layered_config(&path).expect("load");
+        let config = extract_layered_config_with_env(&path, env.clone()).expect("load");
         assert_eq!(
             config.get_path("ai.tasks.chat.model"),
             Some(serde_json::Value::String("gpt-env-override".to_string())),
             "env override must apply at runtime"
         );
 
-        let json = serialize_json_layer(&config, &path).expect("serialize");
-        unsafe {
-            std::env::remove_var("ENE_AI__TASKS__CHAT__MODEL");
-        }
+        let json = serialize_json_layer_with_env(&config, &path, env).expect("serialize");
 
         let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert!(
@@ -1602,25 +1613,16 @@ mod tests {
     #[test]
     fn genuine_change_persists_but_env_override_does_not() {
         let _guard = migration_guard();
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, r#"{"user_name":"DiskName"}"#).expect("seed settings");
 
-        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
-        unsafe {
-            std::env::set_var("ENE_AI__TASKS__CHAT__MODEL", "gpt-env");
-        }
+        let env = pairs_env_layer([("AI__TASKS__CHAT__MODEL", "gpt-env")]);
 
-        let mut config = extract_layered_config(&path).expect("load");
+        let mut config = extract_layered_config_with_env(&path, env.clone()).expect("load");
         config.user_name = "ChangedByUser".to_string();
 
-        let json = serialize_json_layer(&config, &path).expect("serialize");
-        unsafe {
-            std::env::remove_var("ENE_AI__TASKS__CHAT__MODEL");
-        }
+        let json = serialize_json_layer_with_env(&config, &path, env).expect("serialize");
 
         let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(
@@ -1637,9 +1639,6 @@ mod tests {
     #[test]
     fn save_preserves_raw_key_order() {
         let _guard = migration_guard();
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         // Deliberately out of alphabetical order: `zeta` before `alpha`.
@@ -1678,9 +1677,6 @@ mod tests {
     #[test]
     fn defaults_not_forced_to_disk_on_save() {
         let _guard = migration_guard();
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, r#"{"user_name":"OnlyThis"}"#).expect("seed settings");
@@ -1829,9 +1825,6 @@ mod tests {
     #[test]
     fn plugins_profile_env_override_resolves() {
         let _guard = migration_guard();
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(
@@ -1843,14 +1836,11 @@ mod tests {
         )
         .expect("seed settings");
 
-        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
-        unsafe {
-            std::env::set_var("ENE_PLUGINS__PROFILE", "headless");
-        }
-        let config = extract_layered_config(&path).expect("load");
-        unsafe {
-            std::env::remove_var("ENE_PLUGINS__PROFILE");
-        }
+        let config = extract_layered_config_with_env(
+            &path,
+            pairs_env_layer([("PLUGINS__PROFILE", "headless")]),
+        )
+        .expect("load");
 
         assert_eq!(
             config.get_path("plugins.profile"),
@@ -2005,9 +1995,6 @@ mod tests {
     #[test]
     fn load_then_save_restores_file_section_order() {
         let _guard = migration_guard();
-        let _env_guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         write_ordered_settings_fixture(&path);
@@ -2043,9 +2030,6 @@ mod tests {
     #[test]
     fn load_then_save_appends_new_section_after_recorded_order() {
         let _guard = migration_guard();
-        let _env_guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         write_ordered_settings_fixture(&path);
@@ -2079,9 +2063,6 @@ mod tests {
     #[test]
     fn set_schema_via_set_path_round_trips() {
         let _guard = migration_guard();
-        let _env_guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         write_ordered_settings_fixture(&path);

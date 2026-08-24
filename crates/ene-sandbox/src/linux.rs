@@ -2,7 +2,7 @@
 //! opt-in cgroup v2 and network namespaces.
 //!
 //! All layers run in the child between `fork()` and `exec()` via
-//! [`prepare_command`]. Every enabled layer is fail-closed: if it cannot be
+//! `prepare_command`. Every enabled layer is fail-closed: if it cannot be
 //! initialized the exec is aborted and the spawn fails.
 
 use std::collections::BTreeMap;

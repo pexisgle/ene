@@ -1,6 +1,6 @@
-//! Each system is a small, focused function that reads [`Res<T>`] /
-//! [`ResMut<T>`] and / or [`Query`] / [`MessageReader<T>`] parameters
-//! and writes back. The schedule in [`crate::schedule`] controls the
+//! Each system is a small, focused function that reads bevy `Res` /
+//! bevy `ResMut` / `Query` / `MessageReader` parameters
+//! and writes back. The schedule module controls the
 //! execution order.
 pub mod event_pump;
 pub mod physics;

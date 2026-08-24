@@ -5,7 +5,7 @@
 //! session pump forwards [`AudioChunkPayload`] values from WS `audio.chunk`
 //! events over a [`crossbeam_channel`]; the playback thread appends
 //! each chunk to the sink, feeds the same PCM to the shared
-//! [`VisemeState`](super::VisemeState) for lip-sync, and toggles the
+//! [`VisemeState`] for lip-sync, and toggles the
 //! `tts_playing` flag used for self-voice suppression. Chunks that carry
 //! sentence-scoped expression cues ([`AudioChunkPayload::cues`]) also fire
 //! those cues on the emotion pipeline timed to when that sentence's audio

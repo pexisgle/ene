@@ -3,7 +3,7 @@
 //! [`PhysicsWorld`] is a thin façade over Rapier's broad phase +
 //! integration pipeline. It owns the body / collider sets and
 //! exposes the per-frame `step`, raycast, and bone-pose update
-//! operations used by [`crate::runtime::Runtime::about_to_wait`].
+//! operations used by the runtime's per-frame tick.
 //!
 //! ## ECS integration
 //!

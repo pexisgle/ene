@@ -1,7 +1,7 @@
 //! [`first_launch_setup`] runs once per install (release asset copy);
 //! [`load_desktop_settings`] / [`init_app_state`] run at every process
 //! start; `ene-core` is spawned or attached in [`crate::core_session::CoreSession`];
-//! the winit surface setup happens in [`crate::runtime::Runtime::resumed`].
+//! the winit surface setup happens in the runtime's `resumed` handler.
 
 use std::path::PathBuf;
 

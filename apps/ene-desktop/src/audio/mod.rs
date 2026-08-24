@@ -11,7 +11,7 @@
 //! - **Capture** ([`capture`]): `cpal` input stream → energy barge-in →
 //!   [`CoreSession::barge_in`](crate::core_session::CoreSession::barge_in).
 //! - **Playback** ([`playback`]): PCM chunks from the core WS `audio.chunk`
-//!   events → `rodio` sink + [`VisemeDriver`](viseme_driver::VisemeDriver).
+//!   events → `rodio` sink + [`VisemeDriver`].
 //! - **Viseme** ([`viseme_driver`]): smoothed mouth-shape weights read
 //!   once per render frame and applied to the VRM expression layer.
 //!

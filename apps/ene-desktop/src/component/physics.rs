@@ -1,5 +1,5 @@
 //! Each component mirrors a piece of the Rapier state for a single
-//! character entity. The [`crate::plugin::PhysicsPlugin`]
+//! character entity. The physics plugin
 //! populates these from the [`crate::component::character::BoneColliders`]
 //! specs and the per-frame systems consume them to drive the
 //! Rapier body and colliders.

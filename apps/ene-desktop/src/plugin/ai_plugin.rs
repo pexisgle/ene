@@ -1,7 +1,7 @@
-//! Owns the [`CoreSessionResource`] / [`ProcessingFlag`]
+//! Owns the `CoreSessionResource` / processing-flag
 //! resources and the per-action AI consumer systems.
 //!
-//! This plugin does not construct the [`CoreSession`] itself;
+//! This plugin does not construct the `CoreSession` itself;
 //! `Runtime::resumed` does that (the bridge needs the
 //! tokio handle and the cross-thread event sender). The
 //! plugin only owns the bevy-side accessors.

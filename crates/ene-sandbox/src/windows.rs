@@ -274,6 +274,7 @@ fn primary_thread_id(process: Handle) -> Result<u32, SandboxError> {
             }
             return Ok(entry.thread_id);
         }
+        // SAFETY: Thread32Next advances the valid snapshot iterator into the initialized entry.
         found = unsafe { Thread32Next(snapshot, &raw mut entry) } != 0;
     }
     // SAFETY: closing the snapshot handle.

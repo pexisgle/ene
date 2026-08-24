@@ -2,10 +2,10 @@
 //!
 //! This plugin is responsible for:
 //!
-//! 1. Adding the [`SettingsActionEvent`](crate::event::ui_action::SettingsActionEvent)
+//! 1. Adding the [`SettingsActionEvent`]
 //!    message queue to the [`App`].
 //! 2. Spawning the single
-//!    [`SettingsUiBundle`](crate::component::ui::SettingsUiBundle)
+//!    [`SettingsUiBundle`]
 //!    entity during `Startup` so the page render functions can
 //!    read / write components through `World::get` and
 //!    `World::get_mut`.

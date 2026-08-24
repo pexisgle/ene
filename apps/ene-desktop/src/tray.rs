@@ -14,7 +14,7 @@
 //!   icon so it is not dropped when the thread returns.
 //! - On Linux: `TrayHandle::new` constructs the tray icon on the
 //!   calling (main) thread. The runtime must call
-//!   [`TrayHandle::tick_gtk`] from `about_to_wait` to pump
+//!   the GTK tick from `about_to_wait` to pump
 //!   `gtk::main_iteration_do(false)` while events are pending.
 //!
 //! In both cases, `MenuEvent`s and `TrayIconEvent::Click`s are
@@ -254,11 +254,11 @@ fn pump_win32_messages() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetMessageW, TranslateMessage,
     };
+    // SAFETY: `msg` is a valid, zero-initialized `MSG` on the stack
+    // that outlives every call, and `GetMessageW` / `TranslateMessage` /
+    // `DispatchMessageW` are invoked with `hWnd = null_mut()`, which
+    // retrieves / dispatches messages for the current thread only.
     unsafe {
-        // SAFETY: `msg` is a valid, zero-initialized `MSG` on the stack
-        // that outlives every call, and `GetMessageW` / `TranslateMessage` /
-        // `DispatchMessageW` are invoked with `hWnd = null_mut()`, which
-        // retrieves / dispatches messages for the current thread only.
         let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
