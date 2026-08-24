@@ -91,6 +91,9 @@ impl SurfaceRouter for WorkSurfaceRouter {
         }
         match kind {
             SurfaceCallKind::Run => {
+                // One id per model call: approval popups and transcript entries
+                // must reference this exact invocation, not a later retry.
+                let call_id = Uuid::now_v7().to_string();
                 if self.registry.get(name).is_some_and(|def| def.background) {
                     return start_background_outcome(BgStart {
                         host: &self.host,
@@ -101,12 +104,18 @@ impl SurfaceRouter for WorkSurfaceRouter {
                         args: bind_soul_arg(args, self.soul),
                         layer: Layer::Surface,
                         workspace: None,
+                        call_id: &call_id,
                     })
                     .await;
                 }
                 let value = self
                     .registry
-                    .execute(name, bind_soul_arg(args, self.soul), Layer::Surface)
+                    .execute_call(
+                        name,
+                        bind_soul_arg(args, self.soul),
+                        Layer::Surface,
+                        &call_id,
+                    )
                     .await
                     .map_err(|err| KernelError::Tool(err.to_string()))?;
                 self.learned.lock().push(name.to_owned());
@@ -165,6 +174,7 @@ impl SurfaceRouter for JobLayerRouter {
                 .map_err(|err| KernelError::Tool(err.to_string()))?;
         }
         if def.background {
+            let call_id = Uuid::now_v7().to_string();
             return start_background_outcome(BgStart {
                 host: &self.host,
                 registry: &self.registry,
@@ -174,6 +184,7 @@ impl SurfaceRouter for JobLayerRouter {
                 args: bind_job_arg(args, self.soul, self.job_id, name),
                 layer: Layer::Job,
                 workspace: Some(self.workspace_dir.as_path()),
+                call_id: &call_id,
             })
             .await;
         }
@@ -230,6 +241,7 @@ struct BgStart<'a> {
     args: Value,
     layer: Layer,
     workspace: Option<&'a Path>,
+    call_id: &'a str,
 }
 
 async fn start_background_outcome(start: BgStart<'_>) -> Result<SurfaceToolOutcome, KernelError> {
@@ -257,7 +269,6 @@ async fn start_background_outcome(start: BgStart<'_>) -> Result<SurfaceToolOutco
             .id
     };
     let execution_id = Uuid::now_v7().to_string();
-    let call_id = Uuid::now_v7().to_string();
     let plugin_id = match def.source {
         ToolSource::Plugin { plugin_id } => Some(plugin_id),
         ToolSource::Mcp { server } => Some(format!("mcp.{server}")),
@@ -271,7 +282,7 @@ async fn start_background_outcome(start: BgStart<'_>) -> Result<SurfaceToolOutco
             soul_id: start.soul,
             tool_name: start.name.to_owned(),
             plugin_id,
-            call_id: call_id.clone(),
+            call_id: start.call_id.to_owned(),
         })
         .map_err(|err| KernelError::Tool(err.to_string()))?;
     let started = if let Some(workspace) = start.workspace {
@@ -316,7 +327,7 @@ async fn start_background_outcome(start: BgStart<'_>) -> Result<SurfaceToolOutco
     Ok(SurfaceToolOutcome::Result(json!({
         "execution_id": execution_id,
         "job_id": job_id.to_string(),
-        "call_id": call_id,
+        "call_id": start.call_id,
         "status": "started",
     })))
 }

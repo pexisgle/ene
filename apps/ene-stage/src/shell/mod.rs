@@ -4,11 +4,22 @@ pub mod hotkeys;
 pub mod notify;
 pub mod tray;
 
+use crate::detail::DetailTab;
 use thiserror::Error;
 
-pub use hotkeys::{HotkeyManager, ShellAction};
+/// Commands emitted by shell entry points and handled by the stage app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellCommand {
+    OpenSpotlight,
+    OpenDetail(DetailTab),
+    OpenChat,
+    ToggleMic,
+    Quit,
+}
+
+pub use hotkeys::HotkeyManager;
 pub use notify::show_notification;
-pub use tray::{TrayAction, TrayManager};
+pub use tray::TrayManager;
 
 /// Initialize tracing for the stage binary.
 pub fn init_tracing() {

@@ -13,6 +13,7 @@ fn req(tool: &str, se: &[&str], sensitivity: Sensitivity, in_workspace: bool) ->
         sensitivity,
         target: "/workspace/a.txt".to_owned(),
         in_workspace,
+        call_id: "test-call".to_owned(),
     }
 }
 

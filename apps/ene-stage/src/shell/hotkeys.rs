@@ -6,13 +6,7 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use thiserror::Error;
 
-/// Window-level actions triggered by global hotkeys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShellAction {
-    OpenSpotlight,
-    ToggleMic,
-    Quit,
-}
+use super::ShellCommand;
 
 /// Registers Alt+Space and polls for global hotkey events.
 pub struct HotkeyManager {
@@ -66,14 +60,14 @@ impl HotkeyManager {
         }
     }
 
-    pub fn poll(&mut self) -> Option<ShellAction> {
+    pub fn poll(&mut self) -> Option<ShellCommand> {
         self.retry_spotlight();
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state != HotKeyState::Pressed {
                 continue;
             }
             if event.id == self.spotlight_id {
-                return Some(ShellAction::OpenSpotlight);
+                return Some(ShellCommand::OpenSpotlight);
             }
         }
         None

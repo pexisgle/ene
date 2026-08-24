@@ -18,4 +18,7 @@ pub struct AuthzRequest {
     pub sensitivity: Sensitivity,
     pub target: String,
     pub in_workspace: bool,
+    /// Model call this request belongs to; echoed so clients can correlate
+    /// the popup with the exact invocation being judged.
+    pub call_id: String,
 }

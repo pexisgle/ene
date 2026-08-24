@@ -552,6 +552,7 @@ async fn write_msg<S: AsyncWrite + Unpin>(
 }
 
 /// Connect to `ENE_PLUGIN_SOCKET` and serve provider faces until drain.
+#[cfg(feature = "net")]
 pub async fn serve_provider_from_env(
     identity: PluginIdentity,
     handlers: ProviderHandlers,
@@ -580,4 +581,17 @@ pub async fn serve_provider_from_env(
             "plugin IPC requires Unix domain sockets or Windows TCP",
         )))
     }
+}
+
+/// Report that the optional network transport was not compiled in.
+#[cfg(not(feature = "net"))]
+pub async fn serve_provider_from_env(
+    identity: PluginIdentity,
+    handlers: ProviderHandlers,
+) -> Result<(), IpcError> {
+    let _ = (identity, handlers);
+    Err(IpcError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "plugin IPC network transport is disabled",
+    )))
 }

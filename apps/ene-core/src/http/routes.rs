@@ -8,17 +8,17 @@ use axum::http::HeaderMap;
 use base64::Engine;
 use ene_api::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
-    BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
-    CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, GreetingView, Health,
-    HistoryResponse, JobView, ListProviderModelsRequest, ListProviderModelsResponse, McpDocument,
-    McpServerView, MemoryCandidateDecision, MemoryCandidateView, MemoryJournalView, MemoryPatch,
-    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
-    PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
-    PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResolveMemoryCandidateRequest,
-    ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
-    SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
-    SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView,
-    ToolTestRequest, ToolView, UsageView,
+    BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateJobRequest,
+    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot,
+    GreetingView, Health, HistoryResponse, JobView, ListProviderModelsRequest,
+    ListProviderModelsResponse, McpDocument, McpServerView, MemoryCandidateDecision,
+    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, MessageMode, MessageRequest,
+    MessageResponse, OccupantView, Page, PluginConfigErrorView, PluginConfigField,
+    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
+    PluginView, QueuedCancel, ResolveMemoryCandidateRequest, ResolveMemoryCandidateResponse,
+    ResourceKind, RestoreRequest, ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
+    SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
@@ -749,6 +749,57 @@ pub async fn list_jobs(
         state.core.work().list_jobs_all().map_err(map_work)?
     };
     Ok(Json(Page::of(jobs.into_iter().map(job_view).collect())))
+}
+
+pub async fn create_job(
+    State(state): State<AppState>,
+    Json(req): Json<CreateJobRequest>,
+) -> Result<Json<JobView>, ApiReject> {
+    let soul = parse_soul(&req.soul_id)?;
+    state
+        .core
+        .companions()
+        .get_soul(soul)
+        .map_err(map_companion)?
+        .ok_or_else(|| not_found("soul not found"))?;
+    let goal = req.goal.trim();
+    if goal.is_empty() {
+        return Err(bad_request("invalid_message", "goal required"));
+    }
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let value = state
+        .core
+        .supervisor()
+        .registry()
+        .execute(
+            "delegate.start",
+            json!({
+                "goal": goal,
+                "mode": "public",
+                "title": title,
+                "soul_id": soul.to_string(),
+            }),
+            Layer::Surface,
+        )
+        .await
+        .map_err(|err| map_pipeline(&err))?;
+    let id = value
+        .get("delegation_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad_request("fault", "job creation returned no id"))?
+        .parse::<DelegationId>()
+        .map_err(|_| bad_request("fault", "job creation returned an invalid id"))?;
+    let row = state
+        .core
+        .work()
+        .get_job(id)
+        .map_err(map_work)?
+        .ok_or_else(|| bad_request("fault", "job creation returned no job"))?;
+    Ok(Json(job_view(row)))
 }
 
 pub async fn get_job(
@@ -1675,6 +1726,7 @@ pub async fn list_approvals(State(state): State<AppState>) -> Json<Page<Approval
             tool: item.tool,
             target: item.target,
             side_effects: item.side_effects,
+            call_id: item.call_id,
         })
         .collect();
     Json(Page::of(items))
@@ -2749,12 +2801,24 @@ fn map_companion(err: ene_companion::CompanionError) -> ApiReject {
     }
 }
 
+fn map_pipeline(err: &ene_registry::PipelineError) -> ApiReject {
+    match &err {
+        ene_registry::PipelineError::Denied { .. }
+        | ene_registry::PipelineError::Plane(ene_plane::PlaneError::Denied { .. }) => {
+            forbidden("job creation denied").with_detail(err.to_string())
+        }
+        _ => bad_request("fault", &err.to_string()),
+    }
+}
+
 fn map_work(err: ene_work::WorkError) -> ApiReject {
     match err {
         ene_work::WorkError::UnknownJob(_) | ene_work::WorkError::UnknownSchedule(_) => {
             not_found(&err.to_string())
         }
-        ene_work::WorkError::NoOpenQuestion => conflict("question_closed", &err.to_string()),
+        ene_work::WorkError::NoOpenQuestion | ene_work::WorkError::QuestionAlreadyResolved => {
+            conflict("question_closed", &err.to_string())
+        }
         ene_work::WorkError::QuestionAnswerCount { .. } => {
             bad_request("invalid_message", &err.to_string())
         }
@@ -2789,15 +2853,14 @@ pub(crate) fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
                 .map_or_else(|| report.soul_id.to_string(), |id| id.to_string());
             state.events.emit(
                 DisplayDepth::Surface,
-                json!({
-                    "type": ene_api::QUESTION_ASKED_EVENT,
-                    "id": id,
-                    "soul_id": report.soul_id.to_string(),
-                    "prompt": prompt,
-                    "text": prompt,
-                    "questions": questions,
-                    "question_ids": question_ids,
-                }),
+                ene_api::QuestionEvent {
+                    soul_id: Some(report.soul_id.to_string()),
+                    id,
+                    prompt: Some(prompt.clone()),
+                    questions,
+                    question_ids,
+                }
+                .to_value(ene_api::QuestionEventKind::Asked),
             );
         }
         state.events.emit(
@@ -2850,10 +2913,14 @@ fn ask_user_prompt(
 pub(crate) fn emit_question_resolved(state: &AppState, job_id: DelegationId) {
     state.events.emit(
         DisplayDepth::Surface,
-        json!({
-            "type": ene_api::QUESTION_RESOLVED_EVENT,
-            "id": job_id.to_string(),
-        }),
+        ene_api::QuestionEvent {
+            id: job_id.to_string(),
+            soul_id: None,
+            prompt: None,
+            questions: Vec::new(),
+            question_ids: Vec::new(),
+        }
+        .to_value(ene_api::QuestionEventKind::Resolved),
     );
 }
 

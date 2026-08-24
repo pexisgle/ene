@@ -1,24 +1,28 @@
 //! Detail window: eight new-core IA sections plus a session log.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, ApiError, CharacterView, JobView, MemoryCandidateDecision, MemoryCandidateView,
-    MemoryJournalView, MemoryPatch, MemoryView, OccupantView, PluginConfigField,
-    PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
+    ApiClient, ApiError, CharacterView, CreateJobRequest, JobView, MemoryCandidateDecision,
+    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, OccupantView,
+    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
     ResolveMemoryCandidateRequest, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::runtime::Handle;
 
+mod primitives;
+
 use crate::core::session::prepare_soul_target;
-use crate::i18n;
 use crate::settings::DesktopSettings;
 use crate::tasks::{ActivatedCharacter, AsyncOutcome};
+use primitives::{EmptyState, SectionHeading, StatusCard, StatusTone, danger_hint};
+
+use crate::i18n;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailTab {
@@ -279,7 +283,7 @@ enum SettingsLoadState {
     Loaded,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct DetailUiState {
     pub visible: bool,
     pub tab: DetailTab,
@@ -321,12 +325,16 @@ pub struct DetailUiState {
     pub pending_memories: Vec<MemoryCandidateView>,
     pub memory_journal: Vec<MemoryJournalView>,
     pub candidate_drafts: HashMap<String, MemoryCandidateDraft>,
+    pub shared_accept_armed: HashSet<String>,
     pub soul: Option<SoulView>,
     pub characters: Vec<CharacterView>,
     pub occupants: Vec<OccupantView>,
     pub body_ref_draft: String,
     pub jobs: Vec<JobView>,
     pub schedules: Vec<ScheduleView>,
+    pub new_job_title: String,
+    pub new_job_goal: String,
+    pub new_job_inflight: bool,
     pub plugins: Vec<PluginView>,
     pub provider_assets_plugin: String,
     pub provider_assets: Vec<ProviderAssetView>,
@@ -362,7 +370,7 @@ pub struct DetailUiState {
     loaded: DetailLoaded,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct DetailLoaded {
     memory: bool,
     character: bool,
@@ -449,16 +457,31 @@ impl DetailUiState {
         self.pending_memories.clear();
         self.memory_journal.clear();
         self.candidate_drafts.clear();
+        self.shared_accept_armed.clear();
     }
 
     pub(crate) fn sync_candidate_drafts(&mut self, candidates: &[MemoryCandidateView]) {
         self.candidate_drafts
             .retain(|id, _| candidates.iter().any(|candidate| candidate.id == *id));
+        self.shared_accept_armed
+            .retain(|id| candidates.iter().any(|candidate| candidate.id == *id));
         for candidate in candidates {
             self.candidate_drafts
                 .entry(candidate.id.clone())
                 .or_insert_with(|| MemoryCandidateDraft::from(candidate));
         }
+    }
+
+    pub(crate) fn pending_count(&self) -> usize {
+        self.pending_memories.len()
+    }
+
+    /// Resolve removes the row before the server answers; the follow-up
+    /// refresh is authoritative and restores the row when the resolve failed.
+    pub(crate) fn remove_candidate(&mut self, id: &str) {
+        self.pending_memories.retain(|candidate| candidate.id != id);
+        self.candidate_drafts.remove(id);
+        self.shared_accept_armed.remove(id);
     }
 }
 
@@ -815,14 +838,6 @@ impl SetupCard {
         }
     }
 
-    fn color(self) -> egui::Color32 {
-        match self.state {
-            SetupState::Ready => egui::Color32::LIGHT_GREEN,
-            SetupState::NeedsSetup => egui::Color32::YELLOW,
-            SetupState::Error => egui::Color32::LIGHT_RED,
-        }
-    }
-
     fn detail(self, state: &DetailUiState) -> String {
         match self.tab {
             DetailTab::Conversation => home_chat_next_step(state),
@@ -843,6 +858,31 @@ impl SetupCard {
             _ => String::new(),
         }
     }
+}
+
+fn home_status_cards(state: &DetailUiState) -> Vec<(DetailTab, StatusCard)> {
+    setup_cards(state)
+        .into_iter()
+        .map(|card| {
+            let tone = match card.state {
+                SetupState::Ready => StatusTone::Ready,
+                SetupState::NeedsSetup => StatusTone::NeedsConfig,
+                SetupState::Error => StatusTone::Error,
+            };
+            let detail = card.detail(state);
+            let status_card = StatusCard {
+                state: tone,
+                title: card.title(),
+                summary: if detail.is_empty() {
+                    card.state_label()
+                } else {
+                    format!("{} — {detail}", card.state_label())
+                },
+                action_label: Some(i18n::fl("home-open-card")),
+            };
+            (card.tab, status_card)
+        })
+        .collect()
 }
 
 fn setup_cards(state: &DetailUiState) -> Vec<SetupCard> {
@@ -1068,21 +1108,11 @@ fn show_home(
         });
     }
     ui.heading(i18n::fl("detail-tab-home"));
-    for card in setup_cards(state) {
-        ui.group(|ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.strong(card.title());
-                ui.colored_label(
-                    card.color(),
-                    format!("{} {}", i18n::fl("home-status-prefix"), card.state_label()),
-                );
-            });
-            ui.label(card.detail(state));
-            if ui.button(i18n::fl("home-open-card")).clicked() {
-                state.select_tab(card.tab);
-            }
-        });
+    let cards: Vec<(DetailTab, StatusCard)> = home_status_cards(state);
+    for (tab, card) in cards {
+        if card.show(ui) {
+            state.select_tab(tab);
+        }
     }
     let optional = optional_unconfigured(&state.unconfigured);
     if !optional.is_empty() {
@@ -1251,6 +1281,7 @@ fn show_companion(
     }
     ui.label(i18n::fl("character-export-hint"));
     ui.collapsing(i18n::fl("character-advanced"), |ui| {
+        ui.weak(i18n::fl("character-advanced-help"));
         if let Some(soul) = &state.soul {
             ui.label(format!("{}: {}", i18n::fl("character-soul"), soul.id));
             ui.label(format!(
@@ -1271,7 +1302,19 @@ fn show_companion(
                 soul.body_ref.as_deref().unwrap_or("none")
             ));
         }
-        ui.label(i18n::fl("character-occupants"));
+        SectionHeading {
+            title: i18n::fl("character-occupants"),
+            help: i18n::fl("character-occupants-help"),
+        }
+        .show(ui);
+        if renderable_occupants(&state.occupants).next().is_none() {
+            EmptyState {
+                title: i18n::fl("character-occupants-empty"),
+                explanation: i18n::fl("character-occupants-empty-help"),
+                action_label: None,
+            }
+            .show(ui);
+        }
         for occupant in renderable_occupants(&state.occupants) {
             ui.label(format!(
                 "{}\n{}  body={}  avatar={}",
@@ -1310,6 +1353,14 @@ fn show_companion(
     });
     ui.separator();
     let mut activate_id = None;
+    if state.characters.is_empty() {
+        EmptyState {
+            title: i18n::fl("character-list-empty"),
+            explanation: i18n::fl("character-list-empty-help"),
+            action_label: Some(i18n::fl("character-import")),
+        }
+        .show(ui);
+    }
     egui::ScrollArea::vertical()
         .max_height(240.0)
         .show(ui, |ui| {
@@ -1346,8 +1397,11 @@ fn show_conversation(
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     ensure_settings(state, client, rt, async_results);
-    ui.heading(i18n::fl("detail-tab-conversation"));
-    ui.label(i18n::fl("settings-chat-guide"));
+    SectionHeading {
+        title: i18n::fl("detail-tab-conversation"),
+        help: i18n::fl("settings-chat-guide"),
+    }
+    .show(ui);
     show_chat_provider_setup(ui, state, client, rt, async_results);
     ui.separator();
     ui.label(i18n::fl("home-optional-tasks"));
@@ -1509,6 +1563,14 @@ fn show_chat_provider_setup(
     });
     let query = state.provider_model_filter.clone();
     let mut picked = None;
+    if filtered_provider_models(&state.provider_models, &query).is_empty() {
+        EmptyState {
+            title: i18n::fl("settings-models-empty"),
+            explanation: i18n::fl("settings-list-models-empty"),
+            action_label: Some(i18n::fl("settings-list-models")),
+        }
+        .show(ui);
+    }
     egui::ScrollArea::vertical()
         .id_salt("provider-models")
         .max_height(180.0)
@@ -1583,8 +1645,11 @@ fn show_voice(
         state.mic_devices = crate::audio::AudioHub::list_input_device_names();
         state.mic_devices_loaded = true;
     }
-    ui.heading(i18n::fl("detail-tab-voice"));
-    ui.label(i18n::fl("settings-voice-guide"));
+    SectionHeading {
+        title: i18n::fl("detail-tab-voice"),
+        help: i18n::fl("settings-voice-guide"),
+    }
+    .show(ui);
     let providers = state.providers.clone();
     show_voice_task(
         ui,
@@ -1742,7 +1807,7 @@ struct VoiceTaskForm<'a> {
 }
 
 fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm<'_>) {
-    ui.heading(form.label);
+    ui.heading(&form.label);
     let choices = provider_choices_for_seam(providers, form.seam);
     let selected = if form.plugin.is_empty() || form.plugin == "echo" {
         i18n::fl("settings-voice-provider-none")
@@ -1810,11 +1875,25 @@ fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm
     let ready = !form.plugin.is_empty()
         && form.plugin != "echo"
         && (!plugin_needs_key(form.plugin, providers) || *form.key_set || !form.api_key.is_empty());
-    ui.label(if ready {
-        i18n::fl("settings-voice-ready")
-    } else {
-        i18n::fl("settings-voice-not-configured")
-    });
+    StatusCard {
+        state: if ready {
+            StatusTone::Ready
+        } else if choices.is_empty() {
+            StatusTone::Error
+        } else {
+            StatusTone::NeedsConfig
+        },
+        title: form.label.clone(),
+        summary: if ready {
+            i18n::fl("settings-voice-ready")
+        } else if choices.is_empty() {
+            i18n::fl("settings-voice-provider-empty")
+        } else {
+            i18n::fl("settings-voice-not-configured")
+        },
+        action_label: None,
+    }
+    .show(ui);
 }
 
 fn show_voice_provider_config_button(
@@ -1912,22 +1991,41 @@ fn show_memory(
         state.loaded.memory = false;
     }
     let pending = state.pending_memories.clone();
-    ui.heading(format!(
-        "{} ({})",
-        i18n::fl("memory-candidates"),
-        pending.len()
-    ));
+    SectionHeading {
+        title: i18n::fl("memory-candidates"),
+        help: i18n::fl("memory-candidates-help"),
+    }
+    .show(ui);
+    ui.weak(format!("{}", state.pending_count()));
     if pending.is_empty() {
-        ui.label(i18n::fl("memory-pending-empty"));
+        EmptyState {
+            title: i18n::fl("memory-pending-empty"),
+            explanation: i18n::fl("memory-pending-empty-help"),
+            action_label: None,
+        }
+        .show(ui);
     }
     for candidate in pending {
         let draft = state
             .candidate_drafts
             .entry(candidate.id.clone())
             .or_insert_with(|| MemoryCandidateDraft::from(&candidate));
+        let shared = candidate.scope == "shared" || draft.scope == "shared";
+        let armed = state.shared_accept_armed.contains(&candidate.id);
         let mut accept = false;
         let mut reject = false;
-        ui.group(|ui| {
+        let card = if shared {
+            egui::Frame::new()
+                .stroke(egui::Stroke::new(1.5, egui::Color32::YELLOW))
+                .inner_margin(egui::Margin::same(8))
+                .corner_radius(6.0)
+        } else {
+            egui::Frame::group(ui.style())
+        };
+        card.show(ui, |ui| {
+            if shared {
+                ui.colored_label(egui::Color32::YELLOW, i18n::fl("memory-shared-badge"));
+            }
             ui.horizontal(|ui| {
                 ui.label(i18n::fl("memory-title"));
                 ui.text_edit_singleline(&mut draft.title);
@@ -1971,50 +2069,59 @@ fn show_memory(
                     });
             });
             ui.label(format!(
-                "{}: {:.0}%",
+                "{} · {} · {}: {:.0}%",
+                memory_kind_label(&candidate.kind),
+                memory_scope_label(&candidate.scope),
                 i18n::fl("memory-confidence"),
                 candidate.confidence * 100.0
             ));
             if candidate.sensitive {
                 ui.colored_label(egui::Color32::YELLOW, i18n::fl("memory-sensitive"));
             }
-            if candidate.scope == "shared" || draft.scope == "shared" {
+            if shared {
                 ui.colored_label(egui::Color32::YELLOW, i18n::fl("memory-shared-warning"));
             }
             ui.horizontal(|ui| {
-                if ui.button(i18n::fl("memory-accept")).clicked() {
-                    accept = true;
+                if shared && !armed {
+                    if ui.button(i18n::fl("memory-accept-confirm")).clicked() {
+                        state.shared_accept_armed.insert(candidate.id.clone());
+                    }
+                } else {
+                    if ui.button(i18n::fl("memory-accept")).clicked() {
+                        accept = true;
+                    }
+                    if shared && ui.button(i18n::fl("memory-cancel")).clicked() {
+                        state.shared_accept_armed.remove(&candidate.id);
+                    }
                 }
                 if ui.button(i18n::fl("memory-reject")).clicked() {
                     reject = true;
                 }
             });
         });
-        if accept {
-            resolve_memory(
-                &candidate.id,
+        if accept || reject {
+            let payload = if accept {
                 ResolveMemoryCandidateRequest {
                     decision: MemoryCandidateDecision::Accept,
                     title: Some(draft.title.clone()),
                     content: Some(draft.content.clone()),
                     kind: Some(draft.kind.clone()),
                     scope: Some(draft.scope.clone()),
-                },
-                soul_id,
-                client,
-                rt,
-                async_results,
-            );
-        } else if reject {
-            resolve_memory(
-                &candidate.id,
+                }
+            } else {
                 ResolveMemoryCandidateRequest {
                     decision: MemoryCandidateDecision::Reject,
                     title: None,
                     content: None,
                     kind: None,
                     scope: None,
-                },
+                }
+            };
+            state.remove_candidate(&candidate.id);
+            resolve_memory(
+                &candidate.id,
+                payload,
+                &candidate,
                 soul_id,
                 client,
                 rt,
@@ -2123,7 +2230,12 @@ fn show_memory(
         .filter(|memory| memory.kind != "commitment")
         .collect();
     if others.is_empty() && state.memories.is_empty() {
-        ui.label(i18n::fl("memory-empty"));
+        EmptyState {
+            title: i18n::fl("memory-empty"),
+            explanation: i18n::fl("memory-empty-help"),
+            action_label: None,
+        }
+        .show(ui);
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
         for memory in others {
@@ -2185,6 +2297,7 @@ fn memory_journal_action_label(value: &str) -> String {
 fn resolve_memory(
     id: &str,
     request: ResolveMemoryCandidateRequest,
+    original: &MemoryCandidateView,
     soul_id: &str,
     client: &Arc<ApiClient>,
     rt: &Handle,
@@ -2192,16 +2305,26 @@ fn resolve_memory(
 ) {
     let id = id.to_owned();
     let soul_id = soul_id.to_owned();
+    let original = original.clone();
     let client = Arc::clone(client);
     spawn_async(rt, async_results, async move {
-        AsyncOutcome::ResolveMemory {
-            soul_id,
-            id: id.clone(),
-            result: client
-                .resolve_memory_candidate(&id, &request)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
+        let result = client
+            .resolve_memory_candidate(&id, &request)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        if result.is_ok() {
+            AsyncOutcome::ResolveMemory {
+                soul_id,
+                id: id.clone(),
+                result,
+            }
+        } else {
+            AsyncOutcome::ResolveMemoryFailedKeepCandidate {
+                soul_id,
+                original,
+                result,
+            }
         }
     });
 }
@@ -2303,10 +2426,42 @@ fn show_work(
         }
     });
     ui.label(i18n::fl("jobs-export-hint"));
+    ui.heading(i18n::fl("jobs-new"));
+    ui.label(i18n::fl("jobs-new-hint"));
+    ui.add(
+        egui::TextEdit::singleline(&mut state.new_job_title).hint_text(i18n::fl("jobs-new-title")),
+    );
+    ui.add(
+        egui::TextEdit::multiline(&mut state.new_job_goal)
+            .desired_rows(3)
+            .hint_text(i18n::fl("jobs-new-goal")),
+    );
+    let can_create = !state.new_job_inflight && !state.new_job_goal.trim().is_empty();
+    if ui
+        .add_enabled(can_create, egui::Button::new(i18n::fl("jobs-create")))
+        .clicked()
+    {
+        state.new_job_inflight = true;
+        let request = CreateJobRequest {
+            soul_id: soul_id.to_owned(),
+            goal: state.new_job_goal.trim().to_owned(),
+            title: (!state.new_job_title.trim().is_empty())
+                .then(|| state.new_job_title.trim().to_owned()),
+        };
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::CreateJob(client.create_job(&request).await.map_err(|e| e.to_string()))
+        });
+    }
     ui.heading(i18n::fl("jobs-active"));
     let active_jobs = active_jobs(&state.jobs);
     if active_jobs.is_empty() {
-        ui.label(i18n::fl("jobs-empty"));
+        EmptyState {
+            title: i18n::fl("jobs-empty"),
+            explanation: i18n::fl("jobs-empty-help"),
+            action_label: None,
+        }
+        .show(ui);
     }
     for job in active_jobs {
         ui.horizontal(|ui| {
@@ -2326,6 +2481,13 @@ fn show_work(
                 });
             }
         });
+    }
+    let recent_jobs = recent_jobs(&state.jobs);
+    if !recent_jobs.is_empty() {
+        ui.heading(i18n::fl("jobs-recent"));
+        for job in recent_jobs {
+            ui.label(format!("{} [{}] {}", job.title, job.status, job.id));
+        }
     }
     ui.heading(i18n::fl("jobs-schedules"));
     for schedule in &state.schedules {
@@ -2362,6 +2524,18 @@ fn show_work(
 fn active_jobs(jobs: &[JobView]) -> Vec<&JobView> {
     jobs.iter()
         .filter(|job| matches!(job.status.as_str(), "created" | "queued" | "running"))
+        .collect()
+}
+
+fn recent_jobs(jobs: &[JobView]) -> Vec<&JobView> {
+    jobs.iter()
+        .filter(|job| {
+            matches!(
+                job.status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            )
+        })
+        .take(5)
         .collect()
 }
 
@@ -2402,7 +2576,11 @@ fn show_connections(
             )
         });
     }
-    ui.heading(i18n::fl("detail-tab-connections"));
+    SectionHeading {
+        title: i18n::fl("detail-tab-connections"),
+        help: i18n::fl("connections-help"),
+    }
+    .show(ui);
     ui.horizontal(|ui| {
         ui.label(i18n::fl("settings-plugins-profile"));
         for profile in ["desktop", "minimal", "headless"] {
@@ -2431,39 +2609,48 @@ fn show_connections(
         }
     });
     ui.label(i18n::fl("plugins-no-enable-map"));
-    for plugin in state.plugins.clone() {
-        ui.horizontal(|ui| {
-            ui.label(format!(
-                "{} ({}) — {}",
-                plugin.plugin, plugin.state, plugin.row_id
-            ));
-            if ui.button(i18n::fl("plugins-restart")).clicked() {
-                let id = plugin.row_id.clone();
-                let client = Arc::clone(client);
-                spawn_async(rt, async_results, async move {
-                    AsyncOutcome::RestartPlugin {
-                        id: id.clone(),
-                        result: client
-                            .restart_plugin(&id)
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| e.to_string()),
-                    }
+    if state.plugins.is_empty() {
+        EmptyState {
+            title: i18n::fl("connections-empty"),
+            explanation: i18n::fl("connections-empty-help"),
+            action_label: None,
+        }
+        .show(ui);
+    } else {
+        for plugin in state.plugins.clone() {
+            ui.horizontal(|ui| {
+                ui.label(format!("{} ({})", plugin.plugin, plugin.state));
+                ui.collapsing(i18n::fl("plugins-row-id"), |ui| {
+                    ui.label(&plugin.row_id);
                 });
-            }
-            if ui.button(i18n::fl("plugins-config")).clicked() {
-                let id = plugin.row_id.clone();
-                let request_id = begin_plugin_config_load(state, &id);
-                let client = Arc::clone(client);
-                spawn_async(rt, async_results, async move {
-                    AsyncOutcome::LoadPluginConfig {
-                        request_id,
-                        id: id.clone(),
-                        result: client.plugin_config(&id).await.map_err(|e| e.to_string()),
-                    }
-                });
-            }
-        });
+                if ui.button(i18n::fl("plugins-restart")).clicked() {
+                    let id = plugin.row_id.clone();
+                    let client = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        AsyncOutcome::RestartPlugin {
+                            id: id.clone(),
+                            result: client
+                                .restart_plugin(&id)
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| e.to_string()),
+                        }
+                    });
+                }
+                if ui.button(i18n::fl("plugins-config")).clicked() {
+                    let id = plugin.row_id.clone();
+                    let request_id = begin_plugin_config_load(state, &id);
+                    let client = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        AsyncOutcome::LoadPluginConfig {
+                            request_id,
+                            id: id.clone(),
+                            result: client.plugin_config(&id).await.map_err(|e| e.to_string()),
+                        }
+                    });
+                }
+            });
+        }
     }
     show_plugin_config(ui, state, client, rt, async_results);
     show_provider_assets(ui, state, client, rt, async_results);
@@ -3184,6 +3371,12 @@ fn show_system_inner(
                 }
             });
     });
+    if matches!(
+        normalize_approval_mode(&state.approval_mode).as_str(),
+        "auto" | "ai_auto"
+    ) {
+        danger_hint(ui, &i18n::fl("approval-auto-warning"));
+    }
     if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
         let profile = state.plugins_profile.clone();
         let mode = normalize_approval_mode(&state.approval_mode);
@@ -3607,6 +3800,80 @@ mod tests {
     }
 
     #[test]
+    fn pending_count_matches_list_length_and_empty_state() {
+        let mut state = DetailUiState::default();
+        assert_eq!(state.pending_count(), 0);
+
+        let candidate = MemoryCandidateView {
+            id: "candidate-1".to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: "private".to_owned(),
+            kind: "semantic".to_owned(),
+            title: "T".to_owned(),
+            content: "C".to_owned(),
+            confidence: 0.5,
+            sensitive: false,
+            expires_at: None,
+        };
+        state.pending_memories.push(candidate.clone());
+        assert_eq!(state.pending_count(), 1);
+    }
+
+    #[test]
+    fn resolve_removes_candidate_optimistically_by_id() {
+        let mut state = DetailUiState::default();
+        let candidate = |id: &str| MemoryCandidateView {
+            id: id.to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: "shared".to_owned(),
+            kind: "semantic".to_owned(),
+            title: format!("Title {id}"),
+            content: "C".to_owned(),
+            confidence: 0.9,
+            sensitive: true,
+            expires_at: None,
+        };
+        let candidates = vec![candidate("a"), candidate("b")];
+        state.sync_candidate_drafts(&candidates);
+        state.pending_memories = candidates;
+        state.shared_accept_armed.insert("b".to_owned());
+        assert_eq!(state.pending_memories.len(), 2);
+
+        state.remove_candidate("a");
+        assert_eq!(
+            state
+                .pending_memories
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert!(state.shared_accept_armed.contains("b"));
+        state.remove_candidate("b");
+        assert!(state.pending_memories.is_empty());
+        assert!(state.candidate_drafts.is_empty());
+        assert!(!state.shared_accept_armed.contains("b"));
+    }
+
+    #[test]
+    fn shared_scope_is_detected_from_original_or_edit() {
+        let candidate = |scope: &str| MemoryCandidateView {
+            id: "candidate-1".to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: scope.to_owned(),
+            kind: "semantic".to_owned(),
+            title: "T".to_owned(),
+            content: "C".to_owned(),
+            confidence: 0.7,
+            sensitive: false,
+            expires_at: None,
+        };
+
+        assert_eq!(candidate("shared").scope, "shared");
+        assert_ne!(candidate("private").scope, "shared");
+    }
+
+    #[test]
     fn new_chat_button_is_guarded_by_shared_inflight_state() {
         let state = DetailUiState {
             new_session_inflight: true,
@@ -3643,6 +3910,35 @@ mod tests {
             .map(|job| job.status.as_str())
             .collect::<Vec<_>>();
         assert_eq!(active, ["created", "queued", "running"]);
+    }
+
+    #[test]
+    fn recent_jobs_keeps_terminal_jobs_in_api_order_and_caps_the_list() {
+        let job = |id: usize, status: &str| JobView {
+            id: id.to_string(),
+            soul_id: "soul".to_owned(),
+            title: "task".to_owned(),
+            goal: String::new(),
+            status: status.to_owned(),
+            progress_fraction: None,
+            progress_note: None,
+        };
+        let jobs = vec![
+            job(0, "completed"),
+            job(1, "running"),
+            job(2, "failed"),
+            job(3, "cancelled"),
+            job(4, "interrupted"),
+            job(5, "completed"),
+            job(6, "failed"),
+        ];
+
+        let recent = recent_jobs(&jobs)
+            .into_iter()
+            .map(|job| job.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(recent, ["0", "2", "3", "4", "5"]);
     }
 
     #[test]

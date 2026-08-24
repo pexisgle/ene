@@ -208,6 +208,14 @@ pub struct JobView {
     pub progress_note: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateJobRequest {
+    pub soul_id: String,
+    pub goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AnswerJobRequest {
     #[serde(default)]
@@ -452,6 +460,10 @@ pub struct ApprovalView {
     pub tool: String,
     pub target: String,
     pub side_effects: Vec<String>,
+    /// Model call this approval gates; empty on records created before the
+    /// field existed.
+    #[serde(default)]
+    pub call_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

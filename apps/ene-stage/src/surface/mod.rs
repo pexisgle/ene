@@ -8,6 +8,7 @@ mod spotlight;
 use ene_api::{GreetingView, HistoryResponse, MessageMode};
 
 use crate::detail::DetailTab;
+use crate::detail::DetailUiState;
 use crate::i18n;
 
 pub use approvals::PendingApproval;
@@ -29,7 +30,7 @@ pub enum SurfaceAction {
     BargeIn,
     CancelTurn,
     ToggleMic,
-    Approval { decision: String },
+    Approval { id: String, decision: String },
     AnswerQuestion,
     OpenDetail(DetailTab),
     Quit,
@@ -47,6 +48,9 @@ pub struct SurfaceUiState {
     pub chat_draft: String,
     pub focus_chat: bool,
     pub chat_input_focused: bool,
+    /// Mirrors the Detail window's chat readiness so the chat surface can
+    /// show setup guidance without polling core settings itself.
+    pub chat_setup: DetailUiState,
     pub history: HistoryResponse,
     pub greetings: Vec<GreetingView>,
     pub greeting_inflight: bool,
@@ -76,6 +80,7 @@ impl Default for SurfaceUiState {
             chat_draft: String::new(),
             focus_chat: false,
             chat_input_focused: false,
+            chat_setup: DetailUiState::default(),
             history: HistoryResponse {
                 messages: Vec::new(),
                 depth: "surface".to_owned(),
@@ -117,6 +122,12 @@ impl SurfaceUiState {
     pub fn close_chat(&mut self) {
         self.chat_open = false;
         self.chat_input_focused = false;
+    }
+
+    /// Whether a chat window should currently be kept alive.
+    #[must_use]
+    pub fn chat_window_exists(&self) -> bool {
+        self.chat_open
     }
 
     /// A new turn supersedes the previous turn's composer feedback.

@@ -1,4 +1,7 @@
-use super::capability::{PlatformCaps, dependency_missing, fail, screenshot_cli_backend};
+use super::capability::{
+    PlatformCaps, dependency_missing, fail, primary_screenshot_cli_backend, screenshot_cli_backend,
+    screenshot_cli_backend_on_path,
+};
 use super::hostcmd::{pipe_bytes, run, stdout_bytes_timeout, stdout_text};
 use base64::Engine;
 use serde_json::{Value, json};
@@ -24,7 +27,15 @@ pub(crate) fn screenshot() -> Result<Value, String> {
         Ok(png) => (png, backend),
         Err(err) => {
             let path = std::env::var("PATH").ok();
-            let Some(fallback) = portal_fallback_backend(backend, &err, path.as_deref()) else {
+            let fallback = portal_fallback_backend(backend, &err, path.as_deref());
+            if fallback.is_none()
+                && backend == "portal"
+                && screenshot_cli_backend(path.as_deref()).is_none()
+                && let Some(guided) = portal_without_cli_guidance(&err)
+            {
+                return Err(guided);
+            }
+            let Some(fallback) = fallback else {
                 return Err(err);
             };
             (capture_selected_backend(fallback)?, fallback)
@@ -51,6 +62,31 @@ fn portal_fallback_backend(
         return None;
     }
     screenshot_cli_backend(path)
+}
+
+fn missing_screenshot_error(backend: &'static str) -> String {
+    dependency_missing(backend, backend)
+}
+
+fn portal_without_cli_guidance(portal_error: &str) -> Option<String> {
+    let mut value: Value = serde_json::from_str(portal_error).ok()?;
+    if !matches!(
+        value.get("code").and_then(Value::as_str),
+        Some("unavailable" | "backend_failed" | "unsupported")
+    ) {
+        return None;
+    }
+    let original = value
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    value["package"] = json!(primary_screenshot_cli_backend());
+    value["message"] = json!(format!(
+        "{original}; install a CLI screenshot fallback such as {} for captures without the portal",
+        primary_screenshot_cli_backend()
+    ));
+    Some(value.to_string())
 }
 
 fn capture_selected_backend(backend: &'static str) -> Result<Vec<u8>, String> {
@@ -345,11 +381,14 @@ fn capture_png_file(backend: &'static str) -> Result<Vec<u8>, String> {
 
 fn cli_error(backend: &'static str, error: String) -> String {
     let path = std::env::var("PATH").ok();
-    if screenshot_cli_backend(path.as_deref()) == Some(backend) {
-        fail("backend_failed", backend, error)
-    } else {
-        dependency_missing(backend, backend)
+    cli_error_for_path(backend, error, path.as_deref())
+}
+
+fn cli_error_for_path(backend: &'static str, error: String, path: Option<&str>) -> String {
+    if screenshot_cli_backend_on_path(backend, path) {
+        return fail("backend_failed", backend, error);
     }
+    missing_screenshot_error(backend)
 }
 
 fn cap_png(bytes: Vec<u8>, backend: &str) -> Result<Vec<u8>, String> {
@@ -493,6 +532,76 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&err).unwrap();
         assert_eq!(value["code"], "cancelled");
         assert_eq!(value["backend"], "portal");
+    }
+
+    #[test]
+    fn missing_cli_backend_maps_to_dependency_missing_with_hint() {
+        let err = super::missing_screenshot_error("scrot");
+        let value: serde_json::Value = serde_json::from_str(&err).unwrap();
+        assert_eq!(value["code"], "dependency_missing");
+        assert_eq!(value["backend"], "scrot");
+        assert_eq!(value["package"], "scrot");
+        let message = value["message"].as_str().unwrap();
+        assert!(
+            message.contains("apt install scrot"),
+            "install hint must name a package manager: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn x11_vanished_selected_backend_reports_itself_not_global_primary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let grim = dir.path().join("grim");
+        std::fs::write(&grim, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&grim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let err = super::cli_error_for_path(
+            "import",
+            super::fail("backend_failed", "import", "import disappeared"),
+            Some(path),
+        );
+        let value: serde_json::Value = serde_json::from_str(&err).unwrap();
+        assert_eq!(value["code"], "dependency_missing");
+        assert_eq!(value["backend"], "import");
+        assert_eq!(value["package"], "import");
+        assert!(!value["message"].as_str().unwrap().contains("grim"));
+
+        let scrot = dir.path().join("scrot");
+        std::fs::write(&scrot, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&scrot, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(std::fs::remove_file(&grim));
+        let still_installed = super::cli_error_for_path(
+            "scrot",
+            super::fail("backend_failed", "scrot", "scrot failed"),
+            Some(path),
+        );
+        let value: serde_json::Value = serde_json::from_str(&still_installed).unwrap();
+        assert_eq!(value["code"], "backend_failed");
+        assert_eq!(value["backend"], "scrot");
+    }
+
+    #[test]
+    fn portal_failure_without_cli_backend_adds_install_guidance() {
+        let portal_error = super::fail("unavailable", "portal", "service missing");
+        let guided = super::portal_without_cli_guidance(&portal_error).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&guided).unwrap();
+        assert_eq!(value["code"], "unavailable");
+        assert_eq!(value["package"], "grim");
+        let message = value["message"].as_str().unwrap();
+        assert!(
+            message.contains("install a CLI screenshot fallback"),
+            "guidance must be actionable: {message}"
+        );
+    }
+
+    #[test]
+    fn portal_denial_is_not_overwritten_with_install_guidance() {
+        let portal_error = super::fail("denied", "portal", "user refused");
+        assert!(super::portal_without_cli_guidance(&portal_error).is_none());
     }
 
     #[cfg(unix)]

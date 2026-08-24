@@ -25,6 +25,11 @@ pub enum LiveEvent {
         name: String,
         args: String,
     },
+    /// Transcript note for a tool refusal or other lane-level outcome.
+    SessionNote {
+        turn_id: TurnId,
+        text: String,
+    },
     TurnEnded {
         turn_id: TurnId,
         outcome: String,

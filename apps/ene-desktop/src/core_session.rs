@@ -949,7 +949,13 @@ fn dispatch_surface(
                 drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(speech.to_owned()))));
             }
         }
-        ene_api::QUESTION_ASKED_EVENT => dispatch_question_asked(value, event_tx),
+        _ if matches!(
+            ene_api::QuestionEvent::parse(value).map(|(kind, _)| kind),
+            Some(ene_api::QuestionEventKind::Asked)
+        ) =>
+        {
+            dispatch_question_asked(value, event_tx);
+        }
         "audio.chunk" => {
             if let Some(sender) = audio_tx
                 && let Some(pcm) = value.get("pcm").and_then(Value::as_array)
@@ -1011,7 +1017,6 @@ fn dispatch_session_event(
                 result,
             })));
         }
-        "question/asked" => dispatch_question_asked(value, event_tx),
         _ => {}
     }
 }
@@ -1104,22 +1109,6 @@ mod tests {
         assert!(matches!(
             events.first(),
             Some(AppEvent::Ai(AiStreamUpdate::Error(outcome))) if outcome == "interrupted"
-        ));
-    }
-
-    #[test]
-    fn maps_question_asked() {
-        let events = dispatch(json!({
-            "type": "session.event",
-            "kind": "question/asked",
-            "id": "q1",
-            "title": "Pick one",
-            "questions": ["a", "b"]
-        }));
-        assert!(matches!(
-            events.first(),
-            Some(AppEvent::Ai(AiStreamUpdate::UserInputRequired { request_id, prompt }))
-                if request_id == "q1" && prompt.questions.len() == 2
         ));
     }
 

@@ -578,6 +578,108 @@ async fn tool_calling_model_runs_surface_tool_then_speaks() {
 }
 
 #[tokio::test]
+async fn approval_denial_pairs_intent_call_id_with_result() {
+    struct DeniedRouter;
+
+    #[async_trait]
+    impl SurfaceRouter for DeniedRouter {
+        async fn on_tool(
+            &self,
+            _name: &str,
+            _args: serde_json::Value,
+            _step: u32,
+        ) -> Result<SurfaceToolOutcome, KernelError> {
+            Ok(SurfaceToolOutcome::Denied {
+                reason: "not allowed".to_owned(),
+            })
+        }
+    }
+
+    struct OnceToolModel;
+
+    #[async_trait]
+    impl ConversationModel for OnceToolModel {
+        async fn generate(&self, _request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+            Ok(ModelGeneration {
+                tool_calls: vec![crate::ToolCall {
+                    name: "utility.calc".to_owned(),
+                    arguments: serde_json::json!({"expr": "1+1"}),
+                }],
+                finish_reason: "tool_calls".to_owned(),
+                model_id: "denied-tool".to_owned(),
+                ..ModelGeneration::default()
+            })
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(OnceToolModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: LaneMindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        extra_context: Vec::new(),
+        hooks: None,
+        router: Some(Arc::new(DeniedRouter) as Arc<dyn SurfaceRouter>),
+    });
+    lane.prompt("please calc 1+1").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+
+    let events = store.load_events(session, 0).unwrap();
+    let intent_call_id = events.iter().find_map(|event| match &event.payload {
+        EventPayload::ToolCall { call_id, .. } => Some(*call_id),
+        _ => None,
+    });
+    let result_call_id = events.iter().find_map(|event| match &event.payload {
+        EventPayload::ToolResult {
+            call_id, status, ..
+        } => {
+            assert_eq!(*status, ToolStatus::Denied);
+            Some(*call_id)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        intent_call_id, result_call_id,
+        "denied ToolResult must reuse the pre-dispatch intent call id"
+    );
+
+    let history = derive_messages(&events, ProjectOptions::model_visible(8));
+    let tool_messages: Vec<_> = history
+        .messages
+        .iter()
+        .filter(|message| message.role == ene_session::Role::Tool)
+        .collect();
+    assert_eq!(tool_messages.len(), 2, "one call and one denied result");
+    assert_eq!(
+        tool_messages[0].tool_call_id, tool_messages[1].tool_call_id,
+        "projection should pair the denial with its call"
+    );
+}
+
+#[tokio::test]
 async fn screenshot_tool_result_stores_image_ref_not_base64() {
     struct ShotRouter;
 
