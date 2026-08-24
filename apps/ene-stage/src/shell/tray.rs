@@ -32,6 +32,7 @@ const QUIT_ID: &str = "ene-stage.tray.quit";
 pub struct TrayManager {
     _icon: TrayIcon,
     action_rx: Receiver<ShellCommand>,
+    interaction_rx: Receiver<()>,
     mic_item: MenuItem,
 }
 
@@ -47,6 +48,7 @@ impl TrayManager {
     /// Build the tray icon and wire menu events into an internal channel.
     pub fn new() -> Result<Self, TrayError> {
         let (action_tx, action_rx) = unbounded();
+        let (interaction_tx, interaction_rx) = unbounded();
         let icon = build_icon()?;
         let (menu, mic_item) = build_menu()?;
         let tray = TrayIconBuilder::new()
@@ -56,17 +58,30 @@ impl TrayManager {
             .build()
             .map_err(|err| TrayError::Build(err.to_string()))?;
 
-        std::thread::spawn(move || poll_tray_events(&action_tx));
+        std::thread::spawn(move || poll_tray_events(&action_tx, &interaction_tx));
 
         Ok(Self {
             _icon: tray,
             action_rx,
+            interaction_rx,
             mic_item,
         })
     }
 
     pub fn try_recv(&self) -> Option<ShellCommand> {
         self.action_rx.try_recv().ok()
+    }
+
+    /// Drain pending tray interactions (menu open/click). The app uses these
+    /// timestamps to distinguish transient focus loss caused by the tray menu
+    /// from a real focus switch to another application.
+    #[must_use]
+    pub fn take_interactions(&self) -> usize {
+        let mut drained = 0;
+        while self.interaction_rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        drained
     }
 
     pub fn set_mic_active(&self, active: bool) {
@@ -155,16 +170,27 @@ fn synthetic_icon() -> Result<Icon, TrayError> {
     Icon::from_rgba(rgba, width, height).map_err(|err| TrayError::Icon(err.to_string()))
 }
 
-fn poll_tray_events(action_tx: &Sender<ShellCommand>) {
+fn poll_tray_events(action_tx: &Sender<ShellCommand>, interaction_tx: &Sender<()>) {
     loop {
         if let Ok(event) = MenuEvent::receiver().try_recv()
             && let Some(action) = map_menu_id(&event.id)
-            && action_tx.send(action).is_err()
         {
-            return;
+            if interaction_tx.send(()).is_err() {
+                return;
+            }
+            if action_tx.send(action).is_err() {
+                return;
+            }
         }
         if let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            let is_click = matches!(
+                event,
+                TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }
+            );
             let open_detail = matches!(event, TrayIconEvent::DoubleClick { .. });
+            if is_click && interaction_tx.send(()).is_err() {
+                return;
+            }
             if open_detail
                 && action_tx
                     .send(ShellCommand::OpenDetail(DetailTab::Home))

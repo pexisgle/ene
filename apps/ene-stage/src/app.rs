@@ -107,6 +107,7 @@ pub fn run() -> Result<(), AppError> {
         chrome_focused: false,
         last_cursor: None,
         last_tick: Instant::now(),
+        tray_interaction_at: None,
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
         approval_needs_reveal: false,
@@ -164,6 +165,7 @@ struct StageApp {
     chrome_focused: bool,
     last_cursor: Option<LogicalPosition<f32>>,
     last_tick: Instant,
+    tray_interaction_at: Option<Instant>,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
     approval_needs_reveal: bool,
@@ -221,6 +223,7 @@ impl StageApp {
             chrome_focused: false,
             last_cursor: None,
             last_tick: Instant::now(),
+            tray_interaction_at: None,
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
             approval_needs_reveal: false,
@@ -1220,6 +1223,11 @@ impl StageApp {
                 commands
             })
             .unwrap_or_default();
+        if let Some(tray) = self.tray.as_ref()
+            && tray.take_interactions() > 0
+        {
+            self.tray_interaction_at = Some(Instant::now());
+        }
         for command in tray_commands {
             self.dispatch_shell_command(event_loop, command);
         }
@@ -2023,8 +2031,13 @@ impl ApplicationHandler for StageApp {
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(focused) = chrome_focus_state {
-            self.chrome_focused = focused;
-            self.sync_overlay_interaction();
+            let transient =
+                !focused && focus_loss_is_transient(self.tray_interaction_at, Instant::now());
+            if !transient {
+                self.tray_interaction_at = None;
+                self.chrome_focused = focused;
+                self.sync_overlay_interaction();
+            }
         }
         if !self.surface.chat_input_focused
             && overlay_from_chrome.is_none_or(|wants| !wants)
@@ -2122,6 +2135,15 @@ fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     }
 }
 
+/// Focus loss within this window after a tray interaction is treated as the
+/// transient steal caused by the tray menu, not as a real switch to another app.
+const TRAY_FOCUS_GRACE: Duration = Duration::from_millis(1500);
+
+#[must_use]
+fn focus_loss_is_transient(tray_interaction_at: Option<Instant>, now: Instant) -> bool {
+    tray_interaction_at.is_some_and(|at| now.duration_since(at) < TRAY_FOCUS_GRACE)
+}
+
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
         "(empty)"
@@ -2142,14 +2164,17 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, format_log_text,
-        overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
+        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, focus_loss_is_transient,
+        format_log_text, overlay_window_level, provider_asset_load_status, window_focus_state,
+        window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
     use crate::surface::{PendingApproval, PendingQuestion};
     use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
     use std::sync::Arc;
+    use std::time::Duration;
+    use std::time::Instant;
 
     #[test]
     fn save_applies_window_level_for_transparent_and_opaque_overlays() {
@@ -2183,6 +2208,19 @@ mod tests {
             window_focus_state(&winit::event::WindowEvent::Focused(false)),
             Some(false)
         );
+    }
+
+    #[test]
+    fn tray_interaction_within_grace_is_transient() {
+        let now = Instant::now();
+        assert!(focus_loss_is_transient(
+            Some(now),
+            now + Duration::from_millis(100)
+        ));
+        assert!(!focus_loss_is_transient(
+            Some(now.checked_sub(Duration::from_secs(5)).unwrap_or(now)),
+            now
+        ));
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::CloseRequested),
             None
