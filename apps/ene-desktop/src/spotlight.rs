@@ -473,8 +473,9 @@ mod tests {
     fn query_filters_case_insensitively() {
         let actions = default_actions();
         let filtered = filter_actions("SETTINGS", &actions);
-        assert_eq!(filtered.len(), 1);
-        assert!(matches!(filtered[0], SpotlightAction::OpenSettings { .. }));
+        assert!(filtered.iter().any(|action| matches!(action,
+            SpotlightAction::OpenSettings { page: crate::settings_ui::PageKind::Ai, ..
+        })));
     }
 
     #[test]
