@@ -459,21 +459,57 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::ListMemories(result) => match result {
-                Ok(items) => self.detail.memories = items,
-                Err(err) => self.detail.core_status = err,
-            },
-            AsyncOutcome::ListPendingMemories(result) => match result {
-                Ok(items) => self.detail.pending_memories = items,
-                Err(err) => self.detail.core_status = err,
-            },
-            AsyncOutcome::ResolveMemory { result, .. }
-            | AsyncOutcome::DeleteMemory { result, .. }
-            | AsyncOutcome::CompleteMemory { result, .. } => {
-                if result.is_ok() {
-                    self.request_memories();
-                } else if let Err(err) = result {
-                    self.detail.core_status = err;
+            AsyncOutcome::ListMemories { soul_id, result } => {
+                if soul_id != self.session.soul_id() {
+                    return;
+                }
+                match result {
+                    Ok(items) => self.detail.memories = items,
+                    Err(err) => self.detail.core_status = err,
+                }
+            }
+            AsyncOutcome::ListPendingMemories { soul_id, result } => {
+                if soul_id != self.session.soul_id() {
+                    return;
+                }
+                match result {
+                    Ok(items) => {
+                        self.detail.sync_candidate_drafts(&items);
+                        self.detail.pending_memories = items;
+                    }
+                    Err(err) => self.detail.core_status = err,
+                }
+            }
+            AsyncOutcome::ListMemoryJournal { soul_id, result } => {
+                if soul_id != self.session.soul_id() {
+                    return;
+                }
+                match result {
+                    Ok(items) => self.detail.memory_journal = items,
+                    Err(err) => self.detail.core_status = err,
+                }
+            }
+            AsyncOutcome::ResolveMemory {
+                soul_id, result, ..
+            }
+            | AsyncOutcome::DeleteMemory {
+                soul_id, result, ..
+            }
+            | AsyncOutcome::CompleteMemory {
+                soul_id, result, ..
+            } => {
+                if soul_id != self.session.soul_id() {
+                    return;
+                }
+                match result {
+                    Ok(()) => self.request_memories(),
+                    Err(err) => {
+                        let stale_candidate = err.contains("candidate_conflict");
+                        self.detail.core_status = err;
+                        if stale_candidate {
+                            self.request_memories();
+                        }
+                    }
                 }
             }
             AsyncOutcome::LoadSoul(result) => match result {
@@ -827,27 +863,41 @@ impl StageApp {
     }
 
     fn request_memories(&self) {
-        let soul_id = self.session.soul_id().to_owned();
+        let soul_id_memories = self.session.soul_id().to_owned();
         let client = Arc::clone(&self.client);
-        let client_pending = Arc::clone(&client);
         self.spawn(async move {
-            AsyncOutcome::ListMemories(
-                client
-                    .list_memories(&soul_id, None)
+            AsyncOutcome::ListMemories {
+                soul_id: soul_id_memories.clone(),
+                result: client
+                    .list_memories(&soul_id_memories, None)
                     .await
                     .map(|page| page.items)
                     .map_err(|err| err.to_string()),
-            )
+            }
         });
         let soul_id_pending = self.session.soul_id().to_owned();
+        let client_pending = Arc::clone(&self.client);
         self.spawn(async move {
-            AsyncOutcome::ListPendingMemories(
-                client_pending
+            AsyncOutcome::ListPendingMemories {
+                soul_id: soul_id_pending.clone(),
+                result: client_pending
                     .list_pending_memories(&soul_id_pending)
                     .await
                     .map(|page| page.items)
                     .map_err(|err| err.to_string()),
-            )
+            }
+        });
+        let soul_id_journal = self.session.soul_id().to_owned();
+        let client_journal = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::ListMemoryJournal {
+                soul_id: soul_id_journal.clone(),
+                result: client_journal
+                    .list_memory_journal(&soul_id_journal)
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            }
         });
     }
 
@@ -1436,6 +1486,7 @@ impl StageApp {
         self.surface.pending_question = None;
         self.detail.next_activation_generation();
         self.detail.invalidate_character();
+        self.detail.invalidate_memory();
         if self
             .overlay
             .as_ref()
@@ -1458,6 +1509,7 @@ impl StageApp {
         self.surface.pending_approval = None;
         self.approval_needs_reveal = false;
         self.surface.pending_question = None;
+        self.detail.invalidate_memory();
     }
 
     fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
@@ -2080,7 +2132,7 @@ mod tests {
     };
     use crate::core::session::PreparedSessionTarget;
     use crate::surface::{PendingApproval, PendingQuestion};
-    use ene_api::HistoryResponse;
+    use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
     use std::sync::Arc;
 
     #[test]
@@ -2202,6 +2254,7 @@ mod tests {
     fn resolving_memory_refreshes_memories_and_pending_candidates() {
         let mut app = StageApp::new_for_test();
         app.apply_async_outcome(AsyncOutcome::ResolveMemory {
+            soul_id: app.session.soul_id().to_owned(),
             id: "candidate-1".to_owned(),
             result: Ok(()),
         });
@@ -2222,11 +2275,86 @@ mod tests {
             .filter(|outcome| {
                 matches!(
                     outcome,
-                    AsyncOutcome::ListMemories(_) | AsyncOutcome::ListPendingMemories(_)
+                    AsyncOutcome::ListMemories { .. } | AsyncOutcome::ListPendingMemories { .. }
                 )
             })
             .count();
         assert_eq!(refresh_count, 2);
+    }
+
+    #[test]
+    fn stale_memory_results_are_ignored_after_soul_retarget() {
+        let mut app = StageApp::new_for_test();
+        app.session.set_for_test(
+            Arc::clone(&app.client),
+            "soul-a",
+            "old-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        );
+        app.commit_session_target(PreparedSessionTarget::new_for_test_with_soul(
+            "soul-b",
+            "new-session",
+            HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+        ));
+        app.detail.memories = vec![MemoryView {
+            id: "memory-b".to_owned(),
+            soul_id: "soul-b".to_owned(),
+            scope: "private".to_owned(),
+            kind: "semantic".to_owned(),
+            title: "B memory".to_owned(),
+            content: "B".to_owned(),
+            expires_at: None,
+            schedule_id: None,
+        }];
+        app.detail.pending_memories = vec![MemoryCandidateView {
+            id: "candidate-b".to_owned(),
+            soul_id: "soul-b".to_owned(),
+            scope: "private".to_owned(),
+            kind: "semantic".to_owned(),
+            title: "B candidate".to_owned(),
+            content: "B".to_owned(),
+            confidence: 0.9,
+            sensitive: false,
+            expires_at: None,
+        }];
+        app.detail.memory_journal = vec![MemoryJournalView {
+            seq: 1,
+            ts: "now".to_owned(),
+            memory_id: None,
+            soul_id: "soul-b".to_owned(),
+            action: "candidate_accepted".to_owned(),
+            payload: serde_json::json!({}),
+        }];
+
+        app.apply_async_outcome(AsyncOutcome::ListMemories {
+            soul_id: "soul-a".to_owned(),
+            result: Ok(Vec::new()),
+        });
+        app.apply_async_outcome(AsyncOutcome::ListPendingMemories {
+            soul_id: "soul-a".to_owned(),
+            result: Ok(Vec::new()),
+        });
+        app.apply_async_outcome(AsyncOutcome::ListMemoryJournal {
+            soul_id: "soul-a".to_owned(),
+            result: Ok(Vec::new()),
+        });
+        app.apply_async_outcome(AsyncOutcome::ResolveMemory {
+            soul_id: "soul-a".to_owned(),
+            id: "candidate-a".to_owned(),
+            result: Err("old soul failed".to_owned()),
+        });
+
+        assert_eq!(app.session.soul_id(), "soul-b");
+        assert_eq!(app.detail.memories[0].id, "memory-b");
+        assert_eq!(app.detail.pending_memories[0].id, "candidate-b");
+        assert_eq!(app.detail.memory_journal[0].soul_id, "soul-b");
+        assert!(app.detail.core_status.is_empty());
     }
 
     #[test]
