@@ -331,7 +331,7 @@ impl LookAtEvaluator {
     /// transform); `target_world` is the cursor-projected
     /// world point the model should look at (the desktop
     /// runtime computes this in
-    /// the legacy desktop compute_world_target).
+    /// the legacy desktop `compute_world_target`).
     ///
     /// `head_rest_rotation` is the head bone's rest rotation
     /// (the local-to-parent quaternion from the humanoid
