@@ -369,9 +369,8 @@ impl ToolRegistry {
         deadline_ms: Option<u64>,
         workspace_override: Option<PathBuf>,
     ) -> Result<(), PipelineError> {
-        let (def, invoke, prepared) = self
-            .prepare(name, args, layer, false, workspace_override, "")
-            .await?;
+        let (def, invoke, prepared) =
+            self.resolve_and_confine(name, args, layer, workspace_override)?;
         if !def.background {
             return Err(PipelineError::NotBackground(name.to_owned()));
         }
@@ -402,22 +401,7 @@ impl ToolRegistry {
                 required: def.primary_layer(),
             });
         }
-        let Some(plane) = self.plane.lock().clone() else {
-            return Ok(());
-        };
-        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-        let target = authorization_target(name, args).to_owned();
-        let in_workspace = path_in_workspace(workspace, path);
-        let req = AuthzRequest {
-            tool: name.to_owned(),
-            side_effects: def.side_effects.clone(),
-            sensitivity: def.sensitivity,
-            target,
-            in_workspace,
-            call_id: call_id.to_owned(),
-        };
-        plane.authorize(&req).await?;
-        Ok(())
+        self.authorize_request(name, &def, args, workspace, call_id).await
     }
 }
 
@@ -486,20 +470,13 @@ impl ToolRegistry {
     async fn prepare(
         &self,
         name: &str,
-        mut args: Value,
+        args: Value,
         layer: Layer,
         host: bool,
         workspace_override: Option<PathBuf>,
         call_id: &str,
     ) -> Result<(ToolDefinition, Arc<dyn ToolInvoke>, Value), PipelineError> {
-        let (def, invoke) = {
-            let tools = self.tools.lock();
-            let row = tools
-                .get(name)
-                .and_then(|stack| stack.last())
-                .ok_or_else(|| PipelineError::Unknown(name.to_owned()))?;
-            (row.def.clone(), Arc::clone(&row.invoke))
-        };
+        let (def, invoke) = row_lookup(&self.tools, name)?;
         if !host && !def.available_on(layer) {
             return Err(PipelineError::WrongLayer {
                 name: name.to_owned(),
@@ -507,37 +484,87 @@ impl ToolRegistry {
                 required: def.primary_layer(),
             });
         }
-        let workspace = workspace_override.or_else(|| self.workspace.lock().clone());
-        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-        let target = authorization_target(name, &args);
-        let in_workspace = path_in_workspace(workspace.as_deref(), path);
         if !host {
-            let plane = self.plane.lock().clone();
-            if let Some(plane) = plane {
-                let req = AuthzRequest {
-                    tool: name.to_owned(),
-                    side_effects: def.side_effects.clone(),
-                    sensitivity: def.sensitivity,
-                    target: target.to_owned(),
-                    in_workspace,
-                    call_id: call_id.to_owned(),
-                };
-                if let Err(err) = plane.authorize(&req).await {
-                    // Surface the refused intent in the transcript; without this
-                    // entry an Allow/Deny cycle leaves the turn with no record.
-                    tracing::info!(tool = %name, call_id = %call_id, "tool execution denied by approval plane");
-                    return Err(PipelineError::Plane(err));
-                }
-            } else if !def.side_effects.is_empty() {
+            self.authorize_request(name, &def, &args, workspace_override.as_deref(), call_id)
+                .await?;
+        }
+        let mut args = args;
+        let workspace = workspace_override.or_else(|| self.workspace.lock().clone());
+        confine_fs_args(name, &mut args, workspace.as_deref())?;
+        Ok((def, invoke, args))
+    }
+
+    /// Resolve a tool without consulting the approval plane; the caller either
+    /// authorized separately or is starting a pre-authorized dispatch.
+    fn resolve_and_confine(
+        &self,
+        name: &str,
+        mut args: Value,
+        layer: Layer,
+        workspace_override: Option<PathBuf>,
+    ) -> Result<(ToolDefinition, Arc<dyn ToolInvoke>, Value), PipelineError> {
+        let (def, invoke) = row_lookup(&self.tools, name)?;
+        if !def.available_on(layer) {
+            return Err(PipelineError::WrongLayer {
+                name: name.to_owned(),
+                requested: layer,
+                required: def.primary_layer(),
+            });
+        }
+        let workspace = workspace_override.or_else(|| self.workspace.lock().clone());
+        confine_fs_args(name, &mut args, workspace.as_deref())?;
+        Ok((def, invoke, args))
+    }
+
+    /// Build the shared `AuthzRequest` and consult the approval plane once.
+    async fn authorize_request(
+        &self,
+        name: &str,
+        def: &ToolDefinition,
+        args: &Value,
+        workspace: Option<&Path>,
+        call_id: &str,
+    ) -> Result<(), PipelineError> {
+        let Some(plane) = self.plane.lock().clone() else {
+            if !def.side_effects.is_empty() {
                 return Err(PipelineError::Denied {
                     name: name.to_owned(),
                     reason: "deny-by-default until approval plane".to_owned(),
                 });
             }
+            return Ok(());
+        };
+        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+        let target = authorization_target(name, args).to_owned();
+        let in_workspace = path_in_workspace(workspace, path);
+        let req = AuthzRequest {
+            tool: name.to_owned(),
+            side_effects: def.side_effects.clone(),
+            sensitivity: def.sensitivity,
+            target,
+            in_workspace,
+            call_id: call_id.to_owned(),
+        };
+        if let Err(err) = plane.authorize(&req).await {
+            // Surface the refused intent in the transcript; without this entry an
+            // Allow/Deny cycle leaves the turn with no record.
+            tracing::info!(tool = %name, call_id = %call_id, "tool execution denied by approval plane");
+            return Err(PipelineError::Plane(err));
         }
-        confine_fs_args(name, &mut args, workspace.as_deref())?;
-        Ok((def, invoke, args))
+        Ok(())
     }
+}
+
+fn row_lookup(
+    tools: &Mutex<HashMap<String, Vec<Registered>>>,
+    name: &str,
+) -> Result<(ToolDefinition, Arc<dyn ToolInvoke>), PipelineError> {
+    let guard = tools.lock();
+    guard
+        .get(name)
+        .and_then(|stack| stack.last())
+        .map(|row| (row.def.clone(), Arc::clone(&row.invoke)))
+        .ok_or_else(|| PipelineError::Unknown(name.to_owned()))
 }
 
 fn authorization_target<'a>(name: &str, args: &'a Value) -> &'a str {

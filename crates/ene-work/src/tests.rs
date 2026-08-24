@@ -39,7 +39,7 @@ use ene_session::{
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration as StdDuration;
 use tempfile::TempDir;
 
@@ -333,7 +333,7 @@ async fn surface_fs_write_upgrades_without_invoking() {
 
 #[tokio::test]
 async fn empty_side_effect_tool_runs_on_surface_router() {
-    let (dir, _store, host, soul) = open_work();
+    let (_dir, _store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
     registry.register(utility_time_def());
     let router = WorkSurfaceRouter::new(host, Arc::clone(&registry), soul, 4);
@@ -347,7 +347,10 @@ async fn surface_delegate_start_is_approval_gated_before_job_insert() {
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
     let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
+        ene_plane::ApprovalSettings {
+            popup: PopupSettings { timeout_ms: 5_000 },
+            ..ApprovalSettings::default()
+        },
         ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap(),
         Arc::new(ene_plane::ScriptedPopup::new([
             ene_plane::PopupDecision::Deny,
@@ -443,7 +446,7 @@ async fn background_tool_timeout_denies_before_any_job_or_execution_row() {
 
 #[tokio::test]
 async fn duplicate_approval_response_dispatches_exactly_once() {
-    let (dir, store, host, soul) = open_work();
+    let (dir, _store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
     let hits = Arc::new(AtomicBool::new(false));
     registry.register_with(
@@ -463,7 +466,10 @@ async fn duplicate_approval_response_dispatches_exactly_once() {
     });
     let sink: Arc<dyn PopupSink> = popup.clone();
     let plane = Arc::new(ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
+        ene_plane::ApprovalSettings {
+            popup: PopupSettings { timeout_ms: 5_000 },
+            ..ApprovalSettings::default()
+        },
         AuditLog::open(dir.path().join("audit.db")).unwrap(),
         sink,
         None,
@@ -494,15 +500,84 @@ async fn duplicate_approval_response_dispatches_exactly_once() {
     let started = outcomes
         .0
         .ok()
-        .and_then(|left| left.ok())
+        .and_then(std::result::Result::ok)
         .into_iter()
-        .chain(outcomes.1.ok().and_then(|right| right.ok()))
+        .chain(outcomes.1.ok().and_then(std::result::Result::ok))
         .filter_map(|outcome| match outcome {
             SurfaceToolOutcome::Result(value) => Some(value),
             _ => None,
         })
         .count();
     assert_eq!(started, 1, "exactly one dispatch may start");
+}
+
+#[tokio::test]
+async fn ask_all_background_call_prompts_exactly_once() {
+    let (dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    let invoke = Arc::new(BgInvoke {
+        phase: parking_lot::Mutex::new(std::collections::HashMap::new()),
+    });
+    // bg_def() alone has no side effects, so AskAll would auto-allow without
+    // ever opening a popup; give the tool the same exec side effect the
+    // neighboring background tests use.
+    registry.register_with(
+        ToolDefinition {
+            side_effects: vec!["exec".to_owned()],
+            ..bg_def()
+        },
+        Arc::clone(&invoke) as Arc<dyn ToolInvoke>,
+    );
+    let popup = Arc::new(ene_plane::PendingPopup::new());
+    let asks = Arc::new(AtomicUsize::new(0));
+    popup.set_on_ask({
+        let asks = Arc::clone(&asks);
+        Arc::new(move |_view| {
+            asks.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+    let sink: Arc<dyn PopupSink> = popup.clone();
+    let plane = Arc::new(ApprovalPlane::new(
+        ene_plane::ApprovalSettings {
+            popup: PopupSettings { timeout_ms: 5_000 },
+            ..ApprovalSettings::default()
+        },
+        AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        sink,
+        None,
+    ));
+    plane.set_mode(ApprovalMode::AskAll).unwrap();
+    registry.set_plane(plane);
+    let router = WorkSurfaceRouter::new(Arc::clone(&host), Arc::clone(&registry), soul, 8);
+
+    let dispatched = tokio::spawn({
+        let router = Arc::new(router);
+        async move { router.on_tool("bg.sleep", json!({"ms": 1}), 0).await }
+    });
+    while popup.list().is_empty() {
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+    assert_eq!(
+        asks.load(Ordering::SeqCst),
+        1,
+        "AskAll background dispatch must produce exactly one approval",
+    );
+    assert!(
+        store.list_jobs(soul).unwrap().is_empty(),
+        "no job row may exist before approval resolves",
+    );
+    assert!(
+        store.list_running_tool_executions().unwrap().is_empty(),
+        "no execution row may exist before approval resolves",
+    );
+    let id = popup.list()[0].id.clone();
+    assert!(popup.respond(&id, ene_plane::PopupDecision::Allow).is_ok());
+
+    let outcome = dispatched.await.unwrap().unwrap();
+    let SurfaceToolOutcome::Result(value) = outcome else {
+        panic!("expected started result, got {outcome:?}");
+    };
+    assert_eq!(value["status"], "started");
 }
 
 #[tokio::test]
