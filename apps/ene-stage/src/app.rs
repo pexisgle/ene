@@ -1525,6 +1525,17 @@ impl StageApp {
         }
     }
 
+    /// Seed an empty surface from the boot-time session snapshot. A turn that
+    /// completed before the first paint leaves that snapshot empty until its
+    /// refresh lands; seeding stays one-shot so a later refresh always owns
+    /// the surface rows instead of being erased by this copy.
+    fn seed_history_from_session(&mut self) {
+        let cached = self.session.history();
+        if !cached.messages.is_empty() {
+            self.surface.history = cached;
+        }
+    }
+
     /// Stores one body overlay position in the settings map. The active soul
     /// coordinates are also mirrored into the legacy scalar keys so
     /// hand-edited config files stay readable; reads still prefer the map.
@@ -2526,8 +2537,8 @@ impl ApplicationHandler for StageApp {
         self.poll_audio();
         self.process_surface_actions(event_loop);
         self.surface.turn_active = self.session.turn_id().is_some();
-        if self.surface.history.messages.is_empty() {
-            self.surface.history = self.session.history();
+        if self.surface.history.messages.is_empty() && !self.session.history().messages.is_empty() {
+            self.seed_history_from_session();
         }
         self.tick_overlay();
         self.paint_chrome(event_loop);
@@ -3115,5 +3126,41 @@ mod tests {
         // Minimize/hide does not touch surface history; only close does.
         assert_eq!(app.surface.history.messages.len(), 1);
         assert_eq!(app.surface.history.messages[0].text, "kept");
+    }
+
+    #[test]
+    fn empty_surface_is_seeded_from_session_snapshot_once_available() {
+        let mut app = StageApp::new_for_test();
+        assert!(app.session.history().messages.is_empty());
+
+        // A turn completed before the surface ever rendered, so the boot-time
+        // snapshot was fetched empty; the cache fills only after a refresh.
+        app.session.replace_history(HistoryResponse {
+            messages: vec![ene_api::MessageResponse {
+                seq: 1,
+                role: "assistant".to_owned(),
+                text: "completed before paint".to_owned(),
+            }],
+            depth: "surface".to_owned(),
+        });
+
+        app.seed_history_from_session();
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(
+            app.surface.history.messages[0].text,
+            "completed before paint"
+        );
+
+        // Seeding is one-shot: later refreshes own the surface rows.
+        app.surface.history = HistoryResponse {
+            messages: Vec::new(),
+            depth: "surface".to_owned(),
+        };
+        app.session.replace_history(HistoryResponse {
+            messages: Vec::new(),
+            depth: "surface".to_owned(),
+        });
+        app.seed_history_from_session();
+        assert!(app.surface.history.messages.is_empty());
     }
 }
