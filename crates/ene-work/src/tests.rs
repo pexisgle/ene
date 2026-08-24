@@ -21,7 +21,7 @@ use crate::vision::{
     register_screenshot_tool, screenshot_is_job_or_surface, screenshot_png,
 };
 use async_trait::async_trait;
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use ene_companion::{CompanionStore, NewSoul, WorldStateMemory, WorldStateSettings};
 use ene_kernel::{
     ConversationModel, DisplayDepth, EchoModel, EventKind, HarnessSettings, KernelError,
@@ -1294,36 +1294,85 @@ fn missed_remind_fires_once() {
 }
 
 #[test]
-fn interval_spec_converts_to_cron() {
+fn interval_spec_next_fire_uses_elapsed_semantics() {
     let (_dir, store, _host, soul) = open_work();
-    let cases: &[(&str, &str)] = &[
-        ("every 15s", "*/15 * * * * *"),
-        ("every 10m", "0 */10 * * * *"),
-        ("every 1h", "0 0 */1 * * *"),
-        ("every 12h", "0 0 */12 * * *"),
-        ("every 1d", "0 0 0 */1 * *"),
-        ("Every 30m", "0 */30 * * * *"),
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 10, 37, 0).unwrap();
+    let cases: &[(&str, i64)] = &[
+        ("every 15s", 15),
+        ("every 10m", 600),
+        ("every 1h", 3600),
+        ("Every 30m", 1800),
+        ("every 2d", 172_800),
     ];
     for (input, expected) in cases {
         let sched = store
-            .insert_schedule(&NewSchedule {
-                soul_id: soul,
-                name: format!("interval-{input}"),
-                spec: (*input).into(),
-                timezone: "UTC".into(),
-                action: ScheduleAction::Remind,
-                action_ref: Some("tick".into()),
-                important: false,
-            })
+            .insert_schedule_at(
+                &NewSchedule {
+                    soul_id: soul,
+                    name: format!("interval-{input}"),
+                    spec: (*input).into(),
+                    timezone: "UTC".into(),
+                    action: ScheduleAction::Remind,
+                    action_ref: Some("tick".into()),
+                    important: false,
+                },
+                now,
+            )
             .unwrap();
-        assert_eq!(sched.spec, *expected, "input {input}");
+        assert_eq!(
+            sched.spec, *input,
+            "spec must be stored verbatim for interval semantics"
+        );
+        let next = DateTime::parse_from_rfc3339(sched.next_fire.as_deref().unwrap_or_default())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            (next - now).num_seconds(),
+            *expected,
+            "input {input} must fire exactly one interval later"
+        );
     }
 }
 
 #[test]
-fn invalid_interval_spec_rejected() {
+fn interval_month_boundary_keeps_exact_elapsed_time() {
     let (_dir, store, _host, soul) = open_work();
-    for spec in ["every 90m", "every 5h", "every 7s", "every 0m", "every x"] {
+    // Aug 30 + every 2d crosses into September; cron day-of-month steps would
+    // reset at the month boundary and break the 48h cadence.
+    let created = Utc.with_ymd_and_hms(2026, 8, 30, 9, 15, 0).unwrap();
+    let sched = store
+        .insert_schedule_at(
+            &NewSchedule {
+                soul_id: soul,
+                name: "cross-month".into(),
+                spec: "every 2d".into(),
+                timezone: "UTC".into(),
+                action: ScheduleAction::Remind,
+                action_ref: Some("tick".into()),
+                important: false,
+            },
+            created,
+        )
+        .unwrap();
+    assert_eq!(sched.spec, "every 2d");
+    let next = DateTime::parse_from_rfc3339(sched.next_fire.as_deref().unwrap_or_default())
+        .unwrap()
+        .with_timezone(&Utc);
+    assert_eq!((next - created).num_hours(), 48);
+
+    let fired_at = Utc.with_ymd_and_hms(2026, 9, 1, 9, 15, 0).unwrap();
+    store.mark_fired(&sched.id, fired_at).unwrap();
+    let updated = store.get_schedule(&sched.id).unwrap().unwrap();
+    let after = DateTime::parse_from_rfc3339(updated.next_fire.as_deref().unwrap_or_default())
+        .unwrap()
+        .with_timezone(&Utc);
+    assert_eq!((after - fired_at).num_hours(), 48);
+}
+
+#[test]
+fn invalid_spec_rejected_with_readable_error() {
+    let (_dir, store, _host, soul) = open_work();
+    for spec in ["every x", "foo bar", "* * *", "every 0m"] {
         let err = store
             .insert_schedule(&NewSchedule {
                 soul_id: soul,
@@ -1336,10 +1385,35 @@ fn invalid_interval_spec_rejected() {
             })
             .unwrap_err();
         assert!(
-            err.to_string().contains("unsupported interval"),
+            err.to_string().contains("invalid schedule spec"),
             "spec {spec}: {err}"
         );
     }
+}
+
+#[test]
+fn interval_spec_stored_verbatim() {
+    let (_dir, store, _host, soul) = open_work();
+    let now = Utc::now();
+    let sched = store
+        .insert_schedule_at(
+            &NewSchedule {
+                soul_id: soul,
+                name: "verbatim".into(),
+                spec: "every 45m".into(),
+                timezone: "UTC".into(),
+                action: ScheduleAction::Remind,
+                action_ref: Some("tick".into()),
+                important: false,
+            },
+            now,
+        )
+        .unwrap();
+    assert_eq!(sched.spec, "every 45m");
+    let next = DateTime::parse_from_rfc3339(sched.next_fire.as_deref().unwrap_or_default())
+        .unwrap()
+        .with_timezone(&Utc);
+    assert_eq!((next - now).num_minutes(), 45);
 }
 
 #[test]

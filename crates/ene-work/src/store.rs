@@ -258,9 +258,16 @@ impl WorkStore {
     }
 
     pub fn insert_schedule(&self, new: &NewSchedule) -> Result<Schedule, WorkError> {
-        let spec = interval_to_cron(&new.spec)?;
+        self.insert_schedule_at(new, Utc::now())
+    }
+
+    pub fn insert_schedule_at(
+        &self,
+        new: &NewSchedule,
+        now: DateTime<Utc>,
+    ) -> Result<Schedule, WorkError> {
         let id = Uuid::now_v7().to_string();
-        let next = next_fire(&spec, &new.timezone, Utc::now())?;
+        let next = next_fire(&new.spec, &new.timezone, now)?;
         self.conn.lock().execute(
             "INSERT INTO schedules (
                 id, soul_id, name, spec, timezone, action_kind, action_ref,
@@ -270,7 +277,7 @@ impl WorkStore {
                 id,
                 new.soul_id.to_string(),
                 &new.name,
-                &spec,
+                &new.spec,
                 &new.timezone,
                 new.action.as_str(),
                 &new.action_ref,
@@ -809,13 +816,16 @@ pub struct MailboxEntry {
 }
 
 pub fn next_fire(spec: &str, tz_name: &str, from: DateTime<Utc>) -> Result<String, WorkError> {
+    if let Some(duration) = parse_interval(spec) {
+        let next = from.with_timezone(&Utc) + duration;
+        return Ok(next.to_rfc3339());
+    }
     let cron_spec = if spec.split_whitespace().count() == 5 {
         format!("0 {spec}")
     } else {
         spec.to_owned()
     };
-    let schedule =
-        Cron::from_str(&cron_spec).map_err(|err| WorkError::Schedule(err.to_string()))?;
+    let schedule = Cron::from_str(&cron_spec).map_err(|_| schedule_spec_error(spec))?;
     let tz: chrono_tz::Tz = tz_name.parse().unwrap_or(chrono_tz::UTC);
     let local = from.with_timezone(&tz);
     let next = schedule
@@ -825,33 +835,32 @@ pub fn next_fire(spec: &str, tz_name: &str, from: DateTime<Utc>) -> Result<Strin
     Ok(next.with_timezone(&Utc).to_rfc3339())
 }
 
-fn interval_to_cron(spec: &str) -> Result<String, WorkError> {
+fn parse_interval(spec: &str) -> Option<chrono::Duration> {
     let trimmed = spec.trim();
     if !trimmed.to_ascii_lowercase().starts_with("every ") {
-        return Ok(spec.to_owned());
+        return None;
     }
-    let value_part = trimmed[6..].trim();
-    if value_part.len() < 2 {
-        return Err(interval_error(trimmed));
+    let value = trimmed[6..].trim();
+    if value.len() < 2 {
+        return None;
     }
-    let (digits, unit) = value_part.split_at(value_part.len() - 1);
-    let n: u32 = digits.parse().map_err(|_| interval_error(trimmed))?;
+    let (digits, unit) = value.split_at(value.len() - 1);
+    let n: u32 = digits.parse().ok()?;
     if n == 0 {
-        return Err(interval_error(trimmed));
+        return None;
     }
-    let cron = match unit {
-        "s" if 60 % n == 0 => format!("*/{n} * * * * *"),
-        "m" if 60 % n == 0 => format!("0 */{n} * * * *"),
-        "h" if n <= 24 && 24 % n == 0 => format!("0 0 */{n} * * *"),
-        "d" => format!("0 0 0 */{n} * *"),
-        _ => return Err(interval_error(trimmed)),
-    };
-    Ok(cron)
+    match unit.to_ascii_lowercase().as_str() {
+        "s" => Some(chrono::Duration::seconds(i64::from(n))),
+        "m" => Some(chrono::Duration::minutes(i64::from(n))),
+        "h" => Some(chrono::Duration::hours(i64::from(n))),
+        "d" => Some(chrono::Duration::days(i64::from(n))),
+        _ => None,
+    }
 }
 
-fn interval_error(spec: &str) -> WorkError {
+fn schedule_spec_error(spec: &str) -> WorkError {
     WorkError::Schedule(format!(
-        "unsupported interval '{spec}'. use e.g. every 15s, every 10m, every 1h, or every 1d"
+        "invalid schedule spec '{spec}'. use cron (e.g. '0 9 * * *') or interval (e.g. 'every 1h')"
     ))
 }
 
