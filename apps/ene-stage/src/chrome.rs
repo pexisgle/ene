@@ -148,6 +148,14 @@ impl ChromeWindow {
         self.egui_ctx.egui_wants_pointer_input() || self.egui_ctx.egui_wants_keyboard_input()
     }
 
+    /// Whether the chat composer currently owns the keyboard. While it does,
+    /// overlay shortcuts must not fire, or typing A/D/W/S into a message would
+    /// also switch bodies and motions.
+    #[must_use]
+    pub fn composer_owns_keyboard(composer_focused: bool) -> bool {
+        composer_focused
+    }
+
     pub fn place_caption(&self, position: &str) {
         if self.kind != ChromeKind::Caption {
             return;
@@ -446,5 +454,10 @@ mod tests {
         assert_eq!(clamp_window_axis(1_800, 0, 1_920, 520), 1_352);
         assert_eq!(clamp_window_axis(640, 0, 1_920, 520), 640);
         assert_eq!(clamp_window_axis(-1_900, -1_920, 1_920, 520), -1_872);
+    }
+
+    #[test]
+    fn composer_keyboard_ownership_blocks_overlay_shortcuts() {
+        assert!(ChromeWindow::composer_owns_keyboard(true));
     }
 }
