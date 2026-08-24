@@ -49,6 +49,20 @@ jobs:
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+  audit:
+    name: RustSec audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The action fails critical vulnerabilities; unmaintained and other informational advisories remain visible without blocking while they are inventoried.
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   workspace-matrix:
     name: Workspace test matrix
     runs-on: ubuntu-latest
