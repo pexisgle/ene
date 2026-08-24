@@ -2200,7 +2200,7 @@ fn web_ui_is_read_only_in_source() {
     let html = include_str!("../web/index.html");
     assert!(html.contains("/api/v1/souls"));
     assert!(html.contains("display_name"));
-    assert!(html.contains("const protocols = token ? [\"bearer.\" + token] : [];"));
+    assert!(html.contains("\"bearer.\" + state.token"));
     assert!(
         !html.contains("access_token"),
         "WebSocket tokens must not be placed in the URL query"
@@ -2208,6 +2208,10 @@ fn web_ui_is_read_only_in_source() {
     assert!(
         !html.contains("method: \"PATCH\"") && !html.contains("method: \"DELETE\""),
         "Web UI must not PATCH/DELETE in page scripts"
+    );
+    assert!(
+        !html.contains("/respond") && !html.contains("decideApproval"),
+        "approvals are read-only in the web UI; resolve them in the stage app"
     );
     assert!(
         !html.contains("JSON.stringify(memories")
