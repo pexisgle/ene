@@ -134,7 +134,7 @@
     <div class="dialog-body" style="align-items: center;">
       <h2 style="margin: 0;">Connect another device</h2>
       <canvas id="qr-canvas" width="512" height="512" aria-label="Connection QR code"></canvas>
-      <p class="hint" style="text-align: center;">Scanning opens this page with the token prefilled. The URL is never sent to the daemon and is cleared on disconnect.</p>
+      <p class="hint" style="text-align: center;">Scanning opens this page with the token prefilled. The token is removed from the address bar as soon as it is consumed.</p>
       <button id="qr-close" style="align-self: end;">Close</button>
     </div>
   </dialog>
@@ -221,6 +221,7 @@
     function connect(token) {
       state = freshState();
       state.token = token;
+      history.replaceState(null, "", location.pathname + location.search);
       $("token-input").value = "";
       $("disconnect-btn").classList.remove("hidden");
       $("qr-show-btn").classList.remove("hidden");
@@ -3068,6 +3069,7 @@ var qrcode = function() {
       if (!token || !state) return;
       teardown();
       $("token-input").value = token;
+      history.replaceState(null, "", location.pathname + location.search);
     });
 
     function drawQr(canvas, text) {
