@@ -11,16 +11,18 @@ use ene_api::{
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateScheduleRequest,
     CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, GreetingView, Health,
     HistoryResponse, JobView, ListProviderModelsRequest, ListProviderModelsResponse, McpDocument,
-    McpServerView, MemoryPatch, MemoryView, MessageMode, MessageRequest, MessageResponse,
-    OccupantView, Page, PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView,
-    PluginConfigValidateView, PluginConfigValues, PluginConfigView, PluginView, QueuedCancel,
-    ResourceKind, RestoreRequest, ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
-    SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch,
-    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    McpServerView, MemoryCandidateDecision, MemoryCandidateView, MemoryJournalView, MemoryPatch,
+    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
+    PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
+    PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResolveMemoryCandidateRequest,
+    ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
+    SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
+    SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView,
+    ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
-    JournalAction, MemoryId, MemoryScope, avatar_path_for_install, export_dir,
+    CandidateResolution, JournalAction, MemoryId, MemoryScope, avatar_path_for_install, export_dir,
     greeting_options_for_install, import_v3, install_archive, looks_like_package_zip,
     soul_from_install,
 };
@@ -2239,7 +2241,7 @@ pub async fn exclusive_release(
 pub async fn list_pending_memories(
     State(state): State<AppState>,
     Query(filter): Query<SoulFilter>,
-) -> Result<Json<Page<MemoryView>>, ApiReject> {
+) -> Result<Json<Page<MemoryCandidateView>>, ApiReject> {
     let soul = filter
         .soul_id
         .as_deref()
@@ -2252,41 +2254,85 @@ pub async fn list_pending_memories(
         .list_pending_candidates(soul)
         .map_err(map_companion)?
         .into_iter()
-        .map(|cand| MemoryView {
-            id: cand.id.to_string(),
-            soul_id: cand.soul_id.to_string(),
-            scope: cand.scope.as_str().to_owned(),
-            kind: cand.kind.as_str().to_owned(),
-            title: cand.title,
-            content: cand.content,
-            expires_at: cand.expires_at,
-            schedule_id: None,
-        })
+        .map(memory_candidate_view)
         .collect();
     Ok(Json(Page::of(items)))
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct ResolveCandidateBody {
-    accept: bool,
+pub async fn list_memory_journal(
+    State(state): State<AppState>,
+    Query(filter): Query<SoulFilter>,
+) -> Result<Json<Page<MemoryJournalView>>, ApiReject> {
+    let soul = filter
+        .soul_id
+        .as_deref()
+        .map(parse_soul)
+        .transpose()?
+        .ok_or_else(|| bad_request("invalid_message", "soul_id required"))?;
+    let items = state
+        .core
+        .companions()
+        .list_journal(soul)
+        .map_err(map_companion)?
+        .into_iter()
+        .map(memory_journal_view)
+        .collect();
+    Ok(Json(Page::of(items)))
 }
 
 pub async fn resolve_memory_candidate(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<ResolveCandidateBody>,
-) -> Result<Json<Value>, ApiReject> {
+    Json(body): Json<ResolveMemoryCandidateRequest>,
+) -> Result<Json<ResolveMemoryCandidateResponse>, ApiReject> {
     web_mutate_forbidden(&client_id_from_headers(&headers))?;
     let candidate_id = ene_companion::CandidateId::from_str(&id)
         .map_err(|_| bad_request("invalid_message", "bad candidate id"))?;
-    let status = if body.accept { "accepted" } else { "rejected" };
-    state
+    let accept = matches!(body.decision, MemoryCandidateDecision::Accept);
+    if !accept
+        && (body.title.is_some()
+            || body.content.is_some()
+            || body.kind.is_some()
+            || body.scope.is_some())
+    {
+        return Err(bad_request(
+            "invalid_message",
+            "candidate edits require accept",
+        ));
+    }
+    let title = normalize_candidate_edit(body.title, "title")?;
+    let content = normalize_candidate_edit(body.content, "content")?;
+    let kind = body
+        .kind
+        .map(|value| normalize_candidate_kind(&value))
+        .transpose()?;
+    let scope = body
+        .scope
+        .map(|value| normalize_candidate_scope(&value))
+        .transpose()?;
+    let memory = state
         .core
         .companions()
-        .resolve_candidate(candidate_id, status)
+        .resolve_candidate(
+            candidate_id,
+            CandidateResolution {
+                accept,
+                title,
+                content,
+                kind,
+                scope,
+            },
+        )
         .map_err(map_companion)?;
-    Ok(Json(json!({ "ok": true, "status": status })))
+    Ok(Json(ResolveMemoryCandidateResponse {
+        status: if accept {
+            "accepted".to_owned()
+        } else {
+            "rejected".to_owned()
+        },
+        memory: memory.map(memory_view),
+    }))
 }
 
 pub async fn web_index() -> axum::response::Html<&'static str> {
@@ -2551,6 +2597,71 @@ fn memory_view(row: ene_companion::MemoryRecord) -> MemoryView {
     }
 }
 
+fn memory_candidate_view(row: ene_companion::MemoryCandidate) -> MemoryCandidateView {
+    MemoryCandidateView {
+        id: row.id.to_string(),
+        soul_id: row.soul_id.to_string(),
+        scope: row.scope.as_str().to_owned(),
+        kind: row.kind.as_str().to_owned(),
+        title: row.title,
+        content: row.content,
+        confidence: row.confidence,
+        sensitive: row.sensitive,
+        expires_at: row.expires_at,
+    }
+}
+
+fn memory_journal_view(row: ene_companion::MemoryJournalEntry) -> MemoryJournalView {
+    MemoryJournalView {
+        seq: row.seq,
+        ts: row.ts,
+        memory_id: row.memory_id.map(|id| id.to_string()),
+        soul_id: row.soul_id.to_string(),
+        action: row.action,
+        payload: row.payload,
+    }
+}
+
+fn normalize_candidate_edit(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<String>, ApiReject> {
+    value
+        .map(|value| {
+            let value = value.trim().to_owned();
+            if value.is_empty() {
+                Err(bad_request(
+                    "invalid_message",
+                    &format!("candidate {field} must not be empty"),
+                ))
+            } else {
+                Ok(value)
+            }
+        })
+        .transpose()
+}
+
+fn normalize_candidate_kind(value: &str) -> Result<String, ApiReject> {
+    let value = value.trim();
+    if matches!(
+        value,
+        "episodic" | "semantic" | "user_profile" | "preference" | "commitment"
+    ) {
+        Ok(value.to_owned())
+    } else {
+        Err(bad_request("invalid_message", "unknown memory kind"))
+    }
+}
+
+fn normalize_candidate_scope(value: &str) -> Result<String, ApiReject> {
+    let value = value.trim();
+    if matches!(value, "private" | "shared") {
+        Ok(value.to_owned())
+    } else {
+        Err(bad_request("invalid_message", "unknown memory scope"))
+    }
+}
+
 fn parse_soul(raw: &str) -> Result<SoulId, ApiReject> {
     SoulId::from_str(raw).map_err(|_| bad_request("invalid_message", "bad soul id"))
 }
@@ -2615,6 +2726,9 @@ fn map_companion(err: ene_companion::CompanionError) -> ApiReject {
     match err {
         ene_companion::CompanionError::UnknownSoul(_)
         | ene_companion::CompanionError::UnknownMemory(_) => not_found(&err.to_string()),
+        ene_companion::CompanionError::CandidateConflict(_) => {
+            conflict("candidate_conflict", &err.to_string())
+        }
         other => bad_request("fault", &other.to_string()),
     }
 }

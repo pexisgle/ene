@@ -115,6 +115,8 @@ pub enum JournalAction {
     UserRequest,
     Expired,
     Completed,
+    CandidateAccepted,
+    CandidateRejected,
 }
 
 impl JournalAction {
@@ -129,6 +131,8 @@ impl JournalAction {
             Self::UserRequest => "user_request",
             Self::Expired => "expired",
             Self::Completed => "completed",
+            Self::CandidateAccepted => "candidate_accepted",
+            Self::CandidateRejected => "candidate_rejected",
         }
     }
 }
@@ -202,6 +206,25 @@ pub struct MemoryCandidate {
     pub salience: f32,
     pub sensitive: bool,
     pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateResolution {
+    pub accept: bool,
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub kind: Option<String>,
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryJournalEntry {
+    pub seq: u64,
+    pub ts: String,
+    pub memory_id: Option<MemoryId>,
+    pub soul_id: SoulId,
+    pub action: String,
+    pub payload: serde_json::Value,
 }
 
 /// Outcome of [`arbitrate`].

@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ene_api::{
-    ApiClient, ApiError, CharacterView, JobView, MemoryPatch, MemoryView, OccupantView,
-    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
-    ScheduleView, SoulView,
+    ApiClient, ApiError, CharacterView, JobView, MemoryCandidateDecision, MemoryCandidateView,
+    MemoryPatch, MemoryView, OccupantView, PluginConfigField, PluginConfigValues, PluginConfigView,
+    PluginView, ProviderAssetView, ResolveMemoryCandidateRequest, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -298,7 +298,7 @@ pub struct DetailUiState {
     pub health: String,
     pub unconfigured: Vec<String>,
     pub memories: Vec<MemoryView>,
-    pub pending_memories: Vec<MemoryView>,
+    pub pending_memories: Vec<MemoryCandidateView>,
     pub soul: Option<SoulView>,
     pub characters: Vec<CharacterView>,
     pub occupants: Vec<OccupantView>,
@@ -1861,19 +1861,31 @@ fn show_memory(
     if state.pending_memories.is_empty() {
         ui.label(i18n::fl("memory-pending-empty"));
     }
-    for memory in &state.pending_memories {
+    for candidate in &state.pending_memories {
         ui.group(|ui| {
             ui.label(format!(
                 "{} [{}] ({})",
-                memory.title, memory.kind, memory.scope
+                candidate.title, candidate.kind, candidate.scope
             ));
-            ui.label(&memory.content);
+            ui.label(&candidate.content);
             ui.horizontal(|ui| {
                 if ui.button(i18n::fl("memory-accept")).clicked() {
-                    resolve_memory(&memory.id, true, client, rt, async_results);
+                    resolve_memory(
+                        &candidate.id,
+                        MemoryCandidateDecision::Accept,
+                        client,
+                        rt,
+                        async_results,
+                    );
                 }
                 if ui.button(i18n::fl("memory-reject")).clicked() {
-                    resolve_memory(&memory.id, false, client, rt, async_results);
+                    resolve_memory(
+                        &candidate.id,
+                        MemoryCandidateDecision::Reject,
+                        client,
+                        rt,
+                        async_results,
+                    );
                 }
             });
         });
@@ -1968,18 +1980,25 @@ fn show_memory(
 
 fn resolve_memory(
     id: &str,
-    accept: bool,
+    decision: MemoryCandidateDecision,
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     let id = id.to_owned();
     let client = Arc::clone(client);
+    let request = ResolveMemoryCandidateRequest {
+        decision,
+        title: None,
+        content: None,
+        kind: None,
+        scope: None,
+    };
     spawn_async(rt, async_results, async move {
         AsyncOutcome::ResolveMemory {
             id: id.clone(),
             result: client
-                .resolve_memory_candidate(&id, accept)
+                .resolve_memory_candidate(&id, &request)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
