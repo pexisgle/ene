@@ -814,6 +814,14 @@ pub async fn answer_job(
             .collect::<Vec<_>>()
     };
     persist_job_answer(&state, job, &answered).await;
+    if state
+        .core
+        .host()
+        .open_questions(job)
+        .is_ok_and(|open| open.is_empty())
+    {
+        emit_question_resolved(&state, job);
+    }
     get_job(State(state), Path(id)).await
 }
 
@@ -838,6 +846,14 @@ pub async fn answer_question(
         .answer_question(job, question_id, text)
         .map_err(map_work)?;
     persist_job_answer(&state, job, &[(question.question_id(), text.to_owned())]).await;
+    if state
+        .core
+        .host()
+        .open_questions(job)
+        .is_ok_and(|open| open.is_empty())
+    {
+        emit_question_resolved(&state, job);
+    }
     get_job(State(state), Path(id)).await
 }
 
@@ -2829,6 +2845,16 @@ fn ask_user_prompt(
             Vec::new(),
         ),
     }
+}
+
+pub(crate) fn emit_question_resolved(state: &AppState, job_id: DelegationId) {
+    state.events.emit(
+        DisplayDepth::Surface,
+        json!({
+            "type": ene_api::QUESTION_RESOLVED_EVENT,
+            "id": job_id.to_string(),
+        }),
+    );
 }
 
 pub(crate) async fn persist_job_report(state: &AppState, report: &CompanionReport) {
