@@ -374,8 +374,7 @@ impl ToolRegistry {
         workspace: Option<&Path>,
     ) -> Result<(), PipelineError> {
         let (def, invoke, prepared) = self
-            .prepare_without_authorize(name, args, layer, workspace.map(Path::to_path_buf))
-            .await?;
+            .prepare_without_authorize(name, args, layer, workspace.map(Path::to_path_buf))?;
         if !def.background {
             return Err(PipelineError::NotBackground(name.to_owned()));
         }
@@ -406,7 +405,7 @@ impl ToolRegistry {
             .map_err(PipelineError::Execute)
     }
 
-    async fn prepare_without_authorize(
+    fn prepare_without_authorize(
         &self,
         name: &str,
         args: Value,
