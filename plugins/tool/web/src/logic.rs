@@ -4,13 +4,15 @@ use serde_json::{Value, json};
 use std::net::IpAddr;
 use url::Url;
 
+#[path = "credentials.rs"]
+pub(crate) mod credentials;
 #[path = "html.rs"]
 mod html;
 #[path = "search.rs"]
 mod search;
 
 use html::{fail, parse_format, render};
-use search::{catalog, parse_arxiv_atom, parse_backend, require_available};
+use search::{parse_arxiv_atom, parse_backend, require_available};
 
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
@@ -61,7 +63,7 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
             let backend = parse_backend(args.get("backend").and_then(Value::as_str))?;
             search(arg_str(args, "query")?, backend)
         }
-        "web.search_backends" => Ok(catalog()),
+        "web.search_backends" => Ok(search::catalog(credentials::try_credentials().as_ref())),
         other => Err(format!("unknown builtin {other}")),
     }
 }
@@ -85,11 +87,18 @@ fn search(query: &str, backend: search::SearchBackend) -> Result<Value, String> 
         return Err(fail("invalid_query", "query is empty"));
     }
     require_available(backend)?;
+    let credential = credentials::try_credentials()
+        .and_then(|creds| creds.for_backend(backend).map(str::to_owned));
     let results = match backend {
         search::SearchBackend::DuckDuckGo => search_ddg(query)?,
         search::SearchBackend::Arxiv => search_arxiv(query)?,
-        search::SearchBackend::Tavily | search::SearchBackend::Exa => {
-            return Err(fail("credential_missing", "paid backend is not configured"));
+        search::SearchBackend::Tavily => {
+            let key = credential.as_deref().unwrap_or_default();
+            search_tavily(query, key)?
+        }
+        search::SearchBackend::Exa => {
+            let key = credential.as_deref().unwrap_or_default();
+            search_exa(query, key)?
         }
     };
     Ok(json!({
@@ -174,6 +183,164 @@ fn search_arxiv(query: &str) -> Result<Vec<Value>, String> {
     Ok(parse_arxiv_atom(&xml))
 }
 
+fn search_tavily(query: &str, api_key: &str) -> Result<Vec<Value>, String> {
+    let body = json!({
+        "api_key": api_key,
+        "query": query,
+        "max_results": 8,
+    });
+    let payload = host_post_json("https://api.tavily.com/search", &body)?;
+    let status = status_of(&payload);
+    if status == 401 || status == 403 {
+        return Err(fail("credential_invalid", "tavily rejected the API key"));
+    }
+    if status == 429 {
+        return Err(fail("rate_limited", "tavily returned HTTP 429"));
+    }
+    Ok(rows_from_payload(&payload, "content", |row| row))
+}
+
+fn search_exa(query: &str, api_key: &str) -> Result<Vec<Value>, String> {
+    let body = json!({ "query": query, "numResults": 8 });
+    let payload = host_post_json_with_bearer("https://api.exa.ai/search", &body, api_key)?;
+    let status = status_of(&payload);
+    if status == 401 || status == 403 {
+        return Err(fail("credential_invalid", "exa rejected the API key"));
+    }
+    if status == 429 {
+        return Err(fail("rate_limited", "exa returned HTTP 429"));
+    }
+    Ok(rows_from_payload(&payload, "text", |row| row))
+}
+
+fn rows_from_payload(
+    payload: &Value,
+    snippet_key: &str,
+    map_row: impl Fn(&Value) -> &Value,
+) -> Vec<Value> {
+    payload
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(map_row)
+                .filter_map(|row| {
+                    let title = row.get("title").and_then(Value::as_str)?;
+                    Some(json!({
+                        "title": title,
+                        "url": row.get("url").and_then(Value::as_str).unwrap_or(""),
+                        "snippet": row.get(snippet_key).and_then(Value::as_str).unwrap_or(""),
+                    }))
+                })
+                .collect::<Vec<Value>>()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::execute;
+    use crate::credentials::{WebCredentials, with_credentials};
+    use ene_registry::with_post_json;
+    use serde_json::json;
+
+    fn creds() -> WebCredentials {
+        WebCredentials {
+            tavily: Some("tvly-test".to_owned()),
+            exa: Some("exa-test".to_owned()),
+        }
+    }
+
+    #[test]
+    fn tavily_search_posts_api_key_and_maps_results() {
+        let value = with_credentials(creds(), || {
+            with_post_json(
+                |url, body, _bearer| {
+                    assert_eq!(url, "https://api.tavily.com/search");
+                    assert_eq!(body["api_key"], "tvly-test");
+                    Ok(json!({
+                        "status": 200,
+                        "content_type": "application/json",
+                        "results": [
+                            {"title": "Tokyo", "url": "https://example.invalid/tokyo", "content": "Capital"}
+                        ]
+                    }))
+                },
+                || execute("web.search", &json!({"query": "tokyo", "backend": "tavily"})),
+            )
+            .unwrap()
+        });
+        assert_eq!(value["backend"], "tavily");
+        assert_eq!(value["results"][0]["snippet"], "Capital");
+    }
+
+    #[test]
+    fn exa_search_uses_bearer_and_maps_results() {
+        let value = with_credentials(creds(), || {
+            with_post_json(
+                |url, _body, bearer| {
+                    assert_eq!(url, "https://api.exa.ai/search");
+                    assert_eq!(bearer, "exa-test");
+                    Ok(json!({
+                        "status": 200,
+                        "content_type": "application/json",
+                        "results": [
+                            {"title": "Kyoto", "url": "https://example.invalid/kyoto", "text": "Temple"}
+                        ]
+                    }))
+                },
+                || execute("web.search", &json!({"query": "kyoto", "backend": "exa"})),
+            )
+            .unwrap()
+        });
+        assert_eq!(value["backend"], "exa");
+        assert_eq!(value["results"][0]["snippet"], "Temple");
+    }
+
+    #[test]
+    fn invalid_credential_reports_credential_invalid() {
+        let err = with_credentials(creds(), || {
+            with_post_json(
+                |_url, _body, _bearer| {
+                    Ok(json!({
+                        "status": 401,
+                        "content_type": "application/json"
+                    }))
+                },
+                || {
+                    execute(
+                        "web.search",
+                        &json!({"query": "tokyo", "backend": "tavily"}),
+                    )
+                },
+            )
+            .unwrap_err()
+        });
+        assert!(err.contains("credential_invalid"), "{err}");
+    }
+
+    #[test]
+    fn missing_credential_fails_closed_before_network() {
+        let err = execute(
+            "web.search",
+            &json!({"query": "tokyo", "backend": "tavily"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("credential_missing"), "{err}");
+    }
+
+    #[test]
+    fn catalog_reflects_runtime_credentials() {
+        let without = execute("web.search_backends", &json!({})).unwrap();
+        assert_eq!(without["backends"][2]["available"], false);
+        let with = with_credentials(creds(), || {
+            execute("web.search_backends", &json!({})).unwrap()
+        });
+        assert_eq!(with["backends"][2]["available"], true);
+        assert_eq!(with["backends"][3]["available"], true);
+    }
+}
+
 fn search_html(query: &str) -> Result<Vec<Value>, String> {
     let mut url = deny_ssrf("https://html.duckduckgo.com/html/")?;
     url.query_pairs_mut().append_pair("q", query);
@@ -183,6 +350,16 @@ fn search_html(query: &str) -> Result<Vec<Value>, String> {
 
 fn host_get(raw: &str) -> Result<Value, String> {
     try_host_fetch(raw).unwrap_or_else(|| Err("web tools require the host net broker".to_owned()))
+}
+
+fn host_post_json(raw: &str, body: &Value) -> Result<Value, String> {
+    host_post_json_with_bearer(raw, body, "")
+}
+
+fn host_post_json_with_bearer(raw: &str, body: &Value, bearer: &str) -> Result<Value, String> {
+    deny_ssrf(raw)?;
+    ene_registry::try_host_post_json(raw, body, bearer)
+        .unwrap_or_else(|| Err("web tools require the host net broker".to_owned()))
 }
 
 fn status_of(payload: &Value) -> u16 {

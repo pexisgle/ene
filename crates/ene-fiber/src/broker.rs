@@ -326,6 +326,22 @@ impl Broker {
         net_fetch(url)
     }
 
+    /// JSON POST through the same grant and SSRF pipeline as [`Self::net_fetch`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying fetch error when a hop is denied or fails.
+    pub fn net_post_json(
+        &self,
+        uid: FiberUid,
+        url: &str,
+        body: &Value,
+        bearer: Option<&str>,
+    ) -> Result<Value, BrokerError> {
+        self.require(uid, "net.fetch")?;
+        net_post_json(url, body, bearer)
+    }
+
     /// Search file contents with host-managed `rg`.
     ///
     /// # Errors
