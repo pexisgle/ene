@@ -1399,7 +1399,15 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             }
             SurfaceToolOutcome::Denied { reason } => {
                 let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                commit_denied_step(&ctx, &call.name, &reason, step_index, duration_ms).await?;
+                commit_denied_step(
+                    &ctx,
+                    &call.name,
+                    &reason,
+                    intent_call_id,
+                    step_index,
+                    duration_ms,
+                )
+                .await?;
                 finish_speech(
                     &ctx,
                     &ModelGeneration {
@@ -1825,6 +1833,7 @@ async fn commit_denied_step(
     ctx: &TurnCtx,
     name: &str,
     reason: &str,
+    call_id: CallId,
     step_index: u32,
     duration_ms: u64,
 ) -> Result<(), KernelError> {
@@ -1839,7 +1848,7 @@ async fn commit_denied_step(
                     EventKind::ToolResult,
                     EventPayload::ToolResult {
                         v: v1(),
-                        call_id: CallId::new(),
+                        call_id,
                         status: ToolStatus::Denied,
                         blocks: vec![Block::text(format!("denied {name}: {reason}"))],
                         spill_ref: None,
