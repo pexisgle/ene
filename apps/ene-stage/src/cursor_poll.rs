@@ -5,11 +5,9 @@
 //!
 //! Wayland cannot query the global pointer, so this module is X11-only.
 
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 
-use crossbeam_channel::{Receiver, Sender};
-use tracing::debug;
-use x11rb::connection::Connection;
+use crossbeam_channel::Receiver;
 
 /// Global pointer position in screen coordinates, polled from X11.
 #[derive(Debug, Clone, Copy)]
@@ -22,6 +20,25 @@ pub struct GlobalCursor {
 /// fixed interval. Returns `None` when the display is unavailable (non-X11,
 /// headless CI) so callers only need to handle the absence.
 pub fn spawn(poll_interval_ms: u64) -> Option<(JoinHandle<()>, Receiver<GlobalCursor>)> {
+    #[cfg(target_os = "linux")]
+    {
+        spawn_x11(poll_interval_ms)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = poll_interval_ms;
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_x11(poll_interval_ms: u64) -> Option<(JoinHandle<()>, Receiver<GlobalCursor>)> {
+    use std::thread;
+
+    use crossbeam_channel::Sender;
+    use tracing::debug;
+    use x11rb::connection::Connection;
+
     let (conn, screen_num) = match x11rb::connect(None) {
         Ok(pair) => pair,
         Err(err) => {
