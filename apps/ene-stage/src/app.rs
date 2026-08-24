@@ -11,7 +11,7 @@ use tokio::runtime::{Handle, Runtime};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
@@ -191,6 +191,15 @@ pub fn run() -> Result<(), AppError> {
     let runtime = Runtime::new().map_err(|err| AppError::Runtime(err.to_string()))?;
     let rt_handle = runtime.handle().clone();
 
+    // egui windows own smithay-clipboard workers whose proxies point into the
+    // loop's Wayland display. Dropping that display before those windows would
+    // make their teardown dereference freed Wayland objects, so keep a clone of
+    // the connection alive past the last window drop; declaring this before
+    // `app` guarantees it outlives every clipboard worker.
+    let event_loop = EventLoop::new().map_err(|err| AppError::Window(err.to_string()))?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let _wayland_display: OwnedDisplayHandle = event_loop.owned_display_handle();
+
     let (client, core, session, feeds) = runtime.block_on(async {
         let (client, core) = attach_or_spawn_core(&settings).await?;
         let client = Arc::new(client);
@@ -263,8 +272,6 @@ pub fn run() -> Result<(), AppError> {
     );
     app.claim_speaker_notify();
 
-    let event_loop = EventLoop::new().map_err(|err| AppError::Window(err.to_string()))?;
-    event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
         .run_app(&mut app)
         .map_err(|err| AppError::Window(err.to_string()))?;
