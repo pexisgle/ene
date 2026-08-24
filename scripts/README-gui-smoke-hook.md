@@ -11,6 +11,8 @@ Same meaning as the old box `ene-gui-smoke-watcher`:
 2. All non-skipped checks are green
 3. Either first green for that PR, or first green after label `gui-smoke-issues`
 
+Retry: POST retries ~3 times on HTTP 5xx / URLError / timeout (1s, 2s, 4s); leftover failures are logged, that PR is left unfired, and the job stays green. HTTP 4xx still fails the job.
+
 State:
 
 - `fired_green` → Actions cache (`.gui-smoke-hook-state/state.json`)
