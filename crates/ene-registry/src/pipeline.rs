@@ -534,7 +534,7 @@ impl ToolRegistry {
                     tool: name.to_owned(),
                     side_effects: def.side_effects.clone(),
                     sensitivity: def.sensitivity,
-                    target: target.to_owned(),
+                    target: target.clone(),
                     in_workspace,
                     call_id: call_id.to_owned(),
                 };
@@ -566,7 +566,8 @@ impl ToolRegistry {
             in_workspace,
             call_id: call_id.to_owned(),
         };
-        if let Some(plane) = self.plane.lock().clone() {
+        let plane = self.plane.lock().clone();
+        if let Some(plane) = plane {
             if let Err(err) = plane.authorize(&req).await {
                 // Surface the refused intent in the transcript; without this
                 // entry an Allow/Deny cycle leaves the turn with no record.
