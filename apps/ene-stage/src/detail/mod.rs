@@ -279,7 +279,7 @@ enum SettingsLoadState {
     Loaded,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct DetailUiState {
     pub visible: bool,
     pub tab: DetailTab,
@@ -362,7 +362,7 @@ pub struct DetailUiState {
     loaded: DetailLoaded,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct DetailLoaded {
     memory: bool,
     character: bool,
