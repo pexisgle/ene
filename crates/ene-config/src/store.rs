@@ -13,7 +13,7 @@ use crate::{EneConfig, EneConfigError, save_full_config};
 /// The intended usage is:
 /// 1. Mutate config via [`with_config_mut`](Self::with_config_mut) or [`set_config`](Self::set_config).
 /// 2. The store is automatically marked dirty on mutation.
-/// 3. A periodic flush (e.g. a Bevy system each frame) calls `flush_if_dirty`(Self::flush_if_dirty).
+/// 3. A periodic flush (e.g. a Bevy system each frame) calls `flush_if_dirty`.
 pub struct ConfigStore {
     config: RwLock<EneConfig>,
     global_dirty: AtomicBool,
