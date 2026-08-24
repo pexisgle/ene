@@ -531,7 +531,7 @@ mod tests {
     use super::super::cap_from_availability;
     use super::{
         DesktopKind, PlatformCaps, SessionKind, dependency_missing, install_hint,
-        screenshot_cli_backend, window_availability_for_session_with,
+        window_availability_for_session_with,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -630,6 +630,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn screenshot_cli_probe_requires_an_executable_backend() {
+        use super::screenshot_cli_backend;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();

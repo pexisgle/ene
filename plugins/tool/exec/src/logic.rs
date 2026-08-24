@@ -412,7 +412,9 @@ fn signal_tree(pid: u32, kind: &str) {
 mod tests {
     use super::{TEST_WORKSPACE, execute};
     use serde_json::json;
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::process::Command;
     use tempfile::TempDir;
 
