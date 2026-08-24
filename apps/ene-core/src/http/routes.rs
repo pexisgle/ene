@@ -9,17 +9,16 @@ use base64::Engine;
 use ene_api::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateJobRequest,
-    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot, GreetingView,
-    Health,
-    HistoryResponse, JobView, ListProviderModelsRequest, ListProviderModelsResponse, McpDocument,
-    McpServerView, MemoryCandidateDecision, MemoryCandidateView, MemoryJournalView, MemoryPatch,
-    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
-    PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
-    PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResolveMemoryCandidateRequest,
-    ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
-    SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
-    SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView,
-    ToolTestRequest, ToolView, UsageView,
+    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot,
+    GreetingView, Health, HistoryResponse, JobView, ListProviderModelsRequest,
+    ListProviderModelsResponse, McpDocument, McpServerView, MemoryCandidateDecision,
+    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, MessageMode, MessageRequest,
+    MessageResponse, OccupantView, Page, PluginConfigErrorView, PluginConfigField,
+    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
+    PluginView, QueuedCancel, ResolveMemoryCandidateRequest, ResolveMemoryCandidateResponse,
+    ResourceKind, RestoreRequest, ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
+    SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
