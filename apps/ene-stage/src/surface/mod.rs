@@ -8,6 +8,7 @@ mod spotlight;
 use ene_api::{GreetingView, HistoryResponse, MessageMode};
 
 use crate::detail::DetailTab;
+use crate::detail::DetailUiState;
 use crate::i18n;
 
 pub use approvals::PendingApproval;
@@ -47,6 +48,9 @@ pub struct SurfaceUiState {
     pub chat_draft: String,
     pub focus_chat: bool,
     pub chat_input_focused: bool,
+    /// Mirrors the Detail window's chat readiness so the chat surface can
+    /// show setup guidance without polling core settings itself.
+    pub chat_setup: DetailUiState,
     pub history: HistoryResponse,
     pub greetings: Vec<GreetingView>,
     pub greeting_inflight: bool,
@@ -76,6 +80,7 @@ impl Default for SurfaceUiState {
             chat_draft: String::new(),
             focus_chat: false,
             chat_input_focused: false,
+            chat_setup: DetailUiState::default(),
             history: HistoryResponse {
                 messages: Vec::new(),
                 depth: "surface".to_owned(),

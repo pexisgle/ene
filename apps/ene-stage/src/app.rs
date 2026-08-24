@@ -115,6 +115,7 @@ pub fn run() -> Result<(), AppError> {
     app.surface.character_pos = [app.settings.character_x, app.settings.character_y];
     app.surface.history = app.session.history();
     app.surface.greetings = app.session.greetings().to_vec();
+    app.surface.chat_setup = app.detail.clone();
     detail::ensure_settings(
         &mut app.detail,
         &app.client,
@@ -438,6 +439,7 @@ impl StageApp {
                     self.detail.core_patch_text.clear();
                     detail::parse_core_fields(&json, &mut self.detail);
                     self.detail.finish_settings_load();
+                    self.surface.chat_setup = self.detail.clone();
                     self.detail.core_status = if detail::chat_setup_gap(&self.detail)
                         == Some(detail::ChatSetupGap::ApiKey)
                     {

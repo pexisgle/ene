@@ -1,12 +1,14 @@
 //! Chat panel for the surface viewport.
 
-use crate::detail::DetailTab;
+use crate::detail::{DetailTab, chat_setup_gap, chat_setup_status};
 use crate::i18n;
 use crate::surface::{SurfaceAction, SurfaceUiState};
 use ene_api::{HistoryResponse, MessageMode, MessageResponse};
 
+/// Role a transcript row plays in the conversation view. The kind decides
+/// alignment and the visible label, so meaning never rests on color alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TranscriptKind {
+pub(crate) enum TranscriptKind {
     User,
     Assistant,
     Error,
@@ -14,40 +16,44 @@ enum TranscriptKind {
     System,
 }
 
+/// Delivery state of a row. Streaming rows get the caret suffix and the
+/// waiting placeholder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TranscriptState {
+pub(crate) enum TranscriptState {
     Stable,
     Error,
     Streaming,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TranscriptRow<'a> {
-    kind: TranscriptKind,
-    state: TranscriptState,
-    text: &'a str,
+/// Normalized conversation row: role, delivery state, and owned text. Kept
+/// independent of egui so follow-up stage features can reuse the transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChatMessageView {
+    pub(crate) role: TranscriptKind,
+    pub(crate) state: TranscriptState,
+    pub(crate) text: String,
 }
 
-fn normalize_transcript<'a>(
-    history: &'a HistoryResponse,
-    streaming_text: &'a str,
-) -> Vec<TranscriptRow<'a>> {
+pub(crate) fn normalize_transcript(
+    history: &HistoryResponse,
+    streaming_text: &str,
+) -> Vec<ChatMessageView> {
     let mut rows = history
         .messages
         .iter()
         .filter_map(normalize_message)
         .collect::<Vec<_>>();
     if !streaming_text.is_empty() {
-        rows.push(TranscriptRow {
-            kind: TranscriptKind::Assistant,
+        rows.push(ChatMessageView {
+            role: TranscriptKind::Assistant,
             state: TranscriptState::Streaming,
-            text: streaming_text,
+            text: streaming_text.to_owned(),
         });
     }
     rows
 }
 
-fn normalize_message(message: &MessageResponse) -> Option<TranscriptRow<'_>> {
+fn normalize_message(message: &MessageResponse) -> Option<ChatMessageView> {
     let (kind, state) = match message.role.as_str() {
         "user" => (TranscriptKind::User, TranscriptState::Stable),
         "assistant" => (TranscriptKind::Assistant, TranscriptState::Stable),
@@ -56,10 +62,10 @@ fn normalize_message(message: &MessageResponse) -> Option<TranscriptRow<'_>> {
         "inner" | "thinking" => return None,
         _ => (TranscriptKind::System, TranscriptState::Stable),
     };
-    Some(TranscriptRow {
-        kind,
+    Some(ChatMessageView {
+        role: kind,
         state,
-        text: &message.text,
+        text: message.text.clone(),
     })
 }
 
@@ -73,8 +79,8 @@ fn transcript_label(kind: TranscriptKind) -> String {
     })
 }
 
-fn render_transcript_row(ui: &mut egui::Ui, row: TranscriptRow<'_>) {
-    let is_user = row.kind == TranscriptKind::User;
+pub(crate) fn render_message_bubble(ui: &mut egui::Ui, row: &ChatMessageView) {
+    let is_user = row.role == TranscriptKind::User;
     let frame_color = match row.state {
         TranscriptState::Error => egui::Color32::from_rgb(76, 29, 29),
         TranscriptState::Stable | TranscriptState::Streaming if is_user => {
@@ -104,11 +110,11 @@ fn render_transcript_row(ui: &mut egui::Ui, row: TranscriptRow<'_>) {
         frame.show(ui, |ui| {
             ui.set_max_width(bubble_max_width);
             ui.label(
-                egui::RichText::new(transcript_label(row.kind))
+                egui::RichText::new(transcript_label(row.role))
                     .small()
                     .weak(),
             );
-            let mut text = row.text.to_owned();
+            let mut text = row.text.clone();
             if row.state == TranscriptState::Streaming {
                 text.push('▌');
             }
@@ -131,6 +137,10 @@ fn render_greeting_picker(ui: &mut egui::Ui, state: &mut SurfaceUiState) {
         ui.weak(i18n::fl("chat-empty-history"));
         return;
     }
+    if state.greetings.len() == 1 {
+        request_single_greeting_commit(state);
+        return;
+    }
     ui.label(i18n::fl("chat-greeting-prompt"));
     for greeting in state.greetings.clone() {
         let first_line = greeting.text.lines().next().unwrap_or_default();
@@ -148,6 +158,25 @@ fn render_greeting_picker(ui: &mut egui::Ui, state: &mut SurfaceUiState) {
     if !state.greeting_status.is_empty() {
         ui.colored_label(egui::Color32::LIGHT_RED, &state.greeting_status);
     }
+}
+
+/// A lone canonical greeting commits as soon as the picker renders; guard
+/// against re-queueing while the selection is already pending or in flight.
+fn request_single_greeting_commit(state: &mut SurfaceUiState) {
+    let Some(greeting) = state.greetings.first() else {
+        return;
+    };
+    if state.greeting_inflight
+        || state
+            .pending_actions
+            .iter()
+            .any(|action| matches!(action, SurfaceAction::SelectGreeting { .. }))
+    {
+        return;
+    }
+    state.push_action(SurfaceAction::SelectGreeting {
+        index: greeting.index,
+    });
 }
 
 pub(crate) const CHAT_INPUT_ID: &str = "stage-chat-input";
@@ -323,8 +352,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                     render_greeting_picker(ui, state);
                 } else {
                     for row in rows {
-                        render_transcript_row(ui, row);
+                        render_message_bubble(ui, &row);
                     }
+                }
+                if let Some(gap) = chat_setup_gap(&state.chat_setup) {
+                    ui.add_space(4.0);
+                    ui.weak(chat_setup_status(gap));
                 }
             });
 
@@ -337,11 +370,19 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_api::GreetingView;
 
     fn message(role: &str, text: &str) -> MessageResponse {
         MessageResponse {
             seq: 1,
             role: role.to_owned(),
+            text: text.to_owned(),
+        }
+    }
+
+    fn greeting(index: u32, text: &str) -> GreetingView {
+        GreetingView {
+            index,
             text: text.to_owned(),
         }
     }
@@ -364,20 +405,21 @@ mod tests {
         assert_eq!(rows.len(), 5);
         assert_eq!(
             rows[0],
-            TranscriptRow {
-                kind: TranscriptKind::User,
+            ChatMessageView {
+                role: TranscriptKind::User,
                 state: TranscriptState::Stable,
-                text: "hello",
+                text: "hello".to_owned(),
             }
         );
-        assert_eq!(rows[2].kind, TranscriptKind::Error);
-        assert_eq!(rows[3].kind, TranscriptKind::Tool);
+        assert_eq!(rows[2].role, TranscriptKind::Error);
+        assert_eq!(rows[2].state, TranscriptState::Error);
+        assert_eq!(rows[3].role, TranscriptKind::Tool);
         assert_eq!(
             rows[4],
-            TranscriptRow {
-                kind: TranscriptKind::Assistant,
+            ChatMessageView {
+                role: TranscriptKind::Assistant,
                 state: TranscriptState::Streaming,
-                text: "still writing",
+                text: "still writing".to_owned(),
             }
         );
     }
@@ -390,6 +432,61 @@ mod tests {
         };
 
         assert!(normalize_transcript(&history, "").is_empty());
+    }
+
+    #[test]
+    fn greeting_picker_without_greetings_shows_empty_state() {
+        let mut state = SurfaceUiState {
+            greetings: Vec::new(),
+            ..Default::default()
+        };
+
+        request_single_greeting_commit(&mut state);
+
+        assert!(state.pending_actions.is_empty());
+    }
+
+    #[test]
+    fn single_greeting_commits_once_without_click() {
+        let mut state = SurfaceUiState {
+            greetings: vec![greeting(0, "Welcome back.")],
+            ..Default::default()
+        };
+        state.push_action(SurfaceAction::SelectGreeting { index: 0 });
+
+        request_single_greeting_commit(&mut state);
+
+        assert_eq!(state.pending_actions.len(), 1);
+
+        state.greeting_inflight = true;
+        request_single_greeting_commit(&mut state);
+
+        assert_eq!(state.pending_actions.len(), 1);
+    }
+
+    #[test]
+    fn multiple_greetings_wait_for_explicit_selection() {
+        let state = SurfaceUiState {
+            greetings: vec![
+                greeting(0, "First greeting."),
+                greeting(1, "Second greeting."),
+            ],
+            ..Default::default()
+        };
+
+        assert!(state.greetings.len() > 1, "picker must wait for a click");
+
+        assert!(SurfaceUiState::default().pending_actions.is_empty());
+    }
+
+    #[test]
+    fn existing_history_suppresses_greeting_picker() {
+        let mut state = SurfaceUiState::default();
+        state.history.messages = vec![message("assistant", "hello")];
+
+        let rows = normalize_transcript(&state.history, "");
+
+        assert!(!rows.is_empty(), "existing history must hide the picker");
     }
 
     #[test]
