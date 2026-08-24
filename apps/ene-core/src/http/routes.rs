@@ -2754,7 +2754,9 @@ fn map_work(err: ene_work::WorkError) -> ApiReject {
         ene_work::WorkError::UnknownJob(_) | ene_work::WorkError::UnknownSchedule(_) => {
             not_found(&err.to_string())
         }
-        ene_work::WorkError::NoOpenQuestion => conflict("question_closed", &err.to_string()),
+        ene_work::WorkError::NoOpenQuestion | ene_work::WorkError::QuestionAlreadyResolved => {
+            conflict("question_closed", &err.to_string())
+        }
         ene_work::WorkError::QuestionAnswerCount { .. } => {
             bad_request("invalid_message", &err.to_string())
         }

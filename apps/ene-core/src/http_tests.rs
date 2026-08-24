@@ -1004,6 +1004,47 @@ async fn identified_answer_resolves_the_selected_question() {
 }
 
 #[tokio::test]
+async fn duplicate_identified_answer_maps_to_question_closed_conflict() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = start_job(&core, soul, "identify a city");
+    core.host().question(job.id, "which city?").unwrap();
+    let question_id = core.host().open_questions(job.id).unwrap()[0]
+        .question_id()
+        .to_string();
+    client
+        .answer_question(
+            &job.id.to_string(),
+            &question_id,
+            &AnswerQuestionRequest {
+                text: "Tokyo".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let err = client
+        .answer_question(
+            &job.id.to_string(),
+            &question_id,
+            &AnswerQuestionRequest {
+                text: "Tokyo again".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ene_api::ApiError::Problem {
+            status: 409,
+            error_class,
+            ..
+        } if error_class == "question_closed"
+    ));
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn combined_job_answer_rejects_wrong_count_without_consuming_questions() {
     let (_dir, client, core, server) = boot_server().await;
     let soul = core.occupants()[0].0;
