@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -149,6 +150,35 @@ jobs:
         run: cargo clippy --locked -p ene-daemon -p ene-stage --all-targets -- -D warnings
       - name: Test Windows-compatible libraries
         run: cargo test --locked -p ene-config -p ene-plane -p ene-fiber
+
+  gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs: [fmt, clippy, test, docs, windows-native, workspace-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required jobs succeeded
+        env:
+          FMT_RESULT: ${{ needs.fmt.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          DOCS_RESULT: ${{ needs.docs.result }}
+          WINDOWS_RESULT: ${{ needs.windows-native.result }}
+          WORKSPACE_MATRIX_RESULT: ${{ needs.workspace-matrix.result }}
+        run: |
+          if [[ "$FMT_RESULT" != "success" || \
+            "$CLIPPY_RESULT" != "success" || \
+            "$TEST_RESULT" != "success" || \
+            "$DOCS_RESULT" != "success" || \
+            "$WINDOWS_RESULT" != "success" || \
+            "$WORKSPACE_MATRIX_RESULT" != "success" ]]; then
+            printf 'CI gate failed: fmt=%s clippy=%s tests=%s docs=%s windows=%s workspace-matrix=%s\n' \
+              "$FMT_RESULT" "$CLIPPY_RESULT" "$TEST_RESULT" "$DOCS_RESULT" "$WINDOWS_RESULT" \
+              "$WORKSPACE_MATRIX_RESULT" >&2
+            exit 1
+          fi
+          printf 'CI gate passed.\n'
 
   # Keep the two newest rust-cache generations per job, run after the
   # caching jobs save theirs.
