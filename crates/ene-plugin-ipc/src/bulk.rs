@@ -130,11 +130,11 @@ mod unix {
                 if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
                     let bytes = (*cmsg).cmsg_len.saturating_sub(cmsg_len(0));
                     let count = bytes / size_of::<RawFd>();
-                    // POSIX lays `SCM_RIGHTS` payloads out contiguously, but
-                    // only guarantees byte alignment for the control buffer.
+                    // `CMSG_DATA` is only byte-aligned; `read_unaligned`
+                    // handles the kernel-packed fd array safely.
                     #[expect(
                         clippy::cast_ptr_alignment,
-                        reason = "read_unaligned tolerates the kernel byte-aligned cmsg payload"
+                        reason = "fd payloads are byte-aligned and read via read_unaligned"
                     )]
                     let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
                     for i in 0..count {
