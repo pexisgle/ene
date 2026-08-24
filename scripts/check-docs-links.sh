@@ -46,7 +46,7 @@ verify_file_links() {
 # stripping them makes JA paths directly comparable to EN paths.
 summary_paths() {
   extract_links "$1" \
-    | sed -e 's/#.*$//' -e 's#^(\./|\.\./)+##' \
+    | sed -E -e 's/#.*$//' -e 's#^(\./|\.\./)+##' \
     | while IFS= read -r link; do
       if ! is_skipped_link "$link"; then
         printf '%s\n' "$link"
