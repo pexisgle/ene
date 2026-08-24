@@ -153,6 +153,10 @@ mod tests {
 
     #[test]
     fn shipped_alicia_vrm_parses_and_loads() {
+        #![cfg_attr(
+            test,
+            expect(clippy::print_stderr, reason = "test skip must remain visible")
+        )]
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/characters/Alicia/AliciaSolid.vrm");
         if !path.is_file() {

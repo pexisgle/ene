@@ -2719,6 +2719,10 @@ async fn two_souls_keep_isolated_sessions_and_stage_occupants() {
 
 #[tokio::test]
 async fn import_shipped_alicia_vrm_exposes_parseable_avatar() {
+    #![cfg_attr(
+        test,
+        expect(clippy::print_stderr, reason = "test skip must remain visible")
+    )]
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/characters/Alicia/AliciaSolid.vrm");
     if !path.is_file() {
