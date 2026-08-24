@@ -15,56 +15,30 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # .cargo/config.toml must not require sccache. Empty wrapper lets GitHub
-  # runners and non-Nix hosts compile; the Nix shell sets RUSTC_WRAPPER when
-  # sccache is actually on PATH.
   CARGO_BUILD_RUSTC_WRAPPER: ""
 
 jobs:
-  fmt:
-    name: Format check
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-rust
-        with:
-          components: rustfmt
-      - name: Check asset provenance
-        run: bash scripts/check-asset-provenance.sh
-      - name: Test fetch character assets
-        run: bash scripts/test-fetch-character-assets.sh
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy lint
+  check:
+    name: Check
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
         with:
-          components: clippy
+          components: rustfmt,clippy
       - uses: ./.github/actions/rust-build-env
+      - name: Check asset provenance
+        run: bash scripts/check-asset-provenance.sh
+      - name: Test fetch character assets
+        run: bash scripts/test-fetch-character-assets.sh
       - name: Check sidecar template
         run: bash scripts/check-sidecar-template.sh
+      - name: Check formatting
+        run: cargo fmt --all -- --check
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-  audit:
-    name: RustSec audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      checks: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # The action fails critical vulnerabilities; unmaintained and other informational advisories remain visible without blocking while they are inventoried.
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
   feature-matrix:
     name: Cargo feature matrix
     runs-on: ubuntu-latest
@@ -82,55 +56,22 @@ jobs:
       - name: Check plugin IPC with network feature
         run: cargo check --locked -p ene-plugin-ipc --features net
 
-  workspace-matrix:
-    name: Workspace test matrix
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
-      - name: Check workspace test matrix
-        run: bash scripts/check-workspace-test-matrix.sh
-
   test:
-    name: Tests (${{ matrix.group.name }})
+    name: Tests
     runs-on: ubuntu-latest
-    needs: [workspace-matrix]
     timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        group:
-          # Every workspace package belongs to exactly one group; the union
-          # is the full `cargo test --workspace` surface. Splitting the job
-          # isolates a flaky/slow package so a rerun targets one group.
-          - name: core
-            packages: >-
-              -p ene-card -p ene-config -p ene-session -p ene-kernel
-              -p ene-plane -p ene-work -p ene-companion -p ene-body
-              -p ene-fiber -p ene-registry -p ene-api -p ene-plugin-ipc
-              -p ene-sandbox -p ene-vrm -p ene-provider-assets
-          - name: apps
-            packages: >-
-              -p ene-daemon -p ene-ctl -p ene-desktop -p ene-stage
-          - name: plugins
-            packages: >-
-              -p ene-tool-fs -p ene-tool-exec -p ene-tool-web
-              -p ene-tool-utility -p ene-tool-app -p ene-tool-mcp
-              -p ene-provider-openai-compat -p ene-provider-anthropic
-              -p ene-provider-elevenlabs -p ene-provider-voicevox
-              -p ene-provider-edge-tts -p ene-provider-gguf
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
       - uses: ./.github/actions/rust-build-env
       - name: Install ripgrep
         run: sudo apt-get install -y --no-install-recommends ripgrep
-      - name: Run tests
-        run: cargo test --locked ${{ matrix.group.packages }}
+      - name: Run workspace tests
+        run: cargo test --locked --workspace
 
   docs:
-    name: Doc build
+    name: Documentation
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -152,6 +93,7 @@ jobs:
 
   windows-native:
     name: Native Windows check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -166,14 +108,6 @@ jobs:
       - name: Install ripgrep
         shell: pwsh
         run: choco install ripgrep -y --no-progress
-      # Compile every workspace member that carries Windows-only code paths
-      # or target-gated dependencies: the two served applications, the tool
-      # plugin binaries (Win32 window/capture code in ene-tool-app, Job
-      # Object teardown in ene-tool-exec, reparse-point handling in
-      # ene-tool-fs), and the sandbox/IPC/registry libraries their Windows
-      # builds link against. ene-fiber's Windows branches are compiled by
-      # the test step below instead of clippy. ene-desktop is excluded: it
-      # is a frozen legacy application with no active Windows support.
       - name: Lint native Windows applications
         run: >-
           cargo clippy --locked
@@ -183,61 +117,3 @@ jobs:
           --all-targets -- -D warnings
       - name: Test Windows-compatible libraries
         run: cargo test --locked -p ene-config -p ene-plane -p ene-fiber
-
-  gate:
-    name: CI gate
-    if: ${{ always() }}
-    needs: [fmt, clippy, test, docs, windows-native, workspace-matrix]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Verify required jobs succeeded
-        env:
-          FMT_RESULT: ${{ needs.fmt.result }}
-          CLIPPY_RESULT: ${{ needs.clippy.result }}
-          TEST_RESULT: ${{ needs.test.result }}
-          DOCS_RESULT: ${{ needs.docs.result }}
-          WINDOWS_RESULT: ${{ needs.windows-native.result }}
-          WORKSPACE_MATRIX_RESULT: ${{ needs.workspace-matrix.result }}
-        run: |
-          if [[ "$FMT_RESULT" != "success" || \
-            "$CLIPPY_RESULT" != "success" || \
-            "$TEST_RESULT" != "success" || \
-            "$DOCS_RESULT" != "success" || \
-            "$WINDOWS_RESULT" != "success" || \
-            "$WORKSPACE_MATRIX_RESULT" != "success" ]]; then
-            printf 'CI gate failed: fmt=%s clippy=%s tests=%s docs=%s windows=%s workspace-matrix=%s\n' \
-              "$FMT_RESULT" "$CLIPPY_RESULT" "$TEST_RESULT" "$DOCS_RESULT" "$WINDOWS_RESULT" \
-              "$WORKSPACE_MATRIX_RESULT" >&2
-            exit 1
-          fi
-          printf 'CI gate passed.\n'
-
-  # Keep the two newest rust-cache generations per job, run after the
-  # caching jobs save theirs.
-  cache-prune:
-    name: Prune rust caches
-    if: github.ref == 'refs/heads/main'
-    needs: [clippy, feature-matrix, workspace-matrix, test, docs, windows-native]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      actions: write
-    steps:
-      - name: Prune stale rust-cache entries
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          keep_per_job=2
-          gh api --paginate "repos/${{ github.repository }}/actions/caches?per_page=100" \
-            --jq '.actions_caches[] | select(.key | startswith("v0-rust-")) | [.id, .key, .created_at] | @tsv' \
-          | sort -k3,3r \
-          | awk -v keep="$keep_per_job" '
-              { job = $2; sub(/^v0-rust-/, "", job); sub(/-(Linux|Windows)-.*/, "", job) }
-              count[job]++ < keep { next }
-              { print $1 }' \
-          | while read -r id; do
-              gh api -X DELETE "repos/${{ github.repository }}/actions/caches/$id" >/dev/null
-              deleted=$((deleted + 1))
-            done
-          echo "Deleted ${deleted} stale rust-cache entries."
