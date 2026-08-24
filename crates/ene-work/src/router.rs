@@ -110,11 +110,14 @@ impl SurfaceRouter for WorkSurfaceRouter {
                 }
                 let value = self
                     .registry
-                    .execute_call(name, bind_soul_arg(args, self.soul), Layer::Surface, &call_id)
+                    .execute_call(
+                        name,
+                        bind_soul_arg(args, self.soul),
+                        Layer::Surface,
+                        &call_id,
+                    )
                     .await
-                    .map_err(|err| {
-                        KernelError::Tool(err.to_string())
-                    })?;
+                    .map_err(|err| KernelError::Tool(err.to_string()))?;
                 self.learned.lock().push(name.to_owned());
                 Ok(SurfaceToolOutcome::Result(value))
             }

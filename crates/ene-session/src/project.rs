@@ -355,7 +355,7 @@ struct ToolProjectionGroup {
 fn isolate_incomplete_tool_groups(messages: &mut Vec<ProjectedMessage>) {
     let mut groups = Vec::new();
     let mut groups_by_key = HashMap::new();
-    let mut groups_by_call_id = HashMap::new();
+    let mut groups_by_call_id: HashMap<String, usize> = HashMap::new();
     let mut message_groups = vec![None; messages.len()];
     let mut keep_result = vec![false; messages.len()];
 
@@ -387,13 +387,20 @@ fn isolate_incomplete_tool_groups(messages: &mut Vec<ProjectedMessage>) {
             });
         groups[group_index].first_index = groups[group_index].first_index.min(index);
         groups[group_index].last_index = groups[group_index].last_index.max(index);
-        if !groups[group_index].call_ids.insert(call_id.clone()) {
-            groups[group_index].valid = false;
+        if let Some(previous) = groups_by_call_id.get(call_id.as_str()).copied() {
+            // The same call id logged twice inside one group is the intent
+            // event and the result-bearing record of one invocation; a reuse
+            // across different groups is still a projection fault.
+            if previous != group_index {
+                groups[previous].valid = false;
+                groups[group_index].valid = false;
+                continue;
+            }
+            message_groups[index] = Some(group_index);
+            continue;
         }
-        if let Some(previous) = groups_by_call_id.insert(call_id, group_index) {
-            groups[previous].valid = false;
-            groups[group_index].valid = false;
-        }
+        groups_by_call_id.insert(call_id.clone(), group_index);
+        groups[group_index].call_ids.insert(call_id);
         message_groups[index] = Some(group_index);
     }
 
