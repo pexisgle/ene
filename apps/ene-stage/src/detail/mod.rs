@@ -15,10 +15,14 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::runtime::Handle;
 
+mod primitives;
+
 use crate::core::session::prepare_soul_target;
-use crate::i18n;
 use crate::settings::DesktopSettings;
 use crate::tasks::{ActivatedCharacter, AsyncOutcome};
+use primitives::{EmptyState, SectionHeading, StatusCard, StatusTone, danger_hint};
+
+use crate::i18n;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailTab {
@@ -834,14 +838,6 @@ impl SetupCard {
         }
     }
 
-    fn color(self) -> egui::Color32 {
-        match self.state {
-            SetupState::Ready => egui::Color32::LIGHT_GREEN,
-            SetupState::NeedsSetup => egui::Color32::YELLOW,
-            SetupState::Error => egui::Color32::LIGHT_RED,
-        }
-    }
-
     fn detail(self, state: &DetailUiState) -> String {
         match self.tab {
             DetailTab::Conversation => home_chat_next_step(state),
@@ -862,6 +858,31 @@ impl SetupCard {
             _ => String::new(),
         }
     }
+}
+
+fn home_status_cards(state: &DetailUiState) -> Vec<(DetailTab, StatusCard)> {
+    setup_cards(state)
+        .into_iter()
+        .map(|card| {
+            let tone = match card.state {
+                SetupState::Ready => StatusTone::Ready,
+                SetupState::NeedsSetup => StatusTone::NeedsConfig,
+                SetupState::Error => StatusTone::Error,
+            };
+            let detail = card.detail(state);
+            let status_card = StatusCard {
+                state: tone,
+                title: card.title(),
+                summary: if detail.is_empty() {
+                    card.state_label()
+                } else {
+                    format!("{} — {detail}", card.state_label())
+                },
+                action_label: Some(i18n::fl("home-open-card")),
+            };
+            (card.tab, status_card)
+        })
+        .collect()
 }
 
 fn setup_cards(state: &DetailUiState) -> Vec<SetupCard> {
@@ -1087,21 +1108,11 @@ fn show_home(
         });
     }
     ui.heading(i18n::fl("detail-tab-home"));
-    for card in setup_cards(state) {
-        ui.group(|ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.strong(card.title());
-                ui.colored_label(
-                    card.color(),
-                    format!("{} {}", i18n::fl("home-status-prefix"), card.state_label()),
-                );
-            });
-            ui.label(card.detail(state));
-            if ui.button(i18n::fl("home-open-card")).clicked() {
-                state.select_tab(card.tab);
-            }
-        });
+    let cards: Vec<(DetailTab, StatusCard)> = home_status_cards(state);
+    for (tab, card) in cards {
+        if card.show(ui) {
+            state.select_tab(tab);
+        }
     }
     let optional = optional_unconfigured(&state.unconfigured);
     if !optional.is_empty() {
@@ -1270,6 +1281,7 @@ fn show_companion(
     }
     ui.label(i18n::fl("character-export-hint"));
     ui.collapsing(i18n::fl("character-advanced"), |ui| {
+        ui.weak(i18n::fl("character-advanced-help"));
         if let Some(soul) = &state.soul {
             ui.label(format!("{}: {}", i18n::fl("character-soul"), soul.id));
             ui.label(format!(
@@ -1290,7 +1302,19 @@ fn show_companion(
                 soul.body_ref.as_deref().unwrap_or("none")
             ));
         }
-        ui.label(i18n::fl("character-occupants"));
+        SectionHeading {
+            title: i18n::fl("character-occupants"),
+            help: i18n::fl("character-occupants-help"),
+        }
+        .show(ui);
+        if renderable_occupants(&state.occupants).next().is_none() {
+            EmptyState {
+                title: i18n::fl("character-occupants-empty"),
+                explanation: i18n::fl("character-occupants-empty-help"),
+                action_label: None,
+            }
+            .show(ui);
+        }
         for occupant in renderable_occupants(&state.occupants) {
             ui.label(format!(
                 "{}\n{}  body={}  avatar={}",
@@ -1329,6 +1353,14 @@ fn show_companion(
     });
     ui.separator();
     let mut activate_id = None;
+    if state.characters.is_empty() {
+        EmptyState {
+            title: i18n::fl("character-list-empty"),
+            explanation: i18n::fl("character-list-empty-help"),
+            action_label: Some(i18n::fl("character-import")),
+        }
+        .show(ui);
+    }
     egui::ScrollArea::vertical()
         .max_height(240.0)
         .show(ui, |ui| {
@@ -1365,8 +1397,11 @@ fn show_conversation(
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     ensure_settings(state, client, rt, async_results);
-    ui.heading(i18n::fl("detail-tab-conversation"));
-    ui.label(i18n::fl("settings-chat-guide"));
+    SectionHeading {
+        title: i18n::fl("detail-tab-conversation"),
+        help: i18n::fl("settings-chat-guide"),
+    }
+    .show(ui);
     show_chat_provider_setup(ui, state, client, rt, async_results);
     ui.separator();
     ui.label(i18n::fl("home-optional-tasks"));
@@ -1528,6 +1563,14 @@ fn show_chat_provider_setup(
     });
     let query = state.provider_model_filter.clone();
     let mut picked = None;
+    if filtered_provider_models(&state.provider_models, &query).is_empty() {
+        EmptyState {
+            title: i18n::fl("settings-models-empty"),
+            explanation: i18n::fl("settings-list-models-empty"),
+            action_label: Some(i18n::fl("settings-list-models")),
+        }
+        .show(ui);
+    }
     egui::ScrollArea::vertical()
         .id_salt("provider-models")
         .max_height(180.0)
@@ -1602,8 +1645,11 @@ fn show_voice(
         state.mic_devices = crate::audio::AudioHub::list_input_device_names();
         state.mic_devices_loaded = true;
     }
-    ui.heading(i18n::fl("detail-tab-voice"));
-    ui.label(i18n::fl("settings-voice-guide"));
+    SectionHeading {
+        title: i18n::fl("detail-tab-voice"),
+        help: i18n::fl("settings-voice-guide"),
+    }
+    .show(ui);
     let providers = state.providers.clone();
     show_voice_task(
         ui,
@@ -1761,7 +1807,7 @@ struct VoiceTaskForm<'a> {
 }
 
 fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm<'_>) {
-    ui.heading(form.label);
+    ui.heading(&form.label);
     let choices = provider_choices_for_seam(providers, form.seam);
     let selected = if form.plugin.is_empty() || form.plugin == "echo" {
         i18n::fl("settings-voice-provider-none")
@@ -1829,11 +1875,25 @@ fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm
     let ready = !form.plugin.is_empty()
         && form.plugin != "echo"
         && (!plugin_needs_key(form.plugin, providers) || *form.key_set || !form.api_key.is_empty());
-    ui.label(if ready {
-        i18n::fl("settings-voice-ready")
-    } else {
-        i18n::fl("settings-voice-not-configured")
-    });
+    StatusCard {
+        state: if ready {
+            StatusTone::Ready
+        } else if choices.is_empty() {
+            StatusTone::Error
+        } else {
+            StatusTone::NeedsConfig
+        },
+        title: form.label.clone(),
+        summary: if ready {
+            i18n::fl("settings-voice-ready")
+        } else if choices.is_empty() {
+            i18n::fl("settings-voice-provider-empty")
+        } else {
+            i18n::fl("settings-voice-not-configured")
+        },
+        action_label: None,
+    }
+    .show(ui);
 }
 
 fn show_voice_provider_config_button(
@@ -1930,14 +1990,20 @@ fn show_memory(
     if ui.button(i18n::fl("memory-refresh")).clicked() {
         state.loaded.memory = false;
     }
-    ui.heading(format!(
-        "{} ({})",
-        i18n::fl("memory-candidates"),
-        state.pending_count()
-    ));
     let pending = state.pending_memories.clone();
+    SectionHeading {
+        title: i18n::fl("memory-candidates"),
+        help: i18n::fl("memory-candidates-help"),
+    }
+    .show(ui);
+    ui.weak(format!("{}", state.pending_count()));
     if pending.is_empty() {
-        ui.label(i18n::fl("memory-pending-empty"));
+        EmptyState {
+            title: i18n::fl("memory-pending-empty"),
+            explanation: i18n::fl("memory-pending-empty-help"),
+            action_label: None,
+        }
+        .show(ui);
     }
     for candidate in pending {
         let draft = state
@@ -2164,7 +2230,12 @@ fn show_memory(
         .filter(|memory| memory.kind != "commitment")
         .collect();
     if others.is_empty() && state.memories.is_empty() {
-        ui.label(i18n::fl("memory-empty"));
+        EmptyState {
+            title: i18n::fl("memory-empty"),
+            explanation: i18n::fl("memory-empty-help"),
+            action_label: None,
+        }
+        .show(ui);
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
         for memory in others {
@@ -2385,7 +2456,12 @@ fn show_work(
     ui.heading(i18n::fl("jobs-active"));
     let active_jobs = active_jobs(&state.jobs);
     if active_jobs.is_empty() {
-        ui.label(i18n::fl("jobs-empty"));
+        EmptyState {
+            title: i18n::fl("jobs-empty"),
+            explanation: i18n::fl("jobs-empty-help"),
+            action_label: None,
+        }
+        .show(ui);
     }
     for job in active_jobs {
         ui.horizontal(|ui| {
@@ -2500,7 +2576,11 @@ fn show_connections(
             )
         });
     }
-    ui.heading(i18n::fl("detail-tab-connections"));
+    SectionHeading {
+        title: i18n::fl("detail-tab-connections"),
+        help: i18n::fl("connections-help"),
+    }
+    .show(ui);
     ui.horizontal(|ui| {
         ui.label(i18n::fl("settings-plugins-profile"));
         for profile in ["desktop", "minimal", "headless"] {
@@ -2529,39 +2609,48 @@ fn show_connections(
         }
     });
     ui.label(i18n::fl("plugins-no-enable-map"));
-    for plugin in state.plugins.clone() {
-        ui.horizontal(|ui| {
-            ui.label(format!(
-                "{} ({}) — {}",
-                plugin.plugin, plugin.state, plugin.row_id
-            ));
-            if ui.button(i18n::fl("plugins-restart")).clicked() {
-                let id = plugin.row_id.clone();
-                let client = Arc::clone(client);
-                spawn_async(rt, async_results, async move {
-                    AsyncOutcome::RestartPlugin {
-                        id: id.clone(),
-                        result: client
-                            .restart_plugin(&id)
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| e.to_string()),
-                    }
+    if state.plugins.is_empty() {
+        EmptyState {
+            title: i18n::fl("connections-empty"),
+            explanation: i18n::fl("connections-empty-help"),
+            action_label: None,
+        }
+        .show(ui);
+    } else {
+        for plugin in state.plugins.clone() {
+            ui.horizontal(|ui| {
+                ui.label(format!("{} ({})", plugin.plugin, plugin.state));
+                ui.collapsing(i18n::fl("plugins-row-id"), |ui| {
+                    ui.label(&plugin.row_id);
                 });
-            }
-            if ui.button(i18n::fl("plugins-config")).clicked() {
-                let id = plugin.row_id.clone();
-                let request_id = begin_plugin_config_load(state, &id);
-                let client = Arc::clone(client);
-                spawn_async(rt, async_results, async move {
-                    AsyncOutcome::LoadPluginConfig {
-                        request_id,
-                        id: id.clone(),
-                        result: client.plugin_config(&id).await.map_err(|e| e.to_string()),
-                    }
-                });
-            }
-        });
+                if ui.button(i18n::fl("plugins-restart")).clicked() {
+                    let id = plugin.row_id.clone();
+                    let client = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        AsyncOutcome::RestartPlugin {
+                            id: id.clone(),
+                            result: client
+                                .restart_plugin(&id)
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| e.to_string()),
+                        }
+                    });
+                }
+                if ui.button(i18n::fl("plugins-config")).clicked() {
+                    let id = plugin.row_id.clone();
+                    let request_id = begin_plugin_config_load(state, &id);
+                    let client = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        AsyncOutcome::LoadPluginConfig {
+                            request_id,
+                            id: id.clone(),
+                            result: client.plugin_config(&id).await.map_err(|e| e.to_string()),
+                        }
+                    });
+                }
+            });
+        }
     }
     show_plugin_config(ui, state, client, rt, async_results);
     show_provider_assets(ui, state, client, rt, async_results);
@@ -3282,6 +3371,12 @@ fn show_system_inner(
                 }
             });
     });
+    if matches!(
+        normalize_approval_mode(&state.approval_mode).as_str(),
+        "auto" | "ai_auto"
+    ) {
+        danger_hint(ui, &i18n::fl("approval-auto-warning"));
+    }
     if ui.button(i18n::fl("settings-apply-core-fields")).clicked() {
         let profile = state.plugins_profile.clone();
         let mode = normalize_approval_mode(&state.approval_mode);

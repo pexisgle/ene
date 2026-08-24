@@ -241,19 +241,24 @@ fn parse_live_event(value: &Value) -> Option<LiveEvent> {
             id: string_field(value, "id"),
             decision: string_field(value, "decision"),
         }),
-        ene_api::QUESTION_ASKED_EVENT => Some(LiveEvent::QuestionAsked {
-            id: string_field(value, "id"),
-            prompt: value
-                .get("prompt")
-                .or_else(|| value.get("text"))
-                .or_else(|| value.get("question"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned(),
-        }),
-        ene_api::QUESTION_RESOLVED_EVENT => Some(LiveEvent::QuestionResolved {
-            id: string_field(value, "id"),
-        }),
+        _ if matches!(
+            ene_api::QuestionEvent::parse(value).map(|(kind, _)| kind),
+            Some(ene_api::QuestionEventKind::Asked)
+        ) =>
+        {
+            ene_api::QuestionEvent::parse(value).map(|(_, event)| LiveEvent::QuestionAsked {
+                id: event.id,
+                prompt: event.prompt.unwrap_or_default(),
+            })
+        }
+        _ if matches!(
+            ene_api::QuestionEvent::parse(value).map(|(kind, _)| kind),
+            Some(ene_api::QuestionEventKind::Resolved)
+        ) =>
+        {
+            ene_api::QuestionEvent::parse(value)
+                .map(|(_, event)| LiveEvent::QuestionResolved { id: event.id })
+        }
         "notify.hint" => Some(LiveEvent::NotifyHint {
             title: string_field(value, "title"),
             body: value

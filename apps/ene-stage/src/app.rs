@@ -31,6 +31,137 @@ use crate::shell::{HotkeyManager, ShellCommand, ShellError, TrayManager, show_no
 use crate::surface::{self, SpotlightAction, SurfaceAction, SurfaceUiState};
 use crate::tasks::AsyncOutcome;
 
+/// Which chrome window an open action intends to focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusTarget {
+    Chat,
+    Detail,
+    Caption,
+    Spotlight,
+}
+
+/// Which window currently owns keyboard focus, driving overlay z-order and
+/// click-through as one derived state instead of independent booleans.
+/// A chrome `Focused(false)` starts a short grace period during which the
+/// overlay stays protected; another chrome `Focused(true)` cancels it, so a
+/// normal chrome-to-chrome/OS focus handoff never exposes the overlay even
+/// though the loss event always arrives before the next gain event.
+#[derive(Debug, Default)]
+struct OverlayFocus {
+    target: Option<FocusTarget>,
+    pending_loss_until: Option<Instant>,
+}
+
+impl OverlayFocus {
+    fn transition(&mut self, target: FocusTarget) {
+        self.target = Some(target);
+    }
+
+    fn on_focus_event(&mut self, owner: FocusOwner, focused: bool) -> bool {
+        match owner {
+            FocusOwner::Overlay => {
+                if focused {
+                    self.clear()
+                } else {
+                    false
+                }
+            }
+            FocusOwner::Chat => {
+                if focused {
+                    self.set(FocusTarget::Chat)
+                } else {
+                    self.mark_pending_loss()
+                }
+            }
+            FocusOwner::Detail => {
+                if focused {
+                    self.set(FocusTarget::Detail)
+                } else {
+                    self.mark_pending_loss()
+                }
+            }
+            FocusOwner::Caption => {
+                if focused {
+                    self.set(FocusTarget::Caption)
+                } else {
+                    self.mark_pending_loss()
+                }
+            }
+            FocusOwner::Spotlight => {
+                if focused {
+                    self.set(FocusTarget::Spotlight)
+                } else {
+                    self.mark_pending_loss()
+                }
+            }
+        }
+    }
+
+    fn set(&mut self, target: FocusTarget) -> bool {
+        let changed = self.target != Some(target);
+        self.target = Some(target);
+        self.cancel_pending_loss();
+        changed
+    }
+
+    fn mark_pending_loss(&mut self) -> bool {
+        if self.target.is_none() {
+            return false;
+        }
+        self.pending_loss_until = Some(Instant::now() + FOCUS_LOSS_GRACE);
+        // Protection intentionally stays until the grace expires or another
+        // chrome claim cancels it; no interaction sync must run yet.
+        false
+    }
+
+    /// Drop protection once a pending focus loss outlives its grace period.
+    /// Returns whether the state changed and a sync is required.
+    fn expire_pending_loss(&mut self, now: Instant) -> bool {
+        let Some(deadline) = self.pending_loss_until else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.pending_loss_until = None;
+        self.clear()
+    }
+
+    fn clear(&mut self) -> bool {
+        let had = self.target.is_some();
+        self.pending_loss_until = None;
+        self.target = None;
+        had
+    }
+
+    fn clear_target(&mut self, target: FocusTarget) {
+        if self.target == Some(target) {
+            self.clear();
+        } else {
+            self.cancel_pending_loss();
+        }
+    }
+
+    fn cancel_pending_loss(&mut self) {
+        self.pending_loss_until = None;
+    }
+
+    #[must_use]
+    fn protects(&self) -> bool {
+        self.target.is_some()
+    }
+}
+
+/// Which of our windows emitted a focus event, resolved before dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusOwner {
+    Overlay,
+    Chat,
+    Detail,
+    Caption,
+    Spotlight,
+}
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("spawn: {0}")]
@@ -104,10 +235,9 @@ pub fn run() -> Result<(), AppError> {
         detail_win: None,
         caption: None,
         spotlight: None,
-        chrome_focused: false,
+        overlay_focus: OverlayFocus::default(),
         last_cursor: None,
         last_tick: Instant::now(),
-        tray_interaction_at: None,
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
         approval_needs_reveal: false,
@@ -163,10 +293,9 @@ struct StageApp {
     detail_win: Option<ChromeWindow>,
     caption: Option<ChromeWindow>,
     spotlight: Option<ChromeWindow>,
-    chrome_focused: bool,
+    overlay_focus: OverlayFocus,
     last_cursor: Option<LogicalPosition<f32>>,
     last_tick: Instant,
-    tray_interaction_at: Option<Instant>,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
     approval_needs_reveal: bool,
@@ -221,10 +350,9 @@ impl StageApp {
             detail_win: None,
             caption: None,
             spotlight: None,
-            chrome_focused: false,
+            overlay_focus: OverlayFocus::default(),
             last_cursor: None,
             last_tick: Instant::now(),
-            tray_interaction_at: None,
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
             approval_needs_reveal: false,
@@ -239,18 +367,17 @@ impl StageApp {
     }
 
     fn sync_overlay_interaction(&mut self) {
-        // A tray menu steal is not a real focus switch; keep protecting the
-        // chrome windows for the grace window even though `chrome_focused`
-        // already dropped, so the overlay does not pop over an open menu.
-        let tray_protects = focus_loss_is_transient(self.tray_interaction_at, Instant::now());
-        let protect_chrome = (self.chrome_focused || tray_protects) && self.chrome_window_exists();
+        // A tray menu steal is not a real focus switch; the overlay-focus
+        // state machine already models that grace window via its target, so
+        // protection derives solely from which chrome surface owns focus.
+        let protect_chrome = self.overlay_focus.protects();
         let always_on_top = self.local_settings.always_on_top;
-        let click_through = self.local_settings.overlay_click_through;
+        let preferred_click_through = self.local_settings.overlay_click_through;
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
         let level = overlay_window_level(protect_chrome, always_on_top);
-        let click_through = protect_chrome || (overlay.transparent && click_through);
+        let click_through = protect_chrome || (overlay.transparent && preferred_click_through);
         overlay.window.set_window_level(level);
         overlay.set_click_through(click_through);
     }
@@ -258,38 +385,31 @@ impl StageApp {
     fn open_chat(&mut self, event_loop: &ActiveEventLoop) {
         self.surface.chat_open = true;
         self.surface.focus_chat = true;
-        self.chrome_focused = true;
+        if let Some(gpu) = self.gpu.as_ref() {
+            let chat = std::mem::take(&mut self.chat);
+            match ChromeWindow::restore_or_create(
+                chat,
+                event_loop,
+                gpu,
+                ChromeKind::Chat,
+                PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
+                true,
+            ) {
+                Ok(win) => {
+                    self.chat = Some(win);
+                    self.overlay_focus.transition(FocusTarget::Chat);
+                }
+                Err(err) => tracing::warn!(error = %err, "chat window failed"),
+            }
+        }
+        if self.chat.is_none() {
+            self.drop_focus_if_no_chrome();
+        }
         self.sync_overlay_interaction();
         if let Some(chat) = self.chat.as_ref() {
-            chat.show_and_focus();
-            return;
-        }
-        let Some(gpu) = self.gpu.as_ref() else {
-            self.chrome_focused = false;
-            self.sync_overlay_interaction();
-            return;
-        };
-        match ChromeWindow::create(
-            event_loop,
-            gpu,
-            ChromeKind::Chat,
-            PhysicalSize::new(surface::CHAT_WINDOW_WIDTH, surface::CHAT_WINDOW_HEIGHT),
-            true,
-        ) {
-            Ok(win) => {
-                self.chat = Some(win);
-                self.sync_overlay_interaction();
-                if let Some(chat) = self.chat.as_ref() {
-                    chat.show_and_focus();
-                }
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "chat window failed");
-                if !self.chrome_window_exists() {
-                    self.chrome_focused = false;
-                    self.sync_overlay_interaction();
-                }
-            }
+            // Raise after the overlay has been lowered/click-through'd so
+            // the WM stacks the chat above a hit-testing overlay.
+            chat.raise();
         }
     }
 
@@ -1266,7 +1386,7 @@ impl StageApp {
         if let Some(tray) = self.tray.as_ref()
             && tray.take_interactions() > 0
         {
-            self.tray_interaction_at = Some(Instant::now());
+            let _ = tray;
         }
         for command in tray_commands {
             self.dispatch_shell_command(event_loop, command);
@@ -1585,14 +1705,10 @@ impl StageApp {
         self.detail.visible = true;
         self.detail.refresh_settings_on_open();
         self.detail.select_tab(tab);
-        self.chrome_focused = true;
-        self.sync_overlay_interaction();
-        if let Some(detail) = self.detail_win.as_ref() {
-            detail.show_and_focus();
-            return;
-        }
         if let Some(gpu) = self.gpu.as_ref() {
-            match ChromeWindow::create(
+            let detail = std::mem::take(&mut self.detail_win);
+            match ChromeWindow::restore_or_create(
+                detail,
                 event_loop,
                 gpu,
                 ChromeKind::Detail,
@@ -1601,22 +1717,24 @@ impl StageApp {
             ) {
                 Ok(win) => {
                     self.detail_win = Some(win);
-                    self.sync_overlay_interaction();
-                    if let Some(detail) = self.detail_win.as_ref() {
-                        detail.show_and_focus();
-                    }
+                    self.overlay_focus.transition(FocusTarget::Detail);
                 }
-                Err(err) => {
-                    tracing::warn!(error = %err, "detail window failed");
-                    if !self.chrome_window_exists() {
-                        self.chrome_focused = false;
-                        self.sync_overlay_interaction();
-                    }
-                }
+                Err(err) => tracing::warn!(error = %err, "detail window failed"),
             }
-        } else {
-            self.chrome_focused = false;
-            self.sync_overlay_interaction();
+        }
+        if self.detail_win.is_none() {
+            self.drop_focus_if_no_chrome();
+        }
+        self.sync_overlay_interaction();
+        if let Some(detail) = self.detail_win.as_ref() {
+            detail.raise();
+        }
+    }
+
+    /// Clear focus protection only when no other chrome window can hold it.
+    fn drop_focus_if_no_chrome(&mut self) {
+        if !self.chrome_window_exists() {
+            self.overlay_focus = OverlayFocus::default();
         }
     }
 
@@ -1864,6 +1982,29 @@ impl StageApp {
             }
         }
     }
+
+    fn close_chat_window(&mut self) {
+        self.chat = None;
+        self.overlay_focus.clear_target(FocusTarget::Chat);
+        self.surface.close_chat();
+    }
+
+    fn close_detail_window(&mut self) {
+        self.detail_win = None;
+        self.overlay_focus.clear_target(FocusTarget::Detail);
+        self.detail.visible = false;
+    }
+
+    fn close_caption_window(&mut self) {
+        self.caption = None;
+        self.overlay_focus.clear_target(FocusTarget::Caption);
+    }
+
+    fn close_spotlight_window(&mut self) {
+        self.spotlight = None;
+        self.overlay_focus.clear_target(FocusTarget::Spotlight);
+        self.surface.spotlight_open = false;
+    }
 }
 
 fn chat_send_block_reason(detail: &DetailUiState) -> Option<String> {
@@ -1970,8 +2111,9 @@ impl ApplicationHandler for StageApp {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let overlay_id = self.overlay.as_ref().map(OverlayWindow::id);
         if overlay_id == Some(id) {
-            if matches!(event, WindowEvent::Focused(true)) {
-                self.chrome_focused = false;
+            if matches!(event, WindowEvent::Focused(true))
+                && self.overlay_focus.on_focus_event(FocusOwner::Overlay, true)
+            {
                 self.sync_overlay_interaction();
             }
             match event {
@@ -2080,8 +2222,30 @@ impl ApplicationHandler for StageApp {
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
         }
         if let Some(focused) = chrome_focus_state {
-            self.chrome_focused = focused;
-            self.sync_overlay_interaction();
+            let owner = if self.chat.as_ref().is_some_and(|w| w.id() == id) {
+                Some(FocusOwner::Chat)
+            } else if self.detail_win.as_ref().is_some_and(|w| w.id() == id) {
+                Some(FocusOwner::Detail)
+            } else {
+                None
+            };
+
+            // Caption/Spotlight also emit Focused events; route them so a
+            // focus handoff between chrome windows never drops protection.
+            let owner = owner.or_else(|| {
+                if self.caption.as_ref().is_some_and(|w| w.id() == id) {
+                    Some(FocusOwner::Caption)
+                } else if self.spotlight.as_ref().is_some_and(|w| w.id() == id) {
+                    Some(FocusOwner::Spotlight)
+                } else {
+                    None
+                }
+            });
+            if let Some(owner) = owner
+                && self.overlay_focus.on_focus_event(owner, focused)
+            {
+                self.sync_overlay_interaction();
+            }
         }
         if !self.surface.chat_input_focused
             && overlay_from_chrome.is_none_or(|wants| !wants)
@@ -2094,22 +2258,19 @@ impl ApplicationHandler for StageApp {
             self.handle_overlay_shortcut(&key_event.logical_key);
         }
         if close_chat {
-            self.chat = None;
-            self.surface.close_chat();
+            self.close_chat_window();
         }
         if close_detail {
-            self.detail_win = None;
-            self.detail.visible = false;
+            self.close_detail_window();
         }
         if close_caption {
-            self.caption = None;
+            self.close_caption_window();
         }
         if close_spotlight {
-            self.spotlight = None;
-            self.surface.spotlight_open = false;
+            self.close_spotlight_window();
         }
         if !self.chrome_window_exists() {
-            self.chrome_focused = false;
+            self.overlay_focus = OverlayFocus::default();
         }
         if close_chat || close_detail || close_caption || close_spotlight {
             self.sync_overlay_interaction();
@@ -2118,6 +2279,9 @@ impl ApplicationHandler for StageApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
+        if self.overlay_focus.expire_pending_loss(Instant::now()) {
+            self.sync_overlay_interaction();
+        }
         self.drain_async_results();
         self.poll_pending_approvals();
         self.drain_surface_events();
@@ -2179,14 +2343,9 @@ fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     }
 }
 
-/// Focus loss within this window after a tray interaction is treated as the
-/// transient steal caused by the tray menu, not as a real switch to another app.
-const TRAY_FOCUS_GRACE: Duration = Duration::from_millis(1500);
-
-#[must_use]
-fn focus_loss_is_transient(tray_interaction_at: Option<Instant>, now: Instant) -> bool {
-    tray_interaction_at.is_some_and(|at| now.duration_since(at) < TRAY_FOCUS_GRACE)
-}
+/// How long overlay protection survives a chrome Focused(false) while waiting
+/// for another chrome window to claim focus during a normal handoff.
+const FOCUS_LOSS_GRACE: Duration = Duration::from_millis(200);
 
 fn format_log_text(text: &str) -> &str {
     if text.trim().is_empty() {
@@ -2208,9 +2367,9 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncOutcome, ChatWindowAction, StageApp, chat_window_action, focus_loss_is_transient,
-        format_log_text, overlay_window_level, provider_asset_load_status, window_focus_state,
-        window_level,
+        AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, OverlayFocus, StageApp,
+        chat_window_action, format_log_text, overlay_window_level, provider_asset_load_status,
+        window_focus_state, window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -2255,16 +2414,7 @@ mod tests {
     }
 
     #[test]
-    fn tray_interaction_within_grace_is_transient() {
-        let now = Instant::now();
-        assert!(focus_loss_is_transient(
-            Some(now),
-            now + Duration::from_millis(100)
-        ));
-        assert!(!focus_loss_is_transient(
-            Some(now.checked_sub(Duration::from_secs(5)).unwrap_or(now)),
-            now
-        ));
+    fn window_focus_state_ignores_non_focus_events() {
         assert_eq!(
             window_focus_state(&winit::event::WindowEvent::CloseRequested),
             None
@@ -2272,23 +2422,31 @@ mod tests {
     }
 
     #[test]
-    fn alt_tab_focus_loss_clears_chrome_without_tray_grace() {
-        // Simulates: user Alt-Tabs away with no recent tray interaction.
-        // chrome_focused must become false so overlay returns to AlwaysOnTop.
+    fn alt_tab_focus_loss_drops_protection_after_grace() {
+        // Simulates: user Alt-Tabs away with no recent tray interaction and
+        // no other chrome window claiming focus. Protection must drop once
+        // the handoff grace expires so the overlay returns to AlwaysOnTop.
         let mut app = StageApp::new_for_test();
-        app.chrome_focused = true;
         app.chat = None; // ensure chrome_window_exists() can be false
         app.detail_win = None;
         app.caption = None;
         app.spotlight = None;
-        app.tray_interaction_at = None;
+        app.overlay_focus.transition(FocusTarget::Chat);
+        assert!(app.overlay_focus.protects());
 
-        // Apply Focused(false): chrome_focused must drop unconditionally.
+        // Focused(false) starts the grace; protection stays during the window.
         let focused_false = window_focus_state(&winit::event::WindowEvent::Focused(false));
-        if let Some(focused) = focused_false {
-            app.chrome_focused = focused;
+        if focused_false == Some(false) {
+            app.overlay_focus.on_focus_event(FocusOwner::Chat, false);
         }
-        assert!(!app.chrome_focused);
+        assert!(app.overlay_focus.protects());
+
+        // Once the grace expires with no other claim, protection drops.
+        assert!(
+            app.overlay_focus
+                .expire_pending_loss(Instant::now() + Duration::from_secs(1))
+        );
+        assert!(!app.overlay_focus.protects());
     }
 
     #[test]
@@ -2582,5 +2740,144 @@ mod tests {
         assert_eq!(chat_window_action(true, true), ChatWindowAction::None);
         assert_eq!(chat_window_action(true, false), ChatWindowAction::Create);
         assert_eq!(chat_window_action(false, false), ChatWindowAction::None);
+    }
+
+    #[test]
+    fn overlay_focus_tracks_chat_and_detail_transitions() {
+        let mut focus = OverlayFocus::default();
+        assert!(!focus.protects());
+
+        focus.transition(FocusTarget::Chat);
+        assert!(focus.protects());
+
+        focus.transition(FocusTarget::Detail);
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn overlay_focus_loses_protection_when_overlay_gains_focus() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Chat);
+
+        assert!(focus.on_focus_event(FocusOwner::Overlay, true));
+        assert!(!focus.protects());
+    }
+
+    #[test]
+    fn chrome_focus_loss_keeps_protection_until_grace_expires() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Chat);
+
+        // Detail gaining focus replaces the target without dropping protection.
+        assert!(focus.on_focus_event(FocusOwner::Detail, true));
+        assert!(focus.protects());
+
+        // Detail losing focus starts the grace period; protection stays up and
+        // no interaction sync is reported because the overlay must not flip.
+        assert!(!focus.on_focus_event(FocusOwner::Detail, false));
+        assert!(focus.protects());
+
+        // A stale Chat loss must not disturb the pending handoff.
+        assert!(!focus.on_focus_event(FocusOwner::Chat, false));
+        assert!(focus.protects());
+
+        // After the grace expires, protection drops.
+        assert!(focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
+        assert!(!focus.protects());
+    }
+
+    #[test]
+    fn ordered_chrome_handoff_never_drops_protection() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Chat);
+        assert!(focus.protects());
+
+        // Ordered Chat false -> Detail true: the normal OS event order.
+        // Protection must remain continuously true across both events.
+        assert!(!focus.on_focus_event(FocusOwner::Chat, false));
+        assert!(
+            focus.protects(),
+            "protection must survive transient focus loss"
+        );
+        assert!(focus.on_focus_event(FocusOwner::Detail, true));
+        assert!(focus.protects());
+
+        // The new claim cancels the pending-loss grace; expiring later is a no-op.
+        assert!(!focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn focus_event_returns_changed_only_on_actual_transition() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Chat);
+
+        assert!(!focus.on_focus_event(FocusOwner::Chat, true));
+        assert!(focus.protects());
+
+        assert!(focus.on_focus_event(FocusOwner::Detail, true));
+        assert!(!focus.on_focus_event(FocusOwner::Detail, true));
+    }
+
+    #[test]
+    fn closing_chat_resets_chat_state_for_reopen() {
+        let mut app = StageApp::new_for_test();
+        app.surface.chat_open = true;
+        app.surface.focus_chat = true;
+        app.overlay_focus.transition(FocusTarget::Chat);
+
+        app.close_chat_window();
+
+        assert!(app.chat.is_none());
+        assert!(!app.surface.chat_open);
+        assert!(!app.surface.chat_input_focused);
+        assert!(!app.overlay_focus.protects());
+
+        // Reopening after close re-marks the intent even without a window.
+        app.surface.chat_open = true;
+        app.surface.focus_chat = true;
+        assert!(app.surface.chat_open);
+        assert!(app.surface.focus_chat);
+    }
+
+    #[test]
+    fn closing_detail_resets_visibility_and_focus() {
+        let mut app = StageApp::new_for_test();
+        app.detail.visible = true;
+        app.overlay_focus.transition(FocusTarget::Detail);
+
+        app.close_detail_window();
+
+        assert!(app.detail_win.is_none());
+        assert!(!app.detail.visible);
+        assert!(!app.overlay_focus.protects());
+    }
+
+    #[test]
+    fn reopen_after_close_sets_open_intent() {
+        let mut app = StageApp::new_for_test();
+        app.surface.chat_open = true;
+        app.close_chat_window();
+        assert!(!app.surface.chat_open);
+
+        // Simulate tray/F2 open action (without GPU, so no window is created).
+        app.surface.chat_open = true;
+        app.surface.focus_chat = true;
+
+        assert!(app.surface.chat_open);
+        assert!(app.surface.focus_chat);
+    }
+
+    #[test]
+    fn minimize_reopen_preserves_history() {
+        let mut app = StageApp::new_for_test();
+        app.surface.history.messages.push(ene_api::MessageResponse {
+            seq: 1,
+            role: "assistant".to_owned(),
+            text: "kept".to_owned(),
+        });
+        // Minimize/hide does not touch surface history; only close does.
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "kept");
     }
 }

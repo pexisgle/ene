@@ -2816,7 +2816,9 @@ fn map_work(err: ene_work::WorkError) -> ApiReject {
         ene_work::WorkError::UnknownJob(_) | ene_work::WorkError::UnknownSchedule(_) => {
             not_found(&err.to_string())
         }
-        ene_work::WorkError::NoOpenQuestion => conflict("question_closed", &err.to_string()),
+        ene_work::WorkError::NoOpenQuestion | ene_work::WorkError::QuestionAlreadyResolved => {
+            conflict("question_closed", &err.to_string())
+        }
         ene_work::WorkError::QuestionAnswerCount { .. } => {
             bad_request("invalid_message", &err.to_string())
         }
@@ -2851,15 +2853,14 @@ pub(crate) fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
                 .map_or_else(|| report.soul_id.to_string(), |id| id.to_string());
             state.events.emit(
                 DisplayDepth::Surface,
-                json!({
-                    "type": ene_api::QUESTION_ASKED_EVENT,
-                    "id": id,
-                    "soul_id": report.soul_id.to_string(),
-                    "prompt": prompt,
-                    "text": prompt,
-                    "questions": questions,
-                    "question_ids": question_ids,
-                }),
+                ene_api::QuestionEvent {
+                    soul_id: Some(report.soul_id.to_string()),
+                    id,
+                    prompt: Some(prompt.clone()),
+                    questions,
+                    question_ids,
+                }
+                .to_value(ene_api::QuestionEventKind::Asked),
             );
         }
         state.events.emit(
@@ -2912,10 +2913,14 @@ fn ask_user_prompt(
 pub(crate) fn emit_question_resolved(state: &AppState, job_id: DelegationId) {
     state.events.emit(
         DisplayDepth::Surface,
-        json!({
-            "type": ene_api::QUESTION_RESOLVED_EVENT,
-            "id": job_id.to_string(),
-        }),
+        ene_api::QuestionEvent {
+            id: job_id.to_string(),
+            soul_id: None,
+            prompt: None,
+            questions: Vec::new(),
+            question_ids: Vec::new(),
+        }
+        .to_value(ene_api::QuestionEventKind::Resolved),
     );
 }
 

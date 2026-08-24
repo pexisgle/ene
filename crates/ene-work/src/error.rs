@@ -22,6 +22,8 @@ pub enum WorkError {
     UnknownExecution(String),
     #[error("no open question")]
     NoOpenQuestion,
+    #[error("question already resolved")]
+    QuestionAlreadyResolved,
     #[error("expected {expected} answers, got {actual}")]
     QuestionAnswerCount { expected: usize, actual: usize },
     #[error("schedule: {0}")]

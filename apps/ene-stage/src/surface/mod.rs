@@ -124,6 +124,12 @@ impl SurfaceUiState {
         self.chat_input_focused = false;
     }
 
+    /// Whether a chat window should currently be kept alive.
+    #[must_use]
+    pub fn chat_window_exists(&self) -> bool {
+        self.chat_open
+    }
+
     /// A new turn supersedes the previous turn's composer feedback.
     pub(crate) fn begin_send(&mut self) {
         self.status.clear();

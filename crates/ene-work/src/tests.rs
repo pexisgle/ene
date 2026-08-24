@@ -2194,12 +2194,13 @@ fn answer_after_question_timeout_is_rejected() {
             &asked.to_rfc3339(),
         )
         .unwrap();
+    let question_id = store.open_questions(job.id).unwrap()[0].question_id();
     let now = Utc.with_ymd_and_hms(2020, 1, 2, 0, 0, 1).unwrap();
     host.resolve_question_timeouts(now, Some(StdDuration::from_hours(24)))
         .unwrap();
     assert!(matches!(
-        host.answer(job.id, "Tokyo"),
-        Err(crate::WorkError::NoOpenQuestion)
+        host.answer_question(job.id, question_id, "Tokyo"),
+        Err(crate::WorkError::QuestionAlreadyResolved)
     ));
     assert!(
         !store
@@ -2209,6 +2210,65 @@ fn answer_after_question_timeout_is_rejected() {
             .any(|(direction, kind, body)| direction == "parent_to_child"
                 && kind == "answer"
                 && body == "Tokyo")
+    );
+}
+
+#[test]
+fn identified_answer_after_resolution_names_the_conflict() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "planning");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    host.question(job.id, "which airline?").unwrap();
+    let question_id = store.open_questions(job.id).unwrap()[0].question_id();
+    host.answer_question(job.id, question_id, "ANA").unwrap();
+
+    assert!(matches!(
+        host.answer_question(job.id, question_id, "late answer"),
+        Err(crate::WorkError::QuestionAlreadyResolved)
+    ));
+    assert!(
+        !store
+            .mailbox(job.id)
+            .unwrap()
+            .iter()
+            .any(|(_, kind, body)| kind == "answer" && body == "late answer")
+    );
+}
+
+#[test]
+fn repeated_timeout_ticks_are_idempotent() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "planning");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    let asked = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+    store
+        .mailbox_push_at(
+            job.id,
+            "child_to_parent",
+            "question",
+            "which airline?",
+            &asked.to_rfc3339(),
+        )
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 1).unwrap();
+    let first = host
+        .resolve_question_timeouts(now, Some(StdDuration::from_hours(24)))
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    for _ in 0..2 {
+        let reports = host
+            .resolve_question_timeouts(now, Some(StdDuration::from_hours(24)))
+            .unwrap();
+        assert_eq!(reports.len(), 0);
+    }
+    assert_eq!(
+        store
+            .mailbox(job.id)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, kind, _)| kind == "assumption")
+            .count(),
+        1
     );
 }
 
