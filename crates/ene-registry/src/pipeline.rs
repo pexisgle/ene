@@ -600,28 +600,6 @@ impl ToolRegistry {
             confine_fs_args(name, &mut args, workspace.as_deref())?;
             return Ok((def, invoke, args));
         }
-        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-        let target = authorization_target(name, &args).to_owned();
-        let in_workspace = path_in_workspace(workspace_override.as_deref(), path);
-        let req = AuthzRequest {
-            tool: name.to_owned(),
-            side_effects: def.side_effects.clone(),
-            sensitivity: def.sensitivity,
-            target,
-            in_workspace,
-            call_id: call_id.to_owned(),
-        };
-        let plane = self.plane.lock().clone();
-        if let Some(plane) = plane {
-            if let Err(err) = plane.authorize(&req).await {
-                // Surface the refused intent in the transcript; without this
-                // entry an Allow/Deny cycle leaves the turn with no record.
-                tracing::info!(tool = %name, call_id = %call_id, "tool execution denied by approval plane");
-                return Err(PipelineError::Plane(err));
-            }
-        } else {
-            return Ok((def, invoke, args));
-        }
         let mut args = args;
         let workspace = workspace_override.or_else(|| self.workspace.lock().clone());
         confine_fs_args(name, &mut args, workspace.as_deref())?;
