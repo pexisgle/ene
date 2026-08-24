@@ -234,9 +234,8 @@ mod tests {
 
     #[test]
     fn japanese_label_substring_match() {
+        crate::i18n::select_language("ja");
         let entries = palette_entries();
-        // The ja locale renders "Open {tab}" as "{tab}を開く"; either way a
-        // substring of a known tab label must reach its detail entry.
         let ja_matches = filter_entries("マイク", &entries);
         assert!(
             ja_matches
