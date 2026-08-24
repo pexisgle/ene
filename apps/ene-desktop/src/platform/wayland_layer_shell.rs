@@ -15,7 +15,7 @@
 //! integration. The runtime's `resumed` opens the same
 //! stand-alone Wayland connection it uses for the input-region
 //! context and asks the registry for `zwlr_layer_shell_v1`. The
-//! status ([`LayerShellStatus`]) is cached on the [`AppState`]
+//! status ([`LayerShellStatus`]) is cached on the application state
 //! so the click-through dispatcher can branch on it:
 //!
 //! - `LayerShellStatus::Available(_)` — the compositor is layer

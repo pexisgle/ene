@@ -55,8 +55,7 @@ pub struct CharacterRenderer {
     /// Cached `VRMC_springBone` properties. Cloned to avoid a
     /// borrow fight with `&mut VrmModel` in the per-frame update.
     spring_bone_props: Option<SpringBoneProperties>,
-    /// Rebuilt by
-    /// [`CharacterRenderer::set_antialiasing_mode`].
+    /// Rebuilt when the renderer's antialiasing mode changes.
     post_processor: Option<PostProcessor>,
     fxaa_shader: Option<wgpu::ShaderModule>,
     fxaa_format: Option<wgpu::TextureFormat>,

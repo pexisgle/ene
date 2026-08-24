@@ -1,7 +1,7 @@
 //! ECS Components for the settings UI.
 //!
 //! Each component owns a small slice of the runtime UI state. The
-//! [`SettingsUiBundle`](super::character::SettingsUiBundle) (see
+//! `SettingsUiBundle` (see
 //! `plugin/ui_plugin.rs`) assembles them on a single entity so the
 //! runtime can call into the egui render functions via
 //! `world.get::<&UiPage>(entity)` instead of carrying a

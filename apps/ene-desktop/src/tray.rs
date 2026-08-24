@@ -14,7 +14,7 @@
 //!   icon so it is not dropped when the thread returns.
 //! - On Linux: `TrayHandle::new` constructs the tray icon on the
 //!   calling (main) thread. The runtime must call
-//!   [`TrayHandle::tick_gtk`] from `about_to_wait` to pump
+//!   the GTK tick from `about_to_wait` to pump
 //!   `gtk::main_iteration_do(false)` while events are pending.
 //!
 //! In both cases, `MenuEvent`s and `TrayIconEvent::Click`s are

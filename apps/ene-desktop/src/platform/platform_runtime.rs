@@ -8,7 +8,7 @@
 //!
 //! # Wayland
 //!
-//! [`WaylandInputRegionContext`](super::wayland_region::WaylandInputRegionContext)
+//! [`WaylandInputRegionContext`]
 //! pushes the per-frame policy into the cached state and a
 //! stand-alone `wl_surface` (created from the bound
 //! `wl_compositor`) receives the matching `set_input_region`

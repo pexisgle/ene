@@ -877,7 +877,7 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
 
 /// # Config-version migration
 ///
-/// Before the figment pipeline runs, [`migrate_settings_file`] reads the raw
+/// Before the figment pipeline runs, `migrate_settings_file` reads the raw
 /// file and applies any registered
 /// [config-version migrations](crate::migration), persisting the upgraded
 /// document. The (possibly migrated) JSON is then fed to figment as a string
@@ -898,8 +898,8 @@ pub fn load_full_config_from(config_path: &Path) -> Result<EneConfig, EneConfigE
     Ok(config)
 }
 
-/// Shared by [`load_full_config_from`] (the load path) and
-/// [`serialize_json_layer`] (the save path). The save path needs the
+/// Shared by `load_full_config_from` (the load path) and
+/// `serialize_json_layer` (the save path). The save path needs the
 /// exact same baseline the loader produced so it can isolate the user's
 /// in-session mutations from the defaults and env layers.
 fn extract_layered_config_with_env(
@@ -1137,7 +1137,7 @@ fn restore_top_level_order(extra: &mut IndexMap<String, serde_json::Value>, orde
 
 /// Only the JSON layer is persisted: `ENE_` env-var overrides and defaults are
 /// excluded so a transient env override never becomes permanent. See
-/// [`serialize_json_layer`] for the layer-reconstruction details.
+/// `serialize_json_layer` for the layer-reconstruction details.
 ///
 /// `$schema` is auto-filled on the serialised copy when empty so the persisted
 /// file always leads with the schema pointer.

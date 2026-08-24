@@ -35,7 +35,7 @@ use crate::schedule::{configure_schedule, configure_startup};
 ///
 /// Plugin order matters only for the `Startup` schedule; the per-frame
 /// `First` / `PreUpdate` / `Update` / `PostUpdate` / `Last` stages sort
-/// themselves by [`IntoScheduleConfigs`] constraints.
+/// themselves by bevy `IntoScheduleConfigs` constraints.
 #[derive(Default)]
 pub struct DesktopPlugins;
 
