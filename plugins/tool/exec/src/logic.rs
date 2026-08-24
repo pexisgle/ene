@@ -412,11 +412,11 @@ fn signal_tree(pid: u32, kind: &str) {
 mod tests {
     use super::{TEST_WORKSPACE, execute};
     use serde_json::json;
-    use tempfile::TempDir;
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use std::process::Command;
+    use tempfile::TempDir;
 
     fn with_workspace<F: FnOnce()>(f: F) {
         let dir = TempDir::new().unwrap();
