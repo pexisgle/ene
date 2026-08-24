@@ -8,8 +8,7 @@ use base64::Engine as _;
 use ene_api::{
     ApiClient, ApiError, CharacterView, CreateJobRequest, JobView, MemoryCandidateDecision,
     MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, OccupantView,
-    PluginConfigField,
-    PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
+    PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
     ResolveMemoryCandidateRequest, ScheduleView, SoulView,
 };
 use parking_lot::Mutex;
