@@ -3347,9 +3347,9 @@ fn show_mcp_catalog(
                         ui.hyperlink_to(&entry.source_url, &entry.source_url);
                         ui.end_row();
                     });
-                if ui.button(i18n::fl("mcp-catalog-connect")).clicked()
-                    && !state.mcp_servers.iter().any(|server| server.id == entry.id)
-                {
+                let connect_clicked = ui.button(i18n::fl("mcp-catalog-connect")).clicked();
+                let already_added = state.mcp_servers.iter().any(|server| server.id == entry.id);
+                if connect_clicked && !already_added {
                     let generation = state.next_mcp_probe_generation();
                     state.mcp_probe_pending = Some(entry.id.clone());
                     state.mcp_probe_result = None;
@@ -3379,7 +3379,7 @@ fn show_mcp_catalog(
                                 .map_err(|e| e.to_string()),
                         }
                     });
-                } else if ui.button(i18n::fl("mcp-catalog-connect")).clicked() {
+                } else if connect_clicked && already_added {
                     state.core_status = i18n::fl("mcp-catalog-already-added");
                 }
             }
