@@ -19,7 +19,7 @@ use ene_kernel::{
 use ene_plane::{ApprovalMode, AuthzRequest, PolicyDecision, PolicyFile, PolicyRule, Sensitivity};
 use ene_session::{EventKind, EventPayload, SessionId, TurnOrigin, TurnOutcome};
 use std::collections::BTreeMap;
-use std::fs::Permissions;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -3708,6 +3708,7 @@ async fn mcp_probe_lists_tools_without_enabling_the_server() {
     server.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn mcp_probe_success_returns_probed_tools_without_saving_the_server() {
     let python3 = std::process::Command::new("sh")
@@ -3769,7 +3770,7 @@ while True:
 "#,
     )
     .unwrap();
-    std::fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (_dir, client, core, server) = boot_server().await;
 
     // A successful probe must surface the ephemeral bridge's tools under the
@@ -3934,6 +3935,7 @@ async fn mcp_probe_forwards_auth_token_to_remote_servers() {
     remote_task.abort();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn mcp_probe_only_enumerates_tools_without_ingesting_context() {
     let python3 = std::process::Command::new("sh")
@@ -4004,7 +4006,7 @@ while True:
 "#,
     )
     .unwrap();
-    std::fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (_dir, client, core, server) = boot_server().await;
     let context_dir = core.workspace_dir().join("mcp-context");
 
