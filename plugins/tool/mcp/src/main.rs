@@ -108,7 +108,9 @@ fn tool_side_effects(annotations: Option<&Value>) -> Vec<String> {
         return vec!["may modify data".to_owned()];
     };
     if annotations.get("readOnlyHint").and_then(Value::as_bool) == Some(true) {
-        return vec!["read-only".to_owned()];
+        // Empty effects keep read-only tools visible on the dialogue surface,
+        // matching how builtin read-only tools declare no side effects.
+        return Vec::new();
     }
     let mut effects = Vec::new();
     if annotations
@@ -654,7 +656,7 @@ mod tests {
     fn annotations_map_to_side_effect_strings() {
         assert_eq!(
             tool_side_effects(Some(&json!({"readOnlyHint": true}))),
-            vec!["read-only".to_owned()]
+            Vec::<String>::new()
         );
         assert_eq!(
             tool_side_effects(Some(&json!({"destructiveHint": true}))),
