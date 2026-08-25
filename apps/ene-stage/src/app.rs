@@ -537,7 +537,11 @@ impl StageApp {
     #[expect(clippy::too_many_lines, reason = "outcome dispatch is a flat match")]
     fn apply_async_outcome(&mut self, outcome: AsyncOutcome) {
         match outcome {
-            AsyncOutcome::SendMessage { session_id, sent_text, result } => {
+            AsyncOutcome::SendMessage {
+                session_id,
+                sent_text,
+                result,
+            } => {
                 if session_id != self.session.session_id() {
                     return;
                 }
@@ -553,11 +557,14 @@ impl StageApp {
                         .last()
                         .map(|m| m.seq + 1)
                         .unwrap_or(0);
-                    self.surface.history.messages.push(ene_api::MessageResponse {
-                        seq: next_seq,
-                        role: "user".to_owned(),
-                        text: sent_text,
-                    });
+                    self.surface
+                        .history
+                        .messages
+                        .push(ene_api::MessageResponse {
+                            seq: next_seq,
+                            role: "user".to_owned(),
+                            text: sent_text,
+                        });
                     self.request_history_refresh();
                 }
             }
