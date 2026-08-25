@@ -40,6 +40,10 @@ pub enum AsyncOutcome {
         session_id: String,
         result: Result<ene_api::HistoryResponse, String>,
     },
+    ReconcileHistory {
+        session_id: String,
+        result: Result<ene_api::HistoryResponse, String>,
+    },
     SaveLocalSettings(Result<(), String>),
     LoadCoreSettings(Result<String, String>),
     ApplyCoreSettings(Result<(), String>),
