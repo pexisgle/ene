@@ -19,6 +19,7 @@ use ene_kernel::{
 use ene_plane::{ApprovalMode, AuthzRequest, PolicyDecision, PolicyFile, PolicyRule, Sensitivity};
 use ene_session::{EventKind, EventPayload, SessionId, TurnOrigin, TurnOutcome};
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -3707,6 +3708,7 @@ async fn mcp_probe_lists_tools_without_enabling_the_server() {
     server.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn mcp_probe_success_returns_probed_tools_without_saving_the_server() {
     let python3 = std::process::Command::new("sh")
@@ -3933,6 +3935,7 @@ async fn mcp_probe_forwards_auth_token_to_remote_servers() {
     remote_task.abort();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn mcp_probe_only_enumerates_tools_without_ingesting_context() {
     let python3 = std::process::Command::new("sh")

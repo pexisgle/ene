@@ -19,7 +19,7 @@ pub use boot::{BootOptions, CoreDaemon, CoreError, TaskSecrets};
 pub(crate) use boot::{overlay_ai, overlay_plugins};
 pub use http::ServerHandle;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod http_tests;
 #[cfg(test)]
 mod openapi_contract;
