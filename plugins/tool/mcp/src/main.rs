@@ -648,8 +648,6 @@ impl Drop for McpBridge {
 
 #[cfg(test)]
 mod tests {
-    #![expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")]
-
     use super::*;
 
     #[test]
