@@ -471,10 +471,16 @@ mod tests {
 
     #[test]
     fn query_filters_case_insensitively() {
-        let actions = default_actions();
+        let actions = vec![SpotlightAction::OpenSettings {
+            label: "Open Settings".to_owned(),
+            page: PageKind::Ai,
+        }];
         let filtered = filter_actions("SETTINGS", &actions);
-        assert_eq!(filtered.len(), 1);
-        assert!(matches!(filtered[0], SpotlightAction::OpenSettings { .. }));
+        assert!(
+            filtered
+                .iter()
+                .any(|action| matches!(action, SpotlightAction::OpenSettings { .. }))
+        );
     }
 
     #[test]

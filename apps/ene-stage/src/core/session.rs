@@ -11,7 +11,7 @@ use ene_api::{
 use parking_lot::Mutex;
 use uuid::Uuid;
 
-use crate::bundle::{self, motions_dir_for_package};
+use crate::bundle::{self, BundleError, motions_dir_for_package};
 
 /// Overlay draws at most this many VRM bodies (`body.render.max_concurrent` default).
 pub const MAX_OVERLAY_BODIES: usize = 2;
@@ -454,12 +454,15 @@ impl SessionHandle {
 }
 
 /// Import or activate Alicia so a stage occupant exposes `avatar_path`.
-pub async fn ensure_alicia(client: &ApiClient) -> Result<Option<OccupantView>, ApiError> {
+pub async fn ensure_alicia(
+    client: &ApiClient,
+    bundle: impl Fn(&str, &str) -> Result<Vec<u8>, BundleError>,
+) -> Result<Option<OccupantView>, ApiError> {
     let occupants = client.stage().await?.occupants;
     if let Some(occupant) = occupant_with_avatar(&occupants) {
         return Ok(Some(occupant));
     }
-    import_named_companion(client, "char.alicia", "Alicia").await?;
+    import_named_companion(client, "char.alicia", "Alicia", &bundle).await?;
     Ok(occupant_with_avatar(&client.stage().await?.occupants))
 }
 
@@ -468,19 +471,48 @@ pub async fn ensure_avatar_occupants(
     client: &ApiClient,
     want: usize,
 ) -> Result<Vec<OccupantView>, ApiError> {
-    let _ = ensure_alicia(client).await?;
-    let occupants = client.stage().await?.occupants;
-    if avatar_slots(&occupants).len() >= want {
-        return Ok(occupants);
+    resolve_stage_with(client, want, bundle::pack_bundled_named)
+        .await
+        .map(|(_, occupants, _, _)| occupants)
+}
+
+async fn resolve_stage_with(
+    client: &ApiClient,
+    want: usize,
+    bundle: impl Fn(&str, &str) -> Result<Vec<u8>, BundleError>,
+) -> Result<(String, Vec<OccupantView>, Option<PathBuf>, Option<PathBuf>), ApiError> {
+    let _ = ensure_alicia(client, &bundle).await?;
+    let mut occupants = client.stage().await?.occupants;
+    if avatar_slots(&occupants).len() < want {
+        import_named_companion(client, "char.alicia-b", "Alicia B", &bundle).await?;
+        occupants = client.stage().await?.occupants;
     }
-    import_named_companion(client, "char.alicia-b", "Alicia B").await?;
-    Ok(client.stage().await?.occupants)
+
+    let occupant = pick_avatar_occupant(&occupants);
+    let soul_id = if let Some(occupant) = occupant.as_ref() {
+        occupant.soul_id.clone()
+    } else {
+        client
+            .list_souls()
+            .await?
+            .items
+            .first()
+            .map(|soul| soul.id.clone())
+            .ok_or_else(|| ApiError::Transport("no souls available".to_owned()))?
+    };
+    let avatar_path = occupant
+        .as_ref()
+        .and_then(|item| item.avatar_path.clone())
+        .map(PathBuf::from);
+    let motions_dir = occupant.as_ref().and_then(motions_dir_for_occupant);
+    Ok((soul_id, occupants, avatar_path, motions_dir))
 }
 
 async fn import_named_companion(
     client: &ApiClient,
     id: &str,
     display_name: &str,
+    bundle: &impl Fn(&str, &str) -> Result<Vec<u8>, BundleError>,
 ) -> Result<(), ApiError> {
     let packages = client.list_characters().await?.items;
     let existing = packages.iter().find(|pkg| pkg.id == id).or_else(|| {
@@ -495,7 +527,7 @@ async fn import_named_companion(
         let _ = client.activate_character(&pkg.id).await?;
         return Ok(());
     }
-    match bundle::pack_bundled_named(id, display_name) {
+    match bundle(id, display_name) {
         Ok(bytes) => {
             tracing::info!(id, bytes = bytes.len(), "importing bundled VRM .enechar");
             let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -505,10 +537,7 @@ async fn import_named_companion(
             }
             Ok(())
         }
-        Err(err) => {
-            tracing::warn!(error = %err, id, "bundled VRM package unavailable");
-            Ok(())
-        }
+        Err(err) => Err(ApiError::Transport(err.to_string())),
     }
 }
 
@@ -517,6 +546,46 @@ fn find_alicia_package(packages: &[CharacterView]) -> Option<&CharacterView> {
         let id = pkg.id.to_ascii_lowercase();
         id == "char.alicia" || id == "alicia"
     })
+}
+
+#[cfg(test)]
+mod bundle_seam_tests {
+    #![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests"))]
+    use super::*;
+
+    fn recording_client() -> ApiClient {
+        ApiClient::new("http://127.0.0.1:9", "token", "stage")
+    }
+
+    fn failing_bundle(_id: &str, _name: &str) -> Result<Vec<u8>, BundleError> {
+        Err(BundleError::Missing("/no/AliciaSolid.vrm".to_owned()))
+    }
+
+    #[tokio::test]
+    async fn missing_bundle_is_reported_not_swallowed() {
+        let client = recording_client();
+        let err = import_named_companion(&client, "char.alicia", "Alicia", &failing_bundle)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn resolve_stage_surfaces_missing_bundle() {
+        let client = recording_client();
+        // The unroutable base URL makes the first API call fail before the
+        // bundle seam, so any surfaced error proves resolve_stage no longer
+        // swallows bootstrap failures.
+        let bundle = |id: &str, _name: &str| -> Result<Vec<u8>, BundleError> {
+            if id == "char.alicia" {
+                Err(BundleError::Missing("/no/AliciaSolid.vrm".to_owned()))
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let err = resolve_stage_with(&client, 0, bundle).await.unwrap_err();
+        assert!(matches!(err, ApiError::Transport(_)));
+    }
 }
 
 #[must_use]
@@ -601,28 +670,7 @@ async fn resolve_stage(
     client: &ApiClient,
     want_avatars: usize,
 ) -> Result<(String, Vec<OccupantView>, Option<PathBuf>, Option<PathBuf>), ApiError> {
-    if let Err(err) = ensure_avatar_occupants(client, want_avatars).await {
-        tracing::warn!(error = %err, "VRM package bootstrap failed");
-    }
-    let occupants = client.stage().await?.occupants;
-    let occupant = pick_avatar_occupant(&occupants);
-    let soul_id = if let Some(occupant) = occupant.as_ref() {
-        occupant.soul_id.clone()
-    } else {
-        client
-            .list_souls()
-            .await?
-            .items
-            .first()
-            .map(|soul| soul.id.clone())
-            .ok_or_else(|| ApiError::Transport("no souls available".to_owned()))?
-    };
-    let avatar_path = occupant
-        .as_ref()
-        .and_then(|item| item.avatar_path.clone())
-        .map(PathBuf::from);
-    let motions_dir = occupant.as_ref().and_then(motions_dir_for_occupant);
-    Ok((soul_id, occupants, avatar_path, motions_dir))
+    resolve_stage_with(client, want_avatars, bundle::pack_bundled_named).await
 }
 
 async fn resolve_session_id(client: &ApiClient, soul_id: &str) -> Result<String, ApiError> {

@@ -1111,9 +1111,8 @@ mod tests {
 
         let errors = editor_errors(&world, entity);
         assert!(
-            errors
-                .iter()
-                .any(|issue| issue.message.contains("Failed to parse card")),
+            errors.iter().any(|issue| issue.location == "character.json"
+                && issue.severity == crate::settings::EditorSeverity::Error),
             "parse failure must be surfaced, got {errors:?}"
         );
         assert_eq!(
@@ -1154,9 +1153,8 @@ mod tests {
 
         let errors = editor_errors(&world, entity);
         assert!(
-            errors
-                .iter()
-                .any(|issue| issue.message.contains("Failed to read card")),
+            errors.iter().any(|issue| issue.location == "character.json"
+                && issue.severity == crate::settings::EditorSeverity::Error),
             "read failure must be surfaced, got {errors:?}"
         );
     }

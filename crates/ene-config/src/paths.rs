@@ -2,6 +2,11 @@ use std::path::{Path, PathBuf};
 
 const APP_ID: &str = "dev.pexisgle.ene";
 
+/// Compile-time repository assets root. Debug builds fall back to this when
+/// the executable lives outside the repo tree (for example a custom
+/// `CARGO_TARGET_DIR`), where the exe-relative probes cannot find `assets/`.
+const REPO_ASSETS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
+
 pub const IS_DEV_BUILD: bool = cfg!(debug_assertions);
 
 /// OS-standard user data directory (`~/.local/share` on Linux, `%APPDATA%` on Windows).
@@ -42,6 +47,7 @@ fn resolve_assets_dir_impl() -> PathBuf {
         let candidates = [
             exe_dir.join("../../assets"),
             exe_dir.join("../assets"),
+            PathBuf::from(REPO_ASSETS_DIR),
             PathBuf::from("assets"),
         ];
         if let Some(path) = candidates.into_iter().find(|c| c.is_dir()) {
