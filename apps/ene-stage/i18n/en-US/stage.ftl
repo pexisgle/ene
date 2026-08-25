@@ -363,6 +363,18 @@ plugins-mcp-stdio = Local command
 plugins-mcp-http = HTTP
 plugins-mcp-json = JSON import/export
 plugins-mcp-from-json = Load form from JSON
+mcp-catalog-title = Curated servers
+mcp-catalog-hint = Official servers from the Model Context Protocol team. Review the command and side effects before connecting.
+mcp-catalog-source = Source
+mcp-catalog-fallback = Fallback
+mcp-catalog-auth = Auth
+mcp-catalog-auth-none = None
+mcp-catalog-auth-api-key = API key (stored in vault)
+mcp-catalog-auth-oauth = OAuth 2.0 (server flow)
+mcp-catalog-side-effects = Side effects
+mcp-catalog-source-url = Source URL
+mcp-catalog-connect = Add
+mcp-catalog-already-added = This server is already in your list
 plugins-assets = Provider assets
 plugins-assets-plugin = Plugin
 plugins-assets-need-provider = Pick a provider.* plugin (not a tool) to load engines and weights.
@@ -379,6 +391,15 @@ plugins-row-id = Row id
 connections-help = Plugins, local engines, and MCP servers the core talks to. Start here when chat or voice cannot find a provider.
 connections-empty = No plugins are running.
 connections-empty-help = The core has not loaded any plugin fibers yet. Make sure the core is running, then refresh.
+connections-status-active = active
+connections-status-connecting = connecting
+connections-status-disabled = disabled
+connections-status-unhealthy = unhealthy{$error ->
+        ["" ] {""}
+       *[other] {: $error}
+    }
+connections-mcp-tools-title = MCP tools
+connections-mcp-tools-side-effects = Side effects: {$effects}
 mcp-saved = MCP document saved
 mcp-json-invalid = MCP JSON is not valid
 mcp-id-required = Each MCP server needs a name.

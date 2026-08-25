@@ -38,3 +38,19 @@ skills home). Servers that omit those methods are fine. There is no
 settings-page marketplace picker yet (successor, P-616). Do not add a
 `tools.mcp_servers` block copied from the old in-process host — that schema
 is gone.
+
+## Curated catalog
+
+Stage **Connections** also shows a curated catalog of official servers (git,
+fetch, memory, and the remote GitHub MCP server). Each entry previews the
+command, arguments, URL, required auth, side effects, and upstream source URL
+before you connect; **Add** writes a normal row into the same handwritten
+document, so there is exactly one schema.
+
+The catalog is a static allowlist compiled into `ene-work`
+(`GET /api/v1/mcp/catalog`). It carries no signatures yet; distribution and
+signing are a later design. The GitHub remote entry uses OAuth 2.0 through the
+server's own flow — the host never holds provider-specific client secrets.
+After saving, paste the token once via the plugin config secret
+(`vault.plugin.config.mcp.<id>.token`); the bridge injects it as an
+`Authorization` header and it never appears in raw JSON or logs.

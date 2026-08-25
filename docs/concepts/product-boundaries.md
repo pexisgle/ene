@@ -141,8 +141,8 @@ host connectors.
 ### MCP-delegated (D-23) — not restored as builtins
 
 v1.0 connection is a handwritten `mcp.json` row on the same registry
-pipeline. A catalog picker is post-v1.0
-([#812](https://github.com/pexisgle/ene/issues/812), P-616).
+pipeline; stage now adds a curated official-server catalog on top of the
+same rows ([#812](https://github.com/pexisgle/ene/issues/812), P-616).
 
 | Old plugin / action | Delegate | Status |
 |---|---|---|
@@ -173,7 +173,7 @@ not a reason to keep the crate.
 | Memory config + Memories ledger | Memory HTTP | Memory | Current on stage for list/edit/delete; auxiliary LLM scope remains [#717](https://github.com/pexisgle/ene/issues/717) |
 | Sessions | Session HTTP | Log | Current on stage |
 | Permissions / Approvals | Plane HTTP | System | Current on stage |
-| Connectors (MCP form) | `GET/PUT /mcp` | Connections | Current handwritten form on stage. Catalog/health/auth UX: [#812](https://github.com/pexisgle/ene/issues/812) (post-v1.0, on stage) |
+| Connectors (MCP form + curated catalog) | `GET/PUT /mcp`, `GET /mcp/catalog` | Connections | Handwritten form plus curated official-server picker, connection preview, and status/error display are current on stage ([#812](https://github.com/pexisgle/ene/issues/812)) |
 | Schedules | Schedule HTTP | Work | Current on stage |
 | Plugins / Advanced / Diagnostics | Plugin profile + schema leaves | System | Current on stage. Plugin config schema: [#819](https://github.com/pexisgle/ene/issues/819) |
 
@@ -240,7 +240,7 @@ Closing a child issue does not close [#717](https://github.com/pexisgle/ene/issu
 
 | Item | Issue / ID | Why later |
 |---|---|---|
-| MCP catalog, install preview, health, auth UX | [#812](https://github.com/pexisgle/ene/issues/812), P-616, M8 | D-23: v1.0 is handwritten rows |
+| MCP catalog, install preview, health, auth UX | [#812](https://github.com/pexisgle/ene/issues/812), P-616, M8 | Shipped post-v1.0: curated static catalog with preview, fiber error surfacing, and server-flow OAuth token injection |
 | Tool discovery index | [#817](https://github.com/pexisgle/ene/issues/817) (epic [#796](https://github.com/pexisgle/ene/issues/796)) | Scoring stays in `ene-registry`; not a v1.0 `done.md` box |
 | Background tool start/cancel/completion | [#816](https://github.com/pexisgle/ene/issues/816) (epic #796) | Persist on `ene-work` jobs; no second task store |
 | Plugin config schema / dynamic options | [#819](https://github.com/pexisgle/ene/issues/819) (epic #796) | Unreleased: no legacy config shim |

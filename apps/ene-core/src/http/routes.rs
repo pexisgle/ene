@@ -11,14 +11,15 @@ use ene_api::{
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateJobRequest,
     CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot,
     GreetingView, Health, HistoryResponse, JobView, ListProviderModelsRequest,
-    ListProviderModelsResponse, McpDocument, McpServerView, MemoryCandidateDecision,
-    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, MessageMode, MessageRequest,
-    MessageResponse, OccupantView, Page, PluginConfigErrorView, PluginConfigField,
-    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
-    PluginView, QueuedCancel, ResolveMemoryCandidateRequest, ResolveMemoryCandidateResponse,
-    ResourceKind, RestoreRequest, ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
-    SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch,
-    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    ListProviderModelsResponse, McpCatalogDocument, McpDocument, McpServerView,
+    MemoryCandidateDecision, MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView,
+    MessageMode, MessageRequest, MessageResponse, OccupantView, Page, PluginConfigErrorView,
+    PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues,
+    PluginConfigView, PluginView, QueuedCancel, ResolveMemoryCandidateRequest,
+    ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
+    SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
+    SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView,
+    ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
@@ -1167,6 +1168,7 @@ pub async fn list_tools(State(state): State<AppState>) -> Json<Page<ToolView>> {
             layer: def.primary_layer().as_str().to_owned(),
             name: def.name,
             description: def.description,
+            side_effects: def.side_effects,
         })
         .collect();
     Json(Page::of(items))
@@ -1220,6 +1222,7 @@ pub async fn list_plugins(State(state): State<AppState>) -> Json<Page<PluginView
             plugin: fiber.plugin,
             state: fiber.state.as_str().to_owned(),
             wait_reason: fiber.wait_reason,
+            last_error: fiber.last_error,
         })
         .collect();
     Json(Page::of(items))
@@ -1256,6 +1259,7 @@ pub async fn restart_plugin(
         plugin: updated.plugin,
         state: updated.state.as_str().to_owned(),
         wait_reason: updated.wait_reason,
+        last_error: updated.last_error,
     }))
 }
 
@@ -1643,6 +1647,33 @@ fn map_install_status(
 
 pub async fn get_mcp(State(state): State<AppState>) -> Json<McpDocument> {
     Json(mcp_document(&state.core.mcp_servers()))
+}
+
+pub async fn get_mcp_catalog() -> Json<McpCatalogDocument> {
+    let entries = ene_work::mcp_catalog()
+        .iter()
+        .map(|entry| ene_api::McpCatalogEntryView {
+            id: entry.id.clone(),
+            label: entry.label.clone(),
+            description: entry.description.clone(),
+            transport: entry.transport.clone(),
+            command: entry.command.clone(),
+            args: entry.args.clone(),
+            url: entry.url.clone(),
+            auth: match entry.auth {
+                ene_work::McpCatalogAuth::None => ene_api::McpCatalogAuthView::None,
+                ene_work::McpCatalogAuth::ApiKeyHeader => ene_api::McpCatalogAuthView::ApiKeyHeader,
+                ene_work::McpCatalogAuth::Oauth2Remote => ene_api::McpCatalogAuthView::Oauth2Remote,
+            },
+            side_effects: entry.side_effects.clone(),
+            source_url: entry.source_url.clone(),
+        })
+        .collect();
+    Json(McpCatalogDocument {
+        source: "static".to_owned(),
+        fallback: "static table; refresh is not wired in v1".to_owned(),
+        entries,
+    })
 }
 
 pub async fn put_mcp(

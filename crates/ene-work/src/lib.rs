@@ -34,7 +34,10 @@ pub use host::{
     fold_brief, layer_for_call, question_timed_out, should_upgrade_steps, soul_artifacts_dir,
     surface_call_kind, workspace_root,
 };
-pub use mcp::{McpProfile, McpServer, McpTool, ScriptedMcp, register_mcp_tools};
+pub use mcp::{
+    McpCatalogAuth, McpCatalogEntry, McpProfile, McpServer, McpTool, ScriptedMcp, mcp_catalog,
+    register_mcp_tools,
+};
 pub use observe::{
     ObservationPipeline, ObserveAction, ObserveError, ObserveSkip, contains_raw_screenshot,
     observation_send_label, title_reaches_model, vision_payload,

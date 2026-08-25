@@ -363,6 +363,18 @@ plugins-mcp-stdio = ローカルコマンド
 plugins-mcp-http = HTTP
 plugins-mcp-json = JSON の取り込み / 書き出し
 plugins-mcp-from-json = JSON からフォームへ
+mcp-catalog-title = おすすめサーバー
+mcp-catalog-hint = Model Context Protocol 公式のサーバーです。接続前にコマンドと副作用を確認してください。
+mcp-catalog-source = 提供元
+mcp-catalog-fallback = フォールバック
+mcp-catalog-auth = 認証
+mcp-catalog-auth-none = なし
+mcp-catalog-auth-api-key = API キー（vault に保存）
+mcp-catalog-auth-oauth = OAuth 2.0（サーバー側フロー）
+mcp-catalog-side-effects = 副作用
+mcp-catalog-source-url = ソース URL
+mcp-catalog-connect = 追加
+mcp-catalog-already-added = このサーバーは既に追加されています
 plugins-assets = プロバイダーアセット
 plugins-assets-plugin = プラグイン
 plugins-assets-need-provider = エンジンや重みを読むには tool ではなく provider.* を選んでください。
@@ -379,6 +391,15 @@ plugins-row-id = 行 ID
 connections-help = コアが接続するプラグイン・ローカルエンジン・MCP サーバーです。チャットや音声でプロバイダーが見つからないときはここを確認します。
 connections-empty = 実行中のプラグインはありません。
 connections-empty-help = コアがまだプラグインファイバーを読み込んでいません。コアが起動していることを確認して更新してください。
+connections-status-active = 有効
+connections-status-connecting = 接続中
+connections-status-disabled = 無効
+connections-status-unhealthy = 異常{$error ->
+        ["" ] {""}
+       *[other] {: $error}
+    }
+connections-mcp-tools-title = MCP ツール
+connections-mcp-tools-side-effects = 副作用: {$effects}
 mcp-saved = MCP ドキュメントを保存しました
 mcp-json-invalid = MCP JSON が正しくありません
 mcp-id-required = 各 MCP サーバーには名前が必要です。

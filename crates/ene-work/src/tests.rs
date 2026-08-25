@@ -2745,7 +2745,7 @@ struct TimedPopup;
 impl ene_plane::PopupSink for TimedPopup {
     async fn ask(&self, _req: &ene_plane::AuthzRequest) -> ene_plane::PopupDecision {
         loop {
-            tokio::time::sleep(StdDuration::from_secs(3600)).await;
+            tokio::time::sleep(StdDuration::from_hours(1)).await;
         }
     }
 }

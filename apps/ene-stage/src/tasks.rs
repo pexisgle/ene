@@ -42,6 +42,8 @@ pub enum AsyncOutcome {
     SaveLocalSettings(Result<(), String>),
     LoadCoreSettings(Result<String, String>),
     ApplyCoreSettings(Result<(), String>),
+    LoadMcpCatalog(Result<ene_api::McpCatalogDocument, String>),
+    LoadTools(Result<Vec<ene_api::ToolView>, String>),
     ListMemories {
         soul_id: String,
         result: Result<Vec<MemoryView>, String>,

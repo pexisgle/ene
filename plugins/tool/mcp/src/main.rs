@@ -38,6 +38,7 @@ struct McpConfig {
     command: String,
     args: Vec<String>,
     url: Option<String>,
+    auth_token: Option<String>,
     skills_home: PathBuf,
 }
 
@@ -74,6 +75,11 @@ fn load_config() -> McpConfig {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    let auth_token = value
+        .get("auth_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let skills_home = value
         .get("skills_home")
         .and_then(Value::as_str)
@@ -85,6 +91,7 @@ fn load_config() -> McpConfig {
         command,
         args,
         url,
+        auth_token,
         skills_home,
     }
 }
@@ -111,6 +118,7 @@ struct McpStdio {
 struct McpHttp {
     url: String,
     client: reqwest::Client,
+    auth_token: Option<String>,
     next_id: u64,
 }
 
@@ -134,6 +142,7 @@ impl McpBridge {
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .map_err(|err| err.to_string())?,
+                auth_token: config.auth_token.clone(),
                 next_id: 1,
             })
         } else {
@@ -418,7 +427,7 @@ impl McpHttp {
             "method": method,
             "params": params,
         });
-        let incoming = post_rpc(&self.client, &self.url, &msg).await?;
+        let incoming = post_rpc(&self.client, &self.url, self.auth_token.as_deref(), &msg).await?;
         if let Some(err) = incoming.get("error") {
             return Err(err.to_string());
         }
@@ -431,16 +440,25 @@ impl McpHttp {
             "method": method,
             "params": params,
         });
-        drop(post_rpc(&self.client, &self.url, &msg).await);
+        drop(post_rpc(&self.client, &self.url, self.auth_token.as_deref(), &msg).await);
         Ok(())
     }
 }
 
-async fn post_rpc(client: &reqwest::Client, url: &str, msg: &Value) -> Result<Value, String> {
-    let response = client
+async fn post_rpc(
+    client: &reqwest::Client,
+    url: &str,
+    auth_token: Option<&str>,
+    msg: &Value,
+) -> Result<Value, String> {
+    let mut request = client
         .post(url)
         .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream")
+        .header("accept", "application/json, text/event-stream");
+    if let Some(token) = auth_token {
+        request = request.bearer_auth(token);
+    }
+    let response = request
         .json(msg)
         .send()
         .await

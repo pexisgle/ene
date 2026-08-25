@@ -74,6 +74,7 @@ pub struct Fiber {
     pub broker_socket: Option<String>,
     pub sandbox_required: bool,
     pub wait_reason: Option<String>,
+    pub last_error: Option<String>,
 }
 
 impl Fiber {
@@ -90,6 +91,7 @@ impl Fiber {
             broker_socket: None,
             sandbox_required: true,
             wait_reason: None,
+            last_error: None,
         }
     }
 

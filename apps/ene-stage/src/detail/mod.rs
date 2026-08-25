@@ -9,7 +9,7 @@ use ene_api::{
     ApiClient, ApiError, CharacterView, CreateJobRequest, JobView, MemoryCandidateDecision,
     MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, OccupantView,
     PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
-    ResolveMemoryCandidateRequest, ScheduleView, SoulView,
+    ResolveMemoryCandidateRequest, ScheduleView, SoulView, ToolView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -348,6 +348,11 @@ pub struct DetailUiState {
     pub mic_devices_loaded: bool,
     pub mcp_json: String,
     pub mcp_servers: Vec<ene_api::McpServerView>,
+    pub mcp_catalog: Vec<ene_api::McpCatalogEntryView>,
+    pub mcp_catalog_source: String,
+    pub mcp_catalog_fallback: String,
+    pub mcp_selected_catalog_id: String,
+    pub mcp_tools: Vec<ToolView>,
     pub plugin_config_id: String,
     pub plugin_config_request_id: u64,
     pub plugin_config_loading_request_id: Option<u64>,
@@ -1634,6 +1639,15 @@ fn show_voice(
     ensure_settings(state, client, rt, async_results);
     if !state.loaded.plugins {
         state.loaded.plugins = true;
+        let client_catalog = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::LoadMcpCatalog(
+                client_catalog
+                    .mcp_catalog()
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+        });
         let client_list = Arc::clone(client);
         spawn_async(rt, async_results, async move {
             AsyncOutcome::ListPlugins(
@@ -2624,6 +2638,16 @@ fn show_connections(
                 .await,
             )
         });
+        let client_tools = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::LoadTools(
+                client_tools
+                    .list_tools()
+                    .await
+                    .map(|t| t.items)
+                    .map_err(|e| e.to_string()),
+            )
+        });
     }
     SectionHeading {
         title: i18n::fl("detail-tab-connections"),
@@ -2668,7 +2692,8 @@ fn show_connections(
     } else {
         for plugin in state.plugins.clone() {
             ui.horizontal(|ui| {
-                ui.label(format!("{} ({})", plugin.plugin, plugin.state));
+                let status = connection_status_label(&plugin);
+                ui.label(format!("{} ({})", plugin.plugin, status));
                 ui.collapsing(i18n::fl("plugins-row-id"), |ui| {
                     ui.label(&plugin.row_id);
                 });
@@ -2703,8 +2728,46 @@ fn show_connections(
     }
     show_plugin_config(ui, state, client, rt, async_results);
     show_provider_assets(ui, state, client, rt, async_results);
+    show_mcp_tools(ui, state);
     ui.separator();
     show_mcp_form(ui, state, client, rt, async_results);
+}
+
+fn connection_status_label(plugin: &PluginView) -> String {
+    if let Some(error) = &plugin.last_error {
+        return i18n::format("connections-status-unhealthy", &[("error", error.as_str())]);
+    }
+    match plugin.state.as_str() {
+        "active" => i18n::fl("connections-status-active"),
+        "loading" | "waiting" => i18n::fl("connections-status-connecting"),
+        "failed" => i18n::format("connections-status-unhealthy", &[("error", "")]),
+        _ => i18n::fl("connections-status-disabled"),
+    }
+}
+
+fn show_mcp_tools(ui: &mut egui::Ui, state: &DetailUiState) {
+    let tools: Vec<&ToolView> = state
+        .mcp_tools
+        .iter()
+        .filter(|tool| tool.name.starts_with("mcp:"))
+        .collect();
+    if tools.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.heading(i18n::fl("connections-mcp-tools-title"));
+    for tool in tools {
+        ui.horizontal(|ui| {
+            ui.label(&tool.name);
+            ui.small(&tool.description);
+        });
+        if !tool.side_effects.is_empty() {
+            ui.label(i18n::format(
+                "connections-mcp-tools-side-effects",
+                &[("effects", tool.side_effects.join(", ").as_str())],
+            ));
+        }
+    }
 }
 
 fn show_plugin_config(
@@ -2955,6 +3018,7 @@ fn show_mcp_form(
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     ui.heading(i18n::fl("plugins-mcp"));
+    show_mcp_catalog(ui, state);
     let mut remove = None;
     for (index, server) in state.mcp_servers.iter_mut().enumerate() {
         ui.group(|ui| {
@@ -3073,6 +3137,89 @@ fn show_mcp_form(
             match load_mcp_form(state, &state.mcp_json.clone()) {
                 Ok(()) => state.core_status = i18n::fl("settings-loaded"),
                 Err(err) => state.core_status = err,
+            }
+        }
+    });
+}
+
+fn show_mcp_catalog(ui: &mut egui::Ui, state: &mut DetailUiState) {
+    if state.mcp_catalog.is_empty() {
+        return;
+    }
+    ui.collapsing(i18n::fl("mcp-catalog-title"), |ui| {
+        ui.label(i18n::fl("mcp-catalog-hint"));
+        ui.weak(format!(
+            "{}: {} / {}: {}",
+            i18n::fl("mcp-catalog-source"),
+            state.mcp_catalog_source,
+            i18n::fl("mcp-catalog-fallback"),
+            state.mcp_catalog_fallback
+        ));
+        for entry in &state.mcp_catalog.clone() {
+            let selected = state.mcp_selected_catalog_id == entry.id;
+            if ui
+                .selectable_label(selected, format!("{} — {}", entry.label, entry.description))
+                .clicked()
+            {
+                state.mcp_selected_catalog_id = if selected {
+                    String::new()
+                } else {
+                    entry.id.clone()
+                };
+            }
+            if selected {
+                egui::Grid::new(("mcp-catalog-detail", entry.id.as_str()))
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label(i18n::fl("plugins-mcp-id"));
+                        ui.label(&entry.id);
+                        ui.end_row();
+                        ui.label(i18n::fl("plugins-mcp-transport"));
+                        ui.label(&entry.transport);
+                        ui.end_row();
+                        if let Some(command) = &entry.command {
+                            ui.label(i18n::fl("plugins-mcp-command"));
+                            ui.label(format!("{command} {}", entry.args.join(" ")));
+                            ui.end_row();
+                        }
+                        if let Some(url) = &entry.url {
+                            ui.label(i18n::fl("plugins-mcp-url"));
+                            ui.hyperlink_to(url, url);
+                            ui.end_row();
+                        }
+                        ui.label(i18n::fl("mcp-catalog-auth"));
+                        ui.label(match entry.auth {
+                            ene_api::McpCatalogAuthView::None => i18n::fl("mcp-catalog-auth-none"),
+                            ene_api::McpCatalogAuthView::ApiKeyHeader => {
+                                i18n::fl("mcp-catalog-auth-api-key")
+                            }
+                            ene_api::McpCatalogAuthView::Oauth2Remote => {
+                                i18n::fl("mcp-catalog-auth-oauth")
+                            }
+                        });
+                        ui.end_row();
+                        ui.label(i18n::fl("mcp-catalog-side-effects"));
+                        ui.label(entry.side_effects.join("; "));
+                        ui.end_row();
+                        ui.label(i18n::fl("mcp-catalog-source-url"));
+                        ui.hyperlink_to(&entry.source_url, &entry.source_url);
+                        ui.end_row();
+                    });
+                if ui.button(i18n::fl("mcp-catalog-connect")).clicked()
+                    && !state.mcp_servers.iter().any(|server| server.id == entry.id)
+                {
+                    state.mcp_servers.push(ene_api::McpServerView {
+                        id: entry.id.clone(),
+                        transport: entry.transport.clone(),
+                        command: entry.command.clone(),
+                        args: entry.args.clone(),
+                        url: entry.url.clone(),
+                        enabled: true,
+                    });
+                    state.mcp_selected_catalog_id.clear();
+                } else if ui.button(i18n::fl("mcp-catalog-connect")).clicked() {
+                    state.core_status = i18n::fl("mcp-catalog-already-added");
+                }
             }
         }
     });
@@ -4461,12 +4608,14 @@ mod tests {
                 plugin: "tool.utility".into(),
                 state: "ready".into(),
                 wait_reason: None,
+                last_error: None,
             },
             PluginView {
                 row_id: "2".into(),
                 plugin: "provider.openai_compat".into(),
                 state: "ready".into(),
                 wait_reason: None,
+                last_error: None,
             },
         ];
         assert_eq!(
