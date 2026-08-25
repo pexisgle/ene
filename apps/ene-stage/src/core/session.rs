@@ -144,6 +144,11 @@ impl StageSession {
         self.turn_id.lock().clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_turn_id_for_test(&self, turn_id: &str) {
+        *self.turn_id.lock() = Some(turn_id.to_owned());
+    }
+
     pub fn clear_turn(&self) {
         *self.turn_id.lock() = None;
     }

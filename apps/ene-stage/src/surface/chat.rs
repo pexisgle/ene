@@ -269,163 +269,177 @@ fn composer_send_requested(ui: &egui::Ui) -> ComposerSendRequest {
     })
 }
 
-pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> egui::Response {
-    let output = ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    composer_send_allowed(state),
-                    egui::Button::new(i18n::fl("chat-send")),
-                )
-                .clicked()
-            {
-                state.push_action(SurfaceAction::SendChat);
-            }
-            if ui
-                .button(i18n::fl("chat-new-session"))
-                .on_hover_text(i18n::fl("chat-new-session-hint"))
-                .clicked()
-            {
-                state.push_action(SurfaceAction::NewSession);
-            }
-            let mic_label = if mic_active {
-                i18n::fl("mic-on")
-            } else {
-                i18n::fl("mic-off")
-            };
-            if ui.button(mic_label).clicked() {
-                state.push_action(SurfaceAction::ToggleMic);
-            }
-            ui.add_enabled_ui(state.turn_active, |ui| {
-                if ui
-                    .button(i18n::fl("chat-barge-in"))
-                    .on_hover_text(i18n::fl("chat-barge-in-hint"))
-                    .clicked()
-                {
-                    state.push_action(SurfaceAction::BargeIn);
-                }
-                if ui
-                    .button(i18n::fl("chat-cancel"))
-                    .on_hover_text(i18n::fl("chat-cancel-hint"))
-                    .clicked()
-                {
-                    state.push_action(SurfaceAction::CancelTurn);
-                }
-            });
-            if ui
-                .button(i18n::fl("chat-open-detail"))
-                .on_hover_text(i18n::fl("chat-open-detail-hint"))
-                .clicked()
-            {
-                state.push_action(SurfaceAction::OpenDetail(DetailTab::Home));
-            }
-        });
+pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> bool {
+    let mut composer_focused = false;
 
-        ui.horizontal(|ui| {
-            ui.weak(i18n::fl("chat-send-keyboard-hint"));
-            if state.turn_active {
-                ui.weak(i18n::fl("chat-draft-editable-hint"));
-            }
-        });
-
-        let composer_width = ui.available_width();
-        let (rows, composer_min_height) = composer_metrics(&state.chat_draft);
-        let response = ui.add(
-            egui::TextEdit::multiline(&mut state.chat_draft)
-                .id_salt(CHAT_INPUT_ID)
-                .hint_text(i18n::fl("chat-placeholder"))
-                .desired_width(composer_width)
-                .desired_rows(rows)
-                .min_size(egui::vec2(composer_width, composer_min_height))
-                .return_key(Some(egui::KeyboardShortcut::new(
-                    egui::Modifiers::SHIFT,
-                    egui::Key::Enter,
-                ))),
-        );
-        let request = composer_send_requested(ui);
-        if request.send && composer_send_allowed(state) {
-            pop_enter_newline(&mut state.chat_draft);
-            state.push_action(SurfaceAction::SendChat);
-        }
-
-        ui.horizontal(|ui| {
-            ui.label(i18n::fl("chat-input-label"));
-            for (mode, label, hint) in [
-                (
-                    MessageMode::Prompt,
-                    i18n::fl("chat-mode-prompt"),
-                    i18n::fl("chat-mode-prompt-hint"),
-                ),
-                (
-                    MessageMode::Steer,
-                    i18n::fl("chat-mode-steer"),
-                    i18n::fl("chat-mode-steer-hint"),
-                ),
-                (
-                    MessageMode::FollowUp,
-                    i18n::fl("chat-mode-follow-up"),
-                    i18n::fl("chat-mode-follow-up-hint"),
-                ),
-            ] {
-                let enabled = mode == MessageMode::Prompt || state.turn_active;
-                ui.add_enabled_ui(enabled, |ui| {
+    // A fixed-height composer panel reserves its space up front; sizing the
+    // transcript against leftover space keeps long conversations from pushing
+    // either region past the window edge.
+    egui::Panel::bottom("stage-chat-composer")
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(egui::Frame::new())
+        .show(ui, |panel_ui| {
+            panel_ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                ui.horizontal(|ui| {
                     if ui
-                        .selectable_label(state.message_mode == mode, label)
-                        .on_hover_text(hint)
+                        .add_enabled(
+                            composer_send_allowed(state),
+                            egui::Button::new(i18n::fl("chat-send")),
+                        )
                         .clicked()
                     {
-                        state.message_mode = mode;
+                        state.push_action(SurfaceAction::SendChat);
+                    }
+                    if ui
+                        .button(i18n::fl("chat-new-session"))
+                        .on_hover_text(i18n::fl("chat-new-session-hint"))
+                        .clicked()
+                    {
+                        state.push_action(SurfaceAction::NewSession);
+                    }
+                    let mic_label = if mic_active {
+                        i18n::fl("mic-on")
+                    } else {
+                        i18n::fl("mic-off")
+                    };
+                    if ui.button(mic_label).clicked() {
+                        state.push_action(SurfaceAction::ToggleMic);
+                    }
+                    ui.add_enabled_ui(state.turn_active, |ui| {
+                        if ui
+                            .button(i18n::fl("chat-barge-in"))
+                            .on_hover_text(i18n::fl("chat-barge-in-hint"))
+                            .clicked()
+                        {
+                            state.push_action(SurfaceAction::BargeIn);
+                        }
+                        if ui
+                            .button(i18n::fl("chat-cancel"))
+                            .on_hover_text(i18n::fl("chat-cancel-hint"))
+                            .clicked()
+                        {
+                            state.push_action(SurfaceAction::CancelTurn);
+                        }
+                    });
+                    if ui
+                        .button(i18n::fl("chat-open-detail"))
+                        .on_hover_text(i18n::fl("chat-open-detail-hint"))
+                        .clicked()
+                    {
+                        state.push_action(SurfaceAction::OpenDetail(DetailTab::Home));
                     }
                 });
-            }
-            if !state.voice_state.is_empty() {
-                ui.weak(format!(
-                    "{}: {}",
-                    i18n::fl("voice-state"),
-                    state.voice_state
-                ));
-            }
-        });
 
-        if !state.exclusive_notice.is_empty() {
-            ui.colored_label(egui::Color32::YELLOW, &state.exclusive_notice);
-        }
-
-        ui.collapsing(i18n::fl("chat-overlay-hint"), |ui| {
-            ui.label(i18n::fl("chat-overlay-hint"));
-        });
-
-        if !state.status.is_empty() {
-            ui.add(
-                egui::Label::new(egui::RichText::new(&state.status).small())
-                    .wrap()
-                    .selectable(true),
-            );
-        }
-
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .max_height(ui.available_height() - 8.0)
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                let rows = normalize_transcript(&state.history, &state.streaming_text);
-                if rows.is_empty() {
-                    render_greeting_picker(ui, state);
-                } else {
-                    for row in rows {
-                        render_message_bubble(ui, &row);
+                ui.horizontal(|ui| {
+                    ui.weak(i18n::fl("chat-send-keyboard-hint"));
+                    if state.turn_active {
+                        ui.weak(i18n::fl("chat-draft-editable-hint"));
                     }
+                });
+
+                let composer_width = ui.available_width();
+                let (rows, composer_min_height) = composer_metrics(&state.chat_draft);
+                let response = ui.add(
+                    egui::TextEdit::multiline(&mut state.chat_draft)
+                        .id_salt(CHAT_INPUT_ID)
+                        .hint_text(i18n::fl("chat-placeholder"))
+                        .desired_width(composer_width)
+                        .desired_rows(rows)
+                        .min_size(egui::vec2(composer_width, composer_min_height))
+                        .return_key(Some(egui::KeyboardShortcut::new(
+                            egui::Modifiers::SHIFT,
+                            egui::Key::Enter,
+                        ))),
+                );
+                composer_focused = response.has_focus();
+                let request = composer_send_requested(ui);
+                if request.send && composer_send_allowed(state) {
+                    pop_enter_newline(&mut state.chat_draft);
+                    state.push_action(SurfaceAction::SendChat);
                 }
-                if let Some(gap) = chat_setup_gap(&state.chat_setup) {
-                    ui.add_space(4.0);
-                    ui.weak(chat_setup_status(gap));
+
+                ui.horizontal(|ui| {
+                    ui.label(i18n::fl("chat-input-label"));
+                    for (mode, label, hint) in [
+                        (
+                            MessageMode::Prompt,
+                            i18n::fl("chat-mode-prompt"),
+                            i18n::fl("chat-mode-prompt-hint"),
+                        ),
+                        (
+                            MessageMode::Steer,
+                            i18n::fl("chat-mode-steer"),
+                            i18n::fl("chat-mode-steer-hint"),
+                        ),
+                        (
+                            MessageMode::FollowUp,
+                            i18n::fl("chat-mode-follow-up"),
+                            i18n::fl("chat-mode-follow-up-hint"),
+                        ),
+                    ] {
+                        let enabled = mode == MessageMode::Prompt || state.turn_active;
+                        ui.add_enabled_ui(enabled, |ui| {
+                            if ui
+                                .selectable_label(state.message_mode == mode, label)
+                                .on_hover_text(hint)
+                                .clicked()
+                            {
+                                state.message_mode = mode;
+                            }
+                        });
+                    }
+                    if !state.voice_state.is_empty() {
+                        ui.weak(format!(
+                            "{}: {}",
+                            i18n::fl("voice-state"),
+                            state.voice_state
+                        ));
+                    }
+                });
+
+                if !state.exclusive_notice.is_empty() {
+                    ui.colored_label(egui::Color32::YELLOW, &state.exclusive_notice);
                 }
+
+                ui.collapsing(i18n::fl("chat-overlay-hint"), |ui| {
+                    ui.label(i18n::fl("chat-overlay-hint"));
+                });
+
+                if !state.status.is_empty() {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&state.status).small())
+                            .wrap()
+                            .selectable(true),
+                    );
+                }
+
+                ui.add_space(4.0);
             });
+        });
 
-        response
-    });
+    egui::CentralPanel::default()
+        .frame(egui::Frame::new())
+        .show(ui, |transcript_ui| {
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .show(transcript_ui, |scroll_ui| {
+                    let rows = normalize_transcript(&state.history, &state.streaming_text);
+                    if rows.is_empty() {
+                        render_greeting_picker(scroll_ui, state);
+                    } else {
+                        for row in rows {
+                            render_message_bubble(scroll_ui, &row);
+                        }
+                    }
+                    if let Some(gap) = chat_setup_gap(&state.chat_setup) {
+                        scroll_ui.add_space(4.0);
+                        scroll_ui.weak(chat_setup_status(gap));
+                    }
+                });
+        });
 
-    output.inner
+    composer_focused
 }
 
 #[cfg(test)]

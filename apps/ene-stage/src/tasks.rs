@@ -13,6 +13,7 @@ pub struct ActivatedCharacter {
 pub enum AsyncOutcome {
     SendMessage {
         session_id: String,
+        sent_text: String,
         result: Result<(), String>,
     },
     BargeIn {
@@ -36,6 +37,10 @@ pub enum AsyncOutcome {
         result: Result<(), String>,
     },
     RefreshHistory {
+        session_id: String,
+        result: Result<ene_api::HistoryResponse, String>,
+    },
+    ReconcileHistory {
         session_id: String,
         result: Result<ene_api::HistoryResponse, String>,
     },

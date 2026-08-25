@@ -31,6 +31,10 @@ use crate::shell::{HotkeyManager, ShellCommand, ShellError, TrayManager, show_no
 use crate::surface::{self, SpotlightAction, SurfaceAction, SurfaceUiState};
 use crate::tasks::AsyncOutcome;
 
+/// Bounded number of turn-end refresh retries while the projection catches up
+/// with the completed turn.
+const MAX_COMPLETION_REFRESHES: u32 = 3;
+
 /// Which chrome window an open action intends to focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusTarget {
@@ -260,6 +264,9 @@ pub fn run() -> Result<(), AppError> {
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
         approval_needs_reveal: false,
+        pending_completion_refreshes: 0,
+        completion_reconcile_inflight: false,
+        completion_terminal_seq: None,
     };
     app.surface.history = app.session.history();
     app.surface.greetings = app.session.greetings().to_vec();
@@ -316,6 +323,9 @@ struct StageApp {
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
     approval_needs_reveal: bool,
+    pending_completion_refreshes: u32,
+    completion_reconcile_inflight: bool,
+    completion_terminal_seq: Option<u64>,
 }
 
 impl StageApp {
@@ -374,6 +384,9 @@ impl StageApp {
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
             approval_needs_reveal: false,
+            pending_completion_refreshes: 0,
+            completion_reconcile_inflight: false,
+            completion_terminal_seq: None,
         }
     }
 
@@ -537,7 +550,11 @@ impl StageApp {
     #[expect(clippy::too_many_lines, reason = "outcome dispatch is a flat match")]
     fn apply_async_outcome(&mut self, outcome: AsyncOutcome) {
         match outcome {
-            AsyncOutcome::SendMessage { session_id, result } => {
+            AsyncOutcome::SendMessage {
+                session_id,
+                sent_text,
+                result,
+            } => {
                 if session_id != self.session.session_id() {
                     return;
                 }
@@ -546,7 +563,24 @@ impl StageApp {
                 } else {
                     self.surface.chat_draft.clear();
                     self.surface.streaming_text.clear();
-                    self.request_history_refresh();
+                    let next_seq = self
+                        .surface
+                        .history
+                        .messages
+                        .last()
+                        .map_or(0, |m| m.seq + 1);
+                    self.surface
+                        .history
+                        .messages
+                        .push(ene_api::MessageResponse {
+                            seq: next_seq,
+                            role: "user".to_owned(),
+                            text: sent_text,
+                        });
+                    if let Some(chat) = &self.chat {
+                        chat.request_redraw();
+                    }
+                    self.begin_completion_reconciliation();
                 }
             }
             AsyncOutcome::SelectGreeting { session_id, result } => {
@@ -610,14 +644,56 @@ impl StageApp {
                             }
                             mapped.clone_into(&mut self.surface.status);
                         }
-                        self.session.replace_history(history.clone());
-                        self.surface.history = history;
+                        let has_assistant = history.messages.iter().any(|m| m.role == "assistant");
+                        if !has_assistant
+                            && !self.surface.history.messages.is_empty()
+                            && self.pending_completion_refreshes > 0
+                        {
+                            self.session.replace_history(history);
+                        } else {
+                            self.session.replace_history(history.clone());
+                            self.surface.history = history;
+                        }
+                        if self.pending_completion_refreshes > 0 && has_assistant {
+                            self.pending_completion_refreshes = 0;
+                        }
                         self.surface.streaming_text.clear();
                         if let Some(chat) = &self.chat {
                             chat.request_redraw();
                         }
                     }
                     Err(err) => self.surface.status = err,
+                }
+            }
+            AsyncOutcome::ReconcileHistory { session_id, result } => {
+                if session_id != self.session.session_id() {
+                    return;
+                }
+                match result {
+                    Ok(history) => {
+                        // Completion requires a newly projected terminal row:
+                        // surface seqs come from a sparse event log (hidden
+                        // events still consume seqs) and the optimistic user
+                        // row carries a synthetic seq, so only an assistant row
+                        // beyond the pre-turn assistant proves this turn ended.
+                        let progressed = match self.completion_terminal_seq {
+                            None => history.messages.iter().any(|m| m.role == "assistant"),
+                            Some(terminal) => history
+                                .messages
+                                .iter()
+                                .any(|m| m.role == "assistant" && m.seq > terminal),
+                        };
+                        if progressed {
+                            self.surface.history = history.clone();
+                            self.pending_completion_refreshes = 0;
+                        }
+                        self.session.replace_history(history);
+                    }
+                    Err(err) => self.surface.status = err,
+                }
+                self.completion_reconcile_inflight = false;
+                if self.pending_completion_refreshes > 0 {
+                    self.schedule_completion_refresh();
                 }
             }
             AsyncOutcome::SaveLocalSettings(result) => {
@@ -1039,6 +1115,9 @@ impl StageApp {
             AsyncOutcome::NewSession(result) => match result {
                 Ok(split) => {
                     self.session.adopt_new_session(&split);
+                    self.completion_reconcile_inflight = false;
+                    self.pending_completion_refreshes = 0;
+                    self.completion_terminal_seq = None;
                     self.feeds =
                         spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
                     self.detail.set_session_id(self.session.session_id());
@@ -1218,6 +1297,49 @@ impl StageApp {
         });
     }
 
+    /// Re-fetch history after a turn completes. The first refresh can still be
+    /// stale because the projection lags the end event, so the fetch retries
+    /// inside one task until authoritative history shows an assistant row newer
+    /// than the last one seen when the arm happened; ordering between send
+    /// outcomes and turn-end events does not matter because both entry points
+    /// arm through this method. Re-arming keeps the previous terminal marker so
+    /// back-to-back turns cannot complete against rows from the predecessor.
+    fn begin_completion_reconciliation(&mut self) {
+        if !self.completion_reconcile_inflight {
+            self.pending_completion_refreshes = MAX_COMPLETION_REFRESHES;
+        }
+        let terminal = self
+            .surface
+            .history
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .map(|m| m.seq)
+            .or(self.completion_terminal_seq);
+        self.completion_terminal_seq = terminal;
+        self.schedule_completion_refresh();
+    }
+
+    fn schedule_completion_refresh(&mut self) {
+        if self.completion_reconcile_inflight || self.pending_completion_refreshes == 0 {
+            return;
+        }
+        self.pending_completion_refreshes -= 1;
+        self.completion_reconcile_inflight = true;
+        let session = self.session.clone_handle();
+        let session_id = self.session.session_id().to_owned();
+        self.spawn(async move {
+            AsyncOutcome::ReconcileHistory {
+                session_id,
+                result: session
+                    .refresh_history()
+                    .await
+                    .map_err(|err| err.to_string()),
+            }
+        });
+    }
+
     fn start_new_session(&mut self) {
         if self.detail.new_session_inflight {
             return;
@@ -1285,11 +1407,13 @@ impl StageApp {
         }
         let session = self.session.clone_handle();
         let session_id = self.session.session_id().to_owned();
+        let sent_text = text.clone();
         let mode = self.surface.message_mode;
         self.surface.begin_send();
         self.spawn(async move {
             AsyncOutcome::SendMessage {
                 session_id,
+                sent_text,
                 result: session
                     .send(&text, mode)
                     .await
@@ -1330,9 +1454,11 @@ impl StageApp {
         self.surface.chat_draft.clear();
         let session = self.session.clone_handle();
         let session_id = self.session.session_id().to_owned();
+        let sent_text = text.clone();
         self.spawn(async move {
             AsyncOutcome::SendMessage {
                 session_id,
+                sent_text,
                 result: session
                     .answer_job(&question.id, &text)
                     .await
@@ -1555,6 +1681,17 @@ impl StageApp {
         }
     }
 
+    /// Seed an empty surface from the boot-time session snapshot. A turn that
+    /// completed before the first paint leaves that snapshot empty until its
+    /// refresh lands; seeding stays one-shot so a later refresh always owns
+    /// the surface rows instead of being erased by this copy.
+    fn seed_history_from_session(&mut self) {
+        let cached = self.session.history();
+        if !cached.messages.is_empty() {
+            self.surface.history = cached;
+        }
+    }
+
     /// Stores one body overlay position in the settings map. The active soul
     /// coordinates are also mirrored into the legacy scalar keys so
     /// hand-edited config files stay readable; reads still prefer the map.
@@ -1582,7 +1719,7 @@ impl StageApp {
             LiveEvent::SessionEvent { kind, text } => {
                 if kind == "turn/end" || kind.ends_with("/end") {
                     self.session.clear_turn();
-                    self.request_history_refresh();
+                    self.begin_completion_reconciliation();
                     self.surface.on_turn_ended();
                     self.sync_caption_window();
                     if !text.is_empty() {
@@ -1854,6 +1991,9 @@ impl StageApp {
         let feeds = spawn_event_feeds(&self.rt_handle, &self.client, target.session_id());
         self.session.commit_retarget(target);
         self.feeds = feeds;
+        self.completion_reconcile_inflight = false;
+        self.pending_completion_refreshes = 0;
+        self.completion_terminal_seq = None;
         self.surface.history = self.session.history();
         self.surface.greetings = self.session.greetings().to_vec();
         self.surface.greeting_inflight = false;
@@ -2556,8 +2696,8 @@ impl ApplicationHandler for StageApp {
         self.poll_audio();
         self.process_surface_actions(event_loop);
         self.surface.turn_active = self.session.turn_id().is_some();
-        if self.surface.history.messages.is_empty() {
-            self.surface.history = self.session.history();
+        if self.surface.history.messages.is_empty() && !self.session.history().messages.is_empty() {
+            self.seed_history_from_session();
         }
         self.tick_overlay();
         self.paint_chrome(event_loop);
@@ -2633,9 +2773,9 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, OverlayFocus, StageApp,
-        chat_window_action, format_log_text, overlay_window_level, provider_asset_load_status,
-        window_focus_state, window_level,
+        AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
+        OverlayFocus, StageApp, chat_window_action, format_log_text, overlay_window_level,
+        provider_asset_load_status, window_focus_state, window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -3145,7 +3285,406 @@ mod tests {
             text: "kept".to_owned(),
         });
         // Minimize/hide does not touch surface history; only close does.
-        assert_eq!(app.surface.history.messages.len(), 1);
         assert_eq!(app.surface.history.messages[0].text, "kept");
+    }
+
+    #[test]
+    fn empty_surface_is_seeded_from_session_snapshot_once_available() {
+        let mut app = StageApp::new_for_test();
+        assert!(app.session.history().messages.is_empty());
+
+        // A turn completed before the surface ever rendered, so the boot-time
+        // snapshot was fetched empty; the cache fills only after a refresh.
+        app.session.replace_history(HistoryResponse {
+            messages: vec![ene_api::MessageResponse {
+                seq: 1,
+                role: "assistant".to_owned(),
+                text: "completed before paint".to_owned(),
+            }],
+            depth: "surface".to_owned(),
+        });
+
+        app.seed_history_from_session();
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(
+            app.surface.history.messages[0].text,
+            "completed before paint"
+        );
+
+        // Seeding is one-shot: later refreshes own the surface rows.
+        app.surface.history = HistoryResponse {
+            messages: Vec::new(),
+            depth: "surface".to_owned(),
+        };
+        app.session.replace_history(HistoryResponse {
+            messages: Vec::new(),
+            depth: "surface".to_owned(),
+        });
+        app.seed_history_from_session();
+        assert!(app.surface.history.messages.is_empty());
+    }
+
+    #[test]
+    fn completion_refresh_replaces_optimistic_user_row_with_assistant_row() {
+        let mut app = StageApp::new_for_test();
+        let session_id = app.session.session_id().to_owned();
+
+        // The turn ends before the SendMessage outcome is drained, so the
+        // event handler must arm reconciliation without seeing a turn id.
+        app.session.set_turn_id_for_test("turn-1");
+        app.apply_live_event(LiveEvent::SessionEvent {
+            kind: "turn/end".to_owned(),
+            text: String::new(),
+        });
+        assert_eq!(
+            app.pending_completion_refreshes,
+            MAX_COMPLETION_REFRESHES - 1
+        );
+        assert!(app.completion_reconcile_inflight);
+
+        // The late send success still owns the optimistic row and re-arms the
+        // same loop instead of starting a competing one.
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id,
+            sent_text: "again".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.pending_completion_refreshes,
+            MAX_COMPLETION_REFRESHES - 1
+        );
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "again");
+
+        // Attempt #1 (from turn/end) returns an empty first-turn history. The
+        // optimistic surface stays because there is no assistant row yet, and
+        // the retry loop must reschedule.
+        let stale = HistoryResponse {
+            messages: Vec::new(),
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(stale),
+        });
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "again");
+        assert_eq!(
+            app.pending_completion_refreshes,
+            MAX_COMPLETION_REFRESHES - 2
+        );
+        assert!(app.completion_reconcile_inflight);
+
+        // Attempt #2 finally carries the completed assistant row, owns the
+        // surface, and stops the loop before the budget drains.
+        let with_assistant = HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 2,
+                    role: "user".to_owned(),
+                    text: "again".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 3,
+                    role: "assistant".to_owned(),
+                    text: "done".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(with_assistant.clone()),
+        });
+        assert_eq!(
+            app.surface.history.messages.len(),
+            with_assistant.messages.len()
+        );
+        assert_eq!(
+            app.surface.history.messages.last().map(|m| m.text.as_str()),
+            Some("done")
+        );
+        assert_eq!(app.pending_completion_refreshes, 0);
+    }
+
+    #[test]
+    fn reconciliation_ignores_stale_prior_turns_and_waits_for_new_rows() {
+        let mut app = StageApp::new_for_test();
+        let session_id = app.session.session_id().to_owned();
+
+        // The conversation already holds a completed first turn. Surface seqs
+        // mirror the sparse event log: the hidden prior turn-end consumed seq
+        // 11, so the next surface row will not start at 3.
+        app.session.replace_history(HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 10,
+                    role: "user".to_owned(),
+                    text: "first question".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 12,
+                    role: "assistant".to_owned(),
+                    text: "first answer".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        });
+        app.surface.history = app.session.history();
+
+        // Second turn completes before the send outcome drains.
+        app.session.set_turn_id_for_test("turn-2");
+        app.apply_live_event(LiveEvent::SessionEvent {
+            kind: "turn/end".to_owned(),
+            text: String::new(),
+        });
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id,
+            sent_text: "second question".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 3);
+        assert_eq!(app.surface.history.messages[2].text, "second question");
+
+        // Attempt #1 returns the stale pre-turn rows (no new user row yet):
+        // the optimistic row must stay and the loop must retry.
+        let stale_pair = HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 10,
+                    role: "user".to_owned(),
+                    text: "first question".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 12,
+                    role: "assistant".to_owned(),
+                    text: "first answer".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(stale_pair.clone()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 3);
+        assert_eq!(app.surface.history.messages[2].text, "second question");
+        assert!(app.completion_reconcile_inflight);
+
+        // The authoritative user row (seq 13) sits above the synthetic
+        // optimistic seq but is not a terminal row, so the loop must keep
+        // waiting even though "progress" happened.
+        let user_only = HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 10,
+                    role: "user".to_owned(),
+                    text: "first question".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 12,
+                    role: "assistant".to_owned(),
+                    text: "first answer".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 13,
+                    role: "user".to_owned(),
+                    text: "second question".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(user_only),
+        });
+        assert_eq!(app.surface.history.messages.len(), 3);
+        assert_eq!(app.surface.history.messages[2].text, "second question");
+        assert!(app.completion_reconcile_inflight);
+
+        // Attempt #3 carries the newly completed turn and owns the surface.
+        let with_second_turn = HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 10,
+                    role: "user".to_owned(),
+                    text: "first question".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 12,
+                    role: "assistant".to_owned(),
+                    text: "first answer".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 13,
+                    role: "user".to_owned(),
+                    text: "second question".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 15,
+                    role: "assistant".to_owned(),
+                    text: "second answer".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(with_second_turn.clone()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 4);
+        assert_eq!(app.surface.history.messages[3].text, "second answer");
+        assert_eq!(app.pending_completion_refreshes, 0);
+        assert!(!app.completion_reconcile_inflight);
+    }
+
+    #[test]
+    fn new_session_resets_stale_completion_terminal() {
+        let mut app = StageApp::new_for_test();
+
+        // A prior session ended with a high assistant seq; its terminal
+        // marker must not leak into a fresh session.
+        app.completion_terminal_seq = Some(100);
+
+        app.start_new_session();
+        let session_view = |id: &str| ene_api::SessionView {
+            id: id.to_owned(),
+            soul_id: "soul".to_owned(),
+            kind: "conversation".to_owned(),
+            title: None,
+            created_at: String::new(),
+            archived: false,
+            next_seq: 0,
+            ended_at: None,
+            end_reason: None,
+            delegation_id: None,
+        };
+        let split = ene_api::SplitSessionResponse {
+            previous: session_view("old-session"),
+            session: session_view("newer-session"),
+        };
+        app.apply_async_outcome(AsyncOutcome::NewSession(Ok(split)));
+        assert!(!app.completion_reconcile_inflight);
+        assert_eq!(app.pending_completion_refreshes, 0);
+        assert_eq!(app.completion_terminal_seq, None);
+
+        // First turn in the fresh session: a user-only fetch at seq 5 must
+        // not count as completion.
+        app.begin_completion_reconciliation();
+        let user_only = HistoryResponse {
+            messages: vec![ene_api::MessageResponse {
+                seq: 5,
+                role: "user".to_owned(),
+                text: "hello".to_owned(),
+            }],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(user_only),
+        });
+        assert!(app.completion_reconcile_inflight);
+        assert_eq!(
+            app.pending_completion_refreshes,
+            MAX_COMPLETION_REFRESHES - 2
+        );
+
+        // The assistant reply at seq 6 completes reconciliation.
+        let with_reply = HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 5,
+                    role: "user".to_owned(),
+                    text: "hello".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 6,
+                    role: "assistant".to_owned(),
+                    text: "hi".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(with_reply),
+        });
+        assert_eq!(
+            app.surface.history.messages.last().map(|m| m.text.as_str()),
+            Some("hi")
+        );
+        assert_eq!(app.pending_completion_refreshes, 0);
+        assert!(!app.completion_reconcile_inflight);
+    }
+
+    #[test]
+    fn reconcile_ignores_other_sessions_and_drains_budget_when_assistant_missing() {
+        let mut app = StageApp::new_for_test();
+        let session_id = app.session.session_id().to_owned();
+
+        // The conversation already holds an assistant row before this turn,
+        // so only a strictly newer assistant row can complete it.
+        app.session.replace_history(HistoryResponse {
+            messages: vec![ene_api::MessageResponse {
+                seq: 1,
+                role: "assistant".to_owned(),
+                text: "old row".to_owned(),
+            }],
+            depth: "surface".to_owned(),
+        });
+        app.begin_completion_reconciliation();
+        assert_eq!(
+            app.pending_completion_refreshes,
+            MAX_COMPLETION_REFRESHES - 1
+        );
+
+        // A result for another session must not touch this session's state.
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: "other-session".to_owned(),
+            result: Ok(HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            }),
+        });
+
+        // The in-flight attempt is still pending, and an assistant row at the
+        // pre-turn terminal seq does not count as new completion.
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: session_id.clone(),
+            result: Ok(HistoryResponse {
+                messages: vec![ene_api::MessageResponse {
+                    seq: 1,
+                    role: "assistant".to_owned(),
+                    text: "old row".to_owned(),
+                }],
+                depth: "surface".to_owned(),
+            }),
+        });
+        assert_eq!(app.surface.history.messages.len(), 1);
+        // The remaining budget drains without an assistant row and stops
+        // bounded.
+        for _ in 0..MAX_COMPLETION_REFRESHES - 2 {
+            app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+                session_id: session_id.clone(),
+                result: Ok(HistoryResponse {
+                    messages: Vec::new(),
+                    depth: "surface".to_owned(),
+                }),
+            });
+        }
+        assert!(!app.completion_reconcile_inflight);
+        assert_eq!(app.pending_completion_refreshes, 0);
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "old row");
+
+        // The final attempt's outcome clears the loop for good.
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id,
+            result: Ok(HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            }),
+        });
+        assert!(!app.completion_reconcile_inflight);
     }
 }
