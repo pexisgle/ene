@@ -1703,7 +1703,6 @@ pub async fn probe_mcp(
     // The probe activates an ephemeral row whose server name differs from the
     // catalog id, so remember both when filtering registered tools.
     let requested_id = body.id.clone();
-    let auth_token = body.auth_token.clone();
     let server = McpServerView {
         id: requested_id.clone(),
         transport: body.transport,
@@ -1724,6 +1723,12 @@ pub async fn probe_mcp(
     let Some(binary) = supervisor.discover("mcp.bridge") else {
         return Err(conflict("unknown_binary", "mcp bridge not found"));
     };
+    if let Some(token) = body.auth_token.as_deref().filter(|token| !token.is_empty()) {
+        crate::plugin_profile::store_mcp_auth_token(state.core.vault(), &parsed.id, token)
+            .map_err(|err| conflict("fault", &err.to_string()))?;
+    }
+    let auth_token = crate::plugin_profile::mcp_auth_token(state.core.vault(), &parsed.id);
+    let stored_auth = auth_token.is_some();
     // A unique ephemeral row id keeps probes isolated from saved servers and
     // from concurrent probes; the TTL task unloads it even on client abort.
     let row_id = format!("mcp.probe-{}", uuid::Uuid::now_v7().simple());
@@ -1753,7 +1758,7 @@ pub async fn probe_mcp(
         Ok(_) => McpProbeResponse {
             ok: true,
             error: None,
-            probed_id: requested_id.clone(),
+            stored_auth,
             tools: supervisor
                 .registry()
                 .list()
@@ -1764,7 +1769,7 @@ pub async fn probe_mcp(
                     ToolView {
                         name: tool.name.replacen(
                             &format!("mcp:{ephemeral_server}."),
-                            &format!("mcp:{requested_id}."),
+                            &format!("mcp:{}.", parsed.id),
                             1,
                         ),
                         description: tool.description.clone(),
@@ -1777,7 +1782,7 @@ pub async fn probe_mcp(
         Err(err) => McpProbeResponse {
             ok: false,
             error: Some(err.to_string()),
-            probed_id: requested_id,
+            stored_auth,
             tools: Vec::new(),
         },
     };

@@ -505,7 +505,8 @@ pub struct McpProbeRequest {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Optional bearer credential forwarded to the ephemeral probe row only.
+    /// Optional credential for the one-shot probe. The daemon stores it in
+    /// the vault and never echoes it back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
 }
@@ -514,11 +515,11 @@ pub struct McpProbeRequest {
 pub struct McpProbeResponse {
     #[serde(default)]
     pub ok: bool,
-    /// Catalog id this response belongs to; survives the ephemeral probe row.
-    #[serde(default)]
-    pub probed_id: String,
     #[serde(default)]
     pub error: Option<String>,
+    /// Whether a credential is already stored for the candidate id.
+    #[serde(default)]
+    pub stored_auth: bool,
     /// Tools seen during the temporary pre-enable connection.
     #[serde(default)]
     pub tools: Vec<ToolView>,

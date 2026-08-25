@@ -352,6 +352,7 @@ pub struct DetailUiState {
     pub mcp_catalog_source: String,
     pub mcp_catalog_fallback: String,
     pub mcp_selected_catalog_id: String,
+    pub mcp_catalog_auth_input: String,
     pub mcp_probe_pending: Option<String>,
     pub mcp_probe_candidate: Option<ene_api::McpCatalogEntryView>,
     pub mcp_probe_result: Option<ene_api::McpProbeResponse>,
@@ -2770,12 +2771,21 @@ fn show_connections(
                 return;
             };
             if let Some(err) = result.error {
-                ui.label(i18n::fl("connections-status-unhealthy"));
+                let auth_required = candidate.auth != ene_api::McpCatalogAuthView::None;
+                if auth_required && result.stored_auth {
+                    ui.label(i18n::fl("connections-mcp-preview-stored-auth"));
+                } else {
+                    ui.label(if auth_required {
+                        i18n::fl("connections-status-auth-required")
+                    } else {
+                        i18n::fl("connections-status-unhealthy-no-error")
+                    });
+                }
                 ui.label(err);
                 // Auth-required remotes can still be added disabled; the
                 // secret is then provided through plugin config.
-                if candidate.auth != ene_api::McpCatalogAuthView::None
-                    && ui.button(i18n::fl("connections-mcp-preview-add")).clicked()
+                let candidate_exists = state.mcp_probe_candidate.is_some();
+                if candidate_exists && ui.button(i18n::fl("connections-mcp-preview-add")).clicked()
                 {
                     add_probed_server(state, &candidate);
                 }
@@ -2809,14 +2819,20 @@ fn show_connections(
 /// Persist the exact probed catalog entry as a disabled row. Enabling stays a
 /// separate user action after the preview (and any secret setup) succeeds.
 fn add_probed_server(state: &mut DetailUiState, candidate: &ene_api::McpCatalogEntryView) {
-    state.mcp_servers.push(ene_api::McpServerView {
-        id: candidate.id.clone(),
-        transport: candidate.transport.clone(),
-        command: candidate.command.clone(),
-        args: candidate.args.clone(),
-        url: candidate.url.clone(),
-        enabled: false,
-    });
+    if !state
+        .mcp_servers
+        .iter()
+        .any(|server| server.id == candidate.id)
+    {
+        state.mcp_servers.push(ene_api::McpServerView {
+            id: candidate.id.clone(),
+            transport: candidate.transport.clone(),
+            command: candidate.command.clone(),
+            args: candidate.args.clone(),
+            url: candidate.url.clone(),
+            enabled: false,
+        });
+    }
     state.mcp_probe_candidate = None;
     state.mcp_probe_result = None;
 }
@@ -3272,6 +3288,15 @@ fn show_mcp_catalog(
                 };
             }
             if selected {
+                if entry.auth != ene_api::McpCatalogAuthView::None {
+                    ui.horizontal(|ui| {
+                        ui.label(i18n::fl("mcp-catalog-auth-token"));
+                        let field = egui::TextEdit::singleline(&mut state.mcp_catalog_auth_input)
+                            .password(true)
+                            .hint_text(i18n::fl("mcp-catalog-auth-token-hint"));
+                        ui.add(field);
+                    });
+                }
                 egui::Grid::new(("mcp-catalog-detail", entry.id.as_str()))
                     .num_columns(2)
                     .show(ui, |ui| {
@@ -3323,8 +3348,13 @@ fn show_mcp_catalog(
                         command: entry.command.clone(),
                         args: entry.args.clone(),
                         url: entry.url.clone(),
-                        auth_token: None,
+                        auth_token: {
+                            let token = state.mcp_catalog_auth_input.trim().to_owned();
+                            (!token.is_empty()).then_some(token)
+                        },
                     };
+                    // Keep the credential only long enough for the probe request.
+                    state.mcp_catalog_auth_input.clear();
                     let client_probe = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
                         AsyncOutcome::ProbeMcp(

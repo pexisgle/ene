@@ -112,6 +112,32 @@ fn vault_plugin_key(row_id: &str, field: &str) -> String {
     format!("plugin.config.{row_id}.{field}")
 }
 
+/// Load the saved MCP auth token for a candidate id, even before a disabled
+/// profile row exists. Probe uses this to test the credential pre-enable.
+pub(crate) fn mcp_auth_token(vault: &Vault, server_id: &str) -> Option<String> {
+    let bytes = vault
+        .export(&vault_plugin_key(&format!("mcp.{server_id}"), "auth_token"))
+        .ok()?;
+    let token = String::from_utf8(bytes).ok()?;
+    (!token.is_empty()).then_some(token)
+}
+
+/// Persist a probe credential under the same vault key the enabled row later
+/// overlays, without touching `plugin-config.json`.
+pub(crate) fn store_mcp_auth_token(
+    vault: &Vault,
+    server_id: &str,
+    token: &str,
+) -> Result<(), CoreError> {
+    vault
+        .put(
+            &vault_plugin_key(&format!("mcp.{server_id}"), "auth_token"),
+            token.as_bytes(),
+        )
+        .map(|_| ())
+        .map_err(|err| CoreError::Io(std::io::Error::other(err.to_string())))
+}
+
 fn load_plugin_config_file(data_dir: &Path) -> Result<PluginConfigFile, CoreError> {
     let path = plugin_config_path(data_dir);
     if !path.exists() {

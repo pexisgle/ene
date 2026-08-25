@@ -670,19 +670,7 @@ impl StageApp {
             AsyncOutcome::ProbeMcp(result) => {
                 self.detail.mcp_probe_pending = None;
                 self.detail.mcp_probe_result = match result {
-                    Ok(response) => {
-                        // Keep the probed catalog entry so Add can persist the
-                        // exact configuration that was previewed.
-                        if let Some(entry) = self
-                            .detail
-                            .mcp_catalog
-                            .iter()
-                            .find(|entry| entry.id == response.probed_id)
-                        {
-                            self.detail.mcp_probe_candidate = Some(entry.clone());
-                        }
-                        Some(response)
-                    }
+                    Ok(response) => Some(response),
                     Err(err) => Some(ene_api::McpProbeResponse {
                         error: Some(err),
                         ..ene_api::McpProbeResponse::default()

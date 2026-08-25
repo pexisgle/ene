@@ -19,6 +19,8 @@ use ene_kernel::{
 use ene_plane::{ApprovalMode, AuthzRequest, PolicyDecision, PolicyFile, PolicyRule, Sensitivity};
 use ene_session::{EventKind, EventPayload, SessionId, TurnOrigin, TurnOutcome};
 use std::collections::BTreeMap;
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -3762,9 +3764,12 @@ while True:
             "annotations":{"readOnlyHint":True},
             "inputSchema":{"type":"object","additionalProperties":False}
         }]}})
+    elif method == "resources/list":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{"resources":[]}})
 "#,
     )
     .unwrap();
+    std::fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
     let (_dir, client, core, server) = boot_server().await;
 
     // A successful probe must surface the ephemeral bridge's tools under the
@@ -3783,7 +3788,7 @@ while True:
         "successful fixture probe should not error: {:?}",
         probe.error
     );
-    assert_eq!(probe.probed_id, "fixture");
+    assert!(!probe.stored_auth);
     let names: Vec<&str> = probe.tools.iter().map(|tool| tool.name.as_str()).collect();
     assert!(
         names.contains(&"mcp:fixture.ping"),
@@ -3824,7 +3829,10 @@ async fn mcp_probe_forwards_auth_token_to_remote_servers() {
                     .and_then(|value| value.to_str().ok())
                     != Some("Bearer secret-token")
                 {
-                    return (axum::http::StatusCode::UNAUTHORIZED, "{}".to_owned());
+                    return (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32001,\"message\":\"unauthorized\"}}".to_owned(),
+                    );
                 }
                 let msg: serde_json::Value = serde_json::from_str(&body).unwrap();
                 let ident = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
@@ -3873,7 +3881,6 @@ async fn mcp_probe_forwards_auth_token_to_remote_servers() {
         denied.error.is_some(),
         "probe without a token must fail on auth-required remotes"
     );
-    assert_eq!(denied.probed_id, "github-remote");
     assert!(client.mcp().await.unwrap().servers.is_empty());
 
     // With the credential the same catalog entry previews its tools.
