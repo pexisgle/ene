@@ -3801,6 +3801,26 @@ while True:
     );
     let saved = client.mcp().await.unwrap();
     assert!(saved.servers.is_empty());
+    // Previewed tools must vanish from normal discovery the moment the probe
+    // response returns; otherwise Add/enable could be bypassed.
+    let listed = client.list_tools().await.unwrap();
+    assert!(
+        !listed
+            .items
+            .iter()
+            .any(|tool| tool.name.starts_with("mcp:probe-")),
+        "probe rows must not stay registered after preview: {:?}",
+        listed.items.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
+    let invoked = client
+        .test_tool(
+            "mcp:probe-does-not-exist.ping",
+            &ToolTestRequest {
+                arguments: serde_json::json!({}),
+            },
+        )
+        .await;
+    assert!(invoked.is_err(), "previewed tools must not be invokable");
     drop(core);
     server.shutdown().await;
 }

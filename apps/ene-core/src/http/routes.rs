@@ -1732,7 +1732,7 @@ pub async fn probe_mcp(
     let auth_token = crate::plugin_profile::mcp_auth_token(state.core.vault(), &parsed.id);
     let stored_auth = auth_token.is_some();
     // A unique ephemeral row id keeps probes isolated from saved servers and
-    // from concurrent probes; the TTL task unloads it even on client abort.
+    // from concurrent probes; the row is unloaded before the response below.
     let row_id = format!("mcp.probe-{}", uuid::Uuid::now_v7().simple());
     let ephemeral_server = row_id.trim_start_matches("mcp.").to_owned();
     let config = serde_json::json!({
@@ -1758,7 +1758,7 @@ pub async fn probe_mcp(
     };
 
     let activation = supervisor.activate_process(&row, &binary).await;
-    let response = match &activation {
+    let mut response = match &activation {
         Ok(_) => McpProbeResponse {
             ok: true,
             error: None,
@@ -1790,10 +1790,11 @@ pub async fn probe_mcp(
             tools: Vec::new(),
         },
     };
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        state.core.supervisor().unload(&row_id).await;
-    });
+    if activation.is_ok() {
+        supervisor.unload(&row_id).await;
+    } else {
+        response.tools.clear();
+    }
     Ok(Json(response))
 }
 
