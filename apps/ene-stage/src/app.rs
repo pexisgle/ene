@@ -31,6 +31,10 @@ use crate::shell::{HotkeyManager, ShellCommand, ShellError, TrayManager, show_no
 use crate::surface::{self, SpotlightAction, SurfaceAction, SurfaceUiState};
 use crate::tasks::AsyncOutcome;
 
+/// Bounded number of turn-end refresh retries while the projection catches up
+/// with the completed turn.
+const MAX_COMPLETION_REFRESHES: u32 = 3;
+
 /// Which chrome window an open action intends to focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusTarget {
@@ -260,6 +264,7 @@ pub fn run() -> Result<(), AppError> {
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
         approval_needs_reveal: false,
+        pending_completion_refreshes: 0,
     };
     app.surface.history = app.session.history();
     app.surface.greetings = app.session.greetings().to_vec();
@@ -316,6 +321,7 @@ struct StageApp {
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
     approval_needs_reveal: bool,
+    pending_completion_refreshes: u32,
 }
 
 impl StageApp {
@@ -374,6 +380,7 @@ impl StageApp {
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
             approval_needs_reveal: false,
+            pending_completion_refreshes: 0,
         }
     }
 
@@ -565,6 +572,11 @@ impl StageApp {
                             text: sent_text,
                         });
                     self.request_history_refresh();
+                    self.pending_completion_refreshes = if self.session.turn_id().is_some() {
+                        MAX_COMPLETION_REFRESHES
+                    } else {
+                        0
+                    };
                 }
             }
             AsyncOutcome::SelectGreeting { session_id, result } => {
@@ -629,11 +641,17 @@ impl StageApp {
                             mapped.clone_into(&mut self.surface.status);
                         }
                         let has_assistant = history.messages.iter().any(|m| m.role == "assistant");
-                        if !has_assistant && !self.surface.history.messages.is_empty() {
+                        if !has_assistant
+                            && !self.surface.history.messages.is_empty()
+                            && self.pending_completion_refreshes > 0
+                        {
                             self.session.replace_history(history);
                         } else {
                             self.session.replace_history(history.clone());
                             self.surface.history = history;
+                        }
+                        if self.pending_completion_refreshes > 0 && has_assistant {
+                            self.pending_completion_refreshes = 0;
                         }
                         self.surface.streaming_text.clear();
                         if let Some(chat) = &self.chat {
@@ -1591,6 +1609,9 @@ impl StageApp {
                 if kind == "turn/end" || kind.ends_with("/end") {
                     self.session.clear_turn();
                     self.request_history_refresh();
+                    if self.pending_completion_refreshes > 0 {
+                        self.pending_completion_refreshes -= 1;
+                    }
                     self.surface.on_turn_ended();
                     self.sync_caption_window();
                     if !text.is_empty() {
@@ -2641,9 +2662,9 @@ fn map_turn_err(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, OverlayFocus, StageApp,
-        chat_window_action, format_log_text, overlay_window_level, provider_asset_load_status,
-        window_focus_state, window_level,
+        AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
+        OverlayFocus, StageApp, chat_window_action, format_log_text, overlay_window_level,
+        provider_asset_load_status, window_focus_state, window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -3189,5 +3210,86 @@ mod tests {
         });
         app.seed_history_from_session();
         assert!(app.surface.history.messages.is_empty());
+    }
+
+    #[test]
+    fn completion_refresh_replaces_optimistic_user_row_with_assistant_row() {
+        let mut app = StageApp::new_for_test();
+        let session_id = app.session.session_id().to_owned();
+
+        // The send outcome lands before the projection has the assistant row.
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id: session_id.clone(),
+            sent_text: "hello".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.pending_completion_refreshes, 0);
+
+        // Simulate an active turn so the completion retry budget arms.
+        app.session.set_turn_id_for_test("turn-1");
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id,
+            sent_text: "again".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(app.pending_completion_refreshes, MAX_COMPLETION_REFRESHES);
+
+        // Refresh #1 arrives user-only while the turn is still projecting:
+        // the optimistic rows stay on the surface and the cache takes the row.
+        app.apply_async_outcome(AsyncOutcome::RefreshHistory {
+            session_id: "other-session".to_owned(),
+            result: Ok(HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            }),
+        });
+        let user_only = HistoryResponse {
+            messages: vec![ene_api::MessageResponse {
+                seq: 2,
+                role: "user".to_owned(),
+                text: "again".to_owned(),
+            }],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::RefreshHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(user_only),
+        });
+        assert_eq!(app.surface.history.messages.len(), 2);
+        assert_eq!(app.surface.history.messages[1].text, "again");
+
+        // turn/end fires the authoritative refresh; the budget drains once.
+        app.apply_live_event(LiveEvent::SessionEvent {
+            kind: "turn/end".to_owned(),
+            text: String::new(),
+        });
+        assert_eq!(
+            app.pending_completion_refreshes,
+            MAX_COMPLETION_REFRESHES - 1
+        );
+
+        // Refresh #2 now carries the completed assistant row and owns the surface.
+        let with_assistant = HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 2,
+                    role: "user".to_owned(),
+                    text: "again".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 3,
+                    role: "assistant".to_owned(),
+                    text: "done".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::RefreshHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(with_assistant),
+        });
+        assert_eq!(app.surface.history.messages.len(), 2);
+        assert_eq!(app.pending_completion_refreshes, 0);
     }
 }
