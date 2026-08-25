@@ -11,11 +11,11 @@ use ene_api::{
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateJobRequest,
     CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot,
     GreetingView, Health, HistoryResponse, JobView, ListProviderModelsRequest,
-    ListProviderModelsResponse, McpCatalogDocument, McpDocument, McpServerView,
-    MemoryCandidateDecision, MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView,
-    MessageMode, MessageRequest, MessageResponse, OccupantView, Page, PluginConfigErrorView,
-    PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues,
-    PluginConfigView, PluginView, QueuedCancel, ResolveMemoryCandidateRequest,
+    ListProviderModelsResponse, McpCatalogDocument, McpDocument, McpProbeRequest, McpProbeResponse,
+    McpServerView, MemoryCandidateDecision, MemoryCandidateView, MemoryJournalView, MemoryPatch,
+    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
+    PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
+    PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResolveMemoryCandidateRequest,
     ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
     SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
     SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView,
@@ -1692,6 +1692,87 @@ pub async fn put_mcp(
         .map_err(|err| bad_request("fault", &err.to_string()))?;
     state.core.apply_plugin_profile().await;
     Ok(Json(mcp_document(&state.core.mcp_servers())))
+}
+
+pub async fn probe_mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<McpProbeRequest>,
+) -> Result<Json<McpProbeResponse>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    let server = McpServerView {
+        id: body.id,
+        transport: body.transport,
+        command: body.command,
+        args: body.args,
+        url: body.url,
+        enabled: false,
+    };
+    let parsed = parse_mcp_server(&server)?;
+    if parsed.enabled {
+        return Err(bad_request(
+            "invalid_message",
+            "probe rows must stay disabled",
+        ));
+    }
+
+    let supervisor = state.core.supervisor();
+    let Some(binary) = supervisor.discover("mcp.bridge") else {
+        return Err(conflict("unknown_binary", "mcp bridge not found"));
+    };
+    // A unique ephemeral row id keeps probes isolated from saved servers and
+    // from concurrent probes; the TTL task unloads it even on client abort.
+    let row_id = format!("mcp.probe-{}", uuid::Uuid::now_v7().simple());
+    let config = serde_json::json!({
+        "server": row_id.trim_start_matches("mcp."),
+        "transport": parsed.transport,
+        "command": parsed.command,
+        "args": parsed.args,
+        "url": parsed.url,
+        "skills_home": "",
+    });
+    let row = ene_fiber::ProfileRow {
+        row_id: row_id.clone(),
+        plugin: row_id.clone(),
+        requires: Vec::new(),
+        capabilities: Vec::new(),
+        seams: Vec::new(),
+        sandbox_required: false,
+        config,
+    };
+
+    let activation = supervisor.activate_process(&row, &binary).await;
+    let response = match &activation {
+        Ok(_) => McpProbeResponse {
+            ok: true,
+            error: None,
+            tools: supervisor
+                .registry()
+                .list()
+                .into_iter()
+                .filter(|tool| tool.name.starts_with(&format!("mcp:{}.", parsed.id)))
+                .map(|mut tool| {
+                    let layer = tool.primary_layer().as_str().to_owned();
+                    ToolView {
+                        name: std::mem::take(&mut tool.name),
+                        description: tool.description.clone(),
+                        layer,
+                        side_effects: tool.side_effects.clone(),
+                    }
+                })
+                .collect(),
+        },
+        Err(err) => McpProbeResponse {
+            ok: false,
+            error: Some(err.to_string()),
+            tools: Vec::new(),
+        },
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        state.core.supervisor().unload(&row_id).await;
+    });
+    Ok(Json(response))
 }
 
 fn mcp_document(servers: &[ene_work::McpServer]) -> McpDocument {

@@ -173,7 +173,7 @@ not a reason to keep the crate.
 | Memory config + Memories ledger | Memory HTTP | Memory | Current on stage for list/edit/delete; auxiliary LLM scope remains [#717](https://github.com/pexisgle/ene/issues/717) |
 | Sessions | Session HTTP | Log | Current on stage |
 | Permissions / Approvals | Plane HTTP | System | Current on stage |
-| Connectors (MCP form + curated catalog) | `GET/PUT /mcp`, `GET /mcp/catalog` | Connections | Handwritten form plus curated official-server picker, connection preview, and status/error display are current on stage ([#812](https://github.com/pexisgle/ene/issues/812)) |
+| Connectors (MCP form + curated catalog) | `GET/PUT /mcp`, `GET /mcp/catalog`, `POST /mcp/probe` | Connections | Handwritten form plus curated official-server picker, probe-based tool preview before enable, and status/error display are current on stage ([#812](https://github.com/pexisgle/ene/issues/812)) |
 | Schedules | Schedule HTTP | Work | Current on stage |
 | Plugins / Advanced / Diagnostics | Plugin profile + schema leaves | System | Current on stage. Plugin config schema: [#819](https://github.com/pexisgle/ene/issues/819) |
 
@@ -240,7 +240,7 @@ Closing a child issue does not close [#717](https://github.com/pexisgle/ene/issu
 
 | Item | Issue / ID | Why later |
 |---|---|---|
-| MCP catalog, install preview, health, auth UX | [#812](https://github.com/pexisgle/ene/issues/812), P-616, M8 | Shipped post-v1.0: curated static catalog with preview, fiber error surfacing, and server-flow OAuth token injection |
+| MCP catalog, install preview, health, auth UX | [#812](https://github.com/pexisgle/ene/issues/812), P-616, M8 | Shipped post-v1.0: curated static catalog, one-shot probe preview with per-tool side effects before enable, fiber error surfacing with auth-required state, and manual bearer-token injection via the vault |
 | Tool discovery index | [#817](https://github.com/pexisgle/ene/issues/817) (epic [#796](https://github.com/pexisgle/ene/issues/796)) | Scoring stays in `ene-registry`; not a v1.0 `done.md` box |
 | Background tool start/cancel/completion | [#816](https://github.com/pexisgle/ene/issues/816) (epic #796) | Persist on `ene-work` jobs; no second task store |
 | Plugin config schema / dynamic options | [#819](https://github.com/pexisgle/ene/issues/819) (epic #796) | Unreleased: no legacy config shim |

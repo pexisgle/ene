@@ -3672,6 +3672,41 @@ async fn mcp_document_round_trips_through_http() {
 }
 
 #[tokio::test]
+async fn mcp_probe_lists_tools_without_enabling_the_server() {
+    let python3 = std::process::Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|_| ());
+    if python3.is_none() {
+        return;
+    }
+    let (_dir, client, core, server) = boot_server().await;
+
+    // A probe with an empty command fails to activate; the saved server list
+    // must stay empty either way.
+    let probe_before_save = client
+        .probe_mcp(&ene_api::McpProbeRequest {
+            id: "fixture".into(),
+            transport: "stdio".into(),
+            command: Some("__ene_missing_mcp__".into()),
+            ..ene_api::McpProbeRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        probe_before_save.error.is_some(),
+        "empty probe must fail without enabling anything"
+    );
+    assert!(probe_before_save.tools.is_empty());
+    let saved = client.mcp().await.unwrap();
+    assert!(saved.servers.is_empty());
+    drop(core);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_provider_models_rejects_unknown_plugin_and_task() {
     let (_dir, client, _core, server) = boot_server().await;
     let unknown_plugin = client

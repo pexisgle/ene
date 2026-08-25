@@ -44,8 +44,10 @@ is gone.
 Stage **Connections** also shows a curated catalog of official servers (git,
 fetch, memory, and the remote GitHub MCP server). Each entry previews the
 command, arguments, URL, required auth, side effects, and upstream source URL
-before you connect; **Add** writes a normal row into the same handwritten
-document, so there is exactly one schema.
+before you connect. **Connect** first opens a one-shot probe connection that
+never touches `mcp.json`: it lists the tools the server actually exposes, with
+per-tool side effects. Adding from that preview writes a normal row into the same
+handwritten document, disabled until you enable it — exactly one schema.
 
 The catalog is a static allowlist compiled into `ene-work`
 (`GET /api/v1/mcp/catalog`). It carries no signatures yet; distribution and

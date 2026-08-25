@@ -493,6 +493,31 @@ pub struct McpCatalogDocument {
     pub entries: Vec<McpCatalogEntryView>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpProbeRequest {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpProbeResponse {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Tools seen during the temporary pre-enable connection.
+    #[serde(default)]
+    pub tools: Vec<ToolView>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalView {
     pub id: String,

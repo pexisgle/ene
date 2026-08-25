@@ -352,6 +352,8 @@ pub struct DetailUiState {
     pub mcp_catalog_source: String,
     pub mcp_catalog_fallback: String,
     pub mcp_selected_catalog_id: String,
+    pub mcp_probe_pending: Option<String>,
+    pub mcp_probe_result: Option<ene_api::McpProbeResponse>,
     pub mcp_tools: Vec<ToolView>,
     pub plugin_config_id: String,
     pub plugin_config_request_id: u64,
@@ -2618,6 +2620,15 @@ fn show_connections(
     ensure_settings(state, client, rt, async_results);
     if !state.loaded.plugins {
         state.loaded.plugins = true;
+        let client_catalog = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::LoadMcpCatalog(
+                client_catalog
+                    .mcp_catalog()
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+        });
         let client_list = Arc::clone(client);
         spawn_async(rt, async_results, async move {
             AsyncOutcome::ListPlugins(
@@ -2737,9 +2748,70 @@ fn show_connections(
     }
     show_plugin_config(ui, state, client, rt, async_results);
     show_provider_assets(ui, state, client, rt, async_results);
+    if let Some(pending) = state.mcp_probe_pending.clone() {
+        ui.horizontal(|ui| {
+            ui.label(i18n::format(
+                "connections-mcp-probing",
+                &[("id", pending.as_str())],
+            ));
+            if ui
+                .button(i18n::fl("connections-mcp-probe-cancel"))
+                .clicked()
+            {
+                state.mcp_probe_pending = None;
+            }
+        });
+    }
+    if let Some(result) = state.mcp_probe_result.clone() {
+        ui.group(|ui| {
+            ui.heading(i18n::fl("connections-mcp-preview-title"));
+            match result.error {
+                Some(err) => {
+                    ui.label(i18n::fl("connections-status-unhealthy"));
+                    ui.label(err);
+                }
+                None => {
+                    if ui.button(i18n::fl("connections-mcp-preview-add")).clicked() {
+                        let id = probe_id(&state);
+                        state.mcp_servers.push(ene_api::McpServerView {
+                            id,
+                            transport: "stdio".to_owned(),
+                            command: Some(String::new()),
+                            // Added rows stay disabled until the user enables
+                            // them after reviewing this preview.
+                            args: Vec::new(),
+                            url: None,
+                            enabled: false,
+                        });
+                        state.mcp_probe_result = None;
+                    }
+                    if result.tools.is_empty() {
+                        ui.label(i18n::fl("connections-mcp-preview-empty"));
+                    }
+                    for tool in &result.tools {
+                        ui.horizontal(|ui| {
+                            ui.label(&tool.name);
+                            ui.small(&tool.description);
+                        });
+                        if !tool.side_effects.is_empty() {
+                            ui.label(i18n::format(
+                                "connections-mcp-tools-side-effects",
+                                &[("effects", tool.side_effects.join(", ").as_str())],
+                            ));
+                        }
+                    }
+                }
+            }
+        });
+    }
     show_mcp_tools(ui, state);
     ui.separator();
     show_mcp_form(ui, state, client, rt, async_results);
+}
+
+/// The pending probe id; the preview only exists while a probe is tracked.
+fn probe_id(state: &DetailUiState) -> String {
+    state.mcp_probe_pending.clone().unwrap_or_default()
 }
 
 fn connection_status_label(plugin: &PluginView) -> String {
@@ -3037,7 +3109,7 @@ fn show_mcp_form(
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     ui.heading(i18n::fl("plugins-mcp"));
-    show_mcp_catalog(ui, state);
+    show_mcp_catalog(ui, state, client, rt, async_results);
     let mut remove = None;
     for (index, server) in state.mcp_servers.iter_mut().enumerate() {
         ui.group(|ui| {
@@ -3161,7 +3233,13 @@ fn show_mcp_form(
     });
 }
 
-fn show_mcp_catalog(ui: &mut egui::Ui, state: &mut DetailUiState) {
+fn show_mcp_catalog(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
     if state.mcp_catalog.is_empty() {
         return;
     }
@@ -3227,15 +3305,24 @@ fn show_mcp_catalog(ui: &mut egui::Ui, state: &mut DetailUiState) {
                 if ui.button(i18n::fl("mcp-catalog-connect")).clicked()
                     && !state.mcp_servers.iter().any(|server| server.id == entry.id)
                 {
-                    state.mcp_servers.push(ene_api::McpServerView {
+                    state.mcp_probe_pending = Some(entry.id.clone());
+                    state.mcp_probe_result = None;
+                    let probe = ene_api::McpProbeRequest {
                         id: entry.id.clone(),
                         transport: entry.transport.clone(),
                         command: entry.command.clone(),
                         args: entry.args.clone(),
                         url: entry.url.clone(),
-                        enabled: true,
+                    };
+                    let client_probe = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        AsyncOutcome::ProbeMcp(
+                            client_probe
+                                .probe_mcp(&probe)
+                                .await
+                                .map_err(|e| e.to_string()),
+                        )
                     });
-                    state.mcp_selected_catalog_id.clear();
                 } else if ui.button(i18n::fl("mcp-catalog-connect")).clicked() {
                     state.core_status = i18n::fl("mcp-catalog-already-added");
                 }

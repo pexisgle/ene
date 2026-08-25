@@ -166,7 +166,7 @@ stage は同じ行の上に公式サーバーの厳選カタログを重ねま�
 | Memory 設定 + Memories 台帳 | Memory HTTP | Memory | 一覧/編集/削除は stage で Current。補助 LLM の scope は [#717](https://github.com/pexisgle/ene/issues/717) |
 | Sessions | Session HTTP | Log | stage で Current |
 | Permissions / Approvals | Plane HTTP | System | stage で Current |
-| Connectors（MCP フォーム + カタログ） | `GET/PUT /mcp`、`GET /mcp/catalog` | Connections | 手書きフォームに加え、公式サーバーのカタログ選択・接続プレビュー・状態/エラー表示が stage で Current（[#812](https://github.com/pexisgle/ene/issues/812)） |
+| Connectors（MCP フォーム + カタログ） | `GET/PUT /mcp`、`GET /mcp/catalog`、`POST /mcp/probe` | Connections | 手書きフォームに加え、公式サーバーのカタログ選択・有効化前の probe によるツールプレビュー・状態/エラー表示が stage で Current（[#812](https://github.com/pexisgle/ene/issues/812)） |
 | Schedules | Schedule HTTP | Work | stage で Current |
 | Plugins / Advanced / Diagnostics | プラグインプロファイルと schema 葉 | System | stage で Current。plugin config schema は [#819](https://github.com/pexisgle/ene/issues/819) |
 
@@ -234,7 +234,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 
 | 項目 | Issue / ID | 後回しにする理由 |
 |---|---|---|
-| MCP カタログ、導入プレビュー、health、認証 UX | [#812](https://github.com/pexisgle/ene/issues/812)、P-616、M8 | post-v1.0 完了: 静的カタログとプレビュー、ファイバーエラー表示、サーバー flow の OAuth トークン注入 |
+| MCP カタログ、導入プレビュー、health、認証 UX | [#812](https://github.com/pexisgle/ene/issues/812)、P-616、M8 | post-v1.0 完了: 静的カタログ、有効化前の probe プレビュー（ツールごとの副作用つき）、認証必須状態を含むファイバーエラー表示、vault 経由の手動 Bearer トークン注入 |
 | ツール discovery index | [#817](https://github.com/pexisgle/ene/issues/817)（epic [#796](https://github.com/pexisgle/ene/issues/796)） | scoring は `ene-registry`。`done.md` の箱ではない |
 | background tool の start/cancel/completion | [#816](https://github.com/pexisgle/ene/issues/816)（epic #796） | 永続は `ene-work` のジョブ。第二の task store は作らない |
 | plugin config schema / dynamic options | [#819](https://github.com/pexisgle/ene/issues/819)（epic #796） | 未リリースなので旧 config shim は不要 |

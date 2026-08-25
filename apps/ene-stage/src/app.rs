@@ -667,6 +667,16 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
+            AsyncOutcome::ProbeMcp(result) => {
+                self.detail.mcp_probe_pending = None;
+                self.detail.mcp_probe_result = match result {
+                    Ok(response) => Some(response),
+                    Err(err) => Some(ene_api::McpProbeResponse {
+                        error: Some(err),
+                        ..ene_api::McpProbeResponse::default()
+                    }),
+                };
+            }
             AsyncOutcome::ListMemories { soul_id, result } => {
                 if soul_id != self.session.soul_id() {
                     return;
