@@ -130,9 +130,13 @@ mod unix {
                 if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
                     let bytes = (*cmsg).cmsg_len.saturating_sub(cmsg_len(0));
                     let count = bytes / size_of::<RawFd>();
-                    let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
+                    // `cmsghdr` is byte-aligned, so the fd payload only
+                    // supports unaligned loads.
+                    let data = libc::CMSG_DATA(cmsg);
                     for i in 0..count {
-                        let raw = std::ptr::read_unaligned(data.add(i));
+                        let raw = std::ptr::read_unaligned(
+                            data.add(i * size_of::<RawFd>()).cast::<RawFd>(),
+                        );
                         out.push(OwnedFd::from_raw_fd(raw));
                     }
                 }

@@ -112,6 +112,46 @@ fn vault_plugin_key(row_id: &str, field: &str) -> String {
     format!("plugin.config.{row_id}.{field}")
 }
 
+/// Load the saved MCP auth token for a candidate id, even before a disabled
+/// profile row exists. Probe uses this to test the credential pre-enable.
+pub(crate) fn mcp_auth_token(vault: &Vault, server_id: &str) -> Option<String> {
+    let bytes = vault
+        .export(&vault_plugin_key(&format!("mcp.{server_id}"), "auth_token"))
+        .ok()?;
+    let token = String::from_utf8(bytes).ok()?;
+    (!token.is_empty()).then_some(token)
+}
+
+/// Persist a probe credential under the same vault key the enabled row later
+/// overlays, without touching `plugin-config.json`.
+pub(crate) fn store_mcp_auth_token(
+    vault: &Vault,
+    server_id: &str,
+    token: &str,
+) -> Result<(), CoreError> {
+    vault
+        .put(
+            &vault_plugin_key(&format!("mcp.{server_id}"), "auth_token"),
+            token.as_bytes(),
+        )
+        .map(|_| ())
+        .map_err(|err| CoreError::Io(std::io::Error::other(err.to_string())))
+}
+
+/// Record that a saved MCP row owns the `auth_token` vault key so a later
+/// enable overlays it. Probe writes the credential before any profile row
+/// exists, which otherwise leaves no `secret_keys` metadata behind.
+pub(crate) fn ensure_mcp_auth_metadata(data_dir: &Path, server_id: &str) -> Result<(), CoreError> {
+    let row_id = format!("mcp.{server_id}");
+    let mut file = load_plugin_config_file(data_dir)?;
+    let entry = file.rows.entry(row_id).or_default();
+    if entry.secret_keys.iter().any(|key| key == "auth_token") {
+        return Ok(());
+    }
+    entry.secret_keys.push("auth_token".to_owned());
+    save_plugin_config_file(data_dir, &file)
+}
+
 fn load_plugin_config_file(data_dir: &Path) -> Result<PluginConfigFile, CoreError> {
     let path = plugin_config_path(data_dir);
     if !path.exists() {
@@ -496,6 +536,40 @@ mod tests {
     fn unconfigured_task_does_not_spawn_a_provider() {
         assert!(super::provider_row("chat", &TaskBinding::default()).is_none());
         assert!(super::provider_row("chat", &TaskBinding::echo()).is_none());
+    }
+
+    #[test]
+    fn probe_auth_metadata_overlays_the_saved_token_on_enable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = Vault::open_or_create_keyfile(
+            dir.path().join("vault.bin"),
+            dir.path().join("vault.key"),
+        )
+        .unwrap();
+        store_mcp_auth_token(&vault, "github-remote", "secret-token").unwrap();
+        ensure_mcp_auth_metadata(dir.path(), "github-remote").unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join("plugin-config.json")).unwrap();
+        assert!(
+            !raw.contains("secret-token"),
+            "token must stay in the vault"
+        );
+
+        let server = McpServer {
+            id: "github-remote".to_owned(),
+            transport: "http".to_owned(),
+            command: None,
+            args: Vec::new(),
+            url: Some("https://mcp.example.com/mcp".to_owned()),
+            enabled: true,
+        };
+        let mut row = mcp_row(dir.path(), &server).unwrap();
+        assert!(
+            !row.config.as_object().unwrap().contains_key("auth_token"),
+            "base rows never embed credentials"
+        );
+        overlay_persisted_config(std::slice::from_mut(&mut row), dir.path(), &vault);
+        assert_eq!(row.config["auth_token"], "secret-token");
     }
 
     #[test]

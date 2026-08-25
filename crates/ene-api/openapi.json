@@ -88,6 +88,10 @@
       "get": { "summary": "Handwritten MCP servers (mcp.json)", "responses": { "200": { "description": "document" } } },
       "put": { "summary": "Replace handwritten MCP servers and apply profile rows", "responses": { "200": { "description": "document" } } }
     },
+    "/mcp/catalog": {
+      "get": { "summary": "Curated MCP server catalog (static allowlist)", "responses": { "200": { "description": "catalog" } } }
+    },
+    "/mcp/probe": { "post": { "summary": "Connect once without enabling and list the server's tools", "responses": { "200": { "description": "probe result" } } } },
     "/approvals": { "get": { "summary": "Pending popups", "responses": { "200": { "description": "page" } } } },
     "/approvals/{id}/respond": { "post": { "summary": "First writer wins", "responses": { "200": { "description": "ok" }, "409": { "description": "already_resolved" } } } },
     "/characters": { "get": { "summary": "Installed packages", "responses": { "200": { "description": "page" } } } },

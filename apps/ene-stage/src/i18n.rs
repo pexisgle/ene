@@ -84,6 +84,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stage_ftl_catalogs_parse_without_errors() {
+        for (language, source) in [
+            ("en-US", include_str!("../i18n/en-US/stage.ftl")),
+            ("ja", include_str!("../i18n/ja/stage.ftl")),
+        ] {
+            if let Err((_, errors)) = fluent_syntax::parser::parse_runtime(source) {
+                panic!("{language} catalog has Fluent errors: {errors:?}");
+            }
+        }
+    }
+
+    #[test]
     fn fl_resolves_app_title() {
         let title = fl("app-title");
         assert!(!title.is_empty());

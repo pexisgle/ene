@@ -11,14 +11,15 @@ use ene_api::{
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateJobRequest,
     CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot,
     GreetingView, Health, HistoryResponse, JobView, ListProviderModelsRequest,
-    ListProviderModelsResponse, McpDocument, McpServerView, MemoryCandidateDecision,
-    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, MessageMode, MessageRequest,
-    MessageResponse, OccupantView, Page, PluginConfigErrorView, PluginConfigField,
-    PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues, PluginConfigView,
-    PluginView, QueuedCancel, ResolveMemoryCandidateRequest, ResolveMemoryCandidateResponse,
-    ResourceKind, RestoreRequest, ScheduleView, SelectGreetingRequest, SelectGreetingResponse,
-    SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulSkillsPatch,
-    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    ListProviderModelsResponse, McpCatalogDocument, McpDocument, McpProbeRequest, McpProbeResponse,
+    McpServerView, MemoryCandidateDecision, MemoryCandidateView, MemoryJournalView, MemoryPatch,
+    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
+    PluginConfigErrorView, PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView,
+    PluginConfigValues, PluginConfigView, PluginView, QueuedCancel, ResolveMemoryCandidateRequest,
+    ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
+    SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
+    SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView,
+    ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
@@ -1167,6 +1168,7 @@ pub async fn list_tools(State(state): State<AppState>) -> Json<Page<ToolView>> {
             layer: def.primary_layer().as_str().to_owned(),
             name: def.name,
             description: def.description,
+            side_effects: def.side_effects,
         })
         .collect();
     Json(Page::of(items))
@@ -1220,6 +1222,7 @@ pub async fn list_plugins(State(state): State<AppState>) -> Json<Page<PluginView
             plugin: fiber.plugin,
             state: fiber.state.as_str().to_owned(),
             wait_reason: fiber.wait_reason,
+            last_error: fiber.last_error,
         })
         .collect();
     Json(Page::of(items))
@@ -1256,6 +1259,7 @@ pub async fn restart_plugin(
         plugin: updated.plugin,
         state: updated.state.as_str().to_owned(),
         wait_reason: updated.wait_reason,
+        last_error: updated.last_error,
     }))
 }
 
@@ -1645,6 +1649,33 @@ pub async fn get_mcp(State(state): State<AppState>) -> Json<McpDocument> {
     Json(mcp_document(&state.core.mcp_servers()))
 }
 
+pub async fn get_mcp_catalog() -> Json<McpCatalogDocument> {
+    let entries = ene_work::mcp_catalog()
+        .iter()
+        .map(|entry| ene_api::McpCatalogEntryView {
+            id: entry.id.clone(),
+            label: entry.label.clone(),
+            description: entry.description.clone(),
+            transport: entry.transport.clone(),
+            command: entry.command.clone(),
+            args: entry.args.clone(),
+            url: entry.url.clone(),
+            auth: match entry.auth {
+                ene_work::McpCatalogAuth::None => ene_api::McpCatalogAuthView::None,
+                ene_work::McpCatalogAuth::ApiKeyHeader => ene_api::McpCatalogAuthView::ApiKeyHeader,
+                ene_work::McpCatalogAuth::Oauth2Remote => ene_api::McpCatalogAuthView::Oauth2Remote,
+            },
+            side_effects: entry.side_effects.clone(),
+            source_url: entry.source_url.clone(),
+        })
+        .collect();
+    Json(McpCatalogDocument {
+        source: "static".to_owned(),
+        fallback: "static table; refresh is not wired in v1".to_owned(),
+        entries,
+    })
+}
+
 pub async fn put_mcp(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1661,6 +1692,110 @@ pub async fn put_mcp(
         .map_err(|err| bad_request("fault", &err.to_string()))?;
     state.core.apply_plugin_profile().await;
     Ok(Json(mcp_document(&state.core.mcp_servers())))
+}
+
+pub async fn probe_mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<McpProbeRequest>,
+) -> Result<Json<McpProbeResponse>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    // The probe activates an ephemeral row whose server name differs from the
+    // catalog id, so remember both when filtering registered tools.
+    let requested_id = body.id.clone();
+    let server = McpServerView {
+        id: requested_id.clone(),
+        transport: body.transport,
+        command: body.command,
+        args: body.args,
+        url: body.url,
+        enabled: false,
+    };
+    let parsed = parse_mcp_server(&server)?;
+    if parsed.enabled {
+        return Err(bad_request(
+            "invalid_message",
+            "probe rows must stay disabled",
+        ));
+    }
+
+    let supervisor = state.core.supervisor();
+    let Some(binary) = supervisor.discover("mcp.bridge") else {
+        return Err(conflict("unknown_binary", "mcp bridge not found"));
+    };
+    if let Some(token) = body.auth_token.as_deref().filter(|token| !token.is_empty()) {
+        crate::plugin_profile::store_mcp_auth_token(state.core.vault(), &parsed.id, token)
+            .map_err(|err| conflict("fault", &err.to_string()))?;
+        crate::plugin_profile::ensure_mcp_auth_metadata(state.core.data_dir(), &parsed.id)
+            .map_err(|err| conflict("fault", &err.to_string()))?;
+    }
+    let auth_token = crate::plugin_profile::mcp_auth_token(state.core.vault(), &parsed.id);
+    let stored_auth = auth_token.is_some();
+    // A unique ephemeral row id keeps probes isolated from saved servers and
+    // from concurrent probes; the row is unloaded before the response below.
+    let row_id = format!("mcp.probe-{}", uuid::Uuid::now_v7().simple());
+    let ephemeral_server = row_id.trim_start_matches("mcp.").to_owned();
+    let config = serde_json::json!({
+        "server": ephemeral_server,
+        "transport": parsed.transport,
+        "command": parsed.command,
+        "args": parsed.args,
+        "url": parsed.url,
+        // Secrets never enter parsed rows; they only ride the ephemeral probe.
+        "auth_token": auth_token,
+        // Preview must enumerate tools only; no context files are written.
+        "probe_only": true,
+        "skills_home": "",
+    });
+    let row = ene_fiber::ProfileRow {
+        row_id: row_id.clone(),
+        plugin: row_id.clone(),
+        requires: Vec::new(),
+        capabilities: Vec::new(),
+        seams: Vec::new(),
+        sandbox_required: false,
+        config,
+    };
+
+    let activation = supervisor.activate_process(&row, &binary).await;
+    let mut response = match &activation {
+        Ok(_) => McpProbeResponse {
+            ok: true,
+            error: None,
+            stored_auth,
+            tools: supervisor
+                .registry()
+                .list()
+                .into_iter()
+                .filter(|tool| tool.name.starts_with(&format!("mcp:{ephemeral_server}.")))
+                .map(|tool| {
+                    let layer = tool.primary_layer().as_str().to_owned();
+                    ToolView {
+                        name: tool.name.replacen(
+                            &format!("mcp:{ephemeral_server}."),
+                            &format!("mcp:{}.", parsed.id),
+                            1,
+                        ),
+                        description: tool.description.clone(),
+                        layer,
+                        side_effects: tool.side_effects.clone(),
+                    }
+                })
+                .collect(),
+        },
+        Err(err) => McpProbeResponse {
+            ok: false,
+            error: Some(err.to_string()),
+            stored_auth,
+            tools: Vec::new(),
+        },
+    };
+    if activation.is_ok() {
+        supervisor.unload(&row_id).await;
+    } else {
+        response.tools.clear();
+    }
+    Ok(Json(response))
 }
 
 fn mcp_document(servers: &[ene_work::McpServer]) -> McpDocument {

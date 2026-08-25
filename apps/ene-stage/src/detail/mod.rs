@@ -9,7 +9,7 @@ use ene_api::{
     ApiClient, ApiError, CharacterView, CreateJobRequest, JobView, MemoryCandidateDecision,
     MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, OccupantView,
     PluginConfigField, PluginConfigValues, PluginConfigView, PluginView, ProviderAssetView,
-    ResolveMemoryCandidateRequest, ScheduleView, SoulView,
+    ResolveMemoryCandidateRequest, ScheduleView, SoulView, ToolView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -348,6 +348,16 @@ pub struct DetailUiState {
     pub mic_devices_loaded: bool,
     pub mcp_json: String,
     pub mcp_servers: Vec<ene_api::McpServerView>,
+    pub mcp_catalog: Vec<ene_api::McpCatalogEntryView>,
+    pub mcp_catalog_source: String,
+    pub mcp_catalog_fallback: String,
+    pub mcp_selected_catalog_id: String,
+    pub mcp_catalog_auth_input: String,
+    pub mcp_probe_generation: u64,
+    pub mcp_probe_pending: Option<String>,
+    pub mcp_probe_candidate: Option<ene_api::McpCatalogEntryView>,
+    pub mcp_probe_result: Option<ene_api::McpProbeResponse>,
+    pub mcp_tools: Vec<ToolView>,
     pub plugin_config_id: String,
     pub plugin_config_request_id: u64,
     pub plugin_config_loading_request_id: Option<u64>,
@@ -446,6 +456,16 @@ impl DetailUiState {
     #[must_use]
     pub fn activation_is_current(&self, generation: u64) -> bool {
         self.activation_generation == generation
+    }
+
+    pub fn next_mcp_probe_generation(&mut self) -> u64 {
+        self.mcp_probe_generation = self.mcp_probe_generation.wrapping_add(1);
+        self.mcp_probe_generation
+    }
+
+    #[must_use]
+    pub fn mcp_probe_is_current(&self, generation: u64) -> bool {
+        self.mcp_probe_generation == generation
     }
 
     pub fn invalidate_character(&mut self) {
@@ -1634,6 +1654,15 @@ fn show_voice(
     ensure_settings(state, client, rt, async_results);
     if !state.loaded.plugins {
         state.loaded.plugins = true;
+        let client_catalog = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::LoadMcpCatalog(
+                client_catalog
+                    .mcp_catalog()
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+        });
         let client_list = Arc::clone(client);
         spawn_async(rt, async_results, async move {
             AsyncOutcome::ListPlugins(
@@ -2604,6 +2633,15 @@ fn show_connections(
     ensure_settings(state, client, rt, async_results);
     if !state.loaded.plugins {
         state.loaded.plugins = true;
+        let client_catalog = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::LoadMcpCatalog(
+                client_catalog
+                    .mcp_catalog()
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+        });
         let client_list = Arc::clone(client);
         spawn_async(rt, async_results, async move {
             AsyncOutcome::ListPlugins(
@@ -2622,6 +2660,25 @@ fn show_connections(
                     serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
                 }
                 .await,
+            )
+        });
+        let client_tools = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::LoadTools(
+                client_tools
+                    .list_tools()
+                    .await
+                    .map(|t| t.items)
+                    .map_err(|e| e.to_string()),
+            )
+        });
+        let client_catalog = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::LoadMcpCatalog(
+                client_catalog
+                    .mcp_catalog()
+                    .await
+                    .map_err(|e| e.to_string()),
             )
         });
     }
@@ -2668,7 +2725,8 @@ fn show_connections(
     } else {
         for plugin in state.plugins.clone() {
             ui.horizontal(|ui| {
-                ui.label(format!("{} ({})", plugin.plugin, plugin.state));
+                let status = connection_status_label(&plugin);
+                ui.label(format!("{} ({})", plugin.plugin, status));
                 ui.collapsing(i18n::fl("plugins-row-id"), |ui| {
                     ui.label(&plugin.row_id);
                 });
@@ -2703,8 +2761,140 @@ fn show_connections(
     }
     show_plugin_config(ui, state, client, rt, async_results);
     show_provider_assets(ui, state, client, rt, async_results);
+    if let Some(pending) = state.mcp_probe_pending.clone() {
+        ui.horizontal(|ui| {
+            ui.label(i18n::format(
+                "connections-mcp-probing",
+                &[("id", pending.as_str())],
+            ));
+            if ui
+                .button(i18n::fl("connections-mcp-probe-cancel"))
+                .clicked()
+            {
+                state.next_mcp_probe_generation();
+                state.mcp_probe_pending = None;
+                state.mcp_probe_result = None;
+            }
+        });
+    }
+    if let Some(candidate) = state.mcp_probe_candidate.clone() {
+        ui.group(|ui| {
+            ui.heading(i18n::fl("connections-mcp-preview-title"));
+            let Some(result) = state.mcp_probe_result.clone() else {
+                return;
+            };
+            if let Some(err) = result.error {
+                let auth_required = candidate.auth != ene_api::McpCatalogAuthView::None;
+                if auth_required && result.stored_auth {
+                    ui.label(i18n::fl("connections-mcp-preview-stored-auth"));
+                } else {
+                    ui.label(if auth_required {
+                        i18n::fl("connections-status-auth-required")
+                    } else {
+                        i18n::fl("connections-status-unhealthy-no-error")
+                    });
+                }
+                ui.label(err);
+                // Auth-required remotes can still be added disabled; the
+                // secret is then provided through plugin config.
+                let candidate_exists = state.mcp_probe_candidate.is_some();
+                if candidate_exists && ui.button(i18n::fl("connections-mcp-preview-add")).clicked()
+                {
+                    add_probed_server(state, &candidate);
+                }
+            } else {
+                if ui.button(i18n::fl("connections-mcp-preview-add")).clicked() {
+                    add_probed_server(state, &candidate);
+                }
+                if result.tools.is_empty() {
+                    ui.label(i18n::fl("connections-mcp-preview-empty"));
+                }
+                for tool in &result.tools {
+                    ui.horizontal(|ui| {
+                        ui.label(&tool.name);
+                        ui.small(&tool.description);
+                    });
+                    if !tool.side_effects.is_empty() {
+                        ui.label(i18n::format(
+                            "connections-mcp-tools-side-effects",
+                            &[("effects", tool.side_effects.join(", ").as_str())],
+                        ));
+                    }
+                }
+            }
+        });
+    }
+    show_mcp_tools(ui, state);
     ui.separator();
     show_mcp_form(ui, state, client, rt, async_results);
+}
+
+/// Persist the exact probed catalog entry as a disabled row. Enabling stays a
+/// separate user action after the preview (and any secret setup) succeeds.
+fn add_probed_server(state: &mut DetailUiState, candidate: &ene_api::McpCatalogEntryView) {
+    if !state
+        .mcp_servers
+        .iter()
+        .any(|server| server.id == candidate.id)
+    {
+        state.mcp_servers.push(ene_api::McpServerView {
+            id: candidate.id.clone(),
+            transport: candidate.transport.clone(),
+            command: candidate.command.clone(),
+            args: candidate.args.clone(),
+            url: candidate.url.clone(),
+            enabled: false,
+        });
+    }
+    state.mcp_probe_candidate = None;
+    state.mcp_probe_result = None;
+}
+
+fn connection_status_label(plugin: &PluginView) -> String {
+    if let Some(error) = &plugin.last_error {
+        let lowered = error.to_lowercase();
+        if ["401", "unauthorized", "auth"]
+            .iter()
+            .any(|needle| lowered.contains(needle))
+        {
+            return i18n::fl("connections-status-auth-required");
+        }
+        return i18n::format(
+            "connections-status-unhealthy-error",
+            &[("error", error.as_str())],
+        );
+    }
+    match plugin.state.as_str() {
+        "active" => i18n::fl("connections-status-active"),
+        "loading" | "waiting" => i18n::fl("connections-status-connecting"),
+        "failed" => i18n::fl("connections-status-unhealthy-no-error"),
+        _ => i18n::fl("connections-status-disabled"),
+    }
+}
+
+fn show_mcp_tools(ui: &mut egui::Ui, state: &DetailUiState) {
+    let tools: Vec<&ToolView> = state
+        .mcp_tools
+        .iter()
+        .filter(|tool| tool.name.starts_with("mcp:"))
+        .collect();
+    if tools.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.heading(i18n::fl("connections-mcp-tools-title"));
+    for tool in tools {
+        ui.horizontal(|ui| {
+            ui.label(&tool.name);
+            ui.small(&tool.description);
+        });
+        if !tool.side_effects.is_empty() {
+            ui.label(i18n::format(
+                "connections-mcp-tools-side-effects",
+                &[("effects", tool.side_effects.join(", ").as_str())],
+            ));
+        }
+    }
 }
 
 fn show_plugin_config(
@@ -2955,6 +3145,7 @@ fn show_mcp_form(
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     ui.heading(i18n::fl("plugins-mcp"));
+    show_mcp_catalog(ui, state, client, rt, async_results);
     let mut remove = None;
     for (index, server) in state.mcp_servers.iter_mut().enumerate() {
         ui.group(|ui| {
@@ -3073,6 +3264,124 @@ fn show_mcp_form(
             match load_mcp_form(state, &state.mcp_json.clone()) {
                 Ok(()) => state.core_status = i18n::fl("settings-loaded"),
                 Err(err) => state.core_status = err,
+            }
+        }
+    });
+}
+
+fn show_mcp_catalog(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    if state.mcp_catalog.is_empty() {
+        return;
+    }
+    ui.collapsing(i18n::fl("mcp-catalog-title"), |ui| {
+        ui.label(i18n::fl("mcp-catalog-hint"));
+        ui.weak(format!(
+            "{}: {} / {}: {}",
+            i18n::fl("mcp-catalog-source"),
+            state.mcp_catalog_source,
+            i18n::fl("mcp-catalog-fallback"),
+            state.mcp_catalog_fallback
+        ));
+        for entry in &state.mcp_catalog.clone() {
+            let selected = state.mcp_selected_catalog_id == entry.id;
+            if ui
+                .selectable_label(selected, format!("{} — {}", entry.label, entry.description))
+                .clicked()
+            {
+                state.mcp_selected_catalog_id = if selected {
+                    String::new()
+                } else {
+                    entry.id.clone()
+                };
+            }
+            if selected {
+                if entry.auth != ene_api::McpCatalogAuthView::None {
+                    ui.horizontal(|ui| {
+                        ui.label(i18n::fl("mcp-catalog-auth-token"));
+                        let field = egui::TextEdit::singleline(&mut state.mcp_catalog_auth_input)
+                            .password(true)
+                            .hint_text(i18n::fl("mcp-catalog-auth-token-hint"));
+                        ui.add(field);
+                    });
+                }
+                egui::Grid::new(("mcp-catalog-detail", entry.id.as_str()))
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label(i18n::fl("plugins-mcp-id"));
+                        ui.label(&entry.id);
+                        ui.end_row();
+                        ui.label(i18n::fl("plugins-mcp-transport"));
+                        ui.label(&entry.transport);
+                        ui.end_row();
+                        if let Some(command) = &entry.command {
+                            ui.label(i18n::fl("plugins-mcp-command"));
+                            ui.label(format!("{command} {}", entry.args.join(" ")));
+                            ui.end_row();
+                        }
+                        if let Some(url) = &entry.url {
+                            ui.label(i18n::fl("plugins-mcp-url"));
+                            ui.hyperlink_to(url, url);
+                            ui.end_row();
+                        }
+                        ui.label(i18n::fl("mcp-catalog-auth"));
+                        ui.label(match entry.auth {
+                            ene_api::McpCatalogAuthView::None => i18n::fl("mcp-catalog-auth-none"),
+                            ene_api::McpCatalogAuthView::ApiKeyHeader => {
+                                i18n::fl("mcp-catalog-auth-api-key")
+                            }
+                            ene_api::McpCatalogAuthView::Oauth2Remote => {
+                                i18n::fl("mcp-catalog-auth-oauth")
+                            }
+                        });
+                        ui.end_row();
+                        ui.label(i18n::fl("mcp-catalog-side-effects"));
+                        ui.label(entry.side_effects.join("; "));
+                        ui.end_row();
+                        ui.label(i18n::fl("mcp-catalog-source-url"));
+                        ui.hyperlink_to(&entry.source_url, &entry.source_url);
+                        ui.end_row();
+                    });
+                let connect_clicked = ui.button(i18n::fl("mcp-catalog-connect")).clicked();
+                let already_added = state.mcp_servers.iter().any(|server| server.id == entry.id);
+                if connect_clicked && !already_added {
+                    let generation = state.next_mcp_probe_generation();
+                    state.mcp_probe_pending = Some(entry.id.clone());
+                    state.mcp_probe_result = None;
+                    // Snapshot the catalog row up front so Add keeps the
+                    // probed configuration even after the pending flag clears.
+                    state.mcp_probe_candidate = Some(entry.clone());
+                    let probe = ene_api::McpProbeRequest {
+                        id: entry.id.clone(),
+                        transport: entry.transport.clone(),
+                        command: entry.command.clone(),
+                        args: entry.args.clone(),
+                        url: entry.url.clone(),
+                        auth_token: {
+                            let token = state.mcp_catalog_auth_input.trim().to_owned();
+                            (!token.is_empty()).then_some(token)
+                        },
+                    };
+                    // Keep the credential only long enough for the probe request.
+                    state.mcp_catalog_auth_input.clear();
+                    let client_probe = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        AsyncOutcome::ProbeMcp {
+                            generation,
+                            result: client_probe
+                                .probe_mcp(&probe)
+                                .await
+                                .map_err(|e| e.to_string()),
+                        }
+                    });
+                } else if connect_clicked && already_added {
+                    state.core_status = i18n::fl("mcp-catalog-already-added");
+                }
             }
         }
     });
@@ -4461,12 +4770,14 @@ mod tests {
                 plugin: "tool.utility".into(),
                 state: "ready".into(),
                 wait_reason: None,
+                last_error: None,
             },
             PluginView {
                 row_id: "2".into(),
                 plugin: "provider.openai_compat".into(),
                 state: "ready".into(),
                 wait_reason: None,
+                last_error: None,
             },
         ];
         assert_eq!(
@@ -4704,5 +5015,49 @@ mod tests {
         }
         assert!(detail.plugin_config_values.contains("new"));
         assert!(!detail.plugin_config_values.contains("old"));
+    }
+
+    #[test]
+    fn add_probed_server_persists_the_exact_catalog_entry_disabled() {
+        let mut state = DetailUiState::default();
+        let candidate = ene_api::McpCatalogEntryView {
+            id: "github-remote".to_owned(),
+            label: "GitHub".to_owned(),
+            description: String::new(),
+            transport: "http".to_owned(),
+            command: None,
+            args: Vec::new(),
+            url: Some("https://mcp.example.com/sse".to_owned()),
+            auth: ene_api::McpCatalogAuthView::Oauth2Remote,
+            side_effects: Vec::new(),
+            source_url: String::new(),
+        };
+        state.mcp_probe_candidate = Some(candidate.clone());
+
+        add_probed_server(&mut state, &candidate);
+
+        assert_eq!(state.mcp_servers.len(), 1);
+        let added = &state.mcp_servers[0];
+        assert_eq!(added.id, candidate.id);
+        assert_eq!(added.transport, candidate.transport);
+        assert_eq!(added.command, candidate.command);
+        assert_eq!(added.args, candidate.args);
+        assert_eq!(added.url, candidate.url);
+        assert!(
+            !added.enabled,
+            "added catalog rows must stay disabled until reviewed"
+        );
+        assert!(state.mcp_probe_candidate.is_none());
+        assert!(state.mcp_probe_result.is_none());
+    }
+
+    #[test]
+    fn stale_mcp_probe_results_are_ignored() {
+        let mut state = DetailUiState::default();
+        let first = state.next_mcp_probe_generation();
+        let second = state.next_mcp_probe_generation();
+
+        assert!(!state.mcp_probe_is_current(first));
+        assert!(state.mcp_probe_is_current(second));
     }
 }

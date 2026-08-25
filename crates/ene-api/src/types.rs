@@ -359,6 +359,8 @@ pub struct ToolView {
     pub name: String,
     pub description: String,
     pub layer: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub side_effects: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -374,6 +376,8 @@ pub struct PluginView {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -452,6 +456,73 @@ fn default_true() -> bool {
 pub struct McpDocument {
     #[serde(default)]
     pub servers: Vec<McpServerView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpCatalogAuthView {
+    None,
+    ApiKeyHeader,
+    Oauth2Remote,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpCatalogEntryView {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub auth: McpCatalogAuthView,
+    pub side_effects: Vec<String>,
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpCatalogDocument {
+    /// Provenance of the table; v1 is the compiled-in static allowlist.
+    pub source: String,
+    /// What happens when a future dynamic catalog refresh fails.
+    pub fallback: String,
+    #[serde(default)]
+    pub entries: Vec<McpCatalogEntryView>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpProbeRequest {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Optional credential for the one-shot probe. The daemon stores it in
+    /// the vault and never echoes it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpProbeResponse {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Whether a credential is already stored for the candidate id.
+    #[serde(default)]
+    pub stored_auth: bool,
+    /// Tools seen during the temporary pre-enable connection.
+    #[serde(default)]
+    pub tools: Vec<ToolView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

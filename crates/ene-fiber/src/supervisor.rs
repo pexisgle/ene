@@ -92,6 +92,7 @@ struct SupervisorInner {
     loop_hooks: Mutex<Option<LoopHooks>>,
     waterfall_guards: Mutex<HashMap<String, Vec<WaterfallGuard<HookEvent>>>>,
     broker_servers: Mutex<HashMap<String, crate::broker_ipc::BrokerServer>>,
+    last_errors: Mutex<HashMap<String, String>>,
     #[cfg(test)]
     dispose_log: Mutex<Vec<Effect>>,
 }
@@ -301,7 +302,14 @@ impl SupervisorInner {
         self.dispose(&mut fiber);
         fiber.state = FiberState::Failed;
         fiber.wait_reason = Some("circuit open".to_owned());
+        fiber.last_error = self.last_errors.lock().get(row_id).cloned();
         self.fibers.lock().insert(row_id.to_owned(), fiber);
+    }
+
+    fn record_last_error(&self, row_id: &str, err: &SupervisorError) {
+        self.last_errors
+            .lock()
+            .insert(row_id.to_owned(), err.to_string());
     }
 
     fn rollback_loading(&self, fiber: &mut Fiber) {
@@ -429,6 +437,7 @@ impl Supervisor {
                 loop_hooks: Mutex::new(None),
                 waterfall_guards: Mutex::new(HashMap::new()),
                 broker_servers: Mutex::new(HashMap::new()),
+                last_errors: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 dispose_log: Mutex::new(Vec::new()),
             }),
@@ -813,6 +822,7 @@ impl Supervisor {
         {
             Ok(spawned) => spawned,
             Err(err) => {
+                self.inner.record_last_error(&row.row_id, &err);
                 self.inner.rollback_loading(&mut fiber);
                 self.inner
                     .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
@@ -826,6 +836,7 @@ impl Supervisor {
             .apply_spawned(row, &plugin_id, &mut fiber, spawned)
             .await
         {
+            self.inner.record_last_error(&row.row_id, &err);
             self.inner.rollback_loading(&mut fiber);
             self.inner
                 .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
@@ -847,6 +858,7 @@ impl Supervisor {
         }
         self.inner.fibers.lock().insert(row.row_id.clone(), fiber);
         self.inner.reset_failures(&row.row_id);
+        self.inner.last_errors.lock().remove(&row.row_id);
         Ok(uid)
     }
 
@@ -1012,7 +1024,19 @@ impl Supervisor {
     /// Snapshot of every profile row the supervisor currently tracks.
     #[must_use]
     pub fn list_fibers(&self) -> Vec<Fiber> {
-        self.inner.fibers.lock().values().cloned().collect()
+        let errors = self.inner.last_errors.lock().clone();
+        self.inner
+            .fibers
+            .lock()
+            .values()
+            .map(|fiber| {
+                let mut snapshot = fiber.clone();
+                if snapshot.last_error.is_none() {
+                    snapshot.last_error = errors.get(&snapshot.row_id).cloned();
+                }
+                snapshot
+            })
+            .collect()
     }
 
     #[must_use]

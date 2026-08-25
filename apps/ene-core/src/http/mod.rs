@@ -510,6 +510,8 @@ fn router(state: AppState) -> Router {
             post(routes::refresh_provider_assets_catalog),
         )
         .route("/api/v1/mcp", get(routes::get_mcp).put(routes::put_mcp))
+        .route("/api/v1/mcp/catalog", get(routes::get_mcp_catalog))
+        .route("/api/v1/mcp/probe", post(routes::probe_mcp))
         .route("/api/v1/approvals", get(routes::list_approvals))
         .route(
             "/api/v1/approvals/{id}/respond",

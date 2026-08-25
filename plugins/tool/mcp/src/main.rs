@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use async_trait::async_trait;
-use ene_plugin_ipc::{IpcError, ToolHandler, ToolSpecWire, serve_from_env};
+use ene_plugin_ipc::{IpcError, PluginConfigSchema, ToolHandler, ToolSpecWire, serve_from_env};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -38,6 +38,8 @@ struct McpConfig {
     command: String,
     args: Vec<String>,
     url: Option<String>,
+    auth_token: Option<String>,
+    probe_only: bool,
     skills_home: PathBuf,
 }
 
@@ -74,6 +76,15 @@ fn load_config() -> McpConfig {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    let auth_token = value
+        .get("auth_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let probe_only = value
+        .get("probe_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let skills_home = value
         .get("skills_home")
         .and_then(Value::as_str)
@@ -85,6 +96,8 @@ fn load_config() -> McpConfig {
         command,
         args,
         url,
+        auth_token,
+        probe_only,
         skills_home,
     }
 }
@@ -94,6 +107,29 @@ struct McpBridge {
     digest: String,
     specs: Vec<ToolSpecWire>,
     session: Mutex<McpTransport>,
+}
+
+fn tool_side_effects(annotations: Option<&Value>) -> Vec<String> {
+    let Some(annotations) = annotations else {
+        return vec!["may modify data".to_owned()];
+    };
+    if annotations.get("readOnlyHint").and_then(Value::as_bool) == Some(true) {
+        // Empty effects keep read-only tools visible on the dialogue surface,
+        // matching how builtin read-only tools declare no side effects.
+        return Vec::new();
+    }
+    let mut effects = Vec::new();
+    if annotations
+        .get("destructiveHint")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        effects.push("may modify data".to_owned());
+    }
+    if annotations.get("openWorldHint").and_then(Value::as_bool) == Some(true) {
+        effects.push("sends data to external services".to_owned());
+    }
+    effects
 }
 
 enum McpTransport {
@@ -111,6 +147,7 @@ struct McpStdio {
 struct McpHttp {
     url: String,
     client: reqwest::Client,
+    auth_token: Option<String>,
     next_id: u64,
 }
 
@@ -134,6 +171,7 @@ impl McpBridge {
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .map_err(|err| err.to_string())?,
+                auth_token: config.auth_token.clone(),
                 next_id: 1,
             })
         } else {
@@ -186,6 +224,7 @@ impl McpBridge {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned();
+                let side_effects = tool_side_effects(tool.get("annotations"));
                 let parameters = tool
                     .get("inputSchema")
                     .cloned()
@@ -195,7 +234,7 @@ impl McpBridge {
                     description,
                     parameters,
                     output: json!({"type":"object"}),
-                    side_effects: Vec::new(),
+                    side_effects,
                     broker_socket: None,
 
                     category: String::new(),
@@ -205,7 +244,9 @@ impl McpBridge {
                 })
             })
             .collect();
-        ingest_context(&mut session, &config).await;
+        if !config.probe_only {
+            ingest_context(&mut session, &config).await;
+        }
         Ok(Self {
             plugin_id,
             digest: exe_digest(),
@@ -418,7 +459,7 @@ impl McpHttp {
             "method": method,
             "params": params,
         });
-        let incoming = post_rpc(&self.client, &self.url, &msg).await?;
+        let incoming = post_rpc(&self.client, &self.url, self.auth_token.as_deref(), &msg).await?;
         if let Some(err) = incoming.get("error") {
             return Err(err.to_string());
         }
@@ -431,16 +472,25 @@ impl McpHttp {
             "method": method,
             "params": params,
         });
-        drop(post_rpc(&self.client, &self.url, &msg).await);
+        drop(post_rpc(&self.client, &self.url, self.auth_token.as_deref(), &msg).await);
         Ok(())
     }
 }
 
-async fn post_rpc(client: &reqwest::Client, url: &str, msg: &Value) -> Result<Value, String> {
-    let response = client
+async fn post_rpc(
+    client: &reqwest::Client,
+    url: &str,
+    auth_token: Option<&str>,
+    msg: &Value,
+) -> Result<Value, String> {
+    let mut request = client
         .post(url)
         .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream")
+        .header("accept", "application/json, text/event-stream");
+    if let Some(token) = auth_token {
+        request = request.bearer_auth(token);
+    }
+    let response = request
         .json(msg)
         .send()
         .await
@@ -576,6 +626,24 @@ impl ToolHandler for McpBridge {
             .await
             .map_err(IpcError::Call)
     }
+
+    fn has_config(&self) -> bool {
+        true
+    }
+
+    async fn config_schema(&self) -> Result<PluginConfigSchema, IpcError> {
+        Ok(PluginConfigSchema {
+            has_config: true,
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "auth_token": { "type": "string", "x-ene-secret": true }
+                },
+                "additionalProperties": false
+            }),
+            secret_keys: vec!["auth_token".to_owned()],
+        })
+    }
 }
 
 impl Drop for McpBridge {
@@ -585,5 +653,27 @@ impl Drop for McpBridge {
         {
             drop(stdio.child.start_kill());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn annotations_map_to_side_effect_strings() {
+        assert_eq!(
+            tool_side_effects(Some(&json!({"readOnlyHint": true}))),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            tool_side_effects(Some(&json!({"destructiveHint": true}))),
+            vec!["may modify data".to_owned()]
+        );
+        assert_eq!(
+            tool_side_effects(Some(&json!({}))),
+            vec!["may modify data".to_owned()]
+        );
+        assert_eq!(tool_side_effects(None), vec!["may modify data".to_owned()]);
     }
 }

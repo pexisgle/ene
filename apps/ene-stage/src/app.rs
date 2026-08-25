@@ -659,6 +659,27 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
+            AsyncOutcome::LoadMcpCatalog(result) => match result {
+                Ok(doc) => {
+                    self.detail.mcp_catalog = doc.entries;
+                    self.detail.mcp_catalog_source = doc.source;
+                    self.detail.mcp_catalog_fallback = doc.fallback;
+                }
+                Err(err) => self.detail.core_status = err,
+            },
+            AsyncOutcome::ProbeMcp { generation, result } => {
+                if !self.detail.mcp_probe_is_current(generation) {
+                    return;
+                }
+                self.detail.mcp_probe_pending = None;
+                self.detail.mcp_probe_result = match result {
+                    Ok(response) => Some(response),
+                    Err(err) => Some(ene_api::McpProbeResponse {
+                        error: Some(err),
+                        ..ene_api::McpProbeResponse::default()
+                    }),
+                };
+            }
             AsyncOutcome::ListMemories { soul_id, result } => {
                 if soul_id != self.session.soul_id() {
                     return;
@@ -821,6 +842,10 @@ impl StageApp {
             AsyncOutcome::ListPlugins(result) => match result {
                 Ok(items) => self.detail.plugins = items,
                 Err(err) => self.detail.core_status = err,
+            },
+            AsyncOutcome::LoadTools(result) => match result {
+                Ok(items) => self.detail.mcp_tools = items,
+                Err(err) => self.detail.connections_status = err,
             },
             AsyncOutcome::LoadPluginConfig {
                 request_id,

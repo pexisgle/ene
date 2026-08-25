@@ -54,6 +54,8 @@ while True:
         write_msg({"jsonrpc":"2.0","id":ident,"result":{"tools":[{
             "name":"ping",
             "description":"ping",
+            # readOnlyHint keeps the tool on the dialogue surface.
+            "annotations":{"readOnlyHint":True},
             "inputSchema":{"type":"object","additionalProperties":False}
         }]}})
     elif method == "resources/list":
@@ -126,6 +128,13 @@ async fn handwritten_stdio_mcp_registers_and_runs() {
     };
     sup.activate_process(&row, &bin()).await.unwrap();
     assert!(sup.surface_has_tool("mcp:fixture.ping"));
+    assert!(
+        sup.registry()
+            .list()
+            .iter()
+            .any(|def| def.name == "mcp:fixture.ping" && def.side_effects.is_empty()),
+        "read-only annotated MCP tools must stay on the dialogue surface"
+    );
     let value = sup
         .registry()
         .execute("mcp:fixture.ping", json!({}), Layer::Surface)
@@ -202,10 +211,12 @@ while True:
         write_msg({"jsonrpc":"2.0","id":ident,"result":{"tools":[{
             "name":"status",
             "description":"git status --porcelain -b",
+            "annotations":{"readOnlyHint":True},
             "inputSchema":{"type":"object","additionalProperties":False}
         },{
             "name":"log",
             "description":"git log -1 --oneline",
+            "annotations":{"readOnlyHint":True},
             "inputSchema":{"type":"object","additionalProperties":False}
         }]}})
     elif method == "tools/call":

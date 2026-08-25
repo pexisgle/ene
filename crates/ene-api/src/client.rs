@@ -6,16 +6,17 @@ use crate::types::{
     CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot,
     GreetingView, Health, HistoryResponse, InstallProviderAssetRequest,
     InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
-    ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument,
-    MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, MessageRequest, Page,
-    PluginConfigField, PluginConfigOptionsView, PluginConfigValidateView, PluginConfigValues,
-    PluginConfigView, PluginView, Problem, ProviderAssetInstallStatusRequest,
-    ProviderAssetInstallStatusResponse, QueuedCancel, RefreshProviderAssetsCatalogRequest,
-    RefreshProviderAssetsCatalogResponse, ResolveMemoryCandidateRequest,
-    ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
-    SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
-    SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch, SoulSkillsPatch,
-    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpCatalogDocument,
+    McpDocument, McpProbeRequest, McpProbeResponse, MemoryCandidateView, MemoryJournalView,
+    MemoryPatch, MemoryView, MessageRequest, Page, PluginConfigField, PluginConfigOptionsView,
+    PluginConfigValidateView, PluginConfigValues, PluginConfigView, PluginView, Problem,
+    ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse, QueuedCancel,
+    RefreshProviderAssetsCatalogRequest, RefreshProviderAssetsCatalogResponse,
+    ResolveMemoryCandidateRequest, ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest,
+    ScheduleView, SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch,
+    SessionView, SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch,
+    SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest,
+    ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -628,6 +629,16 @@ impl ApiClient {
 
     pub async fn put_mcp(&self, body: &McpDocument) -> Result<McpDocument, ApiError> {
         self.send_json(self.request(Method::PUT, "/api/v1/mcp").json(body))
+            .await
+    }
+
+    pub async fn mcp_catalog(&self) -> Result<McpCatalogDocument, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/mcp/catalog"))
+            .await
+    }
+
+    pub async fn probe_mcp(&self, body: &McpProbeRequest) -> Result<McpProbeResponse, ApiError> {
+        self.send_json(self.request(Method::POST, "/api/v1/mcp/probe").json(body))
             .await
     }
 
