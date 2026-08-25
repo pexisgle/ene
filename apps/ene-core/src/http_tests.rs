@@ -19,7 +19,6 @@ use ene_kernel::{
 use ene_plane::{ApprovalMode, AuthzRequest, PolicyDecision, PolicyFile, PolicyRule, Sensitivity};
 use ene_session::{EventKind, EventPayload, SessionId, TurnOrigin, TurnOutcome};
 use std::collections::BTreeMap;
-use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -3769,7 +3768,7 @@ while True:
 "#,
     )
     .unwrap();
-    std::fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (_dir, client, core, server) = boot_server().await;
 
     // A successful probe must surface the ephemeral bridge's tools under the
@@ -4004,7 +4003,7 @@ while True:
 "#,
     )
     .unwrap();
-    std::fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (_dir, client, core, server) = boot_server().await;
     let context_dir = core.workspace_dir().join("mcp-context");
 
