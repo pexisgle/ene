@@ -505,12 +505,18 @@ pub struct McpProbeRequest {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Optional bearer credential forwarded to the ephemeral probe row only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpProbeResponse {
     #[serde(default)]
     pub ok: bool,
+    /// Catalog id this response belongs to; survives the ephemeral probe row.
+    #[serde(default)]
+    pub probed_id: String,
     #[serde(default)]
     pub error: Option<String>,
     /// Tools seen during the temporary pre-enable connection.

@@ -1700,8 +1700,12 @@ pub async fn probe_mcp(
     Json(body): Json<McpProbeRequest>,
 ) -> Result<Json<McpProbeResponse>, ApiReject> {
     web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    // The probe activates an ephemeral row whose server name differs from the
+    // catalog id, so remember both when filtering registered tools.
+    let requested_id = body.id.clone();
+    let auth_token = body.auth_token.clone();
     let server = McpServerView {
-        id: body.id,
+        id: requested_id.clone(),
         transport: body.transport,
         command: body.command,
         args: body.args,
@@ -1723,12 +1727,15 @@ pub async fn probe_mcp(
     // A unique ephemeral row id keeps probes isolated from saved servers and
     // from concurrent probes; the TTL task unloads it even on client abort.
     let row_id = format!("mcp.probe-{}", uuid::Uuid::now_v7().simple());
+    let ephemeral_server = row_id.trim_start_matches("mcp.").to_owned();
     let config = serde_json::json!({
-        "server": row_id.trim_start_matches("mcp."),
+        "server": ephemeral_server,
         "transport": parsed.transport,
         "command": parsed.command,
         "args": parsed.args,
         "url": parsed.url,
+        // Secrets never enter parsed rows; they only ride the ephemeral probe.
+        "auth_token": auth_token,
         "skills_home": "",
     });
     let row = ene_fiber::ProfileRow {
@@ -1746,15 +1753,20 @@ pub async fn probe_mcp(
         Ok(_) => McpProbeResponse {
             ok: true,
             error: None,
+            probed_id: requested_id.clone(),
             tools: supervisor
                 .registry()
                 .list()
                 .into_iter()
-                .filter(|tool| tool.name.starts_with(&format!("mcp:{}.", parsed.id)))
-                .map(|mut tool| {
+                .filter(|tool| tool.name.starts_with(&format!("mcp:{ephemeral_server}.")))
+                .map(|tool| {
                     let layer = tool.primary_layer().as_str().to_owned();
                     ToolView {
-                        name: std::mem::take(&mut tool.name),
+                        name: tool.name.replacen(
+                            &format!("mcp:{ephemeral_server}."),
+                            &format!("mcp:{}.", requested_id),
+                            1,
+                        ),
                         description: tool.description.clone(),
                         layer,
                         side_effects: tool.side_effects.clone(),
@@ -1765,6 +1777,7 @@ pub async fn probe_mcp(
         Err(err) => McpProbeResponse {
             ok: false,
             error: Some(err.to_string()),
+            probed_id: requested_id,
             tools: Vec::new(),
         },
     };

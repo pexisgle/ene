@@ -3707,6 +3707,207 @@ async fn mcp_probe_lists_tools_without_enabling_the_server() {
 }
 
 #[tokio::test]
+async fn mcp_probe_success_returns_probed_tools_without_saving_the_server() {
+    let python3 = std::process::Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|_| ());
+    if python3.is_none() {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let script = dir.path().join("mcp_probe_fixture.py");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_msg():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            raise SystemExit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        key, _, value = line.decode().partition(":")
+        headers[key.strip().lower()] = value.strip()
+    n = int(headers.get("content-length", "0"))
+    return json.loads(sys.stdin.buffer.read(n))
+
+def write_msg(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    msg = read_msg()
+    method = msg.get("method")
+    ident = msg.get("id")
+    if method == "initialize":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{
+            "protocolVersion":"2024-11-05",
+            "capabilities":{"tools":{}},
+            "serverInfo":{"name":"fixture","version":"0"}
+        }})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{"tools":[{
+            "name":"ping",
+            "description":"ping",
+            "annotations":{"readOnlyHint":True},
+            "inputSchema":{"type":"object","additionalProperties":False}
+        }]}})
+"#,
+    )
+    .unwrap();
+    let (_dir, client, core, server) = boot_server().await;
+
+    // A successful probe must surface the ephemeral bridge's tools under the
+    // probed catalog id and must not persist any server row.
+    let probe = client
+        .probe_mcp(&ene_api::McpProbeRequest {
+            id: "fixture".into(),
+            transport: "stdio".into(),
+            command: Some(script.display().to_string()),
+            ..ene_api::McpProbeRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        probe.error.is_none(),
+        "successful fixture probe should not error: {:?}",
+        probe.error
+    );
+    assert_eq!(probe.probed_id, "fixture");
+    let names: Vec<&str> = probe.tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        names.contains(&"mcp:fixture.ping"),
+        "probed tools must use the catalog namespace: {names:?}"
+    );
+    let ping = &probe.tools[0];
+    assert!(
+        ping.side_effects.is_empty(),
+        "readOnlyHint annotations must map to no side effects"
+    );
+    let saved = client.mcp().await.unwrap();
+    assert!(saved.servers.is_empty());
+    drop(core);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_probe_forwards_auth_token_to_remote_servers() {
+    let python3 = std::process::Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|_| ());
+    if python3.is_none() {
+        return;
+    }
+
+    // Minimal JSON-RPC-over-HTTP endpoint that requires a bearer token.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let remote = axum::Router::new()
+        .route(
+            "/mcp",
+            axum::routing::post(|headers: axum::http::HeaderMap, body: String| async move {
+                if headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    != Some("Bearer secret-token")
+                {
+                    return (axum::http::StatusCode::UNAUTHORIZED, "{}".to_owned());
+                }
+                let msg: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let ident = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                let result = match msg.get("method").and_then(|m| m.as_str()) {
+                    Some("initialize") => serde_json::json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "fixture", "version": "0"}
+                    }),
+                    Some("tools/list") => serde_json::json!({"tools":[{
+                        "name": "ping",
+                        "description": "ping",
+                        "annotations": {"readOnlyHint": true},
+                        "inputSchema": {"type": "object"}
+                    }]}),
+                    _ => serde_json::Value::Null,
+                };
+                (
+                    axum::http::StatusCode::OK,
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": ident, "result": result
+                    })
+                    .to_string(),
+                )
+            }),
+        )
+        .with_state(());
+    let remote_task = tokio::spawn(async move {
+        axum::serve(listener, remote).await.unwrap();
+    });
+
+    let (_dir, client, core, server) = boot_server().await;
+    let url = format!("http://{addr}/mcp");
+
+    // Without the credential the ephemeral probe must fail and save nothing.
+    let denied = client
+        .probe_mcp(&ene_api::McpProbeRequest {
+            id: "github-remote".into(),
+            transport: "http".into(),
+            url: Some(url.clone()),
+            ..ene_api::McpProbeRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        denied.error.is_some(),
+        "probe without a token must fail on auth-required remotes"
+    );
+    assert_eq!(denied.probed_id, "github-remote");
+    assert!(client.mcp().await.unwrap().servers.is_empty());
+
+    // With the credential the same catalog entry previews its tools.
+    let allowed = client
+        .probe_mcp(&ene_api::McpProbeRequest {
+            id: "github-remote".into(),
+            transport: "http".into(),
+            url: Some(url),
+            auth_token: Some("secret-token".into()),
+            ..ene_api::McpProbeRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        allowed.error.is_none(),
+        "probe with the bearer token should succeed: {:?}",
+        allowed.error
+    );
+    let names: Vec<&str> = allowed
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"mcp:github-remote.ping"),
+        "authenticated tools must use the catalog namespace: {names:?}"
+    );
+    assert!(client.mcp().await.unwrap().servers.is_empty());
+    drop(core);
+    server.shutdown().await;
+    remote_task.abort();
+}
+
+#[tokio::test]
 async fn list_provider_models_rejects_unknown_plugin_and_task() {
     let (_dir, client, _core, server) = boot_server().await;
     let unknown_plugin = client

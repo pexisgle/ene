@@ -353,6 +353,7 @@ pub struct DetailUiState {
     pub mcp_catalog_fallback: String,
     pub mcp_selected_catalog_id: String,
     pub mcp_probe_pending: Option<String>,
+    pub mcp_probe_candidate: Option<ene_api::McpCatalogEntryView>,
     pub mcp_probe_result: Option<ene_api::McpProbeResponse>,
     pub mcp_tools: Vec<ToolView>,
     pub plugin_config_id: String,
@@ -2762,26 +2763,25 @@ fn show_connections(
             }
         });
     }
-    if let Some(result) = state.mcp_probe_result.clone() {
+    if let Some(candidate) = state.mcp_probe_candidate.clone() {
         ui.group(|ui| {
             ui.heading(i18n::fl("connections-mcp-preview-title"));
+            let Some(result) = state.mcp_probe_result.clone() else {
+                return;
+            };
             if let Some(err) = result.error {
                 ui.label(i18n::fl("connections-status-unhealthy"));
                 ui.label(err);
+                // Auth-required remotes can still be added disabled; the
+                // secret is then provided through plugin config.
+                if candidate.auth != ene_api::McpCatalogAuthView::None
+                    && ui.button(i18n::fl("connections-mcp-preview-add")).clicked()
+                {
+                    add_probed_server(state, &candidate);
+                }
             } else {
                 if ui.button(i18n::fl("connections-mcp-preview-add")).clicked() {
-                    let id = probe_id(state);
-                    state.mcp_servers.push(ene_api::McpServerView {
-                        id,
-                        transport: "stdio".to_owned(),
-                        command: Some(String::new()),
-                        // Added rows stay disabled until the user enables
-                        // them after reviewing this preview.
-                        args: Vec::new(),
-                        url: None,
-                        enabled: false,
-                    });
-                    state.mcp_probe_result = None;
+                    add_probed_server(state, &candidate);
                 }
                 if result.tools.is_empty() {
                     ui.label(i18n::fl("connections-mcp-preview-empty"));
@@ -2806,9 +2806,19 @@ fn show_connections(
     show_mcp_form(ui, state, client, rt, async_results);
 }
 
-/// The pending probe id; the preview only exists while a probe is tracked.
-fn probe_id(state: &DetailUiState) -> String {
-    state.mcp_probe_pending.clone().unwrap_or_default()
+/// Persist the exact probed catalog entry as a disabled row. Enabling stays a
+/// separate user action after the preview (and any secret setup) succeeds.
+fn add_probed_server(state: &mut DetailUiState, candidate: &ene_api::McpCatalogEntryView) {
+    state.mcp_servers.push(ene_api::McpServerView {
+        id: candidate.id.clone(),
+        transport: candidate.transport.clone(),
+        command: candidate.command.clone(),
+        args: candidate.args.clone(),
+        url: candidate.url.clone(),
+        enabled: false,
+    });
+    state.mcp_probe_candidate = None;
+    state.mcp_probe_result = None;
 }
 
 fn connection_status_label(plugin: &PluginView) -> String {
@@ -3304,12 +3314,16 @@ fn show_mcp_catalog(
                 {
                     state.mcp_probe_pending = Some(entry.id.clone());
                     state.mcp_probe_result = None;
+                    // Snapshot the catalog row up front so Add keeps the
+                    // probed configuration even after the pending flag clears.
+                    state.mcp_probe_candidate = Some(entry.clone());
                     let probe = ene_api::McpProbeRequest {
                         id: entry.id.clone(),
                         transport: entry.transport.clone(),
                         command: entry.command.clone(),
                         args: entry.args.clone(),
                         url: entry.url.clone(),
+                        auth_token: None,
                     };
                     let client_probe = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
@@ -4956,5 +4970,39 @@ mod tests {
         }
         assert!(detail.plugin_config_values.contains("new"));
         assert!(!detail.plugin_config_values.contains("old"));
+    }
+
+    #[test]
+    fn add_probed_server_persists_the_exact_catalog_entry_disabled() {
+        let mut state = DetailUiState::default();
+        let candidate = ene_api::McpCatalogEntryView {
+            id: "github-remote".to_owned(),
+            label: "GitHub".to_owned(),
+            description: String::new(),
+            transport: "http".to_owned(),
+            command: None,
+            args: Vec::new(),
+            url: Some("https://mcp.example.com/sse".to_owned()),
+            auth: ene_api::McpCatalogAuthView::Oauth2Remote,
+            side_effects: Vec::new(),
+            source_url: String::new(),
+        };
+        state.mcp_probe_candidate = Some(candidate.clone());
+
+        add_probed_server(&mut state, &candidate);
+
+        assert_eq!(state.mcp_servers.len(), 1);
+        let added = &state.mcp_servers[0];
+        assert_eq!(added.id, candidate.id);
+        assert_eq!(added.transport, candidate.transport);
+        assert_eq!(added.command, candidate.command);
+        assert_eq!(added.args, candidate.args);
+        assert_eq!(added.url, candidate.url);
+        assert!(
+            !added.enabled,
+            "added catalog rows must stay disabled until reviewed"
+        );
+        assert!(state.mcp_probe_candidate.is_none());
+        assert!(state.mcp_probe_result.is_none());
     }
 }
