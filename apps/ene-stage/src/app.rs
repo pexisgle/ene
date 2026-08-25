@@ -266,6 +266,7 @@ pub fn run() -> Result<(), AppError> {
         approval_needs_reveal: false,
         pending_completion_refreshes: 0,
         completion_reconcile_inflight: false,
+        completion_high_water_seq: None,
     };
     app.surface.history = app.session.history();
     app.surface.greetings = app.session.greetings().to_vec();
@@ -324,6 +325,7 @@ struct StageApp {
     approval_needs_reveal: bool,
     pending_completion_refreshes: u32,
     completion_reconcile_inflight: bool,
+    completion_high_water_seq: Option<u64>,
 }
 
 impl StageApp {
@@ -384,6 +386,7 @@ impl StageApp {
             approval_needs_reveal: false,
             pending_completion_refreshes: 0,
             completion_reconcile_inflight: false,
+            completion_high_water_seq: None,
         }
     }
 
@@ -665,11 +668,14 @@ impl StageApp {
                 }
                 match result {
                     Ok(history) => {
-                        let has_assistant = history.messages.iter().any(|m| m.role == "assistant");
-                        // A completed turn must own the surface once its
-                        // assistant row lands; until then keep optimistic rows
-                        // visible instead of flashing an empty projection.
-                        if has_assistant {
+                        // Completion means authoritative history advanced past
+                        // the rows that predated the turn; any-assistant is not
+                        // enough because later turns start with earlier turns'
+                        // assistant rows already present.
+                        let progressed = self.completion_high_water_seq.is_none_or(|high_water| {
+                            history.messages.iter().any(|m| m.seq > high_water)
+                        });
+                        if progressed {
                             self.surface.history = history.clone();
                             self.pending_completion_refreshes = 0;
                         }
@@ -1252,13 +1258,24 @@ impl StageApp {
 
     /// Re-fetch history after a turn completes. The first refresh can still be
     /// stale because the projection lags the end event, so the fetch retries
-    /// inside one task until the surface shows an assistant row or the budget
-    /// runs out; ordering between send outcomes and turn-end events does not
-    /// matter because both entry points arm through this method.
+    /// inside one task until authoritative history advances past the rows that
+    /// existed when the arm happened; ordering between send outcomes and
+    /// turn-end events does not matter because both entry points arm through
+    /// this method. Re-arming keeps the highest watermark seen so a second
+    /// send cannot complete against rows from only its predecessor.
     fn begin_completion_reconciliation(&mut self) {
         if !self.completion_reconcile_inflight {
             self.pending_completion_refreshes = MAX_COMPLETION_REFRESHES;
         }
+        let high_water = self
+            .surface
+            .history
+            .messages
+            .iter()
+            .map(|m| m.seq)
+            .max()
+            .or(self.completion_high_water_seq);
+        self.completion_high_water_seq = high_water;
         self.schedule_completion_refresh();
     }
 
@@ -3341,6 +3358,104 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_ignores_stale_prior_turns_and_waits_for_new_rows() {
+        let mut app = StageApp::new_for_test();
+        let session_id = app.session.session_id().to_owned();
+
+        // The conversation already holds a completed first turn.
+        app.session.replace_history(HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 1,
+                    role: "user".to_owned(),
+                    text: "first question".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 2,
+                    role: "assistant".to_owned(),
+                    text: "first answer".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        });
+        app.surface.history = app.session.history();
+
+        // Second turn completes before the send outcome drains.
+        app.session.set_turn_id_for_test("turn-2");
+        app.apply_live_event(LiveEvent::SessionEvent {
+            kind: "turn/end".to_owned(),
+            text: String::new(),
+        });
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id,
+            sent_text: "second question".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 3);
+        assert_eq!(app.surface.history.messages[2].text, "second question");
+
+        // Attempt #1 returns the stale pre-turn rows (no new user row yet):
+        // the optimistic row must stay and the loop must retry.
+        let stale_pair = HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 1,
+                    role: "user".to_owned(),
+                    text: "first question".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 2,
+                    role: "assistant".to_owned(),
+                    text: "first answer".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(stale_pair.clone()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 3);
+        assert_eq!(app.surface.history.messages[2].text, "second question");
+        assert!(app.completion_reconcile_inflight);
+
+        // Attempt #2 carries the newly completed turn and owns the surface.
+        let with_second_turn = HistoryResponse {
+            messages: vec![
+                ene_api::MessageResponse {
+                    seq: 1,
+                    role: "user".to_owned(),
+                    text: "first question".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 2,
+                    role: "assistant".to_owned(),
+                    text: "first answer".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 3,
+                    role: "user".to_owned(),
+                    text: "second question".to_owned(),
+                },
+                ene_api::MessageResponse {
+                    seq: 4,
+                    role: "assistant".to_owned(),
+                    text: "second answer".to_owned(),
+                },
+            ],
+            depth: "surface".to_owned(),
+        };
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Ok(with_second_turn.clone()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 4);
+        assert_eq!(app.surface.history.messages[3].text, "second answer");
+        assert_eq!(app.pending_completion_refreshes, 0);
+        assert!(!app.completion_reconcile_inflight);
+    }
+
+    #[test]
     fn reconcile_ignores_other_sessions_and_drains_budget_when_assistant_missing() {
         let mut app = StageApp::new_for_test();
         let session_id = app.session.session_id().to_owned();
@@ -3360,12 +3475,16 @@ mod tests {
             }),
         });
 
-        // The in-flight attempt is still pending, so a same-session result
-        // cannot start a new fetch yet.
+        // The in-flight attempt is still pending, and a same-session result
+        // with rows at the watermark does not count as progress.
         app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
             session_id: session_id.clone(),
             result: Ok(HistoryResponse {
-                messages: Vec::new(),
+                messages: vec![ene_api::MessageResponse {
+                    seq: 1,
+                    role: "assistant".to_owned(),
+                    text: "old row".to_owned(),
+                }],
                 depth: "surface".to_owned(),
             }),
         });
@@ -3380,7 +3499,7 @@ mod tests {
                 }),
             });
         }
-        assert!(app.completion_reconcile_inflight);
+        assert!(!app.completion_reconcile_inflight);
         assert_eq!(app.pending_completion_refreshes, 0);
         assert!(app.surface.history.messages.is_empty());
 
