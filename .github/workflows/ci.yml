@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'labeled' && 'label' || 'default' }}
   cancel-in-progress: true
 
 env:
@@ -101,7 +101,9 @@ jobs:
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'scope:windows'))
+      (github.event_name == 'pull_request' &&
+        ((github.event.action == 'labeled' && github.event.label.name == 'scope:windows') ||
+         (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'scope:windows'))))
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
