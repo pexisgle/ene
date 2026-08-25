@@ -2765,40 +2765,37 @@ fn show_connections(
     if let Some(result) = state.mcp_probe_result.clone() {
         ui.group(|ui| {
             ui.heading(i18n::fl("connections-mcp-preview-title"));
-            match result.error {
-                Some(err) => {
-                    ui.label(i18n::fl("connections-status-unhealthy"));
-                    ui.label(err);
+            if let Some(err) = result.error {
+                ui.label(i18n::fl("connections-status-unhealthy"));
+                ui.label(err);
+            } else {
+                if ui.button(i18n::fl("connections-mcp-preview-add")).clicked() {
+                    let id = probe_id(state);
+                    state.mcp_servers.push(ene_api::McpServerView {
+                        id,
+                        transport: "stdio".to_owned(),
+                        command: Some(String::new()),
+                        // Added rows stay disabled until the user enables
+                        // them after reviewing this preview.
+                        args: Vec::new(),
+                        url: None,
+                        enabled: false,
+                    });
+                    state.mcp_probe_result = None;
                 }
-                None => {
-                    if ui.button(i18n::fl("connections-mcp-preview-add")).clicked() {
-                        let id = probe_id(&state);
-                        state.mcp_servers.push(ene_api::McpServerView {
-                            id,
-                            transport: "stdio".to_owned(),
-                            command: Some(String::new()),
-                            // Added rows stay disabled until the user enables
-                            // them after reviewing this preview.
-                            args: Vec::new(),
-                            url: None,
-                            enabled: false,
-                        });
-                        state.mcp_probe_result = None;
-                    }
-                    if result.tools.is_empty() {
-                        ui.label(i18n::fl("connections-mcp-preview-empty"));
-                    }
-                    for tool in &result.tools {
-                        ui.horizontal(|ui| {
-                            ui.label(&tool.name);
-                            ui.small(&tool.description);
-                        });
-                        if !tool.side_effects.is_empty() {
-                            ui.label(i18n::format(
-                                "connections-mcp-tools-side-effects",
-                                &[("effects", tool.side_effects.join(", ").as_str())],
-                            ));
-                        }
+                if result.tools.is_empty() {
+                    ui.label(i18n::fl("connections-mcp-preview-empty"));
+                }
+                for tool in &result.tools {
+                    ui.horizontal(|ui| {
+                        ui.label(&tool.name);
+                        ui.small(&tool.description);
+                    });
+                    if !tool.side_effects.is_empty() {
+                        ui.label(i18n::format(
+                            "connections-mcp-tools-side-effects",
+                            &[("effects", tool.side_effects.join(", ").as_str())],
+                        ));
                     }
                 }
             }
