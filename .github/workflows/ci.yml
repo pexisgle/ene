@@ -96,6 +96,7 @@ jobs:
       - name: Build Japanese book
         run: mdbook build docs/ja
 
+  # Opt PRs into the Windows runner with the area:windows label.
   windows-native:
     name: Native Windows check
     if: >-
