@@ -555,8 +555,7 @@ impl StageApp {
                         .history
                         .messages
                         .last()
-                        .map(|m| m.seq + 1)
-                        .unwrap_or(0);
+                        .map_or(0, |m| m.seq + 1);
                     self.surface
                         .history
                         .messages
