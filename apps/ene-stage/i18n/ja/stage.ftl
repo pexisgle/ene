@@ -389,7 +389,6 @@ plugins-assets-installing = インストール中
 plugins-asset-install-started = アセットのインストールを開始しました
 plugins-asset-install-failed = アセットのインストールに失敗しました
 plugins-no-enable-map = 個別のプラグイン有効マップはありません。plugins.profile を変えてファイバーを再起動します。
-plugins-row-id = 行 ID
 connections-help = コアが接続するプラグイン・ローカルエンジン・MCP サーバーです。チャットや音声でプロバイダーが見つからないときはここを確認します。
 connections-empty = 実行中のプラグインはありません。
 connections-empty-help = コアがまだプラグインファイバーを読み込んでいません。コアが起動していることを確認して更新してください。

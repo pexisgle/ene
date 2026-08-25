@@ -389,7 +389,6 @@ plugins-assets-installing = Installing
 plugins-asset-install-started = Asset install started
 plugins-asset-install-failed = Asset install failed
 plugins-no-enable-map = Individual plugin enable maps are not used. Change plugins.profile and restart fibers.
-plugins-row-id = Row id
 connections-help = Plugins, local engines, and MCP servers the core talks to. Start here when chat or voice cannot find a provider.
 connections-empty = No plugins are running.
 connections-empty-help = The core has not loaded any plugin fibers yet. Make sure the core is running, then refresh.
