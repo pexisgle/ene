@@ -2648,6 +2648,15 @@ fn show_connections(
                     .map_err(|e| e.to_string()),
             )
         });
+        let client_catalog = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            AsyncOutcome::LoadMcpCatalog(
+                client_catalog
+                    .mcp_catalog()
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+        });
     }
     SectionHeading {
         title: i18n::fl("detail-tab-connections"),
