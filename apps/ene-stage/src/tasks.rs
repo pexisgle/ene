@@ -1,1 +1,147 @@
-dXNlIGVuZV9hcGk6OnsKICAgIEpvYlZpZXcsIE1lbW9yeUNhbmRpZGF0ZVZpZXcsIE1lbW9yeUpvdXJuYWxWaWV3LCBNZW1vcnlWaWV3LCBQbHVnaW5WaWV3LCBQcm92aWRlckFzc2V0VmlldywKICAgIFNjaGVkdWxlVmlldywKfTsKCnVzZSBjcmF0ZTo6Y29yZTo6c2Vzc2lvbjo6UHJlcGFyZWRTZXNzaW9uVGFyZ2V0OwoKcHViIHN0cnVjdCBBY3RpdmF0ZWRDaGFyYWN0ZXIgewogICAgcHViKGNyYXRlKSBjaGFyYWN0ZXI6IGVuZV9hcGk6OkNoYXJhY3RlclZpZXcsCiAgICBwdWIoY3JhdGUpIHRhcmdldDogT3B0aW9uPFByZXBhcmVkU2Vzc2lvblRhcmdldD4sCn0KCnB1YiBlbnVtIEFzeW5jT3V0Y29tZSB7CiAgICBTZW5kTWVzc2FnZSB7CiAgICAgICAgc2Vzc2lvbl9pZDogU3RyaW5nLAogICAgICAgIHNlbnRfdGV4dDogU3RyaW5nLAogICAgICAgIHJlc3VsdDogUmVzdWx0PCgpLCBTdHJpbmc+LAogICAgfSwKICAgIEJhcmdlSW4gewogICAgICAgIHNlc3Npb25faWQ6IFN0cmluZywKICAgICAgICByZXN1bHQ6IFJlc3VsdDwoKSwgU3RyaW5nPiwKICAgIH0sCiAgICBDYW5jZWxUdXJuIHsKICAgICAgICBzZXNzaW9uX2lkOiBTdHJpbmcsCiAgICAgICAgcmVzdWx0OiBSZXN1bHQ8KCksIFN0cmluZz4sCiAgICB9LAogICAgQXBwcm92YWwgewogICAgICAgIHNlc3Npb25faWQ6IFN0cmluZywKICAgICAgICByZXN1bHQ6IFJlc3VsdDwoKSwgU3RyaW5nPiwKICAgIH0sCiAgICBTZWxlY3RHcmVldGluZyB7CiAgICAgICAgc2Vzc2lvbl9pZDogU3RyaW5nLAogICAgICAgIHJlc3VsdDogUmVzdWx0PGVuZV9hcGk6Okhpc3RvcnlSZXNwb25zZSwgU3RyaW5nPiwKICAgIH0sCiAgICBMaXN0ZW4gewogICAgICAgIGdlbmVyYXRpb246IHU2NCwKICAgICAgICByZXN1bHQ6IFJlc3VsdDwoKSwgU3RyaW5nPiwKICAgIH0sCiAgICBSZWZyZXNoSGlzdG9yeSB7CiAgICAgICAgc2Vzc2lvbl9pZDogU3RyaW5nLAogICAgICAgIHJlc3VsdDogUmVzdWx0PGVuZV9hcGk6Okhpc3RvcnlSZXNwb25zZSwgU3RyaW5nPiwKICAgIH0sCiAgICBTYXZlTG9jYWxTZXR0aW5ncyhSZXN1bHQ8KCksIFN0cmluZz4pLAogICAgTG9hZENvcmVTZXR0aW5ncyhSZXN1bHQ8U3RyaW5nLCBTdHJpbmc+KSwKICAgIEFwcGx5Q29yZVNldHRpbmdzKFJlc3VsdDwoKSwgU3RyaW5nPiksCiAgICBMaXN0TWVtb3JpZXMgewogICAgICAgIHNvdWxfaWQ6IFN0cmluZywKICAgICAgICByZXN1bHQ6IFJlc3VsdDxWZWM8TWVtb3J5Vmlldz4sIFN0cmluZz4sCiAgICB9LAogICAgTGlzdFBlbmRpbmdNZW1vcmllcyB7CiAgICAgICAgc291bF9pZDogU3RyaW5nLAogICAgICAgIHJlc3VsdDogUmVzdWx0PFZlYzxNZW1vcnlDYW5kaWRhdGVWaWV3PiwgU3RyaW5nPiwKICAgIH0sCiAgICBMaXN0TWVtb3J5Sm91cm5hbCB7CiAgICAgICAgc291bF9pZDogU3RyaW5nLAogICAgICAgIHJlc3VsdDogUmVzdWx0PFZlYzxNZW1vcnlKb3VybmFsVmlldz4sIFN0cmluZz4sCiAgICB9LAogICAgUmVzb2x2ZU1lbW9yeSB7CiAgICAgICAgc291bF9pZDogU3RyaW5nLAogICAgICAgIGlkOiBTdHJpbmcsCiAgICAgICAgcmVzdWx0OiBSZXN1bHQ8KCksIFN0cmluZz4sCiAgICB9LAogICAgUmVzb2x2ZU1lbW9yeUZhaWxlZEtlZXBDYW5kaWRhdGUgewogICAgICAgIHNvdWxfaWQ6IFN0cmluZywKICAgICAgICBvcmlnaW5hbDogTWVtb3J5Q2FuZGlkYXRlVmlldywKICAgICAgICByZXN1bHQ6IFJlc3VsdDwoKSwgU3RyaW5nPiwKICAgIH0sCiAgICBEZWxldGVNZW1vcnkgewogICAgICAgIHNvdWxfaWQ6IFN0cmluZywKICAgICAgICBpZDogU3RyaW5nLAogICAgICAgIHJlc3VsdDogUmVzdWx0PCgpLCBTdHJpbmc+LAogICAgfSwKICAgIENvbXBsZXRlTWVtb3J5IHsKICAgICAgICBzb3VsX2lkOiBTdHJpbmcsCiAgICAgICAgaWQ6IFN0cmluZywKICAgICAgICByZXN1bHQ6IFJlc3VsdDwoKSwgU3RyaW5nPiwKICAgIH0sCiAgICBMb2FkU291bChSZXN1bHQ8ZW5lX2FwaTo6U291bFZpZXcsIFN0cmluZz4pLAogICAgUGF0Y2hCb2R5KFJlc3VsdDxlbmVfYXBpOjpTb3VsVmlldywgU3RyaW5nPiksCiAgICBJbXBvcnRDaGFyYWN0ZXIgewogICAgICAgIGdlbmVyYXRpb246IHU2NCwKICAgICAgICByZXN1bHQ6IFJlc3VsdDxBY3RpdmF0ZWRDaGFyYWN0ZXIsIFN0cmluZz4sCiAgICB9LAogICAgQWN0aXZhdGVDaGFyYWN0ZXIgewogICAgICAgIGdlbmVyYXRpb246IHU2NCwKICAgICAgICByZXN1bHQ6IFJlc3VsdDxBY3RpdmF0ZWRDaGFyYWN0ZXIsIFN0cmluZz4sCiAgICB9LAogICAgTGlzdENoYXJhY3RlcnMoUmVzdWx0PFZlYzxlbmVfYXBpOjpDaGFyYWN0ZXJWaWV3PiwgU3RyaW5nPiksCiAgICBMaXN0T2NjdXBhbnRzKFJlc3VsdDxWZWM8ZW5lX2FwaTo6T2NjdXBhbnRWaWV3PiwgU3RyaW5nPiksCiAgICBMaXN0Sm9icyhSZXN1bHQ8KFZlYzxKb2JWaWV3PiwgVmVjPFNjaGVkdWxlVmlldz4pLCBTdHJpbmc+KSwKICAgIENyZWF0ZUpvYihSZXN1bHQ8Sm9iVmlldywgU3RyaW5nPiksCiAgICBDcmVhdGVTY2hlZHVsZShSZXN1bHQ8U2NoZWR1bGVWaWV3LCBTdHJpbmc+KSwKICAgIENhbmNlbEpvYiB7CiAgICAgICAgaWQ6IFN0cmluZywKICAgICAgICByZXN1bHQ6IFJlc3VsdDwoKSwgU3RyaW5nPiwKICAgIH0sCiAgICBUb2dnbGVTY2hlZHVsZSB7CiAgICAgICAgaWQ6IFN0cmluZywKICAgICAgICBlbmFibGVkOiBib29sLAogICAgICAgIHJlc3VsdDogUmVzdWx0PCgpLCBTdHJpbmc+LAogICAgfSwKICAgIExpc3RQbHVnaW5zKFJlc3VsdDxWZWM8UGx1Z2luVmlldz4sIFN0cmluZz4pLAogICAgUmVzdGFydFBsdWdpbiB7CiAgICAgICAgaWQ6IFN0cmluZywKICAgICAgICByZXN1bHQ6IFJlc3VsdDwoKSwgU3RyaW5nPiwKICAgIH0sCiAgICBMb2FkUGx1Z2luQ29uZmlnIHsKICAgICAgICByZXF1ZXN0X2lkOiB1NjQsCiAgICAgICAgaWQ6IFN0cmluZywKICAgICAgICByZXN1bHQ6IFJlc3VsdDxlbmVfYXBpOjpQbHVnaW5Db25maWdWaWV3LCBTdHJpbmc+LAogICAgfSwKICAgIFZhbGlkYXRlUGx1Z2luQ29uZmlnKFJlc3VsdDxlbmVfYXBpOjpQbHVnaW5Db25maWdWYWxpZGF0ZVZpZXcsIFN0cmluZz4pLAogICAgQXBwbHlQbHVnaW5Db25maWcoUmVzdWx0PGVuZV9hcGk6OlBsdWdpbkNvbmZpZ1ZhbGlkYXRlVmlldywgU3RyaW5nPiksCiAgICBQbHVnaW5Db25maWdPcHRpb25zKFJlc3VsdDxlbmVfYXBpOjpQbHVnaW5Db25maWdPcHRpb25zVmlldywgU3RyaW5nPiksCiAgICBMaXN0UHJvdmlkZXJBc3NldHMoUmVzdWx0PFZlYzxQcm92aWRlckFzc2V0Vmlldz4sIFN0cmluZz4pLAogICAgSW5zdGFsbFByb3ZpZGVyQXNzZXQgewogICAgICAgIGFzc2V0X2lkOiBTdHJpbmcsCiAgICAgICAgcmVzdWx0OiBSZXN1bHQ8U3RyaW5nLCBTdHJpbmc+LAogICAgfSwKICAgIFByb3ZpZGVyQXNzZXRJbnN0YWxsU3RhdHVzIHsKICAgICAgICBhc3NldF9pZDogU3RyaW5nLAogICAgICAgIHJlc3VsdDogUmVzdWx0PGVuZV9hcGk6OlByb3ZpZGVyQXNzZXRJbnN0YWxsU3RhdHVzUmVzcG9uc2UsIFN0cmluZz4sCiAgICB9LAogICAgU2V0QWN0aXZlUHJvdmlkZXJBc3NldCB7CiAgICAgICAgYXNzZXRfaWQ6IFN0cmluZywKICAgICAgICByZXN1bHQ6IFJlc3VsdDwoKSwgU3RyaW5nPiwKICAgIH0sCiAgICBMaXN0UHJvdmlkZXJNb2RlbHMoUmVzdWx0PChWZWM8U3RyaW5nPiwgT3B0aW9uPFN0cmluZz4pLCBTdHJpbmc+KSwKICAgIExvYWRNY3AoUmVzdWx0PFN0cmluZywgU3RyaW5nPiksCiAgICBTYXZlTWNwKFJlc3VsdDwoKSwgU3RyaW5nPiksCiAgICBNaWNDbGFpbShSZXN1bHQ8Ym9vbCwgU3RyaW5nPiksCiAgICBTcGVha2VyQ2xhaW0oUmVzdWx0PFN0cmluZywgU3RyaW5nPiksCiAgICBOb3RpZnlDbGFpbShSZXN1bHQ8KCksIFN0cmluZz4pLAogICAgSGVhbHRoKFJlc3VsdDxlbmVfYXBpOjpIZWFsdGgsIFN0cmluZz4pLAogICAgVXNhZ2UoUmVzdWx0PGVuZV9hcGk6OlVzYWdlVmlldywgU3RyaW5nPiksCiAgICBCYWNrdXAoUmVzdWx0PChTdHJpbmcsIFN0cmluZyksIFN0cmluZz4pLAogICAgUmVzdG9yZShSZXN1bHQ8KCksIFN0cmluZz4pLAogICAgRGlhZ1NwYW5zKFJlc3VsdDxWZWM8ZW5lX2FwaTo6U3BhblZpZXc+LCBTdHJpbmc+KSwKICAgIExvYWRTY2hlbWEoUmVzdWx0PFN0cmluZywgU3RyaW5nPiksCiAgICBMaXN0QXBwcm92YWxzKFJlc3VsdDxWZWM8ZW5lX2FwaTo6QXBwcm92YWxWaWV3PiwgU3RyaW5nPiksCiAgICBSZWxvYWRBdmF0YXIsCiAgICBFeHBvcnRDaGFyYWN0ZXIoUmVzdWx0PCgpLCBTdHJpbmc+KSwKICAgIEZvcmtTZXNzaW9uKFJlc3VsdDxTdHJpbmcsIFN0cmluZz4pLAogICAgTmV3U2Vzc2lvbihSZXN1bHQ8ZW5lX2FwaTo6U3BsaXRTZXNzaW9uUmVzcG9uc2UsIFN0cmluZz4pLAogICAgQ29tcGFjdFNlc3Npb24oUmVzdWx0PFN0cmluZywgU3RyaW5nPiksCiAgICBFeHBvcnRTZXNzaW9uKFJlc3VsdDwoKSwgU3RyaW5nPiksCn0K
+use ene_api::{
+    JobView, MemoryCandidateView, MemoryJournalView, MemoryView, PluginView, ProviderAssetView,
+    ScheduleView,
+};
+
+use crate::core::session::PreparedSessionTarget;
+
+pub struct ActivatedCharacter {
+    pub(crate) character: ene_api::CharacterView,
+    pub(crate) target: Option<PreparedSessionTarget>,
+}
+
+pub enum AsyncOutcome {
+    SendMessage {
+        session_id: String,
+        sent_text: String,
+        result: Result<(), String>,
+    },
+    BargeIn {
+        session_id: String,
+        result: Result<(), String>,
+    },
+    CancelTurn {
+        session_id: String,
+        result: Result<(), String>,
+    },
+    Approval {
+        session_id: String,
+        result: Result<(), String>,
+    },
+    SelectGreeting {
+        session_id: String,
+        result: Result<ene_api::HistoryResponse, String>,
+    },
+    Listen {
+        generation: u64,
+        result: Result<(), String>,
+    },
+    RefreshHistory {
+        session_id: String,
+        result: Result<ene_api::HistoryResponse, String>,
+    },
+    SaveLocalSettings(Result<(), String>),
+    LoadCoreSettings(Result<String, String>),
+    ApplyCoreSettings(Result<(), String>),
+    ListMemories {
+        soul_id: String,
+        result: Result<Vec<MemoryView>, String>,
+    },
+    ListPendingMemories {
+        soul_id: String,
+        result: Result<Vec<MemoryCandidateView>, String>,
+    },
+    ListMemoryJournal {
+        soul_id: String,
+        result: Result<Vec<MemoryJournalView>, String>,
+    },
+    ResolveMemory {
+        soul_id: String,
+        id: String,
+        result: Result<(), String>,
+    },
+    ResolveMemoryFailedKeepCandidate {
+        soul_id: String,
+        original: MemoryCandidateView,
+        result: Result<(), String>,
+    },
+    DeleteMemory {
+        soul_id: String,
+        id: String,
+        result: Result<(), String>,
+    },
+    CompleteMemory {
+        soul_id: String,
+        id: String,
+        result: Result<(), String>,
+    },
+    LoadSoul(Result<ene_api::SoulView, String>),
+    PatchBody(Result<ene_api::SoulView, String>),
+    ImportCharacter {
+        generation: u64,
+        result: Result<ActivatedCharacter, String>,
+    },
+    ActivateCharacter {
+        generation: u64,
+        result: Result<ActivatedCharacter, String>,
+    },
+    ListCharacters(Result<Vec<ene_api::CharacterView>, String>),
+    ListOccupants(Result<Vec<ene_api::OccupantView>, String>),
+    ListJobs(Result<(Vec<JobView>, Vec<ScheduleView>), String>),
+    CreateJob(Result<JobView, String>),
+    CreateSchedule(Result<ScheduleView, String>),
+    CancelJob {
+        id: String,
+        result: Result<(), String>,
+    },
+    ToggleSchedule {
+        id: String,
+        enabled: bool,
+        result: Result<(), String>,
+    },
+    ListPlugins(Result<Vec<PluginView>, String>),
+    RestartPlugin {
+        id: String,
+        result: Result<(), String>,
+    },
+    LoadPluginConfig {
+        request_id: u64,
+        id: String,
+        result: Result<ene_api::PluginConfigView, String>,
+    },
+    ValidatePluginConfig(Result<ene_api::PluginConfigValidateView, String>),
+    ApplyPluginConfig(Result<ene_api::PluginConfigValidateView, String>),
+    PluginConfigOptions(Result<ene_api::PluginConfigOptionsView, String>),
+    ListProviderAssets(Result<Vec<ProviderAssetView>, String>),
+    InstallProviderAsset {
+        asset_id: String,
+        result: Result<String, String>,
+    },
+    ProviderAssetInstallStatus {
+        asset_id: String,
+        result: Result<ene_api::ProviderAssetInstallStatusResponse, String>,
+    },
+    SetActiveProviderAsset {
+        asset_id: String,
+        result: Result<(), String>,
+    },
+    ListProviderModels(Result<(Vec<String>, Option<String>), String>),
+    LoadMcp(Result<String, String>),
+    SaveMcp(Result<(), String>),
+    MicClaim(Result<bool, String>),
+    SpeakerClaim(Result<String, String>),
+    NotifyClaim(Result<(), String>),
+    Health(Result<ene_api::Health, String>),
+    Usage(Result<ene_api::UsageView, String>),
+    Backup(Result<(String, String), String>),
+    Restore(Result<(), String>),
+    DiagSpans(Result<Vec<ene_api::SpanView>, String>),
+    LoadSchema(Result<String, String>),
+    ListApprovals(Result<Vec<ene_api::ApprovalView>, String>),
+    ReloadAvatar,
+    ExportCharacter(Result<(), String>),
+    ForkSession(Result<String, String>),
+    NewSession(Result<ene_api::SplitSessionResponse, String>),
+    CompactSession(Result<String, String>),
+    ExportSession(Result<(), String>),
+}
