@@ -1764,7 +1764,7 @@ pub async fn probe_mcp(
                     ToolView {
                         name: tool.name.replacen(
                             &format!("mcp:{ephemeral_server}."),
-                            &format!("mcp:{}.", requested_id),
+                            &format!("mcp:{requested_id}."),
                             1,
                         ),
                         description: tool.description.clone(),
