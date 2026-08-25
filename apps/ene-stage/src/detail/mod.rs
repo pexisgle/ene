@@ -353,6 +353,7 @@ pub struct DetailUiState {
     pub mcp_catalog_fallback: String,
     pub mcp_selected_catalog_id: String,
     pub mcp_catalog_auth_input: String,
+    pub mcp_probe_generation: u64,
     pub mcp_probe_pending: Option<String>,
     pub mcp_probe_candidate: Option<ene_api::McpCatalogEntryView>,
     pub mcp_probe_result: Option<ene_api::McpProbeResponse>,
@@ -455,6 +456,16 @@ impl DetailUiState {
     #[must_use]
     pub fn activation_is_current(&self, generation: u64) -> bool {
         self.activation_generation == generation
+    }
+
+    pub fn next_mcp_probe_generation(&mut self) -> u64 {
+        self.mcp_probe_generation = self.mcp_probe_generation.wrapping_add(1);
+        self.mcp_probe_generation
+    }
+
+    #[must_use]
+    pub fn mcp_probe_is_current(&self, generation: u64) -> bool {
+        self.mcp_probe_generation == generation
     }
 
     pub fn invalidate_character(&mut self) {
@@ -2760,7 +2771,9 @@ fn show_connections(
                 .button(i18n::fl("connections-mcp-probe-cancel"))
                 .clicked()
             {
+                state.next_mcp_probe_generation();
                 state.mcp_probe_pending = None;
+                state.mcp_probe_result = None;
             }
         });
     }
@@ -3337,6 +3350,7 @@ fn show_mcp_catalog(
                 if ui.button(i18n::fl("mcp-catalog-connect")).clicked()
                     && !state.mcp_servers.iter().any(|server| server.id == entry.id)
                 {
+                    let generation = state.next_mcp_probe_generation();
                     state.mcp_probe_pending = Some(entry.id.clone());
                     state.mcp_probe_result = None;
                     // Snapshot the catalog row up front so Add keeps the
@@ -3357,12 +3371,13 @@ fn show_mcp_catalog(
                     state.mcp_catalog_auth_input.clear();
                     let client_probe = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
-                        AsyncOutcome::ProbeMcp(
-                            client_probe
+                        AsyncOutcome::ProbeMcp {
+                            generation,
+                            result: client_probe
                                 .probe_mcp(&probe)
                                 .await
                                 .map_err(|e| e.to_string()),
-                        )
+                        }
                     });
                 } else if ui.button(i18n::fl("mcp-catalog-connect")).clicked() {
                     state.core_status = i18n::fl("mcp-catalog-already-added");
@@ -5034,5 +5049,15 @@ mod tests {
         );
         assert!(state.mcp_probe_candidate.is_none());
         assert!(state.mcp_probe_result.is_none());
+    }
+
+    #[test]
+    fn stale_mcp_probe_results_are_ignored() {
+        let mut state = DetailUiState::default();
+        let first = state.next_mcp_probe_generation();
+        let second = state.next_mcp_probe_generation();
+
+        assert!(!state.mcp_probe_is_current(first));
+        assert!(state.mcp_probe_is_current(second));
     }
 }

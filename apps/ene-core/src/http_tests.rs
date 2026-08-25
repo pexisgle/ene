@@ -3915,6 +3915,99 @@ async fn mcp_probe_forwards_auth_token_to_remote_servers() {
 }
 
 #[tokio::test]
+async fn mcp_probe_only_enumerates_tools_without_ingesting_context() {
+    let python3 = std::process::Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|_| ());
+    if python3.is_none() {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let script = dir.path().join("mcp_probe_only_fixture.py");
+    // The fixture exposes a readable resource; probe-only mode must stop at
+    // tools/list and never request its contents.
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_msg():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            raise SystemExit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        key, _, value = line.decode().partition(":")
+        headers[key.strip().lower()] = value.strip()
+    n = int(headers.get("content-length", "0"))
+    return json.loads(sys.stdin.buffer.read(n))
+
+def write_msg(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    msg = read_msg()
+    method = msg.get("method")
+    ident = msg.get("id")
+    if method == "initialize":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{
+            "protocolVersion":"2024-11-05",
+            "capabilities":{"tools":{},"resources":{}},
+            "serverInfo":{"name":"fixture","version":"0"}
+        }})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{"tools":[{
+            "name":"ping",
+            "description":"ping",
+            "annotations":{"readOnlyHint":True},
+            "inputSchema":{"type":"object","additionalProperties":False}
+        }]}})
+    elif method == "resources/list":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{"resources":[{
+            "uri":"file:///notes.md",
+            "name":"notes"
+        }]}})
+    elif method == "resources/read":
+        write_msg({"jsonrpc":"2.0","id":ident,"error":{"code":-32601,"message":"blocked"}})
+    else:
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{}})
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
+    let (_dir, client, core, server) = boot_server().await;
+    let context_dir = core.workspace_dir().join("mcp-context");
+
+    let probe = client
+        .probe_mcp(&ene_api::McpProbeRequest {
+            id: "fixture".into(),
+            transport: "stdio".into(),
+            command: Some(script.display().to_string()),
+            ..ene_api::McpProbeRequest::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        probe.error.is_none(),
+        "probe-only fixture should still enumerate tools: {:?}",
+        probe.error
+    );
+    assert!(!context_dir.exists(), "probe must not create context files");
+    drop(core);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_provider_models_rejects_unknown_plugin_and_task() {
     let (_dir, client, _core, server) = boot_server().await;
     let unknown_plugin = client

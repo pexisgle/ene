@@ -39,6 +39,7 @@ struct McpConfig {
     args: Vec<String>,
     url: Option<String>,
     auth_token: Option<String>,
+    probe_only: bool,
     skills_home: PathBuf,
 }
 
@@ -80,6 +81,10 @@ fn load_config() -> McpConfig {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    let probe_only = value
+        .get("probe_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let skills_home = value
         .get("skills_home")
         .and_then(Value::as_str)
@@ -92,6 +97,7 @@ fn load_config() -> McpConfig {
         args,
         url,
         auth_token,
+        probe_only,
         skills_home,
     }
 }
@@ -238,7 +244,9 @@ impl McpBridge {
                 })
             })
             .collect();
-        ingest_context(&mut session, &config).await;
+        if !config.probe_only {
+            ingest_context(&mut session, &config).await;
+        }
         Ok(Self {
             plugin_id,
             digest: exe_digest(),

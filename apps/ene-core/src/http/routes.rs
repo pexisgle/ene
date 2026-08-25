@@ -1726,6 +1726,8 @@ pub async fn probe_mcp(
     if let Some(token) = body.auth_token.as_deref().filter(|token| !token.is_empty()) {
         crate::plugin_profile::store_mcp_auth_token(state.core.vault(), &parsed.id, token)
             .map_err(|err| conflict("fault", &err.to_string()))?;
+        crate::plugin_profile::ensure_mcp_auth_metadata(state.core.data_dir(), &parsed.id)
+            .map_err(|err| conflict("fault", &err.to_string()))?;
     }
     let auth_token = crate::plugin_profile::mcp_auth_token(state.core.vault(), &parsed.id);
     let stored_auth = auth_token.is_some();
@@ -1741,6 +1743,8 @@ pub async fn probe_mcp(
         "url": parsed.url,
         // Secrets never enter parsed rows; they only ride the ephemeral probe.
         "auth_token": auth_token,
+        // Preview must enumerate tools only; no context files are written.
+        "probe_only": true,
         "skills_home": "",
     });
     let row = ene_fiber::ProfileRow {

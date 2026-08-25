@@ -667,7 +667,10 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::ProbeMcp(result) => {
+            AsyncOutcome::ProbeMcp { generation, result } => {
+                if !self.detail.mcp_probe_is_current(generation) {
+                    return;
+                }
                 self.detail.mcp_probe_pending = None;
                 self.detail.mcp_probe_result = match result {
                     Ok(response) => Some(response),
