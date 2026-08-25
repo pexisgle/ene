@@ -2751,12 +2751,15 @@ fn connection_status_label(plugin: &PluginView) -> String {
         {
             return i18n::fl("connections-status-auth-required");
         }
-        return i18n::format("connections-status-unhealthy", &[("error", error.as_str())]);
+        return i18n::format(
+            "connections-status-unhealthy-error",
+            &[("error", error.as_str())],
+        );
     }
     match plugin.state.as_str() {
         "active" => i18n::fl("connections-status-active"),
         "loading" | "waiting" => i18n::fl("connections-status-connecting"),
-        "failed" => i18n::format("connections-status-unhealthy", &[("error", "")]),
+        "failed" => i18n::fl("connections-status-unhealthy-no-error"),
         _ => i18n::fl("connections-status-disabled"),
     }
 }

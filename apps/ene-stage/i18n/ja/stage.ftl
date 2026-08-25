@@ -394,10 +394,8 @@ connections-empty-help = コアがまだプラグインファイバーを読み�
 connections-status-active = 有効
 connections-status-connecting = 接続中
 connections-status-disabled = 無効
-connections-status-unhealthy = 異常{$error ->
-        ["" ] {""}
-       *[other] {: $error}
-    }
+connections-status-unhealthy-no-error = 異常
+connections-status-unhealthy-error = 異常: {$error}
 connections-status-auth-required = 認証が必要
 connections-mcp-tools-title = MCP ツール
 connections-mcp-tools-side-effects = 副作用: {$effects}

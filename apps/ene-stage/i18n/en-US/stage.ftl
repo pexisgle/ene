@@ -394,10 +394,8 @@ connections-empty-help = The core has not loaded any plugin fibers yet. Make sur
 connections-status-active = active
 connections-status-connecting = connecting
 connections-status-disabled = disabled
-connections-status-unhealthy = unhealthy{$error ->
-        ["" ] {""}
-       *[other] {: $error}
-    }
+connections-status-unhealthy-no-error = unhealthy
+connections-status-unhealthy-error = unhealthy: {$error}
 connections-status-auth-required = auth required
 connections-mcp-tools-title = MCP tools
 connections-mcp-tools-side-effects = Side effects: {$effects}
