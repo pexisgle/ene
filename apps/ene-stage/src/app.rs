@@ -577,6 +577,9 @@ impl StageApp {
                             role: "user".to_owned(),
                             text: sent_text,
                         });
+                    if let Some(chat) = &self.chat {
+                        chat.request_redraw();
+                    }
                     self.begin_completion_reconciliation();
                 }
             }
