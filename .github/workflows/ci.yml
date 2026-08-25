@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   workflow_call:
   workflow_dispatch:
 
@@ -21,6 +22,7 @@ env:
 jobs:
   check:
     name: Check
+    if: github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
@@ -42,6 +44,7 @@ jobs:
 
   feature-matrix:
     name: Cargo feature matrix
+    if: github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -59,6 +62,7 @@ jobs:
 
   test:
     name: Tests
+    if: github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
@@ -94,7 +98,10 @@ jobs:
 
   windows-native:
     name: Native Windows check
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'scope:windows'))
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
