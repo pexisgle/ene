@@ -180,7 +180,7 @@ impl SurfaceUiState {
 }
 
 pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
-    let response = chat::show(ui, state, mic_active);
+    state.chat_input_focused = chat::show(ui, state, mic_active);
     if state.pending_approval.is_some() {
         approvals::show(ui.ctx(), state);
     }
@@ -200,7 +200,6 @@ pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool
         ui.ctx()
             .memory_mut(|mem| mem.request_focus(egui::Id::new(chat::CHAT_INPUT_ID)));
     }
-    state.chat_input_focused = response.has_focus();
 }
 
 pub fn show_caption(
