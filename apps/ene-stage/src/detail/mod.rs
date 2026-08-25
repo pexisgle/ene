@@ -2727,8 +2727,10 @@ fn show_connections(
             ui.horizontal(|ui| {
                 let status = connection_status_label(&plugin);
                 ui.label(format!("{} ({})", plugin.plugin, status));
-                ui.collapsing(i18n::fl("plugins-row-id"), |ui| {
-                    ui.label(&plugin.row_id);
+                ui.push_id(&plugin.row_id, |ui| {
+                    ui.collapsing(plugin.plugin.clone(), |ui| {
+                        ui.label(&plugin.row_id);
+                    });
                 });
                 if ui.button(i18n::fl("plugins-restart")).clicked() {
                     let id = plugin.row_id.clone();
