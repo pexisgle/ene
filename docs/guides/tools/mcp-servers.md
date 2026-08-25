@@ -49,8 +49,10 @@ document, so there is exactly one schema.
 
 The catalog is a static allowlist compiled into `ene-work`
 (`GET /api/v1/mcp/catalog`). It carries no signatures yet; distribution and
-signing are a later design. The GitHub remote entry uses OAuth 2.0 through the
-server's own flow — the host never holds provider-specific client secrets.
-After saving, paste the token once via the plugin config secret
-(`vault.plugin.config.mcp.<id>.token`); the bridge injects it as an
-`Authorization` header and it never appears in raw JSON or logs.
+signing are a later design. The GitHub remote entry expects manual bearer-token
+entry: you create your own personal access token (or another bearer token) and
+paste it once via the plugin config secret field
+(`vault.plugin.config.mcp.<id>.auth_token`). The bridge injects it as an
+`Authorization` header and it never appears in raw JSON or logs. If the server
+rejects the credential, stage surfaces an "auth required" connection state so
+you know to update the token.

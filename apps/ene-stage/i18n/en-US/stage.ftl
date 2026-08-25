@@ -364,13 +364,13 @@ plugins-mcp-http = HTTP
 plugins-mcp-json = JSON import/export
 plugins-mcp-from-json = Load form from JSON
 mcp-catalog-title = Curated servers
-mcp-catalog-hint = Official servers from the Model Context Protocol team. Review the command and side effects before connecting.
+mcp-catalog-hint = Official servers from the Model Context Protocol team. Review the command and side effects before connecting; per-tool details appear after the first successful connection.
 mcp-catalog-source = Source
 mcp-catalog-fallback = Fallback
 mcp-catalog-auth = Auth
 mcp-catalog-auth-none = None
 mcp-catalog-auth-api-key = API key (stored in vault)
-mcp-catalog-auth-oauth = OAuth 2.0 (server flow)
+mcp-catalog-auth-oauth = Bearer token (manual, stored in vault)
 mcp-catalog-side-effects = Side effects
 mcp-catalog-source-url = Source URL
 mcp-catalog-connect = Add
@@ -398,6 +398,7 @@ connections-status-unhealthy = unhealthy{$error ->
         ["" ] {""}
        *[other] {: $error}
     }
+connections-status-auth-required = auth required
 connections-mcp-tools-title = MCP tools
 connections-mcp-tools-side-effects = Side effects: {$effects}
 mcp-saved = MCP document saved

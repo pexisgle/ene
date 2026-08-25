@@ -2735,6 +2735,13 @@ fn show_connections(
 
 fn connection_status_label(plugin: &PluginView) -> String {
     if let Some(error) = &plugin.last_error {
+        let lowered = error.to_lowercase();
+        if ["401", "unauthorized", "auth"]
+            .iter()
+            .any(|needle| lowered.contains(needle))
+        {
+            return i18n::fl("connections-status-auth-required");
+        }
         return i18n::format("connections-status-unhealthy", &[("error", error.as_str())]);
     }
     match plugin.state.as_str() {

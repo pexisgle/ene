@@ -137,9 +137,8 @@ pub fn mcp_catalog() -> &'static [McpCatalogEntry] {
             McpCatalogEntry {
                 id: "github-remote".to_owned(),
                 label: "GitHub (remote)".to_owned(),
-                description:
-                    "Official remote GitHub MCP server; signs in through GitHub OAuth 2.0."
-                        .to_owned(),
+                description: "Official remote GitHub MCP server; you provide your own ".to_owned()
+                    + "personal access token or bearer token via plugin config.",
                 transport: "streamable_http".to_owned(),
                 command: None,
                 args: Vec::new(),

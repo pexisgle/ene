@@ -364,13 +364,13 @@ plugins-mcp-http = HTTP
 plugins-mcp-json = JSON の取り込み / 書き出し
 plugins-mcp-from-json = JSON からフォームへ
 mcp-catalog-title = おすすめサーバー
-mcp-catalog-hint = Model Context Protocol 公式のサーバーです。接続前にコマンドと副作用を確認してください。
+mcp-catalog-hint = Model Context Protocol 公式のサーバーです。接続前にコマンドと副作用を確認してください。ツールごとの詳細は最初の接続成功後に表示されます。
 mcp-catalog-source = 提供元
 mcp-catalog-fallback = フォールバック
 mcp-catalog-auth = 認証
 mcp-catalog-auth-none = なし
 mcp-catalog-auth-api-key = API キー（vault に保存）
-mcp-catalog-auth-oauth = OAuth 2.0（サーバー側フロー）
+mcp-catalog-auth-oauth = Bearer トークン（手動入力、vault に保存）
 mcp-catalog-side-effects = 副作用
 mcp-catalog-source-url = ソース URL
 mcp-catalog-connect = 追加
@@ -398,6 +398,7 @@ connections-status-unhealthy = 異常{$error ->
         ["" ] {""}
        *[other] {: $error}
     }
+connections-status-auth-required = 認証が必要
 connections-mcp-tools-title = MCP ツール
 connections-mcp-tools-side-effects = 副作用: {$effects}
 mcp-saved = MCP ドキュメントを保存しました

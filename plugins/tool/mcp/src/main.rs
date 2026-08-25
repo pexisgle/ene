@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use async_trait::async_trait;
-use ene_plugin_ipc::{IpcError, ToolHandler, ToolSpecWire, serve_from_env};
+use ene_plugin_ipc::{IpcError, PluginConfigSchema, ToolHandler, ToolSpecWire, serve_from_env};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -103,6 +103,27 @@ struct McpBridge {
     session: Mutex<McpTransport>,
 }
 
+fn tool_side_effects(annotations: Option<&Value>) -> Vec<String> {
+    let Some(annotations) = annotations else {
+        return vec!["may modify data".to_owned()];
+    };
+    if annotations.get("readOnlyHint").and_then(Value::as_bool) == Some(true) {
+        return vec!["read-only".to_owned()];
+    }
+    let mut effects = Vec::new();
+    if annotations
+        .get("destructiveHint")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        effects.push("may modify data".to_owned());
+    }
+    if annotations.get("openWorldHint").and_then(Value::as_bool) == Some(true) {
+        effects.push("sends data to external services".to_owned());
+    }
+    effects
+}
+
 enum McpTransport {
     Stdio(Box<McpStdio>),
     Http(McpHttp),
@@ -195,6 +216,7 @@ impl McpBridge {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned();
+                let side_effects = tool_side_effects(tool.get("annotations"));
                 let parameters = tool
                     .get("inputSchema")
                     .cloned()
@@ -204,7 +226,7 @@ impl McpBridge {
                     description,
                     parameters,
                     output: json!({"type":"object"}),
-                    side_effects: Vec::new(),
+                    side_effects,
                     broker_socket: None,
 
                     category: String::new(),
@@ -594,6 +616,24 @@ impl ToolHandler for McpBridge {
             .await
             .map_err(IpcError::Call)
     }
+
+    fn has_config(&self) -> bool {
+        true
+    }
+
+    async fn config_schema(&self) -> Result<PluginConfigSchema, IpcError> {
+        Ok(PluginConfigSchema {
+            has_config: true,
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "auth_token": { "type": "string", "x-ene-secret": true }
+                },
+                "additionalProperties": false
+            }),
+            secret_keys: vec!["auth_token".to_owned()],
+        })
+    }
 }
 
 impl Drop for McpBridge {
@@ -603,5 +643,29 @@ impl Drop for McpBridge {
         {
             drop(stdio.child.start_kill());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")]
+
+    use super::*;
+
+    #[test]
+    fn annotations_map_to_side_effect_strings() {
+        assert_eq!(
+            tool_side_effects(Some(&json!({"readOnlyHint": true}))),
+            vec!["read-only".to_owned()]
+        );
+        assert_eq!(
+            tool_side_effects(Some(&json!({"destructiveHint": true}))),
+            vec!["may modify data".to_owned()]
+        );
+        assert_eq!(
+            tool_side_effects(Some(&json!({}))),
+            vec!["may modify data".to_owned()]
+        );
+        assert_eq!(tool_side_effects(None), vec!["may modify data".to_owned()]);
     }
 }
