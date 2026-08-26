@@ -840,8 +840,7 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::ImportCharacter { generation, result }
-            | AsyncOutcome::ActivateCharacter { generation, result } => {
+            AsyncOutcome::ImportCharacter { generation, result } => {
                 if !self.detail.activation_is_current(generation) {
                     return;
                 }
@@ -855,6 +854,30 @@ impl StageApp {
                         self.detail.core_status = format!(
                             "{}: {}",
                             i18n::fl("character-imported"),
+                            activated.character.id
+                        );
+                        self.request_characters();
+                    }
+                    Err(err) => {
+                        self.surface.status = err.clone();
+                        self.detail.core_status = err;
+                    }
+                }
+            }
+            AsyncOutcome::ActivateCharacter { generation, result } => {
+                if !self.detail.activation_is_current(generation) {
+                    return;
+                }
+                match result {
+                    Ok(activated) => {
+                        if let Some(target) = activated.target {
+                            self.commit_session_target(target);
+                        }
+                        self.reload_avatar();
+                        self.detail.invalidate_character();
+                        self.detail.core_status = format!(
+                            "{}: {}",
+                            i18n::fl("character-activated"),
                             activated.character.id
                         );
                         self.request_characters();
@@ -3686,5 +3709,68 @@ mod tests {
             }),
         });
         assert!(!app.completion_reconcile_inflight);
+    }
+
+    #[test]
+    fn activate_reports_activated_status_not_imported() {
+        let mut app = StageApp::new_for_test();
+        let generation = app.detail.next_activation_generation();
+        let character = ene_api::CharacterView {
+            id: "char.alicia-b".to_owned(),
+            version: "1.0.0".to_owned(),
+            kind: "package".to_owned(),
+            path: "/packages/char.alicia-b@1.0.0".to_owned(),
+            soul_id: Some("alicia-b".to_owned()),
+        };
+        app.apply_async_outcome(AsyncOutcome::ActivateCharacter {
+            generation,
+            result: Ok(crate::tasks::ActivatedCharacter {
+                character,
+                target: None,
+            }),
+        });
+        assert!(
+            app.detail.core_status.contains("char.alicia-b"),
+            "status missing character id: {}",
+            app.detail.core_status
+        );
+        assert!(
+            app.detail.core_status.contains("Activated character")
+                || app.detail.core_status.contains("有効化しました"),
+            "activate should not report an import message: {}",
+            app.detail.core_status
+        );
+        assert!(
+            !app.detail.core_status.contains("Imported character")
+                && !app.detail.core_status.contains("インポートしました"),
+            "activate must not reuse the import message: {}",
+            app.detail.core_status
+        );
+    }
+
+    #[test]
+    fn import_reports_imported_status() {
+        let mut app = StageApp::new_for_test();
+        let generation = app.detail.next_activation_generation();
+        let character = ene_api::CharacterView {
+            id: "char.alicia".to_owned(),
+            version: "1.0.0".to_owned(),
+            kind: "package".to_owned(),
+            path: "/packages/char.alicia@1.0.0".to_owned(),
+            soul_id: Some("alicia".to_owned()),
+        };
+        app.apply_async_outcome(AsyncOutcome::ImportCharacter {
+            generation,
+            result: Ok(crate::tasks::ActivatedCharacter {
+                character,
+                target: None,
+            }),
+        });
+        assert!(
+            app.detail.core_status.contains("Imported character")
+                || app.detail.core_status.contains("インポートしました"),
+            "import should report the import message: {}",
+            app.detail.core_status
+        );
     }
 }

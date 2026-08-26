@@ -303,6 +303,7 @@ character-body-uuid-hint = ボディ ID はインストール済みボディパ�
 character-apply-body = ボディを差し替え
 character-import = .enechar / V3 をインポート…
 character-imported = キャラクターをインポートしました
+character-activated = キャラクターを有効化しました
 character-body-updated = ボディを更新しました
 character-activate = 有効化
 character-occupants = ステージ上の在場

@@ -303,6 +303,7 @@ character-body-uuid-hint = Body id is a UUID from the installed body package, no
 character-apply-body = Hot-swap body
 character-import = Import .enechar / V3…
 character-imported = Imported character
+character-activated = Activated character
 character-body-updated = Body updated
 character-activate = Activate
 character-occupants = Stage occupants
