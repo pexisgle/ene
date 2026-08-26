@@ -126,7 +126,8 @@
       `delegate.start` は SQLite 行を作り、HTTP 経由ジョブランナーが
       queued→running→completed を観測した(P-504 / P-519 / P-605)。ランナー内部は
       Echo/stub。対話レーンとの同時並行は手動未観測。ジョブ実行中に cancel を
-      受け付けた(API 応答まで観測)。ランナー内部への到達確認は未実施。
+      受け付けた(2026-08-26 に status=cancelled 遷移まで観測)。ランナー内部への
+      到達確認は未実施。
       ジョブの progress→complete 報告が job.report 経由で表層に届くことを観測した。
 - [ ] job 実行中のキャンセル・追加指示・質問回答が、動いているランナーに届く。
       CRUD とホスト API 直接呼び出しはある。

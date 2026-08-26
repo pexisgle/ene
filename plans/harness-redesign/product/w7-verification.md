@@ -101,7 +101,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-516 | `usage_ledger_rows_are_append_only`; `usage_ledger_records_completed_turn` | store / HTTP | はい |
 | P-517 | `observe_spans_do_not_leak_content`; `http_spans_and_schema_and_anon_health`; `ctl_client_lists_tools_and_debug_spans` | HTTP / CLI | はい |
 | P-518 | `storage_too_new_is_rejected`; `older_storage_migrates_and_interrupts_open_work`; `recover_closes_open_turn_and_abandons_inbox` | store | はい |
-| P-519 | `progress_and_complete_are_companion_speech`; `surface_message_and_cancel_while_running`; HTTP ジョブランナー観測 | host API / HTTP | 部分(delegation.send progress と job.report の表層到達を観測。cancel 受付は API 応答まで) |
+| P-519 | `progress_and_complete_are_companion_speech`; `surface_message_and_cancel_while_running`; HTTP ジョブランナー観測 | host API / HTTP | 部分(delegation.send progress と job.report の表層到達を観測。2026-08-26 に running ジョブへの cancel が status=cancelled へ遷移するまで観測。ランナー内部の協調停止は未観測) |
 | P-520 | `surface_projection_hides_inner_and_thinking`; `surface_ws_never_sees_inner`; `ene-stage::surface_blocks_inner_and_thinking` | store / HTTP | はい(表層) |
 | P-521 | `progress_and_complete_are_companion_speech`; `completion_waits_for_user_speech_gap` | host API / Scripted | いいえ |
 | P-522 | `surface_fs_write_upgrades_without_invoking`; `lane_auto_upgrade_does_not_execute_fs_write` | store | はい(機構。モデルは注入) |
