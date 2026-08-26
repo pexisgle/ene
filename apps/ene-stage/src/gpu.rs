@@ -36,18 +36,24 @@ impl GpuContext {
             .map_err(|_| GpuError::Adapter)?;
         let mut limits = wgpu::Limits::default().using_resolution(adapter.limits());
         limits.max_bind_groups = adapter.limits().max_bind_groups.max(8);
-        let desc = wgpu::DeviceDescriptor {
+        let desc = |required_limits: wgpu::Limits| wgpu::DeviceDescriptor {
             label: Some("ene-stage"),
             required_features: wgpu::Features::empty(),
-            required_limits: limits,
+            required_limits,
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             trace: wgpu::Trace::Off,
         };
-        let (device, queue) = adapter
-            .request_device(&desc)
-            .await
-            .map_err(|err| GpuError::Device(err.to_string()))?;
+        let (device, queue) = match adapter.request_device(&desc(limits)).await {
+            Ok(devices) => devices,
+            // V3D and llvmpipe expose fewer inter-stage shader variables than
+            // the default request allows, so fall back to the adapter's own
+            // supported limits.
+            Err(_) => adapter
+                .request_device(&desc(adapter.limits()))
+                .await
+                .map_err(|err| GpuError::Device(err.to_string()))?,
+        };
         Ok(Self {
             instance,
             device: Arc::new(device),

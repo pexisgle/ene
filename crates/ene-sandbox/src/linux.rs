@@ -20,13 +20,15 @@ use crate::error::SandboxError;
 use crate::spec::{CgroupSpec, ResourceLimits, SandboxSpec};
 
 /// Whether the running kernel can enforce a Landlock ruleset at the ABI the
-/// crate targets (probes without restricting the current process).
+/// crate targets. `Ruleset::create` alone succeeds as a no-op dummy on
+/// kernels without Landlock, so the probe must also require full enforcement.
 #[must_use]
 pub fn landlock_supported() -> bool {
     Ruleset::default()
         .handle_access(AccessFs::from_all(ABI::V4))
         .and_then(Ruleset::create)
-        .is_ok()
+        .and_then(landlock::RulesetCreated::restrict_self)
+        .is_ok_and(|status| matches!(status.ruleset, RulesetStatus::FullyEnforced))
 }
 
 /// Installs the sandbox into `cmd`'s child (between fork and exec).

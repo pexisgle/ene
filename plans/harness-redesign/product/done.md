@@ -45,7 +45,8 @@
 3. [ ] ローカルモデル構成でネットワークなしに §受入条件 の会話が成立する
    (オフライン可)。`SeamedModel` は未設定なら fail-closed。ツール呼び出しは
    `ToolCallingModel` → `utility.calc` で HTTP 受入する。Echo は機構検出専用。
-   実 GGUF / 設定済み provider の会話品質は未観測。
+   設定済み provider(OpenRouter llama-3.3-70b)の実モデル対話は 2026-08-26 に観測した。
+   オフラインの実 GGUF 会話は未観測。
 4. [x] Linux 開発機で `nix develop` からビルド・起動でき、
    [platform/process-model.md](../platform/process-model.md) が定める
    性能の観点(常駐時のメモリ・起動時間・軽量ツールの往復)で許容できる。
@@ -115,14 +116,18 @@
 - [ ] 「今何時?」「さっき何て言ったっけ?」のような簡単な依頼が、委譲を
       起こさずその場で返る(D-1)。Echo は機構検出専用。ツール呼び出しは
       `ToolCallingModel` が `utility.calc` を出して表層で実行する(P-503 / P-505)。
-      実モデルの簡易応答は未観測。
+      実モデル(OpenRouter)の簡易応答と逐語再現を観測した。ローカル GGUF は未観測。
+      承認フロー(Policy deny → Auto allow)も監査 seq 25/26/29 で確認した。
 - [x] 表層に副作用のあるツールが1つも公開されていない(D-2)。
 - [x] ステップ数超過または副作用ツール要求で自動委譲へ切り替わる機構がある
       (D-3)。モデル判断には依存しない。空の `tool_calls` の Echo は機構検出専用。
       `ToolCallingModel` が calc を出したとき、レーンがツールを実行する。
 - [ ] 会話をしながら job を依頼すると、対話が途切れずに job が裏で進む。
-      `delegate.start` は SQLite 行を作る。モデル+ツールのジョブランナーは
-      無い(P-504 / P-519 / P-605)。
+      `delegate.start` は SQLite 行を作り、HTTP 経由ジョブランナーが
+      queued→running→completed を観測した(P-504 / P-519 / P-605)。ランナー内部は
+      Echo/stub。対話レーンとの同時並行は手動未観測。ジョブ実行中に cancel を
+      受け付けた(API 応答まで観測)。ランナー内部への到達確認は未実施。
+      ジョブの progress→complete 報告が job.report 経由で表層に届くことを観測した。
 - [ ] job 実行中のキャンセル・追加指示・質問回答が、動いているランナーに届く。
       CRUD とホスト API 直接呼び出しはある。
 - [ ] ユーザーが話しかけ続けている間、委譲の完了報告は割込まず、

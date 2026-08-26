@@ -10,6 +10,9 @@
 > Placeholder 以外、または実プロセスで観察できるものに限る。
 
 測定日: 2026-08-17(機構検出)。完成列の見直しは 2026-08-21。
+2026-08-26: OpenRouter 実モデル(`meta-llama/llama-3.3-70b-instruct`)と
+HTTP 経由ジョブランナーの観測を追記した。承認モードは検証中のみ
+`auto` に設定した。
 対象は現行アプリと並べて追加した新クレート
 (`ene-session` / `ene-kernel` / `ene-daemon` / `ene-api` / `ene-ctl` /
 `ene-stage` ほか)。W7 時点では旧 `ene-desktop` も残していた。
@@ -44,7 +47,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 
 | P-id | 機構テスト | 経路 | 完成 |
 |---|---|---|---|
-| P-101 | `ene-kernel::text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `ene-daemon::http_tests::three_clients_share_one_core`; `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat` | Echo（機構） / ToolCalling / Seamed fail-closed | いいえ(実モデル応答は未観測) |
+| P-101 | `ene-kernel::text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `ene-daemon::http_tests::three_clients_share_one_core`; `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat` | Echo（機構） / ToolCalling / Seamed fail-closed / OpenRouter 実モデル | 部分(HTTP 対話で実モデル応答を観測。音声入出力は未観測) |
 | P-102 | `ene-body::barge_in_stops_playback_after_min_speech`; `self_voice_during_playback_is_ignored`; `idle_speech_becomes_transcript`; `ene-stage::echo_aware_gate_drops_playback_bleed`; `ene-daemon::listen_stream_feeds_duplex_machine_without_stt` | Scripted / HTTP WS | いいえ（実スピーカ漏れは未観測。stage は 16 kHz `pcm_s16le` バルク WS と TTS 再生中 RMS×2 ゲート） |
 | P-103 | `ene-kernel::abort_does_not_write_assistant_closure`; `boot_seeds_two_souls_and_session_ops` (barge-in API); `ene-stage::parses_audio_chunk_abort`; `ene-stage::stop_clears_recent_playback_pcm` | Echo / HTTP / stage | 部分(stage が `audio.chunk` abort で sink 停止と viseme reset。0.5s 手動は本番 TTS 未配線) |
 | P-104 | `ene-session::surface_projection_hides_inner_and_thinking`; `ene-kernel::surface_live_subscription_does_not_receive_inner`; `ene-daemon::surface_ws_never_sees_inner` | store / HTTP | はい(表層非露出) |
@@ -84,9 +87,9 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-407 | `boot_stage_maps_emotion_without_a_rendered_body`; `emotion_always_emits_expression_even_without_body` | HTTP / store | はい(描画なしレーン) |
 | P-501 | `turn_roundtrip_projects_history`; `seq_is_monotonic_without_gaps` | store | はい |
 | P-502 | `model_visible_hash_matches_projection`; `model_visible_hash_matches_logged_projection` | store | はい |
-| P-503 | `text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `tool_calling_model_runs_calc_through_http` | Echo（機構） / ToolCalling | いいえ（実モデル簡易応答は未観測） |
-| P-504 | `lane_prompt_still_works_while_job_running` | host API | いいえ(ランナー無し) |
-| P-505 | `text_turn_is_logged_and_projected`(コンテキスト組立は固定文2本); `tool_calling_model_runs_calc_through_http` | Echo（機構） / ToolCalling | いいえ |
+| P-503 | `text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `tool_calling_model_runs_calc_through_http` | Echo（機構） / ToolCalling / OpenRouter 実モデル | 部分(実モデルの turn→step→assistant message を HTTP 対話で観測) |
+| P-504 | `lane_prompt_still_works_while_job_running`; HTTP ジョブランナー観測 | host API / HTTP | 部分(job レーンが独立セッションで queued→running→completed。対話レーンとの同時並行は手動未観測) |
+| P-505 | `text_turn_is_logged_and_projected`(コンテキスト組立は固定文2本); `tool_calling_model_runs_calc_through_http` | Echo（機構） / ToolCalling / OpenRouter 実モデル | 部分(identity/affect/system context を組んだ上での実モデル応答を観測。Source レジストリ全体ではない) |
 | P-506 | `compaction_replaces_range_in_projection`; `compact_keeps_original_rows` | store(切り詰め) | いいえ(要約 LLM 無し) |
 | P-507 | `spill_huge_tool_output_keeps_brief_bounded` | store | はい |
 | P-508 | `internal_delegation_has_no_job_row` | host API | はい(行契約) |
@@ -98,7 +101,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-516 | `usage_ledger_rows_are_append_only`; `usage_ledger_records_completed_turn` | store / HTTP | はい |
 | P-517 | `observe_spans_do_not_leak_content`; `http_spans_and_schema_and_anon_health`; `ctl_client_lists_tools_and_debug_spans` | HTTP / CLI | はい |
 | P-518 | `storage_too_new_is_rejected`; `older_storage_migrates_and_interrupts_open_work`; `recover_closes_open_turn_and_abandons_inbox` | store | はい |
-| P-519 | `progress_and_complete_are_companion_speech`; `surface_message_and_cancel_while_running` | host API | いいえ(ランナー無し) |
+| P-519 | `progress_and_complete_are_companion_speech`; `surface_message_and_cancel_while_running`; HTTP ジョブランナー観測 | host API / HTTP | 部分(delegation.send progress と job.report の表層到達を観測。cancel 受付は API 応答まで) |
 | P-520 | `surface_projection_hides_inner_and_thinking`; `surface_ws_never_sees_inner`; `ene-stage::surface_blocks_inner_and_thinking` | store / HTTP | はい(表層) |
 | P-521 | `progress_and_complete_are_companion_speech`; `completion_waits_for_user_speech_gap` | host API / Scripted | いいえ |
 | P-522 | `surface_fs_write_upgrades_without_invoking`; `lane_auto_upgrade_does_not_execute_fs_write` | store | はい(機構。モデルは注入) |
@@ -108,7 +111,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-602 | `builtin_specs_cover_five_plugins`; `out_of_process_utility_registers_and_runs` | launcher | いいえ(薄いスケッチ。`system_info` / 為替欠落) |
 | P-603 | `handwritten_stdio_mcp_registers_and_runs` | process | はい |
 | P-604 | `handwritten_stdio_mcp_git_status_runs_real_git` | process | はい |
-| P-605 | `lane_prompt_still_works_while_job_running`; `progress_and_complete_are_companion_speech` | host API | いいえ |
+| P-605 | `lane_prompt_still_works_while_job_running`; `progress_and_complete_are_companion_speech`; HTTP ジョブランナー観測 | host API / HTTP | 部分(jobs 行が completed になり、job.report が開いているセッションへ届くことを観測) |
 | P-606 | `schedule_driver_delivers_remind_through_http`; `schedule_driver_defers_quiet_hours_and_fires_important`; `schedule_catch_up_does_not_start_missed_jobs`; `schedule_remind_fires_and_quiet_hours_defer`; `missed_remind_fires_once` | HTTP / store | はい |
 | P-607 | `schedule_driver_delivers_remind_through_http` | HTTP | はい |
 | P-608 | `bookmark_workflow_delivers_markdown_artifact` | host API | いいえ |
@@ -118,7 +121,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-612 | `handwritten_stdio_mcp_git_status_runs_real_git`; `exec_tools_stay_off_surface_schema` | process / store | いいえ(`status`/`log` のみ。fs/exec コーディング未達) |
 | P-613 | `work_tools_cover_delegate_surface`; `plane_denies_side_effects_and_sensitive_reads` | store | はい(スキーマ) |
 | P-614 | `spill_huge_tool_output_keeps_brief_bounded` | store | はい |
-| P-615 | `work_tools_cover_delegate_surface` | store | 部分(呼称契約。発話は host API) |
+| P-615 | `work_tools_cover_delegate_surface`; HTTP ジョブランナー観測 | store / HTTP | 部分(呼称契約と delegation.send の発話化を観測) |
 | P-701 | `spawn_core_writes_api_json_and_health_succeeds` | process | はい |
 | P-702 | `three_clients_share_one_core` | HTTP | はい |
 | P-703 | `three_clients_share_one_core` (OpenAPI) | HTTP | はい |
@@ -136,7 +139,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-805 | `package_localizes_display_name_en_us_and_ja` | store | はい |
 | P-806 | `package_rejects_unknown_format_and_bad_digest`; `manifest_digest_matches_python_plugin_contract` | store / process | はい |
 | P-808 | `package_rejects_unknown_format_and_bad_digest` | store | はい |
-| P-901 | `process_survives_os_sandbox_when_supported` | process | はい(Landlock 対応時) |
+| P-901 | `process_survives_os_sandbox_when_supported` | process | はい(Landlock 対応時)。Landlock 非対応カーネルでは `landlock_supported()` が正しく false を返し、fs/exec/web プラグインは spawn エラーではなく sandbox unavailable 待ちになる。この判定を修正するプローブテストは CI で常時実行 |
 | P-902 | `undeclared_broker_op_is_denied`; `net_fetch_runs_after_grant` | store | 部分(未宣言は Denied。grant 後の `net.fetch` は SSRF 付きでホスト代行) |
 | P-903 | `policy_allows_workspace_write`; `implicit_side_effect_without_popup_is_denied` | store | はい |
 | P-904 | `ai_judgement_reason_is_audited` | Scripted | いいえ(本番 `ApproveModel = None`) |
@@ -148,7 +151,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-910 | `observe_spans_do_not_leak_content` | store | はい |
 | P-1001 | `out_of_process_utility_registers_and_runs` | process | はい |
 | P-1002 | `apply_profile_unloads_removed_rows_and_keeps_uid` | process | はい |
-| P-1003 | `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat`; Echo は `text_turn_is_logged_and_projected` の機構検出 | ToolCalling / Seamed fail-closed | いいえ（実 provider 会話は未観測） |
+| P-1003 | `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat`; Echo は `text_turn_is_logged_and_projected` の機構検出 | ToolCalling / Seamed fail-closed / OpenRouter provider seam | 部分(provider seam 経由の実モデル会話を観測。embed/STT/TTS seam は対象外) |
 | P-1004 | `python_dummy_registers_in_registry_and_executes` | process | はい |
 | P-1005 | `circuit_breaker_opens_after_spawn_failures`; `unload_removes_tools_and_grants` | process | はい |
 | P-1006 | `sidecar_binary_resolves_config_then_cas_then_bundled_and_rejects_urls`; `sidecar_spawn_health_and_kill_on_loopback` | process | はい |
@@ -156,6 +159,18 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-1008 | `manifest_digest_matches_python_plugin_contract` | process | はい |
 | P-1009 | `dummy_plugin_handshake_without_provider_subprotocol` | process(handshake) | いいえ(capability / バルク FD 未実装) |
 | P-1010 | `requires_unsatisfied_row_waits_without_error`; `circular_requires_are_reported_and_rows_stay_inactive`; `disabling_one_fiber_does_not_restart_the_core` | process / HTTP | はい |
+
+## 環境制限(2026-08-26 観測)
+
+Raspberry Pi OS の aarch64 カーネルは `CONFIG_SECURITY_LANDLOCK` が無効で、
+Landlock ruleset の作成自体が ENOSYS になる。このため fs/exec/web ツール
+プラグインはサンドボックス必須のまま起動できず、`state=waiting` に留まる。
+旧プローブは非対応カーネルでも create 成功を true 判定していたため、spawn 時に
+EINVAL で失敗した。修正後は supported=false を正しく返す。コーディング系
+ツール(fs/exec)の受入観測は Landlock 対応環境でのみ可能。
+
+GUI 手動項目(P-102 / P-103 / P-107 / P-403-P-405)も同様に headless Wayland +
+ソフトウェア Vulkan(lavapipe) では実機確認ができない。既存の方針通り手動とする。
 
 ## 固定した不変条件(テスト)
 
