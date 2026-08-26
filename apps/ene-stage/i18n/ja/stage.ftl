@@ -36,6 +36,7 @@ chat-cancel-hint = 進行中のターンを取り消します。
 chat-overlay-hint = オーバーレイ: Space で枠。A/D で体。W/S でモーション。キーが届かないときはシステムでクリック透過をオフ。
 mic-on = マイク ON
 mic-off = マイク OFF
+tray-mic-needs-stt = マイクを使う前に、音声設定で音声認識（STT）プロバイダを有効化してください。
 tray-settings = 設定
 tray-chat = チャット
 tray-detail = 詳細
