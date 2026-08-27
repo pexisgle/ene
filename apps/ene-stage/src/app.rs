@@ -1085,6 +1085,13 @@ impl StageApp {
                 Ok(items) => self.detail.mcp_tools = items,
                 Err(err) => self.detail.connections_status = err,
             },
+            AsyncOutcome::ReloadMcpTools(result) => match result {
+                Ok(items) => {
+                    self.detail.mcp_tools = items;
+                    self.detail.core_status = i18n::fl("mcp-reloaded");
+                }
+                Err(err) => self.detail.core_status = err,
+            },
             AsyncOutcome::LoadPluginConfig {
                 request_id,
                 id,

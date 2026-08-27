@@ -71,6 +71,7 @@ pub enum AsyncOutcome {
         result: Result<ene_api::McpProbeResponse, String>,
     },
     LoadTools(Result<Vec<ene_api::ToolView>, String>),
+    ReloadMcpTools(Result<Vec<ene_api::ToolView>, String>),
     ListMemories {
         soul_id: String,
         result: Result<Vec<MemoryView>, String>,
