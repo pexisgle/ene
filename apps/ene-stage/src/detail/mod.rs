@@ -38,6 +38,15 @@ pub enum DetailTab {
     Log,
 }
 
+/// A job creation blocked by an approval ask, tied to the approval id whose
+/// Allow resolution may replay it. Requests failed for any other reason are
+/// never stashed, and a Deny or an unrelated approval must not consume it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingJobRetry {
+    pub request: CreateJobRequest,
+    pub approval_id: String,
+}
+
 #[must_use]
 fn caption_position_label(value: &str) -> String {
     match value {
@@ -308,6 +317,10 @@ pub struct DetailUiState {
     pub ai_tts_key_set: bool,
     pub tts_api_key_clear_pending: bool,
     pub stt_plugin: String,
+    /// True once a non-placeholder Speech-to-Text provider has been observed.
+    /// Recomputed by `parse_core_fields` (and proven by a successful mic claim)
+    /// so the mic guard and the settings loader share one source of truth.
+    pub stt_plugin_ready: bool,
     pub stt_model: String,
     pub stt_base_url: String,
     pub stt_api_key: String,
@@ -335,6 +348,14 @@ pub struct DetailUiState {
     pub new_job_title: String,
     pub new_job_goal: String,
     pub new_job_inflight: bool,
+    /// Exact request of the in-flight job creation click, kept so an
+    /// approval-pending failure can be stashed verbatim for replay; any other
+    /// terminal state clears it.
+    pub submitted_job: Option<CreateJobRequest>,
+    /// Job creation that failed while its `delegate.start` approval ask was
+    /// still unresolved, stashed together with that approval id so exactly the
+    /// matching Allow resolution can retry it once.
+    pub pending_job_retry: Option<PendingJobRetry>,
     pub new_schedule_name: String,
     pub new_schedule_spec: String,
     pub new_schedule_inflight: bool,
@@ -539,6 +560,9 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
     state.tts_api_key_clear_pending = false;
     state.stt_plugin = nested_string(effective, &["ai", "tasks", "stt", "plugin"]);
     state.stt_model = nested_string(effective, &["ai", "tasks", "stt", "model"]);
+    // The mic toggle reads this ready-mirror instead of re-parsing plugin
+    // strings; a successful mic claim also proves readiness on its own.
+    state.stt_plugin_ready = !(state.stt_plugin.is_empty() || state.stt_plugin == "echo");
     state.stt_base_url = nested_string(effective, &["ai", "tasks", "stt", "base_url"]);
     state.ai_stt_key_set = effective
         .get("ai_stt_key_set")
@@ -688,6 +712,16 @@ pub fn plugin_needs_key(plugin: &str, providers: &Value) -> bool {
 #[must_use]
 pub fn plugin_is_local(plugin: &str, providers: &Value) -> bool {
     provider_bool(providers, plugin, "local")
+}
+
+/// Plugins whose clients substitute a working default when a field is blank,
+/// so an empty form is functional rather than misconfigured.
+#[must_use]
+pub fn plugin_has_fallback(plugin: &str) -> bool {
+    matches!(
+        plugin,
+        "provider.edge_tts" | "provider.voicevox" | "provider.openai_compat"
+    )
 }
 
 fn provider_bool(providers: &Value, plugin: &str, key: &str) -> bool {
@@ -1194,6 +1228,20 @@ async fn prepare_activation(
     Ok(ActivatedCharacter { character, target })
 }
 
+/// A package is the active companion when the soul it created or reused
+/// matches the currently active soul, so the UI can badge it instead of
+/// offering a redundant Activate action (#1177).
+#[must_use]
+pub fn is_character_active(
+    character: &ene_api::CharacterView,
+    active_soul_id: Option<&str>,
+) -> bool {
+    match (character.soul_id.as_deref(), active_soul_id) {
+        (Some(soul_id), Some(active)) => soul_id == active,
+        _ => false,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "companion tab owns import/export/activate"
@@ -1394,7 +1442,9 @@ fn show_companion(
                         "{}@{} ({}) {}",
                         character.id, character.version, character.kind, character.path
                     ));
-                    if ui.button(i18n::fl("character-activate")).clicked() {
+                    if is_character_active(character, state.soul.as_ref().map(|s| s.id.as_str())) {
+                        ui.weak(i18n::fl("character-active-package"));
+                    } else if ui.button(i18n::fl("character-activate")).clicked() {
                         activate_id = Some(character.id.clone());
                     }
                 });
@@ -1887,6 +1937,20 @@ fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm
         ui.label(i18n::fl("settings-voice-local-hint"));
     } else if !form.plugin.is_empty() && form.plugin != "echo" {
         task_row(ui, i18n::fl("settings-voice-base-url"), form.base_url);
+    }
+    // Empty fields are valid for plugins with built-in fallbacks; leaving them
+    // blank-looking under a green Ready card reads as a lost save (#1177).
+    if plugin_has_fallback(form.plugin) {
+        let needs_base_note =
+            !plugin_is_local(form.plugin, providers) && form.base_url.trim().is_empty();
+        let needs_model_note = form.model.trim().is_empty();
+        let needs_voice_note = form
+            .voice
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty());
+        if needs_base_note || needs_model_note || needs_voice_note {
+            ui.label(i18n::fl("settings-voice-fallback-note"));
+        }
     }
     task_row(ui, i18n::fl("settings-voice-model"), form.model);
     if let Some(voice) = form.voice {
@@ -2480,8 +2544,16 @@ fn show_work(
             .hint_text(i18n::fl("jobs-new-goal")),
     );
     let can_create = !state.new_job_inflight && !state.new_job_goal.trim().is_empty();
+    // A stashed request means the last click was blocked by its approval ask;
+    // relabeling keeps the retry visible instead of silently duplicating a job
+    // the user believes was already created.
+    let create_label = if state.pending_job_retry.is_some() {
+        i18n::fl("jobs-create-retry")
+    } else {
+        i18n::fl("jobs-create")
+    };
     if ui
-        .add_enabled(can_create, egui::Button::new(i18n::fl("jobs-create")))
+        .add_enabled(can_create, egui::Button::new(create_label))
         .clicked()
     {
         state.new_job_inflight = true;
@@ -2491,6 +2563,7 @@ fn show_work(
             title: (!state.new_job_title.trim().is_empty())
                 .then(|| state.new_job_title.trim().to_owned()),
         };
+        state.submitted_job = Some(request.clone());
         let client = Arc::clone(client);
         spawn_async(rt, async_results, async move {
             AsyncOutcome::CreateJob(client.create_job(&request).await.map_err(|e| e.to_string()))
@@ -4475,6 +4548,7 @@ mod tests {
             tts_base_url: "https://tts.example.invalid".to_owned(),
             tts_voice: "alloy".to_owned(),
             stt_plugin: "provider.whisper".to_owned(),
+            stt_plugin_ready: true,
             stt_model: "small".to_owned(),
             stt_api_key: "stt-secret".to_owned(),
             ..DetailUiState::default()
@@ -4620,6 +4694,15 @@ mod tests {
             tab: DetailTab::Voice,
             state: SetupState::Ready,
         }));
+    }
+
+    #[test]
+    fn fallback_voice_plugins_treat_blank_fields_as_valid() {
+        assert!(plugin_has_fallback("provider.edge_tts"));
+        assert!(plugin_has_fallback("provider.voicevox"));
+        assert!(plugin_has_fallback("provider.openai_compat"));
+        assert!(!plugin_has_fallback("provider.elevenlabs"));
+        assert!(!plugin_has_fallback(""));
     }
 
     #[test]
@@ -5061,5 +5144,35 @@ mod tests {
 
         assert!(!state.mcp_probe_is_current(first));
         assert!(state.mcp_probe_is_current(second));
+    }
+
+    #[test]
+    fn character_active_badge_matches_active_soul() {
+        let active = CharacterView {
+            id: "char.alicia".to_owned(),
+            version: "1.0.0".to_owned(),
+            kind: "package".to_owned(),
+            path: "/packages/char.alicia".to_owned(),
+            soul_id: Some("alicia".to_owned()),
+        };
+        let other = CharacterView {
+            id: "char.alicia-b".to_owned(),
+            version: "1.0.0".to_owned(),
+            kind: "package".to_owned(),
+            path: "/packages/char.alicia-b".to_owned(),
+            soul_id: Some("alicia-b".to_owned()),
+        };
+        let unbound = CharacterView {
+            id: "char.orphan".to_owned(),
+            version: "1.0.0".to_owned(),
+            kind: "package".to_owned(),
+            path: "/packages/char.orphan".to_owned(),
+            soul_id: None,
+        };
+
+        assert!(is_character_active(&active, Some("alicia")));
+        assert!(!is_character_active(&other, Some("alicia")));
+        assert!(!is_character_active(&unbound, Some("alicia")));
+        assert!(!is_character_active(&active, None));
     }
 }

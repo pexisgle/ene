@@ -21,7 +21,7 @@ use crate::chrome::{ChromeKind, ChromeWindow};
 use crate::core::events::{EventFeeds, LiveEvent, spawn_event_feeds};
 use crate::core::session::StageSession;
 use crate::core::spawn::{StageCore, StageSpawnError, attach_or_spawn_core};
-use crate::detail::{self, DetailTab, DetailUiState, LogKind};
+use crate::detail::{self, DetailTab, DetailUiState, LogKind, PendingJobRetry};
 use crate::gpu::{GpuContext, GpuError};
 use crate::i18n;
 use crate::overlay::{OverlayError, OverlayWindow};
@@ -277,6 +277,10 @@ pub fn run() -> Result<(), AppError> {
         &app.rt_handle,
         &app.async_results,
     );
+    // Load the active soul once at boot so the Home readiness cards and the
+    // companion list reflect the live companion without first opening the
+    // Companion tab (#1177). The Companion tab re-issues this idempotently.
+    app.request_active_soul();
     app.claim_speaker_notify();
 
     event_loop
@@ -510,6 +514,20 @@ impl StageApp {
         });
     }
 
+    /// Load the active soul once so the Home readiness cards and the companion
+    /// list reflect the live companion without first opening the Companion tab
+    /// (#1177). The Companion tab re-issues this idempotently.
+    fn request_active_soul(&mut self) {
+        let soul_id = self.session.soul_id().to_owned();
+        if soul_id.is_empty() {
+            return;
+        }
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::LoadSoul(client.get_soul(&soul_id).await.map_err(|e| e.to_string()))
+        });
+    }
+
     fn claim_speaker_notify(&mut self) {
         if !self.speaker_claimed {
             self.speaker_claimed = true;
@@ -607,14 +625,47 @@ impl StageApp {
                     self.surface.status = err;
                 }
             }
-            AsyncOutcome::Approval { session_id, result } => {
+            AsyncOutcome::Approval {
+                session_id,
+                allowed,
+                approval_id,
+                result,
+            } => {
                 if session_id != self.session.session_id() {
                     return;
                 }
                 self.surface.pending_approval = None;
                 self.approval_needs_reveal = false;
-                if let Err(err) = result {
-                    self.surface.status = err;
+                match result {
+                    Err(err) => self.surface.status = err,
+                    Ok(()) => {
+                        if allowed {
+                            let matched = self
+                                .detail
+                                .pending_job_retry
+                                .as_ref()
+                                .is_some_and(|retry| retry.approval_id == approval_id);
+                            if matched {
+                                let retry = self.detail.pending_job_retry.take();
+                                if let Some(retry) = retry {
+                                    let client = Arc::clone(&self.client);
+                                    self.spawn(async move {
+                                        AsyncOutcome::CreateJob(
+                                            client
+                                                .create_job(&retry.request)
+                                                .await
+                                                .map_err(|e| e.to_string()),
+                                        )
+                                    });
+                                }
+                            }
+                        } else {
+                            // A deny is the final answer for an armed retry
+                            // even when the ask it waited on is gone, so it
+                            // can never fire on some later unrelated grant.
+                            self.detail.pending_job_retry = None;
+                        }
+                    }
                 }
             }
             AsyncOutcome::Listen { generation, result } => {
@@ -707,6 +758,7 @@ impl StageApp {
                     self.detail.core_settings_text.clone_from(&json);
                     self.detail.core_patch_text.clear();
                     detail::parse_core_fields(&json, &mut self.detail);
+                    self.sync_stt_cta_after_settings_parse();
                     self.detail.finish_settings_load();
                     self.surface.chat_setup = self.detail.clone();
                     self.detail.core_status = if detail::chat_setup_gap(&self.detail)
@@ -905,15 +957,45 @@ impl StageApp {
             },
             AsyncOutcome::CreateJob(result) => {
                 self.detail.new_job_inflight = false;
+                let submitted = self.detail.submitted_job.take();
                 match result {
                     Ok(job) => {
+                        self.detail.pending_job_retry = None;
                         self.detail.jobs.retain(|item| item.id != job.id);
                         self.detail.jobs.insert(0, job);
                         self.detail.new_job_title.clear();
                         self.detail.new_job_goal.clear();
                         self.detail.core_status = i18n::fl("jobs-created");
                     }
-                    Err(err) => self.detail.core_status = err,
+                    Err(err) => {
+                        if create_denied_by_approval(&err) {
+                            // The rejection means the goal's delegate.start
+                            // ask reached the plane; bind the surfaced ask id
+                            // when it is already visible so exactly its Allow
+                            // can replay. Late asks match by goal later.
+                            let approval_id = self
+                                .surface
+                                .pending_approval
+                                .as_ref()
+                                .filter(|ask| {
+                                    ask.tool == "delegate.start"
+                                        && submitted
+                                            .as_ref()
+                                            .is_some_and(|job| job.goal == ask.target)
+                                })
+                                .map(|ask| ask.id.clone());
+                            if let Some(request) = submitted {
+                                self.detail.pending_job_retry = Some(PendingJobRetry {
+                                    approval_id: approval_id.unwrap_or_default(),
+                                    request,
+                                });
+                            }
+                        } else {
+                            self.detail.pending_job_retry = None;
+                        }
+
+                        self.detail.core_status = friendly_create_job_error(&err);
+                    }
                 }
             }
             AsyncOutcome::CreateSchedule(result) => match result {
@@ -1046,6 +1128,12 @@ impl StageApp {
             AsyncOutcome::MicClaim(result) => match result {
                 Ok(active) => {
                     self.mic_active = active;
+                    self.detail.stt_plugin_ready = true;
+                    if active {
+                        // A claimed mic proves a real STT provider is in use,
+                        // so any parked Voice-setup CTA is obsolete.
+                        self.surface.stt_setup_needed = false;
+                    }
                     if let Some(tray) = self.tray.as_ref() {
                         tray.set_mic_active(active);
                     }
@@ -1153,6 +1241,8 @@ impl StageApp {
                     self.approval_needs_reveal = false;
                     self.surface.pending_question = None;
                     self.surface.status = i18n::fl("chat-new-session-ready");
+                    self.detail.pending_job_retry = None;
+                    self.detail.submitted_job = None;
                     self.request_history_refresh();
                     self.detail.new_session_inflight = false;
                     self.surface.new_session_inflight = false;
@@ -1202,6 +1292,17 @@ impl StageApp {
     }
 
     fn set_pending_approval(&mut self, approval: surface::PendingApproval) {
+        // The create click can be rejected before its ask reaches the stage
+        // (event vs HTTP race), so a fresh unbound delegate.start ask binds
+        // itself to the stash waiting on the same goal, then surfaces as
+        // usual so the user can still resolve it.
+        if approval.tool == "delegate.start"
+            && let Some(retry) = self.detail.pending_job_retry.as_mut().filter(|retry| {
+                retry.approval_id.is_empty() && retry.request.goal == approval.target
+            })
+        {
+            retry.approval_id.clone_from(&approval.id);
+        }
         let is_new = self
             .surface
             .pending_approval
@@ -1382,6 +1483,14 @@ impl StageApp {
     }
 
     fn toggle_mic(&mut self) {
+        // A mic claim needs a Speech-to-Text provider; without one the claim
+        // succeeds but recognition can never run, so surface the Voice setup
+        // CTA instead of a silent ON state (#1177).
+        if !self.mic_active && !self.detail.stt_plugin_ready {
+            self.surface.status = i18n::fl("tray-mic-needs-stt");
+            self.surface.stt_setup_needed = true;
+            return;
+        }
         let session = self.session.clone_handle();
         let enable = !self.mic_active;
         self.spawn(async move {
@@ -1400,6 +1509,15 @@ impl StageApp {
             };
             AsyncOutcome::MicClaim(result)
         });
+    }
+
+    /// A successful mic claim proves STT readiness on its own, but parked
+    /// Voice-setup CTAs must also be disarmed as soon as effective settings
+    /// show a non-placeholder provider, independent of any mic interaction.
+    fn sync_stt_cta_after_settings_parse(&mut self) {
+        if self.detail.stt_plugin_ready {
+            self.surface.stt_setup_needed = false;
+        }
     }
 
     fn send_chat(&mut self) {
@@ -1541,9 +1659,12 @@ impl StageApp {
         let session_id = self.session.session_id().to_owned();
         let id = pending.id;
         let decision = decision.to_owned();
+        let allowed = decision == "allow" || decision == "allow_and_remember";
         self.spawn(async move {
             AsyncOutcome::Approval {
                 session_id,
+                allowed,
+                approval_id: id.clone(),
                 result: session
                     .respond_approval(&id, &decision)
                     .await
@@ -2026,6 +2147,8 @@ impl StageApp {
         self.surface.pending_approval = None;
         self.approval_needs_reveal = false;
         self.surface.pending_question = None;
+        self.detail.pending_job_retry = None;
+        self.detail.submitted_job = None;
         self.detail.invalidate_memory();
     }
 
@@ -2818,16 +2941,39 @@ fn map_turn_err(err: &str) -> String {
         err.to_owned()
     }
 }
+
+/// Recognize the daemon's approval-pending rejection of job creation; only
+/// this error may stash a request for replay after its approval resolves.
+#[must_use]
+fn create_denied_by_approval(err: &str) -> bool {
+    err.to_ascii_lowercase().contains("job creation denied")
+}
+
+/// Map a raw job-creation error to a user-facing reason, translating the
+/// approval-pending rejection instead of surfacing the raw `http 403` body.
+#[must_use]
+fn friendly_create_job_error(err: &str) -> String {
+    if create_denied_by_approval(err) {
+        i18n::fl("job-creation-denied-by-approval")
+    } else {
+        err.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
-        OverlayFocus, StageApp, chat_window_action, format_log_text, overlay_window_level,
-        provider_asset_load_status, should_repaint_after_event, window_focus_state, window_level,
+        OverlayFocus, StageApp, chat_window_action, format_log_text, friendly_create_job_error,
+        overlay_window_level, provider_asset_load_status, should_repaint_after_event,
+        window_focus_state, window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
+    use crate::detail::PendingJobRetry;
+    use crate::i18n;
     use crate::surface::{PendingApproval, PendingQuestion};
+    use ene_api::CreateJobRequest;
     use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
     use std::sync::Arc;
     use std::time::Duration;
@@ -2923,6 +3069,8 @@ mod tests {
 
         app.apply_async_outcome(AsyncOutcome::Approval {
             session_id: "old-session".to_owned(),
+            allowed: false,
+            approval_id: String::new(),
             result: Ok(()),
         });
 
@@ -3798,6 +3946,217 @@ mod tests {
             app.detail.core_status
         );
     }
+    #[test]
+    fn create_job_denied_by_approval_gets_user_facing_message() {
+        let raw = "http 403: forbidden: job creation denied";
+        assert_eq!(
+            friendly_create_job_error(raw),
+            i18n::fl("job-creation-denied-by-approval")
+        );
+        // Unrelated errors pass through unchanged.
+        assert_eq!(
+            friendly_create_job_error("http 500: internal error"),
+            "http 500: internal error"
+        );
+    }
+
+    fn submitted_request(goal: &str) -> CreateJobRequest {
+        CreateJobRequest {
+            soul_id: "soul".to_owned(),
+            goal: goal.to_owned(),
+            title: Some("Plant care".to_owned()),
+        }
+    }
+
+    /// Submit through the UI path so the in-flight record matches what
+    /// production stores, then feed the API failure the async lane delivers.
+    fn apply_create_failure(app: &mut StageApp, request: CreateJobRequest, err: &str) {
+        app.detail.submitted_job = Some(request);
+        app.apply_async_outcome(AsyncOutcome::CreateJob(Err(err.to_owned())));
+    }
+
+    #[test]
+    fn matching_allow_replays_stashed_job_creation() {
+        let mut app = StageApp::new_for_test();
+        // Surface the delegate.start ask exactly as the WS event would.
+        app.set_pending_approval(PendingApproval {
+            id: "approval-1".to_owned(),
+            tool: "delegate.start".to_owned(),
+            target: "water the plants".to_owned(),
+        });
+        apply_create_failure(
+            &mut app,
+            submitted_request("water the plants"),
+            "http 403: forbidden: job creation denied",
+        );
+        assert!(
+            app.detail.pending_job_retry.is_some(),
+            "an approval-pending rejection must arm the retry stash"
+        );
+        assert_eq!(
+            app.detail
+                .pending_job_retry
+                .as_ref()
+                .map(|retry| retry.approval_id.as_str()),
+            Some("approval-1"),
+            "stash must already carry the surfaced ask id"
+        );
+
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: true,
+            approval_id: "approval-1".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.detail.pending_job_retry, None,
+            "the matching allow consumes the stash"
+        );
+        app.runtime.block_on(async {
+            for _ in 0..200 {
+                if app
+                    .async_results
+                    .lock()
+                    .iter()
+                    .any(|outcome| matches!(outcome, AsyncOutcome::CreateJob(_)))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+        assert!(
+            app.async_results
+                .lock()
+                .iter()
+                .any(|outcome| matches!(outcome, AsyncOutcome::CreateJob(_))),
+            "the stashed request must be replayed"
+        );
+    }
+
+    #[test]
+    fn deny_is_final_even_for_a_matching_stash() {
+        let mut app = StageApp::new_for_test();
+        app.detail.pending_job_retry = Some(PendingJobRetry {
+            request: submitted_request("water the plants"),
+            approval_id: "approval-1".to_owned(),
+        });
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: false,
+            approval_id: "approval-1".to_owned(),
+            result: Ok(()),
+        });
+        assert!(
+            app.detail.pending_job_retry.is_none(),
+            "a deny consumes the stash as the final answer for that ask"
+        );
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: true,
+            approval_id: "approval-2".to_owned(),
+            result: Ok(()),
+        });
+        assert!(
+            !app.async_results
+                .lock()
+                .iter()
+                .any(|outcome| matches!(outcome, AsyncOutcome::CreateJob(_)))
+        );
+    }
+
+    #[test]
+    fn unrelated_allow_never_replays_the_stash() {
+        let mut app = StageApp::new_for_test();
+        let request = submitted_request("water the plants");
+        app.detail.pending_job_retry = Some(PendingJobRetry {
+            approval_id: "approval-1".to_owned(),
+            request: request.clone(),
+        });
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: true,
+            approval_id: "approval-2".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.detail.pending_job_retry,
+            Some(PendingJobRetry {
+                request,
+                approval_id: "approval-1".to_owned(),
+            }),
+            "an allow for a different ask must leave the stash untouched"
+        );
+        assert!(
+            !app.async_results
+                .lock()
+                .iter()
+                .any(|outcome| matches!(outcome, AsyncOutcome::CreateJob(_)))
+        );
+    }
+
+    #[test]
+    fn late_delegate_ask_binds_itself_to_the_waiting_stash() {
+        let mut app = StageApp::new_for_test();
+        apply_create_failure(
+            &mut app,
+            submitted_request("water the plants"),
+            "http 403: forbidden: job creation denied",
+        );
+        assert!(
+            app.detail
+                .pending_job_retry
+                .as_ref()
+                .is_some_and(|retry| retry.approval_id.is_empty()),
+            "the stash starts unbound while its ask has not surfaced yet"
+        );
+
+        app.set_pending_approval(PendingApproval {
+            id: "approval-9".to_owned(),
+            tool: "delegate.start".to_owned(),
+            target: "water the plants".to_owned(),
+        });
+        assert_eq!(
+            app.detail
+                .pending_job_retry
+                .as_ref()
+                .map(|retry| retry.approval_id.as_str()),
+            Some("approval-9"),
+            "the matching ask binds its id so its Allow can replay"
+        );
+
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: true,
+            approval_id: "approval-9".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(app.detail.pending_job_retry, None);
+    }
+
+    #[test]
+    fn only_approval_failures_are_stashed_for_retry() {
+        let mut app = StageApp::new_for_test();
+        let request = submitted_request("network blip");
+        apply_create_failure(
+            &mut app,
+            request.clone(),
+            "http 403: forbidden: job creation denied",
+        );
+        assert_eq!(
+            app.detail
+                .pending_job_retry
+                .as_ref()
+                .map(|retry| &retry.request),
+            Some(&request),
+            "an approval-pending failure is exactly what a later allow should retry"
+        );
+        apply_create_failure(&mut app, request.clone(), "http 500: internal error");
+        assert_eq!(
+            app.detail.pending_job_retry, None,
+            "a non-approval failure must not be replayable by a later allow"
+        );
+    }
 
     #[test]
     fn repaints_after_input_even_when_the_flag_is_dropped() {
@@ -3816,4 +4175,75 @@ mod tests {
         assert!(should_repaint_after_event(false, true));
         assert!(should_repaint_after_event(true, true));
     }
+}
+
+#[test]
+fn request_active_soul_enqueues_a_load_soul_outcome() {
+    let mut app = StageApp::new_for_test();
+    assert!(app.detail.soul.is_none());
+    app.request_active_soul();
+    // The outcome is produced asynchronously; let the spawned task settle.
+    app.runtime.block_on(async {
+        for _ in 0..200 {
+            if app
+                .async_results
+                .lock()
+                .iter()
+                .any(|outcome| matches!(outcome, AsyncOutcome::LoadSoul(_)))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    let queued = app
+        .async_results
+        .lock()
+        .iter()
+        .any(|outcome| matches!(outcome, AsyncOutcome::LoadSoul(_)));
+    assert!(
+        queued,
+        "boot should request the active soul so Home readiness is correct without opening Companion"
+    );
+}
+
+#[test]
+fn mic_toggle_is_blocked_until_stt_is_configured() {
+    let mut app = StageApp::new_for_test();
+    assert!(!app.mic_active);
+    // No STT provider yet: turning the mic on must not claim it.
+    app.toggle_mic();
+    assert!(!app.mic_active, "mic must stay off without STT");
+    assert!(
+        !app.surface.status.is_empty(),
+        "a Voice-setup CTA should be surfaced"
+    );
+    assert!(
+        app.surface.stt_setup_needed,
+        "the mic guard must arm the dedicated STT setup flag"
+    );
+
+    // Once a real STT provider is observed in effective settings, the
+    // settings-load path recomputes the ready mirror via parse_core_fields;
+    // the toggle reads that flag rather than re-parsing plugin strings.
+    detail::parse_core_fields(
+        r#"{"effective": {"ai": {"tasks": {"stt": {"plugin": "whisper.cpp"}}}}}"#,
+        &mut app.detail,
+    );
+    // Same disarm path the settings-load callback uses.
+    app.sync_stt_cta_after_settings_parse();
+    // Clear the prior CTA so we can confirm the configured path does not
+    // re-surface it.
+    app.surface.status.clear();
+    app.toggle_mic();
+    // The synchronous guard must not surface the CTA when STT is
+    // configured; the actual claim is performed asynchronously.
+    assert!(
+        app.surface.status.is_empty(),
+        "configured STT must not trigger the STT-missing CTA"
+    );
+    assert!(
+        !app.surface.stt_setup_needed,
+        "configured STT must leave any earlier STT-missing CTA unarmed"
+    );
 }

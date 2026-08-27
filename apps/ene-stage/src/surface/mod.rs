@@ -68,6 +68,9 @@ pub struct SurfaceUiState {
     pub chat_open: bool,
     pub caption_open: bool,
     pub status: String,
+    /// Set only by the mic toggle guard once it proves Speech-to-Text is
+    /// missing; arbitrary status text must never arm the Voice-setup CTA.
+    pub stt_setup_needed: bool,
     pub voice_state: String,
     pub exclusive_notice: String,
     pub quit: bool,
@@ -105,6 +108,7 @@ impl Default for SurfaceUiState {
             chat_open: true,
             caption_open: false,
             status: i18n::fl("status-ready"),
+            stt_setup_needed: false,
             voice_state: String::new(),
             exclusive_notice: String::new(),
             quit: false,

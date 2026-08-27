@@ -208,7 +208,7 @@ pub struct JobView {
     pub progress_note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateJobRequest {
     pub soul_id: String,
     pub goal: String,

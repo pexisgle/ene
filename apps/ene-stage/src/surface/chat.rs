@@ -271,6 +271,7 @@ fn composer_send_requested(ui: &egui::Ui) -> ComposerSendRequest {
 
 pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> bool {
     let mut composer_focused = false;
+    let mut jump_to_voice = false;
 
     // A fixed-height composer panel reserves its space up front; sizing the
     // transcript against leftover space keeps long conversations from pushing
@@ -335,6 +336,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                     ui.weak(i18n::fl("chat-send-keyboard-hint"));
                     if state.turn_active {
                         ui.weak(i18n::fl("chat-draft-editable-hint"));
+                    }
+                    // The status label at the top of this panel is easily
+                    // missed, so the mic guard repeats its Voice-setup call to
+                    // action as a button inside the composer panel. Gating on
+                    // the dedicated flag keeps unrelated status text from
+                    // advertising a missing Speech-to-Text provider.
+                    if mic_cta_eligible(state, mic_active)
+                        && ui
+                            .add(egui::Button::new(
+                                egui::RichText::new(i18n::fl("tray-mic-needs-stt")).small(),
+                            ))
+                            .clicked()
+                    {
+                        jump_to_voice = true;
                     }
                 });
 
@@ -439,13 +454,41 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                 });
         });
 
+    if jump_to_voice {
+        state.push_action(SurfaceAction::OpenDetail(DetailTab::Voice));
+    }
     composer_focused
+}
+
+/// The mic guard's Voice-setup button must not infer "STT missing" from
+/// arbitrary status text; only the dedicated flag may show or arm it.
+fn mic_cta_eligible(state: &SurfaceUiState, mic_active: bool) -> bool {
+    state.stt_setup_needed && !mic_active
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ene_api::GreetingView;
+
+    #[test]
+    fn unrelated_status_never_arms_or_renders_the_mic_voice_cta() {
+        let mut state = SurfaceUiState {
+            // An unrelated failure path left text in the generic status line.
+            status: "tool: execute: unknown skill skill".to_owned(),
+            ..Default::default()
+        };
+        assert!(
+            !mic_cta_eligible(&state, false),
+            "unrelated status must never render or fire the Voice CTA"
+        );
+
+        // Only the mic toggle guard arms the flag; then the CTA is eligible.
+        state.stt_setup_needed = true;
+        assert!(mic_cta_eligible(&state, false));
+        // With the mic claimed the guard no longer applies either.
+        assert!(!mic_cta_eligible(&state, true));
+    }
 
     fn message(role: &str, text: &str) -> MessageResponse {
         MessageResponse {
