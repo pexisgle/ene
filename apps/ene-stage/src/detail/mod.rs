@@ -317,6 +317,10 @@ pub struct DetailUiState {
     pub ai_tts_key_set: bool,
     pub tts_api_key_clear_pending: bool,
     pub stt_plugin: String,
+    /// True once a non-placeholder Speech-to-Text provider has been observed.
+    /// Recomputed by `parse_core_fields` (and proven by a successful mic claim)
+    /// so the mic guard and the settings loader share one source of truth.
+    pub stt_plugin_ready: bool,
     pub stt_model: String,
     pub stt_base_url: String,
     pub stt_api_key: String,
@@ -556,6 +560,9 @@ pub fn parse_core_fields(json: &str, state: &mut DetailUiState) {
     state.tts_api_key_clear_pending = false;
     state.stt_plugin = nested_string(effective, &["ai", "tasks", "stt", "plugin"]);
     state.stt_model = nested_string(effective, &["ai", "tasks", "stt", "model"]);
+    // The mic toggle reads this ready-mirror instead of re-parsing plugin
+    // strings; a successful mic claim also proves readiness on its own.
+    state.stt_plugin_ready = !(state.stt_plugin.is_empty() || state.stt_plugin == "echo");
     state.stt_base_url = nested_string(effective, &["ai", "tasks", "stt", "base_url"]);
     state.ai_stt_key_set = effective
         .get("ai_stt_key_set")
@@ -4541,6 +4548,7 @@ mod tests {
             tts_base_url: "https://tts.example.invalid".to_owned(),
             tts_voice: "alloy".to_owned(),
             stt_plugin: "provider.whisper".to_owned(),
+            stt_plugin_ready: true,
             stt_model: "small".to_owned(),
             stt_api_key: "stt-secret".to_owned(),
             ..DetailUiState::default()

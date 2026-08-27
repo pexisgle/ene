@@ -758,6 +758,7 @@ impl StageApp {
                     self.detail.core_settings_text.clone_from(&json);
                     self.detail.core_patch_text.clear();
                     detail::parse_core_fields(&json, &mut self.detail);
+                    self.sync_stt_cta_after_settings_parse();
                     self.detail.finish_settings_load();
                     self.surface.chat_setup = self.detail.clone();
                     self.detail.core_status = if detail::chat_setup_gap(&self.detail)
@@ -1127,6 +1128,12 @@ impl StageApp {
             AsyncOutcome::MicClaim(result) => match result {
                 Ok(active) => {
                     self.mic_active = active;
+                    self.detail.stt_plugin_ready = true;
+                    if active {
+                        // A claimed mic proves a real STT provider is in use,
+                        // so any parked Voice-setup CTA is obsolete.
+                        self.surface.stt_setup_needed = false;
+                    }
                     if let Some(tray) = self.tray.as_ref() {
                         tray.set_mic_active(active);
                     }
@@ -1479,10 +1486,9 @@ impl StageApp {
         // A mic claim needs a Speech-to-Text provider; without one the claim
         // succeeds but recognition can never run, so surface the Voice setup
         // CTA instead of a silent ON state (#1177).
-        if !self.mic_active
-            && (self.detail.stt_plugin.is_empty() || self.detail.stt_plugin == "echo")
-        {
+        if !self.mic_active && !self.detail.stt_plugin_ready {
             self.surface.status = i18n::fl("tray-mic-needs-stt");
+            self.surface.stt_setup_needed = true;
             return;
         }
         let session = self.session.clone_handle();
@@ -1503,6 +1509,15 @@ impl StageApp {
             };
             AsyncOutcome::MicClaim(result)
         });
+    }
+
+    /// A successful mic claim proves STT readiness on its own, but parked
+    /// Voice-setup CTAs must also be disarmed as soon as effective settings
+    /// show a non-placeholder provider, independent of any mic interaction.
+    fn sync_stt_cta_after_settings_parse(&mut self) {
+        if self.detail.stt_plugin_ready {
+            self.surface.stt_setup_needed = false;
+        }
     }
 
     fn send_chat(&mut self) {
@@ -4203,9 +4218,20 @@ fn mic_toggle_is_blocked_until_stt_is_configured() {
         !app.surface.status.is_empty(),
         "a Voice-setup CTA should be surfaced"
     );
+    assert!(
+        app.surface.stt_setup_needed,
+        "the mic guard must arm the dedicated STT setup flag"
+    );
 
-    // Once a real STT provider is set, the toggle is allowed to proceed.
-    app.detail.stt_plugin = "whisper.cpp".to_owned();
+    // Once a real STT provider is observed in effective settings, the
+    // settings-load path recomputes the ready mirror via parse_core_fields;
+    // the toggle reads that flag rather than re-parsing plugin strings.
+    detail::parse_core_fields(
+        r#"{"effective": {"ai": {"tasks": {"stt": {"plugin": "whisper.cpp"}}}}}"#,
+        &mut app.detail,
+    );
+    // Same disarm path the settings-load callback uses.
+    app.sync_stt_cta_after_settings_parse();
     // Clear the prior CTA so we can confirm the configured path does not
     // re-surface it.
     app.surface.status.clear();
@@ -4215,5 +4241,9 @@ fn mic_toggle_is_blocked_until_stt_is_configured() {
     assert!(
         app.surface.status.is_empty(),
         "configured STT must not trigger the STT-missing CTA"
+    );
+    assert!(
+        !app.surface.stt_setup_needed,
+        "configured STT must leave any earlier STT-missing CTA unarmed"
     );
 }
