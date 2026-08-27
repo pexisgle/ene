@@ -1,6 +1,6 @@
 //! Chat panel for the surface viewport.
 
-use crate::detail::{DetailTab, chat_setup_gap, chat_setup_status};
+use crate::detail::{ChatSetupGap, DetailTab, DetailUiState, chat_setup_gap, chat_setup_status};
 use crate::i18n;
 use crate::surface::{SurfaceAction, SurfaceUiState};
 use ene_api::{HistoryResponse, MessageMode, MessageResponse};
@@ -453,6 +453,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                     }
                     if let Some(gap) = chat_setup_gap(&state.chat_setup) {
                         scroll_ui.add_space(4.0);
+                        let setup_cta = chat_setup_cta_eligible(state);
+                        if setup_cta
+                            && scroll_ui
+                                .button(i18n::fl("chat-setup-unconfigured"))
+                                .clicked()
+                        {
+                            state.push_action(SurfaceAction::OpenDetail(DetailTab::Conversation));
+                        }
                         scroll_ui.weak(chat_setup_status(gap));
                     }
                 });
@@ -468,6 +476,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
 /// arbitrary status text; only the dedicated flag may show or arm it.
 fn mic_cta_eligible(state: &SurfaceUiState, mic_active: bool) -> bool {
     state.stt_setup_needed && !mic_active
+}
+
+/// The chat-setup CTA may not piggyback on generic status text nor crowd out
+/// live conversation rows or the greeting picker; only a dedicated setup gap
+/// over a quiet panel may show or arm it.
+fn chat_setup_cta_eligible(state: &SurfaceUiState) -> bool {
+    chat_setup_gap(&state.chat_setup).is_some()
+        && state.greetings.is_empty()
+        && normalize_transcript(&state.history, &state.streaming_text).is_empty()
 }
 
 #[cfg(test)]
@@ -574,6 +591,52 @@ mod tests {
         assert!(mic_cta_eligible(&state, false));
         // With the mic claimed the guard no longer applies either.
         assert!(!mic_cta_eligible(&state, true));
+    }
+
+    #[test]
+    fn chat_setup_cta_needs_a_gap_and_an_empty_transcript() {
+        // Defaults leave chat unconfigured, so the bare surface arms the CTA.
+        assert!(chat_setup_cta_eligible(&SurfaceUiState::default()));
+
+        // Rows on screen displace the first-run CTA.
+        let occupied = SurfaceUiState {
+            history: HistoryResponse {
+                messages: vec![message("assistant", "hello")],
+                depth: "surface".to_owned(),
+            },
+            ..Default::default()
+        };
+        assert!(!chat_setup_cta_eligible(&occupied));
+
+        // An active greeting picker displaces it even before any row exists.
+        let greeting_pending = SurfaceUiState {
+            greetings: vec![greeting(0, "Hi!")],
+            history: HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+            ..Default::default()
+        };
+        assert!(!chat_setup_cta_eligible(&greeting_pending));
+
+        // A stream in flight displaces it even without stable rows.
+        let streaming = SurfaceUiState {
+            streaming_text: "still writing".to_owned(),
+            ..Default::default()
+        };
+        assert!(!chat_setup_cta_eligible(&streaming));
+
+        // Configuring a model resolves the gap and removes the CTA.
+        let mut configured = SurfaceUiState::default();
+        configured.chat_setup.chat_plugin = "provider.gguf".to_owned();
+        configured.chat_setup.chat_model = "local-model".to_owned();
+        assert!(!chat_setup_cta_eligible(&configured));
+
+        // Arbitrary generic status text neither arms nor gates the signal.
+        assert!(chat_setup_cta_eligible(&SurfaceUiState {
+            status: "tool: execute: unknown skill skill".to_owned(),
+            ..Default::default()
+        }));
     }
 
     fn message(role: &str, text: &str) -> MessageResponse {
