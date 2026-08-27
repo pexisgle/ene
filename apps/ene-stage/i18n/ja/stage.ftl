@@ -121,6 +121,8 @@ jobs-forked = セッションをフォークしました
 jobs-compacted = セッションを圧縮しました
 jobs-exported = セッションを書き出しました
 jobs-export-hint = セッション JSON を保存します。ダイアログはドキュメントまたはダウンロードを開き、セッション ID をファイル名にします。
+job-creation-denied-by-approval = ジョブ作成は承認リクエストによってブロックされました。承認してから、もう一度ジョブを作成してください。
+
 approval-title = ツール承認
 approval-tool = ツール
 approval-target = 対象

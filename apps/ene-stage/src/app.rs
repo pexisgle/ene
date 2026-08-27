@@ -913,7 +913,7 @@ impl StageApp {
                         self.detail.new_job_goal.clear();
                         self.detail.core_status = i18n::fl("jobs-created");
                     }
-                    Err(err) => self.detail.core_status = err,
+                    Err(err) => self.detail.core_status = friendly_create_job_error(&err),
                 }
             }
             AsyncOutcome::CreateSchedule(result) => match result {
@@ -2793,6 +2793,17 @@ fn map_turn_err(err: &str) -> String {
         err.to_owned()
     }
 }
+
+/// Map a raw job-creation error to a user-facing reason when it was blocked
+/// by an approval request, instead of surfacing the raw `http 403` (#1178).
+#[must_use]
+fn friendly_create_job_error(err: &str) -> String {
+    if err.to_ascii_lowercase().contains("job creation denied") {
+        i18n::fl("job-creation-denied-by-approval")
+    } else {
+        err.to_owned()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3771,6 +3782,19 @@ mod tests {
                 || app.detail.core_status.contains("インポートしました"),
             "import should report the import message: {}",
             app.detail.core_status
+        );
+    }
+    #[test]
+    fn create_job_denied_by_approval_gets_user_facing_message() {
+        let raw = "http 403: forbidden: job creation denied";
+        assert_eq!(
+            friendly_create_job_error(raw),
+            i18n::fl("job-creation-denied-by-approval")
+        );
+        // Unrelated errors pass through unchanged.
+        assert_eq!(
+            friendly_create_job_error("http 500: internal error"),
+            "http 500: internal error"
         );
     }
 }

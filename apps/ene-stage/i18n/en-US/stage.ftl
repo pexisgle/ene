@@ -121,6 +121,8 @@ jobs-forked = Session forked
 jobs-compacted = Session compacted
 jobs-exported = Session exported
 jobs-export-hint = Saves session JSON. The dialog opens in Documents or Downloads with the session id as the file name.
+job-creation-denied-by-approval = Job creation was blocked by an approval request. Approve the prompt, then create the job again.
+
 approval-title = Tool approval
 approval-tool = Tool
 approval-target = Target
