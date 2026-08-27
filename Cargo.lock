@@ -2453,6 +2453,7 @@ dependencies = [
  "gtk",
  "i18n-embed",
  "i18n-embed-fl",
+ "iana-time-zone",
  "image",
  "indexmap",
  "notify-rust",

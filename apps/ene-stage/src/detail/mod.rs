@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine as _;
+use chrono::{DateTime, Utc};
 use ene_api::{
     ApiClient, ApiError, CharacterView, CreateJobRequest, JobView, MemoryCandidateDecision,
     MemoryCandidateView, MemoryJournalView, MemoryPatch, MemoryView, OccupantView,
@@ -357,8 +358,11 @@ pub struct DetailUiState {
     /// matching Allow resolution can retry it once.
     pub pending_job_retry: Option<PendingJobRetry>,
     pub new_schedule_name: String,
+    /// Raw spec typed in the Advanced builder mode; guided modes generate the
+    /// spec from their own fields and never read this.
     pub new_schedule_spec: String,
     pub new_schedule_inflight: bool,
+    pub new_schedule_builder: ScheduleBuilderState,
     pub plugins: Vec<PluginView>,
     pub provider_assets_plugin: String,
     pub provider_assets: Vec<ProviderAssetView>,
@@ -403,6 +407,128 @@ pub struct DetailUiState {
     activation_generation: u64,
     settings_state: SettingsLoadState,
     loaded: DetailLoaded,
+}
+
+/// Guided schedule builder inputs. `spec_for` renders them into the raw spec
+/// the core validates, so the client never becomes a second validator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleBuilderState {
+    pub mode: ScheduleBuilderMode,
+    pub interval_value: u32,
+    pub interval_unit: ScheduleIntervalUnit,
+    pub daily_hour: u32,
+    pub daily_minute: u32,
+    pub weekly_hour: u32,
+    pub weekly_minute: u32,
+    pub weekdays: [bool; 7],
+}
+
+impl Default for ScheduleBuilderState {
+    fn default() -> Self {
+        Self {
+            mode: ScheduleBuilderMode::default(),
+            // 15 minutes is the friendliest first interval; zero would
+            // silently create an invalid `every 0m` spec the core rejects.
+            interval_value: 15,
+            interval_unit: ScheduleIntervalUnit::default(),
+            daily_hour: 9,
+            daily_minute: 0,
+            weekly_hour: 9,
+            weekly_minute: 0,
+            weekdays: [false; 7],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScheduleBuilderMode {
+    #[default]
+    Interval,
+    Daily,
+    Weekly,
+    Advanced,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScheduleIntervalUnit {
+    #[default]
+    Minutes,
+    Hours,
+    Days,
+}
+
+impl ScheduleBuilderState {
+    /// Spec the core will receive in the current builder mode. Advanced mode
+    /// returns an empty string; the raw text lives in the `new_schedule_spec`
+    /// field of `DetailUiState` so power users keep full cron syntax.
+    #[must_use]
+    pub fn spec_for(&self) -> String {
+        match self.mode {
+            ScheduleBuilderMode::Interval => format_interval_spec(
+                self.interval_value,
+                match self.interval_unit {
+                    ScheduleIntervalUnit::Minutes => "m",
+                    ScheduleIntervalUnit::Hours => "h",
+                    ScheduleIntervalUnit::Days => "d",
+                },
+            ),
+            ScheduleBuilderMode::Daily => cron_spec(self.daily_minute, self.daily_hour, &["*"]),
+            ScheduleBuilderMode::Weekly => {
+                let names: Vec<&str> = WEEKDAY_SPEC_NAMES
+                    .iter()
+                    .copied()
+                    .zip(self.weekdays)
+                    .filter_map(|(name, on)| on.then_some(name))
+                    .collect();
+                cron_spec(self.weekly_minute, self.weekly_hour, &names)
+            }
+            ScheduleBuilderMode::Advanced => String::new(),
+        }
+    }
+}
+
+const WEEKDAY_SPEC_NAMES: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
+#[must_use]
+fn format_interval_spec(value: u32, unit: &str) -> String {
+    format!("every {value}{unit}")
+}
+
+/// Render a 5-field cron spec. An empty weekday selection means no valid
+/// schedule exists yet, so the caller sees an empty spec instead of a
+/// silently always-fire pattern.
+#[must_use]
+fn cron_spec(minute: u32, hour: u32, days: &[&str]) -> String {
+    if days.is_empty() {
+        return String::new();
+    }
+    format!("{minute} {hour} * * {}", days.join(","))
+}
+
+/// Human-readable preview of the stored next-fire timestamp, rendered in the
+/// schedule's own timezone when the offset is derivable and falling back to
+/// UTC otherwise; an unparseable stored value passes through untouched.
+#[must_use]
+fn humanize_next_fire(next_fire: Option<&str>, timezone: &str) -> String {
+    let Some(raw) = next_fire else {
+        return i18n::fl("schedule-next-fire-none");
+    };
+    let Ok(ts) = DateTime::parse_from_rfc3339(raw) else {
+        return raw.to_owned();
+    };
+    let local = match timezone.parse::<chrono::FixedOffset>() {
+        Ok(offset) => ts.with_timezone(&offset),
+        Err(_) => ts.with_timezone(&Utc).fixed_offset(),
+    };
+    let local = local.format("%Y-%m-%d %H:%M").to_string();
+    i18n::format("schedule-next-fire", &[("at", &local)])
+}
+
+/// Local IANA timezone name used as the create-request default; falls back to
+/// UTC when the platform cannot report one, matching the core default.
+#[must_use]
+fn local_timezone_name() -> String {
+    iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_owned())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2606,17 +2732,11 @@ fn show_work(
         }
     }
     ui.heading(i18n::fl("jobs-schedules"));
-    ui.add(
-        egui::TextEdit::singleline(&mut state.new_schedule_name)
-            .hint_text(i18n::fl("schedule-new-name")),
-    );
-    ui.add(
-        egui::TextEdit::singleline(&mut state.new_schedule_spec)
-            .hint_text(i18n::fl("schedule-new-spec")),
-    );
+    show_schedule_builder(ui, state);
+    let spec = state.new_schedule_builder.spec_for();
     let can_create = !state.new_schedule_inflight
         && !state.new_schedule_name.trim().is_empty()
-        && !state.new_schedule_spec.trim().is_empty();
+        && !spec.trim().is_empty();
     if ui
         .add_enabled(can_create, egui::Button::new(i18n::fl("schedule-create")))
         .clicked()
@@ -2625,8 +2745,8 @@ fn show_work(
         let request = ene_api::CreateScheduleRequest {
             soul_id: soul_id.to_owned(),
             name: state.new_schedule_name.trim().to_owned(),
-            spec: state.new_schedule_spec.trim().to_owned(),
-            timezone: "UTC".to_owned(),
+            spec: spec.trim().to_owned(),
+            timezone: local_timezone_name(),
             action: "remind".to_owned(),
             action_ref: None,
             important: false,
@@ -2643,9 +2763,16 @@ fn show_work(
     }
     for schedule in &state.schedules {
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "{} ({}) enabled={}",
-                schedule.name, schedule.spec, schedule.enabled
+            ui.label(schedule.name.clone());
+            ui.label(schedule.spec.clone());
+            ui.label(if schedule.enabled {
+                i18n::fl("schedule-state-enabled")
+            } else {
+                i18n::fl("schedule-state-disabled")
+            });
+            ui.label(humanize_next_fire(
+                schedule.next_fire.as_deref(),
+                &schedule.timezone,
             ));
             let label = if schedule.enabled {
                 i18n::fl("schedule-disable")
@@ -2945,6 +3072,136 @@ fn connection_status_label(plugin: &PluginView) -> String {
         "failed" => i18n::fl("connections-status-unhealthy-no-error"),
         _ => i18n::fl("connections-status-disabled"),
     }
+}
+
+/// Guided schedule builder replacing the raw-spec text edit for the common
+/// interval/daily/weekly cases; Advanced keeps the raw spec path for cron
+/// features the guided modes do not cover.
+fn show_schedule_builder(ui: &mut egui::Ui, state: &mut DetailUiState) {
+    let builder = &mut state.new_schedule_builder;
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("schedule-builder-mode"));
+        egui::ComboBox::from_id_salt("schedule-builder-mode")
+            .selected_text(mode_label(builder.mode))
+            .show_ui(ui, |ui| {
+                for mode in [
+                    ScheduleBuilderMode::Interval,
+                    ScheduleBuilderMode::Daily,
+                    ScheduleBuilderMode::Weekly,
+                    ScheduleBuilderMode::Advanced,
+                ] {
+                    ui.selectable_value(&mut builder.mode, mode, mode_label(mode));
+                }
+            });
+    });
+    match builder.mode {
+        ScheduleBuilderMode::Interval => {
+            ui.horizontal(|ui| {
+                ui.label(i18n::fl("schedule-builder-every"));
+                ui.add(
+                    egui::DragValue::new(&mut builder.interval_value)
+                        .range(1..=u32::MAX)
+                        .prefix("")
+                        .suffix(""),
+                );
+                egui::ComboBox::from_id_salt("schedule-builder-interval-unit")
+                    .selected_text(interval_unit_label(builder.interval_unit))
+                    .show_ui(ui, |ui| {
+                        for unit in [
+                            ScheduleIntervalUnit::Minutes,
+                            ScheduleIntervalUnit::Hours,
+                            ScheduleIntervalUnit::Days,
+                        ] {
+                            ui.selectable_value(
+                                &mut builder.interval_unit,
+                                unit,
+                                interval_unit_label(unit),
+                            );
+                        }
+                    });
+            });
+        }
+        ScheduleBuilderMode::Daily => {
+            ui.horizontal(|ui| {
+                ui.label(i18n::fl("schedule-builder-daily-at"));
+                ui.add(
+                    egui::DragValue::new(&mut builder.daily_hour)
+                        .range(0..=23)
+                        .suffix(i18n::fl("schedule-builder-hour")),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut builder.daily_minute)
+                        .range(0..=59)
+                        .suffix(i18n::fl("schedule-builder-minute")),
+                );
+            });
+        }
+        ScheduleBuilderMode::Weekly => {
+            ui.horizontal(|ui| {
+                ui.label(i18n::fl("schedule-builder-weekly-at"));
+                ui.add(
+                    egui::DragValue::new(&mut builder.weekly_hour)
+                        .range(0..=23)
+                        .suffix(i18n::fl("schedule-builder-hour")),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut builder.weekly_minute)
+                        .range(0..=59)
+                        .suffix(i18n::fl("schedule-builder-minute")),
+                );
+            });
+            ui.horizontal(|ui| {
+                for (index, _) in WEEKDAY_SPEC_NAMES.iter().enumerate() {
+                    ui.toggle_value(&mut builder.weekdays[index], weekday_label(index));
+                }
+            });
+        }
+        ScheduleBuilderMode::Advanced => {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.new_schedule_spec)
+                    .hint_text(i18n::fl("schedule-new-spec")),
+            );
+        }
+    }
+    let spec = builder.spec_for();
+    if builder.mode != ScheduleBuilderMode::Advanced && !spec.is_empty() {
+        ui.label(i18n::format(
+            "schedule-builder-spec-preview",
+            &[("spec", &spec)],
+        ));
+    }
+}
+
+#[must_use]
+fn mode_label(mode: ScheduleBuilderMode) -> String {
+    match mode {
+        ScheduleBuilderMode::Interval => i18n::fl("schedule-builder-mode-interval"),
+        ScheduleBuilderMode::Daily => i18n::fl("schedule-builder-mode-daily"),
+        ScheduleBuilderMode::Weekly => i18n::fl("schedule-builder-mode-weekly"),
+        ScheduleBuilderMode::Advanced => i18n::fl("schedule-builder-mode-advanced"),
+    }
+}
+
+#[must_use]
+fn interval_unit_label(unit: ScheduleIntervalUnit) -> String {
+    match unit {
+        ScheduleIntervalUnit::Minutes => i18n::fl("schedule-builder-unit-minutes"),
+        ScheduleIntervalUnit::Hours => i18n::fl("schedule-builder-unit-hours"),
+        ScheduleIntervalUnit::Days => i18n::fl("schedule-builder-unit-days"),
+    }
+}
+
+#[must_use]
+fn weekday_label(index: usize) -> String {
+    i18n::fl(match index {
+        0 => "schedule-builder-mon",
+        1 => "schedule-builder-tue",
+        2 => "schedule-builder-wed",
+        3 => "schedule-builder-thu",
+        4 => "schedule-builder-fri",
+        5 => "schedule-builder-sat",
+        _ => "schedule-builder-sun",
+    })
 }
 
 fn show_mcp_tools(ui: &mut egui::Ui, state: &DetailUiState) {
@@ -5174,5 +5431,76 @@ mod tests {
         assert!(!is_character_active(&other, Some("alicia")));
         assert!(!is_character_active(&unbound, Some("alicia")));
         assert!(!is_character_active(&active, None));
+    }
+
+    #[test]
+    fn schedule_builder_generates_interval_specs() {
+        let mut builder = ScheduleBuilderState::default();
+        assert_eq!(builder.spec_for(), "every 15m");
+
+        builder.interval_value = 90;
+        builder.interval_unit = ScheduleIntervalUnit::Minutes;
+        assert_eq!(builder.spec_for(), "every 90m");
+
+        builder.interval_unit = ScheduleIntervalUnit::Hours;
+        assert_eq!(builder.spec_for(), "every 90h");
+
+        builder.interval_unit = ScheduleIntervalUnit::Days;
+        assert_eq!(builder.spec_for(), "every 90d");
+    }
+
+    #[test]
+    fn schedule_builder_generates_daily_and_weekly_specs() {
+        let mut builder = ScheduleBuilderState {
+            mode: ScheduleBuilderMode::Daily,
+            daily_hour: 9,
+            daily_minute: 5,
+            ..ScheduleBuilderState::default()
+        };
+        assert_eq!(builder.spec_for(), "5 9 * * *");
+
+        builder.mode = ScheduleBuilderMode::Weekly;
+        builder.weekly_hour = 9;
+        builder.weekly_minute = 30;
+        builder.weekdays = [true, false, true, false, true, false, false];
+        assert_eq!(builder.spec_for(), "30 9 * * MON,WED,FRI");
+
+        builder.weekdays = [false; 7];
+        assert_eq!(builder.spec_for(), "");
+    }
+
+    #[test]
+    fn schedule_builder_advanced_mode_uses_raw_spec_field() {
+        let builder = ScheduleBuilderState {
+            mode: ScheduleBuilderMode::Advanced,
+            ..ScheduleBuilderState::default()
+        };
+        assert_eq!(builder.spec_for(), "");
+    }
+
+    #[test]
+    fn humanize_next_fire_formats_utc_fallback_and_none() {
+        assert_eq!(
+            humanize_next_fire(None, "UTC"),
+            i18n::fl("schedule-next-fire-none")
+        );
+        assert_eq!(
+            humanize_next_fire(Some("not-a-timestamp"), "UTC"),
+            "not-a-timestamp"
+        );
+        assert_eq!(
+            humanize_next_fire(Some("2026-01-02T03:04:05Z"), "UTC"),
+            i18n::format("schedule-next-fire", &[("at", "2026-01-02 03:04")])
+        );
+        assert_eq!(
+            humanize_next_fire(Some("2026-01-02T03:04:05+09:00"), "UTC"),
+            i18n::format("schedule-next-fire", &[("at", "2026-01-01 18:04")])
+        );
+    }
+
+    #[test]
+    fn local_timezone_name_never_panics_and_defaults_to_utc() {
+        let name = local_timezone_name();
+        assert!(!name.is_empty());
     }
 }
