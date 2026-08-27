@@ -1,6 +1,6 @@
 //! Chat panel for the surface viewport.
 
-use crate::detail::{ChatSetupGap, DetailTab, DetailUiState, chat_setup_gap, chat_setup_status};
+use crate::detail::{DetailTab, chat_setup_gap, chat_setup_status};
 use crate::i18n;
 use crate::surface::{SurfaceAction, SurfaceUiState};
 use ene_api::{HistoryResponse, MessageMode, MessageResponse};
