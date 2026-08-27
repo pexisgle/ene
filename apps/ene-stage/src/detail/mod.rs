@@ -1197,6 +1197,20 @@ async fn prepare_activation(
     Ok(ActivatedCharacter { character, target })
 }
 
+/// A package is the active companion when the soul it created or reused
+/// matches the currently active soul, so the UI can badge it instead of
+/// offering a redundant Activate action (#1177).
+#[must_use]
+pub fn is_character_active(
+    character: &ene_api::CharacterView,
+    active_soul_id: Option<&str>,
+) -> bool {
+    match (character.soul_id.as_deref(), active_soul_id) {
+        (Some(soul_id), Some(active)) => soul_id == active,
+        _ => false,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "companion tab owns import/export/activate"
@@ -1397,7 +1411,9 @@ fn show_companion(
                         "{}@{} ({}) {}",
                         character.id, character.version, character.kind, character.path
                     ));
-                    if ui.button(i18n::fl("character-activate")).clicked() {
+                    if is_character_active(character, state.soul.as_ref().map(|s| s.id.as_str())) {
+                        ui.weak(i18n::fl("character-active-package"));
+                    } else if ui.button(i18n::fl("character-activate")).clicked() {
                         activate_id = Some(character.id.clone());
                     }
                 });
@@ -5073,5 +5089,35 @@ mod tests {
 
         assert!(!state.mcp_probe_is_current(first));
         assert!(state.mcp_probe_is_current(second));
+    }
+
+    #[test]
+    fn character_active_badge_matches_active_soul() {
+        let active = CharacterView {
+            id: "char.alicia".to_owned(),
+            version: "1.0.0".to_owned(),
+            kind: "package".to_owned(),
+            path: "/packages/char.alicia".to_owned(),
+            soul_id: Some("alicia".to_owned()),
+        };
+        let other = CharacterView {
+            id: "char.alicia-b".to_owned(),
+            version: "1.0.0".to_owned(),
+            kind: "package".to_owned(),
+            path: "/packages/char.alicia-b".to_owned(),
+            soul_id: Some("alicia-b".to_owned()),
+        };
+        let unbound = CharacterView {
+            id: "char.orphan".to_owned(),
+            version: "1.0.0".to_owned(),
+            kind: "package".to_owned(),
+            path: "/packages/char.orphan".to_owned(),
+            soul_id: None,
+        };
+
+        assert!(is_character_active(&active, Some("alicia")));
+        assert!(!is_character_active(&other, Some("alicia")));
+        assert!(!is_character_active(&unbound, Some("alicia")));
+        assert!(!is_character_active(&active, None));
     }
 }

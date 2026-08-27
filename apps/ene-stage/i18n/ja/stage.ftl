@@ -308,6 +308,7 @@ character-imported = キャラクターをインポートしました
 character-activated = キャラクターを有効化しました
 character-body-updated = ボディを更新しました
 character-activate = 有効化
+character-active-package = 有効化済み
 character-occupants = ステージ上の在場
 character-occupants-help = 現在ステージにいる存在です。在場ごとにソウル (人格) とボディ・アバターが対応します。
 character-occupants-empty = ほかにステージには誰もいません。

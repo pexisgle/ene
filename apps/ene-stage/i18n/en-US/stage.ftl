@@ -308,6 +308,7 @@ character-imported = Imported character
 character-activated = Activated character
 character-body-updated = Body updated
 character-activate = Activate
+character-active-package = Active
 character-occupants = Stage occupants
 character-occupants-help = Everyone currently on the stage. Each occupant pairs a soul (personality) with a body and avatar.
 character-occupants-empty = Nobody else is on the stage.
