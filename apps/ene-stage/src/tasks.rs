@@ -30,6 +30,9 @@ pub enum AsyncOutcome {
         /// True when the resolution was an allow variant rather than a deny,
         /// so callers can react only to grants.
         allowed: bool,
+        /// Id of the approval ask this outcome resolves. Callers stash work
+        /// against a specific ask and must match on this before replaying it.
+        approval_id: String,
     },
     SelectGreeting {
         session_id: String,

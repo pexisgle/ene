@@ -38,6 +38,15 @@ pub enum DetailTab {
     Log,
 }
 
+/// A job creation blocked by an approval ask, tied to the approval id whose
+/// Allow resolution may replay it. Requests failed for any other reason are
+/// never stashed, and a Deny or an unrelated approval must not consume it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingJobRetry {
+    pub request: CreateJobRequest,
+    pub approval_id: String,
+}
+
 #[must_use]
 fn caption_position_label(value: &str) -> String {
     match value {
@@ -335,9 +344,14 @@ pub struct DetailUiState {
     pub new_job_title: String,
     pub new_job_goal: String,
     pub new_job_inflight: bool,
-    /// Job creation that failed because approval was still pending, stashed so
-    /// the resolved approval can retry it once (#1178).
-    pub pending_job_retry: Option<CreateJobRequest>,
+    /// Exact request of the in-flight job creation click, kept so an
+    /// approval-pending failure can be stashed verbatim for replay; any other
+    /// terminal state clears it.
+    pub submitted_job: Option<CreateJobRequest>,
+    /// Job creation that failed while its `delegate.start` approval ask was
+    /// still unresolved, stashed together with that approval id so exactly the
+    /// matching Allow resolution can retry it once.
+    pub pending_job_retry: Option<PendingJobRetry>,
     pub new_schedule_name: String,
     pub new_schedule_spec: String,
     pub new_schedule_inflight: bool,
@@ -2523,9 +2537,9 @@ fn show_work(
             .hint_text(i18n::fl("jobs-new-goal")),
     );
     let can_create = !state.new_job_inflight && !state.new_job_goal.trim().is_empty();
-    // A stashed request means the last click was blocked by an approval ask;
-    // relabeling keeps the retry visible instead of the button silently
-    // duplicating a job the user believes was already created (#1178).
+    // A stashed request means the last click was blocked by its approval ask;
+    // relabeling keeps the retry visible instead of silently duplicating a job
+    // the user believes was already created.
     let create_label = if state.pending_job_retry.is_some() {
         i18n::fl("jobs-create-retry")
     } else {
@@ -2542,7 +2556,7 @@ fn show_work(
             title: (!state.new_job_title.trim().is_empty())
                 .then(|| state.new_job_title.trim().to_owned()),
         };
-        state.pending_job_retry = Some(request.clone());
+        state.submitted_job = Some(request.clone());
         let client = Arc::clone(client);
         spawn_async(rt, async_results, async move {
             AsyncOutcome::CreateJob(client.create_job(&request).await.map_err(|e| e.to_string()))

@@ -21,7 +21,7 @@ use crate::chrome::{ChromeKind, ChromeWindow};
 use crate::core::events::{EventFeeds, LiveEvent, spawn_event_feeds};
 use crate::core::session::StageSession;
 use crate::core::spawn::{StageCore, StageSpawnError, attach_or_spawn_core};
-use crate::detail::{self, DetailTab, DetailUiState, LogKind};
+use crate::detail::{self, DetailTab, DetailUiState, LogKind, PendingJobRetry};
 use crate::gpu::{GpuContext, GpuError};
 use crate::i18n;
 use crate::overlay::{OverlayError, OverlayWindow};
@@ -628,6 +628,7 @@ impl StageApp {
             AsyncOutcome::Approval {
                 session_id,
                 allowed,
+                approval_id,
                 result,
             } => {
                 if session_id != self.session.session_id() {
@@ -638,18 +639,31 @@ impl StageApp {
                 match result {
                     Err(err) => self.surface.status = err,
                     Ok(()) => {
-                        // Replay a surface job creation that failed while its
-                        // ask was unresolved so One-time Allow resumes the same
-                        // goal without a manual re-submit (#1178). Denials do
-                        // not retry, keeping deny as the final answer for that
-                        // request until the user submits it again.
-                        if allowed && let Some(request) = self.detail.pending_job_retry.take() {
-                            let client = Arc::clone(&self.client);
-                            self.spawn(async move {
-                                AsyncOutcome::CreateJob(
-                                    client.create_job(&request).await.map_err(|e| e.to_string()),
-                                )
-                            });
+                        if allowed {
+                            let matched = self
+                                .detail
+                                .pending_job_retry
+                                .as_ref()
+                                .is_some_and(|retry| retry.approval_id == approval_id);
+                            if matched {
+                                let retry = self.detail.pending_job_retry.take();
+                                if let Some(retry) = retry {
+                                    let client = Arc::clone(&self.client);
+                                    self.spawn(async move {
+                                        AsyncOutcome::CreateJob(
+                                            client
+                                                .create_job(&retry.request)
+                                                .await
+                                                .map_err(|e| e.to_string()),
+                                        )
+                                    });
+                                }
+                            }
+                        } else {
+                            // A deny is the final answer for an armed retry
+                            // even when the ask it waited on is gone, so it
+                            // can never fire on some later unrelated grant.
+                            self.detail.pending_job_retry = None;
                         }
                     }
                 }
@@ -942,6 +956,7 @@ impl StageApp {
             },
             AsyncOutcome::CreateJob(result) => {
                 self.detail.new_job_inflight = false;
+                let submitted = self.detail.submitted_job.take();
                 match result {
                     Ok(job) => {
                         self.detail.pending_job_retry = None;
@@ -952,6 +967,32 @@ impl StageApp {
                         self.detail.core_status = i18n::fl("jobs-created");
                     }
                     Err(err) => {
+                        if create_denied_by_approval(&err) {
+                            // The rejection means the goal's delegate.start
+                            // ask reached the plane; bind the surfaced ask id
+                            // when it is already visible so exactly its Allow
+                            // can replay. Late asks match by goal later.
+                            let approval_id = self
+                                .surface
+                                .pending_approval
+                                .as_ref()
+                                .filter(|ask| {
+                                    ask.tool == "delegate.start"
+                                        && submitted
+                                            .as_ref()
+                                            .is_some_and(|job| job.goal == ask.target)
+                                })
+                                .map(|ask| ask.id.clone());
+                            if let Some(request) = submitted {
+                                self.detail.pending_job_retry = Some(PendingJobRetry {
+                                    approval_id: approval_id.unwrap_or_default(),
+                                    request,
+                                });
+                            }
+                        } else {
+                            self.detail.pending_job_retry = None;
+                        }
+
                         self.detail.core_status = friendly_create_job_error(&err);
                     }
                 }
@@ -1193,6 +1234,8 @@ impl StageApp {
                     self.approval_needs_reveal = false;
                     self.surface.pending_question = None;
                     self.surface.status = i18n::fl("chat-new-session-ready");
+                    self.detail.pending_job_retry = None;
+                    self.detail.submitted_job = None;
                     self.request_history_refresh();
                     self.detail.new_session_inflight = false;
                     self.surface.new_session_inflight = false;
@@ -1242,6 +1285,17 @@ impl StageApp {
     }
 
     fn set_pending_approval(&mut self, approval: surface::PendingApproval) {
+        // The create click can be rejected before its ask reaches the stage
+        // (event vs HTTP race), so a fresh unbound delegate.start ask binds
+        // itself to the stash waiting on the same goal, then surfaces as
+        // usual so the user can still resolve it.
+        if approval.tool == "delegate.start"
+            && let Some(retry) = self.detail.pending_job_retry.as_mut().filter(|retry| {
+                retry.approval_id.is_empty() && retry.request.goal == approval.target
+            })
+        {
+            retry.approval_id.clone_from(&approval.id);
+        }
         let is_new = self
             .surface
             .pending_approval
@@ -1595,6 +1649,7 @@ impl StageApp {
             AsyncOutcome::Approval {
                 session_id,
                 allowed,
+                approval_id: id.clone(),
                 result: session
                     .respond_approval(&id, &decision)
                     .await
@@ -2077,6 +2132,8 @@ impl StageApp {
         self.surface.pending_approval = None;
         self.approval_needs_reveal = false;
         self.surface.pending_question = None;
+        self.detail.pending_job_retry = None;
+        self.detail.submitted_job = None;
         self.detail.invalidate_memory();
     }
 
@@ -2870,16 +2927,24 @@ fn map_turn_err(err: &str) -> String {
     }
 }
 
-/// Map a raw job-creation error to a user-facing reason when it was blocked
-/// by an approval request, instead of surfacing the raw `http 403` (#1178).
+/// Recognize the daemon's approval-pending rejection of job creation; only
+/// this error may stash a request for replay after its approval resolves.
+#[must_use]
+fn create_denied_by_approval(err: &str) -> bool {
+    err.to_ascii_lowercase().contains("job creation denied")
+}
+
+/// Map a raw job-creation error to a user-facing reason, translating the
+/// approval-pending rejection instead of surfacing the raw `http 403` body.
 #[must_use]
 fn friendly_create_job_error(err: &str) -> String {
-    if err.to_ascii_lowercase().contains("job creation denied") {
+    if create_denied_by_approval(err) {
         i18n::fl("job-creation-denied-by-approval")
     } else {
         err.to_owned()
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2890,6 +2955,7 @@ mod tests {
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
+    use crate::detail::PendingJobRetry;
     use crate::i18n;
     use crate::surface::{PendingApproval, PendingQuestion};
     use ene_api::CreateJobRequest;
@@ -2989,6 +3055,7 @@ mod tests {
         app.apply_async_outcome(AsyncOutcome::Approval {
             session_id: "old-session".to_owned(),
             allowed: false,
+            approval_id: String::new(),
             result: Ok(()),
         });
 
@@ -3878,43 +3945,201 @@ mod tests {
         );
     }
 
-    #[test]
-    fn denied_job_creation_is_stashed_and_replayed_on_allow() {
-        let mut app = StageApp::new_for_test();
-        let request = CreateJobRequest {
+    fn submitted_request(goal: &str) -> CreateJobRequest {
+        CreateJobRequest {
             soul_id: "soul".to_owned(),
-            goal: "water the plants".to_owned(),
+            goal: goal.to_owned(),
             title: Some("Plant care".to_owned()),
-        };
-        // The denial keeps the request around for the approval replay.
-        app.detail.pending_job_retry = Some(request.clone());
-        app.apply_async_outcome(AsyncOutcome::CreateJob(Err(
-            "http 403: forbidden: job creation denied".to_owned(),
-        )));
-        assert_eq!(app.detail.pending_job_retry, Some(request.clone()));
-        assert!(!app.detail.core_status.is_empty());
+        }
+    }
 
-        // Unrelated errors clear nothing either, but a successful creation does.
-        app.detail.pending_job_retry = Some(request.clone());
-        app.apply_async_outcome(AsyncOutcome::Approval {
-            session_id: app.session.session_id().to_owned(),
-            allowed: false,
-            result: Ok(()),
+    /// Submit through the UI path so the in-flight record matches what
+    /// production stores, then feed the API failure the async lane delivers.
+    fn apply_create_failure(app: &mut StageApp, request: CreateJobRequest, err: &str) {
+        app.detail.submitted_job = Some(request);
+        app.apply_async_outcome(AsyncOutcome::CreateJob(Err(err.to_owned())));
+    }
+
+    #[test]
+    fn matching_allow_replays_stashed_job_creation() {
+        let mut app = StageApp::new_for_test();
+        // Surface the delegate.start ask exactly as the WS event would.
+        app.set_pending_approval(PendingApproval {
+            id: "approval-1".to_owned(),
+            tool: "delegate.start".to_owned(),
+            target: "water the plants".to_owned(),
         });
+        apply_create_failure(
+            &mut app,
+            submitted_request("water the plants"),
+            "http 403: forbidden: job creation denied",
+        );
+        assert!(
+            app.detail.pending_job_retry.is_some(),
+            "an approval-pending rejection must arm the retry stash"
+        );
         assert_eq!(
-            app.detail.pending_job_retry,
-            Some(request),
-            "a deny must not replay the stashed job"
+            app.detail
+                .pending_job_retry
+                .as_ref()
+                .map(|retry| retry.approval_id.as_str()),
+            Some("approval-1"),
+            "stash must already carry the surfaced ask id"
         );
 
         app.apply_async_outcome(AsyncOutcome::Approval {
             session_id: app.session.session_id().to_owned(),
             allowed: true,
+            approval_id: "approval-1".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.detail.pending_job_retry, None,
+            "the matching allow consumes the stash"
+        );
+        app.runtime.block_on(async {
+            for _ in 0..200 {
+                if app
+                    .async_results
+                    .lock()
+                    .iter()
+                    .any(|outcome| matches!(outcome, AsyncOutcome::CreateJob(_)))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+        assert!(
+            app.async_results
+                .lock()
+                .iter()
+                .any(|outcome| matches!(outcome, AsyncOutcome::CreateJob(_))),
+            "the stashed request must be replayed"
+        );
+    }
+
+    #[test]
+    fn deny_is_final_even_for_a_matching_stash() {
+        let mut app = StageApp::new_for_test();
+        app.detail.pending_job_retry = Some(PendingJobRetry {
+            request: submitted_request("water the plants"),
+            approval_id: "approval-1".to_owned(),
+        });
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: false,
+            approval_id: "approval-1".to_owned(),
             result: Ok(()),
         });
         assert!(
             app.detail.pending_job_retry.is_none(),
-            "an allow consumes the stash and replays the job"
+            "a deny consumes the stash as the final answer for that ask"
+        );
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: true,
+            approval_id: "approval-2".to_owned(),
+            result: Ok(()),
+        });
+        assert!(
+            !app.async_results
+                .lock()
+                .iter()
+                .any(|outcome| matches!(outcome, AsyncOutcome::CreateJob(_)))
+        );
+    }
+
+    #[test]
+    fn unrelated_allow_never_replays_the_stash() {
+        let mut app = StageApp::new_for_test();
+        let request = submitted_request("water the plants");
+        app.detail.pending_job_retry = Some(PendingJobRetry {
+            approval_id: "approval-1".to_owned(),
+            request: request.clone(),
+        });
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: true,
+            approval_id: "approval-2".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.detail.pending_job_retry,
+            Some(PendingJobRetry {
+                request,
+                approval_id: "approval-1".to_owned(),
+            }),
+            "an allow for a different ask must leave the stash untouched"
+        );
+        assert!(
+            !app.async_results
+                .lock()
+                .iter()
+                .any(|outcome| matches!(outcome, AsyncOutcome::CreateJob(_)))
+        );
+    }
+
+    #[test]
+    fn late_delegate_ask_binds_itself_to_the_waiting_stash() {
+        let mut app = StageApp::new_for_test();
+        apply_create_failure(
+            &mut app,
+            submitted_request("water the plants"),
+            "http 403: forbidden: job creation denied",
+        );
+        assert!(
+            app.detail
+                .pending_job_retry
+                .as_ref()
+                .is_some_and(|retry| retry.approval_id.is_empty()),
+            "the stash starts unbound while its ask has not surfaced yet"
+        );
+
+        app.set_pending_approval(PendingApproval {
+            id: "approval-9".to_owned(),
+            tool: "delegate.start".to_owned(),
+            target: "water the plants".to_owned(),
+        });
+        assert_eq!(
+            app.detail
+                .pending_job_retry
+                .as_ref()
+                .map(|retry| retry.approval_id.as_str()),
+            Some("approval-9"),
+            "the matching ask binds its id so its Allow can replay"
+        );
+
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: true,
+            approval_id: "approval-9".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(app.detail.pending_job_retry, None);
+    }
+
+    #[test]
+    fn only_approval_failures_are_stashed_for_retry() {
+        let mut app = StageApp::new_for_test();
+        let request = submitted_request("network blip");
+        apply_create_failure(
+            &mut app,
+            request.clone(),
+            "http 403: forbidden: job creation denied",
+        );
+        assert_eq!(
+            app.detail
+                .pending_job_retry
+                .as_ref()
+                .map(|retry| &retry.request),
+            Some(&request),
+            "an approval-pending failure is exactly what a later allow should retry"
+        );
+        apply_create_failure(&mut app, request.clone(), "http 500: internal error");
+        assert_eq!(
+            app.detail.pending_job_retry, None,
+            "a non-approval failure must not be replayable by a later allow"
         );
     }
 

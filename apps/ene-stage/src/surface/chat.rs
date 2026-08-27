@@ -271,6 +271,7 @@ fn composer_send_requested(ui: &egui::Ui) -> ComposerSendRequest {
 
 pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> bool {
     let mut composer_focused = false;
+    let mut jump_to_voice = false;
 
     // A fixed-height composer panel reserves its space up front; sizing the
     // transcript against leftover space keeps long conversations from pushing
@@ -335,6 +336,19 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                     ui.weak(i18n::fl("chat-send-keyboard-hint"));
                     if state.turn_active {
                         ui.weak(i18n::fl("chat-draft-editable-hint"));
+                    }
+                    // The status label at the top of this panel is easily
+                    // missed, so the mic guard repeats its Voice-setup call to
+                    // action as a button inside the composer panel.
+                    if !state.status.is_empty()
+                        && !mic_active
+                        && ui
+                            .add(egui::Button::new(
+                                egui::RichText::new(i18n::fl("tray-mic-needs-stt")).small(),
+                            ))
+                            .clicked()
+                    {
+                        jump_to_voice = true;
                     }
                 });
 
@@ -439,6 +453,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                 });
         });
 
+    if jump_to_voice {
+        state.push_action(SurfaceAction::OpenDetail(DetailTab::Voice));
+    }
     composer_focused
 }
 
