@@ -277,6 +277,10 @@ pub fn run() -> Result<(), AppError> {
         &app.rt_handle,
         &app.async_results,
     );
+    // Load the active soul once at boot so the Home readiness cards and the
+    // companion list reflect the live companion without first opening the
+    // Companion tab (#1177). The Companion tab re-issues this idempotently.
+    app.request_active_soul();
     app.claim_speaker_notify();
 
     event_loop
@@ -507,6 +511,20 @@ impl StageApp {
         self.rt_handle.spawn(async move {
             let outcome = task.await;
             results.lock().push(outcome);
+        });
+    }
+
+    /// Load the active soul once so the Home readiness cards and the companion
+    /// list reflect the live companion without first opening the Companion tab
+    /// (#1177). The Companion tab re-issues this idempotently.
+    fn request_active_soul(&mut self) {
+        let soul_id = self.session.soul_id().to_owned();
+        if soul_id.is_empty() {
+            return;
+        }
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::LoadSoul(client.get_soul(&soul_id).await.map_err(|e| e.to_string()))
         });
     }
 
@@ -3864,4 +3882,34 @@ mod tests {
             "an allow consumes the stash and replays the job"
         );
     }
+}
+
+#[test]
+fn request_active_soul_enqueues_a_load_soul_outcome() {
+    let mut app = StageApp::new_for_test();
+    assert!(app.detail.soul.is_none());
+    app.request_active_soul();
+    // The outcome is produced asynchronously; let the spawned task settle.
+    app.runtime.block_on(async {
+        for _ in 0..200 {
+            if app
+                .async_results
+                .lock()
+                .iter()
+                .any(|outcome| matches!(outcome, AsyncOutcome::LoadSoul(_)))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    let queued = app
+        .async_results
+        .lock()
+        .iter()
+        .any(|outcome| matches!(outcome, AsyncOutcome::LoadSoul(_)));
+    assert!(
+        queued,
+        "boot should request the active soul so Home readiness is correct without opening Companion"
+    );
 }
