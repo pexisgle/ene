@@ -16,6 +16,7 @@ use crate::i18n;
 pub use approvals::PendingApproval;
 pub use spotlight::SpotlightAction;
 
+/// Default Companion window size; also the shrink floor for Chat and Detail.
 pub(crate) const CHAT_WINDOW_WIDTH: u32 = 520;
 pub(crate) const CHAT_WINDOW_HEIGHT: u32 = 560;
 
