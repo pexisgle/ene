@@ -693,6 +693,16 @@ pub fn plugin_is_local(plugin: &str, providers: &Value) -> bool {
     provider_bool(providers, plugin, "local")
 }
 
+/// Plugins whose clients substitute a working default when a field is blank,
+/// so an empty form is functional rather than misconfigured.
+#[must_use]
+pub fn plugin_has_fallback(plugin: &str) -> bool {
+    matches!(
+        plugin,
+        "provider.edge_tts" | "provider.voicevox" | "provider.openai_compat"
+    )
+}
+
 fn provider_bool(providers: &Value, plugin: &str, key: &str) -> bool {
     providers
         .as_array()
@@ -1906,6 +1916,20 @@ fn show_voice_task(ui: &mut egui::Ui, providers: &Value, mut form: VoiceTaskForm
         ui.label(i18n::fl("settings-voice-local-hint"));
     } else if !form.plugin.is_empty() && form.plugin != "echo" {
         task_row(ui, i18n::fl("settings-voice-base-url"), form.base_url);
+    }
+    // Empty fields are valid for plugins with built-in fallbacks; leaving them
+    // blank-looking under a green Ready card reads as a lost save (#1177).
+    if plugin_has_fallback(form.plugin) {
+        let needs_base_note =
+            !plugin_is_local(form.plugin, providers) && form.base_url.trim().is_empty();
+        let needs_model_note = form.model.trim().is_empty();
+        let needs_voice_note = form
+            .voice
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty());
+        if needs_base_note || needs_model_note || needs_voice_note {
+            ui.label(i18n::fl("settings-voice-fallback-note"));
+        }
     }
     task_row(ui, i18n::fl("settings-voice-model"), form.model);
     if let Some(voice) = form.voice {
@@ -4648,6 +4672,15 @@ mod tests {
             tab: DetailTab::Voice,
             state: SetupState::Ready,
         }));
+    }
+
+    #[test]
+    fn fallback_voice_plugins_treat_blank_fields_as_valid() {
+        assert!(plugin_has_fallback("provider.edge_tts"));
+        assert!(plugin_has_fallback("provider.voicevox"));
+        assert!(plugin_has_fallback("provider.openai_compat"));
+        assert!(!plugin_has_fallback("provider.elevenlabs"));
+        assert!(!plugin_has_fallback(""));
     }
 
     #[test]

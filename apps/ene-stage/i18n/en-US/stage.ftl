@@ -213,6 +213,7 @@ settings-voice-provider = Provider
 settings-voice-provider-none = Choose a provider
 settings-voice-provider-empty = No installed provider exposes this voice capability yet.
 settings-voice-local-hint = This local provider uses the engine and assets configured under Connections.
+settings-voice-fallback-note = Blank fields use this provider's built-in defaults.
 settings-voice-model = Model
 settings-voice-base-url = Base URL
 settings-voice-voice = Voice

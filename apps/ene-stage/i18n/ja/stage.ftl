@@ -213,6 +213,7 @@ settings-voice-provider = プロバイダ
 settings-voice-provider-none = プロバイダを選ぶ
 settings-voice-provider-empty = この音声機能を提供するインストール済みプロバイダがまだありません。
 settings-voice-local-hint = ローカルプロバイダは接続タブで設定したエンジンとアセットを使います。
+settings-voice-fallback-note = 空欄の項目はプロバイダの既定値が使用されます。
 settings-voice-model = モデル
 settings-voice-base-url = Base URL
 settings-voice-voice = 音声
