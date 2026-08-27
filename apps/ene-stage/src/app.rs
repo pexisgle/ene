@@ -3604,6 +3604,56 @@ mod tests {
     }
 
     #[test]
+    fn failed_reconcile_keeps_optimistic_rows_for_the_next_attempt() {
+        let mut app = StageApp::new_for_test();
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id: app.session.session_id().to_owned(),
+            sent_text: "kept".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 1);
+
+        // A rejected history fetch must leave the surface untouched so the
+        // optimistic row survives until a later attempt carries the turn.
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Err("connection refused".to_owned()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "kept");
+        // The failed attempt consumes one slot of the bounded budget and
+        // re-arms the loop right away instead of ending reconciliation.
+        assert_eq!(
+            app.pending_completion_refreshes,
+            MAX_COMPLETION_REFRESHES - 2
+        );
+        assert!(app.completion_reconcile_inflight);
+    }
+
+    #[test]
+    fn plain_refresh_between_turns_applies_completion_guards() {
+        let mut app = StageApp::new_for_test();
+        let session_id = app.session.session_id().to_owned();
+        app.pending_completion_refreshes = MAX_COMPLETION_REFRESHES;
+
+        // A user-issued refresh that races the completion loop still shows an
+        // assistant-bearing projection; unrelated refreshes take the guard.
+        app.apply_async_outcome(AsyncOutcome::RefreshHistory {
+            session_id,
+            result: Ok(HistoryResponse {
+                messages: vec![ene_api::MessageResponse {
+                    seq: 7,
+                    role: "assistant".to_owned(),
+                    text: "done".to_owned(),
+                }],
+                depth: "surface".to_owned(),
+            }),
+        });
+        assert_eq!(app.surface.history.messages[0].text, "done");
+        assert_eq!(app.pending_completion_refreshes, 0);
+    }
+
+    #[test]
     fn reconciliation_ignores_stale_prior_turns_and_waits_for_new_rows() {
         let mut app = StageApp::new_for_test();
         let session_id = app.session.session_id().to_owned();
