@@ -98,6 +98,7 @@ impl ChromeWindow {
         let attrs = Window::default_attributes()
             .with_title(kind.title())
             .with_inner_size(inner)
+            .with_min_inner_size(minimum_inner_size(kind))
             .with_decorations(decorations)
             .with_transparent(kind == ChromeKind::Caption || kind == ChromeKind::Spotlight)
             .with_window_level(winit::window::WindowLevel::AlwaysOnTop);
@@ -280,6 +281,46 @@ impl ChromeWindow {
             .submit(extra.into_iter().chain(std::iter::once(encoder.finish())));
         frame.present();
         Ok(())
+    }
+}
+
+/// Smallest inner size at which each chrome window still shows its header and
+/// action row. Chat doubles as the fixed floor for all decorated windows so
+/// initially-narrow companions never clip their top instructions or composer.
+#[must_use]
+pub fn minimum_inner_size(kind: ChromeKind) -> PhysicalSize<u32> {
+    match kind {
+        ChromeKind::Chat | ChromeKind::Detail => PhysicalSize::new(
+            crate::surface::CHAT_WINDOW_WIDTH,
+            crate::surface::CHAT_WINDOW_HEIGHT,
+        ),
+        ChromeKind::Caption => PhysicalSize::new(240, 80),
+        ChromeKind::Spotlight => PhysicalSize::new(360, 400),
+    }
+}
+
+#[cfg(test)]
+mod minimum_inner_size_tests {
+    use super::*;
+
+    #[test]
+    fn chat_and_detail_floor_matches_default_bounds() {
+        let expected = PhysicalSize::new(
+            crate::surface::CHAT_WINDOW_WIDTH,
+            crate::surface::CHAT_WINDOW_HEIGHT,
+        );
+        assert_eq!(minimum_inner_size(ChromeKind::Chat), expected);
+        assert_eq!(minimum_inner_size(ChromeKind::Detail), expected);
+    }
+
+    #[test]
+    fn caption_and_spotlight_floors_stay_positive_and_below_defaults() {
+        let caption = minimum_inner_size(ChromeKind::Caption);
+        let spotlight = minimum_inner_size(ChromeKind::Spotlight);
+        assert_eq!(caption, PhysicalSize::new(240, 80));
+        assert_eq!(spotlight, PhysicalSize::new(360, 400));
+        assert!(caption.width < 720 && caption.height < 160);
+        assert!(spotlight.width < 420 && spotlight.height < 480);
     }
 }
 

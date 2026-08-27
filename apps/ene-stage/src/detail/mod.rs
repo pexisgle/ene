@@ -1079,27 +1079,33 @@ pub fn show(
         }
     });
     ui.separator();
-    if !search_has_match(&state.search) {
-        ui.label(i18n::fl("detail-search-empty"));
-        return;
-    }
-    if state.tab != DetailTab::Home && !state.core_status.is_empty() {
-        ui.label(&state.core_status);
-    }
-    match state.tab {
-        DetailTab::Home => show_home(ui, state, client, rt, async_results),
-        DetailTab::Companion => show_companion(ui, state, soul_id, client, rt, async_results),
-        DetailTab::Conversation => show_conversation(ui, state, client, rt, async_results),
-        DetailTab::Voice => show_voice(ui, state, local_settings, client, rt, async_results),
-        DetailTab::Memory => show_memory(ui, state, soul_id, client, rt, async_results),
-        DetailTab::Work => show_work(ui, state, soul_id, client, rt, async_results),
-        DetailTab::Connections => show_connections(ui, state, client, rt, async_results),
-        DetailTab::System => show_system(ui, state, local_settings, client, rt, async_results),
-        DetailTab::Log => show_log(ui, state),
-    }
-    if matches!(state.tab, DetailTab::Home | DetailTab::Companion) {
-        show_onboarding(ui, state, local_settings, client, rt, async_results);
-    }
+    // The window floor only prevents clipping; long content (multiple MCP
+    // forms, plugin config) still overflows the 680-point default height.
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        if !search_has_match(&state.search) {
+            ui.label(i18n::fl("detail-search-empty"));
+            return;
+        }
+        if state.tab != DetailTab::Home && !state.core_status.is_empty() {
+            ui.label(&state.core_status);
+        }
+        match state.tab {
+            DetailTab::Home => show_home(ui, state, client, rt, async_results),
+            DetailTab::Companion => show_companion(ui, state, soul_id, client, rt, async_results),
+            DetailTab::Conversation => show_conversation(ui, state, client, rt, async_results),
+            DetailTab::Voice => show_voice(ui, state, local_settings, client, rt, async_results),
+            DetailTab::Memory => show_memory(ui, state, soul_id, client, rt, async_results),
+            DetailTab::Work => show_work(ui, state, soul_id, client, rt, async_results),
+            DetailTab::Connections => {
+                show_connections(ui, state, client, rt, async_results);
+            }
+            DetailTab::System => show_system(ui, state, local_settings, client, rt, async_results),
+            DetailTab::Log => show_log(ui, state),
+        }
+        if matches!(state.tab, DetailTab::Home | DetailTab::Companion) {
+            show_onboarding(ui, state, local_settings, client, rt, async_results);
+        }
+    });
 }
 
 fn show_onboarding(
