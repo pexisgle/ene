@@ -2661,7 +2661,11 @@ impl ApplicationHandler for StageApp {
         if let Some(chat) = self.chat.as_mut()
             && chat.id() == id
         {
-            chat.on_window_event(&event);
+            close_chat = matches!(event, WindowEvent::CloseRequested);
+            let repaint = should_repaint_after_event(
+                chat.on_window_event(&event),
+                self.surface.chat_input_focused,
+            );
             if let Some(gpu) = self.gpu.as_ref()
                 && let WindowEvent::Resized(size) = &event
             {
@@ -2672,12 +2676,14 @@ impl ApplicationHandler for StageApp {
                     || ChromeWindow::composer_owns_keyboard(self.surface.chat_input_focused),
             );
             chrome_focus_state = window_focus_state(&event);
-            close_chat = matches!(event, WindowEvent::CloseRequested);
+            if repaint && !close_chat {
+                chat.request_redraw();
+            }
         }
         if let Some(detail) = self.detail_win.as_mut()
             && detail.id() == id
         {
-            detail.on_window_event(&event);
+            let repaint = detail.on_window_event(&event);
             if let Some(gpu) = self.gpu.as_ref()
                 && let WindowEvent::Resized(size) = &event
             {
@@ -2686,20 +2692,29 @@ impl ApplicationHandler for StageApp {
             overlay_from_chrome = Some(detail.owns_input());
             chrome_focus_state = window_focus_state(&event);
             close_detail = matches!(event, WindowEvent::CloseRequested);
+            if repaint && !close_detail {
+                detail.request_redraw();
+            }
         }
         if let Some(caption) = self.caption.as_mut()
             && caption.id() == id
         {
-            caption.on_window_event(&event);
+            let repaint = caption.on_window_event(&event);
             chrome_focus_state = window_focus_state(&event);
             close_caption = matches!(event, WindowEvent::CloseRequested);
+            if repaint && !close_caption {
+                caption.request_redraw();
+            }
         }
         if let Some(spotlight) = self.spotlight.as_mut()
             && spotlight.id() == id
         {
-            spotlight.on_window_event(&event);
+            let repaint = spotlight.on_window_event(&event);
             chrome_focus_state = window_focus_state(&event);
             close_spotlight = matches!(event, WindowEvent::CloseRequested);
+            if repaint && !close_spotlight {
+                spotlight.request_redraw();
+            }
         }
         if let Some(focused) = chrome_focus_state {
             let owner = if self.chat.as_ref().is_some_and(|w| w.id() == id) {
@@ -2823,6 +2838,16 @@ fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     }
 }
 
+/// `egui_winit` only raises its repaint flag on input that changes what it
+/// wants to draw (typing, focus changes, resize); trailing mouse moves leave it
+/// down. Dropping the flag lets an OS-throttled event loop defer that frame
+/// until the next interaction, so pasted input into a `TextEdit` appears one
+/// action late and users retype it into what looks like an empty field.
+#[must_use]
+fn should_repaint_after_event(repaint_flag: bool, composer_focused: bool) -> bool {
+    repaint_flag || composer_focused
+}
+
 /// How long overlay protection survives a chrome Focused(false) while waiting
 /// for another chrome window to claim focus during a normal handoff.
 const FOCUS_LOSS_GRACE: Duration = Duration::from_millis(200);
@@ -2860,7 +2885,8 @@ mod tests {
     use super::{
         AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
         OverlayFocus, StageApp, chat_window_action, format_log_text, friendly_create_job_error,
-        overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
+        overlay_window_level, provider_asset_load_status, should_repaint_after_event,
+        window_focus_state, window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -3890,6 +3916,24 @@ mod tests {
             app.detail.pending_job_retry.is_none(),
             "an allow consumes the stash and replays the job"
         );
+    }
+
+    #[test]
+    fn repaints_after_input_even_when_the_flag_is_dropped() {
+        assert!(!should_repaint_after_event(false, false));
+
+        // Typing and pasting raise the egui_winit repaint flag; honoring it
+        // keeps their frame immediate even while an OS throttles the loop.
+        assert!(should_repaint_after_event(true, false));
+    }
+
+    #[test]
+    fn composer_focus_forces_repaint_on_every_chat_event() {
+        // Trailing mouse moves never set the flag; a focused composer still
+        // needs every event to end in a redraw request (request_redraw
+        // coalesces internally, so this stays cheap).
+        assert!(should_repaint_after_event(false, true));
+        assert!(should_repaint_after_event(true, true));
     }
 }
 
