@@ -320,6 +320,7 @@ jobs-new-hint = 非同期の Work タスクを作成します。必要な場合�
 jobs-new-title = タイトル（任意）
 jobs-new-goal = 目的
 jobs-create = ジョブを作成
+jobs-create-retry = 承認後に再試行
 jobs-created = ジョブを作成しました
 jobs-active = アクティブジョブ
 jobs-recent = 最近のジョブ

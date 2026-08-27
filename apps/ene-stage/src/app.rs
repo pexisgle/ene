@@ -607,14 +607,33 @@ impl StageApp {
                     self.surface.status = err;
                 }
             }
-            AsyncOutcome::Approval { session_id, result } => {
+            AsyncOutcome::Approval {
+                session_id,
+                allowed,
+                result,
+            } => {
                 if session_id != self.session.session_id() {
                     return;
                 }
                 self.surface.pending_approval = None;
                 self.approval_needs_reveal = false;
-                if let Err(err) = result {
-                    self.surface.status = err;
+                match result {
+                    Err(err) => self.surface.status = err,
+                    Ok(()) => {
+                        // Replay a surface job creation that failed while its
+                        // ask was unresolved so One-time Allow resumes the same
+                        // goal without a manual re-submit (#1178). Denials do
+                        // not retry, keeping deny as the final answer for that
+                        // request until the user submits it again.
+                        if allowed && let Some(request) = self.detail.pending_job_retry.take() {
+                            let client = Arc::clone(&self.client);
+                            self.spawn(async move {
+                                AsyncOutcome::CreateJob(
+                                    client.create_job(&request).await.map_err(|e| e.to_string()),
+                                )
+                            });
+                        }
+                    }
                 }
             }
             AsyncOutcome::Listen { generation, result } => {
@@ -907,13 +926,16 @@ impl StageApp {
                 self.detail.new_job_inflight = false;
                 match result {
                     Ok(job) => {
+                        self.detail.pending_job_retry = None;
                         self.detail.jobs.retain(|item| item.id != job.id);
                         self.detail.jobs.insert(0, job);
                         self.detail.new_job_title.clear();
                         self.detail.new_job_goal.clear();
                         self.detail.core_status = i18n::fl("jobs-created");
                     }
-                    Err(err) => self.detail.core_status = friendly_create_job_error(&err),
+                    Err(err) => {
+                        self.detail.core_status = friendly_create_job_error(&err);
+                    }
                 }
             }
             AsyncOutcome::CreateSchedule(result) => match result {
@@ -1541,9 +1563,11 @@ impl StageApp {
         let session_id = self.session.session_id().to_owned();
         let id = pending.id;
         let decision = decision.to_owned();
+        let allowed = decision == "allow" || decision == "allow_and_remember";
         self.spawn(async move {
             AsyncOutcome::Approval {
                 session_id,
+                allowed,
                 result: session
                     .respond_approval(&id, &decision)
                     .await
@@ -2808,12 +2832,14 @@ fn friendly_create_job_error(err: &str) -> String {
 mod tests {
     use super::{
         AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
-        OverlayFocus, StageApp, chat_window_action, format_log_text, overlay_window_level,
-        provider_asset_load_status, window_focus_state, window_level,
+        OverlayFocus, StageApp, chat_window_action, format_log_text, friendly_create_job_error,
+        overlay_window_level, provider_asset_load_status, window_focus_state, window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
+    use crate::i18n;
     use crate::surface::{PendingApproval, PendingQuestion};
+    use ene_api::CreateJobRequest;
     use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
     use std::sync::Arc;
     use std::time::Duration;
@@ -2909,6 +2935,7 @@ mod tests {
 
         app.apply_async_outcome(AsyncOutcome::Approval {
             session_id: "old-session".to_owned(),
+            allowed: false,
             result: Ok(()),
         });
 
@@ -3795,6 +3822,46 @@ mod tests {
         assert_eq!(
             friendly_create_job_error("http 500: internal error"),
             "http 500: internal error"
+        );
+    }
+
+    #[test]
+    fn denied_job_creation_is_stashed_and_replayed_on_allow() {
+        let mut app = StageApp::new_for_test();
+        let request = CreateJobRequest {
+            soul_id: "soul".to_owned(),
+            goal: "water the plants".to_owned(),
+            title: Some("Plant care".to_owned()),
+        };
+        // The denial keeps the request around for the approval replay.
+        app.detail.pending_job_retry = Some(request.clone());
+        app.apply_async_outcome(AsyncOutcome::CreateJob(Err(
+            "http 403: forbidden: job creation denied".to_owned(),
+        )));
+        assert_eq!(app.detail.pending_job_retry, Some(request.clone()));
+        assert!(!app.detail.core_status.is_empty());
+
+        // Unrelated errors clear nothing either, but a successful creation does.
+        app.detail.pending_job_retry = Some(request.clone());
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: false,
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.detail.pending_job_retry,
+            Some(request),
+            "a deny must not replay the stashed job"
+        );
+
+        app.apply_async_outcome(AsyncOutcome::Approval {
+            session_id: app.session.session_id().to_owned(),
+            allowed: true,
+            result: Ok(()),
+        });
+        assert!(
+            app.detail.pending_job_retry.is_none(),
+            "an allow consumes the stash and replays the job"
         );
     }
 }

@@ -320,6 +320,7 @@ jobs-new-hint = Creating a job starts an asynchronous Work task and asks for app
 jobs-new-title = Title (optional)
 jobs-new-goal = Goal
 jobs-create = Create job
+jobs-create-retry = Retry after approval
 jobs-created = Job created
 jobs-active = Active jobs
 jobs-recent = Recent jobs

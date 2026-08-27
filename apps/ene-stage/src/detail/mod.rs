@@ -335,6 +335,9 @@ pub struct DetailUiState {
     pub new_job_title: String,
     pub new_job_goal: String,
     pub new_job_inflight: bool,
+    /// Job creation that failed because approval was still pending, stashed so
+    /// the resolved approval can retry it once (#1178).
+    pub pending_job_retry: Option<CreateJobRequest>,
     pub new_schedule_name: String,
     pub new_schedule_spec: String,
     pub new_schedule_inflight: bool,
@@ -2480,8 +2483,16 @@ fn show_work(
             .hint_text(i18n::fl("jobs-new-goal")),
     );
     let can_create = !state.new_job_inflight && !state.new_job_goal.trim().is_empty();
+    // A stashed request means the last click was blocked by an approval ask;
+    // relabeling keeps the retry visible instead of the button silently
+    // duplicating a job the user believes was already created (#1178).
+    let create_label = if state.pending_job_retry.is_some() {
+        i18n::fl("jobs-create-retry")
+    } else {
+        i18n::fl("jobs-create")
+    };
     if ui
-        .add_enabled(can_create, egui::Button::new(i18n::fl("jobs-create")))
+        .add_enabled(can_create, egui::Button::new(create_label))
         .clicked()
     {
         state.new_job_inflight = true;
@@ -2491,6 +2502,7 @@ fn show_work(
             title: (!state.new_job_title.trim().is_empty())
                 .then(|| state.new_job_title.trim().to_owned()),
         };
+        state.pending_job_retry = Some(request.clone());
         let client = Arc::clone(client);
         spawn_async(rt, async_results, async move {
             AsyncOutcome::CreateJob(client.create_job(&request).await.map_err(|e| e.to_string()))

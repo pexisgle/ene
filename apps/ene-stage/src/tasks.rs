@@ -27,6 +27,9 @@ pub enum AsyncOutcome {
     Approval {
         session_id: String,
         result: Result<(), String>,
+        /// True when the resolution was an allow variant rather than a deny,
+        /// so callers can react only to grants.
+        allowed: bool,
     },
     SelectGreeting {
         session_id: String,
