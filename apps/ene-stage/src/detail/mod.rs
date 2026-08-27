@@ -487,7 +487,25 @@ impl ScheduleBuilderState {
     }
 }
 
+/// Spec the Create button sends: guided modes render the builder fields and
+/// Advanced passes the raw text through, so the empty-string sentinel inside
+/// `spec_for` never disables Advanced-mode creation.
+#[must_use]
+fn effective_schedule_spec(builder: &ScheduleBuilderState, raw_spec: &str) -> String {
+    match builder.mode {
+        ScheduleBuilderMode::Advanced => raw_spec.trim().to_owned(),
+        _ => builder.spec_for(),
+    }
+}
+
 const WEEKDAY_SPEC_NAMES: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
+/// Creation gate shared by the button enable state and the request itself,
+/// so a test can pin exactly when Create becomes eligible.
+#[must_use]
+fn schedule_create_is_eligible(builder: &ScheduleBuilderState, name: &str, raw_spec: &str) -> bool {
+    !name.trim().is_empty() && !effective_schedule_spec(builder, raw_spec).is_empty()
+}
 
 #[must_use]
 fn format_interval_spec(value: u32, unit: &str) -> String {
@@ -2732,11 +2750,18 @@ fn show_work(
         }
     }
     ui.heading(i18n::fl("jobs-schedules"));
+    ui.add(
+        egui::TextEdit::singleline(&mut state.new_schedule_name)
+            .hint_text(i18n::fl("schedule-new-name")),
+    );
     show_schedule_builder(ui, state);
-    let spec = state.new_schedule_builder.spec_for();
+    let spec = effective_schedule_spec(&state.new_schedule_builder, &state.new_schedule_spec);
     let can_create = !state.new_schedule_inflight
-        && !state.new_schedule_name.trim().is_empty()
-        && !spec.trim().is_empty();
+        && schedule_create_is_eligible(
+            &state.new_schedule_builder,
+            &state.new_schedule_name,
+            &state.new_schedule_spec,
+        );
     if ui
         .add_enabled(can_create, egui::Button::new(i18n::fl("schedule-create")))
         .clicked()
@@ -5476,6 +5501,43 @@ mod tests {
             ..ScheduleBuilderState::default()
         };
         assert_eq!(builder.spec_for(), "");
+    }
+
+    #[test]
+    fn advanced_mode_create_gate_reads_the_raw_spec() {
+        let builder = ScheduleBuilderState {
+            mode: ScheduleBuilderMode::Advanced,
+            ..ScheduleBuilderState::default()
+        };
+
+        // A non-empty raw cron makes Create eligible in Advanced mode.
+        assert!(schedule_create_is_eligible(&builder, "Repair", "0 9 * * *"));
+
+        // Empty raw text stays disabled.
+        assert!(!schedule_create_is_eligible(&builder, "Repair", "   "));
+
+        // The effective spec sent to the core is the exact raw value.
+        assert_eq!(
+            effective_schedule_spec(&builder, "  5 9 * * MON,WED,FRI  "),
+            "5 9 * * MON,WED,FRI"
+        );
+    }
+
+    #[test]
+    fn create_gate_requires_name_and_guided_spec() {
+        let mut builder = ScheduleBuilderState::default();
+
+        // No name: disabled even with a valid guided spec.
+        assert!(!schedule_create_is_eligible(&builder, "  ", ""));
+
+        // Name plus guided interval spec enables Create.
+        assert!(schedule_create_is_eligible(&builder, "Repair", ""));
+
+        // A guided mode whose fields render no spec (weekly, nothing
+        // selected) stays disabled.
+        builder.mode = ScheduleBuilderMode::Weekly;
+        builder.weekdays = [false; 7];
+        assert!(!schedule_create_is_eligible(&builder, "Repair", ""));
     }
 
     #[test]
