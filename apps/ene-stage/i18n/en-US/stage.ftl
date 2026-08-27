@@ -36,6 +36,7 @@ chat-cancel-hint = Cancel the current turn.
 chat-overlay-hint = Overlay: Space shows the window frame. A/D switch bodies. W/S change motion. Turn off click-through in System if keys do not reach the character.
 mic-on = Mic on
 mic-off = Mic off
+tray-mic-needs-stt = Enable a Speech-to-Text provider in Voice settings before using the mic.
 tray-settings = Settings
 tray-chat = Chat
 tray-detail = Detail

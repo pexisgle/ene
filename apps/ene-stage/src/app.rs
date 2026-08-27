@@ -1422,6 +1422,15 @@ impl StageApp {
     }
 
     fn toggle_mic(&mut self) {
+        // A mic claim needs a Speech-to-Text provider; without one the claim
+        // succeeds but recognition can never run, so surface the Voice setup
+        // CTA instead of a silent ON state (#1177).
+        if !self.mic_active
+            && (self.detail.stt_plugin.is_empty() || self.detail.stt_plugin == "echo")
+        {
+            self.surface.status = i18n::fl("tray-mic-needs-stt");
+            return;
+        }
         let session = self.session.clone_handle();
         let enable = !self.mic_active;
         self.spawn(async move {
@@ -3912,4 +3921,30 @@ fn request_active_soul_enqueues_a_load_soul_outcome() {
         queued,
         "boot should request the active soul so Home readiness is correct without opening Companion"
     );
+
+    #[test]
+    fn mic_toggle_is_blocked_until_stt_is_configured() {
+        let mut app = StageApp::new_for_test();
+        assert!(!app.mic_active);
+        // No STT provider yet: turning the mic on must not claim it.
+        app.toggle_mic();
+        assert!(!app.mic_active, "mic must stay off without STT");
+        assert!(
+            !app.surface.status.is_empty(),
+            "a Voice-setup CTA should be surfaced"
+        );
+
+        // Once a real STT provider is set, the toggle is allowed to proceed.
+        app.detail.stt_plugin = "whisper.cpp".to_owned();
+        // Clear the prior CTA so we can confirm the configured path does not
+        // re-surface it.
+        app.surface.status.clear();
+        app.toggle_mic();
+        // The synchronous guard must not surface the CTA when STT is
+        // configured; the actual claim is performed asynchronously.
+        assert!(
+            app.surface.status.is_empty(),
+            "configured STT must not trigger the STT-missing CTA"
+        );
+    }
 }
