@@ -58,6 +58,10 @@ pub enum AsyncOutcome {
         generation: u64,
         result: Result<ene_api::McpProbeResponse, String>,
     },
+    SaveMcpCredential {
+        generation: u64,
+        result: Result<ene_api::McpProbeResponse, String>,
+    },
     LoadTools(Result<Vec<ene_api::ToolView>, String>),
     ListMemories {
         soul_id: String,
