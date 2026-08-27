@@ -9,7 +9,8 @@ Same meaning as the old box `ene-gui-smoke-watcher`:
 
 1. PR touches `apps/ene-stage/` or `apps/ene-desktop/`
 2. All non-skipped checks are green
-3. Either first green for that PR, or first green after label `gui-smoke-issues`
+3. Either first green for that PR, or first green on a **new** head after label
+   `gui-smoke-issues` (same head keeps the label; cold cache with the label does not fire)
 
 Retry: POST retries ~3 times on HTTP 5xx / URLError / timeout (1s, 2s, 4s); leftover failures are logged, that PR is left unfired, and the job stays green. HTTP 4xx still fails the job.
 

@@ -6,7 +6,7 @@ Runs on GitHub Actions (primary) so it still fires when the Grok Bot computer is
 Mirrors /home/box/ene-gui-smoke-watcher/watch.py fire rules:
   - PR touches apps/ene-stage/ or apps/ene-desktop/
   - All non-skipped checks green
-  - First green ever, or first green after label gui-smoke-issues
+  - First green ever, or first green on a new head after label gui-smoke-issues
 """
 from __future__ import annotations
 
@@ -97,9 +97,12 @@ def pr_has_issues_label(labels: list | None) -> bool:
 def should_fire(pr_num: int, head: str, has_issues: bool, state: dict) -> tuple[bool, str]:
     key = str(pr_num)
     fired = state.setdefault("fired_green", {})
-    if fired.get(key) == head:
+    prior_head = fired.get(key)
+    if prior_head == head:
         return False, "already_fired_this_green"
     if has_issues:
+        if prior_head is None:
+            return False, "issues_label_keep_no_prior_fire"
         return True, "first_green_after_issues"
     if key not in fired:
         return True, "first_green_never_smoked"
