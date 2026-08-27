@@ -578,23 +578,11 @@ impl StageApp {
                 }
                 if let Err(err) = result {
                     self.surface.status = err;
+                    self.surface.chat_draft = sent_text;
                 } else {
                     self.surface.chat_draft.clear();
                     self.surface.streaming_text.clear();
-                    let next_seq = self
-                        .surface
-                        .history
-                        .messages
-                        .last()
-                        .map_or(0, |m| m.seq + 1);
-                    self.surface
-                        .history
-                        .messages
-                        .push(ene_api::MessageResponse {
-                            seq: next_seq,
-                            role: "user".to_owned(),
-                            text: sent_text,
-                        });
+                    self.push_optimistic_user_row(sent_text);
                     if let Some(chat) = &self.chat {
                         chat.request_redraw();
                     }
@@ -1551,6 +1539,7 @@ impl StageApp {
         let sent_text = text.clone();
         let mode = self.surface.message_mode;
         self.surface.begin_send();
+        self.push_optimistic_user_row(sent_text.clone());
         self.spawn(async move {
             AsyncOutcome::SendMessage {
                 session_id,
@@ -1562,6 +1551,35 @@ impl StageApp {
                     .map_err(|err| map_turn_err(&err.to_string())),
             }
         });
+    }
+
+    /// Paints the user row before the HTTP send resolves; the composer keeps
+    /// its editable draft (failure restores it), and a real assistant-era row
+    /// from the next refresh supersedes this one.
+    fn push_optimistic_user_row(&mut self, text: String) {
+        if self
+            .surface
+            .history
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && m.text == text)
+        {
+            return;
+        }
+        let next_seq = self
+            .surface
+            .history
+            .messages
+            .last()
+            .map_or(0, |m| m.seq + 1);
+        self.surface
+            .history
+            .messages
+            .push(ene_api::MessageResponse {
+                seq: next_seq,
+                role: "user".to_owned(),
+                text,
+            });
     }
 
     fn select_greeting(&mut self, index: u32) {
@@ -2582,6 +2600,60 @@ fn chat_send_block_reason(detail: &DetailUiState) -> Option<String> {
 #[cfg(test)]
 mod chat_tests {
     use super::*;
+
+    #[test]
+    fn send_chat_paints_the_optimistic_user_row_immediately() {
+        let mut app = StageApp::new_for_test();
+        app.detail.finish_settings_load();
+        app.detail.chat_plugin = "provider.openai_compat".to_owned();
+        app.detail.chat_model = "gpt-test".to_owned();
+        app.surface.chat_open = true;
+        app.surface.chat_draft = "ping-1215".to_owned();
+
+        app.send_chat();
+
+        assert!(
+            !app.surface.chat_draft.is_empty(),
+            "the editable draft must stay until the send outcome lands"
+        );
+        assert!(app.surface.turn_active);
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].role, "user");
+        assert_eq!(app.surface.history.messages[0].text, "ping-1215");
+
+        // The success path owns the row transition: the real assistant-era
+        // history supersedes the optimistic row without a duplicate.
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id: app.session.session_id().to_owned(),
+            sent_text: "ping-1215".to_owned(),
+            result: Ok(()),
+        });
+        assert!(app.surface.chat_draft.is_empty());
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "ping-1215");
+    }
+
+    #[test]
+    fn failed_send_keeps_the_optimistic_row_and_restores_the_draft() {
+        let mut app = StageApp::new_for_test();
+        let session_id = app.session.session_id().to_owned();
+        app.surface.history.messages.push(ene_api::MessageResponse {
+            seq: 4,
+            role: "user".to_owned(),
+            text: "ping-1215".to_owned(),
+        });
+
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id,
+            sent_text: "ping-1215".to_owned(),
+            result: Err("transport down".to_owned()),
+        });
+
+        assert_eq!(app.surface.status, "transport down");
+        assert_eq!(app.surface.chat_draft, "ping-1215");
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "ping-1215");
+    }
 
     #[test]
     fn chat_waits_for_settings_before_checking_setup() {
