@@ -111,6 +111,7 @@ character-export = Export character…
 character-exported = Character exported
 character-export-hint = Saves a .enechar package. The dialog opens in Documents or Downloads with a suggested file name.
 character-export-need-package = Install a character package before exporting.
+character-import-file-too-large = The character package is larger than 32 MiB.
 character-active = This is the active companion.
 character-layout = Overlay layout
 character-layout-help = Move and size each visible companion. Changes are saved on this device.

@@ -1,7 +1,7 @@
 //! Detail window: eight new-core IA sections plus a session log.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -25,6 +25,8 @@ use crate::tasks::{ActivatedCharacter, AsyncOutcome};
 use primitives::{EmptyState, SectionHeading, StatusCard, StatusTone, danger_hint};
 
 use crate::i18n;
+
+const MAX_CHARACTER_IMPORT_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailTab {
@@ -1963,12 +1965,17 @@ fn show_companion(
             .add_filter("enechar", &["enechar", "zip", "png", "charx"])
             .pick_file()
     {
-        let path = path.display().to_string();
         let generation = state.next_activation_generation();
         state.character_action_pending = true;
         let client = Arc::clone(client);
         spawn_async(rt, async_results, async move {
-            let imported = client.import_character(&path).await;
+            let imported = match read_character_import(&path) {
+                Ok(bytes) => {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    client.import_character_archive_b64(&encoded).await
+                }
+                Err(err) => Err(err),
+            };
             AsyncOutcome::ImportCharacter {
                 generation,
                 result: prepare_activation(&client, imported).await,
@@ -2127,7 +2134,7 @@ fn show_companion(
                         character.id, character.version, character.kind, character.path
                     ));
                     if is_character_active(character, state.soul.as_ref().map(|s| s.id.as_str())) {
-                        ui.weak(i18n::fl("character-active-package"));
+                        ui.strong(i18n::fl("character-active-package"));
                     } else if ui
                         .add_enabled(
                             !state.character_action_pending,
@@ -2170,6 +2177,18 @@ fn show_companion(
             }
         });
     }
+}
+
+fn read_character_import(path: &Path) -> Result<Vec<u8>, ApiError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|err| ApiError::Transport(format!("cannot read character package: {err}")))?;
+    if metadata.len() > MAX_CHARACTER_IMPORT_BYTES {
+        return Err(ApiError::Transport(i18n::fl(
+            "character-import-file-too-large",
+        )));
+    }
+    std::fs::read(path)
+        .map_err(|err| ApiError::Transport(format!("cannot read character package: {err}")))
 }
 
 fn show_overlay_layout(
@@ -6613,6 +6632,18 @@ mod tests {
             soul_id: Some("alicia-b".to_owned()),
         };
         assert!(!bundled_alicia_b_available(&[installed]));
+    }
+
+    #[test]
+    fn selected_character_import_is_read_as_archive_bytes() {
+        let dir = tempfile::TempDir::new().expect("temp directory");
+        let path = dir.path().join("from-documents.enechar");
+        std::fs::write(&path, b"package-bytes").expect("package fixture");
+
+        assert_eq!(
+            read_character_import(&path).expect("read package"),
+            b"package-bytes"
+        );
     }
 
     #[test]

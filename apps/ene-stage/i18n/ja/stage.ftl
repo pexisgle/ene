@@ -111,6 +111,7 @@ character-export = キャラクターを書き出す…
 character-exported = キャラクターを書き出しました
 character-export-hint = .enechar パッケージを保存します。ダイアログはドキュメントまたはダウンロードを開き、名前を提案します。
 character-export-need-package = 書き出すにはキャラクターパッケージをインストールしてください。
+character-import-file-too-large = キャラクターパッケージが32 MiBを超えています。
 character-active = いま話しているコンパニオンです。
 character-layout = オーバーレイ配置
 character-layout-help = 表示中のコンパニオンごとに移動と大きさを設定します。変更はこの端末に保存されます。
