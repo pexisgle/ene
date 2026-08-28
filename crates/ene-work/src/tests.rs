@@ -1436,6 +1436,36 @@ fn cron_spec_stored_verbatim() {
 }
 
 #[test]
+fn cron_numeric_weekdays_follow_standard_monday_based_numbering() {
+    let from = Utc.with_ymd_and_hms(2026, 8, 28, 1, 10, 0).unwrap();
+    assert_eq!(
+        crate::store::next_fire("0 9 * * 1-5", "Etc/UTC", from).unwrap(),
+        "2026-08-28T09:00:00+00:00"
+    );
+    assert_eq!(
+        crate::store::next_fire("0 9 * * 0,6", "Etc/UTC", from).unwrap(),
+        "2026-08-29T09:00:00+00:00"
+    );
+    assert_eq!(
+        crate::store::next_fire("0 9 * * 7", "Etc/UTC", from).unwrap(),
+        "2026-08-30T09:00:00+00:00"
+    );
+}
+
+#[test]
+fn cron_numeric_weekday_steps_are_normalized() {
+    let from = Utc.with_ymd_and_hms(2026, 8, 28, 10, 0, 0).unwrap();
+    assert_eq!(
+        crate::store::next_fire("0 9 * * 1-5/2", "Etc/UTC", from).unwrap(),
+        "2026-08-31T09:00:00+00:00"
+    );
+    assert_eq!(
+        crate::store::next_fire("0 9 * * 0/2", "Etc/UTC", from).unwrap(),
+        "2026-08-29T09:00:00+00:00"
+    );
+}
+
+#[test]
 fn skill_install_and_load() {
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("src");
