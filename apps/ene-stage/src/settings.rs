@@ -31,6 +31,10 @@ ene_config::define_config!(
         #[serde(default)]
         pub character_positions: HashMap<String, [f32; 2]> = HashMap::new(),
         pub look_at_strength: f32 = 0.6,
+        pub direct_reactions_enabled: bool = true,
+        pub direct_reaction_strength: f32 = 0.7,
+        pub direct_reaction_agent: bool = false,
+        pub direct_reaction_selects_active: bool = false,
         pub overlay_click_through: bool = true,
         pub onboarding_dismissed: bool = false,
     }
@@ -103,6 +107,10 @@ mod tests {
         assert!(settings.character_positions.is_empty());
         assert_eq!(settings.overlay_monitor_mode, "primary");
         assert!(settings.overlay_monitor_id.is_empty());
+        assert!(settings.direct_reactions_enabled);
+        assert!((settings.direct_reaction_strength - 0.7).abs() < f32::EPSILON);
+        assert!(!settings.direct_reaction_agent);
+        assert!(!settings.direct_reaction_selects_active);
     }
 
     fn ids(values: &[&str]) -> Vec<String> {

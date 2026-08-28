@@ -22,6 +22,7 @@ pub mod drag;
 pub mod fonts;
 pub mod gpu;
 pub mod i18n;
+pub mod interaction;
 pub mod monitor;
 pub mod overlay;
 pub mod platform;

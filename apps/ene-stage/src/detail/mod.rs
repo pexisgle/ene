@@ -4131,7 +4131,25 @@ fn show_system_inner(
                 0.0..=1.0,
             ));
             ui.end_row();
+            ui.label(i18n::fl("settings-direct-reactions"));
+            ui.checkbox(&mut local_settings.direct_reactions_enabled, "");
+            ui.end_row();
+            ui.label(i18n::fl("settings-direct-reaction-strength"));
+            ui.add_enabled(
+                local_settings.direct_reactions_enabled,
+                egui::Slider::new(&mut local_settings.direct_reaction_strength, 0.0..=1.0),
+            );
+            ui.end_row();
+            ui.label(i18n::fl("settings-direct-reaction-agent"));
+            ui.checkbox(&mut local_settings.direct_reaction_agent, "")
+                .on_hover_text(i18n::fl("settings-direct-reaction-agent-hint"));
+            ui.end_row();
+            ui.label(i18n::fl("settings-direct-reaction-target"));
+            ui.checkbox(&mut local_settings.direct_reaction_selects_active, "")
+                .on_hover_text(i18n::fl("settings-direct-reaction-target-hint"));
+            ui.end_row();
         });
+    ui.weak(i18n::fl("settings-direct-reaction-platform"));
     show_overlay_monitor_settings(ui, state, local_settings, monitors);
     ui.horizontal(|ui| {
         if ui.button(i18n::fl("settings-save-local")).clicked() {

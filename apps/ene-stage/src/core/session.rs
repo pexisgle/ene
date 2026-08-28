@@ -30,7 +30,7 @@ pub struct StageSession {
 }
 
 /// Session state fetched before changing the stage's active dialogue lane.
-pub(crate) struct PreparedSessionTarget {
+pub struct PreparedSessionTarget {
     soul_id: String,
     session_id: String,
     history: HistoryResponse,
@@ -694,6 +694,27 @@ async fn resolve_session_id(client: &ApiClient, soul_id: &str) -> Result<String,
         })
         .await?;
     Ok(created.id)
+}
+
+pub(crate) async fn send_direct_interaction(
+    client: &ApiClient,
+    soul_id: &str,
+    text: &str,
+) -> Result<(), ApiError> {
+    let session_id = resolve_session_id(client, soul_id).await?;
+    let key = Uuid::new_v4().to_string();
+    client
+        .send_message(
+            &session_id,
+            &MessageRequest {
+                text: text.to_owned(),
+                mode: MessageMode::Prompt,
+                input_modality: Some("direct_interaction".to_owned()),
+            },
+            Some(&key),
+        )
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn prepare_soul_target(

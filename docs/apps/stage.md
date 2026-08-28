@@ -29,6 +29,8 @@ SDK.
 | Spotlight (Alt+Space) | local | Searchable command palette: type to filter, ↑/↓ move, Enter runs, Esc closes (clicking an entry also runs it). Covers detail tabs, mic, chat, and quit. If Alt+Space fails to register, Voice shows a warning and a highlighted Open Spotlight button. |
 | Detail (tray or Chat → Detail) | `detail` | Settings IA, inner/thinking/tool/PAD log. Search filters sections; clicking a tab, Home shortcut, or Spotlight clears the filter so it cannot pin you on the current section. An empty log shows a next-step hint instead of a blank pane. |
 
+Direct avatar interaction is configured in Detail → System. A stationary press on a silhouette becomes a click, double-click, or long press; movement past the drag threshold remains a position drag. Each accepted gesture gives the hit soul a short local scale/expression cue. Background clicks stay pass-through. Touch uses the same classifier; pen input follows the platform's mouse or touch mapping. Agent handoff and switching the active chat target are opt-in, and agent handoff is rate-limited. Wayland users must turn off click-through before using touch or drag because the compositor may not deliver events to a transparent surface.
+
 Stage does not use a WebView. Overlay drawing is wgpu; chrome windows are egui
 on winit. The process talks to the core only through `ene-api`
 (`client_id = stage`). It does not link `ene-core`, `ene-companion`, or
@@ -45,7 +47,8 @@ session export open a save dialog in Documents or Downloads with a typed file na
 (`.enechar` / `.json`).
 
 Local `desktop.*` keys (theme, language, mic, captions, beat sync, graphics
-quality, core lifetime, per-body overlay placement in `character_positions`)
+quality, core lifetime, per-body overlay placement in `character_positions`, and
+direct avatar reaction preferences)
 stay on the client. Theme (`light` /
 `dark` / `system`) applies to both the wgpu window clear color and egui widget
 colors, so light mode keeps readable contrast. Japanese UI text uses an OS CJK
@@ -118,4 +121,7 @@ CI and the Cloud Agent use software Vulkan (lavapipe):
 - Overlay layout places two slots apart; `ene-stage` writes the minimal GLB fixture
 
 Manual check: run `ene-stage`, confirm two VRM bodies on the overlay, and talk
-to each via A/D. That GUI walkthrough is not part of CI.
+to each via A/D. In Detail → System, leave Direct avatar reactions on, click and
+hold one body without moving it, then drag it; verify only the hit body reacts
+and the background still passes through. Enable the optional companion handoff
+only with a configured chat provider. That GUI walkthrough is not part of CI.

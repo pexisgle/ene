@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::runtime::{Handle, Runtime};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
@@ -19,11 +19,12 @@ use crate::audio::{AudioHub, ListenAction, MicListen, SendResult, run_listen_str
 use crate::avatar::look_at;
 use crate::chrome::{ChromeKind, ChromeWindow};
 use crate::core::events::{EventFeeds, LiveEvent, spawn_event_feeds};
-use crate::core::session::StageSession;
+use crate::core::session::{StageSession, prepare_soul_target, send_direct_interaction};
 use crate::core::spawn::{StageCore, StageSpawnError, attach_or_spawn_core};
 use crate::detail::{self, DetailTab, DetailUiState, LogKind, PendingJobRetry};
 use crate::gpu::{GpuContext, GpuError};
 use crate::i18n;
+use crate::interaction::{EndResult, GestureTracker, PointerKind, ReactionKind};
 use crate::monitor::{self, MonitorInfo, OverlayMonitorMode};
 use crate::overlay::{OverlayError, OverlayWindow};
 use crate::settings::{DesktopSettings, load_desktop_settings, save_desktop_settings};
@@ -260,10 +261,13 @@ pub fn run() -> Result<(), AppError> {
         spotlight: None,
         overlay_focus: OverlayFocus::default(),
         last_cursor: None,
+        gesture: GestureTracker::default(),
         cursor_poll: None,
         last_global_cursor: None,
         monitors: Vec::new(),
         next_monitor_probe: Instant::now(),
+        direct_reaction_agent_inflight: false,
+        direct_reaction_retarget_inflight: false,
         last_tick: Instant::now(),
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
@@ -327,10 +331,13 @@ struct StageApp {
     spotlight: Option<ChromeWindow>,
     overlay_focus: OverlayFocus,
     last_cursor: Option<PhysicalPosition<f32>>,
+    gesture: GestureTracker,
     cursor_poll: Option<crossbeam_channel::Receiver<crate::cursor_poll::GlobalCursor>>,
     last_global_cursor: Option<crate::cursor_poll::GlobalCursor>,
     monitors: Vec<MonitorInfo>,
     next_monitor_probe: Instant,
+    direct_reaction_agent_inflight: bool,
+    direct_reaction_retarget_inflight: bool,
     last_tick: Instant,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
@@ -398,10 +405,13 @@ impl StageApp {
             spotlight: None,
             overlay_focus: OverlayFocus::default(),
             last_cursor: None,
+            gesture: GestureTracker::default(),
             cursor_poll: None,
             last_global_cursor: None,
             monitors: Vec::new(),
             next_monitor_probe: Instant::now(),
+            direct_reaction_agent_inflight: false,
+            direct_reaction_retarget_inflight: false,
             last_tick: Instant::now(),
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
@@ -608,6 +618,25 @@ impl StageApp {
                         chat.request_redraw();
                     }
                     self.begin_completion_reconciliation();
+                }
+            }
+            AsyncOutcome::DirectReaction { result, .. } => {
+                self.direct_reaction_agent_inflight = false;
+                if let Err(err) = result {
+                    self.surface.status = format!("{}: {err}", i18n::fl("direct-reaction-failed"));
+                }
+            }
+            AsyncOutcome::RetargetSoul { result, .. } => {
+                self.direct_reaction_retarget_inflight = false;
+                match result {
+                    Ok(target) => {
+                        self.commit_session_target(target);
+                        self.reload_avatar();
+                    }
+                    Err(err) => {
+                        self.surface.status =
+                            format!("{}: {err}", i18n::fl("direct-reaction-target-failed"));
+                    }
                 }
             }
             AsyncOutcome::SelectGreeting { session_id, result } => {
@@ -1649,6 +1678,59 @@ impl StageApp {
         next_seq
     }
 
+    fn handle_avatar_reaction(&mut self, soul_id: &str, kind: ReactionKind, rate_limited: bool) {
+        if !self.local_settings.direct_reactions_enabled {
+            return;
+        }
+        let strength = self.local_settings.direct_reaction_strength;
+        let expression = direct_reaction_expression(kind);
+        if let Some(overlay) = self.overlay.as_mut()
+            && let Some(avatar) = overlay.avatar_mut(soul_id)
+        {
+            avatar.trigger_interaction_feedback(strength, expression);
+        }
+        if rate_limited {
+            return;
+        }
+        if self.local_settings.direct_reaction_agent
+            && !self.direct_reaction_agent_inflight
+            && !self.surface.turn_active
+        {
+            self.send_direct_reaction(soul_id, kind);
+        }
+        if self.local_settings.direct_reaction_selects_active
+            && soul_id != self.session.soul_id()
+            && !self.direct_reaction_retarget_inflight
+        {
+            self.request_direct_reaction_retarget(soul_id);
+        }
+    }
+
+    fn send_direct_reaction(&mut self, soul_id: &str, kind: ReactionKind) {
+        self.direct_reaction_agent_inflight = true;
+        let client = Arc::clone(&self.client);
+        let soul_id = soul_id.to_owned();
+        let text = direct_reaction_message(kind).to_owned();
+        self.spawn(async move {
+            let result = send_direct_interaction(&client, &soul_id, &text)
+                .await
+                .map_err(|err| err.to_string());
+            AsyncOutcome::DirectReaction { soul_id, result }
+        });
+    }
+
+    fn request_direct_reaction_retarget(&mut self, soul_id: &str) {
+        self.direct_reaction_retarget_inflight = true;
+        let client = Arc::clone(&self.client);
+        let soul_id = soul_id.to_owned();
+        self.spawn(async move {
+            let result = prepare_soul_target(&client, &soul_id)
+                .await
+                .map_err(|err| err.to_string());
+            AsyncOutcome::RetargetSoul { soul_id, result }
+        });
+    }
+
     fn select_greeting(&mut self, index: u32) {
         if self.surface.greeting_inflight {
             return;
@@ -2607,6 +2689,15 @@ impl StageApp {
     }
 
     fn on_overlay_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
+        self.on_overlay_pointer_moved(PointerKind::Mouse, 0, position);
+    }
+
+    fn on_overlay_pointer_moved(
+        &mut self,
+        pointer: PointerKind,
+        id: u64,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) {
         if self.overlay.is_none() {
             return;
         }
@@ -2623,27 +2714,45 @@ impl StageApp {
 
         let cursor_world =
             crate::drag::cursor_logical_to_world_2d(cursor, (vw, vh), eye, target, up);
-        crate::drag::drag_body(
-            &mut self.surface.drag,
-            &mut self.surface.positions,
-            cursor_world,
-        );
+        if self.gesture.move_to(pointer, id, cursor).is_dragging() {
+            crate::drag::drag_body(
+                &mut self.surface.drag,
+                &mut self.surface.positions,
+                cursor_world,
+            );
+        }
 
         self.sync_overlay_interaction();
     }
 
     fn on_overlay_press(&mut self) {
-        let Some(cursor_logical) = self.last_cursor else {
+        self.on_overlay_pointer_press(PointerKind::Mouse, 0, None);
+    }
+
+    fn on_overlay_pointer_press(
+        &mut self,
+        pointer: PointerKind,
+        id: u64,
+        position: Option<winit::dpi::PhysicalPosition<f64>>,
+    ) {
+        if let Some(position) = position {
+            if self.overlay.is_none() {
+                return;
+            }
+            self.last_cursor = Some(position.cast::<f32>());
+        }
+        let Some(cursor_physical) = self.last_cursor else {
             return;
         };
         let Some((eye, target, up, vw, vh)) = self.camera_basis() else {
             return;
         };
-        let cursor = glam::Vec2::new(cursor_logical.x, cursor_logical.y);
+        let cursor = glam::Vec2::new(cursor_physical.x, cursor_physical.y);
         let candidates = self.overlay_hit_candidates();
         let Some(soul_id) = crate::drag::hit_test(&candidates, (vw, vh), eye, target, up, cursor)
         else {
             self.surface.drag = None;
+            self.gesture.cancel(pointer, id);
             self.sync_overlay_interaction();
             return;
         };
@@ -2651,16 +2760,45 @@ impl StageApp {
         let stored = self.surface.positions.get(&soul_id).copied();
         let cursor_world =
             crate::drag::cursor_logical_to_world_2d(cursor, (vw, vh), eye, target, up);
-        crate::drag::press_body(&mut self.surface.drag, Some(&soul_id), stored, cursor_world);
+        if self
+            .gesture
+            .press(pointer, id, cursor, Some(&soul_id), Instant::now())
+        {
+            crate::drag::press_body(&mut self.surface.drag, Some(&soul_id), stored, cursor_world);
+        }
         self.sync_overlay_interaction();
     }
 
     fn on_overlay_release(&mut self) {
-        if let Some(soul_id) = crate::drag::release_body(&mut self.surface.drag) {
-            self.surface
-                .push_action(SurfaceAction::PersistBodyPosition { soul_id });
+        self.on_overlay_pointer_release(PointerKind::Mouse, 0);
+    }
+
+    fn on_overlay_pointer_release(&mut self, pointer: PointerKind, id: u64) {
+        let end = self.gesture.release(pointer, id, Instant::now());
+        match end {
+            EndResult::Dragged { soul_id } => {
+                let _ = crate::drag::release_body(&mut self.surface.drag);
+                self.surface
+                    .push_action(SurfaceAction::PersistBodyPosition { soul_id });
+            }
+            EndResult::Reaction {
+                soul_id,
+                kind,
+                rate_limited,
+            } => {
+                let _ = crate::drag::release_body(&mut self.surface.drag);
+                self.handle_avatar_reaction(&soul_id, kind, rate_limited);
+            }
+            EndResult::None => {}
         }
         self.sync_overlay_interaction();
+    }
+
+    fn cancel_overlay_pointer(&mut self, pointer: PointerKind, id: u64) {
+        if self.gesture.cancel(pointer, id) {
+            self.surface.drag = None;
+            self.sync_overlay_interaction();
+        }
     }
 
     fn tick_overlay(&mut self) {
@@ -3056,6 +3194,11 @@ impl ApplicationHandler for StageApp {
             }
             match event {
                 WindowEvent::CloseRequested => self.surface.quit = true,
+                WindowEvent::Focused(false) => {
+                    self.gesture.cancel_all();
+                    self.surface.drag = None;
+                    self.sync_overlay_interaction();
+                }
                 WindowEvent::Resized(size) => {
                     if let (Some(gpu), Some(overlay)) = (self.gpu.as_ref(), self.overlay.as_mut()) {
                         overlay.resize(gpu, size);
@@ -3082,6 +3225,26 @@ impl ApplicationHandler for StageApp {
                 } => {
                     self.on_overlay_release();
                 }
+                WindowEvent::Touch(touch) => match touch.phase {
+                    TouchPhase::Started => {
+                        if !self.overlay_focus.protects() {
+                            self.on_overlay_pointer_press(
+                                PointerKind::Touch,
+                                touch.id,
+                                Some(touch.location),
+                            );
+                        }
+                    }
+                    TouchPhase::Moved => {
+                        self.on_overlay_pointer_moved(PointerKind::Touch, touch.id, touch.location);
+                    }
+                    TouchPhase::Ended => {
+                        self.on_overlay_pointer_release(PointerKind::Touch, touch.id);
+                    }
+                    TouchPhase::Cancelled => {
+                        self.cancel_overlay_pointer(PointerKind::Touch, touch.id);
+                    }
+                },
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed && !event.repeat =>
                 {
@@ -3319,6 +3482,26 @@ fn position_changed(before: [f32; 2], after: [f32; 2]) -> bool {
         .into_iter()
         .zip(after)
         .any(|(before, after)| !before.is_finite() || (before - after).abs() > f32::EPSILON)
+}
+
+fn direct_reaction_expression(kind: ReactionKind) -> &'static str {
+    match kind {
+        ReactionKind::Click => "happy",
+        ReactionKind::DoubleClick => "surprised",
+        ReactionKind::LongPress => "calm",
+    }
+}
+
+fn direct_reaction_message(kind: ReactionKind) -> &'static str {
+    match kind {
+        ReactionKind::Click => "The user tapped you. React briefly and warmly if appropriate.",
+        ReactionKind::DoubleClick => {
+            "The user tapped you twice. React briefly and playfully if appropriate."
+        }
+        ReactionKind::LongPress => {
+            "The user held a touch on you. Acknowledge the gentle contact briefly if appropriate."
+        }
+    }
 }
 
 /// Recognize the daemon's approval-pending rejection of job creation; only

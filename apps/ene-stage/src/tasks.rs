@@ -16,6 +16,14 @@ pub enum AsyncOutcome {
         sent_text: String,
         result: Result<(), String>,
     },
+    DirectReaction {
+        soul_id: String,
+        result: Result<(), String>,
+    },
+    RetargetSoul {
+        soul_id: String,
+        result: Result<PreparedSessionTarget, String>,
+    },
     BargeIn {
         session_id: String,
         result: Result<(), String>,
