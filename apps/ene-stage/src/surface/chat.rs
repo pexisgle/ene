@@ -186,8 +186,7 @@ const COMPOSER_MAX_ROWS: usize = 8;
 const COMPOSER_ROW_HEIGHT: f32 = 18.0;
 const COMPOSER_VERTICAL_PADDING: f32 = 14.0;
 const COMPOSER_MIN_HEIGHT: f32 = 64.0;
-// Reserve the always-visible composer rows before the panel can size itself from content.
-const COMPOSER_PANEL_MIN_HEIGHT: f32 = 240.0;
+const COMPOSER_PANEL_HEIGHT: f32 = 240.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComposerSendRequest {
@@ -275,12 +274,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
     let mut composer_focused = false;
     let mut jump_to_voice = false;
 
-    // Without an explicit minimum, a non-resizable horizontal panel starts at
-    // its 20-point default and clips the composer before the transcript is laid out.
+    // Cap the measured panel size: its content can otherwise include the
+    // previous frame's max rect and grow on every repaint until it hides the transcript.
     egui::Panel::bottom("stage-chat-composer")
         .resizable(false)
         .show_separator_line(false)
-        .min_size(COMPOSER_PANEL_MIN_HEIGHT)
+        .exact_size(COMPOSER_PANEL_HEIGHT)
         .frame(egui::Frame::new())
         .show(ui, |panel_ui| {
             panel_ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -491,6 +490,30 @@ mod tests {
         assert!(texts.contains(&"visible user message".to_owned()));
         assert!(texts.contains(&i18n::fl("chat-send-keyboard-hint")));
         assert!(texts.contains(&i18n::fl("chat-input-label")));
+    }
+
+    #[test]
+    fn chat_composer_panel_stays_fixed_across_repaints() {
+        let ctx = egui::Context::default();
+        let mut state = SurfaceUiState::default();
+
+        for _ in 0..8 {
+            let _response = ctx.run_ui(chat_raw_input(), |ui| {
+                show(ui, &mut state, false);
+            });
+
+            let panel = egui::PanelState::load(&ctx, egui::Id::new("stage-chat-composer"));
+            assert!(
+                panel.is_some(),
+                "chat composer panel must persist its layout"
+            );
+            if let Some(panel) = panel {
+                assert!(
+                    (panel.outer_rect.height() - COMPOSER_PANEL_HEIGHT).abs() < f32::EPSILON,
+                    "chat composer panel grew between repaints"
+                );
+            }
+        }
     }
 
     fn chat_raw_input() -> egui::RawInput {
