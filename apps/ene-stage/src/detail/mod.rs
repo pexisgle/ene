@@ -1055,6 +1055,7 @@ fn provider_plugin_ids(state: &DetailUiState) -> Vec<String> {
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
+    parent: &winit::window::Window,
     local_settings: &mut DesktopSettings,
     soul_id: &str,
     client: &Arc<ApiClient>,
@@ -1091,11 +1092,13 @@ pub fn show(
         }
         match state.tab {
             DetailTab::Home => show_home(ui, state, client, rt, async_results),
-            DetailTab::Companion => show_companion(ui, state, soul_id, client, rt, async_results),
+            DetailTab::Companion => {
+                show_companion(ui, state, soul_id, parent, client, rt, async_results);
+            }
             DetailTab::Conversation => show_conversation(ui, state, client, rt, async_results),
             DetailTab::Voice => show_voice(ui, state, local_settings, client, rt, async_results),
             DetailTab::Memory => show_memory(ui, state, soul_id, client, rt, async_results),
-            DetailTab::Work => show_work(ui, state, soul_id, client, rt, async_results),
+            DetailTab::Work => show_work(ui, state, soul_id, parent, client, rt, async_results),
             DetailTab::Connections => {
                 show_connections(ui, state, client, rt, async_results);
             }
@@ -1256,6 +1259,7 @@ fn show_companion(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
     soul_id: &str,
+    parent: &winit::window::Window,
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
@@ -1312,6 +1316,7 @@ fn show_companion(
     }
     if ui.button(i18n::fl("character-import")).clicked()
         && let Some(path) = rfd::FileDialog::new()
+            .set_parent(parent)
             .add_filter("enechar", &["enechar", "zip", "png", "charx"])
             .pick_file()
     {
@@ -1331,7 +1336,9 @@ fn show_companion(
             None => state.core_status = i18n::fl("character-export-need-package"),
             Some(export_id) => {
                 let file_name = character_export_filename(&export_id);
-                if let Some(path) = export_save_dialog(&file_name, "enechar", &["enechar", "zip"]) {
+                if let Some(path) =
+                    export_save_dialog(parent, &file_name, "enechar", &["enechar", "zip"])
+                {
                     let client = Arc::clone(client);
                     spawn_async(rt, async_results, async move {
                         AsyncOutcome::ExportCharacter(
@@ -2450,6 +2457,7 @@ fn show_work(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
     soul_id: &str,
+    parent: &winit::window::Window,
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
@@ -2514,7 +2522,11 @@ fn show_work(
         }
         if ui.button(i18n::fl("jobs-export")).clicked()
             && let Some(path) = export_save_dialog(
-                &session_export_filename(&state.session_id),
+                parent,
+                &session_export_filename(
+                    &state.session_id,
+                    state.soul.as_ref().map(|soul| soul.display_name.as_str()),
+                ),
                 "json",
                 &["json"],
             )
@@ -3941,8 +3953,25 @@ fn character_export_filename(package_or_name: &str) -> String {
 }
 
 #[must_use]
-fn session_export_filename(session_id: &str) -> String {
-    format!("{}.json", safe_export_stem(session_id))
+fn session_export_filename(session_id: &str, companion_name: Option<&str>) -> String {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M").to_string();
+    session_export_filename_with_timestamp(session_id, &timestamp, companion_name)
+}
+
+#[must_use]
+fn session_export_filename_with_timestamp(
+    session_id: &str,
+    timestamp: &str,
+    companion_name: Option<&str>,
+) -> String {
+    let stem = [Some(timestamp), companion_name, Some(session_id)]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .map(safe_export_stem)
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("{stem}.json")
 }
 
 #[must_use]
@@ -3984,8 +4013,14 @@ fn default_export_dir_from(
     std::env::temp_dir()
 }
 
-fn export_save_dialog(file_name: &str, filter_name: &str, extensions: &[&str]) -> Option<PathBuf> {
+fn export_save_dialog(
+    parent: &winit::window::Window,
+    file_name: &str,
+    filter_name: &str,
+    extensions: &[&str],
+) -> Option<PathBuf> {
     rfd::FileDialog::new()
+        .set_parent(parent)
         .set_directory(default_export_dir())
         .set_file_name(file_name)
         .add_filter(filter_name, extensions)
@@ -4926,7 +4961,18 @@ mod tests {
             character_export_filename("char.alicia@1.0.0"),
             "char_alicia_1_0_0.enechar"
         );
-        assert_eq!(session_export_filename(""), "export.json");
+        assert_eq!(
+            session_export_filename_with_timestamp("", "2026-01-02_0304", None),
+            "2026-01-02_0304.json"
+        );
+        assert_eq!(
+            session_export_filename_with_timestamp("", "2026-01-02_0304", Some("Alicia")),
+            "2026-01-02_0304_Alicia.json"
+        );
+        assert_eq!(
+            session_export_filename_with_timestamp("", "", Some("Alicia")),
+            "Alicia.json"
+        );
         assert_eq!(safe_export_stem("???"), "export");
         let dir = default_export_dir_from(Some("/tmp/ene-docs".into()), None, None);
         assert_eq!(dir, PathBuf::from("/tmp/ene-docs"));

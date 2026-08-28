@@ -2495,6 +2495,7 @@ impl StageApp {
             let mut local = self.local_settings.clone();
             let client = Arc::clone(&self.client);
             let rt = self.rt_handle.clone();
+            let detail_window = Arc::clone(&detail_win.window);
             let results = Arc::clone(&self.async_results);
             let soul_id = self.session.soul_id().to_owned();
             self.session.session_id().clone_into(&mut detail.session_id);
@@ -2504,6 +2505,7 @@ impl StageApp {
                 detail::show(
                     ui,
                     &mut detail,
+                    detail_window.as_ref(),
                     &mut local,
                     &soul_id,
                     &client,
