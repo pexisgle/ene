@@ -39,8 +39,8 @@ on winit. The process talks to the core only through `ene-api`
 Characters are `.enechar` packages. `GET /characters` is install inventory;
 playable companions are souls (`GET /souls` / `GET /stage` occupants).
 `body_ref` is a body UUID. Stage imports the bundled Alicia VRM as
-`char.alicia@1.0.0` during first-run setup. A second copy can be added from
-the Companion screen as `char.alicia-b@1.0.0`; activation happens over HTTP
+`char.alicia@1.0.0` during first-run setup. The Companion screen offers the
+second bundled copy as `char.alicia-b@1.0.0`; activation happens over HTTP
 (`soul_from_install`). CCv3/PNG/CHARX
 are conversion inputs only — there is no CCv3 editor. Companion export and Work
 session export open a save dialog in Documents or Downloads with a typed file name
@@ -141,7 +141,8 @@ and the background still passes through. Enable the optional companion handoff
 only with a configured chat provider. That GUI walkthrough is not part of CI.
 
 Manual check: run `ene-stage`, confirm one VRM body on the overlay, then open
-Detail → Companion and add the installed second companion. Verify the overlay
+Detail → Companion and use the bundled-companion action to add the second body.
+Verify the overlay
 changes from one body to two, hide it and choose Show, remove it from display,
 move the bodies up/down when two are present, and restart to confirm the
 persistent selection. A/D should change the chat target independently of

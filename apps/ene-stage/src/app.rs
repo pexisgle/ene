@@ -282,6 +282,7 @@ pub fn run() -> Result<(), AppError> {
         completion_reconcile_inflight: false,
         completion_terminal_seq: None,
         pending_optimistic_user_rows: Vec::new(),
+        local_settings_save_generation: 0,
     };
     app.surface.history = app.session.history();
     app.surface.greetings = app.session.greetings().to_vec();
@@ -354,6 +355,7 @@ struct StageApp {
     completion_reconcile_inflight: bool,
     completion_terminal_seq: Option<u64>,
     pending_optimistic_user_rows: Vec<OptimisticUserRow>,
+    local_settings_save_generation: u64,
 }
 
 #[derive(Debug)]
@@ -430,6 +432,7 @@ impl StageApp {
             completion_reconcile_inflight: false,
             completion_terminal_seq: None,
             pending_optimistic_user_rows: Vec::new(),
+            local_settings_save_generation: 0,
         }
     }
 
@@ -795,9 +798,16 @@ impl StageApp {
                     self.schedule_completion_refresh();
                 }
             }
-            AsyncOutcome::SaveLocalSettings(result) => {
+            AsyncOutcome::SaveLocalSettings {
+                generation,
+                result,
+                success_status,
+            } => {
+                if generation != self.local_settings_save_generation {
+                    return;
+                }
                 self.detail.core_status = match result {
-                    Ok(()) => i18n::fl("settings-saved"),
+                    Ok(()) => success_status.unwrap_or_else(|| i18n::fl("settings-saved")),
                     Err(err) => err,
                 };
             }
@@ -963,8 +973,10 @@ impl StageApp {
                 if !self.detail.activation_is_current(generation) {
                     return;
                 }
+                self.detail.character_action_pending = false;
                 match result {
                     Ok(activated) => {
+                        let displayed_before = self.local_settings.displayed_soul_ids.clone();
                         let new_soul_id = activated.character.soul_id.clone();
                         if let Some(target) = activated.target {
                             self.commit_session_target(target);
@@ -989,6 +1001,11 @@ impl StageApp {
                             self.detail.core_status.push_str(". ");
                             self.detail.core_status.push_str(&status);
                         }
+                        if self.local_settings.displayed_soul_ids != displayed_before {
+                            self.save_local_settings_with_status(Some(
+                                self.detail.core_status.clone(),
+                            ));
+                        }
                         self.request_characters();
                     }
                     Err(err) => {
@@ -1001,8 +1018,10 @@ impl StageApp {
                 if !self.detail.activation_is_current(generation) {
                     return;
                 }
+                self.detail.character_action_pending = false;
                 match result {
                     Ok(activated) => {
+                        let displayed_before = self.local_settings.displayed_soul_ids.clone();
                         let new_soul_id = activated.character.soul_id.clone();
                         if let Some(target) = activated.target {
                             self.commit_session_target(target);
@@ -1027,6 +1046,11 @@ impl StageApp {
                             self.detail.core_status.push_str(". ");
                             self.detail.core_status.push_str(&status);
                         }
+                        if self.local_settings.displayed_soul_ids != displayed_before {
+                            self.save_local_settings_with_status(Some(
+                                self.detail.core_status.clone(),
+                            ));
+                        }
                         self.request_characters();
                     }
                     Err(err) => {
@@ -1036,7 +1060,10 @@ impl StageApp {
                 }
             }
             AsyncOutcome::ListCharacters(result) => match result {
-                Ok(items) => self.detail.characters = items,
+                Ok(items) => {
+                    self.detail.characters = items;
+                    self.detail.character_list_loaded = true;
+                }
                 Err(err) => self.detail.core_status = err,
             },
             AsyncOutcome::ListOccupants(result) => match result {
@@ -1889,6 +1916,12 @@ impl StageApp {
     }
 
     fn save_local_settings(&mut self) {
+        self.save_local_settings_with_status(None);
+    }
+
+    fn save_local_settings_with_status(&mut self, success_status: Option<String>) {
+        self.local_settings_save_generation = self.local_settings_save_generation.wrapping_add(1);
+        let generation = self.local_settings_save_generation;
         let settings = self.local_settings.clone();
         if settings.mic_device != self.settings.mic_device {
             self.audio.set_mic_device(&settings.mic_device);
@@ -1910,9 +1943,11 @@ impl StageApp {
         }
         self.sync_overlay_interaction();
         self.spawn(async move {
-            AsyncOutcome::SaveLocalSettings(
-                save_desktop_settings(&settings).map_err(|err| err.to_string()),
-            )
+            AsyncOutcome::SaveLocalSettings {
+                generation,
+                result: save_desktop_settings(&settings).map_err(|err| err.to_string()),
+                success_status,
+            }
         });
     }
 
@@ -2287,7 +2322,6 @@ impl StageApp {
             .displayed_soul_ids
             .push(soul_id.to_owned());
         self.local_settings.displayed_souls_initialized = true;
-        self.save_local_settings();
         true
     }
 
@@ -2308,6 +2342,7 @@ impl StageApp {
                     Some(status) => status,
                     None => i18n::fl("character-display-updated"),
                 };
+                self.save_local_settings_with_status(Some(self.detail.core_status.clone()));
             }
             DisplayAction::TemporarilyHide(soul_id) => {
                 if self
@@ -2329,9 +2364,10 @@ impl StageApp {
                 self.temporarily_hidden_souls.remove(&soul_id);
                 if self.local_settings.displayed_soul_ids.len() != before {
                     self.local_settings.displayed_souls_initialized = true;
-                    self.save_local_settings();
                     self.reload_avatar();
-                    self.detail.core_status = i18n::fl("character-removed-from-display");
+                    let status = i18n::fl("character-removed-from-display");
+                    self.save_local_settings_with_status(Some(status.clone()));
+                    self.detail.core_status = status;
                 }
             }
             DisplayAction::MoveUp(soul_id) => {
@@ -2345,8 +2381,10 @@ impl StageApp {
                     self.local_settings
                         .displayed_soul_ids
                         .swap(index, index - 1);
-                    self.save_local_settings();
                     self.reload_avatar();
+                    let status = i18n::fl("character-display-updated");
+                    self.save_local_settings_with_status(Some(status.clone()));
+                    self.detail.core_status = status;
                 }
             }
             DisplayAction::MoveDown(soul_id) => {
@@ -2360,8 +2398,10 @@ impl StageApp {
                     self.local_settings
                         .displayed_soul_ids
                         .swap(index, index + 1);
-                    self.save_local_settings();
                     self.reload_avatar();
+                    let status = i18n::fl("character-display-updated");
+                    self.save_local_settings_with_status(Some(status.clone()));
+                    self.detail.core_status = status;
                 }
             }
         }
@@ -3281,6 +3321,12 @@ impl StageApp {
         }
         if let Some(action) = display_action {
             self.apply_display_action(action);
+            if let Some(detail) = self.detail_win.as_ref() {
+                detail.request_redraw();
+            }
+            if let Some(overlay) = self.overlay.as_ref() {
+                overlay.window.request_redraw();
+            }
         }
     }
 
@@ -4823,6 +4869,7 @@ mod tests {
     #[test]
     fn activate_reports_activated_status_not_imported() {
         let mut app = StageApp::new_for_test();
+        app.detail.character_action_pending = true;
         let generation = app.detail.next_activation_generation();
         let character = ene_api::CharacterView {
             id: "char.alicia-b".to_owned(),
@@ -4855,6 +4902,34 @@ mod tests {
             "activate must not reuse the import message: {}",
             app.detail.core_status
         );
+        assert!(!app.detail.character_action_pending);
+    }
+
+    #[test]
+    fn display_save_preserves_action_status() {
+        let mut app = StageApp::new_for_test();
+        app.local_settings_save_generation = 1;
+        let status = i18n::fl("character-display-updated");
+        app.apply_async_outcome(AsyncOutcome::SaveLocalSettings {
+            generation: 1,
+            result: Ok(()),
+            success_status: Some(status.clone()),
+        });
+        assert_eq!(app.detail.core_status, status);
+    }
+
+    #[test]
+    fn stale_settings_save_cannot_overwrite_newer_status() {
+        let mut app = StageApp::new_for_test();
+        let status = i18n::fl("character-removed-from-display");
+        app.local_settings_save_generation = 2;
+        app.detail.core_status.clone_from(&status);
+        app.apply_async_outcome(AsyncOutcome::SaveLocalSettings {
+            generation: 1,
+            result: Ok(()),
+            success_status: None,
+        });
+        assert_eq!(app.detail.core_status, status);
     }
 
     #[test]

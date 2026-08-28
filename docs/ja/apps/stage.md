@@ -36,8 +36,8 @@ Stage は WebView を使いません。オーバーレイは wgpu、操作窓は
 キャラクターは `.enechar` パッケージです。`GET /characters` はインストール在庫、
 対話相手はソウル（`GET /souls` / `GET /stage` の occupants）です。`body_ref` は
 ボディ UUID です。Stage は初回設定で同梱 Alicia VRM を
-`char.alicia@1.0.0` としてインポートします。2体目は Companion 画面から
-`char.alicia-b@1.0.0` として追加し、どちらも HTTP 経由で soul 化します。
+`char.alicia@1.0.0` としてインポートします。Companion 画面には同梱の2体目を
+`char.alicia-b@1.0.0` として追加する操作があり、どちらも HTTP 経由で soul 化します。
 CCv3 / PNG / CHARX は変換入力だけで、
 CCv3 エディタはありません。Companion の書き出しと Work のセッション書き出しは、
 ドキュメントまたはダウンロードで、拡張子付きの名前（`.enechar` / `.json`）を
@@ -134,7 +134,7 @@ CI と Cloud Agent はソフトウェア Vulkan（lavapipe）です:
 設定したあとにだけオンにします。その GUI 手順は CI には含まれません。
 
 手動: `ene-stage` を起動し、まず VRM が1体であることを確認します。Detail →
-Companion でインストール済みの2体目を追加し、1体→2体への変更、一時的に隠す→表示、
+Companion で同梱コンパニオンの追加操作を使って2体目を追加し、1体→2体への変更、一時的に隠す→表示、
 表示から外す、2体表示時の上下による順序変更、再起動後の永続化を確認します。
 A/D は表示状態とは独立してチャット対象だけを変えることも確認します。この GUI 手順は
 CI には含まれません。

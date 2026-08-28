@@ -372,6 +372,7 @@ pub struct DetailUiState {
     pub shared_accept_armed: HashSet<String>,
     pub soul: Option<SoulView>,
     pub characters: Vec<CharacterView>,
+    pub character_list_loaded: bool,
     pub occupants: Vec<OccupantView>,
     pub body_ref_draft: String,
     pub jobs: Vec<JobView>,
@@ -432,6 +433,7 @@ pub struct DetailUiState {
     pub overlay_monitor_apply_pending: bool,
     pub overlay_monitor_fit_pending: bool,
     pub overlay_monitor_notice: String,
+    pub character_action_pending: bool,
     pub display_action: Option<DisplayAction>,
     pub request_chat_open: bool,
     pub restore_id: String,
@@ -672,6 +674,9 @@ impl DetailUiState {
     pub fn invalidate_character(&mut self) {
         self.loaded.character = false;
         self.soul = None;
+        self.characters.clear();
+        self.character_list_loaded = false;
+        self.character_action_pending = false;
         self.occupants.clear();
         self.body_ref_draft.clear();
     }
@@ -1599,6 +1604,13 @@ pub fn is_character_active(
     }
 }
 
+#[must_use]
+fn bundled_alicia_b_available(characters: &[CharacterView]) -> bool {
+    !characters
+        .iter()
+        .any(|character| character.id == crate::bundle::BUNDLED_ALICIA_B_ID)
+}
+
 pub(crate) fn companion_display_rows(
     occupants: &[OccupantView],
     displayed_soul_ids: &[String],
@@ -1940,7 +1952,12 @@ fn show_companion(
     if ui.button(i18n::fl("tray-chat")).clicked() {
         state.request_chat_open = true;
     }
-    if ui.button(i18n::fl("character-import")).clicked()
+    if ui
+        .add_enabled(
+            !state.character_action_pending,
+            egui::Button::new(i18n::fl("character-import")),
+        )
+        .clicked()
         && let Some(path) = rfd::FileDialog::new()
             .set_parent(parent)
             .add_filter("enechar", &["enechar", "zip", "png", "charx"])
@@ -1948,6 +1965,7 @@ fn show_companion(
     {
         let path = path.display().to_string();
         let generation = state.next_activation_generation();
+        state.character_action_pending = true;
         let client = Arc::clone(client);
         spawn_async(rt, async_results, async move {
             let imported = client.import_character(&path).await;
@@ -2071,6 +2089,24 @@ fn show_companion(
         });
         ui.label(i18n::fl("character-body-uuid-hint"));
     });
+    let mut add_bundled_alicia_b = false;
+    if state.character_list_loaded && bundled_alicia_b_available(&state.characters) {
+        ui.collapsing(i18n::fl("character-bundled-companion"), |ui| {
+            ui.weak(i18n::fl("character-bundled-companion-help"));
+            if ui
+                .add_enabled(
+                    !state.character_action_pending,
+                    egui::Button::new(i18n::fl("character-add-bundled-companion")),
+                )
+                .clicked()
+            {
+                add_bundled_alicia_b = true;
+            }
+            if state.character_action_pending {
+                ui.weak(i18n::fl("character-companion-action-pending"));
+            }
+        });
+    }
     ui.separator();
     let mut activate_id = None;
     if state.characters.is_empty() {
@@ -2092,7 +2128,13 @@ fn show_companion(
                     ));
                     if is_character_active(character, state.soul.as_ref().map(|s| s.id.as_str())) {
                         ui.weak(i18n::fl("character-active-package"));
-                    } else if ui.button(i18n::fl("character-add-companion")).clicked() {
+                    } else if ui
+                        .add_enabled(
+                            !state.character_action_pending,
+                            egui::Button::new(i18n::fl("character-add-companion")),
+                        )
+                        .clicked()
+                    {
                         activate_id = Some(character.id.clone());
                     }
                 });
@@ -2100,12 +2142,31 @@ fn show_companion(
         });
     if let Some(id) = activate_id {
         let generation = state.next_activation_generation();
+        state.character_action_pending = true;
         let client = Arc::clone(client);
         spawn_async(rt, async_results, async move {
             let activated = client.activate_character(&id).await;
             AsyncOutcome::ActivateCharacter {
                 generation,
                 result: prepare_activation(&client, activated).await,
+            }
+        });
+    }
+    if add_bundled_alicia_b {
+        let generation = state.next_activation_generation();
+        state.character_action_pending = true;
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            let imported = match crate::bundle::pack_bundled_alicia_b() {
+                Ok(bytes) => {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    client.import_character_archive_b64(&encoded).await
+                }
+                Err(err) => Err(ApiError::Transport(err.to_string())),
+            };
+            AsyncOutcome::ImportCharacter {
+                generation,
+                result: prepare_activation(&client, imported).await,
             }
         });
     }
@@ -6538,6 +6599,20 @@ mod tests {
         assert!(!is_character_active(&other, Some("alicia")));
         assert!(!is_character_active(&unbound, Some("alicia")));
         assert!(!is_character_active(&active, None));
+    }
+
+    #[test]
+    fn fresh_character_list_offers_bundled_alicia_b_until_installed() {
+        assert!(bundled_alicia_b_available(&[]));
+
+        let installed = CharacterView {
+            id: crate::bundle::BUNDLED_ALICIA_B_ID.to_owned(),
+            version: "1.0.0".to_owned(),
+            kind: "package".to_owned(),
+            path: "/packages/char.alicia-b".to_owned(),
+            soul_id: Some("alicia-b".to_owned()),
+        };
+        assert!(!bundled_alicia_b_available(&[installed]));
     }
 
     #[test]
