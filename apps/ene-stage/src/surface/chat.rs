@@ -479,11 +479,12 @@ fn mic_cta_eligible(state: &SurfaceUiState, mic_active: bool) -> bool {
 }
 
 /// The chat-setup CTA may not piggyback on generic status text nor crowd out
-/// live conversation rows or the greeting picker; only a dedicated setup gap
-/// over a quiet panel may show or arm it.
+/// live conversation rows or a visible greeting picker; only a dedicated setup
+/// gap over a quiet panel may show or arm it. A lone greeting is committed
+/// automatically and does not occupy the panel while that request is pending.
 fn chat_setup_cta_eligible(state: &SurfaceUiState) -> bool {
     chat_setup_gap(&state.chat_setup).is_some()
-        && state.greetings.is_empty()
+        && state.greetings.len() < 2
         && normalize_transcript(&state.history, &state.streaming_text).is_empty()
 }
 
@@ -546,10 +547,60 @@ mod tests {
         }
     }
 
+    fn first_run_chat_layout_paints_empty_state_and_setup_cta() {
+        let ctx = egui::Context::default();
+        let mut state = SurfaceUiState::default();
+        let full = ctx.run_ui(first_run_raw_input(), |ui| {
+            show(ui, &mut state, false);
+        });
+        let texts = painted_texts(&full.shapes);
+
+        assert!(texts.contains(&i18n::fl("chat-empty-history")));
+        assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
+        assert!(texts.contains(&i18n::fl("chat-unconfigured")));
+    }
+
+    #[test]
+    fn first_run_chat_layout_paints_setup_cta_while_single_greeting_is_pending() {
+        let ctx = egui::Context::default();
+        let mut state = SurfaceUiState::default();
+        state.greetings.push(GreetingView {
+            index: 0,
+            text: "Hi".to_owned(),
+        });
+        state.greeting_inflight = true;
+        let full = ctx.run_ui(first_run_raw_input(), |ui| {
+            show(ui, &mut state, false);
+        });
+        let texts = painted_texts(&full.shapes);
+
+        assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
+        assert!(texts.contains(&i18n::fl("chat-unconfigured")));
+        assert!(!texts.contains(&i18n::fl("chat-greeting-prompt")));
+    }
+
+    fn first_run_raw_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(520.0, 560.0),
+            )),
+            ..Default::default()
+        }
+    }
+
     fn visible_painted_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
         let mut texts = Vec::new();
         for clipped in shapes {
             collect_visible_texts(&clipped.shape, clipped.clip_rect, &mut texts);
+        }
+        texts
+    }
+
+    fn painted_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        let mut texts = Vec::new();
+        for shape in shapes {
+            collect_texts(&shape.shape, &mut texts);
         }
         texts
     }
@@ -568,6 +619,20 @@ mod tests {
             egui::epaint::Shape::Text(text)
                 if clip_rect.intersects(text.visual_bounding_rect()) =>
             {
+                out.push(text.galley.job.text.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_texts(shape, out);
+                }
+            }
+            egui::epaint::Shape::Text(text) => {
                 out.push(text.galley.job.text.clone());
             }
             _ => {}
@@ -608,9 +673,9 @@ mod tests {
         };
         assert!(!chat_setup_cta_eligible(&occupied));
 
-        // An active greeting picker displaces it even before any row exists.
+        // A visible greeting picker displaces it even before any row exists.
         let greeting_pending = SurfaceUiState {
-            greetings: vec![greeting(0, "Hi!")],
+            greetings: vec![greeting(0, "Hi!"), greeting(1, "Hello!")],
             history: HistoryResponse {
                 messages: Vec::new(),
                 depth: "surface".to_owned(),
@@ -618,6 +683,14 @@ mod tests {
             ..Default::default()
         };
         assert!(!chat_setup_cta_eligible(&greeting_pending));
+
+        // A lone greeting is committed automatically and leaves the panel
+        // free for setup guidance until the assistant row arrives.
+        let single_greeting = SurfaceUiState {
+            greetings: vec![greeting(0, "Hi!")],
+            ..Default::default()
+        };
+        assert!(chat_setup_cta_eligible(&single_greeting));
 
         // A stream in flight displaces it even without stable rows.
         let streaming = SurfaceUiState {
