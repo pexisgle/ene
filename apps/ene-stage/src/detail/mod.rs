@@ -18,6 +18,7 @@ use tokio::runtime::Handle;
 mod primitives;
 
 use crate::core::session::prepare_soul_target;
+use crate::monitor::{self, MonitorInfo, OverlayMonitorMode};
 use crate::settings::DesktopSettings;
 use crate::tasks::{ActivatedCharacter, AsyncOutcome};
 use primitives::{EmptyState, SectionHeading, StatusCard, StatusTone, danger_hint};
@@ -393,6 +394,9 @@ pub struct DetailUiState {
     pub usage_text: String,
     pub spans_text: String,
     pub save_local_pending: bool,
+    pub overlay_monitor_apply_pending: bool,
+    pub overlay_monitor_fit_pending: bool,
+    pub overlay_monitor_notice: String,
     pub request_chat_open: bool,
     pub restore_id: String,
     pub restore_confirm: bool,
@@ -1057,6 +1061,7 @@ pub fn show(
     state: &mut DetailUiState,
     parent: &winit::window::Window,
     local_settings: &mut DesktopSettings,
+    monitors: &[MonitorInfo],
     soul_id: &str,
     client: &Arc<ApiClient>,
     rt: &Handle,
@@ -1102,7 +1107,17 @@ pub fn show(
             DetailTab::Connections => {
                 show_connections(ui, state, client, rt, async_results);
             }
-            DetailTab::System => show_system(ui, state, local_settings, client, rt, async_results),
+            DetailTab::System => {
+                show_system(
+                    ui,
+                    state,
+                    local_settings,
+                    monitors,
+                    client,
+                    rt,
+                    async_results,
+                );
+            }
             DetailTab::Log => show_log(ui, state),
         }
         if matches!(state.tab, DetailTab::Home | DetailTab::Companion) {
@@ -3599,13 +3614,22 @@ fn show_system(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
     local_settings: &mut DesktopSettings,
+    monitors: &[MonitorInfo],
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     ensure_settings(state, client, rt, async_results);
     egui::ScrollArea::vertical().show(ui, |ui| {
-        show_system_inner(ui, state, local_settings, client, rt, async_results);
+        show_system_inner(
+            ui,
+            state,
+            local_settings,
+            monitors,
+            client,
+            rt,
+            async_results,
+        );
     });
 }
 
@@ -3617,6 +3641,7 @@ fn show_system_inner(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
     local_settings: &mut DesktopSettings,
+    monitors: &[MonitorInfo],
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
@@ -3696,6 +3721,7 @@ fn show_system_inner(
             ));
             ui.end_row();
         });
+    show_overlay_monitor_settings(ui, state, local_settings, monitors);
     ui.horizontal(|ui| {
         if ui.button(i18n::fl("settings-save-local")).clicked() {
             state.save_local_pending = true;
@@ -3889,6 +3915,200 @@ fn show_system_inner(
                 .desired_rows(8),
         );
     }
+}
+
+fn show_overlay_monitor_settings(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    local_settings: &mut DesktopSettings,
+    monitors: &[MonitorInfo],
+) {
+    ui.separator();
+    ui.heading(i18n::fl("settings-overlay"));
+    ui.label(i18n::fl("settings-overlay-help"));
+    if !state.overlay_monitor_notice.is_empty() {
+        ui.weak(&state.overlay_monitor_notice);
+    }
+    show_overlay_monitor_preview(ui, local_settings, monitors);
+    if monitors.len() <= 1 {
+        if let Some(monitor) = monitors.first() {
+            ui.weak(monitor_summary(monitor));
+        }
+        ui.weak(i18n::fl("settings-overlay-monitor-single"));
+        return;
+    }
+
+    let mode = OverlayMonitorMode::from_setting(&local_settings.overlay_monitor_mode);
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("settings-overlay-monitor"));
+        egui::ComboBox::from_id_salt("overlay-monitor-mode")
+            .selected_text(overlay_monitor_mode_label(mode))
+            .show_ui(ui, |ui| {
+                for mode in [
+                    OverlayMonitorMode::Primary,
+                    OverlayMonitorMode::Selected,
+                    OverlayMonitorMode::Pointer,
+                    OverlayMonitorMode::All,
+                ] {
+                    if ui
+                        .selectable_value(
+                            &mut local_settings.overlay_monitor_mode,
+                            mode.setting().to_owned(),
+                            overlay_monitor_mode_label(mode),
+                        )
+                        .clicked()
+                    {
+                        request_overlay_monitor_action(state, false);
+                    }
+                }
+            });
+    });
+
+    if mode == OverlayMonitorMode::Selected {
+        let selected_monitor = monitor::find_saved_monitor(
+            monitors,
+            &local_settings.overlay_monitor_id,
+            &local_settings.overlay_monitor_name,
+            local_settings.overlay_monitor_position,
+        );
+        ui.horizontal(|ui| {
+            ui.label(i18n::fl("settings-overlay-monitor-choice"));
+            egui::ComboBox::from_id_salt("overlay-monitor-target")
+                .selected_text(selected_monitor.map_or_else(
+                    || i18n::fl("settings-overlay-monitor-unavailable"),
+                    monitor_summary,
+                ))
+                .show_ui(ui, |ui| {
+                    for monitor in monitors {
+                        if ui
+                            .selectable_value(
+                                &mut local_settings.overlay_monitor_id,
+                                monitor.id.clone(),
+                                monitor_summary(monitor),
+                            )
+                            .clicked()
+                        {
+                            OverlayMonitorMode::Selected
+                                .setting()
+                                .clone_into(&mut local_settings.overlay_monitor_mode);
+                            request_overlay_monitor_action(state, false);
+                        }
+                    }
+                });
+        });
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ui.button(i18n::fl("settings-overlay-move")).clicked() {
+            request_overlay_monitor_action(state, false);
+        }
+        if ui.button(i18n::fl("settings-overlay-fit")).clicked() {
+            request_overlay_monitor_action(state, true);
+        }
+    });
+}
+
+fn show_overlay_monitor_preview(
+    ui: &mut egui::Ui,
+    local_settings: &DesktopSettings,
+    monitors: &[MonitorInfo],
+) {
+    let Some(bounds) = monitor::union_rect(monitors) else {
+        return;
+    };
+    let desired_size = egui::vec2(280.0, 120.0);
+    let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+    let inner = rect.shrink(8.0);
+    let width = (bounds.size[0] as f32).max(1.0);
+    let height = (bounds.size[1] as f32).max(1.0);
+    let scale = (inner.width() / width).min(inner.height() / height);
+    let origin = egui::pos2(
+        inner.left() - bounds.position[0] as f32 * scale,
+        inner.top() - bounds.position[1] as f32 * scale,
+    );
+    let mode = OverlayMonitorMode::from_setting(&local_settings.overlay_monitor_mode);
+    let selected_id = match mode {
+        OverlayMonitorMode::Primary => monitors
+            .iter()
+            .find(|monitor| monitor.is_primary)
+            .or_else(|| monitors.first())
+            .map(|monitor| monitor.id.as_str()),
+        OverlayMonitorMode::Selected => monitor::find_saved_monitor(
+            monitors,
+            &local_settings.overlay_monitor_id,
+            &local_settings.overlay_monitor_name,
+            local_settings.overlay_monitor_position,
+        )
+        .map(|monitor| monitor.id.as_str()),
+        OverlayMonitorMode::Pointer | OverlayMonitorMode::All => None,
+    };
+    let painter = ui.painter_at(rect);
+    for monitor in monitors {
+        let monitor_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                origin.x + monitor.position[0] as f32 * scale,
+                origin.y + monitor.position[1] as f32 * scale,
+            ),
+            egui::vec2(
+                monitor.size[0] as f32 * scale,
+                monitor.size[1] as f32 * scale,
+            ),
+        );
+        let selected = selected_id == Some(monitor.id.as_str());
+        let fill = if selected {
+            ui.visuals().selection.bg_fill
+        } else {
+            ui.visuals().widgets.inactive.bg_fill
+        };
+        let stroke = if monitor.is_primary {
+            ui.visuals().widgets.active.fg_stroke
+        } else {
+            ui.visuals().widgets.inactive.fg_stroke
+        };
+        painter.rect_filled(monitor_rect, 4.0, fill);
+        painter.rect_stroke(monitor_rect, 4.0, stroke, egui::StrokeKind::Inside);
+        painter.text(
+            monitor_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            (monitor.ordinal + 1).to_string(),
+            egui::FontId::proportional(12.0),
+            ui.visuals().text_color(),
+        );
+    }
+}
+
+fn request_overlay_monitor_action(state: &mut DetailUiState, fit_positions: bool) {
+    state.overlay_monitor_apply_pending = true;
+    state.overlay_monitor_fit_pending |= fit_positions;
+    state.overlay_monitor_notice.clear();
+    state.save_local_pending = true;
+}
+
+#[must_use]
+fn overlay_monitor_mode_label(mode: OverlayMonitorMode) -> String {
+    match mode {
+        OverlayMonitorMode::Primary => i18n::fl("settings-overlay-monitor-primary"),
+        OverlayMonitorMode::Selected => i18n::fl("settings-overlay-monitor-selected"),
+        OverlayMonitorMode::Pointer => i18n::fl("settings-overlay-monitor-pointer"),
+        OverlayMonitorMode::All => i18n::fl("settings-overlay-monitor-all"),
+    }
+}
+
+#[must_use]
+fn monitor_summary(monitor: &MonitorInfo) -> String {
+    let number = (monitor.ordinal + 1).to_string();
+    let name = monitor.name.clone().unwrap_or_else(|| {
+        i18n::format("settings-overlay-display", &[("number", number.as_str())])
+    });
+    let size = format!("{}×{}", monitor.size[0], monitor.size[1]);
+    let scale = format!("{:.0}%", monitor.scale_factor * 100.0);
+    i18n::format(
+        "settings-overlay-monitor-summary",
+        &[
+            ("name", name.as_str()),
+            ("size", size.as_str()),
+            ("scale", scale.as_str()),
+        ],
+    )
 }
 
 #[must_use]

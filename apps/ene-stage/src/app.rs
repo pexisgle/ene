@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::runtime::{Handle, Runtime};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, PhysicalSize};
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
@@ -24,6 +24,7 @@ use crate::core::spawn::{StageCore, StageSpawnError, attach_or_spawn_core};
 use crate::detail::{self, DetailTab, DetailUiState, LogKind, PendingJobRetry};
 use crate::gpu::{GpuContext, GpuError};
 use crate::i18n;
+use crate::monitor::{self, MonitorInfo, OverlayMonitorMode};
 use crate::overlay::{OverlayError, OverlayWindow};
 use crate::settings::{DesktopSettings, load_desktop_settings, save_desktop_settings};
 use crate::shell::tray::TrayError;
@@ -260,6 +261,9 @@ pub fn run() -> Result<(), AppError> {
         overlay_focus: OverlayFocus::default(),
         last_cursor: None,
         cursor_poll: None,
+        last_global_cursor: None,
+        monitors: Vec::new(),
+        next_monitor_probe: Instant::now(),
         last_tick: Instant::now(),
         last_approval_poll: Instant::now(),
         approval_poll_inflight: false,
@@ -321,8 +325,11 @@ struct StageApp {
     caption: Option<ChromeWindow>,
     spotlight: Option<ChromeWindow>,
     overlay_focus: OverlayFocus,
-    last_cursor: Option<LogicalPosition<f32>>,
+    last_cursor: Option<PhysicalPosition<f32>>,
     cursor_poll: Option<crossbeam_channel::Receiver<crate::cursor_poll::GlobalCursor>>,
+    last_global_cursor: Option<crate::cursor_poll::GlobalCursor>,
+    monitors: Vec<MonitorInfo>,
+    next_monitor_probe: Instant,
     last_tick: Instant,
     last_approval_poll: Instant,
     approval_poll_inflight: bool,
@@ -384,6 +391,9 @@ impl StageApp {
             overlay_focus: OverlayFocus::default(),
             last_cursor: None,
             cursor_poll: None,
+            last_global_cursor: None,
+            monitors: Vec::new(),
+            next_monitor_probe: Instant::now(),
             last_tick: Instant::now(),
             last_approval_poll: Instant::now(),
             approval_poll_inflight: false,
@@ -401,20 +411,16 @@ impl StageApp {
             || self.spotlight.is_some()
     }
 
-    /// Converts a screen-space pointer position to overlay-local logical
-    /// coordinates using the overlay window's outer position and scale factor.
+    /// Converts a screen-space pointer position to overlay-local physical
+    /// coordinates using the overlay window's outer position.
     /// Returns `None` when the overlay window is gone.
-    fn global_cursor_to_logical(
+    fn global_cursor_to_physical(
         &self,
         cursor: crate::cursor_poll::GlobalCursor,
-    ) -> Option<LogicalPosition<f32>> {
+    ) -> Option<PhysicalPosition<f32>> {
         let overlay = self.overlay.as_ref()?;
         let pos = overlay.window.outer_position().ok()?;
-        let scale = overlay.window.scale_factor();
-        Some(LogicalPosition::new(
-            ((cursor.x - f64::from(pos.x)) / scale).max(0.0) as f32,
-            ((cursor.y - f64::from(pos.y)) / scale).max(0.0) as f32,
-        ))
+        Some(PhysicalPosition::new(cursor.x - f64::from(pos.x), cursor.y - f64::from(pos.y)).cast())
     }
 
     fn sync_overlay_interaction(&mut self) {
@@ -437,14 +443,19 @@ impl StageApp {
         // the silhouette hole armed by re-checking the pointer against body
         // AABBs even while input is transparent.
         let mut allows = crate::drag::allows_input(overlay_transparent, input_state);
+        if let Some(cursor) = self
+            .cursor_poll
+            .as_ref()
+            .and_then(|rx| rx.try_iter().last())
+        {
+            self.last_global_cursor = Some(cursor);
+        }
         if !allows {
             let polled = self
-                .cursor_poll
-                .as_ref()
-                .and_then(|rx| rx.try_recv().ok())
-                .and_then(|cursor| self.global_cursor_to_logical(cursor));
-            if let Some(logical) = polled {
-                self.last_cursor = Some(logical);
+                .last_global_cursor
+                .and_then(|cursor| self.global_cursor_to_physical(cursor));
+            if let Some(physical) = polled {
+                self.last_cursor = Some(physical);
                 if let Some((eye, target, up, vw, vh)) = self.camera_basis() {
                     let candidates = self.overlay_hit_candidates();
                     let hit = crate::drag::hit_test(
@@ -453,7 +464,7 @@ impl StageApp {
                         eye,
                         target,
                         up,
-                        glam::Vec2::new(logical.x, logical.y),
+                        glam::Vec2::new(physical.x, physical.y),
                     );
                     self.surface.hover_soul.clone_from(&hit);
                     allows = hit.is_some() || self.surface.drag.is_some();
@@ -1693,6 +1704,180 @@ impl StageApp {
         });
     }
 
+    fn overlay_monitor_target(
+        &self,
+        monitors: &[MonitorInfo],
+    ) -> Option<monitor::ResolvedMonitorTarget> {
+        let pointer = crate::platform::global_cursor_position().or_else(|| {
+            self.last_global_cursor.map(|cursor| {
+                [
+                    cursor
+                        .x
+                        .round()
+                        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+                    cursor
+                        .y
+                        .round()
+                        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+                ]
+            })
+        });
+        let pointer_fallback_id = self
+            .detail_win
+            .as_ref()
+            .and_then(|window| window.window.current_monitor())
+            .or_else(|| {
+                self.overlay
+                    .as_ref()
+                    .and_then(|window| window.window.current_monitor())
+            })
+            .map(|handle| monitor::stable_id(&handle));
+        monitor::resolve_target(
+            monitors,
+            OverlayMonitorMode::from_setting(&self.local_settings.overlay_monitor_mode),
+            &self.local_settings.overlay_monitor_id,
+            &self.local_settings.overlay_monitor_name,
+            self.local_settings.overlay_monitor_position,
+            pointer,
+            pointer_fallback_id.as_deref(),
+        )
+    }
+
+    fn record_overlay_monitor(&mut self, target: &monitor::ResolvedMonitorTarget) {
+        let mode = OverlayMonitorMode::from_setting(&self.local_settings.overlay_monitor_mode);
+        if mode != OverlayMonitorMode::Selected || target.fallback {
+            return;
+        }
+        let Some(monitor) = target.monitor.as_ref() else {
+            return;
+        };
+        let id = monitor.id.clone();
+        let name = monitor.name.clone().unwrap_or_default();
+        let position = monitor.position;
+        let size = monitor.size;
+        let scale_factor = monitor.scale_factor;
+        let settings = &mut self.local_settings;
+        settings.overlay_monitor_id = id;
+        settings.overlay_monitor_name = name;
+        settings.overlay_monitor_position = position;
+        settings.overlay_monitor_size = size;
+        settings.overlay_monitor_scale_factor = scale_factor;
+    }
+
+    fn clamp_overlay_positions(&mut self) -> bool {
+        let mut changed = false;
+        for (soul_id, position) in &mut self.surface.positions {
+            let clamped = crate::drag::clamp_position(*position);
+            if position_changed(clamped, *position) {
+                *position = clamped;
+                changed = true;
+            }
+            self.local_settings
+                .character_positions
+                .insert(soul_id.clone(), clamped);
+        }
+        for position in self.local_settings.character_positions.values_mut() {
+            let clamped = crate::drag::clamp_position(*position);
+            if position_changed(clamped, *position) {
+                *position = clamped;
+                changed = true;
+            }
+        }
+        let active_soul = self.session.soul_id().to_owned();
+        let before = [
+            self.local_settings.character_x,
+            self.local_settings.character_y,
+        ];
+        crate::settings::mirror_active_position(&mut self.local_settings, &active_soul);
+        changed
+            || position_changed(
+                before,
+                [
+                    self.local_settings.character_x,
+                    self.local_settings.character_y,
+                ],
+            )
+    }
+
+    fn apply_overlay_monitor(&mut self, event_loop: &ActiveEventLoop, fit_positions: bool) {
+        let monitors = monitor::inventory(event_loop);
+        self.monitors.clone_from(&monitors);
+        let Some(target) = self.overlay_monitor_target(&monitors) else {
+            self.detail.overlay_monitor_notice = i18n::fl("settings-overlay-no-monitors");
+            return;
+        };
+        let target_position =
+            PhysicalPosition::new(target.rect.position[0], target.rect.position[1]);
+        let target_size = PhysicalSize::new(target.rect.size[0], target.rect.size[1]);
+        let gpu = self.gpu.as_ref();
+        if let Some(overlay) = self.overlay.as_mut() {
+            if overlay.window.outer_position().ok() != Some(target_position) {
+                overlay.window.set_outer_position(target_position);
+            }
+            let current_size = overlay.window.inner_size();
+            let applied_size = if current_size == target_size {
+                current_size
+            } else {
+                overlay
+                    .window
+                    .request_inner_size(target_size)
+                    .unwrap_or(current_size)
+            };
+            if let Some(gpu) = gpu {
+                overlay.resize(gpu, applied_size);
+            }
+            overlay.window.request_redraw();
+        }
+        self.record_overlay_monitor(&target);
+        if fit_positions || target.fallback {
+            self.clamp_overlay_positions();
+        }
+        if target.fallback {
+            self.detail.overlay_monitor_notice = i18n::fl("settings-overlay-monitor-fallback");
+        } else if let Some(monitor) = target.monitor.as_ref() {
+            let number = (monitor.ordinal + 1).to_string();
+            let name = monitor.name.clone().unwrap_or_else(|| {
+                i18n::format("settings-overlay-display", &[("number", number.as_str())])
+            });
+            let size = format!("{}×{}", monitor.size[0], monitor.size[1]);
+            let scale = format!("{:.0}%", monitor.scale_factor * 100.0);
+            self.detail.overlay_monitor_notice = i18n::format(
+                "settings-overlay-monitor-moved",
+                &[
+                    ("monitor", name.as_str()),
+                    ("size", size.as_str()),
+                    ("scale", scale.as_str()),
+                ],
+            );
+        } else {
+            self.detail.overlay_monitor_notice = i18n::fl("settings-overlay-all-moved");
+        }
+        self.save_local_settings();
+    }
+
+    fn refresh_monitor_inventory(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if now < self.next_monitor_probe {
+            return;
+        }
+        self.next_monitor_probe = now + Duration::from_millis(500);
+        let monitors = monitor::inventory(event_loop);
+        let changed = monitors != self.monitors;
+        self.monitors = monitors;
+        if changed && self.overlay.is_some() {
+            self.apply_overlay_monitor(event_loop, true);
+        }
+    }
+
+    fn process_overlay_monitor_action(&mut self, event_loop: &ActiveEventLoop) {
+        if !std::mem::take(&mut self.detail.overlay_monitor_apply_pending) {
+            return;
+        }
+        let fit_positions = std::mem::take(&mut self.detail.overlay_monitor_fit_pending);
+        self.detail.save_local_pending = false;
+        self.apply_overlay_monitor(event_loop, fit_positions);
+    }
+
     fn sync_chrome_titles(&self) {
         if let Some(win) = &self.chat {
             win.sync_title();
@@ -2340,17 +2525,16 @@ impl StageApp {
     }
 
     fn on_overlay_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
-        let Some(overlay) = self.overlay.as_ref() else {
+        if self.overlay.is_none() {
             return;
-        };
-        let scale = overlay.window.scale_factor();
-        let logical = position.to_logical::<f32>(scale);
-        self.last_cursor = Some(logical);
+        }
+        let physical = position.cast::<f32>();
+        self.last_cursor = Some(physical);
 
         let Some((eye, target, up, vw, vh)) = self.camera_basis() else {
             return;
         };
-        let cursor = glam::Vec2::new(logical.x, logical.y);
+        let cursor = glam::Vec2::new(physical.x, physical.y);
         let candidates = self.overlay_hit_candidates();
         let hit_soul = crate::drag::hit_test(&candidates, (vw, vh), eye, target, up, cursor);
         self.surface.hover_soul.clone_from(&hit_soul);
@@ -2498,6 +2682,7 @@ impl StageApp {
             let detail_window = Arc::clone(&detail_win.window);
             let results = Arc::clone(&self.async_results);
             let soul_id = self.session.soul_id().to_owned();
+            let monitors = self.monitors.clone();
             self.session.session_id().clone_into(&mut detail.session_id);
             detail.spotlight_hotkey_ok = self.surface.spotlight_hotkey_ok;
             let theme = local.theme.clone();
@@ -2507,6 +2692,7 @@ impl StageApp {
                     &mut detail,
                     detail_window.as_ref(),
                     &mut local,
+                    &monitors,
                     &soul_id,
                     &client,
                     &rt,
@@ -2625,10 +2811,17 @@ impl ApplicationHandler for StageApp {
         if self.gpu.is_some() {
             return;
         }
-        let monitor = event_loop.primary_monitor();
-        let size = monitor.as_ref().map_or(
-            PhysicalSize::new(1280, 720),
-            winit::monitor::MonitorHandle::size,
+        self.monitors = monitor::inventory(event_loop);
+        self.next_monitor_probe = Instant::now() + Duration::from_millis(500);
+        let target = self.overlay_monitor_target(&self.monitors);
+        let (position, size) = target.map_or(
+            (PhysicalPosition::new(0, 0), PhysicalSize::new(1280, 720)),
+            |target| {
+                (
+                    PhysicalPosition::new(target.rect.position[0], target.rect.position[1]),
+                    PhysicalSize::new(target.rect.size[0], target.rect.size[1]),
+                )
+            },
         );
         let mut attrs = Window::default_attributes()
             .with_title(i18n::fl("app-title"))
@@ -2637,9 +2830,7 @@ impl ApplicationHandler for StageApp {
             .with_decorations(!self.settings.transparent_overlay)
             .with_visible(true);
         attrs = attrs.with_window_level(window_level(self.settings.always_on_top));
-        if let Some(monitor) = monitor.as_ref() {
-            attrs = attrs.with_position(monitor.position());
-        }
+        attrs = attrs.with_position(position);
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -2672,6 +2863,7 @@ impl ApplicationHandler for StageApp {
             }
         }
         self.gpu = Some(gpu);
+        self.apply_overlay_monitor(event_loop, false);
         self.reload_avatar();
         if self.surface.chat_open {
             self.open_chat(event_loop);
@@ -2858,12 +3050,14 @@ impl ApplicationHandler for StageApp {
         self.poll_shell(event_loop);
         self.poll_audio();
         self.process_surface_actions(event_loop);
+        self.refresh_monitor_inventory(event_loop);
         self.surface.turn_active = self.session.turn_id().is_some();
         if self.surface.history.messages.is_empty() && !self.session.history().messages.is_empty() {
             self.seed_history_from_session();
         }
         self.tick_overlay();
         self.paint_chrome(event_loop);
+        self.process_overlay_monitor_action(event_loop);
         if self.detail.open_spotlight {
             self.detail.open_spotlight = false;
             self.surface.spotlight_open = true;
@@ -2942,6 +3136,13 @@ fn map_turn_err(err: &str) -> String {
     } else {
         err.to_owned()
     }
+}
+
+fn position_changed(before: [f32; 2], after: [f32; 2]) -> bool {
+    before
+        .into_iter()
+        .zip(after)
+        .any(|(before, after)| !before.is_finite() || (before - after).abs() > f32::EPSILON)
 }
 
 /// Recognize the daemon's approval-pending rejection of job creation; only
