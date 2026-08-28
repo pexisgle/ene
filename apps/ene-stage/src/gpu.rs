@@ -1,4 +1,8 @@
 //! Shared wgpu device for the overlay surface and egui chrome windows.
+//!
+//! Windows uses a DirectComposition-backed DX12 swapchain so transparent
+//! windows can carry per-pixel alpha. The matching winit window attribute is
+//! applied when the overlay window is created.
 
 use std::sync::Arc;
 
@@ -25,7 +29,20 @@ pub struct GpuContext {
 
 impl GpuContext {
     pub async fn create() -> Result<Self, GpuError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: {
+                #[cfg(target_os = "windows")]
+                {
+                    wgpu::Backends::DX12
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    wgpu::Backends::PRIMARY
+                }
+            },
+            backend_options: backend_options(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -116,6 +133,24 @@ pub fn acquire_frame(surface: &wgpu::Surface<'_>) -> Result<wgpu::SurfaceTexture
 }
 
 #[must_use]
+fn backend_options() -> wgpu::BackendOptions {
+    #[cfg(target_os = "windows")]
+    {
+        wgpu::BackendOptions {
+            dx12: wgpu::Dx12BackendOptions {
+                presentation_system: wgpu::Dx12SwapchainKind::DxgiFromVisual,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        wgpu::BackendOptions::default()
+    }
+}
+
+#[must_use]
 pub fn pick_alpha_mode(
     surface: &wgpu::Surface<'_>,
     adapter: &wgpu::Adapter,
@@ -137,6 +172,14 @@ pub fn pick_alpha_mode(
             .copied()
             .unwrap_or(wgpu::CompositeAlphaMode::Opaque)
     }
+}
+
+#[must_use]
+pub(crate) const fn alpha_mode_supports_transparency(mode: wgpu::CompositeAlphaMode) -> bool {
+    matches!(
+        mode,
+        wgpu::CompositeAlphaMode::PreMultiplied | wgpu::CompositeAlphaMode::PostMultiplied
+    )
 }
 
 #[must_use]
@@ -171,4 +214,40 @@ const fn format_has_alpha(format: wgpu::TextureFormat) -> bool {
             | wgpu::TextureFormat::Bgra8Unorm
             | wgpu::TextureFormat::Bgra8UnormSrgb
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_pixel_alpha_modes_are_distinguished_from_opaque_modes() {
+        assert!(alpha_mode_supports_transparency(
+            wgpu::CompositeAlphaMode::PreMultiplied
+        ));
+        assert!(alpha_mode_supports_transparency(
+            wgpu::CompositeAlphaMode::PostMultiplied
+        ));
+        assert!(!alpha_mode_supports_transparency(
+            wgpu::CompositeAlphaMode::Opaque
+        ));
+        assert!(!alpha_mode_supports_transparency(
+            wgpu::CompositeAlphaMode::Inherit
+        ));
+    }
+
+    #[test]
+    fn windows_uses_a_visual_swapchain_for_transparency() {
+        let options = backend_options();
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            options.dx12.presentation_system,
+            wgpu::Dx12SwapchainKind::DxgiFromVisual
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            options.dx12.presentation_system,
+            wgpu::Dx12SwapchainKind::default(),
+        );
+    }
 }

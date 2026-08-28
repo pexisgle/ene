@@ -2636,6 +2636,13 @@ impl ApplicationHandler for StageApp {
             .with_transparent(self.settings.transparent_overlay)
             .with_decorations(!self.settings.transparent_overlay)
             .with_visible(true);
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            // DirectComposition owns the visual surface; a redirection bitmap
+            // would make the transparent window opaque before the swapchain is composed.
+            attrs = attrs.with_no_redirection_bitmap(true);
+        }
         attrs = attrs.with_window_level(window_level(self.settings.always_on_top));
         if let Some(monitor) = monitor.as_ref() {
             attrs = attrs.with_position(monitor.position());
@@ -2659,11 +2666,17 @@ impl ApplicationHandler for StageApp {
         };
         match OverlayWindow::create(window, &gpu, self.settings.transparent_overlay) {
             Ok(mut overlay) => {
+                let transparency_fallback =
+                    self.settings.transparent_overlay && !overlay.transparency_supported;
                 overlay.apply_click_through(self.local_settings.overlay_click_through);
                 if let Some((_, rx)) = crate::cursor_poll::spawn(50) {
                     self.cursor_poll = Some(rx);
                 }
                 self.overlay = Some(overlay);
+                if transparency_fallback {
+                    self.surface.overlay_notice = i18n::fl("overlay-transparency-unavailable");
+                    self.detail.core_status = self.surface.overlay_notice.clone();
+                }
             }
             Err(err) => {
                 tracing::error!(error = %err, "overlay surface failed");

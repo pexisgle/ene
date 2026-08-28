@@ -34,6 +34,7 @@ chat-role-assistant = Assistant
 chat-barge-in-hint = Interrupt the current reply. Enabled while a turn is in progress.
 chat-cancel-hint = Cancel the current turn.
 chat-overlay-hint = Overlay: Space shows the window frame. A/D switch bodies. W/S change motion. Turn off click-through in System if keys do not reach the character.
+overlay-transparency-unavailable = Transparent overlay is unavailable on this graphics backend, so the avatar overlay was hidden. Set transparent_overlay=false to use an opaque overlay.
 mic-on = Mic on
 mic-off = Mic off
 tray-mic-needs-stt = Enable a Speech-to-Text provider in Voice settings before using the mic.
