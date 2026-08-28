@@ -2878,34 +2878,76 @@ impl StageApp {
         } else {
             None
         };
-        let scale = self.local_settings.model_scale;
         let soul = self.session.soul_id().to_owned();
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let Some(overlay) = self.overlay.as_mut() else {
-            return;
-        };
-        let surface_positions = &self.surface.positions;
-        for slot in &mut overlay.slots {
-            slot.avatar.model_scale = scale;
-            let pos = surface_positions
-                .get(&slot.soul_id)
-                .copied()
-                .unwrap_or([0.78, 0.5]);
-            let world = crate::drag::normalized_to_world(pos);
-            slot.avatar.world_offset = [world[0], world[1], 0.0];
-            slot.avatar.tick_expression_cue(dt);
-        }
-        if let Err(err) = overlay.tick_and_render(gpu, look, Some(visemes), Some(soul.as_str())) {
-            match err {
-                OverlayError::Surface(_) => {
-                    tracing::debug!(error = %err, "overlay surface skipped");
+        let surface_positions = self.surface.positions.clone();
+        let highlight_soul = self
+            .surface
+            .drag
+            .as_ref()
+            .map(|drag| drag.soul_id().to_owned())
+            .or_else(|| self.surface.hover_soul.clone());
+        let mut corrected_positions = Vec::new();
+        {
+            let Some(overlay) = self.overlay.as_mut() else {
+                return;
+            };
+            let size = overlay.window.inner_size();
+            let viewport = (size.width.max(1), size.height.max(1));
+            for slot in &mut overlay.slots {
+                slot.avatar.model_scale =
+                    crate::settings::effective_model_scale(&self.local_settings, &slot.soul_id);
+                let pos = surface_positions.get(&slot.soul_id).copied().unwrap_or(
+                    crate::settings::default_position_for(&slot.soul_id, soul.as_str()),
+                );
+                let world = crate::drag::normalized_to_world(pos);
+                let fitted = slot
+                    .avatar
+                    .fit_world_offset([world[0], world[1], 0.0], viewport);
+                slot.avatar.world_offset = fitted;
+                let fitted_pos =
+                    crate::drag::world_to_normalized(glam::Vec2::new(fitted[0], fitted[1]));
+                if (fitted_pos[0] - pos[0]).abs() > 0.0001
+                    || (fitted_pos[1] - pos[1]).abs() > 0.0001
+                {
+                    corrected_positions.push((slot.soul_id.clone(), fitted_pos));
                 }
-                OverlayError::Avatar(inner) => tracing::debug!(error = %inner, "overlay avatar"),
+                slot.avatar.tick_expression_cue(dt);
+            }
+            if let Err(err) = overlay.tick_and_render(
+                gpu,
+                look,
+                Some(visemes),
+                Some(soul.as_str()),
+                highlight_soul.as_deref(),
+            ) {
+                match err {
+                    OverlayError::Surface(_) => {
+                        tracing::debug!(error = %err, "overlay surface skipped");
+                    }
+                    OverlayError::Avatar(inner) => {
+                        tracing::debug!(error = %inner, "overlay avatar");
+                    }
+                }
+            }
+            overlay.window.request_redraw();
+        }
+        let layout_changed = !corrected_positions.is_empty();
+        for (soul_id, position) in corrected_positions {
+            self.surface.positions.insert(soul_id.clone(), position);
+            self.local_settings
+                .character_positions
+                .insert(soul_id.clone(), position);
+            if soul_id == soul {
+                self.local_settings.character_x = position[0];
+                self.local_settings.character_y = position[1];
             }
         }
-        overlay.window.request_redraw();
+        if layout_changed {
+            self.save_local_settings();
+        }
     }
 
     fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {

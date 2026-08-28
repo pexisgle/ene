@@ -221,6 +221,7 @@ impl OverlayWindow {
         look_at: Option<Vec3>,
         visemes: Option<ene_vrm::VisemeWeights>,
         speaking_soul: Option<&str>,
+        highlight_soul: Option<&str>,
     ) -> Result<(), OverlayError> {
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_frame).as_secs_f32();
@@ -275,15 +276,24 @@ impl OverlayWindow {
                 )?;
             }
         }
-        if self.collider_debug {
+        if self.collider_debug || highlight_soul.is_some() {
             self.debug.clear();
-            let mut camera_uniform = None;
-            for slot in &self.slots {
-                slot.avatar.push_spring_collider_wires(&mut self.debug);
-                if camera_uniform.is_none() {
-                    camera_uniform = slot.avatar.debug_camera_uniform();
+            if self.collider_debug {
+                for slot in &self.slots {
+                    slot.avatar.push_spring_collider_wires(&mut self.debug);
                 }
             }
+            if let Some(highlight_soul) = highlight_soul {
+                for slot in &self.slots {
+                    if slot.soul_id == highlight_soul {
+                        slot.avatar.push_interaction_outline(&mut self.debug);
+                    }
+                }
+            }
+            let camera_uniform = self
+                .slots
+                .first()
+                .and_then(|slot| slot.avatar.debug_camera_uniform());
             if let Some(camera_uniform) = camera_uniform {
                 self.debug.render(
                     &gpu.device,

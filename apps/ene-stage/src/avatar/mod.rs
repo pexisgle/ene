@@ -3,13 +3,12 @@
 mod collider_debug;
 pub mod look_at;
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-use ene_vrm::DebugRenderer;
 use ene_vrm::VrmError;
 use ene_vrm::camera::{CameraUniform, ModelUniform, OrthographicCamera};
 use ene_vrm::expression::ExpressionName;
@@ -19,6 +18,7 @@ use ene_vrm::prelude::{
     VisemeWeights, VrmModel, VrmRenderer, VrmaAsset, VrmaFrame, VrmaPlayer, load_vrm, load_vrma,
 };
 use ene_vrm::spring_bone::SpringBoneSimulator;
+use ene_vrm::{DebugLine, DebugRenderer};
 
 #[derive(Debug, Error)]
 pub enum AvatarError {
@@ -492,6 +492,88 @@ impl CompanionAvatar {
         )
     }
 
+    /// Clamps a requested translation so the rendered AABB stays inside the
+    /// camera viewport, accounting for the current model scale and aspect.
+    #[must_use]
+    pub fn fit_world_offset(&self, desired: [f32; 3], viewport: (u32, u32)) -> [f32; 3] {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "swapchain pixels are well inside f32"
+        )]
+        let aspect = (viewport.0.max(1) as f32 / viewport.1.max(1) as f32).max(0.0001);
+        let mut camera = self.camera.clone();
+        camera.set_aspect(aspect);
+        let view_projection = camera.debug_proj() * camera.debug_view();
+        let (nmin, nmax) = self.model.normalized_aabb();
+        let auto = camera.compute_auto_fit_scale(nmin, nmax, 0.9);
+        let scale = auto * self.model_scale * self.model.normalize_scale();
+        let corners = aabb_corners(Vec3::from(nmin) * scale, Vec3::from(nmax) * scale);
+        let projected = corners.map(|corner| project_ndc(view_projection, corner));
+        let mut min = Vec2::splat(f32::INFINITY);
+        let mut max = Vec2::splat(f32::NEG_INFINITY);
+        for point in projected {
+            min = min.min(point);
+            max = max.max(point);
+        }
+
+        const VIEWPORT_MARGIN: f32 = 0.96;
+        let origin = project_ndc(view_projection, Vec3::ZERO);
+        let requested = Vec3::from(desired);
+        let requested_translation = project_ndc(view_projection, requested) - origin;
+        let target_translation = Vec2::new(
+            clamp_ndc_translation(
+                requested_translation.x,
+                -VIEWPORT_MARGIN - min.x,
+                VIEWPORT_MARGIN - max.x,
+            ),
+            clamp_ndc_translation(
+                requested_translation.y,
+                -VIEWPORT_MARGIN - min.y,
+                VIEWPORT_MARGIN - max.y,
+            ),
+        );
+        let correction = target_translation - requested_translation;
+        let x_basis = project_ndc(view_projection, Vec3::X) - origin;
+        let y_basis = project_ndc(view_projection, Vec3::Y) - origin;
+        let determinant = x_basis.x * y_basis.y - y_basis.x * x_basis.y;
+        let (delta_x, delta_y) = if determinant.abs() > 0.0001 {
+            (
+                (correction.x * y_basis.y - y_basis.x * correction.y) / determinant,
+                (x_basis.x * correction.y - correction.x * x_basis.y) / determinant,
+            )
+        } else {
+            (correction.x, correction.y)
+        };
+        [requested.x + delta_x, requested.y + delta_y, requested.z]
+    }
+
+    pub(crate) fn push_interaction_outline(&self, debug: &mut DebugRenderer) {
+        let (min, max) = self.world_aabb();
+        let corners = aabb_corners(min, max);
+        const EDGES: [(usize, usize); 12] = [
+            (0, 1),
+            (0, 2),
+            (0, 4),
+            (1, 3),
+            (1, 5),
+            (2, 3),
+            (2, 6),
+            (3, 7),
+            (4, 5),
+            (4, 6),
+            (5, 7),
+            (6, 7),
+        ];
+        let color = Vec4::new(0.2, 0.85, 1.0, 1.0);
+        for (a, b) in EDGES {
+            debug.push_line(DebugLine {
+                a: corners[a],
+                b: corners[b],
+                color,
+            });
+        }
+    }
+
     pub(crate) fn push_spring_collider_wires(&self, debug: &mut DebugRenderer) {
         let Some(props) = self.model.spring_bones.as_ref() else {
             return;
@@ -546,6 +628,36 @@ impl CompanionAvatar {
     pub fn write_default_minimal_vrm(path: &Path) -> Result<(), AvatarError> {
         write_glb(path)?;
         Ok(())
+    }
+}
+
+fn aabb_corners(min: Vec3, max: Vec3) -> [Vec3; 8] {
+    [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(min.x, max.y, max.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(max.x, max.y, max.z),
+    ]
+}
+
+fn project_ndc(view_projection: Mat4, point: Vec3) -> Vec2 {
+    let clip = view_projection * point.extend(1.0);
+    if clip.w.abs() <= f32::EPSILON {
+        Vec2::ZERO
+    } else {
+        Vec2::new(clip.x / clip.w, clip.y / clip.w)
+    }
+}
+
+fn clamp_ndc_translation(value: f32, lower: f32, upper: f32) -> f32 {
+    if lower <= upper {
+        value.clamp(lower, upper)
+    } else {
+        f32::midpoint(lower, upper)
     }
 }
 

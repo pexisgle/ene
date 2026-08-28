@@ -16,9 +16,17 @@ pub const DEFAULT_BODY_POSITION: [f32; 2] = [0.78, 0.5];
 #[must_use]
 pub fn clamp_position(pos: [f32; 2]) -> [f32; 2] {
     [
-        pos[0].clamp(POSITION_MIN, POSITION_MAX),
-        pos[1].clamp(POSITION_MIN, POSITION_MAX),
+        clamp_axis(pos[0], DEFAULT_BODY_POSITION[0]),
+        clamp_axis(pos[1], DEFAULT_BODY_POSITION[1]),
     ]
+}
+
+fn clamp_axis(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(POSITION_MIN, POSITION_MAX)
+    } else {
+        fallback
+    }
 }
 
 /// Maps a normalized position to a world-space XY offset.
@@ -660,5 +668,12 @@ mod tests {
         // World +y maps to normalized top (y minimum); +x maps to x maximum.
         assert!((y - POSITION_MIN).abs() < f32::EPSILON);
         assert!((x - POSITION_MAX).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn non_finite_saved_position_returns_to_the_default_slot() {
+        let [x, y] = clamp_position([f32::NAN, f32::INFINITY]);
+        assert!((x - DEFAULT_BODY_POSITION[0]).abs() < f32::EPSILON);
+        assert!((y - DEFAULT_BODY_POSITION[1]).abs() < f32::EPSILON);
     }
 }
