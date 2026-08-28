@@ -554,10 +554,15 @@ mod tests {
             show(ui, &mut state, false);
         });
         let texts = painted_texts(&full.shapes);
+        let visible_texts = visible_painted_texts(&full.shapes);
 
         assert!(texts.contains(&i18n::fl("chat-empty-history")));
         assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
         assert!(texts.contains(&i18n::fl("chat-unconfigured")));
+        assert!(visible_texts.contains(&i18n::fl("chat-empty-history")));
+        assert!(visible_texts.contains(&i18n::fl("chat-setup-unconfigured")));
+        assert!(visible_texts.contains(&i18n::fl("chat-unconfigured")));
+        assert!(visible_texts.contains(&i18n::fl("chat-send-keyboard-hint")));
     }
 
     #[test]
@@ -624,6 +629,7 @@ mod tests {
             _ => {}
         }
     }
+    }
 
     fn collect_texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
         match shape {
@@ -633,6 +639,26 @@ mod tests {
                 }
             }
             egui::epaint::Shape::Text(text) => {
+                out.push(text.galley.job.text.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_visible_texts(
+        shape: &egui::epaint::Shape,
+        clip_rect: egui::Rect,
+        out: &mut Vec<String>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_visible_texts(shape, clip_rect, out);
+                }
+            }
+            egui::epaint::Shape::Text(text)
+                if clip_rect.intersects(text.visual_bounding_rect()) =>
+            {
                 out.push(text.galley.job.text.clone());
             }
             _ => {}
