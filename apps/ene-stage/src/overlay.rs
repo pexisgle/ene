@@ -25,6 +25,20 @@ pub struct AvatarLoad {
     pub motions_dir: Option<PathBuf>,
 }
 
+/// One avatar that could not be loaded while another avatar was available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvatarLoadFailure {
+    pub soul_id: String,
+    pub error: String,
+}
+
+/// Outcome of loading the selected overlay avatars.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvatarLoadReport {
+    pub loaded: usize,
+    pub failures: Vec<AvatarLoadFailure>,
+}
+
 /// Native overlay window that draws VRM into a transparent swapchain.
 pub struct OverlayWindow {
     pub window: Arc<Window>,
@@ -183,8 +197,9 @@ impl OverlayWindow {
         &mut self,
         gpu: &GpuContext,
         specs: &[AvatarLoad],
-    ) -> Result<usize, crate::avatar::AvatarError> {
+    ) -> Result<AvatarLoadReport, crate::avatar::AvatarError> {
         let mut loaded = Vec::new();
+        let mut failures = Vec::new();
         let mut last_err = None;
         for spec in specs {
             match load_one(gpu, self.format, &spec.path, spec.motions_dir.as_deref()) {
@@ -199,6 +214,10 @@ impl OverlayWindow {
                         soul_id = %spec.soul_id,
                         "VRM load failed"
                     );
+                    failures.push(AvatarLoadFailure {
+                        soul_id: spec.soul_id.clone(),
+                        error: err.to_string(),
+                    });
                     last_err = Some(err);
                 }
             }
@@ -212,7 +231,10 @@ impl OverlayWindow {
                 ))
             }));
         }
-        Ok(self.slots.len())
+        Ok(AvatarLoadReport {
+            loaded: self.slots.len(),
+            failures,
+        })
     }
 
     pub fn tick_and_render(

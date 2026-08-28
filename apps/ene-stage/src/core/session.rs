@@ -195,8 +195,7 @@ impl StageSession {
 
     /// Resolve a soul (preferring an occupant with an avatar), open a session, load history.
     pub async fn bootstrap(client: Arc<ApiClient>) -> Result<Self, ApiError> {
-        let (soul_id, occupants, avatar_path, motions_dir) =
-            resolve_stage(&client, MAX_OVERLAY_BODIES).await?;
+        let (soul_id, occupants, avatar_path, motions_dir) = resolve_stage(&client, 1).await?;
         let session_id = resolve_session_id(&client, &soul_id).await?;
         let history = normalize_history(client.history(&session_id, "surface").await?);
         let greetings = client.list_greetings(&soul_id).await?.items;
@@ -232,8 +231,10 @@ impl StageSession {
 
     #[must_use]
     pub fn avatar_loads(&self) -> Vec<crate::overlay::AvatarLoad> {
-        avatar_slots(&self.occupants)
-            .into_iter()
+        self.occupants
+            .iter()
+            .filter(|occupant| occupant_has_avatar(occupant))
+            .cloned()
             .filter_map(|occupant| {
                 let path = PathBuf::from(occupant.avatar_path.as_ref()?);
                 let motions_dir = motions_dir_for_occupant(&occupant);
@@ -822,12 +823,14 @@ mod tests {
         let occupants = vec![
             OccupantView {
                 soul_id: "text".into(),
+                display_name: String::new(),
                 body_id: None,
                 package_id: None,
                 avatar_path: None,
             },
             OccupantView {
                 soul_id: "alicia".into(),
+                display_name: "Alicia".into(),
                 body_id: Some("body".into()),
                 package_id: Some("char.alicia@1.0.0".into()),
                 avatar_path: Some(
@@ -847,6 +850,7 @@ mod tests {
             occupants[1].clone(),
             OccupantView {
                 soul_id: "other".into(),
+                display_name: "Other".into(),
                 body_id: Some("body2".into()),
                 package_id: Some("char.other@1.0.0".into()),
                 avatar_path: Some("/data/other.vrm".into()),
@@ -894,24 +898,28 @@ mod tests {
         let occupants = vec![
             OccupantView {
                 soul_id: "text".into(),
+                display_name: String::new(),
                 body_id: None,
                 package_id: None,
                 avatar_path: None,
             },
             OccupantView {
                 soul_id: "a".into(),
+                display_name: "A".into(),
                 body_id: Some("b1".into()),
                 package_id: Some("char.alicia@1.0.0".into()),
                 avatar_path: Some("/data/a.vrm".into()),
             },
             OccupantView {
                 soul_id: "b".into(),
+                display_name: "B".into(),
                 body_id: Some("b2".into()),
                 package_id: Some("char.alicia-b@1.0.0".into()),
                 avatar_path: Some("/data/b.vrm".into()),
             },
             OccupantView {
                 soul_id: "c".into(),
+                display_name: "C".into(),
                 body_id: Some("b3".into()),
                 package_id: Some("char.other@1.0.0".into()),
                 avatar_path: Some("/data/c.vrm".into()),

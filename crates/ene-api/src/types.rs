@@ -628,6 +628,9 @@ pub struct ExclusiveSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OccupantView {
     pub soul_id: String,
+    /// Human-readable name resolved from the installed companion package.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

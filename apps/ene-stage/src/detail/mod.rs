@@ -49,6 +49,29 @@ pub struct PendingJobRetry {
     pub approval_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompanionDisplay {
+    pub soul_id: String,
+    pub display_name: String,
+    pub body_id: Option<String>,
+    pub package_id: Option<String>,
+    pub avatar_path: Option<String>,
+    pub has_avatar: bool,
+    pub displayed: bool,
+    pub temporarily_hidden: bool,
+    pub active: bool,
+    pub order: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisplayAction {
+    Show(String),
+    TemporarilyHide(String),
+    Remove(String),
+    MoveUp(String),
+    MoveDown(String),
+}
+
 #[must_use]
 fn caption_position_label(value: &str) -> String {
     match value {
@@ -409,6 +432,7 @@ pub struct DetailUiState {
     pub overlay_monitor_apply_pending: bool,
     pub overlay_monitor_fit_pending: bool,
     pub overlay_monitor_notice: String,
+    pub display_action: Option<DisplayAction>,
     pub request_chat_open: bool,
     pub restore_id: String,
     pub restore_confirm: bool,
@@ -1342,13 +1366,17 @@ fn provider_plugin_ids(state: &DetailUiState) -> Vec<String> {
     ids
 }
 
-pub fn show(
+pub(crate) fn show(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
     parent: &winit::window::Window,
     local_settings: &mut DesktopSettings,
     monitors: &[MonitorInfo],
     soul_id: &str,
+    display_companions: &[CompanionDisplay],
+    displayed_count: usize,
+    display_capacity: usize,
+    thumbnail_cache: &mut HashMap<String, Option<egui::TextureHandle>>,
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
@@ -1391,6 +1419,10 @@ pub fn show(
                         state,
                         local_settings,
                         soul_id,
+                        display_companions,
+                        displayed_count,
+                        display_capacity,
+                        thumbnail_cache,
                         parent,
                         client,
                         rt,
@@ -1567,6 +1599,279 @@ pub fn is_character_active(
     }
 }
 
+pub(crate) fn companion_display_rows(
+    occupants: &[OccupantView],
+    displayed_soul_ids: &[String],
+    temporarily_hidden: &HashSet<String>,
+    active_soul_id: &str,
+) -> Vec<CompanionDisplay> {
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for (order, soul_id) in displayed_soul_ids.iter().enumerate() {
+        if let Some(occupant) = occupants
+            .iter()
+            .find(|occupant| occupant.soul_id == *soul_id)
+            && seen.insert(occupant.soul_id.clone())
+        {
+            rows.push(companion_display_row(
+                occupant,
+                Some(order),
+                temporarily_hidden,
+                active_soul_id,
+                true,
+            ));
+        }
+    }
+    for occupant in occupants {
+        let companion = occupant.package_id.is_some()
+            || crate::core::session::occupant_has_avatar(occupant)
+            || occupant.soul_id == active_soul_id;
+        if companion && seen.insert(occupant.soul_id.clone()) {
+            rows.push(companion_display_row(
+                occupant,
+                None,
+                temporarily_hidden,
+                active_soul_id,
+                false,
+            ));
+        }
+    }
+    rows
+}
+
+fn companion_display_row(
+    occupant: &OccupantView,
+    order: Option<usize>,
+    temporarily_hidden: &HashSet<String>,
+    active_soul_id: &str,
+    displayed: bool,
+) -> CompanionDisplay {
+    let display_name = if occupant.display_name.is_empty() {
+        crate::core::session::occupant_label(occupant)
+    } else {
+        occupant.display_name.clone()
+    };
+    let has_avatar = occupant
+        .avatar_path
+        .as_ref()
+        .is_some_and(|path| !path.is_empty());
+    CompanionDisplay {
+        soul_id: occupant.soul_id.clone(),
+        display_name,
+        body_id: occupant.body_id.clone(),
+        package_id: occupant.package_id.clone(),
+        avatar_path: occupant.avatar_path.clone(),
+        has_avatar,
+        displayed,
+        temporarily_hidden: temporarily_hidden.contains(&occupant.soul_id),
+        active: occupant.soul_id == active_soul_id,
+        order,
+    }
+}
+
+fn show_display_management(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    companions: &[CompanionDisplay],
+    displayed_count: usize,
+    display_capacity: usize,
+    thumbnail_cache: &mut HashMap<String, Option<egui::TextureHandle>>,
+) {
+    SectionHeading {
+        title: i18n::fl("character-display-management"),
+        help: i18n::fl("character-display-management-help"),
+    }
+    .show(ui);
+    let visible_count = companions
+        .iter()
+        .filter(|companion| {
+            companion.displayed && !companion.temporarily_hidden && companion.has_avatar
+        })
+        .take(display_capacity)
+        .count();
+    let visible_text = visible_count.to_string();
+    let capacity_text = display_capacity.to_string();
+    ui.label(i18n::format(
+        "character-display-count",
+        &[("visible", &visible_text), ("capacity", &capacity_text)],
+    ));
+    ui.weak(i18n::fl("character-display-package-hint"));
+    if displayed_count > display_capacity {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            i18n::format("character-display-limit", &[("capacity", &capacity_text)]),
+        );
+    }
+    if visible_count == 0 {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            i18n::fl("character-display-empty-help"),
+        );
+    }
+    for companion in companions {
+        ui.push_id(("companion-display", companion.soul_id.as_str()), |ui| {
+            ui.horizontal(|ui| {
+                companion_thumbnail(ui, companion, thumbnail_cache);
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(&companion.display_name);
+                        if companion.active {
+                            ui.weak(i18n::fl("character-active-badge"));
+                        }
+                        if companion.displayed {
+                            if companion.temporarily_hidden {
+                                ui.weak(i18n::fl("character-temporarily-hidden"));
+                            } else {
+                                ui.weak(i18n::fl("character-displayed"));
+                            }
+                        } else {
+                            ui.weak(i18n::fl("character-not-displayed"));
+                        }
+                    });
+                    let body = companion
+                        .body_id
+                        .as_deref()
+                        .map_or_else(|| i18n::fl("character-body-none"), str::to_owned);
+                    ui.weak(format!(
+                        "{}: {} · {}: {}",
+                        i18n::fl("character-soul"),
+                        companion.soul_id,
+                        i18n::fl("character-body-id"),
+                        body
+                    ));
+                    if companion.active && !state.session_id.is_empty() {
+                        ui.weak(format!(
+                            "{}: {}",
+                            i18n::fl("character-session"),
+                            state.session_id
+                        ));
+                    }
+                });
+                ui.vertical(|ui| {
+                    if !companion.has_avatar {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            i18n::fl("character-text-only-reason"),
+                        );
+                    } else if companion.displayed {
+                        if companion.temporarily_hidden {
+                            if ui.button(i18n::fl("character-show")).clicked() {
+                                state.display_action =
+                                    Some(DisplayAction::Show(companion.soul_id.clone()));
+                            }
+                        } else if ui.button(i18n::fl("character-hide-temporarily")).clicked() {
+                            state.display_action =
+                                Some(DisplayAction::TemporarilyHide(companion.soul_id.clone()));
+                        }
+                        if let Some(order) = companion.order {
+                            let can_move_up = order > 0;
+                            if ui
+                                .add_enabled(can_move_up, egui::Button::new("↑"))
+                                .on_hover_text(i18n::fl("character-move-up"))
+                                .clicked()
+                            {
+                                state.display_action =
+                                    Some(DisplayAction::MoveUp(companion.soul_id.clone()));
+                            }
+                            let can_move_down = order + 1 < displayed_count;
+                            if ui
+                                .add_enabled(can_move_down, egui::Button::new("↓"))
+                                .on_hover_text(i18n::fl("character-move-down"))
+                                .clicked()
+                            {
+                                state.display_action =
+                                    Some(DisplayAction::MoveDown(companion.soul_id.clone()));
+                            }
+                        }
+                        if ui
+                            .button(i18n::fl("character-remove-from-display"))
+                            .on_hover_text(i18n::fl("character-remove-from-display-help"))
+                            .clicked()
+                        {
+                            state.display_action =
+                                Some(DisplayAction::Remove(companion.soul_id.clone()));
+                        }
+                    } else {
+                        let can_display = visible_count < display_capacity;
+                        if ui
+                            .add_enabled(
+                                can_display,
+                                egui::Button::new(i18n::fl("character-add-to-display")),
+                            )
+                            .clicked()
+                        {
+                            state.display_action =
+                                Some(DisplayAction::Show(companion.soul_id.clone()));
+                        }
+                        if !can_display {
+                            ui.weak(i18n::fl("character-display-full-help"));
+                        }
+                    }
+                });
+            });
+        });
+        ui.separator();
+    }
+}
+
+fn companion_thumbnail(
+    ui: &mut egui::Ui,
+    companion: &CompanionDisplay,
+    thumbnail_cache: &mut HashMap<String, Option<egui::TextureHandle>>,
+) {
+    if let Some(path) = companion.avatar_path.as_deref() {
+        if !thumbnail_cache.contains_key(path) {
+            let thumbnail = ene_vrm::load_vrm_thumbnail(path)
+                .ok()
+                .flatten()
+                .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                .map(|image| image.thumbnail(96, 96).to_rgba8())
+                .and_then(|image| {
+                    let size = [
+                        usize::try_from(image.width()).ok()?,
+                        usize::try_from(image.height()).ok()?,
+                    ];
+                    Some(ui.ctx().load_texture(
+                        format!("companion-thumbnail-{}", companion.soul_id),
+                        egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+                        egui::TextureOptions::LINEAR,
+                    ))
+                });
+            thumbnail_cache.insert(path.to_owned(), thumbnail);
+        }
+        if let Some(Some(texture)) = thumbnail_cache.get(path) {
+            ui.add(
+                egui::Image::from_texture((texture.id(), egui::vec2(42.0, 42.0)))
+                    .fit_to_exact_size(egui::vec2(42.0, 42.0)),
+            );
+            return;
+        }
+    }
+    let label = if companion.has_avatar {
+        companion
+            .display_name
+            .chars()
+            .next()
+            .map_or_else(|| "VRM".to_owned(), |value| value.to_uppercase().collect())
+    } else {
+        "TXT".to_owned()
+    };
+    let fill = if companion.has_avatar {
+        egui::Color32::from_rgb(34, 93, 111)
+    } else {
+        egui::Color32::from_rgb(83, 83, 83)
+    };
+    egui::Frame::group(ui.style()).fill(fill).show(ui, |ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(42.0, 42.0),
+            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            |ui| {
+                ui.label(egui::RichText::new(label).strong());
+            },
+        );
+    });
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "companion tab owns import/export/activate"
@@ -1576,6 +1881,10 @@ fn show_companion(
     state: &mut DetailUiState,
     local_settings: &mut DesktopSettings,
     soul_id: &str,
+    display_companions: &[CompanionDisplay],
+    displayed_count: usize,
+    display_capacity: usize,
+    thumbnail_cache: &mut HashMap<String, Option<egui::TextureHandle>>,
     parent: &winit::window::Window,
     client: &Arc<ApiClient>,
     rt: &Handle,
@@ -1683,6 +1992,14 @@ fn show_companion(
     }
     ui.label(i18n::fl("character-export-hint"));
     show_overlay_layout(ui, state, local_settings, soul_id);
+    show_display_management(
+        ui,
+        state,
+        display_companions,
+        displayed_count,
+        display_capacity,
+        thumbnail_cache,
+    );
     ui.collapsing(i18n::fl("character-advanced"), |ui| {
         ui.weak(i18n::fl("character-advanced-help"));
         if let Some(soul) = &state.soul {
@@ -1775,7 +2092,7 @@ fn show_companion(
                     ));
                     if is_character_active(character, state.soul.as_ref().map(|s| s.id.as_str())) {
                         ui.weak(i18n::fl("character-active-package"));
-                    } else if ui.button(i18n::fl("character-activate")).clicked() {
+                    } else if ui.button(i18n::fl("character-add-companion")).clicked() {
                         activate_id = Some(character.id.clone());
                     }
                 });
@@ -5322,12 +5639,14 @@ mod tests {
         let occupants = vec![
             OccupantView {
                 soul_id: "soul.text-only".to_owned(),
+                display_name: String::new(),
                 body_id: None,
                 package_id: None,
                 avatar_path: None,
             },
             OccupantView {
                 soul_id: "soul.avatar".to_owned(),
+                display_name: "Alicia B".to_owned(),
                 body_id: Some("body".to_owned()),
                 package_id: Some("char.alicia-b@1.0.0".to_owned()),
                 avatar_path: Some("/packages/char.alicia-b@1.0.0/model.vrm".to_owned()),
@@ -5340,6 +5659,51 @@ mod tests {
             visible[0].package_id.as_deref(),
             Some("char.alicia-b@1.0.0")
         );
+    }
+
+    #[test]
+    fn companion_display_rows_keep_overlay_order_and_chat_badges_separate() {
+        let occupants = vec![
+            OccupantView {
+                soul_id: "soul-a".to_owned(),
+                display_name: "Alicia".to_owned(),
+                body_id: Some("body-a".to_owned()),
+                package_id: Some("char.alicia@1.0.0".to_owned()),
+                avatar_path: Some("/a.vrm".to_owned()),
+            },
+            OccupantView {
+                soul_id: "soul-b".to_owned(),
+                display_name: "Alicia B".to_owned(),
+                body_id: Some("body-b".to_owned()),
+                package_id: Some("char.alicia-b@1.0.0".to_owned()),
+                avatar_path: Some("/b.vrm".to_owned()),
+            },
+            OccupantView {
+                soul_id: "soul-text".to_owned(),
+                display_name: "Notes".to_owned(),
+                body_id: None,
+                package_id: None,
+                avatar_path: None,
+            },
+        ];
+        let hidden = HashSet::from(["soul-b".to_owned()]);
+        let rows = companion_display_rows(
+            &occupants,
+            &["soul-b".to_owned(), "soul-a".to_owned()],
+            &hidden,
+            "soul-a",
+        );
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.soul_id.as_str())
+                .collect::<Vec<_>>(),
+            ["soul-b", "soul-a"]
+        );
+        assert!(rows[0].temporarily_hidden);
+        assert!(!rows[0].active);
+        assert!(rows[1].active);
+        assert!(rows[1].displayed);
     }
 
     #[test]

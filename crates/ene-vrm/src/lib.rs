@@ -71,6 +71,7 @@ pub mod post_process;
 pub mod prelude;
 pub mod renderer;
 pub mod spring_bone;
+pub mod thumbnail;
 pub mod viseme;
 pub mod vrm0;
 
@@ -125,6 +126,7 @@ pub use spring_bone::{
     SpringBoneColliderGroup, SpringBoneJoint, SpringBoneJointState, SpringBoneProperties,
     SpringBoneShape, SpringBoneSimulator, load_spring_bones,
 };
+pub use thumbnail::load_vrm_thumbnail;
 pub use viseme::{VisemeAnalyzer, VisemeWeights};
 
 /// Returns the crate version. Useful for diagnostics and the `about` panel.
