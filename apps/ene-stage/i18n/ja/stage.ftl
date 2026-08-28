@@ -34,6 +34,7 @@ chat-role-assistant = アシスタント
 chat-barge-in-hint = 進行中の返信を中断します。ターン中だけ使えます。
 chat-cancel-hint = 進行中のターンを取り消します。
 chat-overlay-hint = オーバーレイ: Space で枠。A/D で体。W/S でモーション。キーが届かないときはシステムでクリック透過をオフ。
+overlay-transparency-unavailable = このグラフィックスバックエンドでは透明オーバーレイを利用できないため、アバターオーバーレイを非表示にしました。transparent_overlay=false にすると不透明オーバーレイを使えます。
 mic-on = マイク ON
 mic-off = マイク OFF
 tray-mic-needs-stt = マイクを使う前に、音声設定で音声認識（STT）プロバイダを有効化してください。

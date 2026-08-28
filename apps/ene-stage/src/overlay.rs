@@ -35,6 +35,7 @@ pub struct OverlayWindow {
     depth_view: wgpu::TextureView,
     pub slots: Vec<OverlaySlot>,
     pub transparent: bool,
+    pub transparency_supported: bool,
     pub click_through: bool,
     pub collider_debug: bool,
     debug: DebugRenderer,
@@ -50,6 +51,27 @@ impl OverlayWindow {
         let surface = gpu.create_surface(Arc::clone(&window))?;
         let format = gpu.surface_format(&surface);
         let alpha = gpu::pick_alpha_mode(&surface, &gpu.adapter);
+        let capabilities = surface.get_capabilities(&gpu.adapter);
+        let transparency_supported = gpu::alpha_mode_supports_transparency(alpha);
+        let adapter_info = gpu.adapter.get_info();
+        tracing::info!(
+            backend = ?adapter_info.backend,
+            adapter = %adapter_info.name,
+            format = ?format,
+            alpha_mode = ?alpha,
+            supported_alpha_modes = ?capabilities.alpha_modes,
+            transparent_requested = transparent,
+            transparency_supported,
+            "overlay surface configured"
+        );
+        if transparent && !transparency_supported {
+            tracing::warn!(
+                alpha_mode = ?alpha,
+                supported_alpha_modes = ?capabilities.alpha_modes,
+                "transparent overlay unavailable; hiding avatar window"
+            );
+            window.set_visible(false);
+        }
         let size = window.inner_size();
         let config = gpu::configure_surface(&surface, &gpu.device, format, size, alpha);
         let (depth, depth_view) = gpu::create_depth(&gpu.device, config.width, config.height);
@@ -61,8 +83,9 @@ impl OverlayWindow {
             depth,
             depth_view,
             slots: Vec::new(),
-            transparent,
-            click_through: transparent,
+            transparent: transparent && transparency_supported,
+            transparency_supported,
+            click_through: transparent && transparency_supported,
             collider_debug: false,
             debug: DebugRenderer::new(&gpu.device, format),
             last_frame: Instant::now(),
@@ -146,6 +169,7 @@ impl OverlayWindow {
         self.transparent = !self.transparent;
         let inner = self.window.inner_size();
         self.window.set_decorations(!self.transparent);
+        self.window.set_transparent(self.transparent);
         if self.window.request_inner_size(inner).is_none() {
             tracing::debug!("overlay inner-size request deferred until the next scale event");
         }

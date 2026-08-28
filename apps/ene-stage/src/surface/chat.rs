@@ -416,6 +416,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                 if !state.exclusive_notice.is_empty() {
                     ui.colored_label(egui::Color32::YELLOW, &state.exclusive_notice);
                 }
+                if !state.overlay_notice.is_empty() {
+                    ui.colored_label(egui::Color32::YELLOW, &state.overlay_notice);
+                }
 
                 ui.collapsing(i18n::fl("chat-overlay-hint"), |ui| {
                     ui.label(i18n::fl("chat-overlay-hint"));
