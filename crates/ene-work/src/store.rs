@@ -820,11 +820,8 @@ pub fn next_fire(spec: &str, tz_name: &str, from: DateTime<Utc>) -> Result<Strin
         let next = from.with_timezone(&Utc) + duration;
         return Ok(next.to_rfc3339());
     }
-    let cron_spec = if spec.split_whitespace().count() == 5 {
-        format!("0 {spec}")
-    } else {
-        spec.to_owned()
-    };
+    // The cron crate numbers Sunday as 1; user-facing cron uses Sunday as 0 or 7.
+    let cron_spec = normalize_cron_spec(spec);
     let schedule = Cron::from_str(&cron_spec).map_err(|_| schedule_spec_error(spec))?;
     let tz: chrono_tz::Tz = tz_name.parse().unwrap_or(chrono_tz::UTC);
     let local = from.with_timezone(&tz);
@@ -833,6 +830,78 @@ pub fn next_fire(spec: &str, tz_name: &str, from: DateTime<Utc>) -> Result<Strin
         .next()
         .ok_or_else(|| WorkError::Schedule("no next fire".to_owned()))?;
     Ok(next.with_timezone(&Utc).to_rfc3339())
+}
+
+fn normalize_cron_spec(spec: &str) -> String {
+    let mut fields: Vec<String> = spec.split_whitespace().map(ToOwned::to_owned).collect();
+    if fields.len() == 5 {
+        fields.insert(0, "0".to_owned());
+    }
+    if matches!(fields.len(), 6 | 7) {
+        fields[5] = normalize_cron_day_of_week(&fields[5]);
+    }
+    fields.join(" ")
+}
+
+fn normalize_cron_day_of_week(field: &str) -> String {
+    field
+        .split(',')
+        .map(|item| {
+            normalize_numeric_day_of_week_item(item).map_or_else(
+                || item.to_owned(),
+                |values| {
+                    values
+                        .into_iter()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn normalize_numeric_day_of_week_item(item: &str) -> Option<Vec<u8>> {
+    let (base, step) = match item.split_once('/') {
+        Some((base, raw_step)) if !base.is_empty() && !raw_step.is_empty() => {
+            if raw_step.contains('/') {
+                return None;
+            }
+            let step = raw_step.parse::<u8>().ok()?;
+            if !(1..=7).contains(&step) {
+                return None;
+            }
+            (base, usize::from(step))
+        }
+        Some(_) => return None,
+        None => (item, 1),
+    };
+    if base == "?" || (base == "*" && !item.contains('/')) {
+        return None;
+    }
+
+    let (start, end) = if base == "*" {
+        (0, 7)
+    } else if let Some((raw_start, raw_end)) = base.split_once('-') {
+        (raw_start.parse::<u8>().ok()?, raw_end.parse::<u8>().ok()?)
+    } else {
+        let start = base.parse::<u8>().ok()?;
+        (start, if item.contains('/') { 7 } else { start })
+    };
+    if start > 7 || end > 7 || start > end {
+        return None;
+    }
+
+    let mut weekdays = [false; 7];
+    for value in (start..=end).step_by(step) {
+        weekdays[usize::from(value % 7)] = true;
+    }
+    Some(
+        (0_u8..=6)
+            .filter_map(|day| weekdays[usize::from(day)].then_some(day + 1))
+            .collect(),
+    )
 }
 
 fn parse_interval(spec: &str) -> Option<chrono::Duration> {
