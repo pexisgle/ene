@@ -267,6 +267,7 @@ pub fn run() -> Result<(), AppError> {
         pending_completion_refreshes: 0,
         completion_reconcile_inflight: false,
         completion_terminal_seq: None,
+        pending_optimistic_user_rows: Vec::new(),
     };
     app.surface.history = app.session.history();
     app.surface.greetings = app.session.greetings().to_vec();
@@ -330,6 +331,13 @@ struct StageApp {
     pending_completion_refreshes: u32,
     completion_reconcile_inflight: bool,
     completion_terminal_seq: Option<u64>,
+    pending_optimistic_user_rows: Vec<OptimisticUserRow>,
+}
+
+#[derive(Debug)]
+struct OptimisticUserRow {
+    seq: u64,
+    text: String,
 }
 
 impl StageApp {
@@ -391,6 +399,7 @@ impl StageApp {
             pending_completion_refreshes: 0,
             completion_reconcile_inflight: false,
             completion_terminal_seq: None,
+            pending_optimistic_user_rows: Vec::new(),
         }
     }
 
@@ -577,24 +586,13 @@ impl StageApp {
                     return;
                 }
                 if let Err(err) = result {
+                    self.discard_optimistic_user_row(&sent_text);
                     self.surface.status = err;
+                    self.surface.chat_draft = sent_text;
                 } else {
                     self.surface.chat_draft.clear();
                     self.surface.streaming_text.clear();
-                    let next_seq = self
-                        .surface
-                        .history
-                        .messages
-                        .last()
-                        .map_or(0, |m| m.seq + 1);
-                    self.surface
-                        .history
-                        .messages
-                        .push(ene_api::MessageResponse {
-                            seq: next_seq,
-                            role: "user".to_owned(),
-                            text: sent_text,
-                        });
+                    self.complete_optimistic_user_row(sent_text);
                     if let Some(chat) = &self.chat {
                         chat.request_redraw();
                     }
@@ -1229,6 +1227,7 @@ impl StageApp {
                     self.completion_reconcile_inflight = false;
                     self.pending_completion_refreshes = 0;
                     self.completion_terminal_seq = None;
+                    self.pending_optimistic_user_rows.clear();
                     self.feeds =
                         spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
                     self.detail.set_session_id(self.session.session_id());
@@ -1551,6 +1550,7 @@ impl StageApp {
         let sent_text = text.clone();
         let mode = self.surface.message_mode;
         self.surface.begin_send();
+        self.push_optimistic_user_row(sent_text.clone());
         self.spawn(async move {
             AsyncOutcome::SendMessage {
                 session_id,
@@ -1562,6 +1562,61 @@ impl StageApp {
                     .map_err(|err| map_turn_err(&err.to_string())),
             }
         });
+    }
+
+    /// Paints the user row before the HTTP send resolves; the composer keeps
+    /// its editable draft (failure restores it), and a real assistant-era row
+    /// from the next refresh supersedes this one.
+    fn push_optimistic_user_row(&mut self, text: String) {
+        let seq = self.append_optimistic_user_row(text.clone());
+        self.pending_optimistic_user_rows
+            .push(OptimisticUserRow { seq, text });
+    }
+
+    fn complete_optimistic_user_row(&mut self, text: String) {
+        let Some(index) = self
+            .pending_optimistic_user_rows
+            .iter()
+            .position(|row| row.text == text)
+        else {
+            self.append_optimistic_user_row(text);
+            return;
+        };
+        let pending = self.pending_optimistic_user_rows.remove(index);
+        let still_visible = self.surface.history.messages.iter().any(|message| {
+            message.seq == pending.seq && message.role == "user" && message.text == pending.text
+        });
+        if !still_visible {
+            self.append_optimistic_user_row(pending.text);
+        }
+    }
+
+    fn discard_optimistic_user_row(&mut self, text: &str) {
+        if let Some(index) = self
+            .pending_optimistic_user_rows
+            .iter()
+            .position(|row| row.text == text)
+        {
+            self.pending_optimistic_user_rows.remove(index);
+        }
+    }
+
+    fn append_optimistic_user_row(&mut self, text: String) -> u64 {
+        let next_seq = self
+            .surface
+            .history
+            .messages
+            .last()
+            .map_or(0, |m| m.seq + 1);
+        self.surface
+            .history
+            .messages
+            .push(ene_api::MessageResponse {
+                seq: next_seq,
+                role: "user".to_owned(),
+                text,
+            });
+        next_seq
     }
 
     fn select_greeting(&mut self, index: u32) {
@@ -2112,6 +2167,7 @@ impl StageApp {
             return;
         }
         self.feeds = spawn_event_feeds(&self.rt_handle, &self.client, self.session.session_id());
+        self.pending_optimistic_user_rows.clear();
         self.surface.history = self.session.history();
         self.surface.greetings = self.session.greetings().to_vec();
         self.surface.greeting_inflight = false;
@@ -2138,6 +2194,7 @@ impl StageApp {
         self.completion_reconcile_inflight = false;
         self.pending_completion_refreshes = 0;
         self.completion_terminal_seq = None;
+        self.pending_optimistic_user_rows.clear();
         self.surface.history = self.session.history();
         self.surface.greetings = self.session.greetings().to_vec();
         self.surface.greeting_inflight = false;
@@ -2584,6 +2641,87 @@ fn chat_send_block_reason(detail: &DetailUiState) -> Option<String> {
 #[cfg(test)]
 mod chat_tests {
     use super::*;
+
+    #[test]
+    fn send_chat_paints_the_optimistic_user_row_immediately() {
+        let mut app = StageApp::new_for_test();
+        app.detail.finish_settings_load();
+        app.detail.chat_plugin = "provider.openai_compat".to_owned();
+        app.detail.chat_model = "gpt-test".to_owned();
+        app.surface.chat_open = true;
+        app.surface.chat_draft = "ping-1215".to_owned();
+
+        app.send_chat();
+
+        assert!(
+            !app.surface.chat_draft.is_empty(),
+            "the editable draft must stay until the send outcome lands"
+        );
+        assert!(app.surface.turn_active);
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].role, "user");
+        assert_eq!(app.surface.history.messages[0].text, "ping-1215");
+
+        // The success path must leave the already-painted optimistic row in place.
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id: app.session.session_id().to_owned(),
+            sent_text: "ping-1215".to_owned(),
+            result: Ok(()),
+        });
+        assert!(app.surface.chat_draft.is_empty());
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "ping-1215");
+    }
+
+    #[test]
+    fn repeated_text_gets_a_second_optimistic_row_without_a_success_duplicate() {
+        let mut app = StageApp::new_for_test();
+        app.detail.finish_settings_load();
+        app.detail.chat_plugin = "provider.openai_compat".to_owned();
+        app.detail.chat_model = "gpt-test".to_owned();
+        app.surface.history.messages.push(ene_api::MessageResponse {
+            seq: 4,
+            role: "user".to_owned(),
+            text: "ping".to_owned(),
+        });
+        app.surface.chat_draft = "ping".to_owned();
+
+        app.send_chat();
+
+        assert_eq!(app.surface.history.messages.len(), 2);
+        assert_eq!(app.surface.history.messages[1].text, "ping");
+
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id: app.session.session_id().to_owned(),
+            sent_text: "ping".to_owned(),
+            result: Ok(()),
+        });
+
+        assert_eq!(app.surface.history.messages.len(), 2);
+        assert_eq!(app.surface.history.messages[1].text, "ping");
+    }
+
+    #[test]
+    fn failed_send_keeps_the_optimistic_row_and_restores_the_draft() {
+        let mut app = StageApp::new_for_test();
+        let session_id = app.session.session_id().to_owned();
+        app.surface.history.messages.push(ene_api::MessageResponse {
+            seq: 4,
+            role: "user".to_owned(),
+            text: "ping-1215".to_owned(),
+        });
+
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id,
+            sent_text: "ping-1215".to_owned(),
+            result: Err("transport down".to_owned()),
+        });
+
+        assert_eq!(app.surface.status, "transport down");
+        assert_eq!(app.surface.chat_draft, "ping-1215");
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "ping-1215");
+    }
 
     #[test]
     fn chat_waits_for_settings_before_checking_setup() {
@@ -3615,6 +3753,56 @@ mod tests {
             app.surface.history.messages.last().map(|m| m.text.as_str()),
             Some("done")
         );
+        assert_eq!(app.pending_completion_refreshes, 0);
+    }
+
+    #[test]
+    fn failed_reconcile_keeps_optimistic_rows_for_the_next_attempt() {
+        let mut app = StageApp::new_for_test();
+        app.apply_async_outcome(AsyncOutcome::SendMessage {
+            session_id: app.session.session_id().to_owned(),
+            sent_text: "kept".to_owned(),
+            result: Ok(()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 1);
+
+        // A rejected history fetch must leave the surface untouched so the
+        // optimistic row survives until a later attempt carries the turn.
+        app.apply_async_outcome(AsyncOutcome::ReconcileHistory {
+            session_id: app.session.session_id().to_owned(),
+            result: Err("connection refused".to_owned()),
+        });
+        assert_eq!(app.surface.history.messages.len(), 1);
+        assert_eq!(app.surface.history.messages[0].text, "kept");
+        // The failed attempt consumes one slot of the bounded budget and
+        // re-arms the loop right away instead of ending reconciliation.
+        assert_eq!(
+            app.pending_completion_refreshes,
+            MAX_COMPLETION_REFRESHES - 2
+        );
+        assert!(app.completion_reconcile_inflight);
+    }
+
+    #[test]
+    fn plain_refresh_between_turns_applies_completion_guards() {
+        let mut app = StageApp::new_for_test();
+        let session_id = app.session.session_id().to_owned();
+        app.pending_completion_refreshes = MAX_COMPLETION_REFRESHES;
+
+        // A user-issued refresh that races the completion loop still shows an
+        // assistant-bearing projection; unrelated refreshes take the guard.
+        app.apply_async_outcome(AsyncOutcome::RefreshHistory {
+            session_id,
+            result: Ok(HistoryResponse {
+                messages: vec![ene_api::MessageResponse {
+                    seq: 7,
+                    role: "assistant".to_owned(),
+                    text: "done".to_owned(),
+                }],
+                depth: "surface".to_owned(),
+            }),
+        });
+        assert_eq!(app.surface.history.messages[0].text, "done");
         assert_eq!(app.pending_completion_refreshes, 0);
     }
 
