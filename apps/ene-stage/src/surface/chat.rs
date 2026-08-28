@@ -186,7 +186,7 @@ const COMPOSER_MAX_ROWS: usize = 8;
 const COMPOSER_ROW_HEIGHT: f32 = 18.0;
 const COMPOSER_VERTICAL_PADDING: f32 = 14.0;
 const COMPOSER_MIN_HEIGHT: f32 = 64.0;
-const COMPOSER_PANEL_HEIGHT: f32 = 240.0;
+const COMPOSER_PANEL_HEIGHT: f32 = 280.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComposerSendRequest {
