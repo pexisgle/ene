@@ -436,7 +436,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                 ui.add_space(4.0);
             });
         });
-
     egui::CentralPanel::default()
         .frame(egui::Frame::new())
         .show(ui, |transcript_ui| {
@@ -563,6 +562,30 @@ mod tests {
         assert!(visible_texts.contains(&i18n::fl("chat-setup-unconfigured")));
         assert!(visible_texts.contains(&i18n::fl("chat-unconfigured")));
         assert!(visible_texts.contains(&i18n::fl("chat-send-keyboard-hint")));
+    }
+
+    #[test]
+    fn chat_composer_panel_stays_fixed_across_repaints() {
+        let ctx = egui::Context::default();
+        let mut state = SurfaceUiState::default();
+
+        for _ in 0..8 {
+            let _response = ctx.run_ui(first_run_raw_input(), |ui| {
+                show(ui, &mut state, false);
+            });
+
+            let panel = egui::PanelState::load(&ctx, egui::Id::new("stage-chat-composer"));
+            assert!(
+                panel.is_some(),
+                "chat composer panel must persist its layout"
+            );
+            if let Some(panel) = panel {
+                assert!(
+                    (panel.outer_rect.height() - COMPOSER_PANEL_HEIGHT).abs() < f32::EPSILON,
+                    "chat composer panel grew between repaints"
+                );
+            }
+        }
     }
 
     #[test]
