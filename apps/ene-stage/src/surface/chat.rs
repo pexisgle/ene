@@ -186,6 +186,8 @@ const COMPOSER_MAX_ROWS: usize = 8;
 const COMPOSER_ROW_HEIGHT: f32 = 18.0;
 const COMPOSER_VERTICAL_PADDING: f32 = 14.0;
 const COMPOSER_MIN_HEIGHT: f32 = 64.0;
+// Reserve the always-visible composer rows before the panel can size itself from content.
+const COMPOSER_PANEL_MIN_HEIGHT: f32 = 240.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComposerSendRequest {
@@ -273,12 +275,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
     let mut composer_focused = false;
     let mut jump_to_voice = false;
 
-    // A fixed-height composer panel reserves its space up front; sizing the
-    // transcript against leftover space keeps long conversations from pushing
-    // either region past the window edge.
+    // Without an explicit minimum, a non-resizable horizontal panel starts at
+    // its 20-point default and clips the composer before the transcript is laid out.
     egui::Panel::bottom("stage-chat-composer")
         .resizable(false)
         .show_separator_line(false)
+        .min_size(COMPOSER_PANEL_MIN_HEIGHT)
         .frame(egui::Frame::new())
         .show(ui, |panel_ui| {
             panel_ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -470,6 +472,64 @@ fn mic_cta_eligible(state: &SurfaceUiState, mic_active: bool) -> bool {
 mod tests {
     use super::*;
     use ene_api::GreetingView;
+
+    #[test]
+    fn chat_layout_keeps_transcript_and_composer_content_visible() {
+        let ctx = egui::Context::default();
+        let mut state = SurfaceUiState {
+            history: HistoryResponse {
+                messages: vec![message("user", "visible user message")],
+                depth: "surface".to_owned(),
+            },
+            ..Default::default()
+        };
+        let full = ctx.run_ui(chat_raw_input(), |ui| {
+            show(ui, &mut state, false);
+        });
+        let texts = visible_painted_texts(&full.shapes);
+
+        assert!(texts.contains(&"visible user message".to_owned()));
+        assert!(texts.contains(&i18n::fl("chat-send-keyboard-hint")));
+        assert!(texts.contains(&i18n::fl("chat-input-label")));
+    }
+
+    fn chat_raw_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(520.0, 560.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    fn visible_painted_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        let mut texts = Vec::new();
+        for clipped in shapes {
+            collect_visible_texts(&clipped.shape, clipped.clip_rect, &mut texts);
+        }
+        texts
+    }
+
+    fn collect_visible_texts(
+        shape: &egui::epaint::Shape,
+        clip_rect: egui::Rect,
+        out: &mut Vec<String>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_visible_texts(shape, clip_rect, out);
+                }
+            }
+            egui::epaint::Shape::Text(text)
+                if clip_rect.intersects(text.visual_bounding_rect()) =>
+            {
+                out.push(text.galley.job.text.clone());
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn unrelated_status_never_arms_or_renders_the_mic_voice_cta() {
