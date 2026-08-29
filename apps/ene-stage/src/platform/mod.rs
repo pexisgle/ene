@@ -30,6 +30,25 @@ pub fn apply_click_through(enabled: bool, hwnd: Option<isize>) {
     }
 }
 
+/// Returns the global pointer position when the platform exposes a native
+/// query. Linux uses the existing X11 polling channel instead.
+#[must_use]
+pub fn global_cursor_position() -> Option<[i32; 2]> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+        let mut point = POINT { x: 0, y: 0 };
+        // SAFETY: `point` is a valid writable POINT for the duration of the
+        // synchronous system call.
+        if unsafe { GetCursorPos(&raw mut point) } != 0 {
+            return Some([point.x, point.y]);
+        }
+    }
+    None
+}
+
 #[cfg(target_os = "windows")]
 fn apply_click_through_windows(enabled: bool, hwnd: Option<isize>) -> bool {
     use windows_sys::Win32::Foundation::HWND;

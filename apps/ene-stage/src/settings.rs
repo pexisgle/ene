@@ -19,6 +19,12 @@ ene_config::define_config!(
         pub graphics_quality: String = "high".to_owned(),
         pub always_on_top: bool = true,
         pub transparent_overlay: bool = true,
+        pub overlay_monitor_mode: String = "primary".to_owned(),
+        pub overlay_monitor_id: String = String::new(),
+        pub overlay_monitor_name: String = String::new(),
+        pub overlay_monitor_position: [i32; 2] = [0, 0],
+        pub overlay_monitor_size: [u32; 2] = [0, 0],
+        pub overlay_monitor_scale_factor: f64 = 1.0,
         pub model_scale: f32 = 1.0,
         pub character_x: f32 = 0.78,
         pub character_y: f32 = 0.5,
@@ -95,6 +101,8 @@ mod tests {
     fn default_settings_have_empty_positions() {
         let settings = DesktopSettings::default();
         assert!(settings.character_positions.is_empty());
+        assert_eq!(settings.overlay_monitor_mode, "primary");
+        assert!(settings.overlay_monitor_id.is_empty());
     }
 
     fn ids(values: &[&str]) -> Vec<String> {
@@ -149,6 +157,26 @@ mod tests {
             parsed.character_positions.get("soul-a"),
             Some(&[0.42, 0.58]),
         );
+    }
+
+    #[test]
+    fn settings_roundtrip_preserves_monitor_selection_metadata() {
+        let settings = DesktopSettings {
+            overlay_monitor_mode: "selected".to_owned(),
+            overlay_monitor_id: "name:secondary".to_owned(),
+            overlay_monitor_name: "\\\\.\\DISPLAY2".to_owned(),
+            overlay_monitor_position: [1920, 0],
+            overlay_monitor_size: [2560, 1440],
+            overlay_monitor_scale_factor: 1.25,
+            ..DesktopSettings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap_or_default();
+        let parsed: DesktopSettings = serde_json::from_str(&json).unwrap_or_default();
+        assert_eq!(parsed.overlay_monitor_mode, "selected");
+        assert_eq!(parsed.overlay_monitor_id, "name:secondary");
+        assert_eq!(parsed.overlay_monitor_position, [1920, 0]);
+        assert_eq!(parsed.overlay_monitor_size, [2560, 1440]);
+        assert!((parsed.overlay_monitor_scale_factor - 1.25).abs() < f64::EPSILON);
     }
 
     #[test]
