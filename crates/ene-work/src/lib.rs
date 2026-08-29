@@ -11,6 +11,7 @@
 )]
 #![deny(unsafe_code)]
 
+mod computer;
 mod error;
 mod host;
 mod mcp;
@@ -28,6 +29,10 @@ mod types;
 mod vision;
 mod workflow;
 
+pub use computer::{
+    ActionKind, ComputerAction, ComputerError, ElementRef, GrantId, GrantScope, ObservationId,
+    TaskGrant, WindowIdentity, verify_focus, verify_grant, verify_stale,
+};
 pub use error::WorkError;
 pub use host::{
     DelegationHost, StartDelegation, SurfaceCallKind, UpgradeRequest, def_is_side_effect,
