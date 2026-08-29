@@ -2,7 +2,7 @@
 
 use crate::detail::{DetailTab, chat_setup_gap, chat_setup_status};
 use crate::i18n;
-use crate::surface::{SurfaceAction, SurfaceUiState};
+use crate::surface::{ChatTarget, SurfaceAction, SurfaceUiState};
 use ene_api::{HistoryResponse, MessageMode, MessageResponse};
 
 /// Role a transcript row plays in the conversation view. The kind decides
@@ -270,7 +270,13 @@ fn composer_send_requested(ui: &egui::Ui) -> ComposerSendRequest {
     })
 }
 
-pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> bool {
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &mut SurfaceUiState,
+    mic_active: bool,
+    active_companion: &str,
+    chat_targets: &[ChatTarget],
+) -> bool {
     let mut composer_focused = false;
     let mut jump_to_voice = false;
 
@@ -283,6 +289,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
         .frame(egui::Frame::new())
         .show(ui, |panel_ui| {
             panel_ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(i18n::fl("chat-active-target"));
+                    if chat_targets.is_empty() {
+                        ui.strong(active_companion);
+                    } else {
+                        for target in chat_targets {
+                            if ui
+                                .selectable_label(target.active, &target.label)
+                                .on_hover_text(i18n::fl("motion-select-target"))
+                                .clicked()
+                            {
+                                state.push_action(SurfaceAction::SelectCompanion {
+                                    soul_id: target.soul_id.clone(),
+                                });
+                            }
+                        }
+                    }
+                });
+
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
@@ -520,7 +545,7 @@ mod tests {
                 ..Default::default()
             };
             let full = ctx.run_ui(chat_raw_input(), |ui| {
-                show(ui, &mut state, false);
+                show(ui, &mut state, false, "", &[]);
             });
             let texts = visible_painted_texts(&full.shapes);
 
@@ -537,7 +562,7 @@ mod tests {
 
         for _ in 0..8 {
             let _response = ctx.run_ui(chat_raw_input(), |ui| {
-                show(ui, &mut state, false);
+                show(ui, &mut state, false, "", &[]);
             });
 
             let panel = egui::PanelState::load(&ctx, egui::Id::new("stage-chat-composer"));
@@ -570,7 +595,7 @@ mod tests {
             let ctx = egui::Context::default();
             let mut state = SurfaceUiState::default();
             let full = ctx.run_ui(first_run_raw_input(), |ui| {
-                show(ui, &mut state, false);
+                show(ui, &mut state, false, "", &[]);
             });
             let texts = painted_texts(&full.shapes);
             let visible_texts = visible_painted_texts(&full.shapes);
@@ -596,7 +621,7 @@ mod tests {
             });
             state.greeting_inflight = true;
             let full = ctx.run_ui(first_run_raw_input(), |ui| {
-                show(ui, &mut state, false);
+                show(ui, &mut state, false, "", &[]);
             });
             let texts = painted_texts(&full.shapes);
 

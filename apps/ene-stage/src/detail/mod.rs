@@ -325,7 +325,25 @@ pub struct McpCredentialDraft {
     pub inflight: bool,
 }
 
+#[derive(Clone, Debug)]
+pub enum MotionCommand {
+    SelectSoul(String),
+    SelectMotion { soul_id: String, name: String },
+    Stop { soul_id: String },
+    Reset { soul_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotionControl {
+    pub soul_id: String,
+    pub label: String,
+    pub current: Option<String>,
+    pub manual_override: bool,
+    pub names: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default)]
+
 pub struct DetailUiState {
     pub visible: bool,
     pub tab: DetailTab,
@@ -376,6 +394,7 @@ pub struct DetailUiState {
     pub characters: Vec<CharacterView>,
     pub character_list_loaded: bool,
     pub occupants: Vec<OccupantView>,
+    pub motion_command: Option<MotionCommand>,
     pub body_ref_draft: String,
     pub jobs: Vec<JobView>,
     pub schedules: Vec<ScheduleView>,
@@ -1384,6 +1403,7 @@ pub(crate) fn show(
     displayed_count: usize,
     display_capacity: usize,
     thumbnail_cache: &mut HashMap<String, Option<egui::TextureHandle>>,
+    motion_controls: &[MotionControl],
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
@@ -1430,6 +1450,7 @@ pub(crate) fn show(
                         displayed_count,
                         display_capacity,
                         thumbnail_cache,
+                        motion_controls,
                         parent,
                         client,
                         rt,
@@ -1899,6 +1920,7 @@ fn show_companion(
     displayed_count: usize,
     display_capacity: usize,
     thumbnail_cache: &mut HashMap<String, Option<egui::TextureHandle>>,
+    motion_controls: &[MotionControl],
     parent: &winit::window::Window,
     client: &Arc<ApiClient>,
     rt: &Handle,
@@ -2017,6 +2039,7 @@ fn show_companion(
     }
     ui.label(i18n::fl("character-export-hint"));
     show_overlay_layout(ui, state, local_settings, soul_id);
+    show_motion_controls(ui, state, soul_id, motion_controls);
     show_display_management(
         ui,
         state,
@@ -2284,6 +2307,85 @@ fn show_overlay_layout(
                 }
             });
         });
+    }
+}
+
+fn show_motion_controls(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    active_soul_id: &str,
+    controls: &[MotionControl],
+) {
+    ui.separator();
+    SectionHeading {
+        title: i18n::fl("motion-controls"),
+        help: i18n::fl("motion-controls-help"),
+    }
+    .show(ui);
+    if controls.is_empty() {
+        ui.weak(i18n::fl("motion-no-avatars"));
+        return;
+    }
+
+    let mut command = None;
+    for control in controls {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong(&control.label);
+                if control.soul_id == active_soul_id {
+                    ui.weak(i18n::fl("character-active"));
+                } else if ui.button(i18n::fl("motion-select-target")).clicked() && command.is_none()
+                {
+                    command = Some(MotionCommand::SelectSoul(control.soul_id.clone()));
+                }
+                if control.manual_override {
+                    ui.weak(i18n::fl("motion-manual"));
+                }
+            });
+
+            let current = control.current.clone().unwrap_or_default();
+            if control.names.is_empty() {
+                ui.weak(i18n::fl("motion-no-motions"));
+            } else {
+                let mut selected = current.clone();
+                ui.horizontal(|ui| {
+                    ui.label(i18n::fl("motion-current"));
+                    egui::ComboBox::from_id_salt(("stage-motion", control.soul_id.as_str()))
+                        .selected_text(if current.is_empty() {
+                            i18n::fl("motion-neutral")
+                        } else {
+                            current.clone()
+                        })
+                        .show_ui(ui, |ui| {
+                            for name in &control.names {
+                                ui.selectable_value(&mut selected, name.clone(), name);
+                            }
+                        });
+                });
+                if selected != current && !selected.is_empty() && command.is_none() {
+                    command = Some(MotionCommand::SelectMotion {
+                        soul_id: control.soul_id.clone(),
+                        name: selected,
+                    });
+                }
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button(i18n::fl("motion-reset")).clicked() && command.is_none() {
+                    command = Some(MotionCommand::Reset {
+                        soul_id: control.soul_id.clone(),
+                    });
+                }
+                if ui.button(i18n::fl("motion-stop")).clicked() && command.is_none() {
+                    command = Some(MotionCommand::Stop {
+                        soul_id: control.soul_id.clone(),
+                    });
+                }
+            });
+        });
+    }
+    if command.is_some() {
+        state.motion_command = command;
     }
 }
 
