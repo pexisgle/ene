@@ -668,7 +668,6 @@ mod tests {
             _ => {}
         }
     }
-    }
 
     fn collect_texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
         match shape {
@@ -678,26 +677,6 @@ mod tests {
                 }
             }
             egui::epaint::Shape::Text(text) => {
-                out.push(text.galley.job.text.clone());
-            }
-            _ => {}
-        }
-    }
-
-    fn collect_visible_texts(
-        shape: &egui::epaint::Shape,
-        clip_rect: egui::Rect,
-        out: &mut Vec<String>,
-    ) {
-        match shape {
-            egui::epaint::Shape::Vec(shapes) => {
-                for shape in shapes {
-                    collect_visible_texts(shape, clip_rect, out);
-                }
-            }
-            egui::epaint::Shape::Text(text)
-                if clip_rect.intersects(text.visual_bounding_rect()) =>
-            {
                 out.push(text.galley.job.text.clone());
             }
             _ => {}
