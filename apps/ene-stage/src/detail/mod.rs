@@ -294,6 +294,12 @@ enum SettingsLoadState {
     Loaded,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct McpCredentialDraft {
+    pub token: String,
+    pub inflight: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DetailUiState {
     pub visible: bool,
@@ -379,6 +385,8 @@ pub struct DetailUiState {
     pub mcp_catalog_fallback: String,
     pub mcp_selected_catalog_id: String,
     pub mcp_catalog_auth_input: String,
+    pub mcp_credential_server_id: String,
+    pub mcp_credential_draft: McpCredentialDraft,
     pub mcp_probe_generation: u64,
     pub mcp_probe_pending: Option<String>,
     pub mcp_probe_candidate: Option<ene_api::McpCatalogEntryView>,
@@ -833,6 +841,72 @@ pub fn validate_mcp_document(servers: &[ene_api::McpServerView]) -> Result<(), S
         validate_mcp_server(server)?;
     }
     Ok(())
+}
+
+/// Only persistent `mcp.<id>` rows keep credentials; probe rows are
+/// ephemeral and their ids are rejected by the daemon id rule anyway.
+#[must_use]
+pub fn mcp_credential_row(plugin: &str, row_id: &str) -> Option<String> {
+    let server_id = row_id.strip_prefix("mcp.")?;
+    (!server_id.is_empty() && !server_id.starts_with("probe-") && plugin.starts_with("mcp."))
+        .then(|| server_id.to_owned())
+}
+
+/// The credential is stored by probing the saved row with the new token; the
+/// daemon persists it before the connection attempt, so the response tells us
+/// whether the token was at least accepted into the vault even when the
+/// remote itself is unreachable.
+pub fn spawn_mcp_credential_save(
+    state: &mut DetailUiState,
+    client: &Arc<ApiClient>,
+    rt: &Handle,
+    async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
+) {
+    let token = state.mcp_credential_draft.token.trim().to_owned();
+    // The trimmed value replaces the draft so a later frame cannot resend the
+    // saved token from stale whitespace the user already submitted.
+    state.mcp_credential_draft.token.clone_from(&token);
+    // The setup button stores the already-stripped server id, not the raw
+    // `mcp.<id>` fiber row id.
+    let server_id = state.mcp_credential_server_id.clone();
+    if server_id.is_empty() {
+        return;
+    }
+    if token.is_empty() || state.mcp_credential_draft.inflight {
+        return;
+    }
+    let Some(server) = state
+        .mcp_servers
+        .iter()
+        .find(|server| server.id == server_id)
+    else {
+        // A credential row without a matching form row cannot be probed; the
+        // status tells the user to save the server row first.
+        state.connections_status = i18n::fl("connections-mcp-credential-server-missing");
+        return;
+    };
+    if validate_mcp_server(server).is_err() {
+        state.connections_status = i18n::fl("connections-mcp-credential-needs-url");
+        return;
+    }
+    let probe = ene_api::McpProbeRequest {
+        id: server.id.clone(),
+        transport: server.transport.clone(),
+        command: server.command.clone(),
+        args: server.args.clone(),
+        url: server.url.clone(),
+        auth_token: Some(token),
+    };
+    let generation = state.next_mcp_probe_generation();
+    state.mcp_credential_draft.inflight = true;
+    state.connections_status.clear();
+    let client = Arc::clone(client);
+    spawn_async(rt, async_results, async move {
+        AsyncOutcome::SaveMcpCredential {
+            generation,
+            result: client.probe_mcp(&probe).await.map_err(|e| e.to_string()),
+        }
+    });
 }
 
 #[must_use]
@@ -2993,6 +3067,19 @@ fn show_connections(
                         ui.label(&plugin.row_id);
                     });
                 });
+                if let Some(server_id) = mcp_credential_row(&plugin.plugin, &plugin.row_id)
+                    && ui
+                        .button(i18n::fl("connections-mcp-credential-setup"))
+                        .clicked()
+                {
+                    if state.mcp_credential_server_id == server_id {
+                        state.mcp_credential_server_id.clear();
+                        state.mcp_credential_draft = McpCredentialDraft::default();
+                    } else {
+                        state.mcp_credential_server_id.clone_from(&server_id);
+                        state.mcp_credential_draft = McpCredentialDraft::default();
+                    }
+                }
                 if ui.button(i18n::fl("plugins-restart")).clicked() {
                     let id = plugin.row_id.clone();
                     let client = Arc::clone(client);
@@ -3020,6 +3107,37 @@ fn show_connections(
                     });
                 }
             });
+            if state.mcp_credential_server_id == plugin.row_id.trim_start_matches("mcp.")
+                && mcp_credential_row(&plugin.plugin, &plugin.row_id).is_some()
+            {
+                ui.group(|ui| {
+                    ui.label(i18n::format(
+                        "connections-mcp-credential-for",
+                        &[("id", state.mcp_credential_server_id.as_str())],
+                    ));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.mcp_credential_draft.token)
+                            .password(true)
+                            .hint_text(i18n::fl("connections-mcp-credential-hint")),
+                    );
+                    ui.horizontal(|ui| {
+                        let can_save = !state.mcp_credential_draft.inflight
+                            && !state.mcp_credential_draft.token.trim().is_empty();
+                        if ui
+                            .add_enabled(
+                                can_save,
+                                egui::Button::new(i18n::fl("connections-mcp-credential-save")),
+                            )
+                            .clicked()
+                        {
+                            spawn_mcp_credential_save(state, client, rt, async_results);
+                        }
+                        if state.mcp_credential_draft.inflight {
+                            ui.spinner();
+                        }
+                    });
+                });
+            }
         }
     }
     show_plugin_config(ui, state, client, rt, async_results);
@@ -3058,6 +3176,14 @@ fn show_connections(
                     });
                 }
                 ui.label(err);
+                // The daemon reports the raw spawn failure; for HTTP remotes
+                // the actionable causes are the URL or the credential.
+                if matches!(
+                    candidate.transport.as_str(),
+                    "http" | "sse" | "streamable_http" | "streamable-http"
+                ) {
+                    ui.label(i18n::fl("connections-mcp-preview-check-url"));
+                }
                 // Auth-required remotes can still be added disabled; the
                 // secret is then provided through plugin config.
                 let candidate_exists = state.mcp_probe_candidate.is_some();
@@ -5555,6 +5681,67 @@ mod tests {
         assert_eq!(
             mcp_args_text(&spaced.args),
             "-y\nC:\\Users\\Jane Doe\\workspace\n--verbose"
+        );
+    }
+
+    #[test]
+    fn mcp_credential_rows_skip_probe_rows_and_extract_server_ids() {
+        assert_eq!(
+            mcp_credential_row("mcp.bridge", "mcp.github-remote").as_deref(),
+            Some("github-remote")
+        );
+        assert_eq!(
+            mcp_credential_row("mcp.github-remote", "mcp.github-remote").as_deref(),
+            Some("github-remote")
+        );
+        assert_eq!(mcp_credential_row("mcp.bridge", "mcp.probe-abc123"), None);
+        assert_eq!(
+            mcp_credential_row("mcp.github-remote", "mcp.probe-abc123"),
+            None
+        );
+        assert_eq!(mcp_credential_row("mcp.bridge", "mcp."), None);
+        assert_eq!(
+            mcp_credential_row("provider.gguf", "mcp.github-remote"),
+            None
+        );
+    }
+
+    #[test]
+    fn mcp_credential_save_requires_url_for_http_servers() {
+        let server = ene_api::McpServerView {
+            id: "web".to_owned(),
+            transport: "http".to_owned(),
+            command: None,
+            args: Vec::new(),
+            url: None,
+            enabled: true,
+        };
+        let mut state = DetailUiState {
+            mcp_credential_server_id: "web".to_owned(),
+            mcp_servers: vec![server],
+            ..Default::default()
+        };
+        state.mcp_credential_draft.token = "secret-token".to_owned();
+        let async_results: Arc<Mutex<Vec<AsyncOutcome>>> = Arc::default();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        i18n::select_language("en-US");
+        let handle = rt.handle().clone();
+        spawn_mcp_credential_save(
+            &mut state,
+            &Arc::new(ApiClient::new("http://127.0.0.1:1", "", "test")),
+            &handle,
+            &async_results,
+        );
+        assert_eq!(
+            state.mcp_credential_draft.token, "secret-token",
+            "token must survive when validation fails",
+        );
+        assert_eq!(
+            state.connections_status,
+            i18n::fl("connections-mcp-credential-needs-url")
         );
     }
 

@@ -817,6 +817,25 @@ impl StageApp {
                     }),
                 };
             }
+            AsyncOutcome::SaveMcpCredential { generation, result } => {
+                if !self.detail.mcp_probe_is_current(generation) {
+                    return;
+                }
+                self.detail.mcp_credential_draft.inflight = false;
+                self.detail.connections_status = match result {
+                    Ok(response) => {
+                        self.detail.mcp_credential_draft.token.clear();
+                        if response.error.is_none() {
+                            i18n::fl("connections-mcp-credential-saved")
+                        } else {
+                            // A rejected token still reached the vault; the
+                            // message must say which half succeeded.
+                            i18n::fl("connections-mcp-credential-saved-unverified")
+                        }
+                    }
+                    Err(err) => err,
+                };
+            }
             AsyncOutcome::ListMemories { soul_id, result } => {
                 if soul_id != self.session.soul_id() {
                     return;
