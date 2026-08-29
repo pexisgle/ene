@@ -5727,22 +5727,23 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime");
-        i18n::select_language("en-US");
-        let handle = rt.handle().clone();
-        spawn_mcp_credential_save(
-            &mut state,
-            &Arc::new(ApiClient::new("http://127.0.0.1:1", "", "test")),
-            &handle,
-            &async_results,
-        );
-        assert_eq!(
-            state.mcp_credential_draft.token, "secret-token",
-            "token must survive when validation fails",
-        );
-        assert_eq!(
-            state.connections_status,
-            i18n::fl("connections-mcp-credential-needs-url")
-        );
+        i18n::with_language("en-US", || {
+            let handle = rt.handle().clone();
+            spawn_mcp_credential_save(
+                &mut state,
+                &Arc::new(ApiClient::new("http://127.0.0.1:1", "", "test")),
+                &handle,
+                &async_results,
+            );
+            assert_eq!(
+                state.mcp_credential_draft.token, "secret-token",
+                "token must survive when validation fails",
+            );
+            assert_eq!(
+                state.connections_status,
+                i18n::fl("connections-mcp-credential-needs-url")
+            );
+        });
     }
 
     #[test]

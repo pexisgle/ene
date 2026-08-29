@@ -510,22 +510,24 @@ mod tests {
 
     #[test]
     fn chat_layout_keeps_transcript_and_composer_content_visible() {
-        let ctx = egui::Context::default();
-        let mut state = SurfaceUiState {
-            history: HistoryResponse {
-                messages: vec![message("user", "visible user message")],
-                depth: "surface".to_owned(),
-            },
-            ..Default::default()
-        };
-        let full = ctx.run_ui(chat_raw_input(), |ui| {
-            show(ui, &mut state, false);
-        });
-        let texts = visible_painted_texts(&full.shapes);
+        i18n::with_language("en-US", || {
+            let ctx = egui::Context::default();
+            let mut state = SurfaceUiState {
+                history: HistoryResponse {
+                    messages: vec![message("user", "visible user message")],
+                    depth: "surface".to_owned(),
+                },
+                ..Default::default()
+            };
+            let full = ctx.run_ui(chat_raw_input(), |ui| {
+                show(ui, &mut state, false);
+            });
+            let texts = visible_painted_texts(&full.shapes);
 
-        assert!(texts.contains(&"visible user message".to_owned()));
-        assert!(texts.contains(&i18n::fl("chat-send-keyboard-hint")));
-        assert!(texts.contains(&i18n::fl("chat-input-label")));
+            assert!(texts.contains(&"visible user message".to_owned()));
+            assert!(texts.contains(&i18n::fl("chat-send-keyboard-hint")));
+            assert!(texts.contains(&i18n::fl("chat-input-label")));
+        });
     }
 
     #[test]
@@ -564,40 +566,44 @@ mod tests {
 
     #[test]
     fn first_run_chat_layout_paints_empty_state_and_setup_cta() {
-        let ctx = egui::Context::default();
-        let mut state = SurfaceUiState::default();
-        let full = ctx.run_ui(first_run_raw_input(), |ui| {
-            show(ui, &mut state, false);
-        });
-        let texts = painted_texts(&full.shapes);
-        let visible_texts = visible_painted_texts(&full.shapes);
+        i18n::with_language("en-US", || {
+            let ctx = egui::Context::default();
+            let mut state = SurfaceUiState::default();
+            let full = ctx.run_ui(first_run_raw_input(), |ui| {
+                show(ui, &mut state, false);
+            });
+            let texts = painted_texts(&full.shapes);
+            let visible_texts = visible_painted_texts(&full.shapes);
 
-        assert!(texts.contains(&i18n::fl("chat-empty-history")));
-        assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
-        assert!(texts.contains(&i18n::fl("chat-unconfigured")));
-        assert!(visible_texts.contains(&i18n::fl("chat-empty-history")));
-        assert!(visible_texts.contains(&i18n::fl("chat-setup-unconfigured")));
-        assert!(visible_texts.contains(&i18n::fl("chat-unconfigured")));
-        assert!(visible_texts.contains(&i18n::fl("chat-send-keyboard-hint")));
+            assert!(texts.contains(&i18n::fl("chat-empty-history")));
+            assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
+            assert!(texts.contains(&i18n::fl("chat-unconfigured")));
+            assert!(visible_texts.contains(&i18n::fl("chat-empty-history")));
+            assert!(visible_texts.contains(&i18n::fl("chat-setup-unconfigured")));
+            assert!(visible_texts.contains(&i18n::fl("chat-unconfigured")));
+            assert!(visible_texts.contains(&i18n::fl("chat-send-keyboard-hint")));
+        });
     }
 
     #[test]
     fn first_run_chat_layout_paints_setup_cta_while_single_greeting_is_pending() {
-        let ctx = egui::Context::default();
-        let mut state = SurfaceUiState::default();
-        state.greetings.push(GreetingView {
-            index: 0,
-            text: "Hi".to_owned(),
-        });
-        state.greeting_inflight = true;
-        let full = ctx.run_ui(first_run_raw_input(), |ui| {
-            show(ui, &mut state, false);
-        });
-        let texts = painted_texts(&full.shapes);
+        i18n::with_language("en-US", || {
+            let ctx = egui::Context::default();
+            let mut state = SurfaceUiState::default();
+            state.greetings.push(GreetingView {
+                index: 0,
+                text: "Hi".to_owned(),
+            });
+            state.greeting_inflight = true;
+            let full = ctx.run_ui(first_run_raw_input(), |ui| {
+                show(ui, &mut state, false);
+            });
+            let texts = painted_texts(&full.shapes);
 
-        assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
-        assert!(texts.contains(&i18n::fl("chat-unconfigured")));
-        assert!(!texts.contains(&i18n::fl("chat-greeting-prompt")));
+            assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
+            assert!(texts.contains(&i18n::fl("chat-unconfigured")));
+            assert!(!texts.contains(&i18n::fl("chat-greeting-prompt")));
+        });
     }
 
     fn first_run_raw_input() -> egui::RawInput {

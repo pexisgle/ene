@@ -239,14 +239,15 @@ mod tests {
 
     #[test]
     fn japanese_label_substring_match() {
-        crate::i18n::select_language("ja");
-        let entries = palette_entries();
-        let ja_matches = filter_entries("マイク", &entries);
-        assert!(
-            ja_matches
-                .iter()
-                .any(|entry| entry.action == SpotlightAction::Command(ShellCommand::ToggleMic))
-        );
+        crate::i18n::with_language("ja", || {
+            let entries = palette_entries();
+            let ja_matches = filter_entries("マイク", &entries);
+            assert!(
+                ja_matches
+                    .iter()
+                    .any(|entry| entry.action == SpotlightAction::Command(ShellCommand::ToggleMic))
+            );
+        });
     }
 
     #[test]
