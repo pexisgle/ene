@@ -1316,7 +1316,16 @@ pub fn show(
         match state.tab {
             DetailTab::Home => show_home(ui, state, client, rt, async_results),
             DetailTab::Companion => {
-                show_companion(ui, state, soul_id, parent, client, rt, async_results);
+                show_companion(
+                    ui,
+                    state,
+                    local_settings,
+                    soul_id,
+                    parent,
+                    client,
+                    rt,
+                    async_results,
+                );
             }
             DetailTab::Conversation => {
                 show_conversation(ui, state, parent, client, rt, async_results);
@@ -1493,6 +1502,7 @@ pub fn is_character_active(
 fn show_companion(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
+    local_settings: &mut DesktopSettings,
     soul_id: &str,
     parent: &winit::window::Window,
     client: &Arc<ApiClient>,
@@ -1600,6 +1610,7 @@ fn show_companion(
         }
     }
     ui.label(i18n::fl("character-export-hint"));
+    show_overlay_layout(ui, state, local_settings, soul_id);
     ui.collapsing(i18n::fl("character-advanced"), |ui| {
         ui.weak(i18n::fl("character-advanced-help"));
         if let Some(soul) = &state.soul {
@@ -1708,6 +1719,138 @@ fn show_companion(
                 result: prepare_activation(&client, activated).await,
             }
         });
+    }
+}
+
+fn show_overlay_layout(
+    ui: &mut egui::Ui,
+    state: &mut DetailUiState,
+    local_settings: &mut DesktopSettings,
+    active_soul_id: &str,
+) {
+    SectionHeading {
+        title: i18n::fl("character-layout"),
+        help: i18n::fl("character-layout-help"),
+    }
+    .show(ui);
+    ui.label(i18n::fl("character-layout-drag-hint"));
+
+    let occupants = crate::core::session::avatar_slots(&state.occupants);
+    if occupants.is_empty() {
+        ui.weak(i18n::fl("character-layout-empty"));
+        return;
+    }
+    let soul_ids: Vec<String> = occupants
+        .iter()
+        .map(|occupant| occupant.soul_id.clone())
+        .collect();
+    ui.horizontal_wrapped(|ui| {
+        if ui.button(i18n::fl("character-arrange")).clicked() {
+            apply_arranged_positions(local_settings, &soul_ids, active_soul_id);
+            state.save_local_pending = true;
+        }
+        if ui.button(i18n::fl("character-fit-all")).clicked() {
+            apply_arranged_positions(local_settings, &soul_ids, active_soul_id);
+            let scale = if soul_ids.len() > 1 {
+                crate::settings::TWO_BODY_FIT_SCALE
+            } else {
+                crate::settings::DEFAULT_MODEL_SCALE
+            };
+            for soul_id in &soul_ids {
+                set_character_scale(local_settings, soul_id, soul_id == active_soul_id, scale);
+            }
+            state.save_local_pending = true;
+        }
+    });
+
+    for (index, occupant) in occupants.iter().enumerate() {
+        let soul_id = occupant.soul_id.clone();
+        let active = soul_id == active_soul_id;
+        let label_number = (index + 1).to_string();
+        let mut scale = crate::settings::effective_model_scale(local_settings, &soul_id);
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong(i18n::format(
+                    "character-companion",
+                    &[("number", label_number.as_str())],
+                ));
+                if active {
+                    ui.weak(i18n::fl("character-active"));
+                }
+            });
+            let response = ui.add(
+                egui::Slider::new(
+                    &mut scale,
+                    crate::settings::MODEL_SCALE_MIN..=crate::settings::MODEL_SCALE_MAX,
+                )
+                .text(i18n::fl("settings-model-scale")),
+            );
+            if response.changed() {
+                set_character_scale(local_settings, &soul_id, active, scale);
+            }
+            if response.drag_stopped()
+                || response.clicked()
+                || (response.changed() && !response.dragged())
+            {
+                state.save_local_pending = true;
+            }
+            ui.horizontal(|ui| {
+                if ui.button(i18n::fl("character-center")).clicked() {
+                    set_character_position(
+                        local_settings,
+                        &soul_id,
+                        active,
+                        crate::settings::CENTER_POSITION,
+                    );
+                    state.save_local_pending = true;
+                }
+                if ui.button(i18n::fl("character-reset-position")).clicked() {
+                    set_character_position(
+                        local_settings,
+                        &soul_id,
+                        active,
+                        crate::settings::default_position_for(&soul_id, active_soul_id),
+                    );
+                    state.save_local_pending = true;
+                }
+            });
+        });
+    }
+}
+
+fn apply_arranged_positions(
+    settings: &mut DesktopSettings,
+    soul_ids: &[String],
+    active_soul_id: &str,
+) {
+    for (soul_id, position) in soul_ids
+        .iter()
+        .zip(crate::settings::arranged_positions(soul_ids))
+    {
+        set_character_position(settings, soul_id, soul_id == active_soul_id, position);
+    }
+}
+
+fn set_character_position(
+    settings: &mut DesktopSettings,
+    soul_id: &str,
+    active: bool,
+    position: [f32; 2],
+) {
+    settings
+        .character_positions
+        .insert(soul_id.to_owned(), position);
+    if active {
+        settings.character_x = position[0];
+        settings.character_y = position[1];
+    }
+}
+
+fn set_character_scale(settings: &mut DesktopSettings, soul_id: &str, active: bool, scale: f32) {
+    let scale = crate::settings::clamp_model_scale(scale);
+    settings.character_scales.insert(soul_id.to_owned(), scale);
+    if active {
+        settings.model_scale = scale;
     }
 }
 
@@ -4119,10 +4262,10 @@ fn show_system_inner(
             ui.checkbox(&mut local_settings.overlay_click_through, "")
                 .on_hover_text(i18n::fl("settings-click-through-hint"));
             ui.end_row();
-            ui.label(i18n::fl("settings-model-scale"));
+            ui.label(i18n::fl("settings-default-model-scale"));
             ui.add(egui::Slider::new(
                 &mut local_settings.model_scale,
-                0.3..=2.0,
+                crate::settings::MODEL_SCALE_MIN..=crate::settings::MODEL_SCALE_MAX,
             ));
             ui.end_row();
             ui.label(i18n::fl("settings-look-at"));
@@ -4150,6 +4293,7 @@ fn show_system_inner(
             ui.end_row();
         });
     ui.weak(i18n::fl("settings-direct-reaction-platform"));
+    ui.label(i18n::fl("settings-default-model-scale-hint"));
     show_overlay_monitor_settings(ui, state, local_settings, monitors);
     ui.horizontal(|ui| {
         if ui.button(i18n::fl("settings-save-local")).clicked() {
@@ -6045,5 +6189,24 @@ mod tests {
     fn local_timezone_name_never_panics_and_defaults_to_utc() {
         let name = local_timezone_name();
         assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn layout_actions_persist_positions_and_individual_scales() {
+        let mut settings = DesktopSettings::default();
+        let souls = vec!["left".to_owned(), "active".to_owned()];
+
+        apply_arranged_positions(&mut settings, &souls, "active");
+        let [left_x, left_y] = settings.character_positions["left"];
+        let [active_x, active_y] = settings.character_positions["active"];
+        assert!((left_x - 0.3).abs() < f32::EPSILON);
+        assert!((left_y - 0.5).abs() < f32::EPSILON);
+        assert!((active_x - 0.7).abs() < f32::EPSILON);
+        assert!((active_y - 0.5).abs() < f32::EPSILON);
+        assert!((settings.character_x - 0.7).abs() < f32::EPSILON);
+
+        set_character_scale(&mut settings, "active", true, 1.8);
+        assert!((settings.character_scales["active"] - 1.8).abs() < f32::EPSILON);
+        assert!((settings.model_scale - 1.8).abs() < f32::EPSILON);
     }
 }

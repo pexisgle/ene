@@ -30,6 +30,8 @@ ene_config::define_config!(
         pub character_y: f32 = 0.5,
         #[serde(default)]
         pub character_positions: HashMap<String, [f32; 2]> = HashMap::new(),
+        #[serde(default)]
+        pub character_scales: HashMap<String, f32> = HashMap::new(),
         pub look_at_strength: f32 = 0.6,
         pub direct_reactions_enabled: bool = true,
         pub direct_reaction_strength: f32 = 0.7,
@@ -64,6 +66,63 @@ pub fn save_desktop_settings(settings: &DesktopSettings) -> Result<(), EneConfig
 
 /// Default normalized position for a body without a saved slot.
 pub const DEFAULT_SECONDARY_POSITION: [f32; 2] = [0.22, 0.5];
+/// Default normalized position for the active body.
+pub const DEFAULT_PRIMARY_POSITION: [f32; 2] = [0.78, 0.5];
+/// Default center position used by the per-body recovery action.
+pub const CENTER_POSITION: [f32; 2] = [0.5, 0.5];
+/// Lower bound shared by the per-body and legacy scale controls.
+pub const MODEL_SCALE_MIN: f32 = 0.3;
+/// Upper bound shared by the per-body and legacy scale controls.
+pub const MODEL_SCALE_MAX: f32 = 2.0;
+/// Fallback scale for a missing or malformed per-body value.
+pub const DEFAULT_MODEL_SCALE: f32 = 1.0;
+/// Conservative scale used when two bodies are arranged side by side.
+pub const TWO_BODY_FIT_SCALE: f32 = 0.65;
+
+#[must_use]
+pub fn clamp_model_scale(scale: f32) -> f32 {
+    if scale.is_finite() {
+        scale.clamp(MODEL_SCALE_MIN, MODEL_SCALE_MAX)
+    } else {
+        DEFAULT_MODEL_SCALE
+    }
+}
+
+#[must_use]
+pub fn effective_model_scale(settings: &DesktopSettings, soul_id: &str) -> f32 {
+    settings.character_scales.get(soul_id).copied().map_or_else(
+        || clamp_model_scale(settings.model_scale),
+        clamp_model_scale,
+    )
+}
+
+#[must_use]
+pub fn default_position_for(soul_id: &str, active_soul_id: &str) -> [f32; 2] {
+    if soul_id == active_soul_id {
+        DEFAULT_PRIMARY_POSITION
+    } else {
+        DEFAULT_SECONDARY_POSITION
+    }
+}
+
+#[must_use]
+pub fn arranged_positions(soul_ids: &[String]) -> Vec<[f32; 2]> {
+    match soul_ids.len() {
+        0 => Vec::new(),
+        1 => vec![CENTER_POSITION],
+        _ => soul_ids
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                if index.is_multiple_of(2) {
+                    [0.3, 0.5]
+                } else {
+                    [0.7, 0.5]
+                }
+            })
+            .collect(),
+    }
+}
 
 /// Ensures every loaded soul has an entry in `character_positions`.
 ///
@@ -111,6 +170,7 @@ mod tests {
         assert!((settings.direct_reaction_strength - 0.7).abs() < f32::EPSILON);
         assert!(!settings.direct_reaction_agent);
         assert!(!settings.direct_reaction_selects_active);
+        assert!(settings.character_scales.is_empty());
     }
 
     fn ids(values: &[&str]) -> Vec<String> {
@@ -220,5 +280,34 @@ mod tests {
         mirror_active_position(&mut settings, "unknown");
         assert!((settings.character_x - 0.78).abs() < f32::EPSILON);
         assert!((settings.character_y - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_scale_prefers_a_valid_per_body_value() {
+        let mut settings = DesktopSettings {
+            model_scale: 1.4,
+            ..DesktopSettings::default()
+        };
+        settings.character_scales.insert("active".to_owned(), 0.65);
+
+        assert!((effective_model_scale(&settings, "active") - 0.65).abs() < f32::EPSILON);
+        assert!((effective_model_scale(&settings, "other") - 1.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn malformed_scale_values_fall_back_inside_the_supported_range() {
+        assert!((clamp_model_scale(f32::NAN) - DEFAULT_MODEL_SCALE).abs() < f32::EPSILON);
+        assert!((clamp_model_scale(-1.0) - MODEL_SCALE_MIN).abs() < f32::EPSILON);
+        assert!((clamp_model_scale(9.0) - MODEL_SCALE_MAX).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn arranged_positions_keep_one_body_centered_and_two_separated() {
+        assert_eq!(arranged_positions(&[]), Vec::<[f32; 2]>::new());
+        assert_eq!(arranged_positions(&["a".to_owned()]), vec![CENTER_POSITION]);
+        assert_eq!(
+            arranged_positions(&["a".to_owned(), "b".to_owned()]),
+            vec![[0.3, 0.5], [0.7, 0.5]]
+        );
     }
 }
