@@ -88,6 +88,7 @@ onboarding-open-conversation = 会話を開く
 onboarding-dismiss = 閉じる
 chat-unconfigured = 送信する前に会話タブでチャットプラグインとモデルを設定してください。
 chat-missing-key = このプロバイダには API キーが必要です。会話タブで保存してから送り直してください。
+chat-setup-unconfigured = 会話を設定
 chat-settings-loading = チャット設定を読み込み中です。少し待ってからもう一度送信してください。
 chat-no-active-turn = 進行中のターンがありません。先にプロンプトを送ってください。
 chat-auth-failed = チャットプロバイダが資格情報を拒否しました（401）。会話タブで API キーを保存してから送り直してください。

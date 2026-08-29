@@ -436,7 +436,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                 ui.add_space(4.0);
             });
         });
-
     egui::CentralPanel::default()
         .frame(egui::Frame::new())
         .show(ui, |transcript_ui| {
@@ -453,6 +452,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
                     }
                     if let Some(gap) = chat_setup_gap(&state.chat_setup) {
                         scroll_ui.add_space(4.0);
+                        let setup_cta = chat_setup_cta_eligible(state);
+                        if setup_cta
+                            && scroll_ui
+                                .button(i18n::fl("chat-setup-unconfigured"))
+                                .clicked()
+                        {
+                            state.push_action(SurfaceAction::OpenDetail(DetailTab::Conversation));
+                        }
                         scroll_ui.weak(chat_setup_status(gap));
                     }
                 });
@@ -468,6 +475,32 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) -> 
 /// arbitrary status text; only the dedicated flag may show or arm it.
 fn mic_cta_eligible(state: &SurfaceUiState, mic_active: bool) -> bool {
     state.stt_setup_needed && !mic_active
+}
+
+/// The chat-setup CTA may not piggyback on generic status text nor crowd out
+/// live conversation rows or a visible greeting picker; only a dedicated setup
+/// gap over a quiet panel may show or arm it. A lone greeting is committed
+/// automatically and does not occupy the panel while that request is pending.
+fn chat_setup_cta_eligible(state: &SurfaceUiState) -> bool {
+    if chat_setup_gap(&state.chat_setup).is_none() || state.greetings.len() >= 2 {
+        return false;
+    }
+    if !state.streaming_text.is_empty() {
+        return false;
+    }
+    let rows = normalize_transcript(&state.history, &state.streaming_text);
+    if rows.is_empty() {
+        return true;
+    }
+    // A single committed bootstrap greeting (one assistant row, no user rows)
+    // should still surface setup guidance until a real conversation starts.
+    if rows.len() == 1
+        && rows[0].role == TranscriptKind::Assistant
+        && !state.history.messages.iter().any(|m| m.role == "user")
+    {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -529,10 +562,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn first_run_chat_layout_paints_empty_state_and_setup_cta() {
+        let ctx = egui::Context::default();
+        let mut state = SurfaceUiState::default();
+        let full = ctx.run_ui(first_run_raw_input(), |ui| {
+            show(ui, &mut state, false);
+        });
+        let texts = painted_texts(&full.shapes);
+        let visible_texts = visible_painted_texts(&full.shapes);
+
+        assert!(texts.contains(&i18n::fl("chat-empty-history")));
+        assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
+        assert!(texts.contains(&i18n::fl("chat-unconfigured")));
+        assert!(visible_texts.contains(&i18n::fl("chat-empty-history")));
+        assert!(visible_texts.contains(&i18n::fl("chat-setup-unconfigured")));
+        assert!(visible_texts.contains(&i18n::fl("chat-unconfigured")));
+        assert!(visible_texts.contains(&i18n::fl("chat-send-keyboard-hint")));
+    }
+
+    #[test]
+    fn first_run_chat_layout_paints_setup_cta_while_single_greeting_is_pending() {
+        let ctx = egui::Context::default();
+        let mut state = SurfaceUiState::default();
+        state.greetings.push(GreetingView {
+            index: 0,
+            text: "Hi".to_owned(),
+        });
+        state.greeting_inflight = true;
+        let full = ctx.run_ui(first_run_raw_input(), |ui| {
+            show(ui, &mut state, false);
+        });
+        let texts = painted_texts(&full.shapes);
+
+        assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
+        assert!(texts.contains(&i18n::fl("chat-unconfigured")));
+        assert!(!texts.contains(&i18n::fl("chat-greeting-prompt")));
+    }
+
+    fn first_run_raw_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(520.0, 560.0),
+            )),
+            ..Default::default()
+        }
+    }
+
     fn visible_painted_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
         let mut texts = Vec::new();
         for clipped in shapes {
             collect_visible_texts(&clipped.shape, clipped.clip_rect, &mut texts);
+        }
+        texts
+    }
+
+    fn painted_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        let mut texts = Vec::new();
+        for shape in shapes {
+            collect_texts(&shape.shape, &mut texts);
         }
         texts
     }
@@ -557,6 +646,20 @@ mod tests {
         }
     }
 
+    fn collect_texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_texts(shape, out);
+                }
+            }
+            egui::epaint::Shape::Text(text) => {
+                out.push(text.galley.job.text.clone());
+            }
+            _ => {}
+        }
+    }
+
     #[test]
     fn unrelated_status_never_arms_or_renders_the_mic_voice_cta() {
         let mut state = SurfaceUiState {
@@ -574,6 +677,84 @@ mod tests {
         assert!(mic_cta_eligible(&state, false));
         // With the mic claimed the guard no longer applies either.
         assert!(!mic_cta_eligible(&state, true));
+    }
+
+    #[test]
+    fn chat_setup_cta_needs_a_gap_and_an_empty_transcript() {
+        // Defaults leave chat unconfigured, so the bare surface arms the CTA.
+        assert!(chat_setup_cta_eligible(&SurfaceUiState::default()));
+
+        // Rows on screen displace the first-run CTA.
+        let occupied = SurfaceUiState {
+            history: HistoryResponse {
+                messages: vec![message("user", "hello"), message("assistant", "hi")],
+                depth: "surface".to_owned(),
+            },
+            ..Default::default()
+        };
+        assert!(!chat_setup_cta_eligible(&occupied));
+
+        // A visible greeting picker displaces it even before any row exists.
+        let greeting_pending = SurfaceUiState {
+            greetings: vec![greeting(0, "Hi!"), greeting(1, "Hello!")],
+            history: HistoryResponse {
+                messages: Vec::new(),
+                depth: "surface".to_owned(),
+            },
+            ..Default::default()
+        };
+        assert!(!chat_setup_cta_eligible(&greeting_pending));
+
+        // A lone greeting is committed automatically and leaves the panel
+        // free for setup guidance until the assistant row arrives.
+        let single_greeting = SurfaceUiState {
+            greetings: vec![greeting(0, "Hi!")],
+            ..Default::default()
+        };
+        assert!(chat_setup_cta_eligible(&single_greeting));
+
+        // A stream in flight displaces it even without stable rows.
+        let streaming = SurfaceUiState {
+            streaming_text: "still writing".to_owned(),
+            ..Default::default()
+        };
+        assert!(!chat_setup_cta_eligible(&streaming));
+
+        // Configuring a model resolves the gap and removes the CTA.
+        let mut configured = SurfaceUiState::default();
+        configured.chat_setup.chat_plugin = "provider.gguf".to_owned();
+        configured.chat_setup.chat_model = "local-model".to_owned();
+        assert!(!chat_setup_cta_eligible(&configured));
+
+        // Arbitrary generic status text neither arms nor gates the signal.
+        assert!(chat_setup_cta_eligible(&SurfaceUiState {
+            status: "tool: execute: unknown skill skill".to_owned(),
+            ..Default::default()
+        }));
+
+        // A single committed bootstrap greeting in history still shows the
+        // setup CTA until the user sends a real message.
+        let bootstrap_committed = SurfaceUiState {
+            history: HistoryResponse {
+                messages: vec![message("assistant", "Hello, I am Alicia.")],
+                depth: "surface".to_owned(),
+            },
+            ..Default::default()
+        };
+        assert!(chat_setup_cta_eligible(&bootstrap_committed));
+
+        // Once the user has spoken, even a single assistant row suppresses it.
+        let with_user = SurfaceUiState {
+            history: HistoryResponse {
+                messages: vec![
+                    message("user", "hi"),
+                    message("assistant", "Hello, I am Alicia."),
+                ],
+                depth: "surface".to_owned(),
+            },
+            ..Default::default()
+        };
+        assert!(!chat_setup_cta_eligible(&with_user));
     }
 
     fn message(role: &str, text: &str) -> MessageResponse {
