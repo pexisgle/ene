@@ -43,7 +43,8 @@ pub struct CompanionAvatar {
     motion_idx: usize,
     look_at_target: Option<Vec3>,
     pending_visemes: Option<VisemeWeights>,
-    expression_cue: Option<(String, f32)>,
+    expression_cue: Option<(String, f32, f32)>,
+    interaction_feedback: f32,
     blink_accum: f32,
     blinking: f32,
     last_hips: Option<Vec3>,
@@ -77,6 +78,7 @@ impl CompanionAvatar {
             look_at_target: None,
             pending_visemes: None,
             expression_cue: None,
+            interaction_feedback: 0.0,
             blink_accum: 0.0,
             blinking: 0.0,
             last_hips: None,
@@ -177,10 +179,40 @@ impl CompanionAvatar {
     }
 
     pub fn apply_expression_cue(&mut self, label: &str) {
-        if !self.apply_expression_weighted(label, 1.0) {
+        self.apply_expression_cue_weighted(label, 1.0);
+    }
+
+    pub fn apply_expression_cue_weighted(&mut self, label: &str, weight: f32) -> bool {
+        let weight = if weight.is_finite() {
+            weight.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if !self.apply_expression_weighted(label, weight) {
+            return false;
+        }
+        self.expression_cue = Some((label.to_owned(), 0.0, weight));
+        true
+    }
+
+    pub fn trigger_interaction_feedback(&mut self, strength: f32, expression: &str) {
+        let strength = if strength.is_finite() {
+            strength.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if strength <= 0.0 {
             return;
         }
-        self.expression_cue = Some((label.to_owned(), 0.0));
+        self.interaction_feedback = self.interaction_feedback.max(strength);
+        // Prefer the requested expression but fall back to a widely-supported
+        // preset so long-press still shows feedback on the bundled Alicia.
+        if self.apply_expression_cue_weighted(expression, strength) {
+            return;
+        }
+        if expression != "relaxed" {
+            let _ = self.apply_expression_cue_weighted("relaxed", strength);
+        }
     }
 
     fn apply_expression_weighted(&mut self, label: &str, weight: f32) -> bool {
@@ -194,12 +226,13 @@ impl CompanionAvatar {
     }
 
     pub fn tick_expression_cue(&mut self, dt: f32) {
-        let Some((label, elapsed)) = self.expression_cue.as_mut() else {
+        let Some((label, elapsed, peak)) = self.expression_cue.as_mut() else {
             return;
         };
         *elapsed += dt;
         let remaining = EXPRESSION_CUE_HOLD - *elapsed;
         let label = label.clone();
+        let peak = *peak;
         if remaining <= 0.0 {
             let _ = self
                 .model
@@ -207,7 +240,7 @@ impl CompanionAvatar {
                 .set_expression(&ExpressionName::new(label), 0.0);
             self.expression_cue = None;
         } else if remaining < EXPRESSION_CUE_FADE {
-            let weight = (remaining / EXPRESSION_CUE_FADE).clamp(0.0, 1.0);
+            let weight = peak * (remaining / EXPRESSION_CUE_FADE).clamp(0.0, 1.0);
             let _ = self
                 .model
                 .expressions
@@ -216,7 +249,7 @@ impl CompanionAvatar {
     }
 
     pub fn clear_expression_cue(&mut self) {
-        if let Some((label, _)) = self.expression_cue.take() {
+        if let Some((label, _, _)) = self.expression_cue.take() {
             let _ = self
                 .model
                 .expressions
@@ -300,6 +333,7 @@ impl CompanionAvatar {
     }
 
     pub fn tick(&mut self, dt: f32) {
+        self.interaction_feedback = (self.interaction_feedback - dt * 4.0).max(0.0);
         self.tick_idle(dt);
         if let Some(weights) = self.pending_visemes.take() {
             self.model.expressions.apply_viseme_weights(&weights);
@@ -429,7 +463,8 @@ impl CompanionAvatar {
     fn overlay_model_transform(&self) -> (Mat4, f32) {
         let (aabb_min, aabb_max) = self.model.normalized_aabb();
         let auto = self.camera.compute_auto_fit_scale(aabb_min, aabb_max, 0.9);
-        let scale = auto * self.model_scale * self.model.normalize_scale();
+        let feedback_scale = 1.0 + self.interaction_feedback * 0.06;
+        let scale = auto * self.model_scale * feedback_scale * self.model.normalize_scale();
         let center = self.model.center();
         let translate = Vec3::from(self.world_offset);
         let model_mat = Mat4::from_translation(translate)
@@ -448,7 +483,8 @@ impl CompanionAvatar {
     pub fn world_aabb(&self) -> (Vec3, Vec3) {
         let (nmin, nmax) = self.model.normalized_aabb();
         let auto = self.camera.compute_auto_fit_scale(nmin, nmax, 0.9);
-        let scale = auto * self.model_scale * self.model.normalize_scale();
+        let feedback_scale = 1.0 + self.interaction_feedback * 0.06;
+        let scale = auto * self.model_scale * feedback_scale * self.model.normalize_scale();
         let offset = Vec3::from(self.world_offset);
         (
             Vec3::from(nmin) * scale + offset,
