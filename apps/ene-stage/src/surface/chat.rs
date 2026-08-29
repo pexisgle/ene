@@ -562,6 +562,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn first_run_chat_layout_paints_empty_state_and_setup_cta() {
         let ctx = egui::Context::default();
         let mut state = SurfaceUiState::default();
@@ -580,6 +581,7 @@ mod tests {
         assert!(visible_texts.contains(&i18n::fl("chat-send-keyboard-hint")));
     }
 
+    #[test]
     fn first_run_chat_layout_paints_setup_cta_while_single_greeting_is_pending() {
         let ctx = egui::Context::default();
         let mut state = SurfaceUiState::default();
