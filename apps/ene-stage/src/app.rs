@@ -2725,6 +2725,7 @@ impl StageApp {
         self.sync_overlay_interaction();
     }
 
+    #[expect(dead_code, reason = "kept for symmetry with on_overlay_release")]
     fn on_overlay_press(&mut self) {
         self.on_overlay_pointer_press_with_protection(PointerKind::Mouse, 0, None);
     }
