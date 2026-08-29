@@ -41,7 +41,7 @@ pub enum ComputerError {
     FocusLost,
     GrantDenied,
 }
-pub fn verify_stale(cur: ObservationId, el: &ElementRef) -> Result<(), ComputerError> {
+pub fn verify_stale(cur: &ObservationId, el: &ElementRef) -> Result<(), ComputerError> {
     if cur.0 != el.observation.0 {
         return Err(ComputerError::StaleElement);
     }
