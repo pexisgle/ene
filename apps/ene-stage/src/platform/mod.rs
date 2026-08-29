@@ -42,7 +42,7 @@ pub fn global_cursor_position() -> Option<[i32; 2]> {
         let mut point = POINT { x: 0, y: 0 };
         // SAFETY: `point` is a valid writable POINT for the duration of the
         // synchronous system call.
-        if unsafe { GetCursorPos(&mut point) } != 0 {
+        if unsafe { GetCursorPos(&raw mut point) } != 0 {
             return Some([point.x, point.y]);
         }
     }
