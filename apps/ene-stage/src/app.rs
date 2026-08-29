@@ -2343,6 +2343,7 @@ impl StageApp {
                     None => i18n::fl("character-display-updated"),
                 };
                 self.save_local_settings_with_status(Some(self.detail.core_status.clone()));
+                self.request_detail_and_overlay_redraw();
             }
             DisplayAction::TemporarilyHide(soul_id) => {
                 if self
@@ -2354,6 +2355,7 @@ impl StageApp {
                     self.temporarily_hidden_souls.insert(soul_id);
                     self.reload_avatar();
                     self.detail.core_status = i18n::fl("character-temporarily-hidden-status");
+                    self.request_detail_and_overlay_redraw();
                 }
             }
             DisplayAction::Remove(soul_id) => {
@@ -2368,6 +2370,7 @@ impl StageApp {
                     let status = i18n::fl("character-removed-from-display");
                     self.save_local_settings_with_status(Some(status.clone()));
                     self.detail.core_status = status;
+                    self.request_detail_and_overlay_redraw();
                 }
             }
             DisplayAction::MoveUp(soul_id) => {
@@ -2385,6 +2388,7 @@ impl StageApp {
                     let status = i18n::fl("character-display-updated");
                     self.save_local_settings_with_status(Some(status.clone()));
                     self.detail.core_status = status;
+                    self.request_detail_and_overlay_redraw();
                 }
             }
             DisplayAction::MoveDown(soul_id) => {
@@ -2402,8 +2406,21 @@ impl StageApp {
                     let status = i18n::fl("character-display-updated");
                     self.save_local_settings_with_status(Some(status.clone()));
                     self.detail.core_status = status;
+                    self.request_detail_and_overlay_redraw();
                 }
             }
+        }
+    }
+
+    fn request_detail_and_overlay_redraw(&self) {
+        if let Some(overlay) = self.overlay.as_ref() {
+            overlay.window.request_redraw();
+        }
+        if let Some(detail) = self.detail_win.as_ref() {
+            detail.request_redraw();
+        }
+        if let Some(chat) = self.chat.as_ref() {
+            chat.request_redraw();
         }
     }
 
