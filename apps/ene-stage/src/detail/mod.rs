@@ -1625,7 +1625,7 @@ fn show_companion(
 fn show_conversation(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
-    parent: &winit::window::Window,
+    _parent: &winit::window::Window,
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
