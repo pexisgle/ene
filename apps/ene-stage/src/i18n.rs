@@ -79,6 +79,41 @@ pub fn format(key: &str, args: &[(&str, &str)]) -> String {
     guard.get_args_fluent(key, Some(&fluent_args))
 }
 
+/// Serialises tests that switch or snapshot the process-global catalog.
+/// Parallel tests that switch catalogs otherwise paint in one language and
+/// assert `fl()` in another.
+#[cfg(test)]
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+struct RestoreLanguage(String);
+
+#[cfg(test)]
+impl Drop for RestoreLanguage {
+    fn drop(&mut self) {
+        select_language(&self.0);
+    }
+}
+
+#[cfg(test)]
+fn current_language_tag() -> String {
+    let loader = loader_lock();
+    let guard = loader.read();
+    guard.current_languages().first().map_or_else(
+        || guard.fallback_language().to_string(),
+        ToString::to_string,
+    )
+}
+
+/// Pins the catalog for the duration of `body` and restores the previous one.
+#[cfg(test)]
+pub(crate) fn with_language<T>(tag: &str, body: impl FnOnce() -> T) -> T {
+    let _lock = TEST_LOCK.lock();
+    let _restore = RestoreLanguage(current_language_tag());
+    select_language(tag);
+    body()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
