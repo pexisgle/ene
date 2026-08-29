@@ -69,8 +69,8 @@ mod tests {
             observation: ObservationId(1),
             id: "e1".into(),
         };
-        assert!(verify_stale(ObservationId(2), &el).is_err());
-        assert!(verify_stale(ObservationId(1), &el).is_ok());
+        assert!(verify_stale(&ObservationId(2), &el).is_err());
+        assert!(verify_stale(&ObservationId(1), &el).is_ok());
     }
     #[test]
     fn focus() {
