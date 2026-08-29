@@ -800,6 +800,46 @@ pub fn mcp_args_text(args: &[String]) -> String {
     args.join("\n")
 }
 
+/// Mirror of the daemon-side `valid_mcp_id` rule so the form can explain the
+/// constraint while typing instead of surfacing a raw HTTP 400 after Save.
+#[must_use]
+pub fn valid_mcp_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('.')
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
+}
+
+/// Sanitize a free-form display name into a valid MCP id token. Empty results
+/// mean the name had no usable characters and the user must type an id.
+#[must_use]
+pub fn mcp_id_suggestion(display_name: &str) -> String {
+    let cleaned: String = display_name
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let collapsed = cleaned
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let trimmed = collapsed.trim_start_matches('.').to_owned();
+    if trimmed.len() > 64 {
+        trimmed[..64].to_owned()
+    } else {
+        trimmed
+    }
+}
+
 pub fn set_mcp_args_text(server: &mut ene_api::McpServerView, text: &str) {
     server.args = text
         .lines()
@@ -819,6 +859,9 @@ pub fn load_mcp_form(state: &mut DetailUiState, json: &str) -> Result<(), String
 pub fn validate_mcp_server(server: &ene_api::McpServerView) -> Result<(), String> {
     if server.id.trim().is_empty() {
         return Err(i18n::fl("mcp-id-required"));
+    }
+    if !valid_mcp_id(server.id.trim()) {
+        return Err(i18n::fl("mcp-id-invalid"));
     }
     match server.transport.as_str() {
         "stdio" | "" => {
@@ -907,6 +950,31 @@ pub fn spawn_mcp_credential_save(
             result: client.probe_mcp(&probe).await.map_err(|e| e.to_string()),
         }
     });
+}
+
+#[cfg(test)]
+mod mcp_id_tests {
+    use super::*;
+
+    #[test]
+    fn valid_mcp_id_mirrors_daemon_rule() {
+        assert!(valid_mcp_id("exa"));
+        assert!(valid_mcp_id("exa-search"));
+        assert!(valid_mcp_id("exa_search.v2"));
+        assert!(!valid_mcp_id(""));
+        assert!(!valid_mcp_id("Exa Search"));
+        assert!(!valid_mcp_id(".hidden"));
+        assert!(!valid_mcp_id(&"a".repeat(65)));
+        assert!(valid_mcp_id(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn mcp_id_suggestion_sanitizes_display_names() {
+        assert_eq!(mcp_id_suggestion("Exa Search"), "exa-search");
+        assert_eq!(mcp_id_suggestion("  Tavily  "), "tavily");
+        assert_eq!(mcp_id_suggestion("GitHub (remote)"), "github-remote");
+        assert_eq!(mcp_id_suggestion(""), "");
+    }
 }
 
 #[must_use]
@@ -1305,54 +1373,58 @@ pub fn show(
     ui.separator();
     // The window floor only prevents clipping; long content (multiple MCP
     // forms, plugin config) still overflows the 680-point default height.
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        if !search_has_match(&state.search) {
-            ui.label(i18n::fl("detail-search-empty"));
-            return;
-        }
-        if state.tab != DetailTab::Home && !state.core_status.is_empty() {
-            ui.label(&state.core_status);
-        }
-        match state.tab {
-            DetailTab::Home => show_home(ui, state, client, rt, async_results),
-            DetailTab::Companion => {
-                show_companion(
-                    ui,
-                    state,
-                    local_settings,
-                    soul_id,
-                    parent,
-                    client,
-                    rt,
-                    async_results,
-                );
+    egui::ScrollArea::vertical()
+        .id_salt("detail-body-scroll")
+        .show(ui, |ui| {
+            if !search_has_match(&state.search) {
+                ui.label(i18n::fl("detail-search-empty"));
+                return;
             }
-            DetailTab::Conversation => {
-                show_conversation(ui, state, parent, client, rt, async_results);
+            if state.tab != DetailTab::Home && !state.core_status.is_empty() {
+                ui.label(&state.core_status);
             }
-            DetailTab::Voice => show_voice(ui, state, local_settings, client, rt, async_results),
-            DetailTab::Memory => show_memory(ui, state, soul_id, client, rt, async_results),
-            DetailTab::Work => show_work(ui, state, soul_id, parent, client, rt, async_results),
-            DetailTab::Connections => {
-                show_connections(ui, state, client, rt, async_results);
+            match state.tab {
+                DetailTab::Home => show_home(ui, state, client, rt, async_results),
+                DetailTab::Companion => {
+                    show_companion(
+                        ui,
+                        state,
+                        local_settings,
+                        soul_id,
+                        parent,
+                        client,
+                        rt,
+                        async_results,
+                    );
+                }
+                DetailTab::Conversation => {
+                    show_conversation(ui, state, parent, client, rt, async_results);
+                }
+                DetailTab::Voice => {
+                    show_voice(ui, state, local_settings, client, rt, async_results);
+                }
+                DetailTab::Memory => show_memory(ui, state, soul_id, client, rt, async_results),
+                DetailTab::Work => show_work(ui, state, soul_id, parent, client, rt, async_results),
+                DetailTab::Connections => {
+                    show_connections(ui, state, client, rt, async_results);
+                }
+                DetailTab::System => {
+                    show_system(
+                        ui,
+                        state,
+                        local_settings,
+                        monitors,
+                        client,
+                        rt,
+                        async_results,
+                    );
+                }
+                DetailTab::Log => show_log(ui, state),
             }
-            DetailTab::System => {
-                show_system(
-                    ui,
-                    state,
-                    local_settings,
-                    monitors,
-                    client,
-                    rt,
-                    async_results,
-                );
+            if matches!(state.tab, DetailTab::Home | DetailTab::Companion) {
+                show_onboarding(ui, state, local_settings, client, rt, async_results);
             }
-            DetailTab::Log => show_log(ui, state),
-        }
-        if matches!(state.tab, DetailTab::Home | DetailTab::Companion) {
-            show_onboarding(ui, state, local_settings, client, rt, async_results);
-        }
-    });
+        });
 }
 
 fn show_onboarding(
@@ -3813,12 +3885,18 @@ fn show_mcp_form(
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label(i18n::fl("plugins-mcp-id"));
-                ui.text_edit_singleline(&mut server.id);
+                ui.add(
+                    egui::TextEdit::singleline(&mut server.id)
+                        .hint_text(i18n::fl("plugins-mcp-id-hint")),
+                );
                 ui.checkbox(&mut server.enabled, i18n::fl("plugins-mcp-enabled"));
                 if ui.button(i18n::fl("plugins-mcp-remove")).clicked() {
                     remove = Some(index);
                 }
             });
+            if !server.id.is_empty() && !valid_mcp_id(server.id.trim()) {
+                ui.label(i18n::fl("plugins-mcp-id-warning"));
+            }
             ui.horizontal(|ui| {
                 ui.label(i18n::fl("plugins-mcp-transport"));
                 let label = if server.transport == "stdio" || server.transport.is_empty() {
@@ -3884,16 +3962,31 @@ fn show_mcp_form(
     if let Some(index) = remove {
         state.mcp_servers.remove(index);
     }
-    if ui.button(i18n::fl("plugins-mcp-add")).clicked() {
-        state.mcp_servers.push(ene_api::McpServerView {
-            id: String::new(),
-            transport: "stdio".to_owned(),
-            command: Some(String::new()),
-            args: Vec::new(),
-            url: None,
-            enabled: true,
-        });
-    }
+    ui.horizontal(|ui| {
+        if ui.button(i18n::fl("plugins-mcp-add")).clicked() {
+            state.mcp_servers.push(ene_api::McpServerView {
+                id: String::new(),
+                transport: "stdio".to_owned(),
+                command: Some(String::new()),
+                args: Vec::new(),
+                url: None,
+                enabled: true,
+            });
+        }
+        if ui.button(i18n::fl("plugins-mcp-reload")).clicked() {
+            let client = Arc::clone(client);
+            spawn_async(rt, async_results, async move {
+                AsyncOutcome::ReloadMcpTools(
+                    client
+                        .list_tools()
+                        .await
+                        .map(|t| t.items)
+                        .map_err(|e| e.to_string()),
+                )
+            });
+        }
+    });
+    ui.label(i18n::fl("plugins-mcp-reload-hint"));
     if ui.button(i18n::fl("plugins-mcp-save")).clicked() {
         if let Err(err) = validate_mcp_document(&state.mcp_servers) {
             state.core_status = err;
