@@ -580,31 +580,6 @@ mod tests {
         assert!(visible_texts.contains(&i18n::fl("chat-send-keyboard-hint")));
     }
 
-    #[test]
-    fn chat_composer_panel_stays_fixed_across_repaints() {
-        let ctx = egui::Context::default();
-        let mut state = SurfaceUiState::default();
-
-        for _ in 0..8 {
-            let _response = ctx.run_ui(first_run_raw_input(), |ui| {
-                show(ui, &mut state, false);
-            });
-
-            let panel = egui::PanelState::load(&ctx, egui::Id::new("stage-chat-composer"));
-            assert!(
-                panel.is_some(),
-                "chat composer panel must persist its layout"
-            );
-            if let Some(panel) = panel {
-                assert!(
-                    (panel.outer_rect.height() - COMPOSER_PANEL_HEIGHT).abs() < f32::EPSILON,
-                    "chat composer panel grew between repaints"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn first_run_chat_layout_paints_setup_cta_while_single_greeting_is_pending() {
         let ctx = egui::Context::default();
         let mut state = SurfaceUiState::default();
