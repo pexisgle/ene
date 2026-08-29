@@ -2229,6 +2229,7 @@ impl StageApp {
             match action {
                 SurfaceAction::SendChat => self.send_chat(),
                 SurfaceAction::NewSession => self.start_new_session(),
+                SurfaceAction::SelectCompanion { soul_id } => self.select_occupant(&soul_id),
                 SurfaceAction::SelectGreeting { index } => self.select_greeting(index),
                 SurfaceAction::BargeIn => self.barge_in(),
                 SurfaceAction::CancelTurn => self.cancel_turn(),
@@ -2721,21 +2722,138 @@ impl StageApp {
     }
 
     fn cycle_occupant(&mut self, delta: i32) {
-        let occupants = self.session.occupants();
-        let Some(occupant) =
-            crate::core::session::next_avatar_occupant(occupants, self.session.soul_id(), delta)
-        else {
+        let soul_id = crate::core::session::next_avatar_occupant(
+            self.session.occupants(),
+            self.session.soul_id(),
+            delta,
+        )
+        .map(|occupant| occupant.soul_id.clone());
+        let Some(soul_id) = soul_id else {
             self.surface.status = i18n::fl("overlay-no-avatar");
             return;
         };
-        if occupant.soul_id == self.session.soul_id() {
+        self.select_occupant(&soul_id);
+    }
+
+    fn active_companion_label(&self) -> String {
+        self.companion_label_for_soul(self.session.soul_id())
+    }
+
+    fn chat_targets(&self) -> Vec<surface::ChatTarget> {
+        self.session
+            .occupants()
+            .iter()
+            .map(|occupant| surface::ChatTarget {
+                soul_id: occupant.soul_id.clone(),
+                label: self.companion_label_for_soul(&occupant.soul_id),
+                active: occupant.soul_id == self.session.soul_id(),
+            })
+            .collect()
+    }
+
+    fn companion_label_for_soul(&self, soul_id: &str) -> String {
+        disambiguated_occupant_label(self.session.occupants(), soul_id)
+    }
+
+    fn overlay_motion_controls(&self) -> Vec<detail::MotionControl> {
+        self.overlay
+            .as_ref()
+            .map(|overlay| {
+                overlay
+                    .slots
+                    .iter()
+                    .map(|slot| detail::MotionControl {
+                        soul_id: slot.soul_id.clone(),
+                        label: self.companion_label_for_soul(&slot.soul_id),
+                        current: slot.avatar.current_motion().map(ToOwned::to_owned),
+                        manual_override: slot.avatar.motion_is_manually_overridden(),
+                        names: slot
+                            .avatar
+                            .motion_names()
+                            .into_iter()
+                            .map(ToOwned::to_owned)
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn apply_motion_command(&mut self, command: detail::MotionCommand) {
+        match command {
+            detail::MotionCommand::SelectSoul(soul_id) => self.select_occupant(&soul_id),
+            detail::MotionCommand::SelectMotion { soul_id, name } => {
+                let selected = self
+                    .overlay
+                    .as_mut()
+                    .and_then(|overlay| overlay.avatar_mut(&soul_id))
+                    .is_some_and(|avatar| avatar.select_motion_manually(&name));
+                self.surface.status = if selected {
+                    format!("{}: {name}", i18n::fl("motion-selected"))
+                } else {
+                    i18n::fl("motion-selection-failed")
+                };
+            }
+            detail::MotionCommand::Stop { soul_id } => {
+                if let Some(avatar) = self
+                    .overlay
+                    .as_mut()
+                    .and_then(|overlay| overlay.avatar_mut(&soul_id))
+                {
+                    avatar.stop_motion();
+                    self.surface.status = i18n::fl("motion-stopped");
+                }
+            }
+            detail::MotionCommand::Reset { soul_id } => {
+                if let Some(avatar) = self
+                    .overlay
+                    .as_mut()
+                    .and_then(|overlay| overlay.avatar_mut(&soul_id))
+                {
+                    avatar.reset_motion();
+                    self.surface.status = i18n::fl("motion-reset-done");
+                }
+            }
+        }
+    }
+
+    fn cycle_active_motion(&mut self, delta: i32) {
+        let soul_id = self.session.soul_id().to_owned();
+        let status = if let Some(overlay) = self.overlay.as_mut() {
+            if let Some(avatar) = overlay.avatar_or_first_mut(&soul_id) {
+                let has_motions = !avatar.motion_names().is_empty();
+                avatar.cycle_motion(delta);
+                if let Some(name) = avatar.current_motion() {
+                    format!("{}: {name}", i18n::fl("motion-changed"))
+                } else if has_motions {
+                    i18n::fl("motion-selection-failed")
+                } else {
+                    i18n::fl("motion-no-motions")
+                }
+            } else {
+                i18n::fl("motion-no-avatars")
+            }
+        } else {
+            i18n::fl("motion-no-avatars")
+        };
+        self.surface.status = status;
+    }
+
+    fn select_occupant(&mut self, soul_id: &str) {
+        if soul_id == self.session.soul_id() {
             return;
         }
-        let label = crate::core::session::occupant_label(&occupant);
-        if let Err(err) = self
-            .runtime
-            .block_on(self.session.retarget_soul(&occupant.soul_id))
+        if !self
+            .session
+            .occupants()
+            .iter()
+            .any(|occupant| occupant.soul_id == soul_id)
         {
+            self.surface.status = i18n::fl("overlay-no-avatar");
+            return;
+        }
+        let label = self.companion_label_for_soul(soul_id);
+        if let Err(err) = self.runtime.block_on(self.session.retarget_soul(soul_id)) {
             self.surface.status = err.to_string();
             return;
         }
@@ -2891,20 +3009,10 @@ impl StageApp {
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("a") => self.cycle_occupant(-1),
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("d") => self.cycle_occupant(1),
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("w") => {
-                if let Some(overlay) = self.overlay.as_mut() {
-                    let soul = self.session.soul_id().to_owned();
-                    if let Some(avatar) = overlay.avatar_or_first_mut(&soul) {
-                        avatar.cycle_motion(-1);
-                    }
-                }
+                self.cycle_active_motion(-1);
             }
             Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("s") => {
-                if let Some(overlay) = self.overlay.as_mut() {
-                    let soul = self.session.soul_id().to_owned();
-                    if let Some(avatar) = overlay.avatar_or_first_mut(&soul) {
-                        avatar.cycle_motion(1);
-                    }
-                }
+                self.cycle_active_motion(1);
             }
             _ => {}
         }
@@ -3113,6 +3221,7 @@ impl StageApp {
                 rate_limited,
             } => {
                 let _ = crate::drag::release_body(&mut self.surface.drag);
+                self.select_occupant(&soul_id);
                 self.handle_avatar_reaction(&soul_id, kind, rate_limited);
             }
             EndResult::None => {}
@@ -3160,6 +3269,18 @@ impl StageApp {
             None
         };
         let soul = self.session.soul_id().to_owned();
+        let drag_soul = self
+            .surface
+            .drag
+            .as_ref()
+            .map(|drag| drag.soul_id().to_owned());
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.set_interaction_targets(
+                Some(soul.as_str()),
+                self.surface.hover_soul.as_deref(),
+                drag_soul.as_deref(),
+            );
+        }
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
@@ -3252,17 +3373,21 @@ impl StageApp {
             return;
         };
 
+        let active_companion = self.active_companion_label();
+        let chat_targets = self.chat_targets();
         if let Some(chat) = self.chat.as_mut() {
             let surface = &mut self.surface;
             let mic = self.mic_active;
             let theme = self.local_settings.theme.as_str();
             if let Err(err) = chat.paint(gpu, Some(theme), |ui| {
-                surface::show_chat(ui, surface, mic);
+                surface::show_chat(ui, surface, mic, &active_companion, &chat_targets);
             }) {
                 tracing::debug!(error = %err, "chat paint failed");
             }
         }
         let mut display_action = None;
+        let motion_controls = self.overlay_motion_controls();
+        let mut motion_command = None;
         if let Some(detail_win) = self.detail_win.as_mut() {
             let mut detail = std::mem::take(&mut self.detail);
             let mut local = self.local_settings.clone();
@@ -3295,12 +3420,14 @@ impl StageApp {
                     displayed_count,
                     crate::core::session::MAX_OVERLAY_BODIES,
                     thumbnail_cache,
+                    &motion_controls,
                     &client,
                     &rt,
                     &results,
                 );
             });
             display_action = detail.display_action.take();
+            motion_command = detail.motion_command.take();
             self.detail = detail;
             self.local_settings = local;
             if let Err(err) = paint {
@@ -3335,6 +3462,9 @@ impl StageApp {
                 }
                 SpotlightAction::Close => {}
             }
+        }
+        if let Some(command) = motion_command {
+            self.apply_motion_command(command);
         }
         if let Some(action) = display_action {
             self.apply_display_action(action);
@@ -3852,6 +3982,31 @@ fn format_log_text(text: &str) -> &str {
     } else {
         text
     }
+}
+
+#[must_use]
+fn disambiguated_occupant_label(occupants: &[ene_api::OccupantView], soul_id: &str) -> String {
+    let Some(occupant) = occupants
+        .iter()
+        .find(|occupant| occupant.soul_id == soul_id)
+    else {
+        return soul_id.to_owned();
+    };
+    let base = crate::core::session::occupant_label(occupant);
+    let peers = occupants
+        .iter()
+        .filter(|candidate| crate::core::session::occupant_label(candidate) == base)
+        .collect::<Vec<_>>();
+    if peers.len() < 2 {
+        return base;
+    }
+    let mut sorted = peers;
+    sorted.sort_by_key(|candidate| candidate.soul_id.as_str());
+    let pos = sorted
+        .iter()
+        .position(|candidate| candidate.soul_id == soul_id)
+        .unwrap_or(0);
+    format!("{base} {}", pos + 1)
 }
 
 fn map_turn_err(err: &str) -> String {

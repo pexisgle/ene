@@ -29,6 +29,7 @@ const _: () = {
 pub enum SurfaceAction {
     SendChat,
     NewSession,
+    SelectCompanion { soul_id: String },
     SelectGreeting { index: u32 },
     BargeIn,
     CancelTurn,
@@ -38,6 +39,13 @@ pub enum SurfaceAction {
     OpenDetail(DetailTab),
     Quit,
     PersistBodyPosition { soul_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChatTarget {
+    pub(crate) soul_id: String,
+    pub(crate) label: String,
+    pub(crate) active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -186,8 +194,14 @@ impl SurfaceUiState {
     }
 }
 
-pub fn show_chat(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
-    state.chat_input_focused = chat::show(ui, state, mic_active);
+pub(crate) fn show_chat(
+    ui: &mut egui::Ui,
+    state: &mut SurfaceUiState,
+    mic_active: bool,
+    active_companion: &str,
+    chat_targets: &[ChatTarget],
+) {
+    state.chat_input_focused = chat::show(ui, state, mic_active, active_companion, chat_targets);
     if state.pending_approval.is_some() {
         approvals::show(ui.ctx(), state);
     }

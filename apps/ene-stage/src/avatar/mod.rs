@@ -41,6 +41,7 @@ pub struct CompanionAvatar {
     player: VrmaPlayer,
     motions: Vec<(String, PathBuf)>,
     motion_idx: usize,
+    manual_motion_override: bool,
     look_at_target: Option<Vec3>,
     pending_visemes: Option<VisemeWeights>,
     expression_cue: Option<(String, f32, f32)>,
@@ -75,6 +76,7 @@ impl CompanionAvatar {
             player: VrmaPlayer::default(),
             motions: Vec::new(),
             motion_idx: 0,
+            manual_motion_override: false,
             look_at_target: None,
             pending_visemes: None,
             expression_cue: None,
@@ -125,6 +127,59 @@ impl CompanionAvatar {
             .map(|(name, _)| name.as_str())
     }
 
+    pub fn select_motion_manually(&mut self, name: &str) -> bool {
+        self.manual_motion_override = true;
+        self.select_motion_named(name)
+    }
+
+    pub fn apply_body_motion(&mut self, name: &str) -> bool {
+        if self.manual_motion_override {
+            return false;
+        }
+        self.select_motion_named(name)
+    }
+
+    #[must_use]
+    pub const fn motion_is_manually_overridden(&self) -> bool {
+        self.manual_motion_override
+    }
+
+    fn select_motion_named(&mut self, name: &str) -> bool {
+        let Some(idx) = self.motions.iter().position(|(motion, _)| motion == name) else {
+            return false;
+        };
+        self.motion_idx = idx;
+        self.load_motion_at(idx)
+    }
+
+    pub fn reset_motion(&mut self) {
+        self.manual_motion_override = false;
+        let idle = self
+            .motions
+            .iter()
+            .position(|(name, _)| name.eq_ignore_ascii_case("idle"))
+            .or_else(|| {
+                self.motions
+                    .iter()
+                    .position(|(name, _)| name.to_ascii_uppercase().contains("VRMA_01"))
+            });
+        if let Some(idx) = idle {
+            self.motion_idx = idx;
+            self.load_motion_at(idx);
+        } else {
+            self.vrma = None;
+            self.player = VrmaPlayer::default();
+            self.reset_pose_and_springs();
+        }
+    }
+
+    pub fn stop_motion(&mut self) {
+        self.manual_motion_override = true;
+        self.vrma = None;
+        self.player = VrmaPlayer::default();
+        self.reset_pose_and_springs();
+    }
+
     pub fn cycle_motion(&mut self, delta: i32) {
         if self.motions.is_empty() {
             return;
@@ -132,7 +187,8 @@ impl CompanionAvatar {
         let len = i32::try_from(self.motions.len()).unwrap_or(1);
         let next = (i32::try_from(self.motion_idx).unwrap_or(0) + delta).rem_euclid(len);
         self.motion_idx = usize::try_from(next).unwrap_or(0);
-        self.load_motion_at(self.motion_idx);
+        self.manual_motion_override = true;
+        let _ = self.load_motion_at(self.motion_idx);
     }
 
     fn reset_pose_and_springs(&mut self) {
@@ -152,9 +208,9 @@ impl CompanionAvatar {
         self.last_hips = None;
     }
 
-    fn load_motion_at(&mut self, idx: usize) {
+    fn load_motion_at(&mut self, idx: usize) -> bool {
         let Some((_, path)) = self.motions.get(idx).cloned() else {
-            return;
+            return false;
         };
         match load_vrma(&path) {
             Ok(asset) => {
@@ -165,8 +221,12 @@ impl CompanionAvatar {
                     playing: true,
                     ..VrmaPlayer::default()
                 };
+                true
             }
-            Err(err) => tracing::warn!(path = %path.display(), %err, "VRMA load failed"),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), %err, "VRMA load failed");
+                false
+            }
         }
     }
 

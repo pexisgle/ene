@@ -53,6 +53,9 @@ pub struct OverlayWindow {
     pub click_through: bool,
     pub collider_debug: bool,
     debug: DebugRenderer,
+    active_soul_id: Option<String>,
+    hover_soul_id: Option<String>,
+    drag_soul_id: Option<String>,
     last_frame: Instant,
 }
 
@@ -103,6 +106,9 @@ impl OverlayWindow {
             collider_debug: false,
             debug: DebugRenderer::new(&gpu.device, format),
             last_frame: Instant::now(),
+            active_soul_id: None,
+            hover_soul_id: None,
+            drag_soul_id: None,
         })
     }
 
@@ -235,6 +241,17 @@ impl OverlayWindow {
             loaded: self.slots.len(),
             failures,
         })
+    }
+
+    pub fn set_interaction_targets(
+        &mut self,
+        active_soul_id: Option<&str>,
+        hover_soul_id: Option<&str>,
+        drag_soul_id: Option<&str>,
+    ) {
+        self.active_soul_id = active_soul_id.map(ToOwned::to_owned);
+        self.hover_soul_id = hover_soul_id.map(ToOwned::to_owned);
+        self.drag_soul_id = drag_soul_id.map(ToOwned::to_owned);
     }
 
     pub fn tick_and_render(
