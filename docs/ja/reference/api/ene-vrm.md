@@ -1,7 +1,6 @@
 # ene-vrm API
 
-`ene-vrm` は `wgpu` 29 と `gltf` 1.4 上に構築されたプラットフォーム非依存の
-VRM 1.0 ローダー兼レンダラーです。`ene-stage` が使用します。このページは
+`ene-vrm` は `wgpu` 29 と `gltf` 1.4 上に構築されたプラットフォーム非依存の VRM ローダー兼レンダラーです。`ene-stage` が使用します。このページは
 **意図的にサポートされる API** を挙げます（他の `pub` 項目は呼び出し可能
 ですがサポート対象外です）。
 
@@ -21,7 +20,18 @@ let clip = ene_vrm::load_vrma(path)?;            // VrmaClip（アニメーシ�
 |---|---|
 | `loader::load_vrm` | `.vrm` ファイルを `VrmModel` にパース（メッシュ・スケルトン・表情・spring bone・視線・マテリアル） |
 | `model::VrmModel` / `VrmMesh` / `VrmTexture` | 読み込まれたモデルデータ |
+| `model::VrmFormatVersion` + `VrmModel::format_version` / `format_version_label` | ダイアレクト判定と取得: VRM 0.x か VRM 1.0 かを示す |
 | `error::VrmError` / `VrmResult` | 統合エラー型 |
+
+### フォーマット契約
+
+`load_vrm` は glTF ルート拡張でフォーマットを判別し、レガシーファイルを拒否しません:
+
+- ルート拡張 `VRMC_vrm`（specVersion 1.0）はネイティブの VRM 1.0 経路でそのままパースされます。
+- ルート拡張 `VRM`（VRM 0.x）は読み込み時に、1.0 経路が埋めるのと同じランタイム表現へ変換されます: 人間型ボーンマッピング、ブレンドシェイプ表情、視線＋first-person 由来の目の高さ、spring bone セカンダリアニメーション、MToon マテリアルスロット（`KHR_materials_unlit` の値は 1.0 経路が埋める位置へ対応付け）、メタと利用許諾。0.x 専用レンダラーは存在せず、下流コードは単一の `VrmModel` を扱います。
+
+不正または非対応のファイルは区別された `VrmError` バリアントとして通知されます:
+`NotVrm`（いずれのルート拡張も無し）、`UnsupportedFormat { path }`（認識済みダイアレクトの specVersion が範囲外）、`Malformed(String)`（認識済みファイル内部の構造問題）。読み込み失敗が空モデルに格下げされることはありません。
 
 ## アニメーション
 
@@ -70,7 +80,7 @@ let clip = ene_vrm::load_vrma(path)?;            // VrmaClip（アニメーシ�
 
 ## スコープ
 
-- VRM **1.0** のみ（`.vrm`・`.vrma`）。
+- VRM **1.0** またはレガシー **0.x**（`.vrm`、`.vrma`）。glTF ルート拡張がパース経路を選択します。
 - 描画のみ。認知・メモリ・ランタイム型はインポートされません。
 - 一部のローダー（`load_humanoid_bones`・`load_look_at`・
   `load_spring_bones`・`load_mtoon_materials` など）は `load_vrm` からのみ

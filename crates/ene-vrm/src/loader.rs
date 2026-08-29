@@ -28,6 +28,15 @@
 //!   the meshes / textures. External `.bin` files would require
 //!   the `gltf` crate's `import` feature.
 //!
+//! ## Format detection
+//!
+//! The root-extension name selects the VRM dialect: `VRMC_vrm` is a
+//! VRM 1.0 document and is passed to the 1.0 parsers unchanged;
+//! `VRM` is a legacy VRM 0.x document, whose JSON tree is converted
+//! into the same runtime structs before the shared load path runs.
+//! The detected format is stored on the model and exposed through
+//! [`VrmModel::format_version`].
+//!
 //! See `docs/reference/api/ene-vrm.md` for loader scope and supported formats.
 
 use std::path::Path;
@@ -45,11 +54,72 @@ use crate::expression_override;
 use crate::humanoid;
 use crate::look_at;
 use crate::model::{
-    AlphaMode, MeshVertex, NodeHierarchy, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture,
+    AlphaMode, MeshVertex, NodeHierarchy, Skeleton, VrmFormatVersion, VrmMesh, VrmModel,
+    VrmPrimitive, VrmTexture,
 };
 use crate::mtoon;
 use crate::node_constraint;
 use crate::spring_bone;
+
+/// Root extension a glTF document must declare to be treated as VRM.
+/// Hidden from the "Supported API" docs — callers see the detected
+/// version via [`VrmModel::format_version`] instead.
+#[doc(hidden)]
+const ROOT_EXTENSION_VRMC_VRM: &str = "VRMC_vrm";
+
+#[doc(hidden)]
+const ROOT_EXTENSION_VRM: &str = "VRM";
+
+fn detect_format_version(gltf: &gltf::Gltf) -> Option<VrmFormatVersion> {
+    if gltf
+        .document
+        .extensions_used()
+        .any(|e| e == ROOT_EXTENSION_VRMC_VRM)
+    {
+        return Some(VrmFormatVersion::V1);
+    }
+    if gltf
+        .document
+        .extensions_used()
+        .any(|e| e == ROOT_EXTENSION_VRM)
+    {
+        return Some(VrmFormatVersion::V0x);
+    }
+    None
+}
+
+fn validate_format(gltf: &gltf::Gltf, path: &Path) -> VrmResult<VrmFormatVersion> {
+    let mut ext_names = gltf.document.extensions().map(serde_json::Map::keys);
+    let has_vrmc = ext_names
+        .as_mut()
+        .is_some_and(|keys| keys.any(|key| key == ROOT_EXTENSION_VRMC_VRM));
+    let has_vrm = ext_names
+        .as_mut()
+        .is_some_and(|keys| keys.any(|key| key == ROOT_EXTENSION_VRM));
+    if has_vrmc && has_vrm {
+        return Err(VrmError::UnsupportedFormat {
+            path: path.display().to_string(),
+        });
+    }
+    let detected = detect_format_version(gltf).ok_or(VrmError::NotVrm)?;
+    if detected != VrmFormatVersion::V1 {
+        return Ok(detected);
+    }
+    const SUPPORTED_VRM1_SPEC_VERSION: &str = "1.0";
+    let declared = gltf
+        .document
+        .extensions()
+        .and_then(|exts| exts.get(ROOT_EXTENSION_VRMC_VRM))
+        .and_then(|value| value.get("specVersion"))
+        .and_then(serde_json::Value::as_str);
+    match declared {
+        None => Ok(detected),
+        Some(version) if version == SUPPORTED_VRM1_SPEC_VERSION => Ok(detected),
+        Some(_) => Err(VrmError::UnsupportedFormat {
+            path: path.display().to_string(),
+        }),
+    }
+}
 
 /// Target world-space size of the model along its longest axis
 /// after normalization. The legacy Bevy
@@ -60,9 +130,12 @@ const TARGET_MODEL_SIZE: f32 = 1.5;
 /// Load a `.vrm` file from disk and upload every primitive of every
 /// glTF `Mesh` to the GPU.
 ///
-/// `path` is the on-disk `.vrm` (a glTF binary with the `VRMC_vrm`
-/// extension). `device` and `queue` are used to allocate the
-/// vertex / index / texture buffers.
+/// `path` is the on-disk `.vrm` file. Both VRM dialects are accepted:
+/// a glTF binary with the root extension `VRMC_vrm` (VRM 1.0) or
+/// `VRM` (VRM 0.x; converted to the same runtime model as the 1.0
+/// path). Anything else fails with [`VrmError::NotVrm`]. `device`
+/// and `queue` are used to allocate the vertex / index / texture
+/// buffers.
 pub fn load_vrm(
     path: impl AsRef<Path>,
     device: &wgpu::Device,
@@ -76,11 +149,17 @@ pub fn load_vrm(
 
     let gltf = gltf::Gltf::from_slice(&bytes).map_err(|e| VrmError::Gltf(e.to_string()))?;
 
-    if !gltf.document.extensions_used().any(|e| e == "VRMC_vrm") {
+    let Some(format_version) = detect_format_version(&gltf) else {
         return Err(VrmError::NotVrm);
-    }
+    };
+    validate_format(&gltf, path)?;
 
-    let mtoon_materials = mtoon::load_mtoon_materials(&gltf);
+    let mtoon_materials = if format_version == VrmFormatVersion::V0x {
+        crate::vrm0::load_mtoon_materials_vrm0(&gltf)
+    } else {
+        mtoon::load_mtoon_materials(&gltf)
+    };
+
     // The remap is applied inside `load_all_meshes` so each vertex's
     // `JOINTS_0` is translated from its own skin's index space into the
     // merged-skeleton index space the runtime updates every frame.
@@ -114,11 +193,11 @@ pub fn load_vrm(
     // will promote this to a load-time error once the
     // refactor lands a proper "load is malformed" channel.
     if skeleton.joint_count() == 0 && has_nonzero_joints {
-        tracing::warn!(
-            "VRM {} has no skin but primitive(s) carry non-trivial JOINTS_0; \
-             skinning will fall back to identity. Re-export with VRMC_vrm 1.0 to fix.",
+        return Err(VrmError::Malformed(format!(
+            "{}: primitives carry JOINTS_0 weights but the document declares no skin; \
+             rendering would fall back to identity and hide all deformation",
             path.display()
-        );
+        )));
     }
 
     let unlit_count: usize = mesh
@@ -134,13 +213,36 @@ pub fn load_vrm(
         );
     }
 
-    let expressions_meta = expression_override::load_expression_overrides(&gltf);
+    let mut expressions_meta = expression_override::load_expression_overrides(&gltf);
     if !expressions_meta.is_empty() {
         tracing::info!(
             "VRM {} {} expression definition(s) with override metadata",
             path.display(),
             expressions_meta.len(),
         );
+    }
+    if format_version == VrmFormatVersion::V0x {
+        if let Some(meta) = crate::vrm0::parse_meta(&gltf) {
+            tracing::debug!(
+                title = %meta.title,
+                author = %meta.author,
+                allowed_user = ?meta.allowed_user_name,
+                violent = ?meta.violent_usage,
+                sexual = ?meta.sexual_usage,
+                commercial = ?meta.commercial_usage,
+                "VRM 0.x meta parsed",
+            );
+        }
+        // TODO: warn per animation and skip unmatched tracks once VRMA clips
+        // carry exporter-specific 0.x bone names that fail canonicalization.
+        expressions_meta = crate::vrm0::convert_blendshapes(&gltf);
+        if !expressions_meta.is_empty() {
+            tracing::info!(
+                "VRM {} {} legacy blendShape group(s) converted",
+                path.display(),
+                expressions_meta.len(),
+            );
+        }
     }
 
     let expression_layer = ExpressionLayer::new(
@@ -162,12 +264,20 @@ pub fn load_vrm(
     }
 
     // The `humanoid` module logs per-entry warnings itself.
-    let humanoid = humanoid::load_humanoid_bones(&gltf, &skeleton);
+    let humanoid = if format_version == VrmFormatVersion::V0x {
+        crate::vrm0::convert_humanoid(&gltf, &skeleton)
+    } else {
+        humanoid::load_humanoid_bones(&gltf, &skeleton)
+    };
 
     // `None` for models without the block (legacy VRM 0.x,
     // hand-rolled test fixtures) — the runtime falls back to
     // `LookAtProperties::default()` in that case.
-    let look_at = look_at::load_look_at(&gltf);
+    let look_at = if format_version == VrmFormatVersion::V0x {
+        crate::vrm0::convert_look_at(&gltf)
+    } else {
+        look_at::load_look_at(&gltf)
+    };
     if look_at.is_some() {
         tracing::info!(
             "VRM {} lookAt: type={:?}, offsetFromHeadBone={:?}",
@@ -179,7 +289,11 @@ pub fn load_vrm(
 
     let node_constraints = node_constraint::load_node_constraints(&gltf);
 
-    let spring_bones = spring_bone::load_spring_bones(&gltf);
+    let spring_bones = if format_version == VrmFormatVersion::V0x {
+        crate::vrm0::convert_spring_bones(&gltf)
+    } else {
+        spring_bone::load_spring_bones(&gltf)
+    };
     if let Some(ref sb) = spring_bones {
         tracing::info!(
             "VRM {} springBone: {} collider(s), {} group(s), {} chain(s)",
@@ -205,6 +319,7 @@ pub fn load_vrm(
         node_constraints,
         spring_bones,
     ))
+    .map(|model| model.with_format_version(format_version))
 }
 
 type Aabb = ([f32; 3], [f32; 3]);

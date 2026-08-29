@@ -44,6 +44,7 @@ tray-detail = Detail
 tray-quit = Quit
 status-connecting = Connecting…
 status-ready = Ready
+status-ready-vrm = Ready · {$vrm}
 status-error = Error
 status-disconnected = Disconnected
 voice-state = Voice

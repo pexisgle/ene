@@ -20,6 +20,35 @@ use crate::mtoon::{MToonGpuTextures, MToonMaterial};
 use crate::node_constraint::NodeConstraintRegistry;
 use crate::spring_bone::SpringBoneProperties;
 
+/// Which VRM dialect a loaded [`VrmModel`] came from.
+///
+/// Detected from the glTF root extension at load time:
+/// `VRMC_vrm` means VRM 1.0; `VRM` means legacy VRM 0.x
+/// (converted into the same runtime structures before loading).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum VrmFormatVersion {
+    /// Legacy VRM 0.x document (root extension `VRM`), converted to the
+    /// unified runtime representation at load time.
+    V0x,
+    /// VRM 1.0 document (root extension `VRMC_vrm`); parsed by the native
+    /// 1.0 loaders unchanged.
+    #[default]
+    V1,
+}
+
+impl VrmFormatVersion {
+    /// Human-readable label used by GUI surfaces that show which dialect a
+    /// loaded avatar uses.
+    #[must_use]
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::V0x => "VRM 0.x",
+            Self::V1 => "VRM 1.0",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct VrmPrimitive {
     pub vertex_buf: wgpu::Buffer,
@@ -337,6 +366,11 @@ pub struct VrmModel {
     /// avoid a per-frame `Vec::with_capacity` allocation in
     /// [`Self::rebuild_skin_palette`].
     skin_palette: Vec<Mat4>,
+    /// VRM dialect detected at load time. Defaults to
+    /// [`VrmFormatVersion::V1`] so synthetic models built with
+    /// [`Self::new`] keep the historical behaviour unless they opt in
+    /// via [`Self::with_format_version`].
+    format_version: VrmFormatVersion,
 }
 
 impl VrmModel {
@@ -402,6 +436,27 @@ impl VrmModel {
         self.look_at.as_ref()
     }
 
+    /// The VRM dialect this model was parsed from.
+    #[must_use]
+    pub const fn format_version(&self) -> VrmFormatVersion {
+        self.format_version
+    }
+
+    /// Human-readable dialect label ([`VrmFormatVersion::as_label`]).
+    #[must_use]
+    pub const fn format_version_label(&self) -> &'static str {
+        self.format_version.as_label()
+    }
+
+    /// Override the detected dialect. Test fixtures that build a
+    /// [`VrmModel`] directly keep the default; the loader chains this after
+    /// [`Self::new`] to record what it found.
+    #[must_use]
+    pub const fn with_format_version(mut self, format_version: VrmFormatVersion) -> Self {
+        self.format_version = format_version;
+        self
+    }
+
     /// Construct a `VrmModel` from its already-built pieces plus
     /// the raw AABB and the centre/scale the runtime needs to
     /// build the model matrix. Used by the loader and by
@@ -440,6 +495,7 @@ impl VrmModel {
             node_constraints,
             spring_bones,
             skin_palette: Vec::new(),
+            format_version: VrmFormatVersion::V1,
         }
     }
 

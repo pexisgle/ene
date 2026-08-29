@@ -72,6 +72,7 @@ pub mod prelude;
 pub mod renderer;
 pub mod spring_bone;
 pub mod viseme;
+pub mod vrm0;
 
 pub use animation::{
     BoneChannel, ExpressionChannel, Interpolation, LookAtChannel, RepeatMode, Sampler, VrmaAsset,

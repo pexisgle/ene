@@ -44,6 +44,7 @@ tray-detail = 詳細
 tray-quit = 終了
 status-connecting = 接続中…
 status-ready = 準備完了
+status-ready-vrm = 準備完了 · {$vrm}
 status-error = エラー
 status-disconnected = 切断されました
 voice-state = 音声

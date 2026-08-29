@@ -85,6 +85,13 @@ impl CompanionAvatar {
         })
     }
 
+    /// Human-readable VRM dialect label ("VRM 0.x" / "VRM 1.0") for status
+    /// surfaces that show which format the loaded avatar uses.
+    #[must_use]
+    pub fn format_version_label(&self) -> &str {
+        self.model.format_version_label()
+    }
+
     pub fn load_motions(&mut self, dir: &Path) {
         self.motions = discover_motions(dir);
         let idle = self
