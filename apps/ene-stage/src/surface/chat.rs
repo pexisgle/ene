@@ -685,7 +685,7 @@ mod tests {
         // Rows on screen displace the first-run CTA.
         let occupied = SurfaceUiState {
             history: HistoryResponse {
-                messages: vec![message("assistant", "hello")],
+                messages: vec![message("user", "hello"), message("assistant", "hi")],
                 depth: "surface".to_owned(),
             },
             ..Default::default()
