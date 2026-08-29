@@ -47,7 +47,7 @@ rfd = { workspace = true }
 global-hotkey = { workspace = true }
 crossbeam-channel = { workspace = true }
 indexmap = { workspace = true }
-image = { workspace = true, features = ["png"] }
+image = { workspace = true, features = ["jpeg", "png"] }
 tray-icon = { workspace = true }
 rust-embed = { workspace = true }
 fluent-bundle = { workspace = true }

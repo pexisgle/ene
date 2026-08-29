@@ -18,6 +18,9 @@ pub enum BundleError {
     Missing(String),
 }
 
+pub(crate) const BUNDLED_ALICIA_B_ID: &str = "char.alicia-b";
+pub(crate) const BUNDLED_ALICIA_B_NAME: &str = "Alicia B";
+
 /// Build an Ene character archive from the repo-shipped Alicia body assets.
 pub fn pack_bundled_alicia() -> Result<Vec<u8>, BundleError> {
     pack_bundled_named("char.alicia", "Alicia")
@@ -27,6 +30,10 @@ pub fn pack_bundled_alicia() -> Result<Vec<u8>, BundleError> {
 pub fn pack_bundled_named(id: &str, display_name: &str) -> Result<Vec<u8>, BundleError> {
     let root = ene_config::paths::assets_dir().join("characters/Alicia");
     pack_named_from(&root, id, display_name)
+}
+
+pub(crate) fn pack_bundled_alicia_b() -> Result<Vec<u8>, BundleError> {
+    pack_bundled_named(BUNDLED_ALICIA_B_ID, BUNDLED_ALICIA_B_NAME)
 }
 
 pub fn pack_alicia_from(root: &Path) -> Result<Vec<u8>, BundleError> {
@@ -195,14 +202,15 @@ mod tests {
     fn pack_named_from_uses_requested_id() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("AliciaSolid.vrm"), b"vrm-bytes").unwrap();
-        let bytes = pack_named_from(dir.path(), "char.alicia-b", "Alicia B").expect("pack");
+        let bytes =
+            pack_named_from(dir.path(), BUNDLED_ALICIA_B_ID, BUNDLED_ALICIA_B_NAME).expect("pack");
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut manifest = String::new();
         zip.by_name("manifest.toml")
             .unwrap()
             .read_to_string(&mut manifest)
             .unwrap();
-        assert!(manifest.contains("id = \"char.alicia-b\""));
-        assert!(manifest.contains("display_name = \"Alicia B\""));
+        assert!(manifest.contains(&format!("id = \"{BUNDLED_ALICIA_B_ID}\"")));
+        assert!(manifest.contains(&format!("display_name = \"{BUNDLED_ALICIA_B_NAME}\"")));
     }
 }

@@ -2861,14 +2861,13 @@ async fn import_shipped_alicia_vrm_exposes_parseable_avatar() {
     assert!(installed.starts_with(b"glTF"));
     assert!(installed.windows(8).any(|window| window == b"VRMC_vrm"));
     let stage = client.stage().await.unwrap();
-    assert!(
-        stage
-            .occupants
-            .iter()
-            .any(|occupant| occupant.soul_id == soul_id && occupant.avatar_path.is_some()),
-        "stage occupants: {:?}",
-        stage.occupants
-    );
+    let occupant = stage
+        .occupants
+        .iter()
+        .find(|occupant| occupant.soul_id == soul_id)
+        .expect("stage occupant");
+    assert_eq!(occupant.display_name, "My Character");
+    assert!(occupant.avatar_path.is_some());
     server.shutdown().await;
 }
 
@@ -3067,14 +3066,13 @@ async fn import_vrm_package_exposes_avatar_path_on_soul_and_stage() {
         "unexpected avatar_path: {avatar}"
     );
     let stage = client.stage().await.unwrap();
-    assert!(
-        stage
-            .occupants
-            .iter()
-            .any(|occupant| occupant.soul_id == soul_id && occupant.avatar_path.is_some()),
-        "stage occupants: {:?}",
-        stage.occupants
-    );
+    let occupant = stage
+        .occupants
+        .iter()
+        .find(|occupant| occupant.soul_id == soul_id)
+        .expect("stage occupant");
+    assert_eq!(occupant.display_name, "My Character");
+    assert!(occupant.avatar_path.is_some());
     server.shutdown().await;
 }
 

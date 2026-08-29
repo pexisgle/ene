@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 gltf = { workspace = true, features = ["KHR_materials_unlit", "extensions", "utils", "names"] }
 
-image = { workspace = true, features = ["png"] }
+image = { workspace = true, features = ["jpeg", "png"] }
 
 base64 = { workspace = true, features = ["alloc"] }
 

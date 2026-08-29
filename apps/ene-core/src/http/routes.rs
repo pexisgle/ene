@@ -187,25 +187,26 @@ pub async fn get_soul_affect(
 }
 
 pub async fn get_stage(State(state): State<AppState>) -> Json<StageView> {
+    let store = state.core.companions();
     Json(StageView {
         occupants: state
             .core
             .occupants()
             .into_iter()
             .map(|(soul, body)| {
-                let package = state
-                    .core
-                    .companions()
+                let companion = store
                     .get_soul(soul)
                     .ok()
                     .flatten()
-                    .map(|row| package_fields(&state.core.companions(), &row.character_ref));
-                let (package_id, avatar_path) = package.unwrap_or((None, None));
+                    .map(|row| soul_view(&store, row));
                 OccupantView {
                     soul_id: soul.to_string(),
+                    display_name: companion
+                        .as_ref()
+                        .map_or_else(String::new, |view| view.display_name.clone()),
                     body_id: body.map(|id| id.to_string()),
-                    package_id,
-                    avatar_path,
+                    package_id: companion.as_ref().and_then(|view| view.package_id.clone()),
+                    avatar_path: companion.and_then(|view| view.avatar_path),
                 }
             })
             .collect(),

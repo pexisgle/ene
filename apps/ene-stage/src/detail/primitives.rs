@@ -13,7 +13,7 @@ impl SectionHeading {
     pub(crate) fn show(&self, ui: &mut egui::Ui) {
         ui.heading(&self.title);
         if !self.help.is_empty() {
-            ui.weak(&self.help);
+            ui.add(egui::Label::new(RichText::new(&self.help).weak()).wrap());
         }
     }
 }

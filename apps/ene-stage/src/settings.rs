@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ene_config::{EneConfigError, load_full_config, save_full_config};
 
@@ -32,6 +32,9 @@ ene_config::define_config!(
         pub character_positions: HashMap<String, [f32; 2]> = HashMap::new(),
         #[serde(default)]
         pub character_scales: HashMap<String, f32> = HashMap::new(),
+        pub displayed_soul_ids: Vec<String> = Vec::new(),
+        #[serde(default)]
+        pub displayed_souls_initialized: bool = false,
         pub look_at_strength: f32 = 0.6,
         pub direct_reactions_enabled: bool = true,
         pub direct_reaction_strength: f32 = 0.7,
@@ -156,6 +159,46 @@ pub fn mirror_active_position(settings: &mut DesktopSettings, active_soul_id: &s
     }
 }
 
+pub(crate) fn normalize_displayed_souls(
+    displayed_soul_ids: &mut Vec<String>,
+    initialized: &mut bool,
+    available_soul_ids: &[String],
+) -> bool {
+    let before_ids = displayed_soul_ids.clone();
+    let before_initialized = *initialized;
+    let mut normalized = Vec::new();
+    for soul_id in displayed_soul_ids.iter() {
+        if available_soul_ids
+            .iter()
+            .any(|available| available == soul_id)
+            && !normalized.iter().any(|existing| existing == soul_id)
+        {
+            normalized.push(soul_id.clone());
+        }
+    }
+    if !*initialized && let Some(first) = available_soul_ids.first() {
+        if normalized.is_empty() {
+            normalized.push(first.clone());
+        }
+        *initialized = true;
+    }
+    *displayed_soul_ids = normalized;
+    before_ids != *displayed_soul_ids || before_initialized != *initialized
+}
+
+pub(crate) fn ordered_visible_souls(
+    displayed_soul_ids: &[String],
+    temporarily_hidden: &HashSet<String>,
+    capacity: usize,
+) -> Vec<String> {
+    displayed_soul_ids
+        .iter()
+        .filter(|soul_id| !temporarily_hidden.contains(*soul_id))
+        .take(capacity)
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +214,8 @@ mod tests {
         assert!(!settings.direct_reaction_agent);
         assert!(!settings.direct_reaction_selects_active);
         assert!(settings.character_scales.is_empty());
+        assert!(settings.displayed_soul_ids.is_empty());
+        assert!(!settings.displayed_souls_initialized);
     }
 
     fn ids(values: &[&str]) -> Vec<String> {
@@ -219,12 +264,16 @@ mod tests {
         settings
             .character_positions
             .insert("soul-a".to_owned(), [0.42, 0.58]);
+        settings.displayed_soul_ids = ids(&["soul-a", "soul-b"]);
+        settings.displayed_souls_initialized = true;
         let json = serde_json::to_string(&settings).unwrap_or_default();
         let parsed: DesktopSettings = serde_json::from_str(&json).unwrap_or_default();
         assert_eq!(
             parsed.character_positions.get("soul-a"),
             Some(&[0.42, 0.58]),
         );
+        assert_eq!(parsed.displayed_soul_ids, ids(&["soul-a", "soul-b"]));
+        assert!(parsed.displayed_souls_initialized);
     }
 
     #[test]
@@ -309,5 +358,61 @@ mod tests {
             arranged_positions(&["a".to_owned(), "b".to_owned()]),
             vec![[0.3, 0.5], [0.7, 0.5]]
         );
+    }
+
+    #[test]
+    fn first_available_soul_becomes_the_explained_initial_display() {
+        let mut displayed = Vec::new();
+        let mut initialized = false;
+        let available = ids(&["first", "second"]);
+
+        assert!(normalize_displayed_souls(
+            &mut displayed,
+            &mut initialized,
+            &available
+        ));
+        assert_eq!(displayed, ids(&["first"]));
+        assert!(initialized);
+    }
+
+    #[test]
+    fn normalization_keeps_user_order_and_drops_stale_duplicates() {
+        let mut displayed = ids(&["second", "missing", "first", "second"]);
+        let mut initialized = true;
+        let available = ids(&["first", "second"]);
+
+        assert!(normalize_displayed_souls(
+            &mut displayed,
+            &mut initialized,
+            &available
+        ));
+        assert_eq!(displayed, ids(&["second", "first"]));
+        assert!(initialized);
+    }
+
+    #[test]
+    fn explicit_empty_display_stays_empty_after_initialization() {
+        let mut displayed = Vec::new();
+        let mut initialized = true;
+        let available = ids(&["first"]);
+
+        assert!(!normalize_displayed_souls(
+            &mut displayed,
+            &mut initialized,
+            &available
+        ));
+        assert!(displayed.is_empty());
+    }
+
+    #[test]
+    fn temporary_hidden_souls_do_not_change_persistent_order() {
+        let displayed = ids(&["first", "second", "third"]);
+        let temporarily_hidden = HashSet::from(["first".to_owned()]);
+
+        assert_eq!(
+            ordered_visible_souls(&displayed, &temporarily_hidden, 2),
+            ids(&["second", "third"])
+        );
+        assert_eq!(displayed, ids(&["first", "second", "third"]));
     }
 }

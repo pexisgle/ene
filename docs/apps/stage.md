@@ -23,7 +23,7 @@ SDK.
 
 | Window | Depth | Contents |
 |---|---|---|
-| Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Left-drag a body silhouette to move it; each body keeps its own saved position and clicks on the background pass through to windows below. Click-through is System → Overlay click-through (on by default); with it on, dragging needs the cursor over a body (Windows/X11 open an input hole over the silhouette). On Wayland the overlay receives no pointer events while click-through is on, so turn it off first (Space shows the frame as a fallback) and then drag. Esc quits. Positions persist per soul in `desktop.character_positions` and survive restarts. Up to two VRM bodies stay on the overlay at once (`body.render.max_concurrent`, default 2). A/D switch which soul the chat session targets; W/S change motion on the active body. F3 toggles spring-bone collider wireframes. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
+| Character overlay (wgpu) | `surface` | VRM, VRMA, spring bones, look-at, visemes. Space toggles the window frame. Left-drag a body silhouette to move it; each body keeps its own saved position and clicks on the background pass through to windows below. Click-through is System → Overlay click-through (on by default); with it on, dragging needs the cursor over a body (Windows/X11 open an input hole over the silhouette). On Wayland the overlay receives no pointer events while click-through is on, so turn it off first (Space shows the frame as a fallback) and then drag. Esc quits. Positions persist per soul in `desktop.character_positions` and survive restarts. Detail → Companion chooses which VRM bodies are displayed, in order, and saves that choice in `desktop.displayed_soul_ids`; up to two bodies are shown by the stage client. A/D switches the chat session's soul independently of the display list; W/S changes motion on the active body. F3 toggles spring-bone collider wireframes. The same Space/A/D/W/S shortcuts work from Chat or Detail when no text field is focused. |
 | Chat | `surface` | Prompt / Steer / Follow-up (hover for meaning), New chat, approvals (Allow / Always / Deny), ask-user (`question.asked` opens the form; `POST /jobs/{id}/answer` or `question.resolved` closes it), mic PCM relay, Detail button (same as the tray). New chat ends the current lane and switches every stage subscription and pending prompt to a fresh session only after the core creates it; the old conversation remains in the log. Status wraps on its own line so setup errors stay readable in a narrow window. |
 | Caption | `surface` | Spoken captions. Voice → Caption position (`top` / `bottom` / `left` / `right`) places the window; Pin caption stops it being dragged. Provider and HTTP errors stay on the chat status line (wrapped), not as spoken captions. The overlay closes when the turn ends. Long spoken lines wrap inside the overlay. |
 | Spotlight (Alt+Space) | local | Searchable command palette: type to filter, ↑/↓ move, Enter runs, Esc closes (clicking an entry also runs it). Covers detail tabs, mic, chat, and quit. If Alt+Space fails to register, Voice shows a warning and a highlighted Open Spotlight button. |
@@ -39,16 +39,16 @@ on winit. The process talks to the core only through `ene-api`
 Characters are `.enechar` packages. `GET /characters` is install inventory;
 playable companions are souls (`GET /souls` / `GET /stage` occupants).
 `body_ref` is a body UUID. Stage imports the bundled Alicia VRM as
-`char.alicia@1.0.0` and a second copy as `char.alicia-b@1.0.0` so two
-occupants can render at once, then activates them over HTTP
+`char.alicia@1.0.0` during first-run setup. The Companion screen offers the
+second bundled copy as `char.alicia-b@1.0.0`; activation happens over HTTP
 (`soul_from_install`). CCv3/PNG/CHARX
 are conversion inputs only — there is no CCv3 editor. Companion export and Work
 session export open a save dialog in Documents or Downloads with a typed file name
 (`.enechar` / `.json`).
 
 Local `desktop.*` keys (theme, language, mic, captions, beat sync, graphics
-quality, core lifetime, per-body overlay placement in `character_positions`, and
-direct avatar reaction preferences)
+quality, core lifetime, displayed companion order/selection in
+`displayed_soul_ids`, and per-body overlay placement in `character_positions`)
 stay on the client. Theme (`light` /
 `dark` / `system`) applies to both the wgpu window clear color and egui widget
 colors, so light mode keeps readable contrast. Japanese UI text uses an OS CJK
@@ -103,13 +103,27 @@ overriding this path unchanged.
 Audio device relay, approval popups, tray, and OS notifications (`notify.hint`)
 are stage's client-side jobs; the core owns policy and the live bus.
 
-## Two companions
+## Companion display management
 
-Core boot seeds two souls. Stage then installs the shipped Alicia VRM
-(`assets/characters/Alicia/AliciaSolid.vrm`) twice under distinct package ids
-so the overlay can draw two bodies. Each soul keeps its own session; history
-does not leak across them. A/D retargets chat to the other soul without
-unloading the other mesh.
+An empty profile starts with one shipped Alicia avatar. Stage does not add a
+second body until the user chooses Add companion in Detail → Companion. The
+same screen lists each stage occupant with its name, thumbnail or text-only marker,
+active chat target, soul, body, and session relationship.
+
+Display selection is a client-side overlay choice, separate from installing a
+package and from the active chat target. Add to display / Show loads a body;
+Hide for now removes it until the stage restarts; Remove from display removes
+it from the persistent overlay list but keeps the package, soul, and sessions.
+The up/down controls change the overlay order. A package remains installed
+until it is explicitly managed elsewhere, so removing an avatar from the
+overlay is not an uninstall.
+
+The stage client currently supports two visible VRM bodies. When the list is
+full, the Companion screen explains that another body must be hidden or
+removed before it can be shown. A text-only occupant or a failed VRM load is
+reported as unavailable rather than silently appearing as an empty slot.
+Each soul keeps its own session; history does not leak across them. A/D
+retargets chat without changing which bodies are selected for display.
 
 ### Automated vs manual
 
@@ -117,7 +131,7 @@ CI and the Cloud Agent use software Vulkan (lavapipe):
 `DISPLAY=:1 WGPU_BACKEND=vulkan`. Automated coverage is:
 
 - `ene-vrm` parses and, when a wgpu adapter exists, GPU-loads the shipped Alicia VRM
-- HTTP: two souls keep isolated sessions; importing Alicia exposes `avatar_path`
+- HTTP: souls keep isolated sessions; importing Alicia exposes `avatar_path`
 - Overlay layout places two slots apart; `ene-stage` writes the minimal GLB fixture
 
 Manual check: run `ene-stage`, confirm two VRM bodies on the overlay, and talk
@@ -125,3 +139,11 @@ to each via A/D. In Detail → System, leave Direct avatar reactions on, click a
 hold one body without moving it, then drag it; verify only the hit body reacts
 and the background still passes through. Enable the optional companion handoff
 only with a configured chat provider. That GUI walkthrough is not part of CI.
+
+Manual check: run `ene-stage`, confirm one VRM body on the overlay, then open
+Detail → Companion and use the bundled-companion action to add the second body.
+Verify the overlay
+changes from one body to two, hide it and choose Show, remove it from display,
+move the bodies up/down when two are present, and restart to confirm the
+persistent selection. A/D should change the chat target independently of
+which body is visible. That GUI walkthrough is not part of CI.

@@ -1,5 +1,6 @@
 //! winit application handler for the product stage client.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,13 +22,16 @@ use crate::chrome::{ChromeKind, ChromeWindow};
 use crate::core::events::{EventFeeds, LiveEvent, spawn_event_feeds};
 use crate::core::session::{StageSession, prepare_soul_target, send_direct_interaction};
 use crate::core::spawn::{StageCore, StageSpawnError, attach_or_spawn_core};
-use crate::detail::{self, DetailTab, DetailUiState, LogKind, PendingJobRetry};
+use crate::detail::{self, DetailTab, DetailUiState, DisplayAction, LogKind, PendingJobRetry};
 use crate::gpu::{GpuContext, GpuError};
 use crate::i18n;
 use crate::interaction::{EndResult, GestureTracker, PointerKind, ReactionKind};
 use crate::monitor::{self, MonitorInfo, OverlayMonitorMode};
-use crate::overlay::{OverlayError, OverlayWindow};
-use crate::settings::{DesktopSettings, load_desktop_settings, save_desktop_settings};
+use crate::overlay::{AvatarLoad, OverlayError, OverlayWindow};
+use crate::settings::{
+    DesktopSettings, load_desktop_settings, normalize_displayed_souls, ordered_visible_souls,
+    save_desktop_settings,
+};
 use crate::shell::tray::TrayError;
 use crate::shell::{HotkeyManager, ShellCommand, ShellError, TrayManager, show_notification};
 use crate::surface::{self, SpotlightAction, SurfaceAction, SurfaceUiState};
@@ -249,6 +253,8 @@ pub fn run() -> Result<(), AppError> {
         surface: SurfaceUiState::default(),
         detail: DetailUiState::default(),
         async_results: Arc::new(Mutex::new(Vec::new())),
+        temporarily_hidden_souls: HashSet::new(),
+        companion_thumbnails: HashMap::new(),
         mic_active: false,
         listen: MicListen::new(),
         notify_claimed: false,
@@ -276,6 +282,7 @@ pub fn run() -> Result<(), AppError> {
         completion_reconcile_inflight: false,
         completion_terminal_seq: None,
         pending_optimistic_user_rows: Vec::new(),
+        local_settings_save_generation: 0,
     };
     app.surface.history = app.session.history();
     app.surface.greetings = app.session.greetings().to_vec();
@@ -319,6 +326,8 @@ struct StageApp {
     surface: SurfaceUiState,
     detail: DetailUiState,
     async_results: Arc<Mutex<Vec<AsyncOutcome>>>,
+    temporarily_hidden_souls: HashSet<String>,
+    companion_thumbnails: HashMap<String, Option<egui::TextureHandle>>,
     mic_active: bool,
     listen: MicListen,
     notify_claimed: bool,
@@ -346,6 +355,7 @@ struct StageApp {
     completion_reconcile_inflight: bool,
     completion_terminal_seq: Option<u64>,
     pending_optimistic_user_rows: Vec<OptimisticUserRow>,
+    local_settings_save_generation: u64,
 }
 
 #[derive(Debug)]
@@ -393,6 +403,8 @@ impl StageApp {
             surface: SurfaceUiState::default(),
             detail: DetailUiState::default(),
             async_results: Arc::new(Mutex::new(Vec::new())),
+            temporarily_hidden_souls: HashSet::new(),
+            companion_thumbnails: HashMap::new(),
             mic_active: false,
             listen: MicListen::new(),
             notify_claimed: false,
@@ -420,6 +432,7 @@ impl StageApp {
             completion_reconcile_inflight: false,
             completion_terminal_seq: None,
             pending_optimistic_user_rows: Vec::new(),
+            local_settings_save_generation: 0,
         }
     }
 
@@ -785,9 +798,16 @@ impl StageApp {
                     self.schedule_completion_refresh();
                 }
             }
-            AsyncOutcome::SaveLocalSettings(result) => {
+            AsyncOutcome::SaveLocalSettings {
+                generation,
+                result,
+                success_status,
+            } => {
+                if generation != self.local_settings_save_generation {
+                    return;
+                }
                 self.detail.core_status = match result {
-                    Ok(()) => i18n::fl("settings-saved"),
+                    Ok(()) => success_status.unwrap_or_else(|| i18n::fl("settings-saved")),
                     Err(err) => err,
                 };
             }
@@ -953,18 +973,39 @@ impl StageApp {
                 if !self.detail.activation_is_current(generation) {
                     return;
                 }
+                self.detail.character_action_pending = false;
                 match result {
                     Ok(activated) => {
+                        let displayed_before = self.local_settings.displayed_soul_ids.clone();
+                        let new_soul_id = activated.character.soul_id.clone();
                         if let Some(target) = activated.target {
                             self.commit_session_target(target);
                         }
-                        self.reload_avatar();
+                        let display_limited = new_soul_id.as_deref().is_some_and(|id| {
+                            self.has_avatar_occupant(id) && !self.include_soul_in_display(id)
+                        });
+                        let overlay_status = self.reload_avatar();
                         self.detail.invalidate_character();
                         self.detail.core_status = format!(
                             "{}: {}",
                             i18n::fl("character-imported"),
                             activated.character.id
                         );
+                        if display_limited {
+                            self.detail.core_status.push_str(". ");
+                            self.detail
+                                .core_status
+                                .push_str(&i18n::fl("character-display-full-help"));
+                        }
+                        if let Some(status) = overlay_status {
+                            self.detail.core_status.push_str(". ");
+                            self.detail.core_status.push_str(&status);
+                        }
+                        if self.local_settings.displayed_soul_ids != displayed_before {
+                            self.save_local_settings_with_status(Some(
+                                self.detail.core_status.clone(),
+                            ));
+                        }
                         self.request_characters();
                     }
                     Err(err) => {
@@ -977,18 +1018,39 @@ impl StageApp {
                 if !self.detail.activation_is_current(generation) {
                     return;
                 }
+                self.detail.character_action_pending = false;
                 match result {
                     Ok(activated) => {
+                        let displayed_before = self.local_settings.displayed_soul_ids.clone();
+                        let new_soul_id = activated.character.soul_id.clone();
                         if let Some(target) = activated.target {
                             self.commit_session_target(target);
                         }
-                        self.reload_avatar();
+                        let display_limited = new_soul_id.as_deref().is_some_and(|id| {
+                            self.has_avatar_occupant(id) && !self.include_soul_in_display(id)
+                        });
+                        let overlay_status = self.reload_avatar();
                         self.detail.invalidate_character();
                         self.detail.core_status = format!(
                             "{}: {}",
                             i18n::fl("character-activated"),
                             activated.character.id
                         );
+                        if display_limited {
+                            self.detail.core_status.push_str(". ");
+                            self.detail
+                                .core_status
+                                .push_str(&i18n::fl("character-display-full-help"));
+                        }
+                        if let Some(status) = overlay_status {
+                            self.detail.core_status.push_str(". ");
+                            self.detail.core_status.push_str(&status);
+                        }
+                        if self.local_settings.displayed_soul_ids != displayed_before {
+                            self.save_local_settings_with_status(Some(
+                                self.detail.core_status.clone(),
+                            ));
+                        }
                         self.request_characters();
                     }
                     Err(err) => {
@@ -998,7 +1060,10 @@ impl StageApp {
                 }
             }
             AsyncOutcome::ListCharacters(result) => match result {
-                Ok(items) => self.detail.characters = items,
+                Ok(items) => {
+                    self.detail.characters = items;
+                    self.detail.character_list_loaded = true;
+                }
                 Err(err) => self.detail.core_status = err,
             },
             AsyncOutcome::ListOccupants(result) => match result {
@@ -1274,7 +1339,9 @@ impl StageApp {
                     Err(err) => tracing::debug!(error = %err, "approval poll failed"),
                 }
             }
-            AsyncOutcome::ReloadAvatar => self.reload_avatar(),
+            AsyncOutcome::ReloadAvatar => {
+                self.reload_avatar();
+            }
             AsyncOutcome::ExportCharacter(result) => {
                 self.detail.core_status = match result {
                     Ok(()) => i18n::fl("character-exported"),
@@ -1849,6 +1916,12 @@ impl StageApp {
     }
 
     fn save_local_settings(&mut self) {
+        self.save_local_settings_with_status(None);
+    }
+
+    fn save_local_settings_with_status(&mut self, success_status: Option<String>) {
+        self.local_settings_save_generation = self.local_settings_save_generation.wrapping_add(1);
+        let generation = self.local_settings_save_generation;
         let settings = self.local_settings.clone();
         if settings.mic_device != self.settings.mic_device {
             self.audio.set_mic_device(&settings.mic_device);
@@ -1870,9 +1943,11 @@ impl StageApp {
         }
         self.sync_overlay_interaction();
         self.spawn(async move {
-            AsyncOutcome::SaveLocalSettings(
-                save_desktop_settings(&settings).map_err(|err| err.to_string()),
-            )
+            AsyncOutcome::SaveLocalSettings {
+                generation,
+                result: save_desktop_settings(&settings).map_err(|err| err.to_string()),
+                success_status,
+            }
         });
     }
 
@@ -2210,6 +2285,145 @@ impl StageApp {
         self.save_local_settings();
     }
 
+    fn has_avatar_occupant(&self, soul_id: &str) -> bool {
+        self.session.occupants().iter().any(|occupant| {
+            occupant.soul_id == soul_id && crate::core::session::occupant_has_avatar(occupant)
+        })
+    }
+
+    fn visible_display_count(&self) -> usize {
+        self.local_settings
+            .displayed_soul_ids
+            .iter()
+            .filter(|soul_id| {
+                !self.temporarily_hidden_souls.contains(*soul_id)
+                    && self.has_avatar_occupant(soul_id)
+            })
+            .count()
+    }
+
+    fn include_soul_in_display(&mut self, soul_id: &str) -> bool {
+        if !self.has_avatar_occupant(soul_id) {
+            return false;
+        }
+        if self
+            .local_settings
+            .displayed_soul_ids
+            .iter()
+            .any(|current| current == soul_id)
+        {
+            self.temporarily_hidden_souls.remove(soul_id);
+            return true;
+        }
+        if self.visible_display_count() >= crate::core::session::MAX_OVERLAY_BODIES {
+            return false;
+        }
+        self.local_settings
+            .displayed_soul_ids
+            .push(soul_id.to_owned());
+        self.local_settings.displayed_souls_initialized = true;
+        true
+    }
+
+    fn apply_display_action(&mut self, action: DisplayAction) {
+        match action {
+            DisplayAction::Show(soul_id) => {
+                if !self.has_avatar_occupant(&soul_id) {
+                    self.detail.core_status = i18n::fl("character-text-only-reason");
+                    return;
+                }
+                if !self.include_soul_in_display(&soul_id) {
+                    let capacity = crate::core::session::MAX_OVERLAY_BODIES.to_string();
+                    self.detail.core_status =
+                        i18n::format("character-display-limit", &[("capacity", &capacity)]);
+                    return;
+                }
+                self.detail.core_status = match self.reload_avatar() {
+                    Some(status) => status,
+                    None => i18n::fl("character-display-updated"),
+                };
+                self.save_local_settings_with_status(Some(self.detail.core_status.clone()));
+                self.request_detail_and_overlay_redraw();
+            }
+            DisplayAction::TemporarilyHide(soul_id) => {
+                if self
+                    .local_settings
+                    .displayed_soul_ids
+                    .iter()
+                    .any(|current| current == &soul_id)
+                {
+                    self.temporarily_hidden_souls.insert(soul_id);
+                    self.reload_avatar();
+                    self.detail.core_status = i18n::fl("character-temporarily-hidden-status");
+                    self.request_detail_and_overlay_redraw();
+                }
+            }
+            DisplayAction::Remove(soul_id) => {
+                let before = self.local_settings.displayed_soul_ids.len();
+                self.local_settings
+                    .displayed_soul_ids
+                    .retain(|current| current != &soul_id);
+                self.temporarily_hidden_souls.remove(&soul_id);
+                if self.local_settings.displayed_soul_ids.len() != before {
+                    self.local_settings.displayed_souls_initialized = true;
+                    self.reload_avatar();
+                    let status = i18n::fl("character-removed-from-display");
+                    self.save_local_settings_with_status(Some(status.clone()));
+                    self.detail.core_status = status;
+                    self.request_detail_and_overlay_redraw();
+                }
+            }
+            DisplayAction::MoveUp(soul_id) => {
+                if let Some(index) = self
+                    .local_settings
+                    .displayed_soul_ids
+                    .iter()
+                    .position(|current| current == &soul_id)
+                    && index > 0
+                {
+                    self.local_settings
+                        .displayed_soul_ids
+                        .swap(index, index - 1);
+                    self.reload_avatar();
+                    let status = i18n::fl("character-display-updated");
+                    self.save_local_settings_with_status(Some(status.clone()));
+                    self.detail.core_status = status;
+                    self.request_detail_and_overlay_redraw();
+                }
+            }
+            DisplayAction::MoveDown(soul_id) => {
+                if let Some(index) = self
+                    .local_settings
+                    .displayed_soul_ids
+                    .iter()
+                    .position(|current| current == &soul_id)
+                    && index + 1 < self.local_settings.displayed_soul_ids.len()
+                {
+                    self.local_settings
+                        .displayed_soul_ids
+                        .swap(index, index + 1);
+                    self.reload_avatar();
+                    let status = i18n::fl("character-display-updated");
+                    self.save_local_settings_with_status(Some(status.clone()));
+                    self.detail.core_status = status;
+                    self.request_detail_and_overlay_redraw();
+                }
+            }
+        }
+    }
+
+    fn request_detail_and_overlay_redraw(&self) {
+        if let Some(overlay) = self.overlay.as_ref() {
+            overlay.window.request_redraw();
+        }
+        if let Some(detail) = self.detail_win.as_ref() {
+            detail.request_redraw();
+        }
+        if let Some(chat) = self.chat.as_ref() {
+            chat.request_redraw();
+        }
+    }
+
     fn apply_live_event(&mut self, event: LiveEvent) {
         match event {
             LiveEvent::TextDelta { text, .. } => {
@@ -2406,21 +2620,56 @@ impl StageApp {
         }
     }
 
-    fn reload_avatar(&mut self) {
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        let Some(overlay) = self.overlay.as_mut() else {
-            return;
-        };
-        let specs = self.session.avatar_loads();
+    fn reload_avatar(&mut self) -> Option<String> {
+        let all_specs = self.session.avatar_loads();
+        let available_soul_ids: Vec<String> =
+            all_specs.iter().map(|spec| spec.soul_id.clone()).collect();
+        if normalize_displayed_souls(
+            &mut self.local_settings.displayed_soul_ids,
+            &mut self.local_settings.displayed_souls_initialized,
+            &available_soul_ids,
+        ) {
+            self.save_local_settings();
+        }
+        self.temporarily_hidden_souls.retain(|soul_id| {
+            available_soul_ids
+                .iter()
+                .any(|available| available == soul_id)
+        });
+        let selected_soul_ids = ordered_visible_souls(
+            &self.local_settings.displayed_soul_ids,
+            &self.temporarily_hidden_souls,
+            crate::core::session::MAX_OVERLAY_BODIES,
+        );
+        let specs: Vec<AvatarLoad> = selected_soul_ids
+            .iter()
+            .filter_map(|soul_id| {
+                all_specs
+                    .iter()
+                    .find(|spec| spec.soul_id == *soul_id)
+                    .map(|spec| AvatarLoad {
+                        soul_id: spec.soul_id.clone(),
+                        path: spec.path.clone(),
+                        motions_dir: spec.motions_dir.clone(),
+                    })
+            })
+            .collect();
+        let selection_exceeds_capacity =
+            self.local_settings.displayed_soul_ids.len() > crate::core::session::MAX_OVERLAY_BODIES;
+        let gpu = self.gpu.as_ref()?;
+        let overlay = self.overlay.as_mut()?;
         if specs.is_empty() {
             overlay.clear_avatars();
-            tracing::info!("no avatar_path; overlay stays empty (text-only)");
-            return;
+            let status = if all_specs.is_empty() {
+                i18n::fl("overlay-no-avatar")
+            } else {
+                i18n::fl("character-display-empty-help")
+            };
+            self.surface.status.clone_from(&status);
+            return Some(status);
         }
         match overlay.load_avatars(gpu, &specs) {
-            Ok(count) => {
+            Ok(report) => {
                 let active_soul = self.session.soul_id().to_owned();
                 let soul_ids: Vec<String> = specs.iter().map(|spec| spec.soul_id.clone()).collect();
                 let saved = &self.local_settings.character_positions;
@@ -2439,18 +2688,34 @@ impl StageApp {
                     &active_soul,
                     legacy_pos,
                 );
-                let vrm_label = overlay
-                    .first_avatar()
-                    .map(|avatar| avatar.format_version_label().to_owned());
-                self.surface.status = vrm_label.as_deref().map_or_else(
-                    || i18n::fl("status-ready"),
-                    |label| i18n::format("status-ready-vrm", &[("vrm", label)]),
-                );
-                tracing::info!(count, "loaded overlay VRM bodies");
+                let capacity_status = selection_exceeds_capacity.then(|| {
+                    let capacity = crate::core::session::MAX_OVERLAY_BODIES.to_string();
+                    i18n::format("character-display-limit", &[("capacity", &capacity)])
+                });
+                let failure_status = (!report.failures.is_empty()).then(|| {
+                    let failures = report
+                        .failures
+                        .iter()
+                        .map(|failure| format!("{} ({})", failure.soul_id, failure.error))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    i18n::format("character-overlay-partial-load", &[("failures", &failures)])
+                });
+                let status = match (failure_status, capacity_status) {
+                    (Some(failure), Some(capacity)) => format!("{failure}; {capacity}"),
+                    (Some(failure), None) => failure,
+                    (None, Some(capacity)) => capacity,
+                    (None, None) => i18n::fl("status-ready"),
+                };
+                self.surface.status.clone_from(&status);
+                tracing::info!(count = report.loaded, "loaded overlay VRM bodies");
+                (status != i18n::fl("status-ready")).then_some(status)
             }
             Err(err) => {
-                self.surface.status = format!("{}: {err}", i18n::fl("status-error"));
+                let status = format!("{}: {err}", i18n::fl("character-overlay-load-failed"));
+                self.surface.status.clone_from(&status);
                 tracing::warn!(error = %err, "VRM load failed");
+                Some(status)
             }
         }
     }
@@ -2997,6 +3262,7 @@ impl StageApp {
                 tracing::debug!(error = %err, "chat paint failed");
             }
         }
+        let mut display_action = None;
         if let Some(detail_win) = self.detail_win.as_mut() {
             let mut detail = std::mem::take(&mut self.detail);
             let mut local = self.local_settings.clone();
@@ -3006,6 +3272,14 @@ impl StageApp {
             let results = Arc::clone(&self.async_results);
             let soul_id = self.session.soul_id().to_owned();
             let monitors = self.monitors.clone();
+            let display_companions = detail::companion_display_rows(
+                self.session.occupants(),
+                &self.local_settings.displayed_soul_ids,
+                &self.temporarily_hidden_souls,
+                &soul_id,
+            );
+            let displayed_count = self.local_settings.displayed_soul_ids.len();
+            let thumbnail_cache = &mut self.companion_thumbnails;
             self.session.session_id().clone_into(&mut detail.session_id);
             detail.spotlight_hotkey_ok = self.surface.spotlight_hotkey_ok;
             let theme = local.theme.clone();
@@ -3017,11 +3291,16 @@ impl StageApp {
                     &mut local,
                     &monitors,
                     &soul_id,
+                    &display_companions,
+                    displayed_count,
+                    crate::core::session::MAX_OVERLAY_BODIES,
+                    thumbnail_cache,
                     &client,
                     &rt,
                     &results,
                 );
             });
+            display_action = detail.display_action.take();
             self.detail = detail;
             self.local_settings = local;
             if let Err(err) = paint {
@@ -3055,6 +3334,15 @@ impl StageApp {
                     self.dispatch_shell_command(event_loop, command);
                 }
                 SpotlightAction::Close => {}
+            }
+        }
+        if let Some(action) = display_action {
+            self.apply_display_action(action);
+            if let Some(detail) = self.detail_win.as_ref() {
+                detail.request_redraw();
+            }
+            if let Some(overlay) = self.overlay.as_ref() {
+                overlay.window.request_redraw();
             }
         }
     }
@@ -4598,6 +4886,7 @@ mod tests {
     #[test]
     fn activate_reports_activated_status_not_imported() {
         let mut app = StageApp::new_for_test();
+        app.detail.character_action_pending = true;
         let generation = app.detail.next_activation_generation();
         let character = ene_api::CharacterView {
             id: "char.alicia-b".to_owned(),
@@ -4630,6 +4919,34 @@ mod tests {
             "activate must not reuse the import message: {}",
             app.detail.core_status
         );
+        assert!(!app.detail.character_action_pending);
+    }
+
+    #[test]
+    fn display_save_preserves_action_status() {
+        let mut app = StageApp::new_for_test();
+        app.local_settings_save_generation = 1;
+        let status = i18n::fl("character-display-updated");
+        app.apply_async_outcome(AsyncOutcome::SaveLocalSettings {
+            generation: 1,
+            result: Ok(()),
+            success_status: Some(status.clone()),
+        });
+        assert_eq!(app.detail.core_status, status);
+    }
+
+    #[test]
+    fn stale_settings_save_cannot_overwrite_newer_status() {
+        let mut app = StageApp::new_for_test();
+        let status = i18n::fl("character-removed-from-display");
+        app.local_settings_save_generation = 2;
+        app.detail.core_status.clone_from(&status);
+        app.apply_async_outcome(AsyncOutcome::SaveLocalSettings {
+            generation: 1,
+            result: Ok(()),
+            success_status: None,
+        });
+        assert_eq!(app.detail.core_status, status);
     }
 
     #[test]

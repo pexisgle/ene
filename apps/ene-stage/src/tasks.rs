@@ -58,7 +58,11 @@ pub enum AsyncOutcome {
         session_id: String,
         result: Result<ene_api::HistoryResponse, String>,
     },
-    SaveLocalSettings(Result<(), String>),
+    SaveLocalSettings {
+        generation: u64,
+        result: Result<(), String>,
+        success_status: Option<String>,
+    },
     LoadCoreSettings(Result<String, String>),
     ApplyCoreSettings(Result<(), String>),
     LoadMcpCatalog(Result<ene_api::McpCatalogDocument, String>),
