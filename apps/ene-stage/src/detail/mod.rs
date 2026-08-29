@@ -844,7 +844,7 @@ pub fn validate_mcp_document(servers: &[ene_api::McpServerView]) -> Result<(), S
 #[must_use]
 pub fn mcp_credential_row(plugin: &str, row_id: &str) -> Option<String> {
     let server_id = row_id.strip_prefix("mcp.")?;
-    (!server_id.is_empty() && !server_id.starts_with("probe-") && plugin == "mcp.bridge")
+    (!server_id.is_empty() && !server_id.starts_with("probe-") && plugin.starts_with("mcp."))
         .then(|| server_id.to_owned())
 }
 
@@ -5467,7 +5467,15 @@ mod tests {
             mcp_credential_row("mcp.bridge", "mcp.github-remote").as_deref(),
             Some("github-remote")
         );
+        assert_eq!(
+            mcp_credential_row("mcp.github-remote", "mcp.github-remote").as_deref(),
+            Some("github-remote")
+        );
         assert_eq!(mcp_credential_row("mcp.bridge", "mcp.probe-abc123"), None);
+        assert_eq!(
+            mcp_credential_row("mcp.github-remote", "mcp.probe-abc123"),
+            None
+        );
         assert_eq!(mcp_credential_row("mcp.bridge", "mcp."), None);
         assert_eq!(
             mcp_credential_row("provider.gguf", "mcp.github-remote"),
