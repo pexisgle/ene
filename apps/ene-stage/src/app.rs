@@ -2726,7 +2726,51 @@ impl StageApp {
     }
 
     fn on_overlay_press(&mut self) {
-        self.on_overlay_pointer_press(PointerKind::Mouse, 0, None);
+        self.on_overlay_pointer_press_with_protection(PointerKind::Mouse, 0, None);
+    }
+
+    fn on_overlay_pointer_press_with_protection(
+        &mut self,
+        pointer: PointerKind,
+        id: u64,
+        position: Option<winit::dpi::PhysicalPosition<f64>>,
+    ) {
+        // When chrome has focus, still allow a stationary body hit to trigger
+        // a reaction; otherwise a focused Detail/Chat would swallow all clicks.
+        if self.overlay_focus.protects() {
+            let pos = position.or_else(|| {
+                self.last_cursor.map(|logical| {
+                    let Some(overlay) = self.overlay.as_ref() else {
+                        return winit::dpi::PhysicalPosition::new(0.0, 0.0);
+                    };
+                    let scale = overlay.window.scale_factor() as f32;
+                    winit::dpi::PhysicalPosition::new(
+                        f64::from(logical.x) * f64::from(scale),
+                        f64::from(logical.y) * f64::from(scale),
+                    )
+                })
+            });
+            if let Some(physical) = pos {
+                let Some(overlay) = self.overlay.as_ref() else {
+                    return;
+                };
+                let logical = physical.to_logical::<f32>(overlay.window.scale_factor());
+                if let Some((eye, target, up, vw, vh)) = self.camera_basis() {
+                    let cursor = glam::Vec2::new(logical.x, logical.y);
+                    let candidates = self.overlay_hit_candidates();
+                    if crate::drag::hit_test(&candidates, (vw, vh), eye, target, up, cursor)
+                        .is_none()
+                    {
+                        return;
+                    }
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+        self.on_overlay_pointer_press(pointer, id, position);
     }
 
     fn on_overlay_pointer_press(
@@ -3214,9 +3258,7 @@ impl ApplicationHandler for StageApp {
                     button: MouseButton::Left,
                     ..
                 } => {
-                    if !self.overlay_focus.protects() {
-                        self.on_overlay_press();
-                    }
+                    self.on_overlay_pointer_press_with_protection(PointerKind::Mouse, 0, None);
                 }
                 WindowEvent::MouseInput {
                     state: ElementState::Released,
@@ -3227,13 +3269,11 @@ impl ApplicationHandler for StageApp {
                 }
                 WindowEvent::Touch(touch) => match touch.phase {
                     TouchPhase::Started => {
-                        if !self.overlay_focus.protects() {
-                            self.on_overlay_pointer_press(
-                                PointerKind::Touch,
-                                touch.id,
-                                Some(touch.location),
-                            );
-                        }
+                        self.on_overlay_pointer_press_with_protection(
+                            PointerKind::Touch,
+                            touch.id,
+                            Some(touch.location),
+                        );
                     }
                     TouchPhase::Moved => {
                         self.on_overlay_pointer_moved(PointerKind::Touch, touch.id, touch.location);
@@ -3488,7 +3528,7 @@ fn direct_reaction_expression(kind: ReactionKind) -> &'static str {
     match kind {
         ReactionKind::Click => "happy",
         ReactionKind::DoubleClick => "surprised",
-        ReactionKind::LongPress => "calm",
+        ReactionKind::LongPress => "relaxed",
     }
 }
 

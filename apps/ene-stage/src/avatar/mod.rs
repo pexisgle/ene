@@ -182,16 +182,17 @@ impl CompanionAvatar {
         self.apply_expression_cue_weighted(label, 1.0);
     }
 
-    pub fn apply_expression_cue_weighted(&mut self, label: &str, weight: f32) {
+    pub fn apply_expression_cue_weighted(&mut self, label: &str, weight: f32) -> bool {
         let weight = if weight.is_finite() {
             weight.clamp(0.0, 1.0)
         } else {
             0.0
         };
         if !self.apply_expression_weighted(label, weight) {
-            return;
+            return false;
         }
         self.expression_cue = Some((label.to_owned(), 0.0, weight));
+        true
     }
 
     pub fn trigger_interaction_feedback(&mut self, strength: f32, expression: &str) {
@@ -204,7 +205,14 @@ impl CompanionAvatar {
             return;
         }
         self.interaction_feedback = self.interaction_feedback.max(strength);
-        self.apply_expression_cue_weighted(expression, strength);
+        // Prefer the requested expression but fall back to a widely-supported
+        // preset so long-press still shows feedback on the bundled Alicia.
+        if self.apply_expression_cue_weighted(expression, strength) {
+            return;
+        }
+        if expression != "relaxed" {
+            let _ = self.apply_expression_cue_weighted("relaxed", strength);
+        }
     }
 
     fn apply_expression_weighted(&mut self, label: &str, weight: f32) -> bool {
