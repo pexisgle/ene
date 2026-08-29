@@ -1847,6 +1847,15 @@ impl StageApp {
             self.audio.set_mic_device(&settings.mic_device);
         }
         self.settings = settings.clone();
+        for (soul_id, pos) in &settings.character_positions {
+            self.surface.positions.insert(soul_id.clone(), *pos);
+        }
+        if let Some(overlay) = self.overlay.as_ref() {
+            overlay.window.request_redraw();
+        }
+        if let Some(detail) = self.detail_win.as_ref() {
+            detail.request_redraw();
+        }
         i18n::select_language(&settings.language);
         self.sync_chrome_titles();
         if let Some(caption) = &self.caption {
