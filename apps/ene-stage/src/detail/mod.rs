@@ -1244,7 +1244,9 @@ pub fn show(
             DetailTab::Companion => {
                 show_companion(ui, state, soul_id, parent, client, rt, async_results);
             }
-            DetailTab::Conversation => show_conversation(ui, state, client, rt, async_results),
+            DetailTab::Conversation => {
+                show_conversation(ui, state, parent, client, rt, async_results);
+            }
             DetailTab::Voice => show_voice(ui, state, local_settings, client, rt, async_results),
             DetailTab::Memory => show_memory(ui, state, soul_id, client, rt, async_results),
             DetailTab::Work => show_work(ui, state, soul_id, parent, client, rt, async_results),
@@ -1638,6 +1640,7 @@ fn show_companion(
 fn show_conversation(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
+    _parent: &winit::window::Window,
     client: &Arc<ApiClient>,
     rt: &Handle,
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
