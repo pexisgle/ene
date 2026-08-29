@@ -1964,10 +1964,10 @@ impl StageApp {
                 let vrm_label = overlay
                     .first_avatar()
                     .map(|avatar| avatar.format_version_label().to_owned());
-                self.surface.status = vrm_label
-                    .as_deref()
-                    .map(|label| i18n::format("status-ready-vrm", &[("vrm", label)]))
-                    .unwrap_or_else(|| i18n::fl("status-ready"));
+                self.surface.status = vrm_label.as_deref().map_or_else(
+                    || i18n::fl("status-ready"),
+                    |label| i18n::format("status-ready-vrm", &[("vrm", label)]),
+                );
                 tracing::info!(count, "loaded overlay VRM bodies");
             }
             Err(err) => {
