@@ -482,9 +482,25 @@ fn mic_cta_eligible(state: &SurfaceUiState, mic_active: bool) -> bool {
 /// gap over a quiet panel may show or arm it. A lone greeting is committed
 /// automatically and does not occupy the panel while that request is pending.
 fn chat_setup_cta_eligible(state: &SurfaceUiState) -> bool {
-    chat_setup_gap(&state.chat_setup).is_some()
-        && state.greetings.len() < 2
-        && normalize_transcript(&state.history, &state.streaming_text).is_empty()
+    if chat_setup_gap(&state.chat_setup).is_none() || state.greetings.len() >= 2 {
+        return false;
+    }
+    if !state.streaming_text.is_empty() {
+        return false;
+    }
+    let rows = normalize_transcript(&state.history, &state.streaming_text);
+    if rows.is_empty() {
+        return true;
+    }
+    // A single committed bootstrap greeting (one assistant row, no user rows)
+    // should still surface setup guidance until a real conversation starts.
+    if rows.len() == 1
+        && rows[0].role == TranscriptKind::Assistant
+        && !state.history.messages.iter().any(|m| m.role == "user")
+    {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -759,6 +775,30 @@ mod tests {
             status: "tool: execute: unknown skill skill".to_owned(),
             ..Default::default()
         }));
+
+        // A single committed bootstrap greeting in history still shows the
+        // setup CTA until the user sends a real message.
+        let bootstrap_committed = SurfaceUiState {
+            history: HistoryResponse {
+                messages: vec![message("assistant", "Hello, I am Alicia.")],
+                depth: "surface".to_owned(),
+            },
+            ..Default::default()
+        };
+        assert!(chat_setup_cta_eligible(&bootstrap_committed));
+
+        // Once the user has spoken, even a single assistant row suppresses it.
+        let with_user = SurfaceUiState {
+            history: HistoryResponse {
+                messages: vec![
+                    message("user", "hi"),
+                    message("assistant", "Hello, I am Alicia."),
+                ],
+                depth: "surface".to_owned(),
+            },
+            ..Default::default()
+        };
+        assert!(!chat_setup_cta_eligible(&with_user));
     }
 
     fn message(role: &str, text: &str) -> MessageResponse {
