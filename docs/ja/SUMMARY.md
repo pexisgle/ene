@@ -21,6 +21,10 @@
 - [CLI ユーザーガイド](apps/cli.md)
 - [Desktop ユーザーガイド](apps/desktop.md)（旧版）
 
+# 実験
+
+- [Stage UI Slint + 共有 wgpu 検証](experiments/stage-ui-poc.md)
+
 # ガイド
 
 - [キャラクターエディタ](guides/character-editor.md)

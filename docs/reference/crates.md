@@ -33,6 +33,7 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 | `ene-config` | Settings load/save/schema, paths, `define_config!` | (nothing internal) |
 | `ene-sandbox` | OS sandbox primitives (Landlock + seccomp + rlimits on Linux) | (nothing internal) |
 | `ene-vrm` | VRM 1.0 loader + wgpu renderer | (nothing internal) |
+| `ene-stage-poc` | Isolated Slint + shared-wgpu Stage UI probes (not a product path) | config, vrm |
 
 ## Dependency rules (enforced by review)
 

@@ -1,0 +1,58 @@
+[package]
+name = "ene-stage-poc"
+version.workspace = true
+edition.workspace = true
+description = "Isolated Slint + shared-wgpu Stage UI technical probes; not a product path"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-stage-poc-a"
+path = "src/bin/poc_a.rs"
+
+[[bin]]
+name = "ene-stage-poc-b"
+path = "src/bin/poc_b.rs"
+
+[[bin]]
+name = "ene-stage-poc-baseline"
+path = "src/bin/poc_baseline.rs"
+
+[dependencies]
+ene-config = { workspace = true }
+ene-vrm = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+parking_lot = { workspace = true }
+raw-window-handle = "0.6"
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+slint = { version = "1.17.1", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "renderer-femtovg-wgpu",
+    "unstable-wgpu-29",
+    "raw-window-handle-06",
+] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland"] }
+wayland-client = { version = "0.31", default-features = false }
+x11rb = { version = "0.13", default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

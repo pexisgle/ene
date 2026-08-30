@@ -28,6 +28,7 @@ The finished-product definition is
 | [Concepts](concepts/architecture.md) | How Ene works: process model, packages, memory, plugins |
 | [Apps](apps/stage.md) | User guides for stage, CLI, and the legacy desktop |
 | [Guides](guides/character-editor.md) | Task-oriented how-tos |
+| [Experiments](experiments/stage-ui-poc.md) | Slint + shared wgpu Stage UI probe |
 | [Reference](reference/crates.md) | Crate map and rendering API |
 
 Japanese documentation is available at [日本語ドキュメント](ja/index.md).

@@ -32,6 +32,7 @@
 | `ene-config` | 設定の load/save/schema、パス、`define_config!` | （内部依存なし） |
 | `ene-sandbox` | OS サンドボックス（Linux では Landlock + seccomp + rlimits） | （内部依存なし） |
 | `ene-vrm` | VRM 1.0 ローダ + wgpu レンダラ | （内部依存なし） |
+| `ene-stage-poc` | Slint + 共有 wgpu の Stage UI 検証（製品経路ではない） | config, vrm |
 
 ## 依存規則（レビューで強制）
 

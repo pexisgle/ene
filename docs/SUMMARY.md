@@ -21,6 +21,10 @@
 - [CLI user guide](apps/cli.md)
 - [Desktop user guide](apps/desktop.md) (legacy)
 
+# Experiments
+
+- [Stage UI Slint + shared wgpu probe](experiments/stage-ui-poc.md)
+
 # Guides
 
 - [Character editor](guides/character-editor.md)
