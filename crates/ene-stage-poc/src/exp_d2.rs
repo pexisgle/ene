@@ -590,6 +590,7 @@ mod linux {
                         fmt_rects(&input)
                     );
                     self.last_input_apply = Some(now);
+                    self.last_interaction = interaction;
                 }
             } else if apply_b && apply_i {
                 let dt = shapes.set_split(&bounding, &input);
@@ -601,6 +602,8 @@ mod linux {
                 );
                 self.last_bounding_apply = Some(now);
                 self.last_input_apply = Some(now);
+                self.last_visual = visual;
+                self.last_interaction = interaction;
             } else if apply_b {
                 let dt = shapes.set_bounding(&bounding);
                 println!(
@@ -609,6 +612,7 @@ mod linux {
                     fmt_rects(&bounding)
                 );
                 self.last_bounding_apply = Some(now);
+                self.last_visual = visual;
             } else if apply_i {
                 let dt = shapes.set_input(&input);
                 println!(
@@ -617,9 +621,8 @@ mod linux {
                     fmt_rects(&input)
                 );
                 self.last_input_apply = Some(now);
+                self.last_interaction = interaction;
             }
-            self.last_visual = visual;
-            self.last_interaction = interaction;
         }
 
         fn tick_shapes(&mut self) {
