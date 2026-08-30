@@ -25,6 +25,7 @@
 
 - [Stage UI Slint + 共有 wgpu 検証](experiments/stage-ui-poc.md)
 - [Stage UI 検証 2: compositor コストと Linux 入力領域](experiments/stage-ui-poc-2.md)
+- [Stage UI 検証: X11 の visual と input shape](experiments/stage-ui-x11-shape.md)
 
 # ガイド
 

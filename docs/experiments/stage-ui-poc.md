@@ -332,3 +332,4 @@ Criteria:
 - No change to the production overlay.
 - No GPU picking.
 - Wayland compositor testing is in [Stage UI probe 2](stage-ui-poc-2.md).
+- X11 visual vs input SHAPE is in [Stage UI probe: X11 visual vs input shape](stage-ui-x11-shape.md).

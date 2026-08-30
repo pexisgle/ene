@@ -14,6 +14,9 @@ Code: `crates/ene-stage-poc/`
 Windows is **out of scope** for this follow-up. Linux only: X11 and
 Wayland are measured as separate backends.
 
+X11 visual vs input footprint (Bounding ≠ Input) is a separate probe:
+[Stage UI probe: X11 visual vs input shape](stage-ui-x11-shape.md).
+
 ```sh
 # Experiment C (release; default 5 s warmup + 12 s measure + 5 s idle)
 cargo build --release -p ene-stage-poc --bins

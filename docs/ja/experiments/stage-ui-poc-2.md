@@ -14,6 +14,9 @@
 今回 **Windows は対象外** です。Linux のみ。X11 と Wayland は別
 バックエンドとして測ります。
 
+X11 で visual と input の footprint を分ける話は別検証です:
+[Stage UI 検証: X11 の visual と input shape](stage-ui-x11-shape.md)。
+
 ```sh
 # 実験 C（release。既定は warmup 5 秒 + measure 12 秒 + idle 5 秒）
 cargo build --release -p ene-stage-poc --bins

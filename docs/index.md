@@ -30,6 +30,7 @@ The finished-product definition is
 | [Guides](guides/character-editor.md) | Task-oriented how-tos |
 | [Experiments](experiments/stage-ui-poc.md) | Slint + shared wgpu Stage UI probe |
 | [Experiments (2)](experiments/stage-ui-poc-2.md) | Fair compositor cost and Linux input regions |
+| [Experiments (X11 shape)](experiments/stage-ui-x11-shape.md) | Visual vs input SHAPE on xfwm4 |
 | [Reference](reference/crates.md) | Crate map and rendering API |
 
 Japanese documentation is available at [日本語ドキュメント](ja/index.md).

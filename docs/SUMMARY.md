@@ -25,6 +25,7 @@
 
 - [Stage UI Slint + shared wgpu probe](experiments/stage-ui-poc.md)
 - [Stage UI probe 2: compositor cost and Linux input regions](experiments/stage-ui-poc-2.md)
+- [Stage UI probe: X11 visual vs input shape](experiments/stage-ui-x11-shape.md)
 
 # Guides
 

@@ -302,3 +302,4 @@ GPU→CPU コピー: 合成経路にはない。
 - 本番オーバーレイの変更なし。
 - GPU picking なし。
 - Wayland コンポジタの検証は [Stage UI 検証 2](stage-ui-poc-2.md) にあります。
+- X11 の visual と input SHAPE は [Stage UI 検証: X11 の visual と input shape](stage-ui-x11-shape.md) にあります。
