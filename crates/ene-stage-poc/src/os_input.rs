@@ -235,11 +235,17 @@ impl X11Shape {
             _ => return None,
         };
         let (conn, _) = x11rb::connect(None).ok()?;
-        let shape_available = x11rb::protocol::shape::query_version(&conn)
+        let version = x11rb::protocol::shape::query_version(&conn)
             .ok()
-            .and_then(|cookie| cookie.reply().ok())
-            .is_some();
-        tracing::info!(shape_available, xid, "X11 shape input region");
+            .and_then(|cookie| cookie.reply().ok());
+        let shape_available = version.is_some();
+        tracing::info!(
+            shape_available,
+            xid,
+            major = version.as_ref().map(|v| v.major_version),
+            minor = version.as_ref().map(|v| v.minor_version),
+            "X11 shape input region"
+        );
         Some(Self {
             conn,
             window: xid,
@@ -265,7 +271,7 @@ impl X11Shape {
                 })
             })
             .collect();
-        drop(shape::rectangles(
+        match shape::rectangles(
             &self.conn,
             ShapeOp::SET,
             ShapeKind::INPUT,
@@ -274,11 +280,13 @@ impl X11Shape {
             0,
             0,
             &xrects,
-        ));
-        // x11rb buffers fire-and-forget requests; without a flush the
-        // idle probe never sends the shape (it only draws a couple of frames).
-        if let Err(err) = x11rb::connection::Connection::flush(&self.conn) {
-            tracing::debug!(error = %err, "x11 shape flush failed");
+        ) {
+            Ok(cookie) => {
+                if let Err(err) = cookie.check() {
+                    tracing::warn!(error = %err, nrects = xrects.len(), "x11 shape check failed");
+                }
+            }
+            Err(err) => tracing::warn!(error = %err, "x11 shape rectangles failed"),
         }
     }
 }

@@ -125,6 +125,7 @@ impl ApplicationHandler for SlintApp {
         if running.tick_bench(event_loop) || running.metrics.frames.is_empty() {
             running.window.request_redraw();
         }
+        running.sync_os_input_region();
         event_loop.set_control_flow(running.next_control_flow());
     }
 }
@@ -406,23 +407,28 @@ impl Running {
             self.first_presented = true;
             tracing::info!("first frame presented");
         }
+        self.sync_os_input_region();
+        self.update_status(scale);
+        Ok(())
+    }
 
+    fn sync_os_input_region(&mut self) {
+        let scale = self.window.scale_factor() as f32;
         let layout = self.vrm_layout();
         let ui_rect = slint_host::bubble_rect(&self.host.ui, scale);
-        if self.metrics.frames.len() == 1 {
+        let rects = interactive_rects(&[ui_rect], Some(&layout));
+        if self.metrics.frames.len() <= 1 {
             tracing::info!(
                 ui = ?ui_rect,
                 head = ?layout.head,
                 torso = ?layout.torso,
                 left_hand = ?layout.left_hand,
                 right_hand = ?layout.right_hand,
+                nrects = rects.len(),
                 "hit regions (physical px)"
             );
         }
-        self.input
-            .update_input_region(&interactive_rects(&[ui_rect], Some(&layout)));
-        self.update_status(scale);
-        Ok(())
+        self.input.update_input_region(&rects);
     }
 
     fn vrm_layout(&self) -> VrmHitLayout {
