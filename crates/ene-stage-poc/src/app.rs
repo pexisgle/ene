@@ -409,6 +409,16 @@ impl Running {
 
         let layout = self.vrm_layout();
         let ui_rect = slint_host::bubble_rect(&self.host.ui, scale);
+        if self.metrics.frames.len() == 1 {
+            tracing::info!(
+                ui = ?ui_rect,
+                head = ?layout.head,
+                torso = ?layout.torso,
+                left_hand = ?layout.left_hand,
+                right_hand = ?layout.right_hand,
+                "hit regions (physical px)"
+            );
+        }
         self.input
             .update_input_region(&interactive_rects(&[ui_rect], Some(&layout)));
         self.update_status(scale);
@@ -549,13 +559,10 @@ impl ApplicationHandler for BaselineApp {
         if inner.window.id() != window_id {
             return;
         }
-        if inner
+        let wants_repaint = inner
             .egui_state
             .on_window_event(&inner.window, &event)
-            .repaint
-        {
-            inner.window.request_redraw();
-        }
+            .repaint;
         match event {
             WindowEvent::Resized(size) => inner.resize(size),
             WindowEvent::RedrawRequested => {
@@ -575,6 +582,11 @@ impl ApplicationHandler for BaselineApp {
                 event_loop.exit();
             }
             _ => {}
+        }
+        // egui marks RedrawRequested as always needing a follow-up paint.
+        // During idle we keep a true WaitUntil sample, matching Experiment A.
+        if wants_repaint && (inner.animating || inner.metrics.frames.is_empty()) {
+            inner.window.request_redraw();
         }
     }
 
@@ -600,7 +612,12 @@ impl ApplicationHandler for BaselineApp {
         event_loop.set_control_flow(if inner.animating {
             ControlFlow::Poll
         } else {
-            ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250))
+            let mut deadline = Instant::now() + Duration::from_millis(250);
+            deadline = deadline.min(inner.started + Duration::from_secs(3));
+            if let Some(bench) = inner.bench_until {
+                deadline = deadline.min(bench);
+            }
+            ControlFlow::WaitUntil(deadline)
         });
     }
 }
