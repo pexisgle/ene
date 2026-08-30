@@ -216,6 +216,7 @@ struct X11Shape {
     conn: x11rb::rust_connection::RustConnection,
     window: u32,
     shape_available: bool,
+    logged_shape: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -246,10 +247,40 @@ impl X11Shape {
             minor = version.as_ref().map(|v| v.minor_version),
             "X11 shape input region"
         );
+        // xfwm4's compositor copies Bounding onto Input every frame unless
+        // the window opts out. This is a PoC probe, not a product default.
+        if let Ok(cookie) = x11rb::protocol::xproto::ConnectionExt::intern_atom(
+            &conn,
+            false,
+            b"_NET_WM_BYPASS_COMPOSITOR",
+        ) && let Ok(reply) = cookie.reply()
+        {
+            use x11rb::protocol::xproto::{AtomEnum, PropMode};
+            match x11rb::wrapper::ConnectionExt::change_property32(
+                &conn,
+                PropMode::REPLACE,
+                xid,
+                reply.atom,
+                AtomEnum::CARDINAL,
+                &[1_u32],
+            ) {
+                Ok(prop) => {
+                    if let Err(err) = prop.check() {
+                        tracing::debug!(error = %err, "bypass compositor property failed");
+                    }
+                }
+                Err(err) => tracing::debug!(error = %err, "bypass compositor property send failed"),
+            }
+            if let Err(err) = x11rb::connection::Connection::flush(&conn) {
+                tracing::debug!(error = %err, "bypass compositor flush failed");
+            }
+            tracing::info!("requested _NET_WM_BYPASS_COMPOSITOR=1");
+        }
         Some(Self {
             conn,
             window: xid,
             shape_available,
+            logged_shape: false,
         })
     }
 
@@ -275,7 +306,7 @@ impl X11Shape {
             &self.conn,
             ShapeOp::SET,
             ShapeKind::INPUT,
-            ClipOrdering::UNSORTED,
+            ClipOrdering::YX_SORTED,
             self.window,
             0,
             0,
@@ -287,6 +318,17 @@ impl X11Shape {
                 }
             }
             Err(err) => tracing::warn!(error = %err, "x11 shape rectangles failed"),
+        }
+        if let Ok(cookie) = shape::get_rectangles(&self.conn, self.window, ShapeKind::INPUT)
+            && let Ok(reply) = cookie.reply()
+            && !self.logged_shape
+        {
+            self.logged_shape = true;
+            tracing::info!(
+                n = reply.rectangles.len(),
+                rects = ?reply.rectangles,
+                "x11 shape Input rectangles after SET"
+            );
         }
     }
 }
