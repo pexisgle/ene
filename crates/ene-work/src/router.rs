@@ -277,6 +277,8 @@ async fn start_background_outcome(start: BgStart<'_>) -> Result<SurfaceToolOutco
                 created_from_turn: None,
                 depth: 0,
                 parent_id: None,
+                success_criteria: Vec::new(),
+                allowed_tools: Vec::new(),
             })
             .map_err(|err| KernelError::Tool(err.to_string()))?
             .id

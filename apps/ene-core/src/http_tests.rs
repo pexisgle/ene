@@ -140,6 +140,8 @@ fn start_job(core: &CoreDaemon, soul: ene_session::SoulId, goal: &str) -> ene_wo
             created_from_turn: None,
             depth: 0,
             parent_id: None,
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
         })
         .unwrap()
 }
@@ -692,6 +694,8 @@ async fn restore_rejects_active_jobs() {
             created_from_turn: None,
             depth: 0,
             parent_id: None,
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
         })
         .unwrap();
     core.work()
@@ -753,6 +757,8 @@ async fn create_job_denial_happens_before_job_insertion() {
             soul_id: soul.clone(),
             goal: "should not be inserted".into(),
             title: None,
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -774,6 +780,8 @@ async fn create_job_returns_the_approved_job() {
             soul_id: soul,
             goal: "collect the approved notes".into(),
             title: Some("Approved notes".into()),
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
         })
         .await
         .unwrap();
@@ -1778,6 +1786,8 @@ async fn turn_logs_context_sources_from_registry() {
             created_from_turn: None,
             plan: None,
             brief: None,
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
         })
         .unwrap();
 

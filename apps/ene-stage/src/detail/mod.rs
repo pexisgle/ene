@@ -3530,6 +3530,8 @@ fn show_work(
             goal: state.new_job_goal.trim().to_owned(),
             title: (!state.new_job_title.trim().is_empty())
                 .then(|| state.new_job_title.trim().to_owned()),
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
         };
         state.submitted_job = Some(request.clone());
         let client = Arc::clone(client);

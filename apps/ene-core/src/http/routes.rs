@@ -773,6 +773,8 @@ pub async fn create_job(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let success_criteria = req.success_criteria.clone();
+    let allowed_tools = req.allowed_tools.clone();
     let value = state
         .core
         .supervisor()
@@ -784,6 +786,8 @@ pub async fn create_job(
                 "mode": "public",
                 "title": title,
                 "soul_id": soul.to_string(),
+                "success_criteria": success_criteria,
+                "allowed_tools": allowed_tools,
             }),
             Layer::Surface,
         )

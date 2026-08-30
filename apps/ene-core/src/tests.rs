@@ -151,6 +151,8 @@ async fn job_workspace_stays_under_boot_data_dir() {
             created_from_turn: None,
             depth: 0,
             parent_id: None,
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
         })
         .unwrap();
 
@@ -338,6 +340,8 @@ async fn boot_reports_interrupted_job_without_resume() {
                 created_from_turn: None,
                 depth: 0,
                 parent_id: None,
+                success_criteria: Vec::new(),
+                allowed_tools: Vec::new(),
             })
             .unwrap();
         store

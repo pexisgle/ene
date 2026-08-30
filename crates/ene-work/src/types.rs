@@ -83,6 +83,8 @@ pub struct Job {
     pub plan: Option<String>,
     pub brief: Option<String>,
     pub plan_approved: bool,
+    pub success_criteria: Vec<String>,
+    pub allowed_tools: Vec<String>,
     pub created_at: String,
     pub ended_at: Option<String>,
 }
@@ -98,6 +100,8 @@ pub struct NewJob {
     pub created_from_turn: Option<String>,
     pub plan: Option<String>,
     pub brief: Option<String>,
+    pub success_criteria: Vec<String>,
+    pub allowed_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

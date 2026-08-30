@@ -44,6 +44,14 @@ pub enum WorkError {
     PlanNotApproved,
     #[error("job lane: {0}")]
     JobLane(String),
+    #[error("invalid contract: {0}")]
+    InvalidContract(String),
+    #[error("verification failed: {0}")]
+    VerificationFailed(String),
+    #[error("workspace violation: {0}")]
+    WorkspaceViolation(String),
+    #[error("interrupted")]
+    Interrupted,
     #[error("unsupported artifact kind {0}")]
     UnsupportedArtifact(String),
 }

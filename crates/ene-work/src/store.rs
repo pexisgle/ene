@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   plan TEXT,
   brief TEXT,
   plan_approved INTEGER NOT NULL DEFAULT 0,
+  success_criteria TEXT NOT NULL DEFAULT '[]',
+  allowed_tools TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL,
   ended_at TEXT
 );
@@ -116,6 +118,24 @@ impl WorkStore {
                 [],
             )?;
         }
+        let success_criteria_exists = conn
+            .prepare("SELECT success_criteria FROM jobs LIMIT 0")
+            .is_ok();
+        if !success_criteria_exists {
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN success_criteria TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
+        let allowed_tools_exists = conn
+            .prepare("SELECT allowed_tools FROM jobs LIMIT 0")
+            .is_ok();
+        if !allowed_tools_exists {
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN allowed_tools TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
         let mcp_args_exists = conn.prepare("SELECT args FROM mcp_servers LIMIT 0").is_ok();
         if !mcp_args_exists {
             conn.execute(
@@ -151,12 +171,16 @@ impl WorkStore {
     pub fn insert_job(&self, new: &NewJob) -> Result<Job, WorkError> {
         let id = new.id.unwrap_or_default();
         let now = Utc::now().to_rfc3339();
+        let success_criteria =
+            serde_json::to_string(&new.success_criteria).unwrap_or_else(|_| "[]".to_owned());
+        let allowed_tools =
+            serde_json::to_string(&new.allowed_tools).unwrap_or_else(|_| "[]".to_owned());
         self.conn.lock().execute(
             "INSERT INTO jobs (
                 id, soul_id, title, goal, mode, status, progress_fraction, progress_note,
                 workspace_dir, error_class, created_from_turn, plan, brief, plan_approved,
-                created_at, ended_at
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                success_criteria, allowed_tools, created_at, ended_at
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
                 id.to_string(),
                 new.soul_id.to_string(),
@@ -172,6 +196,8 @@ impl WorkStore {
                 &new.plan,
                 &new.brief,
                 0_i32,
+                &success_criteria,
+                &allowed_tools,
                 now,
                 None::<String>,
             ],
@@ -185,7 +211,7 @@ impl WorkStore {
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, title, goal, mode, status, progress_fraction, progress_note,
                     workspace_dir, error_class, created_from_turn, plan, brief, plan_approved,
-                    created_at, ended_at
+                    success_criteria, allowed_tools, created_at, ended_at
              FROM jobs WHERE id = ?1",
         )?;
         stmt.query_row(params![id.to_string()], row_job)
@@ -348,7 +374,7 @@ impl WorkStore {
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, title, goal, mode, status, progress_fraction, progress_note,
                     workspace_dir, error_class, created_from_turn, plan, brief, plan_approved,
-                    created_at, ended_at
+                    success_criteria, allowed_tools, created_at, ended_at
              FROM jobs WHERE soul_id = ?1 AND mode = 'public' ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![soul.to_string()], row_job)?;
@@ -360,7 +386,7 @@ impl WorkStore {
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, title, goal, mode, status, progress_fraction, progress_note,
                     workspace_dir, error_class, created_from_turn, plan, brief, plan_approved,
-                    created_at, ended_at
+                    success_criteria, allowed_tools, created_at, ended_at
              FROM jobs WHERE mode = 'public' ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_job)?;
@@ -953,8 +979,10 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         plan: row.get(11)?,
         brief: row.get(12)?,
         plan_approved: row.get::<_, i32>(13)? != 0,
-        created_at: row.get(14)?,
-        ended_at: row.get(15)?,
+        success_criteria: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
+        allowed_tools: serde_json::from_str(&row.get::<_, String>(15)?).unwrap_or_default(),
+        created_at: row.get(16)?,
+        ended_at: row.get(17)?,
     })
 }
 
