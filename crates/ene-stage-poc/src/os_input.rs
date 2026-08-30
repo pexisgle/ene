@@ -275,6 +275,11 @@ impl X11Shape {
             0,
             &xrects,
         ));
+        // x11rb buffers fire-and-forget requests; without a flush the
+        // idle probe never sends the shape (it only draws a couple of frames).
+        if let Err(err) = x11rb::connection::Connection::flush(&self.conn) {
+            tracing::debug!(error = %err, "x11 shape flush failed");
+        }
     }
 }
 
@@ -357,6 +362,7 @@ impl WaylandRegion {
         }
         self.surface.set_input_region(Some(&region));
         self.surface.commit();
+        drop(self.connection.flush());
     }
 }
 
