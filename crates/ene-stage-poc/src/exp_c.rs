@@ -277,8 +277,7 @@ impl ApplicationHandler for BenchApp {
             }
             _ => {}
         }
-        let redraw = matches!(inner.phase, Phase::Warmup | Phase::Measure)
-            || inner.metrics.frames.is_empty();
+        let redraw = matches!(inner.phase, Phase::Warmup | Phase::Measure);
         if redraw {
             inner.window.request_redraw();
             event_loop.set_control_flow(ControlFlow::Poll);
