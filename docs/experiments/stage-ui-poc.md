@@ -5,6 +5,9 @@ Isolated technical probes for a future Stage window that composites
 window. **Not a product path.** Production `ene-stage` still uses
 egui chrome + a wgpu overlay and is unchanged.
 
+Follow-up measurements (fair compositor cost, X11 vs Wayland
+click-through): [Stage UI probe 2](stage-ui-poc-2.md).
+
 Code: `crates/ene-stage-poc/`
 
 | Binary | Experiment |
@@ -328,4 +331,4 @@ Criteria:
 - No deletion of egui.
 - No change to the production overlay.
 - No GPU picking.
-- No Wayland compositor run in this Cloud Agent VM (`DISPLAY=:1` is X11).
+- Wayland compositor testing is in [Stage UI probe 2](stage-ui-poc-2.md).

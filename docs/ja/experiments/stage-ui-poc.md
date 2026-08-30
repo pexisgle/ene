@@ -5,6 +5,9 @@
 **製品経路ではありません。** 本番 `ene-stage` は egui chrome + wgpu
 オーバーレイのままです。
 
+続きの測定（公平な compositor コスト、X11 と Wayland の
+click-through）: [Stage UI 検証 2](stage-ui-poc-2.md)。
+
 コード: `crates/ene-stage-poc/`
 
 | バイナリ | 実験 |
@@ -298,4 +301,4 @@ GPU→CPU コピー: 合成経路にはない。
 - egui 削除なし。
 - 本番オーバーレイの変更なし。
 - GPU picking なし。
-- この Cloud Agent VM での Wayland コンポジタ走行なし（`DISPLAY=:1` は X11）。
+- Wayland コンポジタの検証は [Stage UI 検証 2](stage-ui-poc-2.md) にあります。

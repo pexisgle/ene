@@ -28,6 +28,7 @@ Ene は Rust で書かれた **ローカル AI コンパニオン型ハーネス
 | [アプリ](apps/stage.md) | stage、CLI、旧 desktop のユーザーガイド |
 | [ガイド](guides/character-editor.md) | 作業別の手順 |
 | [実験](experiments/stage-ui-poc.md) | Slint + 共有 wgpu の Stage UI 検証 |
+| [実験（2）](experiments/stage-ui-poc-2.md) | 公平な compositor コストと Linux 入力領域 |
 | [リファレンス](reference/crates.md) | クレート地図と描画 API |
 
 日本語版は [日本語ドキュメント](index.md) です。
