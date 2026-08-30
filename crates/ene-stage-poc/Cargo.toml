@@ -27,6 +27,10 @@ path = "src/bin/poc_d.rs"
 name = "ene-stage-poc-click-sink"
 path = "src/bin/poc_click_sink.rs"
 
+[[bin]]
+name = "ene-stage-poc-x11-shape"
+path = "src/bin/poc_x11_shape.rs"
+
 [dependencies]
 ene-config = { workspace = true }
 ene-vrm = { workspace = true }
@@ -54,7 +58,7 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11
 [target.'cfg(target_os = "linux")'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland"] }
 wayland-client = { version = "0.31", default-features = false }
-x11rb = { version = "0.13", default-features = false }
+x11rb = { version = "0.13", default-features = false, features = ["shape"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true }

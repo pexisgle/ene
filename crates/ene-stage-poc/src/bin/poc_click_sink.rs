@@ -32,6 +32,7 @@ fn run(log_path: PathBuf) -> Result<(), String> {
         log_path,
         started: Instant::now(),
         clicks: 0,
+        cursor: None,
         deadline: std::env::var("ENE_STAGE_POC_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -45,6 +46,7 @@ struct SinkApp {
     log_path: PathBuf,
     started: Instant,
     clicks: u32,
+    cursor: Option<(f64, f64)>,
     deadline: Option<std::time::Duration>,
 }
 
@@ -72,25 +74,37 @@ impl ApplicationHandler for SinkApp {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = Some((position.x, position.y));
+            }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
-                self.clicks = self.clicks.saturating_add(1);
+                let (x, y) = self.cursor.unwrap_or((0.0, 0.0));
+                let kind = match state {
+                    ElementState::Pressed => "PRESS",
+                    ElementState::Released => "RELEASE",
+                };
+                if state == ElementState::Pressed {
+                    self.clicks = self.clicks.saturating_add(1);
+                }
+                let wall = self.started.elapsed().as_secs_f64() * 1000.0;
                 let line = format!(
-                    "SINK CLICK n={} wall_ms={:.0}\n",
-                    self.clicks,
-                    self.started.elapsed().as_secs_f64() * 1000.0
+                    "SINK {kind} x={x:.0} y={y:.0} n={} wall_ms={wall:.0}\n",
+                    self.clicks
                 );
                 print!("{line}");
-                if let Ok(mut file) = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.log_path)
-                {
-                    drop(file.write_all(line.as_bytes()));
+                if state == ElementState::Pressed {
+                    let click = format!(
+                        "SINK CLICK n={} wall_ms={wall:.0} x={x:.0} y={y:.0}\n",
+                        self.clicks
+                    );
+                    print!("{click}");
+                    self.append(&click);
                 }
+                self.append(&line);
             }
             _ => {}
         }
@@ -102,6 +116,18 @@ impl ApplicationHandler for SinkApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.deadline.is_some_and(|d| self.started.elapsed() >= d) {
             event_loop.exit();
+        }
+    }
+}
+
+impl SinkApp {
+    fn append(&self, line: &str) {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)
+        {
+            drop(file.write_all(line.as_bytes()));
         }
     }
 }

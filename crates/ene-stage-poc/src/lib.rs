@@ -11,6 +11,7 @@ pub mod app;
 pub mod blit;
 pub mod exp_c;
 pub mod exp_d;
+pub mod exp_d2;
 pub mod gpu;
 pub mod input;
 pub mod metrics;
@@ -19,6 +20,7 @@ pub mod region;
 pub mod slint_host;
 pub mod triangle;
 pub mod vrm_scene;
+pub mod x11_split;
 
 pub use app::{PocMode, run};
 pub use input::{
@@ -58,7 +60,8 @@ mod tests {
         let triangle = include_str!("triangle.rs");
         let vrm = include_str!("vrm_scene.rs");
         let exp_c = include_str!("exp_c.rs");
-        for src in [app, blit, triangle, vrm, exp_c] {
+        let exp_d2 = include_str!("exp_d2.rs");
+        for src in [app, blit, triangle, vrm, exp_c, exp_d2] {
             assert!(
                 !src.contains("texture.map_async") && !src.contains("Buffer::map_async"),
                 "GPU→CPU map is forbidden in the PoC"

@@ -27,21 +27,59 @@ slint::slint! {
 
         in-out property <float> bubble-x: 40;
         in-out property <float> bubble-y: 80;
+        in-out property <float> bubble-w: 280;
+        in-out property <float> bubble-h: 140;
         in-out property <float> bubble-opacity: 1.0;
         in-out property <float> bubble-scale: 1.0;
         in-out property <bool> show-bubble: true;
         in-out property <bool> show-menu: false;
         in-out property <bool> show-cursor: false;
+        in-out property <bool> show-glow: false;
+        in-out property <bool> show-shadow: false;
+        in-out property <bool> show-particle: false;
+        in-out property <bool> show-field: false;
+        in-out property <float> glow-pad: 40;
+        in-out property <float> particle-x: 60;
+        in-out property <float> particle-y: 520;
         in-out property <float> cursor-opacity: 1.0;
         in-out property <string> status-text: "ready";
         in-out property <int> click-count: 0;
         callback bubble-clicked();
 
         Rectangle {
+            x: 100px;
+            y: 100px;
+            width: 600px;
+            height: 400px;
+            visible: root.show-field;
+            background: #1aa0a066;
+        }
+
+        Rectangle {
+            x: (root.bubble-x - root.glow-pad) * 1px;
+            y: (root.bubble-y - root.glow-pad) * 1px;
+            width: (root.bubble-w * root.bubble-scale + root.glow-pad * 2) * 1px;
+            height: (root.bubble-h * root.bubble-scale + root.glow-pad * 2) * 1px;
+            visible: root.show-glow;
+            border-radius: 36px;
+            background: #40d0ff55;
+        }
+
+        Rectangle {
+            x: (root.bubble-x + 18) * 1px;
+            y: (root.bubble-y + 24) * 1px;
+            width: root.bubble-w * root.bubble-scale * 1px;
+            height: root.bubble-h * root.bubble-scale * 1px;
+            visible: root.show-shadow;
+            border-radius: 18px;
+            background: #00000077;
+        }
+
+        Rectangle {
             x: root.bubble-x * 1px;
             y: root.bubble-y * 1px;
-            width: 280px * root.bubble-scale;
-            height: 140px * root.bubble-scale;
+            width: root.bubble-w * root.bubble-scale * 1px;
+            height: root.bubble-h * root.bubble-scale * 1px;
             opacity: root.bubble-opacity;
             visible: root.show-bubble;
             border-radius: 18px;
@@ -95,6 +133,16 @@ slint::slint! {
                     color: #f4fbff;
                 }
             }
+        }
+
+        Rectangle {
+            x: root.particle-x * 1px;
+            y: root.particle-y * 1px;
+            width: 20px;
+            height: 20px;
+            visible: root.show-particle;
+            border-radius: 10px;
+            background: #ffd060ee;
         }
     }
 }
@@ -328,9 +376,51 @@ pub fn bubble_rect(ui: &StagePoc, scale: f32) -> crate::input::ScreenRect {
     crate::input::ScreenRect::new(
         ui.get_bubble_x() * scale,
         ui.get_bubble_y() * scale,
-        280.0 * ui.get_bubble_scale() * scale,
-        140.0 * ui.get_bubble_scale() * scale,
+        ui.get_bubble_w() * ui.get_bubble_scale() * scale,
+        ui.get_bubble_h() * ui.get_bubble_scale() * scale,
     )
+}
+
+#[must_use]
+pub fn glow_rect(ui: &StagePoc, scale: f32) -> crate::input::ScreenRect {
+    if !ui.get_show_glow() {
+        return crate::input::ScreenRect::new(0.0, 0.0, 0.0, 0.0);
+    }
+    bubble_rect(ui, scale).inflate(ui.get_glow_pad() * scale)
+}
+
+#[must_use]
+pub fn shadow_rect(ui: &StagePoc, scale: f32) -> crate::input::ScreenRect {
+    if !ui.get_show_shadow() {
+        return crate::input::ScreenRect::new(0.0, 0.0, 0.0, 0.0);
+    }
+    crate::input::ScreenRect::new(
+        (ui.get_bubble_x() + 18.0) * scale,
+        (ui.get_bubble_y() + 24.0) * scale,
+        ui.get_bubble_w() * ui.get_bubble_scale() * scale,
+        ui.get_bubble_h() * ui.get_bubble_scale() * scale,
+    )
+}
+
+#[must_use]
+pub fn particle_rect(ui: &StagePoc, scale: f32) -> crate::input::ScreenRect {
+    if !ui.get_show_particle() {
+        return crate::input::ScreenRect::new(0.0, 0.0, 0.0, 0.0);
+    }
+    crate::input::ScreenRect::new(
+        ui.get_particle_x() * scale,
+        ui.get_particle_y() * scale,
+        20.0 * scale,
+        20.0 * scale,
+    )
+}
+
+#[must_use]
+pub fn field_rect(ui: &StagePoc, scale: f32) -> crate::input::ScreenRect {
+    if !ui.get_show_field() {
+        return crate::input::ScreenRect::new(0.0, 0.0, 0.0, 0.0);
+    }
+    crate::input::ScreenRect::new(100.0 * scale, 100.0 * scale, 600.0 * scale, 400.0 * scale)
 }
 
 #[must_use]
@@ -351,6 +441,22 @@ pub fn ui_regions(ui: &StagePoc, scale: f32) -> Vec<crate::input::ScreenRect> {
     let menu = menu_rect(ui, scale);
     if !menu.is_empty() {
         out.push(menu);
+    }
+    out
+}
+
+#[must_use]
+pub fn visual_decoration_rects(ui: &StagePoc, scale: f32) -> Vec<crate::input::ScreenRect> {
+    let mut out = Vec::new();
+    for rect in [
+        field_rect(ui, scale),
+        glow_rect(ui, scale),
+        shadow_rect(ui, scale),
+        particle_rect(ui, scale),
+    ] {
+        if !rect.is_empty() {
+            out.push(rect);
+        }
     }
     out
 }

@@ -21,6 +21,50 @@ pub fn build_input_regions(
     out
 }
 
+fn nonempty(rects: &[ScreenRect]) -> Vec<ScreenRect> {
+    rects
+        .iter()
+        .copied()
+        .filter(|rect| !rect.is_empty())
+        .collect()
+}
+
+/// Visual footprint: glow, shadow, particles, outline, and interactive widgets.
+#[must_use]
+pub fn build_visual_region(rects: &[ScreenRect]) -> Vec<ScreenRect> {
+    nonempty(rects)
+}
+
+/// Interaction footprint: speech bubble and coarse VRM colliders only.
+#[must_use]
+pub fn build_interaction_region(rects: &[ScreenRect]) -> Vec<ScreenRect> {
+    nonempty(rects)
+}
+
+#[must_use]
+pub fn vrm_visual_regions(layout: Option<&VrmHitLayout>, outline_pad: f32) -> Vec<ScreenRect> {
+    let Some(layout) = layout else {
+        return Vec::new();
+    };
+    let mut out = vrm_regions(Some(layout));
+    let hair = ScreenRect::new(
+        layout.head.x - 8.0,
+        layout.head.y - 24.0,
+        layout.head.w + 16.0,
+        28.0,
+    );
+    if !hair.is_empty() {
+        out.push(hair);
+    }
+    if outline_pad > 0.0 {
+        out = out
+            .into_iter()
+            .map(|rect| rect.inflate(outline_pad))
+            .collect();
+    }
+    out
+}
+
 #[must_use]
 pub fn vrm_regions(layout: Option<&VrmHitLayout>) -> Vec<ScreenRect> {
     let Some(layout) = layout else {
@@ -68,6 +112,72 @@ pub fn should_apply_region(
         return false;
     }
     last_apply.is_none_or(|prev| now.saturating_duration_since(prev) >= min_interval)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerHit {
+    Interaction,
+    VisualOnly,
+    Background,
+}
+
+#[must_use]
+pub fn classify_layers(
+    point: ScreenPoint,
+    visual: &[ScreenRect],
+    interaction: &[ScreenRect],
+) -> LayerHit {
+    if interaction.iter().any(|rect| rect.contains(point)) {
+        LayerHit::Interaction
+    } else if visual.iter().any(|rect| rect.contains(point)) {
+        LayerHit::VisualOnly
+    } else {
+        LayerHit::Background
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveInput {
+    MatchesRequested,
+    MatchesBounding,
+    FullWindow,
+    ClientRect,
+    FrameRect,
+    Other,
+}
+
+#[must_use]
+pub fn rects_match(a: &[ScreenRect], b: &[ScreenRect], threshold_px: f32) -> bool {
+    !regions_dirty(a, b, threshold_px)
+}
+
+#[must_use]
+pub fn classify_effective_input(
+    input: &[ScreenRect],
+    bounding: &[ScreenRect],
+    window: ScreenRect,
+    frame: Option<ScreenRect>,
+    requested: &[ScreenRect],
+) -> EffectiveInput {
+    if rects_match(input, requested, 2.0) {
+        return EffectiveInput::MatchesRequested;
+    }
+    if rects_match(input, bounding, 2.0) {
+        return EffectiveInput::MatchesBounding;
+    }
+    if input.len() == 1 && rect_delta(input[0], window) <= 2.0 {
+        return EffectiveInput::FullWindow;
+    }
+    if let Some(frame) = frame
+        && input.len() == 1
+        && rect_delta(input[0], frame) <= 2.0
+    {
+        return EffectiveInput::FrameRect;
+    }
+    if input.len() == 1 {
+        return EffectiveInput::ClientRect;
+    }
+    EffectiveInput::Other
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,5 +371,160 @@ mod tests {
             t0 + std::time::Duration::from_millis(50)
         ));
         assert!(!should_apply_region(false, None, interval, t0));
+    }
+
+    fn glow(pad: f32) -> ScreenRect {
+        bubble().inflate(pad)
+    }
+
+    #[test]
+    fn visual_is_larger_than_interaction() {
+        let visual = build_visual_region(&[glow(40.0), bubble()]);
+        let interaction = build_interaction_region(&[bubble()]);
+        let vis = crate::input::aabb_union(&visual);
+        let inter = crate::input::aabb_union(&interaction);
+        assert!(vis.w > inter.w);
+        assert!(vis.h > inter.h);
+        assert!(visual.len() >= interaction.len());
+    }
+
+    #[test]
+    fn visual_only_glow_is_outside_interaction() {
+        let visual = build_visual_region(&[glow(40.0), bubble()]);
+        let interaction = build_interaction_region(&[bubble()]);
+        let point = ScreenPoint {
+            x: bubble().x - 10.0,
+            y: bubble().y + 20.0,
+        };
+        assert_eq!(
+            classify_layers(point, &visual, &interaction),
+            LayerHit::VisualOnly
+        );
+        assert!(glow(40.0).contains(point));
+        assert!(!bubble().contains(point));
+    }
+
+    #[test]
+    fn hidden_ui_drops_from_visual_and_interaction() {
+        let vrm = layout();
+        let visual = build_visual_region(&vrm_visual_regions(Some(&vrm), 0.0));
+        let interaction = build_interaction_region(&vrm_regions(Some(&vrm)));
+        assert!(!visual.iter().any(|rect| *rect == bubble()));
+        assert!(!interaction.iter().any(|rect| *rect == bubble()));
+        assert!(!interaction.is_empty());
+    }
+
+    #[test]
+    fn vrm_movement_dirties_visual() {
+        let a = layout();
+        let mut b = a;
+        b.head.y -= 10.0;
+        b.torso.x += 8.0;
+        assert!(regions_dirty(
+            &vrm_visual_regions(Some(&a), 8.0),
+            &vrm_visual_regions(Some(&b), 8.0),
+            2.0
+        ));
+    }
+
+    #[test]
+    fn interaction_movement_dirties_interaction() {
+        let bubble_a = bubble();
+        let bubble_b = ScreenRect::new(bubble().x + 12.0, bubble().y, bubble().w, bubble().h);
+        assert!(regions_dirty(
+            &build_interaction_region(&[bubble_a]),
+            &build_interaction_region(&[bubble_b]),
+            2.0
+        ));
+        assert!(!regions_dirty(
+            &build_interaction_region(&[bubble_a]),
+            &build_interaction_region(&[bubble_a]),
+            2.0
+        ));
+    }
+
+    #[test]
+    fn empty_visual_and_interaction() {
+        assert!(build_visual_region(&[]).is_empty());
+        assert!(build_interaction_region(&[]).is_empty());
+        assert_eq!(
+            classify_layers(ScreenPoint { x: 1.0, y: 1.0 }, &[], &[]),
+            LayerHit::Background
+        );
+    }
+
+    #[test]
+    fn multiple_components_keep_glow_shadow_and_vrm() {
+        let vrm = layout();
+        let shadow = ScreenRect::new(58.0, 104.0, 280.0, 140.0);
+        let particle = ScreenRect::new(720.0, 40.0, 20.0, 20.0);
+        let visual = build_visual_region(&[
+            glow(40.0),
+            shadow,
+            bubble(),
+            particle,
+            crate::input::aabb_union(&vrm_visual_regions(Some(&vrm), 8.0)),
+        ]);
+        let interaction = build_interaction_region(&[bubble(), menu()]);
+        assert!(visual.len() >= 4);
+        assert_eq!(interaction.len(), 2);
+        assert_eq!(
+            classify_layers(
+                ScreenPoint {
+                    x: particle.x + 2.0,
+                    y: particle.y + 2.0
+                },
+                &visual,
+                &interaction
+            ),
+            LayerHit::VisualOnly
+        );
+        assert_eq!(
+            classify_layers(
+                ScreenPoint {
+                    x: bubble().x + 4.0,
+                    y: bubble().y + 4.0
+                },
+                &visual,
+                &interaction
+            ),
+            LayerHit::Interaction
+        );
+    }
+
+    #[test]
+    fn threshold_dirty_flags_are_independent() {
+        let visual_a = vec![ScreenRect::new(0.0, 0.0, 100.0, 100.0)];
+        let visual_b = vec![ScreenRect::new(8.0, 0.0, 100.0, 100.0)];
+        let interaction = vec![ScreenRect::new(10.0, 10.0, 20.0, 20.0)];
+        assert!(regions_dirty(&visual_a, &visual_b, 2.0));
+        assert!(!regions_dirty(&interaction, &interaction, 2.0));
+        assert!(!regions_dirty(&visual_a, &visual_a, 2.0));
+        let visual_tiny = vec![ScreenRect::new(1.0, 0.0, 100.0, 100.0)];
+        assert!(!regions_dirty(&visual_a, &visual_tiny, 2.0));
+    }
+
+    #[test]
+    fn effective_input_classifies_full_window_after_reset() {
+        let bounding = vec![ScreenRect::new(100.0, 100.0, 600.0, 400.0)];
+        let requested = vec![ScreenRect::new(300.0, 250.0, 200.0, 100.0)];
+        let window = ScreenRect::new(0.0, 0.0, 800.0, 600.0);
+        assert_eq!(
+            classify_effective_input(&requested, &bounding, window, None, &requested),
+            EffectiveInput::MatchesRequested
+        );
+        assert_eq!(
+            classify_effective_input(&bounding, &bounding, window, None, &requested),
+            EffectiveInput::MatchesBounding
+        );
+        assert_eq!(
+            classify_effective_input(&[window], &bounding, window, None, &requested),
+            EffectiveInput::FullWindow
+        );
+        let frame = ScreenRect::new(-4.0, -28.0, 808.0, 632.0);
+        assert_eq!(
+            classify_effective_input(&[frame], &bounding, window, Some(frame), &requested),
+            EffectiveInput::FrameRect
+        );
     }
 }

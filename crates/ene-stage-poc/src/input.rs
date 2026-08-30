@@ -62,6 +62,41 @@ impl ScreenRect {
             round_i32(self.h),
         ))
     }
+
+    #[must_use]
+    pub fn inflate(self, pad: f32) -> Self {
+        Self::new(
+            self.x - pad,
+            self.y - pad,
+            (self.w + pad * 2.0).max(0.0),
+            (self.h + pad * 2.0).max(0.0),
+        )
+    }
+
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = (self.x + self.w).max(other.x + other.w);
+        let bottom = (self.y + self.h).max(other.y + other.h);
+        Self::new(x, y, right - x, bottom - y)
+    }
+}
+
+#[must_use]
+pub fn aabb_union(rects: &[ScreenRect]) -> ScreenRect {
+    rects
+        .iter()
+        .copied()
+        .filter(|rect| !rect.is_empty())
+        .reduce(ScreenRect::union)
+        .unwrap_or(ScreenRect::new(0.0, 0.0, 0.0, 0.0))
 }
 
 /// Coarse screen-space colliders for a single body.
