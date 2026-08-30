@@ -183,8 +183,26 @@ pub enum TaskError {
     IllegalTransition { from: TaskState, to: TaskState },
 }
 
+fn normalize_path(path: &str) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut out = PathBuf::new();
+    for comp in std::path::Path::new(path).components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(s) => out.push(s),
+        }
+    }
+    out
+}
+
 pub fn verify_artifact(artifact: &ArtifactRef, task: &Task) -> Result<(), TaskError> {
-    if !artifact.path.starts_with(&task.contract.workspace) {
+    let ws = normalize_path(&task.contract.workspace);
+    let art = normalize_path(&artifact.path);
+    if !art.starts_with(&ws) {
         return Err(TaskError::WorkspaceViolation(format!(
             "{} not in {}",
             artifact.path, task.contract.workspace
@@ -194,17 +212,22 @@ pub fn verify_artifact(artifact: &ArtifactRef, task: &Task) -> Result<(), TaskEr
 }
 
 pub fn transition(task: &mut Task, next: TaskState) -> Result<(), TaskError> {
+    use TaskState::{Cancelled, Completed, Failed, Interrupted, Pending, Running, Verifying};
     match (task.state, next) {
-        (TaskState::Running, TaskState::Completed) => Err(TaskError::VerificationFailed(
+        (Running, Completed) => Err(TaskError::VerificationFailed(
             "must go through verifying".into(),
         )),
-        (TaskState::Cancelled, TaskState::Running)
-        | (TaskState::Cancelled, TaskState::Verifying)
-        | (TaskState::Cancelled, TaskState::Completed) => Err(TaskError::Cancelled),
-        _ => {
+        (Cancelled, Running | Verifying | Completed) => Err(TaskError::Cancelled),
+        (Pending, Running | Cancelled | Failed)
+        | (Running, Verifying | Cancelled | Interrupted)
+        | (Verifying, Completed | Failed | Cancelled | Interrupted) => {
             task.state = next;
             Ok(())
         }
+        _ => Err(TaskError::IllegalTransition {
+            from: task.state,
+            to: next,
+        }),
     }
 }
 
@@ -225,13 +248,13 @@ mod tests {
     #[test]
     fn incomplete_contract_rejected() {
         let mut c = contract();
-        c.goal = "".into();
+        c.goal = String::new();
         assert!(c.validate().is_err());
         let mut c2 = contract();
         c2.success_criteria.clear();
         assert!(c2.validate().is_err());
         let mut c3 = contract();
-        c3.workspace = "".into();
+        c3.workspace = String::new();
         assert!(c3.validate().is_err());
         assert!(Task::new("t1", c).is_err());
     }
@@ -308,5 +331,65 @@ mod tests {
         let task = Task::new("t1", contract()).expect("valid");
         assert!(!task.follow_up_requires_reapproval(&["fs".to_owned()]));
         assert!(task.follow_up_requires_reapproval(&["fs".to_owned(), "exec".to_owned()]));
+    }
+
+    #[test]
+    fn prefix_sibling_is_not_confinement() {
+        let task = Task::new("t1", contract()).expect("valid");
+        // /tmp/ws must not accept /tmp/ws2/out.md as confined.
+        let sibling = ArtifactRef {
+            path: "/tmp/ws2/out.md".into(),
+            workspace: "/tmp/ws".into(),
+        };
+        assert!(verify_artifact(&sibling, &task).is_err());
+        assert!(
+            Task::new(
+                "t1",
+                TaskContract {
+                    workspace: "/tmp/ws".into(),
+                    ..contract()
+                }
+            )
+            .expect("valid")
+            .register_artifact(ArtifactRef {
+                path: "/tmp/ws/out.md".into(),
+                workspace: "/tmp/ws".into(),
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn parent_dir_escape_is_not_confinement() {
+        let task = Task::new("t1", contract()).expect("valid");
+        let escaped = ArtifactRef {
+            path: "/tmp/ws/../etc/passwd".into(),
+            workspace: "/tmp/ws".into(),
+        };
+        assert!(verify_artifact(&escaped, &task).is_err());
+    }
+
+    #[test]
+    fn illegal_transitions_are_rejected() {
+        let mut pending = Task::new("t1", contract()).expect("valid");
+        assert!(transition(&mut pending, TaskState::Completed).is_err());
+        assert!(transition(&mut pending, TaskState::Verifying).is_err());
+        let mut running = Task::new("r", contract()).expect("valid");
+        running.start().expect("start");
+        assert!(transition(&mut running, TaskState::Completed).is_err());
+        let mut ver = Task::new("v", contract()).expect("valid");
+        ver.start().expect("start");
+        ver.begin_verifying().expect("verifying");
+        assert!(transition(&mut ver, TaskState::Running).is_err());
+        let mut done = Task::new("d", contract()).expect("valid");
+        done.start().expect("start");
+        done.begin_verifying().expect("verifying");
+        done.register_artifact(ArtifactRef {
+            path: "/tmp/ws/out.md".into(),
+            workspace: "/tmp/ws".into(),
+        })
+        .expect("artifact");
+        done.complete().expect("complete");
+        assert!(transition(&mut done, TaskState::Running).is_err());
     }
 }
