@@ -747,7 +747,12 @@ impl StageApp {
                             mapped.clone_into(&mut self.surface.status);
                         }
                         let has_assistant = history.messages.iter().any(|m| m.role == "assistant");
-                        if !has_assistant
+                        let has_status = history
+                            .messages
+                            .iter()
+                            .any(|m| m.role == "status" || m.role == "error");
+                        let has_terminal = has_assistant || has_status;
+                        if !has_terminal
                             && !self.surface.history.messages.is_empty()
                             && self.pending_completion_refreshes > 0
                         {
@@ -756,7 +761,7 @@ impl StageApp {
                             self.session.replace_history(history.clone());
                             self.surface.history = history;
                         }
-                        if self.pending_completion_refreshes > 0 && has_assistant {
+                        if self.pending_completion_refreshes > 0 && has_terminal {
                             self.pending_completion_refreshes = 0;
                         }
                         self.surface.streaming_text.clear();
@@ -779,11 +784,13 @@ impl StageApp {
                         // row carries a synthetic seq, so only an assistant row
                         // beyond the pre-turn assistant proves this turn ended.
                         let progressed = match self.completion_terminal_seq {
-                            None => history.messages.iter().any(|m| m.role == "assistant"),
-                            Some(terminal) => history
-                                .messages
-                                .iter()
-                                .any(|m| m.role == "assistant" && m.seq > terminal),
+                            None => history.messages.iter().any(|m| {
+                                m.role == "assistant" || m.role == "status" || m.role == "error"
+                            }),
+                            Some(terminal) => history.messages.iter().any(|m| {
+                                (m.role == "assistant" || m.role == "status" || m.role == "error")
+                                    && m.seq > terminal
+                            }),
                         };
                         if progressed {
                             self.surface.history = history.clone();
