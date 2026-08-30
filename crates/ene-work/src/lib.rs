@@ -24,6 +24,7 @@ mod skill;
 mod speech_gate;
 mod spill;
 mod store;
+mod task;
 mod tools;
 mod types;
 mod vision;
@@ -64,6 +65,9 @@ pub use spill::{
     DEFAULT_HARD_LIMIT_BYTES, DEFAULT_SOFT_LIMIT_BYTES, SpillResult, bound_brief, spill_tool_output,
 };
 pub use store::{MailboxEntry, WorkStore, next_fire};
+pub use task::{
+    ArtifactRef, Task, TaskContract, TaskError, TaskState, transition, verify_artifact,
+};
 pub use tools::{register_work_tools, surface_shows_delegate};
 pub use types::{
     Artifact, ArtifactKind, CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus,
