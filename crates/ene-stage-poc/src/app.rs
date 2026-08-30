@@ -83,6 +83,7 @@ struct Running {
     animating: bool,
     bench_until: Option<Instant>,
     shared_device: bool,
+    first_presented: bool,
 }
 
 impl ApplicationHandler for SlintApp {
@@ -121,14 +122,10 @@ impl ApplicationHandler for SlintApp {
         let Some(running) = self.inner.as_mut() else {
             return;
         };
-        if running.tick_bench(event_loop) {
+        if running.tick_bench(event_loop) || running.metrics.frames.is_empty() {
             running.window.request_redraw();
         }
-        event_loop.set_control_flow(if running.animating {
-            ControlFlow::Poll
-        } else {
-            ControlFlow::Wait
-        });
+        event_loop.set_control_flow(running.next_control_flow());
     }
 }
 
@@ -230,6 +227,7 @@ impl Running {
             animating,
             bench_until: bench_secs.map(|secs| started + Duration::from_secs(secs)),
             shared_device: true,
+            first_presented: false,
         })
     }
 
@@ -300,6 +298,21 @@ impl Running {
         self.animating || self.host.ui.window().has_active_animations()
     }
 
+    fn next_control_flow(&self) -> ControlFlow {
+        if self.animating {
+            return ControlFlow::Poll;
+        }
+        let now = Instant::now();
+        let mut deadline = now + Duration::from_millis(250);
+        if self.mode == PocMode::Composition && !self.animating {
+            deadline = deadline.min(self.started + Duration::from_secs(3));
+        }
+        if let Some(bench) = self.bench_until {
+            deadline = deadline.min(bench);
+        }
+        ControlFlow::WaitUntil(deadline)
+    }
+
     fn resize(&mut self, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
@@ -318,6 +331,9 @@ impl Running {
 
     fn render_frame(&mut self) -> Result<(), PocError> {
         slint::platform::update_timers_and_animations();
+        if !self.first_presented {
+            tracing::info!("first frame begin");
+        }
         let scale = self.window.scale_factor() as f32;
         let size = self.window.inner_size();
         if self.config.width != size.width || self.config.height != size.height {
@@ -386,6 +402,10 @@ impl Running {
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         self.metrics.on_frame();
+        if !self.first_presented {
+            self.first_presented = true;
+            tracing::info!("first frame presented");
+        }
 
         let layout = self.vrm_layout();
         let ui_rect = slint_host::bubble_rect(&self.host.ui, scale);
@@ -428,7 +448,6 @@ impl Running {
     }
 
     fn update_status(&self, scale: f32) {
-        let info = self.gpu.adapter.get_info();
         let scene = self
             .vrm
             .as_ref()
@@ -439,7 +458,6 @@ impl Running {
             server = self.input.display_server().name(),
             target = self.last_target,
         );
-        let _ = info;
         self.host.ui.set_status_text(text.into());
     }
 
@@ -576,11 +594,13 @@ impl ApplicationHandler for BaselineApp {
             event_loop.exit();
             return;
         }
-        inner.window.request_redraw();
+        if inner.animating || inner.metrics.frames.is_empty() {
+            inner.window.request_redraw();
+        }
         event_loop.set_control_flow(if inner.animating {
             ControlFlow::Poll
         } else {
-            ControlFlow::Wait
+            ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250))
         });
     }
 }
