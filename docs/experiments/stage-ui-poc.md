@@ -95,11 +95,35 @@ logic as `ene-stage`. Linux with lavapipe typically offers
 
 ### Performance
 
-Filled from a Cloud Agent Linux run (`DISPLAY=:1`, lavapipe) after
-`ENE_STAGE_POC_SECONDS=8`.
+Filled from a Cloud Agent Linux run (`DISPLAY=:1`, lavapipe, debug
+build) after `ENE_STAGE_POC_SECONDS=8`.
 
-See the measurement table in the run notes below. VRAM is **not**
-exposed by lavapipe / wgpu without a vendor API; RSS is the proxy.
+Adapter: `llvmpipe (LLVM 20.1.2, 256 bits)`, backend Vulkan.
+`transparency=true` (`Bgra8UnormSrgb`, `PreMultiplied`).
+VRM: `ene_vrm::minimal` fixture (`assets/characters/Alicia/*.vrm`
+is not in this workspace). VRAM is **not** exposed by lavapipe;
+RSS is the proxy. First-frame / shader-compile hitches dominate
+`max_ms`.
+
+| Probe | Phase | frames | avg frame | max frame | CPU user | CPU sys | RSS start | RSS end |
+|---|---|---|---|---|---|---|---|---|
+| A Slint+VRM | idle 3s | 2 | 135.1 ms | 169.5 ms | 280 ms | 20 ms | 122 MiB | 167 MiB |
+| A Slint+VRM | animation 5s | 657 | 11.77 ms | 2740 ms | 10480 ms | 610 ms | 167 MiB | 169 MiB |
+| B input | idle 8s | 2 | 133.6 ms | 162.4 ms | 260 ms | 50 ms | 122 MiB | 167 MiB |
+| egui+triangle | idle 3s | 1 | 21.1 ms | 21.1 ms | 20 ms | 0 | 114 MiB | 137 MiB |
+| egui+triangle | animation 5s | 2958 | 2.70 ms | 2990 ms | 6020 ms | 1570 ms | 137 MiB | 141 MiB |
+
+Idle is real `WaitUntil` (a couple of presents, then sleep). Animation
+is `Poll`. Slint+VRM is slower than the egui triangle baseline because
+the probe draws a VRM, an offscreen UI target, and a blit — not
+because FemtoVG is inherently 4× slower. On lavapipe, animation CPU
+exceeds wall time (software raster). This is not a product-GPU
+number.
+
+Shared Device/Queue: **yes**. Log line
+`FemtoVGWGPURenderer constructed from cloned GpuContext instance/device/queue`.
+GPU→CPU copies: **none** on the composition path (source scan + no
+`map_async` in frame code).
 
 ### Problems
 
@@ -173,7 +197,7 @@ ene never sees the click — that is the desired passthrough.
 | OS | Whole-window click-through | Interactive subset | Notes |
 |---|---|---|---|
 | **Windows** | Yes. `set_cursor_hittest(false)` + `WS_EX_TRANSPARENT`. | Yes, via `SetWindowRgn` union of UI+VRM rects (not per-pixel alpha). `WM_NCHITTEST` / DComp hit-testing would be a later refinement. | Matches stage overlay's HWND path. |
-| **X11** | Yes. XShape `Kind::Input` empty list. | Yes. Shape rectangles. | Stage today mostly toggles `set_cursor_hittest` (no-op on Linux). Desktop already uses shape. **X11 can query the global pointer** (`query_pointer`) so a fully click-through window can re-arm when the cursor returns. |
+| **X11** | Yes. XShape `Kind::Input` empty list. Protocol **works**: SHAPE 1.1 is present, `shape::rectangles(SET, INPUT)` succeeds, and same-connection `get_rectangles` returns the UI∪VRM set. | Yes, rectangle union. | **Compositor caveat (measured on xfwm4):** the WM reparents the client and, within about a frame, restores a full-window Input region. External `XShapeGetRectangles` then shows `0,0 800×600`, and empty-glass clicks still reach the client. `_NET_WM_BYPASS_COMPOSITOR=1` did not stop that reset here. In-process routing still classifies those clicks as `Passthrough`. Stage today mostly toggles `set_cursor_hittest` (no-op on Linux). Desktop already uses shape. **X11 can query the global pointer** (`query_pointer`) so a fully click-through window can re-arm when the cursor returns. Need per-WM verification (openbox / no compositor / picom). |
 | **Wayland** | Yes. `wl_surface::set_input_region` with an empty region. | Yes, rectangle union. **Not** per-pixel. | **No global pointer query.** If the region is empty, the client receives **no** pointer events and cannot hover-open a hole. The viable design is: OS region = UI ∪ VRM coarse rects at all times. Layer-shell (`zwlr_layer_shell_v1`) is optional for stacking above fullscreen; it is not required for input regions. `winit 0.30` `set_cursor_hittest` is a **no-op on Linux** (documented in `ene-desktop` and `ene-stage` platform modules). |
 
 **Wayland is not a blocker for the input model**, but it **is** a
@@ -182,9 +206,25 @@ ene-stage already documents that Wayland users must turn click-through
 off to drag. The PoC's `update_input_region(rects)` is the design that
 closes that gap.
 
-This Cloud Agent session runs under `DISPLAY=:1` (X11). Wayland
+This Cloud Agent session runs under `DISPLAY=:1` (X11, xfwm4). Wayland
 code is compiled and the protocol usage matches `ene-desktop`'s
 `wayland_region.rs`. It was not compositor-tested here.
+
+### Click log (Experiment B, real pointer)
+
+Window-relative clicks via `xdotool mousemove` then `click` (not
+`click --window`, which would XSendEvent and skip hit-testing):
+
+```
+UI hit: true   VRM hit: false  passthrough: false  target: Ui
+UI hit: false  VRM hit: true   passthrough: false  target: Vrm(Torso)
+UI hit: true   VRM hit: false  passthrough: false  target: Ui   # overlap
+UI hit: false  VRM hit: false  passthrough: true   target: Passthrough
+```
+
+Empty-glass events still arrived at the client on this xfwm4 session
+(see compositor caveat above). The in-process router did **not**
+treat them as UI or VRM.
 
 ### Performance concerns
 
@@ -201,18 +241,23 @@ not assumed away.
 
 ## Measurements (Cloud Agent Linux)
 
-Adapter / backend / RSS / CPU / frame time are printed by the binaries
-on exit. Values from this environment:
+See Experiment A performance table. Raw printer lines:
 
-<!-- filled after ENE_STAGE_POC_SECONDS runs -->
+```
+=== experiment-a ===
+adapter: llvmpipe (LLVM 20.1.2, 256 bits)
+backend: Vulkan
+shared_device=true transparency=true vrm=true input=x11 partial_region=true zero_copy=gpu-texture-blit
+phase=idle wall_ms=3000.5 frames=2 avg_ms=135.10 max_ms=169.51 cpu_user_ms=280.0 cpu_sys_ms=20.0 rss_start_kib=125168 rss_end_kib=170852
+phase=animation wall_ms=5005.6 frames=657 avg_ms=11.77 max_ms=2740.44 cpu_user_ms=10480.0 cpu_sys_ms=610.0 rss_start_kib=170852 rss_end_kib=173092
 
-| Probe | Phase | avg frame | max frame | CPU user | CPU sys | RSS start | RSS end |
-|---|---|---|---|---|---|---|---|
-| A Slint | idle | *pending* | | | | | |
-| A Slint | animation | *pending* | | | | | |
-| B input | idle | *pending* | | | | | |
-| egui baseline | idle | *pending* | | | | | |
-| egui baseline | animation | *pending* | | | | | |
+=== experiment-b ===
+phase=idle wall_ms=8000.7 frames=2 avg_ms=133.63 max_ms=162.39 cpu_user_ms=260.0 cpu_sys_ms=50.0 rss_start_kib=124828 rss_end_kib=170832
+
+=== egui-baseline ===
+phase=idle wall_ms=3000.3 frames=1 avg_ms=21.13 max_ms=21.13 cpu_user_ms=20.0 cpu_sys_ms=0.0 rss_start_kib=116288 rss_end_kib=140176
+phase=animation wall_ms=5000.9 frames=2958 avg_ms=2.70 max_ms=2989.63 cpu_user_ms=6020.0 cpu_sys_ms=1570.0 rss_start_kib=140176 rss_end_kib=144556
+```
 
 VRAM: unavailable on lavapipe (software Vulkan). No `nvidia-smi`.
 
@@ -268,9 +313,9 @@ Criteria:
 
 | Concern | Result |
 |---|---|
-| Performance | Extra UI blit is cheap; no readback. Measure on target GPUs. |
-| Memory | One extra Rgba8 UI target (window-sized). |
-| Input correctness | Pure-function tests pass; OS region is the Wayland-correct model. |
+| Performance | Extra UI blit is cheap on a real GPU; lavapipe animation is CPU-bound as expected. No readback. |
+| Memory | Idle RSS ~167 MiB Slint+VRM vs ~137 MiB egui+triangle. One extra window-sized Rgba8 UI target (~2 MiB). |
+| Input correctness | Pure-function tests pass. On this xfwm4 session, empty-glass still reached the client; the router labeled `Passthrough`. Wayland input regions remain the portable OS model. |
 | Transparency | Same alpha-mode picker as stage. |
 | Platform portability | Windows / X11 / Wayland all possible; APIs differ. |
 | Maintenance | Unstable Slint wgpu feature; pin and bump with wgpu. |

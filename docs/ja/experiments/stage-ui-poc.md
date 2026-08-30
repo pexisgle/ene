@@ -92,9 +92,32 @@ pass には置けません。オフスクリーン UI + blit で
 
 ### 性能
 
-Cloud Agent Linux（`DISPLAY=:1`、lavapipe）で
-`ENE_STAGE_POC_SECONDS=8` を走らせた値を下表に書きます。
-lavapipe / wgpu からは VRAM が取れないので RSS を代理にします。
+Cloud Agent Linux（`DISPLAY=:1`、lavapipe、debug ビルド）で
+`ENE_STAGE_POC_SECONDS=8` を走らせた値です。
+
+Adapter: `llvmpipe (LLVM 20.1.2, 256 bits)`、Vulkan。
+`transparency=true`（`Bgra8UnormSrgb` / `PreMultiplied`）。
+VRM は `ene_vrm::minimal` フィクスチャ（この workspace に Alicia なし）。
+VRAM は lavapipe から取れないので RSS を代理にします。`max_ms` は
+初回シェーダコンパイルのヒッチです。
+
+| プローブ | フェーズ | frames | 平均 | 最大 | CPU user | CPU sys | RSS 開始 | RSS 終了 |
+|---|---|---|---|---|---|---|---|---|
+| A Slint+VRM | idle 3s | 2 | 135.1 ms | 169.5 ms | 280 ms | 20 ms | 122 MiB | 167 MiB |
+| A Slint+VRM | animation 5s | 657 | 11.77 ms | 2740 ms | 10480 ms | 610 ms | 167 MiB | 169 MiB |
+| B input | idle 8s | 2 | 133.6 ms | 162.4 ms | 260 ms | 50 ms | 122 MiB | 167 MiB |
+| egui+三角形 | idle 3s | 1 | 21.1 ms | 21.1 ms | 20 ms | 0 | 114 MiB | 137 MiB |
+| egui+三角形 | animation 5s | 2958 | 2.70 ms | 2990 ms | 6020 ms | 1570 ms | 137 MiB | 141 MiB |
+
+Idle は本物の `WaitUntil`（数回 present して停止）。Animation は `Poll`。
+Slint+VRM が egui 三角形より遅いのは VRM + オフスクリーン UI + blit を
+描いているからで、FemtoVG が本質的に 4 倍遅いからではありません。
+lavapipe では animation の CPU が wall を超えます（ソフトウェアラスタ）。
+製品 GPU の数字ではありません。
+
+Device/Queue 共有: **成立**（ログ
+`FemtoVGWGPURenderer constructed from cloned GpuContext instance/device/queue`）。
+GPU→CPU コピー: 合成経路には**ない**。
 
 ### 問題点
 
@@ -162,7 +185,7 @@ VRM があるときは正規化 AABB（オーバーレイと同じ auto-fit）�
 | OS | 窓全体 click-through | インタラクティブ部分だけ | 制約 |
 |---|---|---|---|
 | **Windows** | 可。`set_cursor_hittest(false)` + `WS_EX_TRANSPARENT`。 | 可。UI+VRM 矩形の和を `SetWindowRgn`（ピクセル単位のアルファではない）。`WM_NCHITTEST` / DComp は後段。 | 本番オーバーレイの HWND 経路と同じ。 |
-| **X11** | 可。XShape `Kind::Input` の空リスト。 | 可。Shape 矩形。 | 本番 stage は Linux で `set_cursor_hittest` が no-op。desktop は既に shape を使う。**グローバルポインタを `query_pointer` できる**ので、全透過のあとカーソルが戻ったら再武装できる。 |
+| **X11** | 可。XShape `Kind::Input` の空リスト。プロトコルは**動く**: SHAPE 1.1 があり、`shape::rectangles(SET, INPUT)` は成功し、同一接続の `get_rectangles` は UI∪VRM 集合を返す。 | 可。矩形の和。 | **コンポジタの制約（xfwm4 で実測）:** WM が reparent したあと、およそ 1 フレームで Input を窓全体へ戻す。外部 `XShapeGetRectangles` は `0,0 800×600` になり、透明部分のクリックもクライアントに届く。`_NET_WM_BYPASS_COMPOSITOR=1` では止まらなかった。プロセス内ルーティングはそれを `Passthrough` と分類する。本番 stage の `set_cursor_hittest` は Linux で no-op。desktop は既に shape を使う。**グローバルポインタを `query_pointer` できる。** WM ごとに要確認（openbox / コンポジタなし / picom）。 |
 | **Wayland** | 可。空の `wl_surface::set_input_region`。 | 可。矩形の和。**ピクセル単位ではない。** | **グローバルポインタ照会がない。** region が空だとクライアントはポインタイベントを**一切**受け取らず、ホバーで穴を開けられない。成立する設計は常に OS region = UI ∪ VRM 粗矩形。`zwlr_layer_shell_v1` は全画面の上に載せる任意機能で、input region には不要。winit 0.30 の `set_cursor_hittest` は **Linux では no-op**（`ene-desktop` / `ene-stage` の platform モジュールに記載済み）。 |
 
 **Wayland は入力モデルの blocker ではない**が、
@@ -170,9 +193,24 @@ VRM があるときは正規化 AABB（オーバーレイと同じ auto-fit）�
 ene-stage は既に「Wayland では click-through を切ってからドラッグ」と
 書いています。PoC の `update_input_region(rects)` がその穴を閉じる設計です。
 
-この Cloud Agent は `DISPLAY=:1`（X11）です。Wayland コードはコンパイルされ、
-プロトコルは `ene-desktop` の `wayland_region.rs` と同じです。
+この Cloud Agent は `DISPLAY=:1`（X11、xfwm4）です。Wayland コードは
+コンパイルされ、プロトコルは `ene-desktop` の `wayland_region.rs` と同じです。
 コンポジタ上では未走行です。
+
+### クリックログ（実験 B、実ポインタ）
+
+`xdotool mousemove` のあと別プロセスで `click`（`click --window` は
+XSendEvent になり hit-test を飛ばす）:
+
+```
+UI hit: true   VRM hit: false  passthrough: false  target: Ui
+UI hit: false  VRM hit: true   passthrough: false  target: Vrm(Torso)
+UI hit: true   VRM hit: false  passthrough: false  target: Ui   # overlap
+UI hit: false  VRM hit: false  passthrough: true   target: Passthrough
+```
+
+この xfwm4 セッションでは透明部分のイベントもクライアントに届きました
+（上のコンポジタ制約）。プロセス内ルータは UI/VRM としては扱いません。
 
 ### 性能上の懸念
 
@@ -188,15 +226,23 @@ GPU readback なし。
 
 ## 測定（Cloud Agent Linux）
 
-バイナリ終了時に adapter / backend / RSS / CPU / frame time を印字します。
+実験 A の性能表を参照。バイナリが印字した生データ:
 
-| プローブ | フェーズ | 平均フレーム | 最大 | CPU user | CPU sys | RSS 開始 | RSS 終了 |
-|---|---|---|---|---|---|---|---|
-| A Slint | idle | *pending* | | | | | |
-| A Slint | animation | *pending* | | | | | |
-| B input | idle | *pending* | | | | | |
-| egui baseline | idle | *pending* | | | | | |
-| egui baseline | animation | *pending* | | | | | |
+```
+=== experiment-a ===
+adapter: llvmpipe (LLVM 20.1.2, 256 bits)
+backend: Vulkan
+shared_device=true transparency=true vrm=true input=x11 partial_region=true zero_copy=gpu-texture-blit
+phase=idle wall_ms=3000.5 frames=2 avg_ms=135.10 max_ms=169.51 cpu_user_ms=280.0 cpu_sys_ms=20.0 rss_start_kib=125168 rss_end_kib=170852
+phase=animation wall_ms=5005.6 frames=657 avg_ms=11.77 max_ms=2740.44 cpu_user_ms=10480.0 cpu_sys_ms=610.0 rss_start_kib=170852 rss_end_kib=173092
+
+=== experiment-b ===
+phase=idle wall_ms=8000.7 frames=2 avg_ms=133.63 max_ms=162.39 cpu_user_ms=260.0 cpu_sys_ms=50.0 rss_start_kib=124828 rss_end_kib=170832
+
+=== egui-baseline ===
+phase=idle wall_ms=3000.3 frames=1 avg_ms=21.13 max_ms=21.13 cpu_user_ms=20.0 cpu_sys_ms=0.0 rss_start_kib=116288 rss_end_kib=140176
+phase=animation wall_ms=5000.9 frames=2958 avg_ms=2.70 max_ms=2989.63 cpu_user_ms=6020.0 cpu_sys_ms=1570.0 rss_start_kib=140176 rss_end_kib=144556
+```
 
 VRAM: lavapipe では取得不可。`nvidia-smi` なし。
 GPU→CPU コピー: 合成経路にはない。
@@ -237,9 +283,9 @@ GPU→CPU コピー: 合成経路にはない。
 
 | 観点 | 結果 |
 |---|---|
-| 性能 | UI blit は安い。readback なし。実 GPU でも測る。 |
-| メモリ | 窓サイズの Rgba8 UI ターゲットが 1 枚。 |
-| 入力 | 純関数テストは通る。Wayland では OS region が正しいモデル。 |
+| 性能 | 実 GPU なら UI blit は安い。lavapipe の animation は CPU 律速。readback なし。 |
+| メモリ | Idle RSS は Slint+VRM 約 167 MiB、egui+三角形 約 137 MiB。窓サイズの Rgba8 UI ターゲットが約 2 MiB。 |
+| 入力 | 純関数テストは通る。この xfwm4 では透明クリックもクライアントに届き、ルータは `Passthrough` とラベルした。Wayland の input region が移植可能な OS モデル。 |
 | 透明 | stage と同じ alpha mode 選択。 |
 | 移植 | Windows / X11 / Wayland いずれも可能。API は違う。 |
 | 保守 | 不安定な Slint wgpu feature。wgpu と一緒に bump。 |
