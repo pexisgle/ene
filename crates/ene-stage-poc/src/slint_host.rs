@@ -27,6 +27,12 @@ slint::slint! {
 
         in-out property <float> bubble-x: 40;
         in-out property <float> bubble-y: 80;
+        in-out property <float> bubble-opacity: 1.0;
+        in-out property <float> bubble-scale: 1.0;
+        in-out property <bool> show-bubble: true;
+        in-out property <bool> show-menu: false;
+        in-out property <bool> show-cursor: false;
+        in-out property <float> cursor-opacity: 1.0;
         in-out property <string> status-text: "ready";
         in-out property <int> click-count: 0;
         callback bubble-clicked();
@@ -34,8 +40,10 @@ slint::slint! {
         Rectangle {
             x: root.bubble-x * 1px;
             y: root.bubble-y * 1px;
-            width: 280px;
-            height: 140px;
+            width: 280px * root.bubble-scale;
+            height: 140px * root.bubble-scale;
+            opacity: root.bubble-opacity;
+            visible: root.show-bubble;
             border-radius: 18px;
             background: #14203399;
             border-width: 1px;
@@ -61,6 +69,30 @@ slint::slint! {
                         root.click-count += 1;
                         root.bubble-clicked();
                     }
+                }
+                Rectangle {
+                    width: 2px;
+                    height: 18px;
+                    background: #f4fbff;
+                    opacity: root.cursor-opacity;
+                    visible: root.show-cursor;
+                }
+            }
+        }
+
+        Rectangle {
+            x: 40px;
+            y: 230px;
+            width: 180px;
+            height: 90px;
+            visible: root.show-menu;
+            border-radius: 10px;
+            background: #203044cc;
+            VerticalLayout {
+                padding: 10px;
+                Text {
+                    text: "Menu";
+                    color: #f4fbff;
                 }
             }
         }
@@ -201,7 +233,7 @@ fn send_event(ui: &StagePoc, event: WindowEvent) {
     drop(ui.window().try_dispatch_event(event));
 }
 
-fn scale_f32(scale: f64) -> f32 {
+pub(crate) fn scale_f32(scale: f64) -> f32 {
     #[expect(
         clippy::cast_possible_truncation,
         reason = "window scale factors are small"
@@ -290,10 +322,35 @@ fn dispatch_resize(ui: &StagePoc, size: winit::dpi::PhysicalSize<u32>, scale: f3
 }
 
 pub fn bubble_rect(ui: &StagePoc, scale: f32) -> crate::input::ScreenRect {
+    if !ui.get_show_bubble() {
+        return crate::input::ScreenRect::new(0.0, 0.0, 0.0, 0.0);
+    }
     crate::input::ScreenRect::new(
         ui.get_bubble_x() * scale,
         ui.get_bubble_y() * scale,
-        280.0 * scale,
-        140.0 * scale,
+        280.0 * ui.get_bubble_scale() * scale,
+        140.0 * ui.get_bubble_scale() * scale,
     )
+}
+
+#[must_use]
+pub fn menu_rect(ui: &StagePoc, scale: f32) -> crate::input::ScreenRect {
+    if !ui.get_show_menu() {
+        return crate::input::ScreenRect::new(0.0, 0.0, 0.0, 0.0);
+    }
+    crate::input::ScreenRect::new(40.0 * scale, 230.0 * scale, 180.0 * scale, 90.0 * scale)
+}
+
+#[must_use]
+pub fn ui_regions(ui: &StagePoc, scale: f32) -> Vec<crate::input::ScreenRect> {
+    let mut out = Vec::new();
+    let bubble = bubble_rect(ui, scale);
+    if !bubble.is_empty() {
+        out.push(bubble);
+    }
+    let menu = menu_rect(ui, scale);
+    if !menu.is_empty() {
+        out.push(menu);
+    }
+    out
 }

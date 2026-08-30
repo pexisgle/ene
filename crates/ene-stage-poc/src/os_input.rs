@@ -1,5 +1,7 @@
 //! OS-level click-through / input-region backend for Experiment B.
 
+use std::time::Duration;
+
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::Window;
 
@@ -53,6 +55,8 @@ pub struct NativeInputRegion {
     window: std::sync::Arc<Window>,
     server: DisplayServer,
     last_passthrough: Option<bool>,
+    os_update_count: u32,
+    last_os_update: Duration,
     #[cfg(target_os = "linux")]
     x11: Option<X11Shape>,
     #[cfg(target_os = "linux")]
@@ -79,11 +83,35 @@ impl NativeInputRegion {
             window,
             server,
             last_passthrough: None,
+            os_update_count: 0,
+            last_os_update: Duration::ZERO,
             #[cfg(target_os = "linux")]
             x11,
             #[cfg(target_os = "linux")]
             wayland,
         }
+    }
+
+    #[must_use]
+    pub const fn os_update_count(&self) -> u32 {
+        self.os_update_count
+    }
+
+    #[must_use]
+    pub const fn last_os_update(&self) -> Duration {
+        self.last_os_update
+    }
+
+    pub fn debug_dump(&mut self, tag: &str) {
+        #[cfg(target_os = "linux")]
+        if let Some(x11) = self.x11.as_mut() {
+            x11.dump(tag);
+        }
+        #[cfg(target_os = "linux")]
+        if self.wayland.is_some() {
+            tracing::info!(tag, "wayland input region attached (native wl_surface)");
+        }
+        let _ = tag;
     }
 }
 
@@ -108,6 +136,7 @@ impl StageInputRegion for NativeInputRegion {
         if let Err(err) = self.window.set_cursor_hittest(!empty) {
             tracing::debug!(error = %err, "set_cursor_hittest unsupported");
         }
+        let started = std::time::Instant::now();
         #[cfg(target_os = "windows")]
         windows::set_window_region(self.window.as_ref(), rects);
         #[cfg(target_os = "linux")]
@@ -118,6 +147,8 @@ impl StageInputRegion for NativeInputRegion {
         if let Some(wayland) = self.wayland.as_mut() {
             wayland.set_rects(rects);
         }
+        self.last_os_update = started.elapsed();
+        self.os_update_count = self.os_update_count.saturating_add(1);
         self.last_passthrough = Some(empty);
     }
 
@@ -215,8 +246,68 @@ mod windows {
 struct X11Shape {
     conn: x11rb::rust_connection::RustConnection,
     window: u32,
+    root: Option<u32>,
+    frame: Option<u32>,
+    target: X11Target,
+    kinds: X11ShapeKinds,
     shape_available: bool,
     logged_shape: bool,
+    logged_tree: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum X11Target {
+    Client,
+    Frame,
+    Both,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum X11ShapeKinds {
+    Input,
+    Bounding,
+    Both,
+}
+
+#[cfg(target_os = "linux")]
+impl X11Target {
+    fn from_env() -> Self {
+        match std::env::var("ENE_STAGE_POC_X11_TARGET")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "frame" => Self::Frame,
+            "both" => Self::Both,
+            _ => Self::Client,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl X11ShapeKinds {
+    fn from_env() -> Self {
+        match std::env::var("ENE_STAGE_POC_SHAPE_KIND")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "bounding" => Self::Bounding,
+            "both" => Self::Both,
+            _ => Self::Input,
+        }
+    }
+
+    fn kinds(self) -> &'static [x11rb::protocol::shape::SK] {
+        use x11rb::protocol::shape::SK;
+        match self {
+            Self::Input => &[SK::INPUT],
+            Self::Bounding => &[SK::BOUNDING],
+            Self::Both => &[SK::INPUT, SK::BOUNDING],
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -240,55 +331,167 @@ impl X11Shape {
             .ok()
             .and_then(|cookie| cookie.reply().ok());
         let shape_available = version.is_some();
+        let xfixes = x11rb::protocol::xfixes::query_version(&conn, 5, 0)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok());
+        let target = X11Target::from_env();
+        let kinds = X11ShapeKinds::from_env();
         tracing::info!(
             shape_available,
             xid,
             major = version.as_ref().map(|v| v.major_version),
             minor = version.as_ref().map(|v| v.minor_version),
+            xfixes_major = xfixes.as_ref().map(|v| v.major_version),
+            xfixes_minor = xfixes.as_ref().map(|v| v.minor_version),
+            ?target,
+            ?kinds,
             "X11 shape input region"
         );
-        // xfwm4's compositor copies Bounding onto Input every frame unless
-        // the window opts out. This is a PoC probe, not a product default.
-        if let Ok(cookie) = x11rb::protocol::xproto::ConnectionExt::intern_atom(
-            &conn,
-            false,
-            b"_NET_WM_BYPASS_COMPOSITOR",
-        ) && let Ok(reply) = cookie.reply()
-        {
-            use x11rb::protocol::xproto::{AtomEnum, PropMode};
-            match x11rb::wrapper::ConnectionExt::change_property32(
-                &conn,
-                PropMode::REPLACE,
-                xid,
-                reply.atom,
-                AtomEnum::CARDINAL,
-                &[1_u32],
-            ) {
-                Ok(prop) => {
-                    if let Err(err) = prop.check() {
-                        tracing::debug!(error = %err, "bypass compositor property failed");
-                    }
-                }
-                Err(err) => tracing::debug!(error = %err, "bypass compositor property send failed"),
-            }
-            if let Err(err) = x11rb::connection::Connection::flush(&conn) {
-                tracing::debug!(error = %err, "bypass compositor flush failed");
-            }
-            tracing::info!("requested _NET_WM_BYPASS_COMPOSITOR=1");
-        }
-        Some(Self {
+        let mut this = Self {
             conn,
             window: xid,
+            root: None,
+            frame: None,
+            target,
+            kinds,
             shape_available,
             logged_shape: false,
-        })
+            logged_tree: false,
+        };
+        this.request_bypass_compositor();
+        this.refresh_tree();
+        this.log_wm();
+        Some(this)
+    }
+
+    fn request_bypass_compositor(&self) {
+        use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, PropMode};
+        let Ok(cookie) = self.conn.intern_atom(false, b"_NET_WM_BYPASS_COMPOSITOR") else {
+            return;
+        };
+        let Ok(reply) = cookie.reply() else {
+            return;
+        };
+        match x11rb::wrapper::ConnectionExt::change_property32(
+            &self.conn,
+            PropMode::REPLACE,
+            self.window,
+            reply.atom,
+            AtomEnum::CARDINAL,
+            &[1_u32],
+        ) {
+            Ok(prop) => {
+                if let Err(err) = prop.check() {
+                    tracing::debug!(error = %err, "bypass compositor property failed");
+                }
+            }
+            Err(err) => tracing::debug!(error = %err, "bypass compositor property send failed"),
+        }
+        drop(x11rb::connection::Connection::flush(&self.conn));
+        tracing::info!("requested _NET_WM_BYPASS_COMPOSITOR=1");
+    }
+
+    fn intern(&self, name: &[u8]) -> Option<u32> {
+        use x11rb::protocol::xproto::ConnectionExt;
+        let cookie = self.conn.intern_atom(false, name).ok()?;
+        Some(cookie.reply().ok()?.atom)
+    }
+
+    fn log_wm(&self) {
+        use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+        let Some(root) = self.root else {
+            return;
+        };
+        let Some(check) = self.intern(b"_NET_SUPPORTING_WM_CHECK") else {
+            return;
+        };
+        let Ok(cookie) = self
+            .conn
+            .get_property(false, root, check, AtomEnum::WINDOW, 0, 1)
+        else {
+            return;
+        };
+        let Ok(reply) = cookie.reply() else {
+            return;
+        };
+        let Some(wm_win) = reply.value32().and_then(|mut v| v.next()) else {
+            tracing::info!("_NET_SUPPORTING_WM_CHECK missing");
+            return;
+        };
+        let name_atom = self.intern(b"_NET_WM_NAME");
+        let utf8 = self.intern(b"UTF8_STRING");
+        let wm_name = match (name_atom, utf8) {
+            (Some(name), Some(utf8)) => self
+                .conn
+                .get_property(false, wm_win, name, utf8, 0, 256)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .and_then(|prop| {
+                    if prop.value.is_empty() {
+                        None
+                    } else {
+                        String::from_utf8(prop.value).ok()
+                    }
+                }),
+            _ => None,
+        };
+        tracing::info!(wm_win, wm_name = wm_name.as_deref(), "X11 supporting WM");
+    }
+
+    fn refresh_tree(&mut self) {
+        use x11rb::protocol::xproto::ConnectionExt;
+        let Ok(cookie) = self.conn.query_tree(self.window) else {
+            return;
+        };
+        let Ok(tree) = cookie.reply() else {
+            return;
+        };
+        self.root = Some(tree.root);
+        self.frame = if tree.parent == 0 || tree.parent == tree.root {
+            None
+        } else {
+            Some(tree.parent)
+        };
+        let attrs = self
+            .conn
+            .get_window_attributes(self.window)
+            .ok()
+            .and_then(|c| c.reply().ok());
+        if !self.logged_tree {
+            self.logged_tree = true;
+            tracing::info!(
+                client = self.window,
+                parent = tree.parent,
+                root = tree.root,
+                children = tree.children.len(),
+                frame = self.frame,
+                override_redirect = attrs.as_ref().map(|a| a.override_redirect),
+                map_state = attrs.as_ref().map(|a| format!("{:?}", a.map_state)),
+                "XQueryTree"
+            );
+        }
+    }
+
+    fn destinations(&self) -> Vec<u32> {
+        match self.target {
+            X11Target::Client => vec![self.window],
+            X11Target::Frame => self.frame.into_iter().collect(),
+            X11Target::Both => {
+                let mut out = vec![self.window];
+                if let Some(frame) = self.frame {
+                    out.push(frame);
+                }
+                out
+            }
+        }
     }
 
     fn set_rects(&mut self, rects: &[ScreenRect]) {
         if !self.shape_available {
             return;
         }
-        use x11rb::protocol::shape::{self, SK as ShapeKind, SO as ShapeOp};
+        self.refresh_tree();
+        use x11rb::protocol::shape::{self, SO as ShapeOp};
         use x11rb::protocol::xproto::{ClipOrdering, Rectangle};
         let xrects: Vec<Rectangle> = rects
             .iter()
@@ -302,33 +505,68 @@ impl X11Shape {
                 })
             })
             .collect();
-        match shape::rectangles(
-            &self.conn,
-            ShapeOp::SET,
-            ShapeKind::INPUT,
-            ClipOrdering::YX_SORTED,
-            self.window,
-            0,
-            0,
-            &xrects,
-        ) {
-            Ok(cookie) => {
-                if let Err(err) = cookie.check() {
-                    tracing::warn!(error = %err, nrects = xrects.len(), "x11 shape check failed");
+        for dest in self.destinations() {
+            for kind in self.kinds.kinds() {
+                match shape::rectangles(
+                    &self.conn,
+                    ShapeOp::SET,
+                    *kind,
+                    ClipOrdering::YX_SORTED,
+                    dest,
+                    0,
+                    0,
+                    &xrects,
+                ) {
+                    Ok(cookie) => {
+                        if let Err(err) = cookie.check() {
+                            tracing::warn!(error = %err, dest, ?kind, "x11 shape check failed");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, dest, ?kind, "x11 shape rectangles failed");
+                    }
                 }
             }
-            Err(err) => tracing::warn!(error = %err, "x11 shape rectangles failed"),
         }
-        if let Ok(cookie) = shape::get_rectangles(&self.conn, self.window, ShapeKind::INPUT)
-            && let Ok(reply) = cookie.reply()
-            && !self.logged_shape
-        {
+        drop(x11rb::connection::Connection::flush(&self.conn));
+        if !self.logged_shape {
+            self.dump("after-set");
             self.logged_shape = true;
-            tracing::info!(
-                n = reply.rectangles.len(),
-                rects = ?reply.rectangles,
-                "x11 shape Input rectangles after SET"
-            );
+        }
+    }
+
+    fn dump(&mut self, tag: &str) {
+        self.refresh_tree();
+        use x11rb::protocol::shape::{self, SK};
+        let mut windows = vec![("client", self.window)];
+        if let Some(frame) = self.frame {
+            windows.push(("frame", frame));
+        }
+        for (role, dest) in windows {
+            for kind in [SK::INPUT, SK::BOUNDING] {
+                match shape::get_rectangles(&self.conn, dest, kind) {
+                    Ok(cookie) => match cookie.reply() {
+                        Ok(reply) => {
+                            let rects: Vec<String> = reply
+                                .rectangles
+                                .iter()
+                                .map(|r| format!("{}x{}+{}+{}", r.width, r.height, r.x, r.y))
+                                .collect();
+                            tracing::info!(
+                                tag,
+                                role,
+                                dest,
+                                kind = format!("{kind:?}"),
+                                n = reply.rectangles.len(),
+                                rects = rects.join(","),
+                                "XShapeGetRectangles"
+                            );
+                        }
+                        Err(err) => tracing::debug!(error = %err, dest, "shape reply failed"),
+                    },
+                    Err(err) => tracing::debug!(error = %err, dest, "shape get failed"),
+                }
+            }
         }
     }
 }

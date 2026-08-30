@@ -26,7 +26,11 @@ pub struct PhaseReport {
     pub wall: Duration,
     pub frames: u32,
     pub avg_frame: Duration,
+    pub median_frame: Duration,
+    pub p95_frame: Duration,
+    pub p99_frame: Duration,
     pub max_frame: Duration,
+    pub fps: f64,
     pub cpu_user: Duration,
     pub cpu_sys: Duration,
     pub rss_start: u64,
@@ -83,18 +87,18 @@ impl Metrics {
 
     fn finish_phase(&self) -> PhaseReport {
         let end = Snapshot::now();
-        let avg = if self.frames.is_empty() {
-            Duration::ZERO
-        } else {
-            self.frames.iter().sum::<Duration>() / u32::try_from(self.frames.len()).unwrap_or(1)
-        };
-        let max = self.frames.iter().copied().max().unwrap_or(Duration::ZERO);
+        let wall = self.phase_start.elapsed();
+        let stats = frame_stats(&self.frames, wall);
         PhaseReport {
             name: self.phase_name.clone(),
-            wall: self.phase_start.elapsed(),
+            wall,
             frames: self.phase_frames,
-            avg_frame: avg,
-            max_frame: max,
+            avg_frame: stats.avg,
+            median_frame: stats.median,
+            p95_frame: stats.p95,
+            p99_frame: stats.p99,
+            max_frame: stats.max,
+            fps: stats.fps,
             cpu_user: end.cpu_user.saturating_sub(self.phase_snapshot.cpu_user),
             cpu_sys: end.cpu_sys.saturating_sub(self.phase_snapshot.cpu_sys),
             rss_start: self.phase_snapshot.rss_bytes,
@@ -123,11 +127,15 @@ pub fn print_reports(
     println!("{extra}");
     for report in reports {
         println!(
-            "phase={name} wall_ms={wall:.1} frames={frames} avg_ms={avg:.2} max_ms={max:.2} cpu_user_ms={user:.1} cpu_sys_ms={sys:.1} rss_start_kib={rss0} rss_end_kib={rss1}",
+            "phase={name} wall_ms={wall:.1} frames={frames} fps={fps:.1} avg_ms={avg:.2} median_ms={median:.2} p95_ms={p95:.2} p99_ms={p99:.2} max_ms={max:.2} cpu_user_ms={user:.1} cpu_sys_ms={sys:.1} rss_start_kib={rss0} rss_end_kib={rss1}",
             name = report.name,
             wall = report.wall.as_secs_f64() * 1000.0,
             frames = report.frames,
+            fps = report.fps,
             avg = report.avg_frame.as_secs_f64() * 1000.0,
+            median = report.median_frame.as_secs_f64() * 1000.0,
+            p95 = report.p95_frame.as_secs_f64() * 1000.0,
+            p99 = report.p99_frame.as_secs_f64() * 1000.0,
             max = report.max_frame.as_secs_f64() * 1000.0,
             user = report.cpu_user.as_secs_f64() * 1000.0,
             sys = report.cpu_sys.as_secs_f64() * 1000.0,
@@ -135,6 +143,58 @@ pub fn print_reports(
             rss1 = report.rss_end / 1024,
         );
     }
+}
+
+struct FrameStats {
+    avg: Duration,
+    median: Duration,
+    p95: Duration,
+    p99: Duration,
+    max: Duration,
+    fps: f64,
+}
+
+fn frame_stats(frames: &[Duration], wall: Duration) -> FrameStats {
+    if frames.is_empty() {
+        return FrameStats {
+            avg: Duration::ZERO,
+            median: Duration::ZERO,
+            p95: Duration::ZERO,
+            p99: Duration::ZERO,
+            max: Duration::ZERO,
+            fps: 0.0,
+        };
+    }
+    let mut sorted = frames.to_vec();
+    sorted.sort_unstable();
+    let count = u32::try_from(sorted.len()).unwrap_or(1);
+    let avg = sorted.iter().sum::<Duration>() / count;
+    let fps = if wall.is_zero() {
+        0.0
+    } else {
+        f64::from(count) / wall.as_secs_f64()
+    };
+    FrameStats {
+        avg,
+        median: percentile(&sorted, 0.50),
+        p95: percentile(&sorted, 0.95),
+        p99: percentile(&sorted, 0.99),
+        max: sorted.last().copied().unwrap_or(Duration::ZERO),
+        fps,
+    }
+}
+
+fn percentile(sorted: &[Duration], fraction: f64) -> Duration {
+    if sorted.is_empty() {
+        return Duration::ZERO;
+    }
+    let last = sorted.len().saturating_sub(1);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "percentile index is within Vec length"
+    )]
+    let idx = ((fraction.clamp(0.0, 1.0) * last as f64).round() as usize).min(last);
+    sorted[idx]
 }
 
 fn read_rss() -> u64 {

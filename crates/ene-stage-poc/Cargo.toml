@@ -16,8 +16,16 @@ name = "ene-stage-poc-b"
 path = "src/bin/poc_b.rs"
 
 [[bin]]
-name = "ene-stage-poc-baseline"
-path = "src/bin/poc_baseline.rs"
+name = "ene-stage-poc-c"
+path = "src/bin/poc_c.rs"
+
+[[bin]]
+name = "ene-stage-poc-d"
+path = "src/bin/poc_d.rs"
+
+[[bin]]
+name = "ene-stage-poc-click-sink"
+path = "src/bin/poc_click_sink.rs"
 
 [dependencies]
 ene-config = { workspace = true }

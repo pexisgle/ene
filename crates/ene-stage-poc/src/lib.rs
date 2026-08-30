@@ -9,10 +9,13 @@
 
 pub mod app;
 pub mod blit;
+pub mod exp_c;
+pub mod exp_d;
 pub mod gpu;
 pub mod input;
 pub mod metrics;
 pub mod os_input;
+pub mod region;
 pub mod slint_host;
 pub mod triangle;
 pub mod vrm_scene;
@@ -54,7 +57,8 @@ mod tests {
         let blit = include_str!("blit.rs");
         let triangle = include_str!("triangle.rs");
         let vrm = include_str!("vrm_scene.rs");
-        for src in [app, blit, triangle, vrm] {
+        let exp_c = include_str!("exp_c.rs");
+        for src in [app, blit, triangle, vrm, exp_c] {
             assert!(
                 !src.contains("texture.map_async") && !src.contains("Buffer::map_async"),
                 "GPU→CPU map is forbidden in the PoC"
@@ -64,9 +68,17 @@ mod tests {
                 "GPU→CPU texture readback is forbidden in the PoC"
             );
             assert!(
+                !src.contains("copy_texture_to_texture("),
+                "composition uses a render pass, not copy_texture_to_texture"
+            );
+            assert!(
                 !src.contains("SharedPixelBuffer"),
                 "CPU pixel buffers are not used for composition"
             );
         }
+        assert!(
+            blit.contains("PREMULTIPLIED_ALPHA_BLENDING") && blit.contains("LoadOp::Load"),
+            "UI composite must be a premul fullscreen pass that loads the VRM target"
+        );
     }
 }
