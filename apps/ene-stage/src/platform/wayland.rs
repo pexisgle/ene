@@ -20,8 +20,6 @@ use winit::window::Window;
 use crate::interaction_controller::InteractionMode;
 use crate::scene::InteractionGeometry;
 
-use super::rects_i32;
-
 pub struct WaylandRegion {
     inner: Arc<Mutex<Inner>>,
 }
@@ -89,7 +87,7 @@ impl WaylandRegion {
         })
     }
 
-    pub fn apply(&mut self, mode: InteractionMode, interaction: &InteractionGeometry) {
+    pub fn apply(&mut self, mode: InteractionMode, interaction: &InteractionGeometry, scale: f64) {
         let mut inner = self.inner.lock();
         let mut data = AppData::default();
         if let Err(err) = inner.event_queue.dispatch_pending(&mut data) {
@@ -100,17 +98,19 @@ impl WaylandRegion {
             InteractionMode::Passive => {
                 let region = inner.compositor.create_region(&qh, ());
                 inner.surface.set_input_region(Some(&region));
+                region.destroy();
             }
             InteractionMode::Dragging | InteractionMode::UiFocused => {
                 inner.surface.set_input_region(None);
             }
             InteractionMode::Interactive => {
-                let rects = rects_i32(&interaction.rects);
+                let rects = super::physical_to_surface_local(&interaction.rects, scale);
                 let region = inner.compositor.create_region(&qh, ());
                 for (x, y, w, h) in rects {
                     region.add(x, y, w, h);
                 }
                 inner.surface.set_input_region(Some(&region));
+                region.destroy();
             }
         }
         inner.surface.commit();

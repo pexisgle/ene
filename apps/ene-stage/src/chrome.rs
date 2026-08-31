@@ -95,6 +95,12 @@ impl ChromeWindow {
                 .create_window(attrs)
                 .map_err(|err| GpuError::Surface(err.to_string()))?,
         );
+        if matches!(
+            kind,
+            ChromeKind::Chat | ChromeKind::Detail | ChromeKind::Spotlight
+        ) {
+            window.set_ime_allowed(true);
+        }
         if let Some(monitor) = window.current_monitor() {
             match kind {
                 ChromeKind::Caption => {

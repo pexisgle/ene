@@ -1,10 +1,11 @@
 //! winit application handler for the product stage client.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ene_api::MessageMode;
+use ene_api::{CreateJobRequest, MessageMode, SoulPatch};
 use ene_vrm::viseme::VisemeAnalyzer;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -3822,6 +3823,17 @@ impl StageApp {
                 .unwrap_or(0) as i32,
         );
         ui.set_rows(slint::ModelRc::new(slint::VecModel::from(view.rows)));
+        ui.set_drafts_visible(view.drafts_visible);
+        let actions: Vec<crate::ui::DetailAction> = view
+            .actions
+            .into_iter()
+            .map(|action| crate::ui::DetailAction {
+                id: slint::SharedString::from(action.id),
+                label: slint::SharedString::from(action.label),
+                primary: action.primary,
+            })
+            .collect();
+        ui.set_actions(slint::ModelRc::new(slint::VecModel::from(actions)));
         let tabs: Vec<slint::SharedString> = DetailTab::ALL
             .iter()
             .map(|tab| slint::SharedString::from(tab.label()))
@@ -3847,76 +3859,13 @@ impl StageApp {
                     detail::project::handle_select_tab(&mut self.detail, index);
                 }
                 ChromeAction::DetailPrimary(name) => {
-                    if let Some(ui) = win.layer().and_then(|layer| layer.detail_ui()) {
-                        self.detail.search = ui.get_search().to_string();
-                        match self.detail.tab {
-                            DetailTab::Conversation => {
-                                self.detail.chat_plugin = ui.get_draft_a().to_string();
-                                self.detail.chat_model = ui.get_draft_b().to_string();
-                            }
-                            DetailTab::Work => {
-                                self.detail.new_job_title = ui.get_draft_a().to_string();
-                                self.detail.new_job_goal = ui.get_draft_b().to_string();
-                            }
-                            DetailTab::System => {
-                                self.local_settings.theme = ui.get_draft_a().to_string();
-                                self.local_settings.language = ui.get_draft_b().to_string();
-                                self.detail.save_local_pending = true;
-                            }
-                            _ => {}
-                        }
-                    }
-                    match detail::project::handle_primary(
+                    self.read_detail_drafts();
+                    if let Some(command) = detail::project::handle_primary(
                         &mut self.detail,
                         &mut self.local_settings,
                         &name,
                     ) {
-                        Some(detail::project::DetailPrimary::Apply) => match self.detail.tab {
-                            DetailTab::Voice => {
-                                detail::apply_voice_patch(
-                                    &mut self.detail,
-                                    &self.client,
-                                    &self.rt_handle,
-                                    &self.async_results,
-                                );
-                            }
-                            DetailTab::Conversation => {
-                                detail::apply_ai_patch(
-                                    &mut self.detail,
-                                    &self.client,
-                                    &self.rt_handle,
-                                    &self.async_results,
-                                    true,
-                                );
-                                detail::apply_observation_patch(
-                                    &mut self.detail,
-                                    &self.client,
-                                    &self.rt_handle,
-                                    &self.async_results,
-                                );
-                            }
-                            DetailTab::System => {
-                                detail::request_overlay_monitor_action(&mut self.detail, true);
-                            }
-                            _ => {
-                                detail::apply_ai_patch(
-                                    &mut self.detail,
-                                    &self.client,
-                                    &self.rt_handle,
-                                    &self.async_results,
-                                    false,
-                                );
-                            }
-                        },
-                        Some(detail::project::DetailPrimary::Reload) => {
-                            detail::ensure_settings(
-                                &mut self.detail,
-                                &self.client,
-                                &self.rt_handle,
-                                &self.async_results,
-                            );
-                        }
-                        None => {}
+                        self.dispatch_detail_primary(command);
                     }
                 }
                 ChromeAction::DetailRow(id) => {
@@ -3936,6 +3885,8 @@ impl StageApp {
                         self.local_settings.overlay_monitor_size = monitor.size;
                         self.local_settings.overlay_monitor_scale_factor = monitor.scale_factor;
                         detail::request_overlay_monitor_action(&mut self.detail, true);
+                    } else if let Some(job_id) = id.strip_prefix("job:") {
+                        self.cancel_job(job_id);
                     } else if let Some(action) =
                         detail::project::handle_row(&mut self.detail, &companions, &id)
                     {
@@ -3946,6 +3897,210 @@ impl StageApp {
             }
         }
         display
+    }
+
+    fn read_detail_drafts(&mut self) {
+        let (search, draft_a, draft_b, tab) = {
+            let Some(win) = self.detail_win.as_ref() else {
+                return;
+            };
+            let Some(ui) = win.layer().and_then(|layer| layer.detail_ui()) else {
+                return;
+            };
+            (
+                ui.get_search().to_string(),
+                ui.get_draft_a().to_string(),
+                ui.get_draft_b().to_string(),
+                self.detail.tab,
+            )
+        };
+        self.detail.search = search;
+        match tab {
+            DetailTab::Conversation => {
+                self.detail.chat_plugin = draft_a;
+                self.detail.chat_model = draft_b;
+            }
+            DetailTab::Work => {
+                self.detail.new_job_title = draft_a;
+                self.detail.new_job_goal = draft_b;
+            }
+            DetailTab::System => {
+                self.local_settings.theme = draft_a;
+                self.local_settings.language = draft_b;
+            }
+            DetailTab::Voice => {
+                self.detail.tts_plugin = draft_a;
+                self.detail.stt_plugin = draft_b;
+            }
+            DetailTab::Companion => {
+                self.detail.body_ref_draft = draft_a;
+            }
+            _ => {}
+        }
+    }
+
+    fn dispatch_detail_primary(&mut self, command: detail::project::DetailPrimary) {
+        match command {
+            detail::project::DetailPrimary::ApplyAi => {
+                detail::apply_ai_patch(
+                    &mut self.detail,
+                    &self.client,
+                    &self.rt_handle,
+                    &self.async_results,
+                    true,
+                );
+                detail::apply_observation_patch(
+                    &mut self.detail,
+                    &self.client,
+                    &self.rt_handle,
+                    &self.async_results,
+                );
+            }
+            detail::project::DetailPrimary::ApplyVoice => {
+                detail::apply_voice_patch(
+                    &mut self.detail,
+                    &self.client,
+                    &self.rt_handle,
+                    &self.async_results,
+                );
+            }
+            detail::project::DetailPrimary::ApplySystem => {
+                self.detail.save_local_pending = true;
+                detail::request_overlay_monitor_action(&mut self.detail, true);
+            }
+            detail::project::DetailPrimary::ApplyBody => self.apply_body_ref(),
+            detail::project::DetailPrimary::CreateJob => self.submit_new_job(),
+            detail::project::DetailPrimary::RefreshMemory => self.request_memories(),
+            detail::project::DetailPrimary::ReloadMcp => self.reload_mcp_tools(),
+            detail::project::DetailPrimary::ReloadJobs => self.request_jobs(),
+            detail::project::DetailPrimary::ReloadCharacters => {
+                self.request_characters();
+                self.request_active_soul();
+            }
+            detail::project::DetailPrimary::ImportCharacter => self.import_character_dialog(),
+            detail::project::DetailPrimary::Reload => {
+                detail::ensure_settings(
+                    &mut self.detail,
+                    &self.client,
+                    &self.rt_handle,
+                    &self.async_results,
+                );
+            }
+        }
+    }
+
+    fn submit_new_job(&mut self) {
+        if self.detail.new_job_inflight {
+            return;
+        }
+        let goal = self.detail.new_job_goal.trim().to_owned();
+        if goal.is_empty() {
+            self.detail.core_status = i18n::fl("jobs-goal-required");
+            return;
+        }
+        let title = self.detail.new_job_title.trim();
+        let request = CreateJobRequest {
+            soul_id: self.session.soul_id().to_owned(),
+            goal,
+            title: if title.is_empty() {
+                None
+            } else {
+                Some(title.to_owned())
+            },
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
+        };
+        self.detail.new_job_inflight = true;
+        self.detail.submitted_job = Some(request.clone());
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::CreateJob(
+                client
+                    .create_job(&request)
+                    .await
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+
+    fn cancel_job(&mut self, id: &str) {
+        let id = id.to_owned();
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::CancelJob {
+                id: id.clone(),
+                result: client
+                    .cancel_job(&id)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.to_string()),
+            }
+        });
+    }
+
+    fn reload_mcp_tools(&self) {
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::ReloadMcpTools(
+                client
+                    .list_tools()
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+
+    fn apply_body_ref(&mut self) {
+        let soul_id = self.session.soul_id().to_owned();
+        let body_ref = self.detail.body_ref_draft.clone();
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::PatchBody(
+                client
+                    .patch_soul_body(
+                        &soul_id,
+                        &SoulPatch {
+                            body_ref: Some(body_ref),
+                        },
+                    )
+                    .await
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+
+    fn import_character_dialog(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .add_filter("Character", &["enechar", "png", "json", "charx"])
+            .pick_file();
+        let Some(path) = picked else {
+            return;
+        };
+        self.start_character_import(&path);
+    }
+
+    fn start_character_import(&mut self, path: &Path) {
+        if self.detail.character_action_pending {
+            return;
+        }
+        self.detail.character_action_pending = true;
+        let generation = self.detail.next_activation_generation();
+        let client = Arc::clone(&self.client);
+        let path = path.to_string_lossy().into_owned();
+        self.spawn(async move {
+            AsyncOutcome::ImportCharacter {
+                generation,
+                result: client
+                    .import_character(&path)
+                    .await
+                    .map(|character| crate::tasks::ActivatedCharacter {
+                        character,
+                        target: None,
+                    })
+                    .map_err(|err| err.to_string()),
+            }
+        });
     }
 
     fn sync_spotlight_slint(&mut self) {
@@ -5801,6 +5956,34 @@ mod tests {
             app.detail.core_status
         );
     }
+
+    #[test]
+    fn empty_job_goal_does_not_submit() {
+        let mut app = StageApp::new_for_test();
+        app.detail.new_job_title = "Plant care".to_owned();
+        app.submit_new_job();
+        assert!(!app.detail.new_job_inflight);
+        assert!(app.detail.submitted_job.is_none());
+        assert_eq!(app.detail.core_status, i18n::fl("jobs-goal-required"));
+    }
+
+    #[test]
+    fn work_submit_records_create_job_not_ai_patch() {
+        let mut app = StageApp::new_for_test();
+        app.detail.new_job_title = "Plant care".to_owned();
+        app.detail.new_job_goal = "water the plants".to_owned();
+        app.dispatch_detail_primary(crate::detail::project::DetailPrimary::CreateJob);
+        assert!(app.detail.new_job_inflight);
+        let submitted = app
+            .detail
+            .submitted_job
+            .as_ref()
+            .expect("create-job must stash the request");
+        assert_eq!(submitted.goal, "water the plants");
+        assert_eq!(submitted.title.as_deref(), Some("Plant care"));
+        assert_eq!(submitted.soul_id, "soul");
+    }
+
     #[test]
     fn create_job_denied_by_approval_gets_user_facing_message() {
         let raw = "http 403: forbidden: job creation denied";

@@ -44,7 +44,16 @@ pub fn handle_primary(
     action: &str,
 ) -> Option<DetailPrimary> {
     match action {
-        "apply" => Some(DetailPrimary::Apply),
+        "apply-ai" => Some(DetailPrimary::ApplyAi),
+        "apply-voice" => Some(DetailPrimary::ApplyVoice),
+        "apply-system" => Some(DetailPrimary::ApplySystem),
+        "apply-body" => Some(DetailPrimary::ApplyBody),
+        "create-job" => Some(DetailPrimary::CreateJob),
+        "refresh-memory" => Some(DetailPrimary::RefreshMemory),
+        "reload-mcp" => Some(DetailPrimary::ReloadMcp),
+        "reload-jobs" => Some(DetailPrimary::ReloadJobs),
+        "reload-characters" => Some(DetailPrimary::ReloadCharacters),
+        "import-character" => Some(DetailPrimary::ImportCharacter),
         "reload" => Some(DetailPrimary::Reload),
         "chat" => {
             state.request_chat_open = true;
@@ -87,7 +96,16 @@ pub fn handle_row(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailPrimary {
-    Apply,
+    ApplyAi,
+    ApplyVoice,
+    ApplySystem,
+    ApplyBody,
+    CreateJob,
+    RefreshMemory,
+    ReloadMcp,
+    ReloadJobs,
+    ReloadCharacters,
+    ImportCharacter,
     Reload,
 }
 
@@ -132,6 +150,43 @@ mod tests {
         assert_eq!(
             action,
             Some(DisplayAction::TemporarilyHide("soul-a".to_owned()))
+        );
+    }
+
+    #[test]
+    fn work_create_job_is_not_apply_ai() {
+        let mut state = DetailUiState::default();
+        let mut local = crate::settings::DesktopSettings::default();
+        assert_eq!(
+            handle_primary(&mut state, &mut local, "create-job"),
+            Some(DetailPrimary::CreateJob)
+        );
+        assert_eq!(
+            handle_primary(&mut state, &mut local, "apply-ai"),
+            Some(DetailPrimary::ApplyAi)
+        );
+        assert_eq!(handle_primary(&mut state, &mut local, "apply"), None);
+    }
+
+    #[test]
+    fn companion_and_memory_actions_map_to_tab_commands() {
+        let mut state = DetailUiState::default();
+        let mut local = crate::settings::DesktopSettings::default();
+        assert_eq!(
+            handle_primary(&mut state, &mut local, "apply-body"),
+            Some(DetailPrimary::ApplyBody)
+        );
+        assert_eq!(
+            handle_primary(&mut state, &mut local, "import-character"),
+            Some(DetailPrimary::ImportCharacter)
+        );
+        assert_eq!(
+            handle_primary(&mut state, &mut local, "refresh-memory"),
+            Some(DetailPrimary::RefreshMemory)
+        );
+        assert_eq!(
+            handle_primary(&mut state, &mut local, "reload-mcp"),
+            Some(DetailPrimary::ReloadMcp)
         );
     }
 }

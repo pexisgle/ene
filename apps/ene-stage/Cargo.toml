@@ -59,6 +59,7 @@ zip = { workspace = true, features = ["deflate"] }
 base64 = { workspace = true }
 toml = { workspace = true }
 slint = { workspace = true }
+arboard = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ene-tray-linux = { workspace = true }

@@ -6,6 +6,12 @@ export struct DetailListRow {
     subtitle: string,
 }
 
+export struct DetailAction {
+    id: string,
+    label: string,
+    primary: bool,
+}
+
 export component DetailSurface inherits Window {
     background: EneTheme.bg;
     default-font-family: "Noto Sans CJK JP";
@@ -18,8 +24,10 @@ export component DetailSurface inherits Window {
     in-out property <[DetailListRow]> rows: [];
     in-out property <string> draft-a;
     in-out property <string> draft-b;
+    in-out property <bool> drafts-visible: false;
     in-out property <string> status;
     in-out property <[string]> tabs: ["Home", "Companion", "Conversation", "Voice", "Memory", "Work", "Connections", "System", "Log"];
+    in-out property <[DetailAction]> actions: [];
 
     in-out property <bool> input-focused: false;
 
@@ -56,8 +64,8 @@ export component DetailSurface inherits Window {
             content := VerticalLayout {
                 spacing: EneTheme.space-2;
                 Text { text: body; color: EneTheme.fg; wrap: word-wrap; }
-                TextInput { text <=> draft-a; color: EneTheme.fg; }
-                TextInput { text <=> draft-b; color: EneTheme.fg; }
+                if drafts-visible: TextInput { text <=> draft-a; color: EneTheme.fg; }
+                if drafts-visible: TextInput { text <=> draft-b; color: EneTheme.fg; }
                 for row in rows: Rectangle {
                     background: EneTheme.bg-elevated;
                     border-radius: EneTheme.radius;
@@ -70,9 +78,11 @@ export component DetailSurface inherits Window {
                 }
                 HorizontalLayout {
                     spacing: EneTheme.space-2;
-                    EneButton { text: "Apply"; clicked => { root.primary-action("apply"); } }
-                    EneButton { text: "Reload"; primary: false; clicked => { root.primary-action("reload"); } }
-                    EneButton { text: "Chat"; primary: false; clicked => { root.primary-action("chat"); } }
+                    for action in actions: EneButton {
+                        text: action.label;
+                        primary: action.primary;
+                        clicked => { root.primary-action(action.id); }
+                    }
                 }
             }
         }

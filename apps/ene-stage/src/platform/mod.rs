@@ -152,7 +152,7 @@ impl OverlayPlatform {
             #[cfg(all(target_os = "linux", not(target_os = "android")))]
             PlatformKind::Wayland(backend) => {
                 if push {
-                    backend.apply(mode, interaction);
+                    backend.apply(mode, interaction, window.scale_factor());
                 }
             }
             #[cfg(all(target_os = "linux", not(target_os = "android")))]
@@ -164,7 +164,7 @@ impl OverlayPlatform {
             PlatformKind::Unattached | PlatformKind::Fallback => {
                 let _ = (window, visual, interaction);
                 let enabled = !matches!(mode, InteractionMode::Passive);
-                if self.last_mode != Some(mode) {
+                if push {
                     match window.set_cursor_hittest(enabled) {
                         Ok(()) => {}
                         Err(err) => tracing::debug!(error = %err, "cursor hittest unsupported"),
@@ -172,6 +172,12 @@ impl OverlayPlatform {
                 }
             }
         }
+        if push {
+            self.commit_region_push(mode, interaction);
+        }
+    }
+
+    fn commit_region_push(&mut self, mode: InteractionMode, interaction: &InteractionGeometry) {
         self.last_mode = Some(mode);
         self.last_interaction = interaction.clone();
         self.last_apply = Some(Instant::now());
@@ -233,16 +239,25 @@ fn detect_backend(window: &Window) -> PlatformKind {
 }
 
 pub(crate) fn rects_i32(rects: &[PxRect]) -> Vec<(i32, i32, i32, i32)> {
+    physical_to_surface_local(rects, 1.0)
+}
+
+/// Convert physical-pixel scene rects into Wayland surface-local coordinates.
+///
+/// `wl_surface.set_input_region` is surface-local. `winit` `inner_size` and
+/// [`PxRect`] are physical pixels, so `HiDPI` / fractional scale must divide by
+/// the current window scale before creating the region.
+pub(crate) fn physical_to_surface_local(rects: &[PxRect], scale: f64) -> Vec<(i32, i32, i32, i32)> {
+    let scale = scale.max(0.01);
     rects
         .iter()
         .filter(|rect| !rect.is_empty())
         .map(|rect| {
-            (
-                rect.x.round() as i32,
-                rect.y.round() as i32,
-                rect.w.round().max(1.0) as i32,
-                rect.h.round().max(1.0) as i32,
-            )
+            let x = (f64::from(rect.x) / scale).round() as i32;
+            let y = (f64::from(rect.y) / scale).round() as i32;
+            let w = (f64::from(rect.w) / scale).round().max(1.0) as i32;
+            let h = (f64::from(rect.h) / scale).round().max(1.0) as i32;
+            (x, y, w, h)
         })
         .collect()
 }
@@ -282,5 +297,48 @@ mod tests {
         assert!(
             platform.should_push_region(InteractionMode::Dragging, &InteractionGeometry::default())
         );
+    }
+
+    #[test]
+    fn skipped_small_steps_do_not_reset_rate_limit() {
+        let applied = InteractionGeometry {
+            rects: vec![PxRect::new(0.0, 0.0, 10.0, 10.0)],
+        };
+        let mut platform = OverlayPlatform {
+            kind: PlatformKind::Fallback,
+            last_mode: Some(InteractionMode::Interactive),
+            last_interaction: applied.clone(),
+            last_apply: Some(Instant::now()),
+        };
+        let original_apply = platform.last_apply;
+        for offset in 1_u8..=3 {
+            let next = InteractionGeometry {
+                rects: vec![PxRect::new(f32::from(offset), 0.0, 10.0, 10.0)],
+            };
+            let push = platform.should_push_region(InteractionMode::Interactive, &next);
+            if push {
+                platform.commit_region_push(InteractionMode::Interactive, &next);
+            }
+        }
+        assert_eq!(platform.last_apply, original_apply);
+        assert!(
+            (platform.last_interaction.rects[0].x).abs() < f32::EPSILON,
+            "skipped steps must keep the last applied region"
+        );
+        platform.last_apply = Instant::now()
+            .checked_sub(Duration::from_millis(200))
+            .or(Some(Instant::now()));
+        let drifted = InteractionGeometry {
+            rects: vec![PxRect::new(8.0, 0.0, 10.0, 10.0)],
+        };
+        assert!(platform.should_push_region(InteractionMode::Interactive, &drifted));
+    }
+
+    #[test]
+    fn physical_rects_divide_by_surface_scale() {
+        let rects = [PxRect::new(10.0, 20.0, 40.0, 80.0)];
+        assert_eq!(physical_to_surface_local(&rects, 1.0), [(10, 20, 40, 80)]);
+        assert_eq!(physical_to_surface_local(&rects, 2.0), [(5, 10, 20, 40)]);
+        assert_eq!(physical_to_surface_local(&rects, 1.25), [(8, 16, 32, 64)]);
     }
 }

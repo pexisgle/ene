@@ -6,13 +6,17 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use slint::platform::femtovg_renderer::FemtoVGWGPURenderer;
-use slint::platform::{Platform, PlatformError, PointerEventButton, WindowAdapter, WindowEvent};
+use slint::platform::{
+    Clipboard, Key, Platform, PlatformError, PointerEventButton, WindowAdapter, WindowEvent,
+};
 use slint::{
     ComponentHandle, LogicalPosition, Model, PhysicalSize as SlintPhysicalSize, SharedString,
 };
 use wgpu::TextureView;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent as WinitWindowEvent};
-use winit::keyboard::{Key as WinitKey, NamedKey};
+use winit::event::{
+    ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent as WinitWindowEvent,
+};
+use winit::keyboard::{Key as WinitKey, KeyLocation, ModifiersState, NamedKey};
 
 use crate::gpu::GpuContext;
 use crate::ui::{
@@ -45,6 +49,14 @@ impl Platform for StageSlintPlatform {
 
     fn duration_since_start(&self) -> Duration {
         self.start.elapsed()
+    }
+
+    fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
+        set_system_clipboard(text, &clipboard);
+    }
+
+    fn clipboard_text(&self, clipboard: Clipboard) -> Option<String> {
+        read_system_clipboard(&clipboard)
     }
 }
 
@@ -142,6 +154,8 @@ pub struct SlintOverlayLayer {
     adapter: Option<Rc<StageWindowAdapter>>,
     pending: Rc<RefCell<Vec<OverlayUiAction>>>,
     last_pointer: Cell<LogicalPosition>,
+    composing: Cell<bool>,
+    last_modifiers: Cell<ModifiersState>,
 }
 
 impl SlintOverlayLayer {
@@ -153,6 +167,8 @@ impl SlintOverlayLayer {
             adapter: None,
             pending: Rc::new(RefCell::new(Vec::new())),
             last_pointer: Cell::new(LogicalPosition::new(0.0, 0.0)),
+            composing: Cell::new(false),
+            last_modifiers: Cell::new(ModifiersState::empty()),
         }
     }
 
@@ -212,8 +228,16 @@ impl SlintOverlayLayer {
         let Some(ui) = &self.ui else {
             return;
         };
-        if let Some(converted) = convert_window_event(event, scale, &self.last_pointer) {
-            ui.window().dispatch_event(converted);
+        if let Some(converted) = convert_window_event(
+            event,
+            scale,
+            &self.last_pointer,
+            &self.composing,
+            &self.last_modifiers,
+        ) {
+            for item in converted {
+                ui.window().dispatch_event(item);
+            }
         }
     }
 
@@ -294,6 +318,8 @@ pub struct ChromeLayer {
     pending: Rc<RefCell<Vec<ChromeAction>>>,
     size: (u32, u32),
     last_pointer: Cell<LogicalPosition>,
+    composing: Cell<bool>,
+    last_modifiers: Cell<ModifiersState>,
 }
 
 impl ChromeLayer {
@@ -335,6 +361,8 @@ impl ChromeLayer {
             pending,
             size: (1, 1),
             last_pointer: Cell::new(LogicalPosition::new(0.0, 0.0)),
+            composing: Cell::new(false),
+            last_modifiers: Cell::new(ModifiersState::empty()),
         })
     }
 
@@ -364,6 +392,8 @@ impl ChromeLayer {
             pending,
             size: (1, 1),
             last_pointer: Cell::new(LogicalPosition::new(0.0, 0.0)),
+            composing: Cell::new(false),
+            last_modifiers: Cell::new(ModifiersState::empty()),
         })
     }
 
@@ -376,6 +406,8 @@ impl ChromeLayer {
             pending: Rc::new(RefCell::new(Vec::new())),
             size: (1, 1),
             last_pointer: Cell::new(LogicalPosition::new(0.0, 0.0)),
+            composing: Cell::new(false),
+            last_modifiers: Cell::new(ModifiersState::empty()),
         })
     }
 
@@ -399,6 +431,8 @@ impl ChromeLayer {
             pending,
             size: (1, 1),
             last_pointer: Cell::new(LogicalPosition::new(0.0, 0.0)),
+            composing: Cell::new(false),
+            last_modifiers: Cell::new(ModifiersState::empty()),
         })
     }
 
@@ -449,8 +483,16 @@ impl ChromeLayer {
             ChromeUi::Caption(ui) => ui.window(),
             ChromeUi::Spotlight(ui) => ui.window(),
         };
-        if let Some(converted) = convert_window_event(event, scale, &self.last_pointer) {
-            window.dispatch_event(converted);
+        if let Some(converted) = convert_window_event(
+            event,
+            scale,
+            &self.last_pointer,
+            &self.composing,
+            &self.last_modifiers,
+        ) {
+            for item in converted {
+                window.dispatch_event(item);
+            }
             self.adapter.redraw.set(true);
             return true;
         }
@@ -498,16 +540,18 @@ fn convert_window_event(
     event: &WinitWindowEvent,
     scale: f64,
     last_pointer: &Cell<LogicalPosition>,
-) -> Option<WindowEvent> {
+    composing: &Cell<bool>,
+    last_modifiers: &Cell<ModifiersState>,
+) -> Option<Vec<WindowEvent>> {
     let scale = scale.max(0.01) as f32;
     match event {
         WinitWindowEvent::CursorMoved { position, .. } => {
             let position =
                 LogicalPosition::new(position.x as f32 / scale, position.y as f32 / scale);
             last_pointer.set(position);
-            Some(WindowEvent::PointerMoved { position })
+            Some(vec![WindowEvent::PointerMoved { position }])
         }
-        WinitWindowEvent::CursorLeft { .. } => Some(WindowEvent::PointerExited),
+        WinitWindowEvent::CursorLeft { .. } => Some(vec![WindowEvent::PointerExited]),
         WinitWindowEvent::MouseInput { state, button, .. } => {
             let button = match button {
                 MouseButton::Left => PointerEventButton::Left,
@@ -516,62 +560,265 @@ fn convert_window_event(
                 _ => PointerEventButton::Other,
             };
             let position = last_pointer.get();
-            Some(match state {
+            Some(vec![match state {
                 ElementState::Pressed => WindowEvent::PointerPressed { position, button },
                 ElementState::Released => WindowEvent::PointerReleased { position, button },
-            })
+            }])
         }
         WinitWindowEvent::MouseWheel { delta, .. } => {
             let (delta_x, delta_y) = match delta {
                 MouseScrollDelta::LineDelta(x, y) => (*x * 16.0, *y * 16.0),
                 MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
             };
-            Some(WindowEvent::PointerScrolled {
+            Some(vec![WindowEvent::PointerScrolled {
                 position: last_pointer.get(),
                 delta_x,
                 delta_y,
-            })
+            }])
         }
         WinitWindowEvent::KeyboardInput { event, .. } => {
+            if is_modifier_key(event) || !forward_keyboard(composing.get(), false) {
+                return Some(Vec::new());
+            }
             let text = key_text(event)?;
-            Some(match event.state {
+            Some(vec![match event.state {
                 ElementState::Pressed => WindowEvent::KeyPressed { text },
                 ElementState::Released => WindowEvent::KeyReleased { text },
-            })
+            }])
         }
-        WinitWindowEvent::Focused(focused) => Some(WindowEvent::WindowActiveChanged(*focused)),
+        WinitWindowEvent::Ime(ime) => Some(apply_ime(ime, composing)),
+        WinitWindowEvent::ModifiersChanged(modifiers) => {
+            let next = modifiers.state();
+            let events = modifier_key_events(last_modifiers.get(), next);
+            last_modifiers.set(next);
+            Some(events)
+        }
+        WinitWindowEvent::Focused(focused) => {
+            Some(vec![WindowEvent::WindowActiveChanged(*focused)])
+        }
         WinitWindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-            Some(WindowEvent::ScaleFactorChanged {
+            Some(vec![WindowEvent::ScaleFactorChanged {
                 scale_factor: *scale_factor as f32,
-            })
+            }])
         }
         _ => None,
     }
+}
+
+fn apply_ime(ime: &Ime, composing: &Cell<bool>) -> Vec<WindowEvent> {
+    match ime {
+        Ime::Enabled => Vec::new(),
+        Ime::Disabled => {
+            composing.set(false);
+            Vec::new()
+        }
+        Ime::Preedit(text, _) => {
+            composing.set(!text.is_empty());
+            Vec::new()
+        }
+        Ime::Commit(text) => {
+            composing.set(false);
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![WindowEvent::KeyPressed {
+                    text: SharedString::from(text.as_str()),
+                }]
+            }
+        }
+    }
+}
+
+fn is_modifier_key(event: &winit::event::KeyEvent) -> bool {
+    matches!(
+        event.logical_key,
+        WinitKey::Named(
+            NamedKey::Control
+                | NamedKey::Shift
+                | NamedKey::Alt
+                | NamedKey::AltGraph
+                | NamedKey::Super
+                | NamedKey::Meta
+        )
+    )
+}
+
+const fn forward_keyboard(composing: bool, is_modifier: bool) -> bool {
+    !composing && !is_modifier
+}
+
+fn modifier_key_events(previous: ModifiersState, next: ModifiersState) -> Vec<WindowEvent> {
+    let bits = [
+        (ModifiersState::CONTROL, Key::Control),
+        (ModifiersState::SHIFT, Key::Shift),
+        (ModifiersState::ALT, Key::Alt),
+        (ModifiersState::SUPER, Key::Meta),
+    ];
+    let mut events = Vec::new();
+    for (bit, key) in bits {
+        let was = previous.contains(bit);
+        let is = next.contains(bit);
+        if was == is {
+            continue;
+        }
+        let text: SharedString = key.into();
+        events.push(if is {
+            WindowEvent::KeyPressed { text }
+        } else {
+            WindowEvent::KeyReleased { text }
+        });
+    }
+    events
 }
 
 fn key_text(event: &winit::event::KeyEvent) -> Option<SharedString> {
     match &event.logical_key {
         WinitKey::Character(ch) => Some(SharedString::from(ch.as_str())),
         WinitKey::Named(named) => {
-            let name = match named {
-                NamedKey::Enter => "\n",
-                NamedKey::Tab => "\t",
-                NamedKey::Backspace => "Backspace",
-                NamedKey::Delete => "Delete",
-                NamedKey::Escape => "Escape",
-                NamedKey::ArrowLeft => "LeftArrow",
-                NamedKey::ArrowRight => "RightArrow",
-                NamedKey::ArrowUp => "UpArrow",
-                NamedKey::ArrowDown => "DownArrow",
-                NamedKey::Home => "Home",
-                NamedKey::End => "End",
-                NamedKey::PageUp => "PageUp",
-                NamedKey::PageDown => "PageDown",
-                NamedKey::Space => " ",
+            let key = match named {
+                NamedKey::Enter => Key::Return,
+                NamedKey::Tab => Key::Tab,
+                NamedKey::Backspace => Key::Backspace,
+                NamedKey::Delete => Key::Delete,
+                NamedKey::Escape => Key::Escape,
+                NamedKey::ArrowLeft => Key::LeftArrow,
+                NamedKey::ArrowRight => Key::RightArrow,
+                NamedKey::ArrowUp => Key::UpArrow,
+                NamedKey::ArrowDown => Key::DownArrow,
+                NamedKey::Home => Key::Home,
+                NamedKey::End => Key::End,
+                NamedKey::PageUp => Key::PageUp,
+                NamedKey::PageDown => Key::PageDown,
+                NamedKey::Space => Key::Space,
+                NamedKey::Control => match event.location {
+                    KeyLocation::Right => Key::ControlR,
+                    _ => Key::Control,
+                },
+                NamedKey::Shift => match event.location {
+                    KeyLocation::Right => Key::ShiftR,
+                    _ => Key::Shift,
+                },
+                NamedKey::Alt => Key::Alt,
+                NamedKey::AltGraph => Key::AltGr,
+                NamedKey::Super | NamedKey::Meta => match event.location {
+                    KeyLocation::Right => Key::MetaR,
+                    _ => Key::Meta,
+                },
                 _ => return None,
             };
-            Some(SharedString::from(name))
+            Some(key.into())
         }
         _ => None,
+    }
+}
+
+fn set_system_clipboard(text: &str, clipboard: &Clipboard) {
+    match clipboard {
+        Clipboard::DefaultClipboard => {
+            if let Ok(mut board) = arboard::Clipboard::new() {
+                drop(board.set_text(text));
+            }
+        }
+        Clipboard::SelectionClipboard => set_selection_clipboard(text),
+        _ => {}
+    }
+}
+
+fn read_system_clipboard(clipboard: &Clipboard) -> Option<String> {
+    match clipboard {
+        Clipboard::DefaultClipboard => arboard::Clipboard::new().ok()?.get_text().ok(),
+        Clipboard::SelectionClipboard => read_selection_clipboard(),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_selection_clipboard(text: &str) {
+    use arboard::{LinuxClipboardKind, SetExtLinux};
+    if let Ok(mut board) = arboard::Clipboard::new() {
+        drop(
+            board
+                .set()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text(text),
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_selection_clipboard(_text: &str) {}
+
+#[cfg(target_os = "linux")]
+fn read_selection_clipboard() -> Option<String> {
+    use arboard::{GetExtLinux, LinuxClipboardKind};
+    arboard::Clipboard::new()
+        .ok()?
+        .get()
+        .clipboard(LinuxClipboardKind::Primary)
+        .text()
+        .ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_selection_clipboard() -> Option<String> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ime_preedit_blocks_enter() {
+        let composing = Cell::new(false);
+        let events = apply_ime(&Ime::Preedit("あ".to_owned(), None), &composing);
+        assert!(events.is_empty());
+        assert!(composing.get());
+        assert!(
+            !forward_keyboard(composing.get(), false),
+            "Enter during IME preedit must not reach Slint TextInput.accepted"
+        );
+    }
+
+    #[test]
+    fn ime_commit_forwards_composed_text() {
+        let composing = Cell::new(true);
+        let events = apply_ime(&Ime::Commit("あ".to_owned()), &composing);
+        assert!(!composing.get());
+        assert_eq!(
+            events,
+            vec![WindowEvent::KeyPressed {
+                text: SharedString::from("あ")
+            }]
+        );
+        assert!(forward_keyboard(composing.get(), false));
+    }
+
+    #[test]
+    fn ime_disabled_and_empty_preedit_clear_composing() {
+        let composing = Cell::new(true);
+        assert!(apply_ime(&Ime::Disabled, &composing).is_empty());
+        assert!(!composing.get());
+        composing.set(true);
+        assert!(apply_ime(&Ime::Preedit(String::new(), None), &composing).is_empty());
+        assert!(!composing.get());
+    }
+
+    #[test]
+    fn modifier_changes_forward_control() {
+        let events = modifier_key_events(ModifiersState::empty(), ModifiersState::CONTROL);
+        assert_eq!(
+            events,
+            vec![WindowEvent::KeyPressed {
+                text: Key::Control.into()
+            }]
+        );
+        let released = modifier_key_events(ModifiersState::CONTROL, ModifiersState::empty());
+        assert_eq!(
+            released,
+            vec![WindowEvent::KeyReleased {
+                text: Key::Control.into()
+            }]
+        );
     }
 }
