@@ -23,17 +23,24 @@ if [[ ! "$stable_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-rust_toolchain_action_sha="$(
+resolve_rust_toolchain_action_sha() {
+  local tag="$1"
   git ls-remote https://github.com/dtolnay/rust-toolchain.git \
-    "refs/tags/$stable_version" "refs/tags/$stable_version^{}" \
-    | awk -v peeled="refs/tags/$stable_version^{}" '
+    "refs/tags/$tag" "refs/tags/$tag^{}" \
+    | awk -v peeled="refs/tags/$tag^{}" '
         $2 == peeled { print $1; resolved = 1; exit }
         NR == 1 { fallback = $1 }
         END { if (!resolved && fallback != "") print fallback }
       '
-)"
+}
+
+rust_toolchain_action_sha="$(resolve_rust_toolchain_action_sha "$stable_version")"
+# dtolnay/rust-toolchain dropped per-version tags; v1 is the remaining moving tag.
 if [[ ! "$rust_toolchain_action_sha" =~ ^[0-9a-f]{40}$ ]]; then
-  printf 'Could not resolve dtolnay/rust-toolchain tag %s to a commit SHA.\n' "$stable_version" >&2
+  rust_toolchain_action_sha="$(resolve_rust_toolchain_action_sha "v1")"
+fi
+if [[ ! "$rust_toolchain_action_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'Could not resolve dtolnay/rust-toolchain tag %s or v1 to a commit SHA.\n' "$stable_version" >&2
   exit 1
 fi
 
@@ -44,8 +51,8 @@ sed -i -E \
 workflow_files=(.github/workflows/ci.yml)
 for workflow in "${workflow_files[@]}"; do
   sed -i -E \
-    -e "s#dtolnay/rust-toolchain@[0-9a-f]{40}( # [0-9]+\.[0-9]+\.[0-9]+)?#dtolnay/rust-toolchain@$rust_toolchain_action_sha # $stable_version#g" \
-    -e "s#dtolnay/rust-toolchain@[0-9]+\.[0-9]+\.[0-9]+#dtolnay/rust-toolchain@$rust_toolchain_action_sha # $stable_version#g" \
+    -e "s|dtolnay/rust-toolchain@[0-9a-f]{40}( # [0-9]+\.[0-9]+\.[0-9]+)?|dtolnay/rust-toolchain@$rust_toolchain_action_sha # $stable_version|g" \
+    -e "s|dtolnay/rust-toolchain@[0-9]+\.[0-9]+\.[0-9]+|dtolnay/rust-toolchain@$rust_toolchain_action_sha # $stable_version|g" \
     "$workflow"
 done
 
