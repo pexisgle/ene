@@ -3,6 +3,7 @@ use crate::questions::{combine_questions, route_combined_answers};
 use crate::speech_gate::SpeechGate;
 use crate::spill::{DEFAULT_SOFT_LIMIT_BYTES, bound_brief};
 use crate::store::WorkStore;
+use crate::task::{ArtifactRef, TaskContract, TaskError, TaskState};
 use crate::types::{
     Artifact, CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus, NewJob,
     NewToolExecution, OpenQuestion, ToolExecStatus, ToolExecution, UpgradeReason,
@@ -234,7 +235,13 @@ impl DelegationHost {
             created_from_turn,
             depth,
             parent_id,
+            success_criteria,
+            allowed_tools,
         } = request;
+        if !success_criteria.is_empty() {
+            crate::task::validate_criteria(&success_criteria)
+                .map_err(|err| WorkError::InvalidContract(err.to_string()))?;
+        }
         let mode = self.enforce_secrecy(parent_id, mode)?;
         if depth >= self.settings.max_depth {
             return Err(WorkError::DepthExceeded);
@@ -272,6 +279,8 @@ impl DelegationHost {
                 created_from_turn,
                 plan,
                 brief,
+                success_criteria,
+                allowed_tools: allowed_tools.clone(),
             })?;
             self.store.set_status(job.id, JobStatus::Queued, None)?;
             self.store
@@ -293,6 +302,9 @@ impl DelegationHost {
                 plan,
                 brief,
                 plan_approved: false,
+                success_criteria,
+                allowed_tools,
+                pending_allowed_tools: None,
                 created_at: Utc::now().to_rfc3339(),
                 ended_at: None,
             }
@@ -389,6 +401,8 @@ impl DelegationHost {
             created_from_turn: request.created_from_turn,
             depth: 0,
             parent_id: None,
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
         })
     }
 
@@ -422,8 +436,21 @@ impl DelegationHost {
             ) {
                 return Err(WorkError::AlreadyCompleted);
             }
-            self.deliver_job_artifacts(id)?;
-            self.store.set_status(id, JobStatus::Completed, None)?;
+            if job.success_criteria.is_empty() {
+                // Legacy delegation: completion needs no criteria, artifacts, or verifying state.
+                self.verify_job_completion(&job)?;
+                self.deliver_job_artifacts(id)?;
+                self.store.set_status(id, JobStatus::Completed, None)?;
+            } else {
+                self.verify_job_completion(&job)?;
+                if job.status != JobStatus::Verifying {
+                    return Err(WorkError::VerificationFailed(
+                        "must go through verifying (model done alone is not enough)".into(),
+                    ));
+                }
+                self.deliver_job_artifacts(id)?;
+                self.store.set_status(id, JobStatus::Completed, None)?;
+            }
         }
         self.store
             .mailbox_push(id, "child_to_parent", "complete", summary)?;
@@ -437,6 +464,75 @@ impl DelegationHost {
             ),
             "complete_queued",
         ))
+    }
+
+    fn verify_job_completion(&self, job: &Job) -> Result<(), WorkError> {
+        let artifacts = self.store.artifacts_for(job.id)?;
+        if job.success_criteria.is_empty() {
+            // Legacy job: only ensure registered artifacts stay in the job's own workspace.
+            for art in &artifacts {
+                crate::task::confine_artifact_path(
+                    std::path::Path::new(&job.workspace_dir),
+                    &art.path,
+                )
+                .map_err(|err| match err {
+                    TaskError::WorkspaceViolation(msg) => WorkError::WorkspaceViolation(msg),
+                    TaskError::VerificationFailed(msg) => WorkError::VerificationFailed(msg),
+                    other => WorkError::WorkspaceViolation(other.to_string()),
+                })?;
+            }
+            return Ok(());
+        }
+        if artifacts.is_empty() {
+            return Err(WorkError::VerificationFailed(
+                "model done alone is not enough: no artifacts registered for task contract".into(),
+            ));
+        }
+        let contract = TaskContract {
+            goal: job.goal.clone(),
+            success_criteria: job.success_criteria.clone(),
+            artifacts: artifacts.iter().map(|a| a.path.clone()).collect(),
+            workspace: job.workspace_dir.clone(),
+            allowed_tools: job.allowed_tools.clone(),
+        };
+        if let Err(err) = contract.validate() {
+            return Err(WorkError::InvalidContract(err.to_string()));
+        }
+        let mut task = crate::task::Task {
+            id: job.id.to_string(),
+            contract,
+            state: TaskState::Verifying,
+            mailbox_revision: 0,
+            artifacts: artifacts
+                .iter()
+                .map(|a| ArtifactRef {
+                    path: a.path.clone(),
+                    workspace: job.workspace_dir.clone(),
+                })
+                .collect(),
+        };
+        task.complete().map_err(|err| match err {
+            TaskError::VerificationFailed(msg) => WorkError::VerificationFailed(msg),
+            TaskError::WorkspaceViolation(msg) => WorkError::WorkspaceViolation(msg),
+            other => WorkError::VerificationFailed(other.to_string()),
+        })?;
+        Ok(())
+    }
+
+    pub fn begin_verifying(&self, id: DelegationId) -> Result<(), WorkError> {
+        self.require_known(id)?;
+        let job = self
+            .store
+            .get_job(id)?
+            .ok_or_else(|| WorkError::UnknownJob(id.to_string()))?;
+        if job.status != JobStatus::Running {
+            return Err(WorkError::VerificationFailed(format!(
+                "cannot begin verifying from status {}",
+                job.status.as_str()
+            )));
+        }
+        self.store.set_status(id, JobStatus::Verifying, None)?;
+        Ok(())
     }
 
     pub fn fail(&self, id: DelegationId, summary: &str) -> Result<CompanionReport, WorkError> {
@@ -752,8 +848,106 @@ impl DelegationHost {
 
     pub fn instruct(&self, id: DelegationId, message: &str) -> Result<(), WorkError> {
         self.require_known(id)?;
+        let job = self
+            .store
+            .get_job(id)?
+            .ok_or_else(|| WorkError::UnknownJob(id.to_string()))?;
+        if job.status == JobStatus::Cancelled || job.status == JobStatus::Interrupted {
+            return Err(WorkError::Cancelled);
+        }
+        if (message.to_ascii_lowercase().contains("allow:")
+            || message.to_ascii_lowercase().contains("tool:"))
+            && !job.allowed_tools.is_empty()
+        {
+            let expanded = Self::extract_tools(message);
+            let new_tools: Vec<String> = expanded
+                .into_iter()
+                .filter(|tool| !job.allowed_tools.contains(tool))
+                .collect();
+            if !new_tools.is_empty() {
+                let mut pending = job.pending_allowed_tools.unwrap_or_default();
+                for tool in &new_tools {
+                    if !pending.contains(tool) {
+                        pending.push(tool.clone());
+                    }
+                }
+                self.store.set_pending_allowed_tools(id, Some(&pending))?;
+                return Err(WorkError::ScopeWideningPending { tools: new_tools });
+            }
+        }
         self.store
             .mailbox_push(id, "parent_to_child", "task", message)
+    }
+
+    /// Explicit approval event for a previously requested scope widening.
+    pub fn approve_scope_widening(&self, id: DelegationId) -> Result<Vec<String>, WorkError> {
+        self.require_known(id)?;
+        let job = self
+            .store
+            .get_job(id)?
+            .ok_or_else(|| WorkError::UnknownJob(id.to_string()))?;
+        let Some(pending) = job.pending_allowed_tools else {
+            return Err(WorkError::NoPendingScopeWidening);
+        };
+        let mut allowed = job.allowed_tools;
+        for tool in &pending {
+            if !allowed.contains(tool) {
+                allowed.push(tool.clone());
+            }
+        }
+        self.store.set_allowed_tools(id, &allowed)?;
+        self.store.set_pending_allowed_tools(id, None)?;
+        Ok(pending)
+    }
+
+    pub fn register_artifact_for_job(
+        &self,
+        job_id: DelegationId,
+        artifact: Artifact,
+    ) -> Result<Artifact, WorkError> {
+        let job = self
+            .store
+            .get_job(job_id)?
+            .ok_or_else(|| WorkError::UnknownJob(job_id.to_string()))?;
+        if job.status == JobStatus::Cancelled {
+            return Err(WorkError::Cancelled);
+        }
+        if job.status == JobStatus::Interrupted {
+            return Err(WorkError::Interrupted);
+        }
+        let confined = crate::task::confine_artifact_path(
+            std::path::Path::new(&job.workspace_dir),
+            &artifact.path,
+        )
+        .map_err(|err| match err {
+            TaskError::WorkspaceViolation(msg) => WorkError::WorkspaceViolation(msg),
+            TaskError::VerificationFailed(msg) => WorkError::VerificationFailed(msg),
+            other => WorkError::WorkspaceViolation(other.to_string()),
+        })?;
+        let path = confined.display().to_string();
+        let mut stored = artifact;
+        stored.path = path;
+        stored.size_bytes = std::fs::metadata(&stored.path)
+            .ok()
+            .and_then(|meta| i64::try_from(meta.len()).ok());
+        self.store.register_artifact(stored)
+    }
+
+    fn extract_tools(message: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for token in message.split(|c: char| c == ',' || c.is_whitespace()) {
+            let t = token
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'' || c == ':' || c == ';');
+            if !t.is_empty()
+                && t.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+                && t.contains('.')
+            {
+                out.push(t.to_owned());
+            }
+        }
+        out
     }
 
     pub fn message(&self, id: DelegationId, message: &str) -> Result<(), WorkError> {
@@ -861,6 +1055,8 @@ pub struct StartDelegation {
     pub created_from_turn: Option<String>,
     pub depth: u32,
     pub parent_id: Option<DelegationId>,
+    pub success_criteria: Vec<String>,
+    pub allowed_tools: Vec<String>,
 }
 
 pub struct UpgradeRequest {

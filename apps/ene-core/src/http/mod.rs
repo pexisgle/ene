@@ -437,6 +437,17 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/jobs/{id}/cancel", post(routes::cancel_job))
         .route("/api/v1/jobs/{id}/answer", post(routes::answer_job))
         .route(
+            "/api/v1/tasks",
+            get(routes::list_tasks).post(routes::create_task),
+        )
+        .route("/api/v1/tasks/{id}", get(routes::get_task))
+        .route("/api/v1/tasks/{id}/cancel", post(routes::cancel_task))
+        .route("/api/v1/tasks/{id}/verify", post(routes::verify_task))
+        .route(
+            "/api/v1/tasks/{id}/scope-approval",
+            post(routes::approve_task_scope),
+        )
+        .route(
             "/api/v1/jobs/{id}/questions/{question_id}/answer",
             post(routes::answer_question),
         )

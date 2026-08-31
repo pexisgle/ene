@@ -3,8 +3,8 @@ use crate::pcm::{PCM_S16LE, encode_pcm_s16le};
 use crate::types::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateJobRequest,
-    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot,
-    GreetingView, Health, HistoryResponse, InstallProviderAssetRequest,
+    CreateScheduleRequest, CreateSessionRequest, CreateTaskRequest, EndSessionRequest,
+    ExclusiveSnapshot, GreetingView, Health, HistoryResponse, InstallProviderAssetRequest,
     InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
     ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpCatalogDocument,
     McpDocument, McpProbeRequest, McpProbeResponse, MemoryCandidateView, MemoryJournalView,
@@ -15,8 +15,8 @@ use crate::types::{
     ResolveMemoryCandidateRequest, ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest,
     ScheduleView, SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch,
     SessionView, SetActiveProviderAssetRequest, SetActiveProviderAssetResponse, SoulPatch,
-    SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest,
-    ToolView, UsageView,
+    SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView, TaskView,
+    ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -376,6 +376,39 @@ impl ApiClient {
             .json(req),
         )
         .await
+    }
+
+    pub async fn list_tasks(&self, soul_id: Option<&str>) -> Result<Page<TaskView>, ApiError> {
+        let path = match soul_id {
+            Some(soul) => format!("/api/v1/tasks?soul_id={soul}"),
+            None => "/api/v1/tasks".to_owned(),
+        };
+        self.send_json(self.request(Method::GET, &path)).await
+    }
+
+    pub async fn create_task(&self, req: &CreateTaskRequest) -> Result<TaskView, ApiError> {
+        self.send_json(self.request(Method::POST, "/api/v1/tasks").json(req))
+            .await
+    }
+
+    pub async fn get_task(&self, id: &str) -> Result<TaskView, ApiError> {
+        self.send_json(self.request(Method::GET, &format!("/api/v1/tasks/{id}")))
+            .await
+    }
+
+    pub async fn cancel_task(&self, id: &str) -> Result<TaskView, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/tasks/{id}/cancel")))
+            .await
+    }
+
+    pub async fn verify_task(&self, id: &str) -> Result<TaskView, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/tasks/{id}/verify")))
+            .await
+    }
+
+    pub async fn approve_task_scope(&self, id: &str) -> Result<TaskView, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/tasks/{id}/scope-approval")))
+            .await
     }
 
     pub async fn list_schedules(&self) -> Result<Page<ScheduleView>, ApiError> {

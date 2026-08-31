@@ -9,7 +9,7 @@ use ene_plane::Sensitivity;
 use ene_registry::{ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use ene_session::{DelegationId, SoulId};
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use uuid::Uuid;
@@ -368,7 +368,7 @@ impl ToolInvoke for WorkInvoker {
                 self.host
                     .require_mutating_allowed(job_id)
                     .map_err(|err| err.to_string())?;
-                register_artifact(self.host.as_ref(), &args)
+                register_artifact_via_host(self.host.as_ref(), &args)
             }
             "job.plan_write" => {
                 let report = self
@@ -437,6 +437,24 @@ fn start(invoker: &WorkInvoker, args: &Value) -> Result<Value, String> {
             created_from_turn: None,
             depth,
             parent_id,
+            success_criteria: args
+                .get("success_criteria")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            allowed_tools: args
+                .get("allowed_tools")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
         .map_err(|err| err.to_string())?;
     Ok(json!({
@@ -446,32 +464,26 @@ fn start(invoker: &WorkInvoker, args: &Value) -> Result<Value, String> {
     }))
 }
 
-fn register_artifact(host: &DelegationHost, args: &Value) -> Result<Value, String> {
+fn register_artifact_via_host(host: &DelegationHost, args: &Value) -> Result<Value, String> {
     let kind = ArtifactKind::try_parse(str_arg(args, "kind")?).map_err(|err| err.to_string())?;
     let job_id = job_id_arg(args)?;
-    let workspace = crate::workspace_root(host.data_dir());
-    std::fs::create_dir_all(&workspace).map_err(|err| err.to_string())?;
-    let confined =
-        ene_registry::confine_tool_path(&workspace, Path::new(str_arg(args, "path")?), false)
-            .map_err(|err| err.to_string())?;
-    let path = confined.display().to_string();
-    let size = std::fs::metadata(&path)
-        .ok()
-        .and_then(|meta| i64::try_from(meta.len()).ok());
+    let path = str_arg(args, "path")?.to_owned();
     let art = host
-        .store()
-        .register_artifact(Artifact {
-            id: Uuid::now_v7().to_string(),
-            soul_id: soul_arg(args)?,
-            job_id: Some(job_id),
-            kind,
-            title: str_arg(args, "title")?.to_owned(),
-            path,
-            mime: None,
-            size_bytes: size,
-            created_at: Utc::now().to_rfc3339(),
-            delivered: false,
-        })
+        .register_artifact_for_job(
+            job_id,
+            Artifact {
+                id: Uuid::now_v7().to_string(),
+                soul_id: soul_arg(args)?,
+                job_id: Some(job_id),
+                kind,
+                title: str_arg(args, "title")?.to_owned(),
+                path,
+                mime: None,
+                size_bytes: None,
+                created_at: Utc::now().to_rfc3339(),
+                delivered: false,
+            },
+        )
         .map_err(|err| err.to_string())?;
     Ok(json!({ "id": art.id }))
 }
@@ -494,6 +506,10 @@ fn send_from_child(host: &DelegationHost, args: &Value) -> Result<Value, String>
         "question" => {
             let report = host.question(id, body).map_err(|err| err.to_string())?;
             Ok(json!({ "speech": report.speech }))
+        }
+        "verifying" => {
+            host.begin_verifying(id).map_err(|err| err.to_string())?;
+            Ok(json!({ "ok": true }))
         }
         "complete" => {
             let report = host.complete(id, body).map_err(|err| err.to_string())?;

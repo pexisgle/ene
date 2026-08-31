@@ -82,6 +82,8 @@ fn start_scheduled_job(state: &AppState, fired: &FiredSchedule) {
         created_from_turn: None,
         depth: 0,
         parent_id: None,
+        success_criteria: Vec::new(),
+        allowed_tools: Vec::new(),
     }) {
         tracing::warn!(
             error = %err,

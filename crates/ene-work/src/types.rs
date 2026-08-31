@@ -33,6 +33,7 @@ pub enum JobStatus {
     Created,
     Queued,
     Running,
+    Verifying,
     Completed,
     Failed,
     Cancelled,
@@ -46,6 +47,7 @@ impl JobStatus {
             Self::Created => "created",
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Verifying => "verifying",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -58,6 +60,7 @@ impl JobStatus {
         match raw {
             "queued" => Self::Queued,
             "running" => Self::Running,
+            "verifying" => Self::Verifying,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
@@ -83,6 +86,10 @@ pub struct Job {
     pub plan: Option<String>,
     pub brief: Option<String>,
     pub plan_approved: bool,
+    pub success_criteria: Vec<String>,
+    pub allowed_tools: Vec<String>,
+    /// Tools requested by a follow-up that are not yet approved.
+    pub pending_allowed_tools: Option<Vec<String>>,
     pub created_at: String,
     pub ended_at: Option<String>,
 }
@@ -98,6 +105,8 @@ pub struct NewJob {
     pub created_from_turn: Option<String>,
     pub plan: Option<String>,
     pub brief: Option<String>,
+    pub success_criteria: Vec<String>,
+    pub allowed_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

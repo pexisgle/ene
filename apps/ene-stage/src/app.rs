@@ -5155,6 +5155,8 @@ mod tests {
             soul_id: "soul".to_owned(),
             goal: goal.to_owned(),
             title: Some("Plant care".to_owned()),
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
         }
     }
 
