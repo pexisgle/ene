@@ -12,7 +12,7 @@ default = ["voice"]
 voice = ["dep:cpal", "dep:rodio", "dep:rustfft"]
 
 [dependencies]
-winit = "0.30"
+winit = { workspace = true }
 global-hotkey = { workspace = true }
 wgpu = { workspace = true }
 pollster = "1.0"

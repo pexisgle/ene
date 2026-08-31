@@ -23,7 +23,7 @@ voice = ["dep:cpal", "dep:rodio", "dep:rustfft"]
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
-winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11"] }
+winit = { workspace = true }
 ene-api = { workspace = true }
 ene-config = { workspace = true }
 directories = { workspace = true }

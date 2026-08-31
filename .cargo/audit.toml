@@ -1,0 +1,16 @@
+[advisories]
+ignore = [
+    # Linux tray icons and menus still require GTK3 via tray-icon/muda/libappindicator
+    # until the upstream ksni migration lands.
+    "RUSTSEC-2024-0412", # gdk
+    "RUSTSEC-2024-0413", # atk
+    "RUSTSEC-2024-0415", # gtk
+    "RUSTSEC-2024-0416", # atk-sys
+    "RUSTSEC-2024-0418", # gdk-sys
+    "RUSTSEC-2024-0419", # gtk3-macros
+    "RUSTSEC-2024-0420", # gtk-sys
+    # proc-macro-error is pulled by gtk3-macros/glib-macros 0.18.x in the same stack.
+    "RUSTSEC-2024-0370",
+    # glib 0.18.x unsoundness is fixed in >=0.20, which requires gtk4-rs; blocked on ksni.
+    "RUSTSEC-2024-0429",
+]
