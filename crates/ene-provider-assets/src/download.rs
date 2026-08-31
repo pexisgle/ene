@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,7 +27,7 @@ pub async fn install_version(
     version: &CatalogVersion,
     progress: Arc<Mutex<DownloadProgress>>,
 ) -> Result<PathBuf, AssetError> {
-    if !version.url.starts_with("https://") || !is_allowed_url(version.url) {
+    if !is_allowed_url(version.url) {
         return Err(AssetError::UrlNotAllowed);
     }
     let dest = destination_path(plugin_id, kind, asset_id, version);
@@ -262,9 +263,25 @@ pub fn verify_file(path: &Path, expected_sha256: &str) -> Result<(), AssetError>
 }
 
 fn compute_sha256_file(path: &Path) -> Result<String, AssetError> {
-    let bytes = std::fs::read(path)?;
-    let digest = Sha256::digest(bytes);
-    Ok(hex::encode(digest))
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn enclosed_entry_path<R: Read + ?Sized>(
+    file: &zip::read::ZipFile<'_, R>,
+) -> Result<PathBuf, AssetError> {
+    file.enclosed_name()
+        .ok_or_else(|| AssetError::Archive("path traversal".to_owned()))
 }
 
 async fn extract_zip_member_from_file(
@@ -285,20 +302,20 @@ async fn extract_zip_tree_from_file(zip_path: &Path, dest: &Path) -> Result<(), 
         let mut file = archive
             .by_index(index)
             .map_err(|err| AssetError::Archive(err.to_string()))?;
-        let name = file.name().replace('\\', "/");
-        if name.contains("..") {
-            return Err(AssetError::Archive("path traversal".to_owned()));
-        }
-        let out_path = dest.join(name);
+        let relative = enclosed_entry_path(&file)?;
+        let out_path = dest.join(relative);
         if file.is_dir() {
             tokio::fs::create_dir_all(&out_path)
                 .await
                 .map_err(AssetError::Io)?;
             continue;
         }
-        if let Some(parent) = out_path.parent() {
-            ensure_parent(parent).map_err(AssetError::Io)?;
+        if let Some(parent) = out_path.parent()
+            && !parent.starts_with(dest)
+        {
+            return Err(AssetError::Archive("path traversal".to_owned()));
         }
+        ensure_parent(&out_path).map_err(AssetError::Io)?;
         let mut out = tokio::fs::File::create(&out_path)
             .await
             .map_err(AssetError::Io)?;
@@ -325,9 +342,7 @@ async fn extract_zip_member(zip_bytes: &[u8], member: &str, dest: &Path) -> Resu
     let mut file = archive
         .by_name(member)
         .map_err(|err| AssetError::Archive(err.to_string()))?;
-    if file.name().contains("..") {
-        return Err(AssetError::Archive("path traversal".to_owned()));
-    }
+    enclosed_entry_path(&file)?;
     if let Some(parent) = dest.parent() {
         ensure_parent(parent).map_err(AssetError::Io)?;
     }
@@ -352,11 +367,124 @@ async fn extract_zip_member(zip_bytes: &[u8], member: &str, dest: &Path) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, data) in entries {
+            writer.start_file(*name, options).expect("start zip file");
+            writer.write_all(data).expect("write zip file");
+        }
+        writer.finish().expect("finish zip").into_inner()
+    }
 
     #[test]
     fn verify_rejects_mismatch() {
         let tmp = tempfile::NamedTempFile::new().expect("temp");
         std::fs::write(tmp.path(), b"abc").expect("write");
         assert!(verify_file(tmp.path(), "00").is_err());
+    }
+
+    #[test]
+    fn sha256_matches_known_empty_and_abc() {
+        let empty = tempfile::NamedTempFile::new().expect("temp");
+        std::fs::write(empty.path(), b"").expect("write");
+        assert_eq!(
+            compute_sha256_file(empty.path()).expect("hash"),
+            EMPTY_SHA256
+        );
+
+        let abc = tempfile::NamedTempFile::new().expect("temp");
+        std::fs::write(abc.path(), b"abc").expect("write");
+        assert_eq!(compute_sha256_file(abc.path()).expect("hash"), ABC_SHA256);
+        verify_file(abc.path(), ABC_SHA256).expect("match");
+    }
+
+    #[test]
+    fn sha256_streams_large_file() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp");
+        let payload = vec![0x5a_u8; 200 * 1024];
+        std::fs::write(tmp.path(), &payload).expect("write");
+        let streamed = compute_sha256_file(tmp.path()).expect("hash");
+        let expected = hex::encode(Sha256::digest(&payload));
+        assert_eq!(streamed, expected);
+    }
+
+    #[tokio::test]
+    async fn zip_tree_extracts_safe_member() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = dir.path().join("ok.zip");
+        std::fs::write(&zip_path, zip_bytes(&[("nested/ok.txt", b"hello")])).expect("write zip");
+        let dest = dir.path().join("out");
+        extract_zip_tree_from_file(&zip_path, &dest)
+            .await
+            .expect("extract");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("nested/ok.txt")).expect("read"),
+            "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn zip_tree_rejects_parent_traversal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = dir.path().join("evil.zip");
+        std::fs::write(&zip_path, zip_bytes(&[("../escape.txt", b"nope")])).expect("write zip");
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("mkdir");
+        let err = extract_zip_tree_from_file(&zip_path, &dest)
+            .await
+            .expect_err("traversal");
+        assert!(
+            matches!(err, AssetError::Archive(ref message) if message.contains("path traversal")),
+            "{err:?}"
+        );
+        assert!(!dir.path().join("escape.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn zip_tree_does_not_escape_on_absolute_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = dir.path().join("abs.zip");
+        std::fs::write(
+            &zip_path,
+            zip_bytes(&[("/tmp/ene-provider-assets-abs.txt", b"nope")]),
+        )
+        .expect("write zip");
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("mkdir");
+        let result = extract_zip_tree_from_file(&zip_path, &dest).await;
+        assert!(
+            !Path::new("/tmp/ene-provider-assets-abs.txt").exists(),
+            "absolute zip name must not write outside dest"
+        );
+        if let Err(error) = result {
+            assert!(error.to_string().contains("path traversal"), "{error:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn zip_member_rejects_traversal_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("out.bin");
+        let err = extract_zip_member(
+            &zip_bytes(&[("../escape.bin", b"nope")]),
+            "../escape.bin",
+            &dest,
+        )
+        .await
+        .expect_err("traversal");
+        assert!(
+            matches!(err, AssetError::Archive(ref message) if message.contains("path traversal")),
+            "{err:?}"
+        );
+        assert!(!dest.exists());
     }
 }
