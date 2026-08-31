@@ -2,6 +2,12 @@
 //!
 //! Run: `dbus-run-session -- cargo run -p ene-tray-linux --example smoke`
 
+#![expect(
+    clippy::expect_used,
+    clippy::print_stderr,
+    reason = "manual smoke example: panics on setup failure and prints success to stderr by design"
+)]
+
 use ene_tray_linux::{LinuxTrayConfig, LinuxTrayHandle, TrayMenuSlot};
 use tokio::runtime::Runtime;
 
