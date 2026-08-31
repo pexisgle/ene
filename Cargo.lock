@@ -1970,6 +1970,7 @@ dependencies = [
  "flate2",
  "indexmap",
  "parking_lot",
+ "png",
  "rand 0.10.2",
  "schemars",
  "serde",

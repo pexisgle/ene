@@ -267,6 +267,101 @@ fn png_text_chunks(bytes: &[u8]) -> Result<Vec<TextChunk>, EneConfigError> {
             "missing PNG signature".to_string(),
         ));
     }
+    let parsed = png_text_chunks_decoded(bytes);
+    if let Ok(chunks) = parsed
+        && !chunks.is_empty()
+    {
+        return Ok(chunks);
+    }
+    png_text_chunks_scan(bytes)
+}
+
+fn png_text_chunks_decoded(bytes: &[u8]) -> Result<Vec<TextChunk>, EneConfigError> {
+    let mut decoder = png::StreamingDecoder::new();
+    let mut rest = bytes;
+    let mut chunks_seen = 0usize;
+    while !rest.is_empty() {
+        let (consumed, event) = decoder
+            .update(rest, None)
+            .map_err(|err| EneConfigError::InvalidPngCard(err.to_string()))?;
+        if matches!(event, png::Decoded::ChunkBegin(_, _)) {
+            chunks_seen += 1;
+            if chunks_seen > MAX_PNG_CHUNKS {
+                return Err(EneConfigError::InvalidPngCard(
+                    "too many chunks".to_string(),
+                ));
+            }
+        }
+        if consumed == 0 {
+            break;
+        }
+        rest = &rest[consumed..];
+        if matches!(event, png::Decoded::ChunkComplete(kind) if kind == png::chunk::IEND) {
+            break;
+        }
+    }
+    let info = decoder.info().ok_or(EneConfigError::PngCardMissingChunk)?;
+    let mut out = Vec::new();
+    for chunk in &info.uncompressed_latin1_text {
+        out.push(TextChunk {
+            keyword: chunk.keyword.clone(),
+            payload: chunk.text.as_bytes().to_vec(),
+        });
+    }
+    for chunk in &info.compressed_latin1_text {
+        let mut chunk = chunk.clone();
+        let payload = ztxt_payload(&mut chunk, bytes)?;
+        out.push(TextChunk {
+            keyword: chunk.keyword,
+            payload,
+        });
+    }
+    for chunk in &info.utf8_text {
+        let mut chunk = chunk.clone();
+        chunk
+            .decompress_text_with_limit(usize_limit(MAX_PNG_TEXT_BYTES))
+            .map_err(|err| EneConfigError::InvalidPngCard(err.to_string()))?;
+        let text = chunk
+            .get_text()
+            .map_err(|err| EneConfigError::InvalidPngCard(err.to_string()))?;
+        out.push(TextChunk {
+            keyword: chunk.keyword,
+            payload: text.into_bytes(),
+        });
+    }
+    Ok(out)
+}
+
+fn ztxt_payload(
+    chunk: &mut png::text_metadata::ZTXtChunk,
+    bytes: &[u8],
+) -> Result<Vec<u8>, EneConfigError> {
+    if chunk
+        .decompress_text_with_limit(usize_limit(MAX_PNG_TEXT_BYTES))
+        .is_ok()
+    {
+        let text = chunk
+            .get_text()
+            .map_err(|err| EneConfigError::InvalidPngCard(err.to_string()))?;
+        return Ok(text.into_bytes());
+    }
+    png_text_chunks_scan(bytes)?
+        .into_iter()
+        .find(|scanned| scanned.keyword == chunk.keyword)
+        .map(|scanned| scanned.payload)
+        .ok_or_else(|| EneConfigError::InvalidPngCard("invalid compressed text".to_string()))
+}
+
+fn usize_limit(limit: u64) -> usize {
+    usize::try_from(limit).unwrap_or(usize::MAX)
+}
+
+fn png_text_chunks_scan(bytes: &[u8]) -> Result<Vec<TextChunk>, EneConfigError> {
+    if !bytes.starts_with(&PNG_SIGNATURE) {
+        return Err(EneConfigError::InvalidPngCard(
+            "missing PNG signature".to_string(),
+        ));
+    }
     let mut offset = PNG_SIGNATURE.len();
     let mut out = Vec::new();
     let mut chunks_seen = 0usize;
@@ -528,22 +623,22 @@ fn import_png(
     if target.exists() {
         return Err(EneConfigError::CharacterImportExists(folder));
     }
-    let staging = staging_dir(assets_dir, &folder);
+    let staging = staging_dir(assets_dir, &folder)?;
     let outcome = (|| -> Result<ImportedCharacter, EneConfigError> {
-        std::fs::create_dir_all(&staging).map_err(EneConfigError::IoError)?;
-        materialize_data_assets(&mut card, &staging)?;
-        split_embedded_locales(&mut card, &staging)?;
-        write_card_json(&card, &staging.join("character.json"))?;
-        std::fs::write(staging.join("avatar.png"), bytes).map_err(EneConfigError::IoError)?;
-        std::fs::rename(&staging, &target).map_err(EneConfigError::IoError)?;
+        materialize_data_assets(&mut card, staging.path())?;
+        split_embedded_locales(&mut card, staging.path())?;
+        write_card_json(&card, &staging.path().join("character.json"))?;
+        std::fs::write(staging.path().join("avatar.png"), bytes)
+            .map_err(EneConfigError::IoError)?;
+        std::fs::rename(staging.path(), &target).map_err(EneConfigError::IoError)?;
         Ok(ImportedCharacter {
             name: card.data.get_character_id().to_string(),
             card_path: format!("characters/{folder}/character.json"),
             folder,
         })
     })();
-    if outcome.is_err() {
-        drop(std::fs::remove_dir_all(&staging));
+    if outcome.is_ok() {
+        drop(staging.keep());
     }
     outcome
 }
@@ -561,9 +656,8 @@ fn import_charx(
     if target.exists() {
         return Err(EneConfigError::CharacterImportExists(folder));
     }
-    let staging = staging_dir(assets_dir, &folder);
+    let staging = staging_dir(assets_dir, &folder)?;
     let outcome = (|| -> Result<ImportedCharacter, EneConfigError> {
-        std::fs::create_dir_all(&staging).map_err(EneConfigError::IoError)?;
         let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).map_err(charx_error)?;
         validate_charx_entries(&mut archive)?;
         for index in 0..archive.len() {
@@ -586,20 +680,20 @@ fn import_charx(
             } else {
                 Path::new(&name)
             };
-            write_import_entry(&staging, relative, &content)?;
+            write_import_entry(staging.path(), relative, &content)?;
         }
-        split_embedded_locales(&mut card, &staging)?;
-        materialize_data_assets(&mut card, &staging)?;
-        write_card_json(&card, &staging.join("character.json"))?;
-        std::fs::rename(&staging, &target).map_err(EneConfigError::IoError)?;
+        split_embedded_locales(&mut card, staging.path())?;
+        materialize_data_assets(&mut card, staging.path())?;
+        write_card_json(&card, &staging.path().join("character.json"))?;
+        std::fs::rename(staging.path(), &target).map_err(EneConfigError::IoError)?;
         Ok(ImportedCharacter {
             name: card.data.get_character_id().to_string(),
             card_path: format!("characters/{folder}/character.json"),
             folder,
         })
     })();
-    if outcome.is_err() {
-        drop(std::fs::remove_dir_all(&staging));
+    if outcome.is_ok() {
+        drop(staging.keep());
     }
     outcome
 }
@@ -658,6 +752,9 @@ fn validate_charx_entries(
         let file = archive.by_index_raw(index).map_err(charx_error)?;
         let name = file.name().to_string();
         validate_zip_entry_name(&name)?;
+        if file.enclosed_name().is_none() {
+            return Err(EneConfigError::CharxUnsafePath(name));
+        }
         if file.is_dir() {
             continue;
         }
@@ -684,14 +781,13 @@ fn validate_charx_entries(
 
 /// Unique staging directory for an atomic import; renamed over the target
 /// only after every file is written.
-fn staging_dir(assets_dir: &Path, folder: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    assets_dir
-        .join("characters")
-        .join(format!(".import-{folder}-{}-{nonce}", std::process::id()))
+fn staging_dir(assets_dir: &Path, folder: &str) -> Result<tempfile::TempDir, EneConfigError> {
+    let characters = assets_dir.join("characters");
+    std::fs::create_dir_all(&characters).map_err(EneConfigError::IoError)?;
+    tempfile::Builder::new()
+        .prefix(&format!(".import-{folder}-"))
+        .tempdir_in(characters)
+        .map_err(EneConfigError::IoError)
 }
 
 fn write_import_entry(
@@ -885,19 +981,23 @@ mod tests {
     }
 
     fn png(chunks: &[Vec<u8>]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&PNG_SIGNATURE);
-        out.extend_from_slice(&[0, 0, 0, 13]);
-        out.extend_from_slice(b"IHDR");
-        out.extend_from_slice(&[0; 13]);
-        out.extend_from_slice(&[0; 4]);
-        for chunk in chunks {
-            out.extend_from_slice(chunk);
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer.write_image_data(&[0]).expect("idat");
+            for raw in chunks {
+                let len = u32::from_be_bytes(raw[0..4].try_into().expect("chunk len")) as usize;
+                let type_bytes: [u8; 4] = raw[4..8].try_into().expect("chunk type");
+                let data = &raw[8..8 + len];
+                writer
+                    .write_chunk(png::chunk::ChunkType(type_bytes), data)
+                    .expect("png chunk");
+            }
         }
-        out.extend_from_slice(&[0, 0, 0, 0]);
-        out.extend_from_slice(b"IEND");
-        out.extend_from_slice(&[0; 4]);
-        out
+        bytes
     }
 
     fn text_chunk(keyword: &str, payload: &[u8]) -> Vec<u8> {

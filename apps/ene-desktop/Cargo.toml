@@ -33,7 +33,7 @@ ene-vrm = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
 reqwest = { workspace = true, features = ["rustls"] }
 parking_lot = { workspace = true }
-png = "0.18"
+png = { workspace = true }
 image = { workspace = true, features = ["png"] }
 xcap = "0.9.6"
 serde = { workspace = true }

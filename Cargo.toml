@@ -102,6 +102,7 @@ cargo-husky = { version = "1.5", default-features = false, features = ["user-hoo
 ctor = "1.0"
 thiserror = "2.0"
 zip = { version = "8", default-features = false }
+png = "0.18"
 toml = "0.8"
 htmd = "0.5"
 scraper = "0.23"
