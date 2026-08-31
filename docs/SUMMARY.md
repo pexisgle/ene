@@ -33,6 +33,10 @@
 - [Built-in tools](guides/tools/builtin-tools.md)
 - [App platform matrix](guides/tools/app-platform.md)
 
+# Experiments
+
+- [Stage UI PoC findings](experiments/stage-ui-poc-findings.md)
+
 # Reference
 
 - [Crate reference](reference/crates.md)
