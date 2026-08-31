@@ -24,7 +24,9 @@ tool IPC を話します。
 
 MCP サーバーはベンダーしません。手書きの `mcp.json` の各行は `ene-tool-mcp`
 （stdio または Streamable HTTP）の `mcp.<id>` ファイバーになり、内製ツールと
-同じパイプラインに載ります。プロセス受入は実 `git` を呼ぶ stdio サーバー
+同じパイプラインに載ります。ブリッジは公式 `rmcp` SDK を使います。stdio は
+改行区切り JSON-RPC（MCP 仕様。LSP の Content-Length ではない）、`http` は
+Streamable HTTP です。プロセス受入は実 `git` を呼ぶ stdio サーバー
 （`mcp:git.status` / `mcp:git.log`）です。stage の **Connections** がその
 ドキュメントを編集します（旧 desktop の Connectors も同じ）。代表的な
 サーバーを選ぶマーケット UI は stage 上の後継

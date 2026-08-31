@@ -3821,22 +3821,13 @@ async fn mcp_probe_success_returns_probed_tools_without_saving_the_server() {
 import json, sys
 
 def read_msg():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            raise SystemExit(0)
-        if line in (b"\r\n", b"\n"):
-            break
-        key, _, value = line.decode().partition(":")
-        headers[key.strip().lower()] = value.strip()
-    n = int(headers.get("content-length", "0"))
-    return json.loads(sys.stdin.buffer.read(n))
+    line = sys.stdin.buffer.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
 
 def write_msg(obj):
-    body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(json.dumps(obj).encode() + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3938,6 +3929,7 @@ async fn mcp_probe_forwards_auth_token_to_remote_servers() {
         .route(
             "/mcp",
             axum::routing::post(|headers: axum::http::HeaderMap, body: String| async move {
+                let json_headers = [(axum::http::header::CONTENT_TYPE, "application/json")];
                 if headers
                     .get(axum::http::header::AUTHORIZATION)
                     .and_then(|value| value.to_str().ok())
@@ -3945,27 +3937,37 @@ async fn mcp_probe_forwards_auth_token_to_remote_servers() {
                 {
                     return (
                         axum::http::StatusCode::UNAUTHORIZED,
+                        json_headers,
                         "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32001,\"message\":\"unauthorized\"}}".to_owned(),
                     );
                 }
                 let msg: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let method = msg.get("method").and_then(serde_json::Value::as_str).unwrap_or("");
+                if msg.get("id").is_none() || method.starts_with("notifications/") {
+                    return (
+                        axum::http::StatusCode::ACCEPTED,
+                        json_headers,
+                        String::new(),
+                    );
+                }
                 let ident = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                let result = match msg.get("method").and_then(|m| m.as_str()) {
-                    Some("initialize") => serde_json::json!({
+                let result = match method {
+                    "initialize" => serde_json::json!({
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {}},
                         "serverInfo": {"name": "fixture", "version": "0"}
                     }),
-                    Some("tools/list") => serde_json::json!({"tools":[{
+                    "tools/list" => serde_json::json!({"tools":[{
                         "name": "ping",
                         "description": "ping",
                         "annotations": {"readOnlyHint": true},
                         "inputSchema": {"type": "object"}
                     }]}),
-                    _ => serde_json::Value::Null,
+                    _ => serde_json::json!({}),
                 };
                 (
                     axum::http::StatusCode::OK,
+                    json_headers,
                     serde_json::json!({
                         "jsonrpc": "2.0", "id": ident, "result": result
                     })
@@ -4050,22 +4052,13 @@ async fn mcp_probe_only_enumerates_tools_without_ingesting_context() {
 import json, sys
 
 def read_msg():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            raise SystemExit(0)
-        if line in (b"\r\n", b"\n"):
-            break
-        key, _, value = line.decode().partition(":")
-        headers[key.strip().lower()] = value.strip()
-    n = int(headers.get("content-length", "0"))
-    return json.loads(sys.stdin.buffer.read(n))
+    line = sys.stdin.buffer.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
 
 def write_msg(obj):
-    body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(json.dumps(obj).encode() + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
