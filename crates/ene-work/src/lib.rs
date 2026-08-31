@@ -15,6 +15,7 @@ mod computer;
 mod error;
 mod host;
 mod mcp;
+mod migrations;
 mod observe;
 mod questions;
 mod router;

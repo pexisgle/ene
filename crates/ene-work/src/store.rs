@@ -12,89 +12,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use uuid::Uuid;
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS jobs (
-  id TEXT PRIMARY KEY,
-  soul_id TEXT NOT NULL,
-  title TEXT NOT NULL,
-  goal TEXT NOT NULL,
-  mode TEXT NOT NULL,
-  status TEXT NOT NULL,
-  progress_fraction REAL,
-  progress_note TEXT,
-  workspace_dir TEXT NOT NULL,
-  error_class TEXT,
-  created_from_turn TEXT,
-  plan TEXT,
-  brief TEXT,
-  plan_approved INTEGER NOT NULL DEFAULT 0,
-  success_criteria TEXT NOT NULL DEFAULT '[]',
-  allowed_tools TEXT NOT NULL DEFAULT '[]',
-  pending_allowed_tools TEXT,
-  created_at TEXT NOT NULL,
-  ended_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_jobs_soul ON jobs (soul_id, status, created_at DESC);
-CREATE TABLE IF NOT EXISTS artifacts (
-  id TEXT PRIMARY KEY,
-  soul_id TEXT NOT NULL,
-  job_id TEXT,
-  kind TEXT NOT NULL,
-  title TEXT NOT NULL,
-  path TEXT NOT NULL,
-  mime TEXT,
-  size_bytes INTEGER,
-  created_at TEXT NOT NULL,
-  delivered INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS schedules (
-  id TEXT PRIMARY KEY,
-  soul_id TEXT NOT NULL,
-  name TEXT NOT NULL,
-  spec TEXT NOT NULL,
-  timezone TEXT NOT NULL,
-  action_kind TEXT NOT NULL,
-  action_ref TEXT,
-  enabled INTEGER NOT NULL DEFAULT 1,
-  important INTEGER NOT NULL DEFAULT 0,
-  last_fired TEXT,
-  next_fire TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_sched_next ON schedules (enabled, next_fire);
-CREATE TABLE IF NOT EXISTS mcp_servers (
-  id TEXT PRIMARY KEY,
-  transport TEXT NOT NULL,
-  command TEXT,
-  url TEXT,
-  enabled INTEGER NOT NULL DEFAULT 1,
-  args TEXT NOT NULL DEFAULT '[]'
-);
-CREATE TABLE IF NOT EXISTS mailbox (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  delegation_id TEXT NOT NULL,
-  direction TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  body TEXT NOT NULL,
-  ts TEXT NOT NULL,
-  question_seq INTEGER
-);
-CREATE TABLE IF NOT EXISTS tool_executions (
-  execution_id TEXT PRIMARY KEY,
-  job_id TEXT,
-  soul_id TEXT NOT NULL,
-  tool_name TEXT NOT NULL,
-  plugin_id TEXT,
-  call_id TEXT NOT NULL,
-  status TEXT NOT NULL,
-  error_class TEXT,
-  result_json TEXT,
-  started_at TEXT NOT NULL,
-  ended_at TEXT,
-  completion_delivered INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_tool_exec_job ON tool_executions (job_id, status);
-";
-
 /// Jobs / schedules / artifacts. Opens the same file as `companions.db`.
 pub struct WorkStore {
     conn: Mutex<Connection>,
@@ -107,55 +24,9 @@ impl WorkStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(&path)?;
+        let mut conn = Connection::open(&path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-        conn.execute_batch(SCHEMA)?;
-        let plan_approved_exists = conn
-            .prepare("SELECT plan_approved FROM jobs LIMIT 0")
-            .is_ok();
-        if !plan_approved_exists {
-            conn.execute(
-                "ALTER TABLE jobs ADD COLUMN plan_approved INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
-        let success_criteria_exists = conn
-            .prepare("SELECT success_criteria FROM jobs LIMIT 0")
-            .is_ok();
-        if !success_criteria_exists {
-            conn.execute(
-                "ALTER TABLE jobs ADD COLUMN success_criteria TEXT NOT NULL DEFAULT '[]'",
-                [],
-            )?;
-        }
-        let allowed_tools_exists = conn
-            .prepare("SELECT allowed_tools FROM jobs LIMIT 0")
-            .is_ok();
-        if !allowed_tools_exists {
-            conn.execute(
-                "ALTER TABLE jobs ADD COLUMN allowed_tools TEXT NOT NULL DEFAULT '[]'",
-                [],
-            )?;
-        }
-        let pending_allowed_tools_exists = conn
-            .prepare("SELECT pending_allowed_tools FROM jobs LIMIT 0")
-            .is_ok();
-        if !pending_allowed_tools_exists {
-            conn.execute("ALTER TABLE jobs ADD COLUMN pending_allowed_tools TEXT", [])?;
-        }
-        let mcp_args_exists = conn.prepare("SELECT args FROM mcp_servers LIMIT 0").is_ok();
-        if !mcp_args_exists {
-            conn.execute(
-                "ALTER TABLE mcp_servers ADD COLUMN args TEXT NOT NULL DEFAULT '[]'",
-                [],
-            )?;
-        }
-        let mailbox_question_seq_exists = conn
-            .prepare("SELECT question_seq FROM mailbox LIMIT 0")
-            .is_ok();
-        if !mailbox_question_seq_exists {
-            conn.execute("ALTER TABLE mailbox ADD COLUMN question_seq INTEGER", [])?;
-        }
+        crate::migrations::apply_migrations(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             path,
@@ -169,8 +40,9 @@ impl WorkStore {
 
     /// Reopen the on-disk database after restore (same path).
     pub fn reconnect(&self) -> Result<(), WorkError> {
-        let conn = Connection::open(&self.path)?;
+        let mut conn = Connection::open(&self.path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        crate::migrations::apply_migrations(&mut conn)?;
         *self.conn.lock() = conn;
         Ok(())
     }
