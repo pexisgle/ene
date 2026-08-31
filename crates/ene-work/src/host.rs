@@ -3,7 +3,7 @@ use crate::questions::{combine_questions, route_combined_answers};
 use crate::speech_gate::SpeechGate;
 use crate::spill::{DEFAULT_SOFT_LIMIT_BYTES, bound_brief};
 use crate::store::WorkStore;
-use crate::task::{ArtifactRef, TaskContract, TaskError, TaskState, verify_artifact};
+use crate::task::{ArtifactRef, TaskContract, TaskError, TaskState};
 use crate::types::{
     Artifact, CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus, NewJob,
     NewToolExecution, OpenQuestion, ToolExecStatus, ToolExecution, UpgradeReason,
@@ -238,6 +238,10 @@ impl DelegationHost {
             success_criteria,
             allowed_tools,
         } = request;
+        if !success_criteria.is_empty() {
+            crate::task::validate_criteria(&success_criteria)
+                .map_err(|err| WorkError::InvalidContract(err.to_string()))?;
+        }
         let mode = self.enforce_secrecy(parent_id, mode)?;
         if depth >= self.settings.max_depth {
             return Err(WorkError::DepthExceeded);
@@ -300,6 +304,7 @@ impl DelegationHost {
                 plan_approved: false,
                 success_criteria,
                 allowed_tools,
+                pending_allowed_tools: None,
                 created_at: Utc::now().to_rfc3339(),
                 ended_at: None,
             }
@@ -431,12 +436,21 @@ impl DelegationHost {
             ) {
                 return Err(WorkError::AlreadyCompleted);
             }
-            // For task-contract jobs (success_criteria present) enforce artifact + workspace
-            // confinement; for legacy jobs allow completion without artifacts or explicit
-            // verifying state to keep existing delegation flows working.
-            self.verify_job_completion(&job)?;
-            self.deliver_job_artifacts(id)?;
-            self.store.set_status(id, JobStatus::Completed, None)?;
+            if job.success_criteria.is_empty() {
+                // Legacy delegation: completion needs no criteria, artifacts, or verifying state.
+                self.verify_job_completion(&job)?;
+                self.deliver_job_artifacts(id)?;
+                self.store.set_status(id, JobStatus::Completed, None)?;
+            } else {
+                self.verify_job_completion(&job)?;
+                if job.status != JobStatus::Verifying {
+                    return Err(WorkError::VerificationFailed(
+                        "must go through verifying (model done alone is not enough)".into(),
+                    ));
+                }
+                self.deliver_job_artifacts(id)?;
+                self.store.set_status(id, JobStatus::Completed, None)?;
+            }
         }
         self.store
             .mailbox_push(id, "child_to_parent", "complete", summary)?;
@@ -455,16 +469,18 @@ impl DelegationHost {
     fn verify_job_completion(&self, job: &Job) -> Result<(), WorkError> {
         let artifacts = self.store.artifacts_for(job.id)?;
         if job.success_criteria.is_empty() {
-            // Legacy job: only ensure registered artifacts are workspace-confined.
-            let root = crate::workspace_root(self.data_dir());
+            // Legacy job: only ensure registered artifacts stay in the job's own workspace.
             for art in &artifacts {
-                ene_registry::confine_tool_path(&root, std::path::Path::new(&art.path), false)
-                    .map_err(|_| {
-                        WorkError::WorkspaceViolation(format!(
-                            "{} not in {}",
-                            art.path, job.workspace_dir
-                        ))
-                    })?;
+                crate::task::confine_artifact_path(
+                    std::path::Path::new(&job.workspace_dir),
+                    &art.path,
+                )
+                .map_err(|_| {
+                    WorkError::WorkspaceViolation(format!(
+                        "{} not in {}",
+                        art.path, job.workspace_dir
+                    ))
+                })?;
             }
             return Ok(());
         }
@@ -496,12 +512,6 @@ impl DelegationHost {
                 })
                 .collect(),
         };
-        for art in &task.artifacts.clone() {
-            verify_artifact(art, &task).map_err(|err| match err {
-                TaskError::WorkspaceViolation(msg) => WorkError::WorkspaceViolation(msg),
-                other => WorkError::VerificationFailed(other.to_string()),
-            })?;
-        }
         task.complete().map_err(|err| match err {
             TaskError::VerificationFailed(msg) => WorkError::VerificationFailed(msg),
             TaskError::WorkspaceViolation(msg) => WorkError::WorkspaceViolation(msg),
@@ -522,6 +532,7 @@ impl DelegationHost {
                 job.status.as_str()
             )));
         }
+        self.store.set_status(id, JobStatus::Verifying, None)?;
         Ok(())
     }
 
@@ -850,13 +861,44 @@ impl DelegationHost {
             && !job.allowed_tools.is_empty()
         {
             let expanded = Self::extract_tools(message);
-            let needs_reapproval = expanded.iter().any(|t| !job.allowed_tools.contains(t));
-            if needs_reapproval && !job.plan_approved {
-                return Err(WorkError::PlanNotApproved);
+            let new_tools: Vec<String> = expanded
+                .into_iter()
+                .filter(|tool| !job.allowed_tools.contains(tool))
+                .collect();
+            if !new_tools.is_empty() {
+                let mut pending = job.pending_allowed_tools.unwrap_or_default();
+                for tool in &new_tools {
+                    if !pending.contains(tool) {
+                        pending.push(tool.clone());
+                    }
+                }
+                self.store.set_pending_allowed_tools(id, Some(&pending))?;
+                return Err(WorkError::ScopeWideningPending { tools: new_tools });
             }
         }
         self.store
             .mailbox_push(id, "parent_to_child", "task", message)
+    }
+
+    /// Explicit approval event for a previously requested scope widening.
+    pub fn approve_scope_widening(&self, id: DelegationId) -> Result<Vec<String>, WorkError> {
+        self.require_known(id)?;
+        let job = self
+            .store
+            .get_job(id)?
+            .ok_or_else(|| WorkError::UnknownJob(id.to_string()))?;
+        let Some(pending) = job.pending_allowed_tools else {
+            return Err(WorkError::NoPendingScopeWidening);
+        };
+        let mut allowed = job.allowed_tools;
+        for tool in &pending {
+            if !allowed.contains(tool) {
+                allowed.push(tool.clone());
+            }
+        }
+        self.store.set_allowed_tools(id, &allowed)?;
+        self.store.set_pending_allowed_tools(id, None)?;
+        Ok(pending)
     }
 
     pub fn register_artifact_for_job(
@@ -874,18 +916,19 @@ impl DelegationHost {
         if job.status == JobStatus::Interrupted {
             return Err(WorkError::Interrupted);
         }
-        let root = crate::workspace_root(self.data_dir());
-        let confined =
-            ene_registry::confine_tool_path(&root, std::path::Path::new(&artifact.path), false)
-                .map_err(|_| {
-                    WorkError::WorkspaceViolation(format!(
-                        "{} not in {}",
-                        artifact.path, job.workspace_dir
-                    ))
-                })?;
+        let confined = crate::task::confine_artifact_path(
+            std::path::Path::new(&job.workspace_dir),
+            &artifact.path,
+        )
+        .map_err(|_| {
+            WorkError::WorkspaceViolation(format!("{} not in {}", artifact.path, job.workspace_dir))
+        })?;
         let path = confined.display().to_string();
         let mut stored = artifact;
         stored.path = path;
+        stored.size_bytes = std::fs::metadata(&stored.path)
+            .ok()
+            .and_then(|meta| i64::try_from(meta.len()).ok());
         self.store.register_artifact(stored)
     }
 

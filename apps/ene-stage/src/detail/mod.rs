@@ -3652,7 +3652,12 @@ fn show_work(
 
 fn active_jobs(jobs: &[JobView]) -> Vec<&JobView> {
     jobs.iter()
-        .filter(|job| matches!(job.status.as_str(), "created" | "queued" | "running"))
+        .filter(|job| {
+            matches!(
+                job.status.as_str(),
+                "created" | "queued" | "running" | "verifying"
+            )
+        })
         .collect()
 }
 
@@ -5760,6 +5765,7 @@ mod tests {
             job("created"),
             job("queued"),
             job("running"),
+            job("verifying"),
             job("completed"),
             job("failed"),
             job("cancelled"),
@@ -5770,7 +5776,7 @@ mod tests {
             .into_iter()
             .map(|job| job.status.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(active, ["created", "queued", "running"]);
+        assert_eq!(active, ["created", "queued", "running", "verifying"]);
     }
 
     #[test]

@@ -66,7 +66,8 @@ pub use spill::{
 };
 pub use store::{MailboxEntry, WorkStore, next_fire};
 pub use task::{
-    ArtifactRef, Task, TaskContract, TaskError, TaskState, transition, verify_artifact,
+    ArtifactRef, Task, TaskContract, TaskError, TaskState, transition, validate_criteria,
+    verify_artifact,
 };
 pub use tools::{register_work_tools, surface_shows_delegate};
 pub use types::{

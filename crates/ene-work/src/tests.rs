@@ -1779,7 +1779,8 @@ async fn artifact_register_and_deliver() {
     std::fs::create_dir_all(&workspace).unwrap();
     registry.set_workspace(&workspace);
     assert!(surface_shows_delegate(&registry));
-    let file = workspace.join("out.md");
+    // Artifact paths are confined to the job's own workspace, not the global root.
+    let file = std::path::PathBuf::from(&job.workspace_dir).join("out.md");
     std::fs::write(&file, "# hi").unwrap();
     let registered = registry
         .execute(
@@ -1856,7 +1857,7 @@ async fn artifact_register_rejects_path_outside_workspace() {
         )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("escapes workspace"));
+    assert!(err.to_string().contains("not in"));
 }
 
 #[tokio::test]
@@ -2978,9 +2979,16 @@ fn task_contract_enforced_on_real_runner_path() {
         "model done alone must be rejected, got {err:?}"
     );
 
+    // Verifying is a persisted runner state, visible to store observers.
+    host.begin_verifying(job.id).unwrap();
+    assert_eq!(
+        store.get_job(job.id).unwrap().unwrap().status,
+        JobStatus::Verifying
+    );
+
     // Register a workspace-confined artifact and completion succeeds.
     let workspace = std::path::PathBuf::from(&job.workspace_dir);
-    std::fs::write(workspace.join("out.md"), "# done").unwrap();
+    std::fs::write(workspace.join("out.md"), "# done\nreport exists").unwrap();
     store
         .register_artifact(Artifact {
             id: "art-task".into(),
@@ -3135,10 +3143,210 @@ fn task_contract_enforced_on_real_runner_path() {
             allowed_tools: vec!["fs.read".into()],
         })
         .unwrap();
-    assert!(host.instruct(job5.id, "allow: exec.run, fs.read").is_err());
-    host.approve_plan(job5.id).unwrap();
+    let err5 = host
+        .instruct(job5.id, "allow: exec.run, fs.read")
+        .unwrap_err();
+    assert!(
+        matches!(err5, crate::WorkError::ScopeWideningPending { .. }),
+        "scope-expanding follow-up must stay pending, got {err5:?}"
+    );
+    assert_eq!(
+        store
+            .get_job(job5.id)
+            .unwrap()
+            .unwrap()
+            .pending_allowed_tools,
+        Some(vec!["exec.run".to_owned()])
+    );
+    // The widened scope is not delivered until an explicit approval event.
+    assert!(
+        !store
+            .mailbox(job5.id)
+            .unwrap()
+            .iter()
+            .any(|(_, _, body)| body.contains("exec.run"))
+    );
+    host.approve_scope_widening(job5.id).unwrap();
+    assert_eq!(
+        store.get_job(job5.id).unwrap().unwrap().allowed_tools,
+        vec!["fs.read".to_owned(), "exec.run".to_owned()]
+    );
     host.instruct(job5.id, "allow: exec.run, fs.read").unwrap();
 
     // Unused dir keeps TempDir alive.
+    drop(dir);
+}
+
+#[test]
+fn contract_completion_rejects_unsatisfied_criteria() {
+    let (dir, store, host, soul) = open_work();
+    let job = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "quarterly report".into(),
+            mode: DelegationMode::Public,
+            title: Some("report".into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+            success_criteria: vec!["contains:quarterly".into()],
+            allowed_tools: Vec::new(),
+        })
+        .unwrap();
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    host.begin_verifying(job.id).unwrap();
+    let workspace = std::path::PathBuf::from(&job.workspace_dir);
+    std::fs::write(workspace.join("report.md"), "Q3 numbers only").unwrap();
+    host.register_artifact_for_job(
+        job.id,
+        Artifact {
+            id: "art-quarterly".into(),
+            soul_id: soul,
+            job_id: Some(job.id),
+            kind: ArtifactKind::Markdown,
+            title: "report".into(),
+            path: workspace.join("report.md").to_string_lossy().into_owned(),
+            mime: None,
+            size_bytes: None,
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        },
+    )
+    .unwrap();
+    // An artifact exists but the criterion is unsatisfied: completion rejected.
+    let err = host.complete(job.id, "done").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::WorkError::VerificationFailed(ref msg)
+                if msg.contains("success criteria not satisfied")
+        ),
+        "unsatisfied criterion must block completion, got {err:?}"
+    );
+    assert_eq!(
+        store.get_job(job.id).unwrap().unwrap().status,
+        JobStatus::Verifying
+    );
+    std::fs::write(workspace.join("report.md"), "quarterly numbers").unwrap();
+    host.complete(job.id, "done").unwrap();
+    assert_eq!(
+        store.get_job(job.id).unwrap().unwrap().status,
+        JobStatus::Completed
+    );
+    drop(dir);
+}
+
+#[test]
+fn verifying_is_persisted_and_interrupted_on_restart() {
+    let (dir, store, host, soul) = open_work();
+    let job = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "md report".into(),
+            mode: DelegationMode::Public,
+            title: Some("report".into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+            success_criteria: vec!["path:*.md".into()],
+            allowed_tools: Vec::new(),
+        })
+        .unwrap();
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    host.begin_verifying(job.id).unwrap();
+    assert_eq!(
+        store.get_job(job.id).unwrap().unwrap().status,
+        JobStatus::Verifying
+    );
+    assert!(store.count_active(soul).unwrap() >= 1);
+    // Restart interrupts the in-flight verification phase.
+    store.interrupt_running().unwrap();
+    assert_eq!(
+        store.get_job(job.id).unwrap().unwrap().status,
+        JobStatus::Interrupted
+    );
+    assert!(host.begin_verifying(job.id).is_err());
+    drop(dir);
+}
+
+#[test]
+fn artifact_registration_is_confined_to_own_job_workspace() {
+    let (dir, store, host, soul) = open_work();
+    let goal = |name: &str| {
+        host.start(StartDelegation {
+            soul_id: soul,
+            goal: name.into(),
+            mode: DelegationMode::Public,
+            title: Some(name.into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
+        })
+        .unwrap()
+    };
+    let job_a = goal("a");
+    let job_b = goal("b");
+    store
+        .set_status(job_a.id, JobStatus::Running, None)
+        .unwrap();
+    let b_artifact = std::path::Path::new(&job_b.workspace_dir)
+        .join("out.md")
+        .to_string_lossy()
+        .into_owned();
+    std::fs::write(&b_artifact, "b content").unwrap();
+    // Job A must not register an artifact sitting in job B's workspace.
+    let err = host.register_artifact_for_job(
+        job_a.id,
+        Artifact {
+            id: "art-cross".into(),
+            soul_id: soul,
+            job_id: Some(job_a.id),
+            kind: ArtifactKind::Markdown,
+            title: "out".into(),
+            path: b_artifact.clone(),
+            mime: None,
+            size_bytes: None,
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        },
+    );
+    assert!(
+        matches!(err, Err(crate::WorkError::WorkspaceViolation(_))),
+        "sibling workspace artifact must be rejected, got {err:?}"
+    );
+    // A pre-migration artifact row outside the job workspace blocks legacy completion.
+    store
+        .set_status(job_b.id, JobStatus::Running, None)
+        .unwrap();
+    store
+        .register_artifact(Artifact {
+            id: "art-legacy-foreign".into(),
+            soul_id: soul,
+            job_id: Some(job_b.id),
+            kind: ArtifactKind::Markdown,
+            title: "out".into(),
+            path: std::path::Path::new(&job_a.workspace_dir)
+                .join("out.md")
+                .to_string_lossy()
+                .into_owned(),
+            mime: None,
+            size_bytes: None,
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .unwrap();
+    let err = host.complete(job_b.id, "done").unwrap_err();
+    assert!(
+        matches!(err, crate::WorkError::WorkspaceViolation(_)),
+        "legacy completion must confine to its own workspace, got {err:?}"
+    );
     drop(dir);
 }

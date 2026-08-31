@@ -4,9 +4,9 @@ use base64::Engine;
 use chrono::TimeZone;
 use ene_api::{
     AnswerJobRequest, AnswerQuestionRequest, ApiClient, ClaimResourceRequest, CreateJobRequest,
-    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
-    MemoryCandidateDecision, MessageMode, MessageRequest, ResolveMemoryCandidateRequest,
-    ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
+    CreateScheduleRequest, CreateSessionRequest, CreateTaskRequest, EndSessionRequest,
+    HistoryResponse, MemoryCandidateDecision, MessageMode, MessageRequest,
+    ResolveMemoryCandidateRequest, ResourceKind, RestoreRequest, SoulSkillsPatch, ToolTestRequest,
 };
 use ene_companion::{
     CandidateId, CompanionStore, MemoryCandidate, MemoryKind, MemoryScope, MemorySource, NewMemory,
@@ -798,6 +798,91 @@ async fn create_job_returns_the_approved_job() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn tasks_endpoints_expose_contract_and_verifying() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    core.plane().set_mode(ApprovalMode::Auto).unwrap();
+
+    let task = client
+        .create_task(&CreateTaskRequest {
+            soul_id: soul.clone(),
+            goal: "quarterly summary".into(),
+            title: Some("Q3".into()),
+            success_criteria: vec!["path:*.md".into(), "contains:quarterly".into()],
+            allowed_tools: vec!["fs.read".into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(task.title, "Q3");
+    assert_eq!(task.goal, "quarterly summary");
+    assert_eq!(task.success_criteria, ["path:*.md", "contains:quarterly"]);
+    assert_eq!(task.allowed_tools, ["fs.read"]);
+    assert!(matches!(task.status.as_str(), "queued" | "running"));
+
+    let listed = client.list_tasks(Some(&soul)).await.unwrap();
+    assert!(listed.items.iter().any(|t| t.id == task.id));
+
+    let fetched = client.get_task(&task.id).await.unwrap();
+    assert!(matches!(fetched.status.as_str(), "queued" | "running"));
+
+    // Verifying is a persisted status visible through the API.
+    let job_id: ene_session::DelegationId = task.id.parse().unwrap();
+    core.work()
+        .set_status(job_id, ene_work::JobStatus::Running, None)
+        .unwrap();
+    let verifying = client.verify_task(&task.id).await.unwrap();
+    assert_eq!(verifying.status, "verifying");
+
+    let cancelled = client.cancel_task(&task.id).await.unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn tasks_scope_widening_needs_explicit_approval() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = first_soul_id(&client).await;
+    core.plane().set_mode(ApprovalMode::Auto).unwrap();
+
+    let err = client
+        .create_task(&CreateTaskRequest {
+            soul_id: soul.clone(),
+            goal: "bad criterion".into(),
+            title: None,
+            success_criteria: vec!["bogus:x".into()],
+            allowed_tools: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "invalid_contract");
+
+    // A scope-expanding follow-up stays blocked until the approval event merges it.
+    let task = client
+        .create_task(&CreateTaskRequest {
+            soul_id: soul,
+            goal: "scoped work".into(),
+            title: None,
+            success_criteria: Vec::new(),
+            allowed_tools: vec!["fs.read".into()],
+        })
+        .await
+        .unwrap();
+    let job_id: ene_session::DelegationId = task.id.parse().unwrap();
+    let err = core.host().instruct(job_id, "allow: exec.run").unwrap_err();
+    assert!(
+        matches!(err, ene_work::WorkError::ScopeWideningPending { .. }),
+        "widening must stay pending, got {err:?}"
+    );
+    let approved = client.approve_task_scope(&task.id).await.unwrap();
+    assert!(matches!(approved.status.as_str(), "queued" | "running"));
+    assert_eq!(
+        core.work().get_job(job_id).unwrap().unwrap().allowed_tools,
+        ["fs.read", "exec.run"]
+    );
+    core.host().instruct(job_id, "allow: exec.run").unwrap();
+    server.shutdown().await;
+}
 #[tokio::test]
 async fn job_question_answer_reaches_mailbox() {
     let (_dir, client, core, server) = boot_server().await;

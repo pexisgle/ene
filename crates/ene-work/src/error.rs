@@ -46,6 +46,10 @@ pub enum WorkError {
     JobLane(String),
     #[error("invalid contract: {0}")]
     InvalidContract(String),
+    #[error("scope widening pending approval: {tools:?}")]
+    ScopeWideningPending { tools: Vec<String> },
+    #[error("no scope widening pending")]
+    NoPendingScopeWidening,
     #[error("verification failed: {0}")]
     VerificationFailed(String),
     #[error("workspace violation: {0}")]

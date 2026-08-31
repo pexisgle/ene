@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   plan_approved INTEGER NOT NULL DEFAULT 0,
   success_criteria TEXT NOT NULL DEFAULT '[]',
   allowed_tools TEXT NOT NULL DEFAULT '[]',
+  pending_allowed_tools TEXT,
   created_at TEXT NOT NULL,
   ended_at TEXT
 );
@@ -136,6 +137,12 @@ impl WorkStore {
                 [],
             )?;
         }
+        let pending_allowed_tools_exists = conn
+            .prepare("SELECT pending_allowed_tools FROM jobs LIMIT 0")
+            .is_ok();
+        if !pending_allowed_tools_exists {
+            conn.execute("ALTER TABLE jobs ADD COLUMN pending_allowed_tools TEXT", [])?;
+        }
         let mcp_args_exists = conn.prepare("SELECT args FROM mcp_servers LIMIT 0").is_ok();
         if !mcp_args_exists {
             conn.execute(
@@ -179,8 +186,8 @@ impl WorkStore {
             "INSERT INTO jobs (
                 id, soul_id, title, goal, mode, status, progress_fraction, progress_note,
                 workspace_dir, error_class, created_from_turn, plan, brief, plan_approved,
-                success_criteria, allowed_tools, created_at, ended_at
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                success_criteria, allowed_tools, pending_allowed_tools, created_at, ended_at
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
             params![
                 id.to_string(),
                 new.soul_id.to_string(),
@@ -198,6 +205,7 @@ impl WorkStore {
                 0_i32,
                 &success_criteria,
                 &allowed_tools,
+                None::<String>,
                 now,
                 None::<String>,
             ],
@@ -211,7 +219,7 @@ impl WorkStore {
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, title, goal, mode, status, progress_fraction, progress_note,
                     workspace_dir, error_class, created_from_turn, plan, brief, plan_approved,
-                    success_criteria, allowed_tools, created_at, ended_at
+                    success_criteria, allowed_tools, pending_allowed_tools, created_at, ended_at
              FROM jobs WHERE id = ?1",
         )?;
         stmt.query_row(params![id.to_string()], row_job)
@@ -261,15 +269,18 @@ impl WorkStore {
 
     pub fn interrupt_running(&self) -> Result<Vec<Job>, WorkError> {
         let conn = self.conn.lock();
-        let mut stmt =
-            conn.prepare("SELECT id FROM jobs WHERE status IN ('running', 'queued', 'created')")?;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM jobs WHERE status IN
+            ('running', 'verifying', 'queued', 'created')",
+        )?;
         let ids: Vec<String> = stmt
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "UPDATE jobs SET status = 'interrupted', ended_at = ?1 WHERE status = 'running'",
+            "UPDATE jobs SET status = 'interrupted', ended_at = ?1
+             WHERE status IN ('running', 'verifying')",
             params![now],
         )?;
         drop(conn);
@@ -369,12 +380,56 @@ impl WorkStore {
         Ok(())
     }
 
+    pub fn pending_allowed_tools(
+        &self,
+        id: DelegationId,
+    ) -> Result<Option<Vec<String>>, WorkError> {
+        let raw: Option<String> = self
+            .conn
+            .lock()
+            .query_row(
+                "SELECT pending_allowed_tools FROM jobs WHERE id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(raw.and_then(|encoded| serde_json::from_str(&encoded).ok()))
+    }
+
+    pub fn set_pending_allowed_tools(
+        &self,
+        id: DelegationId,
+        tools: Option<&[String]>,
+    ) -> Result<(), WorkError> {
+        let encoded = tools.map(|list| serde_json::to_string(list).unwrap_or_else(|_| "[]".into()));
+        let n = self.conn.lock().execute(
+            "UPDATE jobs SET pending_allowed_tools = ?1 WHERE id = ?2",
+            params![encoded, id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(WorkError::UnknownJob(id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn set_allowed_tools(&self, id: DelegationId, tools: &[String]) -> Result<(), WorkError> {
+        let encoded = serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_owned());
+        let n = self.conn.lock().execute(
+            "UPDATE jobs SET allowed_tools = ?1 WHERE id = ?2",
+            params![encoded, id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(WorkError::UnknownJob(id.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn list_jobs(&self, soul: SoulId) -> Result<Vec<Job>, WorkError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, title, goal, mode, status, progress_fraction, progress_note,
                     workspace_dir, error_class, created_from_turn, plan, brief, plan_approved,
-                    success_criteria, allowed_tools, created_at, ended_at
+                    success_criteria, allowed_tools, pending_allowed_tools, created_at, ended_at
              FROM jobs WHERE soul_id = ?1 AND mode = 'public' ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![soul.to_string()], row_job)?;
@@ -386,7 +441,7 @@ impl WorkStore {
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, title, goal, mode, status, progress_fraction, progress_note,
                     workspace_dir, error_class, created_from_turn, plan, brief, plan_approved,
-                    success_criteria, allowed_tools, created_at, ended_at
+                    success_criteria, allowed_tools, pending_allowed_tools, created_at, ended_at
              FROM jobs WHERE mode = 'public' ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_job)?;
@@ -450,7 +505,7 @@ impl WorkStore {
     pub fn count_active(&self, soul: SoulId) -> Result<u32, WorkError> {
         let n: i64 = self.conn.lock().query_row(
             "SELECT COUNT(*) FROM jobs
-             WHERE soul_id = ?1 AND status IN ('created', 'queued', 'running')",
+             WHERE soul_id = ?1 AND status IN ('created', 'queued', 'running', 'verifying')",
             params![soul.to_string()],
             |row| row.get(0),
         )?;
@@ -460,7 +515,7 @@ impl WorkStore {
     pub fn has_active_jobs(&self) -> Result<bool, WorkError> {
         let n: i64 = self.conn.lock().query_row(
             "SELECT COUNT(*) FROM jobs
-             WHERE status IN ('created', 'queued', 'running')",
+             WHERE status IN ('created', 'queued', 'running', 'verifying')",
             [],
             |row| row.get(0),
         )?;
@@ -981,8 +1036,11 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         plan_approved: row.get::<_, i32>(13)? != 0,
         success_criteria: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
         allowed_tools: serde_json::from_str(&row.get::<_, String>(15)?).unwrap_or_default(),
-        created_at: row.get(16)?,
-        ended_at: row.get(17)?,
+        pending_allowed_tools: row
+            .get::<_, Option<String>>(16)?
+            .and_then(|raw| serde_json::from_str(&raw).ok()),
+        created_at: row.get(17)?,
+        ended_at: row.get(18)?,
     })
 }
 

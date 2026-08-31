@@ -220,6 +220,44 @@ pub struct CreateJobRequest {
     pub allowed_tools: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskView {
+    pub id: String,
+    pub soul_id: String,
+    pub title: String,
+    pub goal: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_fraction: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub success_criteria: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub plan_approved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateTaskRequest {
+    pub soul_id: String,
+    pub goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub success_criteria: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AnswerJobRequest {
     #[serde(default)]

@@ -9,8 +9,8 @@ use base64::Engine;
 use ene_api::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateJobRequest,
-    CreateScheduleRequest, CreateSessionRequest, EndSessionRequest, ExclusiveSnapshot,
-    GreetingView, Health, HistoryResponse, JobView, ListProviderModelsRequest,
+    CreateScheduleRequest, CreateSessionRequest, CreateTaskRequest, EndSessionRequest,
+    ExclusiveSnapshot, GreetingView, Health, HistoryResponse, JobView, ListProviderModelsRequest,
     ListProviderModelsResponse, McpCatalogDocument, McpDocument, McpProbeRequest, McpProbeResponse,
     McpServerView, MemoryCandidateDecision, MemoryCandidateView, MemoryJournalView, MemoryPatch,
     MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page,
@@ -19,7 +19,7 @@ use ene_api::{
     ResolveMemoryCandidateResponse, ResourceKind, RestoreRequest, ScheduleView,
     SelectGreetingRequest, SelectGreetingResponse, SendMessageResponse, SessionPatch, SessionView,
     SettingsPatch, SoulPatch, SoulSkillsPatch, SoulView, SpanView, SplitSessionResponse, StageView,
-    ToolTestRequest, ToolView, UsageView,
+    TaskView, ToolTestRequest, ToolView, UsageView,
 };
 use ene_body::{InputEffect, VoiceRuntime};
 use ene_companion::{
@@ -914,6 +914,130 @@ pub async fn answer_question(
     get_job(State(state), Path(id)).await
 }
 
+pub async fn list_tasks(
+    State(state): State<AppState>,
+    Query(filter): Query<SoulFilter>,
+) -> Result<Json<Page<TaskView>>, ApiReject> {
+    let jobs = if let Some(raw) = filter.soul_id.as_deref() {
+        let soul = parse_soul(raw)?;
+        state.core.work().list_jobs(soul).map_err(map_work)?
+    } else {
+        state.core.work().list_jobs_all().map_err(map_work)?
+    };
+    Ok(Json(Page::of(jobs.into_iter().map(task_view).collect())))
+}
+
+pub async fn create_task(
+    State(state): State<AppState>,
+    Json(req): Json<CreateTaskRequest>,
+) -> Result<Json<TaskView>, ApiReject> {
+    let soul = parse_soul(&req.soul_id)?;
+    state
+        .core
+        .companions()
+        .get_soul(soul)
+        .map_err(map_companion)?
+        .ok_or_else(|| not_found("soul not found"))?;
+    let goal = req.goal.trim();
+    if goal.is_empty() {
+        return Err(bad_request("invalid_message", "goal required"));
+    }
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let success_criteria = req.success_criteria.clone();
+    let allowed_tools = req.allowed_tools.clone();
+    if !success_criteria.is_empty() {
+        ene_work::validate_criteria(&success_criteria)
+            .map_err(|err| bad_request("invalid_contract", &err.to_string()))?;
+    }
+    let value = state
+        .core
+        .supervisor()
+        .registry()
+        .execute(
+            "delegate.start",
+            json!({
+                "goal": goal,
+                "mode": "public",
+                "title": title,
+                "soul_id": soul.to_string(),
+                "success_criteria": success_criteria,
+                "allowed_tools": allowed_tools,
+            }),
+            Layer::Surface,
+        )
+        .await
+        .map_err(|err| map_pipeline(&err))?;
+    let id = value
+        .get("delegation_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad_request("fault", "task creation returned no id"))?
+        .parse::<DelegationId>()
+        .map_err(|_| bad_request("fault", "task creation returned an invalid id"))?;
+    let row = state
+        .core
+        .work()
+        .get_job(id)
+        .map_err(map_work)?
+        .ok_or_else(|| bad_request("fault", "task creation returned no task"))?;
+    Ok(Json(task_view(row)))
+}
+
+pub async fn get_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TaskView>, ApiReject> {
+    let task = id
+        .parse()
+        .map_err(|_| bad_request("invalid_message", "bad task id"))?;
+    let row = state
+        .core
+        .work()
+        .get_job(task)
+        .map_err(map_work)?
+        .ok_or_else(|| not_found("task not found"))?;
+    Ok(Json(task_view(row)))
+}
+
+pub async fn cancel_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TaskView>, ApiReject> {
+    let task = id
+        .parse()
+        .map_err(|_| bad_request("invalid_message", "bad task id"))?;
+    state.core.host().cancel(task).map_err(map_work)?;
+    get_task(State(state), Path(id)).await
+}
+
+pub async fn verify_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TaskView>, ApiReject> {
+    let task = id
+        .parse()
+        .map_err(|_| bad_request("invalid_message", "bad task id"))?;
+    state.core.host().begin_verifying(task).map_err(map_work)?;
+    get_task(State(state), Path(id)).await
+}
+
+pub async fn approve_task_scope(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TaskView>, ApiReject> {
+    let task = id
+        .parse()
+        .map_err(|_| bad_request("invalid_message", "bad task id"))?;
+    state
+        .core
+        .host()
+        .approve_scope_widening(task)
+        .map_err(map_work)?;
+    get_task(State(state), Path(id)).await
+}
 pub async fn list_schedules(
     State(state): State<AppState>,
 ) -> Result<Json<Page<ScheduleView>>, ApiReject> {
@@ -2766,6 +2890,24 @@ fn job_view(job: ene_work::Job) -> JobView {
         progress_note: job.progress_note,
     }
 }
+fn task_view(job: ene_work::Job) -> TaskView {
+    TaskView {
+        id: job.id.to_string(),
+        soul_id: job.soul_id.to_string(),
+        title: job.title,
+        goal: job.goal,
+        status: job.status.as_str().to_owned(),
+        progress_fraction: job.progress_fraction,
+        progress_note: job.progress_note,
+        success_criteria: job.success_criteria,
+        allowed_tools: job.allowed_tools,
+        pending_allowed_tools: job.pending_allowed_tools,
+        plan_approved: job.plan_approved,
+        error_class: job.error_class,
+        created_at: job.created_at,
+        ended_at: job.ended_at,
+    }
+}
 
 fn schedule_view(row: ene_work::Schedule) -> ScheduleView {
     ScheduleView {
@@ -2964,6 +3106,16 @@ fn map_work(err: ene_work::WorkError) -> ApiReject {
         }
         ene_work::WorkError::AlreadyCompleted | ene_work::WorkError::Cancelled => {
             conflict("already_completed", &err.to_string())
+        }
+        ene_work::WorkError::InvalidContract(msg) => bad_request("invalid_contract", &msg),
+        ene_work::WorkError::VerificationFailed(msg) => conflict("verification_failed", &msg),
+        ene_work::WorkError::WorkspaceViolation(msg) => bad_request("workspace_violation", &msg),
+        ene_work::WorkError::ScopeWideningPending { tools } => conflict(
+            "scope_widening_pending",
+            &format!("waiting for approval: {tools:?}"),
+        ),
+        ene_work::WorkError::NoPendingScopeWidening => {
+            conflict("no_pending_scope", &err.to_string())
         }
         other => bad_request("fault", &other.to_string()),
     }
