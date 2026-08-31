@@ -32,6 +32,11 @@ htmd = { workspace = true }
 scraper = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "fs"] }
+diffy = { workspace = true }
+globset = { workspace = true }
+ignore = { workspace = true }
+strsim = { workspace = true }
+tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { workspace = true }
