@@ -3428,7 +3428,7 @@ fn show_work(
         });
     }
     if ui.button(i18n::fl("jobs-refresh")).clicked() {
-        state.loaded.jobs = false;
+        begin_jobs_reload(state);
     }
     ui.horizontal(|ui| {
         if !state.new_session_inflight && ui.button(i18n::fl("chat-new-session")).clicked() {
@@ -3648,6 +3648,11 @@ fn show_work(
             }
         });
     }
+}
+
+fn begin_jobs_reload(state: &mut DetailUiState) {
+    state.core_status.clear();
+    state.loaded.jobs = false;
 }
 
 fn active_jobs(jobs: &[JobView]) -> Vec<&JobView> {
@@ -5737,6 +5742,21 @@ mod tests {
 
         assert_eq!(candidate("shared").scope, "shared");
         assert_ne!(candidate("private").scope, "shared");
+    }
+
+    #[test]
+    fn jobs_refresh_clears_core_status_and_reloads() {
+        let mut state = DetailUiState {
+            core_status: "http 409: already_completed: already completed".to_owned(),
+            loaded: DetailLoaded {
+                jobs: true,
+                ..DetailLoaded::default()
+            },
+            ..Default::default()
+        };
+        begin_jobs_reload(&mut state);
+        assert!(state.core_status.is_empty());
+        assert!(!state.loaded.jobs);
     }
 
     #[test]

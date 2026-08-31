@@ -1141,8 +1141,15 @@ impl StageApp {
                     self.detail.core_status = err;
                 }
             },
-            AsyncOutcome::CancelJob { result, .. }
-            | AsyncOutcome::ToggleSchedule { result, .. } => {
+            AsyncOutcome::CancelJob { result, .. } => match result {
+                Ok(()) => self.request_jobs(),
+                Err(err) if cancel_already_terminal(&err) => {
+                    self.detail.core_status = friendly_cancel_job_error(&err);
+                    self.request_jobs();
+                }
+                Err(err) => self.detail.core_status = err,
+            },
+            AsyncOutcome::ToggleSchedule { result, .. } => {
                 if result.is_ok() {
                     self.request_jobs();
                 } else if let Err(err) = result {
@@ -4071,13 +4078,34 @@ fn friendly_create_job_error(err: &str) -> String {
     }
 }
 
+/// Core maps both `AlreadyCompleted` and `Cancelled` to this error class, so a
+/// Cancel click that races a finished job arrives as `http 409: already_completed: ...`.
+#[must_use]
+fn cancel_already_terminal(err: &str) -> bool {
+    err.to_ascii_lowercase().contains("already_completed")
+}
+
+/// Replace the raw cancel 409 with a short status, keeping unrelated failures intact.
+#[must_use]
+fn friendly_cancel_job_error(err: &str) -> String {
+    if !cancel_already_terminal(err) {
+        return err.to_owned();
+    }
+    let title = err.rsplit_once(':').map_or(err, |(_, title)| title.trim());
+    if title.eq_ignore_ascii_case("cancelled") {
+        i18n::fl("jobs-cancel-already-cancelled")
+    } else {
+        i18n::fl("jobs-cancel-already-completed")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
-        OverlayFocus, StageApp, chat_window_action, format_log_text, friendly_create_job_error,
-        overlay_window_level, provider_asset_load_status, should_repaint_after_event,
-        window_focus_state, window_level,
+        OverlayFocus, StageApp, cancel_already_terminal, chat_window_action, format_log_text,
+        friendly_cancel_job_error, friendly_create_job_error, overlay_window_level,
+        provider_asset_load_status, should_repaint_after_event, window_focus_state, window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -5148,6 +5176,64 @@ mod tests {
             friendly_create_job_error("http 500: internal error"),
             "http 500: internal error"
         );
+    }
+
+    #[test]
+    fn cancel_already_terminal_matches_core_conflict_class() {
+        assert!(cancel_already_terminal(
+            "http 409: already_completed: already completed"
+        ));
+        assert!(cancel_already_terminal(
+            "http 409: already_completed: cancelled"
+        ));
+        assert!(!cancel_already_terminal(
+            "http 409: question_closed: no open question"
+        ));
+        assert!(!cancel_already_terminal("http 500: fault: boom"));
+    }
+
+    #[test]
+    fn cancel_of_completed_job_uses_friendly_status_instead_of_raw_http() {
+        let mut app = StageApp::new_for_test();
+        app.detail.core_status = "stale".to_owned();
+        app.apply_async_outcome(AsyncOutcome::CancelJob {
+            id: "job-1".to_owned(),
+            result: Err("http 409: already_completed: already completed".to_owned()),
+        });
+        assert_eq!(
+            app.detail.core_status,
+            i18n::fl("jobs-cancel-already-completed")
+        );
+        assert!(
+            !app.detail.core_status.contains("http 409"),
+            "raw conflict must not reach the status row: {}",
+            app.detail.core_status
+        );
+    }
+
+    #[test]
+    fn cancel_of_cancelled_job_uses_friendly_status() {
+        let mut app = StageApp::new_for_test();
+        app.apply_async_outcome(AsyncOutcome::CancelJob {
+            id: "job-1".to_owned(),
+            result: Err("http 409: already_completed: cancelled".to_owned()),
+        });
+        assert_eq!(
+            app.detail.core_status,
+            i18n::fl("jobs-cancel-already-cancelled")
+        );
+    }
+
+    #[test]
+    fn cancel_job_other_errors_stay_raw() {
+        let mut app = StageApp::new_for_test();
+        let raw = "http 500: fault: boom";
+        app.apply_async_outcome(AsyncOutcome::CancelJob {
+            id: "job-1".to_owned(),
+            result: Err(raw.to_owned()),
+        });
+        assert_eq!(app.detail.core_status, raw);
+        assert_eq!(friendly_cancel_job_error(raw), raw);
     }
 
     fn submitted_request(goal: &str) -> CreateJobRequest {
