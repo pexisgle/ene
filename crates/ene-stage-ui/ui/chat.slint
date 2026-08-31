@@ -1,0 +1,145 @@
+import { EneTheme, EneButton, SpeechBubble } from "theme.slint";
+
+export struct ChatRow {
+    role: string,
+    text: string,
+    streaming: bool,
+}
+
+export struct ChatTargetRow {
+    soul-id: string,
+    label: string,
+    active: bool,
+}
+
+export component ChatSurface inherits Window {
+    background: EneTheme.bg;
+    default-font-family: "Noto Sans CJK JP";
+    title: "Chat";
+
+    in-out property <[ChatRow]> rows: [];
+    in-out property <[ChatTargetRow]> targets: [];
+    in-out property <string> draft;
+    in-out property <string> status;
+    in-out property <string> setup-status;
+    in-out property <bool> turn-active: false;
+    in-out property <bool> mic-active: false;
+    in-out property <bool> can-send: false;
+    in-out property <string> approval-prompt;
+    in-out property <bool> approval-visible: false;
+    in-out property <string> question-prompt;
+    in-out property <bool> question-visible: false;
+    in-out property <string> question-draft;
+    in-out property <bool> input-focused: false;
+
+    callback send();
+    callback new-session();
+    callback cancel-turn();
+    callback toggle-mic();
+    callback open-detail();
+    callback select-target(string);
+    callback approval(string);
+    callback answer-question();
+
+    VerticalLayout {
+        padding: EneTheme.space-3;
+        spacing: EneTheme.space-2;
+
+        HorizontalLayout {
+            spacing: EneTheme.space-2;
+            for target in targets: Rectangle {
+                background: target.active ? EneTheme.accent : EneTheme.bg-elevated;
+                border-radius: EneTheme.radius;
+                height: 28px;
+                HorizontalLayout {
+                    padding: EneTheme.space-2;
+                    Text {
+                        text: target.label;
+                        color: target.active ? #101218 : EneTheme.fg;
+                        font-size: EneTheme.type-sm;
+                    }
+                }
+                TouchArea { clicked => { root.select-target(target.soul-id); } }
+            }
+            EneButton { text: "Detail"; primary: false; clicked => { root.open-detail(); } }
+            EneButton { text: "New"; primary: false; clicked => { root.new-session(); } }
+        }
+
+        if setup-status != "": Text {
+            text: setup-status;
+            color: EneTheme.fg-muted;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: EneTheme.bg-elevated;
+            border-radius: EneTheme.radius;
+            Flickable {
+                viewport-height: col.preferred-height;
+                col := VerticalLayout {
+                    padding: EneTheme.space-2;
+                    spacing: EneTheme.space-2;
+                    for row in rows: SpeechBubble {
+                        speaker: row.role;
+                        text: row.streaming ? row.text + " ▌" : row.text;
+                    }
+                }
+            }
+        }
+
+        if approval-visible: Rectangle {
+            background: EneTheme.bg-elevated;
+            border-radius: EneTheme.radius;
+            VerticalLayout {
+                padding: EneTheme.space-3;
+                spacing: EneTheme.space-2;
+                Text { text: approval-prompt; color: EneTheme.fg; wrap: word-wrap; }
+                HorizontalLayout {
+                    spacing: EneTheme.space-2;
+                    EneButton { text: "Allow"; clicked => { root.approval("allow"); } }
+                    EneButton { text: "Always"; primary: false; clicked => { root.approval("always"); } }
+                    EneButton { text: "Deny"; primary: false; clicked => { root.approval("deny"); } }
+                }
+            }
+        }
+
+        if question-visible: Rectangle {
+            background: EneTheme.bg-elevated;
+            border-radius: EneTheme.radius;
+            VerticalLayout {
+                padding: EneTheme.space-3;
+                spacing: EneTheme.space-2;
+                Text { text: question-prompt; color: EneTheme.fg; wrap: word-wrap; }
+                TextInput {
+                    text <=> question-draft;
+                    color: EneTheme.fg;
+                    font-size: EneTheme.type-md;
+                }
+                EneButton { text: "Answer"; clicked => { root.answer-question(); } }
+            }
+        }
+
+        Text { text: status; color: EneTheme.fg-muted; wrap: word-wrap; font-size: EneTheme.type-sm; }
+
+        HorizontalLayout {
+            spacing: EneTheme.space-2;
+            TextInput {
+                text <=> draft;
+                vertical-stretch: 0;
+                height: 56px;
+                color: EneTheme.fg;
+                font-size: EneTheme.type-md;
+                wrap: word-wrap;
+                accepted => { if can-send { root.send(); } }
+                edited => { root.input-focused = true; }
+            }
+            VerticalLayout {
+                spacing: EneTheme.space-1;
+                EneButton { text: "Send"; enabled: can-send; clicked => { root.send(); } }
+                if turn-active: EneButton { text: "Cancel"; primary: false; clicked => { root.cancel-turn(); } }
+                EneButton { text: mic-active ? "Mic on" : "Mic"; primary: false; clicked => { root.toggle-mic(); } }
+            }
+        }
+    }
+}

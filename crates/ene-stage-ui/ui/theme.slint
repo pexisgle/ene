@@ -1,0 +1,131 @@
+// Stage v2 design tokens. User themes overlay these via Rust property sets.
+
+export global EneTheme {
+    in-out property <bool> dark: true;
+    in-out property <bool> reduced-motion: false;
+
+    in-out property <color> bg: #16181d;
+    in-out property <color> bg-elevated: #1e2229;
+    in-out property <color> fg: #e8eaed;
+    in-out property <color> fg-muted: #9aa0a6;
+    in-out property <color> accent: #7eb8ff;
+    in-out property <color> danger: #ff8a80;
+    in-out property <color> bubble: #262b33;
+    in-out property <color> bubble-user: #345a82;
+    in-out property <length> space-1: 4px;
+    in-out property <length> space-2: 8px;
+    in-out property <length> space-3: 12px;
+    in-out property <length> space-4: 16px;
+    in-out property <length> radius: 10px;
+    in-out property <length> type-sm: 12px;
+    in-out property <length> type-md: 14px;
+    in-out property <length> type-lg: 18px;
+    in-out property <duration> motion: 160ms;
+}
+
+export component EneButton inherits Rectangle {
+    in-out property <string> text;
+    in-out property <bool> enabled: true;
+    in-out property <bool> primary: true;
+    callback clicked();
+    border-radius: EneTheme.radius;
+    background: primary ? EneTheme.accent : EneTheme.bg-elevated;
+    opacity: enabled ? 1.0 : 0.45;
+    height: 32px;
+    min-width: 72px;
+    horizontal-stretch: 0;
+    Text {
+        text: text;
+        color: primary ? #101218 : EneTheme.fg;
+        font-size: EneTheme.type-md;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+    ta := TouchArea {
+        enabled: enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component EneIconButton inherits Rectangle {
+    in-out property <string> text;
+    callback clicked();
+    width: 32px;
+    height: 32px;
+    border-radius: EneTheme.radius;
+    background: EneTheme.bg-elevated;
+    Text {
+        text: text;
+        color: EneTheme.fg;
+        font-size: EneTheme.type-md;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+export component EneCard inherits Rectangle {
+    border-radius: EneTheme.radius;
+    background: EneTheme.bg-elevated;
+    in-out property <string> title;
+    in-out property <string> body;
+    VerticalLayout {
+        padding: EneTheme.space-3;
+        spacing: EneTheme.space-1;
+        Text { text: title; color: EneTheme.fg; font-size: EneTheme.type-md; }
+        Text { text: body; color: EneTheme.fg-muted; font-size: EneTheme.type-sm; wrap: word-wrap; }
+    }
+}
+
+export component SpeechBubble inherits Rectangle {
+    in-out property <string> text;
+    in-out property <string> speaker;
+    in property <bool> clickable: false;
+    callback clicked();
+    border-radius: EneTheme.radius;
+    background: EneTheme.bubble;
+    VerticalLayout {
+        padding: EneTheme.space-3;
+        spacing: EneTheme.space-1;
+        Text { text: speaker; color: EneTheme.fg-muted; font-size: EneTheme.type-sm; }
+        Text { text: text; color: EneTheme.fg; font-size: EneTheme.type-md; wrap: word-wrap; }
+    }
+    TouchArea {
+        enabled: clickable;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component StatusBubble inherits Rectangle {
+    in-out property <string> text;
+    border-radius: EneTheme.radius;
+    background: #00000099;
+    VerticalLayout {
+        padding: EneTheme.space-2;
+        Text { text: text; color: EneTheme.fg; font-size: EneTheme.type-sm; wrap: word-wrap; }
+    }
+}
+
+export component Chip inherits Rectangle {
+    in-out property <string> text;
+    in-out property <bool> selected: false;
+    callback clicked();
+    border-radius: 999px;
+    background: selected ? EneTheme.accent : EneTheme.bg-elevated;
+    height: 28px;
+    HorizontalLayout {
+        padding-left: EneTheme.space-3;
+        padding-right: EneTheme.space-3;
+        Text {
+            text: text;
+            color: selected ? #101218 : EneTheme.fg;
+            font-size: EneTheme.type-sm;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}

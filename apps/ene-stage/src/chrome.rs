@@ -1,9 +1,7 @@
-//! Independent egui windows hosted on winit + wgpu.
+//! Independent Slint windows hosted on winit + wgpu.
 
 use std::sync::Arc;
 
-use egui::ViewportId;
-use egui_wgpu::{Renderer, RendererOptions, ScreenDescriptor};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
@@ -11,6 +9,7 @@ use winit::window::{Window, WindowId};
 
 use crate::gpu::{self, GpuContext, GpuError};
 use crate::i18n;
+use crate::renderer::slint_gpu::{ChromeAction, ChromeLayer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChromeKind {
@@ -32,24 +31,18 @@ impl ChromeKind {
     }
 }
 
-/// One native window with its own egui context.
+/// One native window with a Slint GPU layer.
 pub struct ChromeWindow {
     pub kind: ChromeKind,
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    #[expect(dead_code, reason = "kept for surface recreation")]
     format: wgpu::TextureFormat,
-    egui_ctx: egui::Context,
-    egui_state: egui_winit::State,
-    renderer: Renderer,
+    layer: Option<ChromeLayer>,
 }
 
 impl ChromeWindow {
     /// Restore visibility even when the WM rejects programmatic focus.
-    ///
-    /// Hidden, minimized, and behind-other-windows states are all handled
-    /// here so every reopen entry point shares one lifecycle path.
     pub fn restore(&self) {
         if self.window.is_minimized() == Some(true) {
             self.window.set_minimized(false);
@@ -60,11 +53,6 @@ impl ChromeWindow {
         self.window.request_redraw();
     }
 
-    /// Reuse an existing window (restoring it) or build a fresh one.
-    ///
-    /// Callers pass their `Option<ChromeWindow>` by value; a destroyed
-    /// window simply falls through to creation, so tray and hotkey actions
-    /// never need duplicated existence checks.
     pub fn restore_or_create(
         existing: Option<Self>,
         event_loop: &ActiveEventLoop,
@@ -124,35 +112,22 @@ impl ChromeWindow {
         let alpha = gpu::pick_alpha_mode(&surface, &gpu.adapter);
         let config =
             gpu::configure_surface(&surface, &gpu.device, format, window.inner_size(), alpha);
-        let egui_ctx = egui::Context::default();
-        crate::fonts::install_on(&egui_ctx);
-        let egui_state = egui_winit::State::new(
-            egui_ctx.clone(),
-            ViewportId::ROOT,
-            window.as_ref(),
-            Some(window.scale_factor() as f32),
-            None,
-            None,
-        );
-        let renderer = Renderer::new(
-            &gpu.device,
-            format,
-            RendererOptions {
-                msaa_samples: 1,
-                depth_stencil_format: None,
-                dithering: true,
-                predictable_texture_filtering: false,
-            },
-        );
+        let layer = match kind {
+            ChromeKind::Chat => ChromeLayer::chat(),
+            ChromeKind::Detail => ChromeLayer::detail(),
+            ChromeKind::Caption => ChromeLayer::caption(),
+            ChromeKind::Spotlight => ChromeLayer::spotlight(),
+        };
+        if layer.is_none() {
+            tracing::warn!(kind = ?kind, "slint chrome component failed");
+        }
         Ok(Self {
             kind,
             window,
             surface,
             config,
             format,
-            egui_ctx,
-            egui_state,
-            renderer,
+            layer,
         })
     }
 
@@ -171,12 +146,9 @@ impl ChromeWindow {
 
     #[must_use]
     pub fn owns_input(&self) -> bool {
-        self.egui_ctx.egui_wants_pointer_input() || self.egui_ctx.egui_wants_keyboard_input()
+        self.layer.as_ref().is_some_and(ChromeLayer::input_focused)
     }
 
-    /// Whether the chat composer currently owns the keyboard. While it does,
-    /// overlay shortcuts must not fire, or typing A/D/W/S into a message would
-    /// also switch bodies and motions.
     #[must_use]
     pub fn composer_owns_keyboard(composer_focused: bool) -> bool {
         composer_focused
@@ -190,7 +162,10 @@ impl ChromeWindow {
     }
 
     pub fn on_window_event(&mut self, event: &WindowEvent) -> bool {
-        self.egui_state.on_window_event(&self.window, event).repaint
+        let scale = self.window.scale_factor();
+        self.layer
+            .as_ref()
+            .is_some_and(|layer| layer.dispatch_winit(event, scale))
     }
 
     pub fn resize(&mut self, gpu: &GpuContext, size: PhysicalSize<u32>) {
@@ -202,12 +177,18 @@ impl ChromeWindow {
         self.surface.configure(&gpu.device, &self.config);
     }
 
-    pub fn paint(
-        &mut self,
-        gpu: &GpuContext,
-        theme: Option<&str>,
-        mut add_contents: impl FnMut(&mut egui::Ui),
-    ) -> Result<(), GpuError> {
+    pub fn layer(&self) -> Option<&ChromeLayer> {
+        self.layer.as_ref()
+    }
+
+    pub fn take_actions(&self) -> Vec<ChromeAction> {
+        self.layer
+            .as_ref()
+            .map(ChromeLayer::take_actions)
+            .unwrap_or_default()
+    }
+
+    pub fn paint(&mut self, gpu: &GpuContext) -> Result<(), GpuError> {
         let window_size = self.window.inner_size();
         if window_size.width == 0 || window_size.height == 0 {
             return Ok(());
@@ -220,48 +201,22 @@ impl ChromeWindow {
         if !surface_target_matches_window(target_size, window_size) {
             return Ok(());
         }
-        if let Some(theme) = theme {
-            apply_theme(&self.egui_ctx, theme);
-        }
-        let raw = self.egui_state.take_egui_input(&self.window);
-        let full = self.egui_ctx.run_ui(raw, |ui| {
-            fill_opaque_panel(ui, self.kind);
-            add_contents(ui);
-        });
-        self.egui_state
-            .handle_platform_output(&self.window, full.platform_output);
-
-        let pixels_per_point = self.window.scale_factor() as f32;
-        let screen = screen_descriptor_for_target(target_size, pixels_per_point);
-        let primitives = self.egui_ctx.tessellate(full.shapes, pixels_per_point);
-        for (id, delta) in &full.textures_delta.set {
-            self.renderer
-                .update_texture(&gpu.device, &gpu.queue, *id, delta);
-        }
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ene-stage.chrome"),
             });
-        let extra = self.renderer.update_buffers(
-            &gpu.device,
-            &gpu.queue,
-            &mut encoder,
-            &primitives,
-            &screen,
-        );
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let clear = clear_color(self.kind, &self.egui_ctx.global_style().visuals);
         {
-            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ene-stage.chrome.pass"),
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ene-stage.chrome.clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
+                        load: wgpu::LoadOp::Clear(clear_color(self.kind)),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -271,22 +226,16 @@ impl ChromeWindow {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            self.renderer
-                .render(&mut pass.forget_lifetime(), &primitives, &screen);
         }
-        for id in &full.textures_delta.free {
-            self.renderer.free_texture(id);
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        if let Some(layer) = self.layer.as_mut() {
+            layer.render(&view, window_size.width, window_size.height, self.format);
         }
-        gpu.queue
-            .submit(extra.into_iter().chain(std::iter::once(encoder.finish())));
         frame.present();
         Ok(())
     }
 }
 
-/// Smallest inner size at which each chrome window still shows its header and
-/// action row. Chat doubles as the fixed floor for all decorated windows so
-/// initially-narrow companions never clip their top instructions or composer.
 #[must_use]
 pub fn minimum_inner_size(kind: ChromeKind) -> PhysicalSize<u32> {
     match kind {
@@ -299,41 +248,6 @@ pub fn minimum_inner_size(kind: ChromeKind) -> PhysicalSize<u32> {
     }
 }
 
-#[cfg(test)]
-mod minimum_inner_size_tests {
-    use super::*;
-
-    #[test]
-    fn chat_and_detail_floor_matches_default_bounds() {
-        let expected = PhysicalSize::new(
-            crate::surface::CHAT_WINDOW_WIDTH,
-            crate::surface::CHAT_WINDOW_HEIGHT,
-        );
-        assert_eq!(minimum_inner_size(ChromeKind::Chat), expected);
-        assert_eq!(minimum_inner_size(ChromeKind::Detail), expected);
-    }
-
-    #[test]
-    fn caption_and_spotlight_floors_stay_positive_and_below_defaults() {
-        let caption = minimum_inner_size(ChromeKind::Caption);
-        let spotlight = minimum_inner_size(ChromeKind::Spotlight);
-        assert_eq!(caption, PhysicalSize::new(240, 80));
-        assert_eq!(spotlight, PhysicalSize::new(360, 400));
-        assert!(caption.width < 720 && caption.height < 160);
-        assert!(spotlight.width < 420 && spotlight.height < 480);
-    }
-}
-
-fn screen_descriptor_for_target(
-    target_size: wgpu::Extent3d,
-    pixels_per_point: f32,
-) -> ScreenDescriptor {
-    ScreenDescriptor {
-        size_in_pixels: [target_size.width.max(1), target_size.height.max(1)],
-        pixels_per_point,
-    }
-}
-
 fn surface_target_matches_window(
     target_size: wgpu::Extent3d,
     window_size: PhysicalSize<u32>,
@@ -341,39 +255,16 @@ fn surface_target_matches_window(
     target_size.width == window_size.width && target_size.height == window_size.height
 }
 
-fn fill_opaque_panel(ui: &mut egui::Ui, kind: ChromeKind) {
-    if kind == ChromeKind::Caption || kind == ChromeKind::Spotlight {
-        return;
-    }
-    ui.painter()
-        .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
-}
-
-/// Map `desktop.theme` onto egui's light/dark/system preference.
-pub fn apply_theme(ctx: &egui::Context, theme: &str) {
-    match theme {
-        "light" => ctx.set_theme(egui::Theme::Light),
-        "dark" => ctx.set_theme(egui::Theme::Dark),
-        _ => ctx.set_theme(egui::ThemePreference::System),
-    }
-}
-
 #[must_use]
-pub fn clear_color(kind: ChromeKind, visuals: &egui::Visuals) -> wgpu::Color {
-    if kind == ChromeKind::Caption || kind == ChromeKind::Spotlight {
-        wgpu::Color::TRANSPARENT
-    } else {
-        color32_to_wgpu(visuals.panel_fill)
-    }
-}
-
-#[must_use]
-pub fn color32_to_wgpu(color: egui::Color32) -> wgpu::Color {
-    wgpu::Color {
-        r: f64::from(color.r()) / 255.0,
-        g: f64::from(color.g()) / 255.0,
-        b: f64::from(color.b()) / 255.0,
-        a: f64::from(color.a()) / 255.0,
+pub fn clear_color(kind: ChromeKind) -> wgpu::Color {
+    match kind {
+        ChromeKind::Caption | ChromeKind::Spotlight => wgpu::Color::TRANSPARENT,
+        ChromeKind::Chat | ChromeKind::Detail => wgpu::Color {
+            r: 0.086,
+            g: 0.094,
+            b: 0.114,
+            a: 1.0,
+        },
     }
 }
 
@@ -446,55 +337,48 @@ fn clamp_window_axis(position: i32, origin: i32, monitor_extent: u32, window_ext
 }
 
 #[cfg(test)]
+mod minimum_inner_size_tests {
+    use super::*;
+
+    #[test]
+    fn chat_and_detail_floor_matches_default_bounds() {
+        let expected = PhysicalSize::new(
+            crate::surface::CHAT_WINDOW_WIDTH,
+            crate::surface::CHAT_WINDOW_HEIGHT,
+        );
+        assert_eq!(minimum_inner_size(ChromeKind::Chat), expected);
+        assert_eq!(minimum_inner_size(ChromeKind::Detail), expected);
+    }
+
+    #[test]
+    fn caption_and_spotlight_floors_stay_positive_and_below_defaults() {
+        let caption = minimum_inner_size(ChromeKind::Caption);
+        let spotlight = minimum_inner_size(ChromeKind::Spotlight);
+        assert_eq!(caption, PhysicalSize::new(240, 80));
+        assert_eq!(spotlight, PhysicalSize::new(360, 400));
+        assert!(caption.width < 720 && caption.height < 160);
+        assert!(spotlight.width < 420 && spotlight.height < 480);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn luma(color: wgpu::Color) -> f64 {
-        0.2126_f64.mul_add(color.r, 0.7152_f64.mul_add(color.g, 0.0722 * color.b))
-    }
-
-    #[test]
-    fn light_opaque_clear_is_brighter_than_dark() {
-        let light = clear_color(ChromeKind::Detail, &egui::Visuals::light());
-        let dark = clear_color(ChromeKind::Detail, &egui::Visuals::dark());
-        assert!(luma(light) > luma(dark));
-        assert!(luma(light) > 0.7);
-        assert!(luma(dark) < 0.3);
-        assert!((light.a - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn apply_theme_switches_panel_luma() {
-        let ctx = egui::Context::default();
-        apply_theme(&ctx, "light");
-        let light = clear_color(ChromeKind::Chat, &ctx.global_style().visuals);
-        apply_theme(&ctx, "dark");
-        let dark = clear_color(ChromeKind::Chat, &ctx.global_style().visuals);
-        assert!(luma(light) > luma(dark));
-        assert!(luma(light) > 0.7);
-        assert!(luma(dark) < 0.3);
-    }
-
     #[test]
     fn caption_and_spotlight_stay_transparent() {
-        let caption = clear_color(ChromeKind::Caption, &egui::Visuals::light());
-        let spotlight = clear_color(ChromeKind::Spotlight, &egui::Visuals::dark());
+        let caption = clear_color(ChromeKind::Caption);
+        let spotlight = clear_color(ChromeKind::Spotlight);
         assert!((caption.a).abs() < f64::EPSILON);
         assert!((spotlight.a).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn screen_descriptor_uses_surface_target_dimensions() {
-        let screen = screen_descriptor_for_target(
-            wgpu::Extent3d {
-                width: 520,
-                height: 560,
-                depth_or_array_layers: 1,
-            },
-            1.5,
-        );
-        assert_eq!(screen.size_in_pixels, [520, 560]);
-        assert!((screen.pixels_per_point - 1.5).abs() < f32::EPSILON);
+    fn opaque_chrome_clear_is_fully_opaque() {
+        let chat = clear_color(ChromeKind::Chat);
+        let detail = clear_color(ChromeKind::Detail);
+        assert!((chat.a - 1.0).abs() < f64::EPSILON);
+        assert!((detail.a - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

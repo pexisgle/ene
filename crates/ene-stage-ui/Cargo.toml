@@ -1,0 +1,34 @@
+[package]
+name = "ene-stage-ui"
+version.workspace = true
+edition.workspace = true
+description = "Generated Slint bindings for ene-stage (isolated from workspace clippy)"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+slint = { workspace = true }
+
+[build-dependencies]
+slint-build = { workspace = true }
+
+[lints.rust]
+dead_code = "allow"
+unused = "allow"
+unused_qualifications = "allow"
+
+[lints.clippy]
+all = { level = "allow", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+cargo = { level = "allow", priority = -1 }
+unwrap_used = "allow"
+expect_used = "allow"
+panic = "allow"
+todo = "allow"
+unimplemented = "allow"
+print_stdout = "allow"
+print_stderr = "allow"

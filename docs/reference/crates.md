@@ -10,7 +10,7 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 | Package | Path | Role |
 |---|---|---|
 | `ene-daemon` | `apps/ene-core` (binary `ene-core`) | Core daemon: data-dir lock, HTTP/WS API, session + kernel + companion + work + plane + fiber |
-| `ene-stage` | `apps/ene-stage` | Product GUI: wgpu overlay, chat, 9-section detail, tray; surface + detail sockets (`client_id = stage`) |
+| `ene-stage` | `apps/ene-stage` | Product GUI: wgpu overlay with GPU-composited Slint, chat, 9-section detail, tray; surface + detail sockets (`client_id = stage`) |
 | `ene-ctl` | `apps/ene-ctl` | CLI client for the same HTTP/WS API |
 | `ene-desktop` | `apps/ene-desktop` | Frozen pre-redesign GUI restored in #794. No new features; delete when stage is judged to replace it |
 
@@ -33,6 +33,7 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 | `ene-config` | Settings load/save/schema, paths, `define_config!` | (nothing internal) |
 | `ene-sandbox` | OS sandbox primitives (Landlock + seccomp + rlimits on Linux) | (nothing internal) |
 | `ene-vrm` | VRM 1.0 loader + wgpu renderer | (nothing internal) |
+| `ene-stage-ui` | Generated Slint window bindings for stage; isolated so slint-build unwrap cannot fail workspace clippy | (nothing internal) |
 
 ## Dependency rules (enforced by review)
 

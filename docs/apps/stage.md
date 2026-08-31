@@ -31,10 +31,25 @@ SDK.
 
 Direct avatar interaction is configured in Detail → System. A stationary press on a silhouette becomes a click, double-click, or long press; movement past the drag threshold remains a position drag. Each accepted gesture gives the hit soul a short local scale/expression cue. Background clicks stay pass-through. Touch uses the same classifier; pen input follows the platform's mouse or touch mapping. Agent handoff and switching the active chat target are opt-in, and agent handoff is rate-limited. Wayland users must turn off click-through before using touch or drag because the compositor may not deliver events to a transparent surface.
 
-Stage does not use a WebView. Overlay drawing is wgpu; chrome windows are egui
-on winit. The process talks to the core only through `ene-api`
+Stage does not use a WebView. Overlay drawing is wgpu with a Slint UI layer
+composited on GPU; chrome windows (Chat, Detail, Caption, Spotlight) are
+Slint on winit. The process talks to the core only through `ene-api`
 (`client_id = stage`). It does not link `ene-core`, `ene-companion`, or
 `ene-card`.
+
+The overlay event loop uses `ControlFlow::WaitUntil` (about 16 ms) plus
+`request_redraw` when VRM motion, Slint dirty flags, resize, or collider
+debug require a frame. A static pose with no visemes, look-at, or dirty UI
+must not spin. Chrome still paints while its windows are open. Performance
+gates for idle CPU / frame time are real-GPU only; Cloud Agent lavapipe
+numbers are software reference and must not fail those gates.
+
+Wayland click-through uses a coarse `wl_surface` input region from
+interaction geometry. X11 uses coarse SHAPE Bounding/Input when the WM
+accepts it, otherwise window-wide hit-test plus cursor poll. Windows maps
+Passive to `set_cursor_hittest(false)` and keeps the existing DX12/DComp
+path. Weston 13 is the Wayland compositor we verify; other compositors are
+best-effort. X11 pixel-perfect regions are not a goal.
 
 Characters are `.enechar` packages. `GET /characters` is install inventory;
 playable companions are souls (`GET /souls` / `GET /stage` occupants).
@@ -50,7 +65,7 @@ Local `desktop.*` keys (theme, language, mic, captions, beat sync, graphics
 quality, core lifetime, displayed companion order/selection in
 `displayed_soul_ids`, and per-body overlay placement in `character_positions`)
 stay on the client. Theme (`light` /
-`dark` / `system`) applies to both the wgpu window clear color and egui widget
+`dark` / `system`) applies to both the wgpu window clear color and Slint widget
 colors, so light mode keeps readable contrast. Japanese UI text uses an OS CJK
 font (Yu Gothic / Meiryo on Windows, Noto or Droid on Linux), or
 `assets/fonts/NotoSansJP-Regular.ttf` when that file is packaged next to the

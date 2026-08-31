@@ -29,9 +29,24 @@ PowerShell から同じコマンドを使います。
 
 アバターの直接操作は、詳細 → システムで設定します。シルエット上で動かさずに押して離すとクリック、短い間隔の2回ならダブルクリック、一定時間押し続けると長押しになります。移動がドラッグ閾値を超えた場合は従来どおり位置移動です。認識した soul だけに短い拡大・表情フィードバックを返し、背景クリックは従来どおり透過します。タッチも同じ判定を使い、ペンはプラットフォームがマウスまたはタッチへ変換した入力に従います。コンパニオンへのイベント送信と会話対象の切り替えは明示的にオンにした場合だけで、イベント送信にはレート制限があります。Wayland では透過中にコンポジターが入力を届けない場合があるため、タッチやドラッグの前にクリック透過をオフにしてください。
 
-Stage は WebView を使いません。オーバーレイは wgpu、操作窓は winit 上の egui
-です。コアとは `ene-api` のみで話し（`client_id = stage`）、`ene-core` や
+Stage は WebView を使いません。オーバーレイは wgpu 上に Slint UI を GPU
+合成し、操作窓（チャット / 詳細 / キャプション / スポットライト）は winit 上の
+Slint です。コアとは `ene-api` のみで話し（`client_id = stage`）、`ene-core` や
 `ene-companion`、`ene-card` はリンクしません。
+
+オーバーレイのイベントループは `ControlFlow::WaitUntil`（約 16ms）と、
+VRM の動き・Slint dirty・リサイズ・コライダーデバッグがあるときだけの
+`request_redraw` です。ビセームも視線も dirty UI もない静止ポーズは回し続けません。
+操作窓が開いている間は chrome も描画します。idle CPU / フレーム時間の
+performance gate は実 GPU のみです。Cloud Agent の lavapipe 数値は
+ソフトウェア参考で、その gate を落とす理由にはしません。
+
+Wayland のクリック透過は interaction geometry から作る粗い
+`wl_surface` input region です。X11 は WM が受け付けるときだけ粗い SHAPE
+Bounding/Input を使い、失敗時は窓全体のヒットテストと cursor poll に戻します。
+Windows は Passive を `set_cursor_hittest(false)` に写し、既存の DX12/DComp
+経路は変えません。Wayland で確認するのは Weston 13 で、他コンポジタは
+未保証です。X11 のピクセル単位領域は目標にしません。
 
 キャラクターは `.enechar` パッケージです。`GET /characters` はインストール在庫、
 対話相手はソウル（`GET /souls` / `GET /stage` の occupants）です。`body_ref` は
@@ -47,7 +62,7 @@ CCv3 エディタはありません。Companion の書き出しと Work のセ�
 コア寿命、`displayed_soul_ids` による表示体/順番、`character_positions` による体ごとの
 オーバーレイ配置）はクライアント側です。
 テーマ（`light` / `dark` /
-`system`）は wgpu のクリア色と egui の文字色の両方に効くので、light でも
+`system`）は wgpu のクリア色と Slint の文字色の両方に効くので、light でも
 コントラストが保たれます。日本語 UI は OS の CJK フォント（Windows は游ゴシック
 / メイリオ、Linux は Noto や Droid）で描画し、バイナリ横に
 `assets/fonts/NotoSansJP-Regular.ttf` がある場合はそれを使います。表示言語を

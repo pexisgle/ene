@@ -1,0 +1,56 @@
+import { EneTheme } from "theme.slint";
+
+export struct SpotlightEntry {
+    id: string,
+    label: string,
+}
+
+export component SpotlightSurface inherits Window {
+    background: #101218ee;
+    default-font-family: "Noto Sans CJK JP";
+    title: "Spotlight";
+
+    in-out property <string> query;
+    in-out property <[SpotlightEntry]> entries: [];
+    in-out property <int> selected: 0;
+
+    callback run(string);
+    callback dismissed();
+
+    VerticalLayout {
+        padding: EneTheme.space-4;
+        spacing: EneTheme.space-3;
+        TextInput {
+            text <=> query;
+            font-size: EneTheme.type-lg;
+            color: EneTheme.fg;
+            accepted => {
+                if entries.length > 0 {
+                    run(entries[selected].id);
+                }
+            }
+        }
+        Flickable {
+            viewport-height: list.preferred-height;
+            list := VerticalLayout {
+                spacing: EneTheme.space-1;
+                for entry[index] in entries: Rectangle {
+                    background: index == selected ? EneTheme.accent : transparent;
+                    border-radius: EneTheme.radius;
+                    height: 32px;
+                    HorizontalLayout {
+                        padding: EneTheme.space-2;
+                        Text {
+                            text: entry.label;
+                            color: index == selected ? #101218 : EneTheme.fg;
+                            vertical-alignment: center;
+                        }
+                    }
+                    TouchArea {
+                        clicked => { root.run(entry.id); }
+                    }
+                }
+            }
+        }
+    }
+}

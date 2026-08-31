@@ -103,6 +103,8 @@ ctor = "1.0"
 thiserror = "2.0"
 zip = { version = "8", default-features = false }
 toml = "0.8"
+slint = { version = "~1.17", default-features = false, features = ["std", "compat-1-2", "renderer-femtovg-wgpu", "unstable-wgpu-29"] }
+slint-build = { version = "~1.17" }
 
 ene-api = { path = "crates/ene-api" }
 ene-card = { path = "crates/ene-card" }
@@ -121,6 +123,7 @@ ene-work = { path = "crates/ene-work" }
 ene-sandbox = { path = "crates/ene-sandbox" }
 ene-vrm = { path = "crates/ene-vrm" }
 ene-tray-linux = { path = "crates/ene-tray-linux" }
+ene-stage-ui = { path = "crates/ene-stage-ui" }
 
 [workspace.metadata.cargo-husky]
 run-for-all = true

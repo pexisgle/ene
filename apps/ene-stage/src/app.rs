@@ -1,6 +1,6 @@
 //! winit application handler for the product stage client.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,7 @@ use crate::interaction_controller::{
 use crate::monitor::{self, MonitorInfo, OverlayMonitorMode};
 use crate::overlay::{AvatarLoad, OverlayError, OverlayWindow};
 use crate::platform::OverlayPlatform;
+use crate::renderer::slint_gpu::{ChromeAction, OverlayUiAction};
 use crate::scene::{
     AvatarPart, InteractionPrimitive, PxRect, SceneHit, StageAnchor, StageAnchorKind, StageScene,
     VisualPrimitive,
@@ -42,8 +43,12 @@ use crate::settings::{
 };
 use crate::shell::tray::TrayError;
 use crate::shell::{HotkeyManager, ShellCommand, ShellError, TrayManager, show_notification};
+use crate::surface::chat::{
+    chat_setup_cta_eligible, composer_send_allowed, normalize_transcript, transcript_label,
+};
 use crate::surface::{self, SpotlightAction, SurfaceAction, SurfaceUiState};
 use crate::tasks::AsyncOutcome;
+use slint::Global;
 
 /// Bounded number of turn-end refresh retries while the projection catches up
 /// with the completed turn.
@@ -209,11 +214,8 @@ pub fn run() -> Result<(), AppError> {
     let runtime = Runtime::new().map_err(|err| AppError::Runtime(err.to_string()))?;
     let rt_handle = runtime.handle().clone();
 
-    // egui windows own smithay-clipboard workers whose proxies point into the
-    // loop's Wayland display. Dropping that display before those windows would
-    // make their teardown dereference freed Wayland objects, so keep a clone of
-    // the connection alive past the last window drop; declaring this before
-    // `app` guarantees it outlives every clipboard worker.
+    // Slint chrome shares the wgpu device; keep the Wayland display handle
+    // alive for the lifetime of the event loop.
     let event_loop = EventLoop::new().map_err(|err| AppError::Window(err.to_string()))?;
     event_loop.set_control_flow(ControlFlow::WaitUntil(
         Instant::now() + Duration::from_millis(16),
@@ -264,7 +266,6 @@ pub fn run() -> Result<(), AppError> {
         detail: DetailUiState::default(),
         async_results: Arc::new(Mutex::new(Vec::new())),
         temporarily_hidden_souls: HashSet::new(),
-        companion_thumbnails: HashMap::new(),
         mic_active: false,
         listen: MicListen::new(),
         notify_claimed: false,
@@ -340,7 +341,6 @@ struct StageApp {
     detail: DetailUiState,
     async_results: Arc<Mutex<Vec<AsyncOutcome>>>,
     temporarily_hidden_souls: HashSet<String>,
-    companion_thumbnails: HashMap<String, Option<egui::TextureHandle>>,
     mic_active: bool,
     listen: MicListen,
     notify_claimed: bool,
@@ -420,7 +420,6 @@ impl StageApp {
             detail: DetailUiState::default(),
             async_results: Arc::new(Mutex::new(Vec::new())),
             temporarily_hidden_souls: HashSet::new(),
-            companion_thumbnails: HashMap::new(),
             mic_active: false,
             listen: MicListen::new(),
             notify_claimed: false,
@@ -2811,6 +2810,10 @@ impl StageApp {
         disambiguated_occupant_label(self.session.occupants(), soul_id)
     }
 
+    #[expect(
+        dead_code,
+        reason = "motion picker remains on DetailUiState until the Slint companion tab grows a combo"
+    )]
     fn overlay_motion_controls(&self) -> Vec<detail::MotionControl> {
         self.overlay
             .as_ref()
@@ -3410,6 +3413,75 @@ impl StageApp {
             self.save_local_settings();
         }
         self.rebuild_scene();
+        self.sync_overlay_slint();
+    }
+
+    fn sync_overlay_slint(&mut self) {
+        let caption = self.surface.caption.clone();
+        let speaker = self.active_companion_label();
+        let head = self
+            .scene
+            .anchors()
+            .iter()
+            .find(|anchor| anchor.kind == StageAnchorKind::Head)
+            .map(|anchor| anchor.position);
+        let notice = self.surface.overlay_notice.clone();
+        let greetings: Vec<(String, String)> = self
+            .surface
+            .greetings
+            .iter()
+            .map(|g| {
+                (
+                    g.index.to_string(),
+                    g.text.lines().next().unwrap_or("").to_owned(),
+                )
+            })
+            .collect();
+        let multiple_greetings = greetings.len() > 1;
+        let actions = {
+            let Some(overlay) = self.overlay.as_mut() else {
+                return;
+            };
+            let Some(layer) = overlay.slint_layer_mut() else {
+                return;
+            };
+            layer.ensure_component();
+            if let Some(ui) = layer.component() {
+                let visible = !caption.is_empty();
+                ui.set_bubble_text(caption.into());
+                ui.set_bubble_speaker(speaker.into());
+                ui.set_bubble_visible(visible);
+                ui.set_bubble_clickable(false);
+                if let Some(position) = head {
+                    ui.set_bubble_x(position.x);
+                    ui.set_bubble_y((position.y - 72.0).max(8.0));
+                }
+                ui.set_status_visible(!notice.is_empty());
+                ui.set_status_text(notice.into());
+                apply_theme_overlay(ui, &self.local_settings.theme);
+            }
+            if multiple_greetings {
+                let refs: Vec<(&str, &str)> = greetings
+                    .iter()
+                    .map(|(id, label)| (id.as_str(), label.as_str()))
+                    .collect();
+                layer.set_choices(&refs);
+            } else {
+                layer.set_choices(&[]);
+            }
+            layer.take_actions()
+        };
+        for action in actions {
+            match action {
+                OverlayUiAction::Choice(id) => {
+                    if let Ok(index) = id.parse::<u32>() {
+                        self.surface
+                            .push_action(SurfaceAction::SelectGreeting { index });
+                    }
+                }
+                OverlayUiAction::Bubble => {}
+            }
+        }
     }
 
     fn overlay_ui_request(&self) -> UiInteractionRequest {
@@ -3483,6 +3555,44 @@ impl StageApp {
                 });
             }
         }
+        if !self.surface.caption.is_empty()
+            && let Some(head) = anchors
+                .iter()
+                .find(|anchor| anchor.kind == StageAnchorKind::Head)
+        {
+            let rect = PxRect::new(
+                head.position.x,
+                (head.position.y - 72.0).max(0.0),
+                280.0,
+                72.0,
+            );
+            visuals.push(VisualPrimitive::Bubble {
+                id: "speech".to_owned(),
+                rect,
+            });
+            interactions.push(InteractionPrimitive::Ui {
+                id: "speech".to_owned(),
+                rect,
+                mode: crate::scene::UiHitMode::DisplayOnly,
+            });
+        }
+        if self.surface.greetings.len() > 1 {
+            let rect = PxRect::new(
+                24.0,
+                140.0,
+                280.0,
+                40.0 * self.surface.greetings.len() as f32,
+            );
+            visuals.push(VisualPrimitive::Bubble {
+                id: "choices".to_owned(),
+                rect,
+            });
+            interactions.push(InteractionPrimitive::Ui {
+                id: "choices".to_owned(),
+                rect,
+                mode: crate::scene::UiHitMode::Clickable,
+            });
+        }
         self.scene.set_visuals(visuals);
         self.scene.set_interactions(interactions);
         self.scene.set_anchors(anchors);
@@ -3505,91 +3615,50 @@ impl StageApp {
         if self.surface.spotlight_open {
             self.ensure_spotlight(event_loop);
         }
-        let Some(gpu) = self.gpu.as_ref() else {
+        let Some(_gpu_ready) = self.gpu.as_ref() else {
             return;
         };
 
-        let active_companion = self.active_companion_label();
-        let chat_targets = self.chat_targets();
-        if let Some(chat) = self.chat.as_mut() {
-            let surface = &mut self.surface;
-            let mic = self.mic_active;
-            let theme = self.local_settings.theme.as_str();
-            if let Err(err) = chat.paint(gpu, Some(theme), |ui| {
-                surface::show_chat(ui, surface, mic, &active_companion, &chat_targets);
-            }) {
-                tracing::debug!(error = %err, "chat paint failed");
-            }
+        self.sync_chat_slint();
+        if let (Some(gpu), Some(chat)) = (self.gpu.as_ref(), self.chat.as_mut())
+            && let Err(err) = chat.paint(gpu)
+        {
+            tracing::debug!(error = %err, "chat paint failed");
         }
-        let mut display_action = None;
-        let motion_controls = self.overlay_motion_controls();
-        let mut motion_command = None;
-        if let Some(detail_win) = self.detail_win.as_mut() {
-            let mut detail = std::mem::take(&mut self.detail);
-            let mut local = self.local_settings.clone();
-            let client = Arc::clone(&self.client);
-            let rt = self.rt_handle.clone();
-            let detail_window = Arc::clone(&detail_win.window);
-            let results = Arc::clone(&self.async_results);
-            let soul_id = self.session.soul_id().to_owned();
-            let monitors = self.monitors.clone();
-            let display_companions = detail::companion_display_rows(
-                self.session.occupants(),
-                &self.local_settings.displayed_soul_ids,
-                &self.temporarily_hidden_souls,
-                &soul_id,
-            );
-            let displayed_count = self.local_settings.displayed_soul_ids.len();
-            let thumbnail_cache = &mut self.companion_thumbnails;
-            self.session.session_id().clone_into(&mut detail.session_id);
-            detail.spotlight_hotkey_ok = self.surface.spotlight_hotkey_ok;
-            let theme = local.theme.clone();
-            let paint = detail_win.paint(gpu, Some(theme.as_str()), |ui| {
-                detail::show(
-                    ui,
-                    &mut detail,
-                    detail_window.as_ref(),
-                    &mut local,
-                    &monitors,
-                    &soul_id,
-                    &display_companions,
-                    displayed_count,
-                    crate::core::session::MAX_OVERLAY_BODIES,
-                    thumbnail_cache,
-                    &motion_controls,
-                    &client,
-                    &rt,
-                    &results,
-                );
-            });
-            display_action = detail.display_action.take();
-            motion_command = detail.motion_command.take();
-            self.detail = detail;
-            self.local_settings = local;
-            if let Err(err) = paint {
-                tracing::debug!(error = %err, "detail paint failed");
-            }
+        self.drain_chat_actions();
+
+        if self.detail_win.is_some() {
+            self.sync_detail_slint();
         }
-        if let Some(caption) = self.caption.as_mut() {
-            let surface = &self.surface;
-            let font = self.settings.caption_font_size;
-            let position = self.settings.caption_position.clone();
-            let pinned = self.settings.caption_pinned;
-            if let Err(err) = caption.paint(gpu, None, |ui| {
-                surface::show_caption(ui.ctx(), surface, font, &position, pinned);
-            }) {
+        if let (Some(gpu), Some(detail_win)) = (self.gpu.as_ref(), self.detail_win.as_mut())
+            && let Err(err) = detail_win.paint(gpu)
+        {
+            tracing::debug!(error = %err, "detail paint failed");
+        }
+        let display_action = self.drain_detail_actions();
+
+        let caption_text = surface::caption::speech_text(&self.surface).to_owned();
+        let caption_font = self.settings.caption_font_size as i32;
+        let caption_pos = self.settings.caption_position.clone();
+        if let (Some(gpu), Some(caption)) = (self.gpu.as_ref(), self.caption.as_mut()) {
+            if let Some(ui) = caption.layer().and_then(|layer| layer.caption_ui()) {
+                ui.set_caption(caption_text.into());
+                ui.set_font_size(caption_font);
+                apply_theme_caption(ui, &self.local_settings.theme);
+            }
+            caption.place_caption(&caption_pos);
+            if let Err(err) = caption.paint(gpu) {
                 tracing::debug!(error = %err, "caption paint failed");
             }
         }
-        let mut spotlight_action = None;
-        if let Some(spotlight) = self.spotlight.as_mut()
-            && let Err(err) = spotlight.paint(gpu, None, |ui| {
-                spotlight_action = surface::show_spotlight(ui.ctx(), &mut self.surface);
-            })
+
+        self.sync_spotlight_slint();
+        if let (Some(gpu), Some(spotlight)) = (self.gpu.as_ref(), self.spotlight.as_mut())
+            && let Err(err) = spotlight.paint(gpu)
         {
             tracing::debug!(error = %err, "spotlight paint failed");
         }
-        if let Some(action) = spotlight_action {
+        if let Some(action) = self.drain_spotlight_actions() {
             self.surface.spotlight_open = false;
             self.spotlight = None;
             match action {
@@ -3599,7 +3668,7 @@ impl StageApp {
                 SpotlightAction::Close => {}
             }
         }
-        if let Some(command) = motion_command {
+        if let Some(command) = self.detail.motion_command.take() {
             self.apply_motion_command(command);
         }
         if let Some(action) = display_action {
@@ -3611,6 +3680,322 @@ impl StageApp {
                 overlay.window.request_redraw();
             }
         }
+    }
+
+    fn sync_chat_slint(&mut self) {
+        let Some(chat) = self.chat.as_ref() else {
+            return;
+        };
+        let Some(ui) = chat.layer().and_then(|layer| layer.chat_ui()) else {
+            return;
+        };
+        self.surface.chat_draft = ui.get_draft().to_string();
+        self.surface.chat_input_focused = ui.get_input_focused();
+        crate::surface::chat::request_single_greeting_commit(&mut self.surface);
+        let rows: Vec<crate::ui::ChatRow> =
+            normalize_transcript(&self.surface.history, &self.surface.streaming_text)
+                .into_iter()
+                .map(|row| crate::ui::ChatRow {
+                    role: slint::SharedString::from(transcript_label(row.role).as_str()),
+                    text: slint::SharedString::from(row.text.as_str()),
+                    streaming: row.state == crate::surface::chat::TranscriptState::Streaming,
+                })
+                .collect();
+        ui.set_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+        let targets: Vec<crate::ui::ChatTargetRow> = self
+            .chat_targets()
+            .into_iter()
+            .map(|target| crate::ui::ChatTargetRow {
+                soul_id: slint::SharedString::from(target.soul_id.as_str()),
+                label: slint::SharedString::from(target.label.as_str()),
+                active: target.active,
+            })
+            .collect();
+        ui.set_targets(slint::ModelRc::new(slint::VecModel::from(targets)));
+        ui.set_status(self.surface.status.clone().into());
+        let setup = if chat_setup_cta_eligible(&self.surface) {
+            crate::detail::chat_setup_gap(&self.surface.chat_setup)
+                .map(crate::detail::chat_setup_status)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        ui.set_setup_status(setup.into());
+        ui.set_turn_active(self.surface.turn_active);
+        ui.set_mic_active(self.mic_active);
+        ui.set_can_send(composer_send_allowed(&self.surface));
+        if let Some(pending) = &self.surface.pending_approval {
+            ui.set_approval_visible(true);
+            ui.set_approval_prompt(
+                format!("{}: {} / {}", pending.tool, pending.target, pending.id).into(),
+            );
+        } else {
+            ui.set_approval_visible(false);
+            ui.set_approval_prompt(slint::SharedString::new());
+        }
+        if let Some(question) = &self.surface.pending_question {
+            ui.set_question_visible(true);
+            ui.set_question_prompt(question.prompt.clone().into());
+        } else {
+            ui.set_question_visible(false);
+        }
+        apply_theme_chat(ui, &self.local_settings.theme);
+    }
+
+    fn drain_chat_actions(&mut self) {
+        let Some(chat) = self.chat.as_ref() else {
+            return;
+        };
+        let actions = chat.take_actions();
+        if let Some(ui) = chat.layer().and_then(|layer| layer.chat_ui()) {
+            self.surface.chat_draft = ui.get_draft().to_string();
+        }
+        for action in actions {
+            match action {
+                ChromeAction::Send => self.surface.push_action(SurfaceAction::SendChat),
+                ChromeAction::NewSession => self.surface.push_action(SurfaceAction::NewSession),
+                ChromeAction::CancelTurn => self.surface.push_action(SurfaceAction::CancelTurn),
+                ChromeAction::ToggleMic => self.surface.push_action(SurfaceAction::ToggleMic),
+                ChromeAction::OpenDetail => {
+                    self.surface
+                        .push_action(SurfaceAction::OpenDetail(DetailTab::Home));
+                }
+                ChromeAction::SelectTarget(soul_id) => {
+                    self.surface
+                        .push_action(SurfaceAction::SelectCompanion { soul_id });
+                }
+                ChromeAction::Approval(decision) => {
+                    if let Some(pending) = &self.surface.pending_approval {
+                        let mapped = match decision.as_str() {
+                            "always" => "allow_and_remember",
+                            other => other,
+                        };
+                        self.surface.push_action(SurfaceAction::Approval {
+                            id: pending.id.clone(),
+                            decision: mapped.to_owned(),
+                        });
+                    }
+                }
+                ChromeAction::AnswerQuestion => {
+                    self.surface.push_action(SurfaceAction::AnswerQuestion);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn sync_detail_slint(&mut self) {
+        let Some(win) = self.detail_win.as_ref() else {
+            return;
+        };
+        let Some(ui) = win.layer().and_then(|layer| layer.detail_ui()) else {
+            return;
+        };
+        self.detail.search = ui.get_search().to_string();
+        crate::detail::sync_search_tab(&mut self.detail);
+        self.session
+            .session_id()
+            .clone_into(&mut self.detail.session_id);
+        self.detail.spotlight_hotkey_ok = self.surface.spotlight_hotkey_ok;
+        let soul_id = self.session.soul_id().to_owned();
+        let companions = detail::companion_display_rows(
+            self.session.occupants(),
+            &self.local_settings.displayed_soul_ids,
+            &self.temporarily_hidden_souls,
+            &soul_id,
+        );
+        let view = detail::project::project(
+            &self.detail,
+            &self.local_settings,
+            &companions,
+            &self.monitors,
+        );
+        ui.set_heading(view.heading.into());
+        ui.set_body(view.body.into());
+        ui.set_status(view.status.into());
+        ui.set_draft_a(view.draft_a.into());
+        ui.set_draft_b(view.draft_b.into());
+        ui.set_tab(
+            DetailTab::ALL
+                .iter()
+                .position(|tab| *tab == self.detail.tab)
+                .unwrap_or(0) as i32,
+        );
+        ui.set_rows(slint::ModelRc::new(slint::VecModel::from(view.rows)));
+        let tabs: Vec<slint::SharedString> = DetailTab::ALL
+            .iter()
+            .map(|tab| slint::SharedString::from(tab.label()))
+            .collect();
+        ui.set_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
+        apply_theme_detail(ui, &self.local_settings.theme);
+    }
+
+    fn drain_detail_actions(&mut self) -> Option<DisplayAction> {
+        let win = self.detail_win.as_ref()?;
+        let actions = win.take_actions();
+        let mut display = None;
+        let soul_id = self.session.soul_id().to_owned();
+        let companions = detail::companion_display_rows(
+            self.session.occupants(),
+            &self.local_settings.displayed_soul_ids,
+            &self.temporarily_hidden_souls,
+            &soul_id,
+        );
+        for action in actions {
+            match action {
+                ChromeAction::DetailTab(index) => {
+                    detail::project::handle_select_tab(&mut self.detail, index);
+                }
+                ChromeAction::DetailPrimary(name) => {
+                    if let Some(ui) = win.layer().and_then(|layer| layer.detail_ui()) {
+                        self.detail.search = ui.get_search().to_string();
+                        match self.detail.tab {
+                            DetailTab::Conversation => {
+                                self.detail.chat_plugin = ui.get_draft_a().to_string();
+                                self.detail.chat_model = ui.get_draft_b().to_string();
+                            }
+                            DetailTab::Work => {
+                                self.detail.new_job_title = ui.get_draft_a().to_string();
+                                self.detail.new_job_goal = ui.get_draft_b().to_string();
+                            }
+                            DetailTab::System => {
+                                self.local_settings.theme = ui.get_draft_a().to_string();
+                                self.local_settings.language = ui.get_draft_b().to_string();
+                                self.detail.save_local_pending = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    match detail::project::handle_primary(
+                        &mut self.detail,
+                        &mut self.local_settings,
+                        &name,
+                    ) {
+                        Some(detail::project::DetailPrimary::Apply) => match self.detail.tab {
+                            DetailTab::Voice => {
+                                detail::apply_voice_patch(
+                                    &mut self.detail,
+                                    &self.client,
+                                    &self.rt_handle,
+                                    &self.async_results,
+                                );
+                            }
+                            DetailTab::Conversation => {
+                                detail::apply_ai_patch(
+                                    &mut self.detail,
+                                    &self.client,
+                                    &self.rt_handle,
+                                    &self.async_results,
+                                    true,
+                                );
+                                detail::apply_observation_patch(
+                                    &mut self.detail,
+                                    &self.client,
+                                    &self.rt_handle,
+                                    &self.async_results,
+                                );
+                            }
+                            DetailTab::System => {
+                                detail::request_overlay_monitor_action(&mut self.detail, true);
+                            }
+                            _ => {
+                                detail::apply_ai_patch(
+                                    &mut self.detail,
+                                    &self.client,
+                                    &self.rt_handle,
+                                    &self.async_results,
+                                    false,
+                                );
+                            }
+                        },
+                        Some(detail::project::DetailPrimary::Reload) => {
+                            detail::ensure_settings(
+                                &mut self.detail,
+                                &self.client,
+                                &self.rt_handle,
+                                &self.async_results,
+                            );
+                        }
+                        None => {}
+                    }
+                }
+                ChromeAction::DetailRow(id) => {
+                    if let Some(monitor_id) = id.strip_prefix("monitor:")
+                        && let Some(monitor) = self
+                            .monitors
+                            .iter()
+                            .find(|monitor| monitor.id == monitor_id)
+                    {
+                        OverlayMonitorMode::Selected
+                            .setting()
+                            .clone_into(&mut self.local_settings.overlay_monitor_mode);
+                        self.local_settings.overlay_monitor_id = monitor.id.clone();
+                        self.local_settings.overlay_monitor_name =
+                            monitor.name.clone().unwrap_or_default();
+                        self.local_settings.overlay_monitor_position = monitor.position;
+                        self.local_settings.overlay_monitor_size = monitor.size;
+                        self.local_settings.overlay_monitor_scale_factor = monitor.scale_factor;
+                        detail::request_overlay_monitor_action(&mut self.detail, true);
+                    } else if let Some(action) =
+                        detail::project::handle_row(&mut self.detail, &companions, &id)
+                    {
+                        display = Some(action);
+                    }
+                }
+                _ => {}
+            }
+        }
+        display
+    }
+
+    fn sync_spotlight_slint(&mut self) {
+        let Some(spotlight) = self.spotlight.as_ref() else {
+            return;
+        };
+        let Some(ui) = spotlight.layer().and_then(|layer| layer.spotlight_ui()) else {
+            return;
+        };
+        self.surface.spotlight_query = ui.get_query().to_string();
+        let entries = surface::spotlight::palette_entries();
+        let filtered = surface::spotlight::filter_entries(&self.surface.spotlight_query, &entries);
+        let model: Vec<crate::ui::SpotlightEntry> = filtered
+            .iter()
+            .map(|entry| crate::ui::SpotlightEntry {
+                id: slint::SharedString::from(spotlight_entry_id(entry)),
+                label: slint::SharedString::from(entry.label.as_str()),
+            })
+            .collect();
+        ui.set_entries(slint::ModelRc::new(slint::VecModel::from(model)));
+        ui.set_selected(self.surface.spotlight_selected as i32);
+        apply_theme_spotlight(ui, &self.local_settings.theme);
+    }
+
+    fn drain_spotlight_actions(&mut self) -> Option<SpotlightAction> {
+        let spotlight = self.spotlight.as_ref()?;
+        let actions = spotlight.take_actions();
+        let query = spotlight
+            .layer()
+            .and_then(|layer| layer.spotlight_ui())
+            .map(|ui| ui.get_query().to_string())
+            .unwrap_or_default();
+        self.surface.spotlight_query = query;
+        let entries = surface::spotlight::palette_entries();
+        let filtered = surface::spotlight::filter_entries(&self.surface.spotlight_query, &entries);
+        for action in actions {
+            match action {
+                ChromeAction::SpotlightDismiss => return Some(SpotlightAction::Close),
+                ChromeAction::SpotlightRun(id) => {
+                    if let Some(entry) = filtered
+                        .iter()
+                        .find(|entry| spotlight_entry_id(entry) == id)
+                    {
+                        return Some(entry.action);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn close_chat_window(&mut self) {
@@ -3813,11 +4198,17 @@ impl ApplicationHandler for StageApp {
                 return;
             }
         };
+        crate::renderer::slint_gpu::install(&gpu);
         match OverlayWindow::create(window, &gpu, self.settings.transparent_overlay) {
             Ok(mut overlay) => {
                 let transparency_fallback =
                     self.settings.transparent_overlay && !overlay.transparency_supported;
                 overlay.apply_click_through(self.local_settings.overlay_click_through);
+                let size = overlay.window.inner_size();
+                let mut layer =
+                    crate::renderer::slint_gpu::SlintOverlayLayer::new(size.width, size.height);
+                layer.ensure_component();
+                overlay.set_slint_layer(Some(layer));
                 if let Some((_, rx)) = crate::cursor_poll::spawn(50) {
                     self.cursor_poll = Some(rx);
                 }
@@ -3847,6 +4238,12 @@ impl ApplicationHandler for StageApp {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let overlay_id = self.overlay.as_ref().map(OverlayWindow::id);
         if overlay_id == Some(id) {
+            if let Some(overlay) = self.overlay.as_ref() {
+                let scale = overlay.window.scale_factor();
+                if let Some(layer) = overlay.slint_layer() {
+                    layer.dispatch_winit(&event, scale);
+                }
+            }
             if matches!(event, WindowEvent::Focused(true))
                 && self.overlay_focus.on_focus_event(FocusOwner::Overlay, true)
             {
@@ -4106,14 +4503,58 @@ fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     }
 }
 
-/// `egui_winit` only raises its repaint flag on input that changes what it
-/// wants to draw (typing, focus changes, resize); trailing mouse moves leave it
-/// down. Dropping the flag lets an OS-throttled event loop defer that frame
-/// until the next interaction, so pasted input into a `TextEdit` appears one
-/// action late and users retype it into what looks like an empty field.
+/// Repaint when Slint marked the window dirty, or when a text field is
+/// focused so IME/paste is not deferred until the next pointer event.
 #[must_use]
 fn should_repaint_after_event(repaint_flag: bool, composer_focused: bool) -> bool {
     repaint_flag || composer_focused
+}
+
+fn apply_theme_overlay(ui: &crate::ui::StageOverlay, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_theme_chat(ui: &crate::ui::ChatSurface, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_theme_detail(ui: &crate::ui::DetailSurface, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_theme_caption(ui: &crate::ui::CaptionSurface, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_theme_spotlight(ui: &crate::ui::SpotlightSurface, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_ene_theme(global: &crate::ui::EneTheme<'_>, theme: &str) {
+    match theme {
+        "light" => global.set_dark(false),
+        "dark" => global.set_dark(true),
+        _ => {}
+    }
+    crate::ui::theme::apply_to_global(
+        global,
+        &crate::ui::theme::load_user_theme(&user_theme_file()),
+    );
+}
+
+fn user_theme_file() -> std::path::PathBuf {
+    ene_config::data_dir().join("theme.toml")
+}
+
+fn spotlight_entry_id(entry: &crate::surface::spotlight::SpotlightEntry) -> String {
+    match entry.action {
+        SpotlightAction::Close => "close".to_owned(),
+        SpotlightAction::Command(ShellCommand::ToggleMic) => "mic".to_owned(),
+        SpotlightAction::Command(ShellCommand::OpenChat) => "chat".to_owned(),
+        SpotlightAction::Command(ShellCommand::Quit) => "quit".to_owned(),
+        SpotlightAction::Command(ShellCommand::OpenDetail(tab)) => format!("detail:{tab:?}"),
+        SpotlightAction::Command(_) => entry.label.clone(),
+    }
 }
 
 /// How long overlay protection survives a chrome Focused(false) while waiting
@@ -5636,7 +6077,7 @@ mod tests {
     fn repaints_after_input_even_when_the_flag_is_dropped() {
         assert!(!should_repaint_after_event(false, false));
 
-        // Typing and pasting raise the egui_winit repaint flag; honoring it
+        // Typing and pasting raise the Slint redraw flag; honoring it
         // keeps their frame immediate even while an OS throttles the loop.
         assert!(should_repaint_after_event(true, false));
     }

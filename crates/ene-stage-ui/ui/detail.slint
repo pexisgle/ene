@@ -1,0 +1,80 @@
+import { EneTheme, EneButton, Chip, EneCard } from "theme.slint";
+
+export struct DetailListRow {
+    id: string,
+    title: string,
+    subtitle: string,
+}
+
+export component DetailSurface inherits Window {
+    background: EneTheme.bg;
+    default-font-family: "Noto Sans CJK JP";
+    title: "Detail";
+
+    in-out property <string> search;
+    in-out property <int> tab: 0;
+    in-out property <string> heading;
+    in-out property <string> body;
+    in-out property <[DetailListRow]> rows: [];
+    in-out property <string> draft-a;
+    in-out property <string> draft-b;
+    in-out property <string> status;
+    in-out property <[string]> tabs: ["Home", "Companion", "Conversation", "Voice", "Memory", "Work", "Connections", "System", "Log"];
+
+    in-out property <bool> input-focused: false;
+
+    callback select-tab(int);
+    callback primary-action(string);
+    callback row-action(string);
+
+    VerticalLayout {
+        padding: EneTheme.space-3;
+        spacing: EneTheme.space-2;
+
+        TextInput {
+            text <=> search;
+            color: EneTheme.fg;
+            font-size: EneTheme.type-md;
+            edited => { root.input-focused = true; }
+        }
+
+        HorizontalLayout {
+            spacing: EneTheme.space-1;
+            for label[index] in tabs: Chip {
+                text: label;
+                selected: tab == index;
+                clicked => { root.select-tab(index); }
+            }
+        }
+
+        Text { text: heading; color: EneTheme.fg; font-size: EneTheme.type-lg; }
+        Text { text: status; color: EneTheme.fg-muted; wrap: word-wrap; font-size: EneTheme.type-sm; }
+
+        Flickable {
+            vertical-stretch: 1;
+            viewport-height: content.preferred-height;
+            content := VerticalLayout {
+                spacing: EneTheme.space-2;
+                Text { text: body; color: EneTheme.fg; wrap: word-wrap; }
+                TextInput { text <=> draft-a; color: EneTheme.fg; }
+                TextInput { text <=> draft-b; color: EneTheme.fg; }
+                for row in rows: Rectangle {
+                    background: EneTheme.bg-elevated;
+                    border-radius: EneTheme.radius;
+                    VerticalLayout {
+                        padding: EneTheme.space-2;
+                        Text { text: row.title; color: EneTheme.fg; }
+                        Text { text: row.subtitle; color: EneTheme.fg-muted; wrap: word-wrap; font-size: EneTheme.type-sm; }
+                    }
+                    TouchArea { clicked => { root.row-action(row.id); } }
+                }
+                HorizontalLayout {
+                    spacing: EneTheme.space-2;
+                    EneButton { text: "Apply"; clicked => { root.primary-action("apply"); } }
+                    EneButton { text: "Reload"; primary: false; clicked => { root.primary-action("reload"); } }
+                    EneButton { text: "Chat"; primary: false; clicked => { root.primary-action("chat"); } }
+                }
+            }
+        }
+    }
+}

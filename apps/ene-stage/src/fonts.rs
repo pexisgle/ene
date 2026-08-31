@@ -1,11 +1,6 @@
-//! CJK fallback fonts for egui chrome windows.
+//! CJK fallback fonts for Slint chrome and overlay UI.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
-
-use egui::{FontData, FontDefinitions, FontFamily};
-
-const FAMILY: &str = "cjk";
 
 /// Paths searched for a Japanese-capable UI font.
 ///
@@ -79,47 +74,13 @@ fn os_cjk_font_paths() -> Vec<PathBuf> {
     }
 }
 
-fn load_cjk_font() -> Option<FontData> {
-    for path in cjk_font_candidates() {
-        match std::fs::read(&path) {
-            Ok(bytes) if !bytes.is_empty() => {
-                tracing::debug!(path = %path.display(), "loaded CJK UI font");
-                return Some(FontData::from_owned(bytes));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn cjk_font_cached() -> Option<Arc<FontData>> {
-    static FONT: OnceLock<Option<Arc<FontData>>> = OnceLock::new();
-    FONT.get_or_init(|| load_cjk_font().map(Arc::new)).clone()
-}
-
-/// Font definitions with a CJK fallback family when a system or bundled font exists.
+/// First existing CJK font path, if any. Slint/FemtoVG also resolve
+/// `Noto Sans CJK JP` via the platform fontconfig / DirectWrite stack.
 #[must_use]
-pub fn font_definitions() -> FontDefinitions {
-    let mut fonts = FontDefinitions::default();
-    if let Some(data) = cjk_font_cached() {
-        fonts.font_data.insert(FAMILY.to_owned(), data);
-        if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
-            family.push(FAMILY.to_owned());
-        }
-        if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
-            family.push(FAMILY.to_owned());
-        }
-    }
-    fonts
-}
-
-/// Install CJK glyph fallbacks on an egui context.
-pub fn install_on(ctx: &egui::Context) {
-    if cjk_font_cached().is_none() {
-        tracing::warn!("no CJK UI font found; Japanese labels may render as tofu");
-        return;
-    }
-    ctx.set_fonts(font_definitions());
+pub fn first_available_cjk_font() -> Option<PathBuf> {
+    cjk_font_candidates()
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 #[cfg(test)]
@@ -152,30 +113,5 @@ mod tests {
         assert!(joined.contains("yugothr.ttc") || joined.contains("yugothic.ttf"));
         assert!(joined.contains("meiryo.ttc"));
         assert!(joined.contains("msgothic.ttc"));
-    }
-
-    #[test]
-    fn font_definitions_keep_proportional_and_add_cjk_when_available() {
-        let fonts = font_definitions();
-        let proportional = fonts
-            .families
-            .get(&FontFamily::Proportional)
-            .expect("proportional family");
-        assert!(!proportional.is_empty());
-        if cjk_font_cached().is_some() {
-            assert!(fonts.font_data.contains_key(FAMILY));
-            assert_eq!(proportional.last().map(String::as_str), Some(FAMILY));
-            let mono = fonts
-                .families
-                .get(&FontFamily::Monospace)
-                .expect("mono family");
-            assert_eq!(mono.last().map(String::as_str), Some(FAMILY));
-        }
-    }
-
-    #[test]
-    fn install_on_does_not_panic() {
-        let ctx = egui::Context::default();
-        install_on(&ctx);
     }
 }

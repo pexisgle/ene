@@ -1,4 +1,4 @@
-//! Shared wgpu device for the overlay surface and egui chrome windows.
+//! Shared wgpu device for the overlay surface and Slint chrome windows.
 //!
 //! Windows uses a DirectComposition-backed DX12 swapchain so transparent
 //! windows can carry per-pixel alpha. The matching winit window attribute is

@@ -1,14 +1,8 @@
 //! Alt+Space command palette.
 
-use egui::{Align, Align2, Id, Key, ScrollArea, TextEdit};
-
 use crate::detail::DetailTab;
 use crate::i18n;
 use crate::shell::ShellCommand;
-use crate::surface::SurfaceUiState;
-
-const SEARCH_ID: &str = "spotlight-search";
-const LIST_MAX_HEIGHT: f32 = 320.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpotlightAction {
@@ -125,81 +119,6 @@ pub fn filter_entries<'a>(query: &str, entries: &'a [SpotlightEntry]) -> Vec<&'a
         .collect();
     matches.sort_by_key(|(rank, index, _)| (*rank, *index));
     matches.into_iter().map(|(_, _, entry)| entry).collect()
-}
-
-pub fn show(ctx: &egui::Context, state: &mut SurfaceUiState) -> Option<SpotlightAction> {
-    let query = &mut state.spotlight_query;
-    let selected = &mut state.spotlight_selected;
-    let mut confirmed = false;
-    let mut action = None;
-
-    let search_id = Id::new(SEARCH_ID);
-    if !ctx.memory(|mem| mem.has_focus(search_id)) {
-        ctx.memory_mut(|mem| mem.request_focus(search_id));
-    }
-
-    egui::Window::new(i18n::fl("spotlight-title"))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.add(
-                TextEdit::singleline(query)
-                    .id(Id::new(SEARCH_ID))
-                    .hint_text(i18n::fl("spotlight-placeholder"))
-                    .desired_width(f32::INFINITY),
-            );
-
-            let entries = palette_entries();
-            let filtered = filter_entries(query, &entries);
-            if filtered.is_empty() {
-                ui.label(i18n::fl("spotlight-no-match"));
-                return;
-            }
-
-            let move_up = ui.input(|i| i.key_pressed(Key::ArrowUp));
-            let move_down = ui.input(|i| i.key_pressed(Key::ArrowDown));
-            let confirm = ui.input(|i| i.key_pressed(Key::Enter));
-            let cancel = ui.input(|i| i.key_pressed(Key::Escape));
-            if cancel {
-                action = Some(SpotlightAction::Close);
-                return;
-            }
-            *selected = (*selected).min(filtered.len().saturating_sub(1));
-            if move_down && *selected + 1 < filtered.len() {
-                *selected += 1;
-            } else if move_up && *selected > 0 {
-                *selected -= 1;
-            }
-            if confirm {
-                confirmed = true;
-            }
-
-            ScrollArea::vertical()
-                .id_salt("spotlight-results")
-                .max_height(LIST_MAX_HEIGHT)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for (index, entry) in filtered.iter().enumerate() {
-                        let is_selected = index == *selected;
-                        let response = ui.selectable_label(is_selected, &entry.label);
-                        if is_selected {
-                            response.scroll_to_me(Some(Align::Center));
-                        }
-                        if response.clicked() || response.hovered() {
-                            *selected = index;
-                        }
-                        if response.clicked() {
-                            confirmed = true;
-                        }
-                    }
-                });
-
-            if confirmed {
-                action = Some(filtered[*selected].action);
-            }
-        });
-    action
 }
 
 #[cfg(test)]

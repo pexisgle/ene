@@ -18,7 +18,9 @@ pub enum BundleError {
     Missing(String),
 }
 
+#[cfg(test)]
 pub(crate) const BUNDLED_ALICIA_B_ID: &str = "char.alicia-b";
+#[cfg(test)]
 pub(crate) const BUNDLED_ALICIA_B_NAME: &str = "Alicia B";
 
 /// Build an Ene character archive from the repo-shipped Alicia body assets.
@@ -30,10 +32,6 @@ pub fn pack_bundled_alicia() -> Result<Vec<u8>, BundleError> {
 pub fn pack_bundled_named(id: &str, display_name: &str) -> Result<Vec<u8>, BundleError> {
     let root = ene_config::paths::assets_dir().join("characters/Alicia");
     pack_named_from(&root, id, display_name)
-}
-
-pub(crate) fn pack_bundled_alicia_b() -> Result<Vec<u8>, BundleError> {
-    pack_bundled_named(BUNDLED_ALICIA_B_ID, BUNDLED_ALICIA_B_NAME)
 }
 
 pub fn pack_alicia_from(root: &Path) -> Result<Vec<u8>, BundleError> {

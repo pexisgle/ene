@@ -50,6 +50,7 @@ pub struct OverlayWindow {
     pub click_through: bool,
     pub collider_debug: bool,
     slint_layer: Option<SlintOverlayLayer>,
+    gpu_dirty: bool,
     active_soul_id: Option<String>,
     hover_soul_id: Option<String>,
     drag_soul_id: Option<String>,
@@ -98,6 +99,7 @@ impl OverlayWindow {
             click_through: transparent && transparency_supported,
             collider_debug: false,
             slint_layer: None,
+            gpu_dirty: true,
             last_frame: Instant::now(),
             active_soul_id: None,
             hover_soul_id: None,
@@ -117,6 +119,14 @@ impl OverlayWindow {
 
     pub fn set_slint_layer(&mut self, layer: Option<SlintOverlayLayer>) {
         self.slint_layer = layer;
+    }
+
+    pub fn slint_layer(&self) -> Option<&SlintOverlayLayer> {
+        self.slint_layer.as_ref()
+    }
+
+    pub fn slint_layer_mut(&mut self) -> Option<&mut SlintOverlayLayer> {
+        self.slint_layer.as_mut()
     }
 
     #[must_use]
@@ -157,6 +167,7 @@ impl OverlayWindow {
 
     pub fn resize(&mut self, gpu: &GpuContext, size: PhysicalSize<u32>) {
         self.renderer.resize(gpu, size);
+        self.gpu_dirty = true;
         if let Some(layer) = &mut self.slint_layer {
             *layer = SlintOverlayLayer::new(size.width, size.height);
         }
@@ -222,6 +233,7 @@ impl OverlayWindow {
             }
         }
         self.slots = loaded;
+        self.gpu_dirty = true;
         if self.slots.is_empty() {
             return Err(last_err.unwrap_or_else(|| {
                 crate::avatar::AvatarError::Io(std::io::Error::new(
@@ -271,6 +283,20 @@ impl OverlayWindow {
         }
         let highlight =
             highlight_soul.and_then(|soul| self.slots.iter().position(|slot| slot.soul_id == soul));
+        let slint_dirty = self
+            .slint_layer
+            .as_ref()
+            .is_some_and(SlintOverlayLayer::needs_redraw);
+        let avatar_dirty = self.slots.iter().any(|slot| slot.avatar.needs_redraw());
+        if !avatar_dirty
+            && !slint_dirty
+            && !self.collider_debug
+            && highlight.is_none()
+            && !self.gpu_dirty
+        {
+            return Ok(());
+        }
+        self.gpu_dirty = false;
         let mut avatars: Vec<&mut CompanionAvatar> =
             self.slots.iter_mut().map(|slot| &mut slot.avatar).collect();
         self.renderer

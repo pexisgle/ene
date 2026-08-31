@@ -33,3 +33,4 @@ pub mod settings;
 pub mod shell;
 pub mod surface;
 pub mod tasks;
+pub mod ui;
