@@ -108,6 +108,10 @@ slint = { version = "~1.17", default-features = false, features = ["std", "compa
 slint-build = { version = "~1.17" }
 htmd = "0.5"
 scraper = "0.23"
+diffy = "0.4"
+globset = "0.4"
+ignore = "0.4"
+strsim = "0.11"
 
 ene-api = { path = "crates/ene-api" }
 ene-card = { path = "crates/ene-card" }

@@ -58,4 +58,10 @@ pub enum WorkError {
     Interrupted,
     #[error("unsupported artifact kind {0}")]
     UnsupportedArtifact(String),
+    #[error("work storage {found} is newer than supported {supported}")]
+    StorageTooNew { found: u32, supported: u32 },
+    #[error("invalid work_storage_version {0}")]
+    InvalidStorageVersion(String),
+    #[error("missing work migration to version {0}")]
+    MissingMigration(u32),
 }
