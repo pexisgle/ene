@@ -12,7 +12,6 @@ use crate::event::ai::{
     BeatPulse, CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
 };
 use crate::event::chat::OpenChat;
-use crate::event::lifecycle::TickGtk;
 use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};
 use crate::resource::{event_channels::EventChannels, exit::ExitRequested};
@@ -65,16 +64,6 @@ pub fn pump_legacy_events(
             &mut pending_candidates,
         );
     }
-}
-
-/// Publish a `TickGtk` every frame on Linux so the tray icon library makes
-/// progress. Split from [`pump_legacy_events`] to keep that system within
-/// bevy's 16-parameter limit. The actual `tick_gtk()` call still lives in
-/// `Runtime::about_to_wait` because the `Rc<RefCell<TrayHandle>>` is not
-/// `Send + Sync`.
-#[cfg(target_os = "linux")]
-pub fn publish_tick_gtk_system(mut tick_gtk: MessageWriter<TickGtk>) {
-    tick_gtk.write(TickGtk);
 }
 
 fn translate_event(
@@ -196,14 +185,6 @@ fn translate_event(
     }
 }
 
-/// No-op retained for API symmetry; the GTK tick now flows through the
-/// `Messages<TickGtk>` queue consumed by `tick_gtk_system`.
-#[expect(
-    dead_code,
-    reason = "Replaced by Messages<TickGtk>; kept for API symmetry"
-)]
-pub const fn mark_gtk_tick() {}
-
 /// Suppress unused-imports for the `Instant` import in non-tray builds.
 const fn _force_link(_: Instant) {}
 
@@ -238,8 +219,6 @@ mod tests {
         world.init_resource::<Messages<OpenChat>>();
         world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
         world.init_resource::<Messages<PendingCandidatesCount>>();
-        #[cfg(target_os = "linux")]
-        world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
         (world, tx)
     }
 

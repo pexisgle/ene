@@ -1,31 +1,9 @@
 //! System tray integration.
 //!
-//! The tray icon and its menu live in a separate OS-managed
-//! resource. On Windows, `tray-icon` (with the default winapi
-//! backend) requires its own Win32 message-pump thread. On Linux,
-//! `tray-icon` (with the `gtk` feature) requires GTK to be ticked
-//! on the main thread.
-//!
-//! This module abstracts that away behind [`TrayHandle`]:
-//!
-//! - On Windows: `TrayHandle::new` spawns a thread that owns the
-//!   tray icon and pumps `GetMessageW`. The thread sends
-//!   [`TrayAction`]s into the cross-subsystem bus and forgets the
-//!   icon so it is not dropped when the thread returns.
-//! - On Linux: `TrayHandle::new` constructs the tray icon on the
-//!   calling (main) thread. The runtime must call
-//!   the GTK tick from `about_to_wait` to pump
-//!   `gtk::main_iteration_do(false)` while events are pending.
-//!
-//! In both cases, `MenuEvent`s and `TrayIconEvent::Click`s are
-//! translated into [`AppEvent::Tray`].
+//! On Windows, `tray-icon` runs a dedicated Win32 message-pump thread.
+//! On Linux, [`ene_tray_linux`] serves the tray via D-Bus SNI (no GTK).
 use std::fs::File;
 use std::io::BufReader;
-
-#[cfg(target_os = "linux")]
-use tray_icon::TrayIcon;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, TrayIconBuilder, TrayIconEvent};
 
 use crate::events::{AppEvent, AppEventSender, TrayAction};
 
@@ -36,111 +14,110 @@ const QUIT_MENU_ID: &str = "ene.quit";
 const TOOLTIP: &str = "ene";
 
 pub struct TrayHandle {
-    /// Drop guard for the tray icon on Linux. On Windows the icon
-    /// lives in the dedicated thread and is intentionally
-    /// `mem::forgotten`, so this field is unused.
-    #[cfg(target_os = "linux")]
-    _icon: TrayIcon,
+    _private: (),
 }
 
 impl TrayHandle {
     /// Returns `None` if the icon cannot be constructed (e.g. on a
     /// headless build); the runtime should treat that as a soft failure.
-    pub fn new(event_tx: AppEventSender) -> Option<Self> {
-        install_event_pump(event_tx);
-
+    pub fn new(event_tx: AppEventSender, runtime: &tokio::runtime::Handle) -> Option<Self> {
         #[cfg(target_os = "linux")]
         {
-            // GTK requires the icon to be built on the main thread; the
-            // Windows path builds it inside the message-pump thread instead
-            // (see `install_event_pump`), where the HWND must stay alive.
-            if let Err(err) = gtk::init() {
-                tracing::warn!("Failed to initialize GTK for tray: {err}");
-                return None;
-            }
-
-            let menu = build_menu();
-            let icon = build_icon().unwrap_or_else(synthetic_icon);
-
-            let tray_icon = TrayIconBuilder::new()
-                .with_menu(Box::new(menu))
-                .with_tooltip(TOOLTIP)
-                .with_icon(icon)
-                .build()
-                .ok()?;
-
-            Some(Self { _icon: tray_icon })
+            let icon = build_icon_rgba().unwrap_or_else(synthetic_icon_rgba);
+            let menu = vec![
+                ene_tray_linux::TrayMenuSlot::Item {
+                    id: SETTINGS_MENU_ID.into(),
+                    label: i18n_embed_fl::fl!(crate::i18n::loader(), "settings"),
+                    enabled: true,
+                },
+                ene_tray_linux::TrayMenuSlot::Item {
+                    id: CHAT_MENU_ID.into(),
+                    label: i18n_embed_fl::fl!(crate::i18n::loader(), "tray-chat"),
+                    enabled: true,
+                },
+                ene_tray_linux::TrayMenuSlot::Item {
+                    id: DETAIL_MENU_ID.into(),
+                    label: i18n_embed_fl::fl!(crate::i18n::loader(), "tray-detail"),
+                    enabled: true,
+                },
+                ene_tray_linux::TrayMenuSlot::Separator,
+                ene_tray_linux::TrayMenuSlot::Item {
+                    id: QUIT_MENU_ID.into(),
+                    label: i18n_embed_fl::fl!(crate::i18n::loader(), "quit"),
+                    enabled: true,
+                },
+            ];
+            let backend = ene_tray_linux::LinuxTrayHandle::spawn(
+                ene_tray_linux::LinuxTrayConfig {
+                    app_id: "ene-desktop".into(),
+                    tooltip: TOOLTIP.into(),
+                    icon_rgba: icon,
+                    menu,
+                },
+                runtime,
+            )
+            .ok()?;
+            std::thread::spawn(move || pump_linux_tray_events(backend, event_tx));
+            // The pump thread owns the backend handle.
+            Some(Self { _private: () })
         }
 
         #[cfg(target_os = "windows")]
         {
-            // Icon lives in the spawned thread (see
-            // `install_event_pump`); nothing to keep here.
-            Some(Self {})
+            let _ = runtime;
+            install_windows_tray(event_tx);
+            Some(Self { _private: () })
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
-            let _ = event_tx;
+            let _ = (event_tx, runtime);
             None
         }
     }
 }
 
-fn build_menu() -> Menu {
-    let menu = Menu::new();
-    let settings_label = i18n_embed_fl::fl!(crate::i18n::loader(), "settings");
-    let chat_label = i18n_embed_fl::fl!(crate::i18n::loader(), "tray-chat");
-    let detail_label = i18n_embed_fl::fl!(crate::i18n::loader(), "tray-detail");
-    let quit_label = i18n_embed_fl::fl!(crate::i18n::loader(), "quit");
-    let settings_item = MenuItem::with_id(SETTINGS_MENU_ID, settings_label, true, None);
-    let chat_item = MenuItem::with_id(CHAT_MENU_ID, chat_label, true, None);
-    let detail_item = MenuItem::with_id(DETAIL_MENU_ID, detail_label, true, None);
-    let quit_item = MenuItem::with_id(QUIT_MENU_ID, quit_label, true, None);
-    drop(menu.append_items(&[
-        &settings_item,
-        &chat_item,
-        &detail_item,
-        &PredefinedMenuItem::separator(),
-        &quit_item,
-    ]));
-    menu
+#[cfg(target_os = "linux")]
+fn pump_linux_tray_events(backend: ene_tray_linux::LinuxTrayHandle, event_tx: AppEventSender) {
+    loop {
+        while let Some(event) = backend.try_recv() {
+            if let Some(action) = map_linux_event(event)
+                && event_tx.send(AppEvent::Tray(action)).is_err()
+            {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
-fn build_icon() -> Option<Icon> {
-    let path = ene_config::assets_dir().join("icon.png");
-    let file = match File::open(&path) {
-        Ok(f) => f,
-        Err(err) => {
-            tracing::warn!(
-                "Failed to open tray icon {}: {err}; using synthetic fallback",
-                path.display()
-            );
-            return None;
+#[cfg(target_os = "linux")]
+fn map_linux_event(event: ene_tray_linux::LinuxTrayEvent) -> Option<TrayAction> {
+    match event {
+        ene_tray_linux::LinuxTrayEvent::MenuActivate { id } => match id.as_str() {
+            SETTINGS_MENU_ID => Some(TrayAction::OpenSettings { page: None }),
+            CHAT_MENU_ID => Some(TrayAction::OpenChat),
+            DETAIL_MENU_ID => Some(TrayAction::OpenDetail),
+            QUIT_MENU_ID => Some(TrayAction::Quit),
+            _ => None,
+        },
+        ene_tray_linux::LinuxTrayEvent::IconActivate => {
+            Some(TrayAction::OpenSettings { page: None })
         }
-    };
+        ene_tray_linux::LinuxTrayEvent::IconDoubleActivate => None,
+    }
+}
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn build_icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    let path = ene_config::assets_dir().join("icon.png");
+    let file = File::open(&path).ok()?;
     let mut decoder = png::Decoder::new(BufReader::new(file));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = match decoder.read_info() {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!("Failed to read tray icon metadata: {err}");
-            return None;
-        }
-    };
-    let Some(output_size) = reader.output_buffer_size() else {
-        tracing::warn!("Failed to determine tray icon decode buffer size");
-        return None;
-    };
+    let mut reader = decoder.read_info().ok()?;
+    let output_size = reader.output_buffer_size()?;
     let mut bytes = vec![0u8; output_size];
-    let frame = match reader.next_frame(&mut bytes) {
-        Ok(f) => f,
-        Err(err) => {
-            tracing::warn!("Failed to decode tray icon PNG: {err}");
-            return None;
-        }
-    };
+    let frame = reader.next_frame(&mut bytes).ok()?;
     let src = &bytes[..frame.buffer_size()];
     let rgba = match frame.color_type {
         png::ColorType::Rgba => src.to_vec(),
@@ -165,52 +142,34 @@ fn build_icon() -> Option<Icon> {
             }
             out
         }
-        png::ColorType::Indexed => {
-            tracing::warn!("Unsupported indexed PNG color type for tray icon");
-            return None;
-        }
+        png::ColorType::Indexed => return None,
     };
-    match Icon::from_rgba(rgba, frame.width, frame.height) {
-        Ok(icon) => Some(icon),
-        Err(err) => {
-            tracing::warn!("Failed to build tray icon from RGBA: {err}");
-            None
-        }
-    }
+    Some((rgba, frame.width, frame.height))
 }
 
-fn synthetic_icon() -> Icon {
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn synthetic_icon_rgba() -> (Vec<u8>, u32, u32) {
     let (w, h) = (32, 32);
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
     for _ in 0..(w * h) {
         rgba.extend_from_slice(&[0, 128, 255, 255]);
     }
-    // The RGBA buffer is hardcoded to be valid (32x32 pixels of fixed RGBA
-    // quadruples), so `Icon::from_rgba` can only fail via a `tray-icon`
-    // internal bug. Panicking surfaces that bug rather than silently
-    // dropping the tray icon.
-    #[expect(
-        clippy::expect_used,
-        reason = "synthetic RGBA is valid by construction"
-    )]
-    Icon::from_rgba(rgba, w, h).expect("tray-icon internal bug")
+    (rgba, w, h)
 }
 
-fn install_event_pump(event_tx: AppEventSender) {
-    #[cfg(target_os = "windows")]
-    {
-        // The Win32 message pump blocks in `GetMessageW` for the
-        // lifetime of the process, so the `tray-icon` event poll
-        // runs on a second thread that forwards
-        // `TrayIconEvent::Click` and `MenuEvent`s into the bus.
-        // The icon HWND is owned by the message-pump thread;
-        // forgetting it at the end of the pump keeps the
-        // notification-area entry alive.
+#[cfg(target_os = "windows")]
+mod windows {
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::{Icon, MouseButton, TrayIconBuilder, TrayIconEvent};
+
+    use super::{
+        CHAT_MENU_ID, DETAIL_MENU_ID, QUIT_MENU_ID, SETTINGS_MENU_ID, TOOLTIP, TrayAction,
+        build_icon_rgba, synthetic_icon_rgba,
+    };
+    use crate::events::{AppEvent, AppEventSender};
+
+    pub(super) fn install_windows_tray(event_tx: AppEventSender) {
         std::thread::spawn(move || {
-            // The tray-icon builder API consumes the icon, so we
-            // can't lift the `Result` out of the closure. If the
-            // builder itself fails on Windows the only sensible
-            // action is to panic and surface the bug.
             #[expect(
                 clippy::expect_used,
                 reason = "tray icon builder must succeed on Windows"
@@ -224,77 +183,96 @@ fn install_event_pump(event_tx: AppEventSender) {
             pump_win32_messages();
             #[expect(
                 clippy::mem_forget,
-                reason = "keeps the tray icon HWND alive for the life of the message-pump thread; see comment above"
+                reason = "keeps the tray icon HWND alive for the life of the message-pump thread"
             )]
             std::mem::forget(_tray_icon);
         });
-        std::thread::spawn(move || {
-            pump_tray_events(&event_tx);
-        });
+        std::thread::spawn(move || pump_tray_events(&event_tx));
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        // On Linux the icon is owned by the runtime (in
-        // `TrayHandle::_icon`); the pump just polls the global
-        // receivers.
-        std::thread::spawn(move || {
-            pump_tray_events(&event_tx);
-        });
+    fn build_menu() -> Menu {
+        let menu = Menu::new();
+        let settings_label = i18n_embed_fl::fl!(crate::i18n::loader(), "settings");
+        let chat_label = i18n_embed_fl::fl!(crate::i18n::loader(), "tray-chat");
+        let detail_label = i18n_embed_fl::fl!(crate::i18n::loader(), "tray-detail");
+        let quit_label = i18n_embed_fl::fl!(crate::i18n::loader(), "quit");
+        let settings_item = MenuItem::with_id(SETTINGS_MENU_ID, settings_label, true, None);
+        let chat_item = MenuItem::with_id(CHAT_MENU_ID, chat_label, true, None);
+        let detail_item = MenuItem::with_id(DETAIL_MENU_ID, detail_label, true, None);
+        let quit_item = MenuItem::with_id(QUIT_MENU_ID, quit_label, true, None);
+        drop(menu.append_items(&[
+            &settings_item,
+            &chat_item,
+            &detail_item,
+            &PredefinedMenuItem::separator(),
+            &quit_item,
+        ]));
+        menu
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = event_tx;
+    fn build_icon() -> Option<Icon> {
+        let (rgba, width, height) = build_icon_rgba()?;
+        Icon::from_rgba(rgba, width, height).ok()
+    }
+
+    fn synthetic_icon() -> Icon {
+        let (rgba, w, h) = synthetic_icon_rgba();
+        #[expect(
+            clippy::expect_used,
+            reason = "synthetic RGBA is valid by construction"
+        )]
+        Icon::from_rgba(rgba, w, h).expect("tray-icon internal bug")
+    }
+
+    fn pump_win32_messages() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, TranslateMessage,
+        };
+        // SAFETY: `msg` is a valid, zero-initialized `MSG` on the stack
+        // that outlives every call, and `GetMessageW` / `TranslateMessage` /
+        // `DispatchMessageW` are invoked with `hWnd = null_mut()`, which
+        // retrieves / dispatches messages for the current thread only.
+        unsafe {
+            let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    fn pump_tray_events(event_tx: &AppEventSender) {
+        let tray_rx = TrayIconEvent::receiver().clone();
+        let menu_rx = MenuEvent::receiver().clone();
+        loop {
+            crossbeam_channel::select! {
+                recv(tray_rx) -> event => {
+                    let Ok(event) = event else { break };
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        drop(event_tx.send(AppEvent::Tray(TrayAction::OpenSettings { page: None })));
+                    }
+                }
+                recv(menu_rx) -> event => {
+                    let Ok(event) = event else { break };
+                    let action = match event.id.as_ref() {
+                        SETTINGS_MENU_ID => Some(TrayAction::OpenSettings { page: None }),
+                        CHAT_MENU_ID => Some(TrayAction::OpenChat),
+                        DETAIL_MENU_ID => Some(TrayAction::OpenDetail),
+                        QUIT_MENU_ID => Some(TrayAction::Quit),
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        drop(event_tx.send(AppEvent::Tray(action)));
+                    }
+                }
+            }
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
-fn pump_win32_messages() {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, TranslateMessage,
-    };
-    // SAFETY: `msg` is a valid, zero-initialized `MSG` on the stack
-    // that outlives every call, and `GetMessageW` / `TranslateMessage` /
-    // `DispatchMessageW` are invoked with `hWnd = null_mut()`, which
-    // retrieves / dispatches messages for the current thread only.
-    unsafe {
-        let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-}
-
-fn pump_tray_events(event_tx: &AppEventSender) {
-    let tray_rx = TrayIconEvent::receiver().clone();
-    let menu_rx = MenuEvent::receiver().clone();
-    loop {
-        crossbeam_channel::select! {
-            recv(tray_rx) -> event => {
-                let Ok(event) = event else { break };
-                if let TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    ..
-                } = event
-                {
-                    drop(event_tx.send(AppEvent::Tray(TrayAction::OpenSettings { page: None })));
-                }
-            }
-            recv(menu_rx) -> event => {
-                let Ok(event) = event else { break };
-                let action = match event.id.as_ref() {
-                    SETTINGS_MENU_ID => Some(TrayAction::OpenSettings { page: None }),
-                    CHAT_MENU_ID => Some(TrayAction::OpenChat),
-                    DETAIL_MENU_ID => Some(TrayAction::OpenDetail),
-                    QUIT_MENU_ID => Some(TrayAction::Quit),
-                    _ => None,
-                };
-                if let Some(action) = action {
-                    drop(event_tx.send(AppEvent::Tray(action)));
-                }
-            }
-        }
-    }
-}
+use windows::install_windows_tray;

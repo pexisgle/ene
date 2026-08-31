@@ -5,6 +5,5 @@
 pub mod event_pump;
 pub mod physics;
 pub mod platform;
-pub mod tray_tick;
 pub mod ui_consumers;
 pub mod ui_dispatcher;

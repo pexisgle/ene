@@ -12,7 +12,7 @@ default = ["voice"]
 voice = ["dep:cpal", "dep:rodio", "dep:rustfft"]
 
 [dependencies]
-winit = "0.30"
+winit = { workspace = true }
 global-hotkey = { workspace = true }
 wgpu = { workspace = true }
 pollster = "1.0"
@@ -36,7 +36,6 @@ parking_lot = { workspace = true }
 png = "0.18"
 image = { workspace = true, features = ["png"] }
 xcap = "0.9.6"
-tray-icon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -58,8 +57,7 @@ rodio = { workspace = true, optional = true }
 rustfft = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = { workspace = true }
-tray-icon = { workspace = true, features = ["gtk"] }
+ene-tray-linux = { workspace = true }
 wayland-client = { version = "0.31", default-features = false }
 wayland-protocols = { version = "0.32", default-features = false, features = ["staging", "client"] }
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
@@ -70,6 +68,7 @@ pipewire = "0.9"
 futures = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = { workspace = true }
 windows-sys = { workspace = true }
 
 [dev-dependencies]

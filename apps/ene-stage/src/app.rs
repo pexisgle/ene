@@ -218,7 +218,7 @@ pub fn run() -> Result<(), AppError> {
         Ok::<_, StageSpawnError>((client, core, session, feeds))
     })?;
 
-    let tray = match TrayManager::new() {
+    let tray = match TrayManager::new(&rt_handle) {
         Ok(tray) => Some(tray),
         Err(TrayError::Build(err)) => {
             tracing::warn!(error = %err, "tray unavailable");
@@ -2199,12 +2199,6 @@ impl StageApp {
     }
 
     fn poll_shell(&mut self, event_loop: &ActiveEventLoop) {
-        #[cfg(target_os = "linux")]
-        {
-            while gtk::events_pending() {
-                let _ = gtk::main_iteration_do(false);
-            }
-        }
         let tray_commands: Vec<ShellCommand> = self
             .tray
             .as_ref()

@@ -93,7 +93,7 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: ene contributors <info@pexisgle.dev>
-Depends: libgtk-3-0, libssl3 | libssl1.1, libx11-6, libxkbcommon0, libwayland-client0, libvulkan1
+Depends: libssl3 | libssl1.1, libx11-6, libxkbcommon0, libwayland-client0, libvulkan1
 Description: ene stage — local AI companion
  ene stage is an egui + wgpu client that starts ene-core and shows
  companions on a native stage.

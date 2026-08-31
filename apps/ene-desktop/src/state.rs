@@ -236,21 +236,14 @@ impl AppState {
         if self.tray.is_some() {
             return;
         }
-        if let Some(handle) = TrayHandle::new(event_tx.clone()) {
+        let runtime = self
+            .app
+            .world()
+            .resource::<crate::resource::tokio::TokioHandle>()
+            .0
+            .clone();
+        if let Some(handle) = TrayHandle::new(event_tx.clone(), &runtime) {
             self.tray = Some(handle);
-            // Flip the `GtkReady` bevy resource so the GTK pump
-            // systems in `Update` / `Last` stop early-returning.
-            // `TrayHandle::new` calls `gtk::init` on Linux, so
-            // pumping before this point would panic with
-            // `"GTK has not been initialized. Call gtk::init first."`
-            #[cfg(target_os = "linux")]
-            {
-                let mut ready = self
-                    .app
-                    .world_mut()
-                    .resource_mut::<crate::resource::tray::GtkReady>();
-                ready.0 = true;
-            }
         } else {
             tracing::warn!("System tray failed to initialise; running headless");
         }

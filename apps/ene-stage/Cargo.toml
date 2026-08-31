@@ -23,7 +23,7 @@ voice = ["dep:cpal", "dep:rodio", "dep:rustfft"]
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
-winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11"] }
+winit = { workspace = true }
 ene-api = { workspace = true }
 ene-config = { workspace = true }
 directories = { workspace = true }
@@ -48,7 +48,6 @@ global-hotkey = { workspace = true }
 crossbeam-channel = { workspace = true }
 indexmap = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png"] }
-tray-icon = { workspace = true }
 rust-embed = { workspace = true }
 fluent-bundle = { workspace = true }
 i18n-embed = { workspace = true }
@@ -62,11 +61,11 @@ zip = { workspace = true, features = ["deflate"] }
 base64 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = { workspace = true }
-tray-icon = { workspace = true, features = ["gtk"] }
+ene-tray-linux = { workspace = true }
 x11rb = "0.13"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = { workspace = true }
 windows-sys = { workspace = true }
 
 [lints]

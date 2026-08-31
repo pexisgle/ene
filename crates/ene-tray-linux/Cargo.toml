@@ -1,0 +1,19 @@
+[package]
+name = "ene-tray-linux"
+version.workspace = true
+edition.workspace = true
+description = "Linux system tray via ksni (StatusNotifierItem)"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+crossbeam-channel = { workspace = true }
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

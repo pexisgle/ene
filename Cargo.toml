@@ -25,7 +25,8 @@ tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-t
 bytemuck = { version = "1", features = ["derive"] }
 egui = "0.35"
 egui-wgpu = "0.35"
-egui-winit = "0.35"
+egui-winit = { version = "0.35", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 glam = { version = "0.33", features = ["bytemuck"] }
 gltf = { version = "1.4", default-features = false }
 image = { version = "0.25", default-features = false }
@@ -40,7 +41,7 @@ rodio = { version = "0.22", default-features = false }
 fluent-bundle = "0.16"
 fluent-syntax = "0.12"
 crossbeam-channel = "0.5"
-gtk = "0.18.2"
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
 i18n-embed-fl = "0.10"
 
@@ -119,6 +120,7 @@ ene-body = { path = "crates/ene-body" }
 ene-work = { path = "crates/ene-work" }
 ene-sandbox = { path = "crates/ene-sandbox" }
 ene-vrm = { path = "crates/ene-vrm" }
+ene-tray-linux = { path = "crates/ene-tray-linux" }
 
 [workspace.metadata.cargo-husky]
 run-for-all = true
