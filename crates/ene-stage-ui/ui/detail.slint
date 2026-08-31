@@ -29,7 +29,7 @@ export component DetailSurface inherits Window {
     in-out property <[string]> tabs: ["Home", "Companion", "Conversation", "Voice", "Memory", "Work", "Connections", "System", "Log"];
     in-out property <[DetailAction]> actions: [];
 
-    in-out property <bool> input-focused: false;
+    in-out property <bool> input-focused: TextInputInterface.text-input-focused;
 
     callback select-tab(int);
     callback primary-action(string);
@@ -43,7 +43,6 @@ export component DetailSurface inherits Window {
             text <=> search;
             color: EneTheme.fg;
             font-size: EneTheme.type-md;
-            edited => { root.input-focused = true; }
         }
 
         HorizontalLayout {

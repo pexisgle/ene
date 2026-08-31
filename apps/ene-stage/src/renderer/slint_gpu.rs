@@ -5,6 +5,8 @@ use std::rc::{Rc, Weak};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use i_slint_core::input::{InternalKeyEvent, KeyEventType};
+use i_slint_core::window::WindowInner;
 use slint::platform::femtovg_renderer::FemtoVGWGPURenderer;
 use slint::platform::{
     Clipboard, Key, Platform, PlatformError, PointerEventButton, WindowAdapter, WindowEvent,
@@ -32,6 +34,7 @@ struct GpuClone {
 struct StageSlintPlatform {
     gpu: GpuClone,
     start: Instant,
+    clipboard: RefCell<Option<arboard::Clipboard>>,
 }
 
 impl Platform for StageSlintPlatform {
@@ -52,11 +55,11 @@ impl Platform for StageSlintPlatform {
     }
 
     fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
-        set_system_clipboard(text, &clipboard);
+        set_owned_clipboard(&self.clipboard, text, &clipboard);
     }
 
     fn clipboard_text(&self, clipboard: Clipboard) -> Option<String> {
-        read_system_clipboard(&clipboard)
+        read_owned_clipboard(&self.clipboard, &clipboard)
     }
 }
 
@@ -126,6 +129,7 @@ pub fn install(gpu: &GpuContext) {
                 queue: gpu.queue.as_ref().clone(),
             },
             start: Instant::now(),
+            clipboard: RefCell::new(None),
         };
         if let Err(err) = slint::platform::set_platform(Box::new(platform)) {
             tracing::warn!(error = %err, "slint platform already set");
@@ -228,17 +232,14 @@ impl SlintOverlayLayer {
         let Some(ui) = &self.ui else {
             return;
         };
-        if let Some(converted) = convert_window_event(
+        dispatch_to_window(
+            ui.window(),
             event,
             scale,
             &self.last_pointer,
             &self.composing,
             &self.last_modifiers,
-        ) {
-            for item in converted {
-                ui.window().dispatch_event(item);
-            }
-        }
+        );
     }
 
     pub fn needs_redraw(&self) -> bool {
@@ -483,16 +484,14 @@ impl ChromeLayer {
             ChromeUi::Caption(ui) => ui.window(),
             ChromeUi::Spotlight(ui) => ui.window(),
         };
-        if let Some(converted) = convert_window_event(
+        if dispatch_to_window(
+            window,
             event,
             scale,
             &self.last_pointer,
             &self.composing,
             &self.last_modifiers,
         ) {
-            for item in converted {
-                window.dispatch_event(item);
-            }
             self.adapter.redraw.set(true);
             return true;
         }
@@ -534,6 +533,29 @@ impl ChromeLayer {
         }
         self.adapter.take_redraw() || window.has_active_animations()
     }
+}
+
+fn dispatch_to_window(
+    window: &slint::Window,
+    event: &WinitWindowEvent,
+    scale: f64,
+    last_pointer: &Cell<LogicalPosition>,
+    composing: &Cell<bool>,
+    last_modifiers: &Cell<ModifiersState>,
+) -> bool {
+    if let WinitWindowEvent::Ime(ime) = event {
+        dispatch_ime(window, ime, composing);
+        return true;
+    }
+    if let Some(converted) =
+        convert_window_event(event, scale, last_pointer, composing, last_modifiers)
+    {
+        for item in converted {
+            window.dispatch_event(item);
+        }
+        return true;
+    }
+    false
 }
 
 fn convert_window_event(
@@ -586,7 +608,6 @@ fn convert_window_event(
                 ElementState::Released => WindowEvent::KeyReleased { text },
             }])
         }
-        WinitWindowEvent::Ime(ime) => Some(apply_ime(ime, composing)),
         WinitWindowEvent::ModifiersChanged(modifiers) => {
             let next = modifiers.state();
             let events = modifier_key_events(last_modifiers.get(), next);
@@ -605,26 +626,63 @@ fn convert_window_event(
     }
 }
 
-fn apply_ime(ime: &Ime, composing: &Cell<bool>) -> Vec<WindowEvent> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImeAction {
+    Ignore,
+    Update {
+        text: String,
+        selection: Option<(usize, usize)>,
+    },
+    Commit {
+        text: String,
+    },
+}
+
+fn classify_ime(ime: &Ime, composing: &Cell<bool>) -> ImeAction {
     match ime {
-        Ime::Enabled => Vec::new(),
+        Ime::Enabled => ImeAction::Ignore,
         Ime::Disabled => {
             composing.set(false);
-            Vec::new()
+            ImeAction::Update {
+                text: String::new(),
+                selection: None,
+            }
         }
-        Ime::Preedit(text, _) => {
+        Ime::Preedit(text, selection) => {
             composing.set(!text.is_empty());
-            Vec::new()
+            ImeAction::Update {
+                text: text.clone(),
+                selection: *selection,
+            }
         }
         Ime::Commit(text) => {
             composing.set(false);
-            if text.is_empty() {
-                Vec::new()
-            } else {
-                vec![WindowEvent::KeyPressed {
-                    text: SharedString::from(text.as_str()),
-                }]
-            }
+            ImeAction::Commit { text: text.clone() }
+        }
+    }
+}
+
+/// Public [`WindowEvent`] has no IME variants. Slint's own winit backend feeds
+/// preedit/commit through `WindowInner::process_key_input` as
+/// `UpdateComposition` / `CommitComposition`.
+fn dispatch_ime(window: &slint::Window, ime: &Ime, composing: &Cell<bool>) {
+    match classify_ime(ime, composing) {
+        ImeAction::Ignore => {}
+        ImeAction::Update { text, selection } => {
+            WindowInner::from_pub(window).process_key_input(InternalKeyEvent {
+                event_type: KeyEventType::UpdateComposition,
+                preedit_text: SharedString::from(text.as_str()),
+                preedit_selection: selection.map(|(start, end)| start as i32..end as i32),
+                ..InternalKeyEvent::default()
+            });
+        }
+        ImeAction::Commit { text } => {
+            let mut event = InternalKeyEvent {
+                event_type: KeyEventType::CommitComposition,
+                ..InternalKeyEvent::default()
+            };
+            event.key_event.text = SharedString::from(text.as_str());
+            WindowInner::from_pub(window).process_key_input(event);
         }
     }
 }
@@ -712,47 +770,64 @@ fn key_text(event: &winit::event::KeyEvent) -> Option<SharedString> {
     }
 }
 
-fn set_system_clipboard(text: &str, clipboard: &Clipboard) {
-    match clipboard {
+fn set_owned_clipboard(
+    owner: &RefCell<Option<arboard::Clipboard>>,
+    text: &str,
+    clipboard: &Clipboard,
+) {
+    with_owned_clipboard(owner, |board| match clipboard {
         Clipboard::DefaultClipboard => {
-            if let Ok(mut board) = arboard::Clipboard::new() {
-                drop(board.set_text(text));
-            }
+            drop(board.set_text(text));
+            Some(())
         }
-        Clipboard::SelectionClipboard => set_selection_clipboard(text),
-        _ => {}
-    }
+        Clipboard::SelectionClipboard => {
+            set_selection_clipboard(board, text);
+            Some(())
+        }
+        _ => None,
+    });
 }
 
-fn read_system_clipboard(clipboard: &Clipboard) -> Option<String> {
-    match clipboard {
-        Clipboard::DefaultClipboard => arboard::Clipboard::new().ok()?.get_text().ok(),
-        Clipboard::SelectionClipboard => read_selection_clipboard(),
+fn read_owned_clipboard(
+    owner: &RefCell<Option<arboard::Clipboard>>,
+    clipboard: &Clipboard,
+) -> Option<String> {
+    with_owned_clipboard(owner, |board| match clipboard {
+        Clipboard::DefaultClipboard => board.get_text().ok(),
+        Clipboard::SelectionClipboard => read_selection_clipboard(board),
         _ => None,
+    })
+}
+
+fn with_owned_clipboard<T>(
+    owner: &RefCell<Option<arboard::Clipboard>>,
+    f: impl FnOnce(&mut arboard::Clipboard) -> Option<T>,
+) -> Option<T> {
+    let mut slot = owner.borrow_mut();
+    if slot.is_none() {
+        *slot = arboard::Clipboard::new().ok();
     }
+    slot.as_mut().and_then(f)
 }
 
 #[cfg(target_os = "linux")]
-fn set_selection_clipboard(text: &str) {
+fn set_selection_clipboard(board: &mut arboard::Clipboard, text: &str) {
     use arboard::{LinuxClipboardKind, SetExtLinux};
-    if let Ok(mut board) = arboard::Clipboard::new() {
-        drop(
-            board
-                .set()
-                .clipboard(LinuxClipboardKind::Primary)
-                .text(text),
-        );
-    }
+    drop(
+        board
+            .set()
+            .clipboard(LinuxClipboardKind::Primary)
+            .text(text),
+    );
 }
 
 #[cfg(not(target_os = "linux"))]
-fn set_selection_clipboard(_text: &str) {}
+fn set_selection_clipboard(_board: &mut arboard::Clipboard, _text: &str) {}
 
 #[cfg(target_os = "linux")]
-fn read_selection_clipboard() -> Option<String> {
+fn read_selection_clipboard(board: &mut arboard::Clipboard) -> Option<String> {
     use arboard::{GetExtLinux, LinuxClipboardKind};
-    arboard::Clipboard::new()
-        .ok()?
+    board
         .get()
         .clipboard(LinuxClipboardKind::Primary)
         .text()
@@ -760,7 +835,7 @@ fn read_selection_clipboard() -> Option<String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn read_selection_clipboard() -> Option<String> {
+fn read_selection_clipboard(_board: &mut arboard::Clipboard) -> Option<String> {
     None
 }
 
@@ -771,8 +846,14 @@ mod tests {
     #[test]
     fn ime_preedit_blocks_enter() {
         let composing = Cell::new(false);
-        let events = apply_ime(&Ime::Preedit("あ".to_owned(), None), &composing);
-        assert!(events.is_empty());
+        let action = classify_ime(&Ime::Preedit("あ".to_owned(), None), &composing);
+        assert_eq!(
+            action,
+            ImeAction::Update {
+                text: "あ".to_owned(),
+                selection: None
+            }
+        );
         assert!(composing.get());
         assert!(
             !forward_keyboard(composing.get(), false),
@@ -781,15 +862,15 @@ mod tests {
     }
 
     #[test]
-    fn ime_commit_forwards_composed_text() {
+    fn ime_commit_is_composition_not_keypress() {
         let composing = Cell::new(true);
-        let events = apply_ime(&Ime::Commit("あ".to_owned()), &composing);
+        let action = classify_ime(&Ime::Commit("あ".to_owned()), &composing);
         assert!(!composing.get());
         assert_eq!(
-            events,
-            vec![WindowEvent::KeyPressed {
-                text: SharedString::from("あ")
-            }]
+            action,
+            ImeAction::Commit {
+                text: "あ".to_owned()
+            }
         );
         assert!(forward_keyboard(composing.get(), false));
     }
@@ -797,11 +878,37 @@ mod tests {
     #[test]
     fn ime_disabled_and_empty_preedit_clear_composing() {
         let composing = Cell::new(true);
-        assert!(apply_ime(&Ime::Disabled, &composing).is_empty());
+        assert_eq!(
+            classify_ime(&Ime::Disabled, &composing),
+            ImeAction::Update {
+                text: String::new(),
+                selection: None
+            }
+        );
         assert!(!composing.get());
         composing.set(true);
-        assert!(apply_ime(&Ime::Preedit(String::new(), None), &composing).is_empty());
+        assert_eq!(
+            classify_ime(&Ime::Preedit(String::new(), None), &composing),
+            ImeAction::Update {
+                text: String::new(),
+                selection: None
+            }
+        );
         assert!(!composing.get());
+    }
+
+    #[test]
+    fn owned_clipboard_survives_set_for_paste() {
+        let owner = RefCell::new(None);
+        set_owned_clipboard(&owner, "stage-paste", &Clipboard::DefaultClipboard);
+        let Some(got) = read_owned_clipboard(&owner, &Clipboard::DefaultClipboard) else {
+            return;
+        };
+        assert_eq!(got, "stage-paste");
+        assert!(
+            owner.borrow().is_some(),
+            "Linux selection ownership requires the Clipboard to stay alive after set"
+        );
     }
 
     #[test]

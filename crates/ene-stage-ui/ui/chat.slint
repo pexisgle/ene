@@ -30,7 +30,7 @@ export component ChatSurface inherits Window {
     in-out property <string> question-prompt;
     in-out property <bool> question-visible: false;
     in-out property <string> question-draft;
-    in-out property <bool> input-focused: false;
+    in-out property <bool> input-focused: TextInputInterface.text-input-focused;
 
     callback send();
     callback new-session();
@@ -132,7 +132,6 @@ export component ChatSurface inherits Window {
                 font-size: EneTheme.type-md;
                 wrap: word-wrap;
                 accepted => { if can-send { root.send(); } }
-                edited => { root.input-focused = true; }
             }
             VerticalLayout {
                 spacing: EneTheme.space-1;
