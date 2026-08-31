@@ -48,16 +48,31 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
 
 fn block_on_exec<F>(fut: F) -> Result<Value, String>
 where
-    F: std::future::Future<Output = Result<Value, String>>,
+    F: std::future::Future<Output = Result<Value, String>> + Send,
 {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
-        Err(_) => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| err.to_string())?
-            .block_on(fut),
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        }
+        Ok(_) => std::thread::scope(|scope| {
+            scope
+                .spawn(|| run_on_current_thread(fut))
+                .join()
+                .map_err(|_| "exec runtime thread panicked".to_owned())?
+        }),
+        Err(_) => run_on_current_thread(fut),
     }
+}
+
+fn run_on_current_thread<F>(fut: F) -> Result<Value, String>
+where
+    F: std::future::Future<Output = Result<Value, String>>,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| err.to_string())?
+        .block_on(fut)
 }
 
 async fn run_direct(args: &Value) -> Result<Value, String> {
@@ -408,6 +423,19 @@ mod tests {
     fn rejects_path_command() {
         let err = execute("exec.run", &json!({"command": "/bin/echo"})).unwrap_err();
         assert!(err.contains("program name"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_from_current_thread_runtime_does_not_panic() {
+        let err = execute("exec.run", &json!({"command": "/bin/echo"})).unwrap_err();
+        assert!(err.contains("program name"));
+        #[cfg(unix)]
+        {
+            let value =
+                execute("exec.run", &json!({"command": "true", "timeout_ms": 2000})).unwrap();
+            assert_eq!(value["timed_out"], json!(false));
+            assert_eq!(value["exit_code"], json!(0));
+        }
     }
 
     #[test]
