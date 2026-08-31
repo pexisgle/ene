@@ -29,6 +29,11 @@ scraper = { workspace = true }
 uuid = { workspace = true }
 process-wrap = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "time", "fs"] }
+diffy = { workspace = true }
+globset = { workspace = true }
+ignore = { workspace = true }
+strsim = { workspace = true }
+tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

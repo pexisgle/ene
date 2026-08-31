@@ -1,6 +1,8 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ene_plugin_ipc::{BrokerClient, BrokerRequest, BrokerResponse, ToolSpecWire};
 use ene_registry::{arg_str, spec};
+use globset::GlobBuilder;
+use ignore::{DirEntry, WalkBuilder};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -33,8 +35,6 @@ fn io_error(path: &Path, err: &std::io::Error) -> String {
 
 static PATH_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-static TEMP_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
     let expected_hash = json!({"type":"string"});
@@ -273,12 +273,49 @@ fn glob(args: &Value) -> Result<Value, String> {
         .unwrap_or(200)
         .min(MAX_GLOB_RESULTS as u64) as usize;
     let root = workspace()?;
+    let matcher = GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .backslash_escape(false)
+        .build()
+        .map_err(|err| err.to_string())?
+        .compile_matcher();
+    let mut walker = WalkBuilder::new(&root);
+    walker
+        .standard_filters(false)
+        .hidden(false)
+        .follow_links(false)
+        .parents(false)
+        .filter_entry(move |entry| keep_glob_entry(entry, include_hidden));
     let mut paths = Vec::new();
-    walk_glob(&root, &root, pattern, include_hidden, &mut paths, max)?;
+    for entry in walker.build() {
+        let entry = entry.map_err(|err| err.to_string())?;
+        if entry.depth() == 0 {
+            continue;
+        }
+        let path = entry.path();
+        if entry.path_is_symlink() {
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            if canonical.is_dir() || !canonical.starts_with(&root) {
+                continue;
+            }
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .map_err(|_| "path escapes workspace".to_owned())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if matcher.is_match(&rel) {
+            paths.push(rel);
+        }
+    }
     paths.sort();
+    let truncated = paths.len() >= max;
+    paths.truncate(max);
     Ok(json!({
         "paths": paths,
-        "truncated": paths.len() >= max,
+        "truncated": truncated,
     }))
 }
 
@@ -295,91 +332,26 @@ fn deny_glob_escape(pattern: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn walk_glob(
-    root: &Path,
-    dir: &Path,
-    pattern: &str,
-    include_hidden: bool,
-    out: &mut Vec<String>,
-    max: usize,
-) -> Result<(), String> {
-    if out.len() >= max {
-        return Ok(());
+fn keep_glob_entry(entry: &DirEntry, include_hidden: bool) -> bool {
+    if entry.depth() == 0 {
+        return true;
     }
-    let rd = std::fs::read_dir(dir).map_err(|err| err.to_string())?;
-    for ent in rd {
-        if out.len() >= max {
-            break;
-        }
-        let ent = ent.map_err(|err| err.to_string())?;
-        let path = ent.path();
-        let name = ent.file_name();
-        let name = name.to_string_lossy();
-        if name == ".ene" {
-            continue;
-        }
-        if !include_hidden && name.starts_with('.') {
-            continue;
-        }
-        let meta = std::fs::symlink_metadata(&path).map_err(|err| err.to_string())?;
-        if meta.file_type().is_symlink() {
-            // Directory links (and Windows junctions) are never followed.
-            let Ok(canonical) = path.canonicalize() else {
-                continue;
-            };
-            if canonical.is_dir() || !canonical.starts_with(root) {
-                continue;
-            }
-        }
-        let rel = path
-            .strip_prefix(root)
-            .map_err(|_| "path escapes workspace".to_owned())?
-            .to_string_lossy()
-            .replace('\\', "/");
-        if glob_match(pattern, &rel) {
-            out.push(rel.clone());
-        }
-        if meta.is_dir() && !meta.file_type().is_symlink() {
-            walk_glob(root, &path, pattern, include_hidden, out, max)?;
+    let name = entry.file_name().to_string_lossy();
+    if name == ".ene" {
+        return false;
+    }
+    if !include_hidden && name.starts_with('.') {
+        return false;
+    }
+    if entry.path_is_symlink() {
+        let Ok(canonical) = entry.path().canonicalize() else {
+            return false;
+        };
+        if canonical.is_dir() {
+            return false;
         }
     }
-    Ok(())
-}
-
-fn glob_match(pattern: &str, rel: &str) -> bool {
-    let pat: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
-    let path: Vec<&str> = rel.split('/').filter(|part| !part.is_empty()).collect();
-    glob_components(&pat, &path)
-}
-
-fn glob_components(pat: &[&str], path: &[&str]) -> bool {
-    match (pat.first().copied(), path.first().copied()) {
-        (None, None) => true,
-        (Some("**"), _) => {
-            glob_components(&pat[1..], path)
-                || (!path.is_empty() && glob_components(pat, &path[1..]))
-        }
-        (Some(seg), Some(name)) if glob_segment(seg, name) => {
-            glob_components(&pat[1..], &path[1..])
-        }
-        _ => false,
-    }
-}
-
-fn glob_segment(pattern: &str, name: &str) -> bool {
-    glob_stars(pattern.as_bytes(), name.as_bytes())
-}
-
-fn glob_stars(pattern: &[u8], name: &[u8]) -> bool {
-    match (pattern.first().copied(), name.first().copied()) {
-        (None, None) => true,
-        (Some(b'*'), _) => {
-            glob_stars(&pattern[1..], name) || (!name.is_empty() && glob_stars(pattern, &name[1..]))
-        }
-        (Some(b'?'), Some(_)) => glob_stars(&pattern[1..], &name[1..]),
-        (Some(p), Some(n)) if p == n => glob_stars(&pattern[1..], &name[1..]),
-        _ => false,
-    }
+    true
 }
 
 fn delete(args: &Value) -> Result<Value, String> {
@@ -516,18 +488,6 @@ fn patch(args: &Value) -> Result<Value, String> {
 }
 
 #[derive(Debug)]
-struct Hunk {
-    old_start: usize,
-    ops: Vec<HunkOp>,
-}
-
-#[derive(Debug)]
-enum HunkOp {
-    Keep(String),
-    Remove(String),
-    Add(String),
-}
-
 struct LineEnding {
     sep: &'static str,
     trailing: bool,
@@ -570,88 +530,45 @@ fn join_lines(lines: &[String], ending: &LineEnding) -> String {
 }
 
 fn apply_unified_diff(body: &str, diff: &str) -> Result<String, String> {
-    let hunks = parse_hunks(diff)?;
-    if hunks.is_empty() {
+    let ending = detect_line_ending(body);
+    let diff_lf = diff.replace("\r\n", "\n");
+    let patch = diffy::Patch::from_str(&diff_lf).map_err(|err| err.to_string())?;
+    if patch.hunks().is_empty() {
         return Err("diff has no hunks".to_owned());
     }
-    let ending = detect_line_ending(body);
     let mut lines = split_lines(body, &ending);
-    for hunk in hunks {
-        lines = apply_hunk(lines, &hunk)?;
+    for hunk in patch.hunks() {
+        lines = apply_diffy_hunk(lines, hunk)?;
     }
     Ok(join_lines(&lines, &ending))
 }
 
-fn parse_hunks(diff: &str) -> Result<Vec<Hunk>, String> {
-    let mut hunks = Vec::new();
-    let mut current: Option<Hunk> = None;
-    for raw in diff.lines() {
-        if raw.starts_with("@@") {
-            if let Some(hunk) = current.take() {
-                hunks.push(hunk);
-            }
-            current = Some(Hunk {
-                old_start: parse_hunk_start(raw)?,
-                ops: Vec::new(),
-            });
-            continue;
-        }
-        if raw.starts_with("---") || raw.starts_with("+++") || raw.starts_with("diff ") {
-            continue;
-        }
-        if raw.starts_with('\\') {
-            continue;
-        }
-        let Some(hunk) = current.as_mut() else {
-            continue;
-        };
-        let Some(first) = raw.chars().next() else {
-            hunk.ops.push(HunkOp::Keep(String::new()));
-            continue;
-        };
-        let rest = raw[first.len_utf8()..].to_owned();
-        match first {
-            ' ' => hunk.ops.push(HunkOp::Keep(rest)),
-            '-' => hunk.ops.push(HunkOp::Remove(rest)),
-            '+' => hunk.ops.push(HunkOp::Add(rest)),
-            _ => {}
-        }
-    }
-    if let Some(hunk) = current {
-        hunks.push(hunk);
-    }
-    Ok(hunks)
+fn patch_line_text(text: &str) -> String {
+    text.trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_owned()
 }
 
-fn parse_hunk_start(header: &str) -> Result<usize, String> {
-    let Some(rest) = header.strip_prefix("@@ -") else {
-        return Err("bad hunk header".to_owned());
-    };
-    let num: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    if num.is_empty() {
-        return Err("bad hunk header".to_owned());
-    }
-    num.parse::<usize>()
-        .map_err(|_| "bad hunk header".to_owned())
-}
-
-fn apply_hunk(mut lines: Vec<String>, hunk: &Hunk) -> Result<Vec<String>, String> {
+fn apply_diffy_hunk(
+    mut lines: Vec<String>,
+    hunk: &diffy::Hunk<'_, str>,
+) -> Result<Vec<String>, String> {
     let expected: Vec<String> = hunk
-        .ops
+        .lines()
         .iter()
-        .filter_map(|op| match op {
-            HunkOp::Keep(text) | HunkOp::Remove(text) => Some(text.clone()),
-            HunkOp::Add(_) => None,
+        .filter_map(|line| match line {
+            diffy::Line::Context(text) | diffy::Line::Delete(text) => Some(patch_line_text(text)),
+            diffy::Line::Insert(_) => None,
         })
         .collect();
-    let hint = hunk.old_start.saturating_sub(1);
+    let hint = hunk.old_range().start().saturating_sub(1);
     let idx = find_block(&lines, &expected, hint)?;
     let replacement: Vec<String> = hunk
-        .ops
+        .lines()
         .iter()
-        .filter_map(|op| match op {
-            HunkOp::Keep(text) | HunkOp::Add(text) => Some(text.clone()),
-            HunkOp::Remove(_) => None,
+        .filter_map(|line| match line {
+            diffy::Line::Context(text) | diffy::Line::Insert(text) => Some(patch_line_text(text)),
+            diffy::Line::Delete(_) => None,
         })
         .collect();
     let end = idx + expected.len();
@@ -792,25 +709,6 @@ fn matched_line_end(body: &str, span: LineSpan, consume_terminator: bool) -> usi
     end
 }
 
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    let mut current = vec![0_usize; b.len() + 1];
-    for i in 1..=a.len() {
-        current[0] = i;
-        for j in 1..=b.len() {
-            current[j] = if a[i - 1] == b[j - 1] {
-                previous[j - 1]
-            } else {
-                1 + previous[j - 1].min(previous[j]).min(current[j - 1])
-            };
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-    previous[b.len()]
-}
-
 fn find_indent_matches(body: &str, old: &str) -> Vec<(usize, usize)> {
     let consume_terminator = old.ends_with('\n');
     let old_lines: Vec<&str> = old.strip_suffix('\n').unwrap_or(old).split('\n').collect();
@@ -864,7 +762,7 @@ fn block_similarity(body: &str, lines: &[LineSpan], old_lines: &[&str]) -> Optio
     for idx in 1..=lines_to_check {
         let actual = line_text(body, lines[idx]).trim();
         let expected = old_lines[idx].trim();
-        let distance = levenshtein(actual, expected);
+        let distance = strsim::levenshtein(actual, expected);
         let max_len = actual.chars().count().max(expected.chars().count());
         if max_len == 0 {
             continue;
@@ -1138,21 +1036,15 @@ fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .parent()
         .ok_or_else(|| "path has no parent directory".to_owned())?;
     std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    let suffix = TEMP_SUFFIX.fetch_add(1, Ordering::Relaxed);
-    let temp_path = parent.join(format!(".ene-write-{}-{suffix}.tmp", std::process::id()));
-    let result = write_temp_then_rename(path, &temp_path, bytes);
-    if result.is_err() {
-        drop(std::fs::remove_file(&temp_path));
-    }
-    result
-}
-
-fn write_temp_then_rename(path: &Path, temp_path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut file = std::fs::File::create(temp_path).map_err(|err| err.to_string())?;
-    file.write_all(bytes).map_err(|err| err.to_string())?;
-    preserve_permissions(path, &file);
-    drop(file);
-    std::fs::rename(temp_path, path).map_err(|err| err.to_string())
+    let mut temp = tempfile::Builder::new()
+        .prefix(".ene-write-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|err| err.to_string())?;
+    temp.write_all(bytes).map_err(|err| err.to_string())?;
+    preserve_permissions(path, temp.as_file());
+    temp.persist(path).map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 /// Copies mode bits from an existing `src` onto the temp file before rename.
@@ -1512,6 +1404,17 @@ mod tests {
                 }),
             )?;
             assert_eq!(fs::read_to_string(&path).unwrap(), "after");
+            let leftovers: Vec<_> = fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".ene-write-")
+                })
+                .collect();
+            assert!(leftovers.is_empty(), "{leftovers:?}");
             Ok(())
         });
     }
@@ -1636,6 +1539,22 @@ mod tests {
     }
 
     #[test]
+    fn unified_diff_applies_multiple_hunks() {
+        let body = "a\nb\nc\nd\ne\n";
+        let diff = "@@ -1,2 +1,2 @@\n-a\n+A\n b\n@@ -4,2 +4,2 @@\n d\n-e\n+E\n";
+        let next = apply_unified_diff(body, diff).unwrap();
+        assert_eq!(next, "A\nb\nc\nd\nE\n");
+    }
+
+    #[test]
+    fn unified_diff_preserves_missing_trailing_newline() {
+        let body = "alpha\nbeta";
+        let diff = "@@ -1,2 +1,2 @@\n alpha\n-beta\n+BETA\n";
+        let next = apply_unified_diff(body, diff).unwrap();
+        assert_eq!(next, "alpha\nBETA");
+    }
+
+    #[test]
     fn unified_diff_preserves_crlf() {
         let body = "alpha\r\nbeta\r\ngamma\r\n";
         let diff = "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
@@ -1653,9 +1572,17 @@ mod tests {
 
     #[test]
     fn unified_diff_rejects_wrong_context() {
-        let err =
+        let malformed =
             apply_unified_diff("alpha\nbeta\n", "@@ -1,2 +1,2 @@\n no\n-match\n").unwrap_err();
-        assert!(err.contains("context missed"));
+        assert!(
+            malformed.contains("context missed")
+                || malformed.contains("hunk")
+                || malformed.contains("patch"),
+            "{malformed}"
+        );
+        let missed =
+            apply_unified_diff("alpha\nbeta\n", "@@ -1,2 +1,2 @@\n no\n-match\n+x\n").unwrap_err();
+        assert!(missed.contains("context missed"), "{missed}");
     }
 
     #[test]
@@ -1740,6 +1667,15 @@ mod tests {
     }
 
     #[test]
+    fn block_anchor_fuzzy_inner_line_still_matches() {
+        let body = "BEGIN\nmiddl\nEND\n";
+        let next = apply_edit(body, "BEGIN\nmiddle\nEND", "OK", false).unwrap();
+        assert_eq!(next, "OK\n");
+        let far = apply_edit("BEGIN\nxxxxx\nEND\n", "BEGIN\nmiddle\nEND", "OK", false).unwrap_err();
+        assert!(far.contains("old text not found"), "{far}");
+    }
+
+    #[test]
     fn glob_lists_sorted_relative_paths_and_caps() {
         let dir = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -1756,6 +1692,48 @@ mod tests {
             let capped = execute("fs.glob", &json!({"pattern": "**/*", "max": 1}))?;
             assert_eq!(capped["paths"].as_array().unwrap().len(), 1);
             assert_eq!(capped["truncated"], true);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn glob_star_and_question_match_single_path_segment() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::write(dir.path().join("ab.rs"), "a").unwrap();
+        fs::write(dir.path().join("a.rs"), "a").unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/x.rs"), "x").unwrap();
+        with_workspace(&dir, || {
+            let starred = execute("fs.glob", &json!({"pattern": "*.rs"}))?;
+            let starred = starred["paths"].as_array().unwrap();
+            assert!(starred.iter().any(|p| p == "a.rs"));
+            assert!(starred.iter().any(|p| p == "ab.rs"));
+            assert!(!starred.iter().any(|p| p == "src/x.rs"));
+            let q = execute("fs.glob", &json!({"pattern": "?.rs"}))?;
+            let q = q["paths"].as_array().unwrap();
+            assert_eq!(q, &vec![json!("a.rs")]);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn glob_skips_ene_and_hidden_unless_requested() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join(".ene")).unwrap();
+        fs::write(dir.path().join(".ene/secret.rs"), "no").unwrap();
+        fs::write(dir.path().join(".hidden.rs"), "h").unwrap();
+        fs::write(dir.path().join("ok.rs"), "ok").unwrap();
+        with_workspace(&dir, || {
+            let listed = execute("fs.glob", &json!({"pattern": "**/*.rs"}))?;
+            let paths = listed["paths"].as_array().unwrap();
+            assert_eq!(paths, &vec![json!("ok.rs")]);
+            let hidden = execute(
+                "fs.glob",
+                &json!({"pattern": "**/*.rs", "include_hidden": true}),
+            )?;
+            let hidden = hidden["paths"].as_array().unwrap();
+            assert!(hidden.iter().any(|p| p == ".hidden.rs"));
+            assert!(!hidden.iter().any(|p| p.as_str().unwrap().contains(".ene")));
             Ok(())
         });
     }

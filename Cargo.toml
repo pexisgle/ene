@@ -107,6 +107,10 @@ png = "0.18"
 toml = "0.8"
 htmd = "0.5"
 scraper = "0.23"
+diffy = "0.4"
+globset = "0.4"
+ignore = "0.4"
+strsim = "0.11"
 
 ene-api = { path = "crates/ene-api" }
 ene-card = { path = "crates/ene-card" }
