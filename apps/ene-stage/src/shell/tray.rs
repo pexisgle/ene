@@ -193,15 +193,13 @@ fn synthetic_icon_rgba() -> (Vec<u8>, u32, u32) {
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use std::path::Path;
-
     use crossbeam_channel::{Receiver, Sender, unbounded};
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
     use super::{
         CHAT_ID, DETAIL_ID, DetailTab, MIC_ID, QUIT_ID, SETTINGS_ID, ShellCommand, TrayError,
-        load_icon_bytes, map_menu_id, mic_menu_label, synthetic_icon_rgba,
+        map_menu_id, mic_menu_label,
     };
 
     pub(super) struct WindowsTrayBackend {
