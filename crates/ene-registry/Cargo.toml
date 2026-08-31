@@ -28,7 +28,7 @@ htmd = { workspace = true }
 scraper = { workspace = true }
 uuid = { workspace = true }
 process-wrap = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "time", "fs"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "time", "fs"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

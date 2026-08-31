@@ -48,20 +48,16 @@ pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
 
 fn block_on_exec<F>(fut: F) -> Result<Value, String>
 where
-    F: std::future::Future<Output = Result<Value, String>> + Send,
+    F: std::future::Future<Output = Result<Value, String>>,
 {
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|err| err.to_string())?
-                    .block_on(fut)
-            })
-            .join()
-            .map_err(|_| "exec runtime thread panicked".to_owned())?
-    })
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| err.to_string())?
+            .block_on(fut),
+    }
 }
 
 async fn run_direct(args: &Value) -> Result<Value, String> {
