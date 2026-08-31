@@ -2393,6 +2393,7 @@ dependencies = [
  "tray-icon",
  "unic-langid",
  "uuid",
+ "wayland-client",
  "wgpu",
  "windows-sys 0.61.2",
  "winit",

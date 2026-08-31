@@ -62,7 +62,8 @@ base64 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ene-tray-linux = { workspace = true }
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["shape"] }
+wayland-client = { version = "0.31", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = { workspace = true }

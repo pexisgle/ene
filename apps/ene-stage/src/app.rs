@@ -26,8 +26,16 @@ use crate::detail::{self, DetailTab, DetailUiState, DisplayAction, LogKind, Pend
 use crate::gpu::{GpuContext, GpuError};
 use crate::i18n;
 use crate::interaction::{EndResult, GestureTracker, PointerKind, ReactionKind};
+use crate::interaction_controller::{
+    CancelReason, InteractionSnapshot, StageInteractionController, UiInteractionRequest,
+};
 use crate::monitor::{self, MonitorInfo, OverlayMonitorMode};
 use crate::overlay::{AvatarLoad, OverlayError, OverlayWindow};
+use crate::platform::OverlayPlatform;
+use crate::scene::{
+    AvatarPart, InteractionPrimitive, PxRect, SceneHit, StageAnchor, StageAnchorKind, StageScene,
+    VisualPrimitive,
+};
 use crate::settings::{
     DesktopSettings, load_desktop_settings, normalize_displayed_souls, ordered_visible_souls,
     save_desktop_settings,
@@ -207,7 +215,9 @@ pub fn run() -> Result<(), AppError> {
     // the connection alive past the last window drop; declaring this before
     // `app` guarantees it outlives every clipboard worker.
     let event_loop = EventLoop::new().map_err(|err| AppError::Window(err.to_string()))?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(
+        Instant::now() + Duration::from_millis(16),
+    ));
     let _wayland_display: OwnedDisplayHandle = event_loop.owned_display_handle();
 
     let (client, core, session, feeds) = runtime.block_on(async {
@@ -266,6 +276,9 @@ pub fn run() -> Result<(), AppError> {
         caption: None,
         spotlight: None,
         overlay_focus: OverlayFocus::default(),
+        interaction: StageInteractionController::default(),
+        scene: StageScene::new(),
+        overlay_platform: OverlayPlatform::default(),
         last_cursor: None,
         gesture: GestureTracker::default(),
         cursor_poll: None,
@@ -339,6 +352,9 @@ struct StageApp {
     caption: Option<ChromeWindow>,
     spotlight: Option<ChromeWindow>,
     overlay_focus: OverlayFocus,
+    interaction: StageInteractionController,
+    scene: StageScene,
+    overlay_platform: OverlayPlatform,
     last_cursor: Option<PhysicalPosition<f32>>,
     gesture: GestureTracker,
     cursor_poll: Option<crossbeam_channel::Receiver<crate::cursor_poll::GlobalCursor>>,
@@ -416,6 +432,9 @@ impl StageApp {
             caption: None,
             spotlight: None,
             overlay_focus: OverlayFocus::default(),
+            interaction: StageInteractionController::default(),
+            scene: StageScene::new(),
+            overlay_platform: OverlayPlatform::default(),
             last_cursor: None,
             gesture: GestureTracker::default(),
             cursor_poll: None,
@@ -463,18 +482,15 @@ impl StageApp {
         let always_on_top = self.local_settings.always_on_top;
         let preferred_click_through = self.local_settings.overlay_click_through;
         let overlay_transparent = self.overlay.as_ref().is_some_and(|o| o.transparent);
-        let input_state = crate::drag::OverlayInputState {
-            click_through_preferred: preferred_click_through,
-            chrome_protected: protect_chrome,
-            hovering_body: self.surface.hover_soul.is_some(),
-            dragging: self.surface.drag.is_some(),
-        };
+        let window_visible = self
+            .overlay
+            .as_ref()
+            .is_some_and(|o| o.window.is_visible() != Some(false));
+        let has_avatar = self
+            .overlay
+            .as_ref()
+            .is_some_and(OverlayWindow::has_avatars);
 
-        // On X11 an empty input shape stops all pointer events, so a disabled
-        // overlay cannot detect hover on its own. The global cursor poll keeps
-        // the silhouette hole armed by re-checking the pointer against body
-        // AABBs even while input is transparent.
-        let mut allows = crate::drag::allows_input(overlay_transparent, input_state);
         if let Some(cursor) = self
             .cursor_poll
             .as_ref()
@@ -482,7 +498,19 @@ impl StageApp {
         {
             self.last_global_cursor = Some(cursor);
         }
-        if !allows {
+        if self.last_global_cursor.is_none()
+            && let Some([x, y]) = crate::platform::global_cursor_position()
+        {
+            self.last_global_cursor = Some(crate::cursor_poll::GlobalCursor {
+                x: f64::from(x),
+                y: f64::from(y),
+            });
+        }
+
+        // Passive windows receive no pointer events. Re-arm hover from a
+        // global cursor poll (X11 thread or Windows GetCursorPos). This is
+        // not an OS-region hover-rearm; Wayland uses input regions instead.
+        if !self.interaction.cursor_hittest_enabled() {
             let polled = self
                 .last_global_cursor
                 .and_then(|cursor| self.global_cursor_to_physical(cursor));
@@ -499,20 +527,36 @@ impl StageApp {
                         glam::Vec2::new(physical.x, physical.y),
                     );
                     self.surface.hover_soul.clone_from(&hit);
-                    allows = hit.is_some() || self.surface.drag.is_some();
                 }
             }
         }
+
+        self.interaction.sync(InteractionSnapshot {
+            transparent: overlay_transparent,
+            click_through_preferred: preferred_click_through,
+            chrome_protected: protect_chrome,
+            hovering_body: self.surface.hover_soul.is_some(),
+            dragging: self.surface.drag.is_some(),
+            has_avatar,
+            window_visible,
+        });
+        self.interaction.request_ui(self.overlay_ui_request());
 
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
         let level = overlay_window_level(protect_chrome, always_on_top);
         overlay.window.set_window_level(level);
-
-        // The silhouette hole stays open during chrome protection because the
-        // raised chat window still receives its own clicks above the overlay.
-        overlay.set_click_through(!allows);
+        overlay.set_click_through(!self.interaction.cursor_hittest_enabled());
+        self.interaction.apply_to_window(&overlay.window);
+        let visual = self.scene.visual_geometry();
+        let interaction_geom = self.scene.interaction_geometry();
+        self.overlay_platform.apply(
+            &overlay.window,
+            self.interaction.mode(),
+            &visual,
+            &interaction_geom,
+        );
     }
 
     fn open_chat(&mut self, event_loop: &ActiveEventLoop) {
@@ -2630,6 +2674,10 @@ impl StageApp {
     }
 
     fn reload_avatar(&mut self) -> Option<String> {
+        self.surface.hover_soul = None;
+        self.surface.drag = None;
+        self.gesture.cancel_all();
+        self.interaction.cancel(CancelReason::AvatarsChanged);
         let all_specs = self.session.avatar_loads();
         let available_soul_ids: Vec<String> =
             all_specs.iter().map(|spec| spec.soul_id.clone()).collect();
@@ -3190,6 +3238,9 @@ impl StageApp {
             return;
         };
         let cursor = glam::Vec2::new(cursor_physical.x, cursor_physical.y);
+        if matches!(self.scene.hit(cursor), SceneHit::Ui { .. }) {
+            return;
+        }
         let candidates = self.overlay_hit_candidates();
         let Some(soul_id) = crate::drag::hit_test(&candidates, (vw, vh), eye, target, up, cursor)
         else {
@@ -3358,6 +3409,83 @@ impl StageApp {
         if layout_changed {
             self.save_local_settings();
         }
+        self.rebuild_scene();
+    }
+
+    fn overlay_ui_request(&self) -> UiInteractionRequest {
+        let (clickable, focusable) = self.scene.overlay_ui_flags();
+        if focusable {
+            UiInteractionRequest::Focus
+        } else if clickable {
+            UiInteractionRequest::Interactive
+        } else {
+            UiInteractionRequest::None
+        }
+    }
+
+    fn rebuild_scene(&mut self) {
+        let Some(overlay) = self.overlay.as_ref() else {
+            self.scene.set_visuals(Vec::new());
+            self.scene.set_interactions(Vec::new());
+            return;
+        };
+        let size = overlay.window.inner_size();
+        let viewport = (size.width.max(1), size.height.max(1));
+        let mut visuals = Vec::new();
+        let mut interactions = Vec::new();
+        let mut anchors = Vec::new();
+        const PARTS: [AvatarPart; 5] = [
+            AvatarPart::Body,
+            AvatarPart::Head,
+            AvatarPart::Torso,
+            AvatarPart::LeftHand,
+            AvatarPart::RightHand,
+        ];
+        for slot in &overlay.slots {
+            let view_proj = slot.avatar.camera().debug_proj() * slot.avatar.camera().debug_view();
+            let (min, max) = slot.avatar.world_aabb();
+            let body = world_aabb_to_px(min, max, view_proj, viewport);
+            visuals.push(VisualPrimitive::AvatarBounds {
+                soul_id: slot.soul_id.clone(),
+                aabb: body,
+            });
+            for part in PARTS {
+                if let Some((pmin, pmax)) = slot.avatar.part_world_aabb(part) {
+                    interactions.push(InteractionPrimitive::AvatarPart {
+                        soul_id: slot.soul_id.clone(),
+                        part,
+                        aabb: world_aabb_to_px(pmin, pmax, view_proj, viewport),
+                    });
+                }
+            }
+            for (kind, bone) in [
+                (StageAnchorKind::Head, "head"),
+                (StageAnchorKind::Chest, "chest"),
+                (StageAnchorKind::LeftHand, "lefthand"),
+                (StageAnchorKind::RightHand, "righthand"),
+            ] {
+                let Some(world) = slot.avatar.overlay_bone_world(bone).or_else(|| {
+                    if kind == StageAnchorKind::Head {
+                        Some(slot.avatar.head_world())
+                    } else {
+                        None
+                    }
+                }) else {
+                    continue;
+                };
+                let (position, offscreen, behind) = project_world_to_px(world, view_proj, viewport);
+                anchors.push(StageAnchor {
+                    soul_id: slot.soul_id.clone(),
+                    kind,
+                    position,
+                    offscreen,
+                    behind_camera: behind,
+                });
+            }
+        }
+        self.scene.set_visuals(visuals);
+        self.scene.set_interactions(interactions);
+        self.scene.set_anchors(anchors);
     }
 
     fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {
@@ -3694,6 +3822,9 @@ impl ApplicationHandler for StageApp {
                     self.cursor_poll = Some(rx);
                 }
                 self.overlay = Some(overlay);
+                if let Some(overlay) = self.overlay.as_ref() {
+                    self.overlay_platform = OverlayPlatform::attach(&overlay.window);
+                }
                 if transparency_fallback {
                     self.surface.overlay_notice = i18n::fl("overlay-transparency-unavailable");
                     self.detail.core_status = self.surface.overlay_notice.clone();
@@ -3726,6 +3857,8 @@ impl ApplicationHandler for StageApp {
                 WindowEvent::Focused(false) => {
                     self.gesture.cancel_all();
                     self.surface.drag = None;
+                    self.surface.hover_soul = None;
+                    self.interaction.cancel(CancelReason::FocusLost);
                     self.sync_overlay_interaction();
                 }
                 WindowEvent::Resized(size) => {
@@ -3903,10 +4036,6 @@ impl ApplicationHandler for StageApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::Poll);
-        if self.overlay_focus.expire_pending_loss(Instant::now()) {
-            self.sync_overlay_interaction();
-        }
         self.drain_async_results();
         self.poll_pending_approvals();
         self.drain_surface_events();
@@ -3919,6 +4048,9 @@ impl ApplicationHandler for StageApp {
         if self.surface.history.messages.is_empty() && !self.session.history().messages.is_empty() {
             self.seed_history_from_session();
         }
+        if self.overlay_focus.expire_pending_loss(Instant::now()) {
+            self.sync_overlay_interaction();
+        }
         self.tick_overlay();
         self.paint_chrome(event_loop);
         self.process_overlay_monitor_action(event_loop);
@@ -3929,7 +4061,11 @@ impl ApplicationHandler for StageApp {
         }
         if self.surface.quit {
             event_loop.exit();
+            return;
         }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(16),
+        ));
     }
 }
 
@@ -4025,6 +4161,72 @@ fn map_turn_err(err: &str) -> String {
     } else {
         err.to_owned()
     }
+}
+
+fn project_world_to_px(
+    world: glam::Vec3,
+    view_proj: glam::Mat4,
+    viewport: (u32, u32),
+) -> (glam::Vec2, bool, bool) {
+    let clip = view_proj * world.extend(1.0);
+    let behind = clip.w <= 0.0;
+    let ndc = if clip.w.abs() <= f32::EPSILON {
+        glam::Vec2::ZERO
+    } else {
+        glam::Vec2::new(clip.x / clip.w, clip.y / clip.w)
+    };
+    let width = viewport.0.max(1) as f32;
+    let height = viewport.1.max(1) as f32;
+    let mut px = glam::Vec2::new(
+        ndc.x.mul_add(0.5, 0.5) * width,
+        (0.5 - ndc.y * 0.5) * height,
+    );
+    let offscreen = px.x < 0.0 || px.y < 0.0 || px.x > width || px.y > height || behind;
+    px.x = px.x.clamp(0.0, width);
+    px.y = px.y.clamp(0.0, height);
+    (px, offscreen, behind)
+}
+
+fn world_aabb_to_px(
+    min: glam::Vec3,
+    max: glam::Vec3,
+    view_proj: glam::Mat4,
+    viewport: (u32, u32),
+) -> PxRect {
+    let corners = [
+        glam::Vec3::new(min.x, min.y, min.z),
+        glam::Vec3::new(min.x, min.y, max.z),
+        glam::Vec3::new(min.x, max.y, min.z),
+        glam::Vec3::new(min.x, max.y, max.z),
+        glam::Vec3::new(max.x, min.y, min.z),
+        glam::Vec3::new(max.x, min.y, max.z),
+        glam::Vec3::new(max.x, max.y, min.z),
+        glam::Vec3::new(max.x, max.y, max.z),
+    ];
+    let width = viewport.0.max(1) as f32;
+    let height = viewport.1.max(1) as f32;
+    let mut min_px = glam::Vec2::splat(f32::INFINITY);
+    let mut max_px = glam::Vec2::splat(f32::NEG_INFINITY);
+    for corner in corners {
+        let clip = view_proj * corner.extend(1.0);
+        let ndc = if clip.w.abs() <= f32::EPSILON {
+            glam::Vec2::ZERO
+        } else {
+            glam::Vec2::new(clip.x / clip.w, clip.y / clip.w)
+        };
+        let px = glam::Vec2::new(
+            ndc.x.mul_add(0.5, 0.5) * width,
+            (0.5 - ndc.y * 0.5) * height,
+        );
+        min_px = min_px.min(px);
+        max_px = max_px.max(px);
+    }
+    PxRect::new(
+        min_px.x,
+        min_px.y,
+        (max_px.x - min_px.x).max(1.0),
+        (max_px.y - min_px.y).max(1.0),
+    )
 }
 
 fn position_changed(before: [f32; 2], after: [f32; 2]) -> bool {

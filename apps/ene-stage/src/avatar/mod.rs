@@ -552,6 +552,91 @@ impl CompanionAvatar {
         )
     }
 
+    #[must_use]
+    pub fn overlay_bone_world(&self, bone: &str) -> Option<Vec3> {
+        let entry = self.model.humanoid.by_name(bone)?;
+        let pos = *self.model.nodes.world_positions.get(entry.node)?;
+        let (mat, _) = self.overlay_model_transform();
+        Some((mat * pos.extend(1.0)).truncate())
+    }
+
+    /// Coarse CPU collider AABB for one body part. `None` when the bone is missing.
+    #[must_use]
+    pub fn part_world_aabb(&self, part: crate::scene::AvatarPart) -> Option<(Vec3, Vec3)> {
+        match part {
+            crate::scene::AvatarPart::Body => Some(self.world_aabb()),
+            crate::scene::AvatarPart::Head => self.sphere_aabb(&["head", "neck"], 0.12),
+            crate::scene::AvatarPart::Torso => {
+                self.sphere_aabb(&["chest", "upperchest", "spine"], 0.16)
+            }
+            crate::scene::AvatarPart::LeftHand => {
+                self.sphere_aabb(&["lefthand", "leftmiddleproximal"], 0.07)
+            }
+            crate::scene::AvatarPart::RightHand => {
+                self.sphere_aabb(&["righthand", "rightmiddleproximal"], 0.07)
+            }
+        }
+    }
+
+    fn sphere_aabb(&self, bones: &[&str], radius: f32) -> Option<(Vec3, Vec3)> {
+        let center = bones
+            .iter()
+            .find_map(|name| self.overlay_bone_world(name))?;
+        Some((center - Vec3::splat(radius), center + Vec3::splat(radius)))
+    }
+
+    #[must_use]
+    pub fn needs_redraw(&self) -> bool {
+        self.vrma.is_some()
+            || self.pending_visemes.is_some()
+            || self.look_at_target.is_some()
+            || self.blinking > 0.0
+            || self.expression_cue.is_some()
+            || self.interaction_feedback > 0.0
+    }
+
+    pub(crate) fn push_part_collider_wires(&self, debug: &mut DebugRenderer) {
+        const PARTS: [crate::scene::AvatarPart; 4] = [
+            crate::scene::AvatarPart::Head,
+            crate::scene::AvatarPart::Torso,
+            crate::scene::AvatarPart::LeftHand,
+            crate::scene::AvatarPart::RightHand,
+        ];
+        let colors = [
+            Vec4::new(1.0, 0.45, 0.2, 1.0),
+            Vec4::new(0.3, 0.9, 0.4, 1.0),
+            Vec4::new(0.95, 0.85, 0.2, 1.0),
+            Vec4::new(0.95, 0.85, 0.2, 1.0),
+        ];
+        for (part, color) in PARTS.iter().zip(colors) {
+            let Some((min, max)) = self.part_world_aabb(*part) else {
+                continue;
+            };
+            let corners = aabb_corners(min, max);
+            const EDGES: [(usize, usize); 12] = [
+                (0, 1),
+                (0, 2),
+                (0, 4),
+                (1, 3),
+                (1, 5),
+                (2, 3),
+                (2, 6),
+                (3, 7),
+                (4, 5),
+                (4, 6),
+                (5, 7),
+                (6, 7),
+            ];
+            for (a, b) in EDGES {
+                debug.push_line(DebugLine {
+                    a: corners[a],
+                    b: corners[b],
+                    color,
+                });
+            }
+        }
+    }
+
     /// Clamps a requested translation so the rendered AABB stays inside the
     /// camera viewport, accounting for the current model scale and aspect.
     #[must_use]
