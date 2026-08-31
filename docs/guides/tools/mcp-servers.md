@@ -31,7 +31,8 @@ use.
 ```
 
 `transport` is `stdio` (spawn `command` + `args`) or `http` (Streamable HTTP
-JSON-RPC POST to `url`). After `tools/list`, the bridge also calls
+JSON-RPC POST to `url`). Stdio follows the MCP spec via `rmcp`: one JSON-RPC
+message per line. After `tools/list`, the bridge also calls
 `resources/list` (snapshots under `<workspace>/mcp-context/`, injected as
 `mcp.resources`) and `prompts/list` (written as `SKILL.md` under the data-dir
 skills home). Servers that omit those methods are fine. There is no

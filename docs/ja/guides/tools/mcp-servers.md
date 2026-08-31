@@ -29,7 +29,8 @@
 ```
 
 `transport` は `stdio`（`command` + `args` を spawn）か `http`（`url` への
-Streamable HTTP JSON-RPC POST）です。`tools/list` のあと、ブリッジは
+Streamable HTTP JSON-RPC POST）です。stdio は `rmcp` 経由で MCP 仕様どおり
+1 行 1 JSON-RPC メッセージです。`tools/list` のあと、ブリッジは
 `resources/list`（`<workspace>/mcp-context/` にスナップショットし、`mcp.resources`
 として注入）
 と `prompts/list`（data-dir の skills 配下へ `SKILL.md`）も呼びます。

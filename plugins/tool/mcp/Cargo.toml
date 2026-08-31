@@ -2,7 +2,7 @@
 name = "ene-tool-mcp"
 version.workspace = true
 edition.workspace = true
-description = "MCP stdio bridge plugin (handwritten profile rows, P-603)"
+description = "MCP stdio / Streamable HTTP bridge plugin"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
@@ -15,12 +15,12 @@ path = "src/main.rs"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 ene-plugin-ipc = { workspace = true }
-reqwest = { workspace = true, features = ["json", "rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+rmcp = { version = "3.1", default-features = false, features = ["client", "macros", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 
 [dev-dependencies]
 ene-fiber = { workspace = true }
