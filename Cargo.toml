@@ -41,7 +41,7 @@ rodio = { version = "0.22", default-features = false }
 fluent-bundle = "0.16"
 fluent-syntax = "0.12"
 crossbeam-channel = "0.5"
-gtk = "0.18.2"
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
 i18n-embed-fl = "0.10"
 
@@ -120,6 +120,7 @@ ene-body = { path = "crates/ene-body" }
 ene-work = { path = "crates/ene-work" }
 ene-sandbox = { path = "crates/ene-sandbox" }
 ene-vrm = { path = "crates/ene-vrm" }
+ene-tray-linux = { path = "crates/ene-tray-linux" }
 
 [workspace.metadata.cargo-husky]
 run-for-all = true

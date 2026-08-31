@@ -13,7 +13,7 @@ use crate::event::{
         BeatPulse, CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
         PendingCandidatesCount,
     },
-    lifecycle::{TickGtk, WindowCloseRequested},
+    lifecycle::WindowCloseRequested,
     settings::OpenSettings,
     ui_action::SettingsActionEvent,
 };
@@ -102,7 +102,6 @@ pub fn build_app(
     app.add_message::<OpenChat>();
     app.add_message::<SettingsActionEvent>();
     app.add_message::<PendingCandidatesCount>();
-    app.add_message::<TickGtk>();
     app.add_message::<crate::event::lifecycle::RuntimeDisconnected>();
     app.add_systems(Update, crate::caption_overlay::feed_caption_overlay_system);
     app

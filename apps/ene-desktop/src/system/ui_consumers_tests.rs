@@ -271,8 +271,6 @@ fn emote_token_emits_message_via_pump() {
     world.init_resource::<Messages<PendingCandidatesCount>>();
     world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
     #[cfg(target_os = "linux")]
-    world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
-
     world
         .resource::<EventChannels>()
         .tx

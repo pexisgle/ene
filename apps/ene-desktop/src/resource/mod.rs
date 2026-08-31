@@ -18,10 +18,8 @@
 //!   in `First`.
 //! - [`emotion_pipeline::EmotionPipelineState`] — drained by
 //!   `apply_emotions_system` and read by the render path.
-//! - `resource::tray::GtkReady` — Linux-only `NonSend`-friendly
-//!   wrapper around the tray handle, consumed by `tick_gtk_system`.
 //! - [`tokio::TokioHandle`] — the tokio runtime handle used to spawn
-//!   async subsystems (AI bridge, tray pump).
+//!   async subsystems (AI bridge, tray service).
 //!
 //! Per-frame render parameters stay on `Runtime`, not in resources,
 //! because they are GPU- and `!Send`/`!Sync`-bound.

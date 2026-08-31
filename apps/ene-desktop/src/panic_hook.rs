@@ -1,4 +1,4 @@
-//! Custom panic hook that surfaces a localized dialog and log location.
+//! Custom panic hook that surfaces a localized message and log location.
 
 use std::panic::PanicHookInfo;
 use std::path::PathBuf;
@@ -44,21 +44,5 @@ fn log_dir() -> PathBuf {
     reason = "last-resort fallback when no GUI dialog backend is available while the process is already panicking"
 )]
 fn show_fatal_dialog(title: &str, body: &str) {
-    #[cfg(target_os = "linux")]
-    {
-        if gtk::init().is_ok() {
-            use gtk::prelude::*;
-            let dialog = gtk::MessageDialog::new(
-                None::<&gtk::Window>,
-                gtk::DialogFlags::MODAL,
-                gtk::MessageType::Error,
-                gtk::ButtonsType::Ok,
-                &format!("{title}\n\n{body}"),
-            );
-            dialog.run();
-            dialog.close();
-            return;
-        }
-    }
     eprintln!("{title}\n{body}");
 }

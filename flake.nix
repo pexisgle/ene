@@ -23,20 +23,9 @@
         };
         inherit (pkgs) lib;
 
-        # Create compatibility symlinks for crates expecting standard libappindicator3.
-        # This replaces running dynamic shell commands on startup (mktemp / ln -sf).
-        appindicatorCompat = pkgs.runCommand "appindicator-compat" { } ''
-          mkdir -p $out/lib
-          ln -sfn ${pkgs.libayatana-appindicator}/lib/libayatana-appindicator3.so.1 $out/lib/libappindicator3.so.1
-          ln -sfn ${pkgs.libayatana-appindicator}/lib/libayatana-appindicator3.so.1 $out/lib/libappindicator3.so
-        '';
-
         isLinux = lib.strings.hasInfix "linux" system;
 
-        # Shared shell for Linux local/dev (`default`) and a slim variant (`ci`)
-        # without Windows cross, Chromium, sccache, and git-cliff. Native Windows
-        # development uses the MSVC toolchain instead of this shell. GitHub Actions
-        # provisions Linux dependencies via apt, not this shell.
+        # Native Linux dependencies for CI and local development.
         mkEneShell =
           {
             withCrossWindows ? false,
@@ -68,7 +57,7 @@
                     pkgs.clang
                     pkgs.cmake
                     pkgs.alsa-lib
-                    pkgs.libayatana-appindicator
+                    pkgs.dbus
                     pkgs.mesa
                     pkgs.vulkan-loader
                     pkgs.vulkan-headers
@@ -83,11 +72,6 @@
                     pkgs.pipewire
                     pkgs.wayland
                     pkgs.wayland-protocols
-                    pkgs.glib
-                    pkgs.pango
-                    pkgs.cairo
-                    pkgs.gdk-pixbuf
-                    pkgs.gtk3
                     pkgs.libxkbcommon
                     pkgs.xdotool
                   ]
@@ -107,10 +91,6 @@
                   pkgs.libxcursor
                   pkgs.libxkbcommon
                   pkgs.xdotool
-                ]
-                ++ lib.optionals isLinux [
-                  pkgs.libayatana-appindicator
-                  appindicatorCompat
                 ]
               );
               LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
