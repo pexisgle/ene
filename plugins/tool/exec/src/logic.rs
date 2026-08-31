@@ -1,16 +1,25 @@
 use ene_plugin_ipc::ToolSpecWire;
 use ene_registry::spec;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use serde_json::{Value, json};
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
 
 const STDOUT_CAP: usize = 1_048_576;
 const STDERR_CAP: usize = 1_048_576;
 const COMBINED_CAP: usize = 2_097_152;
+#[cfg(unix)]
+const TERM_GRACE: Duration = Duration::from_secs(2);
+const KILL_WAIT: Duration = Duration::from_secs(1);
 
 pub(crate) fn specs() -> Vec<ToolSpecWire> {
     vec![
@@ -31,13 +40,31 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
 
 pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "exec.run" => run_direct(args),
-        "exec.shell" => run_shell(args),
+        "exec.run" => block_on_exec(run_direct(args)),
+        "exec.shell" => block_on_exec(run_shell(args)),
         other => Err(format!("unknown builtin {other}")),
     }
 }
 
-fn run_direct(args: &Value) -> Result<Value, String> {
+fn block_on_exec<F>(fut: F) -> Result<Value, String>
+where
+    F: std::future::Future<Output = Result<Value, String>> + Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|err| err.to_string())?
+                    .block_on(fut)
+            })
+            .join()
+            .map_err(|_| "exec runtime thread panicked".to_owned())?
+    })
+}
+
+async fn run_direct(args: &Value) -> Result<Value, String> {
     let command = args
         .get("command")
         .and_then(Value::as_str)
@@ -57,10 +84,10 @@ fn run_direct(args: &Value) -> Result<Value, String> {
         .unwrap_or_default();
     let mut cmd = Command::new(command);
     cmd.args(&extra);
-    run_process(&mut cmd, args)
+    run_process(cmd, args).await
 }
 
-fn run_shell(args: &Value) -> Result<Value, String> {
+async fn run_shell(args: &Value) -> Result<Value, String> {
     let script = args
         .get("command")
         .and_then(Value::as_str)
@@ -68,8 +95,7 @@ fn run_shell(args: &Value) -> Result<Value, String> {
     if script.is_empty() {
         return Err("missing command".to_owned());
     }
-    let mut cmd = shell_command(script);
-    run_process(&mut cmd, args)
+    run_process(shell_command(script), args).await
 }
 
 fn shell_command(script: &str) -> Command {
@@ -87,26 +113,28 @@ fn shell_command(script: &str) -> Command {
     }
 }
 
-fn run_process(cmd: &mut Command, args: &Value) -> Result<Value, String> {
+async fn run_process(mut cmd: Command, args: &Value) -> Result<Value, String> {
     let cwd = resolve_cwd(args)?;
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
-    apply_env(cmd);
+    apply_env(&mut cmd);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    prepare_process(cmd);
     let timeout_ms = args
         .get("timeout_ms")
         .and_then(Value::as_u64)
         .unwrap_or(30_000);
     let timeout = Duration::from_millis(timeout_ms.max(1));
-    let child = cmd.spawn().map_err(|err| err.to_string())?;
-    let pid = child.id();
-    #[cfg(all(windows, feature = "win32-job"))]
-    let _job = crate::win32_job::assign(&child)?;
-    let captured = read_with_timeout(child, pid, timeout)?;
+    let mut wrap = CommandWrap::from(cmd);
+    #[cfg(unix)]
+    wrap.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    wrap.wrap(JobObject);
+    wrap.wrap(KillOnDrop);
+    let mut child = wrap.spawn().map_err(|err| err.to_string())?;
+    let captured = read_with_timeout(child.as_mut(), timeout).await?;
     Ok(output_value(&captured))
 }
 
@@ -177,15 +205,6 @@ fn env_is_secret(key: &str) -> bool {
         || upper.starts_with("AWS_")
         || upper.ends_with("_KEY")
 }
-
-#[cfg(unix)]
-fn prepare_process(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    cmd.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn prepare_process(_cmd: &mut Command) {}
 
 struct CapturedOutput {
     timed_out: bool,
@@ -259,59 +278,42 @@ impl CapBuffers {
     }
 }
 
-fn read_with_timeout(
-    mut child: Child,
-    pid: u32,
+async fn read_with_timeout(
+    child: &mut dyn ChildWrapper,
     timeout: Duration,
 ) -> Result<CapturedOutput, String> {
     let stdout = child
-        .stdout
+        .stdout()
         .take()
         .ok_or_else(|| "stdout pipe missing".to_owned())?;
     let stderr = child
-        .stderr
+        .stderr()
         .take()
         .ok_or_else(|| "stderr pipe missing".to_owned())?;
     let caps = Arc::new(Mutex::new(CapBuffers::new()));
     let stdout_caps = Arc::clone(&caps);
-    let stdout_thread = thread::spawn(move || {
-        read_stream(stdout, &stdout_caps, true);
-    });
+    let stdout_task = tokio::spawn(async move { read_stream(stdout, stdout_caps, true).await });
     let stderr_caps = Arc::clone(&caps);
-    let stderr_thread = thread::spawn(move || {
-        read_stream(stderr, &stderr_caps, false);
-    });
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        drop(tx.send(child.wait()));
-    });
-    match rx.recv_timeout(timeout) {
+    let stderr_task = tokio::spawn(async move { read_stream(stderr, stderr_caps, false).await });
+    match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => {
-            drop(stdout_thread.join());
-            drop(stderr_thread.join());
-            let caps = caps.lock().map_err(|_| "output lock poisoned".to_owned())?;
-            Ok(CapturedOutput {
-                timed_out: false,
-                exit_code: status.code(),
-                stdout: caps.stdout.clone(),
-                stderr: caps.stderr.clone(),
-                stdout_truncated: caps.stdout_truncated,
-                stderr_truncated: caps.stderr_truncated,
-                truncated_bytes: caps.truncated_bytes,
-            })
+            drop(stdout_task.await);
+            drop(stderr_task.await);
+            snapshot(false, status.code(), &caps)
         }
         Ok(Err(err)) => Err(err.to_string()),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            finish_timeout(pid, &rx, &caps, stdout_thread, stderr_thread)
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err("wait thread exited early".to_owned()),
+        Err(_) => finish_timeout(child, &caps, stdout_task, stderr_task).await,
     }
 }
 
-fn read_stream(mut pipe: impl Read + Send + 'static, caps: &Arc<Mutex<CapBuffers>>, stdout: bool) {
-    let mut buf = [0_u8; 8192];
+async fn read_stream(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+    caps: Arc<Mutex<CapBuffers>>,
+    stdout: bool,
+) {
+    let mut buf = vec![0_u8; 8192];
     loop {
-        let read = match pipe.read(&mut buf) {
+        let read = match pipe.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
@@ -325,53 +327,52 @@ fn read_stream(mut pipe: impl Read + Send + 'static, caps: &Arc<Mutex<CapBuffers
     }
 }
 
-fn finish_timeout(
-    pid: u32,
-    rx: &mpsc::Receiver<std::io::Result<std::process::ExitStatus>>,
+async fn finish_timeout(
+    child: &mut dyn ChildWrapper,
     caps: &Arc<Mutex<CapBuffers>>,
-    stdout_thread: thread::JoinHandle<()>,
-    stderr_thread: thread::JoinHandle<()>,
+    stdout_task: tokio::task::JoinHandle<()>,
+    stderr_task: tokio::task::JoinHandle<()>,
 ) -> Result<CapturedOutput, String> {
-    signal_tree(pid, "TERM");
-    match rx.recv_timeout(Duration::from_secs(2)) {
+    #[cfg(unix)]
+    {
+        drop(child.signal(libc::SIGTERM));
+        match tokio::time::timeout(TERM_GRACE, child.wait()).await {
+            Ok(Ok(status)) => {
+                drop(stdout_task.await);
+                drop(stderr_task.await);
+                return snapshot(true, status.code(), caps);
+            }
+            Ok(Err(err)) => return Err(err.to_string()),
+            Err(_) => {}
+        }
+    }
+    drop(child.start_kill());
+    match tokio::time::timeout(KILL_WAIT, child.wait()).await {
         Ok(Ok(status)) => {
-            drop(stdout_thread.join());
-            drop(stderr_thread.join());
-            let caps = caps.lock().map_err(|_| "output lock poisoned".to_owned())?;
-            Ok(CapturedOutput {
-                timed_out: true,
-                exit_code: status.code(),
-                stdout: caps.stdout.clone(),
-                stderr: caps.stderr.clone(),
-                stdout_truncated: caps.stdout_truncated,
-                stderr_truncated: caps.stderr_truncated,
-                truncated_bytes: caps.truncated_bytes,
-            })
+            drop(stdout_task.await);
+            drop(stderr_task.await);
+            snapshot(true, status.code(), caps)
         }
         Ok(Err(err)) => Err(err.to_string()),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            signal_tree(pid, "KILL");
-            match rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(Ok(status)) => {
-                    drop(stdout_thread.join());
-                    drop(stderr_thread.join());
-                    let caps = caps.lock().map_err(|_| "output lock poisoned".to_owned())?;
-                    Ok(CapturedOutput {
-                        timed_out: true,
-                        exit_code: status.code(),
-                        stdout: caps.stdout.clone(),
-                        stderr: caps.stderr.clone(),
-                        stdout_truncated: caps.stdout_truncated,
-                        stderr_truncated: caps.stderr_truncated,
-                        truncated_bytes: caps.truncated_bytes,
-                    })
-                }
-                Ok(Err(err)) => Err(err.to_string()),
-                Err(_) => Err("exec timed out".to_owned()),
-            }
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err("wait thread exited early".to_owned()),
+        Err(_) => Err("exec timed out".to_owned()),
     }
+}
+
+fn snapshot(
+    timed_out: bool,
+    exit_code: Option<i32>,
+    caps: &Arc<Mutex<CapBuffers>>,
+) -> Result<CapturedOutput, String> {
+    let caps = caps.lock().map_err(|_| "output lock poisoned".to_owned())?;
+    Ok(CapturedOutput {
+        timed_out,
+        exit_code,
+        stdout: caps.stdout.clone(),
+        stderr: caps.stderr.clone(),
+        stdout_truncated: caps.stdout_truncated,
+        stderr_truncated: caps.stderr_truncated,
+        truncated_bytes: caps.truncated_bytes,
+    })
 }
 
 fn output_value(output: &CapturedOutput) -> Value {
@@ -384,28 +385,6 @@ fn output_value(output: &CapturedOutput) -> Value {
         "stderr_truncated": output.stderr_truncated,
         "truncated_bytes": output.truncated_bytes,
     })
-}
-
-fn signal_tree(pid: u32, kind: &str) {
-    #[cfg(unix)]
-    {
-        let flag = if kind == "TERM" { "-TERM" } else { "-KILL" };
-        let group = format!("-{pid}");
-        drop(
-            Command::new("kill")
-                .args([flag, "--", group.as_str()])
-                .status(),
-        );
-    }
-    #[cfg(not(unix))]
-    {
-        let pid = pid.to_string();
-        let mut args = vec!["/PID", pid.as_str(), "/T"];
-        if kind != "TERM" {
-            args.push("/F");
-        }
-        drop(Command::new("taskkill").args(args).status());
-    }
 }
 
 #[cfg(test)]

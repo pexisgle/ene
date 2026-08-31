@@ -7,10 +7,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[features]
-# Declared so path-included exec logic.rs cfg checks are known; leave disabled.
-win32-job = []
-
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
@@ -31,7 +27,11 @@ url = { workspace = true }
 htmd = { workspace = true }
 scraper = { workspace = true }
 uuid = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "time", "fs"] }
+process-wrap = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "time", "fs"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { workspace = true }
