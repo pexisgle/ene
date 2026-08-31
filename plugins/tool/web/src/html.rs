@@ -1,6 +1,9 @@
+use scraper::{ElementRef, Html, Node, Selector};
 use serde_json::{Value, json};
 
 pub const MAX_CONVERT_CHARS: usize = 64 * 1024;
+
+const SKIP_TAGS: &[&str] = &["script", "style", "nav", "noscript"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FetchFormat {
@@ -55,10 +58,9 @@ pub(crate) fn render(
     }
     let htmlish = content_type.to_ascii_lowercase().contains("html");
     let (title, markdown, text) = if htmlish {
-        let readable = readable_html(body);
         let title = page_title(body);
-        let markdown = html_to_markdown(&readable);
-        let text = strip_tags(&readable);
+        let markdown = html_to_markdown(body);
+        let text = html_to_text(body);
         (title, markdown, text)
     } else {
         (None, body.to_owned(), body.to_owned())
@@ -95,218 +97,49 @@ fn cap_chars(text: &str) -> String {
 }
 
 fn page_title(html: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let start = lower.find("<title")?;
-    let after = html.get(start..)?;
-    let gt = after.find('>')?;
-    let rest = after.get(gt + 1..)?;
-    let end_rel = rest.to_ascii_lowercase().find("</title>")?;
-    let raw = rest.get(..end_rel)?;
-    let title = strip_tags(raw);
+    let document = Html::parse_document(html);
+    let selector = Selector::parse("title").ok()?;
+    let title = document
+        .select(&selector)
+        .next()
+        .map(|element| collapse_ws(&element.text().collect::<String>()))?;
     if title.is_empty() { None } else { Some(title) }
 }
 
-fn readable_html(html: &str) -> String {
-    let mut out = html.to_owned();
-    for tag in ["script", "style", "nav", "noscript"] {
-        out = strip_elements(&out, tag);
-    }
-    out
-}
-
-fn strip_elements(html: &str, tag: &str) -> String {
-    let open = format!("<{tag}");
-    let close = format!("</{tag}>");
-    let mut rest = html;
-    let mut out = String::with_capacity(html.len());
-    loop {
-        let lower = rest.to_ascii_lowercase();
-        let Some(start) = lower.find(&open) else {
-            out.push_str(rest);
-            break;
-        };
-        out.push_str(&rest[..start]);
-        let after_open = &rest[start..];
-        let Some(gt) = after_open.find('>') else {
-            break;
-        };
-        let after_gt = &after_open[gt + 1..];
-        let close_at = after_gt.to_ascii_lowercase().find(&close);
-        rest = close_at.map_or("", |idx| after_gt.get(idx + close.len()..).unwrap_or(""));
-    }
-    out
-}
-
 pub(crate) fn html_to_markdown(html: &str) -> String {
+    let converter = htmd::HtmlToMarkdown::builder()
+        .skip_tags(SKIP_TAGS.to_vec())
+        .build();
+    converter.convert(html).unwrap_or_default()
+}
+
+fn html_to_text(html: &str) -> String {
+    let document = Html::parse_document(html);
     let mut out = String::new();
-    let mut rest = html;
-    let mut in_tag = false;
-    let mut tag = String::new();
-    let mut href: Option<String> = None;
-    let mut link_text = String::new();
-    let mut in_link = false;
-    while let Some(ch) = rest.chars().next() {
-        let n = ch.len_utf8();
-        rest = &rest[n..];
-        if ch == '<' {
-            in_tag = true;
-            tag.clear();
-            continue;
-        }
-        if ch == '>' && in_tag {
-            in_tag = false;
-            let parsed = parse_tag(&tag);
-            apply_tag(&parsed, &mut out, &mut href, &mut in_link, &mut link_text);
-            continue;
-        }
-        if in_tag {
-            tag.push(ch);
-            continue;
-        }
-        if in_link {
-            link_text.push(ch);
-        } else {
-            push_text(&mut out, ch);
-        }
-    }
-    collapse_md(&out)
+    collect_text(document.root_element(), &mut out);
+    collapse_ws(&out)
 }
 
-struct ParsedTag {
-    name: String,
-    closing: bool,
-    href: Option<String>,
-}
-
-fn parse_tag(raw: &str) -> ParsedTag {
-    let raw = raw.trim();
-    let closing = raw.starts_with('/');
-    let body = raw.strip_prefix('/').unwrap_or(raw);
-    let name = body
-        .split(|c: char| c.is_whitespace() || c == '/')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let href = attr(body, "href");
-    ParsedTag {
-        name,
-        closing,
-        href,
-    }
-}
-
-fn attr(tag: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}=");
-    let lower = tag.to_ascii_lowercase();
-    let at = lower.find(&needle)?;
-    let rest = tag.get(at + needle.len()..)?.trim_start();
-    let quote = rest.chars().next()?;
-    if quote == '"' || quote == '\'' {
-        let inner = rest.get(1..)?;
-        let end = inner.find(quote)?;
-        Some(inner[..end].to_owned())
-    } else {
-        Some(
-            rest.split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_end_matches('/')
-                .to_owned(),
-        )
-    }
-}
-
-fn apply_tag(
-    tag: &ParsedTag,
-    out: &mut String,
-    href: &mut Option<String>,
-    in_link: &mut bool,
-    link_text: &mut String,
-) {
-    match (tag.name.as_str(), tag.closing) {
-        ("br", _) => out.push('\n'),
-        ("p" | "div" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li", true) => {
-            out.push_str("\n\n");
-        }
-        ("p" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "pre", false) => {
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-            match tag.name.as_str() {
-                "h1" => out.push_str("# "),
-                "h2" => out.push_str("## "),
-                "h3" => out.push_str("### "),
-                "h4" => out.push_str("#### "),
-                "h5" => out.push_str("##### "),
-                "h6" => out.push_str("###### "),
-                "li" => out.push_str("- "),
-                "pre" => out.push_str("```\n"),
-                _ => {}
-            }
-        }
-        ("pre", true) => out.push_str("\n```\n"),
-        ("a", false) => {
-            href.clone_from(&tag.href);
-            *in_link = true;
-            link_text.clear();
-        }
-        ("a", true) => {
-            let text = collapse_ws(link_text);
-            if let Some(url) = href.take()
-                && !text.is_empty()
-            {
-                out.push('[');
-                out.push_str(&text);
-                out.push_str("](");
-                out.push_str(&url);
-                out.push(')');
-            } else {
-                out.push_str(&text);
-            }
-            *in_link = false;
-            link_text.clear();
-        }
-        _ => {}
-    }
-}
-
-fn push_text(out: &mut String, ch: char) {
-    if ch == '\0' {
+fn collect_text(element: ElementRef<'_>, out: &mut String) {
+    if SKIP_TAGS.contains(&element.value().name()) {
         return;
     }
-    out.push(ch);
-}
-
-fn collapse_md(text: &str) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let trimmed = collapse_ws(line);
-        if trimmed.is_empty() {
-            if lines.last().is_none_or(|row| !row.is_empty()) {
-                lines.push(String::new());
+    for child in element.children() {
+        match child.value() {
+            Node::Text(text) => out.push_str(text),
+            Node::Element(_) => {
+                if let Some(child_el) = ElementRef::wrap(child) {
+                    collect_text(child_el, out);
+                }
             }
-        } else {
-            lines.push(trimmed);
-        }
-    }
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
-    }
-    lines.join("\n")
-}
-
-pub(crate) fn strip_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
             _ => {}
         }
     }
-    collapse_ws(&out)
+}
+
+pub(crate) fn strip_tags(html: &str) -> String {
+    let fragment = Html::parse_fragment(html);
+    collapse_ws(&fragment.root_element().text().collect::<String>())
 }
 
 fn collapse_ws(text: &str) -> String {
@@ -340,13 +173,19 @@ mod tests {
 
     #[test]
     fn markdown_keeps_headings_paragraphs_and_links() {
-        let md = html_to_markdown(&super::readable_html(ARTICLE));
+        let md = html_to_markdown(ARTICLE);
         assert!(md.contains("# City"), "{md}");
         assert!(
             md.contains("[Tokyo](https://example.invalid/tokyo)"),
             "{md}"
         );
-        assert!(md.contains("- trains"), "{md}");
+        assert!(
+            md.lines().any(|line| {
+                let trimmed = line.trim_start();
+                (trimmed.starts_with('-') || trimmed.starts_with('*')) && trimmed.contains("trains")
+            }),
+            "{md}"
+        );
         assert!(!md.contains("secret()"), "{md}");
         assert!(!md.contains("Home"), "{md}");
         assert_eq!(page_title(ARTICLE).as_deref(), Some("Tokyo notes"));
@@ -376,5 +215,21 @@ mod tests {
         assert!(!is_binary("text/html; charset=utf-8"));
         let err = render("x", "image/png", FetchFormat::Markdown, "https://x").unwrap_err();
         assert!(err.contains("binary_content"), "{err}");
+    }
+
+    #[test]
+    fn entities_and_malformed_markup_still_convert() {
+        let html = r"<html><head><title>A &amp; B</title></head>
+            <body><!-- <h1>hidden</h1> --><h1>Ok</h1>
+            <p>See <a href=https://example.invalid/x>here</a> &quot;quoted&quot;.</p>
+            <div><div><p>nested</p></div></div>
+            <p>unclosed";
+        let md = html_to_markdown(html);
+        assert!(md.contains("# Ok"), "{md}");
+        assert!(!md.contains("hidden"), "{md}");
+        assert!(md.contains("[here](https://example.invalid/x)"), "{md}");
+        assert!(md.contains("quoted") || md.contains('"'), "{md}");
+        assert!(md.contains("nested"), "{md}");
+        assert_eq!(page_title(html).as_deref(), Some("A & B"));
     }
 }
