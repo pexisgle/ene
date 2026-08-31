@@ -1,24 +1,4 @@
 {
   "$schema": "./schema/settings.schema.json",
-  "mind": {
-    "language": "ja"
-  },
-  "version": 9,
-  "desktop": {
-    "graphics": {
-      "quality": "medium"
-    },
-    "language": "ja",
-    "theme": "system",
-    "mic_device": null,
-    "spotlight_enabled": false,
-    "caption_enabled": false,
-    "caption_position": null,
-    "caption_pinned": null,
-    "beat_sync": {
-      "enabled": false,
-      "device": null
-    },
-    "core_lifetime": "app"
-  }
+  "version": 1
 }

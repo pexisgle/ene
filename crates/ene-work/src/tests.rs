@@ -3350,3 +3350,105 @@ fn artifact_registration_is_confined_to_own_job_workspace() {
     );
     drop(dir);
 }
+
+#[test]
+fn phantom_artifact_registration_is_rejected() {
+    let (dir, store, host, soul) = open_work();
+    let job = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "report".into(),
+            mode: DelegationMode::Public,
+            title: Some("report".into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+            success_criteria: vec!["path:*.md".into()],
+            allowed_tools: Vec::new(),
+        })
+        .unwrap();
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    let ws = std::path::PathBuf::from(&job.workspace_dir);
+    let missing = ws.join("missing.md").to_string_lossy().into_owned();
+    let art = || Artifact {
+        id: "art-phantom".into(),
+        soul_id: soul,
+        job_id: Some(job.id),
+        kind: ArtifactKind::Markdown,
+        title: "phantom".into(),
+        path: missing.clone(),
+        mime: None,
+        size_bytes: None,
+        created_at: Utc::now().to_rfc3339(),
+        delivered: false,
+    };
+    let err = host.register_artifact_for_job(job.id, art()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::WorkError::VerificationFailed(ref msg) if msg.contains("does not exist")
+        ),
+        "phantom artifact must be rejected at registration, got {err:?}"
+    );
+    assert!(store.artifacts_for(job.id).unwrap().is_empty());
+    // The real file registers and the contract completes.
+    std::fs::write(&missing, "# report").unwrap();
+    host.register_artifact_for_job(job.id, art()).unwrap();
+    host.begin_verifying(job.id).unwrap();
+    host.complete(job.id, "done").unwrap();
+    assert_eq!(
+        store.get_job(job.id).unwrap().unwrap().status,
+        JobStatus::Completed
+    );
+    drop(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn artifact_symlink_escape_is_rejected() {
+    let (dir, store, host, soul) = open_work();
+    let job = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "notes".into(),
+            mode: DelegationMode::Public,
+            title: Some("notes".into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+            success_criteria: vec!["path:*".into()],
+            allowed_tools: Vec::new(),
+        })
+        .unwrap();
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    let outside = dir.path().join("secret.txt");
+    std::fs::write(&outside, "s").unwrap();
+    let link = std::path::PathBuf::from(&job.workspace_dir).join("out.md");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let err = host
+        .register_artifact_for_job(
+            job.id,
+            Artifact {
+                id: "art-link".into(),
+                soul_id: soul,
+                job_id: Some(job.id),
+                kind: ArtifactKind::Markdown,
+                title: "link".into(),
+                path: link.to_string_lossy().into_owned(),
+                mime: None,
+                size_bytes: None,
+                created_at: Utc::now().to_rfc3339(),
+                delivered: false,
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::WorkError::WorkspaceViolation(_)),
+        "symlink escaping the workspace must be rejected, got {err:?}"
+    );
+    drop(dir);
+}

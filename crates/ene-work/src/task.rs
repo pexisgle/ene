@@ -260,7 +260,9 @@ pub fn verify_artifact(artifact: &ArtifactRef, task: &Task) -> Result<(), TaskEr
 
 /// Resolve a raw artifact path against the job workspace: relative paths join
 /// the workspace, absolute paths must stay inside it, and an existing file
-/// must not escape through a symlink.
+/// must be a regular file that stays inside the workspace after following
+/// symlinks. Nonexistent paths, dangling symlinks, and directories are
+/// rejected so a registered artifact is real evidence.
 pub fn confine_artifact_path(workspace: &Path, raw: &str) -> Result<PathBuf, TaskError> {
     if raw.trim().is_empty() {
         return Err(TaskError::WorkspaceViolation("empty artifact path".into()));
@@ -282,13 +284,38 @@ pub fn confine_artifact_path(workspace: &Path, raw: &str) -> Result<PathBuf, Tas
             workspace.display()
         )));
     }
-    if let Ok(canonical) = confined.canonicalize()
-        && !canonical.starts_with(&ws)
-    {
+    let entry_meta = std::fs::symlink_metadata(&confined).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            return TaskError::VerificationFailed(format!(
+                "artifact does not exist: {}",
+                confined.display()
+            ));
+        }
+        TaskError::WorkspaceViolation(format!("artifact unreadable: {}", confined.display()))
+    })?;
+    let canonical = confined.canonicalize().map_err(|err| {
+        TaskError::WorkspaceViolation(format!(
+            "artifact unresolvable: {} ({err})",
+            confined.display()
+        ))
+    })?;
+    if !canonical.starts_with(&ws) {
         return Err(TaskError::WorkspaceViolation(format!(
             "{} escapes {} through a symlink",
             raw,
             workspace.display()
+        )));
+    }
+    let followed = std::fs::metadata(&canonical).map_err(|err| {
+        TaskError::WorkspaceViolation(format!(
+            "artifact unresolvable: {} ({err})",
+            canonical.display()
+        ))
+    })?;
+    if !entry_meta.file_type().is_file() && !followed.is_file() {
+        return Err(TaskError::VerificationFailed(format!(
+            "artifact is not a regular file: {}",
+            confined.display()
         )));
     }
     Ok(confined)
@@ -375,6 +402,9 @@ fn evaluate_one(
                 let Some(rel) = artifact_relative(&ws, &art.path) else {
                     continue;
                 };
+                if !is_regular_file(&art.path) {
+                    continue;
+                }
                 if glob_match(&criterion.value, &rel) {
                     return satisfied(raw, format!("artifact '{rel}' matches {}", criterion.value));
                 }
@@ -420,16 +450,14 @@ fn evaluate_one(
             let Ok(min) = criterion.value.parse::<usize>() else {
                 return unsatisfied(raw, format!("invalid count_min '{}'", criterion.value));
             };
-            if artifacts.len() >= min {
-                satisfied(
-                    raw,
-                    format!("{} artifacts registered >= {min}", artifacts.len()),
-                )
+            let existing = artifacts
+                .iter()
+                .filter(|art| is_regular_file(&art.path))
+                .count();
+            if existing >= min {
+                satisfied(raw, format!("{existing} artifacts registered >= {min}"))
             } else {
-                unsatisfied(
-                    raw,
-                    format!("{} artifacts registered < {min}", artifacts.len()),
-                )
+                unsatisfied(raw, format!("{existing} artifacts registered < {min}"))
             }
         }
     }
@@ -495,6 +523,10 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         pi += 1;
     }
     pi == p.len()
+}
+
+fn is_regular_file(path: &str) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
 }
 
 pub fn transition(task: &mut Task, next: TaskState) -> Result<(), TaskError> {
@@ -659,6 +691,7 @@ mod tests {
         let ws_b = std::path::Path::new(&contract_b.workspace);
         assert!(confine_artifact_path(ws_a, &ws_b.join("out.md").to_string_lossy()).is_err());
         assert!(confine_artifact_path(ws_a, "../outside.md").is_err());
+        std::fs::write(ws_a.join("out.md"), "x").expect("write");
         let ok = confine_artifact_path(ws_a, "out.md").expect("inside");
         assert_eq!(ok, ws_a.join("out.md"));
         let _ = dir_a;
@@ -672,6 +705,54 @@ mod tests {
         assert!(glob_match("?eport.md", "report.md"));
         assert!(!glob_match("?eport.md", "report.txt"));
         assert!(glob_match("*", "any/path.md"));
+    }
+    #[test]
+    fn phantom_artifact_fails_path_and_count_criteria() {
+        let (dir, mut contract) = real_workspace();
+        contract.success_criteria = vec!["path:*.md".into()];
+        let missing = dir.path().join("missing.md").to_string_lossy().into_owned();
+        let mut task = Task::new("t1", contract).expect("valid");
+        task.start().expect("start");
+        task.begin_verifying().expect("verifying");
+        task.register_artifact(ArtifactRef {
+            path: missing.clone(),
+            workspace: task.contract.workspace.clone(),
+        })
+        .expect("lexical registration");
+        let err = task.complete().expect_err("phantom must not complete");
+        assert!(err.to_string().contains("success criteria not satisfied"));
+        task.contract.success_criteria = vec!["count_min:1".into()];
+        let err = task
+            .complete()
+            .expect_err("phantom count must not complete");
+        assert!(err.to_string().contains("success criteria not satisfied"));
+        std::fs::write(&missing, "real").expect("write");
+        assert!(task.complete().is_ok());
+        assert_eq!(task.state, TaskState::Completed);
+    }
+
+    #[test]
+    fn confine_artifact_path_rejects_missing_and_directory() {
+        let (dir, contract) = real_workspace();
+        let ws = std::path::Path::new(&contract.workspace);
+        let err = confine_artifact_path(ws, "missing.md").expect_err("missing");
+        assert!(err.to_string().contains("artifact does not exist"));
+        std::fs::create_dir_all(dir.path().join("adir")).expect("mkdir");
+        let err = confine_artifact_path(ws, "adir").expect_err("directory");
+        assert!(err.to_string().contains("not a regular file"));
+        std::fs::write(dir.path().join("ok.md"), "x").expect("write");
+        assert!(confine_artifact_path(ws, "ok.md").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confine_artifact_path_rejects_dangling_symlink() {
+        let (dir, contract) = real_workspace();
+        let ws = std::path::Path::new(&contract.workspace);
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), dir.path().join("link.md"))
+            .expect("symlink");
+        let err = confine_artifact_path(ws, "link.md").expect_err("dangling");
+        assert!(err.to_string().contains("unresolvable"));
     }
 
     #[test]

@@ -475,11 +475,10 @@ impl DelegationHost {
                     std::path::Path::new(&job.workspace_dir),
                     &art.path,
                 )
-                .map_err(|_| {
-                    WorkError::WorkspaceViolation(format!(
-                        "{} not in {}",
-                        art.path, job.workspace_dir
-                    ))
+                .map_err(|err| match err {
+                    TaskError::WorkspaceViolation(msg) => WorkError::WorkspaceViolation(msg),
+                    TaskError::VerificationFailed(msg) => WorkError::VerificationFailed(msg),
+                    other => WorkError::WorkspaceViolation(other.to_string()),
                 })?;
             }
             return Ok(());
@@ -920,8 +919,10 @@ impl DelegationHost {
             std::path::Path::new(&job.workspace_dir),
             &artifact.path,
         )
-        .map_err(|_| {
-            WorkError::WorkspaceViolation(format!("{} not in {}", artifact.path, job.workspace_dir))
+        .map_err(|err| match err {
+            TaskError::WorkspaceViolation(msg) => WorkError::WorkspaceViolation(msg),
+            TaskError::VerificationFailed(msg) => WorkError::VerificationFailed(msg),
+            other => WorkError::WorkspaceViolation(other.to_string()),
         })?;
         let path = confined.display().to_string();
         let mut stored = artifact;
