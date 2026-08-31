@@ -39,7 +39,6 @@ jobs:
           pr-title: "Update flake.lock"
           pr-labels: |
             dependencies
-          pr-reviewers: ${{ github.actor }}
           branch: "deps/update-flake-lock-${{ env.CURRENT_DATE }}"
           commit-msg: "deps: Update flake.lock"
           path-to-flake-dir: ./
