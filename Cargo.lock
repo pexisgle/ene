@@ -2686,7 +2686,9 @@ dependencies = [
  "htmd",
  "ignore",
  "image",
+ "libc",
  "parking_lot",
+ "process-wrap",
  "regex",
  "scraper",
  "serde",
@@ -2823,6 +2825,8 @@ version = "0.1.0"
 dependencies = [
  "ene-plugin-ipc",
  "ene-registry",
+ "libc",
+ "process-wrap",
  "serde_json",
  "tempfile",
  "tokio",
