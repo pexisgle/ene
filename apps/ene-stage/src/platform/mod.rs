@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use winit::window::Window;
 
 use crate::interaction_controller::InteractionMode;
-use crate::scene::{InteractionGeometry, PxRect, VisualGeometry};
+#[cfg(any(test, all(target_os = "linux", not(target_os = "android"))))]
+use crate::scene::PxRect;
+use crate::scene::{InteractionGeometry, VisualGeometry};
 
 const REGION_RATE_LIMIT: Duration = Duration::from_millis(125);
 const REGION_THRESHOLD_PX: f32 = 4.0;
