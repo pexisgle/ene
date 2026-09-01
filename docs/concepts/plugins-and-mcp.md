@@ -24,7 +24,9 @@ Plugin unload drops matching index rows.
 
 MCP servers are not vendored. Each handwritten `mcp.json` row becomes a
 `mcp.<id>` fiber running `ene-tool-mcp` (stdio or Streamable HTTP) on the
-same pipeline as in-tree tools. Process acceptance is a stdio server that
+same pipeline as in-tree tools. The bridge uses the official `rmcp` SDK:
+stdio is newline-delimited JSON-RPC (MCP spec, not LSP Content-Length), and
+`http` is Streamable HTTP. Process acceptance is a stdio server that
 invokes real `git` (`mcp:git.status` / `mcp:git.log`). Stage **Connections**
 edits that document (the legacy desktop Connectors page does too). A
 marketplace picker for popular servers is a successor milestone on stage

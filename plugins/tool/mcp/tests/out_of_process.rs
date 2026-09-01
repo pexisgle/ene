@@ -3,7 +3,7 @@
 use ene_fiber::{ProfileRow, Supervisor};
 use ene_registry::{Layer, ToolRegistry};
 use serde_json::json;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -20,22 +20,13 @@ fn fixture_script(dir: &std::path::Path) -> PathBuf {
 import json, sys
 
 def read_msg():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            raise SystemExit(0)
-        if line in (b"\r\n", b"\n"):
-            break
-        key, _, value = line.decode().partition(":")
-        headers[key.strip().lower()] = value.strip()
-    n = int(headers.get("content-length", "0"))
-    return json.loads(sys.stdin.buffer.read(n))
+    line = sys.stdin.buffer.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
 
 def write_msg(obj):
-    body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(json.dumps(obj).encode() + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -174,22 +165,13 @@ import json, subprocess, sys
 repo = sys.argv[1]
 
 def read_msg():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            raise SystemExit(0)
-        if line in (b"\r\n", b"\n"):
-            break
-        key, _, value = line.decode().partition(":")
-        headers[key.strip().lower()] = value.strip()
-    n = int(headers.get("content-length", "0"))
-    return json.loads(sys.stdin.buffer.read(n))
+    line = sys.stdin.buffer.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
 
 def write_msg(obj):
-    body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(json.dumps(obj).encode() + b"\n")
     sys.stdout.buffer.flush()
 
 def git(*args):
@@ -312,4 +294,142 @@ async fn handwritten_stdio_mcp_git_status_runs_real_git() {
         .unwrap();
     assert!(dirty.to_string().contains("dirty.txt"), "dirty={dirty}");
     sup.unload("mcp.git").await;
+}
+
+fn http_fixture_script(dir: &std::path::Path) -> PathBuf {
+    let path = dir.join("mcp_http_fixture.py");
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(
+        br#"#!/usr/bin/env python3
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+
+def rpc_result(msg):
+    method = msg.get("method")
+    if method == "initialize":
+        return {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+            "serverInfo": {"name": "http-fixture", "version": "0"},
+        }
+    if method == "tools/list":
+        return {"tools": [{
+            "name": "ping",
+            "description": "ping",
+            "annotations": {"readOnlyHint": True},
+            "inputSchema": {"type": "object", "additionalProperties": False},
+        }]}
+    if method == "tools/call":
+        return {"content": [{"type": "text", "text": "pong"}]}
+    if method == "resources/list":
+        return {"resources": [{"uri": "memo://note", "name": "note"}]}
+    if method == "resources/read":
+        return {"contents": [{"uri": "memo://note", "text": "hello resource"}]}
+    if method == "prompts/list":
+        return {"prompts": [{"name": "brief", "description": "a brief"}]}
+    if method == "prompts/get":
+        return {"messages": [{"role": "user", "content": {"type": "text", "text": "do the brief"}}]}
+    if method == "ping":
+        return {}
+    return {}
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        msg = json.loads(self.rfile.read(n) or b"{}")
+        ident = msg.get("id")
+        method = msg.get("method") or ""
+        if ident is None or str(method).startswith("notifications/"):
+            self.send_response(202)
+            self.end_headers()
+            return
+        body = json.dumps({"jsonrpc": "2.0", "id": ident, "result": rpc_result(msg)}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self.send_response(405)
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+host, port = httpd.server_address
+print(f"http://{host}:{port}/mcp", flush=True)
+httpd.serve_forever()
+"#,
+    )
+    .unwrap();
+    path
+}
+
+struct HttpFixture {
+    child: std::process::Child,
+    url: String,
+}
+
+impl Drop for HttpFixture {
+    fn drop(&mut self) {
+        drop(self.child.kill());
+        drop(self.child.wait());
+    }
+}
+
+fn start_http_fixture(dir: &std::path::Path) -> HttpFixture {
+    let script = http_fixture_script(dir);
+    let mut child = std::process::Command::new("python3")
+        .arg(&script)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut line = String::new();
+    BufReader::new(stdout).read_line(&mut line).unwrap();
+    let url = line.trim().to_owned();
+    assert!(url.starts_with("http://"), "http fixture url={url}");
+    HttpFixture { child, url }
+}
+
+#[tokio::test]
+async fn handwritten_http_mcp_registers_and_runs() {
+    if python3_bin().is_none() {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let fixture = start_http_fixture(dir.path());
+    let sup = Supervisor::new(dir.path().to_path_buf(), Arc::new(ToolRegistry::new()));
+    let row = ProfileRow {
+        row_id: "mcp.http".to_owned(),
+        plugin: "mcp.http".to_owned(),
+        requires: Vec::new(),
+        capabilities: Vec::new(),
+        seams: Vec::new(),
+        sandbox_required: false,
+        config: json!({
+            "server": "http",
+            "transport": "http",
+            "url": fixture.url,
+            "skills_home": dir.path().join("skills"),
+        }),
+    };
+    sup.activate_process(&row, &bin()).await.unwrap();
+    assert!(sup.surface_has_tool("mcp:http.ping"));
+    let value = sup
+        .registry()
+        .execute("mcp:http.ping", json!({}), Layer::Surface)
+        .await
+        .unwrap();
+    assert!(value.to_string().contains("pong"), "value={value}");
+    let context = std::fs::read_to_string(dir.path().join("mcp-context/http.md")).unwrap();
+    assert!(context.contains("hello resource"));
+    let skill = std::fs::read_to_string(dir.path().join("skills/brief/SKILL.md")).unwrap();
+    assert!(skill.contains("do the brief"));
+    sup.unload("mcp.http").await;
 }
