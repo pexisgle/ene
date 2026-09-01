@@ -1,4 +1,4 @@
-//! Load-test the user-provided AliciaSolid VRM 0.x fixture.
+//! Load-test the user-provided `AliciaSolid` VRM 0.x fixture.
 #![cfg_attr(
     test,
     expect(
@@ -75,6 +75,24 @@ fn alicia_solid_vrm0_loads_and_maps_runtime_expressions() {
             "missing humanoid bone {bone}"
         );
     }
+    for bone in [
+        "leftThumbProximal",
+        "leftThumbIntermediate",
+        "leftThumbDistal",
+    ] {
+        assert!(
+            model.humanoid.by_name(bone).is_some(),
+            "missing thumb bone {bone}"
+        );
+    }
+    assert_eq!(
+        model.humanoid.by_name("leftThumbProximal").unwrap().node,
+        70
+    );
+    assert_eq!(
+        model.humanoid.by_name("leftThumbIntermediate").unwrap().node,
+        71
+    );
 
     let names: Vec<&str> = model
         .expressions_meta
@@ -121,9 +139,9 @@ fn alicia_solid_vrm0_runtime_pose_and_springs_step() {
     };
     let palette = model.update_skin_palette(
         &ene_vrm::animation::VrmaFrame {
-            bone_rotations: Default::default(),
+            bone_rotations: std::collections::HashMap::default(),
             hips_translation: None,
-            expression_weights: Default::default(),
+            expression_weights: std::collections::HashMap::default(),
             look_at_yaw_pitch: None,
         },
         bone.as_ref(),
