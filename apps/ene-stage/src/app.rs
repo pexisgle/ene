@@ -3255,6 +3255,7 @@ impl StageApp {
                 &mut self.surface.drag,
                 &mut self.surface.positions,
                 cursor_world,
+                (vw, vh),
             );
         }
 
@@ -3351,7 +3352,13 @@ impl StageApp {
             .gesture
             .press(pointer, id, cursor, Some(&soul_id), Instant::now())
         {
-            crate::drag::press_body(&mut self.surface.drag, Some(&soul_id), stored, cursor_world);
+            crate::drag::press_body(
+                &mut self.surface.drag,
+                Some(&soul_id),
+                stored,
+                cursor_world,
+                (vw, vh),
+            );
         }
         self.sync_overlay_interaction();
     }
@@ -3459,13 +3466,25 @@ impl StageApp {
                 let pos = surface_positions.get(&slot.soul_id).copied().unwrap_or(
                     crate::settings::default_position_for(&slot.soul_id, soul.as_str()),
                 );
-                let world = crate::drag::normalized_to_world(pos);
-                let fitted = slot
-                    .avatar
-                    .fit_world_offset([world[0], world[1], 0.0], viewport);
+                let world = crate::drag::normalized_to_world(pos, viewport);
+                let dragging_this = self.surface.drag.as_ref().is_some_and(|gesture| {
+                    matches!(
+                        gesture,
+                        crate::drag::BodyDrag::Dragging { soul_id, .. }
+                            if soul_id == &slot.soul_id
+                    )
+                });
+                let fitted = if dragging_this {
+                    [world[0], world[1], 0.0]
+                } else {
+                    slot.avatar
+                        .fit_world_offset([world[0], world[1], 0.0], viewport)
+                };
                 slot.avatar.world_offset = fitted;
-                let fitted_pos =
-                    crate::drag::world_to_normalized(glam::Vec2::new(fitted[0], fitted[1]));
+                let fitted_pos = crate::drag::world_to_normalized(
+                    glam::Vec2::new(fitted[0], fitted[1]),
+                    viewport,
+                );
                 if (fitted_pos[0] - pos[0]).abs() > 0.0001
                     || (fitted_pos[1] - pos[1]).abs() > 0.0001
                 {

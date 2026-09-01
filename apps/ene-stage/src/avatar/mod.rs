@@ -679,7 +679,7 @@ impl CompanionAvatar {
             max = max.max(point);
         }
 
-        const VIEWPORT_MARGIN: f32 = 0.96;
+        const VIEWPORT_MARGIN: f32 = 0.98;
         let origin = project_ndc(view_projection, Vec3::ZERO);
         let requested = Vec3::from(desired);
         let requested_translation = project_ndc(view_projection, requested) - origin;
