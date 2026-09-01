@@ -1,13 +1,8 @@
-# アーキテクチャ
+# アーキテクチャ（現在実装）
 
-Ene は **コンパニオン型ハーネス**です。コアは1プロセス、クライアントは複数、
-ツールはアウトプロセス、認知層はホスト内です。
+> このページは**現在ツリーに存在するコード**を説明します。製品要件ではありません。あるべき挙動は [要件定義](../requirements/README.md) で確定します。
 
-完成形の定義は
-[`plans/harness-redesign/`](../../../plans/harness-redesign/README.md) にあります。
-このページは、今のツリーにあるコードの説明です。
-
-## プロセスモデル
+現在の Ene は、1つのコアプロセス、複数クライアント、アウトプロセスの tool/provider plugin、ホスト内のドメインライブラリで構成されています。
 
 ```text
 ene-stage   ─┐
@@ -16,35 +11,20 @@ ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core
 Web         ─┘                              │
                                             ├── ene-session / ene-kernel
                                             ├── ene-companion / ene-body / ene-work
-                                            ├── ene-access-control (承認 + 監査 + ボールト)
-                                            └── ene-plugin-host ──► plugins/tool/*
+                                            ├── ene-access-control
+                                            ├── ene-tool-registry
+                                            └── ene-plugin-host ──► plugins/*
 ```
 
-- **ホストは1つ。** 本体の状態は `ene-core` が持ちます。クライアントはカーネルを埋め込みません。
-- **クライアントは対等**です。排他資源（マイク、承認応答）だけコアが調停します。
-  製品 GUI は `ene-stage`、`ene-desktop` は同一 API の凍結レガシーで、
-  stage が代替できたと判断したら削除します。
-  [製品境界](product-boundaries.md) を見てください。
-- **ツールはアウトプロセス。** ビルトイン (`fs` / `exec` / `web` / `utility` /
-  `app`) もサードパーティと同じ IPC です。コンパニオン状態に触るハーネス機能は
-  ホスト内で、`ene-tool-registry` を通します。
+- `ene-core`: プロセス全体の状態と HTTP/WS。
+- `ene-api`: client ↔ core の契約。
+- `ene-session`: 追記専用会話ログと usage 台帳。
+- `ene-kernel`: 対話レーン。
+- `ene-companion`: soul、感情、記憶、内面、能動挙動。
+- `ene-work`: delegation、job、schedule、skill、MCP。
+- `ene-access-control`: 承認、監査、credential vault。
+- `ene-tool-registry`: 統一ツールレジストリ / pipeline。
+- `ene-plugin-host`: plugin process の監督と巻き戻し可能な host-side composition。
+- tool/provider plugin はアウトプロセスで動作します。
 
-## 2層、1体のコンパニオン
-
-各コンパニオンは **表層 soul**（対話レーン）と **裏層ハーネス**（ジョブ・委譲・
-スケジュール）を持ちます。ユーザーが話す相手は表層だけです。複雑な作業は委譲し、
-ジョブレーンがモデルとツールを回し、進捗はコンパニオンの発話として返ります。
-
-表示の深さは `surface` か `detail` です。何を送るかはサーバが決めます。
-stage のキャラクターとチャットは surface、別窓の詳細は detail です。
-旧 desktop も同じ深さを使います。
-
-## 次に読むもの
-
-| 話題 | 文書 |
-|---|---|
-| クレート地図と依存規則 | [クレートリファレンス](../reference/crates.md) |
-| どのクライアントが製品 GUI か | [製品境界](product-boundaries.md) |
-| プラグイン IPC | `ene-plugin-ipc` の rustdoc |
-| キャラクターパッケージ | [キャラクターパッケージ](character-cards.md) |
-| 設計決定 | [`plans/harness-redesign/decisions.md`](../../../plans/harness-redesign/decisions.md) |
+詳細な現在のクレート地図と依存規則は [クレートリファレンス](../reference/crates.md) を参照してください。

@@ -4,10 +4,22 @@
 [Quickstart](quickstart.md)
 [Configuration](configuration.md)
 
-# Concepts
+# Requirements
+
+- [Requirements home](requirements/README.md)
+- [Product](requirements/product.md)
+- [Use cases](requirements/use-cases.md)
+- [Functional requirements](requirements/functional.md)
+- [Non-functional requirements](requirements/non-functional.md)
+- [Invariants](requirements/invariants.md)
+- [Glossary](requirements/glossary.md)
+- [Decisions](requirements/decisions.md)
+- [Legacy inputs](requirements/legacy/README.md)
+
+# Current implementation concepts
 
 - [Architecture](concepts/architecture.md)
-- [Product boundaries](concepts/product-boundaries.md)
+- [Current product/client status](concepts/product-boundaries.md)
 - [Character packages](concepts/character-cards.md)
 - [Memory](concepts/memory.md)
 - [Turns & sessions](concepts/turns-and-sessions.md)
@@ -20,11 +32,6 @@
 - [Stage user guide](apps/stage.md)
 - [CLI user guide](apps/cli.md)
 - [Desktop user guide](apps/desktop.md) (legacy)
-
-# Experiments
-
-- [Stage UI PoC findings](experiments/stage-ui-poc-findings.md)
-- [Stage v2 pre-migration baseline](experiments/stage-v2-baseline.md)
 
 # Guides
 
