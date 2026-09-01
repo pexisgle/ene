@@ -469,6 +469,11 @@ impl ChromeLayer {
         self.pending.replace(Vec::new())
     }
 
+    #[must_use]
+    pub fn needs_redraw(&self) -> bool {
+        self.adapter.redraw.get() || self.adapter.slint_window.has_active_animations()
+    }
+
     pub fn input_focused(&self) -> bool {
         match &self.ui {
             ChromeUi::Chat(ui) => ui.get_input_focused(),

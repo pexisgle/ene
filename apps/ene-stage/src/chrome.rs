@@ -194,6 +194,11 @@ impl ChromeWindow {
             .unwrap_or_default()
     }
 
+    #[must_use]
+    pub fn needs_gpu(&self) -> bool {
+        self.layer.as_ref().is_some_and(ChromeLayer::needs_redraw)
+    }
+
     pub fn paint(&mut self, gpu: &GpuContext) -> Result<(), GpuError> {
         let window_size = self.window.inner_size();
         if window_size.width == 0 || window_size.height == 0 {

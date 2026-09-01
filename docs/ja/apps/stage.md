@@ -40,7 +40,8 @@ Slint です。コアとは `ene-api` のみで話し（`client_id = stage`）�
 `request_redraw` します。視線ターゲットが静止しビセームも dirty UI もない
 ポーズは約 250ms で起き、GPU パスをスキップします。ホバーだけではシアンの
 インタラクション枠を描きません（ドラッグ中のみ）。`CursorLeft` でホバーを
-消します。操作窓が開いている間は chrome も描画します。idle CPU / フレーム時間の
+消します。操作窓は Slint が dirty でなくモデルも変わっていなければ GPU
+present をスキップします。idle CPU / フレーム時間の
 performance gate は実 GPU のみです。Cloud Agent の lavapipe 数値は
 ソフトウェア参考で、その gate を落とす理由にはしません。
 

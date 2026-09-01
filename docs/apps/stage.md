@@ -43,9 +43,10 @@ collider debug, or an active body drag) wake about every 16 ms and
 `request_redraw`. A static pose with a stable look-at target, no visemes,
 and no dirty UI wakes about every 250 ms and skips the GPU pass. Hover
 does not paint the cyan interaction outline; that outline is drag-only.
-`CursorLeft` clears hover. Chrome still paints while its windows are open.
-Performance gates for idle CPU / frame time are real-GPU only; Cloud Agent
-lavapipe numbers are software reference and must not fail those gates.
+`CursorLeft` clears hover. Chrome windows skip GPU presents while their
+Slint layer and model snapshot are unchanged. Performance gates for idle
+CPU / frame time are real-GPU only; Cloud Agent lavapipe numbers are
+software reference and must not fail those gates.
 
 Wayland click-through uses a coarse `wl_surface` input region from
 interaction geometry. X11 uses coarse SHAPE Bounding/Input when the WM

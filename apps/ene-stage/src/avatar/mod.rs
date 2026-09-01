@@ -45,6 +45,7 @@ pub struct CompanionAvatar {
     look_at_target: Option<Vec3>,
     applied_look_at: Option<Vec3>,
     pending_visemes: Option<VisemeWeights>,
+    viseme_open: bool,
     expression_cue: Option<(String, f32, f32)>,
     interaction_feedback: f32,
     blink_accum: f32,
@@ -81,6 +82,7 @@ impl CompanionAvatar {
             look_at_target: None,
             applied_look_at: None,
             pending_visemes: None,
+            viseme_open: false,
             expression_cue: None,
             interaction_feedback: 0.0,
             blink_accum: 0.0,
@@ -320,6 +322,13 @@ impl CompanionAvatar {
     }
 
     pub fn apply_viseme(&mut self, weights: VisemeWeights) {
+        if weights.is_silent() {
+            if self.pending_visemes.is_none() && !self.viseme_open {
+                return;
+            }
+            self.pending_visemes = Some(VisemeWeights::default());
+            return;
+        }
         self.pending_visemes = Some(weights);
     }
 
@@ -377,7 +386,7 @@ impl CompanionAvatar {
                     "oh" => weights.oh = weight,
                     other => tracing::debug!(other, "unknown viseme discarded"),
                 }
-                self.pending_visemes = Some(weights);
+                self.apply_viseme(weights);
             }
             "body.posture" => {}
             other => tracing::debug!(other, "unknown body command discarded"),
@@ -403,6 +412,7 @@ impl CompanionAvatar {
         self.tick_idle(dt);
         if let Some(weights) = self.pending_visemes.take() {
             self.model.expressions.apply_viseme_weights(&weights);
+            self.viseme_open = !weights.is_silent();
         }
         let frame = self.sample_motion(dt);
         let look_at = self.eval_look_at();
@@ -596,6 +606,7 @@ impl CompanionAvatar {
     pub fn needs_redraw(&self) -> bool {
         self.vrma.is_some()
             || self.pending_visemes.is_some()
+            || self.viseme_open
             || look_at_is_dirty(self.look_at_target, self.applied_look_at)
             || self.blinking > 0.0
             || self.expression_cue.is_some()
@@ -947,16 +958,86 @@ mod tests {
     }
 
     #[test]
+    fn silent_viseme_does_not_keep_the_overlay_dirty() {
+        let Some((device, queue)) = try_test_device() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("minimal.vrm");
+        CompanionAvatar::write_default_minimal_vrm(&path).unwrap();
+        let mut avatar =
+            CompanionAvatar::load(&path, &device, &queue, wgpu::TextureFormat::Bgra8UnormSrgb)
+                .expect("minimal VRM loads");
+        avatar.apply_viseme(VisemeWeights::default());
+        assert!(
+            !avatar.needs_redraw(),
+            "closed mouth must not force a GPU frame"
+        );
+
+        avatar.apply_viseme(VisemeWeights {
+            aa: 0.8,
+            ..VisemeWeights::default()
+        });
+        assert!(
+            avatar.needs_redraw(),
+            "speech visemes must dirty the overlay"
+        );
+        avatar.tick(0.0);
+        assert!(
+            avatar.needs_redraw(),
+            "an open mouth must keep the 16ms wake"
+        );
+
+        avatar.apply_viseme(VisemeWeights::default());
+        assert!(
+            avatar.needs_redraw(),
+            "the closing frame must still apply zero weights"
+        );
+        avatar.tick(0.0);
+        assert!(
+            !avatar.needs_redraw(),
+            "after the mouth closes, silence is not dirty"
+        );
+        avatar.apply_viseme(VisemeWeights::default());
+        assert!(
+            !avatar.needs_redraw(),
+            "repeated silence must not re-dirty the overlay"
+        );
+    }
+
+    #[test]
     fn default_minimal_vrm_writes_parseable_glb() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("minimal.vrm");
         CompanionAvatar::write_default_minimal_vrm(&path).unwrap();
+        if let Ok(dest) = std::env::var("ENE_WRITE_MINIMAL_VRM") {
+            let dest = std::path::Path::new(&dest);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::copy(&path, dest).unwrap();
+        }
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"glTF"));
         assert!(
             bytes.windows(8).any(|window| window == b"VRMC_vrm"),
             "minimal fixture must declare VRMC_vrm"
         );
+    }
+
+    #[test]
+    fn companion_avatar_loads_the_minimal_fixture() {
+        let Some((device, queue)) = try_test_device() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("minimal.vrm");
+        CompanionAvatar::write_default_minimal_vrm(&path).unwrap();
+        let avatar =
+            CompanionAvatar::load(&path, &device, &queue, wgpu::TextureFormat::Bgra8UnormSrgb)
+                .expect("minimal VRM loads");
+        assert!(avatar.format_version_label().contains("VRM"));
+        assert!(avatar.motion_names().is_empty());
     }
 
     #[test]
