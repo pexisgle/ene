@@ -4677,10 +4677,9 @@ impl ApplicationHandler for StageApp {
                     self.sync_overlay_interaction();
                 }
                 WindowEvent::CursorLeft { .. } => {
-                    if self.surface.drag.is_none() {
-                        self.surface.hover_soul = None;
-                        self.sync_overlay_interaction();
-                    }
+                    self.surface.hover_soul = None;
+                    self.last_cursor = None;
+                    self.sync_overlay_interaction();
                 }
                 WindowEvent::Resized(size) => {
                     if let (Some(gpu), Some(overlay)) = (self.gpu.as_ref(), self.overlay.as_mut()) {
@@ -4691,11 +4690,6 @@ impl ApplicationHandler for StageApp {
                     if self.overlay.as_ref().is_some() {
                         self.on_overlay_cursor_moved(position);
                     }
-                }
-                WindowEvent::CursorLeft { .. } => {
-                    self.surface.hover_soul = None;
-                    self.last_cursor = None;
-                    self.sync_overlay_interaction();
                 }
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
