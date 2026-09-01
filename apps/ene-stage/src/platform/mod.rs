@@ -115,6 +115,7 @@ enum PlatformKind {
     Wayland(Box<wayland::WaylandRegion>),
     #[cfg(all(target_os = "linux", not(target_os = "android")))]
     X11(Box<x11::X11Shape>),
+    #[cfg(not(target_os = "windows"))]
     Fallback,
 }
 
@@ -161,8 +162,20 @@ impl OverlayPlatform {
                     backend.apply(mode, visual, interaction);
                 }
             }
+            #[cfg(not(target_os = "windows"))]
             PlatformKind::Unattached | PlatformKind::Fallback => {
-                let _ = (window, visual, interaction);
+                let _ = (visual, interaction);
+                let enabled = !matches!(mode, InteractionMode::Passive);
+                if push {
+                    match window.set_cursor_hittest(enabled) {
+                        Ok(()) => {}
+                        Err(err) => tracing::debug!(error = %err, "cursor hittest unsupported"),
+                    }
+                }
+            }
+            #[cfg(target_os = "windows")]
+            PlatformKind::Unattached => {
+                let _ = (visual, interaction);
                 let enabled = !matches!(mode, InteractionMode::Passive);
                 if push {
                     match window.set_cursor_hittest(enabled) {
@@ -207,6 +220,7 @@ impl PlatformKind {
             Self::Wayland(_) => "wayland",
             #[cfg(all(target_os = "linux", not(target_os = "android")))]
             Self::X11(_) => "x11",
+            #[cfg(not(target_os = "windows"))]
             Self::Fallback => "fallback",
         }
     }
@@ -238,6 +252,7 @@ fn detect_backend(window: &Window) -> PlatformKind {
     }
 }
 
+#[cfg(all(target_os = "linux", not(target_os = "android")))]
 pub(crate) fn rects_i32(rects: &[PxRect]) -> Vec<(i32, i32, i32, i32)> {
     physical_to_surface_local(rects, 1.0)
 }
@@ -247,6 +262,7 @@ pub(crate) fn rects_i32(rects: &[PxRect]) -> Vec<(i32, i32, i32, i32)> {
 /// `wl_surface.set_input_region` is surface-local. `winit` `inner_size` and
 /// [`PxRect`] are physical pixels, so `HiDPI` / fractional scale must divide by
 /// the current window scale before creating the region.
+#[cfg(any(test, all(target_os = "linux", not(target_os = "android"))))]
 pub(crate) fn physical_to_surface_local(rects: &[PxRect], scale: f64) -> Vec<(i32, i32, i32, i32)> {
     let scale = scale.max(0.01);
     rects
@@ -269,7 +285,7 @@ mod tests {
     #[test]
     fn rate_limit_skips_tiny_moves() {
         let mut platform = OverlayPlatform {
-            kind: PlatformKind::Fallback,
+            kind: PlatformKind::Unattached,
             last_mode: Some(InteractionMode::Interactive),
             last_interaction: InteractionGeometry {
                 rects: vec![PxRect::new(0.0, 0.0, 10.0, 10.0)],
@@ -289,7 +305,7 @@ mod tests {
     #[test]
     fn mode_change_bypasses_rate_limit() {
         let platform = OverlayPlatform {
-            kind: PlatformKind::Fallback,
+            kind: PlatformKind::Unattached,
             last_mode: Some(InteractionMode::Passive),
             last_interaction: InteractionGeometry::default(),
             last_apply: Some(Instant::now()),
@@ -305,7 +321,7 @@ mod tests {
             rects: vec![PxRect::new(0.0, 0.0, 10.0, 10.0)],
         };
         let mut platform = OverlayPlatform {
-            kind: PlatformKind::Fallback,
+            kind: PlatformKind::Unattached,
             last_mode: Some(InteractionMode::Interactive),
             last_interaction: applied.clone(),
             last_apply: Some(Instant::now()),
