@@ -18,7 +18,7 @@ so clients can stop the playback sink immediately. Tests may still construct
 TTS and STT bind through `ai.tasks.tts` / `ai.tasks.stt` to provider plugins
 (`provider.openai_compat`, `provider.elevenlabs`, `provider.voicevox`,
 `provider.edge_tts`). PCM is `f32` on the provider subprotocol. Stage owns
-the microphone and playback devices. The daemon still owns policy and the live
+the microphone and playback devices. The core still owns policy and the live
 bus; exclusive resources (mic) are claimed through the API.
 
 Lip-sync maps PCM energy to the same viseme targets `ene-vrm` expects.

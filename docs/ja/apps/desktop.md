@@ -7,7 +7,7 @@ stage が、製品として要る desktop の能力を代替できたと判断�
 キャラクターオーバーレイを描き、チャットは **表層**、詳細は **別窓**です。
 
 ```sh
-cargo build -p ene-daemon -p ene-desktop
+cargo build -p ene-core -p ene-desktop
 cargo run -p ene-desktop
 ```
 
@@ -21,8 +21,8 @@ Studio C++ Build Tools、Windows SDK を入れた PowerShell から同じコマ�
 | 詳細 (F4 / トレイ) | `detail` | セッションログ（内面を含む）、thinking、ツール、PAD、タスク |
 | 設定 | ローカル + API | 適用すると JSON 層（API キー以外）を `settings.json` に書き、コア節は PATCH |
 
-WebView は使いません。UI は egui、VRM は wgpu です。デーモンとは `ene-api`
-だけ（`client_id = desktop`）で話します。`ene-daemon` / `ene-companion` や
+WebView は使いません。UI は egui、VRM は wgpu です。コアとは `ene-api`
+だけ（`client_id = desktop`）で話します。`ene-core` / `ene-companion` や
 旧 runtime / mind / store クレートはリンクしません。
 
 ローカルの `desktop.*`（グラフィックス、テーマ、言語、マイク、キャプション、
@@ -55,4 +55,4 @@ OpenAI 互換と Anthropic のモデルコンボは `POST /api/v1/providers/mode
 `seam.stt` を宣言したプラグインだけが出ます。
 
 音声デバイスの中継と承認ポップアップはデスクトップ側の仕事で、ポリシーと
-ライブバスはデーモンが持ちます。
+ライブバスはコアが持ちます。

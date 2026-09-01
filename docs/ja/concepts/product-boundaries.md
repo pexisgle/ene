@@ -201,10 +201,10 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | 層 | 現行 | ギャップ |
 |---|---|---|
 | OS サンドボックス（`ene-sandbox`） | Linux は Landlock + seccomp + rlimits | Windows AppContainer は設計目標であり、現行経路としては主張しない |
-| ホスト FileBroker（`ene-fiber`） | read/write の `confine_path`。レジストリも `fs.*` 引数を書き換え | プラグインは `ENE_WORKSPACE` を受け取りファイルに触れる。list/glob/delete と TOCTOU は [#813](https://github.com/pexisgle/ene/issues/813) |
+| ホスト FileBroker（`ene-plugin-host`） | read/write の `confine_path`。レジストリも `fs.*` 引数を書き換え | プラグインは `ENE_WORKSPACE` を受け取りファイルに触れる。list/glob/delete と TOCTOU は [#813](https://github.com/pexisgle/ene/issues/813) |
 | ホスト net broker | 私的/loopback/link-local 拒否、DNS 固定、redirect なし、1 MiB | `web` プラグインは reqwest で迂回し最大 4 redirect [#799](https://github.com/pexisgle/ene/issues/799) |
 | 資格情報 | ボールト（`vault.bin` + `vault.key`）。プラグイン環境へ生キーを出さない | 検索 backend（[#818](https://github.com/pexisgle/ene/issues/818)）と plugin config（[#819](https://github.com/pexisgle/ene/issues/819)）も vault 参照。MCP 向けホスト OAuth は持たない |
-| 承認（`ene-plane`） | deny-by-default、hash chain、ポップアップ、「次から確認しない」 | 本番の AI 自動承認モデルは未設定（[#717](https://github.com/pexisgle/ene/issues/717)） |
+| 承認（`ene-access-control`） | deny-by-default、hash chain、ポップアップ、「次から確認しない」 | 本番の AI 自動承認モデルは未設定（[#717](https://github.com/pexisgle/ene/issues/717)） |
 | `exec` | 直接の子へ SIGTERM のあと SIGKILL | process tree の所有、出力 byte 上限、cwd/env allowlist は [#798](https://github.com/pexisgle/ene/issues/798) |
 | raw pixel | 観測要約はセッションログの外 | Current: session / memory / audit は digest と要約であり PNG ではない |
 
@@ -235,7 +235,7 @@ desktop 内に作り直さず、`ene-work` / `ene-companion` に置き、プラ�
 | 項目 | Issue / ID | 後回しにする理由 |
 |---|---|---|
 | MCP カタログ、導入プレビュー、health、認証 UX | [#812](https://github.com/pexisgle/ene/issues/812)、P-616、M8 | post-v1.0 完了: 静的カタログ、有効化前の probe プレビュー（ツールごとの副作用つき）、認証必須状態を含むファイバーエラー表示、vault 経由の手動 Bearer トークン注入 |
-| ツール discovery index | [#817](https://github.com/pexisgle/ene/issues/817)（epic [#796](https://github.com/pexisgle/ene/issues/796)） | scoring は `ene-registry`。`done.md` の箱ではない |
+| ツール discovery index | [#817](https://github.com/pexisgle/ene/issues/817)（epic [#796](https://github.com/pexisgle/ene/issues/796)） | scoring は `ene-tool-registry`。`done.md` の箱ではない |
 | background tool の start/cancel/completion | [#816](https://github.com/pexisgle/ene/issues/816)（epic #796） | 永続は `ene-work` のジョブ。第二の task store は作らない |
 | plugin config schema / dynamic options | [#819](https://github.com/pexisgle/ene/issues/819)（epic #796） | 未リリースなので旧 config shim は不要 |
 | 読みやすい Markdown と検索 backend | [#818](https://github.com/pexisgle/ene/issues/818) | 出荷: fetch の markdown/text/html、DDG+ArXiv、有料 backend は未設定として宣言 |

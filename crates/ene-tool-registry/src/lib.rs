@@ -4,7 +4,7 @@
 #![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
 #![deny(unsafe_code)]
 
-extern crate self as ene_registry;
+extern crate self as ene_tool_registry;
 
 mod builtin;
 mod builtins;

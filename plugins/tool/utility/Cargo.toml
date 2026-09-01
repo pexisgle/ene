@@ -17,7 +17,7 @@ blake3 = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 ene-plugin-ipc = { workspace = true }
-ene-registry = { workspace = true }
+ene-tool-registry = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -27,7 +27,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid = { workspace = true }
 
 [dev-dependencies]
-ene-fiber = { workspace = true }
+ene-plugin-host = { workspace = true }
 ene-sandbox = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

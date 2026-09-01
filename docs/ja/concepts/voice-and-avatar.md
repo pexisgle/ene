@@ -19,7 +19,7 @@ TTS / STT は `ai.tasks.tts` / `ai.tasks.stt` で
 プロバイダプラグイン（`provider.openai_compat`、`provider.elevenlabs`、
 `provider.voicevox`、`provider.edge_tts`）に結びます。音声はプロバイダ
 副プロトコル上の `f32` PCM です。マイクと再生デバイスは stage が持ちます。
-ポリシーとライブバスはデーモンのままです。排他資源（マイク）は API で請求します。
+ポリシーとライブバスはコアのままです。排他資源（マイク）は API で請求します。
 
 リップシンクは PCM エネルギーを `ene-vrm` と同じ viseme ターゲットへ
 写します。`ene-companion` の感情が表情キューを選び、`ene-body` が

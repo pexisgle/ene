@@ -1,6 +1,6 @@
 # Quickstart
 
-This page gets you from a fresh checkout to a running daemon and client.
+This page gets you from a fresh checkout to a running core and client.
 Build-environment details live in the repository's `AGENTS.md`.
 
 ## 1. Requirements
@@ -30,17 +30,17 @@ cargo build --workspace
 cargo build -p ene-ctl
 ```
 
-For native Windows desktop development, build the daemon alongside the client
+For native Windows desktop development, build the core alongside the client
 so `ene-stage` can start `ene-core` from `target/debug`:
 
 ```powershell
-cargo build -p ene-daemon -p ene-stage
+cargo build -p ene-core -p ene-stage
 ```
 
 ## 3. Run the CLI
 
 ```sh
-# Start the core daemon, then talk to it
+# Start the core, then talk to it
 cargo run -p ene-ctl -- core start
 cargo run -p ene-ctl -- --help
 ```
@@ -56,7 +56,7 @@ cargo run -p ene-stage
 ```
 
 On native Windows, run the same command from PowerShell after building both
-`ene-daemon` and `ene-stage` as shown above. Set `ENE_CORE_BIN` if the daemon
+`ene-core` and `ene-stage` as shown above. Set `ENE_CORE_BIN` if the core
 binary is stored outside `target/debug`.
 
 Stage starts `ene-core` as a child when needed, shows the character overlay

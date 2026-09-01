@@ -25,7 +25,7 @@
 | `define_config!` | 設定セクション構造体（`core`、`harness`、`mind`、`body`、`voice`、`store`、`approval`、`characters` など）と JSON スキーマ・登録を宣言（settings / character / ネストの各バリアント） |
 | `define_label_enum!` | 一貫した `label()` API を持つラベル付き enum を宣言 |
 
-プラグインのプロファイル行はファイバー状態（`ene-fiber`）であり、
+プラグインのプロファイル行はファイバー状態（`ene-plugin-host`）であり、
 `define_config!` セクションではありません。
 
 ## 依存関係

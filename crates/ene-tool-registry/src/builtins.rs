@@ -1,6 +1,6 @@
 use crate::builtin;
 use crate::def::{ToolDefinition, ToolSource};
-use ene_plane::Sensitivity;
+use ene_access_control::Sensitivity;
 use ene_plugin_ipc::{BuiltinKind, IpcError, ToolHandler, ToolSpecWire, serve_from_env};
 use serde_json::Value;
 use std::path::Path;
@@ -191,7 +191,7 @@ impl ToolHandler for ToolPluginHandler {
 #[cfg(test)]
 mod tests {
     use super::{host_sensitivity, host_spec_for};
-    use ene_plane::Sensitivity;
+    use ene_access_control::Sensitivity;
 
     #[test]
     fn direct_exec_uses_shell_equivalent_approval_boundary() {

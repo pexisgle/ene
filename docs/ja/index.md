@@ -2,7 +2,7 @@
 
 Ene は Rust で書かれた **ローカル AI コンパニオン型ハーネス**です。コンパニオンは
 ユーザーのデバイスに住み、話し、聞き、覚え、承認 plane の下でツールを実行します。
-状態はコアデーモン (`ene-core`) が持ち、desktop / CLI / stage / Web は同一 API のクライアントです。
+状態はコア (`ene-core`) が持ち、desktop / CLI / stage / Web は同一 API のクライアントです。
 製品 GUI は `ene-stage`、`ene-desktop` は凍結レガシーで、stage が代替できたら削除します。
 [製品境界](concepts/product-boundaries.md) を見てください。
 

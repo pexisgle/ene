@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use ene_fiber::{ProfileRow, discover_plugin_executable_in, provider_plugin, task_seam};
+use ene_access_control::Vault;
 use ene_kernel::{AiSettings, PluginProfileKind, PluginSettings, TaskBinding};
-use ene_plane::Vault;
+use ene_plugin_host::{ProfileRow, discover_plugin_executable_in, provider_plugin, task_seam};
 use ene_work::{McpServer, WorkError, WorkStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};

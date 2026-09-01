@@ -3,7 +3,7 @@
 > product convergence を横断する実装方針。
 
 ## crate 責務
-- ene-session: 会話ログ所有。ene-kernel: lane 非依存。ene-companion: daemon 非依存。ene-work: plane ゲート。ene-plane: 承認/監査。ene-fiber: 監督。
+- ene-session: 会話ログ所有。ene-kernel: lane 非依存。ene-companion: core 非依存。ene-work: access-control ゲート。ene-access-control: 承認/監査。ene-plugin-host: 監督。
 
 ## 型/状態
 - typed state/error/ID、normal table と event log 分離、REST 正規投影/WS 差分。

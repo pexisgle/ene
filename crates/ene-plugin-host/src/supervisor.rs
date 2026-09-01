@@ -15,7 +15,7 @@ use ene_plugin_ipc::{
     ToolCall, TtsAudio, TtsRequest,
 };
 use ene_provider_assets::CatalogRegistry;
-use ene_registry::{
+use ene_tool_registry::{
     BuiltinExecutor, BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource,
     definitions_for, with_http_fetch, with_post_json, with_web_credentials,
 };

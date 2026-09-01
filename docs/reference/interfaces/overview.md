@@ -10,6 +10,6 @@ seams only** for the crates that still have a dedicated Markdown page.
 | `ene-vrm` | [ene-vrm](ene-vrm.md) |
 
 The rest of the workspace (`ene-session`, `ene-kernel`, `ene-companion`,
-`ene-work`, `ene-plane`, `ene-fiber`, `ene-registry`, `ene-plugin-ipc`,
+`ene-work`, `ene-access-control`, `ene-plugin-host`, `ene-tool-registry`, `ene-plugin-ipc`,
 `ene-api`, `ene-sandbox`, `ene-body`, and the apps) is documented in rustdoc
 plus [Crate reference](../crates.md).

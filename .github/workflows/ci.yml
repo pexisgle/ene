@@ -122,9 +122,9 @@ jobs:
       - name: Lint native Windows applications
         run: >-
           cargo clippy --locked
-          -p ene-daemon -p ene-stage
+          -p ene-core -p ene-stage
           -p ene-tool-app -p ene-tool-exec -p ene-tool-fs
-          -p ene-sandbox -p ene-plugin-ipc -p ene-registry
+          -p ene-sandbox -p ene-plugin-ipc -p ene-tool-registry
           --all-targets -- -D warnings
       - name: Test Windows-compatible libraries
-        run: cargo test --locked -p ene-config -p ene-plane -p ene-fiber
+        run: cargo test --locked -p ene-config -p ene-access-control -p ene-plugin-host

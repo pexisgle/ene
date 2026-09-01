@@ -14,7 +14,7 @@
 HTTP 経由ジョブランナーの観測を追記した。承認モードは検証中のみ
 `auto` に設定した。
 対象は現行アプリと並べて追加した新クレート
-(`ene-session` / `ene-kernel` / `ene-daemon` / `ene-api` / `ene-ctl` /
+(`ene-session` / `ene-kernel` / `ene-core` / `ene-api` / `ene-ctl` /
 `ene-stage` ほか)。W7 時点では旧 `ene-desktop` も残していた。
 
 ## 経路の記号
@@ -34,11 +34,11 @@ HTTP 経由ジョブランナーの観測を追記した。承認モードは検
 
 | # | 条件 | 機構 | 完成 |
 |---|---|---|---|
-| 1 | stage + CLI + Web が同一コアに接続 | `ene-daemon::http_tests::three_clients_share_one_core` | はい(HTTP) |
+| 1 | stage + CLI + Web が同一コアに接続 | `ene-core::http_tests::three_clients_share_one_core` | はい(HTTP) |
 | 2 | 1 体が done.md の全 P-xxx を満たす | 下表の機構検出。VRM は minimal fixture | いいえ。総括 3・ジョブループ・本番音声が未達 |
 | 3 | ネットワークなしで会話 | `spawned_core_offline_conversation_and_rss` は Echo 往復（機構）。`seamed_model_rejects_unconfigured_chat`; `tool_calling_model_runs_calc_through_http` | いいえ（実 GGUF 未観測） |
 | 4 | ビルドと性能(D-29) | `minimal_http_baselines_are_measurable` / `kernel::echo_turn_to_first_chunk_is_measurable` / `w7_acceptance` RSS | はい(測定。会話は Echo) |
-| 5 | 監査・バックアップ・エクスポート | `ene-plane::audit_hash_chain_verifies` / `http::backup::backup_and_restore_roundtrip` / `export_default_omits_inner` | はい(store / HTTP) |
+| 5 | 監査・バックアップ・エクスポート | `ene-access-control::audit_hash_chain_verifies` / `http::backup::backup_and_restore_roundtrip` / `export_default_omits_inner` | はい(store / HTTP) |
 
 ## v1.0 P-id → 機構 / 完成
 
@@ -47,17 +47,17 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 
 | P-id | 機構テスト | 経路 | 完成 |
 |---|---|---|---|
-| P-101 | `ene-kernel::text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `ene-daemon::http_tests::three_clients_share_one_core`; `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat` | Echo（機構） / ToolCalling / Seamed fail-closed / OpenRouter 実モデル | 部分(HTTP 対話で実モデル応答を観測。音声入出力は未観測) |
-| P-102 | `ene-body::barge_in_stops_playback_after_min_speech`; `self_voice_during_playback_is_ignored`; `idle_speech_becomes_transcript`; `ene-stage::echo_aware_gate_drops_playback_bleed`; `ene-daemon::listen_stream_feeds_duplex_machine_without_stt` | Scripted / HTTP WS | いいえ（実スピーカ漏れは未観測。stage は 16 kHz `pcm_s16le` バルク WS と TTS 再生中 RMS×2 ゲート） |
+| P-101 | `ene-kernel::text_turn_is_logged_and_projected`; `tool_calling_model_runs_surface_tool_then_speaks`; `ene-core::http_tests::three_clients_share_one_core`; `tool_calling_model_runs_calc_through_http`; `seamed_model_rejects_unconfigured_chat` | Echo（機構） / ToolCalling / Seamed fail-closed / OpenRouter 実モデル | 部分(HTTP 対話で実モデル応答を観測。音声入出力は未観測) |
+| P-102 | `ene-body::barge_in_stops_playback_after_min_speech`; `self_voice_during_playback_is_ignored`; `idle_speech_becomes_transcript`; `ene-stage::echo_aware_gate_drops_playback_bleed`; `ene-core::listen_stream_feeds_duplex_machine_without_stt` | Scripted / HTTP WS | いいえ（実スピーカ漏れは未観測。stage は 16 kHz `pcm_s16le` バルク WS と TTS 再生中 RMS×2 ゲート） |
 | P-103 | `ene-kernel::abort_does_not_write_assistant_closure`; `boot_seeds_two_souls_and_session_ops` (barge-in API); `ene-stage::parses_audio_chunk_abort`; `ene-stage::stop_clears_recent_playback_pcm` | Echo / HTTP / stage | 部分(stage が `audio.chunk` abort で sink 停止と viseme reset。0.5s 手動は本番 TTS 未配線) |
-| P-104 | `ene-session::surface_projection_hides_inner_and_thinking`; `ene-kernel::surface_live_subscription_does_not_receive_inner`; `ene-daemon::surface_ws_never_sees_inner` | store / HTTP | はい(表層非露出) |
+| P-104 | `ene-session::surface_projection_hides_inner_and_thinking`; `ene-kernel::surface_live_subscription_does_not_receive_inner`; `ene-core::surface_ws_never_sees_inner` | store / HTTP | はい(表層非露出) |
 | P-105 | `ene-companion::proactive_gate_fail_closed_without_llm`; `proactive_speaks_when_gates_pass`; `proactive_disabled_never_invokes_llm`; `tendency_does_not_pierce_gates` | Scripted | いいえ(ゲート機構は実コード) |
 | P-106 | `ene-body::autonomy_tick_does_not_require_a_turn` | store | はい(描画なし tick) |
 | P-107 | `boot_seeds_two_souls_and_session_ops`; `two_souls_keep_isolated_sessions_and_stage_occupants`; overlay 2-slot layout | HTTP / stage | 部分(セッション隔離と2スロット。GUI E2E は手動) |
 
 | P-108 | `ene-session::session_end_and_surface_search`; `boot_seeds_two_souls_and_session_ops` (split / end / search) | store / HTTP | はい |
 | P-109 | `ene-session::fork_copies_prefix_and_leaves_source_intact`; `fork_leaves_original_session_intact` | store / HTTP | はい |
-| P-110 | `ene-daemon::http_tests::export_default_omits_inner` | HTTP | はい |
+| P-110 | `ene-core::http_tests::export_default_omits_inner` | HTTP | はい |
 | P-112 | `ene-work::observe_screen_from_png_does_not_enter_session_history`; `tool_path_returns_png_and_placeholder_is_unavailable`; `world_state_does_not_store_screen_summary` | process / host API | 部分(PNG観測。ツール結果は画像ブロック未配線) |
 | P-201 | `ene-companion::memory_survives_reopen` | store | はい(永続化。抽出は正規表現) |
 | P-202 | `ene-companion::extract_names_as_shared_and_arbitrates` | Scripted / 正規表現 | いいえ |
@@ -81,7 +81,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-401 | `package_install_and_soul_creation`; `soul_and_body_packages_compose`; `import_shipped_alicia_vrm_exposes_parseable_avatar` | store / HTTP | 部分(I/O とはい。stage GUI 表示は手動) |
 | P-402 | `hot_swap_drops_pending_cues`; `unknown_emotion_falls_back_with_warning` | store | はい |
 | P-403 | `ene-vrm::minimal_glb_parses_as_vrm`; `minimal_glb_loads_with_wgpu`; `shipped_alicia_vrm_parses_and_loads`; `ene-stage::default_minimal_vrm_writes_parseable_glb` | Alicia / fixture | 部分(同梱 Alicia のパース/wgpu。GUI は手動) |
-| P-404 | `lipsync_from_tone_has_amplitude`; `emotion_always_emits_expression_even_without_body`; `autonomy_tick_does_not_require_a_turn`; `ene-daemon::affect_flushes_body_expression_to_surface_ws`; `ene-daemon::body_events_are_scoped_per_soul` | Scripted / HTTP | 部分(WS 配信。stage GUI の表情観察は手動) |
+| P-404 | `lipsync_from_tone_has_amplitude`; `emotion_always_emits_expression_even_without_body`; `autonomy_tick_does_not_require_a_turn`; `ene-core::affect_flushes_body_expression_to_surface_ws`; `ene-core::body_events_are_scoped_per_soul` | Scripted / HTTP | 部分(WS 配信。stage GUI の表情観察は手動) |
 | P-405 | `stage_caps_concurrent_rendered_bodies`; `boot_seeds_two_souls_and_session_ops`; `two_souls_keep_isolated_sessions_and_stage_occupants`; `overlay_slot_offsets_place_two_bodies_apart` | store / HTTP / overlay | 部分(2スロット配置。GUI E2E は手動) |
 | P-406 | `hot_swap_drops_pending_cues` | store | はい |
 | P-407 | `boot_stage_maps_emotion_without_a_rendered_body`; `emotion_always_emits_expression_even_without_body` | HTTP / store | はい(描画なしレーン) |
@@ -201,7 +201,7 @@ GUI 手動項目(P-102 / P-103 / P-107 / P-403-P-405)も同様に headless Wayla
 
 結果（2026-08-21, Cloud Agent）: 実マイク/スピーカは無い。機構は
 `ene-stage::echo_aware_gate_drops_playback_bleed` と
-`ene-daemon::listen_stream_feeds_duplex_machine_without_stt` で確認。
+`ene-core::listen_stream_feeds_duplex_machine_without_stt` で確認。
 
 ## 意図的にやらないこと(W7)
 

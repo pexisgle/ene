@@ -1,6 +1,6 @@
 # アーキテクチャ
 
-Ene は **コンパニオン型ハーネス**です。コアデーモンは1プロセス、クライアントは複数、
+Ene は **コンパニオン型ハーネス**です。コアは1プロセス、クライアントは複数、
 ツールはアウトプロセス、認知層はホスト内です。
 
 完成形の定義は
@@ -12,22 +12,22 @@ Ene は **コンパニオン型ハーネス**です。コアデーモンは1プ�
 ```text
 ene-stage   ─┐
 ene-desktop ─┤
-ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core (ene-daemon)
+ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core
 Web         ─┘                              │
                                             ├── ene-session / ene-kernel
                                             ├── ene-companion / ene-body / ene-work
-                                            ├── ene-plane (承認 + 監査 + ボールト)
-                                            └── ene-fiber ──► plugins/tool/*
+                                            ├── ene-access-control (承認 + 監査 + ボールト)
+                                            └── ene-plugin-host ──► plugins/tool/*
 ```
 
 - **ホストは1つ。** 本体の状態は `ene-core` が持ちます。クライアントはカーネルを埋め込みません。
-- **クライアントは対等**です。排他資源（マイク、承認応答）だけデーモンが調停します。
+- **クライアントは対等**です。排他資源（マイク、承認応答）だけコアが調停します。
   製品 GUI は `ene-stage`、`ene-desktop` は同一 API の凍結レガシーで、
   stage が代替できたと判断したら削除します。
   [製品境界](product-boundaries.md) を見てください。
 - **ツールはアウトプロセス。** ビルトイン (`fs` / `exec` / `web` / `utility` /
   `app`) もサードパーティと同じ IPC です。コンパニオン状態に触るハーネス機能は
-  ホスト内で、`ene-registry` を通します。
+  ホスト内で、`ene-tool-registry` を通します。
 
 ## 2層、1体のコンパニオン
 

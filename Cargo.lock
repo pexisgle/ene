@@ -1985,6 +1985,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
+name = "ene-access-control"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "ene-config",
+ "hex",
+ "parking_lot",
+ "rand 0.10.2",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "ene-api"
 version = "0.1.0"
 dependencies = [
@@ -2042,11 +2064,11 @@ dependencies = [
  "blake3",
  "chrono",
  "chrono-tz",
+ "ene-access-control",
  "ene-card",
  "ene-config",
- "ene-plane",
- "ene-registry",
  "ene-session",
+ "ene-tool-registry",
  "flate2",
  "hex",
  "iana-time-zone",
@@ -2084,25 +2106,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-ctl"
-version = "0.1.0"
-dependencies = [
- "chrono-tz",
- "clap",
- "cron",
- "ene-api",
- "ene-daemon",
- "ene-session",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "ene-daemon"
+name = "ene-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2111,16 +2115,16 @@ dependencies = [
  "cargo-husky",
  "chrono",
  "clap",
+ "ene-access-control",
  "ene-api",
  "ene-body",
  "ene-companion",
  "ene-config",
- "ene-fiber",
  "ene-kernel",
- "ene-plane",
+ "ene-plugin-host",
  "ene-plugin-ipc",
- "ene-registry",
  "ene-session",
+ "ene-tool-registry",
  "ene-work",
  "fs2",
  "indexmap",
@@ -2134,6 +2138,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "ene-ctl"
+version = "0.1.0"
+dependencies = [
+ "chrono-tz",
+ "clap",
+ "cron",
+ "ene-api",
+ "ene-core",
+ "ene-session",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -2199,33 +2221,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-fiber"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "blake3",
- "ene-config",
- "ene-kernel",
- "ene-plugin-ipc",
- "ene-provider-assets",
- "ene-registry",
- "ene-sandbox",
- "parking_lot",
- "regex",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "ene-kernel"
 version = "0.1.0"
 dependencies = [
@@ -2244,25 +2239,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-plane"
+name = "ene-plugin-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "blake3",
- "chrono",
  "ene-config",
- "hex",
+ "ene-kernel",
+ "ene-plugin-ipc",
+ "ene-provider-assets",
+ "ene-sandbox",
+ "ene-tool-registry",
  "parking_lot",
- "rand 0.10.2",
- "rusqlite",
+ "regex",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "url",
  "uuid",
- "zeroize",
 ]
 
 [[package]]
@@ -2399,42 +2399,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-registry"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "ashpd 0.13.13",
- "async-trait",
- "base64 0.23.1",
- "blake3",
- "chrono",
- "chrono-tz",
- "diffy",
- "ene-plane",
- "ene-plugin-ipc",
- "globset",
- "htmd",
- "ignore",
- "image",
- "libc",
- "parking_lot",
- "process-wrap",
- "regex",
- "scraper",
- "serde",
- "serde_json",
- "sha2",
- "strsim",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "url",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "ene-sandbox"
 version = "0.1.0"
 dependencies = [
@@ -2525,10 +2489,10 @@ dependencies = [
  "arboard",
  "ashpd 0.13.13",
  "base64 0.23.1",
- "ene-fiber",
- "ene-plane",
+ "ene-access-control",
+ "ene-plugin-host",
  "ene-plugin-ipc",
- "ene-registry",
+ "ene-tool-registry",
  "image",
  "serde_json",
  "tempfile",
@@ -2543,7 +2507,7 @@ name = "ene-tool-exec"
 version = "0.1.0"
 dependencies = [
  "ene-plugin-ipc",
- "ene-registry",
+ "ene-tool-registry",
  "libc",
  "process-wrap",
  "serde_json",
@@ -2560,10 +2524,10 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "diffy",
- "ene-fiber",
+ "ene-plugin-host",
  "ene-plugin-ipc",
- "ene-registry",
  "ene-sandbox",
+ "ene-tool-registry",
  "globset",
  "ignore",
  "parking_lot",
@@ -2582,9 +2546,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
- "ene-fiber",
+ "ene-plugin-host",
  "ene-plugin-ipc",
- "ene-registry",
+ "ene-tool-registry",
  "rmcp",
  "serde",
  "serde_json",
@@ -2595,6 +2559,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-tool-registry"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "ashpd 0.13.13",
+ "async-trait",
+ "base64 0.23.1",
+ "blake3",
+ "chrono",
+ "chrono-tz",
+ "diffy",
+ "ene-access-control",
+ "ene-plugin-ipc",
+ "globset",
+ "htmd",
+ "ignore",
+ "image",
+ "libc",
+ "parking_lot",
+ "process-wrap",
+ "regex",
+ "scraper",
+ "serde",
+ "serde_json",
+ "sha2",
+ "strsim",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ene-tool-utility"
 version = "0.1.0"
 dependencies = [
@@ -2602,10 +2602,10 @@ dependencies = [
  "blake3",
  "chrono",
  "chrono-tz",
- "ene-fiber",
+ "ene-plugin-host",
  "ene-plugin-ipc",
- "ene-registry",
  "ene-sandbox",
+ "ene-tool-registry",
  "regex",
  "serde_json",
  "sha2",
@@ -2621,7 +2621,7 @@ name = "ene-tool-web"
 version = "0.1.0"
 dependencies = [
  "ene-plugin-ipc",
- "ene-registry",
+ "ene-tool-registry",
  "htmd",
  "scraper",
  "serde_json",
@@ -2672,11 +2672,11 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "cron",
+ "ene-access-control",
  "ene-companion",
  "ene-kernel",
- "ene-plane",
- "ene-registry",
  "ene-session",
+ "ene-tool-registry",
  "image",
  "parking_lot",
  "rusqlite",

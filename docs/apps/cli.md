@@ -42,7 +42,7 @@ arguments appear only with `--verbose` or `ene-ctl debug`.
 | `task list/cancel/answer` | Jobs (public delegations) |
 | `memory list/edit/delete` | Memory rows |
 | `schedule list` / `schedule add <soul> <name> <spec>` | List schedules, or create one. Quote `spec` (5 or 6 cron fields). `--timezone` (default `UTC`), `--action` (`remind` / `job` / `turn`), `--action-ref`, `--important` |
-| `core start/status/stop` | Daemon process |
+| `core start/status/stop` | Core process |
 | `debug log <session>` | History at detail depth |
 | `debug delegation <id>` | Job id or delegation session id, history at detail depth |
 | `debug spans` | Diagnostic spans |

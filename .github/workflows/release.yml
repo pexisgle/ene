@@ -43,7 +43,7 @@ jobs:
 
       - name: Verify tag matches workspace version
         run: |
-          package_id="$(nix develop --command cargo pkgid -p ene-daemon)"
+          package_id="$(nix develop --command cargo pkgid -p ene-core)"
           cargo_version="${package_id##*@}"
           if [ "$cargo_version" != "$VERSION" ]; then
             echo "error: tag version $VERSION does not match Cargo workspace version $cargo_version" >&2
@@ -53,7 +53,7 @@ jobs:
       - name: Build release binaries
         run: |
           nix develop --command cargo build --release \
-            -p ene-daemon \
+            -p ene-core \
             -p ene-ctl \
             -p ene-stage \
             -p ene-tool-fs \

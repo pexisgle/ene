@@ -231,12 +231,12 @@ pub fn skill_matches(meta: &SkillMeta, query: &str) -> bool {
 }
 
 pub fn read_skill_file(home: &Path, name: &str, rel: &str) -> Result<String, WorkError> {
-    let root = ene_registry::confine_tool_path(home, Path::new(name), false)
+    let root = ene_tool_registry::confine_tool_path(home, Path::new(name), false)
         .map_err(|err| WorkError::Skill(err.to_string()))?;
     if !root.is_dir() {
         return Err(WorkError::UnknownSkill(name.to_owned()));
     }
-    let confined = ene_registry::confine_tool_path(&root, Path::new(rel), false)
+    let confined = ene_tool_registry::confine_tool_path(&root, Path::new(rel), false)
         .map_err(|err| WorkError::Skill(err.to_string()))?;
     fs::read_to_string(confined).map_err(WorkError::from)
 }

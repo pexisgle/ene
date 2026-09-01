@@ -2,7 +2,7 @@ use crate::BuiltinExecutor;
 use crate::def::{Layer, ToolDefinition, ToolSource};
 use crate::discovery::{IndexedTool, ToolHit, lexical_score};
 use async_trait::async_trait;
-use ene_plane::{ApprovalPlane, AuthzRequest};
+use ene_access_control::{ApprovalPlane, AuthzRequest};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -88,7 +88,7 @@ pub enum PipelineError {
     #[error("path escapes workspace: {0}")]
     PathEscape(String),
     #[error(transparent)]
-    Plane(#[from] ene_plane::PlaneError),
+    Plane(#[from] ene_access_control::PlaneError),
     #[error("execute: {0}")]
     Execute(String),
 }

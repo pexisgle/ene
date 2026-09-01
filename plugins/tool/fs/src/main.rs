@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     // Keep host-only `logic::with_workspace` live in this binary so shared
     // logic.rs stays clean under -D warnings (no #[allow]; expect(dead_code)
-    // is unfulfilled when ene-registry includes the same file).
+    // is unfulfilled when ene-tool-registry includes the same file).
     if std::env::var_os("ENE_NEVER_SET_HOST_WORKSPACE_LINK").is_some() {
         drop(logic::with_workspace(std::path::Path::new("."), || {
             Ok::<(), String>(())
@@ -24,7 +24,7 @@ async fn main() {
         )
         .init();
     if let Err(err) =
-        ene_registry::run_tool_plugin("tool.fs", logic::specs, broker_session::execute).await
+        ene_tool_registry::run_tool_plugin("tool.fs", logic::specs, broker_session::execute).await
     {
         tracing::error!(error = %err, plugin = "tool.fs", "fatal");
         std::process::exit(1);

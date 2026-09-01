@@ -166,7 +166,7 @@ desktop の数字で隠さない。
 | データ成長(1 エコーターン後 `sessions.db`) | 4 096 bytes | 監視のみ |
 
 以後の回帰はこれらの上限をテストで固定する(`ene-plugin-ipc` /
-`ene-kernel` / `ene-daemon` の measurable テストと
+`ene-kernel` / `ene-core` の measurable テストと
 `apps/ene-core/tests/w7_acceptance.rs`)。release 最適化や実プロバイダ遅延は
 別枠であり、`minimal` の未達をそれで隠さない。
 

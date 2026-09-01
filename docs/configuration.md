@@ -3,7 +3,7 @@
 Ene loads settings as defaults → JSON → `ENE_` environment variables.
 `__` separates nested keys (for example `ENE_CORE__SERVER__BIND`).
 
-The daemon loads `<data>/settings.json` through the same `ene-config` figment
+The core loads `<data>/settings.json` through the same `ene-config` figment
 pipeline used elsewhere: defaults, then JSON, then `ENE_` environment variables.
 A missing file is treated as `{}`; malformed JSON fails boot. Do not overlay
 `ENE_*` by hand in `ene-core`. The repository file
@@ -34,7 +34,7 @@ Add keys at the owning `define_config!` invocation. Schemas regenerate into
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
 | `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs`, `sessions.synchronous` |
-| `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
+| `approval` | `ene-access-control` | `mode`, `popup.timeout_ms` |
 
 `core.backup.skills_max_bytes` caps the `skills/` tree copied into each manual
 backup generation. The default is 100 MiB.

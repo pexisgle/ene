@@ -27,10 +27,10 @@ use crate::store::CompanionStore;
 use crate::tools::{QueryEmbed, register_memory_tools, surface_hides_write_shared};
 use crate::{CompanionError, EmotionReport, VOCABULARY};
 use chrono::{Duration, Utc};
-use ene_registry::{Layer, ToolRegistry};
 use ene_session::{
     DisplayDepth, InnerAspect, ProjectOptions, derive_messages, surface_leaks_inner,
 };
+use ene_tool_registry::{Layer, ToolRegistry};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -1313,18 +1313,18 @@ async fn memory_tools_surface_omits_write_shared() {
     let store = CompanionStore::open(dir.path().join("companions.db")).unwrap();
     let soul = store.create_soul(&NewSoul::text_only("char.a@1")).unwrap();
     let registry = ToolRegistry::new();
-    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
-    let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
+    let audit = ene_access_control::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_access_control::ApprovalPlane::new(
+        ene_access_control::ApprovalSettings::default(),
         audit,
-        Arc::new(ene_plane::ScriptedPopup::deny_all()),
+        Arc::new(ene_access_control::ScriptedPopup::deny_all()),
         None,
     ));
-    plane.set_policy(ene_plane::PolicyFile {
-        rules: vec![ene_plane::PolicyRule {
+    plane.set_policy(ene_access_control::PolicyFile {
+        rules: vec![ene_access_control::PolicyRule {
             tool: "memory.write_shared".to_owned(),
             scope: None,
-            decision: ene_plane::PolicyDecision::Allow,
+            decision: ene_access_control::PolicyDecision::Allow,
         }],
     });
     registry.set_plane(Arc::clone(&plane));

@@ -1,8 +1,8 @@
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use ene_access_control::{AiJudgement, ApproveModel, AuthzRequest};
 use ene_kernel::TaskBinding;
-use ene_plane::{AiJudgement, ApproveModel, AuthzRequest};
 use ene_plugin_ipc::{LlmGenerateRequest, LlmMessage, LlmRole, ProviderAuth};
 
 use crate::CoreDaemon;

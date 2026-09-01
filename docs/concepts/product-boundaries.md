@@ -208,10 +208,10 @@ and surface privacy controls on **stage**.
 | Layer | Current | Gap |
 |---|---|---|
 | OS sandbox (`ene-sandbox`) | Landlock + seccomp + rlimits on Linux | Windows AppContainer is still the design target, not a claimed current path |
-| Host FileBroker (`ene-fiber`) | `confine_path` for read/write; registry also rewrites `fs.*` args | Plugin still receives `ENE_WORKSPACE` and can touch files. List/glob/delete + TOCTOU: [#813](https://github.com/pexisgle/ene/issues/813) |
+| Host FileBroker (`ene-plugin-host`) | `confine_path` for read/write; registry also rewrites `fs.*` args | Plugin still receives `ENE_WORKSPACE` and can touch files. List/glob/delete + TOCTOU: [#813](https://github.com/pexisgle/ene/issues/813) |
 | Host net broker | Private/loopback/link-local deny, DNS pin, no redirects, 1 MiB body | `web` plugin bypasses it with reqwest + up to 4 redirects: [#799](https://github.com/pexisgle/ene/issues/799) |
 | Credentials | Vault (`vault.bin` + `vault.key`); plugins do not get raw keys in env | Keep vault refs for search backends ([#818](https://github.com/pexisgle/ene/issues/818)) and plugin config ([#819](https://github.com/pexisgle/ene/issues/819)). No host OAuth for MCP services |
-| Approval (`ene-plane`) | Deny-by-default, hash chain, popup, “don’t ask next time” | AI auto-approve production model still unset ([#717](https://github.com/pexisgle/ene/issues/717)) |
+| Approval (`ene-access-control`) | Deny-by-default, hash chain, popup, “don’t ask next time” | AI auto-approve production model still unset ([#717](https://github.com/pexisgle/ene/issues/717)) |
 | `exec` | SIGTERM then SIGKILL on the direct child | Process-tree ownership, output byte caps, cwd/env allowlist: [#798](https://github.com/pexisgle/ene/issues/798) |
 | Raw pixels | Observation summarizes off the session log | Current: session / memory / audit store digest and summary, not PNG |
 
@@ -241,7 +241,7 @@ Closing a child issue does not close [#717](https://github.com/pexisgle/ene/issu
 | Item | Issue / ID | Why later |
 |---|---|---|
 | MCP catalog, install preview, health, auth UX | [#812](https://github.com/pexisgle/ene/issues/812), P-616, M8 | Shipped post-v1.0: curated static catalog, one-shot probe preview with per-tool side effects before enable, fiber error surfacing with auth-required state, and manual bearer-token injection via the vault |
-| Tool discovery index | [#817](https://github.com/pexisgle/ene/issues/817) (epic [#796](https://github.com/pexisgle/ene/issues/796)) | Scoring stays in `ene-registry`; not a v1.0 `done.md` box |
+| Tool discovery index | [#817](https://github.com/pexisgle/ene/issues/817) (epic [#796](https://github.com/pexisgle/ene/issues/796)) | Scoring stays in `ene-tool-registry`; not a v1.0 `done.md` box |
 | Background tool start/cancel/completion | [#816](https://github.com/pexisgle/ene/issues/816) (epic #796) | Persist on `ene-work` jobs; no second task store |
 | Plugin config schema / dynamic options | [#819](https://github.com/pexisgle/ene/issues/819) (epic #796) | Unreleased: no legacy config shim |
 | Readable Markdown + search backends | [#818](https://github.com/pexisgle/ene/issues/818) | Shipped: markdown/text/html fetch, DDG+ArXiv, paid backends declared unconfigured |

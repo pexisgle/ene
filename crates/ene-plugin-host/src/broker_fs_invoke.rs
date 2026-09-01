@@ -1,6 +1,6 @@
 use crate::broker::{Broker, BrokerError};
 use crate::fiber::FiberUid;
-use ene_registry::BuiltinExecutor;
+use ene_tool_registry::BuiltinExecutor;
 use serde_json::{Value, json};
 use std::path::Path;
 

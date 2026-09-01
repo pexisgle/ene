@@ -2,7 +2,7 @@
 
 Starting point for a provider plugin that runs a local inference engine as a
 child process ("sidecar") instead of linking the native runtime in-process.
-Host-side spawn lives in `ene-fiber` (`SidecarRequest`). HTTP engines such as
+Host-side spawn lives in `ene-plugin-host` (`SidecarRequest`). HTTP engines such as
 `provider.openai_compat` (llama-server) and `provider.voicevox` talk to a
 user-run process over loopback.
 

@@ -1,4 +1,4 @@
-//! HTTP/WS contract for `ene-core`. Transport only — no daemon types.
+//! HTTP/WS contract for `ene-core`. Transport only — no core types.
 
 #![deny(unsafe_code)]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "tests"))]

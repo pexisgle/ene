@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use ene_daemon::{BootOptions, CoreDaemon};
+use ene_core::{BootOptions, CoreDaemon};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "ene-core", about = "Ene core daemon")]
+#[command(name = "ene-core", about = "Ene core")]
 struct Args {
     /// Data directory (sessions.db + exclusive lock).
     #[arg(long)]

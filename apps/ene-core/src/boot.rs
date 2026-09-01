@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use ene_access_control::{
+    ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink,
+    Vault,
+};
 use ene_body::{
     BodyCatalog, BodyError, BodySettings, EmotionCue, PerformanceBus, Stage, VoiceRuntime,
     VoiceSettings,
@@ -12,21 +16,17 @@ use ene_companion::{
     CharacterSettings, CompanionRuntime, CompanionStore, MindSettings, NewSoul, QueryEmbed,
     SlotQueryEmbed, register_memory_tools,
 };
-use ene_fiber::Supervisor;
 use ene_kernel::{
     AiSettings, ConversationModel, CoreSettings, HarnessSettings, LaneHandle, LaneMindSettings,
     LaneOptions, LoopHooks, PluginSettings, SpeechPresenter, SurfaceRouter, TaskBinding,
     TurnFinalizer, TurnPrefetch, format_recovery_note,
 };
-use ene_plane::{
-    ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink,
-    Vault,
-};
-use ene_registry::ToolRegistry;
+use ene_plugin_host::Supervisor;
 use ene_session::{
     BodyId, EventKind, EventPayload, NewEvent, RecoveryReport, SessionEndReason, SessionId,
     SessionStore, SoulId, StoreSettings, Transaction, v1,
 };
+use ene_tool_registry::ToolRegistry;
 use ene_work::{
     CompanionReport, DelegationHost, WorkError, WorkStore, WorkSurfaceRouter, register_work_tools,
     workspace_root,
@@ -35,7 +35,7 @@ use fs2::FileExt;
 use thiserror::Error;
 use tracing::info;
 
-/// Options for booting the core daemon (W0: store + recovery, no HTTP).
+/// Options for booting the core process (W0: store + recovery, no HTTP).
 #[derive(Debug, Clone)]
 pub struct BootOptions {
     /// Data directory that holds `sessions.db` and the lock file.
@@ -66,11 +66,11 @@ pub enum CoreError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Plane(#[from] ene_plane::PlaneError),
+    Plane(#[from] ene_access_control::PlaneError),
     #[error(transparent)]
-    Audit(#[from] ene_plane::AuditError),
+    Audit(#[from] ene_access_control::AuditError),
     #[error(transparent)]
-    Vault(#[from] ene_plane::VaultError),
+    Vault(#[from] ene_access_control::VaultError),
     #[error(transparent)]
     Companion(#[from] ene_companion::CompanionError),
     #[error(transparent)]

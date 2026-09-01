@@ -1,5 +1,5 @@
 use ene_plugin_ipc::ToolSpecWire;
-use ene_registry::spec;
+use ene_tool_registry::spec;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -155,7 +155,7 @@ fn resolve_cwd(args: &Value) -> Result<Option<PathBuf>, String> {
         return Ok(args.get("cwd").and_then(Value::as_str).map(PathBuf::from));
     };
     let raw = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
-    ene_registry::confine_tool_path(&workspace, Path::new(raw), false)
+    ene_tool_registry::confine_tool_path(&workspace, Path::new(raw), false)
         .map(Some)
         .map_err(|err| err.to_string())
 }

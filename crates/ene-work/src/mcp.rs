@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use ene_plane::Sensitivity;
-use ene_registry::{ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
+use ene_access_control::Sensitivity;
+use ene_tool_registry::{ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;

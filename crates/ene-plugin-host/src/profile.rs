@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::fiber::{Fiber, FiberState};
 use crate::supervisor::ProfileRow;
 use ene_plugin_ipc::BuiltinKind;
-use ene_registry::definitions_for;
+use ene_tool_registry::definitions_for;
 
 /// Outcome of [`crate::Supervisor::apply_profile`].
 #[derive(Debug, Clone, PartialEq, Eq)]

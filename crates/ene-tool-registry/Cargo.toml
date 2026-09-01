@@ -1,5 +1,5 @@
 [package]
-name = "ene-registry"
+name = "ene-tool-registry"
 version.workspace = true
 edition.workspace = true
 description = "Unified tool registry: side_effects filter, deny-by-default pipeline, builtins"
@@ -14,7 +14,7 @@ blake3 = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 ene-plugin-ipc = { workspace = true, features = ["net"] }
-ene-plane = { workspace = true }
+ene-access-control = { workspace = true }
 parking_lot = { workspace = true }
 arboard = { workspace = true }
 regex = { workspace = true }

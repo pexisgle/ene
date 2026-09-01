@@ -1,7 +1,7 @@
 use ene_plugin_ipc::{
     BrokerClient, BrokerClientTransport, BrokerRequest, BrokerResponse, BrokerSession,
 };
-use ene_registry::arg_str;
+use ene_tool_registry::arg_str;
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 use tokio::sync::Mutex as AsyncMutex;

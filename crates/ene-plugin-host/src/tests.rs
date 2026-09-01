@@ -3,7 +3,7 @@ use crate::{
     SidecarRequest, Supervisor, SupervisorError, confine_path, discover_plugin_script,
     manifest_digest,
 };
-use ene_registry::{Layer, ToolRegistry};
+use ene_tool_registry::{Layer, ToolRegistry};
 use parking_lot::Mutex;
 use serde_json::json;
 use std::path::PathBuf;
@@ -86,7 +86,7 @@ async fn unloading_the_later_fiber_restores_the_earlier_tool() {
 #[tokio::test]
 async fn dispose_inverts_every_effect_kind_lifo() {
     use ene_plugin_ipc::BuiltinKind;
-    use ene_registry::definitions_for;
+    use ene_tool_registry::definitions_for;
 
     let (_dir, sup) = supervisor();
     let hooks = ene_kernel::LoopHooks::new();
@@ -779,7 +779,7 @@ async fn probe_search_backends_reports_injected_credentials() {
     r.config = json!({"tavily_api_key": "tvly-live"});
     sup.activate(&r).unwrap();
     sup.grant_for_tests(sup.fiber("r-web").unwrap().uid, "net.fetch");
-    ene_registry::with_post_json(
+    ene_tool_registry::with_post_json(
         move |_url, _body, _bearer| {
             Ok(json!({"status": 200, "content_type": "application/json", "results": []}))
         },
@@ -791,7 +791,7 @@ async fn probe_search_backends_reports_injected_credentials() {
                 .unwrap();
             assert_eq!(v["backends"][2]["id"], "tavily");
             assert_eq!(v["backends"][2]["available"], true);
-            Ok::<(), ene_registry::PipelineError>(())
+            Ok::<(), ene_tool_registry::PipelineError>(())
         },
     )
     .await

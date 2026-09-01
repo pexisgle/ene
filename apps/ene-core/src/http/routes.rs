@@ -6,6 +6,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use base64::Engine;
+use ene_access_control::PopupDecision;
 use ene_api::{
     AffectView, AnswerJobRequest, AnswerQuestionRequest, ApprovalView, ArtifactView,
     BackupResponse, CharacterView, ClaimResourceRequest, CompactResponse, CreateJobRequest,
@@ -28,13 +29,12 @@ use ene_companion::{
     soul_from_install,
 };
 use ene_kernel::DisplayDepth;
-use ene_plane::PopupDecision;
-use ene_registry::{Layer, PipelineError};
 use ene_session::{
     Block, ClientId, DelegationId, EventKind, EventPayload, NewEvent, NewSession, QuestionId,
     SessionCreatedBy, SessionEndReason, SessionId, SessionKind, SessionMeta, SoulId, Transaction,
     TurnId, v1,
 };
+use ene_tool_registry::{Layer, PipelineError};
 use ene_work::{CompanionReport, NewSchedule, ScheduleAction};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -1133,7 +1133,7 @@ pub async fn artifact_content(
         .get_artifact(&id)
         .map_err(map_work)?
         .ok_or_else(|| not_found("artifact not found"))?;
-    let confined = ene_registry::confine_tool_path(
+    let confined = ene_tool_registry::confine_tool_path(
         &state.core.workspace_dir(),
         std::path::Path::new(&art.path),
         false,
@@ -1546,9 +1546,9 @@ pub async fn list_provider_models(
     State(state): State<AppState>,
     Json(body): Json<ListProviderModelsRequest>,
 ) -> Result<Json<ListProviderModelsResponse>, ApiReject> {
-    let seam = ene_fiber::task_seam(&body.task)
+    let seam = ene_plugin_host::task_seam(&body.task)
         .ok_or_else(|| bad_request("invalid_message", "unknown task"))?;
-    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+    if ene_plugin_host::provider_plugin(&body.plugin).is_none() {
         return Err(bad_request("invalid_message", "unknown plugin"));
     }
     let api_key = if body.api_key.is_empty() {
@@ -1572,7 +1572,7 @@ pub async fn list_provider_models(
             models: result.models,
             error: result.error,
         })),
-        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+        Err(ene_plugin_host::SupervisorError::UnknownPlugin(_)) => {
             Err(bad_request("invalid_message", "unknown plugin"))
         }
         Err(err) => Ok(Json(ListProviderModelsResponse {
@@ -1586,13 +1586,13 @@ pub async fn list_provider_assets(
     State(state): State<AppState>,
     Json(body): Json<ene_api::ListProviderAssetsRequest>,
 ) -> Result<Json<ene_api::ListProviderAssetsResponse>, ApiReject> {
-    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+    if ene_plugin_host::provider_plugin(&body.plugin).is_none() {
         return Err(bad_request("invalid_message", "unknown plugin"));
     }
     let result = state.core.supervisor().list_assets(&body.plugin).await;
     match result {
         Ok(result) => Ok(Json(map_assets_list(result))),
-        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+        Err(ene_plugin_host::SupervisorError::UnknownPlugin(_)) => {
             Err(bad_request("invalid_message", "unknown plugin"))
         }
         Err(err) => Ok(Json(ene_api::ListProviderAssetsResponse {
@@ -1606,7 +1606,7 @@ pub async fn install_provider_asset(
     State(state): State<AppState>,
     Json(body): Json<ene_api::InstallProviderAssetRequest>,
 ) -> Result<Json<ene_api::InstallProviderAssetResponse>, ApiReject> {
-    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+    if ene_plugin_host::provider_plugin(&body.plugin).is_none() {
         return Err(bad_request("invalid_message", "unknown plugin"));
     }
     let request = ene_plugin_ipc::InstallAssetRequest {
@@ -1624,7 +1624,7 @@ pub async fn install_provider_asset(
             job_id: result.job_id,
             error: result.error,
         })),
-        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+        Err(ene_plugin_host::SupervisorError::UnknownPlugin(_)) => {
             Err(bad_request("invalid_message", "unknown plugin"))
         }
         Err(err) => Ok(Json(ene_api::InstallProviderAssetResponse {
@@ -1638,7 +1638,7 @@ pub async fn provider_asset_install_status(
     State(state): State<AppState>,
     Json(body): Json<ene_api::ProviderAssetInstallStatusRequest>,
 ) -> Result<Json<ene_api::ProviderAssetInstallStatusResponse>, ApiReject> {
-    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+    if ene_plugin_host::provider_plugin(&body.plugin).is_none() {
         return Err(bad_request("invalid_message", "unknown plugin"));
     }
     let request = ene_plugin_ipc::InstallStatusRequest {
@@ -1651,7 +1651,7 @@ pub async fn provider_asset_install_status(
         .await
     {
         Ok(result) => Ok(Json(map_install_status(result))),
-        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+        Err(ene_plugin_host::SupervisorError::UnknownPlugin(_)) => {
             Err(bad_request("invalid_message", "unknown plugin"))
         }
         Err(err) => Ok(Json(ene_api::ProviderAssetInstallStatusResponse {
@@ -1665,7 +1665,7 @@ pub async fn set_active_provider_asset(
     State(state): State<AppState>,
     Json(body): Json<ene_api::SetActiveProviderAssetRequest>,
 ) -> Result<Json<ene_api::SetActiveProviderAssetResponse>, ApiReject> {
-    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+    if ene_plugin_host::provider_plugin(&body.plugin).is_none() {
         return Err(bad_request("invalid_message", "unknown plugin"));
     }
     let request = ene_plugin_ipc::SetActiveAssetRequest {
@@ -1681,7 +1681,7 @@ pub async fn set_active_provider_asset(
         Ok(result) => Ok(Json(ene_api::SetActiveProviderAssetResponse {
             error: result.error,
         })),
-        Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
+        Err(ene_plugin_host::SupervisorError::UnknownPlugin(_)) => {
             Err(bad_request("invalid_message", "unknown plugin"))
         }
         Err(err) => Ok(Json(ene_api::SetActiveProviderAssetResponse {
@@ -1694,7 +1694,7 @@ pub async fn refresh_provider_assets_catalog(
     State(state): State<AppState>,
     Json(body): Json<ene_api::RefreshProviderAssetsCatalogRequest>,
 ) -> Result<Json<ene_api::RefreshProviderAssetsCatalogResponse>, ApiReject> {
-    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+    if ene_plugin_host::provider_plugin(&body.plugin).is_none() {
         return Err(bad_request("invalid_message", "unknown plugin"));
     }
     match state
@@ -1876,7 +1876,7 @@ pub async fn probe_mcp(
         "probe_only": true,
         "skills_home": "",
     });
-    let row = ene_fiber::ProfileRow {
+    let row = ene_plugin_host::ProfileRow {
         row_id: row_id.clone(),
         plugin: row_id.clone(),
         requires: Vec::new(),
@@ -2008,16 +2008,16 @@ pub async fn respond_approval(
         .and_then(Value::as_str)
         .ok_or_else(|| bad_request("invalid_message", "decision required"))?;
     let parsed = PopupDecision::parse(decision).map_err(|err| match err {
-        ene_plane::PlaneError::UnknownApproval(_) => {
+        ene_access_control::PlaneError::UnknownApproval(_) => {
             bad_request("invalid_message", "unknown decision")
         }
         other => bad_request("fault", &other.to_string()),
     })?;
     state.popup.respond(&id, parsed).map_err(|err| match err {
-        ene_plane::PlaneError::AlreadyResolved(_) => {
+        ene_access_control::PlaneError::AlreadyResolved(_) => {
             conflict("already_resolved", "approval already resolved")
         }
-        ene_plane::PlaneError::UnknownApproval(_) => not_found("approval not found"),
+        ene_access_control::PlaneError::UnknownApproval(_) => not_found("approval not found"),
         other => bad_request("fault", &other.to_string()),
     })?;
     state.events.emit(
@@ -2189,7 +2189,7 @@ fn attach_provider_catalog(
     if let Some(map) = effective.as_object_mut() {
         map.insert(
             "providers".to_owned(),
-            Value::Array(ene_fiber::provider_catalog(Some(&home))),
+            Value::Array(ene_plugin_host::provider_catalog(Some(&home))),
         );
     }
 }
@@ -2352,7 +2352,7 @@ pub async fn patch_settings(
     }
     if let Some(approval_value) = current.get("approval")
         && let Ok(approval) =
-            serde_json::from_value::<ene_plane::ApprovalSettings>(approval_value.clone())
+            serde_json::from_value::<ene_access_control::ApprovalSettings>(approval_value.clone())
     {
         state.core.replace_approval(approval);
     }
@@ -3083,12 +3083,12 @@ fn map_companion(err: ene_companion::CompanionError) -> ApiReject {
     }
 }
 
-fn map_pipeline(err: &ene_registry::PipelineError) -> ApiReject {
+fn map_pipeline(err: &ene_tool_registry::PipelineError) -> ApiReject {
     match &err {
-        ene_registry::PipelineError::Denied { .. }
-        | ene_registry::PipelineError::Plane(ene_plane::PlaneError::Denied { .. }) => {
-            forbidden("job creation denied").with_detail(err.to_string())
-        }
+        ene_tool_registry::PipelineError::Denied { .. }
+        | ene_tool_registry::PipelineError::Plane(ene_access_control::PlaneError::Denied {
+            ..
+        }) => forbidden("job creation denied").with_detail(err.to_string()),
         _ => bad_request("fault", &err.to_string()),
     }
 }

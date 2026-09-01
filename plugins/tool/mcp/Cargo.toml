@@ -23,8 +23,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 rmcp = { version = "3.1", default-features = false, features = ["client", "macros", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 
 [dev-dependencies]
-ene-fiber = { workspace = true }
-ene-registry = { workspace = true }
+ene-plugin-host = { workspace = true }
+ene-tool-registry = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

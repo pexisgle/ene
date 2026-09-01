@@ -14,8 +14,8 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 ene-card = { workspace = true }
 ene-config = { workspace = true }
-ene-plane = { workspace = true }
-ene-registry = { workspace = true }
+ene-access-control = { workspace = true }
+ene-tool-registry = { workspace = true }
 ene-session = { workspace = true }
 flate2 = { workspace = true }
 hex = { workspace = true }

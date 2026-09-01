@@ -174,7 +174,7 @@ fn overlapping_def() -> ToolDefinition {
             name: "overlap.tool".to_owned(),
         },
         timeout_ms: None,
-        sensitivity: ene_plane::Sensitivity::None,
+        sensitivity: ene_access_control::Sensitivity::None,
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
@@ -272,7 +272,7 @@ fn harness_tool_uses_the_same_pipeline() {
             name: "memory.recall".to_owned(),
         },
         timeout_ms: None,
-        sensitivity: ene_plane::Sensitivity::None,
+        sensitivity: ene_access_control::Sensitivity::None,
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
@@ -284,7 +284,7 @@ fn harness_tool_uses_the_same_pipeline() {
 
 #[tokio::test]
 async fn plane_denies_side_effects_and_sensitive_reads() {
-    use ene_plane::{ApprovalPlane, ApprovalSettings, AuditLog, ScriptedPopup};
+    use ene_access_control::{ApprovalPlane, ApprovalSettings, AuditLog, ScriptedPopup};
     let dir = tempfile::TempDir::new().unwrap();
     let registry = ToolRegistry::new();
     registry.set_workspace(dir.path());
@@ -309,7 +309,7 @@ async fn plane_denies_side_effects_and_sensitive_reads() {
             name: "app.screenshot".to_owned(),
         },
         timeout_ms: None,
-        sensitivity: ene_plane::Sensitivity::High,
+        sensitivity: ene_access_control::Sensitivity::High,
         category: String::new(),
         keywords: Vec::new(),
         examples: Vec::new(),
@@ -372,7 +372,7 @@ fn unknown_plugin_empty_side_effects_are_medium_sensitivity() {
             plugin_id: "evil".to_owned(),
         },
     );
-    assert_eq!(def.sensitivity, ene_plane::Sensitivity::Medium);
+    assert_eq!(def.sensitivity, ene_access_control::Sensitivity::Medium);
 }
 
 #[tokio::test]
@@ -475,11 +475,11 @@ fn app_screenshot_is_high_sensitivity_from_host_spec() {
     let defs = crate::builtins::definitions_for(BuiltinKind::App);
     assert_eq!(
         crate::builtins::host_sensitivity("app.screenshot"),
-        ene_plane::Sensitivity::High
+        ene_access_control::Sensitivity::High
     );
     if let Some(shot) = defs.iter().find(|def| def.name == "app.screenshot") {
         assert!(shot.side_effects.is_empty());
-        assert_eq!(shot.sensitivity, ene_plane::Sensitivity::High);
+        assert_eq!(shot.sensitivity, ene_access_control::Sensitivity::High);
     }
     let click = defs.iter().find(|def| def.name == "app.click");
     if let Some(click) = click {
@@ -639,7 +639,7 @@ fn search_tools_tie_breaks_by_name() {
             name: "test".to_owned(),
         },
         timeout_ms: None,
-        sensitivity: ene_plane::Sensitivity::None,
+        sensitivity: ene_access_control::Sensitivity::None,
         category: "test".to_owned(),
         keywords: vec!["needle".to_owned()],
         examples: Vec::new(),
@@ -655,7 +655,7 @@ fn search_tools_tie_breaks_by_name() {
             name: "test".to_owned(),
         },
         timeout_ms: None,
-        sensitivity: ene_plane::Sensitivity::None,
+        sensitivity: ene_access_control::Sensitivity::None,
         category: "test".to_owned(),
         keywords: vec!["needle".to_owned()],
         examples: Vec::new(),
@@ -701,7 +701,7 @@ fn search_tools_truncates_huge_metadata() {
             name: "test".to_owned(),
         },
         timeout_ms: None,
-        sensitivity: ene_plane::Sensitivity::None,
+        sensitivity: ene_access_control::Sensitivity::None,
         category: "x".repeat(256),
         keywords: vec!["x".repeat(256); 64],
         examples: vec!["y".repeat(512); 16],
@@ -725,7 +725,7 @@ fn search_tools_finds_mcp_tool_definition() {
             server: "git".to_owned(),
         },
         timeout_ms: None,
-        sensitivity: ene_plane::Sensitivity::None,
+        sensitivity: ene_access_control::Sensitivity::None,
         category: "vcs".to_owned(),
         keywords: vec!["git".to_owned(), "status".to_owned()],
         examples: vec!["git status".to_owned()],

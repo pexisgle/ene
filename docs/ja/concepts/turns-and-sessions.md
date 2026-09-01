@@ -3,7 +3,7 @@
 ## ターン
 
 **ターン**は会話の 1 単位です。ユーザーメッセージ（またはプロアクティブ・
-スケジュール・委譲によるトリガー）と、それに対するデーモンの一連の応答を
+スケジュール・委譲によるトリガー）と、それに対するコアの一連の応答を
 指します。すべてのターンは `TurnId` を持ちます。対話レーンは `ene-kernel`
 です。
 
@@ -38,7 +38,7 @@
 3. 設定済みの会話モデルが、結び付けた `provider.*` プラグイン経由でテキストを
    ストリーム。一時的なプロバイダ失敗は `harness.retry` で再試行し、プロンプトは
    実効コンテキスト窓に収まるようパックします（[設定](../configuration.md)）。
-4. 表層向けツールは `ene-registry` / `ene-plane` を通る。
+4. 表層向けツールは `ene-tool-registry` / `ene-access-control` を通る。
    `delegate.start` はすぐに戻り、`ene-work` が **ジョブレーン**
    （`origin: delegation`）を開き、作業ツールと `delegation.send` を使います。
    しおり依頼（`workflow.bookmark`）は `web.search` があれば調査し、
@@ -55,7 +55,7 @@
 6. ライブイベントは `surface` または `detail` の深さで送出。
 
 生成の前に、共有 `LoopHooks` の waterfall として `agent/pre-step` が走ります。
-ホストと `ene-fiber` はガード付きで購読し、ファイバー unload で外れます。
+ホストと `ene-plugin-host` はガード付きで購読し、ファイバー unload で外れます。
 `next` を呼ばないリスナーはターンを書き換え／停止できます。`emit` は通知のみです。
 アウトプロセスプラグインに生の intercept IPC は渡しません。承認や quiet hours を
 ツール副プロトコルから迂回できてしまうためです。
@@ -89,7 +89,7 @@
 
 ## イベント
 
-デーモンは HTTP と WebSocket のライブバスを出します。
+コアは HTTP と WebSocket のライブバスを出します。
 `ene-kernel::LiveEvent` はサーバ側で深さフィルタされます。`surface` は発話、
 `detail` は内面 / thinking / ツール引数も受け取ります。stage の主画面は
 surface、別窓の詳細画面（と `ene-ctl --verbose`）は detail です。
@@ -111,7 +111,7 @@ stage / desktop / Web はこの名前を待ちます。回答は対話レーン�
 ジョブメールボックス（`host.answer`）へ送ります。同一ジョブに未回答が複数ある
 ときは `combine_pending_questions` で結合して出します。単一の `text` はその
 ジョブの未回答すべてに届きます。`question_timeout_hours`（既定 24 時間）を
-過ぎた未回答は、デーモンのティックがメールボックスに `assumption` を書いて
+過ぎた未回答は、コアのティックがメールボックスに `assumption` を書いて
 閉じます。
 そのジョブの未回答がなくなったとき（どのクライアントから回答された場合も、
 タイムアウトで閉じられた場合も）、core は `question.resolved`（`id` はジョブ /
@@ -133,4 +133,4 @@ stage / desktop / Web はこの名前を待ちます。回答は対話レーン�
 終了済みセッションへの prompt は `closed` で失敗します。
 
 セッションタイトルは作成時または `PATCH` でクライアントが付けたものです。
-デーモンは会話内容から自動では付けません。
+コアは会話内容から自動では付けません。

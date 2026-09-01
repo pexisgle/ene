@@ -4,7 +4,7 @@
     reason = "set_var plants a secret so the child env filter can be asserted"
 )]
 
-use ene_registry::BuiltinExecutor;
+use ene_tool_registry::BuiltinExecutor;
 use serde_json::json;
 use tempfile::TempDir;
 

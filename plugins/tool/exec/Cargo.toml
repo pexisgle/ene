@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 ene-plugin-ipc = { workspace = true }
-ene-registry = { workspace = true }
+ene-tool-registry = { workspace = true }
 process-wrap = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
@@ -24,7 +24,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 libc = { workspace = true }
 
 [dev-dependencies]
-ene-registry = { workspace = true }
+ene-tool-registry = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 

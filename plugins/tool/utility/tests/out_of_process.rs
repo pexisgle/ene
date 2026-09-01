@@ -5,8 +5,8 @@
     reason = "tests fail fast"
 )]
 
-use ene_fiber::{ProfileRow, Supervisor};
-use ene_registry::{Layer, ToolRegistry};
+use ene_plugin_host::{ProfileRow, Supervisor};
+use ene_tool_registry::{Layer, ToolRegistry};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;

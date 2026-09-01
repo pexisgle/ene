@@ -1,4 +1,4 @@
-//! Core daemon process: data-dir lock, session store, interrupt recovery.
+//! Core process: data-dir lock, session store, interrupt recovery.
 
 #![cfg_attr(
     test,

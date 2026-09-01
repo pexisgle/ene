@@ -1,4 +1,4 @@
-//! Spatiotemporal plugin composition (D-32). Kill is not unload.
+//! Plugin host: process supervision and reversible host-context composition. Kill is not unload.
 
 #![cfg_attr(
     test,

@@ -10,8 +10,8 @@ use crate::types::{
     WorkDelegationSettings,
 };
 use chrono::{DateTime, Utc};
-use ene_registry::{Layer, ToolDefinition, ToolRegistry};
 use ene_session::{DelegationId, QuestionId, SoulId};
+use ene_tool_registry::{Layer, ToolDefinition, ToolRegistry};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! Approval plane, append-only audit hash chain, and credential vault (W2).
+//! Access control: approval, append-only audit hash chain, and credential vault.
 
 #![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
 #![deny(unsafe_code)]

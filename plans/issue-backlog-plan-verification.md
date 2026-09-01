@@ -8,7 +8,7 @@
 
 ## 2) Architecture boundaries
 - #1177/#1179/#1181: ene-stage(chrome/detail/platform)のみ、ene-session等の所有を侵さない → OK
-- #1198/#1199/#1203/#1204/#1205: ene-work/ene-session/ene-plane/ene-companion/ene-kernelの責務分離を維持。kernelはHTTP/plugin/companion非依存を維持、companionはdaemon非依存、workはplaneゲート経由 → 要レビュー項目としてPRテンプレに明記
+- #1198/#1199/#1203/#1204/#1205: ene-work/ene-session/ene-access-control/ene-companion/ene-kernelの責務分離を維持。kernelはHTTP/plugin/companion非依存を維持、companionはdaemon非依存、workはplaneゲート経由 → 要レビュー項目としてPRテンプレに明記
 - #1200/#1208/#1209/#1210: docsのみ、crate非依存 → OK
 - #717/#1187/#1206: テスト追加は各クレートの責務内に留める → OK
 

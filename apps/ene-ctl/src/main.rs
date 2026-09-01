@@ -39,7 +39,7 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Manage the ene-core daemon process
+    /// Manage the ene-core process
     Core {
         #[command(subcommand)]
         op: CoreCmd,

@@ -1,8 +1,8 @@
 # Plugins & MCP
 
-Tools are **out-of-process binaries**. The host (`ene-fiber`) spawns them,
+Tools are **out-of-process binaries**. The host (`ene-plugin-host`) spawns them,
 negotiates split `core` / `tool` / `provider` / `capability` subprotocols (`ene-plugin-ipc`),
-and registers tools in `ene-registry`. Harness functions that touch companion
+and registers tools in `ene-tool-registry`. Harness functions that touch companion
 state stay in-process and still go through the same registry pipeline.
 
 The plugin supervisor can subscribe to kernel waterfall points
@@ -17,7 +17,7 @@ network-isolated and does not open sockets. See [Built-in tools](../guides/tools
 and [Write a tool](../guides/tools/write-a-tool.md).
 
 Tool specs may carry optional discovery metadata (`category`, `keywords`,
-`examples`) on the wire. `ene-registry` indexes every registered tool — bundled
+`examples`) on the wire. `ene-tool-registry` indexes every registered tool — bundled
 plugins, MCP rows, and harness tools share the same path — and exposes lexical
 `search_tools(query, limit)` for host-side discovery without embeddings.
 Plugin unload drops matching index rows.
@@ -33,7 +33,7 @@ marketplace picker for popular servers is a successor milestone on stage
 ([#812](https://github.com/pexisgle/ene/issues/812), P-616).
 
 Provider plugins live under `plugins/provider/` and speak the `provider`
-subprotocol. The host catalog (`ene_fiber::PROVIDER_PLUGINS`) is the single
+subprotocol. The host catalog (`ene_plugin_host::PROVIDER_PLUGINS`) is the single
 list: desktop pickers, Engines, and `ai.tasks.*` all read it (via
 `effective.providers`). Adding a provider is adding a plugin binary plus a
 catalog row with its seams, `local`, and `needs_key` — not a second allowlist
@@ -57,7 +57,7 @@ tree. Local GGUF chat and embeddings use `provider.gguf` (`ene-provider-gguf`).
 The plugin owns the static weight catalog; the host fetches `llama-server`
 releases from GitHub, stores verified artifacts under
 `data_dir/plugins/provider.gguf/assets/`, and spawns `llama-server` on loopback
-via `ene-fiber`. Sidecar helpers also live in `templates/sidecar`.
+via `ene-plugin-host`. Sidecar helpers also live in `templates/sidecar`.
 
 A plugin that names `capability` in `hello_ack` can call Broker RPC
 (`capability.request`, `capability.approval_query`) and receive grants.
@@ -141,7 +141,7 @@ free-text (`fallback: true`) when enumeration fails. Apply failure keeps the
 previous effective `ProfileRow.config`. Successful apply persists non-secret
 values in `plugin-config.json` (keyed by row id) and secret fields in the
 vault as `plugin.config.{row_id}.{field}`. `apply_plugin_profile` overlays
-those values onto collected rows so settings survive a daemon restart. Stage
+those values onto collected rows so settings survive a core restart. Stage
 Connections loads the same document for the selected fiber.
 
 ## `provider.assets`
@@ -161,7 +161,7 @@ plugin that negotiates `assets`; `ene-core` proxies the same contract over HTTP
 
 **Host-managed catalogs.** Sidecar engines for `provider.gguf` (`llama-server`)
 and `provider.voicevox` (`voicevox-engine`) are listed and installed by the host
-(`ene-fiber` + `ene-provider-assets`), not from static plugin source. At startup
+(`ene-plugin-host` + `ene-provider-assets`), not from static plugin source. At startup
 (and on manual refresh) the host fetches GitHub Releases for
 `ggml-org/llama.cpp` and `VOICEVOX/voicevox_engine`, caches JSON under
 `data_dir/catalog-cache/`, and merges install state from each plugin's
@@ -181,6 +181,6 @@ packages extract as a full zip tree; llama-server zips extract the full archive
 (Windows bundles ship `ggml.dll` and related libraries beside the executable).
 CUDA builds also pull matching `cudart-*` companion zips into the same directory.
 
-**Sidecar injection.** After install, `ene-fiber` injects `sidecar_base_url` for
+**Sidecar injection.** After install, `ene-plugin-host` injects `sidecar_base_url` for
 `provider.gguf` and `cas_path` for `provider.voicevox` when those fields are not
 already set in settings.

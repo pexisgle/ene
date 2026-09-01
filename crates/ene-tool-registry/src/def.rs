@@ -1,4 +1,4 @@
-use ene_plane::Sensitivity;
+use ene_access_control::Sensitivity;
 use ene_plugin_ipc::ToolSpecWire;
 use std::fmt;
 

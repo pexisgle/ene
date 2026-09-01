@@ -8,7 +8,7 @@
 
 | パッケージ | パス | 役割 |
 |---|---|---|
-| `ene-daemon` | `apps/ene-core`（バイナリ `ene-core`） | コアデーモン: データディレクトリのロック、HTTP/WS API、session + kernel + companion + work + plane + fiber |
+| `ene-core` | `apps/ene-core`（バイナリ `ene-core`） | コアプロセス: データディレクトリのロック、HTTP/WS API、session + kernel + companion + work + access-control + plugin-host |
 | `ene-stage` | `apps/ene-stage` | 製品 GUI: wgpu オーバーレイ、チャット、9 セクションの詳細、トレイ。表層 + 詳細の 2 本のソケット（`client_id = stage`） |
 | `ene-ctl` | `apps/ene-ctl` | 同一 HTTP/WS API の CLI クライアント |
 | `ene-desktop` | `apps/ene-desktop` | 凍結した再設計前 GUI（#794 で復元）。機能追加なし。stage が代替できたと判断したら削除 |
@@ -19,12 +19,12 @@
 |---|---|---|
 | `ene-session` | 追記専用の会話ログ、usage 台帳、履歴投影 | config |
 | `ene-kernel` | 対話レーン: prompt / steer / follow_up / abort / compact、可視性、可観測性 | config, session |
-| `ene-companion` | soul・感情・記憶・内面・能動発話・キャラパッケージ | card, config, plane, registry, session |
+| `ene-companion` | soul・感情・記憶・内面・能動発話・キャラパッケージ | card, config, access-control, tool-registry, session |
 | `ene-body` | パフォーマンスキュー、感情→表情、全二重音声 | config, session |
-| `ene-work` | 委譲、ジョブ（ジョブレーンのランナー）、スケジュール、skill（カタログ/発動コンテキスト、しおり workflow）、MCP | companion, kernel, plane, registry, session |
-| `ene-plane` | 承認 plane、hash chain 監査、資格情報ボールト | config |
-| `ene-fiber` | プラグインファイバー合成: 巻き戻し可能な effect、プロファイル reconcile、サンドボックス spawn | plugin-ipc, registry, sandbox, kernel |
-| `ene-registry` | 統一ツールレジストリ: side_effects フィルタ、deny-by-default パイプライン | plugin-ipc, plane |
+| `ene-work` | 委譲、ジョブ（ジョブレーンのランナー）、スケジュール、skill（カタログ/発動コンテキスト、しおり workflow）、MCP | companion, kernel, access-control, tool-registry, session |
+| `ene-access-control` | 承認、hash chain 監査、資格情報ボールト | config |
+| `ene-plugin-host` | プラグイン監督: 巻き戻し可能な effect、プロファイル reconcile、サンドボックス spawn | plugin-ipc, tool-registry, sandbox, kernel |
+| `ene-tool-registry` | 統一ツールレジストリ: side_effects フィルタ、deny-by-default パイプライン | plugin-ipc, access-control |
 | `ene-plugin-ipc` | 分割 IPC: core / tool 副プロトコルの length-prefixed MessagePack | （内部依存なし） |
 | `ene-provider-assets` | provider 向け共有アセットカタログ、manifest、検証付きダウンロード | config, plugin-ipc |
 | `ene-api` | HTTP/WS 型、OpenAPI、Rust クライアント | （内部依存なし） |
@@ -36,19 +36,19 @@
 ## 依存規則（レビューで強制）
 
 ```text
-ene-session     ↛ kernel, companion, work, daemon
-ene-kernel      ↛ companion, work, fiber, daemon
-ene-fiber       → kernel（共有 `LoopHooks` のみ。kernel ↛ fiber は維持）
-ene-companion   ↛ daemon, fiber
+ene-session     ↛ kernel, companion, work, core
+ene-kernel      ↛ companion, work, plugin-host, core
+ene-plugin-host → kernel（共有 `LoopHooks` のみ。kernel ↛ plugin-host は維持）
+ene-companion   ↛ core, plugin-host
 ene-plugin-ipc  ↛ business logic
 ene-card        → ene-config のみ（逆辺は禁止）
 ene-vrm         ↛ kernel, companion, work, session
-ene-api         ↛ daemon types
+ene-api         ↛ core types
 ```
 
-クライアントは `ene-api` 経由でのみデーモンと話します。`ene-desktop` と
-`ene-stage` の本番コードから `ene-daemon` をリンクしないでください
-（`ene-ctl` のテストはデーモンを spawn してよい）。
+クライアントは `ene-api` 経由でのみコアと話します。`ene-desktop` と
+`ene-stage` の本番コードから `ene-core` をリンクしないでください
+（`ene-ctl` のテストはコアを spawn してよい）。
 
 どのクライアントが製品 GUI か、旧ツールがどこへ行ったかは
 [製品境界](../concepts/product-boundaries.md) にあります。

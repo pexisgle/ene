@@ -32,7 +32,7 @@
 
 ### Track D: Task/Attention/Computer（runtime中心、並列）
 | issue | 方針 |
-| #1198 | ene-work/ene-session/ene-planeに TaskContract/TaskState/verifying/evaluator/artifact registry/workspace confinement/mailbox revision/follow-up/question/answer/cancel/Interrupted/API /tasks 移行を実装。 incomplete拒否/model done≠Completed/scope拡大再承認/workspace外拒否/cancel後副作用停止/restart消失防止 |
+| #1198 | ene-work/ene-session/ene-access-controlに TaskContract/TaskState/verifying/evaluator/artifact registry/workspace confinement/mailbox revision/follow-up/question/answer/cancel/Interrupted/API /tasks 移行を実装。 incomplete拒否/model done≠Completed/scope拡大再承認/workspace外拒否/cancel後副作用停止/restart消失防止 |
 | #1199 | Attention Item/Store/state/priority/action_required/dedupe/expiry/task adapter/quiet hours/speaking gate/surface report turn/speech-card-notification-digest/Task Center API。raw完了文を直接出さない、action-required埋没防止、集約、stage未接続でも喪失なし、追跡可能、割込率計測 |
 | #1203 | WindowIdentity/ObservationID/UIA backend/screenshot+element tree統合/stale-safe click-type-key-scroll/postcondition/semantic risk/Task Grant/hard confirmation/prompt injection対策。古い要素再利用禁止/focus逸脱停止/結果不明≠成功/scope内連続操作/外部送信の無確認禁止/監査追跡 |
 | #1201 | VS-01〜07のvertical sliceを実モデル+実tool+実stageで成立（Markdown生成/並行会話/follow-up等/Attention報告/Task Center/初回設定/実provider受入） |

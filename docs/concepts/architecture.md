@@ -1,6 +1,6 @@
 # Architecture
 
-Ene is a **companion harness**: one core daemon process, several clients,
+Ene is a **companion harness**: one core process, several clients,
 out-of-process tools, and an in-process cognitive layer.
 
 The finished product is defined in
@@ -12,23 +12,23 @@ This page describes the code that is in the tree today.
 ```text
 ene-stage   ─┐
 ene-desktop ─┤
-ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core (ene-daemon)
+ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core
 Web         ─┘                              │
                                             ├── ene-session / ene-kernel
                                             ├── ene-companion / ene-body / ene-work
-                                            ├── ene-plane (approval + audit + vault)
-                                            └── ene-fiber ──► plugins/tool/*
+                                            ├── ene-access-control (approval + audit + vault)
+                                            └── ene-plugin-host ──► plugins/tool/*
 ```
 
 - **One host.** Table-stakes state lives in `ene-core`. Clients do not embed
   the kernel.
 - **Clients are peers** on the public API. Exclusive resources (mic, approval
-  response) are mediated by the daemon. `ene-stage` is the product GUI;
+  response) are mediated by the core. `ene-stage` is the product GUI;
   `ene-desktop` is frozen legacy of the same API and is deleted when stage
   is judged to replace it — see [Product boundaries](product-boundaries.md).
 - **Tools are out of process.** Built-in tools (`fs`, `exec`, `web`, `utility`,
   `app`) use the same IPC as a third-party tool would. Harness functions that
-  touch companion state stay in-process and go through `ene-registry`.
+  touch companion state stay in-process and go through `ene-tool-registry`.
 
 ## Two layers, one companion
 

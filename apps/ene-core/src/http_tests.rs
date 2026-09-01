@@ -2,6 +2,9 @@ use crate::{BootOptions, CoreDaemon};
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::TimeZone;
+use ene_access_control::{
+    ApprovalMode, AuthzRequest, PolicyDecision, PolicyFile, PolicyRule, Sensitivity,
+};
 use ene_api::{
     AnswerJobRequest, AnswerQuestionRequest, ApiClient, ClaimResourceRequest, CreateJobRequest,
     CreateScheduleRequest, CreateSessionRequest, CreateTaskRequest, EndSessionRequest,
@@ -16,7 +19,6 @@ use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
     ToolCallingModel, spans_leak_content,
 };
-use ene_plane::{ApprovalMode, AuthzRequest, PolicyDecision, PolicyFile, PolicyRule, Sensitivity};
 use ene_session::{EventKind, EventPayload, SessionId, TurnOrigin, TurnOutcome};
 use std::collections::BTreeMap;
 #[cfg(unix)]
@@ -636,7 +638,7 @@ async fn approval_first_writer_wins() {
     let err = cli.respond_approval(&pending.id, "deny").await.unwrap_err();
     assert_eq!(err.error_class(), "already_resolved");
     let outcome = task.await.unwrap().unwrap();
-    assert_eq!(outcome, ene_plane::Decision::Allow);
+    assert_eq!(outcome, ene_access_control::Decision::Allow);
     server.shutdown().await;
 }
 
@@ -3321,7 +3323,7 @@ async fn web_cannot_resolve_approval() {
     assert_eq!(err.error_class(), "forbidden");
     stage.respond_approval(&pending.id, "allow").await.unwrap();
     let outcome = task.await.unwrap().unwrap();
-    assert_eq!(outcome, ene_plane::Decision::Allow);
+    assert_eq!(outcome, ene_access_control::Decision::Allow);
     server.shutdown().await;
 }
 

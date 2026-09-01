@@ -15,8 +15,8 @@ chrono-tz = { workspace = true }
 cron = { workspace = true }
 ene-companion = { workspace = true }
 ene-kernel = { workspace = true }
-ene-plane = { workspace = true }
-ene-registry = { workspace = true }
+ene-access-control = { workspace = true }
+ene-tool-registry = { workspace = true }
 ene-session = { workspace = true }
 image = { workspace = true, features = ["png"] }
 parking_lot = { workspace = true }

@@ -8,8 +8,8 @@
 #![deny(unsafe_code)]
 
 use ene_api::{ApiClient, CreateSessionRequest, EndSessionRequest, MessageMode, MessageRequest};
+use ene_core as _;
 use ene_ctl::core::{read_api_ready, wait_for_api_json};
-use ene_daemon as _;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -190,7 +190,7 @@ async fn cli_binary_starts_core_and_runs_session_ops() {
     let ctl_bin = ene_ctl_bin();
     assert!(
         core_bin.is_file(),
-        "ene-core missing at {} (build ene-daemon first)",
+        "ene-core missing at {} (build ene-core first)",
         core_bin.display()
     );
     assert!(
