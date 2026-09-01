@@ -1,0 +1,56 @@
+name: Refresh PR 1322 lock
+
+on:
+  push:
+    branches:
+      - cursor/exec-process-wrap-4124
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+      - name: Merge main and refresh Cargo.lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+
+          set +e
+          git merge --no-commit --no-ff origin/main
+          merge_status=$?
+          set -e
+
+          if [ "$merge_status" -ne 0 ]; then
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            if [ "$conflicts" != "Cargo.lock" ]; then
+              echo "Unexpected conflicts:"
+              printf '%s\n' "$conflicts"
+              git merge --abort
+              exit 1
+            fi
+            # Start from main's lockfile, which contains the rmcp graph from #1321.
+            # Cargo metadata then minimally reconciles the exec/process-wrap manifest changes.
+            git checkout --theirs Cargo.lock
+            git add Cargo.lock
+          fi
+
+          cargo metadata --format-version 1 >/dev/null
+          rm .github/workflows/refresh-1322-lock.yml
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "chore(exec): merge main and refresh Cargo.lock"
+          git push origin HEAD:cursor/exec-process-wrap-4124
