@@ -36,7 +36,7 @@ export component EneButton inherits Rectangle {
     horizontal-stretch: 0;
     Text {
         text: root.text;
-        color: primary ? #101218 : EneTheme.fg;
+        color: primary && root.enabled ? #101218 : EneTheme.fg;
         font-size: EneTheme.type-md;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -107,6 +107,7 @@ export component SpeechBubble inherits Rectangle {
     border-radius: EneTheme.radius;
     background: user ? EneTheme.bubble-user : EneTheme.bubble;
     VerticalLayout {
+        width: 100%;
         padding: EneTheme.space-3;
         spacing: EneTheme.space-1;
         Text {
@@ -119,6 +120,7 @@ export component SpeechBubble inherits Rectangle {
             color: EneTheme.fg;
             font-size: EneTheme.type-md;
             wrap: word-wrap;
+            width: 100%;
         }
     }
     TouchArea {

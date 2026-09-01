@@ -146,6 +146,7 @@ export component ChatSurface inherits Window {
                     padding: EneTheme.space-2;
                     spacing: EneTheme.space-2;
                     for row in rows: SpeechBubble {
+                        width: 100%;
                         speaker: row.role;
                         text: row.streaming ? row.text + " ▌" : row.text;
                         user: row.user;

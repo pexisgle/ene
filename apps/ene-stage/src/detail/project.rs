@@ -14,13 +14,6 @@ pub fn project(
     monitors: &[MonitorInfo],
 ) -> DetailView {
     let mut view = project_tab(state, local, companions, monitors);
-    if !state.core_status.is_empty() {
-        if view.status.is_empty() {
-            view.status.clone_from(&state.core_status);
-        } else {
-            view.status = format!("{}\n{}", view.status, state.core_status);
-        }
-    }
     if onboarding_visible(state, local) {
         view.body = format!(
             "{}\n\n{}\n{}",
