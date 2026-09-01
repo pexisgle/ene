@@ -10,7 +10,8 @@ Build-environment details live in the repository's `AGENTS.md`.
 - **Rust 1.98.0** (the workspace uses edition 2024; the version is pinned in
   `rust-toolchain.toml`).
 - On Linux, native dependencies are Vulkan, ALSA, OpenSSL, `libclang`, `mold`,
-  and Wayland/X11 development packages. The checked-in Nix flake provides them.
+  fontconfig, and Wayland/X11 development packages. The checked-in Nix flake
+  provides them.
 - On Windows, install the stable MSVC Rust toolchain, Visual Studio 2022
   Build Tools with **Desktop development with C++**, and the Windows 10/11
   SDK. The desktop uses DX12 and WASAPI on Windows.

@@ -57,8 +57,8 @@ notify) are mediated by `ene-core`.
 | Web (`apps/ene-core/web`) | LAN / tunnel client | Surface chat + read-only detail (inner, thinking, tools, PAD, memories, jobs) | Settings mutation, memory delete, character admin, VRM | Text path + D-31 (no settings/memory writes). Detail UX is still log-like ([#717](https://github.com/pexisgle/ene/issues/717)). |
 | Mobile | Post-v1.0 (M1) | — | — | Not in tree |
 
-`ene-stage` and `ene-desktop` both speak the same API, both draw with
-egui + wgpu, and neither uses a WebView.
+`ene-stage` and `ene-desktop` both speak the same API. Stage draws with
+Slint + wgpu; desktop remains frozen on egui + wgpu. Neither uses a WebView.
 [PR #794](https://github.com/pexisgle/ene/pull/794) restored the old
 desktop binary so that UX is not lost while stage grows, but **the
 product seat is `ene-stage`**. Plans say `desktop(stage)` for that role.

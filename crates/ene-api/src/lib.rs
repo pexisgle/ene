@@ -43,3 +43,15 @@ pub const OPENAPI_JSON: &str = include_str!("../openapi.json");
 pub fn openapi_json() -> &'static str {
     OPENAPI_JSON
 }
+
+#[cfg(test)]
+mod tests {
+    use super::openapi_json;
+
+    #[test]
+    fn openapi_document_is_non_empty_json_object() {
+        let doc = openapi_json();
+        assert!(doc.contains("\"openapi\""));
+        assert!(doc.trim_start().starts_with('{'));
+    }
+}

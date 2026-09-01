@@ -80,6 +80,14 @@ pub struct VisemeWeights {
     pub oh: f32,
 }
 
+impl VisemeWeights {
+    /// True when every mouth weight is effectively closed.
+    #[must_use]
+    pub fn is_silent(self) -> bool {
+        self.aa.max(self.ih).max(self.ou).max(self.ee).max(self.oh) < 1e-4
+    }
+}
+
 /// Streaming PCM-to-viseme analyzer.
 ///
 /// Feed audio with [`push_pcm`](Self::push_pcm) and read the smoothed
@@ -336,6 +344,28 @@ mod tests {
     fn empty_buffer_yields_zero_weights() {
         let mut analyzer = VisemeAnalyzer::new(SR);
         assert_eq!(analyzer.analyze(), VisemeWeights::default());
+    }
+
+    #[test]
+    fn default_weights_are_silent_and_speech_is_not() {
+        assert!(VisemeWeights::default().is_silent());
+        assert!(
+            VisemeWeights {
+                aa: 0.0,
+                ih: 0.0,
+                ou: 0.0,
+                ee: 0.0,
+                oh: 1e-5,
+            }
+            .is_silent()
+        );
+        assert!(
+            !VisemeWeights {
+                aa: 0.2,
+                ..VisemeWeights::default()
+            }
+            .is_silent()
+        );
     }
 
     #[test]

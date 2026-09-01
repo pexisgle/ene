@@ -1,8 +1,8 @@
 //! Caption overlay for streamed assistant text.
 
-use crate::i18n;
 use crate::surface::SurfaceUiState;
 
+#[cfg(test)]
 pub const POSITIONS: [&str; 4] = ["bottom", "top", "left", "right"];
 
 /// Native-window offset inside a monitor, in physical pixels from the top-left.
@@ -24,16 +24,6 @@ pub fn outer_offset(position: &str, screen: (u32, u32), inner: (u32, u32)) -> (u
     }
 }
 
-#[must_use]
-pub fn egui_anchor(position: &str) -> (egui::Align2, [f32; 2]) {
-    match position {
-        "top" => (egui::Align2::CENTER_TOP, [0.0, 16.0]),
-        "left" => (egui::Align2::LEFT_CENTER, [16.0, 0.0]),
-        "right" => (egui::Align2::RIGHT_CENTER, [-16.0, 0.0]),
-        _ => (egui::Align2::CENTER_BOTTOM, [0.0, -16.0]),
-    }
-}
-
 /// True when `text` is spoken reply content, not a kernel provider-failure marker.
 #[must_use]
 pub(crate) fn is_speech_caption(text: &str) -> bool {
@@ -44,42 +34,8 @@ pub(crate) fn is_speech_caption(text: &str) -> bool {
             .starts_with("the chat provider failed")
 }
 
-pub fn show(
-    ctx: &egui::Context,
-    state: &SurfaceUiState,
-    font_size: f32,
-    position: &str,
-    pinned: bool,
-) {
-    let text = speech_text(state);
-    if text.is_empty() {
-        return;
-    }
-    let max_width = (ctx.content_rect().width() * 0.72).clamp(240.0, 720.0);
-    let (anchor, offset) = egui_anchor(position);
-    egui::Window::new(i18n::fl("caption-title"))
-        .id(egui::Id::new("stage-caption"))
-        .title_bar(false)
-        .resizable(false)
-        .collapsible(false)
-        .movable(!pinned)
-        .anchor(anchor, offset)
-        .max_width(max_width)
-        .show(ctx, |ui| {
-            ui.set_max_width(max_width);
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(text)
-                        .font(egui::FontId::proportional(font_size.min(22.0)))
-                        .color(egui::Color32::WHITE)
-                        .strong(),
-                )
-                .wrap(),
-            );
-        });
-}
-
-fn speech_text(state: &SurfaceUiState) -> &str {
+#[must_use]
+pub fn speech_text(state: &SurfaceUiState) -> &str {
     let candidate = if state.caption.is_empty() {
         state.streaming_text.as_str()
     } else {
@@ -97,11 +53,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn all_named_positions_are_handled() {
+        for position in POSITIONS {
+            let (x, y) = outer_offset(position, (1920, 1080), (720, 160));
+            assert!(x < 1920);
+            assert!(y < 1080);
+        }
+    }
+
+    #[test]
     fn top_sits_near_the_monitor_top() {
         let (x, y) = outer_offset("top", (1920, 1080), (720, 160));
         assert_eq!(x, (1920 - 720) / 2);
         assert_eq!(y, 48);
-        assert_eq!(egui_anchor("top").0, egui::Align2::CENTER_TOP);
     }
 
     #[test]
@@ -110,7 +74,6 @@ mod tests {
         let unknown = outer_offset("elsewhere", (1920, 1080), (720, 160));
         assert_eq!(bottom, unknown);
         assert_eq!(bottom.1, 1080 - 160 - 96);
-        assert_eq!(egui_anchor("bottom").0, egui::Align2::CENTER_BOTTOM);
     }
 
     #[test]
@@ -131,5 +94,17 @@ mod tests {
         assert!(is_speech_caption("401 Unauthorized"));
         assert!(is_speech_caption("Error handling in Rust"));
         assert!(is_speech_caption("Hello from the companion."));
+    }
+
+    #[test]
+    fn speech_text_prefers_caption_and_hides_provider_errors() {
+        let mut state = SurfaceUiState::default();
+        assert_eq!(speech_text(&state), "");
+        state.streaming_text = "hello".into();
+        assert_eq!(speech_text(&state), "hello");
+        state.caption = "spoken".into();
+        assert_eq!(speech_text(&state), "spoken");
+        state.caption = "The chat provider failed: boom".into();
+        assert_eq!(speech_text(&state), "");
     }
 }

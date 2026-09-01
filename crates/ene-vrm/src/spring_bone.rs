@@ -416,8 +416,9 @@ impl SpringBoneSimulator {
                             let len = if len.is_finite() { len } else { 0.0 };
                             (axis, len)
                         } else {
-                            // Tail joint: use parent's world rotation to
-                            // estimate a downward axis
+                            // Tail joint: extend along the previous segment when the
+                            // chain has a parent bone; single-node chains keep the
+                            // legacy 7 cm fallback used by UniVRM exporters.
                             let raw_axis = parent_world_rot.inverse() * (-Vec3::Y);
                             let axis = if raw_axis.is_finite() && raw_axis.length_squared() > 1e-10
                             {
@@ -425,7 +426,17 @@ impl SpringBoneSimulator {
                             } else {
                                 -Vec3::Y
                             };
-                            let len = 0.07; // vrm0 fallback: 7 cm
+                            let len = if i > 0 {
+                                let parent_node = chain.joints[i - 1].node;
+                                let parent_world_pos = node_world_positions
+                                    .get(&parent_node)
+                                    .copied()
+                                    .filter(|v| v.is_finite())
+                                    .unwrap_or(world_pos);
+                                (world_pos - parent_world_pos).length().max(0.01)
+                            } else {
+                                0.07
+                            };
                             (axis, len)
                         };
 

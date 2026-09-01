@@ -10,7 +10,7 @@ for compatibility's sake; prefer clean changes over legacy shims.
 
 ## Build environment
 
-Linux native dependencies (Vulkan, ALSA, OpenSSL, libclang, mold) come from the checked-in
+Linux native dependencies (Vulkan, ALSA, OpenSSL, libclang, mold, fontconfig) come from the checked-in
 Nix flake. Run Linux builds from the repo root. If `direnv` is active, plain `cargo` works;
 otherwise prefix with `nix develop --command`. GitHub Actions Linux jobs install the same
 native deps with apt (`.github/actions/rust-build-env`) rather than entering the Nix shell.

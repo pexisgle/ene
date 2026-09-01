@@ -1,0 +1,29 @@
+import { EneTheme } from "theme.slint";
+
+export component CaptionSurface inherits Window {
+    background: transparent;
+    default-font-family: "Noto Sans CJK JP";
+
+    in-out property <string> caption;
+    in-out property <int> font-size: 18;
+
+    VerticalLayout {
+        alignment: end;
+        padding: 16px;
+        if caption != "": Rectangle {
+            border-radius: EneTheme.radius;
+            background: #00000099;
+            HorizontalLayout {
+                padding: 10px;
+                Text {
+                    text: caption;
+                    color: white;
+                    font-size: font-size * 1px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    width: 100%;
+                }
+            }
+        }
+    }
+}

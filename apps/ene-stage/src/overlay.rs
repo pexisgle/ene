@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use ene_vrm::DebugRenderer;
 use glam::Vec3;
 use winit::dpi::PhysicalSize;
 use winit::window::{Window, WindowId};
 
 use crate::avatar::CompanionAvatar;
 use crate::gpu::{self, GpuContext, GpuError};
+use crate::renderer::StageRenderer;
+use crate::renderer::slint_gpu::SlintOverlayLayer;
 
 /// One GPU-resident body drawn in the overlay, keyed by soul.
 pub struct OverlaySlot {
@@ -42,17 +43,14 @@ pub struct AvatarLoadReport {
 /// Native overlay window that draws VRM into a transparent swapchain.
 pub struct OverlayWindow {
     pub window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    format: wgpu::TextureFormat,
-    depth: wgpu::Texture,
-    depth_view: wgpu::TextureView,
+    renderer: StageRenderer,
     pub slots: Vec<OverlaySlot>,
     pub transparent: bool,
     pub transparency_supported: bool,
     pub click_through: bool,
     pub collider_debug: bool,
-    debug: DebugRenderer,
+    slint_layer: Option<SlintOverlayLayer>,
+    gpu_dirty: bool,
     active_soul_id: Option<String>,
     hover_soul_id: Option<String>,
     drag_soul_id: Option<String>,
@@ -94,17 +92,14 @@ impl OverlayWindow {
         let (depth, depth_view) = gpu::create_depth(&gpu.device, config.width, config.height);
         Ok(Self {
             window,
-            surface,
-            config,
-            format,
-            depth,
-            depth_view,
+            renderer: StageRenderer::new(gpu, surface, config, format, depth, depth_view),
             slots: Vec::new(),
             transparent: transparent && transparency_supported,
             transparency_supported,
             click_through: transparent && transparency_supported,
             collider_debug: false,
-            debug: DebugRenderer::new(&gpu.device, format),
+            slint_layer: None,
+            gpu_dirty: true,
             last_frame: Instant::now(),
             active_soul_id: None,
             hover_soul_id: None,
@@ -119,7 +114,19 @@ impl OverlayWindow {
 
     #[must_use]
     pub fn format(&self) -> wgpu::TextureFormat {
-        self.format
+        self.renderer.format()
+    }
+
+    pub fn set_slint_layer(&mut self, layer: Option<SlintOverlayLayer>) {
+        self.slint_layer = layer;
+    }
+
+    pub fn slint_layer(&self) -> Option<&SlintOverlayLayer> {
+        self.slint_layer.as_ref()
+    }
+
+    pub fn slint_layer_mut(&mut self) -> Option<&mut SlintOverlayLayer> {
+        self.slint_layer.as_mut()
     }
 
     #[must_use]
@@ -159,28 +166,20 @@ impl OverlayWindow {
     }
 
     pub fn resize(&mut self, gpu: &GpuContext, size: PhysicalSize<u32>) {
-        if size.width == 0 || size.height == 0 {
-            return;
+        self.renderer.resize(gpu, size);
+        self.gpu_dirty = true;
+        if let Some(layer) = &mut self.slint_layer {
+            *layer = SlintOverlayLayer::new(size.width, size.height);
         }
-        self.config.width = size.width;
-        self.config.height = size.height;
-        self.surface.configure(&gpu.device, &self.config);
-        let (depth, depth_view) = gpu::create_depth(&gpu.device, size.width, size.height);
-        self.depth = depth;
-        self.depth_view = depth_view;
     }
 
     pub fn set_click_through(&mut self, enabled: bool) {
-        if self.click_through != enabled {
-            self.click_through = enabled;
-            if let Err(err) = self.window.set_cursor_hittest(!enabled) {
-                tracing::debug!(error = %err, "cursor hittest unsupported");
-            }
-        }
+        self.click_through = enabled;
     }
 
     /// Chrome on (decorations visible) always hit-tests so Allow/Detail work.
     /// Chrome off restores the saved click-through preference.
+    /// Hit-test OS calls go through [`crate::interaction_controller::StageInteractionController`].
     pub fn apply_click_through(&mut self, preferred: bool) {
         self.set_click_through(self.transparent && preferred);
     }
@@ -208,7 +207,12 @@ impl OverlayWindow {
         let mut failures = Vec::new();
         let mut last_err = None;
         for spec in specs {
-            match load_one(gpu, self.format, &spec.path, spec.motions_dir.as_deref()) {
+            match load_one(
+                gpu,
+                self.renderer.format(),
+                &spec.path,
+                spec.motions_dir.as_deref(),
+            ) {
                 Ok(avatar) => loaded.push(OverlaySlot {
                     soul_id: spec.soul_id.clone(),
                     avatar,
@@ -229,6 +233,7 @@ impl OverlayWindow {
             }
         }
         self.slots = loaded;
+        self.gpu_dirty = true;
         if self.slots.is_empty() {
             return Err(last_err.unwrap_or_else(|| {
                 crate::avatar::AvatarError::Io(std::io::Error::new(
@@ -254,6 +259,18 @@ impl OverlayWindow {
         self.drag_soul_id = drag_soul_id.map(ToOwned::to_owned);
     }
 
+    #[must_use]
+    pub fn needs_redraw(&self) -> bool {
+        self.gpu_dirty
+            || self.collider_debug
+            || self.drag_soul_id.is_some()
+            || self.slots.iter().any(|slot| slot.avatar.needs_redraw())
+            || self
+                .slint_layer
+                .as_ref()
+                .is_some_and(SlintOverlayLayer::needs_redraw)
+    }
+
     pub fn tick_and_render(
         &mut self,
         gpu: &GpuContext,
@@ -261,92 +278,44 @@ impl OverlayWindow {
         visemes: Option<ene_vrm::VisemeWeights>,
         speaking_soul: Option<&str>,
         highlight_soul: Option<&str>,
-    ) -> Result<(), OverlayError> {
+    ) -> Result<bool, OverlayError> {
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
         for slot in &mut self.slots {
             if let Some(target) = look_at {
                 slot.avatar.set_look_at_target(target);
+            } else {
+                slot.avatar.clear_look_at_target();
             }
             if speaking_soul.is_some_and(|id| id == slot.soul_id)
                 && let Some(weights) = visemes
             {
                 slot.avatar.apply_viseme(weights);
             }
+        }
+        let highlight =
+            highlight_soul.and_then(|soul| self.slots.iter().position(|slot| slot.soul_id == soul));
+        let gpu_needed = self.needs_redraw() || highlight.is_some();
+        for slot in &mut self.slots {
             slot.avatar.tick(dt);
         }
-        let frame = gpu::acquire_frame(&self.surface).map_err(OverlayError::Surface)?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("ene-stage.overlay"),
-            });
-        if self.slots.is_empty() {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ene-stage.overlay.clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-                multiview_mask: None,
-            });
-        } else {
-            for (index, slot) in self.slots.iter_mut().enumerate() {
-                slot.avatar.render_to_texture(
-                    &gpu.queue,
-                    &mut encoder,
-                    &view,
-                    &self.depth_view,
-                    self.config.width,
-                    self.config.height,
-                    index == 0,
-                )?;
-            }
+        if !gpu_needed {
+            return Ok(false);
         }
-        if self.collider_debug || highlight_soul.is_some() {
-            self.debug.clear();
-            if self.collider_debug {
-                for slot in &self.slots {
-                    slot.avatar.push_spring_collider_wires(&mut self.debug);
-                }
-            }
-            if let Some(highlight_soul) = highlight_soul {
-                for slot in &self.slots {
-                    if slot.soul_id == highlight_soul {
-                        slot.avatar.push_interaction_outline(&mut self.debug);
-                    }
-                }
-            }
-            let camera_uniform = self
-                .slots
-                .first()
-                .and_then(|slot| slot.avatar.debug_camera_uniform());
-            if let Some(camera_uniform) = camera_uniform {
-                self.debug.render(
-                    &gpu.device,
-                    &gpu.queue,
-                    &mut encoder,
-                    &view,
-                    &self.depth_view,
-                    &camera_uniform,
-                );
-            }
-        }
-        gpu.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
-        Ok(())
+        self.gpu_dirty = false;
+        let mut avatars: Vec<&mut CompanionAvatar> =
+            self.slots.iter_mut().map(|slot| &mut slot.avatar).collect();
+        self.renderer
+            .render(
+                gpu,
+                avatars.as_mut_slice(),
+                self.collider_debug,
+                highlight,
+                self.slint_layer.as_ref(),
+            )
+            .map_err(OverlayError::Avatar)?;
+        Ok(true)
     }
 }
 

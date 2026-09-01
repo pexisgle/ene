@@ -859,3 +859,34 @@ pub struct SetActiveProviderAssetResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{OccupantView, Page, Problem};
+
+    #[test]
+    fn page_of_has_no_cursor() {
+        let page = Page::of(vec!["a", "b"]);
+        assert_eq!(page.items, ["a", "b"]);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn problem_new_uses_about_blank() {
+        let problem = Problem::new(404, "missing", "gone");
+        assert_eq!(problem.status, 404);
+        assert_eq!(problem.type_url, "about:blank");
+        assert_eq!(problem.error_class, "missing");
+    }
+
+    #[test]
+    fn occupant_display_name_defaults_when_omitted() {
+        let occupant: OccupantView = serde_json::from_value(serde_json::json!({
+            "soul_id": "s"
+        }))
+        .expect("defaults");
+        assert_eq!(occupant.soul_id, "s");
+        assert!(occupant.display_name.is_empty());
+        assert!(occupant.avatar_path.is_none());
+    }
+}

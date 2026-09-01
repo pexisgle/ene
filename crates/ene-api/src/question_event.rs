@@ -168,4 +168,12 @@ mod tests {
         assert_eq!(parsed.id, "j");
         assert!(parsed.questions.is_empty());
     }
+
+    #[test]
+    fn parse_rejects_unknown_and_missing_fields() {
+        assert!(QuestionEvent::parse(&serde_json::json!({"type": "nope", "id": "j"})).is_none());
+        assert!(QuestionEvent::parse(&serde_json::json!({"type": "question.asked"})).is_none());
+        assert_eq!(QuestionEventKind::Asked.as_str(), "question.asked");
+        assert_eq!(QuestionEventKind::Resolved.as_str(), "question.resolved");
+    }
 }

@@ -2,8 +2,8 @@
 
 mod approvals;
 pub(crate) mod caption;
-mod chat;
-mod spotlight;
+pub(crate) mod chat;
+pub(crate) mod spotlight;
 
 use std::collections::BTreeMap;
 
@@ -70,6 +70,8 @@ pub struct SurfaceUiState {
     pub caption: String,
     pub pending_approval: Option<PendingApproval>,
     pub pending_question: Option<PendingQuestion>,
+    pub question_draft: String,
+    pub push_chat_draft: bool,
     pub spotlight_open: bool,
     pub spotlight_query: String,
     pub spotlight_selected: usize,
@@ -111,6 +113,8 @@ impl Default for SurfaceUiState {
             caption: String::new(),
             pending_approval: None,
             pending_question: None,
+            question_draft: String::new(),
+            push_chat_draft: false,
             spotlight_open: false,
             spotlight_query: String::new(),
             spotlight_selected: 0,
@@ -192,55 +196,6 @@ impl SurfaceUiState {
     pub(crate) fn caption_visible(&self) -> bool {
         self.caption_open && caption::is_speech_caption(&self.caption)
     }
-}
-
-pub(crate) fn show_chat(
-    ui: &mut egui::Ui,
-    state: &mut SurfaceUiState,
-    mic_active: bool,
-    active_companion: &str,
-    chat_targets: &[ChatTarget],
-) {
-    state.chat_input_focused = chat::show(ui, state, mic_active, active_companion, chat_targets);
-    if state.pending_approval.is_some() {
-        approvals::show(ui.ctx(), state);
-    }
-    if let Some(question) = state.pending_question.clone() {
-        egui::Window::new(i18n::fl("ask-user-title"))
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 40.0])
-            .show(ui.ctx(), |ui| {
-                ui.label(&question.prompt);
-                if ui.button(i18n::fl("ask-user-answer")).clicked() {
-                    state.push_action(SurfaceAction::AnswerQuestion);
-                }
-            });
-    }
-    if state.focus_chat {
-        state.focus_chat = false;
-        ui.ctx()
-            .memory_mut(|mem| mem.request_focus(egui::Id::new(chat::CHAT_INPUT_ID)));
-    }
-}
-
-pub fn show_caption(
-    ctx: &egui::Context,
-    state: &SurfaceUiState,
-    font_size: f32,
-    position: &str,
-    pinned: bool,
-) {
-    caption::show(ctx, state, font_size, position, pinned);
-}
-
-pub fn show_spotlight(ctx: &egui::Context, state: &mut SurfaceUiState) -> Option<SpotlightAction> {
-    let action = spotlight::show(ctx, state);
-    if action.is_some() {
-        state.spotlight_open = false;
-        state.spotlight_query.clear();
-        state.spotlight_selected = 0;
-    }
-    action
 }
 
 #[cfg(test)]

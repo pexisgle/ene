@@ -117,7 +117,53 @@ fn parse_vec3(arr: &[Value]) -> [f32; 3] {
 }
 
 fn vec3_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<[f32; 3]> {
-    Some(parse_vec3(obj.get(key)?.as_array()?))
+    let value = obj.get(key)?;
+    if let Some(arr) = value.as_array() {
+        return Some(parse_vec3(arr));
+    }
+    let obj = value.as_object()?;
+    Some([
+        obj.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        obj.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        obj.get("z").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+    ])
+}
+
+/// Map a legacy `blendShapeMaster.presetName` to the VRM 1.0
+/// expression key the runtime writes (`lookUp`, `happy`, `aa`, …).
+/// Exporters emit `PascalCase` enums (`LookUp`, `Joy`, `Blink_L`);
+/// without this step procedural look-at, blink, and emotion cues
+/// silently miss because `ExpressionLayer` keys never match.
+fn canonicalize_vrm0_preset_name(raw: &str) -> String {
+    let mut normalised = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch == '_' || ch == '-' || ch == ' ' {
+            continue;
+        }
+        for lower in ch.to_lowercase() {
+            normalised.push(lower);
+        }
+    }
+    match normalised.as_str() {
+        "a" => "aa".to_owned(),
+        "i" => "ih".to_owned(),
+        "u" => "ou".to_owned(),
+        "e" => "ee".to_owned(),
+        "o" => "oh".to_owned(),
+        "blink" => "blink".to_owned(),
+        "blinkl" | "blinkleft" => "blinkLeft".to_owned(),
+        "blinkr" | "blinkright" => "blinkRight".to_owned(),
+        "neutral" => "neutral".to_owned(),
+        "joy" | "fun" => "happy".to_owned(),
+        "angry" => "angry".to_owned(),
+        "sorrow" => "sad".to_owned(),
+        "lookup" => "lookUp".to_owned(),
+        "lookdown" => "lookDown".to_owned(),
+        "lookleft" => "lookLeft".to_owned(),
+        "lookright" => "lookRight".to_owned(),
+        "happy" | "sad" | "relaxed" | "surprised" | "aa" | "ih" | "ou" | "ee" | "oh" => normalised,
+        _ => format!("custom_{normalised}"),
+    }
 }
 /// Parse the legacy `meta` block. Called only on detected VRM 0.x documents;
 /// missing or malformed fields degrade to their defaults rather than failing
@@ -255,9 +301,9 @@ pub(crate) fn convert_blendshapes(gltf: &gltf::Gltf) -> Vec<ExpressionDefinition
 
     for group in groups {
         let name = match group.get("presetName").and_then(Value::as_str) {
-            Some(preset) if !preset.is_empty() => preset.to_owned(),
+            Some(preset) if !preset.is_empty() => canonicalize_vrm0_preset_name(preset),
             _ => match group.get("name").and_then(Value::as_str) {
-                Some(name) => format!("custom_{name}"),
+                Some(name) => canonicalize_vrm0_preset_name(name),
                 None => continue,
             },
         };
@@ -504,4 +550,74 @@ pub(crate) fn load_mtoon_materials_vrm0(gltf: &gltf::Gltf) -> Vec<Option<MToonMa
             Some(mat)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AllowedUserName, UsagePermission, as_object, canonicalize_vrm0_preset_name, parse_vec3,
+        vec3_field,
+    };
+    use serde_json::{Map, json};
+
+    #[test]
+    fn allowed_user_name_parses_only_author() {
+        assert_eq!(
+            AllowedUserName::parse("OnlyAuthor"),
+            AllowedUserName::OnlyAuthor
+        );
+        assert_eq!(AllowedUserName::parse(""), AllowedUserName::Everyone);
+        assert_eq!(
+            AllowedUserName::parse("Everyone"),
+            AllowedUserName::Everyone
+        );
+    }
+
+    #[test]
+    fn usage_permission_denies_only_disallow() {
+        assert_eq!(UsagePermission::parse("Disallow"), UsagePermission::Denied);
+        assert_eq!(UsagePermission::parse("Allow"), UsagePermission::Permitted);
+        assert_eq!(UsagePermission::parse(""), UsagePermission::Permitted);
+    }
+
+    #[test]
+    fn parse_vec3_pads_and_ignores_non_numbers() {
+        let empty = parse_vec3(&[]);
+        assert!(empty.iter().all(|v| v.abs() < f32::EPSILON));
+        let parsed = parse_vec3(&[json!(1.0), json!(2), json!("x"), json!(9.0)]);
+        assert!((parsed[0] - 1.0).abs() < f32::EPSILON);
+        assert!((parsed[1] - 2.0).abs() < f32::EPSILON);
+        assert!(parsed[2].abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn as_object_and_vec3_field_round_trip() {
+        assert!(as_object(None).is_none());
+        assert!(as_object(Some(&json!(1))).is_none());
+        let mut map = Map::new();
+        map.insert("g".into(), json!([0.0, 1.0, 0.0]));
+        let got = vec3_field(&map, "g").expect("g");
+        assert!(got[0].abs() < f32::EPSILON);
+        assert!((got[1] - 1.0).abs() < f32::EPSILON);
+        assert!(got[2].abs() < f32::EPSILON);
+        assert!(vec3_field(&map, "missing").is_none());
+        map.insert("obj".into(), json!({"x": 0.1, "y": 0.2, "z": 0.3}));
+        let object = vec3_field(&map, "obj").expect("obj");
+        assert!((object[0] - 0.1).abs() < f32::EPSILON);
+        assert!((object[1] - 0.2).abs() < f32::EPSILON);
+        assert!((object[2] - 0.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn canonicalize_vrm0_preset_maps_legacy_names_to_runtime_keys() {
+        assert_eq!(canonicalize_vrm0_preset_name("Joy"), "happy");
+        assert_eq!(canonicalize_vrm0_preset_name("Sorrow"), "sad");
+        assert_eq!(canonicalize_vrm0_preset_name("LookUp"), "lookUp");
+        assert_eq!(canonicalize_vrm0_preset_name("Blink_L"), "blinkLeft");
+        assert_eq!(canonicalize_vrm0_preset_name("A"), "aa");
+        assert_eq!(
+            canonicalize_vrm0_preset_name("CustomSmile"),
+            "custom_customsmile"
+        );
+    }
 }

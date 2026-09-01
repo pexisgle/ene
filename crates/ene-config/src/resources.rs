@@ -105,3 +105,14 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_resource_dirs;
+
+    #[test]
+    fn debug_ensure_returns_assets_dir() {
+        let dir = ensure_resource_dirs().expect("debug assets");
+        assert_eq!(dir, crate::paths::assets_dir());
+    }
+}
