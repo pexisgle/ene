@@ -635,6 +635,10 @@ pub fn occupant_has_avatar(occupant: &OccupantView) -> bool {
 
 #[must_use]
 pub fn occupant_label(occupant: &OccupantView) -> String {
+    let display = occupant.display_name.trim();
+    if !display.is_empty() {
+        return display.to_owned();
+    }
     occupant
         .package_id
         .as_deref()
@@ -843,7 +847,7 @@ mod tests {
         assert!(occupant_with_avatar(&occupants[..1]).is_none());
         let cycled = next_avatar_occupant(&occupants, "text", 1).expect("avatar");
         assert_eq!(cycled.soul_id, "alicia");
-        assert_eq!(occupant_label(&cycled), "alicia");
+        assert_eq!(occupant_label(&cycled), "Alicia");
         assert!(next_avatar_occupant(&occupants[..1], "text", 1).is_none());
         let with_other = vec![
             occupants[0].clone(),
@@ -862,6 +866,34 @@ mod tests {
                 .soul_id,
             "other"
         );
+    }
+
+    #[test]
+    fn occupant_label_prefers_display_name_then_package_id() {
+        let named = OccupantView {
+            soul_id: "01abc".into(),
+            display_name: " Alicia ".into(),
+            body_id: None,
+            package_id: Some("char.alicia@1.0.0".into()),
+            avatar_path: None,
+        };
+        assert_eq!(occupant_label(&named), "Alicia");
+        let packed = OccupantView {
+            soul_id: "01abc".into(),
+            display_name: String::new(),
+            body_id: None,
+            package_id: Some("char.alicia@1.0.0".into()),
+            avatar_path: None,
+        };
+        assert_eq!(occupant_label(&packed), "alicia");
+        let bare = OccupantView {
+            soul_id: "01abc".into(),
+            display_name: String::new(),
+            body_id: None,
+            package_id: None,
+            avatar_path: None,
+        };
+        assert_eq!(occupant_label(&bare), "01abc");
     }
 
     #[test]

@@ -14,13 +14,6 @@ pub fn project(
     monitors: &[MonitorInfo],
 ) -> DetailView {
     let mut view = project_tab(state, local, companions, monitors);
-    if !state.core_status.is_empty() {
-        if view.status.is_empty() {
-            view.status.clone_from(&state.core_status);
-        } else {
-            view.status = format!("{}\n{}", view.status, state.core_status);
-        }
-    }
     if onboarding_visible(state, local) {
         view.body = format!(
             "{}\n\n{}\n{}",
@@ -57,6 +50,10 @@ pub fn handle_primary(
         "reload" => Some(DetailPrimary::Reload),
         "chat" => {
             state.request_chat_open = true;
+            None
+        }
+        "open-spotlight" => {
+            state.open_spotlight = true;
             None
         }
         "dismiss-onboarding" => {
@@ -188,5 +185,17 @@ mod tests {
             handle_primary(&mut state, &mut local, "reload-mcp"),
             Some(DetailPrimary::ReloadMcp)
         );
+    }
+
+    #[test]
+    fn open_spotlight_sets_the_detail_flag() {
+        let mut state = DetailUiState::default();
+        let mut local = crate::settings::DesktopSettings::default();
+        assert!(!state.open_spotlight);
+        assert_eq!(
+            handle_primary(&mut state, &mut local, "open-spotlight"),
+            None
+        );
+        assert!(state.open_spotlight);
     }
 }

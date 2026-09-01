@@ -298,11 +298,14 @@ pub enum ChromeAction {
     SelectTarget(String),
     Approval(String),
     AnswerQuestion,
+    SetMode(i32),
+    BargeIn,
     SpotlightRun(String),
     SpotlightDismiss,
     DetailTab(i32),
     DetailPrimary(String),
     DetailRow(String),
+    DetailSearchSubmit,
 }
 
 enum ChromeUi {
@@ -355,6 +358,12 @@ impl ChromeLayer {
             ui.on_answer_question(move || {
                 pending_cb.borrow_mut().push(ChromeAction::AnswerQuestion);
             });
+            let pending_cb = Rc::clone(&pending);
+            ui.on_set_mode(move |mode| {
+                pending_cb.borrow_mut().push(ChromeAction::SetMode(mode));
+            });
+            let pending_cb = Rc::clone(&pending);
+            ui.on_barge_in(move || pending_cb.borrow_mut().push(ChromeAction::BargeIn));
         }
         Some(Self {
             ui: ChromeUi::Chat(ui),
@@ -385,6 +394,12 @@ impl ChromeLayer {
                 pending_cb
                     .borrow_mut()
                     .push(ChromeAction::DetailRow(id.to_string()));
+            });
+            let pending_cb = Rc::clone(&pending);
+            ui.on_search_submit(move || {
+                pending_cb
+                    .borrow_mut()
+                    .push(ChromeAction::DetailSearchSubmit);
             });
         }
         Some(Self {
@@ -473,7 +488,8 @@ impl ChromeLayer {
         match &self.ui {
             ChromeUi::Chat(ui) => ui.get_input_focused(),
             ChromeUi::Detail(ui) => ui.get_input_focused(),
-            ChromeUi::Caption(_) | ChromeUi::Spotlight(_) => false,
+            ChromeUi::Spotlight(ui) => ui.get_input_focused(),
+            ChromeUi::Caption(_) => false,
         }
     }
 

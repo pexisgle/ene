@@ -667,8 +667,10 @@ impl StageApp {
                     self.discard_optimistic_user_row(&sent_text);
                     self.surface.status = err;
                     self.surface.chat_draft = sent_text;
+                    self.surface.push_chat_draft = true;
                 } else {
                     self.surface.chat_draft.clear();
+                    self.surface.push_chat_draft = true;
                     self.surface.streaming_text.clear();
                     self.complete_optimistic_user_row(sent_text);
                     if let Some(chat) = &self.chat {
@@ -1886,12 +1888,14 @@ impl StageApp {
         let Some(question) = self.surface.pending_question.take() else {
             return;
         };
-        let text = if self.surface.chat_draft.trim().is_empty() {
-            question.prompt
-        } else {
-            self.surface.chat_draft.trim().to_owned()
-        };
+        let text = question_answer_text(
+            &self.surface.question_draft,
+            &self.surface.chat_draft,
+            &question.prompt,
+        );
+        self.surface.question_draft.clear();
         self.surface.chat_draft.clear();
+        self.surface.push_chat_draft = true;
         let session = self.session.clone_handle();
         let session_id = self.session.session_id().to_owned();
         let sent_text = text.clone();
@@ -3315,19 +3319,25 @@ impl StageApp {
                 )
             })
         });
-        let look = if let (Some(cursor), Some((size, eye, target, head))) = (cursor, look_input) {
-            let viewport = (size.width.max(1), size.height.max(1));
-            Some(look_at::compute_world_target(
-                glam::Vec2::new(cursor.x, cursor.y),
-                viewport,
-                glam::Vec3::from(eye),
-                glam::Vec3::from(target),
-                glam::Vec3::from(ene_vrm::camera::DEFAULT_UP),
-                head,
-                strength,
-                &mut self.look_at_state,
-                dt,
-            ))
+        let look_at_active =
+            self.interaction.cursor_hittest_enabled() && self.local_settings.look_at_strength > 0.0;
+        let look = if look_at_active {
+            if let (Some(cursor), Some((size, eye, target, head))) = (cursor, look_input) {
+                let viewport = (size.width.max(1), size.height.max(1));
+                Some(look_at::compute_world_target(
+                    glam::Vec2::new(cursor.x, cursor.y),
+                    viewport,
+                    glam::Vec3::from(eye),
+                    glam::Vec3::from(target),
+                    glam::Vec3::from(ene_vrm::camera::DEFAULT_UP),
+                    head,
+                    strength,
+                    &mut self.look_at_state,
+                    dt,
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -3348,12 +3358,14 @@ impl StageApp {
             return;
         };
         let surface_positions = self.surface.positions.clone();
-        let highlight_soul = self
-            .surface
-            .drag
-            .as_ref()
-            .map(|drag| drag.soul_id().to_owned())
-            .or_else(|| self.surface.hover_soul.clone());
+        let highlight_soul = overlay_highlight_soul(
+            self.interaction.cursor_hittest_enabled(),
+            self.surface
+                .drag
+                .as_ref()
+                .map(super::drag::BodyDrag::soul_id),
+            self.surface.hover_soul.as_deref(),
+        );
         let mut corrected_positions = Vec::new();
         {
             let Some(overlay) = self.overlay.as_mut() else {
@@ -3397,7 +3409,6 @@ impl StageApp {
                     }
                 }
             }
-            overlay.window.request_redraw();
         }
         let layout_changed = !corrected_positions.is_empty();
         for (soul_id, position) in corrected_positions {
@@ -3690,8 +3701,14 @@ impl StageApp {
         let Some(ui) = chat.layer().and_then(|layer| layer.chat_ui()) else {
             return;
         };
-        self.surface.chat_draft = ui.get_draft().to_string();
         self.surface.chat_input_focused = ui.get_input_focused();
+        if self.surface.push_chat_draft {
+            ui.set_draft(self.surface.chat_draft.clone().into());
+            self.surface.push_chat_draft = false;
+        } else {
+            self.surface.chat_draft = ui.get_draft().to_string();
+        }
+        self.surface.question_draft = ui.get_question_draft().to_string();
         crate::surface::chat::request_single_greeting_commit(&mut self.surface);
         let rows: Vec<crate::ui::ChatRow> =
             normalize_transcript(&self.surface.history, &self.surface.streaming_text)
@@ -3700,6 +3717,7 @@ impl StageApp {
                     role: slint::SharedString::from(transcript_label(row.role).as_str()),
                     text: slint::SharedString::from(row.text.as_str()),
                     streaming: row.state == crate::surface::chat::TranscriptState::Streaming,
+                    user: row.role == crate::surface::chat::TranscriptKind::User,
                 })
                 .collect();
         ui.set_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
@@ -3725,6 +3743,8 @@ impl StageApp {
         ui.set_turn_active(self.surface.turn_active);
         ui.set_mic_active(self.mic_active);
         ui.set_can_send(composer_send_allowed(&self.surface));
+        ui.set_mode(message_mode_index(self.surface.message_mode));
+        apply_chat_copy(ui);
         if let Some(pending) = &self.surface.pending_approval {
             ui.set_approval_visible(true);
             ui.set_approval_prompt(
@@ -3748,9 +3768,6 @@ impl StageApp {
             return;
         };
         let actions = chat.take_actions();
-        if let Some(ui) = chat.layer().and_then(|layer| layer.chat_ui()) {
-            self.surface.chat_draft = ui.get_draft().to_string();
-        }
         for action in actions {
             match action {
                 ChromeAction::Send => self.surface.push_action(SurfaceAction::SendChat),
@@ -3780,6 +3797,10 @@ impl StageApp {
                 ChromeAction::AnswerQuestion => {
                     self.surface.push_action(SurfaceAction::AnswerQuestion);
                 }
+                ChromeAction::BargeIn => self.surface.push_action(SurfaceAction::BargeIn),
+                ChromeAction::SetMode(index) => {
+                    self.surface.message_mode = message_mode_from_index(index);
+                }
                 _ => {}
             }
         }
@@ -3793,7 +3814,6 @@ impl StageApp {
             return;
         };
         self.detail.search = ui.get_search().to_string();
-        crate::detail::sync_search_tab(&mut self.detail);
         self.session
             .session_id()
             .clone_into(&mut self.detail.session_id);
@@ -3814,14 +3834,17 @@ impl StageApp {
         ui.set_heading(view.heading.into());
         ui.set_body(view.body.into());
         ui.set_status(view.status.into());
-        ui.set_draft_a(view.draft_a.into());
-        ui.set_draft_b(view.draft_b.into());
-        ui.set_tab(
-            DetailTab::ALL
-                .iter()
-                .position(|tab| *tab == self.detail.tab)
-                .unwrap_or(0) as i32,
-        );
+        let tab_index = DetailTab::ALL
+            .iter()
+            .position(|tab| *tab == self.detail.tab)
+            .unwrap_or(0) as i32;
+        if should_push_detail_drafts(ui.get_input_focused(), ui.get_tab(), tab_index) {
+            ui.set_draft_a(view.draft_a.into());
+            ui.set_draft_b(view.draft_b.into());
+        }
+        ui.set_draft_a_label(view.draft_a_label.into());
+        ui.set_draft_b_label(view.draft_b_label.into());
+        ui.set_tab(tab_index);
         ui.set_rows(slint::ModelRc::new(slint::VecModel::from(view.rows)));
         ui.set_drafts_visible(view.drafts_visible);
         let actions: Vec<crate::ui::DetailAction> = view
@@ -3839,6 +3862,8 @@ impl StageApp {
             .map(|tab| slint::SharedString::from(tab.label()))
             .collect();
         ui.set_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
+        ui.set_search_placeholder(i18n::fl("detail-search").into());
+        ui.set_title_text(i18n::fl("detail-title").into());
         apply_theme_detail(ui, &self.local_settings.theme);
     }
 
@@ -3856,7 +3881,20 @@ impl StageApp {
         for action in actions {
             match action {
                 ChromeAction::DetailTab(index) => {
+                    self.read_detail_drafts();
                     detail::project::handle_select_tab(&mut self.detail, index);
+                }
+                ChromeAction::DetailSearchSubmit => {
+                    self.detail.search = self
+                        .detail_win
+                        .as_ref()
+                        .and_then(|win| win.layer())
+                        .and_then(|layer| layer.detail_ui())
+                        .map_or_else(
+                            || self.detail.search.clone(),
+                            |ui| ui.get_search().to_string(),
+                        );
+                    crate::detail::sync_search_tab(&mut self.detail);
                 }
                 ChromeAction::DetailPrimary(name) => {
                     self.read_detail_drafts();
@@ -3887,6 +3925,12 @@ impl StageApp {
                         detail::request_overlay_monitor_action(&mut self.detail, true);
                     } else if let Some(job_id) = id.strip_prefix("job:") {
                         self.cancel_job(job_id);
+                    } else if let Some(model) = id.strip_prefix("model:") {
+                        model.clone_into(&mut self.detail.chat_model);
+                    } else if let Some(candidate_id) = id.strip_prefix("pending-accept:") {
+                        self.resolve_memory_candidate(candidate_id, true);
+                    } else if let Some(candidate_id) = id.strip_prefix("pending-reject:") {
+                        self.resolve_memory_candidate(candidate_id, false);
                     } else if let Some(action) =
                         detail::project::handle_row(&mut self.detail, &companions, &id)
                     {
@@ -4023,6 +4067,56 @@ impl StageApp {
         });
     }
 
+    fn resolve_memory_candidate(&mut self, id: &str, accept: bool) {
+        let Some(original) = self
+            .detail
+            .pending_memories
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        self.detail.remove_candidate(id);
+        let soul_id = self.session.soul_id().to_owned();
+        let client = Arc::clone(&self.client);
+        let candidate_id = id.to_owned();
+        let decision = if accept {
+            ene_api::MemoryCandidateDecision::Accept
+        } else {
+            ene_api::MemoryCandidateDecision::Reject
+        };
+        self.spawn(async move {
+            let result = client
+                .resolve_memory_candidate(
+                    &candidate_id,
+                    &ene_api::ResolveMemoryCandidateRequest {
+                        decision,
+                        title: None,
+                        content: None,
+                        kind: None,
+                        scope: None,
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|err| err.to_string());
+            if result.is_err() {
+                AsyncOutcome::ResolveMemoryFailedKeepCandidate {
+                    soul_id,
+                    original,
+                    result,
+                }
+            } else {
+                AsyncOutcome::ResolveMemory {
+                    soul_id,
+                    id: candidate_id,
+                    result,
+                }
+            }
+        });
+    }
+
     fn cancel_job(&mut self, id: &str) {
         let id = id.to_owned();
         let client = Arc::clone(&self.client);
@@ -4121,7 +4215,15 @@ impl StageApp {
             })
             .collect();
         ui.set_entries(slint::ModelRc::new(slint::VecModel::from(model)));
-        ui.set_selected(self.surface.spotlight_selected as i32);
+        let selected = self
+            .surface
+            .spotlight_selected
+            .min(filtered.len().saturating_sub(1));
+        self.surface.spotlight_selected = selected;
+        ui.set_selected(selected as i32);
+        ui.set_placeholder(i18n::fl("spotlight-placeholder").into());
+        ui.set_empty_text(i18n::fl("spotlight-no-match").into());
+        ui.set_title_text(i18n::fl("spotlight-title").into());
         apply_theme_spotlight(ui, &self.local_settings.theme);
     }
 
@@ -4413,6 +4515,12 @@ impl ApplicationHandler for StageApp {
                     self.interaction.cancel(CancelReason::FocusLost);
                     self.sync_overlay_interaction();
                 }
+                WindowEvent::CursorLeft { .. } => {
+                    if self.surface.drag.is_none() {
+                        self.surface.hover_soul = None;
+                        self.sync_overlay_interaction();
+                    }
+                }
                 WindowEvent::Resized(size) => {
                     if let (Some(gpu), Some(overlay)) = (self.gpu.as_ref(), self.overlay.as_mut()) {
                         overlay.resize(gpu, size);
@@ -4524,9 +4632,38 @@ impl ApplicationHandler for StageApp {
         if let Some(spotlight) = self.spotlight.as_mut()
             && spotlight.id() == id
         {
-            let repaint = spotlight.on_window_event(&event);
+            let mut skip_slint = false;
+            if let WindowEvent::KeyboardInput { event, .. } = &event
+                && event.state == ElementState::Pressed
+            {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        close_spotlight = true;
+                        skip_slint = true;
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.surface.spotlight_selected =
+                            self.surface.spotlight_selected.saturating_add(1);
+                        skip_slint = true;
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.surface.spotlight_selected =
+                            self.surface.spotlight_selected.saturating_sub(1);
+                        skip_slint = true;
+                    }
+                    _ => {}
+                }
+            }
+            let repaint = if skip_slint {
+                true
+            } else {
+                should_repaint_after_event(
+                    spotlight.on_window_event(&event),
+                    spotlight.owns_input(),
+                )
+            };
             chrome_focus_state = window_focus_state(&event);
-            close_spotlight = matches!(event, WindowEvent::CloseRequested);
+            close_spotlight = close_spotlight || matches!(event, WindowEvent::CloseRequested);
             if repaint && !close_spotlight {
                 spotlight.request_redraw();
             }
@@ -4615,8 +4752,15 @@ impl ApplicationHandler for StageApp {
             event_loop.exit();
             return;
         }
+        let look_at_active = self.interaction.cursor_hittest_enabled()
+            && self.local_settings.look_at_strength > 0.0
+            && self.last_cursor.is_some();
+        let overlay_busy = self
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.wants_frame(look_at_active));
         event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(16),
+            Instant::now() + Duration::from_millis(if overlay_busy { 16 } else { 100 }),
         ));
     }
 }
@@ -4686,15 +4830,99 @@ fn apply_theme_spotlight(ui: &crate::ui::SpotlightSurface, theme: &str) {
 }
 
 fn apply_ene_theme(global: &crate::ui::EneTheme<'_>, theme: &str) {
-    match theme {
-        "light" => global.set_dark(false),
-        "dark" => global.set_dark(true),
-        _ => {}
+    if theme == "light" {
+        global.set_dark(false);
+        global.set_bg(slint::Color::from_rgb_u8(0xf4, 0xf5, 0xf7));
+        global.set_bg_elevated(slint::Color::from_rgb_u8(0xff, 0xff, 0xff));
+        global.set_fg(slint::Color::from_rgb_u8(0x1a, 0x1c, 0x20));
+        global.set_fg_muted(slint::Color::from_rgb_u8(0x5f, 0x63, 0x68));
+        global.set_bubble(slint::Color::from_rgb_u8(0xe8, 0xea, 0xed));
+        global.set_bubble_user(slint::Color::from_rgb_u8(0xc5, 0xda, 0xf0));
+    } else {
+        global.set_dark(true);
+        global.set_bg(slint::Color::from_rgb_u8(0x16, 0x18, 0x1d));
+        global.set_bg_elevated(slint::Color::from_rgb_u8(0x1e, 0x22, 0x29));
+        global.set_fg(slint::Color::from_rgb_u8(0xe8, 0xea, 0xed));
+        global.set_fg_muted(slint::Color::from_rgb_u8(0x9a, 0xa0, 0xa6));
+        global.set_bubble(slint::Color::from_rgb_u8(0x26, 0x2b, 0x33));
+        global.set_bubble_user(slint::Color::from_rgb_u8(0x34, 0x5a, 0x82));
     }
     crate::ui::theme::apply_to_global(
         global,
         &crate::ui::theme::load_user_theme(&user_theme_file()),
     );
+}
+
+fn apply_chat_copy(ui: &crate::ui::ChatSurface) {
+    ui.set_title_text(i18n::fl("surface-title").into());
+    ui.set_detail_label(i18n::fl("chat-open-detail").into());
+    ui.set_new_label(i18n::fl("chat-new-session").into());
+    ui.set_send_label(i18n::fl("chat-send").into());
+    ui.set_cancel_label(i18n::fl("chat-cancel").into());
+    ui.set_barge_label(i18n::fl("chat-barge-in").into());
+    ui.set_mic_on_label(i18n::fl("mic-on").into());
+    ui.set_mic_off_label(i18n::fl("mic-off").into());
+    ui.set_allow_label(i18n::fl("approval-allow").into());
+    ui.set_always_label(i18n::fl("approval-always").into());
+    ui.set_deny_label(i18n::fl("approval-deny").into());
+    ui.set_answer_label(i18n::fl("ask-user-answer").into());
+    ui.set_placeholder(i18n::fl("chat-placeholder").into());
+    ui.set_prompt_label(i18n::fl("chat-mode-prompt").into());
+    ui.set_steer_label(i18n::fl("chat-mode-steer").into());
+    ui.set_follow_up_label(i18n::fl("chat-mode-follow-up").into());
+    ui.set_question_placeholder(i18n::fl("ask-user-answer").into());
+}
+
+#[must_use]
+fn should_push_detail_drafts(input_focused: bool, ui_tab: i32, state_tab: i32) -> bool {
+    ui_tab != state_tab || !input_focused
+}
+
+#[must_use]
+fn overlay_highlight_soul(
+    interactive: bool,
+    drag_soul: Option<&str>,
+    hover_soul: Option<&str>,
+) -> Option<String> {
+    if let Some(soul) = drag_soul {
+        return Some(soul.to_owned());
+    }
+    if interactive {
+        hover_soul.map(ToOwned::to_owned)
+    } else {
+        None
+    }
+}
+
+#[must_use]
+fn question_answer_text(question_draft: &str, chat_draft: &str, prompt: &str) -> String {
+    let question = question_draft.trim();
+    if !question.is_empty() {
+        return question.to_owned();
+    }
+    let chat = chat_draft.trim();
+    if !chat.is_empty() {
+        return chat.to_owned();
+    }
+    prompt.to_owned()
+}
+
+#[must_use]
+fn message_mode_index(mode: MessageMode) -> i32 {
+    match mode {
+        MessageMode::Prompt => 0,
+        MessageMode::Steer => 1,
+        MessageMode::FollowUp => 2,
+    }
+}
+
+#[must_use]
+fn message_mode_from_index(index: i32) -> MessageMode {
+    match index {
+        1 => MessageMode::Steer,
+        2 => MessageMode::FollowUp,
+        _ => MessageMode::Prompt,
+    }
 }
 
 fn user_theme_file() -> std::path::PathBuf {
@@ -4896,8 +5124,10 @@ mod tests {
     use super::{
         AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
         OverlayFocus, StageApp, cancel_already_terminal, chat_window_action, format_log_text,
-        friendly_cancel_job_error, friendly_create_job_error, overlay_window_level,
-        provider_asset_load_status, should_repaint_after_event, window_focus_state, window_level,
+        friendly_cancel_job_error, friendly_create_job_error, message_mode_from_index,
+        overlay_highlight_soul, overlay_window_level, provider_asset_load_status,
+        question_answer_text, should_push_detail_drafts, should_repaint_after_event,
+        window_focus_state, window_level,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -4905,7 +5135,9 @@ mod tests {
     use crate::i18n;
     use crate::surface::{PendingApproval, PendingQuestion};
     use ene_api::CreateJobRequest;
-    use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
+    use ene_api::{
+        HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView, MessageMode,
+    };
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::Instant;
@@ -6272,6 +6504,44 @@ mod tests {
         // coalesces internally, so this stays cheap).
         assert!(should_repaint_after_event(false, true));
         assert!(should_repaint_after_event(true, true));
+    }
+
+    #[test]
+    fn detail_drafts_are_not_pushed_while_the_same_tab_is_focused() {
+        assert!(!should_push_detail_drafts(true, 2, 2));
+        assert!(should_push_detail_drafts(true, 2, 3));
+        assert!(should_push_detail_drafts(false, 2, 2));
+    }
+
+    #[test]
+    fn overlay_highlight_is_hidden_while_click_through() {
+        assert_eq!(overlay_highlight_soul(false, None, Some("soul")), None);
+        assert_eq!(
+            overlay_highlight_soul(true, None, Some("soul")).as_deref(),
+            Some("soul")
+        );
+        assert_eq!(
+            overlay_highlight_soul(false, Some("drag"), Some("soul")).as_deref(),
+            Some("drag")
+        );
+    }
+
+    #[test]
+    fn question_answer_prefers_the_question_field() {
+        assert_eq!(
+            question_answer_text(" typed answer ", "composer", "prompt"),
+            "typed answer"
+        );
+        assert_eq!(question_answer_text("  ", "composer", "prompt"), "composer");
+        assert_eq!(question_answer_text("", "", "prompt"), "prompt");
+    }
+
+    #[test]
+    fn message_mode_index_round_trips() {
+        assert_eq!(message_mode_from_index(0), MessageMode::Prompt);
+        assert_eq!(message_mode_from_index(1), MessageMode::Steer);
+        assert_eq!(message_mode_from_index(2), MessageMode::FollowUp);
+        assert_eq!(message_mode_from_index(99), MessageMode::Prompt);
     }
 }
 

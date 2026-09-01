@@ -29,14 +29,14 @@ export component EneButton inherits Rectangle {
     in-out property <bool> primary: true;
     callback clicked();
     border-radius: EneTheme.radius;
-    background: primary ? EneTheme.accent : EneTheme.bg-elevated;
+    background: !root.enabled ? EneTheme.bg-elevated : (primary ? EneTheme.accent : EneTheme.bg-elevated);
     opacity: enabled ? 1.0 : 0.45;
     height: 32px;
     min-width: 72px;
     horizontal-stretch: 0;
     Text {
-        text: text;
-        color: primary ? #101218 : EneTheme.fg;
+        text: root.text;
+        color: primary && root.enabled ? #101218 : EneTheme.fg;
         font-size: EneTheme.type-md;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -44,8 +44,11 @@ export component EneButton inherits Rectangle {
         height: 100%;
     }
     ta := TouchArea {
-        enabled: enabled;
-        clicked => { root.clicked(); }
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
     }
 }
 
@@ -55,9 +58,9 @@ export component EneIconButton inherits Rectangle {
     width: 32px;
     height: 32px;
     border-radius: EneTheme.radius;
-    background: EneTheme.bg-elevated;
+    background: ta.has-hover ? EneTheme.bg : EneTheme.bg-elevated;
     Text {
-        text: text;
+        text: root.text;
         color: EneTheme.fg;
         font-size: EneTheme.type-md;
         horizontal-alignment: center;
@@ -65,7 +68,12 @@ export component EneIconButton inherits Rectangle {
         width: 100%;
         height: 100%;
     }
-    TouchArea { clicked => { root.clicked(); } }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
 }
 
 export component EneCard inherits Rectangle {
@@ -76,8 +84,17 @@ export component EneCard inherits Rectangle {
     VerticalLayout {
         padding: EneTheme.space-3;
         spacing: EneTheme.space-1;
-        Text { text: title; color: EneTheme.fg; font-size: EneTheme.type-md; }
-        Text { text: body; color: EneTheme.fg-muted; font-size: EneTheme.type-sm; wrap: word-wrap; }
+        Text {
+            text: root.title;
+            color: EneTheme.fg;
+            font-size: EneTheme.type-md;
+        }
+        Text {
+            text: root.body;
+            color: EneTheme.fg-muted;
+            font-size: EneTheme.type-sm;
+            wrap: word-wrap;
+        }
     }
 }
 
@@ -85,18 +102,33 @@ export component SpeechBubble inherits Rectangle {
     in-out property <string> text;
     in-out property <string> speaker;
     in property <bool> clickable: false;
+    in property <bool> user: false;
     callback clicked();
     border-radius: EneTheme.radius;
-    background: EneTheme.bubble;
+    background: user ? EneTheme.bubble-user : EneTheme.bubble;
     VerticalLayout {
+        width: 100%;
         padding: EneTheme.space-3;
         spacing: EneTheme.space-1;
-        Text { text: speaker; color: EneTheme.fg-muted; font-size: EneTheme.type-sm; }
-        Text { text: text; color: EneTheme.fg; font-size: EneTheme.type-md; wrap: word-wrap; }
+        Text {
+            text: root.speaker;
+            color: EneTheme.fg-muted;
+            font-size: EneTheme.type-sm;
+        }
+        Text {
+            text: root.text;
+            color: EneTheme.fg;
+            font-size: EneTheme.type-md;
+            wrap: word-wrap;
+            width: 100%;
+        }
     }
     TouchArea {
         enabled: clickable;
-        clicked => { root.clicked(); }
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
     }
 }
 
@@ -106,26 +138,84 @@ export component StatusBubble inherits Rectangle {
     background: #00000099;
     VerticalLayout {
         padding: EneTheme.space-2;
-        Text { text: text; color: EneTheme.fg; font-size: EneTheme.type-sm; wrap: word-wrap; }
+        Text {
+            text: root.text;
+            color: EneTheme.fg;
+            font-size: EneTheme.type-sm;
+            wrap: word-wrap;
+        }
     }
 }
 
 export component Chip inherits Rectangle {
     in-out property <string> text;
     in-out property <bool> selected: false;
+    in-out property <bool> enabled: true;
     callback clicked();
     border-radius: 999px;
-    background: selected ? EneTheme.accent : EneTheme.bg-elevated;
+    background: selected ? EneTheme.accent : (ta.has-hover ? EneTheme.bg : EneTheme.bg-elevated);
+    opacity: enabled ? 1.0 : 0.45;
     height: 28px;
     HorizontalLayout {
         padding-left: EneTheme.space-3;
         padding-right: EneTheme.space-3;
         Text {
-            text: text;
+            text: root.text;
             color: selected ? #101218 : EneTheme.fg;
             font-size: EneTheme.type-sm;
             vertical-alignment: center;
         }
     }
-    TouchArea { clicked => { root.clicked(); } }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component EneField inherits VerticalLayout {
+    in-out property <string> text;
+    in-out property <string> placeholder;
+    in-out property <string> label;
+    in-out property <length> field-height: 36px;
+    in-out property <bool> multiline: false;
+    callback accepted();
+    spacing: 2px;
+    if label != "": Text {
+        text: label;
+        color: EneTheme.fg-muted;
+        font-size: EneTheme.type-sm;
+    }
+    Rectangle {
+        height: field-height;
+        border-radius: EneTheme.radius;
+        background: EneTheme.bg;
+        border-width: 1px;
+        border-color: EneTheme.fg-muted;
+        if input.text == "": Text {
+            x: EneTheme.space-2;
+            width: parent.width - 16px;
+            height: 100%;
+            text: placeholder;
+            color: EneTheme.fg-muted;
+            font-size: EneTheme.type-md;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        input := TextInput {
+            x: EneTheme.space-2;
+            width: parent.width - 16px;
+            height: 100%;
+            text <=> root.text;
+            color: EneTheme.fg;
+            font-size: EneTheme.type-md;
+            wrap: multiline ? word-wrap : no-wrap;
+            single-line: !multiline;
+            accepted => {
+                root.accepted();
+            }
+        }
+    }
 }

@@ -1,4 +1,4 @@
-import { EneTheme } from "theme.slint";
+import { EneTheme, EneField } from "theme.slint";
 
 export struct SpotlightEntry {
     id: string,
@@ -8,11 +8,15 @@ export struct SpotlightEntry {
 export component SpotlightSurface inherits Window {
     background: #101218ee;
     default-font-family: "Noto Sans CJK JP";
-    title: "Spotlight";
+    title: title-text;
 
     in-out property <string> query;
     in-out property <[SpotlightEntry]> entries: [];
     in-out property <int> selected: 0;
+    in-out property <string> title-text: "Spotlight";
+    in-out property <string> placeholder: "Type a command…";
+    in-out property <string> empty-text: "";
+    in-out property <bool> input-focused: TextInputInterface.text-input-focused;
 
     callback run(string);
     callback dismissed();
@@ -20,22 +24,27 @@ export component SpotlightSurface inherits Window {
     VerticalLayout {
         padding: EneTheme.space-4;
         spacing: EneTheme.space-3;
-        TextInput {
+        EneField {
             text <=> query;
-            font-size: EneTheme.type-lg;
-            color: EneTheme.fg;
+            placeholder: placeholder;
+            field-height: 40px;
             accepted => {
                 if entries.length > 0 {
-                    run(entries[selected].id);
+                    run(entries[max(0, min(selected, entries.length - 1))].id);
                 }
             }
         }
+        if entries.length == 0: Text {
+            text: empty-text;
+            color: EneTheme.fg-muted;
+        }
         Flickable {
             viewport-height: list.preferred-height;
+            viewport-y: max(0px, min(selected * 36px, max(0px, list.preferred-height - self.height)));
             list := VerticalLayout {
                 spacing: EneTheme.space-1;
                 for entry[index] in entries: Rectangle {
-                    background: index == selected ? EneTheme.accent : transparent;
+                    background: index == selected ? EneTheme.accent : (row-touch.has-hover ? EneTheme.bg-elevated : transparent);
                     border-radius: EneTheme.radius;
                     height: 32px;
                     HorizontalLayout {
@@ -46,8 +55,11 @@ export component SpotlightSurface inherits Window {
                             vertical-alignment: center;
                         }
                     }
-                    TouchArea {
-                        clicked => { root.run(entry.id); }
+                    row-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.run(entry.id);
+                        }
                     }
                 }
             }

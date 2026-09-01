@@ -266,13 +266,15 @@ impl OverlayWindow {
         visemes: Option<ene_vrm::VisemeWeights>,
         speaking_soul: Option<&str>,
         highlight_soul: Option<&str>,
-    ) -> Result<(), OverlayError> {
+    ) -> Result<bool, OverlayError> {
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
         for slot in &mut self.slots {
             if let Some(target) = look_at {
                 slot.avatar.set_look_at_target(target);
+            } else {
+                slot.avatar.clear_look_at_target();
             }
             if speaking_soul.is_some_and(|id| id == slot.soul_id)
                 && let Some(weights) = visemes
@@ -294,7 +296,7 @@ impl OverlayWindow {
             && highlight.is_none()
             && !self.gpu_dirty
         {
-            return Ok(());
+            return Ok(false);
         }
         self.gpu_dirty = false;
         let mut avatars: Vec<&mut CompanionAvatar> =
@@ -307,7 +309,20 @@ impl OverlayWindow {
                 highlight,
                 self.slint_layer.as_ref(),
             )
-            .map_err(OverlayError::Avatar)
+            .map_err(OverlayError::Avatar)?;
+        Ok(true)
+    }
+
+    #[must_use]
+    pub fn wants_frame(&self, look_at_active: bool) -> bool {
+        self.gpu_dirty
+            || self.collider_debug
+            || look_at_active
+            || self
+                .slint_layer
+                .as_ref()
+                .is_some_and(SlintOverlayLayer::needs_redraw)
+            || self.slots.iter().any(|slot| slot.avatar.needs_redraw())
     }
 }
 
