@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use glam::{Mat4, Vec2, Vec3, Vec3Swizzles};
 
 /// Lower bound for a normalized body position.
-pub const POSITION_MIN: f32 = 0.05;
+pub const POSITION_MIN: f32 = 0.02;
 /// Upper bound for a normalized body position.
-pub const POSITION_MAX: f32 = 0.95;
+pub const POSITION_MAX: f32 = 0.98;
 
 /// Fallback normalized position for a body missing from the saved map.
 pub const DEFAULT_BODY_POSITION: [f32; 2] = [0.78, 0.5];
@@ -29,16 +29,37 @@ fn clamp_axis(value: f32, fallback: f32) -> f32 {
     }
 }
 
-/// Maps a normalized position to a world-space XY offset.
+fn aspect_from_viewport(viewport: (u32, u32)) -> f32 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "swapchain pixels are well inside f32"
+    )]
+    let aspect = viewport.0.max(1) as f32 / viewport.1.max(1) as f32;
+    aspect.max(0.0001)
+}
+
+fn viewport_half_extents(aspect: f32) -> (f32, f32) {
+    let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
+    let half_w = half_h * aspect.max(0.0001);
+    (half_w, half_h)
+}
+
+/// Maps a normalized position to a world-space XY offset on the
+/// orthographic focal plane for the given viewport aspect.
 #[must_use]
-pub fn normalized_to_world(pos: [f32; 2]) -> [f32; 2] {
-    [(pos[0] - 0.5) * 0.8, (0.5 - pos[1]) * 0.8]
+pub fn normalized_to_world(pos: [f32; 2], viewport: (u32, u32)) -> [f32; 2] {
+    let (half_w, half_h) = viewport_half_extents(aspect_from_viewport(viewport));
+    [(pos[0] - 0.5) * 2.0 * half_w, (0.5 - pos[1]) * 2.0 * half_h]
 }
 
 /// Maps a world-space XY offset back to clamped normalized coordinates.
 #[must_use]
-pub fn world_to_normalized(world: Vec2) -> [f32; 2] {
-    clamp_position([world.x / 0.8 + 0.5, 0.5 - world.y / 0.8])
+pub fn world_to_normalized(world: Vec2, viewport: (u32, u32)) -> [f32; 2] {
+    let (half_w, half_h) = viewport_half_extents(aspect_from_viewport(viewport));
+    clamp_position([
+        world.x / (2.0 * half_w) + 0.5,
+        0.5 - world.y / (2.0 * half_h),
+    ])
 }
 
 /// One drawable body offered to the hit-test pass.
@@ -110,12 +131,16 @@ pub fn press_body(
     hit_soul: Option<&str>,
     stored: Option<[f32; 2]>,
     cursor_world: Option<Vec2>,
+    viewport: (u32, u32),
 ) {
     let Some(soul_id) = hit_soul else {
         *drag = None;
         return;
     };
-    let body_world = Vec2::from(normalized_to_world(stored.unwrap_or(DEFAULT_BODY_POSITION)));
+    let body_world = Vec2::from(normalized_to_world(
+        stored.unwrap_or(DEFAULT_BODY_POSITION),
+        viewport,
+    ));
     let grab_offset = cursor_world.map_or(Vec2::ZERO, |world| world - body_world);
     *drag = Some(BodyDrag::Armed {
         soul_id: soul_id.to_owned(),
@@ -130,6 +155,7 @@ pub fn drag_body(
     drag: &mut Option<BodyDrag>,
     positions: &mut BTreeMap<String, [f32; 2]>,
     cursor_world: Option<Vec2>,
+    viewport: (u32, u32),
 ) {
     if let Some(BodyDrag::Armed {
         soul_id,
@@ -149,7 +175,7 @@ pub fn drag_body(
         Some(world),
     ) = (drag.as_ref(), cursor_world)
     {
-        let pos = world_to_normalized(world - *grab_offset);
+        let pos = world_to_normalized(world - *grab_offset, viewport);
         positions.insert(soul_id.clone(), pos);
     }
 }
@@ -305,6 +331,8 @@ mod tests {
     const TARGET: Vec3 = Vec3::new(0.0, 0.0, 0.0);
     const UP: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
+    const TEST_VIEWPORT: (u32, u32) = (640, 480);
+
     fn candidate(soul: &str, min: Vec3, max: Vec3) -> HitCandidate {
         HitCandidate {
             soul_id: soul.to_owned(),
@@ -331,8 +359,8 @@ mod tests {
     #[test]
     fn normalized_world_roundtrip() {
         let original = [0.7, 0.3];
-        let world = normalized_to_world(original);
-        let back = world_to_normalized(Vec2::from(world));
+        let world = normalized_to_world(original, TEST_VIEWPORT);
+        let back = world_to_normalized(Vec2::from(world), TEST_VIEWPORT);
         assert!((back[0] - original[0]).abs() < 1e-5);
         assert!((back[1] - original[1]).abs() < 1e-5);
     }
@@ -582,7 +610,7 @@ mod tests {
             soul_id: "stale".to_owned(),
             grab_offset: Vec2::ONE,
         });
-        press_body(&mut drag, None, Some([0.5, 0.5]), Some(Vec2::ZERO));
+        press_body(&mut drag, None, Some([0.5, 0.5]), Some(Vec2::ZERO), TEST_VIEWPORT);
         assert!(drag.is_none());
     }
 
@@ -590,12 +618,20 @@ mod tests {
     fn press_on_body_arms_with_grab_offset() {
         let mut drag = None;
         let stored = [0.6, 0.4];
-        let body_world = Vec2::from(normalized_to_world(stored));
+        let body_world = Vec2::from(normalized_to_world(stored, TEST_VIEWPORT));
         let cursor_world = body_world + Vec2::new(0.1, -0.05);
-        press_body(&mut drag, Some("soul-a"), Some(stored), Some(cursor_world));
+        press_body(
+            &mut drag,
+            Some("soul-a"),
+            Some(stored),
+            Some(cursor_world),
+            TEST_VIEWPORT,
+        );
         let armed = drag.expect("armed");
         assert_eq!(armed.soul_id(), "soul-a");
-        assert_eq!(armed.grab_offset(), Vec2::new(0.1, -0.05));
+        let grab = armed.grab_offset();
+        assert!((grab.x - 0.1).abs() < 1e-5);
+        assert!((grab.y + 0.05).abs() < 1e-5);
     }
 
     #[test]
@@ -607,7 +643,7 @@ mod tests {
             grab_offset: Vec2::ZERO,
         });
         let world = Vec2::new(-0.2, 0.1);
-        drag_body(&mut drag, &mut positions, Some(world));
+        drag_body(&mut drag, &mut positions, Some(world), TEST_VIEWPORT);
         assert_eq!(
             drag,
             Some(BodyDrag::Dragging {
@@ -616,7 +652,7 @@ mod tests {
             }),
         );
         let moved = positions["a"];
-        let expected = world_to_normalized(world);
+        let expected = world_to_normalized(world, TEST_VIEWPORT);
         assert!((moved[0] - expected[0]).abs() < 1e-5);
         assert!((moved[1] - expected[1]).abs() < 1e-5);
         let [b_x, b_y] = positions["b"];
@@ -634,14 +670,14 @@ mod tests {
             grab_offset: grab,
         });
         let first = Vec2::new(0.05, -0.04);
-        drag_body(&mut drag, &mut positions, Some(first));
+        drag_body(&mut drag, &mut positions, Some(first), TEST_VIEWPORT);
         let second = Vec2::new(0.09, -0.08);
-        drag_body(&mut drag, &mut positions, Some(second));
+        drag_body(&mut drag, &mut positions, Some(second), TEST_VIEWPORT);
         // The offset keeps the body anchored to the cursor across moves.
         let pos = positions["a"];
         let anchored = second - grab;
-        assert!((normalized_to_world(pos)[0] - anchored.x).abs() < 1e-5);
-        assert!((normalized_to_world(pos)[1] - anchored.y).abs() < 1e-5);
+        assert!((normalized_to_world(pos, TEST_VIEWPORT)[0] - anchored.x).abs() < 1e-5);
+        assert!((normalized_to_world(pos, TEST_VIEWPORT)[1] - anchored.y).abs() < 1e-5);
     }
 
     #[test]
@@ -663,7 +699,12 @@ mod tests {
             soul_id: "a".to_owned(),
             grab_offset: Vec2::ZERO,
         });
-        drag_body(&mut drag, &mut positions, Some(Vec2::new(100.0, 100.0)));
+        drag_body(
+            &mut drag,
+            &mut positions,
+            Some(Vec2::new(100.0, 100.0)),
+            TEST_VIEWPORT,
+        );
         let [x, y] = positions["a"];
         // World +y maps to normalized top (y minimum); +x maps to x maximum.
         assert!((y - POSITION_MIN).abs() < f32::EPSILON);

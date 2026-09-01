@@ -55,7 +55,7 @@ use std::path::Path;
 use glam::{Quat, Vec3};
 
 use crate::error::{VrmError, VrmResult};
-use crate::humanoid::{HumanoidBoneRegistry, canonicalize_bone_name};
+use crate::humanoid::{HumanoidBoneRegistry, VrmBone, canonicalize_bone_name};
 
 /// Interpolation mode for keyframe sampling. Mirrors the glTF
 /// `sampler.interpolation` enum.
@@ -556,6 +556,34 @@ pub fn evaluate_clip(clip: &VrmaClip, t: f32) -> VrmaFrame {
     frame
 }
 
+/// Map a VRMA source bone name onto a destination humanoid bone.
+///
+/// VRM 1.0 models expose `*thumbmetacarpal` / `*thumbproximal` /
+/// `*thumbdistal`. Legacy VRM 0.x models use `*thumbproximal` /
+/// `*thumbintermediate` / `*thumbdistal` instead. VRMA clips always
+/// follow the 1.0 naming; when the destination lacks a metacarpal
+/// segment, fold metacarpal motion onto proximal and proximal motion
+/// onto intermediate.
+fn resolve_vrma_dest_bone(vrma_bone: &str, dest: &HumanoidBoneRegistry) -> Option<VrmBone> {
+    let vrm0_left_thumb = dest.by_name("leftthumbmetacarpal").is_none()
+        && dest.by_name("leftthumbintermediate").is_some();
+    let vrm0_right_thumb = dest.by_name("rightthumbmetacarpal").is_none()
+        && dest.by_name("rightthumbintermediate").is_some();
+    let mapped = match vrma_bone {
+        "leftthumbmetacarpal" if vrm0_left_thumb => "leftthumbproximal",
+        "leftthumbproximal" if vrm0_left_thumb => "leftthumbintermediate",
+        "rightthumbmetacarpal" if vrm0_right_thumb => "rightthumbproximal",
+        "rightthumbproximal" if vrm0_right_thumb => "rightthumbintermediate",
+        other => other,
+    };
+    let bone = canonicalize_bone_name(mapped)?;
+    if dest.lookup(&bone).is_some() {
+        Some(bone)
+    } else {
+        None
+    }
+}
+
 /// Destination rest pose slices used by [`evaluate_retargeted`].
 #[derive(Clone, Copy, Debug)]
 pub struct DestRestPose<'a> {
@@ -585,19 +613,22 @@ pub fn evaluate_retargeted(
         look_at_yaw_pitch: raw.look_at_yaw_pitch,
     };
     for (name, src_pose) in &raw.bone_rotations {
-        let Some(dst_entry) = dest_humanoid.by_name(name) else {
+        let Some(dest_bone) = resolve_vrma_dest_bone(name, dest_humanoid) else {
+            continue;
+        };
+        let Some(dst_entry) = dest_humanoid.lookup(&dest_bone) else {
             continue;
         };
         let Some(&src_node) = asset.properties.humanoid_bones.get(name) else {
-            frame.bone_rotations.insert(name.clone(), *src_pose);
+            frame.bone_rotations.insert(dest_bone.0.clone(), *src_pose);
             continue;
         };
         let Some(src_rest_local) = asset.node_rest_rotations.get(src_node).copied() else {
-            frame.bone_rotations.insert(name.clone(), *src_pose);
+            frame.bone_rotations.insert(dest_bone.0.clone(), *src_pose);
             continue;
         };
         let Some(src_rest_world) = asset.node_world_rest_rotations.get(src_node).copied() else {
-            frame.bone_rotations.insert(name.clone(), *src_pose);
+            frame.bone_rotations.insert(dest_bone.0.clone(), *src_pose);
             continue;
         };
         let Some(dst_rest_local) = dest.local_rotations.get(dst_entry.node).copied() else {
@@ -613,7 +644,7 @@ pub fn evaluate_retargeted(
             dst_rest_local,
             dst_rest_world,
         );
-        frame.bone_rotations.insert(name.clone(), dst_pose);
+        frame.bone_rotations.insert(dest_bone.0.clone(), dst_pose);
     }
     if let Some(src_pose) = raw.hips_translation {
         frame.hips_translation = retarget_hips_to_dest(asset, dest_humanoid, dest, src_pose);
@@ -1445,5 +1476,153 @@ mod tests {
         let hips = frame.hips_translation.expect("hips");
         assert!((hips.x - 0.1).abs() < 1e-5, "x shifted: {hips:?}");
         assert!((hips.y - 0.95).abs() < 1e-5, "y wrong: {hips:?}");
+    }
+
+    #[test]
+    fn resolve_vrma_dest_bone_maps_thumb_chain_for_vrm0() {
+        use crate::humanoid::{BoneRestTransform, HumanoidBoneEntry, VrmBone};
+        let mut vrm0 = HumanoidBoneRegistry::new();
+        for (name, node) in [
+            ("leftthumbproximal", 70),
+            ("leftthumbintermediate", 71),
+            ("leftthumbdistal", 72),
+        ] {
+            vrm0.insert(
+                VrmBone(name.into()),
+                HumanoidBoneEntry {
+                    node,
+                    joint: None,
+                    rest: BoneRestTransform::default(),
+                },
+            );
+        }
+        assert_eq!(
+            resolve_vrma_dest_bone("leftthumbmetacarpal", &vrm0)
+                .unwrap()
+                .0,
+            "leftthumbproximal"
+        );
+        assert_eq!(
+            resolve_vrma_dest_bone("leftthumbproximal", &vrm0)
+                .unwrap()
+                .0,
+            "leftthumbintermediate"
+        );
+        assert_eq!(
+            resolve_vrma_dest_bone("leftthumbdistal", &vrm0)
+                .unwrap()
+                .0,
+            "leftthumbdistal"
+        );
+
+        let mut vrm1 = HumanoidBoneRegistry::new();
+        for (name, node) in [
+            ("leftthumbmetacarpal", 10),
+            ("leftthumbproximal", 11),
+            ("leftthumbdistal", 12),
+        ] {
+            vrm1.insert(
+                VrmBone(name.into()),
+                HumanoidBoneEntry {
+                    node,
+                    joint: None,
+                    rest: BoneRestTransform::default(),
+                },
+            );
+        }
+        assert_eq!(
+            resolve_vrma_dest_bone("leftthumbmetacarpal", &vrm1)
+                .unwrap()
+                .0,
+            "leftthumbmetacarpal"
+        );
+        assert_eq!(
+            resolve_vrma_dest_bone("leftthumbproximal", &vrm1)
+                .unwrap()
+                .0,
+            "leftthumbproximal"
+        );
+    }
+
+    #[test]
+    fn evaluate_retargeted_emits_vrm0_thumb_bone_names() {
+        use crate::humanoid::{BoneRestTransform, HumanoidBoneEntry, VrmBone};
+        let mut dest_humanoid = HumanoidBoneRegistry::new();
+        for (name, node) in [
+            ("leftthumbproximal", 70),
+            ("leftthumbintermediate", 71),
+            ("leftthumbdistal", 72),
+        ] {
+            dest_humanoid.insert(
+                VrmBone(name.into()),
+                HumanoidBoneEntry {
+                    node,
+                    joint: Some(node),
+                    rest: BoneRestTransform::default(),
+                },
+            );
+        }
+        let mut src_bones = HashMap::new();
+        for (name, node) in [
+            ("leftthumbmetacarpal", 0),
+            ("leftthumbproximal", 1),
+            ("leftthumbdistal", 2),
+        ] {
+            src_bones.insert(name.to_owned(), node);
+        }
+        let asset = VrmaAsset {
+            properties: VrmaProperties {
+                humanoid_bones: src_bones,
+                ..VrmaProperties::default()
+            },
+            clips: Vec::new(),
+            node_rest_rotations: vec![Quat::IDENTITY; 3],
+            node_rest_positions: vec![Vec3::ZERO; 3],
+            node_world_rest_rotations: vec![Quat::IDENTITY; 3],
+            node_world_rest_positions: vec![Vec3::ZERO; 3],
+            node_parents: vec![-1, -1, -1],
+        };
+        let mut bone_channels = HashMap::new();
+        for name in ["leftthumbmetacarpal", "leftthumbproximal", "leftthumbdistal"] {
+            bone_channels.insert(
+                name.to_owned(),
+                BoneChannel {
+                    bone_name: name.to_owned(),
+                    rotation: Sampler {
+                        times: vec![0.0],
+                        values: vec![Quat::from_rotation_y(0.5)],
+                        interpolation: Interpolation::Step,
+                    },
+                    translation: None,
+                },
+            );
+        }
+        let clip = VrmaClip {
+            name: "thumb".into(),
+            duration: 1.0,
+            bone_channels,
+            expression_channels: HashMap::new(),
+            look_at_channel: None,
+        };
+        let local_rot = vec![Quat::IDENTITY; 73];
+        let world_rot = vec![Quat::IDENTITY; 73];
+        let local_pos = vec![Vec3::ZERO; 73];
+        let world_pos = vec![Vec3::ZERO; 73];
+        let frame = evaluate_retargeted(
+            &asset,
+            &clip,
+            0.0,
+            &dest_humanoid,
+            DestRestPose {
+                local_rotations: &local_rot,
+                world_rotations: &world_rot,
+                local_positions: &local_pos,
+                world_positions: &world_pos,
+            },
+        );
+        assert!(frame.bone_rotations.contains_key("leftthumbproximal"));
+        assert!(frame.bone_rotations.contains_key("leftthumbintermediate"));
+        assert!(frame.bone_rotations.contains_key("leftthumbdistal"));
+        assert!(!frame.bone_rotations.contains_key("leftthumbmetacarpal"));
     }
 }

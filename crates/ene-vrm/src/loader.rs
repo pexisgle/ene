@@ -853,23 +853,30 @@ fn load_node_hierarchy(gltf: &gltf::Gltf) -> NodeHierarchy {
     let mut out_of_order = 0usize;
     for i in 0..node_count {
         let p = parents[i];
-        if p < 0 {
-            world_rotations[i] = rest_local_rotations[i];
-            world_positions[i] = rest_local_positions[i];
-        } else {
-            let p = p as usize;
-            // Out-of-order node: treat as root for itself so the
-            // cascade stays sound for its descendants.
-            if i < p {
-                out_of_order += 1;
-                world_rotations[i] = rest_local_rotations[i];
-                world_positions[i] = rest_local_positions[i];
-            } else {
-                world_rotations[i] = world_rotations[p] * rest_local_rotations[i];
-                world_positions[i] =
-                    world_rotations[p] * rest_local_positions[i] + world_positions[p];
-            }
+        if p >= 0 && i < p as usize {
+            out_of_order += 1;
         }
+
+        let mut chain = Vec::new();
+        let mut cur = i as i32;
+        loop {
+            chain.push(cur as usize);
+            let parent = parents[cur as usize];
+            if parent < 0 {
+                break;
+            }
+            cur = parent;
+        }
+        chain.reverse();
+
+        let mut wr = glam::Quat::IDENTITY;
+        let mut wp = glam::Vec3::ZERO;
+        for &node in &chain {
+            wp += wr * rest_local_positions[node];
+            wr *= rest_local_rotations[node];
+        }
+        world_rotations[i] = wr;
+        world_positions[i] = wp;
     }
     if out_of_order > 0 {
         tracing::warn!(
