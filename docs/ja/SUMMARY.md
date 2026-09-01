@@ -21,6 +21,11 @@
 - [CLI ユーザーガイド](apps/cli.md)
 - [Desktop ユーザーガイド](apps/desktop.md)（旧版）
 
+# 実験
+
+- [Stage UI PoC の結論](experiments/stage-ui-poc-findings.md)
+- [Stage v2 移行前 baseline](experiments/stage-v2-baseline.md)
+
 # ガイド
 
 - [キャラクターエディタ](guides/character-editor.md)
@@ -32,10 +37,6 @@
 - [MCP サーバー](guides/tools/mcp-servers.md)
 - [同梱ツール](guides/tools/builtin-tools.md)
 - [App プラットフォーム表](guides/tools/app-platform.md)
-
-# 実験
-
-- [Stage UI PoC の検証結果](experiments/stage-ui-poc-findings.md)
 
 # リファレンス
 

@@ -1,4 +1,4 @@
-//! Shared wgpu device for the overlay surface and egui chrome windows.
+//! Shared wgpu device for the overlay surface and Slint chrome windows.
 //!
 //! Windows uses a DirectComposition-backed DX12 swapchain so transparent
 //! windows can carry per-pixel alpha. The matching winit window attribute is
@@ -249,5 +249,12 @@ mod tests {
             options.dx12.presentation_system,
             wgpu::Dx12SwapchainKind::default(),
         );
+    }
+
+    #[test]
+    fn format_has_alpha_matches_rgba_family() {
+        assert!(format_has_alpha(wgpu::TextureFormat::Rgba8Unorm));
+        assert!(format_has_alpha(wgpu::TextureFormat::Bgra8UnormSrgb));
+        assert!(!format_has_alpha(wgpu::TextureFormat::R8Unorm));
     }
 }

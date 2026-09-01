@@ -1,9 +1,9 @@
 //! Chat panel for the surface viewport.
 
-use crate::detail::{DetailTab, chat_setup_gap, chat_setup_status};
+use crate::detail::chat_setup_gap;
 use crate::i18n;
-use crate::surface::{ChatTarget, SurfaceAction, SurfaceUiState};
-use ene_api::{HistoryResponse, MessageMode, MessageResponse};
+use crate::surface::{SurfaceAction, SurfaceUiState};
+use ene_api::{HistoryResponse, MessageResponse};
 
 /// Role a transcript row plays in the conversation view. The kind decides
 /// alignment and the visible label, so meaning never rests on color alone.
@@ -25,8 +25,8 @@ pub(crate) enum TranscriptState {
     Streaming,
 }
 
-/// Normalized conversation row: role, delivery state, and owned text. Kept
-/// independent of egui so follow-up stage features can reuse the transcript.
+/// Normalized conversation row: role, delivery state, and owned text. Overlay
+/// and Chat share this model; it does not depend on a UI toolkit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChatMessageView {
     pub(crate) role: TranscriptKind,
@@ -69,7 +69,7 @@ fn normalize_message(message: &MessageResponse) -> Option<ChatMessageView> {
     })
 }
 
-fn transcript_label(kind: TranscriptKind) -> String {
+pub(crate) fn transcript_label(kind: TranscriptKind) -> String {
     i18n::fl(match kind {
         TranscriptKind::User => "chat-role-user",
         TranscriptKind::Assistant => "chat-role-assistant",
@@ -79,90 +79,9 @@ fn transcript_label(kind: TranscriptKind) -> String {
     })
 }
 
-pub(crate) fn render_message_bubble(ui: &mut egui::Ui, row: &ChatMessageView) {
-    let is_user = row.role == TranscriptKind::User;
-    let frame_color = match row.state {
-        TranscriptState::Error => egui::Color32::from_rgb(76, 29, 29),
-        TranscriptState::Stable | TranscriptState::Streaming if is_user => {
-            egui::Color32::from_rgb(52, 90, 130)
-        }
-        TranscriptState::Stable | TranscriptState::Streaming => egui::Color32::from_rgb(38, 42, 50),
-    };
-    let text_color = if row.state == TranscriptState::Error {
-        egui::Color32::from_rgb(255, 205, 205)
-    } else {
-        egui::Color32::PLACEHOLDER
-    };
-    let row_width = ui.available_width();
-    let bubble_max_width = (row_width * 0.82).max(120.0);
-    let frame = egui::Frame::new()
-        .fill(frame_color)
-        .inner_margin(egui::Margin::symmetric(10, 8))
-        .corner_radius(8.0);
-    let align = if is_user {
-        egui::Align::Max
-    } else {
-        egui::Align::Min
-    };
-
-    ui.with_layout(egui::Layout::top_down(align), |ui| {
-        ui.set_width(row_width);
-        frame.show(ui, |ui| {
-            ui.set_max_width(bubble_max_width);
-            ui.label(
-                egui::RichText::new(transcript_label(row.role))
-                    .small()
-                    .weak(),
-            );
-            let mut text = row.text.clone();
-            if row.state == TranscriptState::Streaming {
-                text.push('▌');
-            }
-            if text.is_empty() && row.state == TranscriptState::Streaming {
-                ui.weak(i18n::fl("chat-waiting"));
-            } else {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(text).color(text_color))
-                        .wrap()
-                        .selectable(true),
-                );
-            }
-        });
-    });
-    ui.add_space(6.0);
-}
-
-fn render_greeting_picker(ui: &mut egui::Ui, state: &mut SurfaceUiState) {
-    if state.greetings.is_empty() {
-        ui.weak(i18n::fl("chat-empty-history"));
-        return;
-    }
-    if state.greetings.len() == 1 {
-        request_single_greeting_commit(state);
-        return;
-    }
-    ui.label(i18n::fl("chat-greeting-prompt"));
-    for greeting in state.greetings.clone() {
-        let first_line = greeting.text.lines().next().unwrap_or_default();
-        let preview: String = first_line.chars().take(48).collect();
-        let label = format!("[{}] {preview}", greeting.index);
-        if ui
-            .add_enabled(!state.greeting_inflight, egui::Button::new(label))
-            .clicked()
-        {
-            state.push_action(SurfaceAction::SelectGreeting {
-                index: greeting.index,
-            });
-        }
-    }
-    if !state.greeting_status.is_empty() {
-        ui.colored_label(egui::Color32::LIGHT_RED, &state.greeting_status);
-    }
-}
-
 /// A lone canonical greeting commits as soon as the picker renders; guard
 /// against re-queueing while the selection is already pending or in flight.
-fn request_single_greeting_commit(state: &mut SurfaceUiState) {
+pub(crate) fn request_single_greeting_commit(state: &mut SurfaceUiState) {
     let Some(greeting) = state.greetings.first() else {
         return;
     };
@@ -179,27 +98,33 @@ fn request_single_greeting_commit(state: &mut SurfaceUiState) {
     });
 }
 
-pub(crate) const CHAT_INPUT_ID: &str = "stage-chat-input";
-
+#[cfg(test)]
 const COMPOSER_MIN_ROWS: usize = 3;
+#[cfg(test)]
 const COMPOSER_MAX_ROWS: usize = 8;
+#[cfg(test)]
 const COMPOSER_ROW_HEIGHT: f32 = 18.0;
+#[cfg(test)]
 const COMPOSER_VERTICAL_PADDING: f32 = 14.0;
+#[cfg(test)]
 const COMPOSER_MIN_HEIGHT: f32 = 64.0;
-const COMPOSER_PANEL_HEIGHT: f32 = 280.0;
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComposerSendRequest {
     send: bool,
 }
 
+#[cfg(test)]
 const COMPOSER_NONE: ComposerSendRequest = ComposerSendRequest { send: false };
 
+#[cfg(test)]
 const COMPOSER_SEND: ComposerSendRequest = ComposerSendRequest { send: true };
 
 /// Rows the composer shows for the current draft: grows with content up to
 /// the cap, past which the editor scrolls internally instead of pushing the
 /// rest of the panel off screen.
+#[cfg(test)]
 #[must_use]
 fn composer_metrics(draft: &str) -> (usize, f32) {
     let mut rows = draft.lines().count().max(1);
@@ -216,19 +141,21 @@ fn composer_metrics(draft: &str) -> (usize, f32) {
 }
 
 #[must_use]
-fn composer_send_allowed(state: &SurfaceUiState) -> bool {
+pub(crate) fn composer_send_allowed(state: &SurfaceUiState) -> bool {
     !state.chat_draft.trim().is_empty()
 }
 
 /// The multiline editor inserts the newline for the same Enter press that
 /// requests the send; dropping it keeps blocked turns from collecting stray
 /// blank lines at the end of the draft.
+#[cfg(test)]
 fn pop_enter_newline(draft: &mut String) {
     if draft.ends_with('\n') {
         draft.pop();
     }
 }
 
+#[cfg(test)]
 #[must_use]
 fn composer_request_for_key(
     enter_pressed: bool,
@@ -241,263 +168,9 @@ fn composer_request_for_key(
     COMPOSER_SEND
 }
 
-/// Reads the focused editor's key events for this frame instead of inferring
-/// intent from focus loss, so a focus race can never swallow or fake a send.
-/// Shift+Enter stays a newline and an active IME preedit claims Enter for
-/// the composition.
-#[must_use]
-fn composer_send_requested(ui: &egui::Ui) -> ComposerSendRequest {
-    ui.input(|input| {
-        let mut request = COMPOSER_NONE;
-        let mut composing = false;
-        for event in &input.events {
-            match event {
-                egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) if !text.is_empty() => {
-                    composing = true;
-                }
-                egui::Event::Key {
-                    key: egui::Key::Enter,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => {
-                    request = composer_request_for_key(true, modifiers.shift, false);
-                }
-                _ => {}
-            }
-        }
-        if composing { COMPOSER_NONE } else { request }
-    })
-}
-
-pub fn show(
-    ui: &mut egui::Ui,
-    state: &mut SurfaceUiState,
-    mic_active: bool,
-    active_companion: &str,
-    chat_targets: &[ChatTarget],
-) -> bool {
-    let mut composer_focused = false;
-    let mut jump_to_voice = false;
-
-    // Cap the measured panel size: its content can otherwise include the
-    // previous frame's max rect and grow on every repaint until it hides the transcript.
-    egui::Panel::bottom("stage-chat-composer")
-        .resizable(false)
-        .show_separator_line(false)
-        .exact_size(COMPOSER_PANEL_HEIGHT)
-        .frame(egui::Frame::new())
-        .show(ui, |panel_ui| {
-            panel_ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(i18n::fl("chat-active-target"));
-                    if chat_targets.is_empty() {
-                        ui.strong(active_companion);
-                    } else {
-                        for target in chat_targets {
-                            if ui
-                                .selectable_label(target.active, &target.label)
-                                .on_hover_text(i18n::fl("motion-select-target"))
-                                .clicked()
-                            {
-                                state.push_action(SurfaceAction::SelectCompanion {
-                                    soul_id: target.soul_id.clone(),
-                                });
-                            }
-                        }
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            composer_send_allowed(state),
-                            egui::Button::new(i18n::fl("chat-send")),
-                        )
-                        .clicked()
-                    {
-                        state.push_action(SurfaceAction::SendChat);
-                    }
-                    if ui
-                        .button(i18n::fl("chat-new-session"))
-                        .on_hover_text(i18n::fl("chat-new-session-hint"))
-                        .clicked()
-                    {
-                        state.push_action(SurfaceAction::NewSession);
-                    }
-                    let mic_label = if mic_active {
-                        i18n::fl("mic-on")
-                    } else {
-                        i18n::fl("mic-off")
-                    };
-                    if ui.button(mic_label).clicked() {
-                        state.push_action(SurfaceAction::ToggleMic);
-                    }
-                    ui.add_enabled_ui(state.turn_active, |ui| {
-                        if ui
-                            .button(i18n::fl("chat-barge-in"))
-                            .on_hover_text(i18n::fl("chat-barge-in-hint"))
-                            .clicked()
-                        {
-                            state.push_action(SurfaceAction::BargeIn);
-                        }
-                        if ui
-                            .button(i18n::fl("chat-cancel"))
-                            .on_hover_text(i18n::fl("chat-cancel-hint"))
-                            .clicked()
-                        {
-                            state.push_action(SurfaceAction::CancelTurn);
-                        }
-                    });
-                    if ui
-                        .button(i18n::fl("chat-open-detail"))
-                        .on_hover_text(i18n::fl("chat-open-detail-hint"))
-                        .clicked()
-                    {
-                        state.push_action(SurfaceAction::OpenDetail(DetailTab::Home));
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    ui.weak(i18n::fl("chat-send-keyboard-hint"));
-                    if state.turn_active {
-                        ui.weak(i18n::fl("chat-draft-editable-hint"));
-                    }
-                    // The status label at the top of this panel is easily
-                    // missed, so the mic guard repeats its Voice-setup call to
-                    // action as a button inside the composer panel. Gating on
-                    // the dedicated flag keeps unrelated status text from
-                    // advertising a missing Speech-to-Text provider.
-                    if mic_cta_eligible(state, mic_active)
-                        && ui
-                            .add(egui::Button::new(
-                                egui::RichText::new(i18n::fl("tray-mic-needs-stt")).small(),
-                            ))
-                            .clicked()
-                    {
-                        jump_to_voice = true;
-                    }
-                });
-
-                let composer_width = ui.available_width();
-                let (rows, composer_min_height) = composer_metrics(&state.chat_draft);
-                let response = ui.add(
-                    egui::TextEdit::multiline(&mut state.chat_draft)
-                        .id_salt(CHAT_INPUT_ID)
-                        .hint_text(i18n::fl("chat-placeholder"))
-                        .desired_width(composer_width)
-                        .desired_rows(rows)
-                        .min_size(egui::vec2(composer_width, composer_min_height))
-                        .return_key(Some(egui::KeyboardShortcut::new(
-                            egui::Modifiers::SHIFT,
-                            egui::Key::Enter,
-                        ))),
-                );
-                composer_focused = response.has_focus();
-                let request = composer_send_requested(ui);
-                if request.send && composer_send_allowed(state) {
-                    pop_enter_newline(&mut state.chat_draft);
-                    state.push_action(SurfaceAction::SendChat);
-                }
-
-                ui.horizontal(|ui| {
-                    ui.label(i18n::fl("chat-input-label"));
-                    for (mode, label, hint) in [
-                        (
-                            MessageMode::Prompt,
-                            i18n::fl("chat-mode-prompt"),
-                            i18n::fl("chat-mode-prompt-hint"),
-                        ),
-                        (
-                            MessageMode::Steer,
-                            i18n::fl("chat-mode-steer"),
-                            i18n::fl("chat-mode-steer-hint"),
-                        ),
-                        (
-                            MessageMode::FollowUp,
-                            i18n::fl("chat-mode-follow-up"),
-                            i18n::fl("chat-mode-follow-up-hint"),
-                        ),
-                    ] {
-                        let enabled = mode == MessageMode::Prompt || state.turn_active;
-                        ui.add_enabled_ui(enabled, |ui| {
-                            if ui
-                                .selectable_label(state.message_mode == mode, label)
-                                .on_hover_text(hint)
-                                .clicked()
-                            {
-                                state.message_mode = mode;
-                            }
-                        });
-                    }
-                    if !state.voice_state.is_empty() {
-                        ui.weak(format!(
-                            "{}: {}",
-                            i18n::fl("voice-state"),
-                            state.voice_state
-                        ));
-                    }
-                });
-
-                if !state.exclusive_notice.is_empty() {
-                    ui.colored_label(egui::Color32::YELLOW, &state.exclusive_notice);
-                }
-                if !state.overlay_notice.is_empty() {
-                    ui.colored_label(egui::Color32::YELLOW, &state.overlay_notice);
-                }
-
-                ui.collapsing(i18n::fl("chat-overlay-hint"), |ui| {
-                    ui.label(i18n::fl("chat-overlay-hint"));
-                });
-
-                if !state.status.is_empty() {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&state.status).small())
-                            .wrap()
-                            .selectable(true),
-                    );
-                }
-
-                ui.add_space(4.0);
-            });
-        });
-    egui::CentralPanel::default()
-        .frame(egui::Frame::new())
-        .show(ui, |transcript_ui| {
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .show(transcript_ui, |scroll_ui| {
-                    let rows = normalize_transcript(&state.history, &state.streaming_text);
-                    if rows.is_empty() {
-                        render_greeting_picker(scroll_ui, state);
-                    } else {
-                        for row in rows {
-                            render_message_bubble(scroll_ui, &row);
-                        }
-                    }
-                    if let Some(gap) = chat_setup_gap(&state.chat_setup) {
-                        scroll_ui.add_space(4.0);
-                        let setup_cta = chat_setup_cta_eligible(state);
-                        if setup_cta
-                            && scroll_ui
-                                .button(i18n::fl("chat-setup-unconfigured"))
-                                .clicked()
-                        {
-                            state.push_action(SurfaceAction::OpenDetail(DetailTab::Conversation));
-                        }
-                        scroll_ui.weak(chat_setup_status(gap));
-                    }
-                });
-        });
-
-    if jump_to_voice {
-        state.push_action(SurfaceAction::OpenDetail(DetailTab::Voice));
-    }
-    composer_focused
-}
-
 /// The mic guard's Voice-setup button must not infer "STT missing" from
 /// arbitrary status text; only the dedicated flag may show or arm it.
+#[cfg(test)]
 fn mic_cta_eligible(state: &SurfaceUiState, mic_active: bool) -> bool {
     state.stt_setup_needed && !mic_active
 }
@@ -506,7 +179,7 @@ fn mic_cta_eligible(state: &SurfaceUiState, mic_active: bool) -> bool {
 /// live conversation rows or a visible greeting picker; only a dedicated setup
 /// gap over a quiet panel may show or arm it. A lone greeting is committed
 /// automatically and does not occupy the panel while that request is pending.
-fn chat_setup_cta_eligible(state: &SurfaceUiState) -> bool {
+pub(crate) fn chat_setup_cta_eligible(state: &SurfaceUiState) -> bool {
     if chat_setup_gap(&state.chat_setup).is_none() || state.greetings.len() >= 2 {
         return false;
     }
@@ -532,164 +205,6 @@ fn chat_setup_cta_eligible(state: &SurfaceUiState) -> bool {
 mod tests {
     use super::*;
     use ene_api::GreetingView;
-
-    #[test]
-    fn chat_layout_keeps_transcript_and_composer_content_visible() {
-        i18n::with_language("en-US", || {
-            let ctx = egui::Context::default();
-            let mut state = SurfaceUiState {
-                history: HistoryResponse {
-                    messages: vec![message("user", "visible user message")],
-                    depth: "surface".to_owned(),
-                },
-                ..Default::default()
-            };
-            let full = ctx.run_ui(chat_raw_input(), |ui| {
-                show(ui, &mut state, false, "", &[]);
-            });
-            let texts = visible_painted_texts(&full.shapes);
-
-            assert!(texts.contains(&"visible user message".to_owned()));
-            assert!(texts.contains(&i18n::fl("chat-send-keyboard-hint")));
-            assert!(texts.contains(&i18n::fl("chat-input-label")));
-        });
-    }
-
-    #[test]
-    fn chat_composer_panel_stays_fixed_across_repaints() {
-        let ctx = egui::Context::default();
-        let mut state = SurfaceUiState::default();
-
-        for _ in 0..8 {
-            let _response = ctx.run_ui(chat_raw_input(), |ui| {
-                show(ui, &mut state, false, "", &[]);
-            });
-
-            let panel = egui::PanelState::load(&ctx, egui::Id::new("stage-chat-composer"));
-            assert!(
-                panel.is_some(),
-                "chat composer panel must persist its layout"
-            );
-            if let Some(panel) = panel {
-                assert!(
-                    (panel.outer_rect.height() - COMPOSER_PANEL_HEIGHT).abs() < f32::EPSILON,
-                    "chat composer panel grew between repaints"
-                );
-            }
-        }
-    }
-
-    fn chat_raw_input() -> egui::RawInput {
-        egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(520.0, 560.0),
-            )),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn first_run_chat_layout_paints_empty_state_and_setup_cta() {
-        i18n::with_language("en-US", || {
-            let ctx = egui::Context::default();
-            let mut state = SurfaceUiState::default();
-            let full = ctx.run_ui(first_run_raw_input(), |ui| {
-                show(ui, &mut state, false, "", &[]);
-            });
-            let texts = painted_texts(&full.shapes);
-            let visible_texts = visible_painted_texts(&full.shapes);
-
-            assert!(texts.contains(&i18n::fl("chat-empty-history")));
-            assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
-            assert!(texts.contains(&i18n::fl("chat-unconfigured")));
-            assert!(visible_texts.contains(&i18n::fl("chat-empty-history")));
-            assert!(visible_texts.contains(&i18n::fl("chat-setup-unconfigured")));
-            assert!(visible_texts.contains(&i18n::fl("chat-unconfigured")));
-            assert!(visible_texts.contains(&i18n::fl("chat-send-keyboard-hint")));
-        });
-    }
-
-    #[test]
-    fn first_run_chat_layout_paints_setup_cta_while_single_greeting_is_pending() {
-        i18n::with_language("en-US", || {
-            let ctx = egui::Context::default();
-            let mut state = SurfaceUiState::default();
-            state.greetings.push(GreetingView {
-                index: 0,
-                text: "Hi".to_owned(),
-            });
-            state.greeting_inflight = true;
-            let full = ctx.run_ui(first_run_raw_input(), |ui| {
-                show(ui, &mut state, false, "", &[]);
-            });
-            let texts = painted_texts(&full.shapes);
-
-            assert!(texts.contains(&i18n::fl("chat-setup-unconfigured")));
-            assert!(texts.contains(&i18n::fl("chat-unconfigured")));
-            assert!(!texts.contains(&i18n::fl("chat-greeting-prompt")));
-        });
-    }
-
-    fn first_run_raw_input() -> egui::RawInput {
-        egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(520.0, 560.0),
-            )),
-            ..Default::default()
-        }
-    }
-
-    fn visible_painted_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
-        let mut texts = Vec::new();
-        for clipped in shapes {
-            collect_visible_texts(&clipped.shape, clipped.clip_rect, &mut texts);
-        }
-        texts
-    }
-
-    fn painted_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
-        let mut texts = Vec::new();
-        for shape in shapes {
-            collect_texts(&shape.shape, &mut texts);
-        }
-        texts
-    }
-
-    fn collect_visible_texts(
-        shape: &egui::epaint::Shape,
-        clip_rect: egui::Rect,
-        out: &mut Vec<String>,
-    ) {
-        match shape {
-            egui::epaint::Shape::Vec(shapes) => {
-                for shape in shapes {
-                    collect_visible_texts(shape, clip_rect, out);
-                }
-            }
-            egui::epaint::Shape::Text(text)
-                if clip_rect.intersects(text.visual_bounding_rect()) =>
-            {
-                out.push(text.galley.job.text.clone());
-            }
-            _ => {}
-        }
-    }
-
-    fn collect_texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
-        match shape {
-            egui::epaint::Shape::Vec(shapes) => {
-                for shape in shapes {
-                    collect_texts(shape, out);
-                }
-            }
-            egui::epaint::Shape::Text(text) => {
-                out.push(text.galley.job.text.clone());
-            }
-            _ => {}
-        }
-    }
 
     #[test]
     fn unrelated_status_never_arms_or_renders_the_mic_voice_cta() {

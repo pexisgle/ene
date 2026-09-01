@@ -141,3 +141,21 @@ impl AudioPlayback {
         self.sample_rate
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_is_idle_with_a_positive_sample_rate() {
+        let mut playback = AudioPlayback::new();
+        assert!(playback.sample_rate() > 0);
+        assert!(!playback.is_tts_playing());
+        assert!(!playback.tts_playing_flag().load(Ordering::Relaxed));
+        playback.stop();
+        assert!(!playback.is_tts_playing());
+        assert!(playback.recent_pcm().is_empty());
+        playback.note_playback(0, playback.sample_rate());
+        assert!(!playback.is_tts_playing());
+    }
+}

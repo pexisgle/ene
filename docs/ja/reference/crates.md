@@ -9,7 +9,7 @@
 | パッケージ | パス | 役割 |
 |---|---|---|
 | `ene-daemon` | `apps/ene-core`（バイナリ `ene-core`） | コアデーモン: データディレクトリのロック、HTTP/WS API、session + kernel + companion + work + plane + fiber |
-| `ene-stage` | `apps/ene-stage` | 製品 GUI: wgpu オーバーレイ、チャット、9 セクションの詳細、トレイ。表層 + 詳細の 2 本のソケット（`client_id = stage`） |
+| `ene-stage` | `apps/ene-stage` | 製品 GUI: wgpu オーバーレイ（Slint を GPU 合成）、チャット、9 セクションの詳細、トレイ。表層 + 詳細の 2 本のソケット（`client_id = stage`） |
 | `ene-ctl` | `apps/ene-ctl` | 同一 HTTP/WS API の CLI クライアント |
 | `ene-desktop` | `apps/ene-desktop` | 凍結した再設計前 GUI（#794 で復元）。機能追加なし。stage が代替できたと判断したら削除 |
 
@@ -32,6 +32,7 @@
 | `ene-config` | 設定の load/save/schema、パス、`define_config!` | （内部依存なし） |
 | `ene-sandbox` | OS サンドボックス（Linux では Landlock + seccomp + rlimits） | （内部依存なし） |
 | `ene-vrm` | VRM 1.0 ローダ + wgpu レンダラ | （内部依存なし） |
+| `ene-stage-ui` | Stage 用の生成 Slint バインディング。slint-build の unwrap が workspace clippy を落とさないよう隔離 | （内部依存なし） |
 
 ## 依存規則（レビューで強制）
 

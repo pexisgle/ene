@@ -43,7 +43,9 @@ pub struct CompanionAvatar {
     motion_idx: usize,
     manual_motion_override: bool,
     look_at_target: Option<Vec3>,
+    applied_look_at: Option<Vec3>,
     pending_visemes: Option<VisemeWeights>,
+    viseme_open: bool,
     expression_cue: Option<(String, f32, f32)>,
     interaction_feedback: f32,
     blink_accum: f32,
@@ -78,7 +80,9 @@ impl CompanionAvatar {
             motion_idx: 0,
             manual_motion_override: false,
             look_at_target: None,
+            applied_look_at: None,
             pending_visemes: None,
+            viseme_open: false,
             expression_cue: None,
             interaction_feedback: 0.0,
             blink_accum: 0.0,
@@ -318,11 +322,22 @@ impl CompanionAvatar {
     }
 
     pub fn apply_viseme(&mut self, weights: VisemeWeights) {
+        if weights.is_silent() {
+            if self.pending_visemes.is_none() && !self.viseme_open {
+                return;
+            }
+            self.pending_visemes = Some(VisemeWeights::default());
+            return;
+        }
         self.pending_visemes = Some(weights);
     }
 
     pub fn set_look_at_target(&mut self, target: Vec3) {
         self.look_at_target = Some(target);
+    }
+
+    pub fn clear_look_at_target(&mut self) {
+        self.look_at_target = None;
     }
 
     pub fn apply_body_event(&mut self, value: &Value) {
@@ -371,7 +386,7 @@ impl CompanionAvatar {
                     "oh" => weights.oh = weight,
                     other => tracing::debug!(other, "unknown viseme discarded"),
                 }
-                self.pending_visemes = Some(weights);
+                self.apply_viseme(weights);
             }
             "body.posture" => {}
             other => tracing::debug!(other, "unknown body command discarded"),
@@ -397,6 +412,7 @@ impl CompanionAvatar {
         self.tick_idle(dt);
         if let Some(weights) = self.pending_visemes.take() {
             self.model.expressions.apply_viseme_weights(&weights);
+            self.viseme_open = !weights.is_silent();
         }
         let frame = self.sample_motion(dt);
         let look_at = self.eval_look_at();
@@ -427,6 +443,7 @@ impl CompanionAvatar {
         self.model.update_skin_palette(&frame, bone);
         self.last_hips = hips;
         self.step_springs(dt, hips);
+        self.applied_look_at = self.look_at_target;
     }
 
     fn tick_idle(&mut self, dt: f32) {
@@ -552,6 +569,92 @@ impl CompanionAvatar {
         )
     }
 
+    #[must_use]
+    pub fn overlay_bone_world(&self, bone: &str) -> Option<Vec3> {
+        let entry = self.model.humanoid.by_name(bone)?;
+        let pos = *self.model.nodes.world_positions.get(entry.node)?;
+        let (mat, _) = self.overlay_model_transform();
+        Some((mat * pos.extend(1.0)).truncate())
+    }
+
+    /// Coarse CPU collider AABB for one body part. `None` when the bone is missing.
+    #[must_use]
+    pub fn part_world_aabb(&self, part: crate::scene::AvatarPart) -> Option<(Vec3, Vec3)> {
+        match part {
+            crate::scene::AvatarPart::Body => Some(self.world_aabb()),
+            crate::scene::AvatarPart::Head => self.sphere_aabb(&["head", "neck"], 0.12),
+            crate::scene::AvatarPart::Torso => {
+                self.sphere_aabb(&["chest", "upperchest", "spine"], 0.16)
+            }
+            crate::scene::AvatarPart::LeftHand => {
+                self.sphere_aabb(&["lefthand", "leftmiddleproximal"], 0.07)
+            }
+            crate::scene::AvatarPart::RightHand => {
+                self.sphere_aabb(&["righthand", "rightmiddleproximal"], 0.07)
+            }
+        }
+    }
+
+    fn sphere_aabb(&self, bones: &[&str], radius: f32) -> Option<(Vec3, Vec3)> {
+        let center = bones
+            .iter()
+            .find_map(|name| self.overlay_bone_world(name))?;
+        Some((center - Vec3::splat(radius), center + Vec3::splat(radius)))
+    }
+
+    #[must_use]
+    pub fn needs_redraw(&self) -> bool {
+        self.vrma.is_some()
+            || self.pending_visemes.is_some()
+            || self.viseme_open
+            || look_at_is_dirty(self.look_at_target, self.applied_look_at)
+            || self.blinking > 0.0
+            || self.expression_cue.is_some()
+            || self.interaction_feedback > 0.0
+    }
+
+    pub(crate) fn push_part_collider_wires(&self, debug: &mut DebugRenderer) {
+        const PARTS: [crate::scene::AvatarPart; 4] = [
+            crate::scene::AvatarPart::Head,
+            crate::scene::AvatarPart::Torso,
+            crate::scene::AvatarPart::LeftHand,
+            crate::scene::AvatarPart::RightHand,
+        ];
+        let colors = [
+            Vec4::new(1.0, 0.45, 0.2, 1.0),
+            Vec4::new(0.3, 0.9, 0.4, 1.0),
+            Vec4::new(0.95, 0.85, 0.2, 1.0),
+            Vec4::new(0.95, 0.85, 0.2, 1.0),
+        ];
+        for (part, color) in PARTS.iter().zip(colors) {
+            let Some((min, max)) = self.part_world_aabb(*part) else {
+                continue;
+            };
+            let corners = aabb_corners(min, max);
+            const EDGES: [(usize, usize); 12] = [
+                (0, 1),
+                (0, 2),
+                (0, 4),
+                (1, 3),
+                (1, 5),
+                (2, 3),
+                (2, 6),
+                (3, 7),
+                (4, 5),
+                (4, 6),
+                (5, 7),
+                (6, 7),
+            ];
+            for (a, b) in EDGES {
+                debug.push_line(DebugLine {
+                    a: corners[a],
+                    b: corners[b],
+                    color,
+                });
+            }
+        }
+    }
+
     /// Clamps a requested translation so the rendered AABB stays inside the
     /// camera viewport, accounting for the current model scale and aspect.
     #[must_use]
@@ -576,7 +679,7 @@ impl CompanionAvatar {
             max = max.max(point);
         }
 
-        const VIEWPORT_MARGIN: f32 = 0.96;
+        const VIEWPORT_MARGIN: f32 = 0.98;
         let origin = project_ndc(view_projection, Vec3::ZERO);
         let requested = Vec3::from(desired);
         let requested_translation = project_ndc(view_projection, requested) - origin;
@@ -782,6 +885,16 @@ fn discover_motions(dir: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
+/// True when the look-at target has moved enough to justify another GPU frame.
+#[must_use]
+pub fn look_at_is_dirty(target: Option<Vec3>, applied: Option<Vec3>) -> bool {
+    match (target, applied) {
+        (Some(next), Some(was)) => next.distance_squared(was) > 1e-6,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,16 +942,102 @@ mod tests {
     }
 
     #[test]
+    fn look_at_is_dirty_only_when_the_target_moves() {
+        assert!(!look_at_is_dirty(None, None));
+        assert!(!look_at_is_dirty(None, Some(Vec3::ZERO)));
+        assert!(look_at_is_dirty(Some(Vec3::ZERO), None));
+        assert!(!look_at_is_dirty(Some(Vec3::ZERO), Some(Vec3::ZERO)));
+        assert!(look_at_is_dirty(
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            Some(Vec3::ZERO)
+        ));
+        assert!(!look_at_is_dirty(
+            Some(Vec3::new(1e-5, 0.0, 0.0)),
+            Some(Vec3::ZERO)
+        ));
+    }
+
+    #[test]
+    fn silent_viseme_does_not_keep_the_overlay_dirty() {
+        let Some((device, queue)) = try_test_device() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("minimal.vrm");
+        CompanionAvatar::write_default_minimal_vrm(&path).unwrap();
+        let mut avatar =
+            CompanionAvatar::load(&path, &device, &queue, wgpu::TextureFormat::Bgra8UnormSrgb)
+                .expect("minimal VRM loads");
+        avatar.apply_viseme(VisemeWeights::default());
+        assert!(
+            !avatar.needs_redraw(),
+            "closed mouth must not force a GPU frame"
+        );
+
+        avatar.apply_viseme(VisemeWeights {
+            aa: 0.8,
+            ..VisemeWeights::default()
+        });
+        assert!(
+            avatar.needs_redraw(),
+            "speech visemes must dirty the overlay"
+        );
+        avatar.tick(0.0);
+        assert!(
+            avatar.needs_redraw(),
+            "an open mouth must keep the 16ms wake"
+        );
+
+        avatar.apply_viseme(VisemeWeights::default());
+        assert!(
+            avatar.needs_redraw(),
+            "the closing frame must still apply zero weights"
+        );
+        avatar.tick(0.0);
+        assert!(
+            !avatar.needs_redraw(),
+            "after the mouth closes, silence is not dirty"
+        );
+        avatar.apply_viseme(VisemeWeights::default());
+        assert!(
+            !avatar.needs_redraw(),
+            "repeated silence must not re-dirty the overlay"
+        );
+    }
+
+    #[test]
     fn default_minimal_vrm_writes_parseable_glb() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("minimal.vrm");
         CompanionAvatar::write_default_minimal_vrm(&path).unwrap();
+        if let Ok(dest) = std::env::var("ENE_WRITE_MINIMAL_VRM") {
+            let dest = std::path::Path::new(&dest);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::copy(&path, dest).unwrap();
+        }
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"glTF"));
         assert!(
             bytes.windows(8).any(|window| window == b"VRMC_vrm"),
             "minimal fixture must declare VRMC_vrm"
         );
+    }
+
+    #[test]
+    fn companion_avatar_loads_the_minimal_fixture() {
+        let Some((device, queue)) = try_test_device() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("minimal.vrm");
+        CompanionAvatar::write_default_minimal_vrm(&path).unwrap();
+        let avatar =
+            CompanionAvatar::load(&path, &device, &queue, wgpu::TextureFormat::Bgra8UnormSrgb)
+                .expect("minimal VRM loads");
+        assert!(avatar.format_version_label().contains("VRM"));
+        assert!(avatar.motion_names().is_empty());
     }
 
     #[test]

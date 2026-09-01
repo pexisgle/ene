@@ -8,7 +8,7 @@
 - **Linux とネイティブ Windows** を開発対象にします。macOS は非対応です。
 - **Rust 1.98.0**（edition 2024。バージョンは `rust-toolchain.toml` に固定）。
 - Linux のネイティブ依存は Vulkan、ALSA、OpenSSL、`libclang`、`mold`、
-  Wayland/X11 です。checked-in の Nix flake が提供します。
+  fontconfig、Wayland/X11 です。checked-in の Nix flake が提供します。
 - Windows では stable MSVC Rust ツールチェーン、Visual Studio 2022 Build Tools の
   **Desktop development with C++**、Windows 10/11 SDK を入れます。デスクトップは
   Windows では DX12 と WASAPI を使います。

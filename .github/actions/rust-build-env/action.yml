@@ -17,7 +17,7 @@ runs:
           pkg-config cmake clang mold libssl-dev \
           zlib1g-dev \
           libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
-          libwayland-dev libxkbcommon-dev \
+          libwayland-dev libxkbcommon-dev libfontconfig1-dev \
           libvulkan-dev libgbm-dev libegl1-mesa-dev libxcb1-dev \
           glslc spirv-headers
         SCRIPT

@@ -1,0 +1,139 @@
+import { EneTheme, EneButton, Chip, EneField } from "theme.slint";
+
+export struct DetailListRow {
+    id: string,
+    title: string,
+    subtitle: string,
+}
+
+export struct DetailAction {
+    id: string,
+    label: string,
+    primary: bool,
+}
+
+export component DetailSurface inherits Window {
+    background: EneTheme.bg;
+    default-font-family: "Noto Sans CJK JP";
+    title: title-text;
+
+    in-out property <string> search;
+    in-out property <int> tab: 0;
+    in-out property <string> heading;
+    in-out property <string> body;
+    in-out property <[DetailListRow]> rows: [];
+    in-out property <string> draft-a;
+    in-out property <string> draft-b;
+    in-out property <string> draft-a-label;
+    in-out property <string> draft-b-label;
+    in-out property <bool> drafts-visible: false;
+    in-out property <string> status;
+    in-out property <[string]> tabs: [];
+    in-out property <[DetailAction]> actions: [];
+    in-out property <string> title-text: "Detail";
+    in-out property <string> search-placeholder: "Search";
+
+    in-out property <bool> input-focused: TextInputInterface.text-input-focused;
+
+    callback select-tab(int);
+    callback primary-action(string);
+    callback row-action(string);
+    callback search-submit();
+
+    VerticalLayout {
+        padding: EneTheme.space-3;
+        spacing: EneTheme.space-2;
+
+        EneField {
+            text <=> search;
+            placeholder: search-placeholder;
+            accepted => {
+                root.search-submit();
+            }
+        }
+
+        Flickable {
+            vertical-stretch: 0;
+            height: 32px;
+            viewport-width: tab-row.preferred-width;
+            tab-row := HorizontalLayout {
+                spacing: EneTheme.space-1;
+                for label[index] in tabs: Chip {
+                    text: label;
+                    selected: tab == index;
+                    clicked => {
+                        root.select-tab(index);
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: heading;
+            color: EneTheme.fg;
+            font-size: EneTheme.type-lg;
+        }
+        Text {
+            text: status;
+            color: EneTheme.fg-muted;
+            wrap: word-wrap;
+            font-size: EneTheme.type-sm;
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: content.preferred-height;
+            content := VerticalLayout {
+                spacing: EneTheme.space-2;
+                Text {
+                    text: body;
+                    color: EneTheme.fg;
+                    wrap: word-wrap;
+                }
+                if drafts-visible && draft-a-label != "": EneField {
+                    text <=> draft-a;
+                    label: draft-a-label;
+                }
+                if drafts-visible && draft-b-label != "": EneField {
+                    text <=> draft-b;
+                    label: draft-b-label;
+                }
+                for row in rows: Rectangle {
+                    background: row-touch.has-hover ? EneTheme.bg : EneTheme.bg-elevated;
+                    border-radius: EneTheme.radius;
+                    VerticalLayout {
+                        padding: EneTheme.space-2;
+                        Text {
+                            text: row.title;
+                            color: EneTheme.fg;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: row.subtitle;
+                            color: EneTheme.fg-muted;
+                            wrap: word-wrap;
+                            font-size: EneTheme.type-sm;
+                        }
+                    }
+                    row-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.row-action(row.id);
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: EneTheme.space-2;
+                    for action in actions: EneButton {
+                        text: action.label;
+                        primary: action.primary;
+                        clicked => {
+                            root.primary-action(action.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

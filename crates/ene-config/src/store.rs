@@ -134,3 +134,33 @@ impl ConfigStore {
         self.global_dirty.store(true, Ordering::Release);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_config_starts_clean_and_noop_flush() {
+        let store = ConfigStore::from_config(EneConfig::default());
+        assert!(!store.is_dirty());
+        assert!(!store.flush_if_dirty().expect("clean flush"));
+        assert!(format!("{store:?}").contains("ConfigStore"));
+    }
+
+    #[test]
+    fn with_config_mut_and_set_config_mark_dirty() {
+        let store = ConfigStore::from_config(EneConfig::default());
+        store.with_config_mut(|cfg| {
+            let _ = cfg.version;
+        });
+        assert!(store.is_dirty());
+
+        let store = ConfigStore::from_config(EneConfig::default());
+        store.set_config(EneConfig::default());
+        assert!(store.is_dirty());
+        store.mark_dirty();
+        assert!(store.is_dirty());
+        let cloned = store.config();
+        assert_eq!(cloned.version, EneConfig::default().version);
+    }
+}

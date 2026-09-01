@@ -91,9 +91,11 @@ pub const HUMANOID_BONE_NAMES: &[&str] = &[
     "righthand",
     "leftthumbmetacarpal",
     "leftthumbproximal",
+    "leftthumbintermediate",
     "leftthumbdistal",
     "rightthumbmetacarpal",
     "rightthumbproximal",
+    "rightthumbintermediate",
     "rightthumbdistal",
     "leftindexproximal",
     "leftindexintermediate",
@@ -327,10 +329,9 @@ pub fn canonicalize_bone_name(raw: &str) -> Option<VrmBone> {
         }
     }
     if HUMANOID_BONE_NAMES.contains(&normalised.as_str()) {
-        Some(VrmBone(normalised))
-    } else {
-        None
+        return Some(VrmBone(normalised));
     }
+    None
 }
 
 /// Parse `Document::extensions()["VRMC_vrm"]["humanoid"]["humanBones"]`
@@ -432,12 +433,12 @@ pub fn load_humanoid_bones(gltf: &gltf::Gltf, skel: &Skeleton) -> HumanoidBoneRe
 mod tests {
     use super::*;
 
-    /// The 55-bone set is the canonical contract. A
+    /// The bone-name table is the canonical contract. A
     /// regression (a bone dropped, a duplicate added) would
     /// silently break the humanoid registry's foundation.
     #[test]
-    fn bone_name_set_has_55_unique_entries() {
-        assert_eq!(HUMANOID_BONE_NAMES.len(), 55);
+    fn bone_name_set_has_unique_entries() {
+        assert_eq!(HUMANOID_BONE_NAMES.len(), 57);
         // Dedup check via a `Vec` of owned `String`s rather
         // than a `HashSet`; the linear scan is O(N^2) = 3000
         // ops, fine for a unit test.
@@ -480,6 +481,10 @@ mod tests {
             "leftupperarm"
         );
         assert_eq!(canonicalize_bone_name("  hips  ").unwrap().0, "hips");
+        assert_eq!(
+            canonicalize_bone_name("leftThumbIntermediate").unwrap().0,
+            "leftthumbintermediate"
+        );
     }
 
     /// A typo or `VRoid` extension bone must return `None`,

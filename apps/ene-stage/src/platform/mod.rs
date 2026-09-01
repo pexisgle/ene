@@ -1,22 +1,37 @@
-//! Platform-specific helpers for the stage overlay window.
+//! Overlay OS hit-test backends. Slint and VRM never see these types.
 
-use std::path::PathBuf;
+#[cfg(all(target_os = "linux", not(target_os = "android")))]
+mod wayland;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(all(target_os = "linux", not(target_os = "android")))]
+mod x11;
 
-use ene_config::data_dir;
-use tracing::warn;
+use std::time::{Duration, Instant};
+
+use winit::window::Window;
+
+use crate::interaction_controller::InteractionMode;
+#[cfg(any(test, all(target_os = "linux", not(target_os = "android"))))]
+use crate::scene::PxRect;
+use crate::scene::{InteractionGeometry, VisualGeometry};
+
+const REGION_RATE_LIMIT: Duration = Duration::from_millis(125);
+const REGION_THRESHOLD_PX: f32 = 4.0;
 
 /// Best-effort overlay window hints (Linux layer-shell / input region).
 ///
 /// winit 0.30 does not expose layer-shell; click-through uses
-/// [`winit::window::Window::set_cursor_hittest`]. A compositor-specific
-/// mask can be added later without changing the core contract.
+/// [`winit::window::Window::set_cursor_hittest`] on Windows and
+/// [`OverlayPlatform`] on Linux.
 pub fn apply_overlay_hints(_window: &winit::window::Window) {
-    tracing::debug!("overlay platform hints applied (portable click-through only)");
+    tracing::debug!("overlay platform hints applied");
 }
 
 /// Apply click-through to the native window when supported.
 ///
-/// `hwnd` is optional on Windows (`HWND` as `isize`). When absent, the call is a no-op.
+/// Production hit-test goes through [`OverlayPlatform`]. This helper is the
+/// leftover HWND EXSTYLE path and is not used by the overlay.
 pub fn apply_click_through(enabled: bool, hwnd: Option<isize>) {
     #[cfg(target_os = "windows")]
     {
@@ -26,7 +41,7 @@ pub fn apply_click_through(enabled: bool, hwnd: Option<isize>) {
     }
     let _ = hwnd;
     if enabled {
-        warn!("click-through requested but not supported on this platform");
+        tracing::warn!("click-through requested but not supported on this platform");
     }
 }
 
@@ -57,7 +72,7 @@ fn apply_click_through_windows(enabled: bool, hwnd: Option<isize>) -> bool {
     };
 
     let Some(raw) = hwnd else {
-        warn!("click-through on Windows requires an HWND");
+        tracing::warn!("click-through on Windows requires an HWND");
         return false;
     };
     let hwnd = raw as HWND;
@@ -71,7 +86,7 @@ fn apply_click_through_windows(enabled: bool, hwnd: Option<isize>) -> bool {
     // SAFETY: same HWND validity as above; only EXSTYLE bits are toggled.
     let updated = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next) };
     if updated == 0 {
-        warn!("SetWindowLongPtrW failed for click-through");
+        tracing::warn!("SetWindowLongPtrW failed for click-through");
         return false;
     }
     true
@@ -79,6 +94,278 @@ fn apply_click_through_windows(enabled: bool, hwnd: Option<isize>) -> bool {
 
 /// Preferred persistent data directory for stage-local state.
 #[must_use]
-pub fn preferred_data_dir() -> PathBuf {
-    data_dir().join("stage")
+pub fn preferred_data_dir() -> std::path::PathBuf {
+    ene_config::data_dir().join("stage")
+}
+
+/// OS backend attached to one overlay window.
+#[derive(Default)]
+pub struct OverlayPlatform {
+    kind: PlatformKind,
+    last_mode: Option<InteractionMode>,
+    last_interaction: InteractionGeometry,
+    last_apply: Option<Instant>,
+}
+
+#[derive(Default)]
+enum PlatformKind {
+    #[default]
+    Unattached,
+    #[cfg(target_os = "windows")]
+    Windows,
+    #[cfg(all(target_os = "linux", not(target_os = "android")))]
+    Wayland(Box<wayland::WaylandRegion>),
+    #[cfg(all(target_os = "linux", not(target_os = "android")))]
+    X11(Box<x11::X11Shape>),
+    #[cfg(not(target_os = "windows"))]
+    Fallback,
+}
+
+impl OverlayPlatform {
+    pub fn attach(window: &Window) -> Self {
+        let kind = detect_backend(window);
+        tracing::info!(backend = kind.name(), "overlay platform attached");
+        Self {
+            kind,
+            last_mode: None,
+            last_interaction: InteractionGeometry::default(),
+            last_apply: None,
+        }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        self.kind.name()
+    }
+
+    /// Map controller mode + scene geometry onto the OS hit-test path.
+    pub fn apply(
+        &mut self,
+        window: &Window,
+        mode: InteractionMode,
+        visual: &VisualGeometry,
+        interaction: &InteractionGeometry,
+    ) {
+        let push = self.should_push_region(mode, interaction);
+        match &mut self.kind {
+            #[cfg(target_os = "windows")]
+            PlatformKind::Windows => {
+                windows::apply_mode(window, mode);
+            }
+            #[cfg(all(target_os = "linux", not(target_os = "android")))]
+            PlatformKind::Wayland(backend) => {
+                if push {
+                    backend.apply(mode, interaction, window.scale_factor());
+                }
+            }
+            #[cfg(all(target_os = "linux", not(target_os = "android")))]
+            PlatformKind::X11(backend) => {
+                if push {
+                    backend.apply(mode, visual, interaction);
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            PlatformKind::Unattached | PlatformKind::Fallback => {
+                let _ = (visual, interaction);
+                let enabled = !matches!(mode, InteractionMode::Passive);
+                if push {
+                    match window.set_cursor_hittest(enabled) {
+                        Ok(()) => {}
+                        Err(err) => tracing::debug!(error = %err, "cursor hittest unsupported"),
+                    }
+                }
+            }
+            #[cfg(target_os = "windows")]
+            PlatformKind::Unattached => {
+                let _ = (visual, interaction);
+                let enabled = !matches!(mode, InteractionMode::Passive);
+                if push {
+                    match window.set_cursor_hittest(enabled) {
+                        Ok(()) => {}
+                        Err(err) => tracing::debug!(error = %err, "cursor hittest unsupported"),
+                    }
+                }
+            }
+        }
+        if push {
+            self.commit_region_push(mode, interaction);
+        }
+    }
+
+    fn commit_region_push(&mut self, mode: InteractionMode, interaction: &InteractionGeometry) {
+        self.last_mode = Some(mode);
+        self.last_interaction = interaction.clone();
+        self.last_apply = Some(Instant::now());
+    }
+
+    fn should_push_region(&self, mode: InteractionMode, interaction: &InteractionGeometry) -> bool {
+        if self.last_mode != Some(mode) {
+            return true;
+        }
+        if let Some(last) = self.last_apply
+            && last.elapsed() < REGION_RATE_LIMIT
+            && interaction.within_threshold(&self.last_interaction, REGION_THRESHOLD_PX)
+        {
+            return false;
+        }
+        true
+    }
+}
+
+impl PlatformKind {
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Unattached => "unattached",
+            #[cfg(target_os = "windows")]
+            Self::Windows => "windows-dcomp",
+            #[cfg(all(target_os = "linux", not(target_os = "android")))]
+            Self::Wayland(_) => "wayland",
+            #[cfg(all(target_os = "linux", not(target_os = "android")))]
+            Self::X11(_) => "x11",
+            #[cfg(not(target_os = "windows"))]
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+fn detect_backend(window: &Window) -> PlatformKind {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = window;
+        PlatformKind::Windows
+    }
+    #[cfg(all(target_os = "linux", not(target_os = "android")))]
+    {
+        if let Some(wayland) = wayland::WaylandRegion::try_new(window) {
+            PlatformKind::Wayland(Box::new(wayland))
+        } else if let Some(x11) = x11::X11Shape::try_new(window) {
+            PlatformKind::X11(Box::new(x11))
+        } else {
+            PlatformKind::Fallback
+        }
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        all(target_os = "linux", not(target_os = "android"))
+    )))]
+    {
+        let _ = window;
+        PlatformKind::Fallback
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_os = "android")))]
+pub(crate) fn rects_i32(rects: &[PxRect]) -> Vec<(i32, i32, i32, i32)> {
+    physical_to_surface_local(rects, 1.0)
+}
+
+/// Convert physical-pixel scene rects into Wayland surface-local coordinates.
+///
+/// `wl_surface.set_input_region` is surface-local. `winit` `inner_size` and
+/// [`PxRect`] are physical pixels, so `HiDPI` / fractional scale must divide by
+/// the current window scale before creating the region.
+#[cfg(any(test, all(target_os = "linux", not(target_os = "android"))))]
+pub(crate) fn physical_to_surface_local(rects: &[PxRect], scale: f64) -> Vec<(i32, i32, i32, i32)> {
+    let scale = scale.max(0.01);
+    rects
+        .iter()
+        .filter(|rect| !rect.is_empty())
+        .map(|rect| {
+            let x = (f64::from(rect.x) / scale).round() as i32;
+            let y = (f64::from(rect.y) / scale).round() as i32;
+            let w = (f64::from(rect.w) / scale).round().max(1.0) as i32;
+            let h = (f64::from(rect.h) / scale).round().max(1.0) as i32;
+            (x, y, w, h)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_skips_tiny_moves() {
+        let mut platform = OverlayPlatform {
+            kind: PlatformKind::Unattached,
+            last_mode: Some(InteractionMode::Interactive),
+            last_interaction: InteractionGeometry {
+                rects: vec![PxRect::new(0.0, 0.0, 10.0, 10.0)],
+            },
+            last_apply: Some(Instant::now()),
+        };
+        let next = InteractionGeometry {
+            rects: vec![PxRect::new(1.0, 0.0, 10.0, 10.0)],
+        };
+        assert!(!platform.should_push_region(InteractionMode::Interactive, &next));
+        platform.last_apply = Instant::now()
+            .checked_sub(Duration::from_millis(200))
+            .or(Some(Instant::now()));
+        assert!(platform.should_push_region(InteractionMode::Interactive, &next));
+    }
+
+    #[test]
+    fn mode_change_bypasses_rate_limit() {
+        let platform = OverlayPlatform {
+            kind: PlatformKind::Unattached,
+            last_mode: Some(InteractionMode::Passive),
+            last_interaction: InteractionGeometry::default(),
+            last_apply: Some(Instant::now()),
+        };
+        assert!(
+            platform.should_push_region(InteractionMode::Dragging, &InteractionGeometry::default())
+        );
+    }
+
+    #[test]
+    fn skipped_small_steps_do_not_reset_rate_limit() {
+        let applied = InteractionGeometry {
+            rects: vec![PxRect::new(0.0, 0.0, 10.0, 10.0)],
+        };
+        let mut platform = OverlayPlatform {
+            kind: PlatformKind::Unattached,
+            last_mode: Some(InteractionMode::Interactive),
+            last_interaction: applied.clone(),
+            last_apply: Some(Instant::now()),
+        };
+        let original_apply = platform.last_apply;
+        for offset in 1_u8..=3 {
+            let next = InteractionGeometry {
+                rects: vec![PxRect::new(f32::from(offset), 0.0, 10.0, 10.0)],
+            };
+            let push = platform.should_push_region(InteractionMode::Interactive, &next);
+            if push {
+                platform.commit_region_push(InteractionMode::Interactive, &next);
+            }
+        }
+        assert_eq!(platform.last_apply, original_apply);
+        assert!(
+            (platform.last_interaction.rects[0].x).abs() < f32::EPSILON,
+            "skipped steps must keep the last applied region"
+        );
+        platform.last_apply = Instant::now()
+            .checked_sub(Duration::from_millis(200))
+            .or(Some(Instant::now()));
+        let drifted = InteractionGeometry {
+            rects: vec![PxRect::new(8.0, 0.0, 10.0, 10.0)],
+        };
+        assert!(platform.should_push_region(InteractionMode::Interactive, &drifted));
+    }
+
+    #[test]
+    fn physical_rects_divide_by_surface_scale() {
+        let rects = [PxRect::new(10.0, 20.0, 40.0, 80.0)];
+        assert_eq!(physical_to_surface_local(&rects, 1.0), [(10, 20, 40, 80)]);
+        assert_eq!(physical_to_surface_local(&rects, 2.0), [(5, 10, 20, 40)]);
+        assert_eq!(physical_to_surface_local(&rects, 1.25), [(8, 16, 32, 64)]);
+    }
+
+    #[test]
+    fn empty_rects_and_tiny_scale_are_safe() {
+        assert!(physical_to_surface_local(&[], 1.0).is_empty());
+        assert!(physical_to_surface_local(&[PxRect::new(0.0, 0.0, 0.0, 10.0)], 1.0).is_empty());
+        let scaled = physical_to_surface_local(&[PxRect::new(0.0, 0.0, 10.0, 10.0)], 0.0);
+        assert_eq!(scaled.len(), 1);
+        assert!(scaled[0].2 >= 1 && scaled[0].3 >= 1);
+    }
 }

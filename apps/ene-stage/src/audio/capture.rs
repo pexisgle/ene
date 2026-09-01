@@ -205,3 +205,22 @@ where
         .map_err(|err| AudioError::Device(err.to_string()))?;
     Ok(stream)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn missing_device_still_constructs_an_idle_capture() {
+        let capture = MicCapture::new_with_device(
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Some("no-such-mic-device"),
+        );
+        assert!(!capture.barge_in_active());
+        assert!(capture.try_recv().is_none());
+        let names = list_input_device_names();
+        assert!(names.iter().all(|name| !name.contains('\0')));
+    }
+}

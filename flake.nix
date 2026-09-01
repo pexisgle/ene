@@ -73,6 +73,7 @@
                     pkgs.wayland
                     pkgs.wayland-protocols
                     pkgs.libxkbcommon
+                    pkgs.fontconfig
                     pkgs.xdotool
                   ]
                   ++ lib.optionals withCrossWindows [ pkgs.pkgsCross.mingwW64.stdenv.cc ]

@@ -21,6 +21,11 @@
 - [CLI user guide](apps/cli.md)
 - [Desktop user guide](apps/desktop.md) (legacy)
 
+# Experiments
+
+- [Stage UI PoC findings](experiments/stage-ui-poc-findings.md)
+- [Stage v2 pre-migration baseline](experiments/stage-v2-baseline.md)
+
 # Guides
 
 - [Character editor](guides/character-editor.md)
@@ -32,10 +37,6 @@
 - [MCP servers](guides/tools/mcp-servers.md)
 - [Built-in tools](guides/tools/builtin-tools.md)
 - [App platform matrix](guides/tools/app-platform.md)
-
-# Experiments
-
-- [Stage UI PoC findings](experiments/stage-ui-poc-findings.md)
 
 # Reference
 

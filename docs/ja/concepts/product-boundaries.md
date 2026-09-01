@@ -53,8 +53,8 @@ v1.0 の追跡は [#717](https://github.com/pexisgle/ene/issues/717)
 | Web（`apps/ene-core/web`） | LAN / トンネル | 表層チャットと読み取り専用の詳細（内面、thinking、ツール、PAD、記憶、ジョブ） | 設定変更、記憶削除、キャラ管理、VRM | テキスト経路と D-31。詳細 UX はまだログ寄り（[#717](https://github.com/pexisgle/ene/issues/717)） |
 | モバイル | Post-v1.0（M1） | — | — | ツリーに無い |
 
-`ene-stage` と `ene-desktop` は同じ API を話し、どちらも egui + wgpu で、
-WebView は使いません。[PR #794](https://github.com/pexisgle/ene/pull/794)
+`ene-stage` と `ene-desktop` は同じ API を話します。stage は Slint + wgpu、
+desktop は凍結した egui + wgpu のままです。どちらも WebView は使いません。[PR #794](https://github.com/pexisgle/ene/pull/794)
 は stage を伸ばすあいだ旧 UX を失わないために desktop を復元しましたが、
 **製品の席は `ene-stage`** です。計画文書の `desktop(stage)` はその役割の
 名前です。desktop は凍結のみ。stage が、製品として要る desktop の能力を

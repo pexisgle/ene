@@ -50,3 +50,112 @@ pub fn compute_world_target(
     state.smoothed_world_target = Some(smoothed);
     smoothed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn camera() -> (Vec3, Vec3, Vec3, Vec3) {
+        (
+            Vec3::new(0.0, 1.0, 4.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::Y,
+            Vec3::new(0.0, 1.2, 0.0),
+        )
+    }
+
+    #[test]
+    fn neutral_target_is_in_front_of_the_head() {
+        let head = Vec3::new(1.0, 2.0, 3.0);
+        assert_eq!(neutral_target(head), head + Vec3::new(0.0, 0.0, 1.8));
+    }
+
+    #[test]
+    fn strength_zero_stays_on_the_neutral_axis() {
+        let (eye, target, up, head) = camera();
+        let mut state = LookAtState::default();
+        let world = compute_world_target(
+            Vec2::new(100.0, 50.0),
+            (200, 100),
+            eye,
+            target,
+            up,
+            head,
+            0.0,
+            &mut state,
+            1.0,
+        );
+        let expected = neutral_target(head);
+        assert!(world.distance(expected) < 1e-4);
+    }
+
+    #[test]
+    fn strength_one_follows_the_cursor_and_zero_dt_does_not_smooth() {
+        let (eye, target, up, head) = camera();
+        let mut left_state = LookAtState::default();
+        let mut right_state = LookAtState::default();
+        let left = compute_world_target(
+            Vec2::new(0.0, 50.0),
+            (200, 100),
+            eye,
+            target,
+            up,
+            head,
+            1.0,
+            &mut left_state,
+            1.0,
+        );
+        let right = compute_world_target(
+            Vec2::new(200.0, 50.0),
+            (200, 100),
+            eye,
+            target,
+            up,
+            head,
+            1.0,
+            &mut right_state,
+            1.0,
+        );
+        assert!(
+            left.distance(right) > 0.01,
+            "left and right cursor must produce different look-at targets"
+        );
+
+        let mut held_state = LookAtState {
+            smoothed_world_target: Some(left),
+        };
+        let held_again = compute_world_target(
+            Vec2::new(200.0, 50.0),
+            (200, 100),
+            eye,
+            target,
+            up,
+            head,
+            1.0,
+            &mut held_state,
+            0.0,
+        );
+        assert!(
+            held_again.distance(left) < 1e-5,
+            "dt=0 must not advance smoothing"
+        );
+    }
+
+    #[test]
+    fn zero_viewport_does_not_panic() {
+        let (eye, target, up, head) = camera();
+        let mut state = LookAtState::default();
+        let world = compute_world_target(
+            Vec2::ZERO,
+            (0, 0),
+            eye,
+            target,
+            up,
+            head,
+            0.5,
+            &mut state,
+            0.016,
+        );
+        assert!(world.is_finite());
+    }
+}

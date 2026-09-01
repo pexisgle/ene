@@ -1,0 +1,57 @@
+import { EneTheme, SpeechBubble, StatusBubble, EneButton } from "theme.slint";
+
+export struct OverlayChoice {
+    id: string,
+    label: string,
+}
+
+export component StageOverlay inherits Window {
+    background: transparent;
+    default-font-family: "Noto Sans CJK JP";
+
+    in-out property <string> bubble-text;
+    in-out property <string> bubble-speaker;
+    in-out property <bool> bubble-visible: false;
+    in-out property <bool> bubble-clickable: false;
+    in-out property <length> bubble-x: 24px;
+    in-out property <length> bubble-y: 24px;
+    in-out property <string> status-text;
+    in-out property <bool> status-visible: false;
+    in-out property <length> status-x: 24px;
+    in-out property <length> status-y: 80px;
+    in-out property <[OverlayChoice]> choices: [];
+    in-out property <length> choices-x: 24px;
+    in-out property <length> choices-y: 140px;
+
+    callback choice-clicked(string);
+    callback bubble-clicked();
+
+    if bubble-visible: SpeechBubble {
+        x: bubble-x;
+        y: bubble-y;
+        width: 280px;
+        text: bubble-text;
+        speaker: bubble-speaker;
+        clickable: bubble-clickable;
+        clicked => { root.bubble-clicked(); }
+    }
+
+    if status-visible: StatusBubble {
+        x: status-x;
+        y: status-y;
+        width: 240px;
+        text: status-text;
+    }
+
+    if choices.length > 0: Rectangle {
+        x: choices-x;
+        y: choices-y;
+        VerticalLayout {
+            spacing: EneTheme.space-2;
+            for choice in choices: EneButton {
+                text: choice.label;
+                clicked => { root.choice-clicked(choice.id); }
+            }
+        }
+    }
+}

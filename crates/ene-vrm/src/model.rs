@@ -267,26 +267,35 @@ impl NodeHierarchy {
     }
 
     /// Build the world transforms from `local_rotations` /
-    /// `local_positions` / `parents`. The walk assumes glTF
-    /// nodes are topologically ordered (parents before
-    /// children) — which the loader guarantees by writing
-    /// each node's index after its parent.
+    /// `local_positions` / `parents`. Walks each node's parent
+    /// chain root → node so out-of-order glTF node indices stay
+    /// correct (same strategy as VRMA rest-pose computation).
     pub fn compute_world_transforms(&mut self) {
         let n = self.local_rotations.len();
         if n == 0 {
             return;
         }
         for i in 0..n {
-            let p = self.parents[i];
-            if p < 0 {
-                self.world_rotations[i] = self.local_rotations[i];
-                self.world_positions[i] = self.local_positions[i];
-            } else {
-                let p = p as usize;
-                self.world_rotations[i] = self.world_rotations[p] * self.local_rotations[i];
-                self.world_positions[i] =
-                    self.world_rotations[p] * self.local_positions[i] + self.world_positions[p];
+            let mut chain = Vec::new();
+            let mut cur = i as i32;
+            loop {
+                chain.push(cur as usize);
+                let p = self.parents[cur as usize];
+                if p < 0 {
+                    break;
+                }
+                cur = p;
             }
+            chain.reverse();
+
+            let mut wr = Quat::IDENTITY;
+            let mut wp = Vec3::ZERO;
+            for &node in &chain {
+                wp += wr * self.local_positions[node];
+                wr *= self.local_rotations[node];
+            }
+            self.world_rotations[i] = wr;
+            self.world_positions[i] = wp;
         }
     }
 }

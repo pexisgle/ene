@@ -1,10 +1,13 @@
 //! winit application handler for the product stage client.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ene_api::MessageMode;
+use ene_api::{CreateJobRequest, MessageMode, SoulPatch};
 use ene_vrm::viseme::VisemeAnalyzer;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -26,16 +29,29 @@ use crate::detail::{self, DetailTab, DetailUiState, DisplayAction, LogKind, Pend
 use crate::gpu::{GpuContext, GpuError};
 use crate::i18n;
 use crate::interaction::{EndResult, GestureTracker, PointerKind, ReactionKind};
+use crate::interaction_controller::{
+    CancelReason, InteractionSnapshot, StageInteractionController, UiInteractionRequest,
+};
 use crate::monitor::{self, MonitorInfo, OverlayMonitorMode};
 use crate::overlay::{AvatarLoad, OverlayError, OverlayWindow};
+use crate::platform::OverlayPlatform;
+use crate::renderer::slint_gpu::{ChromeAction, OverlayUiAction};
+use crate::scene::{
+    AvatarPart, InteractionPrimitive, PxRect, SceneHit, StageAnchor, StageAnchorKind, StageScene,
+    VisualPrimitive,
+};
 use crate::settings::{
     DesktopSettings, load_desktop_settings, normalize_displayed_souls, ordered_visible_souls,
     save_desktop_settings,
 };
 use crate::shell::tray::TrayError;
 use crate::shell::{HotkeyManager, ShellCommand, ShellError, TrayManager, show_notification};
+use crate::surface::chat::{
+    chat_setup_cta_eligible, composer_send_allowed, normalize_transcript, transcript_label,
+};
 use crate::surface::{self, SpotlightAction, SurfaceAction, SurfaceUiState};
 use crate::tasks::AsyncOutcome;
+use slint::Global;
 
 /// Bounded number of turn-end refresh retries while the projection catches up
 /// with the completed turn.
@@ -201,13 +217,12 @@ pub fn run() -> Result<(), AppError> {
     let runtime = Runtime::new().map_err(|err| AppError::Runtime(err.to_string()))?;
     let rt_handle = runtime.handle().clone();
 
-    // egui windows own smithay-clipboard workers whose proxies point into the
-    // loop's Wayland display. Dropping that display before those windows would
-    // make their teardown dereference freed Wayland objects, so keep a clone of
-    // the connection alive past the last window drop; declaring this before
-    // `app` guarantees it outlives every clipboard worker.
+    // Slint chrome shares the wgpu device; keep the Wayland display handle
+    // alive for the lifetime of the event loop.
     let event_loop = EventLoop::new().map_err(|err| AppError::Window(err.to_string()))?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(
+        Instant::now() + Duration::from_millis(16),
+    ));
     let _wayland_display: OwnedDisplayHandle = event_loop.owned_display_handle();
 
     let (client, core, session, feeds) = runtime.block_on(async {
@@ -254,7 +269,6 @@ pub fn run() -> Result<(), AppError> {
         detail: DetailUiState::default(),
         async_results: Arc::new(Mutex::new(Vec::new())),
         temporarily_hidden_souls: HashSet::new(),
-        companion_thumbnails: HashMap::new(),
         mic_active: false,
         listen: MicListen::new(),
         notify_claimed: false,
@@ -266,6 +280,9 @@ pub fn run() -> Result<(), AppError> {
         caption: None,
         spotlight: None,
         overlay_focus: OverlayFocus::default(),
+        interaction: StageInteractionController::default(),
+        scene: StageScene::new(),
+        overlay_platform: OverlayPlatform::default(),
         last_cursor: None,
         gesture: GestureTracker::default(),
         cursor_poll: None,
@@ -283,6 +300,11 @@ pub fn run() -> Result<(), AppError> {
         completion_terminal_seq: None,
         pending_optimistic_user_rows: Vec::new(),
         local_settings_save_generation: 0,
+        last_overlay_slint: None,
+        last_chat_sync: None,
+        last_detail_sync: None,
+        last_caption_sync: None,
+        last_spotlight_sync: None,
     };
     app.surface.history = app.session.history();
     app.surface.greetings = app.session.greetings().to_vec();
@@ -327,7 +349,6 @@ struct StageApp {
     detail: DetailUiState,
     async_results: Arc<Mutex<Vec<AsyncOutcome>>>,
     temporarily_hidden_souls: HashSet<String>,
-    companion_thumbnails: HashMap<String, Option<egui::TextureHandle>>,
     mic_active: bool,
     listen: MicListen,
     notify_claimed: bool,
@@ -339,6 +360,9 @@ struct StageApp {
     caption: Option<ChromeWindow>,
     spotlight: Option<ChromeWindow>,
     overlay_focus: OverlayFocus,
+    interaction: StageInteractionController,
+    scene: StageScene,
+    overlay_platform: OverlayPlatform,
     last_cursor: Option<PhysicalPosition<f32>>,
     gesture: GestureTracker,
     cursor_poll: Option<crossbeam_channel::Receiver<crate::cursor_poll::GlobalCursor>>,
@@ -356,6 +380,20 @@ struct StageApp {
     completion_terminal_seq: Option<u64>,
     pending_optimistic_user_rows: Vec<OptimisticUserRow>,
     local_settings_save_generation: u64,
+    last_overlay_slint: Option<OverlaySlintKey>,
+    last_chat_sync: Option<u64>,
+    last_detail_sync: Option<u64>,
+    last_caption_sync: Option<u64>,
+    last_spotlight_sync: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct OverlaySlintKey {
+    caption: String,
+    speaker: String,
+    notice: String,
+    greetings: Vec<(String, String)>,
+    head: Option<(i32, i32)>,
 }
 
 #[derive(Debug)]
@@ -404,7 +442,6 @@ impl StageApp {
             detail: DetailUiState::default(),
             async_results: Arc::new(Mutex::new(Vec::new())),
             temporarily_hidden_souls: HashSet::new(),
-            companion_thumbnails: HashMap::new(),
             mic_active: false,
             listen: MicListen::new(),
             notify_claimed: false,
@@ -416,6 +453,9 @@ impl StageApp {
             caption: None,
             spotlight: None,
             overlay_focus: OverlayFocus::default(),
+            interaction: StageInteractionController::default(),
+            scene: StageScene::new(),
+            overlay_platform: OverlayPlatform::default(),
             last_cursor: None,
             gesture: GestureTracker::default(),
             cursor_poll: None,
@@ -433,6 +473,11 @@ impl StageApp {
             completion_terminal_seq: None,
             pending_optimistic_user_rows: Vec::new(),
             local_settings_save_generation: 0,
+            last_overlay_slint: None,
+            last_chat_sync: None,
+            last_detail_sync: None,
+            last_caption_sync: None,
+            last_spotlight_sync: None,
         }
     }
 
@@ -441,6 +486,64 @@ impl StageApp {
             || self.detail_win.is_some()
             || self.caption.is_some()
             || self.spotlight.is_some()
+    }
+
+    fn chat_model_revision(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.surface.history.messages.len().hash(&mut hasher);
+        if let Some(last) = self.surface.history.messages.last() {
+            last.seq.hash(&mut hasher);
+            last.role.hash(&mut hasher);
+            last.text.hash(&mut hasher);
+        }
+        self.surface.streaming_text.hash(&mut hasher);
+        self.surface.status.hash(&mut hasher);
+        self.surface.turn_active.hash(&mut hasher);
+        self.mic_active.hash(&mut hasher);
+        self.surface
+            .pending_approval
+            .as_ref()
+            .map(|pending| pending.id.as_str())
+            .hash(&mut hasher);
+        self.surface
+            .pending_question
+            .as_ref()
+            .map(|question| question.prompt.as_str())
+            .hash(&mut hasher);
+        self.local_settings.theme.hash(&mut hasher);
+        self.session.soul_id().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn detail_model_revision(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        std::mem::discriminant(&self.detail.tab).hash(&mut hasher);
+        self.detail.search.hash(&mut hasher);
+        self.detail.log.len().hash(&mut hasher);
+        self.detail.core_status.hash(&mut hasher);
+        self.detail.health.hash(&mut hasher);
+        self.detail.chat_plugin.hash(&mut hasher);
+        self.detail.chat_model.hash(&mut hasher);
+        self.local_settings.theme.hash(&mut hasher);
+        self.local_settings.displayed_soul_ids.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn caption_model_revision(&self, text: &str, font: i32, position: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        font.hash(&mut hasher);
+        position.hash(&mut hasher);
+        self.local_settings.theme.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn spotlight_model_revision(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.surface.spotlight_query.hash(&mut hasher);
+        self.surface.spotlight_selected.hash(&mut hasher);
+        self.local_settings.theme.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Converts a screen-space pointer position to overlay-local physical
@@ -463,18 +566,15 @@ impl StageApp {
         let always_on_top = self.local_settings.always_on_top;
         let preferred_click_through = self.local_settings.overlay_click_through;
         let overlay_transparent = self.overlay.as_ref().is_some_and(|o| o.transparent);
-        let input_state = crate::drag::OverlayInputState {
-            click_through_preferred: preferred_click_through,
-            chrome_protected: protect_chrome,
-            hovering_body: self.surface.hover_soul.is_some(),
-            dragging: self.surface.drag.is_some(),
-        };
+        let window_visible = self
+            .overlay
+            .as_ref()
+            .is_some_and(|o| o.window.is_visible() != Some(false));
+        let has_avatar = self
+            .overlay
+            .as_ref()
+            .is_some_and(OverlayWindow::has_avatars);
 
-        // On X11 an empty input shape stops all pointer events, so a disabled
-        // overlay cannot detect hover on its own. The global cursor poll keeps
-        // the silhouette hole armed by re-checking the pointer against body
-        // AABBs even while input is transparent.
-        let mut allows = crate::drag::allows_input(overlay_transparent, input_state);
         if let Some(cursor) = self
             .cursor_poll
             .as_ref()
@@ -482,7 +582,19 @@ impl StageApp {
         {
             self.last_global_cursor = Some(cursor);
         }
-        if !allows {
+        if self.last_global_cursor.is_none()
+            && let Some([x, y]) = crate::platform::global_cursor_position()
+        {
+            self.last_global_cursor = Some(crate::cursor_poll::GlobalCursor {
+                x: f64::from(x),
+                y: f64::from(y),
+            });
+        }
+
+        // Passive windows receive no pointer events. Re-arm hover from a
+        // global cursor poll (X11 thread or Windows GetCursorPos). This is
+        // not an OS-region hover-rearm; Wayland uses input regions instead.
+        if !self.interaction.cursor_hittest_enabled() {
             let polled = self
                 .last_global_cursor
                 .and_then(|cursor| self.global_cursor_to_physical(cursor));
@@ -499,20 +611,36 @@ impl StageApp {
                         glam::Vec2::new(physical.x, physical.y),
                     );
                     self.surface.hover_soul.clone_from(&hit);
-                    allows = hit.is_some() || self.surface.drag.is_some();
                 }
             }
         }
+
+        self.interaction.sync(InteractionSnapshot {
+            transparent: overlay_transparent,
+            click_through_preferred: preferred_click_through,
+            chrome_protected: protect_chrome,
+            hovering_body: self.surface.hover_soul.is_some(),
+            dragging: self.surface.drag.is_some(),
+            has_avatar,
+            window_visible,
+        });
+        self.interaction.request_ui(self.overlay_ui_request());
 
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
         let level = overlay_window_level(protect_chrome, always_on_top);
         overlay.window.set_window_level(level);
-
-        // The silhouette hole stays open during chrome protection because the
-        // raised chat window still receives its own clicks above the overlay.
-        overlay.set_click_through(!allows);
+        overlay.set_click_through(!self.interaction.cursor_hittest_enabled());
+        self.interaction.apply_to_window(&overlay.window);
+        let visual = self.scene.visual_geometry();
+        let interaction_geom = self.scene.interaction_geometry();
+        self.overlay_platform.apply(
+            &overlay.window,
+            self.interaction.mode(),
+            &visual,
+            &interaction_geom,
+        );
     }
 
     fn open_chat(&mut self, event_loop: &ActiveEventLoop) {
@@ -623,8 +751,10 @@ impl StageApp {
                     self.discard_optimistic_user_row(&sent_text);
                     self.surface.status = err;
                     self.surface.chat_draft = sent_text;
+                    self.surface.push_chat_draft = true;
                 } else {
                     self.surface.chat_draft.clear();
+                    self.surface.push_chat_draft = true;
                     self.surface.streaming_text.clear();
                     self.complete_optimistic_user_row(sent_text);
                     if let Some(chat) = &self.chat {
@@ -1842,12 +1972,14 @@ impl StageApp {
         let Some(question) = self.surface.pending_question.take() else {
             return;
         };
-        let text = if self.surface.chat_draft.trim().is_empty() {
-            question.prompt
-        } else {
-            self.surface.chat_draft.trim().to_owned()
-        };
+        let text = question_answer_text(
+            &self.surface.question_draft,
+            &self.surface.chat_draft,
+            &question.prompt,
+        );
+        self.surface.question_draft.clear();
         self.surface.chat_draft.clear();
+        self.surface.push_chat_draft = true;
         let session = self.session.clone_handle();
         let session_id = self.session.session_id().to_owned();
         let sent_text = text.clone();
@@ -2630,6 +2762,10 @@ impl StageApp {
     }
 
     fn reload_avatar(&mut self) -> Option<String> {
+        self.surface.hover_soul = None;
+        self.surface.drag = None;
+        self.gesture.cancel_all();
+        self.interaction.cancel(CancelReason::AvatarsChanged);
         let all_specs = self.session.avatar_loads();
         let available_soul_ids: Vec<String> =
             all_specs.iter().map(|spec| spec.soul_id.clone()).collect();
@@ -2763,6 +2899,13 @@ impl StageApp {
         disambiguated_occupant_label(self.session.occupants(), soul_id)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "motion picker remains on DetailUiState until the Slint companion tab grows a combo"
+        )
+    )]
     fn overlay_motion_controls(&self) -> Vec<detail::MotionControl> {
         self.overlay
             .as_ref()
@@ -3116,10 +3259,14 @@ impl StageApp {
                 &mut self.surface.drag,
                 &mut self.surface.positions,
                 cursor_world,
+                (vw, vh),
             );
         }
 
         self.sync_overlay_interaction();
+        if let Some(overlay) = self.overlay.as_ref() {
+            overlay.window.request_redraw();
+        }
     }
 
     #[expect(dead_code, reason = "kept for symmetry with on_overlay_release")]
@@ -3190,6 +3337,9 @@ impl StageApp {
             return;
         };
         let cursor = glam::Vec2::new(cursor_physical.x, cursor_physical.y);
+        if matches!(self.scene.hit(cursor), SceneHit::Ui { .. }) {
+            return;
+        }
         let candidates = self.overlay_hit_candidates();
         let Some(soul_id) = crate::drag::hit_test(&candidates, (vw, vh), eye, target, up, cursor)
         else {
@@ -3206,7 +3356,13 @@ impl StageApp {
             .gesture
             .press(pointer, id, cursor, Some(&soul_id), Instant::now())
         {
-            crate::drag::press_body(&mut self.surface.drag, Some(&soul_id), stored, cursor_world);
+            crate::drag::press_body(
+                &mut self.surface.drag,
+                Some(&soul_id),
+                stored,
+                cursor_world,
+                (vw, vh),
+            );
         }
         self.sync_overlay_interaction();
     }
@@ -3260,19 +3416,25 @@ impl StageApp {
                 )
             })
         });
-        let look = if let (Some(cursor), Some((size, eye, target, head))) = (cursor, look_input) {
-            let viewport = (size.width.max(1), size.height.max(1));
-            Some(look_at::compute_world_target(
-                glam::Vec2::new(cursor.x, cursor.y),
-                viewport,
-                glam::Vec3::from(eye),
-                glam::Vec3::from(target),
-                glam::Vec3::from(ene_vrm::camera::DEFAULT_UP),
-                head,
-                strength,
-                &mut self.look_at_state,
-                dt,
-            ))
+        let look_at_active =
+            self.interaction.cursor_hittest_enabled() && self.local_settings.look_at_strength > 0.0;
+        let look = if look_at_active {
+            if let (Some(cursor), Some((size, eye, target, head))) = (cursor, look_input) {
+                let viewport = (size.width.max(1), size.height.max(1));
+                Some(look_at::compute_world_target(
+                    glam::Vec2::new(cursor.x, cursor.y),
+                    viewport,
+                    glam::Vec3::from(eye),
+                    glam::Vec3::from(target),
+                    glam::Vec3::from(ene_vrm::camera::DEFAULT_UP),
+                    head,
+                    strength,
+                    &mut self.look_at_state,
+                    dt,
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -3293,12 +3455,14 @@ impl StageApp {
             return;
         };
         let surface_positions = self.surface.positions.clone();
-        let highlight_soul = self
-            .surface
-            .drag
-            .as_ref()
-            .map(|drag| drag.soul_id().to_owned())
-            .or_else(|| self.surface.hover_soul.clone());
+        let highlight_soul = overlay_outline_soul(
+            self.surface
+                .drag
+                .as_ref()
+                .map(crate::drag::BodyDrag::soul_id),
+            self.surface.hover_soul.as_deref(),
+        )
+        .map(str::to_owned);
         let mut corrected_positions = Vec::new();
         {
             let Some(overlay) = self.overlay.as_mut() else {
@@ -3312,13 +3476,25 @@ impl StageApp {
                 let pos = surface_positions.get(&slot.soul_id).copied().unwrap_or(
                     crate::settings::default_position_for(&slot.soul_id, soul.as_str()),
                 );
-                let world = crate::drag::normalized_to_world(pos);
-                let fitted = slot
-                    .avatar
-                    .fit_world_offset([world[0], world[1], 0.0], viewport);
+                let world = crate::drag::normalized_to_world(pos, viewport);
+                let dragging_this = self.surface.drag.as_ref().is_some_and(|gesture| {
+                    matches!(
+                        gesture,
+                        crate::drag::BodyDrag::Dragging { soul_id, .. }
+                            if soul_id == &slot.soul_id
+                    )
+                });
+                let fitted = if dragging_this {
+                    [world[0], world[1], 0.0]
+                } else {
+                    slot.avatar
+                        .fit_world_offset([world[0], world[1], 0.0], viewport)
+                };
                 slot.avatar.world_offset = fitted;
-                let fitted_pos =
-                    crate::drag::world_to_normalized(glam::Vec2::new(fitted[0], fitted[1]));
+                let fitted_pos = crate::drag::world_to_normalized(
+                    glam::Vec2::new(fitted[0], fitted[1]),
+                    viewport,
+                );
                 if (fitted_pos[0] - pos[0]).abs() > 0.0001
                     || (fitted_pos[1] - pos[1]).abs() > 0.0001
                 {
@@ -3326,23 +3502,27 @@ impl StageApp {
                 }
                 slot.avatar.tick_expression_cue(dt);
             }
-            if let Err(err) = overlay.tick_and_render(
+            match overlay.tick_and_render(
                 gpu,
                 look,
                 Some(visemes),
                 Some(soul.as_str()),
                 highlight_soul.as_deref(),
             ) {
-                match err {
+                Ok(drew) => {
+                    if drew {
+                        overlay.window.request_redraw();
+                    }
+                }
+                Err(err) => match err {
                     OverlayError::Surface(_) => {
                         tracing::debug!(error = %err, "overlay surface skipped");
                     }
                     OverlayError::Avatar(inner) => {
                         tracing::debug!(error = %inner, "overlay avatar");
                     }
-                }
+                },
             }
-            overlay.window.request_redraw();
         }
         let layout_changed = !corrected_positions.is_empty();
         for (soul_id, position) in corrected_positions {
@@ -3358,6 +3538,203 @@ impl StageApp {
         if layout_changed {
             self.save_local_settings();
         }
+        self.rebuild_scene();
+        self.sync_overlay_slint();
+    }
+
+    fn sync_overlay_slint(&mut self) {
+        let caption = self.surface.caption.clone();
+        let speaker = self.active_companion_label();
+        let head = self
+            .scene
+            .anchors()
+            .iter()
+            .find(|anchor| anchor.kind == StageAnchorKind::Head)
+            .map(|anchor| anchor.position);
+        let notice = self.surface.overlay_notice.clone();
+        let greetings: Vec<(String, String)> = self
+            .surface
+            .greetings
+            .iter()
+            .map(|g| {
+                (
+                    g.index.to_string(),
+                    g.text.lines().next().unwrap_or("").to_owned(),
+                )
+            })
+            .collect();
+        let key = OverlaySlintKey {
+            caption: caption.clone(),
+            speaker: speaker.clone(),
+            notice: notice.clone(),
+            greetings: greetings.clone(),
+            head: head.map(|position| (snap_px(position.x), snap_px(position.y))),
+        };
+        let multiple_greetings = greetings.len() > 1;
+        let skip_setters = self.last_overlay_slint.as_ref() == Some(&key);
+        let actions = {
+            let Some(overlay) = self.overlay.as_mut() else {
+                return;
+            };
+            let Some(layer) = overlay.slint_layer_mut() else {
+                return;
+            };
+            layer.ensure_component();
+            if !skip_setters {
+                if let Some(ui) = layer.component() {
+                    let visible = !caption.is_empty();
+                    ui.set_bubble_text(caption.into());
+                    ui.set_bubble_speaker(speaker.into());
+                    ui.set_bubble_visible(visible);
+                    ui.set_bubble_clickable(false);
+                    if let Some(position) = head {
+                        ui.set_bubble_x(position.x);
+                        ui.set_bubble_y((position.y - 72.0).max(8.0));
+                    }
+                    ui.set_status_visible(!notice.is_empty());
+                    ui.set_status_text(notice.into());
+                    apply_theme_overlay(ui, &self.local_settings.theme);
+                }
+                if multiple_greetings {
+                    let refs: Vec<(&str, &str)> = greetings
+                        .iter()
+                        .map(|(id, label)| (id.as_str(), label.as_str()))
+                        .collect();
+                    layer.set_choices(&refs);
+                } else {
+                    layer.set_choices(&[]);
+                }
+            }
+            layer.take_actions()
+        };
+        if !skip_setters {
+            self.last_overlay_slint = Some(key);
+        }
+        for action in actions {
+            match action {
+                OverlayUiAction::Choice(id) => {
+                    if let Ok(index) = id.parse::<u32>() {
+                        self.surface
+                            .push_action(SurfaceAction::SelectGreeting { index });
+                    }
+                }
+                OverlayUiAction::Bubble => {}
+            }
+        }
+    }
+
+    fn overlay_ui_request(&self) -> UiInteractionRequest {
+        let (clickable, focusable) = self.scene.overlay_ui_flags();
+        if focusable {
+            UiInteractionRequest::Focus
+        } else if clickable {
+            UiInteractionRequest::Interactive
+        } else {
+            UiInteractionRequest::None
+        }
+    }
+
+    fn rebuild_scene(&mut self) {
+        let Some(overlay) = self.overlay.as_ref() else {
+            self.scene.set_visuals(Vec::new());
+            self.scene.set_interactions(Vec::new());
+            return;
+        };
+        let size = overlay.window.inner_size();
+        let viewport = (size.width.max(1), size.height.max(1));
+        let mut visuals = Vec::new();
+        let mut interactions = Vec::new();
+        let mut anchors = Vec::new();
+        const PARTS: [AvatarPart; 5] = [
+            AvatarPart::Body,
+            AvatarPart::Head,
+            AvatarPart::Torso,
+            AvatarPart::LeftHand,
+            AvatarPart::RightHand,
+        ];
+        for slot in &overlay.slots {
+            let view_proj = slot.avatar.camera().debug_proj() * slot.avatar.camera().debug_view();
+            let (min, max) = slot.avatar.world_aabb();
+            let body = world_aabb_to_px(min, max, view_proj, viewport);
+            visuals.push(VisualPrimitive::AvatarBounds {
+                soul_id: slot.soul_id.clone(),
+                aabb: body,
+            });
+            for part in PARTS {
+                if let Some((pmin, pmax)) = slot.avatar.part_world_aabb(part) {
+                    interactions.push(InteractionPrimitive::AvatarPart {
+                        soul_id: slot.soul_id.clone(),
+                        part,
+                        aabb: world_aabb_to_px(pmin, pmax, view_proj, viewport),
+                    });
+                }
+            }
+            for (kind, bone) in [
+                (StageAnchorKind::Head, "head"),
+                (StageAnchorKind::Chest, "chest"),
+                (StageAnchorKind::LeftHand, "lefthand"),
+                (StageAnchorKind::RightHand, "righthand"),
+            ] {
+                let Some(world) = slot.avatar.overlay_bone_world(bone).or_else(|| {
+                    if kind == StageAnchorKind::Head {
+                        Some(slot.avatar.head_world())
+                    } else {
+                        None
+                    }
+                }) else {
+                    continue;
+                };
+                let (position, offscreen, behind) = project_world_to_px(world, view_proj, viewport);
+                anchors.push(StageAnchor {
+                    soul_id: slot.soul_id.clone(),
+                    kind,
+                    position,
+                    offscreen,
+                    behind_camera: behind,
+                });
+            }
+        }
+        if !self.surface.caption.is_empty()
+            && let Some(head) = anchors
+                .iter()
+                .find(|anchor| anchor.kind == StageAnchorKind::Head)
+        {
+            let rect = PxRect::new(
+                head.position.x,
+                (head.position.y - 72.0).max(0.0),
+                280.0,
+                72.0,
+            );
+            visuals.push(VisualPrimitive::Bubble {
+                id: "speech".to_owned(),
+                rect,
+            });
+            interactions.push(InteractionPrimitive::Ui {
+                id: "speech".to_owned(),
+                rect,
+                mode: crate::scene::UiHitMode::DisplayOnly,
+            });
+        }
+        if self.surface.greetings.len() > 1 {
+            let rect = PxRect::new(
+                24.0,
+                140.0,
+                280.0,
+                40.0 * self.surface.greetings.len() as f32,
+            );
+            visuals.push(VisualPrimitive::Bubble {
+                id: "choices".to_owned(),
+                rect,
+            });
+            interactions.push(InteractionPrimitive::Ui {
+                id: "choices".to_owned(),
+                rect,
+                mode: crate::scene::UiHitMode::Clickable,
+            });
+        }
+        self.scene.set_visuals(visuals);
+        self.scene.set_interactions(interactions);
+        self.scene.set_anchors(anchors);
     }
 
     fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {
@@ -3377,91 +3754,84 @@ impl StageApp {
         if self.surface.spotlight_open {
             self.ensure_spotlight(event_loop);
         }
-        let Some(gpu) = self.gpu.as_ref() else {
+        let Some(_gpu_ready) = self.gpu.as_ref() else {
             return;
         };
 
-        let active_companion = self.active_companion_label();
-        let chat_targets = self.chat_targets();
-        if let Some(chat) = self.chat.as_mut() {
-            let surface = &mut self.surface;
-            let mic = self.mic_active;
-            let theme = self.local_settings.theme.as_str();
-            if let Err(err) = chat.paint(gpu, Some(theme), |ui| {
-                surface::show_chat(ui, surface, mic, &active_companion, &chat_targets);
-            }) {
+        let chat_rev = self.chat_model_revision();
+        if self.chat.as_ref().is_some_and(|chat| {
+            chrome_frame_needed(chat.needs_gpu(), self.last_chat_sync, chat_rev)
+        }) {
+            self.sync_chat_slint();
+            if let (Some(gpu), Some(chat)) = (self.gpu.as_ref(), self.chat.as_mut())
+                && let Err(err) = chat.paint(gpu)
+            {
                 tracing::debug!(error = %err, "chat paint failed");
             }
+            self.last_chat_sync = Some(chat_rev);
+        } else if self.chat.is_none() {
+            self.last_chat_sync = None;
         }
-        let mut display_action = None;
-        let motion_controls = self.overlay_motion_controls();
-        let mut motion_command = None;
-        if let Some(detail_win) = self.detail_win.as_mut() {
-            let mut detail = std::mem::take(&mut self.detail);
-            let mut local = self.local_settings.clone();
-            let client = Arc::clone(&self.client);
-            let rt = self.rt_handle.clone();
-            let detail_window = Arc::clone(&detail_win.window);
-            let results = Arc::clone(&self.async_results);
-            let soul_id = self.session.soul_id().to_owned();
-            let monitors = self.monitors.clone();
-            let display_companions = detail::companion_display_rows(
-                self.session.occupants(),
-                &self.local_settings.displayed_soul_ids,
-                &self.temporarily_hidden_souls,
-                &soul_id,
-            );
-            let displayed_count = self.local_settings.displayed_soul_ids.len();
-            let thumbnail_cache = &mut self.companion_thumbnails;
-            self.session.session_id().clone_into(&mut detail.session_id);
-            detail.spotlight_hotkey_ok = self.surface.spotlight_hotkey_ok;
-            let theme = local.theme.clone();
-            let paint = detail_win.paint(gpu, Some(theme.as_str()), |ui| {
-                detail::show(
-                    ui,
-                    &mut detail,
-                    detail_window.as_ref(),
-                    &mut local,
-                    &monitors,
-                    &soul_id,
-                    &display_companions,
-                    displayed_count,
-                    crate::core::session::MAX_OVERLAY_BODIES,
-                    thumbnail_cache,
-                    &motion_controls,
-                    &client,
-                    &rt,
-                    &results,
-                );
-            });
-            display_action = detail.display_action.take();
-            motion_command = detail.motion_command.take();
-            self.detail = detail;
-            self.local_settings = local;
-            if let Err(err) = paint {
+        self.drain_chat_actions();
+
+        let detail_rev = self.detail_model_revision();
+        if self.detail_win.as_ref().is_some_and(|win| {
+            chrome_frame_needed(win.needs_gpu(), self.last_detail_sync, detail_rev)
+        }) {
+            self.sync_detail_slint();
+            if let (Some(gpu), Some(detail_win)) = (self.gpu.as_ref(), self.detail_win.as_mut())
+                && let Err(err) = detail_win.paint(gpu)
+            {
                 tracing::debug!(error = %err, "detail paint failed");
             }
+            self.last_detail_sync = Some(detail_rev);
+        } else if self.detail_win.is_none() {
+            self.last_detail_sync = None;
         }
-        if let Some(caption) = self.caption.as_mut() {
-            let surface = &self.surface;
-            let font = self.settings.caption_font_size;
-            let position = self.settings.caption_position.clone();
-            let pinned = self.settings.caption_pinned;
-            if let Err(err) = caption.paint(gpu, None, |ui| {
-                surface::show_caption(ui.ctx(), surface, font, &position, pinned);
-            }) {
-                tracing::debug!(error = %err, "caption paint failed");
+        let display_action = self.drain_detail_actions();
+
+        let caption_text = surface::caption::speech_text(&self.surface).to_owned();
+        let caption_font = self.settings.caption_font_size as i32;
+        let caption_pos = self.settings.caption_position.clone();
+        let caption_rev = self.caption_model_revision(&caption_text, caption_font, &caption_pos);
+        if self.caption.as_ref().is_some_and(|caption| {
+            chrome_frame_needed(caption.needs_gpu(), self.last_caption_sync, caption_rev)
+        }) {
+            if let (Some(gpu), Some(caption)) = (self.gpu.as_ref(), self.caption.as_mut()) {
+                if let Some(ui) = caption.layer().and_then(|layer| layer.caption_ui()) {
+                    ui.set_caption(caption_text.into());
+                    ui.set_font_size(caption_font);
+                    apply_theme_caption(ui, &self.local_settings.theme);
+                }
+                caption.place_caption(&caption_pos);
+                if let Err(err) = caption.paint(gpu) {
+                    tracing::debug!(error = %err, "caption paint failed");
+                }
             }
+            self.last_caption_sync = Some(caption_rev);
+        } else if self.caption.is_none() {
+            self.last_caption_sync = None;
         }
-        let mut spotlight_action = None;
-        if let Some(spotlight) = self.spotlight.as_mut()
-            && let Err(err) = spotlight.paint(gpu, None, |ui| {
-                spotlight_action = surface::show_spotlight(ui.ctx(), &mut self.surface);
-            })
-        {
-            tracing::debug!(error = %err, "spotlight paint failed");
+
+        let spotlight_rev = self.spotlight_model_revision();
+        if self.spotlight.as_ref().is_some_and(|spotlight| {
+            chrome_frame_needed(
+                spotlight.needs_gpu(),
+                self.last_spotlight_sync,
+                spotlight_rev,
+            )
+        }) {
+            self.sync_spotlight_slint();
+            if let (Some(gpu), Some(spotlight)) = (self.gpu.as_ref(), self.spotlight.as_mut())
+                && let Err(err) = spotlight.paint(gpu)
+            {
+                tracing::debug!(error = %err, "spotlight paint failed");
+            }
+            self.last_spotlight_sync = Some(spotlight_rev);
+        } else if self.spotlight.is_none() {
+            self.last_spotlight_sync = None;
         }
-        if let Some(action) = spotlight_action {
+        if let Some(action) = self.drain_spotlight_actions() {
             self.surface.spotlight_open = false;
             self.spotlight = None;
             match action {
@@ -3471,7 +3841,7 @@ impl StageApp {
                 SpotlightAction::Close => {}
             }
         }
-        if let Some(command) = motion_command {
+        if let Some(command) = self.detail.motion_command.take() {
             self.apply_motion_command(command);
         }
         if let Some(action) = display_action {
@@ -3483,6 +3853,567 @@ impl StageApp {
                 overlay.window.request_redraw();
             }
         }
+    }
+
+    fn sync_chat_slint(&mut self) {
+        let Some(chat) = self.chat.as_ref() else {
+            return;
+        };
+        let Some(ui) = chat.layer().and_then(|layer| layer.chat_ui()) else {
+            return;
+        };
+        self.surface.chat_input_focused = ui.get_input_focused();
+        if self.surface.push_chat_draft {
+            ui.set_draft(self.surface.chat_draft.clone().into());
+            self.surface.push_chat_draft = false;
+        } else {
+            self.surface.chat_draft = ui.get_draft().to_string();
+        }
+        self.surface.question_draft = ui.get_question_draft().to_string();
+        crate::surface::chat::request_single_greeting_commit(&mut self.surface);
+        let rows: Vec<crate::ui::ChatRow> =
+            normalize_transcript(&self.surface.history, &self.surface.streaming_text)
+                .into_iter()
+                .map(|row| crate::ui::ChatRow {
+                    role: slint::SharedString::from(transcript_label(row.role).as_str()),
+                    text: slint::SharedString::from(row.text.as_str()),
+                    streaming: row.state == crate::surface::chat::TranscriptState::Streaming,
+                    user: row.role == crate::surface::chat::TranscriptKind::User,
+                })
+                .collect();
+        ui.set_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+        let targets: Vec<crate::ui::ChatTargetRow> = self
+            .chat_targets()
+            .into_iter()
+            .map(|target| crate::ui::ChatTargetRow {
+                soul_id: slint::SharedString::from(target.soul_id.as_str()),
+                label: slint::SharedString::from(target.label.as_str()),
+                active: target.active,
+            })
+            .collect();
+        ui.set_targets(slint::ModelRc::new(slint::VecModel::from(targets)));
+        ui.set_status(self.surface.status.clone().into());
+        let setup = if chat_setup_cta_eligible(&self.surface) {
+            crate::detail::chat_setup_gap(&self.surface.chat_setup)
+                .map(crate::detail::chat_setup_status)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        ui.set_setup_status(setup.into());
+        ui.set_turn_active(self.surface.turn_active);
+        ui.set_mic_active(self.mic_active);
+        ui.set_can_send(composer_send_allowed(&self.surface));
+        ui.set_mode(message_mode_index(self.surface.message_mode));
+        apply_chat_copy(ui);
+        if let Some(pending) = &self.surface.pending_approval {
+            ui.set_approval_visible(true);
+            ui.set_approval_prompt(
+                format!("{}: {} / {}", pending.tool, pending.target, pending.id).into(),
+            );
+        } else {
+            ui.set_approval_visible(false);
+            ui.set_approval_prompt(slint::SharedString::new());
+        }
+        if let Some(question) = &self.surface.pending_question {
+            ui.set_question_visible(true);
+            ui.set_question_prompt(question.prompt.clone().into());
+        } else {
+            ui.set_question_visible(false);
+        }
+        apply_theme_chat(ui, &self.local_settings.theme);
+    }
+
+    fn drain_chat_actions(&mut self) {
+        let Some(chat) = self.chat.as_ref() else {
+            return;
+        };
+        let actions = chat.take_actions();
+        for action in actions {
+            match action {
+                ChromeAction::Send => self.surface.push_action(SurfaceAction::SendChat),
+                ChromeAction::NewSession => self.surface.push_action(SurfaceAction::NewSession),
+                ChromeAction::CancelTurn => self.surface.push_action(SurfaceAction::CancelTurn),
+                ChromeAction::ToggleMic => self.surface.push_action(SurfaceAction::ToggleMic),
+                ChromeAction::OpenDetail => {
+                    self.surface
+                        .push_action(SurfaceAction::OpenDetail(DetailTab::Home));
+                }
+                ChromeAction::SelectTarget(soul_id) => {
+                    self.surface
+                        .push_action(SurfaceAction::SelectCompanion { soul_id });
+                }
+                ChromeAction::Approval(decision) => {
+                    if let Some(pending) = &self.surface.pending_approval {
+                        let mapped = match decision.as_str() {
+                            "always" => "allow_and_remember",
+                            other => other,
+                        };
+                        self.surface.push_action(SurfaceAction::Approval {
+                            id: pending.id.clone(),
+                            decision: mapped.to_owned(),
+                        });
+                    }
+                }
+                ChromeAction::AnswerQuestion => {
+                    self.surface.push_action(SurfaceAction::AnswerQuestion);
+                }
+                ChromeAction::BargeIn => self.surface.push_action(SurfaceAction::BargeIn),
+                ChromeAction::SetMode(index) => {
+                    self.surface.message_mode = message_mode_from_index(index);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn sync_detail_slint(&mut self) {
+        let Some(win) = self.detail_win.as_ref() else {
+            return;
+        };
+        let Some(ui) = win.layer().and_then(|layer| layer.detail_ui()) else {
+            return;
+        };
+        self.detail.search = ui.get_search().to_string();
+        self.session
+            .session_id()
+            .clone_into(&mut self.detail.session_id);
+        self.detail.spotlight_hotkey_ok = self.surface.spotlight_hotkey_ok;
+        let soul_id = self.session.soul_id().to_owned();
+        let companions = detail::companion_display_rows(
+            self.session.occupants(),
+            &self.local_settings.displayed_soul_ids,
+            &self.temporarily_hidden_souls,
+            &soul_id,
+        );
+        let view = detail::project::project(
+            &self.detail,
+            &self.local_settings,
+            &companions,
+            &self.monitors,
+        );
+        ui.set_heading(view.heading.into());
+        ui.set_body(view.body.into());
+        ui.set_status(view.status.into());
+        let tab_index = DetailTab::ALL
+            .iter()
+            .position(|tab| *tab == self.detail.tab)
+            .unwrap_or(0) as i32;
+        if should_push_detail_drafts(ui.get_input_focused(), ui.get_tab(), tab_index) {
+            ui.set_draft_a(view.draft_a.into());
+            ui.set_draft_b(view.draft_b.into());
+        }
+        ui.set_draft_a_label(view.draft_a_label.into());
+        ui.set_draft_b_label(view.draft_b_label.into());
+        ui.set_tab(tab_index);
+        ui.set_rows(slint::ModelRc::new(slint::VecModel::from(view.rows)));
+        ui.set_drafts_visible(view.drafts_visible);
+        let actions: Vec<crate::ui::DetailAction> = view
+            .actions
+            .into_iter()
+            .map(|action| crate::ui::DetailAction {
+                id: slint::SharedString::from(action.id),
+                label: slint::SharedString::from(action.label),
+                primary: action.primary,
+            })
+            .collect();
+        ui.set_actions(slint::ModelRc::new(slint::VecModel::from(actions)));
+        let tabs: Vec<slint::SharedString> = DetailTab::ALL
+            .iter()
+            .map(|tab| slint::SharedString::from(tab.label()))
+            .collect();
+        ui.set_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
+        ui.set_search_placeholder(i18n::fl("detail-search").into());
+        ui.set_title_text(i18n::fl("detail-title").into());
+        apply_theme_detail(ui, &self.local_settings.theme);
+    }
+
+    fn drain_detail_actions(&mut self) -> Option<DisplayAction> {
+        let win = self.detail_win.as_ref()?;
+        let actions = win.take_actions();
+        let mut display = None;
+        let soul_id = self.session.soul_id().to_owned();
+        let companions = detail::companion_display_rows(
+            self.session.occupants(),
+            &self.local_settings.displayed_soul_ids,
+            &self.temporarily_hidden_souls,
+            &soul_id,
+        );
+        for action in actions {
+            match action {
+                ChromeAction::DetailTab(index) => {
+                    self.read_detail_drafts();
+                    detail::project::handle_select_tab(&mut self.detail, index);
+                }
+                ChromeAction::DetailSearchSubmit => {
+                    self.detail.search = self
+                        .detail_win
+                        .as_ref()
+                        .and_then(|win| win.layer())
+                        .and_then(|layer| layer.detail_ui())
+                        .map_or_else(
+                            || self.detail.search.clone(),
+                            |ui| ui.get_search().to_string(),
+                        );
+                    crate::detail::sync_search_tab(&mut self.detail);
+                }
+                ChromeAction::DetailPrimary(name) => {
+                    self.read_detail_drafts();
+                    if let Some(command) = detail::project::handle_primary(
+                        &mut self.detail,
+                        &mut self.local_settings,
+                        &name,
+                    ) {
+                        self.dispatch_detail_primary(command);
+                    }
+                }
+                ChromeAction::DetailRow(id) => {
+                    if let Some(monitor_id) = id.strip_prefix("monitor:")
+                        && let Some(monitor) = self
+                            .monitors
+                            .iter()
+                            .find(|monitor| monitor.id == monitor_id)
+                    {
+                        OverlayMonitorMode::Selected
+                            .setting()
+                            .clone_into(&mut self.local_settings.overlay_monitor_mode);
+                        self.local_settings.overlay_monitor_id = monitor.id.clone();
+                        self.local_settings.overlay_monitor_name =
+                            monitor.name.clone().unwrap_or_default();
+                        self.local_settings.overlay_monitor_position = monitor.position;
+                        self.local_settings.overlay_monitor_size = monitor.size;
+                        self.local_settings.overlay_monitor_scale_factor = monitor.scale_factor;
+                        detail::request_overlay_monitor_action(&mut self.detail, true);
+                    } else if let Some(job_id) = id.strip_prefix("job:") {
+                        self.cancel_job(job_id);
+                    } else if let Some(model) = id.strip_prefix("model:") {
+                        model.clone_into(&mut self.detail.chat_model);
+                    } else if let Some(candidate_id) = id.strip_prefix("pending-accept:") {
+                        self.resolve_memory_candidate(candidate_id, true);
+                    } else if let Some(candidate_id) = id.strip_prefix("pending-reject:") {
+                        self.resolve_memory_candidate(candidate_id, false);
+                    } else if let Some(action) =
+                        detail::project::handle_row(&mut self.detail, &companions, &id)
+                    {
+                        display = Some(action);
+                    }
+                }
+                _ => {}
+            }
+        }
+        display
+    }
+
+    fn read_detail_drafts(&mut self) {
+        let (search, draft_a, draft_b, tab) = {
+            let Some(win) = self.detail_win.as_ref() else {
+                return;
+            };
+            let Some(ui) = win.layer().and_then(|layer| layer.detail_ui()) else {
+                return;
+            };
+            (
+                ui.get_search().to_string(),
+                ui.get_draft_a().to_string(),
+                ui.get_draft_b().to_string(),
+                self.detail.tab,
+            )
+        };
+        self.detail.search = search;
+        match tab {
+            DetailTab::Conversation => {
+                self.detail.chat_plugin = draft_a;
+                self.detail.chat_model = draft_b;
+            }
+            DetailTab::Work => {
+                self.detail.new_job_title = draft_a;
+                self.detail.new_job_goal = draft_b;
+            }
+            DetailTab::System => {
+                self.local_settings.theme = draft_a;
+                self.local_settings.language = draft_b;
+            }
+            DetailTab::Voice => {
+                self.detail.tts_plugin = draft_a;
+                self.detail.stt_plugin = draft_b;
+            }
+            DetailTab::Companion => {
+                self.detail.body_ref_draft = draft_a;
+            }
+            _ => {}
+        }
+    }
+
+    fn dispatch_detail_primary(&mut self, command: detail::project::DetailPrimary) {
+        match command {
+            detail::project::DetailPrimary::ApplyAi => {
+                detail::apply_ai_patch(
+                    &mut self.detail,
+                    &self.client,
+                    &self.rt_handle,
+                    &self.async_results,
+                    true,
+                );
+                detail::apply_observation_patch(
+                    &mut self.detail,
+                    &self.client,
+                    &self.rt_handle,
+                    &self.async_results,
+                );
+            }
+            detail::project::DetailPrimary::ApplyVoice => {
+                detail::apply_voice_patch(
+                    &mut self.detail,
+                    &self.client,
+                    &self.rt_handle,
+                    &self.async_results,
+                );
+            }
+            detail::project::DetailPrimary::ApplySystem => {
+                self.detail.save_local_pending = true;
+                detail::request_overlay_monitor_action(&mut self.detail, true);
+            }
+            detail::project::DetailPrimary::ApplyBody => self.apply_body_ref(),
+            detail::project::DetailPrimary::CreateJob => self.submit_new_job(),
+            detail::project::DetailPrimary::RefreshMemory => self.request_memories(),
+            detail::project::DetailPrimary::ReloadMcp => self.reload_mcp_tools(),
+            detail::project::DetailPrimary::ReloadJobs => self.request_jobs(),
+            detail::project::DetailPrimary::ReloadCharacters => {
+                self.request_characters();
+                self.request_active_soul();
+            }
+            detail::project::DetailPrimary::ImportCharacter => self.import_character_dialog(),
+            detail::project::DetailPrimary::Reload => {
+                detail::ensure_settings(
+                    &mut self.detail,
+                    &self.client,
+                    &self.rt_handle,
+                    &self.async_results,
+                );
+            }
+        }
+    }
+
+    fn submit_new_job(&mut self) {
+        if self.detail.new_job_inflight {
+            return;
+        }
+        let goal = self.detail.new_job_goal.trim().to_owned();
+        if goal.is_empty() {
+            self.detail.core_status = i18n::fl("jobs-goal-required");
+            return;
+        }
+        let title = self.detail.new_job_title.trim();
+        let request = CreateJobRequest {
+            soul_id: self.session.soul_id().to_owned(),
+            goal,
+            title: if title.is_empty() {
+                None
+            } else {
+                Some(title.to_owned())
+            },
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
+        };
+        self.detail.new_job_inflight = true;
+        self.detail.submitted_job = Some(request.clone());
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::CreateJob(
+                client
+                    .create_job(&request)
+                    .await
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+
+    fn resolve_memory_candidate(&mut self, id: &str, accept: bool) {
+        let Some(original) = self
+            .detail
+            .pending_memories
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        self.detail.remove_candidate(id);
+        let soul_id = self.session.soul_id().to_owned();
+        let client = Arc::clone(&self.client);
+        let candidate_id = id.to_owned();
+        let decision = if accept {
+            ene_api::MemoryCandidateDecision::Accept
+        } else {
+            ene_api::MemoryCandidateDecision::Reject
+        };
+        self.spawn(async move {
+            let result = client
+                .resolve_memory_candidate(
+                    &candidate_id,
+                    &ene_api::ResolveMemoryCandidateRequest {
+                        decision,
+                        title: None,
+                        content: None,
+                        kind: None,
+                        scope: None,
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|err| err.to_string());
+            if result.is_err() {
+                AsyncOutcome::ResolveMemoryFailedKeepCandidate {
+                    soul_id,
+                    original,
+                    result,
+                }
+            } else {
+                AsyncOutcome::ResolveMemory {
+                    soul_id,
+                    id: candidate_id,
+                    result,
+                }
+            }
+        });
+    }
+
+    fn cancel_job(&mut self, id: &str) {
+        let id = id.to_owned();
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::CancelJob {
+                id: id.clone(),
+                result: client
+                    .cancel_job(&id)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.to_string()),
+            }
+        });
+    }
+
+    fn reload_mcp_tools(&self) {
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::ReloadMcpTools(
+                client
+                    .list_tools()
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+
+    fn apply_body_ref(&mut self) {
+        let soul_id = self.session.soul_id().to_owned();
+        let body_ref = self.detail.body_ref_draft.clone();
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            AsyncOutcome::PatchBody(
+                client
+                    .patch_soul_body(
+                        &soul_id,
+                        &SoulPatch {
+                            body_ref: Some(body_ref),
+                        },
+                    )
+                    .await
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+
+    fn import_character_dialog(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .add_filter("Character", &["enechar", "png", "json", "charx"])
+            .pick_file();
+        let Some(path) = picked else {
+            return;
+        };
+        self.start_character_import(&path);
+    }
+
+    fn start_character_import(&mut self, path: &Path) {
+        if self.detail.character_action_pending {
+            return;
+        }
+        self.detail.character_action_pending = true;
+        let generation = self.detail.next_activation_generation();
+        let client = Arc::clone(&self.client);
+        let path = path.to_string_lossy().into_owned();
+        self.spawn(async move {
+            AsyncOutcome::ImportCharacter {
+                generation,
+                result: client
+                    .import_character(&path)
+                    .await
+                    .map(|character| crate::tasks::ActivatedCharacter {
+                        character,
+                        target: None,
+                    })
+                    .map_err(|err| err.to_string()),
+            }
+        });
+    }
+
+    fn sync_spotlight_slint(&mut self) {
+        let Some(spotlight) = self.spotlight.as_ref() else {
+            return;
+        };
+        let Some(ui) = spotlight.layer().and_then(|layer| layer.spotlight_ui()) else {
+            return;
+        };
+        self.surface.spotlight_query = ui.get_query().to_string();
+        let entries = surface::spotlight::palette_entries();
+        let filtered = surface::spotlight::filter_entries(&self.surface.spotlight_query, &entries);
+        let model: Vec<crate::ui::SpotlightEntry> = filtered
+            .iter()
+            .map(|entry| crate::ui::SpotlightEntry {
+                id: slint::SharedString::from(spotlight_entry_id(entry)),
+                label: slint::SharedString::from(entry.label.as_str()),
+            })
+            .collect();
+        ui.set_entries(slint::ModelRc::new(slint::VecModel::from(model)));
+        let selected = self
+            .surface
+            .spotlight_selected
+            .min(filtered.len().saturating_sub(1));
+        self.surface.spotlight_selected = selected;
+        ui.set_selected(selected as i32);
+        ui.set_placeholder(i18n::fl("spotlight-placeholder").into());
+        ui.set_empty_text(i18n::fl("spotlight-no-match").into());
+        ui.set_title_text(i18n::fl("spotlight-title").into());
+        apply_theme_spotlight(ui, &self.local_settings.theme);
+    }
+
+    fn drain_spotlight_actions(&mut self) -> Option<SpotlightAction> {
+        let spotlight = self.spotlight.as_ref()?;
+        let actions = spotlight.take_actions();
+        let query = spotlight
+            .layer()
+            .and_then(|layer| layer.spotlight_ui())
+            .map(|ui| ui.get_query().to_string())
+            .unwrap_or_default();
+        self.surface.spotlight_query = query;
+        let entries = surface::spotlight::palette_entries();
+        let filtered = surface::spotlight::filter_entries(&self.surface.spotlight_query, &entries);
+        for action in actions {
+            match action {
+                ChromeAction::SpotlightDismiss => return Some(SpotlightAction::Close),
+                ChromeAction::SpotlightRun(id) => {
+                    if let Some(entry) = filtered
+                        .iter()
+                        .find(|entry| spotlight_entry_id(entry) == id)
+                    {
+                        return Some(entry.action);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn close_chat_window(&mut self) {
@@ -3685,15 +4616,24 @@ impl ApplicationHandler for StageApp {
                 return;
             }
         };
+        crate::renderer::slint_gpu::install(&gpu);
         match OverlayWindow::create(window, &gpu, self.settings.transparent_overlay) {
             Ok(mut overlay) => {
                 let transparency_fallback =
                     self.settings.transparent_overlay && !overlay.transparency_supported;
                 overlay.apply_click_through(self.local_settings.overlay_click_through);
+                let size = overlay.window.inner_size();
+                let mut layer =
+                    crate::renderer::slint_gpu::SlintOverlayLayer::new(size.width, size.height);
+                layer.ensure_component();
+                overlay.set_slint_layer(Some(layer));
                 if let Some((_, rx)) = crate::cursor_poll::spawn(50) {
                     self.cursor_poll = Some(rx);
                 }
                 self.overlay = Some(overlay);
+                if let Some(overlay) = self.overlay.as_ref() {
+                    self.overlay_platform = OverlayPlatform::attach(&overlay.window);
+                }
                 if transparency_fallback {
                     self.surface.overlay_notice = i18n::fl("overlay-transparency-unavailable");
                     self.detail.core_status = self.surface.overlay_notice.clone();
@@ -3716,6 +4656,12 @@ impl ApplicationHandler for StageApp {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let overlay_id = self.overlay.as_ref().map(OverlayWindow::id);
         if overlay_id == Some(id) {
+            if let Some(overlay) = self.overlay.as_ref() {
+                let scale = overlay.window.scale_factor();
+                if let Some(layer) = overlay.slint_layer() {
+                    layer.dispatch_winit(&event, scale);
+                }
+            }
             if matches!(event, WindowEvent::Focused(true))
                 && self.overlay_focus.on_focus_event(FocusOwner::Overlay, true)
             {
@@ -3726,6 +4672,13 @@ impl ApplicationHandler for StageApp {
                 WindowEvent::Focused(false) => {
                     self.gesture.cancel_all();
                     self.surface.drag = None;
+                    self.surface.hover_soul = None;
+                    self.interaction.cancel(CancelReason::FocusLost);
+                    self.sync_overlay_interaction();
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    self.surface.hover_soul = None;
+                    self.last_cursor = None;
                     self.sync_overlay_interaction();
                 }
                 WindowEvent::Resized(size) => {
@@ -3839,9 +4792,38 @@ impl ApplicationHandler for StageApp {
         if let Some(spotlight) = self.spotlight.as_mut()
             && spotlight.id() == id
         {
-            let repaint = spotlight.on_window_event(&event);
+            let mut skip_slint = false;
+            if let WindowEvent::KeyboardInput { event, .. } = &event
+                && event.state == ElementState::Pressed
+            {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        close_spotlight = true;
+                        skip_slint = true;
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.surface.spotlight_selected =
+                            self.surface.spotlight_selected.saturating_add(1);
+                        skip_slint = true;
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.surface.spotlight_selected =
+                            self.surface.spotlight_selected.saturating_sub(1);
+                        skip_slint = true;
+                    }
+                    _ => {}
+                }
+            }
+            let repaint = if skip_slint {
+                true
+            } else {
+                should_repaint_after_event(
+                    spotlight.on_window_event(&event),
+                    spotlight.owns_input(),
+                )
+            };
             chrome_focus_state = window_focus_state(&event);
-            close_spotlight = matches!(event, WindowEvent::CloseRequested);
+            close_spotlight = close_spotlight || matches!(event, WindowEvent::CloseRequested);
             if repaint && !close_spotlight {
                 spotlight.request_redraw();
             }
@@ -3903,10 +4885,6 @@ impl ApplicationHandler for StageApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::Poll);
-        if self.overlay_focus.expire_pending_loss(Instant::now()) {
-            self.sync_overlay_interaction();
-        }
         self.drain_async_results();
         self.poll_pending_approvals();
         self.drain_surface_events();
@@ -3919,6 +4897,9 @@ impl ApplicationHandler for StageApp {
         if self.surface.history.messages.is_empty() && !self.session.history().messages.is_empty() {
             self.seed_history_from_session();
         }
+        if self.overlay_focus.expire_pending_loss(Instant::now()) {
+            self.sync_overlay_interaction();
+        }
         self.tick_overlay();
         self.paint_chrome(event_loop);
         self.process_overlay_monitor_action(event_loop);
@@ -3929,7 +4910,22 @@ impl ApplicationHandler for StageApp {
         }
         if self.surface.quit {
             event_loop.exit();
+            return;
         }
+        let overlay_dirty = self
+            .overlay
+            .as_ref()
+            .is_some_and(OverlayWindow::needs_redraw);
+        let chrome_dirty = self.chat.as_ref().is_some_and(ChromeWindow::needs_gpu)
+            || self
+                .detail_win
+                .as_ref()
+                .is_some_and(ChromeWindow::needs_gpu)
+            || self.caption.as_ref().is_some_and(ChromeWindow::needs_gpu)
+            || self.spotlight.as_ref().is_some_and(ChromeWindow::needs_gpu);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + overlay_wake_period(overlay_dirty || chrome_dirty),
+        ));
     }
 }
 
@@ -3938,6 +4934,41 @@ fn auth_failure(err: &str) -> bool {
     lower.contains("401 unauthorized")
         || lower.contains("403 forbidden")
         || lower.contains("no cookie auth")
+}
+
+/// Cyan AABB is drag-only. Hover (including X11 global-cursor poll) must not
+/// paint the interaction outline in normal mode.
+#[must_use]
+fn overlay_outline_soul<'a>(
+    drag_soul: Option<&'a str>,
+    _hover_soul: Option<&'a str>,
+) -> Option<&'a str> {
+    drag_soul
+}
+
+/// Idle overlay wakes slowly so look-at/blink can still fire without a 60 Hz GPU tick.
+#[must_use]
+fn overlay_wake_period(needs_redraw: bool) -> Duration {
+    if needs_redraw {
+        Duration::from_millis(16)
+    } else {
+        Duration::from_millis(250)
+    }
+}
+
+#[must_use]
+fn chrome_frame_needed(gpu_dirty: bool, last: Option<u64>, revision: u64) -> bool {
+    gpu_dirty || last != Some(revision)
+}
+
+fn snap_px(value: f32) -> i32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "pixel-quantized overlay dirty compare"
+    )]
+    {
+        value.round() as i32
+    }
 }
 
 fn provider_asset_load_status(count: usize) -> String {
@@ -3970,14 +5001,126 @@ fn window_focus_state(event: &WindowEvent) -> Option<bool> {
     }
 }
 
-/// `egui_winit` only raises its repaint flag on input that changes what it
-/// wants to draw (typing, focus changes, resize); trailing mouse moves leave it
-/// down. Dropping the flag lets an OS-throttled event loop defer that frame
-/// until the next interaction, so pasted input into a `TextEdit` appears one
-/// action late and users retype it into what looks like an empty field.
+/// Repaint when Slint marked the window dirty, or when a text field is
+/// focused so IME/paste is not deferred until the next pointer event.
 #[must_use]
 fn should_repaint_after_event(repaint_flag: bool, composer_focused: bool) -> bool {
     repaint_flag || composer_focused
+}
+
+fn apply_theme_overlay(ui: &crate::ui::StageOverlay, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_theme_chat(ui: &crate::ui::ChatSurface, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_theme_detail(ui: &crate::ui::DetailSurface, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_theme_caption(ui: &crate::ui::CaptionSurface, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_theme_spotlight(ui: &crate::ui::SpotlightSurface, theme: &str) {
+    apply_ene_theme(&crate::ui::EneTheme::get(ui), theme);
+}
+
+fn apply_ene_theme(global: &crate::ui::EneTheme<'_>, theme: &str) {
+    if theme == "light" {
+        global.set_dark(false);
+        global.set_bg(slint::Color::from_rgb_u8(0xf4, 0xf5, 0xf7));
+        global.set_bg_elevated(slint::Color::from_rgb_u8(0xff, 0xff, 0xff));
+        global.set_fg(slint::Color::from_rgb_u8(0x1a, 0x1c, 0x20));
+        global.set_fg_muted(slint::Color::from_rgb_u8(0x5f, 0x63, 0x68));
+        global.set_bubble(slint::Color::from_rgb_u8(0xe8, 0xea, 0xed));
+        global.set_bubble_user(slint::Color::from_rgb_u8(0xc5, 0xda, 0xf0));
+    } else {
+        global.set_dark(true);
+        global.set_bg(slint::Color::from_rgb_u8(0x16, 0x18, 0x1d));
+        global.set_bg_elevated(slint::Color::from_rgb_u8(0x1e, 0x22, 0x29));
+        global.set_fg(slint::Color::from_rgb_u8(0xe8, 0xea, 0xed));
+        global.set_fg_muted(slint::Color::from_rgb_u8(0x9a, 0xa0, 0xa6));
+        global.set_bubble(slint::Color::from_rgb_u8(0x26, 0x2b, 0x33));
+        global.set_bubble_user(slint::Color::from_rgb_u8(0x34, 0x5a, 0x82));
+    }
+    crate::ui::theme::apply_to_global(
+        global,
+        &crate::ui::theme::load_user_theme(&user_theme_file()),
+    );
+}
+
+fn apply_chat_copy(ui: &crate::ui::ChatSurface) {
+    ui.set_title_text(i18n::fl("surface-title").into());
+    ui.set_detail_label(i18n::fl("chat-open-detail").into());
+    ui.set_new_label(i18n::fl("chat-new-session").into());
+    ui.set_send_label(i18n::fl("chat-send").into());
+    ui.set_cancel_label(i18n::fl("chat-cancel").into());
+    ui.set_barge_label(i18n::fl("chat-barge-in").into());
+    ui.set_mic_on_label(i18n::fl("mic-on").into());
+    ui.set_mic_off_label(i18n::fl("mic-off").into());
+    ui.set_allow_label(i18n::fl("approval-allow").into());
+    ui.set_always_label(i18n::fl("approval-always").into());
+    ui.set_deny_label(i18n::fl("approval-deny").into());
+    ui.set_answer_label(i18n::fl("ask-user-answer").into());
+    ui.set_placeholder(i18n::fl("chat-placeholder").into());
+    ui.set_prompt_label(i18n::fl("chat-mode-prompt").into());
+    ui.set_steer_label(i18n::fl("chat-mode-steer").into());
+    ui.set_follow_up_label(i18n::fl("chat-mode-follow-up").into());
+    ui.set_question_placeholder(i18n::fl("ask-user-answer").into());
+}
+
+#[must_use]
+fn should_push_detail_drafts(input_focused: bool, ui_tab: i32, state_tab: i32) -> bool {
+    ui_tab != state_tab || !input_focused
+}
+
+#[must_use]
+fn question_answer_text(question_draft: &str, chat_draft: &str, prompt: &str) -> String {
+    let question = question_draft.trim();
+    if !question.is_empty() {
+        return question.to_owned();
+    }
+    let chat = chat_draft.trim();
+    if !chat.is_empty() {
+        return chat.to_owned();
+    }
+    prompt.to_owned()
+}
+
+#[must_use]
+fn message_mode_index(mode: MessageMode) -> i32 {
+    match mode {
+        MessageMode::Prompt => 0,
+        MessageMode::Steer => 1,
+        MessageMode::FollowUp => 2,
+    }
+}
+
+#[must_use]
+fn message_mode_from_index(index: i32) -> MessageMode {
+    match index {
+        1 => MessageMode::Steer,
+        2 => MessageMode::FollowUp,
+        _ => MessageMode::Prompt,
+    }
+}
+
+fn user_theme_file() -> std::path::PathBuf {
+    ene_config::data_dir().join("theme.toml")
+}
+
+fn spotlight_entry_id(entry: &crate::surface::spotlight::SpotlightEntry) -> String {
+    match entry.action {
+        SpotlightAction::Close => "close".to_owned(),
+        SpotlightAction::Command(ShellCommand::ToggleMic) => "mic".to_owned(),
+        SpotlightAction::Command(ShellCommand::OpenChat) => "chat".to_owned(),
+        SpotlightAction::Command(ShellCommand::Quit) => "quit".to_owned(),
+        SpotlightAction::Command(ShellCommand::OpenDetail(tab)) => format!("detail:{tab:?}"),
+        SpotlightAction::Command(_) => entry.label.clone(),
+    }
 }
 
 /// How long overlay protection survives a chrome Focused(false) while waiting
@@ -4025,6 +5168,72 @@ fn map_turn_err(err: &str) -> String {
     } else {
         err.to_owned()
     }
+}
+
+fn project_world_to_px(
+    world: glam::Vec3,
+    view_proj: glam::Mat4,
+    viewport: (u32, u32),
+) -> (glam::Vec2, bool, bool) {
+    let clip = view_proj * world.extend(1.0);
+    let behind = clip.w <= 0.0;
+    let ndc = if clip.w.abs() <= f32::EPSILON {
+        glam::Vec2::ZERO
+    } else {
+        glam::Vec2::new(clip.x / clip.w, clip.y / clip.w)
+    };
+    let width = viewport.0.max(1) as f32;
+    let height = viewport.1.max(1) as f32;
+    let mut px = glam::Vec2::new(
+        ndc.x.mul_add(0.5, 0.5) * width,
+        (0.5 - ndc.y * 0.5) * height,
+    );
+    let offscreen = px.x < 0.0 || px.y < 0.0 || px.x > width || px.y > height || behind;
+    px.x = px.x.clamp(0.0, width);
+    px.y = px.y.clamp(0.0, height);
+    (px, offscreen, behind)
+}
+
+fn world_aabb_to_px(
+    min: glam::Vec3,
+    max: glam::Vec3,
+    view_proj: glam::Mat4,
+    viewport: (u32, u32),
+) -> PxRect {
+    let corners = [
+        glam::Vec3::new(min.x, min.y, min.z),
+        glam::Vec3::new(min.x, min.y, max.z),
+        glam::Vec3::new(min.x, max.y, min.z),
+        glam::Vec3::new(min.x, max.y, max.z),
+        glam::Vec3::new(max.x, min.y, min.z),
+        glam::Vec3::new(max.x, min.y, max.z),
+        glam::Vec3::new(max.x, max.y, min.z),
+        glam::Vec3::new(max.x, max.y, max.z),
+    ];
+    let width = viewport.0.max(1) as f32;
+    let height = viewport.1.max(1) as f32;
+    let mut min_px = glam::Vec2::splat(f32::INFINITY);
+    let mut max_px = glam::Vec2::splat(f32::NEG_INFINITY);
+    for corner in corners {
+        let clip = view_proj * corner.extend(1.0);
+        let ndc = if clip.w.abs() <= f32::EPSILON {
+            glam::Vec2::ZERO
+        } else {
+            glam::Vec2::new(clip.x / clip.w, clip.y / clip.w)
+        };
+        let px = glam::Vec2::new(
+            ndc.x.mul_add(0.5, 0.5) * width,
+            (0.5 - ndc.y * 0.5) * height,
+        );
+        min_px = min_px.min(px);
+        max_px = max_px.max(px);
+    }
+    PxRect::new(
+        min_px.x,
+        min_px.y,
+        (max_px.x - min_px.x).max(1.0),
+        (max_px.y - min_px.y).max(1.0),
+    )
 }
 
 fn position_changed(before: [f32; 2], after: [f32; 2]) -> bool {
@@ -4097,9 +5306,13 @@ fn friendly_cancel_job_error(err: &str) -> String {
 mod tests {
     use super::{
         AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
-        OverlayFocus, StageApp, cancel_already_terminal, chat_window_action, format_log_text,
-        friendly_cancel_job_error, friendly_create_job_error, overlay_window_level,
-        provider_asset_load_status, should_repaint_after_event, window_focus_state, window_level,
+        OverlayFocus, StageApp, auth_failure, cancel_already_terminal, chat_window_action,
+        chrome_frame_needed, create_denied_by_approval, disambiguated_occupant_label,
+        format_log_text, friendly_cancel_job_error, friendly_create_job_error, map_turn_err,
+        message_mode_from_index, overlay_outline_soul, overlay_wake_period, overlay_window_level,
+        position_changed, project_world_to_px, provider_asset_load_status, question_answer_text,
+        should_push_detail_drafts, should_repaint_after_event, spotlight_entry_id, user_theme_file,
+        window_focus_state, window_level, world_aabb_to_px,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -4107,7 +5320,9 @@ mod tests {
     use crate::i18n;
     use crate::surface::{PendingApproval, PendingQuestion};
     use ene_api::CreateJobRequest;
-    use ene_api::{HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView};
+    use ene_api::{
+        HistoryResponse, MemoryCandidateView, MemoryJournalView, MemoryView, MessageMode,
+    };
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::Instant;
@@ -4489,6 +5704,229 @@ mod tests {
 
         focus.transition(FocusTarget::Detail);
         assert!(focus.protects());
+    }
+
+    #[test]
+    fn overlay_focus_set_is_idempotent_for_the_same_target() {
+        let mut focus = OverlayFocus::default();
+        assert!(focus.set(FocusTarget::Chat));
+        assert!(!focus.set(FocusTarget::Chat));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn mark_pending_loss_is_a_noop_without_a_target() {
+        let mut focus = OverlayFocus::default();
+        assert!(!focus.mark_pending_loss());
+        assert!(!focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn clear_target_only_drops_the_matching_chrome() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Chat);
+        focus.clear_target(FocusTarget::Detail);
+        assert!(focus.protects());
+        focus.clear_target(FocusTarget::Chat);
+        assert!(!focus.protects());
+    }
+
+    #[test]
+    fn cancel_pending_loss_keeps_the_current_target() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Caption);
+        assert!(!focus.on_focus_event(FocusOwner::Caption, false));
+        focus.cancel_pending_loss();
+        assert!(!focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn spotlight_and_caption_focus_protect_the_overlay() {
+        let mut focus = OverlayFocus::default();
+        assert!(focus.on_focus_event(FocusOwner::Spotlight, true));
+        assert!(focus.protects());
+        assert!(focus.on_focus_event(FocusOwner::Caption, true));
+        assert!(focus.protects());
+        assert!(!focus.on_focus_event(FocusOwner::Overlay, false));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn hover_does_not_paint_the_cyan_outline() {
+        assert_eq!(overlay_outline_soul(None, Some("soul")), None);
+        assert_eq!(
+            overlay_outline_soul(Some("drag"), Some("hover")),
+            Some("drag")
+        );
+        assert_eq!(overlay_outline_soul(None, None), None);
+    }
+
+    #[test]
+    fn chrome_window_exists_is_false_without_chrome() {
+        let app = StageApp::new_for_test();
+        assert!(!app.chrome_window_exists());
+        assert_eq!(app.visible_display_count(), 0);
+        assert!(!app.has_avatar_occupant("soul"));
+        assert!(app.chat_targets().is_empty());
+        assert_eq!(app.companion_label_for_soul("soul"), "soul");
+        assert_eq!(app.active_companion_label(), "soul");
+        assert!(app.overlay_motion_controls().is_empty());
+    }
+
+    #[test]
+    fn auth_failure_matches_http_and_cookie_messages() {
+        assert!(auth_failure("401 Unauthorized"));
+        assert!(auth_failure("403 Forbidden"));
+        assert!(auth_failure("NO COOKIE AUTH"));
+        assert!(!auth_failure("timeout"));
+        assert!(!auth_failure(""));
+    }
+
+    #[test]
+    fn map_turn_err_translates_known_classes() {
+        assert_eq!(
+            map_turn_err("no_active_operation"),
+            i18n::fl("chat-no-active-turn")
+        );
+        assert_eq!(
+            map_turn_err("401 Unauthorized"),
+            i18n::fl("chat-auth-failed")
+        );
+        assert_eq!(map_turn_err("boom"), "boom");
+    }
+
+    #[test]
+    fn position_changed_uses_epsilon_and_rejects_nan() {
+        assert!(!position_changed([1.0, 2.0], [1.0, 2.0]));
+        assert!(position_changed([1.0, 2.0], [1.0, 2.1]));
+        assert!(position_changed([f32::NAN, 0.0], [0.0, 0.0]));
+        assert!(!position_changed(
+            [1.0, 2.0],
+            [1.0 + f32::EPSILON / 2.0, 2.0]
+        ));
+    }
+
+    #[test]
+    fn project_world_to_px_handles_behind_and_zero_viewport() {
+        let identity = glam::Mat4::IDENTITY;
+        let (px, offscreen, behind) = project_world_to_px(glam::Vec3::ZERO, identity, (100, 50));
+        assert!(!behind);
+        assert!(!offscreen);
+        assert!((px.x - 50.0).abs() < 1e-4);
+        assert!((px.y - 25.0).abs() < 1e-4);
+
+        let behind_m = glam::Mat4::from_cols(
+            glam::Vec4::X,
+            glam::Vec4::Y,
+            glam::Vec4::Z,
+            glam::Vec4::new(0.0, 0.0, 0.0, -1.0),
+        );
+        let (behind_px, offscreen_behind, is_behind) =
+            project_world_to_px(glam::Vec3::ZERO, behind_m, (0, 0));
+        assert!(is_behind);
+        assert!(offscreen_behind);
+        assert!(behind_px.x >= 0.0 && behind_px.y >= 0.0);
+    }
+
+    #[test]
+    fn world_aabb_to_px_has_minimum_extent() {
+        let rect = world_aabb_to_px(
+            glam::Vec3::ZERO,
+            glam::Vec3::ZERO,
+            glam::Mat4::IDENTITY,
+            (100, 100),
+        );
+        assert!(rect.w >= 1.0);
+        assert!(rect.h >= 1.0);
+    }
+
+    #[test]
+    fn create_denied_by_approval_is_case_insensitive() {
+        assert!(create_denied_by_approval("Job Creation Denied"));
+        assert!(!create_denied_by_approval("forbidden"));
+    }
+
+    #[test]
+    fn user_theme_file_is_under_the_data_dir() {
+        let path = user_theme_file();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("theme.toml")
+        );
+    }
+
+    #[test]
+    fn spotlight_entry_id_is_stable_for_known_actions() {
+        use crate::shell::ShellCommand;
+        use crate::surface::spotlight::SpotlightEntry;
+        assert_eq!(
+            spotlight_entry_id(&SpotlightEntry {
+                label: "x".into(),
+                action: crate::surface::SpotlightAction::Close,
+                keywords: &[],
+                shortcut: None,
+            }),
+            "close"
+        );
+        assert_eq!(
+            spotlight_entry_id(&SpotlightEntry {
+                label: "x".into(),
+                action: crate::surface::SpotlightAction::Command(ShellCommand::ToggleMic),
+                keywords: &[],
+                shortcut: None,
+            }),
+            "mic"
+        );
+        assert_eq!(
+            spotlight_entry_id(&SpotlightEntry {
+                label: "fallback".into(),
+                action: crate::surface::SpotlightAction::Command(ShellCommand::Quit),
+                keywords: &[],
+                shortcut: None,
+            }),
+            "quit"
+        );
+    }
+
+    #[test]
+    fn disambiguated_occupant_label_suffixes_duplicates() {
+        let occupants = vec![
+            ene_api::OccupantView {
+                soul_id: "a".into(),
+                display_name: String::new(),
+                body_id: None,
+                package_id: Some("char.Twin".into()),
+                avatar_path: None,
+            },
+            ene_api::OccupantView {
+                soul_id: "b".into(),
+                display_name: String::new(),
+                body_id: None,
+                package_id: Some("char.Twin".into()),
+                avatar_path: None,
+            },
+        ];
+        assert_eq!(disambiguated_occupant_label(&occupants, "a"), "Twin 1");
+        assert_eq!(disambiguated_occupant_label(&occupants, "b"), "Twin 2");
+        assert_eq!(
+            disambiguated_occupant_label(&occupants, "missing"),
+            "missing"
+        );
+    }
+
+    #[test]
+    fn idle_overlay_wakes_slower_than_a_dirty_frame() {
+        assert_eq!(overlay_wake_period(true), Duration::from_millis(16));
+        assert_eq!(overlay_wake_period(false), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn chrome_frame_needed_skips_unchanged_idle_windows() {
+        assert!(chrome_frame_needed(true, Some(1), 1));
+        assert!(chrome_frame_needed(false, None, 1));
+        assert!(chrome_frame_needed(false, Some(1), 2));
+        assert!(!chrome_frame_needed(false, Some(1), 1));
     }
 
     #[test]
@@ -5158,6 +6596,34 @@ mod tests {
             app.detail.core_status
         );
     }
+
+    #[test]
+    fn empty_job_goal_does_not_submit() {
+        let mut app = StageApp::new_for_test();
+        app.detail.new_job_title = "Plant care".to_owned();
+        app.submit_new_job();
+        assert!(!app.detail.new_job_inflight);
+        assert!(app.detail.submitted_job.is_none());
+        assert_eq!(app.detail.core_status, i18n::fl("jobs-goal-required"));
+    }
+
+    #[test]
+    fn work_submit_records_create_job_not_ai_patch() {
+        let mut app = StageApp::new_for_test();
+        app.detail.new_job_title = "Plant care".to_owned();
+        app.detail.new_job_goal = "water the plants".to_owned();
+        app.dispatch_detail_primary(crate::detail::project::DetailPrimary::CreateJob);
+        assert!(app.detail.new_job_inflight);
+        let submitted = app
+            .detail
+            .submitted_job
+            .as_ref()
+            .expect("create-job must stash the request");
+        assert_eq!(submitted.goal, "water the plants");
+        assert_eq!(submitted.title.as_deref(), Some("Plant care"));
+        assert_eq!(submitted.soul_id, "soul");
+    }
+
     #[test]
     fn create_job_denied_by_approval_gets_user_facing_message() {
         let raw = "http 403: forbidden: job creation denied";
@@ -5434,7 +6900,7 @@ mod tests {
     fn repaints_after_input_even_when_the_flag_is_dropped() {
         assert!(!should_repaint_after_event(false, false));
 
-        // Typing and pasting raise the egui_winit repaint flag; honoring it
+        // Typing and pasting raise the Slint redraw flag; honoring it
         // keeps their frame immediate even while an OS throttles the loop.
         assert!(should_repaint_after_event(true, false));
     }
@@ -5446,6 +6912,31 @@ mod tests {
         // coalesces internally, so this stays cheap).
         assert!(should_repaint_after_event(false, true));
         assert!(should_repaint_after_event(true, true));
+    }
+
+    #[test]
+    fn detail_drafts_are_not_pushed_while_the_same_tab_is_focused() {
+        assert!(!should_push_detail_drafts(true, 2, 2));
+        assert!(should_push_detail_drafts(true, 2, 3));
+        assert!(should_push_detail_drafts(false, 2, 2));
+    }
+
+    #[test]
+    fn question_answer_prefers_the_question_field() {
+        assert_eq!(
+            question_answer_text(" typed answer ", "composer", "prompt"),
+            "typed answer"
+        );
+        assert_eq!(question_answer_text("  ", "composer", "prompt"), "composer");
+        assert_eq!(question_answer_text("", "", "prompt"), "prompt");
+    }
+
+    #[test]
+    fn message_mode_index_round_trips() {
+        assert_eq!(message_mode_from_index(0), MessageMode::Prompt);
+        assert_eq!(message_mode_from_index(1), MessageMode::Steer);
+        assert_eq!(message_mode_from_index(2), MessageMode::FollowUp);
+        assert_eq!(message_mode_from_index(99), MessageMode::Prompt);
     }
 }
 

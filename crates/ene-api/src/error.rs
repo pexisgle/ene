@@ -40,3 +40,18 @@ impl ApiError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ApiError;
+    use crate::types::Problem;
+
+    #[test]
+    fn error_class_matches_variant() {
+        assert_eq!(ApiError::Transport("x".into()).error_class(), "transport");
+        assert_eq!(ApiError::Codec("x".into()).error_class(), "codec");
+        assert_eq!(ApiError::Websocket("x".into()).error_class(), "websocket");
+        let problem = ApiError::from_problem(401, Problem::new(401, "auth", "nope"));
+        assert_eq!(problem.error_class(), "auth");
+    }
+}
