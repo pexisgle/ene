@@ -94,19 +94,19 @@ fn minimal_vrm0_loads_with_expected_runtime_data() {
         3,
         "expected exactly 3 expressions, got {names:?}"
     );
-    for expected in ["joy", "sorrow", "blink"] {
+    for expected in ["happy", "sad", "blink"] {
         assert!(
             names.contains(&expected),
             "expression {expected} missing from {names:?}"
         );
     }
-    let joy = model
+    let happy = model
         .expressions_meta
         .iter()
-        .find(|e| e.name.as_str() == "joy")
+        .find(|e| e.name.as_str() == "happy")
         .unwrap();
-    assert_eq!(joy.morph_target_binds.len(), 1);
-    let bind = &joy.morph_target_binds[0];
+    assert_eq!(happy.morph_target_binds.len(), 1);
+    let bind = &happy.morph_target_binds[0];
     assert_eq!(bind.node, 5); // FaceMorphQuad node carries mesh 1
     assert_eq!(bind.index, 0);
     assert!((bind.weight - 0.9).abs() < 1e-6); // legacy 90% -> 0.9

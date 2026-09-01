@@ -327,10 +327,17 @@ pub fn canonicalize_bone_name(raw: &str) -> Option<VrmBone> {
         }
     }
     if HUMANOID_BONE_NAMES.contains(&normalised.as_str()) {
-        Some(VrmBone(normalised))
-    } else {
-        None
+        return Some(VrmBone(normalised));
     }
+    // VRM 0.x thumb chains omit the metacarpal bone VRM 1.0 added; map the
+    // legacy intermediate segment onto proximal so VRMA retargeting and look-at
+    // still find a joint instead of silently dropping the track.
+    let alias = match normalised.as_str() {
+        "leftthumbintermediate" => "leftthumbproximal",
+        "rightthumbintermediate" => "rightthumbproximal",
+        _ => return None,
+    };
+    Some(VrmBone(alias.to_owned()))
 }
 
 /// Parse `Document::extensions()["VRMC_vrm"]["humanoid"]["humanBones"]`
