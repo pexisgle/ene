@@ -43,6 +43,7 @@ pub struct CompanionAvatar {
     motion_idx: usize,
     manual_motion_override: bool,
     look_at_target: Option<Vec3>,
+    applied_look_at: Option<Vec3>,
     pending_visemes: Option<VisemeWeights>,
     expression_cue: Option<(String, f32, f32)>,
     interaction_feedback: f32,
@@ -78,6 +79,7 @@ impl CompanionAvatar {
             motion_idx: 0,
             manual_motion_override: false,
             look_at_target: None,
+            applied_look_at: None,
             pending_visemes: None,
             expression_cue: None,
             interaction_feedback: 0.0,
@@ -325,6 +327,10 @@ impl CompanionAvatar {
         self.look_at_target = Some(target);
     }
 
+    pub fn clear_look_at_target(&mut self) {
+        self.look_at_target = None;
+    }
+
     pub fn apply_body_event(&mut self, value: &Value) {
         let Some(kind) = value.get("type").and_then(Value::as_str) else {
             return;
@@ -427,6 +433,7 @@ impl CompanionAvatar {
         self.model.update_skin_palette(&frame, bone);
         self.last_hips = hips;
         self.step_springs(dt, hips);
+        self.applied_look_at = self.look_at_target;
     }
 
     fn tick_idle(&mut self, dt: f32) {
@@ -589,7 +596,7 @@ impl CompanionAvatar {
     pub fn needs_redraw(&self) -> bool {
         self.vrma.is_some()
             || self.pending_visemes.is_some()
-            || self.look_at_target.is_some()
+            || look_at_is_dirty(self.look_at_target, self.applied_look_at)
             || self.blinking > 0.0
             || self.expression_cue.is_some()
             || self.interaction_feedback > 0.0
@@ -867,6 +874,16 @@ fn discover_motions(dir: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
+/// True when the look-at target has moved enough to justify another GPU frame.
+#[must_use]
+pub fn look_at_is_dirty(target: Option<Vec3>, applied: Option<Vec3>) -> bool {
+    match (target, applied) {
+        (Some(next), Some(was)) => next.distance_squared(was) > 1e-6,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,6 +928,22 @@ mod tests {
     fn unknown_expression_is_not_stored() {
         let value = serde_json::json!({ "type": "body.posture", "name": "sit" });
         assert_eq!(value["type"], "body.posture");
+    }
+
+    #[test]
+    fn look_at_is_dirty_only_when_the_target_moves() {
+        assert!(!look_at_is_dirty(None, None));
+        assert!(!look_at_is_dirty(None, Some(Vec3::ZERO)));
+        assert!(look_at_is_dirty(Some(Vec3::ZERO), None));
+        assert!(!look_at_is_dirty(Some(Vec3::ZERO), Some(Vec3::ZERO)));
+        assert!(look_at_is_dirty(
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            Some(Vec3::ZERO)
+        ));
+        assert!(!look_at_is_dirty(
+            Some(Vec3::new(1e-5, 0.0, 0.0)),
+            Some(Vec3::ZERO)
+        ));
     }
 
     #[test]

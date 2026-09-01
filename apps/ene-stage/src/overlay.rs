@@ -266,20 +266,21 @@ impl OverlayWindow {
         visemes: Option<ene_vrm::VisemeWeights>,
         speaking_soul: Option<&str>,
         highlight_soul: Option<&str>,
-    ) -> Result<(), OverlayError> {
+    ) -> Result<bool, OverlayError> {
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
         for slot in &mut self.slots {
             if let Some(target) = look_at {
                 slot.avatar.set_look_at_target(target);
+            } else {
+                slot.avatar.clear_look_at_target();
             }
             if speaking_soul.is_some_and(|id| id == slot.soul_id)
                 && let Some(weights) = visemes
             {
                 slot.avatar.apply_viseme(weights);
             }
-            slot.avatar.tick(dt);
         }
         let highlight =
             highlight_soul.and_then(|soul| self.slots.iter().position(|slot| slot.soul_id == soul));
@@ -288,13 +289,16 @@ impl OverlayWindow {
             .as_ref()
             .is_some_and(SlintOverlayLayer::needs_redraw);
         let avatar_dirty = self.slots.iter().any(|slot| slot.avatar.needs_redraw());
-        if !avatar_dirty
-            && !slint_dirty
-            && !self.collider_debug
-            && highlight.is_none()
-            && !self.gpu_dirty
-        {
-            return Ok(());
+        let gpu_needed = avatar_dirty
+            || slint_dirty
+            || self.collider_debug
+            || highlight.is_some()
+            || self.gpu_dirty;
+        for slot in &mut self.slots {
+            slot.avatar.tick(dt);
+        }
+        if !gpu_needed {
+            return Ok(false);
         }
         self.gpu_dirty = false;
         let mut avatars: Vec<&mut CompanionAvatar> =
@@ -307,7 +311,8 @@ impl OverlayWindow {
                 highlight,
                 self.slint_layer.as_ref(),
             )
-            .map_err(OverlayError::Avatar)
+            .map_err(OverlayError::Avatar)?;
+        Ok(true)
     }
 }
 

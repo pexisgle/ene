@@ -74,4 +74,10 @@ mod tests {
         let err = decode_pcm_s16le(&[0, 1, 2]).expect_err("odd");
         assert_eq!(err.error_class(), "codec");
     }
+
+    #[test]
+    fn empty_pcm_roundtrips_to_empty_bytes() {
+        assert!(encode_pcm_s16le(&[]).is_empty());
+        assert_eq!(decode_pcm_s16le(&[]).expect("empty"), Vec::<f32>::new());
+    }
 }

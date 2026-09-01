@@ -2811,9 +2811,12 @@ impl StageApp {
         disambiguated_occupant_label(self.session.occupants(), soul_id)
     }
 
-    #[expect(
-        dead_code,
-        reason = "motion picker remains on DetailUiState until the Slint companion tab grows a combo"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "motion picker remains on DetailUiState until the Slint companion tab grows a combo"
+        )
     )]
     fn overlay_motion_controls(&self) -> Vec<detail::MotionControl> {
         self.overlay
@@ -3172,6 +3175,9 @@ impl StageApp {
         }
 
         self.sync_overlay_interaction();
+        if let Some(overlay) = self.overlay.as_ref() {
+            overlay.window.request_redraw();
+        }
     }
 
     #[expect(dead_code, reason = "kept for symmetry with on_overlay_release")]
@@ -3348,12 +3354,14 @@ impl StageApp {
             return;
         };
         let surface_positions = self.surface.positions.clone();
-        let highlight_soul = self
-            .surface
-            .drag
-            .as_ref()
-            .map(|drag| drag.soul_id().to_owned())
-            .or_else(|| self.surface.hover_soul.clone());
+        let highlight_soul = overlay_outline_soul(
+            self.surface
+                .drag
+                .as_ref()
+                .map(crate::drag::BodyDrag::soul_id),
+            self.surface.hover_soul.as_deref(),
+        )
+        .map(str::to_owned);
         let mut corrected_positions = Vec::new();
         {
             let Some(overlay) = self.overlay.as_mut() else {
@@ -3381,23 +3389,27 @@ impl StageApp {
                 }
                 slot.avatar.tick_expression_cue(dt);
             }
-            if let Err(err) = overlay.tick_and_render(
+            match overlay.tick_and_render(
                 gpu,
                 look,
                 Some(visemes),
                 Some(soul.as_str()),
                 highlight_soul.as_deref(),
             ) {
-                match err {
+                Ok(drew) => {
+                    if drew {
+                        overlay.window.request_redraw();
+                    }
+                }
+                Err(err) => match err {
                     OverlayError::Surface(_) => {
                         tracing::debug!(error = %err, "overlay surface skipped");
                     }
                     OverlayError::Avatar(inner) => {
                         tracing::debug!(error = %inner, "overlay avatar");
                     }
-                }
+                },
             }
-            overlay.window.request_redraw();
         }
         let layout_changed = !corrected_positions.is_empty();
         for (soul_id, position) in corrected_positions {
@@ -4423,6 +4435,11 @@ impl ApplicationHandler for StageApp {
                         self.on_overlay_cursor_moved(position);
                     }
                 }
+                WindowEvent::CursorLeft { .. } => {
+                    self.surface.hover_soul = None;
+                    self.last_cursor = None;
+                    self.sync_overlay_interaction();
+                }
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
@@ -4615,8 +4632,12 @@ impl ApplicationHandler for StageApp {
             event_loop.exit();
             return;
         }
+        let overlay_dirty = self
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.slots.iter().any(|slot| slot.avatar.needs_redraw()));
         event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(16),
+            Instant::now() + overlay_wake_period(overlay_dirty),
         ));
     }
 }
@@ -4626,6 +4647,26 @@ fn auth_failure(err: &str) -> bool {
     lower.contains("401 unauthorized")
         || lower.contains("403 forbidden")
         || lower.contains("no cookie auth")
+}
+
+/// Cyan AABB is drag-only. Hover (including X11 global-cursor poll) must not
+/// paint the interaction outline in normal mode.
+#[must_use]
+fn overlay_outline_soul<'a>(
+    drag_soul: Option<&'a str>,
+    _hover_soul: Option<&'a str>,
+) -> Option<&'a str> {
+    drag_soul
+}
+
+/// Idle overlay wakes slowly so look-at/blink can still fire without a 60 Hz GPU tick.
+#[must_use]
+fn overlay_wake_period(needs_redraw: bool) -> Duration {
+    if needs_redraw {
+        Duration::from_millis(16)
+    } else {
+        Duration::from_millis(250)
+    }
 }
 
 fn provider_asset_load_status(count: usize) -> String {
@@ -4895,9 +4936,12 @@ fn friendly_cancel_job_error(err: &str) -> String {
 mod tests {
     use super::{
         AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
-        OverlayFocus, StageApp, cancel_already_terminal, chat_window_action, format_log_text,
-        friendly_cancel_job_error, friendly_create_job_error, overlay_window_level,
-        provider_asset_load_status, should_repaint_after_event, window_focus_state, window_level,
+        OverlayFocus, StageApp, auth_failure, cancel_already_terminal, chat_window_action,
+        create_denied_by_approval, disambiguated_occupant_label, format_log_text,
+        friendly_cancel_job_error, friendly_create_job_error, map_turn_err, overlay_outline_soul,
+        overlay_wake_period, overlay_window_level, position_changed, project_world_to_px,
+        provider_asset_load_status, should_repaint_after_event, spotlight_entry_id,
+        user_theme_file, window_focus_state, window_level, world_aabb_to_px,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -5287,6 +5331,221 @@ mod tests {
 
         focus.transition(FocusTarget::Detail);
         assert!(focus.protects());
+    }
+
+    #[test]
+    fn overlay_focus_set_is_idempotent_for_the_same_target() {
+        let mut focus = OverlayFocus::default();
+        assert!(focus.set(FocusTarget::Chat));
+        assert!(!focus.set(FocusTarget::Chat));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn mark_pending_loss_is_a_noop_without_a_target() {
+        let mut focus = OverlayFocus::default();
+        assert!(!focus.mark_pending_loss());
+        assert!(!focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn clear_target_only_drops_the_matching_chrome() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Chat);
+        focus.clear_target(FocusTarget::Detail);
+        assert!(focus.protects());
+        focus.clear_target(FocusTarget::Chat);
+        assert!(!focus.protects());
+    }
+
+    #[test]
+    fn cancel_pending_loss_keeps_the_current_target() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Caption);
+        assert!(!focus.on_focus_event(FocusOwner::Caption, false));
+        focus.cancel_pending_loss();
+        assert!(!focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn spotlight_and_caption_focus_protect_the_overlay() {
+        let mut focus = OverlayFocus::default();
+        assert!(focus.on_focus_event(FocusOwner::Spotlight, true));
+        assert!(focus.protects());
+        assert!(focus.on_focus_event(FocusOwner::Caption, true));
+        assert!(focus.protects());
+        assert!(!focus.on_focus_event(FocusOwner::Overlay, false));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn hover_does_not_paint_the_cyan_outline() {
+        assert_eq!(overlay_outline_soul(None, Some("soul")), None);
+        assert_eq!(
+            overlay_outline_soul(Some("drag"), Some("hover")),
+            Some("drag")
+        );
+        assert_eq!(overlay_outline_soul(None, None), None);
+    }
+
+    #[test]
+    fn chrome_window_exists_is_false_without_chrome() {
+        let app = StageApp::new_for_test();
+        assert!(!app.chrome_window_exists());
+        assert_eq!(app.visible_display_count(), 0);
+        assert!(!app.has_avatar_occupant("soul"));
+        assert!(app.chat_targets().is_empty());
+        assert_eq!(app.companion_label_for_soul("soul"), "soul");
+        assert_eq!(app.active_companion_label(), "soul");
+        assert!(app.overlay_motion_controls().is_empty());
+    }
+
+    #[test]
+    fn auth_failure_matches_http_and_cookie_messages() {
+        assert!(auth_failure("401 Unauthorized"));
+        assert!(auth_failure("403 Forbidden"));
+        assert!(auth_failure("NO COOKIE AUTH"));
+        assert!(!auth_failure("timeout"));
+        assert!(!auth_failure(""));
+    }
+
+    #[test]
+    fn map_turn_err_translates_known_classes() {
+        assert_eq!(
+            map_turn_err("no_active_operation"),
+            i18n::fl("chat-no-active-turn")
+        );
+        assert_eq!(
+            map_turn_err("401 Unauthorized"),
+            i18n::fl("chat-auth-failed")
+        );
+        assert_eq!(map_turn_err("boom"), "boom");
+    }
+
+    #[test]
+    fn position_changed_uses_epsilon_and_rejects_nan() {
+        assert!(!position_changed([1.0, 2.0], [1.0, 2.0]));
+        assert!(position_changed([1.0, 2.0], [1.0, 2.1]));
+        assert!(position_changed([f32::NAN, 0.0], [0.0, 0.0]));
+        assert!(!position_changed(
+            [1.0, 2.0],
+            [1.0 + f32::EPSILON / 2.0, 2.0]
+        ));
+    }
+
+    #[test]
+    fn project_world_to_px_handles_behind_and_zero_viewport() {
+        let identity = glam::Mat4::IDENTITY;
+        let (px, offscreen, behind) = project_world_to_px(glam::Vec3::ZERO, identity, (100, 50));
+        assert!(!behind);
+        assert!(!offscreen);
+        assert!((px.x - 50.0).abs() < 1e-4);
+        assert!((px.y - 25.0).abs() < 1e-4);
+
+        let behind_m = glam::Mat4::from_cols(
+            glam::Vec4::X,
+            glam::Vec4::Y,
+            glam::Vec4::Z,
+            glam::Vec4::new(0.0, 0.0, 0.0, -1.0),
+        );
+        let (behind_px, offscreen_behind, is_behind) =
+            project_world_to_px(glam::Vec3::ZERO, behind_m, (0, 0));
+        assert!(is_behind);
+        assert!(offscreen_behind);
+        assert!(behind_px.x >= 0.0 && behind_px.y >= 0.0);
+    }
+
+    #[test]
+    fn world_aabb_to_px_has_minimum_extent() {
+        let rect = world_aabb_to_px(
+            glam::Vec3::ZERO,
+            glam::Vec3::ZERO,
+            glam::Mat4::IDENTITY,
+            (100, 100),
+        );
+        assert!(rect.w >= 1.0);
+        assert!(rect.h >= 1.0);
+    }
+
+    #[test]
+    fn create_denied_by_approval_is_case_insensitive() {
+        assert!(create_denied_by_approval("Job Creation Denied"));
+        assert!(!create_denied_by_approval("forbidden"));
+    }
+
+    #[test]
+    fn user_theme_file_is_under_the_data_dir() {
+        let path = user_theme_file();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("theme.toml")
+        );
+    }
+
+    #[test]
+    fn spotlight_entry_id_is_stable_for_known_actions() {
+        use crate::shell::ShellCommand;
+        use crate::surface::spotlight::SpotlightEntry;
+        assert_eq!(
+            spotlight_entry_id(&SpotlightEntry {
+                label: "x".into(),
+                action: crate::surface::SpotlightAction::Close,
+                keywords: &[],
+                shortcut: None,
+            }),
+            "close"
+        );
+        assert_eq!(
+            spotlight_entry_id(&SpotlightEntry {
+                label: "x".into(),
+                action: crate::surface::SpotlightAction::Command(ShellCommand::ToggleMic),
+                keywords: &[],
+                shortcut: None,
+            }),
+            "mic"
+        );
+        assert_eq!(
+            spotlight_entry_id(&SpotlightEntry {
+                label: "fallback".into(),
+                action: crate::surface::SpotlightAction::Command(ShellCommand::Quit),
+                keywords: &[],
+                shortcut: None,
+            }),
+            "quit"
+        );
+    }
+
+    #[test]
+    fn disambiguated_occupant_label_suffixes_duplicates() {
+        let occupants = vec![
+            ene_api::OccupantView {
+                soul_id: "a".into(),
+                display_name: String::new(),
+                body_id: None,
+                package_id: Some("char.Twin".into()),
+                avatar_path: None,
+            },
+            ene_api::OccupantView {
+                soul_id: "b".into(),
+                display_name: String::new(),
+                body_id: None,
+                package_id: Some("char.Twin".into()),
+                avatar_path: None,
+            },
+        ];
+        assert_eq!(disambiguated_occupant_label(&occupants, "a"), "Twin 1");
+        assert_eq!(disambiguated_occupant_label(&occupants, "b"), "Twin 2");
+        assert_eq!(
+            disambiguated_occupant_label(&occupants, "missing"),
+            "missing"
+        );
+    }
+
+    #[test]
+    fn idle_overlay_wakes_slower_than_a_dirty_frame() {
+        assert_eq!(overlay_wake_period(true), Duration::from_millis(16));
+        assert_eq!(overlay_wake_period(false), Duration::from_millis(250));
     }
 
     #[test]

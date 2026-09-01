@@ -359,4 +359,13 @@ mod tests {
         assert_eq!(physical_to_surface_local(&rects, 2.0), [(5, 10, 20, 40)]);
         assert_eq!(physical_to_surface_local(&rects, 1.25), [(8, 16, 32, 64)]);
     }
+
+    #[test]
+    fn empty_rects_and_tiny_scale_are_safe() {
+        assert!(physical_to_surface_local(&[], 1.0).is_empty());
+        assert!(physical_to_surface_local(&[PxRect::new(0.0, 0.0, 0.0, 10.0)], 1.0).is_empty());
+        let scaled = physical_to_surface_local(&[PxRect::new(0.0, 0.0, 10.0, 10.0)], 0.0);
+        assert_eq!(scaled.len(), 1);
+        assert!(scaled[0].2 >= 1 && scaled[0].3 >= 1);
+    }
 }

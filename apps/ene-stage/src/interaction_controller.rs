@@ -346,4 +346,28 @@ mod tests {
         ctl.sync(snap);
         assert_eq!(ctl.mode(), InteractionMode::Interactive);
     }
+
+    #[test]
+    fn default_is_passive_and_release_ui_drops_focus() {
+        let mut ctl = StageInteractionController::default();
+        assert_eq!(ctl.mode(), InteractionMode::Passive);
+        assert_eq!(ctl.ui_request(), UiInteractionRequest::None);
+        assert!(!ctl.cursor_hittest_enabled());
+        ctl.sync(transparent_click_through());
+        ctl.request_ui(UiInteractionRequest::Focus);
+        assert_eq!(ctl.mode(), InteractionMode::UiFocused);
+        ctl.release_ui();
+        assert_eq!(ctl.mode(), InteractionMode::Passive);
+        assert_eq!(ctl.ui_request(), UiInteractionRequest::None);
+    }
+
+    #[test]
+    fn hover_without_avatar_stays_passive() {
+        let mut ctl = StageInteractionController::default();
+        let mut snap = transparent_click_through();
+        snap.has_avatar = false;
+        snap.hovering_body = true;
+        ctl.sync(snap);
+        assert_eq!(ctl.mode(), InteractionMode::Passive);
+    }
 }

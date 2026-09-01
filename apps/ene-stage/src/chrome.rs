@@ -415,5 +415,18 @@ mod tests {
     #[test]
     fn composer_keyboard_ownership_blocks_overlay_shortcuts() {
         assert!(ChromeWindow::composer_owns_keyboard(true));
+        assert!(!ChromeWindow::composer_owns_keyboard(false));
+    }
+
+    #[test]
+    fn chrome_kind_titles_are_localized() {
+        let chat = ChromeKind::Chat.title();
+        let detail = ChromeKind::Detail.title();
+        let caption = ChromeKind::Caption.title();
+        let spotlight = ChromeKind::Spotlight.title();
+        assert!(!chat.is_empty());
+        assert_ne!(chat, detail);
+        assert!(!caption.is_empty());
+        assert!(!spotlight.is_empty());
     }
 }

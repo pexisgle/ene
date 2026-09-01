@@ -474,4 +474,159 @@ mod tests {
         assert!(!now.within_threshold(&previous, 0.5));
         assert!(scene.take_dirty());
     }
+
+    #[test]
+    fn pxrect_contains_inside_edge_outside_and_empty() {
+        let rect = PxRect::new(10.0, 20.0, 30.0, 40.0);
+        assert!(rect.contains(Vec2::new(10.0, 20.0)));
+        assert!(rect.contains(Vec2::new(39.9, 59.9)));
+        assert!(!rect.contains(Vec2::new(40.0, 20.0)));
+        assert!(!rect.contains(Vec2::new(10.0, 60.0)));
+        assert!(!rect.contains(Vec2::new(9.0, 20.0)));
+        assert!(PxRect::new(0.0, 0.0, 0.0, 10.0).is_empty());
+        assert!(PxRect::new(0.0, 0.0, 10.0, 0.0).is_empty());
+        assert!(!PxRect::new(0.0, 0.0, 1.0, 1.0).is_empty());
+        assert!(!PxRect::new(0.0, 0.0, 0.0, 10.0).contains(Vec2::ZERO));
+    }
+
+    #[test]
+    fn pxrect_padded_clamps_negative_padding_to_empty() {
+        let rect = PxRect::new(10.0, 10.0, 8.0, 8.0);
+        assert_eq!(rect.padded(2.0), PxRect::new(8.0, 8.0, 12.0, 12.0));
+        assert_eq!(rect.padded(0.0), rect);
+        let shrunk = rect.padded(-10.0);
+        assert!(shrunk.is_empty());
+        assert!(shrunk.w >= 0.0 && shrunk.h >= 0.0);
+    }
+
+    #[test]
+    fn pxrect_max_extent_delta_uses_the_largest_axis() {
+        let a = PxRect::new(0.0, 0.0, 10.0, 10.0);
+        let b = PxRect::new(3.0, 1.0, 10.0, 10.0);
+        assert!((a.max_extent_delta(b) - 3.0).abs() < f32::EPSILON);
+        assert!(a.max_extent_delta(a).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn visual_and_interaction_ids_and_rects() {
+        let avatar_bounds = VisualPrimitive::AvatarBounds {
+            soul_id: "a".to_owned(),
+            aabb: PxRect::new(1.0, 2.0, 3.0, 4.0),
+        };
+        assert_eq!(avatar_bounds.id(), "a");
+        assert_eq!(avatar_bounds.visual_rect(), PxRect::new(1.0, 2.0, 3.0, 4.0));
+        let effect = VisualPrimitive::Effect {
+            id: "glow".to_owned(),
+            rect: PxRect::new(0.0, 0.0, 10.0, 10.0),
+            padding: 2.0,
+        };
+        assert_eq!(effect.id(), "glow");
+        assert_eq!(effect.visual_rect(), PxRect::new(-2.0, -2.0, 14.0, 14.0));
+
+        let ui = InteractionPrimitive::Ui {
+            id: "btn".to_owned(),
+            rect: PxRect::new(0.0, 0.0, 5.0, 5.0),
+            mode: UiHitMode::Clickable,
+        };
+        assert_eq!(ui.id(), "btn");
+        assert_eq!(ui.os_input_rect(), Some(PxRect::new(0.0, 0.0, 5.0, 5.0)));
+        assert_eq!(ui.hit_rect(), PxRect::new(0.0, 0.0, 5.0, 5.0));
+        let display = InteractionPrimitive::Ui {
+            id: "speech".to_owned(),
+            rect: PxRect::new(0.0, 0.0, 5.0, 5.0),
+            mode: UiHitMode::DisplayOnly,
+        };
+        assert_eq!(display.os_input_rect(), None);
+        assert_eq!(display.hit_rect(), PxRect::new(0.0, 0.0, 5.0, 5.0));
+        let part = InteractionPrimitive::AvatarPart {
+            soul_id: "a".to_owned(),
+            part: AvatarPart::Head,
+            aabb: PxRect::new(1.0, 1.0, 2.0, 2.0),
+        };
+        assert_eq!(part.id(), "a");
+        assert_eq!(part.os_input_rect(), Some(PxRect::new(1.0, 1.0, 2.0, 2.0)));
+    }
+
+    #[test]
+    fn hide_is_idempotent_and_show_unknown_is_a_noop() {
+        let mut scene = StageScene::new();
+        scene.hide("bubble");
+        assert!(scene.take_dirty());
+        scene.hide("bubble");
+        assert!(!scene.take_dirty());
+        scene.show("missing");
+        assert!(!scene.is_dirty());
+        scene.show("bubble");
+        assert!(scene.take_dirty());
+        assert!(!scene.is_hidden("bubble"));
+    }
+
+    #[test]
+    fn overlay_ui_flags_ignore_hidden_and_display_only() {
+        let mut scene = StageScene::new();
+        scene.set_interactions(vec![
+            InteractionPrimitive::Ui {
+                id: "hidden-focus".to_owned(),
+                rect: PxRect::new(0.0, 0.0, 10.0, 10.0),
+                mode: UiHitMode::Focusable,
+            },
+            InteractionPrimitive::Ui {
+                id: "click".to_owned(),
+                rect: PxRect::new(20.0, 0.0, 10.0, 10.0),
+                mode: UiHitMode::Clickable,
+            },
+            InteractionPrimitive::Ui {
+                id: "speech".to_owned(),
+                rect: PxRect::new(40.0, 0.0, 10.0, 10.0),
+                mode: UiHitMode::DisplayOnly,
+            },
+        ]);
+        scene.hide("hidden-focus");
+        assert_eq!(scene.overlay_ui_flags(), (true, false));
+        scene.show("hidden-focus");
+        assert_eq!(scene.overlay_ui_flags(), (true, true));
+    }
+
+    #[test]
+    fn identical_visuals_do_not_mark_dirty() {
+        let mut scene = StageScene::new();
+        let visuals = vec![VisualPrimitive::Bubble {
+            id: "b".to_owned(),
+            rect: PxRect::new(0.0, 0.0, 1.0, 1.0),
+        }];
+        scene.set_visuals(visuals.clone());
+        assert!(scene.take_dirty());
+        scene.set_visuals(visuals);
+        assert!(!scene.is_dirty());
+        scene.set_anchors(vec![StageAnchor {
+            soul_id: "a".to_owned(),
+            kind: StageAnchorKind::Head,
+            position: Vec2::new(1.0, 2.0),
+            offscreen: false,
+            behind_camera: false,
+        }]);
+        assert!(scene.take_dirty());
+        assert_eq!(scene.anchors().len(), 1);
+    }
+
+    #[test]
+    fn empty_visual_rects_are_dropped_from_geometry() {
+        let mut scene = StageScene::new();
+        scene.set_visuals(vec![VisualPrimitive::Bubble {
+            id: "empty".to_owned(),
+            rect: PxRect::new(0.0, 0.0, 0.0, 10.0),
+        }]);
+        assert!(scene.visual_geometry().rects.is_empty());
+    }
+
+    #[test]
+    fn within_threshold_is_false_when_rect_counts_differ() {
+        let a = InteractionGeometry {
+            rects: vec![PxRect::new(0.0, 0.0, 1.0, 1.0)],
+        };
+        let b = InteractionGeometry { rects: Vec::new() };
+        assert!(!a.within_threshold(&b, 10.0));
+        assert!(!a.is_empty());
+        assert!(b.is_empty());
+    }
 }

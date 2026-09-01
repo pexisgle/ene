@@ -947,3 +947,27 @@ fn session_search_query(soul_id: Option<&str>, q: Option<&str>) -> String {
         .collect::<Vec<_>>()
         .join("&")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ApiClient, session_search_query};
+
+    #[test]
+    fn new_strips_trailing_slash_and_stores_identity() {
+        let client = ApiClient::new("http://127.0.0.1:9/", "tok", "stage");
+        assert_eq!(client.base(), "http://127.0.0.1:9");
+        assert_eq!(client.token(), "tok");
+        assert_eq!(client.client_id(), "stage");
+    }
+
+    #[test]
+    fn session_search_query_encodes_optional_pairs() {
+        assert_eq!(session_search_query(None, None), "");
+        assert_eq!(session_search_query(Some("s"), None), "soul_id=s");
+        assert_eq!(session_search_query(None, Some("a b")), "q=a+b");
+        assert_eq!(
+            session_search_query(Some("s"), Some("a b")),
+            "soul_id=s&q=a+b"
+        );
+    }
+}

@@ -34,10 +34,13 @@ Stage は WebView を使いません。オーバーレイは wgpu 上に Slint U
 Slint です。コアとは `ene-api` のみで話し（`client_id = stage`）、`ene-core` や
 `ene-companion`、`ene-card` はリンクしません。
 
-オーバーレイのイベントループは `ControlFlow::WaitUntil`（約 16ms）と、
-VRM の動き・Slint dirty・リサイズ・コライダーデバッグがあるときだけの
-`request_redraw` です。ビセームも視線も dirty UI もない静止ポーズは回し続けません。
-操作窓が開いている間は chrome も描画します。idle CPU / フレーム時間の
+オーバーレイのイベントループは `ControlFlow::WaitUntil` です。dirty フレーム
+（VRM モーション、視線ターゲット変化、ビセーム、まばたき、Slint dirty、
+リサイズ、コライダーデバッグ、ボディドラッグ中）は約 16ms で起き、
+`request_redraw` します。視線ターゲットが静止しビセームも dirty UI もない
+ポーズは約 250ms で起き、GPU パスをスキップします。ホバーだけではシアンの
+インタラクション枠を描きません（ドラッグ中のみ）。`CursorLeft` でホバーを
+消します。操作窓が開いている間は chrome も描画します。idle CPU / フレーム時間の
 performance gate は実 GPU のみです。Cloud Agent の lavapipe 数値は
 ソフトウェア参考で、その gate を落とす理由にはしません。
 
