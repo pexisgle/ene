@@ -17,7 +17,16 @@ use ene_vrm::spring_bone::SpringBoneSimulator;
 use glam::{Quat, Vec3};
 
 fn alicia_path() -> PathBuf {
-    PathBuf::from("/home/ubuntu/.cursor/projects/workspace/uploads/AliciaSolid_d551.vrm")
+    for candidate in [
+        "/home/ubuntu/.cursor/projects/workspace/uploads/AliciaSolid0-X.vrm",
+        "/home/ubuntu/.cursor/projects/workspace/uploads/AliciaSolid_d551.vrm",
+    ] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return path;
+        }
+    }
+    PathBuf::from("/home/ubuntu/.cursor/projects/workspace/uploads/AliciaSolid0-X.vrm")
 }
 
 fn try_create_wgpu_device() -> Option<(wgpu::Device, wgpu::Queue)> {

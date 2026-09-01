@@ -559,11 +559,12 @@ pub fn evaluate_clip(clip: &VrmaClip, t: f32) -> VrmaFrame {
 /// Map a VRMA source bone name onto a destination humanoid bone.
 ///
 /// VRM 1.0 models expose `*thumbmetacarpal` / `*thumbproximal` /
-/// `*thumbdistal`. Legacy VRM 0.x models use `*thumbproximal` /
-/// `*thumbintermediate` / `*thumbdistal` instead. VRMA clips always
-/// follow the 1.0 naming; when the destination lacks a metacarpal
-/// segment, fold metacarpal motion onto proximal and proximal motion
-/// onto intermediate.
+/// `*thumbdistal` ([bevy_vrm1](https://github.com/not-elm/bevy_vrm1)). Legacy
+/// VRM 0.x models use `*thumbproximal` / `*thumbintermediate` /
+/// `*thumbdistal` ([bevy_vrm](https://github.com/unavi-xyz/bevy_vrm)). VRMA
+/// clips always follow the 1.0 naming; when the destination lacks a metacarpal
+/// segment, fold metacarpal motion onto proximal and proximal motion onto
+/// intermediate.
 fn resolve_vrma_dest_bone(vrma_bone: &str, dest: &HumanoidBoneRegistry) -> Option<VrmBone> {
     let vrm0_left_thumb = dest.by_name("leftthumbmetacarpal").is_none()
         && dest.by_name("leftthumbintermediate").is_some();

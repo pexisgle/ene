@@ -27,6 +27,7 @@ rustfft = { workspace = true }
 
 [dev-dependencies]
 pollster = "1.0"
+serde_json = { workspace = true }
 zip = { workspace = true, features = ["deflate"] }
 
 [lints]
