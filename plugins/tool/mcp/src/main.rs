@@ -1,15 +1,23 @@
 //! MCP stdio / HTTP bridge. One process per handwritten `mcp.<server>` profile row.
 
 use std::path::PathBuf;
-use std::process::Stdio;
 
 use async_trait::async_trait;
 use ene_plugin_ipc::{IpcError, PluginConfigSchema, ToolHandler, ToolSpecWire, serve_from_env};
+use rmcp::model::{
+    CallToolRequestParams, ClientCapabilities, ClientInfo, GetPromptRequestParams, Implementation,
+    ReadResourceRequestParams, ToolAnnotations,
+};
+use rmcp::service::RunningService;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
+
+type McpSession = RunningService<RoleClient, ClientInfo>;
 
 #[tokio::main]
 async fn main() {
@@ -106,146 +114,68 @@ struct McpBridge {
     plugin_id: String,
     digest: String,
     specs: Vec<ToolSpecWire>,
-    session: Mutex<McpTransport>,
+    session: Mutex<McpSession>,
 }
 
-fn tool_side_effects(annotations: Option<&Value>) -> Vec<String> {
+fn tool_side_effects(annotations: Option<&ToolAnnotations>) -> Vec<String> {
     let Some(annotations) = annotations else {
         return vec!["may modify data".to_owned()];
     };
-    if annotations.get("readOnlyHint").and_then(Value::as_bool) == Some(true) {
-        // Empty effects keep read-only tools visible on the dialogue surface,
-        // matching how builtin read-only tools declare no side effects.
+    if annotations.read_only_hint == Some(true) {
         return Vec::new();
     }
     let mut effects = Vec::new();
-    if annotations
-        .get("destructiveHint")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
+    if annotations.destructive_hint.unwrap_or(true) {
         effects.push("may modify data".to_owned());
     }
-    if annotations.get("openWorldHint").and_then(Value::as_bool) == Some(true) {
+    if annotations.open_world_hint == Some(true) {
         effects.push("sends data to external services".to_owned());
     }
     effects
 }
 
-enum McpTransport {
-    Stdio(Box<McpStdio>),
-    Http(McpHttp),
-}
-
-struct McpStdio {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next_id: u64,
-}
-
-struct McpHttp {
-    url: String,
-    client: reqwest::Client,
-    auth_token: Option<String>,
-    next_id: u64,
+fn client_info() -> ClientInfo {
+    ClientInfo::new(
+        ClientCapabilities::default(),
+        Implementation::new("ene", "0.1.0"),
+    )
 }
 
 impl McpBridge {
     async fn connect(config: McpConfig) -> Result<Self, String> {
-        let http = config.transport == "http"
-            || config.transport == "sse"
-            || config.transport == "streamable_http"
-            || config.transport == "streamable-http"
-            || (config.url.is_some() && config.command.is_empty());
-        let mut session = if http {
-            let url = config
-                .url
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| "mcp http needs url".to_owned())?
-                .to_owned();
-            McpTransport::Http(McpHttp {
-                url,
-                client: reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .map_err(|err| err.to_string())?,
-                auth_token: config.auth_token.clone(),
-                next_id: 1,
-            })
+        let session = if is_http_transport(&config) {
+            connect_http(&config).await?
         } else {
-            if config.command.is_empty() {
-                return Err("mcp stdio needs command".to_owned());
-            }
-            let mut child = Command::new(&config.command)
-                .args(&config.args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|err| err.to_string())?;
-            let stdin = child.stdin.take().ok_or_else(|| "mcp stdin".to_owned())?;
-            let stdout = child.stdout.take().ok_or_else(|| "mcp stdout".to_owned())?;
-            McpTransport::Stdio(Box::new(McpStdio {
-                child,
-                stdin,
-                stdout: BufReader::new(stdout),
-                next_id: 1,
-            }))
+            connect_stdio(&config).await?
         };
-        session
-            .rpc(
-                "initialize",
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": { "name": "ene", "version": "0.1.0" }
-                }),
-            )
-            .await?;
-        session
-            .notify("notifications/initialized", json!({}))
-            .await?;
-        let listed = session.rpc("tools/list", json!({})).await?;
-        let tools = listed
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let listed = session
+            .list_all_tools()
+            .await
+            .map_err(|err| err.to_string())?;
         let plugin_id = format!("mcp.{}", config.server);
-        let specs = tools
+        let specs = listed
             .into_iter()
-            .filter_map(|tool| {
-                let name = tool.get("name")?.as_str()?.to_owned();
-                let description = tool
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                let side_effects = tool_side_effects(tool.get("annotations"));
-                let parameters = tool
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| json!({"type":"object"}));
-                Some(ToolSpecWire {
+            .map(|tool| {
+                let name = tool.name.as_ref().to_owned();
+                let description = tool.description.as_deref().unwrap_or("").to_owned();
+                let side_effects = tool_side_effects(tool.annotations.as_ref());
+                let parameters = Value::Object((*tool.input_schema).clone());
+                ToolSpecWire {
                     name: format!("mcp:{}.{name}", config.server),
                     description,
                     parameters,
                     output: json!({"type":"object"}),
                     side_effects,
                     broker_socket: None,
-
                     category: String::new(),
                     keywords: Vec::new(),
                     examples: Vec::new(),
                     background: false,
-                })
+                }
             })
             .collect();
         if !config.probe_only {
-            ingest_context(&mut session, &config).await;
+            ingest_context(&session, &config).await;
         }
         Ok(Self {
             plugin_id,
@@ -256,9 +186,49 @@ impl McpBridge {
     }
 }
 
-async fn ingest_context(session: &mut McpTransport, config: &McpConfig) {
-    if let Ok(listed) = session.rpc("resources/list", json!({})).await {
-        let text = resource_markdown(&listed, session).await;
+fn is_http_transport(config: &McpConfig) -> bool {
+    matches!(
+        config.transport.as_str(),
+        "http" | "sse" | "streamable_http" | "streamable-http"
+    ) || (config.url.is_some() && config.command.is_empty())
+}
+
+async fn connect_stdio(config: &McpConfig) -> Result<McpSession, String> {
+    if config.command.is_empty() {
+        return Err("mcp stdio needs command".to_owned());
+    }
+    let args = config.args.clone();
+    let transport = TokioChildProcess::new(Command::new(&config.command).configure(|cmd| {
+        cmd.args(&args);
+        cmd.kill_on_drop(true);
+    }))
+    .map_err(|err| err.to_string())?;
+    client_info()
+        .serve(transport)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+async fn connect_http(config: &McpConfig) -> Result<McpSession, String> {
+    let url = config
+        .url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "mcp http needs url".to_owned())?;
+    let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_owned());
+    if let Some(token) = config.auth_token.as_deref() {
+        transport_config = transport_config.auth_header(token);
+    }
+    let transport = StreamableHttpClientTransport::from_config(transport_config);
+    client_info()
+        .serve(transport)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+async fn ingest_context(session: &McpSession, config: &McpConfig) {
+    if let Ok(resources) = session.list_all_resources().await {
+        let text = resource_markdown(session, &resources).await;
         if !text.is_empty() {
             write_resource_snapshot(&config.server, &text);
         }
@@ -266,47 +236,43 @@ async fn ingest_context(session: &mut McpTransport, config: &McpConfig) {
     if config.skills_home.as_os_str().is_empty() {
         return;
     }
-    let Ok(listed) = session.rpc("prompts/list", json!({})).await else {
-        return;
-    };
-    let Some(prompts) = listed.get("prompts").and_then(Value::as_array) else {
+    let Ok(prompts) = session.list_all_prompts().await else {
         return;
     };
     for prompt in prompts {
-        let Some(name) = prompt.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        let description = prompt
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or(name);
-        let body = match session
-            .rpc("prompts/get", json!({ "name": name, "arguments": {} }))
-            .await
-        {
-            Ok(got) => prompt_body(&got),
+        let name = prompt.name;
+        let description = prompt.description.as_deref().unwrap_or(&name);
+        let body = match session.get_prompt(GetPromptRequestParams::new(&name)).await {
+            Ok(got) => match serde_json::to_value(&got) {
+                Ok(value) => prompt_body(&value),
+                Err(_) => String::new(),
+            },
             Err(_) => String::new(),
         };
-        write_prompt_skill(&config.skills_home, name, description, &body);
+        write_prompt_skill(&config.skills_home, &name, description, &body);
     }
 }
 
-async fn resource_markdown(listed: &Value, session: &mut McpTransport) -> String {
-    let Some(resources) = listed.get("resources").and_then(Value::as_array) else {
-        return String::new();
-    };
+async fn resource_markdown(session: &McpSession, resources: &[rmcp::model::Resource]) -> String {
     let mut chunks = Vec::new();
     for resource in resources.iter().take(32) {
-        let uri = resource
-            .get("uri")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let uri = resource.uri.as_str();
         if uri.is_empty() {
             continue;
         }
-        let title = resource.get("name").and_then(Value::as_str).unwrap_or(uri);
-        let body = match session.rpc("resources/read", json!({ "uri": uri })).await {
-            Ok(got) => resource_text(&got),
+        let title = if resource.name.is_empty() {
+            uri
+        } else {
+            resource.name.as_str()
+        };
+        let body = match session
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await
+        {
+            Ok(got) => match serde_json::to_value(&got) {
+                Ok(value) => resource_text(&value),
+                Err(_) => String::new(),
+            },
             Err(_) => String::new(),
         };
         if body.is_empty() {
@@ -401,194 +367,6 @@ fn write_prompt_skill(home: &std::path::Path, name: &str, description: &str, bod
     drop(std::fs::write(skill_dir.join("SKILL.md"), md));
 }
 
-impl McpTransport {
-    async fn rpc(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        match self {
-            Self::Stdio(session) => session.rpc(method, params).await,
-            Self::Http(session) => session.rpc(method, params).await,
-        }
-    }
-
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
-        match self {
-            Self::Stdio(session) => session.notify(method, params).await,
-            Self::Http(session) => session.notify(method, params).await,
-        }
-    }
-}
-
-impl McpStdio {
-    async fn rpc(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        write_msg(&mut self.stdin, &msg).await?;
-        loop {
-            let incoming = read_msg(&mut self.stdout).await?;
-            if json_id(&incoming) == Some(id) {
-                if let Some(err) = incoming.get("error") {
-                    return Err(err.to_string());
-                }
-                return Ok(incoming.get("result").cloned().unwrap_or(Value::Null));
-            }
-        }
-    }
-
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        write_msg(&mut self.stdin, &msg).await
-    }
-}
-
-impl McpHttp {
-    async fn rpc(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        let incoming = post_rpc(&self.client, &self.url, self.auth_token.as_deref(), &msg).await?;
-        if let Some(err) = incoming.get("error") {
-            return Err(err.to_string());
-        }
-        Ok(incoming.get("result").cloned().unwrap_or(Value::Null))
-    }
-
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        drop(post_rpc(&self.client, &self.url, self.auth_token.as_deref(), &msg).await);
-        Ok(())
-    }
-}
-
-async fn post_rpc(
-    client: &reqwest::Client,
-    url: &str,
-    auth_token: Option<&str>,
-    msg: &Value,
-) -> Result<Value, String> {
-    let mut request = client
-        .post(url)
-        .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream");
-    if let Some(token) = auth_token {
-        request = request.bearer_auth(token);
-    }
-    let response = request
-        .json(msg)
-        .send()
-        .await
-        .map_err(|err| err.to_string())?;
-    let text = response.text().await.map_err(|err| err.to_string())?;
-    parse_rpc_body(&text)
-}
-
-fn parse_rpc_body(text: &str) -> Result<Value, String> {
-    let trimmed = text.trim();
-    if trimmed.starts_with('{') {
-        return serde_json::from_str(trimmed).map_err(|err| err.to_string());
-    }
-    for line in trimmed.lines() {
-        let Some(rest) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let rest = rest.trim();
-        if rest.starts_with('{') {
-            return serde_json::from_str(rest).map_err(|err| err.to_string());
-        }
-    }
-    Err("mcp http: no json body".to_owned())
-}
-
-fn json_id(value: &Value) -> Option<u64> {
-    value.get("id").and_then(Value::as_u64).or_else(|| {
-        value
-            .get("id")
-            .and_then(Value::as_i64)
-            .and_then(|n| u64::try_from(n).ok())
-    })
-}
-
-async fn write_msg(stdin: &mut ChildStdin, msg: &Value) -> Result<(), String> {
-    let body = serde_json::to_vec(msg).map_err(|err| err.to_string())?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    stdin
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|err| err.to_string())?;
-    stdin
-        .write_all(&body)
-        .await
-        .map_err(|err| err.to_string())?;
-    stdin.flush().await.map_err(|err| err.to_string())
-}
-
-async fn read_msg(stdout: &mut BufReader<ChildStdout>) -> Result<Value, String> {
-    let mut first = String::new();
-    stdout
-        .read_line(&mut first)
-        .await
-        .map_err(|err| err.to_string())?;
-    if first.is_empty() {
-        return Err("mcp eof".to_owned());
-    }
-    if first.trim_start().starts_with('{') {
-        return serde_json::from_str(first.trim()).map_err(|err| err.to_string());
-    }
-    let mut headers = first;
-    loop {
-        let mut line = String::new();
-        stdout
-            .read_line(&mut line)
-            .await
-            .map_err(|err| err.to_string())?;
-        if line.is_empty() {
-            return Err("mcp eof".to_owned());
-        }
-        if line == "\r\n" || line == "\n" {
-            break;
-        }
-        headers.push_str(&line);
-    }
-    let mut length = 0_usize;
-    for line in headers.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        if key.eq_ignore_ascii_case("content-length") {
-            length = value
-                .trim()
-                .parse()
-                .map_err(|err: std::num::ParseIntError| err.to_string())?;
-        }
-    }
-    if length == 0 {
-        return Err("mcp missing content-length".to_owned());
-    }
-    let mut buf = vec![0_u8; length];
-    stdout
-        .read_exact(&mut buf)
-        .await
-        .map_err(|err| err.to_string())?;
-    serde_json::from_slice(&buf).map_err(|err| err.to_string())
-}
-
 fn exe_digest() -> String {
     std::env::current_exe()
         .ok()
@@ -620,11 +398,16 @@ impl ToolHandler for McpBridge {
             .unwrap_or(&self.plugin_id);
         let prefix = format!("mcp:{server}.");
         let tool = name.strip_prefix(&prefix).unwrap_or(name).to_owned();
-        let mut session = self.session.lock().await;
-        session
-            .rpc("tools/call", json!({"name": tool, "arguments": args}))
+        let mut params = CallToolRequestParams::new(tool);
+        if let Value::Object(map) = args {
+            params = params.with_arguments(map);
+        }
+        let session = self.session.lock().await;
+        let result = session
+            .call_tool(params)
             .await
-            .map_err(IpcError::Call)
+            .map_err(|err| IpcError::Call(err.to_string()))?;
+        serde_json::to_value(&result).map_err(|err| IpcError::Call(err.to_string()))
     }
 
     fn has_config(&self) -> bool {
@@ -646,16 +429,6 @@ impl ToolHandler for McpBridge {
     }
 }
 
-impl Drop for McpBridge {
-    fn drop(&mut self) {
-        if let Ok(mut session) = self.session.try_lock()
-            && let McpTransport::Stdio(stdio) = &mut *session
-        {
-            drop(stdio.child.start_kill());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,15 +436,27 @@ mod tests {
     #[test]
     fn annotations_map_to_side_effect_strings() {
         assert_eq!(
-            tool_side_effects(Some(&json!({"readOnlyHint": true}))),
+            tool_side_effects(Some(&ToolAnnotations::from_raw(
+                None,
+                Some(true),
+                None,
+                None,
+                None,
+            ))),
             Vec::<String>::new()
         );
         assert_eq!(
-            tool_side_effects(Some(&json!({"destructiveHint": true}))),
+            tool_side_effects(Some(&ToolAnnotations::from_raw(
+                None,
+                None,
+                Some(true),
+                None,
+                None,
+            ))),
             vec!["may modify data".to_owned()]
         );
         assert_eq!(
-            tool_side_effects(Some(&json!({}))),
+            tool_side_effects(Some(&ToolAnnotations::default())),
             vec!["may modify data".to_owned()]
         );
         assert_eq!(tool_side_effects(None), vec!["may modify data".to_owned()]);
