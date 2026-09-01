@@ -1,4 +1,5 @@
 use crate::error::WorkError;
+use crate::events::DelegationEventPayload;
 use crate::host::{DelegationHost, StartDelegation};
 use crate::skill::{catalog, load_skill, read_skill_file};
 use crate::types::{Artifact, ArtifactKind, DelegationMode};
@@ -200,7 +201,7 @@ fn delegate_defs() -> Vec<ToolDefinition> {
         ),
         harness(
             "delegation.send",
-            "Child-to-parent mailbox send.",
+            "Child-to-parent delegation event send.",
             json!({
                 "type": "object",
                 "properties": {
@@ -521,7 +522,13 @@ fn send_from_child(host: &DelegationHost, args: &Value) -> Result<Value, String>
         }
         other => {
             host.store()
-                .mailbox_push(id, "child_to_parent", other, body)
+                .append_delegation_event(
+                    id,
+                    &DelegationEventPayload::ChildReport {
+                        kind: other.to_owned(),
+                        body: body.to_owned(),
+                    },
+                )
                 .map_err(|err| err.to_string())?;
             Ok(json!({ "ok": true }))
         }

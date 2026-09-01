@@ -13,6 +13,7 @@
 
 mod computer;
 mod error;
+mod events;
 mod host;
 mod mcp;
 mod migrations;
@@ -36,6 +37,7 @@ pub use computer::{
     TaskGrant, WindowIdentity, verify_focus, verify_grant, verify_stale,
 };
 pub use error::WorkError;
+pub use events::{DelegationEvent, DelegationEventPayload};
 pub use host::{
     DelegationHost, StartDelegation, SurfaceCallKind, UpgradeRequest, def_is_side_effect,
     fold_brief, layer_for_call, question_timed_out, should_upgrade_steps, soul_artifacts_dir,
@@ -65,7 +67,7 @@ pub use speech_gate::SpeechGate;
 pub use spill::{
     DEFAULT_HARD_LIMIT_BYTES, DEFAULT_SOFT_LIMIT_BYTES, SpillResult, bound_brief, spill_tool_output,
 };
-pub use store::{MailboxEntry, WorkStore, next_fire};
+pub use store::{WorkStore, next_fire};
 pub use task::{
     ArtifactRef, Task, TaskContract, TaskError, TaskState, transition, validate_criteria,
     verify_artifact,

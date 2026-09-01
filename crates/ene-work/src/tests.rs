@@ -1,3 +1,4 @@
+use crate::DelegationEventPayload;
 use crate::host::{
     DelegationHost, StartDelegation, SurfaceCallKind, UpgradeRequest, question_timed_out,
     should_upgrade_steps, surface_call_kind,
@@ -675,12 +676,11 @@ async fn child_reports_do_not_require_tool_approval() {
         .unwrap();
 
     assert!(matches!(outcome, SurfaceToolOutcome::Result(_)));
-    let mailbox = store.mailbox(job.id).unwrap();
-    assert!(
-        mailbox
-            .iter()
-            .any(|(_, kind, body)| { kind == "progress" && body == "working" })
-    );
+    let events = store.delegation_events(job.id).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        DelegationEventPayload::Progress { note } if note == "working"
+    )));
 }
 
 #[tokio::test]
@@ -900,11 +900,12 @@ async fn drive_job_runs_echo_model_to_completion() {
     .unwrap();
     let done = work.get_job(job.id).unwrap().unwrap();
     assert_eq!(done.status, JobStatus::Completed);
-    let mail = work.mailbox(job.id).unwrap();
+    let events = work.delegation_events(job.id).unwrap();
     assert!(
-        mail.iter()
-            .any(|(dir, kind, _)| dir == "child_to_parent" && kind == "complete"),
-        "job lane must send a complete mailbox row, got {mail:?}"
+        events
+            .iter()
+            .any(|event| matches!(event.payload, DelegationEventPayload::Complete { .. })),
+        "job lane must send a complete event, got {events:?}"
     );
 }
 
@@ -1111,18 +1112,20 @@ async fn drive_job_executes_tools_and_delegation_send() {
     );
     let done = work.get_job(job.id).unwrap().unwrap();
     assert_eq!(done.status, JobStatus::Completed);
-    let mail = work.mailbox(job.id).unwrap();
+    let events = work.delegation_events(job.id).unwrap();
     assert!(
-        mail.iter().any(|(dir, kind, body)| dir == "child_to_parent"
-            && kind == "progress"
-            && body.contains("clock")),
-        "expected progress send, got {mail:?}"
+        events.iter().any(|event| matches!(
+            &event.payload,
+            DelegationEventPayload::Progress { note } if note.contains("clock")
+        )),
+        "expected progress send, got {events:?}"
     );
     assert!(
-        mail.iter().any(|(dir, kind, body)| dir == "child_to_parent"
-            && kind == "complete"
-            && body.contains("got the time")),
-        "expected complete send, got {mail:?}"
+        events.iter().any(|event| matches!(
+            &event.payload,
+            DelegationEventPayload::Complete { summary } if summary.contains("got the time")
+        )),
+        "expected complete send, got {events:?}"
     );
 }
 
@@ -1197,7 +1200,7 @@ fn internal_delegation_has_no_job_row() {
         .unwrap();
     assert!(store.get_job(job.id).unwrap().is_none());
     assert!(store.list_jobs(soul).unwrap().is_empty());
-    assert!(!store.mailbox(job.id).unwrap().is_empty());
+    assert!(store.has_delegation_events(job.id).unwrap());
 }
 
 #[test]
@@ -2346,17 +2349,15 @@ fn combined_child_questions_merge_and_route_answers() {
     host.apply_combined_answers(&combined, &["Tokyo".into(), "3".into()])
         .unwrap();
     assert!(host.open_questions(job.id).unwrap().is_empty());
-    let mailbox = host.store().mailbox(job.id).unwrap();
-    assert!(
-        mailbox
-            .iter()
-            .any(|(_, kind, body)| kind == "answer" && body == "Tokyo")
-    );
-    assert!(
-        mailbox
-            .iter()
-            .any(|(_, kind, body)| kind == "answer" && body == "3")
-    );
+    let events = host.store().delegation_events(job.id).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        DelegationEventPayload::Answer { body, .. } if body == "Tokyo"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        DelegationEventPayload::Answer { body, .. } if body == "3"
+    )));
 }
 
 #[test]
@@ -2376,13 +2377,7 @@ fn question_timeout_proceeds_with_assumption() {
     store.set_status(job.id, JobStatus::Running, None).unwrap();
     let asked = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
     store
-        .mailbox_push_at(
-            job.id,
-            "child_to_parent",
-            "question",
-            "which airline?",
-            &asked.to_rfc3339(),
-        )
+        .append_question_at(job.id, "which airline?", &asked.to_rfc3339())
         .unwrap();
     let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 1).unwrap();
     let reports = host
@@ -2391,8 +2386,12 @@ fn question_timeout_proceeds_with_assumption() {
     assert_eq!(reports.len(), 1);
     assert!(reports[0].speech.contains("timeout"));
     assert!(!reports[0].starts_conversation);
-    let mailbox = store.mailbox(job.id).unwrap();
-    assert!(mailbox.iter().any(|(_, kind, _)| kind == "assumption"));
+    let events = store.delegation_events(job.id).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, DelegationEventPayload::Assumption { .. }))
+    );
 }
 
 #[test]
@@ -2402,15 +2401,9 @@ fn answer_after_question_timeout_is_rejected() {
     store.set_status(job.id, JobStatus::Running, None).unwrap();
     let asked = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
     store
-        .mailbox_push_at(
-            job.id,
-            "child_to_parent",
-            "question",
-            "which airline?",
-            &asked.to_rfc3339(),
-        )
+        .append_question_at(job.id, "which airline?", &asked.to_rfc3339())
         .unwrap();
-    let question_id = store.open_questions(job.id).unwrap()[0].question_id();
+    let question_id = store.open_questions(job.id).unwrap()[0].question_id;
     let now = Utc.with_ymd_and_hms(2020, 1, 2, 0, 0, 1).unwrap();
     host.resolve_question_timeouts(now, Some(StdDuration::from_hours(24)))
         .unwrap();
@@ -2420,12 +2413,13 @@ fn answer_after_question_timeout_is_rejected() {
     ));
     assert!(
         !store
-            .mailbox(job.id)
+            .delegation_events(job.id)
             .unwrap()
             .iter()
-            .any(|(direction, kind, body)| direction == "parent_to_child"
-                && kind == "answer"
-                && body == "Tokyo")
+            .any(|event| matches!(
+                &event.payload,
+                DelegationEventPayload::Answer { body, .. } if body == "Tokyo"
+            ))
     );
 }
 
@@ -2435,7 +2429,7 @@ fn identified_answer_after_resolution_names_the_conflict() {
     let job = public_start(&host, soul, "planning");
     store.set_status(job.id, JobStatus::Running, None).unwrap();
     host.question(job.id, "which airline?").unwrap();
-    let question_id = store.open_questions(job.id).unwrap()[0].question_id();
+    let question_id = store.open_questions(job.id).unwrap()[0].question_id;
     host.answer_question(job.id, question_id, "ANA").unwrap();
 
     assert!(matches!(
@@ -2444,10 +2438,13 @@ fn identified_answer_after_resolution_names_the_conflict() {
     ));
     assert!(
         !store
-            .mailbox(job.id)
+            .delegation_events(job.id)
             .unwrap()
             .iter()
-            .any(|(_, kind, body)| kind == "answer" && body == "late answer")
+            .any(|event| matches!(
+                &event.payload,
+                DelegationEventPayload::Answer { body, .. } if body == "late answer"
+            ))
     );
 }
 
@@ -2458,13 +2455,7 @@ fn repeated_timeout_ticks_are_idempotent() {
     store.set_status(job.id, JobStatus::Running, None).unwrap();
     let asked = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
     store
-        .mailbox_push_at(
-            job.id,
-            "child_to_parent",
-            "question",
-            "which airline?",
-            &asked.to_rfc3339(),
-        )
+        .append_question_at(job.id, "which airline?", &asked.to_rfc3339())
         .unwrap();
     let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 1).unwrap();
     let first = host
@@ -2479,10 +2470,10 @@ fn repeated_timeout_ticks_are_idempotent() {
     }
     assert_eq!(
         store
-            .mailbox(job.id)
+            .delegation_events(job.id)
             .unwrap()
-            .into_iter()
-            .filter(|(_, kind, _)| kind == "assumption")
+            .iter()
+            .filter(|event| matches!(event.payload, DelegationEventPayload::Assumption { .. }))
             .count(),
         1
     );
@@ -2619,9 +2610,17 @@ fn surface_message_and_cancel_while_running() {
     host.message(job.id, "user added context").unwrap();
     host.instruct(job.id, "please prioritize speed").unwrap();
     assert_eq!(host.cancel(job.id).unwrap(), JobStatus::Cancelled);
-    let mailbox = store.mailbox(job.id).unwrap();
-    assert!(mailbox.iter().any(|(_, kind, _)| kind == "message"));
-    assert!(mailbox.iter().any(|(_, kind, _)| kind == "task"));
+    let events = store.delegation_events(job.id).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, DelegationEventPayload::Message { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, DelegationEventPayload::Task { .. }))
+    );
 }
 
 #[test]
@@ -3161,10 +3160,13 @@ fn task_contract_enforced_on_real_runner_path() {
     // The widened scope is not delivered until an explicit approval event.
     assert!(
         !store
-            .mailbox(job5.id)
+            .delegation_events(job5.id)
             .unwrap()
             .iter()
-            .any(|(_, _, body)| body.contains("exec.run"))
+            .any(|event| matches!(
+                &event.payload,
+                DelegationEventPayload::Task { goal } if goal.contains("exec.run")
+            ))
     );
     host.approve_scope_widening(job5.id).unwrap();
     assert_eq!(
