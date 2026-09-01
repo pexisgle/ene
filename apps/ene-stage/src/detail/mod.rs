@@ -16,6 +16,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::runtime::Handle;
 
+mod nav;
 mod primitives;
 
 use crate::core::session::prepare_soul_target;
@@ -1409,22 +1410,10 @@ pub(crate) fn show(
     async_results: &Arc<Mutex<Vec<AsyncOutcome>>>,
 ) {
     state.request_chat_open = false;
-    ui.horizontal(|ui| {
-        ui.label(i18n::fl("detail-search"));
-        ui.text_edit_singleline(&mut state.search);
-    });
+    if let Some(tab) = nav::show_nav_bar(ui, &mut state.search, state.tab) {
+        state.select_tab(tab);
+    }
     sync_search_tab(state);
-    ui.horizontal_wrapped(|ui| {
-        for tab in DetailTab::ALL {
-            let label = tab.label();
-            if !tab.matches_search(&state.search) {
-                continue;
-            }
-            if ui.selectable_label(state.tab == tab, label).clicked() {
-                state.select_tab(tab);
-            }
-        }
-    });
     ui.separator();
     // The window floor only prevents clipping; long content (multiple MCP
     // forms, plugin config) still overflows the 680-point default height.
