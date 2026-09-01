@@ -306,4 +306,54 @@ mod tests {
             EndResult::None
         );
     }
+
+    #[test]
+    fn second_press_is_rejected_and_wrong_pointer_is_ignored() {
+        let now = Instant::now();
+        let mut tracker = GestureTracker::default();
+        assert!(tracker.press(PointerKind::Mouse, 0, Vec2::ZERO, Some("a"), now));
+        assert!(!tracker.press(PointerKind::Mouse, 1, Vec2::ZERO, Some("b"), now));
+        assert_eq!(
+            tracker.move_to(PointerKind::Touch, 0, position(100.0, 0.0)),
+            MoveResult::None
+        );
+        assert_eq!(tracker.release(PointerKind::Touch, 0, now), EndResult::None);
+        assert!(tracker.cancel(PointerKind::Mouse, 0));
+        assert!(!tracker.cancel(PointerKind::Mouse, 0));
+        tracker.cancel_all();
+        assert_eq!(
+            tracker.move_to(PointerKind::Mouse, 0, position(100.0, 0.0)),
+            MoveResult::None
+        );
+    }
+
+    #[test]
+    fn sub_threshold_move_is_not_a_drag_and_is_dragging_tracks_state() {
+        let now = Instant::now();
+        let mut tracker = GestureTracker::default();
+        assert!(tracker.press(PointerKind::Mouse, 0, Vec2::ZERO, Some("a"), now));
+        assert_eq!(
+            tracker.move_to(
+                PointerKind::Mouse,
+                0,
+                position(DRAG_THRESHOLD_PX - 0.1, 0.0)
+            ),
+            MoveResult::None
+        );
+        assert!(!MoveResult::None.is_dragging());
+        assert!(MoveResult::DragStarted.is_dragging());
+        assert!(MoveResult::Dragging.is_dragging());
+        assert_eq!(
+            tracker.move_to(
+                PointerKind::Mouse,
+                0,
+                position(DRAG_THRESHOLD_PX + 0.1, 0.0)
+            ),
+            MoveResult::DragStarted
+        );
+        assert_eq!(
+            tracker.move_to(PointerKind::Mouse, 0, position(20.0, 0.0)),
+            MoveResult::Dragging
+        );
+    }
 }

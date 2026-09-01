@@ -250,4 +250,11 @@ mod tests {
             wgpu::Dx12SwapchainKind::default(),
         );
     }
+
+    #[test]
+    fn format_has_alpha_matches_rgba_family() {
+        assert!(format_has_alpha(wgpu::TextureFormat::Rgba8Unorm));
+        assert!(format_has_alpha(wgpu::TextureFormat::Bgra8UnormSrgb));
+        assert!(!format_has_alpha(wgpu::TextureFormat::R8Unorm));
+    }
 }

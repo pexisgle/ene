@@ -194,6 +194,11 @@ impl ChromeWindow {
             .unwrap_or_default()
     }
 
+    #[must_use]
+    pub fn needs_gpu(&self) -> bool {
+        self.layer.as_ref().is_some_and(ChromeLayer::needs_redraw)
+    }
+
     pub fn paint(&mut self, gpu: &GpuContext) -> Result<(), GpuError> {
         let window_size = self.window.inner_size();
         if window_size.width == 0 || window_size.height == 0 {
@@ -415,5 +420,18 @@ mod tests {
     #[test]
     fn composer_keyboard_ownership_blocks_overlay_shortcuts() {
         assert!(ChromeWindow::composer_owns_keyboard(true));
+        assert!(!ChromeWindow::composer_owns_keyboard(false));
+    }
+
+    #[test]
+    fn chrome_kind_titles_are_localized() {
+        let chat = ChromeKind::Chat.title();
+        let detail = ChromeKind::Detail.title();
+        let caption = ChromeKind::Caption.title();
+        let spotlight = ChromeKind::Spotlight.title();
+        assert!(!chat.is_empty());
+        assert_ne!(chat, detail);
+        assert!(!caption.is_empty());
+        assert!(!spotlight.is_empty());
     }
 }

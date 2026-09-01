@@ -505,3 +505,52 @@ pub(crate) fn load_mtoon_materials_vrm0(gltf: &gltf::Gltf) -> Vec<Option<MToonMa
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AllowedUserName, UsagePermission, as_object, parse_vec3, vec3_field};
+    use serde_json::{Map, json};
+
+    #[test]
+    fn allowed_user_name_parses_only_author() {
+        assert_eq!(
+            AllowedUserName::parse("OnlyAuthor"),
+            AllowedUserName::OnlyAuthor
+        );
+        assert_eq!(AllowedUserName::parse(""), AllowedUserName::Everyone);
+        assert_eq!(
+            AllowedUserName::parse("Everyone"),
+            AllowedUserName::Everyone
+        );
+    }
+
+    #[test]
+    fn usage_permission_denies_only_disallow() {
+        assert_eq!(UsagePermission::parse("Disallow"), UsagePermission::Denied);
+        assert_eq!(UsagePermission::parse("Allow"), UsagePermission::Permitted);
+        assert_eq!(UsagePermission::parse(""), UsagePermission::Permitted);
+    }
+
+    #[test]
+    fn parse_vec3_pads_and_ignores_non_numbers() {
+        let empty = parse_vec3(&[]);
+        assert!(empty.iter().all(|v| v.abs() < f32::EPSILON));
+        let parsed = parse_vec3(&[json!(1.0), json!(2), json!("x"), json!(9.0)]);
+        assert!((parsed[0] - 1.0).abs() < f32::EPSILON);
+        assert!((parsed[1] - 2.0).abs() < f32::EPSILON);
+        assert!(parsed[2].abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn as_object_and_vec3_field_round_trip() {
+        assert!(as_object(None).is_none());
+        assert!(as_object(Some(&json!(1))).is_none());
+        let mut map = Map::new();
+        map.insert("g".into(), json!([0.0, 1.0, 0.0]));
+        let got = vec3_field(&map, "g").expect("g");
+        assert!(got[0].abs() < f32::EPSILON);
+        assert!((got[1] - 1.0).abs() < f32::EPSILON);
+        assert!(got[2].abs() < f32::EPSILON);
+        assert!(vec3_field(&map, "missing").is_none());
+    }
+}

@@ -162,4 +162,22 @@ mod tests {
         assert!(should_report_missing("ja", "another-missing-key"));
         assert!(should_report_missing("en-US", "test-missing-key"));
     }
+
+    #[test]
+    fn format_fills_named_placeholders_and_empty_args_are_safe() {
+        with_language("en-US", || {
+            let filled = format("spotlight-open-detail", &[("tab", "Work")]);
+            assert!(filled.contains("Work"));
+            let missing = format("definitely-missing-key", &[("tab", "x")]);
+            assert!(!missing.is_empty());
+        });
+    }
+
+    #[test]
+    fn empty_language_tag_falls_back_to_os_default() {
+        with_language("", || {
+            let title = fl("app-title");
+            assert!(!title.is_empty());
+        });
+    }
 }

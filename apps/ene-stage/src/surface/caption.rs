@@ -95,4 +95,16 @@ mod tests {
         assert!(is_speech_caption("Error handling in Rust"));
         assert!(is_speech_caption("Hello from the companion."));
     }
+
+    #[test]
+    fn speech_text_prefers_caption_and_hides_provider_errors() {
+        let mut state = SurfaceUiState::default();
+        assert_eq!(speech_text(&state), "");
+        state.streaming_text = "hello".into();
+        assert_eq!(speech_text(&state), "hello");
+        state.caption = "spoken".into();
+        assert_eq!(speech_text(&state), "spoken");
+        state.caption = "The chat provider failed: boom".into();
+        assert_eq!(speech_text(&state), "");
+    }
 }

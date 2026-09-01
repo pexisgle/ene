@@ -947,3 +947,126 @@ fn session_search_query(soul_id: Option<&str>, q: Option<&str>) -> String {
         .collect::<Vec<_>>()
         .join("&")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ApiClient, session_search_query};
+    use crate::error::ApiError;
+    use std::future::Future;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn spawn_json_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = vec![0; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                seen.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let reason = if (200..300).contains(&status) {
+                    "OK"
+                } else {
+                    "ERR"
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(resp.as_bytes()).expect("write");
+            }
+            seen
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt")
+            .block_on(fut)
+    }
+
+    #[test]
+    fn new_strips_trailing_slash_and_stores_identity() {
+        let client = ApiClient::new("http://127.0.0.1:9/", "tok", "stage");
+        assert_eq!(client.base(), "http://127.0.0.1:9");
+        assert_eq!(client.token(), "tok");
+        assert_eq!(client.client_id(), "stage");
+    }
+
+    #[test]
+    fn session_search_query_encodes_optional_pairs() {
+        assert_eq!(session_search_query(None, None), "");
+        assert_eq!(session_search_query(Some("s"), None), "soul_id=s");
+        assert_eq!(session_search_query(None, Some("a b")), "q=a+b");
+        assert_eq!(
+            session_search_query(Some("s"), Some("a b")),
+            "soul_id=s&q=a+b"
+        );
+    }
+
+    #[test]
+    fn health_sends_bearer_and_client_id() {
+        let body = r#"{"status":"ok","bind":"127.0.0.1:9"}"#.to_owned();
+        let (base, handle) = spawn_json_server(vec![(200, body)]);
+        let client = ApiClient::new(base, "tok", "stage");
+        let health = block_on(client.health()).expect("health");
+        assert_eq!(health.status, "ok");
+        let seen = handle.join().expect("server");
+        assert!(
+            seen[0].contains("GET /api/v1/health"),
+            "request={:?}",
+            seen[0]
+        );
+        let lower = seen[0].to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization:") && lower.contains("tok"),
+            "request={:?}",
+            seen[0]
+        );
+        assert!(
+            lower.contains("x-client-id: stage"),
+            "request={:?}",
+            seen[0]
+        );
+    }
+
+    #[test]
+    fn send_json_maps_401_problem_and_codec_errors() {
+        let problem = r#"{"type":"about:blank","status":401,"error_class":"auth","title":"nope"}"#;
+        let (base, handle) = spawn_json_server(vec![
+            (401, problem.to_owned()),
+            (200, "not-json".to_owned()),
+        ]);
+        let client = ApiClient::new(base, "tok", "stage");
+        let err = block_on(client.health()).expect_err("401");
+        assert_eq!(err.error_class(), "auth");
+        let err = block_on(client.health()).expect_err("codec");
+        assert_eq!(err.error_class(), "codec");
+        handle.join().expect("server");
+    }
+
+    #[test]
+    fn send_empty_accepts_empty_object() {
+        let (base, handle) = spawn_json_server(vec![(200, "{}".to_owned())]);
+        let client = ApiClient::new(base, "tok", "stage");
+        block_on(client.delete_memory("m1")).expect("delete");
+        let seen = handle.join().expect("server");
+        assert!(seen[0].contains("DELETE /api/v1/memories/m1"));
+    }
+
+    #[test]
+    fn transport_error_when_nothing_listens() {
+        let client = ApiClient::new("http://127.0.0.1:9", "tok", "stage");
+        let err = block_on(client.health()).expect_err("refused");
+        assert_eq!(err.error_class(), "transport");
+        assert!(matches!(err, ApiError::Transport(_)));
+    }
+}

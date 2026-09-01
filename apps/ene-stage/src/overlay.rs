@@ -259,6 +259,18 @@ impl OverlayWindow {
         self.drag_soul_id = drag_soul_id.map(ToOwned::to_owned);
     }
 
+    #[must_use]
+    pub fn needs_redraw(&self) -> bool {
+        self.gpu_dirty
+            || self.collider_debug
+            || self.drag_soul_id.is_some()
+            || self.slots.iter().any(|slot| slot.avatar.needs_redraw())
+            || self
+                .slint_layer
+                .as_ref()
+                .is_some_and(SlintOverlayLayer::needs_redraw)
+    }
+
     pub fn tick_and_render(
         &mut self,
         gpu: &GpuContext,
@@ -281,21 +293,14 @@ impl OverlayWindow {
             {
                 slot.avatar.apply_viseme(weights);
             }
-            slot.avatar.tick(dt);
         }
         let highlight =
             highlight_soul.and_then(|soul| self.slots.iter().position(|slot| slot.soul_id == soul));
-        let slint_dirty = self
-            .slint_layer
-            .as_ref()
-            .is_some_and(SlintOverlayLayer::needs_redraw);
-        let avatar_dirty = self.slots.iter().any(|slot| slot.avatar.needs_redraw());
-        if !avatar_dirty
-            && !slint_dirty
-            && !self.collider_debug
-            && highlight.is_none()
-            && !self.gpu_dirty
-        {
+        let gpu_needed = self.needs_redraw() || highlight.is_some();
+        for slot in &mut self.slots {
+            slot.avatar.tick(dt);
+        }
+        if !gpu_needed {
             return Ok(false);
         }
         self.gpu_dirty = false;
@@ -311,18 +316,6 @@ impl OverlayWindow {
             )
             .map_err(OverlayError::Avatar)?;
         Ok(true)
-    }
-
-    #[must_use]
-    pub fn wants_frame(&self, look_at_active: bool) -> bool {
-        self.gpu_dirty
-            || self.collider_debug
-            || look_at_active
-            || self
-                .slint_layer
-                .as_ref()
-                .is_some_and(SlintOverlayLayer::needs_redraw)
-            || self.slots.iter().any(|slot| slot.avatar.needs_redraw())
     }
 }
 

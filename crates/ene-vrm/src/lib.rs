@@ -133,3 +133,12 @@ pub use viseme::{VisemeAnalyzer, VisemeWeights};
 pub const fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn crate_version_is_semver() {
+        assert!(!super::version().is_empty());
+        assert!(super::version().contains('.'));
+    }
+}

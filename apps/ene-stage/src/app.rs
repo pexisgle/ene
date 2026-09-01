@@ -1,6 +1,8 @@
 //! winit application handler for the product stage client.
 
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -298,6 +300,11 @@ pub fn run() -> Result<(), AppError> {
         completion_terminal_seq: None,
         pending_optimistic_user_rows: Vec::new(),
         local_settings_save_generation: 0,
+        last_overlay_slint: None,
+        last_chat_sync: None,
+        last_detail_sync: None,
+        last_caption_sync: None,
+        last_spotlight_sync: None,
     };
     app.surface.history = app.session.history();
     app.surface.greetings = app.session.greetings().to_vec();
@@ -373,6 +380,20 @@ struct StageApp {
     completion_terminal_seq: Option<u64>,
     pending_optimistic_user_rows: Vec<OptimisticUserRow>,
     local_settings_save_generation: u64,
+    last_overlay_slint: Option<OverlaySlintKey>,
+    last_chat_sync: Option<u64>,
+    last_detail_sync: Option<u64>,
+    last_caption_sync: Option<u64>,
+    last_spotlight_sync: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct OverlaySlintKey {
+    caption: String,
+    speaker: String,
+    notice: String,
+    greetings: Vec<(String, String)>,
+    head: Option<(i32, i32)>,
 }
 
 #[derive(Debug)]
@@ -452,6 +473,11 @@ impl StageApp {
             completion_terminal_seq: None,
             pending_optimistic_user_rows: Vec::new(),
             local_settings_save_generation: 0,
+            last_overlay_slint: None,
+            last_chat_sync: None,
+            last_detail_sync: None,
+            last_caption_sync: None,
+            last_spotlight_sync: None,
         }
     }
 
@@ -460,6 +486,64 @@ impl StageApp {
             || self.detail_win.is_some()
             || self.caption.is_some()
             || self.spotlight.is_some()
+    }
+
+    fn chat_model_revision(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.surface.history.messages.len().hash(&mut hasher);
+        if let Some(last) = self.surface.history.messages.last() {
+            last.seq.hash(&mut hasher);
+            last.role.hash(&mut hasher);
+            last.text.hash(&mut hasher);
+        }
+        self.surface.streaming_text.hash(&mut hasher);
+        self.surface.status.hash(&mut hasher);
+        self.surface.turn_active.hash(&mut hasher);
+        self.mic_active.hash(&mut hasher);
+        self.surface
+            .pending_approval
+            .as_ref()
+            .map(|pending| pending.id.as_str())
+            .hash(&mut hasher);
+        self.surface
+            .pending_question
+            .as_ref()
+            .map(|question| question.prompt.as_str())
+            .hash(&mut hasher);
+        self.local_settings.theme.hash(&mut hasher);
+        self.session.soul_id().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn detail_model_revision(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        std::mem::discriminant(&self.detail.tab).hash(&mut hasher);
+        self.detail.search.hash(&mut hasher);
+        self.detail.log.len().hash(&mut hasher);
+        self.detail.core_status.hash(&mut hasher);
+        self.detail.health.hash(&mut hasher);
+        self.detail.chat_plugin.hash(&mut hasher);
+        self.detail.chat_model.hash(&mut hasher);
+        self.local_settings.theme.hash(&mut hasher);
+        self.local_settings.displayed_soul_ids.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn caption_model_revision(&self, text: &str, font: i32, position: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        font.hash(&mut hasher);
+        position.hash(&mut hasher);
+        self.local_settings.theme.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn spotlight_model_revision(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.surface.spotlight_query.hash(&mut hasher);
+        self.surface.spotlight_selected.hash(&mut hasher);
+        self.local_settings.theme.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Converts a screen-space pointer position to overlay-local physical
@@ -2815,9 +2899,12 @@ impl StageApp {
         disambiguated_occupant_label(self.session.occupants(), soul_id)
     }
 
-    #[expect(
-        dead_code,
-        reason = "motion picker remains on DetailUiState until the Slint companion tab grows a combo"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "motion picker remains on DetailUiState until the Slint companion tab grows a combo"
+        )
     )]
     fn overlay_motion_controls(&self) -> Vec<detail::MotionControl> {
         self.overlay
@@ -3176,6 +3263,9 @@ impl StageApp {
         }
 
         self.sync_overlay_interaction();
+        if let Some(overlay) = self.overlay.as_ref() {
+            overlay.window.request_redraw();
+        }
     }
 
     #[expect(dead_code, reason = "kept for symmetry with on_overlay_release")]
@@ -3358,14 +3448,14 @@ impl StageApp {
             return;
         };
         let surface_positions = self.surface.positions.clone();
-        let highlight_soul = overlay_highlight_soul(
-            self.interaction.cursor_hittest_enabled(),
+        let highlight_soul = overlay_outline_soul(
             self.surface
                 .drag
                 .as_ref()
-                .map(super::drag::BodyDrag::soul_id),
+                .map(crate::drag::BodyDrag::soul_id),
             self.surface.hover_soul.as_deref(),
-        );
+        )
+        .map(str::to_owned);
         let mut corrected_positions = Vec::new();
         {
             let Some(overlay) = self.overlay.as_mut() else {
@@ -3393,21 +3483,26 @@ impl StageApp {
                 }
                 slot.avatar.tick_expression_cue(dt);
             }
-            if let Err(err) = overlay.tick_and_render(
+            match overlay.tick_and_render(
                 gpu,
                 look,
                 Some(visemes),
                 Some(soul.as_str()),
                 highlight_soul.as_deref(),
             ) {
-                match err {
+                Ok(drew) => {
+                    if drew {
+                        overlay.window.request_redraw();
+                    }
+                }
+                Err(err) => match err {
                     OverlayError::Surface(_) => {
                         tracing::debug!(error = %err, "overlay surface skipped");
                     }
                     OverlayError::Avatar(inner) => {
                         tracing::debug!(error = %inner, "overlay avatar");
                     }
-                }
+                },
             }
         }
         let layout_changed = !corrected_positions.is_empty();
@@ -3449,7 +3544,15 @@ impl StageApp {
                 )
             })
             .collect();
+        let key = OverlaySlintKey {
+            caption: caption.clone(),
+            speaker: speaker.clone(),
+            notice: notice.clone(),
+            greetings: greetings.clone(),
+            head: head.map(|position| (snap_px(position.x), snap_px(position.y))),
+        };
         let multiple_greetings = greetings.len() > 1;
+        let skip_setters = self.last_overlay_slint.as_ref() == Some(&key);
         let actions = {
             let Some(overlay) = self.overlay.as_mut() else {
                 return;
@@ -3458,31 +3561,36 @@ impl StageApp {
                 return;
             };
             layer.ensure_component();
-            if let Some(ui) = layer.component() {
-                let visible = !caption.is_empty();
-                ui.set_bubble_text(caption.into());
-                ui.set_bubble_speaker(speaker.into());
-                ui.set_bubble_visible(visible);
-                ui.set_bubble_clickable(false);
-                if let Some(position) = head {
-                    ui.set_bubble_x(position.x);
-                    ui.set_bubble_y((position.y - 72.0).max(8.0));
+            if !skip_setters {
+                if let Some(ui) = layer.component() {
+                    let visible = !caption.is_empty();
+                    ui.set_bubble_text(caption.into());
+                    ui.set_bubble_speaker(speaker.into());
+                    ui.set_bubble_visible(visible);
+                    ui.set_bubble_clickable(false);
+                    if let Some(position) = head {
+                        ui.set_bubble_x(position.x);
+                        ui.set_bubble_y((position.y - 72.0).max(8.0));
+                    }
+                    ui.set_status_visible(!notice.is_empty());
+                    ui.set_status_text(notice.into());
+                    apply_theme_overlay(ui, &self.local_settings.theme);
                 }
-                ui.set_status_visible(!notice.is_empty());
-                ui.set_status_text(notice.into());
-                apply_theme_overlay(ui, &self.local_settings.theme);
-            }
-            if multiple_greetings {
-                let refs: Vec<(&str, &str)> = greetings
-                    .iter()
-                    .map(|(id, label)| (id.as_str(), label.as_str()))
-                    .collect();
-                layer.set_choices(&refs);
-            } else {
-                layer.set_choices(&[]);
+                if multiple_greetings {
+                    let refs: Vec<(&str, &str)> = greetings
+                        .iter()
+                        .map(|(id, label)| (id.as_str(), label.as_str()))
+                        .collect();
+                    layer.set_choices(&refs);
+                } else {
+                    layer.set_choices(&[]);
+                }
             }
             layer.take_actions()
         };
+        if !skip_setters {
+            self.last_overlay_slint = Some(key);
+        }
         for action in actions {
             match action {
                 OverlayUiAction::Choice(id) => {
@@ -3631,44 +3739,78 @@ impl StageApp {
             return;
         };
 
-        self.sync_chat_slint();
-        if let (Some(gpu), Some(chat)) = (self.gpu.as_ref(), self.chat.as_mut())
-            && let Err(err) = chat.paint(gpu)
-        {
-            tracing::debug!(error = %err, "chat paint failed");
+        let chat_rev = self.chat_model_revision();
+        if self.chat.as_ref().is_some_and(|chat| {
+            chrome_frame_needed(chat.needs_gpu(), self.last_chat_sync, chat_rev)
+        }) {
+            self.sync_chat_slint();
+            if let (Some(gpu), Some(chat)) = (self.gpu.as_ref(), self.chat.as_mut())
+                && let Err(err) = chat.paint(gpu)
+            {
+                tracing::debug!(error = %err, "chat paint failed");
+            }
+            self.last_chat_sync = Some(chat_rev);
+        } else if self.chat.is_none() {
+            self.last_chat_sync = None;
         }
         self.drain_chat_actions();
 
-        if self.detail_win.is_some() {
+        let detail_rev = self.detail_model_revision();
+        if self.detail_win.as_ref().is_some_and(|win| {
+            chrome_frame_needed(win.needs_gpu(), self.last_detail_sync, detail_rev)
+        }) {
             self.sync_detail_slint();
-        }
-        if let (Some(gpu), Some(detail_win)) = (self.gpu.as_ref(), self.detail_win.as_mut())
-            && let Err(err) = detail_win.paint(gpu)
-        {
-            tracing::debug!(error = %err, "detail paint failed");
+            if let (Some(gpu), Some(detail_win)) = (self.gpu.as_ref(), self.detail_win.as_mut())
+                && let Err(err) = detail_win.paint(gpu)
+            {
+                tracing::debug!(error = %err, "detail paint failed");
+            }
+            self.last_detail_sync = Some(detail_rev);
+        } else if self.detail_win.is_none() {
+            self.last_detail_sync = None;
         }
         let display_action = self.drain_detail_actions();
 
         let caption_text = surface::caption::speech_text(&self.surface).to_owned();
         let caption_font = self.settings.caption_font_size as i32;
         let caption_pos = self.settings.caption_position.clone();
-        if let (Some(gpu), Some(caption)) = (self.gpu.as_ref(), self.caption.as_mut()) {
-            if let Some(ui) = caption.layer().and_then(|layer| layer.caption_ui()) {
-                ui.set_caption(caption_text.into());
-                ui.set_font_size(caption_font);
-                apply_theme_caption(ui, &self.local_settings.theme);
+        let caption_rev = self.caption_model_revision(&caption_text, caption_font, &caption_pos);
+        if self.caption.as_ref().is_some_and(|caption| {
+            chrome_frame_needed(caption.needs_gpu(), self.last_caption_sync, caption_rev)
+        }) {
+            if let (Some(gpu), Some(caption)) = (self.gpu.as_ref(), self.caption.as_mut()) {
+                if let Some(ui) = caption.layer().and_then(|layer| layer.caption_ui()) {
+                    ui.set_caption(caption_text.into());
+                    ui.set_font_size(caption_font);
+                    apply_theme_caption(ui, &self.local_settings.theme);
+                }
+                caption.place_caption(&caption_pos);
+                if let Err(err) = caption.paint(gpu) {
+                    tracing::debug!(error = %err, "caption paint failed");
+                }
             }
-            caption.place_caption(&caption_pos);
-            if let Err(err) = caption.paint(gpu) {
-                tracing::debug!(error = %err, "caption paint failed");
-            }
+            self.last_caption_sync = Some(caption_rev);
+        } else if self.caption.is_none() {
+            self.last_caption_sync = None;
         }
 
-        self.sync_spotlight_slint();
-        if let (Some(gpu), Some(spotlight)) = (self.gpu.as_ref(), self.spotlight.as_mut())
-            && let Err(err) = spotlight.paint(gpu)
-        {
-            tracing::debug!(error = %err, "spotlight paint failed");
+        let spotlight_rev = self.spotlight_model_revision();
+        if self.spotlight.as_ref().is_some_and(|spotlight| {
+            chrome_frame_needed(
+                spotlight.needs_gpu(),
+                self.last_spotlight_sync,
+                spotlight_rev,
+            )
+        }) {
+            self.sync_spotlight_slint();
+            if let (Some(gpu), Some(spotlight)) = (self.gpu.as_ref(), self.spotlight.as_mut())
+                && let Err(err) = spotlight.paint(gpu)
+            {
+                tracing::debug!(error = %err, "spotlight paint failed");
+            }
+            self.last_spotlight_sync = Some(spotlight_rev);
+        } else if self.spotlight.is_none() {
+            self.last_spotlight_sync = None;
         }
         if let Some(action) = self.drain_spotlight_actions() {
             self.surface.spotlight_open = false;
@@ -4531,6 +4673,11 @@ impl ApplicationHandler for StageApp {
                         self.on_overlay_cursor_moved(position);
                     }
                 }
+                WindowEvent::CursorLeft { .. } => {
+                    self.surface.hover_soul = None;
+                    self.last_cursor = None;
+                    self.sync_overlay_interaction();
+                }
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button: MouseButton::Left,
@@ -4752,15 +4899,19 @@ impl ApplicationHandler for StageApp {
             event_loop.exit();
             return;
         }
-        let look_at_active = self.interaction.cursor_hittest_enabled()
-            && self.local_settings.look_at_strength > 0.0
-            && self.last_cursor.is_some();
-        let overlay_busy = self
+        let overlay_dirty = self
             .overlay
             .as_ref()
-            .is_some_and(|overlay| overlay.wants_frame(look_at_active));
+            .is_some_and(OverlayWindow::needs_redraw);
+        let chrome_dirty = self.chat.as_ref().is_some_and(ChromeWindow::needs_gpu)
+            || self
+                .detail_win
+                .as_ref()
+                .is_some_and(ChromeWindow::needs_gpu)
+            || self.caption.as_ref().is_some_and(ChromeWindow::needs_gpu)
+            || self.spotlight.as_ref().is_some_and(ChromeWindow::needs_gpu);
         event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(if overlay_busy { 16 } else { 100 }),
+            Instant::now() + overlay_wake_period(overlay_dirty || chrome_dirty),
         ));
     }
 }
@@ -4770,6 +4921,41 @@ fn auth_failure(err: &str) -> bool {
     lower.contains("401 unauthorized")
         || lower.contains("403 forbidden")
         || lower.contains("no cookie auth")
+}
+
+/// Cyan AABB is drag-only. Hover (including X11 global-cursor poll) must not
+/// paint the interaction outline in normal mode.
+#[must_use]
+fn overlay_outline_soul<'a>(
+    drag_soul: Option<&'a str>,
+    _hover_soul: Option<&'a str>,
+) -> Option<&'a str> {
+    drag_soul
+}
+
+/// Idle overlay wakes slowly so look-at/blink can still fire without a 60 Hz GPU tick.
+#[must_use]
+fn overlay_wake_period(needs_redraw: bool) -> Duration {
+    if needs_redraw {
+        Duration::from_millis(16)
+    } else {
+        Duration::from_millis(250)
+    }
+}
+
+#[must_use]
+fn chrome_frame_needed(gpu_dirty: bool, last: Option<u64>, revision: u64) -> bool {
+    gpu_dirty || last != Some(revision)
+}
+
+fn snap_px(value: f32) -> i32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "pixel-quantized overlay dirty compare"
+    )]
+    {
+        value.round() as i32
+    }
 }
 
 fn provider_asset_load_status(count: usize) -> String {
@@ -4876,22 +5062,6 @@ fn apply_chat_copy(ui: &crate::ui::ChatSurface) {
 #[must_use]
 fn should_push_detail_drafts(input_focused: bool, ui_tab: i32, state_tab: i32) -> bool {
     ui_tab != state_tab || !input_focused
-}
-
-#[must_use]
-fn overlay_highlight_soul(
-    interactive: bool,
-    drag_soul: Option<&str>,
-    hover_soul: Option<&str>,
-) -> Option<String> {
-    if let Some(soul) = drag_soul {
-        return Some(soul.to_owned());
-    }
-    if interactive {
-        hover_soul.map(ToOwned::to_owned)
-    } else {
-        None
-    }
 }
 
 #[must_use]
@@ -5123,11 +5293,13 @@ fn friendly_cancel_job_error(err: &str) -> String {
 mod tests {
     use super::{
         AsyncOutcome, ChatWindowAction, FocusOwner, FocusTarget, MAX_COMPLETION_REFRESHES,
-        OverlayFocus, StageApp, cancel_already_terminal, chat_window_action, format_log_text,
-        friendly_cancel_job_error, friendly_create_job_error, message_mode_from_index,
-        overlay_highlight_soul, overlay_window_level, provider_asset_load_status,
-        question_answer_text, should_push_detail_drafts, should_repaint_after_event,
-        window_focus_state, window_level,
+        OverlayFocus, StageApp, auth_failure, cancel_already_terminal, chat_window_action,
+        chrome_frame_needed, create_denied_by_approval, disambiguated_occupant_label,
+        format_log_text, friendly_cancel_job_error, friendly_create_job_error, map_turn_err,
+        message_mode_from_index, overlay_outline_soul, overlay_wake_period, overlay_window_level,
+        position_changed, project_world_to_px, provider_asset_load_status, question_answer_text,
+        should_push_detail_drafts, should_repaint_after_event, spotlight_entry_id, user_theme_file,
+        window_focus_state, window_level, world_aabb_to_px,
     };
     use crate::core::events::LiveEvent;
     use crate::core::session::PreparedSessionTarget;
@@ -5519,6 +5691,229 @@ mod tests {
 
         focus.transition(FocusTarget::Detail);
         assert!(focus.protects());
+    }
+
+    #[test]
+    fn overlay_focus_set_is_idempotent_for_the_same_target() {
+        let mut focus = OverlayFocus::default();
+        assert!(focus.set(FocusTarget::Chat));
+        assert!(!focus.set(FocusTarget::Chat));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn mark_pending_loss_is_a_noop_without_a_target() {
+        let mut focus = OverlayFocus::default();
+        assert!(!focus.mark_pending_loss());
+        assert!(!focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn clear_target_only_drops_the_matching_chrome() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Chat);
+        focus.clear_target(FocusTarget::Detail);
+        assert!(focus.protects());
+        focus.clear_target(FocusTarget::Chat);
+        assert!(!focus.protects());
+    }
+
+    #[test]
+    fn cancel_pending_loss_keeps_the_current_target() {
+        let mut focus = OverlayFocus::default();
+        focus.transition(FocusTarget::Caption);
+        assert!(!focus.on_focus_event(FocusOwner::Caption, false));
+        focus.cancel_pending_loss();
+        assert!(!focus.expire_pending_loss(Instant::now() + Duration::from_secs(1)));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn spotlight_and_caption_focus_protect_the_overlay() {
+        let mut focus = OverlayFocus::default();
+        assert!(focus.on_focus_event(FocusOwner::Spotlight, true));
+        assert!(focus.protects());
+        assert!(focus.on_focus_event(FocusOwner::Caption, true));
+        assert!(focus.protects());
+        assert!(!focus.on_focus_event(FocusOwner::Overlay, false));
+        assert!(focus.protects());
+    }
+
+    #[test]
+    fn hover_does_not_paint_the_cyan_outline() {
+        assert_eq!(overlay_outline_soul(None, Some("soul")), None);
+        assert_eq!(
+            overlay_outline_soul(Some("drag"), Some("hover")),
+            Some("drag")
+        );
+        assert_eq!(overlay_outline_soul(None, None), None);
+    }
+
+    #[test]
+    fn chrome_window_exists_is_false_without_chrome() {
+        let app = StageApp::new_for_test();
+        assert!(!app.chrome_window_exists());
+        assert_eq!(app.visible_display_count(), 0);
+        assert!(!app.has_avatar_occupant("soul"));
+        assert!(app.chat_targets().is_empty());
+        assert_eq!(app.companion_label_for_soul("soul"), "soul");
+        assert_eq!(app.active_companion_label(), "soul");
+        assert!(app.overlay_motion_controls().is_empty());
+    }
+
+    #[test]
+    fn auth_failure_matches_http_and_cookie_messages() {
+        assert!(auth_failure("401 Unauthorized"));
+        assert!(auth_failure("403 Forbidden"));
+        assert!(auth_failure("NO COOKIE AUTH"));
+        assert!(!auth_failure("timeout"));
+        assert!(!auth_failure(""));
+    }
+
+    #[test]
+    fn map_turn_err_translates_known_classes() {
+        assert_eq!(
+            map_turn_err("no_active_operation"),
+            i18n::fl("chat-no-active-turn")
+        );
+        assert_eq!(
+            map_turn_err("401 Unauthorized"),
+            i18n::fl("chat-auth-failed")
+        );
+        assert_eq!(map_turn_err("boom"), "boom");
+    }
+
+    #[test]
+    fn position_changed_uses_epsilon_and_rejects_nan() {
+        assert!(!position_changed([1.0, 2.0], [1.0, 2.0]));
+        assert!(position_changed([1.0, 2.0], [1.0, 2.1]));
+        assert!(position_changed([f32::NAN, 0.0], [0.0, 0.0]));
+        assert!(!position_changed(
+            [1.0, 2.0],
+            [1.0 + f32::EPSILON / 2.0, 2.0]
+        ));
+    }
+
+    #[test]
+    fn project_world_to_px_handles_behind_and_zero_viewport() {
+        let identity = glam::Mat4::IDENTITY;
+        let (px, offscreen, behind) = project_world_to_px(glam::Vec3::ZERO, identity, (100, 50));
+        assert!(!behind);
+        assert!(!offscreen);
+        assert!((px.x - 50.0).abs() < 1e-4);
+        assert!((px.y - 25.0).abs() < 1e-4);
+
+        let behind_m = glam::Mat4::from_cols(
+            glam::Vec4::X,
+            glam::Vec4::Y,
+            glam::Vec4::Z,
+            glam::Vec4::new(0.0, 0.0, 0.0, -1.0),
+        );
+        let (behind_px, offscreen_behind, is_behind) =
+            project_world_to_px(glam::Vec3::ZERO, behind_m, (0, 0));
+        assert!(is_behind);
+        assert!(offscreen_behind);
+        assert!(behind_px.x >= 0.0 && behind_px.y >= 0.0);
+    }
+
+    #[test]
+    fn world_aabb_to_px_has_minimum_extent() {
+        let rect = world_aabb_to_px(
+            glam::Vec3::ZERO,
+            glam::Vec3::ZERO,
+            glam::Mat4::IDENTITY,
+            (100, 100),
+        );
+        assert!(rect.w >= 1.0);
+        assert!(rect.h >= 1.0);
+    }
+
+    #[test]
+    fn create_denied_by_approval_is_case_insensitive() {
+        assert!(create_denied_by_approval("Job Creation Denied"));
+        assert!(!create_denied_by_approval("forbidden"));
+    }
+
+    #[test]
+    fn user_theme_file_is_under_the_data_dir() {
+        let path = user_theme_file();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("theme.toml")
+        );
+    }
+
+    #[test]
+    fn spotlight_entry_id_is_stable_for_known_actions() {
+        use crate::shell::ShellCommand;
+        use crate::surface::spotlight::SpotlightEntry;
+        assert_eq!(
+            spotlight_entry_id(&SpotlightEntry {
+                label: "x".into(),
+                action: crate::surface::SpotlightAction::Close,
+                keywords: &[],
+                shortcut: None,
+            }),
+            "close"
+        );
+        assert_eq!(
+            spotlight_entry_id(&SpotlightEntry {
+                label: "x".into(),
+                action: crate::surface::SpotlightAction::Command(ShellCommand::ToggleMic),
+                keywords: &[],
+                shortcut: None,
+            }),
+            "mic"
+        );
+        assert_eq!(
+            spotlight_entry_id(&SpotlightEntry {
+                label: "fallback".into(),
+                action: crate::surface::SpotlightAction::Command(ShellCommand::Quit),
+                keywords: &[],
+                shortcut: None,
+            }),
+            "quit"
+        );
+    }
+
+    #[test]
+    fn disambiguated_occupant_label_suffixes_duplicates() {
+        let occupants = vec![
+            ene_api::OccupantView {
+                soul_id: "a".into(),
+                display_name: String::new(),
+                body_id: None,
+                package_id: Some("char.Twin".into()),
+                avatar_path: None,
+            },
+            ene_api::OccupantView {
+                soul_id: "b".into(),
+                display_name: String::new(),
+                body_id: None,
+                package_id: Some("char.Twin".into()),
+                avatar_path: None,
+            },
+        ];
+        assert_eq!(disambiguated_occupant_label(&occupants, "a"), "Twin 1");
+        assert_eq!(disambiguated_occupant_label(&occupants, "b"), "Twin 2");
+        assert_eq!(
+            disambiguated_occupant_label(&occupants, "missing"),
+            "missing"
+        );
+    }
+
+    #[test]
+    fn idle_overlay_wakes_slower_than_a_dirty_frame() {
+        assert_eq!(overlay_wake_period(true), Duration::from_millis(16));
+        assert_eq!(overlay_wake_period(false), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn chrome_frame_needed_skips_unchanged_idle_windows() {
+        assert!(chrome_frame_needed(true, Some(1), 1));
+        assert!(chrome_frame_needed(false, None, 1));
+        assert!(chrome_frame_needed(false, Some(1), 2));
+        assert!(!chrome_frame_needed(false, Some(1), 1));
     }
 
     #[test]
@@ -6511,19 +6906,6 @@ mod tests {
         assert!(!should_push_detail_drafts(true, 2, 2));
         assert!(should_push_detail_drafts(true, 2, 3));
         assert!(should_push_detail_drafts(false, 2, 2));
-    }
-
-    #[test]
-    fn overlay_highlight_is_hidden_while_click_through() {
-        assert_eq!(overlay_highlight_soul(false, None, Some("soul")), None);
-        assert_eq!(
-            overlay_highlight_soul(true, None, Some("soul")).as_deref(),
-            Some("soul")
-        );
-        assert_eq!(
-            overlay_highlight_soul(false, Some("drag"), Some("soul")).as_deref(),
-            Some("drag")
-        );
     }
 
     #[test]
