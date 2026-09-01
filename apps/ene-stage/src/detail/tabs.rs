@@ -26,6 +26,8 @@ pub struct DetailView {
     pub rows: Vec<DetailListRow>,
     pub draft_a: String,
     pub draft_b: String,
+    pub draft_a_label: String,
+    pub draft_b_label: String,
     pub drafts_visible: bool,
     pub status: String,
     pub actions: Vec<DetailActionSpec>,
@@ -109,6 +111,8 @@ fn companion(state: &DetailUiState, companions: &[CompanionDisplay]) -> DetailVi
         rows,
         draft_a: state.body_ref_draft.clone(),
         draft_b: String::new(),
+        draft_a_label: i18n::fl("character-body-id"),
+        draft_b_label: String::new(),
         drafts_visible: true,
         status: state.core_status.clone(),
         actions: vec![
@@ -127,6 +131,8 @@ fn conversation(state: &DetailUiState) -> DetailView {
         body: format!("{setup}\n{}", observation_scope_text(state)),
         draft_a: state.chat_plugin.clone(),
         draft_b: state.chat_model.clone(),
+        draft_a_label: i18n::fl("settings-chat-plugin"),
+        draft_b_label: i18n::fl("settings-chat-model"),
         drafts_visible: true,
         status: state.core_status.clone(),
         actions: vec![
@@ -150,16 +156,22 @@ fn voice(state: &DetailUiState, local: &DesktopSettings) -> DetailView {
     DetailView {
         heading: i18n::fl("detail-tab-voice"),
         body: format!(
-            "TTS {} / {}\nSTT {} / {}\nmic {}\ncaption {}",
+            "{}: {} / {}\n{}: {} / {}\n{}: {}\n{}: {}",
+            i18n::fl("task-tts"),
             state.tts_plugin,
             state.tts_model,
+            i18n::fl("task-stt"),
             state.stt_plugin,
             state.stt_model,
+            i18n::fl("settings-mic-device"),
             local.mic_device,
+            i18n::fl("settings-captions"),
             caption_position_label(&local.caption_position)
         ),
         draft_a: state.tts_plugin.clone(),
         draft_b: state.stt_plugin.clone(),
+        draft_a_label: i18n::fl("settings-tts-plugin"),
+        draft_b_label: i18n::fl("settings-stt-plugin"),
         drafts_visible: true,
         status: state.core_status.clone(),
         rows: Vec::new(),
@@ -171,22 +183,34 @@ fn voice(state: &DetailUiState, local: &DesktopSettings) -> DetailView {
 }
 
 fn memory(state: &DetailUiState) -> DetailView {
-    let rows = state
-        .memories
-        .iter()
-        .map(|memory| DetailListRow {
-            id: slint::SharedString::from(memory.id.as_str()),
-            title: slint::SharedString::from(memory.title.as_str()),
-            subtitle: slint::SharedString::from(format!(
-                "{} / {}",
-                memory_kind_label(&memory.kind),
-                memory_scope_label(&memory.scope)
-            )),
-        })
-        .collect();
+    let mut rows = Vec::new();
+    for candidate in &state.pending_memories {
+        rows.push(DetailListRow {
+            id: slint::SharedString::from(format!("pending-accept:{}", candidate.id)),
+            title: slint::SharedString::from(candidate.title.as_str()),
+            subtitle: slint::SharedString::from(i18n::fl("memory-click-accept")),
+        });
+        rows.push(DetailListRow {
+            id: slint::SharedString::from(format!("pending-reject:{}", candidate.id)),
+            title: slint::SharedString::from(candidate.title.as_str()),
+            subtitle: slint::SharedString::from(i18n::fl("memory-click-reject")),
+        });
+    }
+    rows.extend(state.memories.iter().map(|memory| DetailListRow {
+        id: slint::SharedString::from(memory.id.as_str()),
+        title: slint::SharedString::from(memory.title.as_str()),
+        subtitle: slint::SharedString::from(format!(
+            "{} / {}",
+            memory_kind_label(&memory.kind),
+            memory_scope_label(&memory.scope)
+        )),
+    }));
     DetailView {
         heading: i18n::fl("detail-tab-memory"),
-        body: format!("{} pending", state.pending_memories.len()),
+        body: i18n::format(
+            "memory-pending-count",
+            &[("count", &state.pending_memories.len().to_string())],
+        ),
         rows,
         status: state.core_status.clone(),
         actions: vec![action("refresh-memory", i18n::fl("memory-refresh"), true)],
@@ -206,10 +230,12 @@ fn work(state: &DetailUiState) -> DetailView {
         .collect();
     DetailView {
         heading: i18n::fl("detail-tab-work"),
-        body: format!("{} schedules", state.schedules.len()),
+        body: format!("{}: {}", i18n::fl("jobs-schedules"), state.schedules.len()),
         rows,
         draft_a: state.new_job_title.clone(),
         draft_b: state.new_job_goal.clone(),
+        draft_a_label: i18n::fl("jobs-new-title"),
+        draft_b_label: i18n::fl("jobs-new-goal"),
         drafts_visible: true,
         status: state.core_status.clone(),
         actions: vec![
@@ -242,12 +268,18 @@ fn connections(state: &DetailUiState) -> DetailView {
 fn system(state: &DetailUiState, local: &DesktopSettings, monitors: &[MonitorInfo]) -> DetailView {
     let mode = OverlayMonitorMode::from_setting(&local.overlay_monitor_mode);
     let mut body = format!(
-        "theme {} / language {} / approval {}\noverlay {}\ncore {} / plugins {}",
+        "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
+        i18n::fl("settings-theme"),
         super::theme_label(&local.theme),
+        i18n::fl("settings-language"),
         super::language_value_label(&local.language),
+        i18n::fl("settings-approval-mode"),
         approval_mode_label(&state.approval_mode),
+        i18n::fl("settings-overlay"),
         overlay_monitor_mode_label(mode),
+        i18n::fl("settings-core-lifetime"),
         core_lifetime_label(&local.core_lifetime),
+        i18n::fl("settings-plugins-profile"),
         plugin_profile_label(&state.plugins_profile)
     );
     if !state.overlay_monitor_notice.is_empty() {
@@ -272,6 +304,8 @@ fn system(state: &DetailUiState, local: &DesktopSettings, monitors: &[MonitorInf
         rows,
         draft_a: local.theme.clone(),
         draft_b: local.language.clone(),
+        draft_a_label: i18n::fl("settings-theme"),
+        draft_b_label: i18n::fl("settings-language"),
         drafts_visible: true,
         status: state.core_status.clone(),
         actions: vec![
@@ -350,5 +384,51 @@ mod tests {
         let connections = view_for(DetailTab::Connections);
         assert_eq!(action_ids(&memory), vec!["refresh-memory"]);
         assert_eq!(action_ids(&connections), vec!["reload-mcp"]);
+    }
+
+    #[test]
+    fn conversation_and_work_drafts_are_labelled() {
+        let conversation = view_for(DetailTab::Conversation);
+        assert!(!conversation.draft_a_label.is_empty());
+        assert!(!conversation.draft_b_label.is_empty());
+        let work = view_for(DetailTab::Work);
+        assert!(!work.draft_a_label.is_empty());
+        assert!(!work.draft_b_label.is_empty());
+    }
+
+    #[test]
+    fn memory_pending_rows_are_accept_and_reject() {
+        let mut state = DetailUiState {
+            tab: DetailTab::Memory,
+            ..DetailUiState::default()
+        };
+        state.pending_memories.push(ene_api::MemoryCandidateView {
+            id: "c1".to_owned(),
+            soul_id: "soul".to_owned(),
+            scope: "private".to_owned(),
+            kind: "semantic".to_owned(),
+            title: "Keep me".to_owned(),
+            content: "fact".to_owned(),
+            confidence: 0.9,
+            sensitive: false,
+            expires_at: None,
+        });
+        let view = project_tab(&state, &DesktopSettings::default(), &[], &[]);
+        let ids: Vec<&str> = view.rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, ["pending-accept:c1", "pending-reject:c1"]);
+        assert_ne!(view.body, "1 pending");
+        assert!(!view.body.is_empty());
+    }
+
+    #[test]
+    fn voice_and_system_bodies_use_translated_labels() {
+        crate::i18n::with_language("en-US", || {
+            let voice = view_for(DetailTab::Voice);
+            assert!(voice.body.contains("Speech synthesis"));
+            assert!(!voice.body.starts_with("TTS "));
+            let system = view_for(DetailTab::System);
+            assert!(system.body.contains("Theme"));
+            assert!(!system.body.starts_with("theme "));
+        });
     }
 }

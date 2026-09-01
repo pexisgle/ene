@@ -739,7 +739,6 @@ impl DetailUiState {
 
     /// Resolve removes the row before the server answers; the follow-up
     /// refresh is authoritative and restores the row when the resolve failed.
-    #[cfg(test)]
     pub(crate) fn remove_candidate(&mut self, id: &str) {
         self.pending_memories.retain(|candidate| candidate.id != id);
         self.candidate_drafts.remove(id);

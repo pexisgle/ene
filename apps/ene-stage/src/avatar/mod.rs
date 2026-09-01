@@ -325,6 +325,10 @@ impl CompanionAvatar {
         self.look_at_target = Some(target);
     }
 
+    pub fn clear_look_at_target(&mut self) {
+        self.look_at_target = None;
+    }
+
     pub fn apply_body_event(&mut self, value: &Value) {
         let Some(kind) = value.get("type").and_then(Value::as_str) else {
             return;

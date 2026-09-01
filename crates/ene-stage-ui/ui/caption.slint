@@ -10,12 +10,20 @@ export component CaptionSurface inherits Window {
     VerticalLayout {
         alignment: end;
         padding: 16px;
-        Text {
-            text: caption;
-            color: white;
-            font-size: font-size * 1px;
-            wrap: word-wrap;
-            horizontal-alignment: center;
+        if caption != "": Rectangle {
+            border-radius: EneTheme.radius;
+            background: #00000099;
+            HorizontalLayout {
+                padding: 10px;
+                Text {
+                    text: caption;
+                    color: white;
+                    font-size: font-size * 1px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    width: 100%;
+                }
+            }
         }
     }
 }
