@@ -59,6 +59,10 @@ pub fn handle_primary(
             state.request_chat_open = true;
             None
         }
+        "open-spotlight" => {
+            state.open_spotlight = true;
+            None
+        }
         "dismiss-onboarding" => {
             local.onboarding_dismissed = true;
             state.save_local_pending = true;
@@ -188,5 +192,17 @@ mod tests {
             handle_primary(&mut state, &mut local, "reload-mcp"),
             Some(DetailPrimary::ReloadMcp)
         );
+    }
+
+    #[test]
+    fn open_spotlight_sets_the_detail_flag() {
+        let mut state = DetailUiState::default();
+        let mut local = crate::settings::DesktopSettings::default();
+        assert!(!state.open_spotlight);
+        assert_eq!(
+            handle_primary(&mut state, &mut local, "open-spotlight"),
+            None
+        );
+        assert!(state.open_spotlight);
     }
 }

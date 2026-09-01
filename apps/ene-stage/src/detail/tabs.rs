@@ -286,6 +286,10 @@ fn system(state: &DetailUiState, local: &DesktopSettings, monitors: &[MonitorInf
         body.push('\n');
         body.push_str(&state.overlay_monitor_notice);
     }
+    if !state.spotlight_hotkey_ok {
+        body.push('\n');
+        body.push_str(&i18n::fl("settings-spotlight-hotkey-fallback"));
+    }
     let rows = monitors
         .iter()
         .map(|monitor| DetailListRow {
@@ -310,6 +314,7 @@ fn system(state: &DetailUiState, local: &DesktopSettings, monitors: &[MonitorInf
         status: state.core_status.clone(),
         actions: vec![
             action("apply-system", i18n::fl("detail-apply"), true),
+            action("open-spotlight", i18n::fl("settings-open-spotlight"), false),
             action("reload", i18n::fl("detail-reload"), false),
         ],
     }
@@ -429,6 +434,8 @@ mod tests {
             let system = view_for(DetailTab::System);
             assert!(system.body.contains("Theme"));
             assert!(!system.body.starts_with("theme "));
+            assert!(action_ids(&system).contains(&"open-spotlight"));
+            assert!(system.body.contains("Alt+Space"));
         });
     }
 }
