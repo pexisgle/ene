@@ -1509,9 +1509,7 @@ mod tests {
             "leftthumbintermediate"
         );
         assert_eq!(
-            resolve_vrma_dest_bone("leftthumbdistal", &vrm0)
-                .unwrap()
-                .0,
+            resolve_vrma_dest_bone("leftthumbdistal", &vrm0).unwrap().0,
             "leftthumbdistal"
         );
 
@@ -1583,7 +1581,11 @@ mod tests {
             node_parents: vec![-1, -1, -1],
         };
         let mut bone_channels = HashMap::new();
-        for name in ["leftthumbmetacarpal", "leftthumbproximal", "leftthumbdistal"] {
+        for name in [
+            "leftthumbmetacarpal",
+            "leftthumbproximal",
+            "leftthumbdistal",
+        ] {
             bone_channels.insert(
                 name.to_owned(),
                 BoneChannel {

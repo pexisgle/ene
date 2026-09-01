@@ -123,15 +123,9 @@ fn vec3_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<[f32; 3
     }
     let obj = value.as_object()?;
     Some([
-        obj.get("x")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0) as f32,
-        obj.get("y")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0) as f32,
-        obj.get("z")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0) as f32,
+        obj.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        obj.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        obj.get("z").and_then(Value::as_f64).unwrap_or(0.0) as f32,
     ])
 }
 
@@ -607,10 +601,7 @@ mod tests {
         assert!((got[1] - 1.0).abs() < f32::EPSILON);
         assert!(got[2].abs() < f32::EPSILON);
         assert!(vec3_field(&map, "missing").is_none());
-        map.insert(
-            "obj".into(),
-            json!({"x": 0.1, "y": 0.2, "z": 0.3}),
-        );
+        map.insert("obj".into(), json!({"x": 0.1, "y": 0.2, "z": 0.3}));
         let object = vec3_field(&map, "obj").expect("obj");
         assert!((object[0] - 0.1).abs() < f32::EPSILON);
         assert!((object[1] - 0.2).abs() < f32::EPSILON);
@@ -624,6 +615,9 @@ mod tests {
         assert_eq!(canonicalize_vrm0_preset_name("LookUp"), "lookUp");
         assert_eq!(canonicalize_vrm0_preset_name("Blink_L"), "blinkLeft");
         assert_eq!(canonicalize_vrm0_preset_name("A"), "aa");
-        assert_eq!(canonicalize_vrm0_preset_name("CustomSmile"), "custom_customsmile");
+        assert_eq!(
+            canonicalize_vrm0_preset_name("CustomSmile"),
+            "custom_customsmile"
+        );
     }
 }

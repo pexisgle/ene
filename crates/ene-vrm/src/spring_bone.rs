@@ -433,9 +433,7 @@ impl SpringBoneSimulator {
                                     .copied()
                                     .filter(|v| v.is_finite())
                                     .unwrap_or(world_pos);
-                                (world_pos - parent_world_pos)
-                                    .length()
-                                    .max(0.01)
+                                (world_pos - parent_world_pos).length().max(0.01)
                             } else {
                                 0.07
                             };

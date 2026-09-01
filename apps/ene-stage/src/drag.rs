@@ -610,7 +610,13 @@ mod tests {
             soul_id: "stale".to_owned(),
             grab_offset: Vec2::ONE,
         });
-        press_body(&mut drag, None, Some([0.5, 0.5]), Some(Vec2::ZERO), TEST_VIEWPORT);
+        press_body(
+            &mut drag,
+            None,
+            Some([0.5, 0.5]),
+            Some(Vec2::ZERO),
+            TEST_VIEWPORT,
+        );
         assert!(drag.is_none());
     }
 

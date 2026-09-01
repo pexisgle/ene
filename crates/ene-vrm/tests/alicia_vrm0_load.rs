@@ -68,7 +68,11 @@ fn alicia_solid_vrm0_loads_and_maps_runtime_expressions() {
 
     let model = load_vrm(&path, &device, &queue).unwrap();
     assert_eq!(model.format_version(), VrmFormatVersion::V0x);
-    assert!(model.humanoid.len() >= 50, "humanoid bones = {}", model.humanoid.len());
+    assert!(
+        model.humanoid.len() >= 50,
+        "humanoid bones = {}",
+        model.humanoid.len()
+    );
     for bone in ["hips", "head", "lefteye", "righteye"] {
         assert!(
             model.humanoid.by_name(bone).is_some(),
@@ -90,7 +94,11 @@ fn alicia_solid_vrm0_loads_and_maps_runtime_expressions() {
         70
     );
     assert_eq!(
-        model.humanoid.by_name("leftThumbIntermediate").unwrap().node,
+        model
+            .humanoid
+            .by_name("leftThumbIntermediate")
+            .unwrap()
+            .node,
         71
     );
 
@@ -99,7 +107,15 @@ fn alicia_solid_vrm0_loads_and_maps_runtime_expressions() {
         .iter()
         .map(|e| e.name.as_str())
         .collect();
-    for expected in ["happy", "sad", "blink", "lookUp", "lookDown", "lookLeft", "lookRight"] {
+    for expected in [
+        "happy",
+        "sad",
+        "blink",
+        "lookUp",
+        "lookDown",
+        "lookLeft",
+        "lookRight",
+    ] {
         assert!(
             names.contains(&expected),
             "expression {expected} missing from converted presets {names:?}"
@@ -110,7 +126,12 @@ fn alicia_solid_vrm0_loads_and_maps_runtime_expressions() {
     assert_eq!(look_at.look_at_type, LookAtType::Bone);
     assert!((look_at.offset_from_head_bone[1] - 0.06).abs() < 0.01);
 
-    assert!(model.spring_bones.as_ref().is_some_and(|sb| !sb.springs.is_empty()));
+    assert!(
+        model
+            .spring_bones
+            .as_ref()
+            .is_some_and(|sb| !sb.springs.is_empty())
+    );
     assert!(model.joint_count() > 0);
 }
 
@@ -185,6 +206,17 @@ fn alicia_solid_vrm0_runtime_pose_and_springs_step() {
         .map(|(i, r)| (i, *r))
         .collect();
     let mut sim = SpringBoneSimulator::new(&spring_props, &pos, &rot, &parent_rot, &local_rot);
-    let updates = sim.step(1.0 / 60.0, &spring_props, &pos, &rot, &parent_rot, &pos, &rot);
-    assert!(!updates.is_empty(), "spring bone sim should move hair joints");
+    let updates = sim.step(
+        1.0 / 60.0,
+        &spring_props,
+        &pos,
+        &rot,
+        &parent_rot,
+        &pos,
+        &rot,
+    );
+    assert!(
+        !updates.is_empty(),
+        "spring bone sim should move hair joints"
+    );
 }
