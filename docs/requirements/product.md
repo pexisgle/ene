@@ -43,9 +43,9 @@ Ene は「高性能なAgentにキャラクターを貼る」ことを第一目�
 |---|---|---|---|
 | Host OS | Windows、Linux | macOS | Core、スケジュール、永続状態、バックグラウンド処理を実行する |
 | Desktop Client | Windows、Linux | macOS | DesktopMate風マスコットを表示する |
-| Remote Client | 設計上接続可能 | Mobile、Web、その他のClient | 同じHost上のCompanionへ接続する |
+| Remote Client | なし | Mobile、Web、その他のClient | 同じHost上のCompanionへ接続する |
 
-現行の正式対象以外のリリース時期、対応機能、配布形態は未確定である。現行のDesktop Observation / Computer UseはHost PCを主対象とするが、将来のClientが音声I/O、Observation、Body、Computer Use等のCapabilityを提供できるようにし、その追加にCoreの大規模な再設計を必要とする構造へ固定しない。
+現行の正式対象以外のリリース時期、対応機能、配布形態は未確定である。Remote Client自体は現行の正式対象ではないが、将来追加できる構造を妨げない。現行のDesktop Observation / Computer UseはHost PCを主対象とするが、将来のClientが音声I/O、Observation、Body、Computer Use等のCapabilityを提供できるようにし、その追加にCoreの大規模な再設計を必要とする構造へ固定しない。
 
 ## 4. Companion とキャラクター
 
@@ -106,22 +106,22 @@ Companionは概念上常に存在するが、Main LLMを常時実行すること
 
 会話履歴、Memory、Emotion、Mood、Relationship、Character Instance、設定、Permission、タスク履歴、成果物などEneの永続状態はHost PCを正本とする。クラウドは必要な推論・音声・処理を委譲する先であり、Eneの状態の正本ではない。
 
-LLM、VLM、Embedding、STT、TTSその他の推論コンポーネントは、コンポーネント単位でLocal、Cloud、またはHybridを選べる。完全Local、完全Cloud、LocalとCloudの混在をいずれも正規の構成として扱う。初回設定では、少なくともMain LLM、STT、TTSについて、推奨候補を示すことはできてもユーザー自身が利用構成を明示的に選択する。STT / TTSは未設定を選べ、その場合はテキストUIを利用する。外部Providerの選択、費用、送信データはユーザーが理解して設定できる必要がある。
+LLM、VLM、Embedding、Reranker、STT、TTSその他の推論コンポーネントは、それぞれ利用可能なLocal ProviderまたはCloud Providerを選択できなければならない。コンポーネントごとの選択を独立させることで、システム全体として完全Local、Cloud中心、またはLocalとCloudが混在する構成を正規に扱う。個別ProviderがLocalとCloudを組み合わせるHybrid実行を提供することは許容するが、すべてのProviderにHybrid実行を要求しない。初回設定では、少なくともMain LLM、STT、TTSについて、推奨候補を示すことはできてもユーザー自身が利用構成を明示的に選択する。STT / TTSは未設定を選べ、その場合はテキストUIを利用する。外部Providerの選択、費用、送信データはユーザーが理解して設定できる必要がある。
 
 ## 9. 目標
 
 - AITuber / AI companionとして、長く一緒に過ごせる明確な個を提供する。
-- Memory、Skill、Emotion、Mood、Relationship、Interestを長期的に蓄積し、経験によってCompanionと作業の質が改善する。
+- Memory、Skill、Relationship、Interestを長期的に形成・更新し、Emotion / Moodは経験と時間経過に応じて継続的に変化させることで、Companionと作業の質が経験から改善する。
 - 必要なPC作業をCompanionの自然な委任として実行する。
 - 複数Companionが互いに別の個として存在し、共有と個別性を両立する。
 - Hostを中心に、複数のClientから同じCompanionへ接続できる。
-- 永続状態をユーザーの管理下へ置き、Local / Cloud / Hybridの自由度を保つ。
+- 永続状態をユーザーの管理下へ置き、Local / Cloudの選択と、それらを組み合わせた構成の自由度を保つ。
 - 常駐ソフトとして、通常のPC作業を邪魔しない軽量性を最優先する。
 - 内部の高度な処理を隠しながら、必要なときには詳細設定・監査画面で挙動を確認できるようにする。
 
 ## 10. 非目標
 
-現行の製品目標には次を含めない。
+以下は現時点のBaselineとして採用する非目標であり、今後の要件レビューで必要に応じて再確認・変更し得る。
 
 - チーム・企業向けのマルチユーザー／マルチテナント基盤
 - Eneの永続状態をクラウドサービス側で管理するSaaS
@@ -140,12 +140,14 @@ LLM、VLM、Embedding、STT、TTSその他の推論コンポーネントは、�
 以下は本書で意図的に決めていない。
 
 - 各OS・Clientのリリース時期と対応機能の優先順位
+- Remote Clientの認証、暗号化、Device trust、接続方式
 - Aliciaから将来のEne独自キャラクターへ移行する具体的な方法
 - Character Packageのファイル形式、署名、配布・販売モデル
-- 採用するLLM / VLM / Embedding / STT / TTS Provider、モデル、価格表
+- 採用するLLM / VLM / Embedding / Reranker / STT / TTS Provider、モデル、価格表
 - 完全Offline動作をどの範囲まで保証するか
 - 正確なCPU、GPU、RAM、ストレージ、音声・対話レイテンシの数値予算
 - Emotion / Mood / Relationship / Interestの具体的なスキーマ、数値範囲、更新式
 - Permissionのリスク分類、通知と承認の境界、自然言語ポリシーの競合解決
+- 「忘れる」要求におけるMemoryのみの削除、原資料の削除、原資料を残した再学習禁止の具体的なUI・保持方式
 - Plugin API、IPC、Sandbox機構、データ転送方式、Marketplaceの審査方式
 - 永続ログの正確な保持期間、容量、暗号化、エクスポート形式
