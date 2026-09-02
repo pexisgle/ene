@@ -43,74 +43,78 @@ CompanionやSub-agentの推測、要約、解釈は、ユーザーの明示発�
 
 ### INV-009 Internal StateとCompanion Contextを混同しない
 
-Emotion、Mood、Relationship、Interest等の内部数値・構造化Stateを、そのまま機械的に発話やMain LLMの人格入力へ直結しない。必要なStateは、由来・変化・確信度を保ったSemantic Stateへ変換して利用する。一方、Memory、Skill、Conversation、Observation / Context、Task等はSemantic Stateそのものではなく、必要に応じてSemantic StateとともにCompanion Contextへ統合する。
+Current Affective State、Mood、Relationship、Interest等の内部数値・構造化Stateを、そのまま機械的に発話やMain LLMの判断へ直結しない。必要なStateは、由来・変化・確信度を保ったSemantic Stateへ変換して利用する。一方、Memory、Skill、Conversation、Observation / Context、Task等はSemantic Stateそのものではなく、必要に応じてSemantic StateとともにCompanion Contextへ統合する。
 
 ### INV-010 Memoryの種類とscopeを混同しない
 
-Working、Core、Episodic、SemanticというMemoryの種類と、Shared、Companion-specificというscopeは別の軸である。Shared / Companion-specificを理由にMemory種別を失わない。
+Working、Core、Episodic、SemanticというMemoryの種類と、Shared、Companion-specificというscopeは別の軸である。Shared / Companion-specificを理由にMemory種別を失わない。Working Memoryが短期状態であることと、長期Memoryのscope分類も混同しない。
+
+### INV-011 削除意図を学習が覆さない
+
+ユーザー削除またはPrivacy / retention policyによって長期Memoryとして利用しないと決定された情報を、Learning Review、Consolidation、Retrievalその他の自動処理が、残存する原資料から同じ長期Memoryとして勝手に復活させてはならない。
 
 ## 安全性と権限
 
-### INV-011 Hard BoundaryはLLMより強い
+### INV-012 Hard BoundaryはLLMより強い
 
 LLM、Memory、Skill、Character Package、Plugin、MCP、Provider、自然言語委任のいずれも、機械的に禁止されたFilesystem、Credential、Network、Device、Cloud Egress、Computer Use、Capabilityへアクセスできない。
 
-### INV-012 学習は権限を増やさない
+### INV-013 学習は権限を増やさない
 
 Learning Review、Consolidation、Memory更新、Skill生成・改善、Relationship更新は、Permission、Sandbox、Data Egress、観測範囲、Credentialその他のHard Boundaryを緩めたり新しく付与したりできない。
 
-### INV-013 Characterは権限を付与しない
+### INV-014 Characterは権限を付与しない
 
 Character Definition、Character Package、Character Instanceが望むRole、Capability、行動特性は、ユーザー環境の実効Permissionを変更しない。
 
-### INV-014 Skillは能力や権限を追加しない
+### INV-015 Skillは能力や権限を追加しない
 
 Skillは既存Capabilityの使い方を表すProcedural Knowledgeであり、新しいTool、Provider、Credential、Filesystem、Network、Permission、Sandbox例外を追加しない。
 
-### INV-015 Pluginは無制限の特権を持たない
+### INV-016 Pluginは無制限の特権を持たない
 
 PluginはEneを拡張できるが、Pluginであることを理由にCore、他Plugin、CompanionのPrivate Memory、ユーザーデータ、OS資源へ無制限にアクセスできない。公開Extension PointとPermission / Broker境界を通る。
 
 ## 実行と会話
 
-### INV-016 Main LLMは待機のために動き続けない
+### INV-017 Main LLMは待機のために動き続けない
 
 Sub-agent、Schedule、外部サービス、ユーザー入力その他のイベントを待つためだけに、Main LLMを定期的に呼び出したりPollingしたりしない。待機はRuntimeが担い、意味のある状態変化で起動する。
 
-### INV-017 会話空間は同時発話しない
+### INV-018 会話空間は同時発話しない
 
 複数Companionが同時に発話意図を持っても、同一会話空間で論理的に同時発話させない。先に発話した内容を含む最新文脈で、後続Companionが発話要否を再評価する。
 
-### INV-018 Companionの判断と物理制約を分ける
+### INV-019 Companionの判断と物理制約を分ける
 
 Companionは、発話、作業、移動、表情、モーション等の意味や意図を判断できる。一方、Permission、Sandbox、画面外への逸脱、座標、衝突、OSの物理的制約はシステムが強制する。
 
-### INV-019 音声代替は同じ存在である
+### INV-020 音声代替は同じ存在である
 
 STT/TTSが使えない場合のテキスト入力・吹き出しは、別の会話、別のユーザー、別のCompanion、別のMemoryとして扱わない。
 
 ## 拡張と可用性
 
-### INV-020 Plugin、MCP、Skillは別の責務である
+### INV-021 Plugin、MCP、Skillは別の責務である
 
 PluginはEne自体の拡張、MCPは外部Tool / Resourceの接続、Skillは既存能力の利用方法である。単純な外部Tool接続を理由にPluginとSkillを混同しない。
 
-### INV-021 第三者Pluginの障害をCoreへ波及させない
+### INV-022 第三者Pluginの障害をCoreへ波及させない
 
 第三者Pluginのクラッシュ、OOM、GPU Runtime障害、Deadlock、未許可アクセスによって、Ene Core、他Plugin、他Companion、永続状態全体の完全性を不必要に損なわない。
 
-### INV-022 自動Provider切替を暗黙に行わない
+### INV-023 自動Provider切替を暗黙に行わない
 
 Providerが利用不能になった場合、ユーザーが選んでいない別Providerへ黙って切り替えたり、課金やData Egressを新たに開始したりしない。別Providerの利用は、ユーザーが理解できる明示的な選択または将来定義する明示設定に基づく。
 
-### INV-023 有料Providerは明示的に選択される
+### INV-024 有料Providerは明示的に選択される
 
 有料または従量課金のProviderを、推奨表示やインストールだけを理由に有効化、契約、課金開始しない。
 
-### INV-024 記録可能性と内部推論を混同しない
+### INV-025 記録可能性と内部推論を混同しない
 
-主要な会話、判断、Action、Result、Permission、状態変更は追跡可能にするが、LLMの逐語的な内部推論や常時観測の全Rawデータを保存しなければ監査できない、とはしない。
+主要な会話、判断、Action、Result、Permission、重要な状態変更は追跡可能にするが、LLMの逐語的な内部推論、すべての微小State変化、常時観測の全Rawデータを保存しなければ監査できない、とはしない。
 
-### INV-025 過去資料は現行要件ではない
+### INV-026 過去資料は現行要件ではない
 
 過去の設計・計画資料やGit履歴に書かれた設計、数値、実装構造を、明示的な再確認なしに現行要件や不変条件へ昇格させない。
