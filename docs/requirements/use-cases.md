@@ -15,12 +15,13 @@
 
 1. Eneは、Character Packageを別途用意しなくても開始できるデフォルトCompanionを提供する。
 2. 現時点ではAliciaがデフォルトCompanionとして表示される。
-3. ユーザーは、必要に応じてLLM、STT、TTS等のProviderを選択する。
-4. 有料Providerを選ぶ場合、費用・送信先・必要な認証設定を確認したうえでユーザーが明示的に選択する。
-5. 設定後、ユーザーはCompanionとの最初の会話を開始できる。
+3. EneはLLM、STT、TTS等について推奨候補と、Local / Cloud、費用、Privacy、必要Hardware等の判断材料を提示できる。
+4. ユーザーは、少なくともMain LLM、STT、TTSについて利用するProviderまたは未設定を明示的に選択する。STT / TTSは未設定のままでもよい。
+5. 有料Providerを選ぶ場合、費用・送信先・必要な認証設定を確認したうえでユーザーが明示的に選択する。
+6. 設定後、ユーザーはCompanionとの最初の会話を開始できる。
 
 **失敗時の挙動**: Providerが未設定または利用不能でも、利用可能なテキストUIで設定を続けられる。自動的に別の有料Providerを有効化しない。
-**完了条件**: ユーザーが、課金の意図しない開始なしに、少なくとも利用可能な入力・出力手段でCompanionへ話しかけられる。
+**完了条件**: ユーザーが、利用構成と課金の有無を理解して明示的に選択したうえで、少なくとも利用可能な入力・出力手段でCompanionへ話しかけられる。
 
 ## UC-002 音声中心の通常対話
 
@@ -57,7 +58,7 @@
 
 ## UC-004 状況を見た自発的な会話
 
-**Actor**: Companions、ユーザー
+**Actor**: Companion、ユーザー
 **前提**: ユーザーが許可した範囲でDesktop、OS、予定、タスク等の文脈を観測できる。
 **Trigger**: Context Monitorが、あるCompanionにとって意味がありそうな変化を検出する。
 
@@ -122,7 +123,7 @@
 4. ユーザーが再接続したとき、Companionが結果と保留事項を自然に伝える。
 5. 将来のRemote Clientでは、重要度に応じた通知を利用できる余地を残す。
 
-**失敗時の挙動**: Host停止中は処理を失ったことにせず、再開可能な状態を保存する。
+**失敗時の挙動**: Host停止前までに永続化された状態を保持し、再起動後は未完了・未処理の作業を失ったことにせず、再開または再実行可能な状態として扱う。
 **完了条件**: 再接続後に、作業の結果・失敗・保留がCompanionから説明できる。
 
 ## UC-008 複数Companionとのグループ会話
@@ -272,7 +273,7 @@
 1. Ene自体の拡張が必要な場合はPlugin、外部Tool / Resource接続で足りる場合はMCP、既存能力の使い方はSkillとして扱う。
 2. Pluginは公開されたExtension Point、Event、Capability、Brokerを通じてEneを拡張する。
 3. 第三者PluginはCoreから隔離され、必要な権限だけを受け取る。
-4. 高帯域データを扱うProvider Pluginも、不要なコピーや直列化によって実用性を失わない。
+4. Local LLM / VLM / Audio等の高帯域Provider Pluginは、PermissionとSandboxの範囲でPlugin自身の実行環境からGPUや必要なRuntimeを直接利用でき、不要なコピーや直列化によって実用性を失わない。
 5. SkillはAgent Skills互換形式でImport / Exportでき、利用実績と学習による改訂を管理できる。
 6. Pluginが設定・詳細・診断UIを追加することはできるが、Companion UIへ任意の要素を挿入・置換しない。
 
