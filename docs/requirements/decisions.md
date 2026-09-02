@@ -41,7 +41,7 @@ Status: confirmed
 Nature: design direction
 Decision: Ene Core、永続状態、Scheduler、Context Monitor、Learning、HarnessはHostに置き、Desktop / Remote Clientは同じCoreへ接続する。
 Reason: ユーザーが接続していない間もCompanionとTaskが継続する必要があるため。
-Consequences: 現行はWindows / LinuxをHostとDesktop Clientの対象とし、将来macOS、Mobile、Web Clientを追加できる余地を残す。
+Consequences: 現行はWindows / LinuxをHostとDesktop Clientの対象とし、将来macOS、Mobile、Web Clientを追加できる余地を残す。Remote Clientは現行の正式対象ではない。
 
 ### R-D004: 複数の独立したCompanion
 
@@ -63,9 +63,9 @@ Consequences: Import / Export、将来の配布・販売Marketplaceを想定で�
 
 Status: confirmed
 Nature: product decision
-Decision: Character Packageなしでも開始できるデフォルトCompanionを提供し、現時点ではAliciaを採用する。
+Decision: Character Packageなしでも開始できるデフォルトCompanionを提供し、現時点の製品構成ではAliciaを採用する。
 Reason: 初回起動時にキャラクター選択を必須にせず、Companion体験へすぐ到達できるようにするため。
-Consequences: 将来Ene独自キャラクターへ置き換える余地を残す。移行方法と時期は未確定。
+Consequences: 機能要件は特定Character名へ固定せず「少なくとも1体の利用可能なデフォルトCompanion」とする。将来Ene独自キャラクターへ置き換える余地を残し、移行方法と時期は未確定とする。
 
 ### R-D007: VRM常駐UIと音声中心
 
@@ -128,8 +128,8 @@ Consequences: Sub-agentは意味のある進捗をCompanionへ返し、最終ま
 Status: confirmed
 Nature: product decision
 Decision: Sub-agentは実行中に発見、計画変更、問題、判断要求、フェーズ完了等をCompanionへ共有し、Companionは報告に応じて追加指示やユーザー通知を判断する。
-Reason: Companionsが作業を自分の意図として把握し、ユーザーの質問や自発的な報告に答えられるようにするため。
-Consequences: 低レベルの全操作を流すのではなく、Task履歴と最終まとめを残す。
+Reason: Companionが作業を自分の意図として把握し、ユーザーの質問や自発的な報告に答えられるようにするため。
+Consequences: 低レベルの全操作を流すのではなく、Task履歴と最終まとめを残す。Task / Sub-agentはCancelと安全なRetryを扱える必要がある。
 
 ### R-D015: 自律性を観測・発話・作業に分ける
 
@@ -143,7 +143,7 @@ Consequences: 通知と承認を区別し、詳細なリスク閾値は未確定
 
 Status: confirmed
 Nature: product decision
-Decision: 会話、Memory、Emotion、Mood、Relationship、Character Instance、設定、Permission、Task履歴等の永続状態はHost PCを正本とする。
+Decision: 会話、Memory、Emotion / Mood、Relationship、Character Instance、設定、Permission、Task履歴等の永続状態はHost PCを正本とする。
 Reason: ユーザーの個人的な存在としてのEneを、特定Cloud ProviderやClientの可用性から分離するため。
 Consequences: Cloudは必要な計算の委譲先であり、Remote Clientは同じ正本へ接続する。
 
@@ -151,9 +151,9 @@ Consequences: Cloudは必要な計算の委譲先であり、Remote Clientは同
 
 Status: confirmed
 Nature: product decision
-Decision: Main LLM、Context Monitor、VLM、Embedding、STT、TTS等について、Local、Cloud、Hybridをコンポーネントごとに選べるようにする。完全Local、完全Cloud、混在を正規構成とする。
+Decision: Main LLM、Context Monitor、Sub-agent LLM、VLM、Embedding、Reranker、STT、TTS等について、利用可能なLocal ProviderまたはCloud Provider等をコンポーネントごとに独立して選べるようにする。その結果として完全Local、Cloud中心、LocalとCloudの混在を正規構成とする。個別ProviderがHybrid実行を提供することは許容するが必須としない。
 Reason: Hardware、コスト、品質、Privacyの要求がコンポーネントごとに異なるため。
-Consequences: 特定Providerや現在のPlugin方式を要件へ固定しない。Cloud送信は個別Permissionの対象とする。
+Consequences: 特定Providerや現在のPlugin方式を要件へ固定しない。Cloud送信は個別Permissionの対象とする。「Hybrid」は主としてシステム全体の混在構成を指し、全ProviderへLocal+Cloudの複合実行を要求しない。
 
 ### R-D018: 自動Provider fallbackを前提にしない
 
@@ -208,8 +208,8 @@ Consequences: Eneが公開するBody APIや正規の表現拡張は妨げない�
 Status: confirmed
 Nature: product decision
 Decision: MemoryをWorking、Core、Episodic、Semanticに分け、scopeをSharedとCompanion-specificに分ける。SkillはProcedural Memoryとして別管理する。
-Reason: 常時参照する情報、経験、抽象化された事実、作業手順、共有範囲を混同しないため。
-Consequences: Coreは小さく厳選し、Episodic / SemanticはRetrievalする。Memoryの具体schemaは未確定。
+Reason: 現在の作業状態、常時参照する情報、経験、抽象化された事実、作業手順、共有範囲を混同しないため。
+Consequences: Working Memoryは短期状態として扱い、Coreは小さく厳選し、Episodic / SemanticはRetrievalする。Learning Reviewの長期保存先としてWorking Memoryを扱わない。Memoryの具体schemaは未確定。
 
 ### R-D025: 自動想起と明示検索を併用する
 
@@ -217,23 +217,23 @@ Status: confirmed
 Nature: product decision
 Decision: 普段は軽量な自動想起を行い、必要時はCompanion、Agent、ユーザーが明示的な深掘り検索を実行できるようにする。RetrievalはEmbedding単独でなく、時間、Entity、scope、感情的意義、Relationship、Task、confidence等を組み合わせる。
 Reason: 自然な会話と、曖昧・古い・根拠が弱い過去の調査を両立するため。
-Consequences: Consolidated Memoryだけでなく元Conversation / Logまで辿れるようにする。
+Consequences: Consolidated Memoryだけでなく、保持ポリシーで利用可能な元Conversation / Logまで辿れるようにする。
 
 ### R-D026: 忘却は主にRecall decayとする
 
 Status: confirmed
 Nature: design direction
-Decision: 通常の忘却は物理削除ではなくRecall priorityの低下とし、ユーザー削除、Privacy、明確な誤記憶、完全重複等に限って物理削除を行えるようにする。
-Reason: 強いcueがあれば古い経験を思い出せる余地を残し、誤記憶とPrivacyも管理するため。
-Consequences: Memoryはimportance、recency、emotional significance、confidence等を持つ。
+Decision: 通常の忘却は物理削除ではなくRecall priorityの低下とし、ユーザー削除、Privacy、明確な誤記憶、完全重複等では物理削除や再学習禁止を行えるようにする。
+Reason: 強いcueがあれば古い経験を思い出せる余地を残しつつ、ユーザーの削除意図とPrivacyを守るため。
+Consequences: Memoryはimportance、recency、emotional significance、confidence等を持つ。削除意図に反して原資料から同じMemoryを自動再生成しない。
 
 ### R-D027: Learning Review / Consolidationを分離する
 
 Status: confirmed
 Nature: design direction
-Decision: 経験からの候補作成・即時反映をLearning Review、重複統合・抽象化・再評価・忘却調整をConsolidationとして扱い、非緊急処理はアイドル時・イベント駆動で行う。
+Decision: 個々のExperienceからの候補作成・即時反映をLearning Review、重複統合・抽象化・再評価・忘却調整をConsolidationとして扱い、非緊急のConsolidationは主にアイドル時・余剰資源のある時に行う。
 Reason: ユーザー体験への即時性と、常駐Coreの軽量性を両立するため。
-Consequences: Host停止・高負荷を跨ぐ処理キューが必要になるが、固定夜間実行やMain LLM常時実行は要求しない。
+Consequences: Host停止・高負荷を跨ぐ処理キューが必要になるが、固定夜間実行やMain LLM常時実行は要求しない。アイドル時処理をLearning Reviewそのものと混同しない。
 
 ### R-D028: 学習は自動、管理は深いUI
 
@@ -251,13 +251,13 @@ Decision: Skillは独自フォーマットを作らず、可能な限りAgent Sk
 Reason: Import / Export、Progressive Disclosure、他のSkill対応Agentとの再利用性を確保するため。
 Consequences: Skillは既存Capabilityの使い方であり、Plugin、MCP、Permissionを代替・付与しない。
 
-### R-D030: EmotionをPAD-like StateとAppraisalで表す
+### R-D030: Emotionを連続StateとAppraisalで表す
 
 Status: confirmed
 Nature: design direction
-Decision: Emotionは表情だけでなく意思決定に影響する内部状態とし、基礎状態はValence、Arousal、Control / Dominanceを中心に、出来事の意味はNovelty、Goal relevance、Conduciveness、Agency、Coping、Norm compatibility等のAppraisalで扱う。
-Reason: 感情の連続性、個体差、同じ出来事への異なる反応を表現し、感情ラベルの大量な固定軸を避けるため。
-Consequences: Baseline、Mood、短期Affect、Decay、Reactivity、Inertia、Recovery、Reappraisalを区別し、正確な更新式は未確定とする。
+Decision: Emotion Systemは表情だけでなく意思決定に影響する内部状態を扱い、基礎状態はValence、Arousal、Control（Sense of Control）を中心とする。ControlはPADモデルのDominanceに由来するが、Eneでは状況への主体性・対処可能感を表す名称として扱う。出来事の意味はNovelty / Expectedness、Goal relevance、Conduciveness、Agency、Coping、Norm compatibility等のAppraisalで扱う。
+Reason: 感情の連続性、個体差、同じ出来事への異なる反応を表現し、感情ラベルの大量な固定軸や「Dominance=他者支配」という誤解を避けるため。
+Consequences: Baseline、Mood、Fast Affect、Decay、Reactivity、Inertia、Recovery、Reappraisalを区別し、正確な更新式は未確定とする。
 
 ### R-D031: RelationshipをFamiliarity・Closeness・Trustで分ける
 
@@ -265,7 +265,7 @@ Status: confirmed
 Nature: design direction
 Decision: Relationshipは少なくともFamiliarity、Closeness、Trustを別状態として扱い、Trustは必要に応じてPredictability、Dependability、Benevolent expectation等へ分ける。
 Reason: 利用期間、心理的な近さ、信頼性を単一の好感度へ潰さないため。
-Consequences: Satisfaction、Affection、Resentment等は必要時の派生解釈とし、依存を最大化する単一Commitment指標を製品Coreに置かない。Attachment anxiety / avoidance、Need for closeness、Independence、Expressiveness等は必要なCharacterのPersonality側の傾向として扱い、全Companion共通のRelationship軸にはしない。
+Consequences: Relationshipは通常、経験の蓄積に応じて比較的緩やかに変化し、小イベントだけでゲーム的に極端に上下させない。ただし重大イベントは相応に大きく影響し得る。Satisfaction、Affection、Resentment等は必要時の派生解釈とし、依存を最大化する単一Commitment指標を製品Coreに置かない。Attachment anxiety / avoidance、Need for closeness、Independence、Expressiveness等は必要なCharacterのPersonality側の傾向として扱い、全Companion共通のRelationship軸にはしない。
 
 ### R-D032: UIを3層に分ける
 
@@ -279,7 +279,7 @@ Consequences: 3層の違いは画面構成、導線、視覚的階層で一貫�
 
 Status: confirmed
 Nature: design direction
-Decision: 会話、主体間通信、Task、Tool / MCP / Computer Use、Permission、Schedule、重要Context、Memory / Skill変更、Provider利用、Plugin障害等を追跡可能にする。一方、逐語的な内部推論、Raw音声、Raw画面、意味のない低レベルイベントを既定で永続保存しない。
+Decision: 会話、主体間通信、Task、Tool / MCP / Computer Use、Permission、Schedule、重要Context、Memory / Skill変更、重要なCompanion State変更、設定変更、Provider利用、Plugin障害等を追跡可能にする。一方、逐語的な内部推論、全微小State変化、Raw音声、Raw画面、意味のない低レベルイベントを既定で永続保存しない。
 Reason: 監査性、トラブルシュート、Privacy、Storage消費を両立するため。
 Consequences: 監査ログを完全なクラッシュリプレイやEvent Sourcingと同一視しない。
 
@@ -311,9 +311,9 @@ Consequences: 部分障害を隔離し、成功・失敗・中断・保留を正
 
 Status: confirmed
 Nature: design direction
-Decision: Emotion、Mood、Relationship、Interest等の内部数値・構造化Stateは、LLMが理解しやすいSemantic Stateへ変換する。一方、Memory、Skill、Conversation、Observation / Context、Task等はSemantic Stateそのものとはせず、必要な情報をSemantic StateとともにCompanion Contextへ統合してMain LLMへ渡す。
+Decision: Current Affective State、Mood、Relationship、Interest等の内部数値・構造化Stateは、LLMが理解しやすいSemantic Stateへ変換する。一方、Memory、Skill、Conversation、Observation / Current Context、Task等はSemantic Stateそのものとはせず、必要な情報をSemantic StateとともにCompanion Contextへ統合してMain LLMへ渡す。
 Reason: 数値をそのままLLMへ渡す不明瞭さを避けつつ、MemoryやTaskまで一つの意味表現へ押し込んで責務を曖昧にしないため。
-Consequences: Internal State → Semantic Stateと、複数情報源 → Companion Contextという2段階を区別する。具体的なPrompt形式は未確定。
+Consequences: Internal State → Semantic Stateと、複数情報源 → Companion Contextという2段階を区別する。基本的なSemantic State変換はMain LLMを必須とせず軽量なRuntime処理で実行可能にし、具体的なPrompt形式は未確定とする。
 
 ### R-D038: 初期Provider構成はユーザーが明示的に選ぶ
 
@@ -329,7 +329,7 @@ Status: confirmed
 Nature: design direction
 Decision: 現行のDesktop Observation / Computer UseはHost PCを主対象とするが、将来のClientが音声I/O、Observation、Body、Computer Use等をCapabilityとしてHost上の同じEneへ提供できる構造を保つ。
 Reason: 複数デバイスから同じCompanionへ接続する将来像で、Client側を単なる表示端末に固定しないため。
-Consequences: Capabilityの所在をHostだけに固定せず、追加時にCoreやPermission Systemを大規模に再設計することを前提としない。具体的なRemote protocolと開始時期は未確定。
+Consequences: Companion Stateと永続状態の正本はHostに維持する。Observation等のCapabilityの実行場所はHostだけに固定せず、追加時にCoreやPermission Systemを大規模に再設計することを前提としない。具体的なRemote protocol、認証、暗号化、開始時期は未確定。
 
 ### R-D040: Memory Retrievalは検索精度を重視する
 
@@ -339,20 +339,37 @@ Decision: Memory Retrievalは軽量性だけでなく高い検索精度を重要
 Reason: 保存量が増えても必要な記憶を正しく思い出せなければ、長期Memoryの価値とCompanionの一貫性が失われるため。
 Consequences: Embedding単独に固定せず、Hybrid RetrievalとRerankingを利用可能にし、代表的な評価セットと定量指標は実測して決める。
 
+### R-D041: 削除されたMemoryを自動再学習で復活させない
+
+Status: confirmed
+Nature: product decision
+Decision: ユーザー削除またはPrivacy / retention policyによって長期Memoryとして利用しないと決定された情報は、原資料が別目的で残っていても、Learning ReviewやConsolidationによって同じ長期Memoryとして自動再生成しない。
+Reason: 「忘れて」というユーザー意図やPrivacy削除が、バックグラウンド学習によって無効化されることを防ぐため。
+Consequences: Memoryのみの削除、原資料自体の削除、原資料を残した再学習禁止を区別できる余地を持つ。具体的なUI、保持情報、tombstone等の実装方式は未確定。
+
+### R-D042: Companion StateとCurrent Contextを分ける
+
+Status: confirmed
+Nature: design direction
+Decision: Emotion Systemの状態、Mood、Relationship、Interest、意図等の継続的な内部状態をCompanion Stateとし、現在のConversation、Desktop / OS観測、Schedule、Task、接続状態、時間情報等の外部・一時的情報をCurrent Contextとして区別する。
+Reason: 「Companion自身の状態」と「現在周囲で起きていること」を同じStateへ押し込み、永続化・Semantic State・Context構築の責務を曖昧にしないため。
+Consequences: Main LLM起動時は両者を必要に応じてCompanion Contextへ統合する。Current ContextをCompanion Stateとして恒久保存することを前提としない。
+
 ## 未確定事項
 
 次の項目は、今回の判断から直接は決まらないため、別途検証・対話して決める。
 
 | ID | 未確定項目 |
 |---|---|
-| O-001 | 各OS・Clientのリリース時期、対応機能、Remote接続の仕様 |
+| O-001 | 各OS・Clientのリリース時期、対応機能、Remote接続の仕様・認証・暗号化・Device trust |
 | O-002 | AliciaからEne独自キャラクターへの移行方法、Character Packageのmanifest・署名・Marketplace方式 |
 | O-003 | LLM、VLM、Embedding、Reranker、STT、TTSのProvider・モデル・価格・Credential保管 |
 | O-004 | 完全Offlineで保証する機能範囲 |
 | O-005 | CPU、GPU、RAM、Storage、対話・音声・Remoteの定量的な性能予算 |
-| O-006 | Emotion、Mood、Relationship、Interest、Semantic State、Memoryの正確なschemaと更新式 |
+| O-006 | Current Affective State、Mood、Relationship、Interest、Semantic State、Memoryの正確なschemaと更新式 |
 | O-007 | Permissionのリスク分類、通知・承認の閾値、自然言語ポリシーの競合解決 |
 | O-008 | Plugin API、Extension Point、IPC、Sandbox、Broker、bulk data転送の具体方式 |
 | O-009 | Companion間交流の段階数・既定値、ランダム起動の頻度・制限 |
 | O-010 | ログ、Memory、成果物、音声、画像、Tool outputの保持・削除・Export形式 |
-| O-011 | Accessibility基準、UIテーマ、3層の視覚表現 |
+| O-011 | 「忘れる」要求のMemory削除、原資料削除、再学習禁止を区別するUI・保持方式 |
+| O-012 | Accessibility基準、UIテーマ、3層の視覚表現 |
