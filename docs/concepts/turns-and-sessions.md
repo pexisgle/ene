@@ -112,11 +112,11 @@ Ask-user from a running job is a **live** `question.asked` event (`id` is the
 job / delegation id, `prompt` / `text` is the speech, `questions` is the
 combined list). Stage, desktop, and Web all listen for that name. Answer with
 `POST /api/v1/jobs/{id}/answer` (`{ "text" }` or `{ "answers": ["…"] }`) so
-the reply lands on the job mailbox (`host.answer`), not the dialogue lane.
+the reply lands on the delegation event log (`host.answer`), not the dialogue lane.
 Several open questions on one job are merged with `combine_pending_questions`
 before emit; a single `text` answers every still-open question on that job.
 Unanswered questions older than `question_timeout_hours` (default 24h) are
-closed by a core tick that writes an `assumption` mailbox note.
+closed by a core tick that appends an `Assumption` delegation event.
 When every open question on that job is gone — answered from any client or
 closed by the timeout tick — core emits `question.resolved` (`id` is the job /
 delegation id) so clients can close their ask-user form.

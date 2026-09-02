@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 ///
 /// Stored as `meta.work_storage_version` rather than `PRAGMA user_version`
 /// because this file is also opened by [`ene_companion::CompanionStore`].
-pub const WORK_STORAGE_VERSION: u32 = 1;
+pub const WORK_STORAGE_VERSION: u32 = 2;
 
 const META_KEY: &str = "work_storage_version";
 
@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS schedules (
   next_fire TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sched_next ON schedules (enabled, next_fire);
+CREATE TABLE IF NOT EXISTS delegation_events (
+  event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  delegation_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_delegation_events_delegation
+  ON delegation_events (delegation_id, event_seq);
 CREATE TABLE IF NOT EXISTS mcp_servers (
   id TEXT PRIMARY KEY,
   transport TEXT NOT NULL,
@@ -69,15 +77,6 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   url TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
   args TEXT NOT NULL DEFAULT '[]'
-);
-CREATE TABLE IF NOT EXISTS mailbox (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  delegation_id TEXT NOT NULL,
-  direction TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  body TEXT NOT NULL,
-  ts TEXT NOT NULL,
-  question_seq INTEGER
 );
 CREATE TABLE IF NOT EXISTS tool_executions (
   execution_id TEXT PRIMARY KEY,
@@ -129,6 +128,7 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<(), WorkError> {
 fn migrate(version: u32, conn: &Connection) -> Result<(), WorkError> {
     match version {
         1 => migrate_v1(conn),
+        2 => migrate_v2(conn),
         _ => Err(WorkError::MissingMigration(version)),
     }
 }
@@ -155,7 +155,21 @@ fn migrate_v1(conn: &Connection) -> Result<(), WorkError> {
         conn,
         "ALTER TABLE mcp_servers ADD COLUMN args TEXT NOT NULL DEFAULT '[]'",
     )?;
-    add_column(conn, "ALTER TABLE mailbox ADD COLUMN question_seq INTEGER")?;
+    Ok(())
+}
+
+fn migrate_v2(conn: &Connection) -> Result<(), WorkError> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS mailbox;
+         CREATE TABLE IF NOT EXISTS delegation_events (
+           event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+           delegation_id TEXT NOT NULL,
+           created_at TEXT NOT NULL,
+           payload TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_delegation_events_delegation
+           ON delegation_events (delegation_id, event_seq);",
+    )?;
     Ok(())
 }
 
@@ -218,7 +232,7 @@ mod tests {
     use crate::types::{DelegationMode, NewJob};
     use ene_companion::{CompanionStore, NewSoul};
     use ene_session::{DelegationId, SoulId};
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OptionalExtension};
     use tempfile::TempDir;
 
     const LEGACY_V0: &str = "
@@ -276,6 +290,16 @@ CREATE TABLE mailbox (
             .is_ok()
     }
 
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |_| Ok(true),
+        )
+        .optional()
+        .is_ok_and(|row| row.is_some())
+    }
+
     #[test]
     fn fresh_database_initializes_latest_schema() {
         let dir = TempDir::new().unwrap();
@@ -290,7 +314,8 @@ CREATE TABLE mailbox (
         assert!(column_exists(&conn, "jobs", "allowed_tools"));
         assert!(column_exists(&conn, "jobs", "pending_allowed_tools"));
         assert!(column_exists(&conn, "mcp_servers", "args"));
-        assert!(column_exists(&conn, "mailbox", "question_seq"));
+        assert!(table_exists(&conn, "delegation_events"));
+        assert!(!table_exists(&conn, "mailbox"));
     }
 
     #[test]
@@ -335,13 +360,13 @@ CREATE TABLE mailbox (
         assert_eq!(mcp.len(), 1);
         assert!(mcp[0].args.is_empty());
 
-        let mail = store.mailbox_entries(job_id).unwrap();
-        assert_eq!(mail.len(), 1);
-        assert!(mail[0].question_seq.is_none());
+        let events = store.delegation_events(job_id).unwrap();
+        assert!(events.is_empty());
 
         let conn = Connection::open(&path).unwrap();
         pragma_wal_and_fk(&conn);
         assert_eq!(read_version(&conn).unwrap(), WORK_STORAGE_VERSION);
+        assert!(!table_exists(&conn, "mailbox"));
     }
 
     #[test]
@@ -363,8 +388,8 @@ CREATE TABLE mailbox (
         assert!(column_exists(&conn, "jobs", "allowed_tools"));
         assert!(column_exists(&conn, "jobs", "pending_allowed_tools"));
         assert!(column_exists(&conn, "mcp_servers", "args"));
-        assert!(column_exists(&conn, "mailbox", "question_seq"));
-        assert_eq!(read_version(&conn).unwrap(), WORK_STORAGE_VERSION);
+        assert!(table_exists(&conn, "delegation_events"));
+        assert!(!table_exists(&conn, "mailbox"));
     }
 
     #[test]

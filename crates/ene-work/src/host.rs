@@ -1,4 +1,5 @@
 use crate::error::WorkError;
+use crate::events::DelegationEventPayload;
 use crate::questions::{combine_questions, route_combined_answers};
 use crate::speech_gate::SpeechGate;
 use crate::spill::{DEFAULT_SOFT_LIMIT_BYTES, bound_brief};
@@ -194,6 +195,7 @@ impl DelegationHost {
     fn deliver_or_queue(&self, report: CompanionReport, queued_intent: &str) -> CompanionReport {
         let soul_id = report.soul_id;
         let job_id = report.job_id;
+        let question_id = report.question_id;
         if let Some(delivered) = self.speech_gate.offer(report) {
             self.publish_report(&delivered);
             delivered
@@ -204,6 +206,7 @@ impl DelegationHost {
                 speech: String::new(),
                 inner_intent: Some(queued_intent.to_owned()),
                 starts_conversation: false,
+                question_id,
             }
         }
     }
@@ -214,6 +217,7 @@ impl DelegationHost {
         speech: String,
         intent: &str,
         starts_conversation: bool,
+        question_id: Option<QuestionId>,
     ) -> CompanionReport {
         CompanionReport {
             soul_id,
@@ -221,6 +225,7 @@ impl DelegationHost {
             speech,
             inner_intent: Some(intent.to_owned()),
             starts_conversation,
+            question_id,
         }
     }
 
@@ -310,8 +315,12 @@ impl DelegationHost {
             }
         };
         self.store.record_meta(job.id, mode, depth)?;
-        self.store
-            .mailbox_push(job.id, "parent_to_child", "task", &job.goal)?;
+        self.store.append_delegation_event(
+            job.id,
+            &DelegationEventPayload::Task {
+                goal: job.goal.clone(),
+            },
+        )?;
         self.wake_job(&job);
         Ok(job)
     }
@@ -339,14 +348,15 @@ impl DelegationHost {
     pub fn present_plan(&self, id: DelegationId, plan: &str) -> Result<CompanionReport, WorkError> {
         self.require_known(id)?;
         self.store.set_plan(id, plan)?;
-        self.store
-            .mailbox_push(id, "child_to_parent", "question", &format!("plan:\n{plan}"))?;
+        let prompt = format!("plan:\n{plan}");
+        let question_id = self.store.append_question(id, &prompt)?;
         Ok(Self::speak(
             self.soul_id_of(id)?,
             Some(id),
             format!("here's the plan: {plan}"),
             "ask_plan",
             true,
+            Some(question_id),
         ))
     }
 
@@ -416,14 +426,19 @@ impl DelegationHost {
         if self.store.get_job(id)?.is_some() {
             self.store.set_progress(id, fraction, Some(note))?;
         }
-        self.store
-            .mailbox_push(id, "child_to_parent", "progress", note)?;
+        self.store.append_delegation_event(
+            id,
+            &DelegationEventPayload::Progress {
+                note: note.to_owned(),
+            },
+        )?;
         Ok(Self::speak(
             self.soul_id_of(id)?,
             Some(id),
             format!("still working: {note}"),
             "progress",
             false,
+            None,
         ))
     }
 
@@ -452,8 +467,12 @@ impl DelegationHost {
                 self.store.set_status(id, JobStatus::Completed, None)?;
             }
         }
-        self.store
-            .mailbox_push(id, "child_to_parent", "complete", summary)?;
+        self.store.append_delegation_event(
+            id,
+            &DelegationEventPayload::Complete {
+                summary: summary.to_owned(),
+            },
+        )?;
         Ok(self.deliver_or_queue(
             Self::speak(
                 self.soul_id_of(id)?,
@@ -461,6 +480,7 @@ impl DelegationHost {
                 format!("done — {summary}"),
                 "complete",
                 true,
+                None,
             ),
             "complete_queued",
         ))
@@ -541,8 +561,12 @@ impl DelegationHost {
             self.store
                 .set_status(id, JobStatus::Failed, Some("failed"))?;
         }
-        self.store
-            .mailbox_push(id, "child_to_parent", "failed", summary)?;
+        self.store.append_delegation_event(
+            id,
+            &DelegationEventPayload::Failed {
+                summary: summary.to_owned(),
+            },
+        )?;
         Ok(self.deliver_or_queue(
             Self::speak(
                 self.soul_id_of(id)?,
@@ -550,6 +574,7 @@ impl DelegationHost {
                 format!("the task failed: {summary}"),
                 "failed",
                 true,
+                None,
             ),
             "failed_queued",
         ))
@@ -559,7 +584,7 @@ impl DelegationHost {
         self.require_known(id)?;
         let Some(job) = self.store.get_job(id)? else {
             self.store
-                .mailbox_push(id, "parent_to_child", "cancel", "")?;
+                .append_delegation_event(id, &DelegationEventPayload::Cancel)?;
             return Ok(JobStatus::Cancelled);
         };
         match job.status {
@@ -603,6 +628,7 @@ impl DelegationHost {
                     speech,
                     inner_intent: Some("interrupted".into()),
                     starts_conversation: true,
+                    question_id: None,
                 }
             })
             .collect();
@@ -637,8 +663,12 @@ impl DelegationHost {
             return Ok(None);
         }
         if let Some(job_id) = row.job_id {
-            self.store
-                .mailbox_push(job_id, "child_to_parent", "tool_complete", summary)?;
+            self.store.append_delegation_event(
+                job_id,
+                &DelegationEventPayload::ToolComplete {
+                    summary: summary.to_owned(),
+                },
+            )?;
         }
         let speech = match status {
             ToolExecStatus::Cancelled => format!("{} was cancelled", row.tool_name),
@@ -659,7 +689,7 @@ impl DelegationHost {
             _ => "tool_complete",
         };
         Ok(Some(self.deliver_or_queue(
-            Self::speak(row.soul_id, row.job_id, speech, intent, true),
+            Self::speak(row.soul_id, row.job_id, speech, intent, true, None),
             "tool_complete_queued",
         )))
     }
@@ -715,14 +745,14 @@ impl DelegationHost {
     pub fn question(&self, id: DelegationId, prompt: &str) -> Result<CompanionReport, WorkError> {
         let _question_guard = self.question_gate.lock();
         self.require_known(id)?;
-        self.store
-            .mailbox_push(id, "child_to_parent", "question", prompt)?;
+        let question_id = self.store.append_question(id, prompt)?;
         let report = Self::speak(
             self.soul_id_of(id)?,
             Some(id),
             prompt.to_owned(),
             "ask_user",
             true,
+            Some(question_id),
         );
         self.publish_report(&report);
         Ok(report)
@@ -777,8 +807,14 @@ impl DelegationHost {
         let Some(question) = pending.first() else {
             return Err(WorkError::NoOpenQuestion);
         };
-        self.store
-            .mailbox_push_for_question(id, question.mailbox_seq, "answer", answer)
+        self.store.append_delegation_event(
+            id,
+            &DelegationEventPayload::Answer {
+                question_id: question.question_id,
+                body: answer.to_owned(),
+            },
+        )?;
+        Ok(())
     }
 
     /// Answer one pending question identified by its stable question id.
@@ -793,12 +829,17 @@ impl DelegationHost {
         let pending = self.store.open_questions(id)?;
         let Some(question) = pending
             .into_iter()
-            .find(|question| question.question_id() == question_id)
+            .find(|question| question.question_id == question_id)
         else {
             return Err(WorkError::QuestionAlreadyResolved);
         };
-        self.store
-            .mailbox_push_for_question(id, question.mailbox_seq, "answer", answer)?;
+        self.store.append_delegation_event(
+            id,
+            &DelegationEventPayload::Answer {
+                question_id: question.question_id,
+                body: answer.to_owned(),
+            },
+        )?;
         Ok(question)
     }
 
@@ -815,13 +856,18 @@ impl DelegationHost {
             return Err(WorkError::QuestionAlreadyResolved);
         }
         for question in &pending {
-            self.store
-                .mailbox_push_for_question(id, question.mailbox_seq, "answer", answer)?;
+            self.store.append_delegation_event(
+                id,
+                &DelegationEventPayload::Answer {
+                    question_id: question.question_id,
+                    body: answer.to_owned(),
+                },
+            )?;
         }
         Ok(pending)
     }
 
-    /// Answer all pending questions in mailbox order.
+    /// Answer all pending questions in event-log order.
     pub fn answer_pending(
         &self,
         id: DelegationId,
@@ -840,8 +886,13 @@ impl DelegationHost {
             });
         }
         for (question, answer) in pending.iter().zip(answers) {
-            self.store
-                .mailbox_push_for_question(id, question.mailbox_seq, "answer", answer)?;
+            self.store.append_delegation_event(
+                id,
+                &DelegationEventPayload::Answer {
+                    question_id: question.question_id,
+                    body: answer.clone(),
+                },
+            )?;
         }
         Ok(pending)
     }
@@ -875,8 +926,13 @@ impl DelegationHost {
                 return Err(WorkError::ScopeWideningPending { tools: new_tools });
             }
         }
-        self.store
-            .mailbox_push(id, "parent_to_child", "task", message)
+        self.store.append_delegation_event(
+            id,
+            &DelegationEventPayload::Task {
+                goal: message.to_owned(),
+            },
+        )?;
+        Ok(())
     }
 
     /// Explicit approval event for a previously requested scope widening.
@@ -952,8 +1008,13 @@ impl DelegationHost {
 
     pub fn message(&self, id: DelegationId, message: &str) -> Result<(), WorkError> {
         self.require_known(id)?;
-        self.store
-            .mailbox_push(id, "parent_to_child", "message", message)
+        self.store.append_delegation_event(
+            id,
+            &DelegationEventPayload::Message {
+                body: message.to_owned(),
+            },
+        )?;
+        Ok(())
     }
 
     pub fn status_snapshot(&self, id: DelegationId) -> Result<Job, WorkError> {
@@ -997,8 +1058,12 @@ impl DelegationHost {
                 .join("; ");
             let assumption =
                 format!("no answer after timeout — proceeding with best guess for: {prompts}");
-            self.store
-                .mailbox_push(job.id, "parent_to_child", "assumption", &assumption)?;
+            self.store.append_delegation_event(
+                job.id,
+                &DelegationEventPayload::Assumption {
+                    note: assumption.clone(),
+                },
+            )?;
             reports.push(self.progress(job.id, None, &assumption)?);
         }
         Ok(reports)
@@ -1038,7 +1103,7 @@ impl DelegationHost {
         if self.store.get_job(id)?.is_some() {
             return Ok(());
         }
-        if self.store.mailbox(id)?.is_empty() {
+        if !self.store.has_delegation_events(id)? {
             return Err(WorkError::UnknownJob(id.to_string()));
         }
         Ok(())

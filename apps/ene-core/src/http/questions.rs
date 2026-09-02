@@ -10,7 +10,7 @@ const TICK: Duration = Duration::from_secs(30);
 
 /// Drive unanswered ask-user timeouts until serve shutdown aborts this task.
 ///
-/// Deadlines are wall-clock timestamps on the mailbox question row, so a
+/// Deadlines are wall-clock timestamps on the delegation question event, so a
 /// core restart mid-question neither resets nor doubles the wait: the tick
 /// compares `Utc::now` against the original `asked_at`, and the assumption
 /// push closes the question exactly once.

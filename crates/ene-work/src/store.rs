@@ -1,11 +1,12 @@
 use crate::error::WorkError;
+use crate::events::{DelegationEvent, DelegationEventPayload};
 use crate::types::{
     Artifact, ArtifactKind, DelegationMode, Job, JobStatus, NewJob, NewSchedule, NewToolExecution,
     OpenQuestion, Schedule, ScheduleAction, ToolExecStatus, ToolExecution,
 };
 use chrono::{DateTime, Utc};
 use cron::Schedule as Cron;
-use ene_session::{DelegationId, SoulId};
+use ene_session::{DelegationId, QuestionId, SoulId};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -462,83 +463,76 @@ impl WorkStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(WorkError::from)
     }
 
-    pub fn mailbox_push(
+    pub fn append_delegation_event(
         &self,
         id: DelegationId,
-        direction: &str,
-        kind: &str,
-        body: &str,
+        payload: &DelegationEventPayload,
     ) -> Result<(), WorkError> {
-        self.mailbox_push_at(id, direction, kind, body, &Utc::now().to_rfc3339())
+        self.append_delegation_event_at(id, payload, &Utc::now().to_rfc3339())
     }
 
-    pub fn mailbox_push_at(
+    pub fn append_delegation_event_at(
         &self,
         id: DelegationId,
-        direction: &str,
-        kind: &str,
-        body: &str,
-        ts: &str,
+        payload: &DelegationEventPayload,
+        created_at: &str,
     ) -> Result<(), WorkError> {
-        self.mailbox_push_at_for_question(id, None, direction, kind, body, ts)
-    }
-
-    pub fn mailbox_push_for_question(
-        &self,
-        id: DelegationId,
-        question_seq: i64,
-        kind: &str,
-        body: &str,
-    ) -> Result<(), WorkError> {
-        self.mailbox_push_at_for_question(
-            id,
-            Some(question_seq),
-            "parent_to_child",
-            kind,
-            body,
-            &Utc::now().to_rfc3339(),
-        )
-    }
-
-    fn mailbox_push_at_for_question(
-        &self,
-        id: DelegationId,
-        question_seq: Option<i64>,
-        direction: &str,
-        kind: &str,
-        body: &str,
-        ts: &str,
-    ) -> Result<(), WorkError> {
-        self.conn.lock().execute(
-            "INSERT INTO mailbox (delegation_id, direction, kind, body, ts, question_seq)
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            params![id.to_string(), direction, kind, body, ts, question_seq],
+        let payload_json =
+            serde_json::to_string(&payload).map_err(|err| WorkError::Codec(err.to_string()))?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO delegation_events (delegation_id, created_at, payload)
+             VALUES (?1,?2,?3)",
+            params![id.to_string(), created_at, payload_json],
         )?;
         Ok(())
     }
 
-    pub fn mailbox(&self, id: DelegationId) -> Result<Vec<(String, String, String)>, WorkError> {
-        Ok(self
-            .mailbox_entries(id)?
-            .into_iter()
-            .map(|entry| (entry.direction, entry.kind, entry.body))
-            .collect())
+    pub fn append_question(&self, id: DelegationId, prompt: &str) -> Result<QuestionId, WorkError> {
+        self.append_question_at(id, prompt, &Utc::now().to_rfc3339())
     }
 
-    pub fn mailbox_entries(&self, id: DelegationId) -> Result<Vec<MailboxEntry>, WorkError> {
+    pub fn append_question_at(
+        &self,
+        id: DelegationId,
+        prompt: &str,
+        created_at: &str,
+    ) -> Result<QuestionId, WorkError> {
+        let question_id = QuestionId::new();
+        self.append_delegation_event_at(
+            id,
+            &DelegationEventPayload::Question {
+                question_id,
+                prompt: prompt.to_owned(),
+            },
+            created_at,
+        )?;
+        Ok(question_id)
+    }
+
+    pub fn delegation_events(&self, id: DelegationId) -> Result<Vec<DelegationEvent>, WorkError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT seq, direction, kind, body, ts, question_seq
-             FROM mailbox WHERE delegation_id = ?1 ORDER BY seq",
+            "SELECT event_seq, created_at, payload
+             FROM delegation_events WHERE delegation_id = ?1 ORDER BY event_seq",
         )?;
         let rows = stmt.query_map(params![id.to_string()], |row| {
-            Ok(MailboxEntry {
-                seq: row.get(0)?,
-                direction: row.get(1)?,
-                kind: row.get(2)?,
-                body: row.get(3)?,
-                ts: row.get(4)?,
-                question_seq: row.get(5)?,
+            let event_seq: i64 = row.get(0)?;
+            let created_at: String = row.get(1)?;
+            let payload_json: String = row.get(2)?;
+            let payload: DelegationEventPayload =
+                serde_json::from_str(&payload_json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?;
+            Ok(DelegationEvent {
+                event_seq,
+                delegation_id: id,
+                created_at,
+                payload,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(WorkError::from)
@@ -550,8 +544,8 @@ impl WorkStore {
         mode: DelegationMode,
         depth: u32,
     ) -> Result<(), WorkError> {
-        self.mailbox_push(id, "meta", "mode", mode.as_str())?;
-        self.mailbox_push(id, "meta", "depth", &depth.to_string())?;
+        self.append_delegation_event(id, &DelegationEventPayload::ModeSet { mode })?;
+        self.append_delegation_event(id, &DelegationEventPayload::DepthSet { depth })?;
         Ok(())
     }
 
@@ -559,51 +553,61 @@ impl WorkStore {
         if let Some(job) = self.get_job(id)? {
             return Ok(Some(job.mode));
         }
-        for entry in self.mailbox_entries(id)? {
-            if entry.direction == "meta" && entry.kind == "mode" {
-                return Ok(Some(DelegationMode::parse(&entry.body)));
+        let mut mode = None;
+        for event in self.delegation_events(id)? {
+            if let DelegationEventPayload::ModeSet { mode: next } = event.payload {
+                mode = Some(next);
             }
         }
-        Ok(None)
+        Ok(mode)
     }
 
     pub fn delegation_depth(&self, id: DelegationId) -> Result<Option<u32>, WorkError> {
-        for entry in self.mailbox_entries(id)? {
-            if entry.direction == "meta"
-                && entry.kind == "depth"
-                && let Ok(depth) = entry.body.parse::<u32>()
-            {
-                return Ok(Some(depth));
+        let mut depth = None;
+        for event in self.delegation_events(id)? {
+            if let DelegationEventPayload::DepthSet { depth: next } = event.payload {
+                depth = Some(next);
             }
         }
-        Ok(None)
+        Ok(depth)
     }
 
     pub fn open_questions(&self, id: DelegationId) -> Result<Vec<OpenQuestion>, WorkError> {
-        let entries = self.mailbox_entries(id)?;
-        let mut pending: Vec<MailboxEntry> = Vec::new();
-        for entry in entries {
-            if entry.direction == "child_to_parent" && entry.kind == "question" {
-                pending.push(entry);
-            } else if entry.direction == "parent_to_child" && entry.kind == "answer" {
-                if let Some(question_seq) = entry.question_seq {
-                    pending.retain(|question| question.seq != question_seq);
-                } else if !pending.is_empty() {
-                    pending.remove(0);
+        let events = self.delegation_events(id)?;
+        let mut pending: Vec<OpenQuestion> = Vec::new();
+        for event in events {
+            match event.payload {
+                DelegationEventPayload::Question {
+                    question_id,
+                    prompt,
+                } => {
+                    pending.push(OpenQuestion {
+                        delegation_id: id,
+                        question_id,
+                        prompt,
+                        asked_at: event.created_at,
+                    });
                 }
-            } else if entry.direction == "parent_to_child" && entry.kind == "assumption" {
-                pending.clear();
+                DelegationEventPayload::Answer { question_id, .. } => {
+                    pending.retain(|question| question.question_id != question_id);
+                }
+                DelegationEventPayload::Assumption { .. } => {
+                    pending.clear();
+                }
+                _ => {}
             }
         }
-        Ok(pending
-            .into_iter()
-            .map(|entry| OpenQuestion {
-                delegation_id: id,
-                mailbox_seq: entry.seq,
-                prompt: entry.body,
-                asked_at: entry.ts,
-            })
-            .collect())
+        Ok(pending)
+    }
+
+    pub fn has_delegation_events(&self, id: DelegationId) -> Result<bool, WorkError> {
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM delegation_events WHERE delegation_id = ?1",
+            params![id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn upsert_mcp(
@@ -756,16 +760,6 @@ impl WorkStore {
         }
         Ok(out)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MailboxEntry {
-    pub seq: i64,
-    pub direction: String,
-    pub kind: String,
-    pub body: String,
-    pub ts: String,
-    pub question_seq: Option<i64>,
 }
 
 pub fn next_fire(spec: &str, tz_name: &str, from: DateTime<Utc>) -> Result<String, WorkError> {

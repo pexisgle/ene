@@ -108,10 +108,10 @@ surface、別窓の詳細画面（と `ene-ctl --verbose`）は detail です。
 ジョブ / 委譲 id、`prompt` / `text` は発話、`questions` は結合した質問配列）。
 stage / desktop / Web はこの名前を待ちます。回答は対話レーンではなく
 `POST /api/v1/jobs/{id}/answer`（`{ "text" }` または `{ "answers": ["…"] }`）で
-ジョブメールボックス（`host.answer`）へ送ります。同一ジョブに未回答が複数ある
+委譲イベントログ（`host.answer`）へ送ります。同一ジョブに未回答が複数ある
 ときは `combine_pending_questions` で結合して出します。単一の `text` はその
 ジョブの未回答すべてに届きます。`question_timeout_hours`（既定 24 時間）を
-過ぎた未回答は、コアのティックがメールボックスに `assumption` を書いて
+過ぎた未回答は、コアのティックが `Assumption` 委譲イベントを追記して
 閉じます。
 そのジョブの未回答がなくなったとき（どのクライアントから回答された場合も、
 タイムアウトで閉じられた場合も）、core は `question.resolved`（`id` はジョブ /

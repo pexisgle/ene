@@ -236,23 +236,17 @@ pub struct CompanionReport {
     pub inner_intent: Option<String>,
     /// Progress companion speech does not open a surface conversation turn.
     pub starts_conversation: bool,
+    /// Ask-user question identity when this report opens a question.
+    pub question_id: Option<QuestionId>,
 }
 
 /// Child question still waiting for a parent answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenQuestion {
     pub delegation_id: ene_session::DelegationId,
-    pub mailbox_seq: i64,
+    pub question_id: QuestionId,
     pub prompt: String,
     pub asked_at: String,
-}
-
-impl OpenQuestion {
-    /// Stable identity derived from the append-only mailbox row.
-    #[must_use]
-    pub fn question_id(&self) -> QuestionId {
-        QuestionId::from_mailbox(self.delegation_id, self.mailbox_seq)
-    }
 }
 
 /// Parent-facing combined ask-user turn for one or more child questions.

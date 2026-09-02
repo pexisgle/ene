@@ -87,18 +87,6 @@ uuid_id!(
     /// Ask-user question identifier.
     QuestionId
 );
-
-impl QuestionId {
-    /// Stable id for a delegation mailbox question row.
-    #[must_use]
-    pub fn from_mailbox(delegation: DelegationId, mailbox_seq: i64) -> Self {
-        const NS: Uuid = uuid::uuid!("f47ac10b-58cc-4372-a567-0e02b2c3d479");
-        Self::from_uuid(Uuid::new_v5(
-            &NS,
-            format!("{delegation}:{mailbox_seq}").as_bytes(),
-        ))
-    }
-}
 uuid_id!(
     /// Usage-ledger row identifier.
     UsageId

@@ -102,6 +102,7 @@ pub fn reminder_report(sched: &Schedule) -> CompanionReport {
         speech: format!("it's time: {body}"),
         inner_intent: Some("remind".into()),
         starts_conversation: true,
+        question_id: None,
     }
 }
 

@@ -20,6 +20,7 @@ use ene_kernel::{
     ToolCallingModel, spans_leak_content,
 };
 use ene_session::{EventKind, EventPayload, SessionId, TurnOrigin, TurnOutcome};
+use ene_work::DelegationEventPayload;
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -731,11 +732,12 @@ async fn job_runner_completes_queued_work_on_its_own_lane() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let mail = core.work().mailbox(job.id).unwrap();
+    let events = core.work().delegation_events(job.id).unwrap();
     assert!(
-        mail.iter()
-            .any(|(direction, kind, _)| direction == "child_to_parent" && kind == "complete"),
-        "runner must complete via the job lane, got {mail:?}"
+        events
+            .iter()
+            .any(|event| matches!(event.payload, DelegationEventPayload::Complete { .. })),
+        "runner must complete via the job lane, got {events:?}"
     );
     server.shutdown().await;
 }
@@ -929,12 +931,13 @@ async fn job_question_answer_reaches_mailbox() {
         )
         .await
         .unwrap();
-    let mail = core.work().mailbox(job.id).unwrap();
+    let events = core.work().delegation_events(job.id).unwrap();
     assert!(
-        mail.iter().any(|(direction, kind, body)| {
-            direction == "parent_to_child" && kind == "answer" && body == "Tokyo"
-        }),
-        "answer must land on the job mailbox, got {mail:?}"
+        events.iter().any(|event| matches!(
+            &event.payload,
+            DelegationEventPayload::Answer { body, .. } if body == "Tokyo"
+        )),
+        "answer must land on the delegation event log, got {events:?}"
     );
     assert!(core.host().open_questions(job.id).unwrap().is_empty());
     let sid = SessionId::from_str(&session.id).unwrap();
@@ -1062,7 +1065,7 @@ async fn partial_answer_does_not_emit_question_resolved() {
         }
     }
     let questions = core.host().open_questions(job.id).unwrap();
-    let first_id = questions[0].question_id().to_string();
+    let first_id = questions[0].question_id.to_string();
     client
         .answer_question(
             &job.id.to_string(),
@@ -1098,7 +1101,7 @@ async fn identified_job_question_answer_reaches_mailbox() {
     let job = start_job(&core, soul, "identify a city");
     core.host().question(job.id, "which city?").unwrap();
     let question_id = core.host().open_questions(job.id).unwrap()[0]
-        .question_id()
+        .question_id
         .to_string();
     client
         .answer_question(
@@ -1110,10 +1113,11 @@ async fn identified_job_question_answer_reaches_mailbox() {
         )
         .await
         .unwrap();
-    let mail = core.work().mailbox(job.id).unwrap();
-    assert!(mail.iter().any(|(direction, kind, body)| {
-        direction == "parent_to_child" && kind == "answer" && body == "Tokyo"
-    }));
+    let events = core.work().delegation_events(job.id).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        DelegationEventPayload::Answer { body, .. } if body == "Tokyo"
+    )));
     assert!(core.host().open_questions(job.id).unwrap().is_empty());
     server.shutdown().await;
 }
@@ -1126,8 +1130,8 @@ async fn identified_answer_resolves_the_selected_question() {
     core.host().question(job.id, "first?").unwrap();
     core.host().question(job.id, "second?").unwrap();
     let questions = core.host().open_questions(job.id).unwrap();
-    let first_id = questions[0].question_id().to_string();
-    let second_id = questions[1].question_id().to_string();
+    let first_id = questions[0].question_id.to_string();
+    let second_id = questions[1].question_id.to_string();
 
     client
         .answer_question(
@@ -1141,7 +1145,7 @@ async fn identified_answer_resolves_the_selected_question() {
         .unwrap();
     let remaining = core.host().open_questions(job.id).unwrap();
     assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].question_id().to_string(), first_id);
+    assert_eq!(remaining[0].question_id.to_string(), first_id);
 
     client
         .answer_question(
@@ -1164,7 +1168,7 @@ async fn duplicate_identified_answer_maps_to_question_closed_conflict() {
     let job = start_job(&core, soul, "identify a city");
     core.host().question(job.id, "which city?").unwrap();
     let question_id = core.host().open_questions(job.id).unwrap()[0]
-        .question_id()
+        .question_id
         .to_string();
     client
         .answer_question(
@@ -1227,10 +1231,10 @@ async fn combined_job_answer_rejects_wrong_count_without_consuming_questions() {
     assert!(
         !core
             .work()
-            .mailbox(job.id)
+            .delegation_events(job.id)
             .unwrap()
             .iter()
-            .any(|(direction, kind, _)| direction == "parent_to_child" && kind == "answer")
+            .any(|event| matches!(event.payload, DelegationEventPayload::Answer { .. }))
     );
     server.shutdown().await;
 }
@@ -1292,13 +1296,15 @@ async fn combined_job_answers_persist_matching_question_ids() {
         )
         .await
         .unwrap();
-    let mail = core.work().mailbox(job.id).unwrap();
-    assert!(mail.iter().any(|(direction, kind, body)| {
-        direction == "parent_to_child" && kind == "answer" && body == "Tokyo"
-    }));
-    assert!(mail.iter().any(|(direction, kind, body)| {
-        direction == "parent_to_child" && kind == "answer" && body == "3"
-    }));
+    let events = core.work().delegation_events(job.id).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        DelegationEventPayload::Answer { body, .. } if body == "Tokyo"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        DelegationEventPayload::Answer { body, .. } if body == "3"
+    )));
     let deadline = Instant::now() + Duration::from_secs(3);
     let events = loop {
         let events = core.store().load_events(sid, 0).unwrap();
@@ -1363,26 +1369,22 @@ async fn job_question_timeout_loop_writes_assumption() {
         .unwrap();
     let asked = chrono::Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
     core.work()
-        .mailbox_push_at(
-            job.id,
-            "child_to_parent",
-            "question",
-            "which airline?",
-            &asked.to_rfc3339(),
-        )
+        .append_question_at(job.id, "which airline?", &asked.to_rfc3339())
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let mail = core.work().mailbox(job.id).unwrap();
-        if mail
-            .iter()
-            .any(|(_, kind, body)| kind == "assumption" && body.contains("timeout"))
-        {
+        let events = core.work().delegation_events(job.id).unwrap();
+        if events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                DelegationEventPayload::Assumption { note } if note.contains("timeout")
+            )
+        }) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "daemon timeout loop did not write an assumption, mailbox={mail:?}"
+            "daemon timeout loop did not write an assumption, events={events:?}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -1399,26 +1401,22 @@ async fn job_answer_after_timeout_is_rejected_without_mailbox_answer() {
         .unwrap();
     let asked = chrono::Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
     core.work()
-        .mailbox_push_at(
-            job.id,
-            "child_to_parent",
-            "question",
-            "which airline?",
-            &asked.to_rfc3339(),
-        )
+        .append_question_at(job.id, "which airline?", &asked.to_rfc3339())
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let mail = core.work().mailbox(job.id).unwrap();
-        if mail
-            .iter()
-            .any(|(_, kind, body)| kind == "assumption" && body.contains("timeout"))
-        {
+        let events = core.work().delegation_events(job.id).unwrap();
+        if events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                DelegationEventPayload::Assumption { note } if note.contains("timeout")
+            )
+        }) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "daemon timeout loop did not close the question, mailbox={mail:?}"
+            "daemon timeout loop did not close the question, events={events:?}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -1443,12 +1441,13 @@ async fn job_answer_after_timeout_is_rejected_without_mailbox_answer() {
     assert!(
         !core
             .work()
-            .mailbox(job.id)
+            .delegation_events(job.id)
             .unwrap()
             .iter()
-            .any(|(direction, kind, body)| direction == "parent_to_child"
-                && kind == "answer"
-                && body == "Tokyo")
+            .any(|event| matches!(
+                &event.payload,
+                DelegationEventPayload::Answer { body, .. } if body == "Tokyo"
+            ))
     );
     server.shutdown().await;
 }

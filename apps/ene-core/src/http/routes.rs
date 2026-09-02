@@ -852,7 +852,7 @@ pub async fn answer_job(
         let questions = host.answer_all_pending(job, text).map_err(map_work)?;
         questions
             .into_iter()
-            .map(|question| (question.question_id(), text.to_owned()))
+            .map(|question| (question.question_id, text.to_owned()))
             .collect::<Vec<_>>()
     } else {
         let answers = req
@@ -867,7 +867,7 @@ pub async fn answer_job(
         questions
             .into_iter()
             .zip(answers)
-            .map(|(question, answer)| (question.question_id(), answer))
+            .map(|(question, answer)| (question.question_id, answer))
             .collect::<Vec<_>>()
     };
     persist_job_answer(&state, job, &answered).await;
@@ -902,7 +902,7 @@ pub async fn answer_question(
         .host()
         .answer_question(job, question_id, text)
         .map_err(map_work)?;
-    persist_job_answer(&state, job, &[(question.question_id(), text.to_owned())]).await;
+    persist_job_answer(&state, job, &[(question.question_id, text.to_owned())]).await;
     if state
         .core
         .host()
@@ -3190,7 +3190,7 @@ fn ask_user_prompt(
             let question_ids = turn
                 .questions
                 .iter()
-                .map(|question| question.question_id().to_string())
+                .map(|question| question.question_id.to_string())
                 .collect();
             (turn.speech, questions, question_ids)
         }
@@ -3237,21 +3237,7 @@ pub(crate) async fn persist_job_report(state: &AppState, report: &CompanionRepor
     )];
     if report.inner_intent.as_deref() == Some("ask_user")
         && let Some(job_id) = report.job_id
-        && let Some(question_id) =
-            state
-                .core
-                .host()
-                .open_questions(job_id)
-                .ok()
-                .and_then(|questions| {
-                    questions
-                        .iter()
-                        .rev()
-                        .find(|question| question.prompt == report.speech)
-                        .map(|question| {
-                            QuestionId::from_mailbox(question.delegation_id, question.mailbox_seq)
-                        })
-                })
+        && let Some(question_id) = report.question_id
     {
         entries.push(NewEvent::new(
             session.id,
