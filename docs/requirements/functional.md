@@ -3,7 +3,7 @@
 状態: **Baseline / 対話による初版確定**
 最終確認: 2026-09-02
 
-ここでは、Eneが提供すべき能力と外部から観測できる挙動を定義する。要件を満たすためのcrate名、DB schema、IPC protocol、モデル名、アルゴリズムは固定しない。`将来` と付いた要件は、現行版の必須範囲ではないが、将来追加できる構造を妨げてはならない。
+ここでは、Eneが提供すべき機能、システム上の必須能力・制約、および外部から観測できる挙動を定義する。要件を満たすためのcrate名、DB schema、IPC protocol、モデル名、アルゴリズムは固定しない。`将来` と付いた要件は、現行版の必須範囲ではないが、将来追加できる構造を妨げてはならない。
 
 ## 1. Core、Host、ライフサイクル
 
@@ -91,7 +91,7 @@ Character Definition、Story / Lore、Avatar資産、Voice設定、感情表現�
 
 ### FR-CMP-011 デフォルトCompanion
 
-新規ユーザーがCharacter Packageを別途用意しなくてもCompanion体験を開始できなければならない。現時点のデフォルトCompanionはAliciaとする。将来Ene独自キャラクターへ置き換える具体的方法は未確定である。
+新規ユーザーがCharacter Packageを別途用意しなくてもCompanion体験を開始できるよう、少なくとも1体の利用可能なデフォルトCompanionを提供しなければならない。具体的にどのCharacterをデフォルトとするかは製品構成・決定記録で管理し、この機能要件では固定しない。
 
 ### FR-CMP-012 Character Packageの権限境界
 
@@ -286,9 +286,9 @@ Memory Systemは、少なくとも内容、種別、scope、source / provenance�
 
 Memory候補は、ユーザーとの会話、Companion間会話、Agent Harnessの作業、Sub-agent報告、許可されたContext Observation、ユーザーの明示的な記憶要求、既存Memoryの再評価等から生成できなければならない。イベント発生だけを理由に長期保存してはならない。
 
-### FR-MEM-005 Memory選別
+### FR-MEM-005 長期Memoryの選別
 
-Learning Systemは、候補について将来価値、永続性、一時性、新規性、重複、事実と推測の区別、confidence、Shared / Companion-specific、Working / Core / Episodic / Semanticへの適合性を評価できなければならない。
+Learning Systemは、長期保存の候補について将来価値、永続性、一時性、新規性、重複、事実と推測の区別、confidence、Shared / Companion-specific、Core / Episodic / Semanticへの適合性を評価できなければならない。Working Memoryは現在の会話・Task用の短期状態として別に管理し、長期保存先の一種として扱うことを前提としない。
 
 ### FR-MEM-006 Memoryの更新・矛盾処理
 
@@ -330,7 +330,7 @@ Memory Retrievalは単一のVector Similarityだけに依存してはならな�
 
 ### FR-RET-005 種別・原資料に応じた検索
 
-Semantic Memory、Episodic Memory、Core Memory、Shared / Companion-specific Memoryを同一の意味で扱わず、必要に応じて時間、参加者、Entity、元会話、scope等を使い分けられなければならない。Consolidated Memoryだけでなく根拠となるConversation Historyや関連ログも検索可能でなければならない。
+Semantic Memory、Episodic Memory、Core Memory、Shared / Companion-specific Memoryを同一の意味で扱わず、必要に応じて時間、参加者、Entity、元会話、scope等を使い分けられなければならない。Consolidated Memoryだけでなく根拠となるConversation Historyや関連ログも検索可能でなければならない。ただし削除・再学習禁止等の保持ポリシーによって利用不可となった原資料を、想起や再学習のために再利用してはならない。
 
 ### FR-RET-006 不確かな想起
 
@@ -355,6 +355,10 @@ Learning Systemは、経験、Conversation、Memory候補、Agent経験を対象
 ### FR-CON-005 即時学習と遅延整理
 
 明示的な訂正、削除、重要な記憶要求、次回から使う方法など即時性の高い変更は、可能な範囲でConsolidationを待たず反映できなければならない。重複統合、抽象化、再評価、忘却調整等の重い処理は後から実行できる。
+
+### FR-CON-006 削除後の再学習防止
+
+ユーザーによる削除またはPrivacy / retention policyによって長期Memoryとして利用しないと決定された情報は、元Conversation、Observation、Task履歴等が別の保持目的で残っている場合でも、その削除意図に反してLearning ReviewまたはConsolidationから同じ内容の長期Memoryとして自動再生成してはならない。Memoryのみの削除、原資料自体の削除、原資料を保持した再学習禁止をどのようにユーザーへ選択させるかは未確定である。
 
 ## 10. Skill SystemとLearning System
 
@@ -392,7 +396,7 @@ Eneは、`Experience → Learning Review → Memory / Skill / Companion Stateへ
 
 ### FR-LRN-002 Learningの出力
 
-Learning Reviewは、Memory作成・更新、Core昇格・降格、Skill作成・更新、Relationship更新、Interest更新、Emotion関連の長期的反映、または永続学習なしを選択できなければならない。
+Learning Reviewは、Memory作成・更新、Core昇格・降格、Skill作成・更新、Relationship更新、Interest更新、Companion Stateへの必要な反映、または永続学習なしを選択できなければならない。Working Memoryの通常更新を長期学習の出力と同一視しない。
 
 ### FR-LRN-003 自動学習と低い認知負荷
 
@@ -414,11 +418,11 @@ Learning SystemはPermission Systemより上位の権限を持ってはならな
 
 ### FR-AFF-001 感情を意思決定へ接続
 
-Emotionは表情や音声を選ぶためだけの値ではなく、会話内容、注意、発話タイミング、自発行動、Taskの選択・優先順位、Memory形成、Relationship更新に影響する内部状態として扱えなければならない。
+Emotion Systemの状態は表情や音声を選ぶためだけの値ではなく、会話内容、注意、発話タイミング、自発行動、Taskの選択・優先順位、Memory形成、Relationship更新に影響する内部状態として扱えなければならない。
 
-### FR-AFF-002 Affective State
+### FR-AFF-002 Current Affective State
 
-Companionは、少なくとも概念上、Valence、Arousal、Control / Dominanceに相当する基礎的な連続状態を扱えなければならない。具体的な数値範囲、名前、保存形式は未確定である。
+Companionは、少なくとも概念上、Valence、Arousal、Control（Sense of Control）に相当する基礎的な連続状態を扱えなければならない。ControlはPADモデルにおけるDominance由来の概念をEne向けに「状況を制御・対処できる感覚」として扱う名称であり、他者を支配する意味を要求しない。具体的な数値範囲、保存形式は未確定である。
 
 ### FR-AFF-003 Appraisal
 
@@ -428,13 +432,13 @@ Companionは、少なくとも概念上、Valence、Arousal、Control / Dominanc
 
 同じ出来事でも、Personality、Goals、Values、Memory、Relationship、Interest等によって異なるAppraisalと感情変化を生じさせられなければならない。
 
-### FR-AFF-005 Baseline、Mood、Affect
+### FR-AFF-005 Baseline、Mood、Fast Affect
 
-Emotion Systemは、Personality由来の比較的安定したbaseline、比較的長く持続するMood、イベントに反応する短期Affectを、少なくとも意味上は区別できなければならない。
+Emotion Systemは、Personality由来の比較的安定したbaseline、比較的長く持続するMood、イベントに反応する短期のFast Affectを、少なくとも意味上は区別できなければならない。
 
 ### FR-AFF-006 Decay
 
-短期Affectや必要な状態は、新しい意味のあるイベントがない場合、時間経過に応じてbaselineまたはMoodへ近づく自然なdecayを扱えなければならない。時間経過のためだけにMain LLMを定期起動して再計算することを必須としてはならない。
+Fast Affectや必要な状態は、新しい意味のあるイベントがない場合、時間経過に応じてbaselineまたはMoodへ近づく自然なdecayを扱えなければならない。時間経過のためだけにMain LLMを定期起動して再計算することを必須としてはならない。
 
 ### FR-AFF-007 Reactivity、Inertia、Recovery
 
@@ -442,11 +446,11 @@ Character設定は、イベントへのreactivity、状態のinertia / persisten
 
 ### FR-AFF-008 Reappraisal
 
-出来事の意味、原因、結果、ユーザーの意図等について新しい情報が得られた場合、Companionは過去のAppraisalをreappraisalし、Emotion、Mood、Memory、Relationshipを更新できなければならない。単なるdecayと意味変化によるreappraisalを区別できること。
+出来事の意味、原因、結果、ユーザーの意図等について新しい情報が得られた場合、Companionは過去のAppraisalをreappraisalし、Current Affective State、Mood、Memory、Relationshipを更新できなければならない。単なるdecayと意味変化によるreappraisalを区別できること。
 
 ### FR-AFF-009 感情表出との分離
 
-内部Emotion Stateと発話、Voice、表情、姿勢、モーション、Body行動を同一視してはならない。同じ内部状態でも、CompanionのPersonalityや現在のContextに応じて異なる表現を選べなければならない。
+内部のCurrent Affective Stateと発話、Voice、表情、姿勢、モーション、Body行動を同一視してはならない。同じ内部状態でも、CompanionのPersonalityや現在のContextに応じて異なる表現を選べなければならない。
 
 ### FR-AFF-010 時間情報の意味付け
 
@@ -456,11 +460,15 @@ Character設定は、イベントへのreactivity、状態のinertia / persisten
 
 Emotion、Mood、Relationship、Interest等の内部数値・構造化Stateを、そのままMain LLMへ大量に渡すことのみを前提としてはならない。Eneは、現在値、baselineとの差、直近の変化・trend、主な原因となったEvent / Appraisal、confidence等を、LLMが理解しやすい意味表現であるSemantic Stateへ変換できなければならない。
 
-### FR-AFF-012 LLMへの利用
+### FR-AFF-012 Semantic State変換の軽量性
+
+Internal StateからSemantic Stateへの基本変換は、Main LLMを必須とせず、Runtime側の決定的・軽量な処理等で実行可能でなければならない。数値や構造化Stateを意味表現へ変換するだけのために、高価なMain LLMを定期的に起動することを要求してはならない。
+
+### FR-AFF-013 LLMへの利用
 
 CompanionのLLMは、Semantic StateをPersonality、Goals、Values、Memory、現在Contextと合わせて解釈し、発話、行動、表現、追加観測、Task委任を判断できなければならない。内部Stateの特定数値を機械的に発話へ変換することを要求しない。
 
-### FR-AFF-013 Companion Context
+### FR-AFF-014 Companion Context
 
 Eneは、Semantic StateをMemory、Skill、Personality、Goals / Values、現在のConversation、Observation / Context、Task、Schedule、関連Appraisal等とは区別して保持し、Main LLM起動時に必要なものだけを統合したCompanion Contextを構成できなければならない。MemoryやTaskそのものをSemantic Stateへ変換しなければ利用できない設計を前提としてはならない。
 
@@ -497,6 +505,10 @@ Satisfaction、Sense of security、Affection、Resentment等は、必要なと�
 ### FR-REL-008 Character固有の関係傾向
 
 Attachment anxiety / avoidance、Need for closeness、Independence、Expressiveness等の関係傾向は、必要なCharacterについてPersonality / Character Definition側で表現できなければならない。これらを全Companion共通のRelationship Stateや好感度軸として必須化してはならない。
+
+### FR-REL-009 Relationshipの時間的安定性
+
+Familiarity、Closeness、Trust等の長期Relationship Stateを、小さな単発イベントだけでゲーム的に極端に上下させることを基本挙動としてはならない。通常は経験の蓄積を反映して緩やかに変化しつつ、重大な支援、裏切り、境界侵害その他の高い意味を持つ出来事については、Appraisalと既存関係に応じた相応の大きな変化を許容しなければならない。
 
 ### FR-INT-001 Interestの分離
 
@@ -544,7 +556,7 @@ LLMは、機械的に許可された範囲内で、目的、文脈、ユーザ�
 
 Permissionの要求、許可、拒否、通知、承認、ポリシー変更、実行結果を、後から確認可能な監査情報として扱わなければならない。
 
-## 14. Provider、Local / Cloud / Hybrid
+## 14. Provider、Local / Cloud構成
 
 ### FR-PROV-001 推論コンポーネントの交換
 
@@ -552,7 +564,7 @@ Main LLM、Context Monitor、Sub-agent LLM、VLM、Embedding、Reranker、STT、
 
 ### FR-PROV-002 構成単位の選択
 
-ユーザーは、推論コンポーネントごとにLocal、Cloud、Hybridの実行構成を選べなければならない。完全Local、推論の大部分または全部をCloudへ委譲する構成、LocalとCloudを混在させる構成をいずれも正規に扱えること。
+ユーザーは、推論コンポーネントごとに利用可能なLocal ProviderまたはCloud Provider等を独立して選択できなければならない。その結果として、システム全体を完全Local、Cloud中心、またはLocalとCloudの混在構成として正規に扱えること。個別ProviderがLocalとCloudを組み合わせるHybrid実行を提供することは許容するが、すべてのProviderにHybrid実行を要求しない。
 
 ### FR-PROV-003 Cloudと正本の分離
 
@@ -642,7 +654,7 @@ Companion UIでは、ユーザーが「Companionが考え、行動している�
 
 ### FR-OBS-001 主要イベントの記録
 
-Eneは、後から何が起きたかを追跡できるよう、会話、主要な通信、重要なContextイベント、Task、Tool / MCP / Computer Use、Permission判断、自律行動、Schedule、Memory変更、Skill変更、Provider利用、Pluginの起動・停止・障害等を記録しなければならない。
+Eneは、後から何が起きたかを追跡できるよう、会話、主要な通信、重要なContextイベント、Task、Tool / MCP / Computer Use、Permission判断、自律行動、Schedule、Memory変更、Skill変更、重要なEmotion / Mood / Relationship / Interest等のCompanion State変更、設定変更、Provider利用、Pluginの起動・停止・障害等を記録しなければならない。高頻度の微小なState変化をすべて永続記録することは要求しない。
 
 ### FR-OBS-002 主体間通信
 
@@ -692,8 +704,9 @@ Core、Host、Provider、Pluginの再起動・停止後も、確定済みの会�
 
 ## 19. 機能要件として未確定の項目
 
-- Emotion、Mood、Relationship、Interest、Semantic Stateの正確なschema、数値範囲、更新式。
+- Emotion System、Current Affective State、Mood、Relationship、Interest、Semantic Stateの正確なschema、数値範囲、更新式。
 - Memory・Skillの保存形式、検索アルゴリズム、Embedding・Rerankerの採用。
+- 「忘れる」要求におけるMemoryのみの削除、原資料の削除、原資料を残した再学習禁止の具体的なUI・保持方式。
 - Permissionのリスク分類、通知・承認の閾値、自然言語ポリシーの競合解決。
 - Providerの一覧、モデル、価格表、Credential保管方式、自動切替の詳細。
 - Plugin API、Extension Point、IPC、Sandbox、Broker、高帯域転送の具体方式。
@@ -701,3 +714,4 @@ Core、Host、Provider、Pluginの再起動・停止後も、確定済みの会�
 - Companion間交流の段階数・既定値と、自発的ランダム起動の頻度・制限。
 - ログ、Rawデータ、成果物、音声、画像、Tool outputの保持・削除・Export形式。
 - Client側のObservation、Computer Use、音声I/O、Remote通知の開始時期と機能範囲。
+- Remote Clientの認証、暗号化、Device trust、接続方式。
