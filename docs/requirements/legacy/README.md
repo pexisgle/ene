@@ -1,13 +1,34 @@
-# 旧要件・旧判断資料
+# 旧要件・旧設計資料
 
-ここはリセット前の資料のうち、製品意図や人間レビュー済みの判断が含まれていて再確認の価値があるものだけを隔離して残す場所です。
+ここは要件リセット前に検討・決定されていた内容を、**一件ずつ再確認するための資料庫**です。
 
-**現在の要件ではありません。実装の根拠に直接使わないでください。**
+**この配下の文書は現行要件ではありません。legacy の記述をそのまま実装の根拠にしないでください。**
 
-残すもの:
+## 収録内容
 
-- [旧 product vision](vision.md)
-- [旧 reviewed decisions](decisions.md)
-- [旧 v1 product decisions](product-decisions-v1.md)
+- [`harness-redesign/`](harness-redesign/README.md) — 要件リセット前の harness redesign 設計一式
+- [`harness-redesign/decisions.md`](harness-redesign/decisions.md) — 旧 D-* 判断の索引。再検討は基本的にここから始めます
+- `harness-redesign/` 配下の各設計文書 — 旧判断の背景、理由、想定していた具体設計を確認するための補助資料
 
-有用な内容があれば、対話で再確認したうえで現在の要件・決定記録へ移します。それ以外の旧 plan / verification / migration 文書は Git 履歴を archive とします。
+過去の backlog、PR 実装計画、verification checklist など、単発の作業管理資料は復元しません。必要な場合は Git 履歴から参照します。
+
+## 再検討の進め方
+
+旧 `D-*` を一件ずつ確認し、現在の製品要件として次のいずれかを明示的に判断します。
+
+- **Accept** — 現在もそのまま採用する
+- **Modify** — 意図は維持するが内容を変更して採用する
+- **Reject** — 現在の要件としては採用しない
+- **Defer** — 判断材料が不足しているため保留する
+
+Accept / Modify した内容だけを `../decisions.md` または対応する現在の要件文書へ記録します。そこへ昇格されるまでは、legacy 内の記述は要件ではありません。
+
+旧 `D-*` 番号は履歴上の識別子です。新しい決定記録の ID として自動的に引き継ぐ必要はありません。
+
+## 正本の区別
+
+- **あるべき挙動**: `docs/requirements/` の明示的に確定した要件・決定
+- **現在の挙動**: ソースコード、テスト、Cargo manifest、rustdoc
+- **過去の意図・設計**: この `legacy/` 配下
+
+現在の要件と legacy が食い違う場合は、現在の確定要件だけを採用します。
