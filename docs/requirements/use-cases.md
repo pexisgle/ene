@@ -164,18 +164,19 @@
 
 **Actor**: ユーザー、Companion、Learning System
 **前提**: 会話、作業、観測、既存Memoryの再評価が発生している。
-**Trigger**: 経験の終了、ユーザーの訂正、明示的な記憶要求、またはアイドル時のLearning Review。
+**Trigger**: 経験の終了、ユーザーの訂正、明示的な記憶要求、またはConsolidation対象がアイドル時・余剰資源のある時に処理可能になる。
 
 **期待する流れ**
 
 1. Learning Systemが、経験からMemory候補、Skill候補、State更新候補を作る。
-2. 将来価値、永続性、重複、事実と推測、scope、Memory種別などを評価する。
-3. 必要ならShared / Companion-specific、Working / Core / Episodic / Semantic、Skillへ反映する。
-4. 重複統合、矛盾整理、重要度・confidence・recall優先度の調整など重い処理はアイドル時に行う。
+2. Learning Reviewが、将来価値、永続性、重複、事実と推測、scope、Memory種別などを評価する。
+3. 必要ならShared / Companion-specificのscopeを選び、Core / Episodic / Semantic Memory、Skill、Relationship、Interestその他の永続Stateへ反映する。Working Memoryは現在の会話・Task用の短期状態として別に管理する。
+4. 重複統合、矛盾整理、抽象化、重要度・confidence・recall優先度の調整など重い処理はConsolidationとしてアイドル時に行う。
 5. 日常の小さな学習で毎回承認を求めない。
 6. ユーザーは「覚えておいて」「忘れて」「それは違う」「次からこのやり方で」等を自然言語で伝え、後から修正・削除できる。
+7. ユーザー削除またはPrivacy上の削除対象となった情報は、元の会話・履歴が残っている場合でも、削除意図に反してConsolidationから同じ長期Memoryとして自動再生成しない。
 
-**失敗時の挙動**: 推測を確認済み事実として固定しない。Permissionで保存不可の情報を学習してはならない。
+**失敗時の挙動**: 推測を確認済み事実として固定しない。Permissionで保存不可の情報を学習しない。削除済み・再学習禁止として扱う情報をバックグラウンド処理で復活させない。
 **完了条件**: 次回の想起・判断・作業に適切な学習が反映され、ユーザーが必要なら詳細履歴を確認できる。
 
 ## UC-011 文脈・記憶を使った再想起
@@ -189,7 +190,7 @@
 1. 通常の会話では、現在文脈に関連するMemoryを軽量に自動想起する。
 2. 根拠が足りない場合、CompanionまたはAgentが明示的なMemory検索を行う。
 3. Semantic / Episodic / Core、Shared / Companion-specific、時間、重要度、感情的意義、Relationship、現在タスク、confidence等を組み合わせて候補を絞る。
-4. 必要ならConsolidated Memoryだけでなく、元の会話履歴や関連ログまで調べる。
+4. 必要ならConsolidated Memoryだけでなく、元の会話履歴や関連ログまで調べる。ただし、削除・再学習禁止等の保持ポリシーで利用不可となった原資料を再利用しない。
 5. 根拠が弱い場合、確信度を下げる、追加検索する、または思い出せないと伝える。
 
 **失敗時の挙動**: 存在しない記憶を補完して事実として答えない。Core Memoryだけで過去全体を表現しようとしない。
@@ -212,16 +213,16 @@
 **失敗時の挙動**: 承認が得られない場合は操作を実行せず、保留または代替案として示す。
 **完了条件**: ユーザーが、何が自発的に行われ、どこで通知・承認されたかを確認できる。
 
-## UC-013 Local / Cloud / Hybrid Providerの利用
+## UC-013 Local / Cloud構成の利用
 
 **Actor**: ユーザー、Ene Core、Provider
-**前提**: LLM、VLM、Embedding、STT、TTS等の候補が利用可能である。
+**前提**: LLM、VLM、Embedding、Reranker、STT、TTS等の候補が利用可能である。
 **Trigger**: 初回設定、Provider変更、または特定処理の実行。
 
 **期待する流れ**
 
-1. ユーザーは推論コンポーネントごとにLocal、Cloud、Hybridの構成を選べる。
-2. 完全Local、完全Cloud、混在のいずれも利用可能な構成として扱う。
+1. ユーザーは推論コンポーネントごとに利用可能なLocal ProviderまたはCloud Provider等を選べる。
+2. コンポーネントごとの選択を独立させ、システム全体として完全Local、Cloud中心、LocalとCloudの混在のいずれも正規構成として扱う。個別ProviderがHybrid実行を提供することは許容するが必須としない。
 3. Cloudを使う場合、対象データ、送信先、費用、認証をユーザーが確認できる。
 4. Eneの永続状態はHost PCに残し、Cloud Providerは処理結果を返す。
 
@@ -255,7 +256,7 @@
 
 1. 第3層の詳細設定・管理画面で、Task、Sub-agent、Tool、MCP、Plugin、Context Monitor、Memory、Skill、Permission、ログを確認する。
 2. ユーザーはMemory / Skillの閲覧、検索、編集、削除、scope確認、provenance確認、revision確認、rollback、enable / disableを行える。
-3. Companion間通信、CompanionとSub-agentの報告、自律行動の理由、主要な権限判断を後から確認できる。
+3. Companion間通信、CompanionとSub-agentの報告、自律行動の理由、主要な権限判断、重要なCompanion State変更や設定変更を後から確認できる。
 4. Provider別、用途別、Companion別、Task別、バックグラウンド処理別の利用量・推定コストを確認する。
 5. 日次・月次等の予算、上限接近通知、上限到達時の停止・保留・承認要求を設定できる。
 
@@ -300,8 +301,10 @@
 ## ユースケース上の未確定事項
 
 - 各OS・Clientで、どのユースケースを最初のリリースへ含めるか。
+- Remote Clientの認証・暗号化・Device trust・接続方法。
 - 自発的なランダム起動の具体的な頻度・制限。
 - Companion間交流レベルの名称、段階数、既定値。
 - 通知と明示的承認を分ける正確なリスク分類。
+- 「忘れて」等の要求で、Memoryのみを削除するか、原資料も削除するか、原資料を残して再学習だけ禁止するかを選ぶ具体的なUI・保持方式。
 - Provider障害時のユーザー向け表示、再設定導線、手動選択の詳細。
 - 監査ログ・成果物・音声・画像・Tool出力の保持期間とエクスポート形式。
