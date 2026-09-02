@@ -1,6 +1,6 @@
 # クイックスタート
 
-このページは、チェックアウトからデーモンとクライアント起動までの最短経路です。
+このページは、チェックアウトからコアとクライアント起動までの最短経路です。
 ビルド環境の詳細はリポジトリの `AGENTS.md` にあります。
 
 ## 1. 要件
@@ -32,7 +32,7 @@ cargo build -p ene-ctl
 `ene-core` を stage から起動できるよう、両方をビルドします。
 
 ```powershell
-cargo build -p ene-daemon -p ene-stage
+cargo build -p ene-core -p ene-stage
 ```
 
 ## 3. CLI を動かす
@@ -53,7 +53,7 @@ cargo run -p ene-stage
 ```
 
 ネイティブ Windows では、上記の両方のビルドを PowerShell で実行してから
-同じコマンドを使います。デーモンを `target/debug` 外に置く場合は
+同じコマンドを使います。コアを `target/debug` 外に置く場合は
 `ENE_CORE_BIN` を設定してください。
 
 stage は必要なら `ene-core` を子プロセスとして起動し、表層にキャラクターと

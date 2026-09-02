@@ -3,7 +3,7 @@
 ## Turns
 
 A **turn** is one unit of conversation: a user message (or a proactive /
-scheduled / delegated trigger) plus everything the daemon does in response.
+scheduled / delegated trigger) plus everything the core does in response.
 Every turn has a `TurnId`. The dialogue lane lives in `ene-kernel`.
 
 Clients start a turn with `POST /api/v1/sessions/{id}/messages` (`prompt`,
@@ -39,7 +39,7 @@ running turn; `compact` compresses history.
    plugin. Transient provider failures retry with `harness.retry`; the packed
    prompt is trimmed to the effective context window (see
    [Configuration](../configuration.md)).
-4. Surface-eligible tools run through `ene-registry` / `ene-plane`.
+4. Surface-eligible tools run through `ene-tool-registry` / `ene-access-control`.
    `delegate.start` returns immediately; `ene-work` opens a **job lane**
    (`origin: delegation`) that uses job-layer tools and `delegation.send`.
    A bookmark request (`workflow.bookmark`) researches with `web.search` when
@@ -57,7 +57,7 @@ running turn; `compact` compresses history.
 6. Live events go out at `surface` or `detail` depth.
 
 Before generation, `agent/pre-step` runs as a waterfall on the shared
-`LoopHooks` chain. The host and `ene-fiber` subscribe with a guard that
+`LoopHooks` chain. The host and `ene-plugin-host` subscribe with a guard that
 unregisters on fiber unload. A listener that skips `next` can rewrite or
 stop the turn. `emit` buses notify only. Out-of-process plugins do not get
 a raw intercept IPC — that would let a tool skip approval or quiet hours.
@@ -91,7 +91,7 @@ Signatures live in rustdoc for `ene-kernel` and `ene-session`.
 
 ## Events
 
-The daemon exposes HTTP plus a WebSocket live bus. `ene-kernel::LiveEvent`
+The core exposes HTTP plus a WebSocket live bus. `ene-kernel::LiveEvent`
 is depth-filtered on the server: `surface` gets speech, `detail` also gets
 inner / thinking / tool args. Stage's main window is surface; the separate
 detail window (and `ene-ctl --verbose`) is detail.
@@ -136,5 +136,5 @@ session's dialogue-lane actor from the in-process hub. If the turn does not
 go idle in time, the end request fails and `session/end` is not written. A
 later prompt on the ended session fails with `closed`.
 
-Session titles are whatever the client sends on create or `PATCH`. The daemon
+Session titles are whatever the client sends on create or `PATCH`. The core
 does not auto-generate a title from conversation content.

@@ -4,9 +4,9 @@ use crate::memory::{
 };
 use crate::store::CompanionStore;
 use async_trait::async_trait;
-use ene_plane::Sensitivity;
-use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
+use ene_access_control::Sensitivity;
 use ene_session::SoulId;
+use ene_tool_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::str::FromStr;

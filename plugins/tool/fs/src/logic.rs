@@ -1,6 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ene_plugin_ipc::{BrokerClient, BrokerRequest, BrokerResponse, ToolSpecWire};
-use ene_registry::{arg_str, spec};
+use ene_tool_registry::{arg_str, spec};
 use globset::GlobBuilder;
 use ignore::{DirEntry, WalkBuilder};
 use parking_lot::Mutex;
@@ -1099,7 +1099,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-// Used when this source is included by ene-registry; unused in the standalone plugin binary
+// Used when this source is included by ene-tool-registry; unused in the standalone plugin binary
 // unless referenced from the plugin binary (see main.rs link stub).
 struct WorkspaceOverrideGuard(Option<PathBuf>);
 
@@ -1157,18 +1157,18 @@ static TEST_WORKSPACE_GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(())
 
 fn resolve(path: &str, create_parent: bool) -> Result<PathBuf, String> {
     if let Some(root) = scoped_workspace() {
-        return ene_registry::confine_tool_path(&root, Path::new(path), create_parent)
+        return ene_tool_registry::confine_tool_path(&root, Path::new(path), create_parent)
             .map_err(|err| fail("path_outside_workspace", Path::new(path), err));
     }
     #[cfg(test)]
     if let Some(root) = TEST_WORKSPACE.lock().clone() {
-        return ene_registry::confine_tool_path(&root, Path::new(path), create_parent)
+        return ene_tool_registry::confine_tool_path(&root, Path::new(path), create_parent)
             .map_err(|err| fail("path_outside_workspace", Path::new(path), err));
     }
     let Ok(workspace) = std::env::var("ENE_WORKSPACE") else {
         return Ok(PathBuf::from(path));
     };
-    ene_registry::confine_tool_path(Path::new(&workspace), Path::new(path), create_parent)
+    ene_tool_registry::confine_tool_path(Path::new(&workspace), Path::new(path), create_parent)
         .map_err(|err| fail("path_outside_workspace", Path::new(path), err))
 }
 

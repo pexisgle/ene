@@ -1,16 +1,16 @@
 use crate::{BootOptions, CoreDaemon, CoreError};
 use async_trait::async_trait;
-use ene_fiber::{ProfileRow, discover_plugin_script};
 use ene_kernel::{
     ConversationModel, DisplayDepth, EchoModel, EventKind, EventPayload, KernelError, ModelRequest,
     ToolCallingModel,
 };
-use ene_registry::Layer;
+use ene_plugin_host::{ProfileRow, discover_plugin_script};
 use ene_session::{
     Block, ClientId, NewEvent, NewSession, Role, SessionCreatedBy, SessionKind, SessionStore,
     SoulId, Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger, abandoned_inbox,
     unclaimed_inbox, v1,
 };
+use ene_tool_registry::Layer;
 use parking_lot::Mutex;
 use serde_json::json;
 use std::sync::Arc;
@@ -305,7 +305,7 @@ async fn dummy_plugin_and_harness_tools_share_registry() {
     .await
     .unwrap();
     core.plane()
-        .set_mode(ene_plane::ApprovalMode::Auto)
+        .set_mode(ene_access_control::ApprovalMode::Auto)
         .unwrap();
     let registry = sup.registry();
     assert!(registry.get("dummy.ping").is_some());
@@ -504,7 +504,7 @@ async fn approval_policy_file_from_settings_json_is_loaded() {
         .await
         .unwrap();
     assert_eq!(core.approval_settings().policy_file, "team-policy.json");
-    assert_eq!(core.plane().mode(), ene_plane::ApprovalMode::Auto);
+    assert_eq!(core.plane().mode(), ene_access_control::ApprovalMode::Auto);
     let policy = core.plane().policy();
     assert_eq!(policy.rules.len(), 1);
     assert_eq!(policy.rules[0].tool, "fs.write");
@@ -586,7 +586,7 @@ async fn harness_max_steps_one_auto_delegates_the_second_step() {
         .await
         .unwrap();
     core.plane()
-        .set_mode(ene_plane::ApprovalMode::Auto)
+        .set_mode(ene_access_control::ApprovalMode::Auto)
         .unwrap();
     assert_eq!(core.harness().loop_cfg.max_steps_per_turn, 1);
     let soul = core.occupants()[0].0;

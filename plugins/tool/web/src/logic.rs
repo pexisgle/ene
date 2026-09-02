@@ -1,5 +1,5 @@
 use ene_plugin_ipc::ToolSpecWire;
-use ene_registry::{arg_str, spec, try_host_fetch, try_host_post_json};
+use ene_tool_registry::{arg_str, spec, try_host_fetch, try_host_post_json};
 use serde_json::{Value, json};
 use std::net::IpAddr;
 use url::Url;
@@ -54,7 +54,7 @@ pub(crate) fn specs() -> Vec<ToolSpecWire> {
 }
 
 pub(crate) fn execute(name: &str, args: &Value) -> Result<Value, String> {
-    credentials::install_host_credentials(ene_registry::try_web_credentials(), || match name {
+    credentials::install_host_credentials(ene_tool_registry::try_web_credentials(), || match name {
         "web.fetch" => {
             let format = parse_format(args.get("format").and_then(Value::as_str))?;
             fetch(arg_str(args, "url")?, format)
@@ -241,7 +241,7 @@ fn rows_from_payload(
 mod backend_tests {
     use super::credentials::{WebCredentials, with_credentials};
     use super::execute;
-    use ene_registry::with_post_json;
+    use ene_tool_registry::with_post_json;
     use serde_json::json;
 
     fn creds() -> WebCredentials {
@@ -487,7 +487,7 @@ fn is_private(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{decode_ddg_href, execute, parse_ddg_html};
-    use ene_registry::with_http_fetch;
+    use ene_tool_registry::with_http_fetch;
     use serde_json::json;
 
     #[test]

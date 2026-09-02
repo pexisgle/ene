@@ -8,8 +8,8 @@ use ene_kernel::{
 use ene_plugin_ipc::{
     LlmGenerateRequest, LlmImage, LlmMessage, LlmRole, LlmToolCall, LlmToolSchema, ProviderAuth,
 };
-use ene_registry::Layer;
 use ene_session::{Block, InnerAspect, ProjectedMessage, Role, SessionStore, SpillObject};
+use ene_tool_registry::Layer;
 
 use crate::CoreDaemon;
 

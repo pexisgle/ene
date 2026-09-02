@@ -5,10 +5,10 @@ use crate::types::{Job, JobStatus};
 use ene_kernel::{
     ConversationModel, HarnessSettings, LaneHandle, LaneMindSettings, LaneOptions, SurfaceRouter,
 };
-use ene_registry::ToolRegistry;
 use ene_session::{
     NewSession, ProjectOptions, Role, SessionCreatedBy, SessionKind, SessionStore, derive_messages,
 };
+use ene_tool_registry::ToolRegistry;
 use std::sync::Arc;
 use std::time::Duration;
 

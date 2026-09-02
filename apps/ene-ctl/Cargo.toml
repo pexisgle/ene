@@ -27,7 +27,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "process", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
-ene-daemon = { path = "../ene-core" }
+ene-core = { workspace = true }
 ene-session = { workspace = true }
 tempfile = { workspace = true }
 

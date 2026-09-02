@@ -1,5 +1,5 @@
 use ene_plugin_ipc::ToolSpecWire;
-use ene_registry::{arg_str, spec};
+use ene_tool_registry::{arg_str, spec};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

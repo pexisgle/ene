@@ -13,7 +13,8 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    if let Err(err) = ene_registry::run_tool_plugin("tool.exec", logic::specs, logic::execute).await
+    if let Err(err) =
+        ene_tool_registry::run_tool_plugin("tool.exec", logic::specs, logic::execute).await
     {
         tracing::error!(error = %err, plugin = "tool.exec", "fatal");
         std::process::exit(1);

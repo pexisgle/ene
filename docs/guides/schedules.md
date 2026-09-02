@@ -12,7 +12,7 @@ restart because they live in the work database, not in a client.
 |---|---|
 | `remind` | Speak a reminder on the surface |
 | `turn` | Start a dialogue turn |
-| `job` | Kick a back-harness job (`action_ref`); the daemon job lane then runs tools |
+| `job` | Kick a back-harness job (`action_ref`); the core job lane then runs tools |
 
 `important` schedules still fire when quiet hours would otherwise hold
 speech. Quiet hours for schedules use the same window as
@@ -20,7 +20,7 @@ speech. Quiet hours for schedules use the same window as
 reuse the proactive speech gate: a due `remind` is deferred until the
 window ends, except `important`.
 
-## Daemon driver
+## Core driver
 
 `ene-core` polls due rows about once a second.
 

@@ -9,7 +9,7 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 
 | Package | Path | Role |
 |---|---|---|
-| `ene-daemon` | `apps/ene-core` (binary `ene-core`) | Core daemon: data-dir lock, HTTP/WS API, session + kernel + companion + work + plane + fiber |
+| `ene-core` | `apps/ene-core` (binary `ene-core`) | Core process: data-dir lock, HTTP/WS API, session + kernel + companion + work + access-control + plugin-host |
 | `ene-stage` | `apps/ene-stage` | Product GUI: wgpu overlay with GPU-composited Slint, chat, 9-section detail, tray; surface + detail sockets (`client_id = stage`) |
 | `ene-ctl` | `apps/ene-ctl` | CLI client for the same HTTP/WS API |
 | `ene-desktop` | `apps/ene-desktop` | Frozen pre-redesign GUI restored in #794. No new features; delete when stage is judged to replace it |
@@ -20,12 +20,12 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 |---|---|---|
 | `ene-session` | Append-only conversation log, usage ledger, history projection | config |
 | `ene-kernel` | Dialogue lane: prompt / steer / follow_up / abort / compact, visibility, observability | config, session |
-| `ene-companion` | Soul, affect, memory, inner channel, proactive speech, character packages | card, config, plane, registry, session |
+| `ene-companion` | Soul, affect, memory, inner channel, proactive speech, character packages | card, config, access-control, tool-registry, session |
 | `ene-body` | Performance queue, emotion-to-expression mapping, duplex voice | config, session |
-| `ene-work` | Delegation, jobs (job-lane runner), schedules, skills (catalog/active context, bookmark workflow), MCP bindings | companion, kernel, plane, registry, session |
-| `ene-plane` | Approval plane, hash-chained audit log, credential vault | config |
-| `ene-fiber` | Plugin fiber composition: reversible effects, profile reconcile, sandbox spawn | plugin-ipc, registry, sandbox, kernel |
-| `ene-registry` | Unified tool registry: side_effects filter, deny-by-default pipeline, lexical tool discovery index | plugin-ipc, plane |
+| `ene-work` | Delegation, jobs (job-lane runner), schedules, skills (catalog/active context, bookmark workflow), MCP bindings | companion, kernel, access-control, tool-registry, session |
+| `ene-access-control` | Approval, hash-chained audit log, credential vault | config |
+| `ene-plugin-host` | Plugin process supervision: reversible effects, profile reconcile, sandbox spawn | plugin-ipc, tool-registry, sandbox, kernel |
+| `ene-tool-registry` | Unified tool registry: side_effects filter, deny-by-default pipeline, lexical tool discovery index | plugin-ipc, access-control |
 | `ene-plugin-ipc` | Split plugin IPC: length-prefixed MessagePack frames for core and tool subprotocols | (nothing internal) |
 | `ene-provider-assets` | Shared provider asset catalog, manifests, and verified downloads | config, plugin-ipc |
 | `ene-api` | HTTP/WS types, OpenAPI document, typed Rust client | (nothing internal) |
@@ -38,19 +38,19 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 ## Dependency rules (enforced by review)
 
 ```text
-ene-session     ↛ kernel, companion, work, daemon
-ene-kernel      ↛ companion, work, fiber, daemon
-ene-fiber       → kernel (shared `LoopHooks` only; kernel still ↛ fiber)
-ene-companion   ↛ daemon, fiber
+ene-session     ↛ kernel, companion, work, core
+ene-kernel      ↛ companion, work, plugin-host, core
+ene-plugin-host → kernel (shared `LoopHooks` only; kernel still ↛ plugin-host)
+ene-companion   ↛ core, plugin-host
 ene-plugin-ipc  ↛ business logic
 ene-card        → ene-config only (never the reverse)
 ene-vrm         ↛ kernel, companion, work, session
-ene-api         ↛ daemon types
+ene-api         ↛ core types
 ```
 
-Clients talk to the daemon only through `ene-api`. Do not link `ene-daemon`
+Clients talk to the core only through `ene-api`. Do not link `ene-core`
 from `ene-desktop` or `ene-stage` production code (`ene-ctl` tests may spawn
-the daemon).
+the core).
 
 Which client is the product GUI, and how old tools map onto the current
 tree, is recorded in [Product boundaries](../concepts/product-boundaries.md).

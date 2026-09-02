@@ -1,41 +1,37 @@
 # Ene Documentation
 
-Ene is a **local AI companion harness** written in Rust. Companions live on
-your device, speak and listen, remember, and run tools under an approval
-plane. A core daemon (`ene-core`) owns that state; desktop, CLI, stage, and Web
-are clients of the same API. `ene-stage` is the product GUI; `ene-desktop` is
-frozen legacy and is deleted when stage is judged to replace it. See
-[Product boundaries](concepts/product-boundaries.md).
+Ene is a local AI companion harness written in Rust. This documentation is split deliberately into two kinds of material:
 
-The finished-product definition is
-[`plans/harness-redesign/`](../plans/harness-redesign/README.md).
+- **Requirements** define what Ene should become. They are being rebuilt interactively and are the product source of truth once confirmed.
+- **Current implementation docs** describe the code and behavior that exist in the tree today. They must not silently become product requirements.
 
-## Who this documentation is for
+## Start here
 
 | If you are… | Start here |
 |---|---|
+| Defining or reviewing the product | [Requirements](requirements/README.md) |
 | An end user who wants to run Ene | [Quickstart](quickstart.md) |
-| Someone configuring companions and settings | [Configuration](configuration.md) → [Concepts](concepts/architecture.md) |
+| Someone configuring Ene | [Configuration](configuration.md) |
 | A developer extending Ene with tools | [Write a tool](guides/tools/write-a-tool.md) |
-| A contributor to this repository | [Architecture](concepts/architecture.md) → [Crate reference](reference/crates.md) |
+| A contributor trying to understand the current code | [Architecture](concepts/architecture.md) → [Crate reference](reference/crates.md) |
 
 ## Documentation map
 
 | Section | What it covers |
 |---|---|
-| [Quickstart](quickstart.md) | Build, configure, and run `ene-ctl` / `ene-stage` |
-| [Configuration](configuration.md) | `settings.json`, environment variables, file locations |
-| [Concepts](concepts/architecture.md) | How Ene works: process model, packages, memory, plugins |
-| [Apps](apps/stage.md) | User guides for stage, CLI, and the legacy desktop |
-| [Guides](guides/character-editor.md) | Task-oriented how-tos |
-| [Reference](reference/crates.md) | Crate map and rendering API |
+| [Requirements](requirements/README.md) | Product definition, use cases, requirements, invariants, glossary, decisions |
+| [Quickstart](quickstart.md) | Build, configure, and run Ene |
+| [Configuration](configuration.md) | Settings, environment variables, file locations |
+| [Concepts](concepts/architecture.md) | Descriptive documentation of the current implementation |
+| [Apps](apps/stage.md) | Current stage, CLI, and legacy desktop behavior |
+| [Guides](guides/character-editor.md) | Current task-oriented how-tos |
+| [Reference](reference/crates.md) | Current crate map and APIs |
 
 Japanese documentation is available at [日本語ドキュメント](ja/index.md).
-Every page under `docs/` has a matching page under `docs/ja/`.
 
 ## Source of truth
 
-If a page and the code disagree, the code wins — please report the discrepancy.
+For **desired product behavior**, confirmed documents under `docs/requirements/` win. For **current behavior and signatures**, code and rustdoc win. Legacy requirement material under `docs/requirements/legacy/` is historical input only.
 
 - Repository: <https://github.com/pexisgle/ene>
 - Rust API docs: `cargo doc --workspace --no-deps`

@@ -28,7 +28,7 @@ impl ProviderInfo {
 }
 
 /// Fallback when core has not published `effective.providers` yet.
-/// Keep ids/seams aligned with `ene_fiber::PROVIDER_PLUGINS`.
+/// Keep ids/seams aligned with `ene_plugin_host::PROVIDER_PLUGINS`.
 fn fallback_catalog() -> Vec<ProviderInfo> {
     vec![
         ProviderInfo {

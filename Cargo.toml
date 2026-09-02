@@ -119,12 +119,12 @@ ene-card = { path = "crates/ene-card" }
 ene-config = { path = "crates/ene-config" }
 ene-session = { path = "crates/ene-session" }
 ene-kernel = { path = "crates/ene-kernel" }
-ene-daemon = { path = "apps/ene-core" }
+ene-core = { path = "apps/ene-core" }
 ene-plugin-ipc = { path = "crates/ene-plugin-ipc" }
 ene-provider-assets = { path = "crates/ene-provider-assets" }
-ene-registry = { path = "crates/ene-registry" }
-ene-fiber = { path = "crates/ene-fiber" }
-ene-plane = { path = "crates/ene-plane" }
+ene-tool-registry = { path = "crates/ene-tool-registry" }
+ene-plugin-host = { path = "crates/ene-plugin-host" }
+ene-access-control = { path = "crates/ene-access-control" }
 ene-companion = { path = "crates/ene-companion" }
 ene-body = { path = "crates/ene-body" }
 ene-work = { path = "crates/ene-work" }

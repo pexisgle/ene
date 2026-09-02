@@ -6,9 +6,9 @@ use crate::types::{Artifact, ArtifactKind, DelegationMode};
 use crate::workflow::{BookmarkFill, fill_bookmark_job};
 use async_trait::async_trait;
 use chrono::Utc;
-use ene_plane::Sensitivity;
-use ene_registry::{ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
+use ene_access_control::Sensitivity;
 use ene_session::{DelegationId, SoulId};
+use ene_tool_registry::{ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -574,7 +574,7 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
 #[must_use]
 pub fn surface_shows_delegate(registry: &ToolRegistry) -> bool {
     let names: Vec<_> = registry
-        .schemas(ene_registry::Layer::Surface)
+        .schemas(ene_tool_registry::Layer::Surface)
         .iter()
         .filter_map(|schema| {
             schema

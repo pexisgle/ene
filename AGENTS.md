@@ -32,7 +32,7 @@ the CLI client, not the workspace.** Always pass `--workspace` or `-p <package>`
 | Focused iteration | `cargo check -p <pkg>` / `cargo test -p <pkg>` |
 | Full lint (CI gate) | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Full tests (CI gate) | `cargo test --workspace` |
-| Run | `cargo run -p ene-ctl -- --help` / `cargo run -p ene-stage` / `cargo run -p ene-daemon` |
+| Run | `cargo run -p ene-ctl -- --help` / `cargo run -p ene-stage` / `cargo run -p ene-core` |
 
 CI additionally runs `cargo doc --workspace --no-deps`. It is deliberately *not* run with
 `RUSTDOCFLAGS=-D warnings` — pre-existing broken intra-doc links would fail unrelated work.
@@ -114,19 +114,19 @@ Violating these is the most common way to break this repo:
 - `ene-kernel` owns the dialogue lane (`prompt` / `steer` / `follow_up` / `abort` /
   `compact`). It must not depend on HTTP, plugins, or companion persistence.
 - `ene-companion` owns soul, affect, memory, inner channel, proactive speech, and
-  character packages. It must not depend on the daemon or the tool host.
+  character packages. It must not depend on `ene-core` or `ene-plugin-host`.
 - `ene-work` owns delegation, jobs, schedules, skills, and MCP bindings. Mutating work
-  is gated on plan approval in `ene-plane`, not on mailbox text.
-- `ene-plane` owns approval, the audit hash chain, and the credential vault.
-- `ene-fiber` owns plugin process supervision and reversible host-context composition.
+  is gated on plan approval in `ene-access-control`, not on mailbox text.
+- `ene-access-control` owns approval, the audit hash chain, and the credential vault.
+- `ene-plugin-host` owns plugin process supervision and reversible host-context composition.
   Child kill is not unload; host registrations must be disposed LIFO.
-- `ene-plugin-ipc` is wire ABI only (split `core` / `tool` subprotocols). `ene-registry`
+- `ene-plugin-ipc` is wire ABI only (split `core` / `tool` subprotocols). `ene-tool-registry`
   is the unified tool pipeline. Never move business or DB logic into the ABI crate.
 - `ene-card` owns Character Card V3 / PNG / CHARX import. It depends only on
   `ene-config`; `ene-config` must never depend on it, or the `zip` dependency leaks
   back into the settings core.
 - `ene-vrm` is rendering-only. It must not depend on kernel, companion, or work.
-- `ene-daemon` (`apps/ene-core`, binary `ene-core`) is the process that wires the
+- `ene-core` is the process that wires the
   libraries and serves HTTP/WS. Clients (`ene-ctl`, `ene-stage`, Web) talk only through
   `ene-api`.
 
@@ -148,13 +148,13 @@ Precedence is defaults → JSON → `ENE_` env vars, with `__` separating nested
 (e.g. `ENE_CORE__SERVER__BIND`). Public sections: `core.*`, `harness.*`, `mind.*`,
 `characters.*`, `body.*`, `voice.*`, `store.*`, `approval.*`. Add settings at the
 owning `define_config!` invocation (`ene-session`, `ene-kernel`, `ene-companion`,
-`ene-body`, `ene-plane`). Schemas regenerate automatically at config init —
+`ene-body`, `ene-access-control`). Schemas regenerate automatically at config init —
 `assets/schema/*` is gitignored; never hand-edit or commit it.
 
 ## Plugins and IPC
 
 New tools are separate lightweight binaries: `cargo new --bin plugins/tool/<name>`.
-Serve via `ene_registry::run_tool_plugin` with local `specs` / `execute` (see
+Serve via `ene_tool_registry::run_tool_plugin` with local `specs` / `execute` (see
 `plugins/tool/fs/src/main.rs`). Do not dispatch on `BuiltinKind` in the plugin
 binary — that enum is a host catalog for in-process tests. Use namespaced
 `<namespace>.<action>` names and declare side effects. Verify through
@@ -164,13 +164,13 @@ Plugin crates are **binary-only** — no `[lib]` target (see `plugins/tool/fs`).
 not a reason to add one: `#[cfg(test)]` modules run normally in a bin crate. Add `[lib]`
 only when an integration test under `tests/` or another workspace crate must link the
 logic directly. In-process host tests may `#[path]`-include `src/logic.rs` from
-`ene-registry` instead.
+`ene-tool-registry` instead.
 
 One plugin per native runtime. `llama.cpp`, `whisper.cpp`, and ONNX Runtime each get their
 own plugin binary — never bundle two native runtimes into one.
 
 Provider plugins: add a binary under `plugins/provider/` **and** a row in
-`ene_fiber::PROVIDER_PLUGINS` (id, seams, `local`, `needs_key`). Desktop pickers
+`ene_plugin_host::PROVIDER_PLUGINS` (id, seams, `local`, `needs_key`). Desktop pickers
 read `GET /api/v1/settings` → `effective.providers` from that table — do not add
 a parallel UI allowlist. Each `ai.tasks.*` binding gets its own fiber so chat and
 embedding can share a plugin with different GGUFs. Local GGUF is
@@ -179,12 +179,12 @@ plugins, or unset).
 
 Sidecar pattern: provider plugins that run a local engine as a child process follow
 `templates/sidecar` — the host spawns the sidecar on a loopback port via
-`ene-fiber` (`broker.spawn_sidecar`), health-polls with a timeout, and kills on
+`ene-plugin-host` (`broker.spawn_sidecar`), health-polls with a timeout, and kills on
 fiber unload. **Sidecar engines** (`llama-server`, VOICEVOX Engine) use a
 **host-managed runtime catalog**: `ene-provider-assets` fetches GitHub Releases
 at startup (6h TTL disk cache under `data_dir/catalog-cache/`), installs
 verified artifacts under `data_dir/plugins/<plugin_id>/assets/`, and exposes
-`list` / `install` / `install_status` / `set_active` via `ene-fiber` and
+`list` / `install` / `install_status` / `set_active` via `ene-plugin-host` and
 `ene-core` HTTP (`refresh_catalog` forces a refetch). Install keys are
 `{release_tag}/{variant_id}`. **GGUF weights** stay in each plugin's static
 catalog; the host merges probe `assets.list` with runtime sidecar rows. Plugins

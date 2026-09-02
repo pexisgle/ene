@@ -10,6 +10,6 @@
 | `ene-vrm` | [ene-vrm](ene-vrm.md) |
 
 残りのワークスペース（`ene-session`、`ene-kernel`、`ene-companion`、
-`ene-work`、`ene-plane`、`ene-fiber`、`ene-registry`、`ene-plugin-ipc`、
+`ene-work`、`ene-access-control`、`ene-plugin-host`、`ene-tool-registry`、`ene-plugin-ipc`、
 `ene-api`、`ene-sandbox`、`ene-body`、各アプリ）は rustdoc と
 [クレートリファレンス](../crates.md) を見てください。

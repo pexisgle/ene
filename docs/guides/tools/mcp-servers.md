@@ -3,7 +3,7 @@
 [Model Context Protocol](https://modelcontextprotocol.io) servers are not
 vendored. Each handwritten row becomes a `mcp.<id>` fiber that runs
 `ene-tool-mcp` and registers tools as `mcp:<id>.<tool>` on the same
-`ene-registry` pipeline as in-tree tools.
+`ene-tool-registry` pipeline as in-tree tools.
 
 Write `<data-dir>/mcp.json` or use stage **Connections** (name / command-or-URL form +
 `GET`/`PUT /api/v1/mcp`). Arguments are one argv entry per line so paths with

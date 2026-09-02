@@ -4,10 +4,22 @@
 [クイックスタート](quickstart.md)
 [設定](configuration.md)
 
-# コンセプト
+# 要件定義
+
+- [要件定義トップ](requirements/README.md)
+- [製品定義](requirements/product.md)
+- [ユースケース](requirements/use-cases.md)
+- [機能要件](requirements/functional.md)
+- [非機能要件](requirements/non-functional.md)
+- [不変条件](requirements/invariants.md)
+- [用語集](requirements/glossary.md)
+- [決定記録](requirements/decisions.md)
+- [旧資料](requirements/legacy/README.md)
+
+# 現在実装のコンセプト
 
 - [アーキテクチャ](concepts/architecture.md)
-- [製品境界](concepts/product-boundaries.md)
+- [現在の製品・クライアント状態](concepts/product-boundaries.md)
 - [キャラクターパッケージ](concepts/character-cards.md)
 - [メモリ](concepts/memory.md)
 - [ターンとセッション](concepts/turns-and-sessions.md)
@@ -20,11 +32,6 @@
 - [Stage ユーザーガイド](apps/stage.md)
 - [CLI ユーザーガイド](apps/cli.md)
 - [Desktop ユーザーガイド](apps/desktop.md)（旧版）
-
-# 実験
-
-- [Stage UI PoC の結論](experiments/stage-ui-poc-findings.md)
-- [Stage v2 移行前 baseline](experiments/stage-v2-baseline.md)
 
 # ガイド
 

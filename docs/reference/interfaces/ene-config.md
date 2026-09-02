@@ -25,7 +25,7 @@ Character packages live in [`ene-card`](ene-card.md) / `ene-companion`.
 | `define_config!` | Declares a settings section struct (`core`, `harness`, `mind`, `body`, `voice`, `store`, `approval`, `characters`, …), its JSON schema, and its registration (settings / character / nested variants) |
 | `define_label_enum!` | Declares a labeled enum with a consistent `label()` API |
 
-Plugin profile rows are fiber state (`ene-fiber`), not a `define_config!`
+Plugin profile rows are fiber state (`ene-plugin-host`), not a `define_config!`
 section.
 
 ## Dependencies

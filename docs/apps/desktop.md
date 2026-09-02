@@ -8,7 +8,7 @@ character overlay with `ene-vrm`, keeps chat on the **surface** depth, and
 opens a **separate detail window**.
 
 ```sh
-cargo build -p ene-daemon -p ene-desktop
+cargo build -p ene-core -p ene-desktop
 cargo run -p ene-desktop
 ```
 
@@ -24,8 +24,8 @@ the Windows SDK.
 | Settings | local + API | Apply writes the JSON layer (no API keys) to desktop `settings.json` and PATCHes core sections |
 
 Desktop does not use a WebView. UI is egui; VRM is wgpu. The process talks to
-the daemon only through `ene-api` (`client_id = desktop`). It does not link
-`ene-daemon`, `ene-companion`, or the old runtime/mind/store crates.
+the core only through `ene-api` (`client_id = desktop`). It does not link
+`ene-core`, `ene-companion`, or the old runtime/mind/store crates.
 
 Local `desktop.*` (graphics, theme, language, mic, captions, beat sync, core
 lifetime) and the other applied sections (AI, mind, plugins) are persisted into
@@ -57,4 +57,4 @@ plugin picker as chat. Leave a task unset to inherit the conversation model.
 TTS/STT pickers list plugins that declare `seam.tts` / `seam.stt`.
 
 Audio device relay and approval popups are the desktop's client-side jobs;
-the daemon still owns policy and the live bus.
+the core still owns policy and the live bus.

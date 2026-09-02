@@ -23,19 +23,21 @@ use crate::vision::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use ene_access_control::{
+    ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PopupSettings, PopupSink,
+    ScriptedPopup, Sensitivity,
+};
 use ene_companion::{CompanionStore, NewSoul, WorldStateMemory, WorldStateSettings};
 use ene_kernel::{
     ConversationModel, DisplayDepth, EchoModel, EventKind, HarnessSettings, KernelError,
     LaneHandle, LaneMindSettings, LaneOptions, ModelGeneration, ModelRequest, SurfaceRouter,
     SurfaceToolOutcome, ToolCall,
 };
-use ene_plane::{
-    ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PopupSettings, PopupSink,
-    ScriptedPopup, Sensitivity,
-};
-use ene_registry::{BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use ene_session::{
     NewSession, SessionCreatedBy, SessionKind, SessionStore, SoulId, derive_messages,
+};
+use ene_tool_registry::{
+    BuiltinInvoker, Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource,
 };
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -313,7 +315,7 @@ async fn surface_fs_write_upgrades_without_invoking() {
         .unwrap_err();
     assert!(matches!(
         err,
-        ene_registry::PipelineError::WrongLayer {
+        ene_tool_registry::PipelineError::WrongLayer {
             requested: Layer::Surface,
             required: Layer::Job,
             ..
@@ -349,18 +351,20 @@ async fn surface_delegate_start_is_approval_gated_before_job_insert() {
     let (dir, store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
-    let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings {
+    let plane = Arc::new(ene_access_control::ApprovalPlane::new(
+        ene_access_control::ApprovalSettings {
             popup: PopupSettings { timeout_ms: 5_000 },
             ..ApprovalSettings::default()
         },
-        ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap(),
-        Arc::new(ene_plane::ScriptedPopup::new([
-            ene_plane::PopupDecision::Deny,
+        ene_access_control::AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        Arc::new(ene_access_control::ScriptedPopup::new([
+            ene_access_control::PopupDecision::Deny,
         ])),
         None,
     ));
-    plane.set_mode(ene_plane::ApprovalMode::AskAll).unwrap();
+    plane
+        .set_mode(ene_access_control::ApprovalMode::AskAll)
+        .unwrap();
     registry.set_plane(plane);
     let router = WorkSurfaceRouter::new(host, registry, soul, 4);
 
@@ -382,15 +386,17 @@ async fn surface_delegate_start_inserts_one_job_after_approval() {
     let (dir, store, host, soul) = open_work();
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
-    let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
-        ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap(),
-        Arc::new(ene_plane::ScriptedPopup::new([
-            ene_plane::PopupDecision::Allow,
+    let plane = Arc::new(ene_access_control::ApprovalPlane::new(
+        ene_access_control::ApprovalSettings::default(),
+        ene_access_control::AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        Arc::new(ene_access_control::ScriptedPopup::new([
+            ene_access_control::PopupDecision::Allow,
         ])),
         None,
     ));
-    plane.set_mode(ene_plane::ApprovalMode::AskAll).unwrap();
+    plane
+        .set_mode(ene_access_control::ApprovalMode::AskAll)
+        .unwrap();
     registry.set_plane(plane);
     let router = WorkSurfaceRouter::new(host, registry, soul, 4);
 
@@ -461,7 +467,7 @@ async fn duplicate_approval_response_dispatches_exactly_once() {
         },
         invoke,
     );
-    let popup = Arc::new(ene_plane::PendingPopup::new());
+    let popup = Arc::new(ene_access_control::PendingPopup::new());
     let asked = Arc::new(tokio::sync::Notify::new());
     popup.set_on_ask({
         let asked = Arc::clone(&asked);
@@ -471,7 +477,7 @@ async fn duplicate_approval_response_dispatches_exactly_once() {
     });
     let sink: Arc<dyn PopupSink> = popup.clone();
     let plane = Arc::new(ApprovalPlane::new(
-        ene_plane::ApprovalSettings {
+        ene_access_control::ApprovalSettings {
             popup: PopupSettings { timeout_ms: 5_000 },
             ..ApprovalSettings::default()
         },
@@ -507,12 +513,12 @@ async fn duplicate_approval_response_dispatches_exactly_once() {
     let ids: Vec<_> = popup.list().iter().map(|v| v.id.clone()).collect();
     assert!(
         popup
-            .respond(&ids[0], ene_plane::PopupDecision::Allow)
+            .respond(&ids[0], ene_access_control::PopupDecision::Allow)
             .is_ok()
     );
     assert!(
         popup
-            .respond(&ids[1], ene_plane::PopupDecision::Deny)
+            .respond(&ids[1], ene_access_control::PopupDecision::Deny)
             .is_ok()
     );
 
@@ -548,7 +554,7 @@ async fn ask_all_background_call_prompts_exactly_once() {
         },
         Arc::clone(&invoke) as Arc<dyn ToolInvoke>,
     );
-    let popup = Arc::new(ene_plane::PendingPopup::new());
+    let popup = Arc::new(ene_access_control::PendingPopup::new());
     let asks = Arc::new(AtomicUsize::new(0));
     popup.set_on_ask({
         let asks = Arc::clone(&asks);
@@ -558,7 +564,7 @@ async fn ask_all_background_call_prompts_exactly_once() {
     });
     let sink: Arc<dyn PopupSink> = popup.clone();
     let plane = Arc::new(ApprovalPlane::new(
-        ene_plane::ApprovalSettings {
+        ene_access_control::ApprovalSettings {
             popup: PopupSettings { timeout_ms: 5_000 },
             ..ApprovalSettings::default()
         },
@@ -601,7 +607,11 @@ async fn ask_all_background_call_prompts_exactly_once() {
         "no execution row may exist before approval resolves",
     );
     let id = popup.list()[0].id.clone();
-    assert!(popup.respond(&id, ene_plane::PopupDecision::Allow).is_ok());
+    assert!(
+        popup
+            .respond(&id, ene_access_control::PopupDecision::Allow)
+            .is_ok()
+    );
 
     let outcome = dispatched.await.unwrap().unwrap();
     let SurfaceToolOutcome::Result(value) = outcome else {
@@ -656,13 +666,15 @@ async fn child_reports_do_not_require_tool_approval() {
     let job = public_start(&host, soul, "report progress");
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
-    let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
-        ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap(),
-        Arc::new(ene_plane::ScriptedPopup::deny_all()),
+    let plane = Arc::new(ene_access_control::ApprovalPlane::new(
+        ene_access_control::ApprovalSettings::default(),
+        ene_access_control::AuditLog::open(dir.path().join("audit.db")).unwrap(),
+        Arc::new(ene_access_control::ScriptedPopup::deny_all()),
         None,
     ));
-    plane.set_mode(ene_plane::ApprovalMode::AskAll).unwrap();
+    plane
+        .set_mode(ene_access_control::ApprovalMode::AskAll)
+        .unwrap();
     registry.set_plane(plane);
     let router = JobLayerRouter::new(host, registry, soul, job.id, &job.workspace_dir);
 
@@ -691,7 +703,9 @@ async fn job_upgrade_is_denied_before_any_job_row_is_written() {
     let plane = Arc::new(ApprovalPlane::new(
         ApprovalSettings::default(),
         audit,
-        Arc::new(ScriptedPopup::new([ene_plane::PopupDecision::Deny])),
+        Arc::new(ScriptedPopup::new([
+            ene_access_control::PopupDecision::Deny,
+        ])),
         None,
     ));
     plane.set_mode(ApprovalMode::AskAll).unwrap();
@@ -722,7 +736,9 @@ async fn job_upgrade_creates_exactly_one_job_after_allow() {
     let plane = Arc::new(ApprovalPlane::new(
         ApprovalSettings::default(),
         audit,
-        Arc::new(ScriptedPopup::new([ene_plane::PopupDecision::Allow])),
+        Arc::new(ScriptedPopup::new([
+            ene_access_control::PopupDecision::Allow,
+        ])),
         None,
     ));
     plane.set_mode(ApprovalMode::AskAll).unwrap();
@@ -1049,14 +1065,16 @@ async fn drive_job_executes_tools_and_delegation_send() {
     let job = public_start(&host, soul, "look up the time");
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
-    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
-    let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
+    let audit = ene_access_control::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_access_control::ApprovalPlane::new(
+        ene_access_control::ApprovalSettings::default(),
         audit,
-        Arc::new(ene_plane::ScriptedPopup::deny_all()),
+        Arc::new(ene_access_control::ScriptedPopup::deny_all()),
         None,
     ));
-    plane.set_mode(ene_plane::ApprovalMode::Auto).unwrap();
+    plane
+        .set_mode(ene_access_control::ApprovalMode::Auto)
+        .unwrap();
     registry.set_plane(plane);
     let hit = Arc::new(AtomicBool::new(false));
     registry.register_with(
@@ -1763,18 +1781,18 @@ async fn artifact_register_and_deliver() {
     host.approve_plan(job.id).unwrap();
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
-    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
-    let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
+    let audit = ene_access_control::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_access_control::ApprovalPlane::new(
+        ene_access_control::ApprovalSettings::default(),
         audit,
-        Arc::new(ene_plane::ScriptedPopup::deny_all()),
+        Arc::new(ene_access_control::ScriptedPopup::deny_all()),
         None,
     ));
-    plane.set_policy(ene_plane::PolicyFile {
-        rules: vec![ene_plane::PolicyRule {
+    plane.set_policy(ene_access_control::PolicyFile {
+        rules: vec![ene_access_control::PolicyRule {
             tool: "artifact.register".to_owned(),
             scope: None,
-            decision: ene_plane::PolicyDecision::Allow,
+            decision: ene_access_control::PolicyDecision::Allow,
         }],
     });
     registry.set_plane(plane);
@@ -1829,18 +1847,18 @@ async fn artifact_register_rejects_path_outside_workspace() {
     host.approve_plan(job.id).unwrap();
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
-    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
-    let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
+    let audit = ene_access_control::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_access_control::ApprovalPlane::new(
+        ene_access_control::ApprovalSettings::default(),
         audit,
-        Arc::new(ene_plane::ScriptedPopup::deny_all()),
+        Arc::new(ene_access_control::ScriptedPopup::deny_all()),
         None,
     ));
-    plane.set_policy(ene_plane::PolicyFile {
-        rules: vec![ene_plane::PolicyRule {
+    plane.set_policy(ene_access_control::PolicyFile {
+        rules: vec![ene_access_control::PolicyRule {
             tool: "artifact.register".to_owned(),
             scope: None,
-            decision: ene_plane::PolicyDecision::Allow,
+            decision: ene_access_control::PolicyDecision::Allow,
         }],
     });
     registry.set_plane(plane);
@@ -1874,18 +1892,18 @@ async fn artifact_register_requires_job_id() {
     let soul = SoulId::new();
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, host, dir.path().join("skills"));
-    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
-    let plane = Arc::new(ene_plane::ApprovalPlane::new(
-        ene_plane::ApprovalSettings::default(),
+    let audit = ene_access_control::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_access_control::ApprovalPlane::new(
+        ene_access_control::ApprovalSettings::default(),
         audit,
-        Arc::new(ene_plane::ScriptedPopup::deny_all()),
+        Arc::new(ene_access_control::ScriptedPopup::deny_all()),
         None,
     ));
-    plane.set_policy(ene_plane::PolicyFile {
-        rules: vec![ene_plane::PolicyRule {
+    plane.set_policy(ene_access_control::PolicyFile {
+        rules: vec![ene_access_control::PolicyRule {
             tool: "artifact.register".to_owned(),
             scope: None,
-            decision: ene_plane::PolicyDecision::Allow,
+            decision: ene_access_control::PolicyDecision::Allow,
         }],
     });
     registry.set_plane(plane);
@@ -2746,7 +2764,7 @@ async fn mutating_work_waits_for_plan_approval() {
     let registry = Arc::new(ToolRegistry::new());
     register_work_tools(&registry, Arc::clone(&host), PathBuf::from("/tmp/skills"));
     let names: Vec<String> = registry
-        .schemas(ene_registry::Layer::Surface)
+        .schemas(ene_tool_registry::Layer::Surface)
         .iter()
         .filter_map(|schema| {
             schema
@@ -2788,8 +2806,11 @@ struct BgInvoke {
 struct TimedPopup;
 
 #[async_trait]
-impl ene_plane::PopupSink for TimedPopup {
-    async fn ask(&self, _req: &ene_plane::AuthzRequest) -> ene_plane::PopupDecision {
+impl ene_access_control::PopupSink for TimedPopup {
+    async fn ask(
+        &self,
+        _req: &ene_access_control::AuthzRequest,
+    ) -> ene_access_control::PopupDecision {
         loop {
             tokio::time::sleep(StdDuration::from_hours(1)).await;
         }

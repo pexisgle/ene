@@ -15,7 +15,7 @@ path = "src/main.rs"
 base64 = { workspace = true, features = ["std"] }
 blake3 = { workspace = true }
 ene-plugin-ipc = { workspace = true, features = ["net"] }
-ene-registry = { workspace = true }
+ene-tool-registry = { workspace = true }
 parking_lot = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
@@ -29,7 +29,7 @@ strsim = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
-ene-fiber = { workspace = true }
+ene-plugin-host = { workspace = true }
 ene-sandbox = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }

@@ -5,12 +5,12 @@
 #[cfg(test)]
 use async_trait::async_trait;
 use base64::Engine;
+use ene_access_control::Sensitivity;
 use ene_companion::{
     ProactiveObservation, ScreenSummaryStatus, WorldStateMemory, WorldStateSettings,
     WorldStateSnapshot,
 };
-use ene_plane::Sensitivity;
-use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
+use ene_tool_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use thiserror::Error;

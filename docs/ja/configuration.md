@@ -3,7 +3,7 @@
 設定の優先順位は defaults → JSON → `ENE_` 環境変数です。
 ネストしたキーは `__` で区切ります（例: `ENE_CORE__SERVER__BIND`）。
 
-デーモンはデータディレクトリの `settings.json` を、他と同じ `ene-config` の
+コアはデータディレクトリの `settings.json` を、他と同じ `ene-config` の
 figment パイプライン（defaults → JSON → `ENE_`）で読みます。ファイルが無いとき
 は `{}` として扱い、壊れた JSON では起動に失敗します。`ene-core` で `ENE_*` を
 手で重ねないでください。リポジトリの
@@ -35,7 +35,7 @@ API キーは vault のままです。
 | `body` | `ene-body` | `render.*`, `autonomy.*` |
 | `voice` | `ene-body` | `enabled`, `barge_in.*`, `input.routing` |
 | `store` | `ene-session` | `sessions.db_path`, `sessions.idle_timeout_secs`, `sessions.synchronous` |
-| `approval` | `ene-plane` | `mode`, `popup.timeout_ms` |
+| `approval` | `ene-access-control` | `mode`, `popup.timeout_ms` |
 
 `core.backup.skills_max_bytes` は手動バックアップへコピーする `skills/` ツリーの
 上限です。既定値は 100 MiB です。

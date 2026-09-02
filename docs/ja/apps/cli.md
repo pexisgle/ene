@@ -42,7 +42,7 @@ desktop 専用 API はありません。stage が線上でできることは `en
 | `task list/cancel/answer` | ジョブ（公開委譲） |
 | `memory list/edit/delete` | 記憶行 |
 | `schedule list` / `schedule add <soul> <name> <spec>` | スケジュール一覧、または作成。`spec` は 5 か 6 フィールドの cron（空白を含むなら引用）。`--timezone`（既定 `UTC`）、`--action`（`remind` / `job` / `turn`）、`--action-ref`、`--important` |
-| `core start/status/stop` | デーモン |
+| `core start/status/stop` | コア |
 | `debug log <session>` | detail 深度の履歴 |
 | `debug delegation <id>` | ジョブ ID または委譲セッション ID を detail 深度で表示 |
 | `debug spans` | 診断スパン |

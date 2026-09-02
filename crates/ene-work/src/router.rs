@@ -5,8 +5,8 @@ use crate::host::{
 use crate::types::{DelegationMode, NewToolExecution, ToolExecStatus};
 use async_trait::async_trait;
 use ene_kernel::{KernelError, SurfaceRouter, SurfaceToolOutcome};
-use ene_registry::{Layer, ToolRegistry, ToolSource};
 use ene_session::{DelegationId, SoulId};
+use ene_tool_registry::{Layer, ToolRegistry, ToolSource};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};

@@ -1,40 +1,35 @@
 # Ene ドキュメント
 
-Ene は Rust で書かれた **ローカル AI コンパニオン型ハーネス**です。コンパニオンは
-ユーザーのデバイスに住み、話し、聞き、覚え、承認 plane の下でツールを実行します。
-状態はコアデーモン (`ene-core`) が持ち、desktop / CLI / stage / Web は同一 API のクライアントです。
-製品 GUI は `ene-stage`、`ene-desktop` は凍結レガシーで、stage が代替できたら削除します。
-[製品境界](concepts/product-boundaries.md) を見てください。
+Ene は Rust で書かれたローカル AI コンパニオン型ハーネスです。このドキュメントでは、意図的に次の2種類を分離します。
 
-完成形の定義は
-[`plans/harness-redesign/`](../../plans/harness-redesign/README.md) にあります。
+- **要件**: Ene が何であるべきかを定義します。現在、対話的に作り直しています。確定済み要件が製品仕様の正です。
+- **現行実装の説明**: 今のコードがどう動くかを説明します。ここに書かれている実装都合を、そのまま製品要件として扱いません。
 
-## このドキュメントの対象
+## まず読むもの
 
 | あなたが… | まず読むもの |
 |---|---|
-| Ene を動かしたい利用者 | [クイックスタート](quickstart.md) |
-| コンパニオンと設定を触る人 | [設定](configuration.md) → [コンセプト](concepts/architecture.md) |
-| ツールを足す開発者 | [ツールを書く](guides/tools/write-a-tool.md) |
-| このリポジトリの貢献者 | [アーキテクチャ](concepts/architecture.md) → [クレートリファレンス](reference/crates.md) |
+| 製品像・仕様を決めたい | [要件定義](requirements/README.md) |
+| Ene を動かしたい | [クイックスタート](quickstart.md) |
+| 設定を触りたい | [設定](configuration.md) |
+| ツールを追加したい | [ツールを書く](guides/tools/write-a-tool.md) |
+| 現在のコードを把握したい | [アーキテクチャ](concepts/architecture.md) → [クレートリファレンス](reference/crates.md) |
 
 ## ドキュメント地図
 
 | セクション | 内容 |
 |---|---|
-| [クイックスタート](quickstart.md) | `ene-ctl` / `ene-stage` のビルドと起動 |
-| [設定](configuration.md) | `settings.json`、環境変数、ファイル位置 |
-| [コンセプト](concepts/architecture.md) | プロセスモデル、パッケージ、記憶、プラグイン |
-| [アプリ](apps/stage.md) | stage、CLI、旧 desktop のユーザーガイド |
-| [ガイド](guides/character-editor.md) | 作業別の手順 |
-| [リファレンス](reference/crates.md) | クレート地図と描画 API |
-
-日本語版は [日本語ドキュメント](index.md) です。
-`docs/` の各ページには `docs/ja/` に対応ページがあります。
+| [要件定義](requirements/README.md) | 製品定義、ユースケース、機能・非機能要件、不変条件、用語、決定 |
+| [クイックスタート](quickstart.md) | ビルド・設定・起動 |
+| [設定](configuration.md) | 設定、環境変数、ファイル位置 |
+| [コンセプト](concepts/architecture.md) | 現在実装の説明（要件ではない） |
+| [アプリ](apps/stage.md) | 現在の stage / CLI / 旧 desktop |
+| [ガイド](guides/character-editor.md) | 現在実装に対する作業別手順 |
+| [リファレンス](reference/crates.md) | 現在のクレート地図・API |
 
 ## 正の情報源
 
-ページとコードが食い違ったらコードが勝ちます。食い違いを見つけたら報告してください。
+**あるべき製品挙動**は `docs/requirements/` の確定済み文書、**現在の挙動・シグネチャ**はコードと rustdoc が正です。`docs/requirements/legacy/` は過去の判断を再確認するための参考資料であり、現在の要件ではありません。
 
 - リポジトリ: <https://github.com/pexisgle/ene>
 - Rust API docs: `cargo doc --workspace --no-deps`

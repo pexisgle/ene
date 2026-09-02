@@ -14,7 +14,7 @@ async fn main() {
         )
         .init();
     if let Err(err) =
-        ene_registry::run_tool_plugin("tool.utility", logic::specs, logic::execute).await
+        ene_tool_registry::run_tool_plugin("tool.utility", logic::specs, logic::execute).await
     {
         tracing::error!(error = %err, plugin = "tool.utility", "fatal");
         std::process::exit(1);

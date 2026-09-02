@@ -1,52 +1,30 @@
-# Architecture
+# Architecture (current implementation)
 
-Ene is a **companion harness**: one core daemon process, several clients,
-out-of-process tools, and an in-process cognitive layer.
+> This page describes the code that exists today. It is **not** the product requirements document. Desired behavior is defined under [Requirements](../requirements/README.md).
 
-The finished product is defined in
-[`plans/harness-redesign/`](../../plans/harness-redesign/README.md).
-This page describes the code that is in the tree today.
-
-## Process model
+Ene currently uses one core process, several clients, out-of-process tool/provider plugins, and in-process domain libraries.
 
 ```text
 ene-stage   ─┐
 ene-desktop ─┤
-ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core (ene-daemon)
+ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core
 Web         ─┘                              │
                                             ├── ene-session / ene-kernel
                                             ├── ene-companion / ene-body / ene-work
-                                            ├── ene-plane (approval + audit + vault)
-                                            └── ene-fiber ──► plugins/tool/*
+                                            ├── ene-access-control
+                                            ├── ene-tool-registry
+                                            └── ene-plugin-host ──► plugins/*
 ```
 
-- **One host.** Table-stakes state lives in `ene-core`. Clients do not embed
-  the kernel.
-- **Clients are peers** on the public API. Exclusive resources (mic, approval
-  response) are mediated by the daemon. `ene-stage` is the product GUI;
-  `ene-desktop` is frozen legacy of the same API and is deleted when stage
-  is judged to replace it — see [Product boundaries](product-boundaries.md).
-- **Tools are out of process.** Built-in tools (`fs`, `exec`, `web`, `utility`,
-  `app`) use the same IPC as a third-party tool would. Harness functions that
-  touch companion state stay in-process and go through `ene-registry`.
+- `ene-core` owns process-level state and serves HTTP/WS.
+- Clients use `ene-api`; they do not embed the kernel.
+- `ene-session` owns the append-only conversation log and usage ledger.
+- `ene-kernel` owns the dialogue lane.
+- `ene-companion` owns soul, affect, memory, inner state, and proactive behavior.
+- `ene-work` owns delegation, jobs, schedules, skills, and MCP bindings.
+- `ene-access-control` owns approval, audit, and the credential vault.
+- `ene-tool-registry` owns the unified tool registry/pipeline.
+- `ene-plugin-host` supervises plugin processes and reversible host-side composition.
+- Tool and provider plugins run out of process.
 
-## Two layers, one companion
-
-Each companion has a **surface soul** (the dialogue lane) and a **back harness**
-(jobs, delegation, schedules). Users speak only to the surface. Complicated
-work is delegated; a job lane runs the model with tools, and progress comes
-back as companion speech, not a progress bar.
-
-Display depth is `surface` or `detail`. The server decides what a connection
-receives. Stage's character overlay and chat are surface; the separate detail
-window is detail. The legacy desktop client uses the same depths.
-
-## Where to read next
-
-| Topic | Doc |
-|---|---|
-| Crate map and dependency rules | [Crate reference](../reference/crates.md) |
-| Which client is the product GUI | [Product boundaries](product-boundaries.md) |
-| Plugin IPC | rustdoc for `ene-plugin-ipc` |
-| Character packages | [Character packages](character-cards.md) |
-| Design decisions | [`plans/harness-redesign/decisions.md`](../../plans/harness-redesign/decisions.md) |
+For the complete current crate map and dependency rules, see [Crate reference](../reference/crates.md).

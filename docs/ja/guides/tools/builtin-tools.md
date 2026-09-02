@@ -14,7 +14,7 @@
 
 `fs.write`、`fs.edit`、`fs.delete`、`exec`、入力を変える `app.*` は表層スキーマに出ません。
 レジストリは名前のホワイトリストではなく空の `side_effects` でフィルタします。
-承認は deny-by-default で、`ene-plane` に一致するポリシーがあるまで止まります。
+承認は deny-by-default で、`ene-access-control` に一致するポリシーがあるまで止まります。
 ホスト観測（`app.active_window`、`app.screenshot`）は、ユーザーがプロアクティブ
 ソースを有効にしているとき承認ポップアップを飛ばします。観測経路は `png_base64`
 をデコードしてセッション履歴の外で要約します。`{available: false}` は成功した

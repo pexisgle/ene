@@ -29,9 +29,9 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
+use ene_access_control::PendingPopup;
 use ene_api::SendMessageResponse;
 use ene_kernel::{ConversationModel, DisplayDepth, EchoModel};
-use ene_plane::PendingPopup;
 use parking_lot::Mutex;
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
@@ -119,7 +119,7 @@ pub struct ServerHandle {
     shutdown: Option<oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
     background: Vec<tokio::task::JoinHandle<()>>,
-    supervisor: Arc<ene_fiber::Supervisor>,
+    supervisor: Arc<ene_plugin_host::Supervisor>,
     host: Arc<ene_work::DelegationHost>,
     core: Arc<CoreDaemon>,
     lanes: Arc<LaneHub>,

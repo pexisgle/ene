@@ -1,8 +1,8 @@
 # プラグインと MCP
 
-ツールは **アウトプロセスのバイナリ**です。ホスト (`ene-fiber`) が spawn し、
+ツールは **アウトプロセスのバイナリ**です。ホスト (`ene-plugin-host`) が spawn し、
 分割された `core` / `tool` / `provider` / `capability` 副プロトコル (`ene-plugin-ipc`) を交渉し、
-仕様を `ene-registry` に載せます。コンパニオン状態に触るハーネス機能は
+仕様を `ene-tool-registry` に載せます。コンパニオン状態に触るハーネス機能は
 ホスト内のまま、同じレジストリパイプラインを通ります。
 
 プラグイン監督はカーネルの waterfall（`agent/pre-step`、`agent/request`）を
@@ -18,7 +18,7 @@ tool IPC を話します。
 [ツールを書く](../guides/tools/write-a-tool.md) を見てください。
 
 仕様には任意の discovery メタデータ（`category`、`keywords`、`examples`）を
-載せられます。`ene-registry` は登録されたすべてのツール（同梱プラグイン、MCP、
+載せられます。`ene-tool-registry` は登録されたすべてのツール（同梱プラグイン、MCP、
 ハーネス）を同じ経路で索引し、埋め込みなしの字句検索 `search_tools(query, limit)`
 をホスト向けに提供します。プラグイン unload で該当行は索引から外れます。
 
@@ -33,7 +33,7 @@ Streamable HTTP です。プロセス受入は実 `git` を呼ぶ stdio サー�
 （[#812](https://github.com/pexisgle/ene/issues/812)、P-616）です。
 
 プロバイダプラグインは `plugins/provider/` にあり、`provider` 副プロトコルを話します。
-ホストカタログ（`ene_fiber::PROVIDER_PLUGINS`）が唯一の一覧です。デスクトップの
+ホストカタログ（`ene_plugin_host::PROVIDER_PLUGINS`）が唯一の一覧です。デスクトップの
 選択、Engines、`ai.tasks.*` はすべてそれ（`effective.providers`）を読みます。
 プロバイダを足すのは、バイナリと seams / `local` / `needs_key` 付きのカタログ行を
 足すことであり、UI 側の第二の許可リストではありません。
@@ -57,7 +57,7 @@ API キーは vault に置き、`settings.json` には書きません。ネイ�
 （`ene-provider-gguf`）です。プラグインが GGUF 重みの静的カタログを所有し、ホストが
 GitHub から `llama-server` リリースを取得し、
 `data_dir/plugins/provider.gguf/assets/` に検証済みアーティファクトを置き、
-`ene-fiber` 経由で `llama-server` をループバック起動します。Sidecar 補助は
+`ene-plugin-host` 経由で `llama-server` をループバック起動します。Sidecar 補助は
 `templates/sidecar` にもあります。
 
 `hello_ack` で `capability` を名乗るプラグインは Broker RPC
@@ -141,7 +141,7 @@ schema と redact 済みの現在値です。検証は `POST .../config/validate
 直前の有効な `ProfileRow.config` を保持します。適用が成功すると、秘密ではない
 値は `plugin-config.json`（row id キー）へ、秘密フィールドは vault の
 `plugin.config.{row_id}.{field}` へ残します。`apply_plugin_profile` が
-収集した行へこれらを重ねるので、デーモン再起動後も設定が残ります。Stage の
+収集した行へこれらを重ねるので、コア再起動後も設定が残ります。Stage の
 Connections は同じ文書を選択中のファイバーへ出します。
 
 ## `provider.assets`
@@ -162,7 +162,7 @@ Connections は同じ文書を選択中のファイバーへ出します。
 
 **ホスト管理カタログ。** `provider.gguf` の `llama-server` と
 `provider.voicevox` の `voicevox-engine` は、プラグインの静的ソースではなく
-ホスト（`ene-fiber` + `ene-provider-assets`）が一覧・インストールします。起動時
+ホスト（`ene-plugin-host` + `ene-provider-assets`）が一覧・インストールします。起動時
 （および手動更新時）に `ggml-org/llama.cpp` と `VOICEVOX/voicevox_engine` の
 GitHub Releases を取得し、`data_dir/catalog-cache/` に JSON をキャッシュ、各
 プラグインの `manifest.json` とマージします。インストールキーは
@@ -180,5 +180,5 @@ URL を検証し、ディスクへストリーミング、GitHub が digest を�
 llama-server は zip 全体を展開（Windows では `ggml.dll` 等が実行ファイルと同じ
 ディレクトリに必要）。CUDA は `cudart-*` コンパニオン zip も同ディレクトリに展開します。
 
-**サイドカー注入。** インストール後、設定に未設定なら `ene-fiber` が
+**サイドカー注入。** インストール後、設定に未設定なら `ene-plugin-host` が
 `provider.gguf` に `sidecar_base_url`、`provider.voicevox` に `cas_path` を注入します。

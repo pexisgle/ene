@@ -3,8 +3,8 @@ use crate::host::DelegationHost;
 use crate::skill::match_skills;
 use crate::types::{Artifact, ArtifactKind, CompanionReport, JobStatus};
 use chrono::Utc;
-use ene_registry::{Layer, ToolRegistry};
 use ene_session::{DelegationId, SoulId};
+use ene_tool_registry::{Layer, ToolRegistry};
 use serde_json::{Value, json};
 use std::fmt::Write;
 use std::path::Path;
@@ -103,7 +103,7 @@ async fn research_sections(registry: Option<&ToolRegistry>, theme: &str) -> Vec<
         .await
     {
         Ok(value) => sections_from_search(&value),
-        Err(ene_registry::PipelineError::Unknown(_)) => Vec::new(),
+        Err(ene_tool_registry::PipelineError::Unknown(_)) => Vec::new(),
         Err(err) => vec![BookmarkSection {
             heading: "Findings".to_owned(),
             body: format!("web.search unavailable: {err}"),
