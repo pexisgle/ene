@@ -1,9 +1,9 @@
-# Invariants
+# 不変条件
 
-Status: **Draft / requirements reset in progress**
+状態: **Draft / 要件再定義中**
 
-This file is for implementation-independent rules that must remain true across every valid design.
+どの実装方式を選んでも絶対に守る必要がある、実装非依存の規則だけを置きます。
 
-Do not promote a convenient property of the current code into an invariant without explicitly confirming why the product needs it.
+現在コードの都合で成り立っている性質を、理由を確認せず不変条件へ昇格させません。
 
-No invariants are confirmed yet.
+現在、確定済み不変条件はありません。

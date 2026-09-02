@@ -1,24 +1,24 @@
-# Requirements
+# 要件定義
 
-This directory is the source of truth for **what Ene should become**.
+このディレクトリを **「Ene がどうあるべきか」** の正本にします。
 
-Requirements are currently being rebuilt interactively. A document being present here does not mean every section is decided: explicit `TBD` items are unresolved, and only entries marked as confirmed/accepted are normative.
+現在は要件を対話的に作り直している途中です。ファイルが存在するだけでは確定要件ではありません。`TBD` は未決定であり、明示的に確定した項目だけを実装判断の根拠にします。
 
-## Documents
+## 文書
 
-- [Product](product.md) — what Ene is, target users, goals, non-goals
-- [Use cases](use-cases.md) — observable user scenarios
-- [Functional requirements](functional.md) — capabilities Ene must provide
-- [Non-functional requirements](non-functional.md) — performance, reliability, privacy, portability, etc.
-- [Invariants](invariants.md) — rules no implementation may violate
-- [Glossary](glossary.md) — precise domain vocabulary
-- [Decisions](decisions.md) — confirmed product/requirement decisions and rationale
-- [Legacy](legacy/README.md) — pre-reset documents kept only as historical input
+- [製品定義](product.md) — Ene とは何か、利用者、目標、非目標
+- [ユースケース](use-cases.md) — ユーザーから観測できる利用シナリオ
+- [機能要件](functional.md) — 必須の能力
+- [非機能要件](non-functional.md) — 性能、信頼性、privacy、platform など
+- [不変条件](invariants.md) — 実装方法に関係なく破ってはいけない条件
+- [用語集](glossary.md) — domain 用語の厳密な意味
+- [決定記録](decisions.md) — 確定した要件判断と理由
+- [旧資料](legacy/README.md) — リセット前から選別して残した参考資料
 
-## Rule of interpretation
+## 判断の優先順位
 
-1. Confirmed requirements and decisions in this directory define desired behavior.
-2. Code/rustdoc define current behavior, not desired behavior.
-3. `docs/concepts/`, `docs/apps/`, `docs/guides/`, and `docs/reference/` describe the current implementation.
-4. `legacy/` is never authoritative. Reconfirm a legacy idea before copying it into current requirements.
-5. Old implementation plans are kept in Git history instead of the working tree.
+1. このディレクトリの**明示的に確定した要件・決定**が、あるべき製品挙動の正です。
+2. ソースコード・テスト・Cargo manifest・rustdoc は現在挙動の正であり、要件の正ではありません。
+3. 既に実装されているという理由だけで、その挙動を要件へ昇格させません。
+4. `legacy/` は参考資料です。内容を現在要件へ移す前に必ず再確認します。
+5. 削除した docs / plans は Git 履歴に残し、必要な場合だけ議論の材料として参照します。

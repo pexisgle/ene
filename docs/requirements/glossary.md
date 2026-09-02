@@ -1,7 +1,7 @@
-# Glossary
+# 用語集
 
-Status: **Draft / requirements reset in progress**
+状態: **Draft / 要件再定義中**
 
-Define domain terms before using them as architecture or type names. In particular, terms such as session, turn, step, task, job, delegation, companion, soul, tool, plugin, provider, lane, and inbox/mailbox should receive one unambiguous meaning if they remain part of the product model.
+architecture や型名を決める前に domain 用語を定義します。特に session / turn / step / task / job / delegation / companion / soul / tool / plugin / provider / lane / inbox / mailbox などは、今後も使うなら意味を1つに固定します。
 
-No terms are confirmed yet.
+現在、確定済み用語はありません。

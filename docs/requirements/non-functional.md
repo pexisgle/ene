@@ -1,7 +1,7 @@
-# Non-functional requirements
+# 非機能要件
 
-Status: **Draft / requirements reset in progress**
+状態: **Draft / 要件再定義中**
 
-Define measurable expectations for areas such as latency, resource usage, reliability, crash behavior, privacy, security, offline operation, portability, accessibility, and maintainability.
+遅延、resource 使用量、信頼性、crash 時挙動、privacy、security、offline 動作、platform、accessibility、保守性などについて、可能な限り観測・測定可能な条件を定義します。
 
-No non-functional requirements are confirmed yet.
+現在、確定済み非機能要件はありません。

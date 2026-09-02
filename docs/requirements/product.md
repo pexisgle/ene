@@ -1,19 +1,19 @@
-# Product
+# 製品定義
 
-Status: **Draft / requirements reset in progress**
+状態: **Draft / 要件再定義中**
 
-## Product definition
+## Ene とは何か
 
-TBD through interactive requirements work.
+対話的に確定するため TBD。
 
-## Target users
+## 対象ユーザー
 
-TBD.
+TBD。
 
-## Goals
+## 目標
 
-TBD.
+TBD。
 
-## Non-goals
+## 非目標
 
-TBD.
+TBD。

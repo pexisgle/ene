@@ -1,9 +1,9 @@
-# Use cases
+# ユースケース
 
-Status: **Draft / requirements reset in progress**
+状態: **Draft / 要件再定義中**
 
-Record observable user scenarios here before choosing implementation mechanisms.
+実装方式を決める前に、ユーザーから観測できる利用シナリオをここへ記録します。
 
-For each use case, capture: actor, preconditions, trigger, expected flow, failure behavior, and observable completion condition.
+各ユースケースでは、actor、前提条件、trigger、期待する流れ、失敗時の挙動、完了を判断できる観測条件を定義します。
 
-No use cases are confirmed yet.
+現在、確定済みユースケースはありません。
