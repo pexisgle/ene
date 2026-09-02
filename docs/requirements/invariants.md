@@ -41,9 +41,9 @@ Eneの永続的なユーザーデータ、Companion State、Memory、Character I
 
 CompanionやSub-agentの推測、要約、解釈は、ユーザーの明示発言、直接観測、検証済み情報と同じ確実性で扱わない。Provenanceとconfidenceを失ったまま、推測を事実として固定しない。
 
-### INV-009 内部Stateは意味表現を経由する
+### INV-009 Internal StateとCompanion Contextを混同しない
 
-Emotion、Mood、Relationship、Interest、Memory、Context等の内部数値・構造化Stateを、そのまま機械的に発話やMain LLMの人格入力へ直結しない。必要な状態は、由来と確信度を保ったSemantic Stateへ変換して利用する。
+Emotion、Mood、Relationship、Interest等の内部数値・構造化Stateを、そのまま機械的に発話やMain LLMの人格入力へ直結しない。必要なStateは、由来・変化・確信度を保ったSemantic Stateへ変換して利用する。一方、Memory、Skill、Conversation、Observation / Context、Task等はSemantic Stateそのものではなく、必要に応じてSemantic StateとともにCompanion Contextへ統合する。
 
 ### INV-010 Memoryの種類とscopeを混同しない
 
