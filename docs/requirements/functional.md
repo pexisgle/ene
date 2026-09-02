@@ -1,9 +1,9 @@
 # 機能要件
 
 状態: **Baseline / 対話による初版確定**
-最終確認: 2026-09-02
+最終確認: 2026-09-03
 
-ここでは、Eneが提供すべき機能、システム上の必須能力・制約、および外部から観測できる挙動を定義する。要件を満たすためのcrate名、DB schema、IPC protocol、モデル名、アルゴリズムは固定しない。`将来` と付いた要件は、現行版の必須範囲ではないが、将来追加できる構造を妨げてはならない。
+ここでは、Eneが提供すべき機能、システム上の必須能力・制約、および外部から観測できる挙動を定義する。要件を満たすためのcrate名、DB schema、IPC protocol、モデル名、アルゴリズムは固定しない。`将来` と付いた要件は直近Betaの必須範囲ではないが、要件から明示的に削除されない限り正式リリースまでの実装対象である。詳細設計を現時点で確定する必要はないが、追加時にCore全体の置換を要する明らかな行き止まりへ固定してはならない。
 
 ## 1. Core、Host、ライフサイクル
 
@@ -47,6 +47,10 @@ Eneは、ユーザー入力、Context Monitor、Schedule、Sub-agent報告、Com
 
 ユーザーは、Companionが観測、発話、内部作業、外部状態を変更する作業をどの程度自発的に行えるかを設定できなければならない。
 
+### FR-CORE-011 App Data Directory
+
+Eneが管理する会話、Memory、Companion State、Character Instance、設定、Permission、Schedule、Task履歴、主要ログ、Skillその他のローカル永続データは、単一のApp Data Directory配下へ自己完結した配置で保存しなければならない。専用のデータ移行機能を必要とせず、そのDirectoryの移動・複製によってローカル状態を復元できなければならない。OSの保護領域に保存するCredential、外部サービス側の状態、OS固有Integration等は例外とし、移動先で再認証・再設定が必要になり得ることを明示する。
+
 ## 2. Companion、Character、複数個体
 
 ### FR-CMP-001 Companionの個体性
@@ -87,7 +91,7 @@ Companion同士の会話や出来事について、各Companionが相手につ�
 
 ### FR-CMP-010 Character Package
 
-Character Definition、Story / Lore、Avatar資産、Voice設定、感情表現、Role、初期設定等を、1つのCharacter PackageとしてImport / Exportできなければならない。将来の配布・販売Marketplaceを妨げない構造とする。
+Character Definition、Story / Lore、Avatar資産、Voice設定、感情表現、Role、初期設定等を、1つのCharacter PackageとしてImport / Exportできなければならない。必要に応じて関連するSkillとResourceを同じ配布物へ含められなければならない。成長済みCharacter Instance自体のExport / Importは要件とせず、配布物へ個人のMemory、会話・監査ログ、Relationship、Credentialを含めてはならない。将来の配布・販売Marketplaceを妨げない構造とする。
 
 ### FR-CMP-011 デフォルトCompanion
 
@@ -121,7 +125,7 @@ Companion Aが先に発話を開始した場合、発話待ちのCompanion BはA
 
 ### FR-CONV-006 将来のfull-duplex
 
-現行版は半二重の音声対話を満たせばよい。将来、発話中の割り込み、barge-in、入力と出力の同時処理を追加できるよう、会話の開始、停止、キャンセル、割り込み、音声ストリームを単一の不可分な処理として固定してはならない。
+直近Betaは半二重の音声対話を満たせばよい。後続実装で、発話中の割り込み、barge-in、入力と出力の同時処理を追加できるよう、会話の開始、停止、キャンセル、割り込み、音声ストリームを単一の不可分な処理として固定してはならない。
 
 ## 4. Desktop Body、音声、補助UI
 
@@ -156,6 +160,18 @@ TTSが未設定または利用不能な場合、Eneは吹き出し等のテキ�
 ### FR-AUDIO-004 音声代替の一貫性
 
 STT/TTSの代替UIは別の会話モード、別のユーザー、別のCompanionとして扱ってはならない。入力、出力、Memory、Learning、Relationshipは同じ会話の一部として処理する。
+
+### FR-AUDIO-005 音声入力の起動方式
+
+音声入力の既定方式は、常時待受のVADによる発話区間検出とする。ユーザーは少なくとも、常時VAD、Wake Word、Push-to-Talk、音声入力無効を選択できなければならない。
+
+### FR-AUDIO-006 単一ユーザーの音声モデル
+
+音声対話は1人のユーザーとの1対1利用を基本とする。声紋等による話者識別・本人認証や、周囲の他者の声を識別して排除することを初期要件としない。運用上の問題が確認された場合に安全策を追加できる余地は保つ。
+
+### FR-AUDIO-007 マイク状態と即時停止
+
+Desktop Clientは、マイクの待受、音声取得、外部送信の状態をユーザーが認識できる形で示し、ユーザーが直ちにMuteまたは音声入力停止を行えるようにしなければならない。
 
 ## 5. Context Monitorと観測
 
@@ -235,7 +251,7 @@ Taskの完了・失敗・中断時、Sub-agentは、結果、実行した主要�
 
 ### FR-AGENT-011 Task状態
 
-Eneは、実行中、待機中、承認待ち、完了、失敗、中断等のTask状態をユーザーとCompanionが確認できるようにし、Clientの切断やCore再起動を跨いで必要な状態を保持できなければならない。
+Eneは、実行中、待機中、承認待ち、完了、失敗、中断、状態不明等のTask状態をユーザーとCompanionが確認できるようにし、Clientの切断を跨いで必要な状態を保持できなければならない。Core再起動時に実行中だったTaskは、外部変更の重複実行を防ぐため `interrupted` または状態不明として扱い、自動Replayしてはならない。
 
 ### FR-AGENT-012 CancelとRetry
 
@@ -245,7 +261,7 @@ Eneは、実行中、待機中、承認待ち、完了、失敗、中断等のTa
 
 ### FR-AUTO-001 Schedule
 
-ユーザーおよびCompanionは、指定時刻、定期予定、Reminder、後で再評価する時刻等をScheduleとして登録できなければならない。Schedule到来時、Host上のCoreは必要なCompanionまたはTaskを起動できなければならない。
+ユーザーおよびCompanionは、指定時刻、定期予定、Reminder、後で再評価する時刻等をScheduleとして登録できなければならない。CompanionによるScheduleの作成・変更・削除と、Schedule到来時のActionは、それぞれ実行前に通常のPermission Policyで評価しなければならない。Schedule到来時、Host上のCoreは許可された範囲で必要なCompanionまたはTaskを起動できなければならない。
 
 ### FR-AUTO-002 自発的な観測・発話・作業
 
@@ -257,7 +273,7 @@ Eneは、ユーザーから明示的な入力がない場合でも、許可さ�
 
 ### FR-AUTO-004 文脈に応じた判断
 
-通知・承認・自動実行の要否は、Companionの文脈、Taskの影響、ユーザーの委任、現在のPermissionを考慮して判断できなければならない。ただし、LLMの判断でHard Boundaryを緩めてはならない。
+通知・承認・自動実行の要否は、Taskの影響、ユーザーの委任、現在のPermissionを考慮して判断できなければならない。`Ask` に対して自動判断が設定されている場合は、Main Companionとは独立したApproval Reviewerを利用する。ただし、CompanionまたはApproval Reviewerの判断でHard Boundaryを緩めてはならない。
 
 ### FR-AUTO-005 ユーザー不在時の結果
 
@@ -276,7 +292,7 @@ Eneは少なくとも次のMemory種別を区別して扱わなければなら�
 
 ### FR-MEM-002 Memory scope
 
-長期Memoryは少なくとも `Shared` と `Companion-specific` のscopeを持たなければならない。Shared Memoryは全Companionが参照できる情報、Companion-specific Memoryは特定Companionの経験・解釈・関係・固有情報を扱う。同一の出来事から両方のMemoryが生成されてもよい。
+長期Memoryのscopeは `Shared` と `Companion-specific` の2つのみとする。Shared Memoryは全Companionが参照できる情報、Companion-specific Memoryは特定Companionの経験・解釈・関係・固有情報を扱う。同一の出来事から両方のMemoryが生成されてもよい。
 
 ### FR-MEM-003 Memoryの概念属性
 
@@ -310,6 +326,10 @@ Shared Memoryを知っていることを、すべてのCompanionがその出来�
 
 観測やContext処理が許可されていても、長期Memoryへの保存が禁止されている情報を保存してはならない。Memory生成、更新、削除、scope変更もPermissionと保持ポリシーの対象としなければならない。
 
+### FR-MEM-011 Companion-specific Memoryの隔離
+
+Companion-specific Memoryは、そのMemoryを所有するCompanionとユーザーの管理UIだけが直接検索・取得できなければならない。別のCompanion、およびそのCompanionの代理で動くTask / Sub-agent / Toolは直接読み取ってはならず、Conversation History、Task履歴、監査ログ等の検索を迂回路として同内容を取得してはならない。別Companionが内容を知るには、所有Companionとの通常のCompanion間会話を通じて共有を受け、その会話を新しい経験としてprovenance付きで扱わなければならない。
+
 ## 9. Memory Retrieval、忘却、Consolidation
 
 ### FR-RET-001 自動想起
@@ -330,7 +350,7 @@ Memory Retrievalは単一のVector Similarityだけに依存してはならな�
 
 ### FR-RET-005 種別・原資料に応じた検索
 
-Semantic Memory、Episodic Memory、Core Memory、Shared / Companion-specific Memoryを同一の意味で扱わず、必要に応じて時間、参加者、Entity、元会話、scope等を使い分けられなければならない。Consolidated Memoryだけでなく根拠となるConversation Historyや関連ログも検索可能でなければならない。ただし削除・再学習禁止等の保持ポリシーによって利用不可となった原資料を、想起や再学習のために再利用してはならない。
+Semantic Memory、Episodic Memory、Core Memory、Shared / Companion-specific Memoryを同一の意味で扱わず、必要に応じて時間、参加者、Entity、元会話、scope等を使い分けられなければならない。Consolidated Memoryだけでなく根拠となるConversation Historyや関連ログも検索可能でなければならない。「忘れる」によってMemoryが削除されても、独立したログは通常の履歴検索から参照できる。ただし、その参照を削除済みMemoryの自動再生成理由にしてはならない。
 
 ### FR-RET-006 不確かな想起
 
@@ -342,7 +362,7 @@ Semantic Memory、Episodic Memory、Core Memory、Shared / Companion-specific Me
 
 ### FR-CON-002 物理削除
 
-ユーザーの削除要求、Privacy / retention policy、明確な誤記憶、不要な完全重複等の場合、Memoryを物理的に削除できなければならない。
+ユーザーの削除要求、Privacy / retention policy、明確な誤記憶、不要な完全重複等の場合、Memoryを物理的に削除できなければならない。削除対象にはMemory本文だけでなく、対応するEmbedding、検索Index、派生Cache等、Memoryとしての想起に使われる複製を含めなければならない。
 
 ### FR-CON-003 Consolidation
 
@@ -350,7 +370,7 @@ Learning Systemは、経験、Conversation、Memory候補、Agent経験を対象
 
 ### FR-CON-004 アイドル時・イベント駆動のConsolidation
 
-非緊急のConsolidationは固定時刻の実行を前提とせず、Hostが起動し、ユーザー作業と競合しないアイドル状態や十分な余剰資源を利用して実行できなければならない。処理待ちのキューはHostの停止・再起動を跨いで保持し、負荷が上がった場合は中断・延期・分割できなければならない。
+非緊急のConsolidationは固定時刻の実行を前提とせず、Hostが起動し、ユーザー作業と競合しないアイドル状態や十分な余剰資源を利用して実行できなければならない。負荷が上がった場合は中断・延期・分割できなければならない。実行中または処理待ちのConsolidation自体をCrash後まで耐久化することは必須とせず、確定済みの元情報から必要な処理を再計算できればよい。
 
 ### FR-CON-005 即時学習と遅延整理
 
@@ -358,13 +378,17 @@ Learning Systemは、経験、Conversation、Memory候補、Agent経験を対象
 
 ### FR-CON-006 削除後の再学習防止
 
-ユーザーによる削除またはPrivacy / retention policyによって長期Memoryとして利用しないと決定された情報は、元Conversation、Observation、Task履歴等が別の保持目的で残っている場合でも、その削除意図に反してLearning ReviewまたはConsolidationから同じ内容の長期Memoryとして自動再生成してはならない。Memoryのみの削除、原資料自体の削除、原資料を保持した再学習禁止をどのようにユーザーへ選択させるかは未確定である。
+ユーザーによる「忘れる」はMemory Systemだけへ適用し、Conversation History、Task履歴、監査ログ等のLog Systemを削除対象としない。残存ログは履歴として検索・参照できるが、その情報をLearning Review、Consolidation、Retrievalその他の自動処理から同じ長期Memoryとして再生成してはならない。必要に応じて、内容そのものを残さない最小のtombstone、対象sourceの学習除外、または同等の仕組みを保持できなければならない。ユーザーが後から明示的に再記憶を要求した場合は、新しいMemoryとして作成できる。
+
+### FR-CON-007 Memory全消去後の扱い
+
+ユーザーがMemory System全体を消去した場合、過去ログを既定で一括再処理してMemoryを再構築してはならない。過去ログからの再学習は、ユーザーが対象と範囲を明示して開始した場合に限る。
 
 ## 10. Skill SystemとLearning System
 
 ### FR-SKL-001 Agent Skills互換
 
-EneのSkill形式は独自規格を必須とせず、可能な限りAgent Skillsのオープンな形式および運用と互換でなければならない。標準的な `SKILL.md` と関連resourceをImport・利用でき、Eneが生成・改善したSkillも可能な限り互換形式でExportできなければならない。
+EneのSkill形式は独自規格を必須とせず、可能な限りAgent Skillsのオープンな形式および運用と互換でなければならない。標準的な `SKILL.md` と関連resourceをImport・利用でき、Eneが生成・改善したSkillも可能な限り互換形式でExportできなければならない。必要に応じてCharacter Packageや他のSkillと依存関係を保ってまとめて配布できる一方、個人のMemory、ログ、Credentialを配布物へ自動的に含めてはならない。
 
 ### FR-SKL-002 Skillの意味
 
@@ -389,6 +413,10 @@ Eneは、PortableなSkill形式とは別に、indexing、retrieval、Import / Ex
 ### FR-SKL-007 Importと学習改訂の分離
 
 外部からImportした元のSkillと、Eneが経験から加えた変更・Override・Revisionを区別できなければならない。provenance、revision historyの確認と、必要な場合のrollbackが可能でなければならない。
+
+### FR-SKL-008 Skillの信頼と権限の分離
+
+Ene自身が生成したSkill、およびユーザーが明示的にInstall / ImportしたSkillは、作業手順を構成する信頼済みInstructionとして扱うことができる。ただし、その信頼は記述された手順の採用可否に限り、SkillがPermission、Credential、Capability、Sandbox例外、Hard Denyの免除を獲得することを意味してはならない。
 
 ### FR-LRN-001 Learning Review
 
@@ -556,6 +584,38 @@ LLMは、機械的に許可された範囲内で、目的、文脈、ユーザ�
 
 Permissionの要求、許可、拒否、通知、承認、ポリシー変更、実行結果を、後から確認可能な監査情報として扱わなければならない。
 
+### FR-PERM-009 Policy Ruleと既定Ask
+
+Permission Policyは、Actionを `Allow`、`Ask`、`Deny` のいずれかへ解決するRuleの集合として管理しなければならない。全体の既定値は `Ask` とし、該当scopeに別の既定結果が設定されている場合だけその結果を用いる。Allow、Ask、Denyを別々の設定体系へ分散させず、scope、Action、対象、期間、Companion、Task、Schedule、Tool / MCP、Data Egress等とともに一つの一覧で確認・編集できなければならない。
+
+### FR-PERM-010 自然言語Policy
+
+ユーザーは自然言語でPolicy Ruleを追加・変更できなければならない。指定したscopeに、明示Ruleが一致しない場合だけ使う既定結果を設定することで、「原則Allowし、明示した対象をDenyまたはAskにする」Policyと、「原則DenyまたはAskとし、明示した対象だけをAllowする」Policyの双方を表現できなければならない。自然言語は実効Ruleへ解釈された結果をユーザーが確認・修正できるようにする。
+
+### FR-PERM-011 Ruleの競合解決
+
+Permissionは、Hard Deny、明示Rule、該当scopeの既定結果、全体の既定Askの順に評価しなければならない。複数の明示Ruleが同じActionへ一致した場合は、少なくとも `Deny > Ask > Allow` の順で安全側へ解決する。scopeの既定結果は明示Ruleがない場合だけ使うため、「原則Deny＋明示Allow」等の例外を妨げない。より広いAllowや自動承認が明示Denyを上書きしてはならず、明示Denyを許可へ変える場合は該当Rule自体をユーザーが変更または削除する。
+
+### FR-PERM-012 Hard Deny
+
+Eneは、通常のPolicy Ruleや「すべてAllow」より先に適用され、ユーザー設定やLLM判断から解除できないHard Denyを持たなければならない。少なくとも、システムまたはユーザーデータの壊滅的破壊、Raw Diskや保護されたCredential Storeへの未仲介アクセス、Credentialの探索・窃取・流出、権限昇格・不正な永続化、安全制御の無効化・回避、拒否された操作の回避試行、制御不能な再帰・大量生成・資源枯渇を対象とする。厳密なAction判定方法は別途定める。
+
+### FR-PERM-013 独立したApproval Reviewer
+
+`Ask` の自動判断を有効にした場合、Main Companionとは別の独立したLLM / SessionをApproval Reviewerとして使用しなければならない。Reviewerは、信頼できるユーザー委任・実効Policyと、実行主体、正規化されたAction、対象、作用、不可逆性、Data Egress、Credential利用、provenance等の必要最小限の構造化情報から、`今回のみAllow`、`Deny`、`ユーザーへAsk` のいずれかを返す。Main CompanionのPersonality、隠れた推論、未整理の会話全文、Tool出力中の命令をReviewerの上位Instructionとして渡してはならない。
+
+### FR-PERM-014 Reviewerの権限と失敗
+
+Approval ReviewerはHard Denyまたは機械的なSandbox / ACL / Brokerを緩められず、永続的なAllow Ruleを自動作成してはならない。Reviewerが判定不能、Timeout、障害となった場合はユーザーへAskとし、ユーザー不在時は実行せず保留する。同一目的のDeny後に、表現・分割・Toolを変えた実質同一Actionが反復された場合は、回避試行として停止・記録できなければならない。
+
+### FR-PERM-015 全Actionへの事前評価
+
+ユーザー、Companion、Agent Harness、Sub-agent、Schedule、Plugin、MCP、Toolのいずれが起点でも、Capabilityを使用するActionは実行前に同じPermission解決を通らなければならない。CompanionがScheduleを作成・変更・削除するActionと、そのScheduleが後から起動するActionは、それぞれ独立して評価する。
+
+### FR-PERM-016 外部Dataは権限を持たない
+
+Web、MCP、Tool、外部Resource、文書等から取得した内容は、接続先やTool自体がInstall済み・信頼済みであっても、原則として外部Dataとして扱わなければならない。その内容に含まれる命令は、System / User Instruction、Permission Policy、承認結果、Hard Boundaryを変更できない。Prompt Injection検出を追加してもよいが、それだけを安全境界としてはならない。
+
 ## 14. Provider、Local / Cloud構成
 
 ### FR-PROV-001 推論コンポーネントの交換
@@ -584,7 +644,7 @@ Cloud Providerを使う処理では、送信されるデータの種類、送信
 
 ### FR-PROV-007 初期Provider構成の明示選択
 
-初回設定では、少なくともMain LLM、STT、TTSについて推奨候補を提示できるが、利用するProviderまたは未設定をユーザー自身が明示的に選択できなければならない。STT / TTSは未設定を正規の構成として扱い、その場合はテキストUIで代替する。推奨候補をユーザーの選択とみなして自動適用してはならない。
+初回設定では、少なくともMain LLM、STT、TTSについて推奨候補を提示できるが、利用構成をユーザー自身が明示的に選択できなければならない。Main LLMには利用可能なProviderの設定を必須とし、未設定の構成を許可してはならない。STT / TTSは未設定を正規の構成として扱い、その場合はテキストUIで代替する。推奨候補をユーザーの選択とみなして自動適用してはならない。
 
 ## 15. Plugin、MCP、Skillの責務
 
@@ -624,6 +684,10 @@ Pluginは、Pluginであることを理由にFilesystem、Network、Credential�
 
 Pluginは、Eneが提供する設定、管理、詳細表示、診断、Plugin固有の画面へUIを追加できる。ただし、通常のCompanion UIのマスコット、発話、吹き出し、主要対話面へ任意のUI要素を挿入・置換してはならない。Eneが定義したBody API等を介した正規の表現拡張は妨げない。
 
+### FR-EXT-009 接続先の信頼と出力の分離
+
+Plugin、MCP Server、Tool、外部ServiceをInstall・接続・有効化するユーザー操作は、そのCapabilityを指定範囲で利用する信頼判断として扱える。ただし、その接続先が返す任意の本文をSystem / User InstructionやPermissionとして信頼することを意味してはならない。出力はprovenanceを持つ外部Dataとして扱い、Memory / Skillへの反映時にも出所とconfidenceを失ってはならない。
+
 ## 16. UIの3層
 
 ### FR-UI-001 情報公開の3層
@@ -644,7 +708,7 @@ Companion UIでは、ユーザーが「Companionが考え、行動している�
 
 ### FR-UI-004 詳細設定・管理
 
-詳細設定・管理では、内部Taskの進捗、Sub-agent tree、Companion間通信、CompanionとSub-agentの報告、重要Contextイベント、Memory / Skillの由来、Permission判断、Provider利用、Plugin障害、診断情報を確認できなければならない。
+詳細設定・管理では、内部Taskの進捗、Sub-agent tree、Companion間通信、CompanionとSub-agentの報告、重要Contextイベント、Memory / Skillの由来、Allow / Ask / Deny Ruleとその適用結果、Approval Reviewerの判断、Provider利用、Plugin障害、診断情報を確認できなければならない。
 
 ### FR-UI-005 視覚的な深さ
 
@@ -666,7 +730,7 @@ LLMの逐語的な内部推論、Context Monitorが破棄した大量の非重�
 
 ### FR-OBS-004 ログ管理
 
-ユーザーは、必要に応じてログの保存期間、容量、デバッグ情報、画像・音声・大きなTool出力の保存可否、カテゴリ除外を管理できなければならない。正確な保持期間と容量は未確定である。
+ログは一般的なログシステムと同様に追記中心で扱い、個別Eventの任意編集・削除を通常機能として提供しない。ユーザーは、必要に応じてログの保存期間、容量、デバッグ情報、画像・音声・大きなTool出力の保存可否、カテゴリ除外を管理できなければならない。容量が過大になった場合は、保持期間・容量Policyに従うローテーションや古いSegment単位の削除を行える。正確な保持期間、容量、Segment方式は未確定である。
 
 ### FR-COST-001 利用量と推定コスト
 
@@ -688,7 +752,7 @@ Providerの料金形態、概算品質・速度、必要なHardware、外部送�
 
 ### FR-RES-001 機能単位のGraceful Degradation
 
-STT未設定・利用不能時はテキスト入力、TTS未設定・利用不能時はテキスト表示へ切り替えなければならない。Main LLM、Provider、Plugin、Sub-agent、Networkの障害は、利用不能となった機能を明示し、可能な他機能とCoreを不必要に停止してはならない。
+STT未設定・利用不能時はテキスト入力、TTS未設定・利用不能時はテキスト表示へ切り替えなければならない。Main LLMの未設定は許可せず、設定済みMain LLMが利用不能な場合もCompanionの会話・判断・新規Actionを運用エラーとして停止する。Main LLM、Provider、Plugin、Sub-agent、Networkの障害範囲を明示し、設定・ログ閲覧等のCore機能や無関係な機能を不必要に停止してはならない。
 
 ### FR-RES-002 自動Fallbackの非必須化
 
@@ -696,7 +760,7 @@ Eneは、自動Provider fallbackや全機能の無停止継続を必須としな
 
 ### FR-RES-003 再起動後のTaskとLearning
 
-Core、Host、Provider、Pluginの再起動・停止後も、確定済みの会話、Memory、主要ログ、Task状態、通知・承認待ち、Learning / Consolidation待ちを合理的な範囲で復元または再開可能にしなければならない。
+CoreまたはHostの再起動後も、確定済みの会話、Memory、設定、Permission、Schedule、主要ログ、Taskの最終状態を保護・復元できなければならない。再起動前に実行中だったTaskは `interrupted` または状態不明とし、外部変更を自動Replayしてはならない。現在状態を確認したうえで手動Retryできるようにする。未確定のLearning / Consolidation作業自体は失われてもよく、確定済みの元情報から必要に応じて再計算できればよい。
 
 ### FR-RES-004 失敗の正確な表示
 
@@ -706,12 +770,12 @@ Core、Host、Provider、Pluginの再起動・停止後も、確定済みの会�
 
 - Emotion System、Current Affective State、Mood、Relationship、Interest、Semantic Stateの正確なschema、数値範囲、更新式。
 - Memory・Skillの保存形式、検索アルゴリズム、Embedding・Rerankerの採用。
-- 「忘れる」要求におけるMemoryのみの削除、原資料の削除、原資料を残した再学習禁止の具体的なUI・保持方式。
-- Permissionのリスク分類、通知・承認の閾値、自然言語ポリシーの競合解決。
+- 削除済みMemoryの再学習を防ぐ最小保持情報、tombstone / source除外等の具体方式、Memory管理UI。
+- Hard Deny Actionの厳密な判定方法、Policy Ruleの表現・自然言語からの変換、承認Popupの詳細。
 - Providerの一覧、モデル、価格表、Credential保管方式、自動切替の詳細。
 - Plugin API、Extension Point、IPC、Sandbox、Broker、高帯域転送の具体方式。
 - Character Packageのmanifest、署名、依存関係、Marketplaceの審査・課金方式。
 - Companion間交流の段階数・既定値と、自発的ランダム起動の頻度・制限。
-- ログ、Rawデータ、成果物、音声、画像、Tool outputの保持・削除・Export形式。
+- ログ、Rawデータ、成果物、音声、画像、Tool outputの保持期間、ローテーション、Segment削除、Export形式。
 - Client側のObservation、Computer Use、音声I/O、Remote通知の開始時期と機能範囲。
 - Remote Clientの認証、暗号化、Device trust、接続方式。

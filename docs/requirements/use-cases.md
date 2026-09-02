@@ -1,7 +1,7 @@
 # ユースケース
 
 状態: **Baseline / 対話による初版確定**
-最終確認: 2026-09-02
+最終確認: 2026-09-03
 
 ここでは、Eneを使うユーザーから観測できる代表的な体験を定義する。個別のアプリやサービス名は例であり、製品の作業範囲を限定しない。各ユースケースの内部処理は、Companion、Agent Harness、Sub-agent、Provider、Plugin等の実装方式に依存しない。
 
@@ -16,12 +16,12 @@
 1. Eneは、Character Packageを別途用意しなくても開始できるデフォルトCompanionを提供する。
 2. 現時点ではAliciaがデフォルトCompanionとして表示される。
 3. EneはLLM、STT、TTS等について推奨候補と、Local / Cloud、費用、Privacy、必要Hardware等の判断材料を提示できる。
-4. ユーザーは、少なくともMain LLM、STT、TTSについて利用するProviderまたは未設定を明示的に選択する。STT / TTSは未設定のままでもよい。
+4. ユーザーは、少なくともMain LLM、STT、TTSについて利用構成を明示的に選択する。Main LLMには利用可能なProviderを必ず設定し、STT / TTSだけは未設定のままでもよい。
 5. 有料Providerを選ぶ場合、費用・送信先・必要な認証設定を確認したうえでユーザーが明示的に選択する。
 6. 設定後、ユーザーはCompanionとの最初の会話を開始できる。
 
-**失敗時の挙動**: Providerが未設定または利用不能でも、利用可能なテキストUIで設定を続けられる。自動的に別の有料Providerを有効化しない。
-**完了条件**: ユーザーが、利用構成と課金の有無を理解して明示的に選択したうえで、少なくとも利用可能な入力・出力手段でCompanionへ話しかけられる。
+**失敗時の挙動**: Main LLMが未設定または利用不能な場合、Companionの運用を開始せず、設定エラーと復旧導線を表示する。STT / TTSが未設定または利用不能でも、利用可能なテキストUIで設定を続けられる。自動的に別の有料Providerを有効化しない。
+**完了条件**: ユーザーが、利用構成と課金の有無を理解して明示的に選択し、利用可能なMain LLMと少なくとも一つの入力・出力手段でCompanionへ話しかけられる。
 
 ## UC-002 音声中心の通常対話
 
@@ -31,11 +31,14 @@
 
 **期待する流れ**
 
-1. 音声入力をSTTでテキスト化する。
-2. Eneは現在の会話、関連Memory、Companion State、現在文脈を用いてCompanionを起動する。
-3. Companionは自分の人格と判断に基づいて応答を生成する。
-4. TTSで音声を出力し、表情・姿勢・モーションと組み合わせてキャラクターが発話する。
-5. 入出力とCompanionの発話は、同じ会話履歴として後から参照できる。
+1. 既定の入力方式は常時VADとし、発話区間を検出した音声をSTTでテキスト化する。ユーザーはWake Word、Push-to-Talk、音声入力無効からも選択できる。
+2. Eneはマイクの待受・録音・送信状態をユーザーへ分かる形で表示し、すぐにMuteまたは音声入力停止できるようにする。
+3. Eneは現在の会話、関連Memory、Companion State、現在文脈を用いてCompanionを起動する。
+4. Companionは自分の人格と判断に基づいて応答を生成する。
+5. TTSで音声を出力し、表情・姿勢・モーションと組み合わせてキャラクターが発話する。
+6. 入出力とCompanionの発話は、同じ会話履歴として後から参照できる。
+
+Eneは1対1の利用を基本とし、声紋等による話者認識・本人認証や、周囲の他者の発話を識別・排除することを初期要件としない。
 
 **失敗時の挙動**: STTが使えない場合は入力ポップアップ、TTSが使えない場合は吹き出し等のテキスト表示へ切り替える。代替UIを別Companionや別セッションとして扱わない。
 **完了条件**: ユーザーが内容を受け取り、同じCompanionとの会話を継続できる。
@@ -123,7 +126,7 @@
 4. ユーザーが再接続したとき、Companionが結果と保留事項を自然に伝える。
 5. 将来のRemote Clientでは、重要度に応じた通知を利用できる余地を残す。
 
-**失敗時の挙動**: Host停止前までに永続化された状態を保持し、再起動後は未完了・未処理の作業を失ったことにせず、再開または再実行可能な状態として扱う。
+**失敗時の挙動**: Host停止前までに確定・永続化された状態を保持する。実行中だった外部変更Taskは再起動後に `interrupted` または状態不明として示し、自動再実行しない。ユーザーまたはCompanionが外部状態を確認してから手動でRetryまたは再委任できるようにする。
 **完了条件**: 再接続後に、作業の結果・失敗・保留がCompanionから説明できる。
 
 ## UC-008 複数Companionとのグループ会話
@@ -156,6 +159,7 @@
 3. ユーザー不在時も、許可された範囲で相談・協調・雑談を行える。
 4. 交流の履歴を保存し、ユーザーが後から閲覧できる。
 5. 各Companionは、相手についての経験・感情・Relationshipを自分のMemoryとして形成できる。
+6. あるCompanionが別CompanionのCompanion-specific Memoryを直接検索・取得することはできない。内容を知るには、所有するCompanionとの会話を通じて共有を受ける。
 
 **失敗時の挙動**: 許可レベルを越える交流を行わない。Companion間の会話をSub-agentの作業報告と混同しない。
 **完了条件**: ユーザーが、交流の内容と、どのCompanionが発話したかを確認できる。
@@ -173,8 +177,9 @@
 3. 必要ならShared / Companion-specificのscopeを選び、Core / Episodic / Semantic Memory、Skill、Relationship、Interestその他の永続Stateへ反映する。Working Memoryは現在の会話・Task用の短期状態として別に管理する。
 4. 重複統合、矛盾整理、抽象化、重要度・confidence・recall優先度の調整など重い処理はConsolidationとしてアイドル時に行う。
 5. 日常の小さな学習で毎回承認を求めない。
-6. ユーザーは「覚えておいて」「忘れて」「それは違う」「次からこのやり方で」等を自然言語で伝え、後から修正・削除できる。
-7. ユーザー削除またはPrivacy上の削除対象となった情報は、元の会話・履歴が残っている場合でも、削除意図に反してConsolidationから同じ長期Memoryとして自動再生成しない。
+6. ユーザーは「覚えておいて」「忘れて」「それは違う」「次からこのやり方で」等を自然言語で伝え、後からMemoryを修正・削除できる。
+7. 「忘れて」はMemory Systemだけへ適用し、対象Memoryの本文、検索Index、Embedding、派生Cacheを削除する。会話・監査ログは独立した履歴として残り、通常のログ検索から参照できる。
+8. 残存ログを参照しただけで、削除済みMemoryをLearning ReviewやConsolidationから自動再生成しない。ユーザーが後から明示的に「再び覚えて」と指示した場合は、新しいMemoryとして作成できる。
 
 **失敗時の挙動**: 推測を確認済み事実として固定しない。Permissionで保存不可の情報を学習しない。削除済み・再学習禁止として扱う情報をバックグラウンド処理で復活させない。
 **完了条件**: 次回の想起・判断・作業に適切な学習が反映され、ユーザーが必要なら詳細履歴を確認できる。
@@ -190,7 +195,7 @@
 1. 通常の会話では、現在文脈に関連するMemoryを軽量に自動想起する。
 2. 根拠が足りない場合、CompanionまたはAgentが明示的なMemory検索を行う。
 3. Semantic / Episodic / Core、Shared / Companion-specific、時間、重要度、感情的意義、Relationship、現在タスク、confidence等を組み合わせて候補を絞る。
-4. 必要ならConsolidated Memoryだけでなく、元の会話履歴や関連ログまで調べる。ただし、削除・再学習禁止等の保持ポリシーで利用不可となった原資料を再利用しない。
+4. 必要ならConsolidated Memoryだけでなく、元の会話履歴や関連ログまで調べる。「忘れて」によりMemoryが削除されていても、独立したログ自体は検索・参照できる。ただし、その参照だけを理由に同じ内容を長期Memoryへ自動登録し直さない。
 5. 根拠が弱い場合、確信度を下げる、追加検索する、または思い出せないと伝える。
 
 **失敗時の挙動**: 存在しない記憶を補完して事実として答えない。Core Memoryだけで過去全体を表現しようとしない。
@@ -204,13 +209,15 @@
 
 **期待する流れ**
 
-1. Companionは観測、発話、内部調査、外部状態を変更する作業を区別する。
-2. 新しい外部変更作業は原則として開始前にユーザーへ通知する。
-3. 事前委任済み作業、スケジュール済み作業、提案の根拠を集める内部調査は、設定と権限の範囲で通知なしに進められる。
-4. 影響が大きい操作や権限上承認が必要な操作では、ユーザーの明示的承認を待つ。
-5. 通知・承認の判断は、機械的なHard Boundaryを越えない範囲で、現在文脈とCompanionの判断を利用する。
+1. Companionは観測、発話、内部調査、Schedule作成、外部状態を変更する作業を区別する。
+2. Companion自身によるSchedule作成を含むすべてのActionについて、実行前にHard DenyとユーザーのPermission Policyを評価する。
+3. Allow、Ask、Denyを同じRule集合で管理する。Hard Denyに該当しないActionは、明示Rule、該当scopeの既定結果の順に解決し、どちらもない場合は `Ask` とする。
+4. `Ask` は、設定に応じてユーザーへ承認Popupを表示するか、Main Companionとは独立したApproval Reviewerへ判断を委ねる。
+5. Approval Reviewerは、信頼できるユーザー委任・Policyと、対象、作用、Data Egress、不可逆性、由来を含む構造化されたAction情報だけを受け取り、`今回のみAllow`、`Deny`、`ユーザーへAsk` のいずれかを返す。Main Companionの人格、未整理の会話全文、隠れた推論に判断を左右させない。
+6. 事前委任済み・Schedule済みで明示Allowに一致する作業や、提案の根拠を集める許可済み内部調査は、設定範囲で通知なしに進められる。新しい外部変更作業は原則として開始前に通知する。
+7. Approval ReviewerもHard Denyを越える権限を付与できない。判定不能、Timeout、Reviewer障害時はユーザーへAskとし、ユーザー不在時は実行せず保留する。
 
-**失敗時の挙動**: 承認が得られない場合は操作を実行せず、保留または代替案として示す。
+**失敗時の挙動**: 承認が得られない場合は操作を実行せず、保留または代替案として示す。拒否された操作を言い換え・細分化して繰り返し試行する回避行動を検出した場合は停止する。
 **完了条件**: ユーザーが、何が自発的に行われ、どこで通知・承認されたかを確認できる。
 
 ## UC-013 Local / Cloud構成の利用
@@ -226,7 +233,7 @@
 3. Cloudを使う場合、対象データ、送信先、費用、認証をユーザーが確認できる。
 4. Eneの永続状態はHost PCに残し、Cloud Providerは処理結果を返す。
 
-**失敗時の挙動**: Providerが利用不能でも、Eneが未設定の別Providerを自動有効化しない。STT/TTSの欠落はUC-002のテキスト代替へ切り替える。
+**失敗時の挙動**: Providerが利用不能でも、Eneが未設定の別Providerを自動有効化しない。Main LLMの欠落・利用不能はCompanionの運用エラーとして示し、STT/TTSの欠落だけはUC-002のテキスト代替へ切り替える。
 **完了条件**: ユーザーが意図したProvider構成とデータ境界で処理を行える。
 
 ## UC-014 Permission・観測・Data Egressの制御
@@ -237,13 +244,15 @@
 
 **期待する流れ**
 
-1. 要求元が、実行したい目的と必要なCapabilityを示す。
-2. Eneは、観測、Context Monitor処理、Main Companionへの伝達、Memory保存、Filesystem、Computer Use、Network、Credential、Cloud Egress、自律実行等を個別に評価する。
-3. 自然言語の委任・ポリシーと、機械的なACL / Sandbox / BrokerのHard Boundaryを組み合わせる。
-4. 許可された場合だけ、実際のCapabilityへアクセスする。
-5. 判断、通知、承認、拒否を監査可能なログへ残す。
+1. 要求元が、実行したい目的、Action、対象、作用、必要なCapability、外部送信の有無を構造化して示す。
+2. Eneは最初にHard Denyを適用し、システムやユーザーデータの壊滅的破壊、Credentialの探索・窃取・流出、権限昇格・永続化、安全制御の無効化・回避、拒否回避、暴走・資源枯渇等を、広いAllow設定があっても禁止する。
+3. Eneは、観測、Context Monitor処理、Main Companionへの伝達、Memory保存、Filesystem、Computer Use、Network、Credential、Cloud Egress、自律実行等を個別に評価する。
+4. 明示的なDeny、Ask、AllowのRuleを一つのPolicy集合として、scope、Action、対象、期間、Companion、Task、Schedule、Tool / MCP、自然言語条件等とともに管理する。Hard Deny、明示Rule、scopeの既定結果、全体の既定Askの順に評価し、複数の明示Ruleが競合する場合は `Deny > Ask > Allow` を基本とする。
+5. 自然言語の委任・ポリシー、必要に応じたApproval Reviewer、機械的なACL / Sandbox / Brokerを組み合わせる。
+6. 許可された場合だけ、実際のCapabilityへアクセスする。
+7. 判断、通知、承認、拒否を監査可能なログへ残す。
 
-**失敗時の挙動**: LLM、Character Package、Skill、Plugin、MemoryのいずれもHard Boundaryを越えられない。観測可能でも保存・Main LLM伝達・Cloud送信が禁止されている場合は、それぞれを止める。
+**失敗時の挙動**: LLM、Approval Reviewer、Character Package、Skill、Plugin、MCP / Tool出力、MemoryのいずれもHard Boundaryを越えられない。観測可能でも保存・Main LLM伝達・Cloud送信が禁止されている場合は、それぞれを止める。
 **完了条件**: 許可範囲内の処理だけが実行され、ユーザーが判断を確認できる。
 
 ## UC-015 詳細管理・監査・コスト確認
@@ -275,8 +284,10 @@
 2. Pluginは公開されたExtension Point、Event、Capability、Brokerを通じてEneを拡張する。
 3. 第三者PluginはCoreから隔離され、必要な権限だけを受け取る。
 4. Local LLM / VLM / Audio等の高帯域Provider Pluginは、PermissionとSandboxの範囲でPlugin自身の実行環境からGPUや必要なRuntimeを直接利用でき、不要なコピーや直列化によって実用性を失わない。
-5. SkillはAgent Skills互換形式でImport / Exportでき、利用実績と学習による改訂を管理できる。
-6. Pluginが設定・詳細・診断UIを追加することはできるが、Companion UIへ任意の要素を挿入・置換しない。
+5. SkillはAgent Skills互換形式でImport / Exportでき、利用実績と学習による改訂を管理できる。Character Package等と必要なSkill・Resourceをまとめて配布できるが、個人のMemory、ログ、Credentialは含めない。
+6. Eneが生成したSkillと、ユーザーが明示的にInstall / ImportしたSkillは、手順を構成する信頼済みInstructionとして扱える。ただし、PermissionやSandbox例外を付与するものではない。
+7. 接続・Install済みのMCP / Tool / Webから返る本文は、接続先を信頼していても外部Dataとして扱う。その出力内の命令によってPolicy、Permission、承認結果、Instruction優先順位を変更せず、MemoryやSkillへ自動昇格させる場合もprovenanceとconfidenceを保持する。
+8. Pluginが設定・詳細・診断UIを追加することはできるが、Companion UIへ任意の要素を挿入・置換しない。
 
 **失敗時の挙動**: Plugin障害はCoreや他Pluginへ波及させず、その機能だけを利用不能として知らせる。SkillやMCPの記述をPermission付与として扱わない。
 **完了条件**: 拡張機能の責務、権限、状態、失敗範囲がユーザーとシステムから区別できる。
@@ -289,22 +300,39 @@
 
 **期待する流れ**
 
-1. Eneは、通常のデスクトップソフトとして合理的な範囲で、確定済みの状態・履歴・タスクを失わない。
-2. 起動後、未完了タスク、待機中のLearning / Consolidation、通知・承認待ちを復元可能な状態として示す。
-3. Provider単位の障害は、他の機能・Core・永続状態へ不必要に波及させない。
-4. STT/TTS等の利用不能はテキスト代替へ切り替える。
-5. 自動Provider fallbackを前提にせず、ユーザーが再設定または別Providerを明示的に選べる。
+1. Eneは、通常のデスクトップソフトとして合理的な範囲で、確定済みの会話、Memory、設定、Permission、Schedule、Task状態、主要ログを破損・消失から保護する。
+2. 起動前に実行中だったTaskは `interrupted` または状態不明として示す。外部変更を伴う処理を自動Replayせず、現在の外部状態を確認した後にユーザーまたはCompanionが手動でRetry・再委任できるようにする。
+3. 未実行のSchedule、通知・承認待ちは状態を表示し、通常のPolicy評価を経て扱う。未確定のLearning Review / Consolidation作業は失われてもよく、確定済みの元情報から必要に応じて再計算できればよい。
+4. Provider単位の障害は、他の機能・Core・永続状態へ不必要に波及させない。
+5. STT/TTS等の利用不能はテキスト代替へ切り替える。Main LLMが利用不能な場合はCompanion運用エラーを示す。
+6. 自動Provider fallbackを前提にせず、ユーザーが再設定または別Providerを明示的に選べる。
 
-**失敗時の挙動**: 復元できない処理は成功として扱わず、失敗・中断・再実行可能性を示す。完全なクラッシュリプレイを要求しない。
+**失敗時の挙動**: 復元できない処理は成功として扱わず、失敗・中断・状態不明・再実行可能性を示す。完全なクラッシュリプレイ、永続的な実行中キュー、無停止Failoverを要求しない。
 **完了条件**: ユーザーが再起動後に状態を理解し、可能なタスクを継続または再実行できる。
+
+## UC-018 App Data Directoryによる環境移動
+
+**Actor**: ユーザー、Host
+**前提**: Eneを停止し、App Data Directory全体を読み書きできる。
+**Trigger**: ユーザーがEneのローカル状態を別の対応Hostへ移したい。
+
+**期待する流れ**
+
+1. ユーザーはEneが使用しているApp Data Directoryの場所と、移動後に再設定が必要になり得る項目を確認できる。
+2. ユーザーは専用Exportを使わず、Directory全体を新しいHostへ移動または複製する。
+3. 互換性のあるEneがそのDirectoryを読み込み、Companion、会話、Memory、設定、Permission、Schedule、Task履歴、主要ログ、Skill等のローカル状態を復元する。
+4. OS保護Credential、外部サービス側の認証、OS固有Integration等は、必要に応じてユーザーが再認証・再設定する。
+
+**失敗時の挙動**: Directoryが不完全、破損、または利用中のEneと互換でない場合は、状態を黙って初期化・上書きせず、診断可能なエラーを示す。
+**完了条件**: 明示された例外を除き、Directoryの移動だけで同じローカルEne状態を利用できる。
 
 ## ユースケース上の未確定事項
 
-- 各OS・Clientで、どのユースケースを最初のリリースへ含めるか。
+- 各OS・Clientで、どのユースケースを直近Betaへ含めるか。
 - Remote Clientの認証・暗号化・Device trust・接続方法。
 - 自発的なランダム起動の具体的な頻度・制限。
 - Companion間交流レベルの名称、段階数、既定値。
-- 通知と明示的承認を分ける正確なリスク分類。
-- 「忘れて」等の要求で、Memoryのみを削除するか、原資料も削除するか、原資料を残して再学習だけ禁止するかを選ぶ具体的なUI・保持方式。
+- Hard Denyに含めるActionの厳密な判定方法、自然言語PolicyとRuleの編集・表示方法、承認Popupの詳細。
+- 削除済みMemoryの再学習を防ぐ最小保持情報と、Memory管理UIの詳細。
 - Provider障害時のユーザー向け表示、再設定導線、手動選択の詳細。
-- 監査ログ・成果物・音声・画像・Tool出力の保持期間とエクスポート形式。
+- 監査ログ・成果物・音声・画像・Tool出力の保持期間、ローテーション条件とエクスポート形式。

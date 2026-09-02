@@ -1,7 +1,7 @@
 # 製品定義
 
 状態: **Baseline / 対話による初版確定**
-最終確認: 2026-09-02
+最終確認: 2026-09-03
 
 ## 1. 製品の要約
 
@@ -11,7 +11,7 @@ Ene は、**1人のユーザーのために1台のHost PC上に継続的に存�
 
 ユーザーは主に音声とキャラクターを介して接する。音声機能が利用できないときも、テキスト入力と吹き出し表示によって同じCompanionとの体験を継続できる。必要なPC作業は、Companionが内部のAgent Harness、Computer Use、Tool、MCP、Sub-agent等の能力を使って遂行する。これらの内部機構は、日常UIでは主役にしない。
 
-Grok Bot,ChatGPT work,Claude Coworkなどのような機能を主としつつ、Harmes agentやnanobotのようなSkill作成、管理やそれから拡張された記憶システムを使い、自己改善を行うエージェントを、AiriのようなVTuberやAI Companion的なインターフェースを用いて実装する。
+Grok Bot、ChatGPT work、Claude Cowork、Hermes Agent、nanobot等が持つAgent Harness、Skill作成・管理、記憶、自己改善の機能は、Eneの能力面における参考とする。ただし、それらの製品構成を主役として模倣するのではなく、品質、設計、UIの優先順位は一貫してCompanion-firstとする。Airi等のVTuber / AI Companion的なインターフェースも参考にしながら、「能力を持つCompanion」として統合する。
 
 ## 2. 製品の中心価値
 
@@ -41,13 +41,13 @@ Ene は「高性能なAgentにキャラクターを貼る」ことを第一目�
 
 ### 3.3 対応プラットフォームの方針
 
-| 区分 | 現行の正式対象 | 将来対象 | 備考 |
+| 区分 | 直近Betaの実装対象 | 後続実装対象 | 備考 |
 |---|---|---|---|
 | Host OS | Windows、Linux | macOS | Core、スケジュール、永続状態、バックグラウンド処理を実行する |
 | Desktop Client | Windows、Linux | macOS | DesktopMate風マスコットを表示する |
 | Remote Client | なし | Mobile、Web、その他のClient | 同じHost上のCompanionへ接続する |
 
-現行の正式対象以外のリリース時期、対応機能、配布形態は未確定である。Remote Client自体は現行の正式対象ではないが、将来追加できる構造を妨げない。現行のDesktop Observation / Computer UseはHost PCを主対象とするが、将来のClientが音声I/O、Observation、Body、Computer Use等のCapabilityを提供できるようにし、その追加にCoreの大規模な再設計を必要とする構造へ固定しない。
+直近Betaは実装順上の一区切りであり、製品全体の正式リリースではない。後続実装対象も、要件から明示的に削除されない限り正式リリースまでに実装する。各対象の実装時期、対応機能、配布形態の詳細は未確定であり、現時点で完全な詳細設計を要求しない。ただし、Remote Client等の既知の後続要件を追加するためにCoreの大規模な置換を必要とする構造へ固定しない。直近BetaのDesktop Observation / Computer UseはHost PCを主対象とし、後続Clientは音声I/O、Observation、Body、Computer Use等のCapabilityを提供できるようにする。
 
 ## 4. Companion とキャラクター
 
@@ -73,9 +73,9 @@ Companion は、ユーザーに従うだけの無人格なアシスタントで�
 
 ### 4.3 Character Package
 
-キャラクターの配布単位は、人格・ストーリー・アバター・音声・感情表現・役割などをまとめた Character Package とする。Character Package はImport / Export可能な形式を目指し、将来的には配布・販売するMarketplaceへ拡張できる構造を保つ。
+キャラクターの配布単位は、人格・ストーリー・アバター・音声・感情表現・役割などをまとめた Character Package とする。Character Package はImport / Export可能な形式を目指し、必要に応じてそのCharacter向けのSkillや関連Resourceを一緒に配布できるようにする。将来的には配布・販売するMarketplaceへ拡張できる構造を保つ。
 
-配布可能な **Character Definition** と、特定ユーザーの環境で記憶・関係性・感情を蓄積する **Character Instance** は分離する。同じDefinitionを複数ユーザーが利用しても、Instanceの経験は自動的に共有しない。
+配布可能な **Character Definition** と、特定ユーザーの環境で記憶・関係性・感情を蓄積する **Character Instance** は分離する。同じDefinitionを複数ユーザーが利用しても、Instanceの経験は自動的に共有しない。成長済みInstance自体のExport / Importは要件とせず、配布物へ個人のMemory、会話・監査ログ、Relationship、Credentialを含めない。
 
 現時点のデフォルトCompanionは Alicia とする。ただし、Aliciaを将来のEne独自キャラクターへ置き換える計画の具体的な時期や移行方式は未確定である。キャラクターが要求する能力は、ユーザーのPermissionを付与するものではない。
 
@@ -83,12 +83,13 @@ Companion は、ユーザーに従うだけの無人格なアシスタントで�
 
 - DesktopMateのように、Companionがデスクトップ上へ常駐している。
 - 通常の対話は音声入力（STT）と音声出力（TTS）を中心に行う。
+- 音声入力は常時待受のVADを既定とし、Wake Word、Push-to-Talk、音声入力無効も選べる。1対1利用を基本とし、話者識別・本人認証は初期要件としない。
 - STT未設定・利用不能時はテキスト入力ポップアップを使う。
 - TTS未設定・利用不能時は吹き出し等のテキスト表示を使う。
 - 対話履歴は別UIで閲覧できる。代替テキストUIも同じ会話・同じ記憶・同じCompanionとして扱う。
 - Companionはユーザーの入力を待つだけでなく、現在のデスクトップ文脈、予定、記憶、感情、タスクなどから自発的に話しかけたり行動したりできる。
 - Companionはドラッグ、クリック、位置、ウィンドウ、複数モニター等のデスクトップ空間を身体の一部として扱い、状況に応じて移動・表情・モーションを選べる。
-- v1で人間に近いfull-duplex / barge-in音声会話を必須としない。ただし将来それを追加するために会話Coreや音声I/Oを全面的に作り直すことを前提にしない。
+- 直近Betaで人間に近いfull-duplex / barge-in音声会話を必須としない。ただし後続実装で追加するために会話Coreや音声I/Oを全面的に作り直すことを前提にしない。
 
 ## 6. 作業能力
 
@@ -102,13 +103,13 @@ Eneは用途をコーディングや調査に限定しない。ユーザーのPC
 
 Companionは概念上常に存在するが、Main LLMを常時実行することを要求しない。ユーザー入力、重要なContext Monitorイベント、スケジュール、Sub-agentや他Companionからの報告、許可されたランダムな自発起動などを契機に推論する。
 
-観測・発話・外部状態を変更する作業は別の権限・自律性として扱う。新しい外部変更作業は原則として開始前に通知し、事前に委任された作業、スケジュール済み作業、提案の根拠を集める内部調査などは通知なしで実行できる。通知または承認の具体的な分類は、Hard Boundaryの内側で文脈とLLMが判断できるようにするが、詳細な閾値は未確定である。
+観測・発話・Schedule作成・外部状態を変更する作業は別の権限・自律性として扱い、すべてのActionへ事前Policyを適用する。全体の既定値はAskとし、Allow / Ask / Denyの明示Ruleとscopeごとの既定結果を一つのPolicy集合で管理する。Askはユーザーが承認するか、設定されている場合はMain Companionとは独立したApproval Reviewerが今回のみAllow、Deny、ユーザーへAskのいずれかを判断する。新しい外部変更作業は原則として開始前に通知し、事前に委任された作業、Schedule済み作業、提案の根拠を集める内部調査などは明示Allowの範囲で通知なしに実行できる。Hard Denyは「すべてAllow」やLLM判断でも解除できない。
 
 ## 8. ローカルファーストとProvider
 
-会話履歴、Memory、Emotion、Mood、Relationship、Character Instance、設定、Permission、タスク履歴、成果物などEneの永続状態はHost PCを正本とする。クラウドは必要な推論・音声・処理を委譲する先であり、Eneの状態の正本ではない。
+会話履歴、Memory、Emotion、Mood、Relationship、Character Instance、設定、Permission、タスク履歴、ログ、Eneが管理する成果物などEneの永続状態はHost PCを正本とし、単一のApp Data Directory配下へ自己完結した構成で保存する。原則として、そのDirectoryを別の環境へ移動・複製すればEneのローカル状態を復元できるようにする。専用のデータ移行機能は要件としない。OSの保護領域に置くCredential、外部サービス側の状態、OS固有Integration等は、移動先で再認証・再設定が必要になり得ることを明示する。クラウドは必要な推論・音声・処理を委譲する先であり、Eneの状態の正本ではない。
 
-LLM、VLM、Embedding、Reranker、STT、TTSその他の推論コンポーネントは、それぞれ利用可能なLocal ProviderまたはCloud Providerを選択できなければならない。コンポーネントごとの選択を独立させることで、システム全体として完全Local、Cloud中心、またはLocalとCloudが混在する構成を正規に扱う。個別ProviderがLocalとCloudを組み合わせるHybrid実行を提供することは許容するが、すべてのProviderにHybrid実行を要求しない。初回設定では、少なくともMain LLM、STT、TTSについて、推奨候補を示すことはできてもユーザー自身が利用構成を明示的に選択する。STT / TTSは未設定を選べ、その場合はテキストUIを利用する。外部Providerの選択、費用、送信データはユーザーが理解して設定できる必要がある。
+LLM、VLM、Embedding、Reranker、STT、TTSその他の推論コンポーネントは、それぞれ利用可能なLocal ProviderまたはCloud Providerを選択できなければならない。コンポーネントごとの選択を独立させることで、システム全体として完全Local、Cloud中心、またはLocalとCloudが混在する構成を正規に扱う。個別ProviderがLocalとCloudを組み合わせるHybrid実行を提供することは許容するが、すべてのProviderにHybrid実行を要求しない。初回設定では、少なくともMain LLM、STT、TTSについて、推奨候補を示すことはできてもユーザー自身が利用構成を明示的に選択する。Main LLMは必須であり、未設定の構成ではCompanionを運用できず、明示的な設定エラーとする。STT / TTSは未設定を選べ、その場合はテキストUIを利用する。外部Providerの選択、費用、送信データはユーザーが理解して設定できる必要がある。
 
 ## 9. 目標
 
@@ -129,9 +130,9 @@ LLM、VLM、Embedding、Reranker、STT、TTSその他の推論コンポーネン
 - Eneの永続状態をクラウドサービス側で管理するSaaS
 - コーディング専用Agent、または特定用途だけのWorkflow製品
 - Agent Harness、Sub-agent、Tool実行、内部推論を日常UIの主役にすること
-- v1からのmacOS、Mobile、Webの正式対応
-- v1から人間同等のfull-duplex / barge-in音声会話を必須にすること
-- Marketplaceをv1の必須機能とすること
+- 直近BetaからのmacOS、Mobile、Web対応
+- 直近Betaから人間同等のfull-duplex / barge-in音声会話を必須にすること
+- Marketplaceを直近Betaの必須機能とすること
 - Skillを実行プログラムやPermission付与機構にすること
 - 自動Provider fallbackを必須の継続方法とすること
 - すべての観測を逐語的な内部推論、Raw音声、Raw画面、完全な低レベル操作ログとして永続保存すること
@@ -149,7 +150,7 @@ LLM、VLM、Embedding、Reranker、STT、TTSその他の推論コンポーネン
 - 完全Offline動作をどの範囲まで保証するか
 - 正確なCPU、GPU、RAM、ストレージ、音声・対話レイテンシの数値予算
 - Emotion / Mood / Relationship / Interestの具体的なスキーマ、数値範囲、更新式
-- Permissionのリスク分類、通知と承認の境界、自然言語ポリシーの競合解決
-- 「忘れる」要求におけるMemoryのみの削除、原資料の削除、原資料を残した再学習禁止の具体的なUI・保持方式
+- PermissionのHard Denyに含める操作の厳密な判定方法、自然言語ポリシーの表現・編集UI、承認画面の詳細
+- 「忘れる」要求で削除したMemoryの再学習を防ぐ最小保持情報と、Memory管理UIの詳細
 - Plugin API、IPC、Sandbox機構、データ転送方式、Marketplaceの審査方式
-- 永続ログの正確な保持期間、容量、暗号化、エクスポート形式
+- 永続ログの正確な保持期間、容量、ローテーション、暗号化、エクスポート形式

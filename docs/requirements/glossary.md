@@ -1,7 +1,7 @@
 # 用語集
 
 状態: **Baseline / 対話による初版確定**
-最終確認: 2026-09-02
+最終確認: 2026-09-03
 
 ここでは、実装型やprotocol名ではなく、要件定義で使うDomain用語を定義する。用語の具体的なschema、配置、通信方式は別途決める。
 
@@ -11,17 +11,29 @@
 
 1人のユーザーのために、Companion、Memory、State、対話、PC作業、Permission、学習を統合する製品全体。
 
+### 直近Beta / Beta Milestone
+
+実装順と検証範囲を区切るための中間マイルストーン。製品全体の完成または正式リリースを意味しない。
+
+### 正式リリース
+
+要件から明示的に削除されたものを除き、後続実装対象を含む、その時点で残っている要件をすべて実装した段階。後続要件の詳細設計を直近Betaで完了することまでは要求しない。
+
 ### Ene Core / Core
 
 Host上で継続的に動作し、Companionの個体、永続状態、Scheduler、Context Monitor、Learning、Agent Harness、Permission等を管理する中核。
 
 ### Host
 
-Ene CoreとEneの永続状態の正本を保持するコンピューター。現行のHost OS対象はWindowsとLinux。HostはClient未接続時にも許可された処理を継続できる。
+Ene CoreとEneの永続状態の正本を保持するコンピューター。直近BetaのHost OS対象はWindowsとLinux。HostはClient未接続時にも許可された処理を継続できる。
+
+### App Data Directory
+
+Eneが管理する会話、Memory、Companion State、設定、Permission、Schedule、Task履歴、ログ、Skill等のローカル永続データを自己完結して保存する単一の基準Directory。その移動・複製によってローカル状態を復元できることを基本とする。OS保護Credential、外部サービス側の状態、OS固有Integrationは再認証・再設定が必要になり得る。
 
 ### Client
 
-Host上の同じEneへ接続する対話、表示、操作のインターフェース。現行のDesktop Client対象はWindowsとLinux。macOS Desktop Client、Mobile、Web等のRemote Clientは将来対象。将来的には表示端末に限らず、Permissionの範囲で音声I/O、Observation、Body、Computer Use等のCapabilityをHostへ提供し得るが、永続状態の正本にはならない。
+Host上の同じEneへ接続する対話、表示、操作のインターフェース。直近BetaのDesktop Client対象はWindowsとLinux。macOS Desktop Client、Mobile、Web等のRemote Clientは後続実装対象。将来的には表示端末に限らず、Permissionの範囲で音声I/O、Observation、Body、Computer Use等のCapabilityをHostへ提供し得るが、永続状態の正本にはならない。
 
 ### Companion
 
@@ -37,11 +49,11 @@ Personality、Goals / Values、Role、Story / Lore、Avatar、Voice、感情表�
 
 ### Character Package
 
-Character Definition、Story / Lore、Avatar資産、Voice設定、感情表現、Role等をまとめたImport / Export単位。将来の配布・販売Marketplaceを想定するが、形式と流通は未確定。
+Character Definition、Story / Lore、Avatar資産、Voice設定、感情表現、Role等をまとめたImport / Export単位。必要なSkillや関連Resourceを同梱できる。成長済みCharacter InstanceのMemory、会話・監査ログ、Relationship、Credentialは配布対象にしない。将来の配布・販売Marketplaceを想定するが、形式と流通は未確定。
 
 ### Main LLM / Main Companion
 
-Companion自身の会話、解釈、発話、行動、委任を担う推論主体。Main LLMは常時実行せず、Event駆動で起動する。Main CompanionはLLMそのものだけでなく、CompanionとしてのStateと判断主体を指す場合がある。
+Companion自身の会話、解釈、発話、行動、委任を担う推論主体。Main LLMはCompanion運用に必須であり、未設定を許可しない。常時実行はせず、Event駆動で起動する。Main CompanionはLLMそのものだけでなく、CompanionとしてのStateと判断主体を指す場合がある。
 
 ### Agent Harness
 
@@ -57,7 +69,7 @@ Sub-agentが必要に応じて生成する一時的な作業主体。現行要�
 
 ### Task
 
-Companionが自分で行う、またはAgent Harnessへ委任する一つの目的を持った作業。実行中、待機中、承認待ち、完了、失敗、中断等の状態を持ち得る。
+Companionが自分で行う、またはAgent Harnessへ委任する一つの目的を持った作業。実行中、待機中、承認待ち、完了、失敗、中断、状態不明等の状態を持ち得る。Crash時に実行中だった外部変更Taskは自動Replayせず、中断または状態不明として確認する。
 
 ### Event
 
@@ -66,6 +78,10 @@ Companionが自分で行う、またはAgent Harnessへ委任する一つの目�
 ### Schedule
 
 指定時刻、定期予定、Reminder、将来再評価する時刻等を表す時間ベースの起動条件。
+
+### VAD / Voice Activity Detection
+
+音声から発話区間を検出する仕組み。Eneの既定音声入力は常時待受のVADとし、Wake Word、Push-to-Talk、音声入力無効も選択肢とする。VADは話者本人を識別・認証する仕組みではない。
 
 ## Memoryと学習
 
@@ -95,7 +111,7 @@ Companionが常時または高頻度に参照する、少量で重要な長期Me
 
 ### Companion-specific Memory
 
-特定Companionの経験、解釈、ユーザーとの関係、相手Companionとの出来事等に属するMemory。別Companionへ自動的に同じ経験として共有しない。
+特定Companionの経験、解釈、ユーザーとの関係、相手Companionとの出来事等に属するMemory。所有するCompanionとユーザーの管理UIだけが直接検索・取得でき、別Companionは直接読み取れない。別Companionはログ検索等を迂回路として同内容を取得せず、内容を知るには所有Companionとの会話を通じて共有を受け、その会話を新しい経験として扱う。
 
 ### Provenance
 
@@ -115,7 +131,7 @@ Memory、Skill、Decision等がどの会話、観測、Task、外部情報、推
 
 ### Forget / 削除意図
 
-ユーザーがある情報を今後のMemoryとして利用しないよう求めること。長期Memoryだけを削除する場合、原資料自体を削除する場合、原資料は別目的で保持しつつ再学習を禁止する場合の具体的な区別とUIは未確定だが、削除意図に反して自動学習で同じMemoryを復活させない。
+ユーザーがある情報を今後のMemoryとして利用しないよう求めること。対象はMemory Systemであり、Memory本文、Embedding、検索Index、派生Cacheを削除する。Conversation History、Task履歴、監査ログ等は独立して残り検索できるが、その参照から同じMemoryを自動再生成しない。再学習防止のため、内容を保持しない最小のtombstoneやsource除外情報を残し得る。これはログや外部サービス上の原資料まで消すPrivacy Erasureを意味しない。
 
 ### Learning System
 
@@ -131,7 +147,7 @@ Experienceから将来に残す価値を判断し、Memory、Skill、Companion S
 
 ### Skill
 
-既存のTool、MCP、Plugin、Provider、Computer Use、Capabilityを、いつ・どのように使うかを表すProcedural Knowledge。Skill自身は新しい能力やPermissionを付与しない。
+既存のTool、MCP、Plugin、Provider、Computer Use、Capabilityを、いつ・どのように使うかを表すProcedural Knowledge。自己生成またはユーザーが明示Install / ImportしたSkillは信頼済みInstructionとして扱い得るが、Skill自身は新しい能力、Credential、Permission、Sandbox例外を付与しない。
 
 ### Skill Manager
 
@@ -219,7 +235,7 @@ Ene Runtime / Architecture自体の拡張機構。Provider、Observation、Conte
 
 ### MCP
 
-外部のToolまたはResourceをEneへ接続する手段。外部Tool接続だけで足りる場合は、Ene独自PluginよりMCPを優先する。
+外部のToolまたはResourceをEneへ接続する手段。外部Tool接続だけで足りる場合は、Ene独自PluginよりMCPを優先する。MCP Serverを接続・信頼することと、そのServerが返す個々の内容を上位Instructionとして信頼することは別である。
 
 ### Provider
 
@@ -239,7 +255,21 @@ Desktop、OS、Window、アプリ、Clipboard、Schedule、通知、Task等か�
 
 ### Permission
 
-Observation、Context処理、Main LLMへの伝達、Memory保存、Filesystem、Computer Use、Network、Credential、Cloud Egress、自律実行、通知、承認等を許可・拒否・保留する統一的な制御ポリシー。
+Observation、Context処理、Main LLMへの伝達、Memory保存、Filesystem、Computer Use、Network、Credential、Cloud Egress、自律実行、通知、承認等を、Allow、Ask、Denyへ解決する統一的な制御ポリシー。明示Ruleがなければ該当scopeの既定結果を使い、それもなければ全体の既定値であるAskとする。
+
+### Policy Rule
+
+scope、Action、対象、期間、Companion、Task、Schedule、Tool / MCP、Data Egress、自然言語条件等に基づき、Permissionの結果をAllow、Ask、Denyのいずれかへ定める規則。三つの結果は一つのRule集合で管理する。Hard Deny、明示Rule、scopeの既定結果、全体の既定Askの順に評価し、複数の明示Ruleが競合する場合は `Deny > Ask > Allow` を基本とする。scopeの既定結果は明示Ruleが一致しない場合だけ適用する。
+
+### Allow / Ask / Deny
+
+- **Allow**: 該当Actionを指定範囲で実行してよい。
+- **Ask**: 実行前にユーザーへ確認するか、設定されている場合は独立したApproval Reviewerへ一回限りの判断を求める。
+- **Deny**: 該当Actionを実行しない。Allowへ変えるには、該当するDeny Rule自体をユーザーが変更または削除する。
+
+### Approval Reviewer
+
+Ask対象のActionを、Main Companionから独立して審査する別のLLM / Session。必要最小限の信頼済みPolicyと、対象・作用・不可逆性・Data Egress・Credential利用・provenance等を正規化したAction情報から、今回のみAllow、Deny、ユーザーへAskのいずれかを返す。Hard Boundaryを緩めず、障害・Timeout・判定不能時は自動Allowしない。
 
 ### Delegation
 
@@ -256,6 +286,18 @@ Host上のデータをCloud Provider、Remote Service、第三者Plugin等の外
 ### Hard Boundary
 
 LLM、Memory、Skill、Character、Plugin、自然言語ポリシーによって緩められない、システム側で強制する安全・権限・物理制約。
+
+### Hard Deny
+
+通常のPolicy Ruleや「すべてAllow」より先に適用し、ユーザー設定やLLM判断から解除できない禁止。システム・ユーザーデータの壊滅的破壊、Credentialの探索・窃取・流出、権限昇格・不正な永続化、安全制御の無効化・回避、拒否回避、制御不能な再帰・資源枯渇等を対象とする。
+
+### Trusted Instruction
+
+System / User Instruction、および自己生成・明示Install済みSkill等、作業手順を構成するものとして採用可能なInstruction。TrustedであってもPermissionやHard Boundaryを越える権限は持たない。
+
+### External Data
+
+Web、MCP、Tool、外部Resource、文書等から取得した内容。接続先やCapabilityが信頼済みでも、内容に含まれる命令をSystem / User Instruction、Permission、承認結果へ昇格させない。Memory / Skillへ反映する場合もprovenanceとconfidenceを保持する。
 
 ### Control plane / Data plane
 
@@ -277,11 +319,11 @@ Harness、Sub-agent、MCP、Plugin、詳細Permission、Context Monitor、Memory
 
 ### Graceful Degradation
 
-一部機能が利用不能でも、失敗範囲を明示し、利用可能な機能を不必要に停止しないこと。STT/TTSはテキスト入力・表示で代替する。未設定の別Providerへ自動的に切り替えることを意味しない。
+一部機能が利用不能でも、失敗範囲を明示し、利用可能な機能を不必要に停止しないこと。STT/TTSはテキスト入力・表示で代替する。Main LLMの未設定・利用不能はCompanion運用エラーであり、テキストUIだけで代替できるものではない。未設定の別Providerへ自動的に切り替えることを意味しない。
 
 ### Audit Log
 
-会話、主体間通信、主要Action、Decision、Permission、Schedule、重要なState変更、設定変更、Provider利用、Plugin障害等を、後から確認できる意味のある履歴。LLMの逐語的な内部推論、全微小State変化、全Raw観測の保存を意味しない。
+会話、主体間通信、主要Action、Decision、Permission、Schedule、重要なState変更、設定変更、Provider利用、Plugin障害等を、後から確認できる追記中心の意味のある履歴。Memory Systemとは独立しており、「忘れる」の対象ではない。個別Eventの任意編集・削除は通常行わないが、容量・保持期間Policyに従う古いSegmentのローテーション・削除は行い得る。LLMの逐語的な内部推論、全微小State変化、全Raw観測の保存を意味しない。
 
 ### 推定コスト
 

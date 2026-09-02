@@ -1,7 +1,7 @@
 # 不変条件
 
 状態: **Baseline / 対話による初版確定**
-最終確認: 2026-09-02
+最終確認: 2026-09-03
 
 以下は、Provider、モデル、OS、UI、Storage、Plugin、通信方式などの実装を変更しても破ってはならない製品上の不変条件である。性能目標、具体的なschema、実装上の便利な制約はここへ置かない。
 
@@ -31,7 +31,7 @@ Agent Harness、Computer Use、Tool、MCP、Plugin、内部推論、Sub-agentは
 
 ### INV-006 Hostが永続状態の正本である
 
-Eneの永続的なユーザーデータ、Companion State、Memory、Character Instance、Permission、Task履歴の正本は、Ene CoreをホストするHost PCにある。Cloud Provider、Remote Client、Pluginを唯一の正本にしない。
+Eneの永続的なユーザーデータ、Companion State、Memory、Character Instance、Permission、Task履歴、主要ログの正本は、Ene CoreをホストするHost PCにある。Eneが管理するローカル永続データは単一のApp Data Directory配下へ置き、そのDirectoryの移動・複製でローカル状態を復元可能にする。Cloud Provider、Remote Client、Pluginを唯一の正本にしない。OS保護Credential、外部サービス側の状態、OS固有Integrationは再設定が必要になり得る例外とする。
 
 ### INV-007 観測・伝達・保存・送信は同一ではない
 
@@ -47,17 +47,17 @@ Current Affective State、Mood、Relationship、Interest等の内部数値・構
 
 ### INV-010 Memoryの種類とscopeを混同しない
 
-Working、Core、Episodic、SemanticというMemoryの種類と、Shared、Companion-specificというscopeは別の軸である。Shared / Companion-specificを理由にMemory種別を失わない。Working Memoryが短期状態であることと、長期Memoryのscope分類も混同しない。
+Working、Core、Episodic、SemanticというMemoryの種類と、Shared、Companion-specificというscopeは別の軸である。長期Memoryのscopeはこの2つのみとし、Shared / Companion-specificを理由にMemory種別を失わない。Working Memoryが短期状態であることと、長期Memoryのscope分類も混同しない。別Companionは他個体のCompanion-specific Memoryを直接読めず、ログ検索等を迂回路として同内容を取得しない。内容を知るには所有Companionとの会話を通じて共有を受ける。
 
 ### INV-011 削除意図を学習が覆さない
 
-ユーザー削除またはPrivacy / retention policyによって長期Memoryとして利用しないと決定された情報を、Learning Review、Consolidation、Retrievalその他の自動処理が、残存する原資料から同じ長期Memoryとして勝手に復活させてはならない。
+「忘れる」はMemory Systemだけへ適用し、対象Memoryと、そのEmbedding、検索Index、派生Cacheを削除する。独立したConversation History、Task履歴、監査ログは残り、検索・参照できるが、Learning Review、Consolidation、Retrievalその他の自動処理が、その参照から同じ長期Memoryを勝手に復活させてはならない。ユーザーが明示的に再記憶を求めた場合は、新しいMemoryとして扱う。
 
 ## 安全性と権限
 
 ### INV-012 Hard BoundaryはLLMより強い
 
-LLM、Memory、Skill、Character Package、Plugin、MCP、Provider、自然言語委任のいずれも、機械的に禁止されたFilesystem、Credential、Network、Device、Cloud Egress、Computer Use、Capabilityへアクセスできない。
+Main LLM、Approval Reviewer、Memory、Skill、Character Package、Plugin、MCP、Provider、自然言語委任のいずれも、機械的に禁止されたFilesystem、Credential、Network、Device、Cloud Egress、Computer Use、Capabilityへアクセスできない。
 
 ### INV-013 学習は権限を増やさない
 
@@ -69,11 +69,11 @@ Character Definition、Character Package、Character Instanceが望むRole、Cap
 
 ### INV-015 Skillは能力や権限を追加しない
 
-Skillは既存Capabilityの使い方を表すProcedural Knowledgeであり、新しいTool、Provider、Credential、Filesystem、Network、Permission、Sandbox例外を追加しない。
+Skillは既存Capabilityの使い方を表すProcedural Knowledgeであり、新しいTool、Provider、Credential、Filesystem、Network、Permission、Sandbox例外を追加しない。自己生成または明示Install済みで信頼済みInstructionとして扱われても、この境界は変わらない。
 
 ### INV-016 Pluginは無制限の特権を持たない
 
-PluginはEneを拡張できるが、Pluginであることを理由にCore、他Plugin、CompanionのPrivate Memory、ユーザーデータ、OS資源へ無制限にアクセスできない。公開Extension PointとPermission / Broker境界を通る。
+PluginはEneを拡張できるが、Pluginであることを理由にCore、他Plugin、他CompanionのCompanion-specific Memory、ユーザーデータ、OS資源へ無制限にアクセスできない。公開Extension PointとPermission / Broker境界を通る。
 
 ## 実行と会話
 
@@ -118,3 +118,25 @@ Providerが利用不能になった場合、ユーザーが選んでいない別
 ### INV-026 過去資料は現行要件ではない
 
 過去の設計・計画資料やGit履歴に書かれた設計、数値、実装構造を、明示的な再確認なしに現行要件や不変条件へ昇格させない。
+
+## 必須構成とPolicy
+
+### INV-027 Main LLMなしでCompanionを運用しない
+
+Main LLMの未設定を正規構成として扱わない。設定済みMain LLMが利用不能な場合も、Companionの会話・判断・新規Actionを利用可能であるかのように継続しない。STT / TTSだけはテキストUIで代替できる。
+
+### INV-028 すべてのActionは事前Policy評価を通る
+
+Companion自身によるSchedule作成を含め、Capabilityを使用するすべてのActionは実行前に統一Permission Systemで評価する。明示Ruleがなければ該当scopeの既定結果を使い、それもなければAskとする。Schedule作成時の許可を将来の実行時の無条件な許可として扱わない。
+
+### INV-029 Hard Denyは「すべてAllow」でも解除されない
+
+システム・ユーザーデータの壊滅的破壊、Credentialの探索・窃取・流出、権限昇格・不正な永続化、安全制御の無効化・回避、拒否回避、制御不能な再帰・資源枯渇等のHard Denyは、明示Allow、「すべてAllow」、自然言語Policy、LLM判断のいずれでも解除されない。
+
+### INV-030 Approval Reviewerは権限を増やさない
+
+Approval ReviewerはMain Companionとは独立したLLM / Sessionとして必要最小限の信頼済みPolicyと構造化Actionだけを評価し、Hard Boundaryを緩めたり永続Allow Ruleを自動作成したりしない。判定不能・障害・TimeoutをAllowとして扱わない。
+
+### INV-031 外部Dataは上位Instructionではない
+
+Web、MCP、Tool、外部Resource、文書から得た内容は、接続先やCapabilityが信頼済みでも外部Dataである。そこに含まれる命令は、System / User Instruction、Permission Policy、承認結果、Hard Boundaryを変更しない。

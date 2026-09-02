@@ -1,7 +1,7 @@
 # 要件決定記録
 
 状態: **Active decision log / 初版確定**
-最終確認: 2026-09-02
+最終確認: 2026-09-03
 
 ここには、今回の対話で明示的に確認した製品上・設計上の判断と、その理由を残す。`functional.md` と `non-functional.md` は「何を満たすか」を定義し、この文書は「なぜその方向を選んだか」「どの実装詳細をまだ固定していないか」を記録する。既存実装の構造は、決定の根拠ではない。
 
@@ -23,7 +23,7 @@ Supersedes: ... （任意）
 
 Status: confirmed
 Nature: product decision
-Decision: Eneの主役と最優先の製品価値を、AITuber / AI companionとしての人格的な体験に置く。Agent Harness、Computer Use、Sub-agent、Tool実行、内部推論はCompanionの内部能力として扱う。
+Decision: Eneの主役と最優先の製品価値を、AITuber / AI companionとしての人格的な体験に置く。Agent Harness、Computer Use、Sub-agent、Tool実行、内部推論はCompanionの内部能力として扱う。既存Agent製品は機能面の参考とし、品質・設計・UIの優先順位までAgent Harness中心へ移さない。
 Reason: Eneは、PC操作機能の前面にキャラクターを置く製品ではなく、ユーザーが一緒に過ごせる個が必要に応じて実作業を行う製品を目指すため。
 Consequences: 日常UIはCompanion中心とし、内部エージェントの詳細は必要な場合だけ深い管理画面で見せる。
 
@@ -41,7 +41,7 @@ Status: confirmed
 Nature: design direction
 Decision: Ene Core、永続状態、Scheduler、Context Monitor、Learning、HarnessはHostに置き、Desktop / Remote Clientは同じCoreへ接続する。
 Reason: ユーザーが接続していない間もCompanionとTaskが継続する必要があるため。
-Consequences: 現行はWindows / LinuxをHostとDesktop Clientの対象とし、将来macOS、Mobile、Web Clientを追加できる余地を残す。Remote Clientは現行の正式対象ではない。
+Consequences: 直近BetaはWindows / LinuxをHostとDesktop Clientの対象とし、後続実装でmacOS、Mobile、Web Clientを追加する。Remote Clientは直近Betaの対象ではない。
 
 ### R-D004: 複数の独立したCompanion
 
@@ -57,7 +57,7 @@ Status: confirmed
 Nature: product decision
 Decision: 配布可能なCharacter Definition / Packageと、特定ユーザーのもとで成長するCharacter Instanceを分ける。
 Reason: 同じキャラクターを複数ユーザーが使っても、個人的なMemory、Emotion、Relationshipを混ぜないため。
-Consequences: Import / Export、将来の配布・販売Marketplaceを想定できるが、PackageはPermissionを付与しない。
+Consequences: Character Definition / PackageはImport / Exportし、必要なSkillやResourceを一緒に配布できる。成長済みCharacter Instance自体のExport / Importは要件とせず、個人のMemory、ログ、Relationship、Credentialを配布物へ含めない。将来の配布・販売Marketplaceを想定できるが、PackageはPermissionを付与しない。
 
 ### R-D006: Aliciaを現行デフォルトとする
 
@@ -71,17 +71,17 @@ Consequences: 機能要件は特定Character名へ固定せず「少なくとも
 
 Status: confirmed
 Nature: product decision
-Decision: 現行の主UIはDesktopMate風のVRMデスクトップマスコットとし、通常対話はSTT / TTSによる音声を中心にする。
+Decision: 直近Betaの主UIはDesktopMate風のVRMデスクトップマスコットとし、通常対話はSTT / TTSによる音声を中心にする。音声入力は常時待受のVADを既定とし、Wake Word、Push-to-Talk、音声入力無効も選択可能にする。
 Reason: EneのAITuberらしさと「同じPC上に存在する」感覚を製品の入口にするため。
-Consequences: STT未設定時はテキスト入力、TTS未設定時は吹き出し表示を使い、同じ会話として継続する。
+Consequences: STT未設定時はテキスト入力、TTS未設定時は吹き出し表示を使い、同じ会話として継続する。1対1利用を基本とし、話者識別・本人認証や周囲の他者の声の排除は初期要件としない。マイク状態を表示し、即時Muteを可能にする。
 
 ### R-D008: Full-duplexは将来、構造は阻害しない
 
 Status: confirmed
 Nature: product decision
-Decision: 現行版で人間に近いfull-duplex / barge-inを必須とせず、将来追加するために会話・音声I/Oを全面再設計する必要がない構造を目指す。
+Decision: 直近Betaで人間に近いfull-duplex / barge-inを必須とせず、後続実装で追加するために会話・音声I/Oを全面再設計する必要がない構造を目指す。
 Reason: 初期の複雑性を抑えつつ、音声体験の将来性を失わないため。
-Consequences: 現行の半二重対話、発話停止・キャンセル・割り込みを将来拡張できる境界として扱う。
+Consequences: 直近Betaの半二重対話、発話停止・キャンセル・割り込みを後続拡張できる境界として扱う。
 
 ### R-D009: Bodyの意味判断と物理制約の分離
 
@@ -135,17 +135,17 @@ Consequences: 低レベルの全操作を流すのではなく、Task履歴と�
 
 Status: confirmed
 Nature: product decision
-Decision: 観測、Companionの自発発話、内部調査、外部状態変更作業を別の自律性・Permissionとして扱う。新規の外部変更作業は原則通知し、事前委任・Schedule済み・提案の根拠調査は通知なしを許可する。
+Decision: 観測、Companionの自発発話、内部調査、Schedule作成、外部状態変更作業を別の自律性・Permissionとして扱う。Companion自身によるSchedule作成を含むすべてのActionへ事前Policyを適用する。新規の外部変更作業は原則通知し、事前委任・Schedule済み・提案の根拠調査は明示Allowの範囲で通知なしを許可する。
 Reason: 能動的なCompanionらしさと、予期しない外部変更の抑制を両立するため。
-Consequences: 通知と承認を区別し、詳細なリスク閾値は未確定のままHard Boundaryと文脈判断を組み合わせる。
+Consequences: 通知と承認を区別し、既定Ask、明示Allow / Deny、独立Approval Reviewer、Hard Boundaryを組み合わせる。
 
 ### R-D016: Host中心のLocal-first
 
 Status: confirmed
 Nature: product decision
-Decision: 会話、Memory、Emotion / Mood、Relationship、Character Instance、設定、Permission、Task履歴等の永続状態はHost PCを正本とする。
+Decision: 会話、Memory、Emotion / Mood、Relationship、Character Instance、設定、Permission、Schedule、Task履歴、主要ログ等の永続状態はHost PCを正本とし、Eneが管理するローカルデータを単一のApp Data Directory配下へ自己完結して保存する。
 Reason: ユーザーの個人的な存在としてのEneを、特定Cloud ProviderやClientの可用性から分離するため。
-Consequences: Cloudは必要な計算の委譲先であり、Remote Clientは同じ正本へ接続する。
+Consequences: Cloudは必要な計算の委譲先であり、Remote Clientは同じ正本へ接続する。専用Migration Toolを要件とせず、Directoryの移動・複製でローカル状態を復元可能にする。OS保護Credential、外部サービス側の状態、OS固有Integrationは再認証・再設定が必要になり得る。
 
 ### R-D017: Providerをコンポーネントごとに選ぶ
 
@@ -185,7 +185,7 @@ Status: confirmed
 Nature: design direction
 Decision: 外部Tool / Resourceの接続だけで足りる場合は、Ene独自Pluginを作らずMCPを利用する。
 Reason: Plugin SystemをMCPの再実装にせず、標準的な外部接続とEne内部拡張を分離するため。
-Consequences: MCPは外部能力、PluginはEne自体の拡張、Skillは既存能力の使い方として扱う。
+Consequences: MCPは外部能力、PluginはEne自体の拡張、Skillは既存能力の使い方として扱う。MCP / Toolを接続・信頼することと、その出力内容を上位Instructionとして信頼することは分ける。
 
 ### R-D022: 第三者Pluginは隔離する
 
@@ -209,7 +209,7 @@ Status: confirmed
 Nature: product decision
 Decision: MemoryをWorking、Core、Episodic、Semanticに分け、scopeをSharedとCompanion-specificに分ける。SkillはProcedural Memoryとして別管理する。
 Reason: 現在の作業状態、常時参照する情報、経験、抽象化された事実、作業手順、共有範囲を混同しないため。
-Consequences: Working Memoryは短期状態として扱い、Coreは小さく厳選し、Episodic / SemanticはRetrievalする。Learning Reviewの長期保存先としてWorking Memoryを扱わない。Memoryの具体schemaは未確定。
+Consequences: Working Memoryは短期状態として扱い、Coreは小さく厳選し、Episodic / SemanticはRetrievalする。Learning Reviewの長期保存先としてWorking Memoryを扱わない。長期MemoryのscopeはSharedとCompanion-specificの2つのみとする。別Companionは他個体のCompanion-specific Memoryを直接読めず、ログ検索等を迂回路として同内容を取得しない。所有Companionとの会話を通じて共有を受ける。Memoryの具体schemaは未確定。
 
 ### R-D025: 自動想起と明示検索を併用する
 
@@ -223,9 +223,9 @@ Consequences: Consolidated Memoryだけでなく、保持ポリシーで利用�
 
 Status: confirmed
 Nature: design direction
-Decision: 通常の忘却は物理削除ではなくRecall priorityの低下とし、ユーザー削除、Privacy、明確な誤記憶、完全重複等では物理削除や再学習禁止を行えるようにする。
+Decision: 通常の忘却は物理削除ではなくRecall priorityの低下とする。ユーザーの「忘れる」はMemory Systemだけへ適用し、Memory本文、Embedding、検索Index、派生Cacheを物理削除する。Conversation History、Task履歴、監査ログは独立して残し、検索可能とする。
 Reason: 強いcueがあれば古い経験を思い出せる余地を残しつつ、ユーザーの削除意図とPrivacyを守るため。
-Consequences: Memoryはimportance、recency、emotional significance、confidence等を持つ。削除意図に反して原資料から同じMemoryを自動再生成しない。
+Consequences: Memoryはimportance、recency、emotional significance、confidence等を持つ。残存ログを参照しても同じMemoryを自動再生成せず、そのための最小tombstoneまたはsource除外情報を保持できるようにする。ユーザーが明示的に再記憶を求めた場合は新しいMemoryとして作成できる。「忘れる」はPrivacy Erasureやログ削除を意味しない。
 
 ### R-D027: Learning Review / Consolidationを分離する
 
@@ -233,7 +233,7 @@ Status: confirmed
 Nature: design direction
 Decision: 個々のExperienceからの候補作成・即時反映をLearning Review、重複統合・抽象化・再評価・忘却調整をConsolidationとして扱い、非緊急のConsolidationは主にアイドル時・余剰資源のある時に行う。
 Reason: ユーザー体験への即時性と、常駐Coreの軽量性を両立するため。
-Consequences: Host停止・高負荷を跨ぐ処理キューが必要になるが、固定夜間実行やMain LLM常時実行は要求しない。アイドル時処理をLearning Reviewそのものと混同しない。
+Consequences: 高負荷時は処理を中断・延期・分割できる。実行中・処理待ちのLearning / Consolidation自体をCrash後まで耐久化することは要求せず、確定済みの元情報から必要に応じて再計算する。固定夜間実行やMain LLM常時実行は要求しない。
 
 ### R-D028: 学習は自動、管理は深いUI
 
@@ -247,9 +247,9 @@ Consequences: Permissionと保持ポリシーは自動学習より上位に置�
 
 Status: confirmed
 Nature: product decision
-Decision: Skillは独自フォーマットを作らず、可能な限りAgent Skillsの形式・運用と互換にする。Ene固有のscope、評価、provenance、revision、利用履歴はSkill Manager側で管理する。
+Decision: Skillは独自フォーマットを作らず、可能な限りAgent Skillsの形式・運用と互換にする。Ene固有のscope、評価、provenance、revision、利用履歴はSkill Manager側で管理する。Character Packageや他のSkillと依存関係を保って配布可能にする。
 Reason: Import / Export、Progressive Disclosure、他のSkill対応Agentとの再利用性を確保するため。
-Consequences: Skillは既存Capabilityの使い方であり、Plugin、MCP、Permissionを代替・付与しない。
+Consequences: Eneが自己生成したSkillとユーザーが明示Install / ImportしたSkillは信頼済みInstructionとして扱えるが、既存Capabilityの使い方に限られ、Plugin、MCP、Credential、Permission、Sandbox例外を代替・付与しない。配布物へ個人のMemory、ログ、Credentialを含めない。
 
 ### R-D030: Emotionを連続StateとAppraisalで表す
 
@@ -279,9 +279,9 @@ Consequences: 3層の違いは画面構成、導線、視覚的階層で一貫�
 
 Status: confirmed
 Nature: design direction
-Decision: 会話、主体間通信、Task、Tool / MCP / Computer Use、Permission、Schedule、重要Context、Memory / Skill変更、重要なCompanion State変更、設定変更、Provider利用、Plugin障害等を追跡可能にする。一方、逐語的な内部推論、全微小State変化、Raw音声、Raw画面、意味のない低レベルイベントを既定で永続保存しない。
+Decision: 会話、主体間通信、Task、Tool / MCP / Computer Use、Permission、Schedule、重要Context、Memory / Skill変更、重要なCompanion State変更、設定変更、Provider利用、Plugin障害等を追記中心のログとして追跡可能にする。一方、逐語的な内部推論、全微小State変化、Raw音声、Raw画面、意味のない低レベルイベントを既定で永続保存しない。
 Reason: 監査性、トラブルシュート、Privacy、Storage消費を両立するため。
-Consequences: 監査ログを完全なクラッシュリプレイやEvent Sourcingと同一視しない。
+Consequences: Memoryの「忘れる」でログを削除せず、個別Eventの任意編集・削除も通常機能としない。容量・保持期間Policyに従い、古いSegment単位のローテーション・削除は可能にする。監査ログを完全なクラッシュリプレイやEvent Sourcingと同一視しない。
 
 ### R-D034: コストを第一級に管理する
 
@@ -303,9 +303,9 @@ Consequences: VRM / Providerの負荷はCoreと分けて評価し、高負荷時
 
 Status: confirmed
 Nature: product decision
-Decision: Crash、再起動、Provider・Plugin障害に対し、確定状態、主要履歴、Task、Learning待ちを合理的な範囲で保護・復元する。ただし完全なクラッシュリプレイ、無停止Failover、自動Provider fallbackは必須にしない。
+Decision: Crash、再起動、Provider・Plugin障害に対し、確定済みの会話、Memory、設定、Permission、Schedule、主要ログ、Taskの最終状態を合理的な範囲で保護する。実行中だったTaskは `interrupted` または状態不明とし、外部変更を自動Replayしない。未確定のLearning / Consolidation作業は失われてもよく、元情報から再計算できればよい。
 Reason: 必要な信頼性を確保しつつ、過剰な耐久基盤を製品要件に持ち込まないため。
-Consequences: 部分障害を隔離し、成功・失敗・中断・保留を正確に表示する。
+Consequences: 部分障害を隔離し、成功・失敗・中断・状態不明・保留を正確に表示する。現在の外部状態を確認してから手動Retryできるようにする。完全なクラッシュリプレイ、実行中キューの完全耐久化、無停止Failover、自動Provider fallbackは必須にしない。
 
 ### R-D037: Semantic StateとCompanion Contextを分ける
 
@@ -319,15 +319,15 @@ Consequences: Internal State → Semantic Stateと、複数情報源 → Compani
 
 Status: confirmed
 Nature: product decision
-Decision: 初回設定でMain LLM、STT、TTS等の推奨候補を提示できるが、利用するProviderまたは未設定はユーザー自身が明示的に選択する。STT / TTSは未設定を正規の構成とする。
+Decision: 初回設定でMain LLM、STT、TTS等の推奨候補を提示できるが、利用構成はユーザー自身が明示的に選択する。Main LLMには利用可能なProviderを必須とし、未設定を許可しない。STT / TTSは未設定を正規の構成とする。
 Reason: Providerは費用、Privacy、Hardware負荷、品質に影響するため、推奨をユーザーの選択として扱わないため。
-Consequences: STT / TTS未設定時はテキストUIを利用する。有料ProviderについてはR-D019の明示同意も満たす。
+Consequences: Main LLMが未設定または利用不能ならCompanion運用エラーとする。STT / TTS未設定時はテキストUIを利用する。有料ProviderについてはR-D019の明示同意も満たす。
 
 ### R-D039: 将来ClientもCapabilityを提供できる
 
 Status: confirmed
 Nature: design direction
-Decision: 現行のDesktop Observation / Computer UseはHost PCを主対象とするが、将来のClientが音声I/O、Observation、Body、Computer Use等をCapabilityとしてHost上の同じEneへ提供できる構造を保つ。
+Decision: 直近BetaのDesktop Observation / Computer UseはHost PCを主対象とするが、後続Clientが音声I/O、Observation、Body、Computer Use等をCapabilityとしてHost上の同じEneへ提供できる構造を保つ。
 Reason: 複数デバイスから同じCompanionへ接続する将来像で、Client側を単なる表示端末に固定しないため。
 Consequences: Companion Stateと永続状態の正本はHostに維持する。Observation等のCapabilityの実行場所はHostだけに固定せず、追加時にCoreやPermission Systemを大規模に再設計することを前提としない。具体的なRemote protocol、認証、暗号化、開始時期は未確定。
 
@@ -343,9 +343,9 @@ Consequences: Embedding単独に固定せず、Hybrid RetrievalとRerankingを�
 
 Status: confirmed
 Nature: product decision
-Decision: ユーザー削除またはPrivacy / retention policyによって長期Memoryとして利用しないと決定された情報は、原資料が別目的で残っていても、Learning ReviewやConsolidationによって同じ長期Memoryとして自動再生成しない。
+Decision: ユーザーが「忘れる」としたMemoryは、原資料であるConversation History、Task履歴、監査ログが独立して残り検索されても、Learning ReviewやConsolidationによって同じ長期Memoryとして自動再生成しない。
 Reason: 「忘れて」というユーザー意図やPrivacy削除が、バックグラウンド学習によって無効化されることを防ぐため。
-Consequences: Memoryのみの削除、原資料自体の削除、原資料を残した再学習禁止を区別できる余地を持つ。具体的なUI、保持情報、tombstone等の実装方式は未確定。
+Consequences: Memory本文、Embedding、検索Index、派生Cacheを削除し、内容を保持しない最小tombstone、source除外等で再学習を防ぐ。具体的なUIと保持方式は未確定。ユーザーの明示的な再記憶要求は許容し、Memory全消去後に過去ログを既定で一括再学習しない。
 
 ### R-D042: Companion StateとCurrent Contextを分ける
 
@@ -355,21 +355,62 @@ Decision: Emotion Systemの状態、Mood、Relationship、Interest、意図等�
 Reason: 「Companion自身の状態」と「現在周囲で起きていること」を同じStateへ押し込み、永続化・Semantic State・Context構築の責務を曖昧にしないため。
 Consequences: Main LLM起動時は両者を必要に応じてCompanion Contextへ統合する。Current ContextをCompanion Stateとして恒久保存することを前提としない。
 
+### R-D043: Betaは実装順、正式リリースは全要件完了後
+
+Status: confirmed
+Nature: product decision
+Decision: `v1` と呼んでいた区切りは直近Betaの実装マイルストーンとして扱い、製品全体の正式リリースとはみなさない。要件から明示的に削除したものを除き、後続実装対象を含む残存要件をすべて実装した段階を正式リリースとする。
+Reason: Platformや高度な音声機能等を実装順によって分けても、完成時の製品範囲から外す意図ではないため。
+Consequences: 文書では `v1` を直近Betaへ置き換える。後続要件の詳細設計を現時点で完了する必要はないが、既知の追加にCore全体の置換を要する明らかな行き止まりへ固定しない。
+
+### R-D044: Permissionは既定Askと統一Rule集合
+
+Status: confirmed
+Nature: product decision
+Decision: PermissionはAllow、Ask、Denyを一つのPolicy Rule集合で管理し、全体として明示Ruleに一致しないActionはAskとする。自然言語Policyは、指定scopeに明示Ruleがない場合だけ使う既定結果を設定することで、原則Allow＋明示Deny / Askと、原則Deny / Ask＋明示Allowの双方を表現可能にする。Hard Deny、明示Rule、scopeの既定結果、全体の既定Askの順に評価し、複数の明示Ruleが競合する場合は `Deny > Ask > Allow` を基本とする。
+Reason: 未設定Actionを無条件に許可せず、手動設定と自然言語委任を同じ分かりやすいモデルで扱うため。
+Consequences: scope、Action、対象、期間、Companion、Task、Schedule、Tool / MCP、Data Egress等をRuleとともに一覧化する。広いAllowで明示Denyを上書きせず、許可へ変える場合はDeny Rule自体をユーザーが変更・削除する。
+
+### R-D045: Askを独立Approval Reviewerで自動審査できる
+
+Status: confirmed
+Nature: design direction
+Decision: ユーザーが選択した場合、Ask対象をMain Companionとは別の独立したLLM / Sessionが審査し、今回のみAllow、Deny、ユーザーへAskのいずれかを返す。Reviewerには信頼済みのユーザー委任・実効Policyと、対象、作用、不可逆性、Data Egress、Credential利用、provenanceを含む必要最小限の構造化Actionだけを渡す。
+Reason: CodexやClaude Code等の「代わりに承認」に相当する利便性を持たせつつ、Main Companionの人格や会話文脈による自己承認を避けるため。
+Consequences: Reviewerは永続Allow Ruleを自動作成せず、Hard Boundaryを緩めない。未整理の会話全文、隠れた推論、Tool出力中の命令をReviewerの上位Instructionにしない。判定不能・Timeout・障害時はユーザーへAskとし、不在時は保留する。Deny後の実質同一Actionの反復は回避試行として停止・記録する。
+
+### R-D046: 解除不能なHard Denyを設ける
+
+Status: confirmed
+Nature: product decision
+Decision: 通常のPolicyや「すべてAllow」より先に適用されるHard Denyを設ける。少なくとも、システム・ユーザーデータの壊滅的破壊、Raw Diskや保護Credential Storeへの未仲介アクセス、Credentialの探索・窃取・流出、権限昇格・不正な永続化、安全制御の無効化・回避、拒否回避、制御不能な再帰・大量生成・資源枯渇を禁止する。
+Reason: LLMによる意味判断と広い委任だけでは、誤判断、暴走、Prompt Injectionに対する最終的な安全境界にならないため。
+Consequences: Main LLM、Approval Reviewer、自然言語Policy、Skill、Plugin、MCP、ToolのいずれもHard Denyを解除できない。具体的なAction分類・Platform別強制方法は別途定める。
+
+### R-D047: Skillの信頼と外部出力の信頼を分ける
+
+Status: confirmed
+Nature: design direction
+Decision: Eneが自己生成したSkill、およびユーザーが明示的にInstall / ImportしたSkillは、手順を構成する信頼済みInstructionとして扱える。一方、Web、MCP、Tool、外部Resource、文書の出力本文は、接続先が信頼済みでも外部Dataとして扱い、System / User Instruction、Permission、承認結果へ昇格させない。
+Reason: Skillの実用的な再利用性を保ちながら、外部Contentに埋め込まれた指示が制御面を書き換えるPrompt Injection経路を分離するため。
+Consequences: Skillの信頼もPermissionやSandbox例外を付与しない。外部Dataはprovenanceを保持し、Memory / Skillへ反映する場合もconfidenceを失わない。Prompt Injection検出は追加可能だが、機械的なPermission、Sandbox、Broker、Credential、Data Egress境界の代替にはしない。
+
 ## 未確定事項
 
 次の項目は、今回の判断から直接は決まらないため、別途検証・対話して決める。
 
 | ID | 未確定項目 |
 |---|---|
-| O-001 | 各OS・Clientのリリース時期、対応機能、Remote接続の仕様・認証・暗号化・Device trust |
+| O-001 | 各OS・ClientのBeta内での実装順、対応機能、Remote接続の仕様・認証・暗号化・Device trust |
 | O-002 | AliciaからEne独自キャラクターへの移行方法、Character Packageのmanifest・署名・Marketplace方式 |
 | O-003 | LLM、VLM、Embedding、Reranker、STT、TTSのProvider・モデル・価格・Credential保管 |
 | O-004 | 完全Offlineで保証する機能範囲 |
 | O-005 | CPU、GPU、RAM、Storage、対話・音声・Remoteの定量的な性能予算 |
 | O-006 | Current Affective State、Mood、Relationship、Interest、Semantic State、Memoryの正確なschemaと更新式 |
-| O-007 | Permissionのリスク分類、通知・承認の閾値、自然言語ポリシーの競合解決 |
+| O-007 | Hard Deny Actionの厳密な分類・Platform別強制方法、自然言語PolicyのRule表現・確認UI、承認Popupの詳細 |
 | O-008 | Plugin API、Extension Point、IPC、Sandbox、Broker、bulk data転送の具体方式 |
 | O-009 | Companion間交流の段階数・既定値、ランダム起動の頻度・制限 |
-| O-010 | ログ、Memory、成果物、音声、画像、Tool outputの保持・削除・Export形式 |
-| O-011 | 「忘れる」要求のMemory削除、原資料削除、再学習禁止を区別するUI・保持方式 |
+| O-010 | ログ、成果物、音声、画像、Tool outputの保持期間、ローテーション、Segment削除、Export形式 |
+| O-011 | Memory削除後の再学習を防ぐ最小tombstone / source除外情報とMemory管理UIの具体方式 |
 | O-012 | Accessibility基準、UIテーマ、3層の視覚表現 |
+| O-013 | Approval Reviewerに利用するモデル、評価Prompt、Action schema、品質評価、Timeout値 |
