@@ -187,6 +187,10 @@ Context Monitorは「重要そうな変化がある」ことを通知できる�
 
 観測できること、Monitorが処理できること、Main Companionへ伝えられること、長期Memoryへ保存できること、Cloudへ送信できることを別々のPermissionとして評価できなければならない。
 
+### FR-CTX-008 将来のClient Capability
+
+現行のDesktop Observation / Computer UseはHost PCを主対象とする。将来、接続Clientが音声I/O、Observation、Body、Computer Use等のCapabilityを提供し、Host上の同じCompanionがそれらを利用できるよう拡張可能でなければならない。Capabilityの所在をHostだけに固定し、Client対応のためにCoreを大規模に再設計することを前提としてはならない。
+
 ## 6. Agent Harness、Sub-agent、Task
 
 ### FR-AGENT-001 汎用PC作業
@@ -232,6 +236,10 @@ Taskの完了・失敗・中断時、Sub-agentは、結果、実行した主要�
 ### FR-AGENT-011 Task状態
 
 Eneは、実行中、待機中、承認待ち、完了、失敗、中断等のTask状態をユーザーとCompanionが確認できるようにし、Clientの切断やCore再起動を跨いで必要な状態を保持できなければならない。
+
+### FR-AGENT-012 CancelとRetry
+
+ユーザーまたはCompanionは、実行中・待機中のTaskやSub-agent作業を必要に応じてCancelできなければならない。失敗・中断した作業は、影響範囲と現在状態を確認したうえで、適切な単位からRetryまたは再委任できなければならない。Retryによって既に完了した外部変更を無条件に重複実行することを前提としてはならない。
 
 ## 7. Schedule、自律行動、通知
 
@@ -446,11 +454,15 @@ Character設定は、イベントへのreactivity、状態のinertia / persisten
 
 ### FR-AFF-011 Semantic Stateへの変換
 
-内部の数値・構造化Stateを、そのままMain LLMへ大量に渡してはならない。Eneは、現在のEmotion、Mood、Relationship、Interest、Memory、Context、Task等を、確信度と由来を失わない意味表現であるSemantic Stateへ変換し、そのSemantic StateをCompanionのLLMへ提供できなければならない。
+Emotion、Mood、Relationship、Interest等の内部数値・構造化Stateを、そのままMain LLMへ大量に渡すことのみを前提としてはならない。Eneは、現在値、baselineとの差、直近の変化・trend、主な原因となったEvent / Appraisal、confidence等を、LLMが理解しやすい意味表現であるSemantic Stateへ変換できなければならない。
 
 ### FR-AFF-012 LLMへの利用
 
 CompanionのLLMは、Semantic StateをPersonality、Goals、Values、Memory、現在Contextと合わせて解釈し、発話、行動、表現、追加観測、Task委任を判断できなければならない。内部Stateの特定数値を機械的に発話へ変換することを要求しない。
+
+### FR-AFF-013 Companion Context
+
+Eneは、Semantic StateをMemory、Skill、Personality、Goals / Values、現在のConversation、Observation / Context、Task、Schedule、関連Appraisal等とは区別して保持し、Main LLM起動時に必要なものだけを統合したCompanion Contextを構成できなければならない。MemoryやTaskそのものをSemantic Stateへ変換しなければ利用できない設計を前提としてはならない。
 
 ## 12. RelationshipとInterest
 
@@ -481,6 +493,10 @@ Responsiveness、Self-disclosure、Support、Cooperation、Conflict、Promise ke
 ### FR-REL-007 派生評価
 
 Satisfaction、Sense of security、Affection、Resentment等は、必要なときにMemory、Relationship、Emotion、Contextから派生的に解釈できればよく、恒久的な単一数値軸として保存することを必須としない。
+
+### FR-REL-008 Character固有の関係傾向
+
+Attachment anxiety / avoidance、Need for closeness、Independence、Expressiveness等の関係傾向は、必要なCharacterについてPersonality / Character Definition側で表現できなければならない。これらを全Companion共通のRelationship Stateや好感度軸として必須化してはならない。
 
 ### FR-INT-001 Interestの分離
 
@@ -554,6 +570,10 @@ Provider障害時に、Eneが未設定の別Providerへ自動的に切り替え�
 
 Cloud Providerを使う処理では、送信されるデータの種類、送信先、認証、費用をユーザーが確認でき、Permissionで許可されたデータだけを送信しなければならない。
 
+### FR-PROV-007 初期Provider構成の明示選択
+
+初回設定では、少なくともMain LLM、STT、TTSについて推奨候補を提示できるが、利用するProviderまたは未設定をユーザー自身が明示的に選択できなければならない。STT / TTSは未設定を正規の構成として扱い、その場合はテキストUIで代替する。推奨候補をユーザーの選択とみなして自動適用してはならない。
+
 ## 15. Plugin、MCP、Skillの責務
 
 ### FR-EXT-001 汎用Plugin System
@@ -582,7 +602,7 @@ Eneは、Plugin、MCP、Skillを別概念として扱わなければならない
 
 ### FR-EXT-006 高帯域Pluginの性能
 
-Pluginの隔離は、Local LLM / VLM、STT、TTS、Embedding、画像、音声その他の高帯域・低遅延処理を実用上妨げてはならない。大量データを扱うPluginへ、不要なコピー・直列化・Core経由の中継を強制しない拡張・通信方式を選べなければならない。
+Pluginの隔離は、Local LLM / VLM、STT、TTS、Embedding、画像、音声その他の高帯域・低遅延処理を実用上妨げてはならない。PermissionとSandboxの範囲内で、隔離されたPluginプロセス自身がGPU、Accelerator、必要なRuntimeへ直接アクセスできる構成を許容し、大量データを扱うPluginへ不要なコピー・直列化・Core経由の中継を強制しない拡張・通信方式を選べなければならない。
 
 ### FR-EXT-007 Pluginの権限
 
@@ -616,7 +636,7 @@ Companion UIでは、ユーザーが「Companionが考え、行動している�
 
 ### FR-UI-005 視覚的な深さ
 
-3層の情報公開レベルは、画面構成、導線、視覚的階層で一貫して表現しなければならない。会話で示した「青の深さ」を視覚表現の候補とするが、正確な色、テーマ、コンポーネントは未確定である。
+3層の情報公開レベルは、画面構成、導線、視覚的階層で一貫して表現しなければならない。具体的な色、テーマ、コンポーネントは未確定である。
 
 ## 17. ログ、監査、コスト
 
