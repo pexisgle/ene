@@ -21,7 +21,7 @@ Ene CoreとEneの永続状態の正本を保持するコンピューター。現
 
 ### Client
 
-Host上の同じEneへ接続する対話、表示、操作のインターフェース。現行のDesktop Client対象はWindowsとLinux。macOS、Mobile、Web Clientは将来対象。将来的には表示端末に限らず、Permissionの範囲で音声I/O、Observation、Body、Computer Use等のCapabilityをHostへ提供し得る。
+Host上の同じEneへ接続する対話、表示、操作のインターフェース。現行のDesktop Client対象はWindowsとLinux。macOS Desktop Client、Mobile、Web等のRemote Clientは将来対象。将来的には表示端末に限らず、Permissionの範囲で音声I/O、Observation、Body、Computer Use等のCapabilityをHostへ提供し得るが、永続状態の正本にはならない。
 
 ### Companion
 
@@ -75,19 +75,19 @@ Companionが自分で行う、またはAgent Harnessへ委任する一つの目�
 
 ### Working Memory
 
-現在の会話、Task、直近の観測・文脈など、短期間の作業に使うMemory。
+現在の会話、Task、直近の観測・文脈など、短期間の作業に使うMemory。Core / Episodic / Semantic Memoryのような長期保存先とは区別する。
 
 ### Core Memory
 
-Companionが常時または高頻度に参照する、少量で重要なMemory。通常の出来事を無制限に格納しない。
+Companionが常時または高頻度に参照する、少量で重要な長期Memory。通常の出来事を無制限に格納しない。
 
 ### Episodic Memory
 
-「いつ、誰と、何が起きたか」という経験のMemory。
+「いつ、誰と、何が起きたか」という経験の長期Memory。
 
 ### Semantic Memory
 
-経験や原資料から抽出された、比較的安定した事実・知識のMemory。
+経験や原資料から抽出された、比較的安定した事実・知識の長期Memory。
 
 ### Shared Memory
 
@@ -107,23 +107,27 @@ Memory、Skill、Decision等がどの会話、観測、Task、外部情報、推
 
 ### Emotional significance
 
-あるMemoryがCompanionにとってどの程度感情的に重要だったかを示すMemory側の属性。現在のEmotion Stateそのものではない。
+あるMemoryがCompanionにとってどの程度感情的に重要だったかを示すMemory側の属性。現在のCurrent Affective Stateそのものではない。
 
 ### Recall decay
 
 時間経過、利用状況、関連性等によりMemoryの想起優先度が下がること。通常の忘却では物理削除を意味しない。
 
+### Forget / 削除意図
+
+ユーザーがある情報を今後のMemoryとして利用しないよう求めること。長期Memoryだけを削除する場合、原資料自体を削除する場合、原資料は別目的で保持しつつ再学習を禁止する場合の具体的な区別とUIは未確定だが、削除意図に反して自動学習で同じMemoryを復活させない。
+
 ### Learning System
 
-Experienceから将来に残す価値を判断し、Memory、Skill、Emotion / Mood、Relationship、Interest等へ反映し、結果を再評価する上位の仕組み。
+Experienceから将来に残す価値を判断し、Memory、Skill、Companion State等へ反映し、結果を再評価する上位の仕組み。
 
 ### Learning Review
 
-経験ごとに、Memory候補、Skill候補、State更新、または永続学習なしを判断する処理。
+個々のExperienceについて、長期Memory候補、Skill候補、State更新、または永続学習なしを判断する処理。Working Memoryの日常的な更新そのものとは区別する。
 
 ### Consolidation
 
-蓄積されたExperienceやMemoryを、重複統合、Semantic抽出、矛盾整理、重要度・Confidence・scope・Recall priority再評価、Skill候補抽出等によって整理する処理。非緊急処理はアイドル時・Event駆動で行う。
+蓄積されたExperienceやMemoryを、重複統合、Semantic抽出、矛盾整理、重要度・Confidence・scope・Recall priority再評価、Skill候補抽出等によって整理する処理。非緊急処理は主にアイドル時・余剰資源のある時に行う。
 
 ### Skill
 
@@ -137,15 +141,27 @@ SkillのIndex、Retrieval、Import / Export、scope、Provenance、Revision、�
 
 ### Companion State
 
-Companionが継続的に持つEmotion、Mood、Relationship、Interest、意図、現在Context等の状態。Memoryとは別系統だが、想起・Appraisal・意思決定へ影響する。
+Companionが継続的に保持・更新する内部状態。Emotion Systemの状態、Mood、Relationship、Interest、意図等を含む。現在のDesktop、Window、Schedule、Task観測などの外部・一時的なCurrent Contextとは区別する。Memoryとは別系統だが、Memory、Current Contextとともに想起・Appraisal・意思決定へ影響する。
 
-### Emotion / Affective State
+### Current Context
 
-出来事に反応し、意思決定、発話、行動、Memory、Relationship等へ影響する短・中期的な内部状態。基礎軸としてValence、Arousal、Control / Dominanceを扱う方針だが、schemaと数値範囲は未確定。
+現在のConversation、Observation、Desktop / OS状態、Schedule、実行中Task、接続状態、時間情報等、その時点の判断に必要な外部または一時的な文脈。Companionが長期的に保持する内部Stateそのものではない。
+
+### Emotion System
+
+出来事へのAppraisal、Current Affective State、Baseline、Mood、Fast Affect、Decay、Reactivity、Inertia、Recovery、Reappraisal等を扱い、Companionの意思決定や表現へ感情的文脈を提供する仕組み。
+
+### Current Affective State
+
+Companionの現在の基礎的な感情状態。Eneでは少なくともValence、Arousal、Control（Sense of Control）に相当する連続状態を扱う方針とする。ControlはPADモデルのDominanceに由来するが、Eneでは主に「状況を制御・対処できる感覚」を意味し、他者支配を意味しない。schemaと数値範囲は未確定。
+
+### Control / Sense of Control
+
+Current Affective Stateの基礎軸の一つ。状況に対する主体性、対処可能感、無力感との対比を表す。心理学上のPADにおけるDominanceをEne向けに解釈した名称。
 
 ### Appraisal
 
-出来事の意味をCompanion自身のGoals、Values、Personality、Memory、Relationship等に照らして評価する処理。Novelty、Goal relevance、Goal conduciveness、Agency、Coping / Control、Norm compatibility等を含み得る。
+出来事の意味をCompanion自身のGoals、Values、Personality、Memory、Relationship等に照らして評価する処理。Novelty / Expectedness、Goal relevance、Goal conduciveness、Agency、Coping potential / Control、Norm compatibility等を含み得る。
 
 ### Baseline
 
@@ -153,11 +169,11 @@ Personality等に由来する、比較的安定した感情の基準状態。
 
 ### Mood
 
-短期Affectより長く持続し、現在の解釈や反応の傾向に影響する状態。具体的な期間や更新式は未確定。
+Fast Affectより長い時間尺度で持続し、現在の解釈や反応の傾向に影響する状態。具体的な期間や更新式は未確定。
 
-### Affect
+### Fast Affect
 
-意味のあるEventへ反応する短期的な感情状態。時間経過によるDecay、強度、Reappraisal等の影響を受け得る。
+意味のあるEventへの反応として生じる短期的な感情変化。時間経過によるDecay、強度、Appraisal / Reappraisal等の影響を受ける。
 
 ### Reactivity / Inertia / Recovery
 
@@ -169,15 +185,15 @@ Personality等に由来する、比較的安定した感情の基準状態。
 
 ### Semantic State
 
-Emotion、Mood、Relationship、Interest等の内部数値・構造化Stateを、現在値、baselineとの差、変化、trend、原因となったEvent / Appraisal、Confidence等を保ちながら、Main LLMが理解しやすい意味表現へ変換したもの。Memory、Skill、Conversation、Observation / Context、TaskそのものをSemantic Stateへ含めることを意味しない。
+Current Affective State、Mood、Relationship、Interest等の内部数値・構造化Stateを、現在値、baselineとの差、変化、trend、原因となったEvent / Appraisal、Confidence等を保ちながら、Main LLMが理解しやすい意味表現へ変換したもの。Memory、Skill、Conversation、Observation / Current Context、TaskそのものをSemantic Stateへ含めることを意味しない。基本的な変換はMain LLMを必要としない軽量処理で実行可能とする。
 
 ### Companion Context
 
-Main LLMを起動するときに、そのCompanionの判断に必要な情報だけを統合した文脈。Personality、Goals / Values、Semantic State、関連Memory、Skill、Conversation、Observation / Context、Task、Schedule、関連Appraisal等を必要に応じて組み合わせる。Semantic Stateとは別の上位コンテキストである。
+Main LLMを起動するときに、そのCompanionの判断に必要な情報だけを統合した文脈。Personality、Goals / Values、Semantic State、関連Memory、Skill、Conversation、Current Context、Task、Schedule、関連Appraisal等を必要に応じて組み合わせる。Semantic Stateとは別の上位コンテキストである。
 
 ### Relationship
 
-Companionとユーザー、またはCompanion同士の長期的な関係状態。少なくともFamiliarity、Closeness、Trustを区別する。
+Companionとユーザー、またはCompanion同士の長期的な関係状態。少なくともFamiliarity、Closeness、Trustを区別し、通常は経験の蓄積に応じて比較的緩やかに変化する。
 
 ### Familiarity
 
@@ -207,7 +223,7 @@ Ene Runtime / Architecture自体の拡張機構。Provider、Observation、Conte
 
 ### Provider
 
-LLM、VLM、Embedding、Reranker、STT、TTS等の処理を提供するLocalまたはCloudの実行バックエンド。コンポーネントごとに交換・選択できる。
+LLM、VLM、Embedding、Reranker、STT、TTS等の処理を提供する実行バックエンド。コンポーネントごとにLocal ProviderまたはCloud Provider等を交換・選択でき、システム全体としてそれらを混在させられる。個別ProviderがLocal / CloudのHybrid実行を持つことはあり得るが必須ではない。
 
 ### Tool
 
@@ -265,7 +281,7 @@ Harness、Sub-agent、MCP、Plugin、詳細Permission、Context Monitor、Memory
 
 ### Audit Log
 
-会話、主体間通信、主要Action、Decision、Permission、Schedule、State変更、Provider利用、Plugin障害等を、後から確認できる意味のある履歴。LLMの逐語的な内部推論や全Raw観測の保存を意味しない。
+会話、主体間通信、主要Action、Decision、Permission、Schedule、重要なState変更、設定変更、Provider利用、Plugin障害等を、後から確認できる意味のある履歴。LLMの逐語的な内部推論、全微小State変化、全Raw観測の保存を意味しない。
 
 ### 推定コスト
 
