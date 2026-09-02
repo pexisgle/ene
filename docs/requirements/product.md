@@ -11,6 +11,8 @@ Ene は、**1人のユーザーのために1台のHost PC上に継続的に存�
 
 ユーザーは主に音声とキャラクターを介して接する。音声機能が利用できないときも、テキスト入力と吹き出し表示によって同じCompanionとの体験を継続できる。必要なPC作業は、Companionが内部のAgent Harness、Computer Use、Tool、MCP、Sub-agent等の能力を使って遂行する。これらの内部機構は、日常UIでは主役にしない。
 
+Grok Bot,ChatGPT work,Claude Coworkなどのような機能を主としつつ、Harmes agentやnanobotのようなSkill作成、管理やそれから拡張された記憶システムを使い、自己改善を行うエージェントを、AiriのようなVTuberやAI Companion的なインターフェースを用いて実装する。
+
 ## 2. 製品の中心価値
 
 Ene が提供する価値は、次の4つを両立することにある。
