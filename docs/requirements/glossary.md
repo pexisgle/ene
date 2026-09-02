@@ -21,7 +21,7 @@ Ene CoreとEneの永続状態の正本を保持するコンピューター。現
 
 ### Client
 
-Host上の同じEneへ接続する対話、表示、操作のインターフェース。現行のDesktop Client対象はWindowsとLinux。macOS、Mobile、Web Clientは将来対象。
+Host上の同じEneへ接続する対話、表示、操作のインターフェース。現行のDesktop Client対象はWindowsとLinux。macOS、Mobile、Web Clientは将来対象。将来的には表示端末に限らず、Permissionの範囲で音声I/O、Observation、Body、Computer Use等のCapabilityをHostへ提供し得る。
 
 ### Companion
 
@@ -169,7 +169,11 @@ Personality等に由来する、比較的安定した感情の基準状態。
 
 ### Semantic State
 
-内部の数値・構造化Stateを、由来とConfidenceを保った自然言語的・意味的な表現へ変換したもの。Main LLMは原則としてSemantic Stateを受け取り、内部数値を直接発話へ変換しない。
+Emotion、Mood、Relationship、Interest等の内部数値・構造化Stateを、現在値、baselineとの差、変化、trend、原因となったEvent / Appraisal、Confidence等を保ちながら、Main LLMが理解しやすい意味表現へ変換したもの。Memory、Skill、Conversation、Observation / Context、TaskそのものをSemantic Stateへ含めることを意味しない。
+
+### Companion Context
+
+Main LLMを起動するときに、そのCompanionの判断に必要な情報だけを統合した文脈。Personality、Goals / Values、Semantic State、関連Memory、Skill、Conversation、Observation / Context、Task、Schedule、関連Appraisal等を必要に応じて組み合わせる。Semantic Stateとは別の上位コンテキストである。
 
 ### Relationship
 
@@ -219,7 +223,7 @@ Desktop、OS、Window、アプリ、Clipboard、Schedule、通知、Task等か�
 
 ### Permission
 
-Observation、Context処理、Main LLMへの伝達、Memory保存、Filesystem、Computer Use、Network、Credential、Cloud Egress、自律実行、通知、承認等を許可・拒否・保留する統一的な政策。
+Observation、Context処理、Main LLMへの伝達、Memory保存、Filesystem、Computer Use、Network、Credential、Cloud Egress、自律実行、通知、承認等を許可・拒否・保留する統一的な制御ポリシー。
 
 ### Delegation
 
@@ -257,7 +261,7 @@ Harness、Sub-agent、MCP、Plugin、詳細Permission、Context Monitor、Memory
 
 ### Graceful Degradation
 
-一部機能が利用不能でも、失敗範囲を明示し、可能な代替手段で同じCompanion体験やCoreの他機能を継続すること。STT/TTSはテキスト入力・表示で代替する。自動Provider fallbackを意味しない。
+一部機能が利用不能でも、失敗範囲を明示し、利用可能な機能を不必要に停止しないこと。STT/TTSはテキスト入力・表示で代替する。未設定の別Providerへ自動的に切り替えることを意味しない。
 
 ### Audit Log
 
