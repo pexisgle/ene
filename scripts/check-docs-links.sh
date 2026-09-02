@@ -38,11 +38,6 @@ verify_file_links() {
 
 shopt -s globstar nullglob
 for file in docs/**/*.md; do
-  # Legacy documents are preserved as historical snapshots. Their relative links
-  # were authored at older repository paths and are intentionally not maintained.
-  case "$file" in
-    docs/requirements/legacy/*) continue ;;
-  esac
   verify_file_links "$file"
 done
 
