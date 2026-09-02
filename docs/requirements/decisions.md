@@ -193,7 +193,7 @@ Status: confirmed
 Nature: design direction
 Decision: 第三者Pluginは原則アウトプロセス等でCoreから隔離し、API、Event、Capability、Brokerを経由してアクセスする。隔離は高帯域・低遅延処理を不必要に阻害しない。
 Reason: Pluginのクラッシュ、未許可アクセス、GPU Runtime障害からCoreと他データを守りつつ、Local Providerの性能を確保するため。
-Consequences: Control planeとbulk dataの転送を分ける余地を持たせるが、具体的なIPCやSandbox方式は未確定。
+Consequences: Control planeとbulk dataの転送を分ける余地を持たせ、PermissionとSandboxの範囲で隔離されたProvider Plugin自身がGPU / Acceleratorや必要なRuntimeへ直接アクセスできる構成を許容する。具体的なIPCやSandbox方式は未確定。
 
 ### R-D023: Companion UIへのPlugin干渉を制限する
 
@@ -265,7 +265,7 @@ Status: confirmed
 Nature: design direction
 Decision: Relationshipは少なくともFamiliarity、Closeness、Trustを別状態として扱い、Trustは必要に応じてPredictability、Dependability、Benevolent expectation等へ分ける。
 Reason: 利用期間、心理的な近さ、信頼性を単一の好感度へ潰さないため。
-Consequences: Satisfaction、Affection、Resentment等は必要時の派生解釈とし、依存を最大化する単一Commitment指標を製品Coreに置かない。
+Consequences: Satisfaction、Affection、Resentment等は必要時の派生解釈とし、依存を最大化する単一Commitment指標を製品Coreに置かない。Attachment anxiety / avoidance、Need for closeness、Independence、Expressiveness等は必要なCharacterのPersonality側の傾向として扱い、全Companion共通のRelationship軸にはしない。
 
 ### R-D032: UIを3層に分ける
 
@@ -273,7 +273,7 @@ Status: confirmed
 Nature: product decision
 Decision: Companion UI、表層設定、詳細設定・管理の3層で情報公開の深さを分ける。
 Reason: 日常は自然なCompanion体験に集中し、高度なユーザーには監査・管理能力を提供するため。
-Consequences: 「青の深さ」を視覚表現の候補とするが、色と具体UIは未確定。
+Consequences: 3層の違いは画面構成、導線、視覚的階層で一貫して表現する。具体的な色、テーマ、コンポーネントは未確定。
 
 ### R-D033: 主要イベントを監査し、内部推論は保存しない
 
@@ -307,6 +307,38 @@ Decision: Crash、再起動、Provider・Plugin障害に対し、確定状態、
 Reason: 必要な信頼性を確保しつつ、過剰な耐久基盤を製品要件に持ち込まないため。
 Consequences: 部分障害を隔離し、成功・失敗・中断・保留を正確に表示する。
 
+### R-D037: Semantic StateとCompanion Contextを分ける
+
+Status: confirmed
+Nature: design direction
+Decision: Emotion、Mood、Relationship、Interest等の内部数値・構造化Stateは、LLMが理解しやすいSemantic Stateへ変換する。一方、Memory、Skill、Conversation、Observation / Context、Task等はSemantic Stateそのものとはせず、必要な情報をSemantic StateとともにCompanion Contextへ統合してMain LLMへ渡す。
+Reason: 数値をそのままLLMへ渡す不明瞭さを避けつつ、MemoryやTaskまで一つの意味表現へ押し込んで責務を曖昧にしないため。
+Consequences: Internal State → Semantic Stateと、複数情報源 → Companion Contextという2段階を区別する。具体的なPrompt形式は未確定。
+
+### R-D038: 初期Provider構成はユーザーが明示的に選ぶ
+
+Status: confirmed
+Nature: product decision
+Decision: 初回設定でMain LLM、STT、TTS等の推奨候補を提示できるが、利用するProviderまたは未設定はユーザー自身が明示的に選択する。STT / TTSは未設定を正規の構成とする。
+Reason: Providerは費用、Privacy、Hardware負荷、品質に影響するため、推奨をユーザーの選択として扱わないため。
+Consequences: STT / TTS未設定時はテキストUIを利用する。有料ProviderについてはR-D019の明示同意も満たす。
+
+### R-D039: 将来ClientもCapabilityを提供できる
+
+Status: confirmed
+Nature: design direction
+Decision: 現行のDesktop Observation / Computer UseはHost PCを主対象とするが、将来のClientが音声I/O、Observation、Body、Computer Use等をCapabilityとしてHost上の同じEneへ提供できる構造を保つ。
+Reason: 複数デバイスから同じCompanionへ接続する将来像で、Client側を単なる表示端末に固定しないため。
+Consequences: Capabilityの所在をHostだけに固定せず、追加時にCoreやPermission Systemを大規模に再設計することを前提としない。具体的なRemote protocolと開始時期は未確定。
+
+### R-D040: Memory Retrievalは検索精度を重視する
+
+Status: confirmed
+Nature: product decision
+Decision: Memory Retrievalは軽量性だけでなく高い検索精度を重要品質として扱い、長期Memoryが増加しても関連Memoryの取りこぼしと無関係Memoryの混入を抑える。自動想起と明示的Deep Retrievalの双方を評価対象とする。
+Reason: 保存量が増えても必要な記憶を正しく思い出せなければ、長期Memoryの価値とCompanionの一貫性が失われるため。
+Consequences: Embedding単独に固定せず、Hybrid RetrievalとRerankingを利用可能にし、代表的な評価セットと定量指標は実測して決める。
+
 ## 未確定事項
 
 次の項目は、今回の判断から直接は決まらないため、別途検証・対話して決める。
@@ -323,4 +355,4 @@ Consequences: 部分障害を隔離し、成功・失敗・中断・保留を正
 | O-008 | Plugin API、Extension Point、IPC、Sandbox、Broker、bulk data転送の具体方式 |
 | O-009 | Companion間交流の段階数・既定値、ランダム起動の頻度・制限 |
 | O-010 | ログ、Memory、成果物、音声、画像、Tool outputの保持・削除・Export形式 |
-| O-011 | Accessibility基準、UIテーマ、青の深さの正確な表現 |
+| O-011 | Accessibility基準、UIテーマ、3層の視覚表現 |
