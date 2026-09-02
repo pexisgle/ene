@@ -85,16 +85,10 @@ jobs:
       - uses: ./.github/actions/rust-build-env
       - name: Check documentation links
         run: bash scripts/check-docs-links.sh
-      - name: Build docs
+      - name: Build rustdoc
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --locked --workspace --no-deps
-      - name: Install mdBook
-        run: cargo install mdbook --locked --version 0.5.4
-      - name: Build English book
-        run: mdbook build docs
-      - name: Build Japanese book
-        run: mdbook build docs/ja
 
   # Opt PRs into the Windows runner with the area:windows label.
   windows-native:

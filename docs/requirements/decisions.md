@@ -1,18 +1,18 @@
-# Requirement decisions
+# 要件決定記録
 
-Status: **Active decision log**
+状態: **Active decision log**
 
-Record only decisions explicitly confirmed during the new requirements process.
+新しい要件定義で明示的に確認した判断だけを残します。
 
-Use this format:
+形式:
 
 ```text
-R-Dxxx: Short title
+R-Dxxx: 短いタイトル
 Status: confirmed | superseded
 Decision: ...
 Reason: ...
 Consequences: ...
-Supersedes: ... (optional)
+Supersedes: ... （任意）
 ```
 
-No new decisions are confirmed yet.
+現在、新要件として確定済みの決定はありません。

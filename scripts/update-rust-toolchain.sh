@@ -35,7 +35,6 @@ resolve_rust_toolchain_action_sha() {
 }
 
 rust_toolchain_action_sha="$(resolve_rust_toolchain_action_sha "$stable_version")"
-# dtolnay/rust-toolchain dropped per-version tags; v1 is the remaining moving tag.
 if [[ ! "$rust_toolchain_action_sha" =~ ^[0-9a-f]{40}$ ]]; then
   rust_toolchain_action_sha="$(resolve_rust_toolchain_action_sha "v1")"
 fi
@@ -54,11 +53,6 @@ for workflow in "${workflow_files[@]}"; do
     -e "s|dtolnay/rust-toolchain@[0-9a-f]{40}( # [0-9]+\.[0-9]+\.[0-9]+)?|dtolnay/rust-toolchain@$rust_toolchain_action_sha # $stable_version|g" \
     -e "s|dtolnay/rust-toolchain@[0-9]+\.[0-9]+\.[0-9]+|dtolnay/rust-toolchain@$rust_toolchain_action_sha # $stable_version|g" \
     "$workflow"
-done
-
-for file in README.md docs/quickstart.md docs/ja/quickstart.md \
-  docs/guides/rust-toolchain.md docs/ja/guides/rust-toolchain.md; do
-  sed -i -E "s/Rust [0-9]+\.[0-9]+\.[0-9]+/Rust $stable_version/g" "$file"
 done
 
 pinned_version="$(awk -F'"' '/^channel =/ { print $2; exit }' rust-toolchain.toml)"

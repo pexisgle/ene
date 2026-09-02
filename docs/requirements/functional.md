@@ -1,7 +1,7 @@
-# Functional requirements
+# 機能要件
 
-Status: **Draft / requirements reset in progress**
+状態: **Draft / 要件再定義中**
 
-Only product capabilities confirmed during requirements work belong here. Do not encode crate names, database schemas, protocols, or other implementation choices unless they are themselves externally required.
+対話で確認した製品能力だけを記録します。crate 名、DB schema、protocol などの実装詳細は、それ自体が外部要件でない限りここへ入れません。
 
-No functional requirements are confirmed yet.
+現在、確定済み機能要件はありません。
