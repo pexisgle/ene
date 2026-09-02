@@ -5,7 +5,7 @@
 
 ## 1. 製品の要約
 
-Ene は、**1人のユーザーのために1台の Host PC 上へ継続的に存在する、AITuber / AI companion 中心のパーソナルAIシステム**である。
+Ene は、**1人のユーザーのために1台のHost PC上に継続的に存在する、AITuber / AI companion中心のパーソナルAIシステム**である。
 
 ユーザーが日常的に接する主役は、DesktopMate のようなデスクトップマスコットとして表示される Companion である。Companion は単なるチャットボットの外見や音声ではなく、人格、価値観、意思、感情、記憶、関係性、関心、身体表現を持つ個として、ユーザーを自分なりに支援する。
 
@@ -13,7 +13,7 @@ Ene は、**1人のユーザーのために1台の Host PC 上へ継続的に存
 
 ## 2. 製品の中心価値
 
-Ene が提供する価値は、次の両立にある。
+Ene が提供する価値は、次の4つを両立することにある。
 
 1. **一緒に過ごせる個** — ユーザーを継続的に理解し、記憶し、感情や関係性を形成し、状況に応じて自然に会話・行動する。
 2. **実際に役立つ能力** — ユーザーのPC上で可能な汎用作業を、許可された範囲で調査・操作・作成・整理する。
@@ -45,7 +45,7 @@ Ene は「高性能なAgentにキャラクターを貼る」ことを第一目�
 | Desktop Client | Windows、Linux | macOS | DesktopMate風マスコットを表示する |
 | Remote Client | 設計上接続可能 | Mobile、Web、その他のClient | 同じHost上のCompanionへ接続する |
 
-現行の正式対象以外のリリース時期、対応機能、配布形態は未確定である。現在の要件は、将来のClientがHost上の能力や状態を不自然に複製しなくても追加できることを妨げない。
+現行の正式対象以外のリリース時期、対応機能、配布形態は未確定である。現行のDesktop Observation / Computer UseはHost PCを主対象とするが、将来のClientが音声I/O、Observation、Body、Computer Use等のCapabilityを提供できるようにし、その追加にCoreの大規模な再設計を必要とする構造へ固定しない。
 
 ## 4. Companion とキャラクター
 
@@ -106,7 +106,7 @@ Companionは概念上常に存在するが、Main LLMを常時実行すること
 
 会話履歴、Memory、Emotion、Mood、Relationship、Character Instance、設定、Permission、タスク履歴、成果物などEneの永続状態はHost PCを正本とする。クラウドは必要な推論・音声・処理を委譲する先であり、Eneの状態の正本ではない。
 
-LLM、VLM、Embedding、STT、TTSその他の推論コンポーネントは、コンポーネント単位でLocal、Cloud、またはHybridを選べる。完全Local、完全Cloud、LocalとCloudの混在をいずれも正規の構成として扱う。ただし、外部Providerの選択、費用、送信データはユーザーが理解して明示的に設定できる必要がある。
+LLM、VLM、Embedding、STT、TTSその他の推論コンポーネントは、コンポーネント単位でLocal、Cloud、またはHybridを選べる。完全Local、完全Cloud、LocalとCloudの混在をいずれも正規の構成として扱う。初回設定では、少なくともMain LLM、STT、TTSについて、推奨候補を示すことはできてもユーザー自身が利用構成を明示的に選択する。STT / TTSは未設定を選べ、その場合はテキストUIを利用する。外部Providerの選択、費用、送信データはユーザーが理解して設定できる必要がある。
 
 ## 9. 目標
 
