@@ -31,7 +31,7 @@ VRM / 将来のLive2D描画、ユーザーが選択したLocal LLM / VLM / STT /
 
 性能計測では、Ene Core、Desktop Body、Context Monitor、Provider、第三者Pluginを区別して負荷を観測できなければならない。具体的なCPU、GPU、RAM、Storageの予算値は未確定である。
 
-## 2. レイテンシとスケジューリング
+## 2. レイテンシ、検索品質、スケジューリング
 
 ### NFR-LAT-001 日常対話の応答性
 
@@ -48,6 +48,10 @@ Context Monitor、Memory Retrieval、Learning Review、Consolidation、Sub-agent
 ### NFR-LAT-004 将来のfull-duplex余地
 
 現行版でfull-duplex / barge-inを提供しなくても、将来、入力音声と出力音声の同時処理、発話中断、自己音声抑制等を追加するために、会話Coreを全面的に再設計することを前提にしない。具体的な音声プロトコルは未確定である。
+
+### NFR-RET-001 Memory Retrievalの品質
+
+Memoryが長期的に増加しても、関連するMemoryを高い精度で想起できることを重要な品質目標とする。検索速度だけを優先して関連Memoryの取りこぼしや無関係なMemoryの混入を恒常的に許容してはならない。自動想起とDeep Retrievalについて、代表的な会話・時間指定・Entity・Companion scope・曖昧検索等の評価セットを用意し、Precision / Recallその他の具体的な品質目標は実測に基づいて定量化する。
 
 ## 3. 信頼性、永続性、復旧
 
@@ -99,7 +103,7 @@ LLMのプロンプト、Memory、Skill、Character Package、Pluginの記述だ�
 
 ### NFR-SEC-003 高帯域処理の安全な性能
 
-Plugin隔離とPermission強制は、Local LLM / VLM、画像、音声、Embedding等の高帯域処理へ不要なコピー・直列化・中継遅延を強制しない。安全性と性能を両立できる通信方式を選べること。
+Plugin隔離とPermission強制は、Local LLM / VLM、画像、音声、Embedding等の高帯域処理へ不要なコピー・直列化・中継遅延を強制しない。隔離されたProvider Pluginが、許可されたGPU / Acceleratorや必要なRuntimeを自身の実行環境から直接利用できることを妨げず、安全性と性能を両立できる通信方式を選べること。
 
 ## 5. Providerと費用
 
@@ -114,6 +118,10 @@ Main LLM、Context Monitor、Sub-agent、VLM、Embedding、STT、TTS等は、Loc
 ### NFR-PROV-003 自動切替の扱い
 
 Providerが利用不能な場合、ユーザーが選んでいない別Providerへ黙って切り替えてはならない。自動切替を将来提供する場合も、明示的な設定、Data Egress、費用、予算制御と整合させる。詳細は未確定である。
+
+### NFR-PROV-004 初期構成の選択可能性
+
+初回設定では、Main LLM、STT、TTS等について推奨候補を提示できるが、利用構成はユーザーが明示的に選択できなければならない。STT / TTSの未設定を正規の選択肢として扱い、推奨設定をユーザーの同意なしに自動適用してはならない。
 
 ### NFR-COST-001 利用量の追跡可能性
 
@@ -131,7 +139,7 @@ Provider利用量と推定コストを、Provider、用途、Companion、Sub-age
 
 ### NFR-PLAT-002 将来Platform
 
-HostおよびDesktop ClientへのmacOS、Remote ClientへのMobileおよびWebは将来対象とする。将来のClientを追加するため、Companion State、Permission、能力の所在をDesktop Clientへ固定しすぎない。
+HostおよびDesktop ClientへのmacOS、Remote ClientへのMobileおよびWebは将来対象とする。将来のClientを追加するため、Companion State、Permission、Observation、Body、音声I/O、Computer Use等のCapabilityの所在をHostまたはDesktop Clientの一方へ固定しすぎない。
 
 ### NFR-PLAT-003 Remote接続
 
@@ -140,6 +148,10 @@ Remote Clientから接続してもHost上の同じCompanionと会話・Task確�
 ### NFR-PLAT-004 完全Offlineの扱い
 
 Local Providerを選択できることは要件だが、ネットワーク切断時にどの範囲の機能を保証するかは未確定である。Cloud依存機能が使えない場合も、状態を破損させず、利用不能理由を示す。
+
+### NFR-PLAT-005 将来のClient Capability
+
+現行のObservation / Computer Useの主対象はHost PCとする。一方、将来のClientが自身の画面、OS、入力、音声、Body、Computer Use等をCapabilityとしてHost上のEneへ提供できるようにし、その追加にCoreやPermissionモデルの大規模な再設計を要求しないことを目標とする。
 
 ## 7. 拡張性、保守性、観測可能性
 
@@ -171,7 +183,7 @@ Companion UI、表層設定、詳細設定・管理の3層で、同じ状態を�
 
 ### NFR-UX-003 劣化時の継続
 
-STT/TTS、Body、Provider、Pluginの一部が使えなくても、可能な代替手段で同じCompanionの体験を継続できる。代替への切替は、ユーザーに理解できる形で示す。
+STTが利用できない場合はテキスト入力、TTSが利用できない場合はテキスト表示によって同じCompanion体験を継続できなければならない。Body、Main LLM、Provider、Pluginその他の機能が利用不能な場合は失敗範囲を明示し、Coreや無関係な機能へ不必要に波及させない。未設定の別Providerへの自動fallbackを代替手段として要求しない。
 
 ### NFR-A11Y-001 アクセシビリティ
 
@@ -181,6 +193,7 @@ Desktop Client、設定、詳細管理、テキスト代替UIが満たすアク�
 
 - 基準Hardwareとシナリオ別のCPU、GPU、RAM、Storage予算
 - 音声入力から発話開始までの目標レイテンシ、TTS中断時間、Remote接続遅延
+- Memory RetrievalのPrecision / Recall、誤想起率、長期Memory増加時の品質劣化許容値
 - Context Monitorの観測頻度、Main LLM起動率、Token・API利用量の目標
 - Learning / Consolidationのバッチ量、アイドル判定、優先度と停止条件
 - Crash後の許容データ損失、再開可能性、ログ保持期間と容量
