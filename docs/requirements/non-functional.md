@@ -39,7 +39,7 @@ VRM / 将来のLive2D描画、ユーザーが選択したLocal LLM / VLM / STT /
 
 ### NFR-LAT-002 Main LLMの節約
 
-Context Monitor、Memory Retrieval、Learning Review、Consolidation、Sub-agent待機、Schedule待機により、必要以上に高価・高性能なMain LLMを起動してはならない。
+Context Monitor、Memory Retrieval、Learning Review、Consolidation、Semantic Stateの基本変換、Sub-agent待機、Schedule待機により、必要以上に高価・高性能なMain LLMを起動してはならない。
 
 ### NFR-LAT-003 イベント駆動
 
@@ -93,6 +93,10 @@ Cloud Providerへ送信する情報は、許可された目的に必要な範囲
 
 監査に必要な主要イベントは残す一方、LLMの逐語的な内部推論、常時観測のRaw画面・音声、意味のない低レベルイベントを既定で無制限に保存してはならない。保持期間、容量、暗号化、Export方式は未確定である。
 
+### NFR-PRIV-005 削除意図の維持
+
+ユーザー削除またはPrivacy / retention policyによって長期利用不可となった情報は、別目的で残る原資料やバックアップ相当の履歴から、通常のLearning Review / Consolidationによって長期Memoryへ自動的に復活しないようにしなければならない。削除範囲と原資料保持の具体的な選択肢は未確定である。
+
 ### NFR-SEC-001 機械的な権限強制
 
 LLMのプロンプト、Memory、Skill、Character Package、Pluginの記述だけで、機械的に拒否されたFilesystem、Credential、Network、Device、Cloud Egress、Computer Useへアクセスできてはならない。
@@ -105,11 +109,15 @@ LLMのプロンプト、Memory、Skill、Character Package、Pluginの記述だ�
 
 Plugin隔離とPermission強制は、Local LLM / VLM、画像、音声、Embedding等の高帯域処理へ不要なコピー・直列化・中継遅延を強制しない。隔離されたProvider Pluginが、許可されたGPU / Acceleratorや必要なRuntimeを自身の実行環境から直接利用できることを妨げず、安全性と性能を両立できる通信方式を選べること。
 
+### NFR-SEC-004 将来のRemote Client保護
+
+将来Remote Clientを提供する場合、ClientとHostの接続は、ユーザーが意図したDeviceであることを確認でき、通信内容とCredential等を第三者から保護できなければならない。認証方式、暗号化方式、Device trust、鍵管理、失効方法は未確定である。
+
 ## 5. Providerと費用
 
 ### NFR-PROV-001 構成の独立性
 
-Main LLM、Context Monitor、Sub-agent、VLM、Embedding、STT、TTS等は、Local、Cloud、Hybridをコンポーネントごとに選択・交換できなければならない。一つのProviderの採用が、他の全Providerの実行場所を強制してはならない。
+Main LLM、Context Monitor、Sub-agent、VLM、Embedding、Reranker、STT、TTS等は、利用可能なLocal ProviderまたはCloud Provider等をコンポーネントごとに独立して選択・交換できなければならない。一つのProviderの採用が、他の全Providerの実行場所を強制してはならない。システム全体としてLocalとCloudの混在を許容し、個別ProviderのHybrid実行は必須としない。
 
 ### NFR-PROV-002 課金への明示的同意
 
@@ -139,11 +147,11 @@ Provider利用量と推定コストを、Provider、用途、Companion、Sub-age
 
 ### NFR-PLAT-002 将来Platform
 
-HostおよびDesktop ClientへのmacOS、Remote ClientへのMobileおよびWebは将来対象とする。将来のClientを追加するため、Companion State、Permission、Observation、Body、音声I/O、Computer Use等のCapabilityの所在をHostまたはDesktop Clientの一方へ固定しすぎない。
+HostおよびDesktop ClientへのmacOS、Remote ClientへのMobileおよびWebは将来対象とする。Companion Stateと永続状態の正本はHostに維持したまま、将来のClientがObservation、Body、音声I/O、Computer Use等のCapabilityを提供できるよう、それらの実行場所をHostまたは現行Desktop Clientだけへ固定しすぎない。
 
-### NFR-PLAT-003 Remote接続
+### NFR-PLAT-003 将来のRemote接続
 
-Remote Clientから接続してもHost上の同じCompanionと会話・Task確認ができなければならない。Clientがない場合のCoreの継続性と、Client固有のBody・Observation・Computer Useの違いを混同しない。
+将来Remote Clientを提供する場合、Host上の同じCompanionとの会話、Task確認、許可された操作を行えるようにする。Remote Client自体は現行の正式対象ではない。Clientがない場合のCoreの継続性と、Client固有のBody・Observation・Computer Useの違いを混同しない。
 
 ### NFR-PLAT-004 完全Offlineの扱い
 
@@ -165,7 +173,7 @@ Skillは可能な限りAgent Skills互換形式でImport / Exportでき、Ene固
 
 ### NFR-OBS-001 監査可能性
 
-ユーザーが、主要な会話、主体間通信、Task、Tool / MCP / Computer Use、Permission、Schedule、自律行動、Memory / Skill変更、Provider利用、Plugin障害を、過剰な内部推論の保存なしに追跡できなければならない。
+ユーザーが、主要な会話、主体間通信、Task、Tool / MCP / Computer Use、Permission、Schedule、自律行動、Memory / Skill変更、重要なCompanion State変更、設定変更、Provider利用、Plugin障害を、過剰な内部推論や全微小State変化の保存なしに追跡できなければならない。
 
 ### NFR-OBS-002 障害診断
 
@@ -189,7 +197,7 @@ STTが利用できない場合はテキスト入力、TTSが利用できない�
 
 Desktop Client、設定、詳細管理、テキスト代替UIが満たすアクセシビリティ基準、キーボード操作、スクリーンリーダー対応等の具体的な範囲は未確定である。将来のClient追加を妨げない設計とする。
 
-## 9. 定量化待ちの項目
+## 9. 定量化待ち・詳細未確定の項目
 
 - 基準Hardwareとシナリオ別のCPU、GPU、RAM、Storage予算
 - 音声入力から発話開始までの目標レイテンシ、TTS中断時間、Remote接続遅延
@@ -198,4 +206,6 @@ Desktop Client、設定、詳細管理、テキスト代替UIが満たすアク�
 - Learning / Consolidationのバッチ量、アイドル判定、優先度と停止条件
 - Crash後の許容データ損失、再開可能性、ログ保持期間と容量
 - Cloud送信時の暗号化、Credential保管、保存地域、Providerごとの削除保証
-- 各OSでの正式サポート範囲、アクセシビリティ基準、Remote ClientのSLO
+- Memory削除、原資料削除、再学習禁止の保持・表示方式
+- Remote Clientの認証、暗号化、Device trust、鍵管理、接続方式、SLO
+- 各OSでの正式サポート範囲、アクセシビリティ基準
