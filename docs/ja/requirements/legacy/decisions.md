@@ -67,8 +67,8 @@ compaction の `start`/`end` ロック括弧も後継。v1.0 は成功時の
 ユーザーが新しいターン/job として指示する。
 
 **実施方法**: inbox 項目は `inbox/enqueued` 等のログイベントとして書く
-([core/session-log.md §3.7](core/session-log.md))。起動時は未 claim 項目を
-放棄して中断報告の材料にする([core/agent-loop.md §12](core/agent-loop.md))。
+(core/session-log.md §3.7)。起動時は未 claim 項目を
+放棄して中断報告の材料にする(core/agent-loop.md §12)。
 同一プロセス内の通常動作では、ask-user の回答は従来どおり同一ターンを続ける。
 
 ## D-6 複数コンパニオン — v1.0 で同時並存
@@ -296,7 +296,7 @@ N-1 ポリシーで無関係な全プラグインが失効し、(c) 音声が `a
 | 現行アクション | 移動先 | 理由 |
 |---|---|---|
 | `question` | ハーネス機能(表層への差し戻し) | ユーザーへの質問は層をまたぐ制御であって、ツールではない |
-| `notify` | クライアント機能 | 通知の出し方はクライアントが決める。契約は [platform/clients.md §3.1](platform/clients.md) |
+| `notify` | クライアント機能 | 通知の出し方はクライアントが決める。契約は platform/clients.md §3.1 |
 | `timer` | `tasks/` のスケジュール | スケジュール機構と重複している |
 | `todo` | `tasks/` のジョブ | ジョブ機構と重複している |
 | `time` / `system_info` | 新 `utility` に残る | — |
@@ -399,7 +399,7 @@ Cordis そのもの(TypeScript の in-process ローダ)は採用しない(visio
 この2次元が無いと「死んだプラグインのツールが残る」「LLM を差し替えると
 無関係なツールまで再起動する」が構造的に起きる。
 
-**波及**: [plugins/composition.md](plugins/composition.md) が本体。
+**波及**: plugins/composition.md が本体。
 manifest の `provides`/`requires`、監督のファイバー状態機械、
 レジストリ登録の逆、seam のブローカー役、プロファイル差分の reconcile。
 

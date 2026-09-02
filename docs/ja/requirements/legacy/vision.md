@@ -1,7 +1,7 @@
 # プロダクトビジョン
 
 > 実装する前に、このアプリが「何であるか」を定義する文書。
-> 機能目録は [features.md](features.md)、完成の定義は [done.md](done.md)。
+> 機能目録は features.md、完成の定義は done.md。
 > 用語の厳密な定義は [用語集](#用語集)にあり、以降の全設計文書はこの用語に従う。
 
 ## 1. 位置づけ
@@ -43,7 +43,7 @@ Ene の設計上の立場は次の通り。
 ## 2. 利用者像
 
 - **主利用者**: 1人の個人ユーザー。自分の PC にインストールして使う(ローカルファースト)。
-  マルチユーザー・チーム利用は非目標([done.md の非目標](done.md#非目標))。
+  マルチユーザー・チーム利用は非目標(done.md の非目標)。
 - **使い方**:
   - デスクトップの stage にコンパニオンを表示し、音声とテキストで会話する。
   - 「旅行のしおりを作って」「この PDF を要約して」「明日の午後3時に会議の準備を
@@ -80,7 +80,7 @@ Ene の設計上の立場は次の通り。
    省くだけで、検証(ハッシュ・サンドボックス)を無効化しない。
 6. **会話ログの追記性による信頼性。** セッションで起きたことはすべて
    追記専用のログに記録され、UI・履歴・fork・リプレイはログから投影される
-   ([core/session-log.md](../core/session-log.md))。「モデルに見えるものは必ず
+   (core/session-log.md)。「モデルに見えるものは必ず
    ログから再構成できる」は最上位の不変条件である。
    イベントソーシングの適用範囲は**会話ログに限る**。記憶・スケジュール・
    成果物・設定は通常のテーブル構造で持つ(D-9)。
@@ -100,8 +100,8 @@ Ene の設計上の立場は次の通り。
 
 - **採用**: System Context と Session History の分離、Context Epoch(プロバイダ
   キャッシュ基準点)の概念、巨大ツール出力の spill、HTTP API+生成 SDK+
-  Embedded/Remote 二重モード → [core/context-assembly.md](../core/context-assembly.md)、
-  [platform/server-api.md](../platform/server-api.md)。
+  Embedded/Remote 二重モード → core/context-assembly.md、
+  platform/server-api.md。
   **裏層ハーネス**の実装性格(セッションランタイム・ツール実行・コンテキスト管理)。
 - **不採用**: コーディング特化の前提(worktree・patch・git 中心のツール面)。
   ツールは非コーディングを含めた対等な capability として設計する。
@@ -114,13 +114,13 @@ Ene の設計上の立場は次の通り。
   turn/step ループ、ToolDefinition(正規出力宣言+モデル非公開フィールドの分離)、
   waterfall/emit の2モードイベント、capability seam の3役割、guard・plan・goal・
   interaction plane、プロファイル/バンドル/パッチ構成 →
-  [core/](../core/README.md)、[tools/](../tools/README.md)、[plugins/](../plugins/README.md)
+  core/、tools/、plugins/
 - **不採用**: Cordis(TypeScript 前提の in-process ローダ)そのもの。
   Web GUI を唯一のホストとする構成も採用しない(Ene のホストはコアデーモン)。
 - **採用する抽象**: 時空間合成(D-32)。ホスト文脈への登録は巻き戻し可能な
   effect、行間の依存は `provides`/`requires` の反応的解決、設定変更は
   ファイバー単位の reconcile。実現は
-  [plugins/composition.md](../plugins/composition.md)。
+  plugins/composition.md。
   アウトプロセス隔離(D-10)は保ち、プラグイン同士の直接呼び出しはしない。
 
 ### Codex multi-agent v2 から
@@ -128,7 +128,7 @@ Ene の設計上の立場は次の通り。
 - **採用**: 親と子が同期 await せず、型付きエンベロープで相互にメッセージを
   送る通信。`NEW_TASK`(ターンを起こす委託/追加指示)、`MESSAGE`(ターンを
   起こさずキューする共有)、`FINAL_ANSWER`(終端報告)の3種を層間プロトコルの
-  骨格にする → [core/delegation.md](../core/delegation.md)。
+  骨格にする → core/delegation.md。
   両層が互いの進捗を確認でき、あわせて**1つのエージェント経験**になる点。
 - **不採用**: ユーザーがサブエージェントを直接観察・操作する IDE 向け UX。
   暗号化ペイロードやオペレータ監査 UI。Ene では層間メッセージはセッション
@@ -140,15 +140,15 @@ Ene の設計上の立場は次の通り。
 
 - **v1.0 で採用**: レーンコマンド面と結果/エラーモデル(`resume` と
   `lane.last_result` 照合は後継)、不変条件と競合カタログと
-  テスト階層、スパンにコンテンツを載せない → [core/lane-api.md](../core/lane-api.md)、
-  [core/invariants.md](../core/invariants.md)、
-  [core/observability.md](../core/observability.md)。
+  テスト階層、スパンにコンテンツを載せない → core/lane-api.md、
+  core/invariants.md、
+  core/observability.md。
 - **後継設計として保存(v1.0 では実装しない)**: 「three stores, one invariant」
   (entries / registers / usage)、OperationState をレーンのプログラムカウンタに
   する、effect sandwich、close = 制御されたクラッシュ
-  → [core/storage-model.md](../core/storage-model.md)、
-  [core/operations.md](../core/operations.md)、
-  [core/durability.md](../core/durability.md)。
+  → core/storage-model.md、
+  core/operations.md、
+  core/durability.md。
   v1.0 のスコープを維持したままここまで作り込むと初版が出ない。一方
   effect sandwich は後付けが難しいので、設計としては捨てずに残す(D-4)。
   v1.0 の最低ラインは「中断されたターン/ジョブを検出し、後始末をして、
@@ -163,9 +163,9 @@ Ene の設計上の立場は次の通り。
 
 - **採用**: soul(魂・エージェント)と body(体・アバター)の分離、
   内面(思考・感情・行動)の可視化、stage 中心の UX、複数 body の舞台、
-  イベント駆動のサーバーランタイム → [body/](../body/README.md)、
-  [companion/inner-channel.md](../companion/inner-channel.md)、
-  [platform/clients.md](../platform/clients.md)。
+  イベント駆動のサーバーランタイム → body/、
+  companion/inner-channel.md、
+  platform/clients.md。
   **表層 soul** の実装性格(存在感・感情・会話が主、仕事の遂行は裏に置く)。
 - **不採用**: ブラウザ(Electron/Tauri 上の Web 描画)専有の前提。
   Ene はネイティブ描画(VRM/wgpu)を維持するが、描画は body レイヤーに閉じ込める。
@@ -176,8 +176,8 @@ Ene の設計上の立場は次の通り。
 ### Open-LLM-VTuber から
 
 - **採用**: 全二重音声(割り込み・自声回避)、デスクトップペットの発想(後継)、
-  エージェント実装の差し替え可能性、内面描写の表示 → [body/voice.md](../body/voice.md)、
-  [core/agent-loop.md](../core/agent-loop.md)
+  エージェント実装の差し替え可能性、内面描写の表示 → body/voice.md、
+  core/agent-loop.md
 - **不採用**: 単一コンパニオン前提、テキスト内感情キーワード埋め込みの表現方式。
   感情は構造化イベントとして扱い、テキストは発話に専念させる。
 
@@ -206,8 +206,8 @@ Ene の設計上の立場は次の通り。
 | Context Source | 人格・感情・記憶・内面。作業 Source は載せない | 委譲ブリーフ・job workspace・skill・MCP。親の対話履歴は既定で載せない |
 | waterfall | 感情・quiet hours・能動発話ゲート | guard・plan・sandbox 前段 |
 
-実装の登録表は [core/agent-loop.md](../core/agent-loop.md) と
-[core/context-assembly.md](../core/context-assembly.md)。
+実装の登録表は core/agent-loop.md と
+core/context-assembly.md。
 後継の「実装差し替え」(P-514)は、この専用実装そのものを別アーキテクチャに
 入れ替える余地であり、v1.0 の2実装分割とは別物である。
 
@@ -225,7 +225,7 @@ Ene の設計上の立場は次の通り。
    または副作用のあるツールを必要とした時点で、ハーネスが自動的に裏層への
    委譲へ切り替える(D-3)。モデルが正しく判断することに依存しない。
 4. **声は表層のみ。** ユーザーに向けた発話は対話レーンだけが発生させる
-   ([core/invariants.md](../core/invariants.md) I-31)。裏層の出力が発話
+   (core/invariants.md I-31)。裏層の出力が発話
    チャネルに直接出る経路はない。
 5. **1体として成立する。** 裏層は表層と同じ soul の identity・記憶方針・
    skill を継承する。ユーザーから見れば「Ene(そのコンパニオン)がやってくれている」
@@ -233,7 +233,7 @@ Ene の設計上の立場は次の通り。
 6. **ハーネスは常駐の第二人格ではない。** 裏層実装はデーモンに常駐するが、
    実行は作業のたびに job レーンへ **spawn** する。常時もう1つの心が
    ユーザーと並行会話することはない。spawn ごとに独立した
-   **job workspace** を持つ([tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md))。
+   **job workspace** を持つ(tasks/jobs-and-schedules.md)。
 
 ### 5.2 1枚図
 
@@ -287,7 +287,7 @@ Ene の設計上の立場は次の通り。
 ### 5.3 層間メッセージ(Codex multi-agent v2 に倣う)
 
 表層と裏層は、同期のツール結果待ちではなく、型付きエンベロープの送受信で
-協調する。詳細なツール名と耐久化は [core/delegation.md](../core/delegation.md)。
+協調する。詳細なツール名と耐久化は core/delegation.md。
 
 | 種別 | Codex v2 の対応 | 方向 | 相手の扱い | 用途 |
 |---|---|---|---|---|
@@ -309,7 +309,7 @@ Ene の設計上の立場は次の通り。
 
 ### 5.4 パッケージとの関係
 
-キャラクターパッケージ([character/](../character/README.md))が配るのは
+キャラクターパッケージ(character/)が配るのは
 soul 定義と body であり、裏層ハーネスはパッケージに含めない。
 ハーネスはコアデーモンがすべてのコンパニオンに付ける実行層である。
 実行時の1体は「パッケージ由来の soul/body + デーモン由来の裏層」で、
@@ -375,4 +375,4 @@ soul 定義と body であり、裏層ハーネスはパッケージに含めな
 
 ---
 
-- 次: [機能目録 features.md](features.md)
+- 次: 機能目録 features.md
