@@ -349,7 +349,7 @@ impl DelegationHost {
         self.require_known(id)?;
         self.store.set_plan(id, plan)?;
         let prompt = format!("plan:\n{plan}");
-        let (question_id, _) = self.store.append_question(id, &prompt)?;
+        let question_id = self.store.append_question(id, &prompt)?;
         Ok(Self::speak(
             self.soul_id_of(id)?,
             Some(id),
@@ -745,7 +745,7 @@ impl DelegationHost {
     pub fn question(&self, id: DelegationId, prompt: &str) -> Result<CompanionReport, WorkError> {
         let _question_guard = self.question_gate.lock();
         self.require_known(id)?;
-        let (question_id, _) = self.store.append_question(id, prompt)?;
+        let question_id = self.store.append_question(id, prompt)?;
         let report = Self::speak(
             self.soul_id_of(id)?,
             Some(id),

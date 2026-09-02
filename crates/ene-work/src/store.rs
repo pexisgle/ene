@@ -467,7 +467,7 @@ impl WorkStore {
         &self,
         id: DelegationId,
         payload: &DelegationEventPayload,
-    ) -> Result<i64, WorkError> {
+    ) -> Result<(), WorkError> {
         self.append_delegation_event_at(id, payload, &Utc::now().to_rfc3339())
     }
 
@@ -476,23 +476,19 @@ impl WorkStore {
         id: DelegationId,
         payload: &DelegationEventPayload,
         created_at: &str,
-    ) -> Result<i64, WorkError> {
+    ) -> Result<(), WorkError> {
         let payload_json =
             serde_json::to_string(&payload).map_err(|err| WorkError::Codec(err.to_string()))?;
-        self.conn.lock().execute(
+        let conn = self.conn.lock();
+        conn.execute(
             "INSERT INTO delegation_events (delegation_id, created_at, payload)
              VALUES (?1,?2,?3)",
             params![id.to_string(), created_at, payload_json],
         )?;
-        let event_seq = self.conn.lock().last_insert_rowid();
-        Ok(event_seq)
+        Ok(())
     }
 
-    pub fn append_question(
-        &self,
-        id: DelegationId,
-        prompt: &str,
-    ) -> Result<(QuestionId, i64), WorkError> {
+    pub fn append_question(&self, id: DelegationId, prompt: &str) -> Result<QuestionId, WorkError> {
         self.append_question_at(id, prompt, &Utc::now().to_rfc3339())
     }
 
@@ -501,9 +497,9 @@ impl WorkStore {
         id: DelegationId,
         prompt: &str,
         created_at: &str,
-    ) -> Result<(QuestionId, i64), WorkError> {
+    ) -> Result<QuestionId, WorkError> {
         let question_id = QuestionId::new();
-        let event_seq = self.append_delegation_event_at(
+        self.append_delegation_event_at(
             id,
             &DelegationEventPayload::Question {
                 question_id,
@@ -511,7 +507,7 @@ impl WorkStore {
             },
             created_at,
         )?;
-        Ok((question_id, event_seq))
+        Ok(question_id)
     }
 
     pub fn delegation_events(&self, id: DelegationId) -> Result<Vec<DelegationEvent>, WorkError> {
@@ -557,21 +553,23 @@ impl WorkStore {
         if let Some(job) = self.get_job(id)? {
             return Ok(Some(job.mode));
         }
+        let mut mode = None;
         for event in self.delegation_events(id)? {
-            if let DelegationEventPayload::ModeSet { mode } = event.payload {
-                return Ok(Some(mode));
+            if let DelegationEventPayload::ModeSet { mode: next } = event.payload {
+                mode = Some(next);
             }
         }
-        Ok(None)
+        Ok(mode)
     }
 
     pub fn delegation_depth(&self, id: DelegationId) -> Result<Option<u32>, WorkError> {
+        let mut depth = None;
         for event in self.delegation_events(id)? {
-            if let DelegationEventPayload::DepthSet { depth } = event.payload {
-                return Ok(Some(depth));
+            if let DelegationEventPayload::DepthSet { depth: next } = event.payload {
+                depth = Some(next);
             }
         }
-        Ok(None)
+        Ok(depth)
     }
 
     pub fn open_questions(&self, id: DelegationId) -> Result<Vec<OpenQuestion>, WorkError> {

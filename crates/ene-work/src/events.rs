@@ -51,6 +51,7 @@ pub enum DelegationEventPayload {
     ToolComplete {
         summary: String,
     },
+    /// Extension point for `delegation.send` kinds not handled by dedicated host methods.
     ChildReport {
         kind: String,
         body: String,

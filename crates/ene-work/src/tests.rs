@@ -1222,6 +1222,106 @@ fn internal_delegation_has_no_job_row() {
 }
 
 #[test]
+fn delegation_meta_projection_uses_latest_set_events() {
+    let (_dir, store, host, soul) = open_work();
+    let job = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "public".into(),
+            mode: DelegationMode::Public,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 1,
+            parent_id: None,
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
+        })
+        .unwrap();
+    store
+        .append_delegation_event(
+            job.id,
+            &DelegationEventPayload::ModeSet {
+                mode: DelegationMode::Internal,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.delegation_mode(job.id).unwrap(),
+        Some(DelegationMode::Public)
+    );
+
+    let internal = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "internal".into(),
+            mode: DelegationMode::Internal,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+            success_criteria: Vec::new(),
+            allowed_tools: Vec::new(),
+        })
+        .unwrap();
+    store
+        .append_delegation_event(
+            internal.id,
+            &DelegationEventPayload::ModeSet {
+                mode: DelegationMode::Public,
+            },
+        )
+        .unwrap();
+    store
+        .append_delegation_event(internal.id, &DelegationEventPayload::DepthSet { depth: 9 })
+        .unwrap();
+    assert_eq!(
+        store.delegation_mode(internal.id).unwrap(),
+        Some(DelegationMode::Public)
+    );
+    assert_eq!(store.delegation_depth(internal.id).unwrap(), Some(9));
+}
+
+#[test]
+fn concurrent_delegation_appends_keep_unique_event_seq() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "research");
+    let shared = Arc::clone(&store);
+    let job_id = job.id;
+    let handles = (0..8)
+        .map(|index| {
+            let store = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                store
+                    .append_delegation_event(
+                        job_id,
+                        &DelegationEventPayload::Progress {
+                            note: format!("note-{index}"),
+                        },
+                    )
+                    .unwrap();
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let events = store.delegation_events(job.id).unwrap();
+    let progress_count = events
+        .iter()
+        .filter(|event| matches!(event.payload, DelegationEventPayload::Progress { .. }))
+        .count();
+    assert_eq!(progress_count, 8);
+    let seqs: Vec<i64> = events.iter().map(|event| event.event_seq).collect();
+    for pair in seqs.windows(2) {
+        assert!(pair[1] > pair[0]);
+    }
+}
+
+#[test]
 fn schedule_remind_fires_and_quiet_hours_defer() {
     let (_dir, store, _host, soul) = open_work();
     let now = Utc.with_ymd_and_hms(2026, 8, 17, 3, 0, 0).unwrap();

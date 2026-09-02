@@ -111,7 +111,7 @@ stage / desktop / Web はこの名前を待ちます。回答は対話レーン�
 委譲イベントログ（`host.answer`）へ送ります。同一ジョブに未回答が複数ある
 ときは `combine_pending_questions` で結合して出します。単一の `text` はその
 ジョブの未回答すべてに届きます。`question_timeout_hours`（既定 24 時間）を
-過ぎた未回答は、デーモンのティックが `Assumption` 委譲イベントを追記して
+過ぎた未回答は、コアのティックが `Assumption` 委譲イベントを追記して
 閉じます。
 そのジョブの未回答がなくなったとき（どのクライアントから回答された場合も、
 タイムアウトで閉じられた場合も）、core は `question.resolved`（`id` はジョブ /
