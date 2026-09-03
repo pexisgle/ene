@@ -216,8 +216,11 @@ Eneは1対1の利用を基本とし、声紋等による話者認識・本人認
 5. Approval Reviewerは、信頼できるユーザー委任・Policyと、対象、作用、Data Egress、不可逆性、由来を含む構造化されたAction情報だけを受け取り、`今回のみAllow`、`Deny`、`ユーザーへAsk` のいずれかを返す。Main Companionの人格、未整理の会話全文、隠れた推論に判断を左右させない。
 6. 事前委任済み・Schedule済みで明示Allowに一致する作業や、提案の根拠を集める許可済み内部調査は、設定範囲で通知なしに進められる。新しい外部変更作業は原則として開始前に通知する。
 7. Approval ReviewerもHard Denyを越える権限を付与できない。判定不能、Timeout、Reviewer障害時はユーザーへAskとし、ユーザー不在時は実行せず保留する。
+8. ユーザーへのAskまたはReviewerからの `ユーザーへAsk` は、目的、Action、対象、作用、不可逆性、Data Egress、Credential利用、適用Policy、作成時刻、期限を含む `pending approval` としてHostへ保存される。保存後に自動実行や自動Retryを行わない。
+9. ユーザーが次回Clientへ接続すると、Companion UIから未処理承認の存在を認識でき、詳細管理画面で今回のみAllow、Deny、Cancelを選べる。Allowを選んでも永続Policyは作成されない。
+10. Allow後の実行直前にHard Deny、実効Policy、対象の現在状態を再評価する。対象や内容が変わった、期限切れ、または再評価できない場合は実行せず、再承認を求める。
 
-**失敗時の挙動**: 承認が得られない場合は操作を実行せず、保留または代替案として示す。拒否された操作を言い換え・細分化して繰り返し試行する回避行動を検出した場合は停止する。
+**失敗時の挙動**: 承認が得られない場合は操作を実行せず、保留または代替案として示す。ユーザーが応答しない、期限切れ、再評価不能の場合も保留し、拒否された操作を言い換え・細分化して繰り返し試行する回避行動を検出した場合は停止する。
 **完了条件**: ユーザーが、何が自発的に行われ、どこで通知・承認されたかを確認できる。
 
 ## UC-013 Local / Cloud構成の利用
@@ -321,18 +324,29 @@ Eneは1対1の利用を基本とし、声紋等による話者認識・本人認
 1. ユーザーはEneが使用しているApp Data Directoryの場所と、移動後に再設定が必要になり得る項目を確認できる。
 2. ユーザーは専用Exportを使わず、Directory全体を新しいHostへ移動または複製する。
 3. 互換性のあるEneがそのDirectoryを読み込み、Companion、会話、Memory、設定、Permission、Schedule、Task履歴、主要ログ、Skill等のローカル状態を復元する。
-4. OS保護Credential、外部サービス側の認証、OS固有Integration等は、必要に応じてユーザーが再認証・再設定する。
+4. OS保護CredentialはApp Data Directoryへ含めず、移動先でCredentialが見つからない場合はProviderを利用不能として示し、ユーザーが再認証・再設定する。外部サービス側の認証、OS固有Integration等も必要に応じて再設定する。EneはCredentialを通常のDirectory移動で自動コピーせず、未設定の別Providerへfallbackしない。
 
 **失敗時の挙動**: Directoryが不完全、破損、または利用中のEneと互換でない場合は、状態を黙って初期化・上書きせず、診断可能なエラーを示す。
 **完了条件**: 明示された例外を除き、Directoryの移動だけで同じローカルEne状態を利用できる。
 
+## 直近Betaの受け入れシナリオ
+
+直近Betaでは、少なくとも次の一連のシナリオを完了できることを確認する。
+
+1. WindowsまたはLinuxのHostでEneを起動し、1体のデフォルトCompanion（現時点ではAlicia）を表示する。
+2. テキスト入力・テキスト表示で会話する。ユーザーが利用可能なSTT / TTSを明示選択した場合は、同じCompanionとの音声入出力も確認する。
+3. ユーザーがCompanionへローカルファイルの読み取りと、許可された範囲での新規作成または編集の一つを自然言語で依頼する。CompanionはPermission評価を経てTaskを開始し、状態と結果を返す。
+4. Eneを再起動し、会話、確定したTask状態、Permission判断等が復元されることを確認する。再起動前に実行中だった外部変更を自動Replayしない。
+
+複数Companion、Remote Client、full-duplex、Marketplace、高度なLearning等はこの最低限のシナリオの完了条件ではないが、後続要件から削除されたものではない。
+
 ## ユースケース上の未確定事項
 
-- 各OS・Clientで、どのユースケースを直近Betaへ含めるか。
+- Windows / Linux各OSでの直近Beta内の実装順・Platform固有の対応範囲。
 - Remote Clientの認証・暗号化・Device trust・接続方法。
 - 自発的なランダム起動の具体的な頻度・制限。
 - Companion間交流レベルの名称、段階数、既定値。
-- Hard Denyに含めるActionの厳密な判定方法、自然言語PolicyとRuleの編集・表示方法、承認Popupの詳細。
+- Hard Denyに含めるActionの厳密な判定方法、自然言語PolicyとRuleの編集・表示方法、承認Popupの視覚的詳細。
 - 削除済みMemoryの再学習を防ぐ最小保持情報と、Memory管理UIの詳細。
-- Provider障害時のユーザー向け表示、再設定導線、手動選択の詳細。
-- 監査ログ・成果物・音声・画像・Tool出力の保持期間、ローテーション条件とエクスポート形式。
+- Provider障害時のユーザー向け表示、再設定導線、手動選択の詳細。CredentialのOS別Store backend、rotation、再認証UI。
+- 監査ログ・成果物・音声・画像・Tool出力・明示Captureの保持期間、ローテーション条件とエクスポート形式。

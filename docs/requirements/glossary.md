@@ -179,6 +179,10 @@ Current Affective Stateの基礎軸の一つ。状況に対する主体性、対
 
 出来事の意味をCompanion自身のGoals、Values、Personality、Memory、Relationship等に照らして評価する処理。Novelty / Expectedness、Goal relevance、Goal conduciveness、Agency、Coping potential / Control、Norm compatibility等を含み得る。
 
+### pre-Appraisal / post-Appraisal
+
+pre-Appraisalは、Main LLM起動前に構造化されたEvent情報を低コストに評価し、Fast Affect、優先度、wake要否等の暫定判断へ使うAppraisalである。post-Appraisalは、Main LLMの意味解釈後に、その解釈がAppraisalを変え得る場合だけ実行する事後評価であり、ReappraisalやState更新へ使える。どちらもPermissionやHard Boundaryを変更せず、すべてのRaw EventやLLM応答でMain LLMを呼ぶことを意味しない。
+
 ### Baseline
 
 Personality等に由来する、比較的安定した感情の基準状態。
@@ -241,13 +245,17 @@ Ene Runtime / Architecture自体の拡張機構。Provider、Observation、Conte
 
 LLM、VLM、Embedding、Reranker、STT、TTS等の処理を提供する実行バックエンド。コンポーネントごとにLocal ProviderまたはCloud Provider等を交換・選択でき、システム全体としてそれらを混在させられる。個別ProviderがLocal / CloudのHybrid実行を持つことはあり得るが必須ではない。
 
+### OS保護Credential Store
+
+API Key、OAuth refresh token等の再利用可能なCredentialを、OSまたは同等の保護機構によって管理する保存先。通常のApp Data Directoryへ平文やそのまま再利用できる形式で保存せず、Directoryを移動・複製してもCredentialが自動移行されるとは限らない。移動先で見つからない場合は再認証・再設定が必要になる。
+
 ### Tool
 
 CompanionまたはAgentが呼び出して、外部状態の取得・変更や計算を行う個別の実行能力。ToolはPlugin、MCP、Harness等から提供され得るが、Tool自体がPermissionを付与しない。
 
 ### Observation
 
-Desktop、OS、Window、アプリ、Clipboard、Schedule、通知、Task等から現在の状況を取得すること。Observationの許可はMemory保存、Main LLMへの伝達、Cloud送信の許可を意味しない。
+Desktop、OS、Window、アプリ、Clipboard、Schedule、通知、Task等から現在の状況を取得すること。Observationの許可はMemory保存、Main LLMへの伝達、Cloud送信の許可を意味しない。スクリーンショット、画面Frame、Raw Accessibility情報等のRaw Observationは、通常は処理中だけMemory Bufferへ保持し、処理終了後に破棄する。
 
 ### Context Monitor
 
@@ -270,6 +278,10 @@ scope、Action、対象、期間、Companion、Task、Schedule、Tool / MCP、Da
 ### Approval Reviewer
 
 Ask対象のActionを、Main Companionから独立して審査する別のLLM / Session。必要最小限の信頼済みPolicyと、対象・作用・不可逆性・Data Egress・Credential利用・provenance等を正規化したAction情報から、今回のみAllow、Deny、ユーザーへAskのいずれかを返す。Hard Boundaryを緩めず、障害・Timeout・判定不能時は自動Allowしない。
+
+### Pending approval / 承認待ち
+
+ユーザーまたはApproval Reviewerの承認が必要で、まだ実行できないActionをHost上へ保存した状態。目的、Action、対象、作用、不可逆性、Data Egress、Credential利用、適用Policy、作成時刻、期限等を確認でき、ユーザーが今回のみAllow、Deny、Cancelを選ぶまで実行・自動Retryしない。実行直前にもPolicyと対象の現在状態を再評価する。
 
 ### Delegation
 

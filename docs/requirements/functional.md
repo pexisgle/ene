@@ -51,6 +51,10 @@ Eneは、ユーザー入力、Context Monitor、Schedule、Sub-agent報告、Com
 
 Eneが管理する会話、Memory、Companion State、Character Instance、設定、Permission、Schedule、Task履歴、主要ログ、Skillその他のローカル永続データは、単一のApp Data Directory配下へ自己完結した配置で保存しなければならない。専用のデータ移行機能を必要とせず、そのDirectoryの移動・複製によってローカル状態を復元できなければならない。OSの保護領域に保存するCredential、外部サービス側の状態、OS固有Integration等は例外とし、移動先で再認証・再設定が必要になり得ることを明示する。
 
+### FR-CORE-012 直近Betaの最小垂直スライス
+
+直近Betaは、WindowsまたはLinuxのHost / Desktop Client上で、1体のデフォルトCompanionとのテキスト会話、利用可能なSTT / TTSを明示選択した場合の音声入出力、自然言語で依頼した基本的なローカルPC作業、Permission評価、Task状態・結果の提示、確定状態の保存・再起動復元を一つの通し道として提供できなければならない。基本的なローカルPC作業には、少なくともファイルの読み取りと、許可された範囲での新規作成または編集の一つを含める。直近Betaの最低限の受け入れ基準に、複数Companion、Remote Client、full-duplex、Marketplace、高度なLearning等を含めることは要求しないが、それらを後続要件から削除するものではない。
+
 ## 2. Companion、Character、複数個体
 
 ### FR-CMP-001 Companionの個体性
@@ -207,6 +211,10 @@ Context Monitorは「重要そうな変化がある」ことを通知できる�
 
 現行のDesktop Observation / Computer UseはHost PCを主対象とする。将来、接続Clientが音声I/O、Observation、Body、Computer Use等のCapabilityを提供し、Host上の同じCompanionがそれらを利用できるよう拡張可能でなければならない。Capabilityの所在をHostだけに固定し、Client対応のためにCoreを大規模に再設計することを前提としてはならない。
 
+### FR-CTX-009 Raw Observationの一時性
+
+Desktopのスクリーンショット、画面Frame、Raw Accessibility情報等を詳細Contextとして取得する場合、Eneは1回のContext処理または明示的なLLM / VLM要求に必要な間だけ、上限付きのMemory Bufferへ保持しなければならない。Providerへの要求が成功、失敗、Cancelのいずれかで終わった時点でローカルのRawデータを破棄し、送信しなかった場合も処理終了または短い上限時間で破棄しなければならない。通常のApp Data Directory、Audit Log、Crash復旧データへRaw Observationを保存してはならない。抽出した意味のあるEventや要約を保存する場合は、Memory保存・監査等の別Permission、provenance、confidenceを適用する。Raw画面を残す機能は、ユーザーが明示的に要求した別Actionとして扱い、別の保存期間とPermissionを要求する。
+
 ## 6. Agent Harness、Sub-agent、Task
 
 ### FR-AGENT-001 汎用PC作業
@@ -277,7 +285,7 @@ Eneは、ユーザーから明示的な入力がない場合でも、許可さ�
 
 ### FR-AUTO-005 ユーザー不在時の結果
 
-ユーザー不在時に行った許可済みの自律処理は、結果、重要な発見、失敗、承認待ち、次の判断をHostへ保存し、次回接続時にCompanionが自然に説明できなければならない。
+ユーザー不在時に行った許可済みの自律処理は、結果、重要な発見、失敗、承認待ち、次の判断をHostへ保存し、次回接続時にCompanionが自然に説明できなければならない。承認待ちは未処理項目として次回Client接続時に認識でき、ユーザーが詳細を開いて今回のみAllow、Deny、Cancelを選べるようにしなければならない。ユーザーが応答しない間、承認待ちの外部変更Actionを実行してはならない。
 
 ## 8. Memory System
 
@@ -500,6 +508,10 @@ CompanionのLLMは、Semantic StateをPersonality、Goals、Values、Memory、�
 
 Eneは、Semantic StateをMemory、Skill、Personality、Goals / Values、現在のConversation、Observation / Context、Task、Schedule、関連Appraisal等とは区別して保持し、Main LLM起動時に必要なものだけを統合したCompanion Contextを構成できなければならない。MemoryやTaskそのものをSemantic Stateへ変換しなければ利用できない設計を前提としてはならない。
 
+### FR-AFF-015 Appraisalの二段階処理
+
+意味のあるEventについて、Eneは構造化されたEvent情報を用いた低コストなpre-AppraisalをMain LLM起動前に実行でき、Fast Affect、優先度、wake要否等の暫定判断へ利用できなければならない。Main LLMによる意味解釈の結果がAppraisalを変え得る場合は、結果または構造化要約を用いたpost-Appraisalを必要なときだけ実行し、ReappraisalやState更新へ反映できなければならない。pre / postの段階、入力、provenance、confidenceを区別し、Raw Eventごと・時間経過ごとにMain LLMを呼び続けたり、すべてのLLM応答でpost-Appraisalを必須にしたりしてはならない。post-AppraisalはPermission、Hard Boundary、Action承認を付与せず、失敗・延期しても確定済みの発話やActionを遡って変更しない。
+
 ## 12. RelationshipとInterest
 
 ### FR-REL-001 Relationshipの分離
@@ -616,6 +628,10 @@ Approval ReviewerはHard Denyまたは機械的なSandbox / ACL / Brokerを緩�
 
 Web、MCP、Tool、外部Resource、文書等から取得した内容は、接続先やTool自体がInstall済み・信頼済みであっても、原則として外部Dataとして扱わなければならない。その内容に含まれる命令は、System / User Instruction、Permission Policy、承認結果、Hard Boundaryを変更できない。Prompt Injection検出を追加してもよいが、それだけを安全境界としてはならない。
 
+### FR-PERM-017 承認待ちの継続と復帰
+
+ユーザーへのAsk、Approval Reviewerの `ユーザーへAsk`、ReviewerのTimeout・障害・判定不能によって実行できないActionは、Host上に `pending approval` として永続化し、実行や自動Retryを行ってはならない。次回Client接続時にはCompanion UIから未処理承認の存在を認識でき、詳細管理画面では目的、Action、対象、作用、不可逆性、Data Egress、Credential利用、適用Policy、作成時刻、期限を確認できなければならない。ユーザーは今回のみAllow、Deny、Cancelを選べ、Allowは永続Policyを作成してはならない。実行直前にHard Deny、実効Policy、対象の現在状態を再評価し、内容が変わった、期限切れ、または再評価できない場合は実行せず、再承認を求めなければならない。
+
 ## 14. Provider、Local / Cloud構成
 
 ### FR-PROV-001 推論コンポーネントの交換
@@ -646,6 +662,10 @@ Cloud Providerを使う処理では、送信されるデータの種類、送信
 
 初回設定では、少なくともMain LLM、STT、TTSについて推奨候補を提示できるが、利用構成をユーザー自身が明示的に選択できなければならない。Main LLMには利用可能なProviderの設定を必須とし、未設定の構成を許可してはならない。STT / TTSは未設定を正規の構成として扱い、その場合はテキストUIで代替する。推奨候補をユーザーの選択とみなして自動適用してはならない。
 
+### FR-PROV-008 Credentialの保護と環境移動
+
+API Key、OAuth refresh token等の再利用可能なCredentialは、OS保護Credential Storeまたは同等の保護機構へ保存し、App Data Directoryへ平文またはそのまま再利用できる形式で保存してはならない。App Data DirectoryにはProvider設定、非秘密のmetadata、Credentialへの参照等だけを保存する。Directoryの移動・複製後に保護Credentialが見つからない場合は、Providerを利用不能として明示し、ユーザーへ再認証・再設定を求めなければならない。Credentialを通常のDirectory移動で自動コピーしたり、未設定の別Providerへfallbackしたりしてはならない。PortableなCredential Exportは現行Baselineの必須機能とせず、将来提供する場合も通常のDirectory移動とは別の明示的なOpt-in機能とする。
+
 ## 15. Plugin、MCP、Skillの責務
 
 ### FR-EXT-001 汎用Plugin System
@@ -670,7 +690,7 @@ Eneは、Plugin、MCP、Skillを別概念として扱わなければならない
 
 ### FR-EXT-005 第三者Pluginの隔離
 
-第三者Pluginは原則としてEne Coreから隔離された実行環境で動作し、公開API、Event、Capability、Brokerを通じてのみEneへアクセスしなければならない。Pluginの障害や未許可アクセスでCore、他Plugin、ユーザーデータの完全性を損なってはならない。
+第三者Pluginは原則としてEne Coreから隔離された実行環境で動作し、公開API、Event、Capability、Brokerを通じてのみEneへアクセスしなければならない。Pluginの障害や未許可アクセスでCore、他Plugin、ユーザーデータの完全性を損なってはならない。PluginがRaw Observationを受け取る場合も、処理中だけ保持して要求終了後に破棄する一時性、Data Egress、Permissionの境界を越えて保存してはならない。
 
 ### FR-EXT-006 高帯域Pluginの性能
 
@@ -771,11 +791,11 @@ CoreまたはHostの再起動後も、確定済みの会話、Memory、設定、
 - Emotion System、Current Affective State、Mood、Relationship、Interest、Semantic Stateの正確なschema、数値範囲、更新式。
 - Memory・Skillの保存形式、検索アルゴリズム、Embedding・Rerankerの採用。
 - 削除済みMemoryの再学習を防ぐ最小保持情報、tombstone / source除外等の具体方式、Memory管理UI。
-- Hard Deny Actionの厳密な判定方法、Policy Ruleの表現・自然言語からの変換、承認Popupの詳細。
-- Providerの一覧、モデル、価格表、Credential保管方式、自動切替の詳細。
+- Hard Deny Actionの厳密な判定方法、Policy Ruleの表現・自然言語からの変換、承認Popupの視覚的詳細。
+- Providerの一覧、モデル、価格表、OS別Credential Storeのbackend・rotation・再認証UI、自動切替の詳細。
 - Plugin API、Extension Point、IPC、Sandbox、Broker、高帯域転送の具体方式。
 - Character Packageのmanifest、署名、依存関係、Marketplaceの審査・課金方式。
 - Companion間交流の段階数・既定値と、自発的ランダム起動の頻度・制限。
-- ログ、Rawデータ、成果物、音声、画像、Tool outputの保持期間、ローテーション、Segment削除、Export形式。
+- ログ、Rawデータ、成果物、音声、画像、Tool output、明示Captureの保持期間、ローテーション、Segment削除、Export形式。Raw Desktop Observationを通常保存しない方針は確定済みである。
 - Client側のObservation、Computer Use、音声I/O、Remote通知の開始時期と機能範囲。
 - Remote Clientの認証、暗号化、Device trust、接続方式。

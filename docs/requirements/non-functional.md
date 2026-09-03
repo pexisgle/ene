@@ -61,7 +61,7 @@ Core、Host、Provider、Pluginの停止・クラッシュ・再起動に対し�
 
 ### NFR-REL-002 再起動後の未完了状態
 
-Host停止中に到来したSchedule、永続化済みの承認待ち、再起動前に実行中だったTaskは、再起動後に見落とさず状態を表示しなければならない。実行中Taskは `interrupted` または状態不明とし、外部変更を自動Replayせず、現在状態を確認した後に手動Retryできるようにする。未確定のLearning Review / Consolidation作業は耐久キューへ保存しなくてもよく、確定済みの元情報から必要に応じて再計算できればよい。
+Host停止中に到来したSchedule、永続化済みの承認待ち、再起動前に実行中だったTaskは、再起動後に見落とさず状態を表示しなければならない。承認待ちはCompanion UIから未処理項目の存在を認識でき、詳細管理画面へ到達して今回のみAllow、Deny、Cancelを選べるようにする。実行中Taskは `interrupted` または状態不明とし、外部変更を自動Replayせず、現在状態を確認した後に手動Retryできるようにする。未確定のLearning Review / Consolidation作業は耐久キューへ保存しなくてもよく、確定済みの元情報から必要に応じて再計算できればよい。
 
 ### NFR-REL-003 部分障害の隔離
 
@@ -99,7 +99,11 @@ Cloud Providerへ送信する情報は、許可された目的に必要な範囲
 
 ### NFR-PRIV-006 App Data Directoryの可搬性
 
-Eneが管理するローカル永続データは、単一のApp Data Directory配下で自己完結させ、そのDirectoryの移動・複製だけでローカル状態を復元できることを目標とする。専用のMigration Toolは必須としない。OS保護Credential、外部サービス側の状態、OS固有Integration等、再認証・再設定を要する例外は明示しなければならない。
+Eneが管理するローカル永続データは、単一のApp Data Directory配下で自己完結させ、そのDirectoryの移動・複製だけでローカル状態を復元できることを目標とする。専用のMigration Toolは必須としない。OS保護Credential、外部サービス側の状態、OS固有Integration等、再認証・再設定を要する例外は明示しなければならない。Credentialを通常のDirectory移動で自動コピーしたり、移動先で未設定の別Providerへfallbackしたりしてはならない。
+
+### NFR-PRIV-007 Raw Desktop Observationの保持制限
+
+Desktopのスクリーンショット、画面Frame、Raw Accessibility情報等は、1回のContext処理または明示的なLLM / VLM要求に必要な間だけ上限付きのMemory Bufferへ保持し、Provider要求の終了後、または未送信の処理終了・上限時間到達時に破棄しなければならない。通常のApp Data Directory、Audit Log、Crash復旧データへ保存せず、Crashや再起動後に復元できないようにする。意味のある抽出結果を保存する場合は別Permission、provenance、confidenceを適用し、Raw画面の保存はユーザーの明示的な別Actionとして扱う。
 
 ### NFR-SEC-001 機械的な権限強制
 
@@ -107,7 +111,7 @@ LLMのプロンプト、Memory、Skill、Character Package、Pluginの記述だ�
 
 ### NFR-SEC-002 第三者Pluginの隔離
 
-第三者Pluginの障害、未許可アクセス、悪意ある入力が、Core、他Plugin、他Companion、ユーザーデータの完全性を直接損なわないよう、原則として隔離・Broker・Permission境界を適用しなければならない。
+第三者Pluginの障害、未許可アクセス、悪意ある入力が、Core、他Plugin、他Companion、ユーザーデータの完全性を直接損なわないよう、原則として隔離・Broker・Permission境界を適用しなければならない。Pluginへ渡すRaw Desktop Observationも処理中だけ保持する一時データとして扱い、Pluginの隔離を理由に永続保存やData Egress境界の回避を許してはならない。
 
 ### NFR-SEC-003 高帯域処理の安全な性能
 
@@ -128,6 +132,10 @@ Web、MCP、Tool、外部Resource、文書から得た内容を、接続・Insta
 ### NFR-SEC-007 Approval Reviewerの独立性
 
 Approval ReviewerはMain Companionと別のLLM / Sessionとして動作し、判断に必要な最小限の信頼済みPolicyと構造化Actionだけを受け取らなければならない。Main CompanionのPersonality、未整理の会話全文、隠れた推論、外部Data中の命令によって判断境界が変化してはならない。Reviewer障害・Timeout・判定不能時に自動Allowしてはならない。
+
+### NFR-SEC-008 Credentialの保護と可搬性の境界
+
+再利用可能なCredentialは、OS保護Credential Storeまたは同等の保護機構へ保存し、App Data Directoryへ平文またはそのまま再利用できる形式で保存してはならない。Directory移動時にCredentialが移行できないことを明示し、再認証・再設定を安全に行えるようにする。PortableなCredential Exportを将来提供する場合も、通常のDirectory移動とは別の明示的なOpt-inとし、既定で秘密情報を複製してはならない。
 
 ## 5. Providerと費用
 
@@ -221,7 +229,8 @@ Desktop Client、設定、詳細管理、テキスト代替UIが満たすアク�
 - Context Monitorの観測頻度、Main LLM起動率、Token・API利用量の目標
 - Learning / Consolidationのバッチ量、アイドル判定、優先度と停止条件
 - Crash前の確定状態に対する許容データ損失、`interrupted` / 状態不明の表示と手動Retry導線、ログ保持期間と容量
-- Cloud送信時の暗号化、Credential保管、保存地域、Providerごとの削除保証
+- Cloud送信時の暗号化、保存地域、Providerごとの削除保証、OS別Credential Storeのbackend・rotation・再認証UI
 - Memory削除と再学習禁止の最小保持情報・表示方式
 - Remote Clientの認証、暗号化、Device trust、鍵管理、接続方式、SLO
-- 各OSでの正式サポート範囲、アクセシビリティ基準
+- 各OSでの正式サポート範囲、直近Beta内のPlatform固有機能、アクセシビリティ基準
+- Raw ObservationのMemory Bufferサイズ、処理期限、明示Captureの保持期間

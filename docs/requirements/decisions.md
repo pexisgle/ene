@@ -395,22 +395,62 @@ Decision: Eneが自己生成したSkill、およびユーザーが明示的にIn
 Reason: Skillの実用的な再利用性を保ちながら、外部Contentに埋め込まれた指示が制御面を書き換えるPrompt Injection経路を分離するため。
 Consequences: Skillの信頼もPermissionやSandbox例外を付与しない。外部Dataはprovenanceを保持し、Memory / Skillへ反映する場合もconfidenceを失わない。Prompt Injection検出は追加可能だが、機械的なPermission、Sandbox、Broker、Credential、Data Egress境界の代替にはしない。
 
+### R-D048: 直近Betaは最小垂直スライスを受け入れ基準とする
+
+Status: confirmed
+Nature: product decision
+Decision: 直近Betaは、WindowsまたはLinuxのHost / Desktop Client上で、1体のデフォルトCompanion（現時点ではAlicia）とのテキスト会話、選択した音声Providerが利用可能な場合の音声入出力、自然言語で依頼した基本的なローカルPC作業、Permission評価、Task結果の提示、確定状態の保存・再起動復元までを一つの通し道として成立させる。基本的なローカルPC作業は、少なくともファイルの読み取りと、許可された範囲での新規作成または編集の一つを含む。
+Reason: 製品の主役であるCompanion体験と、実際に役立つ作業能力を早期に同時検証し、各機能を個別に作り込んでから接続できないリスクを避けるため。
+Consequences: この通し道は直近Betaの最低限の受け入れ基準であり、複数Companion、Remote Client、full-duplex、Marketplace、高度なLearning等をBetaから全面的に除外する決定ではない。再起動前の外部変更Taskは自動Replayしない。
+
+### R-D049: 承認待ちは永続化し、ユーザー復帰時に明示する
+
+Status: confirmed
+Nature: product decision
+Decision: ユーザーへのAsk、Approval Reviewerの `ユーザーへAsk`、ReviewerのTimeout・障害・判定不能によって実行できないActionは、Host上に `pending approval` として永続化し、実行も自動Retryもしてはならない。次回Client接続時にはCompanion UIから未処理承認の存在を認識でき、詳細管理画面では目的、Action、対象、作用、不可逆性、Data Egress、Credential利用、適用Policy、作成時刻、期限を確認できるようにする。ユーザーは今回のみAllow、Deny、Cancelを選べ、Allowは永続Policyを作成しない。実行直前にHard Deny、実効Policy、対象の現在状態を再評価し、内容が変わった、期限切れ、または再評価できない場合は実行せず、再承認を求める。
+Reason: ユーザー不在時の安全な保留と、復帰後に承認要求が埋もれない操作性を両立するため。
+Consequences: 承認待ちはTask状態、通知、監査ログ、再起動後の復旧対象として一貫して扱う。ユーザーが応答しない限り外部変更を開始しない。承認Popupの具体的な視覚設計、Reviewerのモデル・Prompt・Timeout値は別途未確定とする。
+
+### R-D050: Credentialの保護を可搬性より優先する
+
+Status: confirmed
+Nature: design direction
+Decision: API Key、OAuth refresh token等の再利用可能なCredentialは、OS保護Credential Storeまたは同等の保護機構へ保存し、App Data Directoryへ平文またはそのまま再利用できる形式で保存しない。App Data DirectoryにはProvider設定、非秘密のmetadata、Credentialへの参照等だけを含める。Directoryを移動・複製したときに保護Credentialが移行先に存在しなければ、Providerを利用不能として明示し、ユーザーへ再認証・再設定を求める。通常のDirectory移動にCredentialを自動コピーせず、別Providerへfallbackしない。PortableなCredential Exportは現行Baselineに含めず、将来追加する場合も通常のDirectory移動とは別の明示的なOpt-in機能とする。
+Reason: App Data Directoryによるローカル状態の可搬性を維持しつつ、コピー・バックアップ・共有時にCredentialが漏洩するリスクとOSの保護機構を損なうリスクを抑えるため。
+Consequences: Directory移動で会話、Memory、設定、Permission、Task履歴等は復元できるが、Credentialは再認証が必要になり得る。この例外とProvider利用不能の復旧導線をユーザーへ示す。OS別のStore backend、rotation、再認証UIは未確定とする。
+
+### R-D051: Appraisalは軽量な事前評価と必要時の事後評価に分ける
+
+Status: confirmed
+Nature: design direction
+Decision: 意味のあるEventについて、Runtimeは構造化されたEvent情報を用いた低コストなpre-AppraisalをMain LLM起動前に実行でき、Fast Affect、優先度、wake要否等の暫定判断へ利用する。Main LLMが意味を解釈した後、その解釈によってAppraisalが変わり得る場合だけ、結果または構造化要約を用いたpost-Appraisalを実行し、ReappraisalやState更新へ反映できるようにする。pre / postの段階、入力、provenance、confidenceを区別し、Raw Eventごと・時間経過ごとにMain LLMを呼び続ける構成や、すべてのLLM応答でpost-Appraisalを必須にする構成は採用しない。
+Reason: Emotion Systemを単なるLLM出力の後付け説明にせず、Companionの起動・判断へ接続しながら、常時LLM実行による負荷・費用を避けるため。
+Consequences: post-Appraisalが失敗・延期しても、確定済みの発話やPermissionを遡って変更しない。新しい意味が得られた場合は別Eventとして再評価し、Appraisal自体がPermission、Hard Boundary、Action承認を付与することはない。
+
+### R-D052: Desktop Observationは処理中だけ保持する
+
+Status: confirmed
+Nature: design direction
+Decision: Desktopのスクリーンショット、画面Frame、Raw Accessibility情報等は、1回のContext処理または明示的なLLM / VLM要求に必要な間だけ、上限付きのMemory Bufferへ保持する。Providerへの要求が成功、失敗、Cancelのいずれかで終わった時点でローカルのRawデータを破棄し、送信しなかった場合も処理終了または短い上限時間で破棄する。通常のApp Data Directory、Audit Log、Crash復旧データへRaw Observationを保存しない。抽出した意味のあるEventや要約を保存する場合は、Memory保存・監査等の別Permission、provenance、confidenceを適用する。Raw画面を残す機能は、ユーザーが明示的に要求した別Actionとしてのみ許容し、別の保存期間とPermissionを持たせる。
+Reason: 自発的な文脈理解に必要な観測能力を提供しながら、常時画面保存と第三者Plugin・Providerへの意図しない保持を防ぐため。
+Consequences: Observationの許可はRawデータの永続保存やCloud送信の許可を意味しない。第三者PluginやProviderを経由する場合も同じ一時性・Data Egress・Permission境界を適用する。Memory Bufferのサイズ、処理期限、明示Captureの保持期間は未確定とする。
+
 ## 未確定事項
 
 次の項目は、今回の判断から直接は決まらないため、別途検証・対話して決める。
 
 | ID | 未確定項目 |
 |---|---|
-| O-001 | 各OS・ClientのBeta内での実装順、対応機能、Remote接続の仕様・認証・暗号化・Device trust |
+| O-001 | Windows / Linux各OSでのBeta内の実装順・Platform固有の対応範囲、Remote接続の仕様・認証・暗号化・Device trust |
 | O-002 | AliciaからEne独自キャラクターへの移行方法、Character Packageのmanifest・署名・Marketplace方式 |
-| O-003 | LLM、VLM、Embedding、Reranker、STT、TTSのProvider・モデル・価格・Credential保管 |
+| O-003 | LLM、VLM、Embedding、Reranker、STT、TTSのProvider・モデル・価格、OS別Credential Storeのbackend・rotation・再認証UI |
 | O-004 | 完全Offlineで保証する機能範囲 |
 | O-005 | CPU、GPU、RAM、Storage、対話・音声・Remoteの定量的な性能予算 |
 | O-006 | Current Affective State、Mood、Relationship、Interest、Semantic State、Memoryの正確なschemaと更新式 |
-| O-007 | Hard Deny Actionの厳密な分類・Platform別強制方法、自然言語PolicyのRule表現・確認UI、承認Popupの詳細 |
+| O-007 | Hard Deny Actionの厳密な分類・Platform別強制方法、自然言語PolicyのRule表現・確認UI、承認Popupの視覚的詳細 |
 | O-008 | Plugin API、Extension Point、IPC、Sandbox、Broker、bulk data転送の具体方式 |
 | O-009 | Companion間交流の段階数・既定値、ランダム起動の頻度・制限 |
-| O-010 | ログ、成果物、音声、画像、Tool outputの保持期間、ローテーション、Segment削除、Export形式 |
+| O-010 | ログ、成果物、音声、画像、Tool output、明示Captureの保持期間、ローテーション、Segment削除、Export形式（Raw Desktop Observationを通常保存しない方針は確定済み） |
 | O-011 | Memory削除後の再学習を防ぐ最小tombstone / source除外情報とMemory管理UIの具体方式 |
 | O-012 | Accessibility基準、UIテーマ、3層の視覚表現 |
-| O-013 | Approval Reviewerに利用するモデル、評価Prompt、Action schema、品質評価、Timeout値 |
+| O-013 | Approval Reviewerに利用するモデル、評価Prompt、Action schema、品質評価、Timeout値（承認待ちの保留・復帰フローは確定済み） |
