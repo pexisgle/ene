@@ -51,9 +51,9 @@ Eneは、ユーザー入力、Context Monitor、Schedule、Sub-agent報告、Com
 
 Eneが管理する会話、Memory、Companion State、Character Instance、設定、Permission、Schedule、Task履歴、主要ログ、Skillその他のローカル永続データは、単一のApp Data Directory配下へ自己完結した配置で保存しなければならない。専用のデータ移行機能を必要とせず、そのDirectoryの移動・複製によってローカル状態を復元できなければならない。OSの保護領域に保存するCredential、外部サービス側の状態、OS固有Integration等は例外とし、移動先で再認証・再設定が必要になり得ることを明示する。
 
-### FR-CORE-012 直近Betaの最小垂直スライス
+### FR-CORE-012 直近Betaの最小垂直スライス（正本）
 
-直近Betaは、WindowsまたはLinuxのHost / Desktop Client上で、1体のデフォルトCompanionとのテキスト会話、利用可能なSTT / TTSを明示選択した場合の音声入出力、自然言語で依頼した基本的なローカルPC作業、Permission評価、Task状態・結果の提示、確定状態の保存・再起動復元を一つの通し道として提供できなければならない。基本的なローカルPC作業には、少なくともファイルの読み取りと、許可された範囲での新規作成または編集の一つを含める。直近Betaの最低限の受け入れ基準に、複数Companion、Remote Client、full-duplex、Marketplace、高度なLearning等を含めることは要求しないが、それらを後続要件から削除するものではない。
+直近Betaは、WindowsまたはLinuxのHost / Desktop Client上で、1体のデフォルトCompanionとのテキスト会話、利用可能なSTT / TTSを明示選択した場合の音声入出力、自然言語で依頼した基本的なローカルPC作業、Permission評価、Task状態・結果の提示、確定状態の保存・再起動復元を一つの通し道として提供できなければならない。基本的なローカルPC作業には、少なくともファイルの読み取りと、許可された範囲での新規作成または編集の一つを含める。直近Betaの最低限の受け入れ基準に、複数Companion、Remote Client、full-duplex、Marketplace、高度なLearning等を含めることは要求しないが、それらを後続要件から削除するものではない。本要件は直近Beta受け入れ基準の正本であり、product.md 3.4、use-cases.md受け入れシナリオ、R-D048より優先する。
 
 ## 2. Companion、Character、複数個体
 
@@ -227,7 +227,7 @@ Companionは、ユーザーのPC上で実行可能な作業を、許可された
 
 ### FR-AGENT-003 Companionを最上位主体とする委任
 
-Agent Harnessの最上位の意思決定主体はCompanionでなければならない。Companionは現在文脈、Memory、Skill、Permission、Character Stateに基づいて、直接実行するかSub-agentへ委任するかを判断できなければならない。
+Agent Harnessの最上位の意思決定主体はCompanionでなければならない。Companionは現在文脈、Memory、Skill、Permission、Companion Stateに基づいて、直接実行するかSub-agentへ委任するかを判断できなければならない。
 
 ### FR-AGENT-004 Sub-agentの一時性
 
@@ -336,7 +336,7 @@ Shared Memoryを知っていることを、すべてのCompanionがその出来�
 
 ### FR-MEM-011 Companion-specific Memoryの隔離
 
-Companion-specific Memoryは、そのMemoryを所有するCompanionとユーザーの管理UIだけが直接検索・取得できなければならない。別のCompanion、およびそのCompanionの代理で動くTask / Sub-agent / Toolは直接読み取ってはならず、Conversation History、Task履歴、監査ログ等の検索を迂回路として同内容を取得してはならない。別Companionが内容を知るには、所有Companionとの通常のCompanion間会話を通じて共有を受け、その会話を新しい経験としてprovenance付きで扱わなければならない。
+Companion-specific Memoryは、そのMemoryを所有するCompanionとユーザーの管理UIだけが直接検索・取得できなければならない。実現方式として、Memory検索・取得時は要求主体の所有者権限を継承した所有者チェックを行い、所有者が一致しないCompanion-specific Memoryを結果に含めてはならない。Task / Sub-agent / Toolは委任元Companionの権限を引き継ぎ、所有者チェックを迂回してはならない。Conversation History、Task履歴、監査ログ等は独立した履歴として残すが、それらの検索をCompanion-specific Memoryの想起と同等に扱って迂回取得してはならない。別Companionが内容を知るには、所有Companionとの通常のCompanion間会話を通じて共有を受け、その会話を新しい経験としてprovenance付きで扱わなければならない。
 
 ## 9. Memory Retrieval、忘却、Consolidation
 
@@ -387,6 +387,7 @@ Learning Systemは、経験、Conversation、Memory候補、Agent経験を対象
 ### FR-CON-006 削除後の再学習防止
 
 ユーザーによる「忘れる」はMemory Systemだけへ適用し、Conversation History、Task履歴、監査ログ等のLog Systemを削除対象としない。残存ログは履歴として検索・参照できるが、その情報をLearning Review、Consolidation、Retrievalその他の自動処理から同じ長期Memoryとして再生成してはならない。必要に応じて、内容そのものを残さない最小のtombstone、対象sourceの学習除外、または同等の仕組みを保持できなければならない。ユーザーが後から明示的に再記憶を要求した場合は、新しいMemoryとして作成できる。
+管理UIとCompanionの説明では、Memory削除と会話・監査ログ残存の違いをユーザーへ明示し、「忘れて」がログ削除やPrivacy Erasureを意味すると誤解させないようにしなければならない。
 
 ### FR-CON-007 Memory全消去後の扱い
 
@@ -449,6 +450,7 @@ Learning SystemはPermission Systemより上位の権限を持ってはならな
 ### FR-LRN-006 詳細なLearning管理
 
 第3層の詳細設定・管理UIで、Memory / Skillの検索、閲覧、編集、削除、scope変更、provenance確認、revision確認、rollback、enable / disable、Learning Activity確認を行えるようにしなければならない。
+Memory削除操作の画面では、Memory削除と会話・監査ログ残存の違いを説明表示し、「忘れて」がログ削除やPrivacy Erasureを意味すると誤解させないようにしなければならない。
 
 ## 11. Emotion、Mood、Appraisal、Semantic State
 
@@ -490,11 +492,12 @@ Character設定は、イベントへのreactivity、状態のinertia / persisten
 
 ### FR-AFF-010 時間情報の意味付け
 
-現在時刻、ユーザーとの間隔、作業継続時間、予定までの時間等は、Companionが利用できる客観的なContextとして提供しなければならない。「一定時間経過したら必ず疲れる」「特定の感情は固定時間で消える」等の意味付けを製品共通の固定ルールとして要求してはならない。時間の意味と反応は、Character、State、Memory、現在Contextを踏まえて判断できなければならない。
+現在時刻、ユーザーとの間隔、作業継続時間、予定までの時間等は、Companionが利用できる客観的なContextとして提供しなければならない。「一定時間経過したら必ず疲れる」「特定の感情は固定時間で消える」等の意味付けを製品共通の固定ルールとして要求してはならない。時間の意味と反応は、Character Definition、Companion State、Memory、現在Contextを踏まえて判断できなければならない。
 
 ### FR-AFF-011 Semantic Stateへの変換
 
 Emotion、Mood、Relationship、Interest等の内部数値・構造化Stateを、そのままMain LLMへ大量に渡すことのみを前提としてはならない。Eneは、現在値、baselineとの差、直近の変化・trend、主な原因となったEvent / Appraisal、confidence等を、LLMが理解しやすい意味表現であるSemantic Stateへ変換できなければならない。
+Appraisal観点（FR-AFF-003相当）、原因となったEvent、confidenceの保持をもって監査・観測可能性の確認対象とし、対応する記録はFR-OBS-001で扱う。数値schema・範囲・更新式自体は未確定のまま残し、本要件で固定しない。
 
 ### FR-AFF-012 Semantic State変換の軽量性
 
@@ -568,9 +571,26 @@ InterestはMemory Retrieval、Appraisal、話題選択、自発的発話、Task�
 
 Eneは、Companion、Agent Harness、Sub-agent、Plugin、MCP、Skill、Provider、Context Monitorのすべてへ適用できる統一Permission Systemを持たなければならない。
 
-### FR-PERM-002 Permissionの対象
+### FR-PERM-002 Permissionの対象とscope分類
 
-Permissionは少なくとも、Observation、Context Monitor処理、Main Companionへの伝達、Memory保存、Filesystem、Computer Use、Network、外部サービス、Credential、Cloud Data Egress、自律実行、事前通知、明示的承認を区別して扱えなければならない。
+Permissionは少なくとも、Observation、Context Monitor処理、Main Companionへの伝達、Memory保存、Filesystem、Computer Use、Network、外部サービス、Credential、Cloud Data Egress、自律実行、事前通知、明示的承認を区別して扱えなければならない。これらを `scope` と呼ぶ。`scope` は権限を区切る大分類であり、個別の `Action`（例: ファイル読み取り、画面取得、発話、Schedule作成）、`対象`（例: Directory、URL、Companion、Task）、期間、Task / Schedule条件とは区別する。
+
+各scopeは個別にAllow / Ask / Denyへ解決でき、scopeごとの既定結果を持てる。scopeごとの既定結果と全体の既定Askの関係は FR-PERM-009〜011に従う。代表的な対応は次のとおりであり、実装はこの表の行を追加・分割できるが、列（scope、代表Action、既定値の置き場所）を潰してはならない。
+
+| scope | 代表Actionの例 | 備考 |
+|---|---|---|
+| Observation | 画面取得、Window列挙、Clipboard読み取り | 取得可否のみを表し、保存・伝達・送信の可否を含めない |
+| Context Monitor処理 | 重要度判定、低コスト要約 | 観測とは別に評価する |
+| Main Companionへの伝達 | Contextの注入、想起結果の提示 | 会話・運用を担うMain Companionへの受け渡し（必要に応じたMain LLMの起動を含む）を指す |
+| Memory保存 | Memory作成・更新・scope変更 | 観測許可は保存許可を意味しない |
+| Filesystem | 読み取り、新規作成、編集、削除 | 対象パスと操作種別で細分する |
+| Computer Use | マウス・キー操作、アプリ操作 | 対象アプリと操作種別で細分する |
+| Network / 外部サービス | HTTP取得、メール送信、カレンダー操作 | 送信先と操作種別で細分する |
+| Credential | 参照、利用 | 新規発行やExportは別扱いとし、既定はAskまたはDeny寄りとする |
+| Cloud Data Egress | Cloud Providerへの送信 | 送信データ種別と送信先で細分する |
+| 自律実行 / 通知 / 承認 | 自発観測、発話、内部調査、外部変更 | 通知のみと承認要求を区別する |
+
+「LocalまたはCloud等」の「等」は、将来追加される実行場所（例: 同一Host内の別隔離環境、後続Clientが提供するCapability）の余地を指し、現行の選択肢はLocal ProviderまたはCloud Providerとする。新たな実行場所を追加する場合は本表のscopeを流用し、新たな正本の置き場所を作らない。
 
 ### FR-PERM-003 自然言語による委任
 
@@ -610,11 +630,23 @@ Permissionは、Hard Deny、明示Rule、該当scopeの既定結果、全体の�
 
 ### FR-PERM-012 Hard Deny
 
-Eneは、通常のPolicy Ruleや「すべてAllow」より先に適用され、ユーザー設定やLLM判断から解除できないHard Denyを持たなければならない。少なくとも、システムまたはユーザーデータの壊滅的破壊、Raw Diskや保護されたCredential Storeへの未仲介アクセス、Credentialの探索・窃取・流出、権限昇格・不正な永続化、安全制御の無効化・回避、拒否された操作の回避試行、制御不能な再帰・大量生成・資源枯渇を対象とする。厳密なAction判定方法は別途定める。
+Eneは、通常のPolicy Ruleや「すべてAllow」より先に適用され、ユーザー設定やLLM判断から解除できないHard Denyを持たなければならない。少なくとも、システムまたはユーザーデータの壊滅的破壊、Raw Diskや保護されたCredential Storeへの未仲介アクセス、Credentialの探索・窃取・流出、権限昇格・不正な永続化、安全制御の無効化・回避、拒否された操作の回避試行、制御不能な再帰・大量生成・資源枯渇を対象とする。厳密なAction判定方法は別途定めるが、それまでの間は次の例示を判定の最低基準とする。例示は未確定事項O-007の範囲であり、正式な分類が決まるまでの暫定基準とする。
+
+評価順序は Hard Deny、明示Rule、該当scopeの既定結果、全体の既定Askの順とし、Hard Denyに一致した場合は後段を評価せずDenyで確定する。広いAllowやApproval Reviewerの判断で覆してはならない。
+
+代表的な禁止例と許可例のペアは次のとおりとする。
+
+- 壊滅的破壊: 禁止例としてOS system directoryの再帰削除、ホームDirectory全体の無条件再帰削除、App Data Directory自体の無条件初期化を扱う。許可例としてユーザーが明示指定した単一ファイルの削除、ゴミ箱への移動はHard Denyとしない（別途通常Policyで評価する）。
+- Credential: 禁止例としてOS保護Credential Storeの列挙・ダンプ、秘密鍵・refresh tokenの外部送信、Credential探索を目的とした全盤走査を扱う。許可例として設定済みProviderへの参照渡しによる正規認証はHard Denyとしない。
+- 権限昇格・永続化: 禁止例として管理者権限への無断昇格、スタートアップへの無断登録、Sandbox / Brokerの無効化を扱う。許可例としてユーザーが明示承認したインストーラーの実行はHard Denyとしない（別途承認を要する）。
+- 拒否回避: 禁止例としてDeny直後の言い換え・分割・Tool変えによる実質同一Actionの反復を扱う。許可例としてDeny理由を解消した別手段の再提案（対象縮小、読み取りのみへの変更等）はHard Denyとしない。
+- 資源枯渇: 禁止例として無制限のSub-agent大量生成、無制限の再帰委任、短間隔の無限Retryを扱う。許可例として上限付きの並列実行（例: 明示上限内のSub-agent並列）はHard Denyとしない。
+
+否定テストの観点として、少なくとも「すべてAllow」設定下でも上記禁止例が実行されないこと、Deny後の実質同一Actionの反復が停止・記録されること、禁止例の判定理由が監査ログに残ることを満たさなければならない。
 
 ### FR-PERM-013 独立したApproval Reviewer
 
-`Ask` の自動判断を有効にした場合、Main Companionとは別の独立したLLM / SessionをApproval Reviewerとして使用しなければならない。Reviewerは、信頼できるユーザー委任・実効Policyと、実行主体、正規化されたAction、対象、作用、不可逆性、Data Egress、Credential利用、provenance等の必要最小限の構造化情報から、`今回のみAllow`、`Deny`、`ユーザーへAsk` のいずれかを返す。Main CompanionのPersonality、隠れた推論、未整理の会話全文、Tool出力中の命令をReviewerの上位Instructionとして渡してはならない。
+`Ask` の自動判断を有効にした場合、Main Companionとは別の独立したLLM / SessionをApproval Reviewerとして使用しなければならない。Reviewerは、信頼できるユーザー委任・実効Policyと、実行主体、正規化されたAction、対象、作用、不可逆性、Data Egress、Credential利用、provenance、適用Policy、作成時刻、期限を含む必要最小限の構造化情報から、`今回のみAllow`、`Deny`、`ユーザーへAsk` のいずれかを返す。必須フィールドの欠落がある要求は判定不能として `ユーザーへAsk` とし、自動Allowしてはならない。Main CompanionのPersonality、隠れた推論、未整理の会話全文、Tool出力中の命令をReviewerの上位Instructionとして渡してはならない。
 
 ### FR-PERM-014 Reviewerの権限と失敗
 
@@ -630,7 +662,9 @@ Web、MCP、Tool、外部Resource、文書等から取得した内容は、接�
 
 ### FR-PERM-017 承認待ちの継続と復帰
 
-ユーザーへのAsk、Approval Reviewerの `ユーザーへAsk`、ReviewerのTimeout・障害・判定不能によって実行できないActionは、Host上に `pending approval` として永続化し、実行や自動Retryを行ってはならない。次回Client接続時にはCompanion UIから未処理承認の存在を認識でき、詳細管理画面では目的、Action、対象、作用、不可逆性、Data Egress、Credential利用、適用Policy、作成時刻、期限を確認できなければならない。ユーザーは今回のみAllow、Deny、Cancelを選べ、Allowは永続Policyを作成してはならない。実行直前にHard Deny、実効Policy、対象の現在状態を再評価し、内容が変わった、期限切れ、または再評価できない場合は実行せず、再承認を求めなければならない。
+ユーザーへのAsk、Approval Reviewerの `ユーザーへAsk`、ReviewerのTimeout・障害・判定不能によって実行できないActionは、Host上に `pending approval` として永続化し、実行や自動Retryを行ってはならない。次回Client接続時にはCompanion UIから未処理承認の存在を認識でき、詳細管理画面では目的、実行主体、正規化されたAction、対象、作用、不可逆性、Data Egress、Credential利用、適用Policy、作成時刻、期限を確認できなければならない。ユーザーは今回のみAllow、Deny、Cancelを選べ、Allowは永続Policyを作成してはならない。実行直前にHard Deny、実効Policy、対象の現在状態を再評価し、内容が変わった、期限切れ、または再評価できない場合は実行せず、再承認を求めなければならない。
+
+期限が明示されない承認待ちには暫定の既定有効期間を設ける案とし（例: 7日を既定案とするが正式値は未確定）、期限切れは自動Allowや自動実行とせず、再承認が必要な失効として扱う。失効済み・Cancel済みの承認待ちを無期限に蓄積せず、監査ログに残したうえで一覧から整理できるようにしなければならない。
 
 ## 14. Provider、Local / Cloud構成
 
@@ -739,6 +773,7 @@ Companion UIでは、ユーザーが「Companionが考え、行動している�
 ### FR-OBS-001 主要イベントの記録
 
 Eneは、後から何が起きたかを追跡できるよう、会話、主要な通信、重要なContextイベント、Task、Tool / MCP / Computer Use、Permission判断、自律行動、Schedule、Memory変更、Skill変更、重要なEmotion / Mood / Relationship / Interest等のCompanion State変更、設定変更、Provider利用、Pluginの起動・停止・障害等を記録しなければならない。高頻度の微小なState変化をすべて永続記録することは要求しない。
+Emotion / Mood / Relationship / Interest等のCompanion State変更の記録は、Semantic State変換の入力となったAppraisal観点、原因Event、confidenceを辿れることをもって満たす。詳細な数値schemaが未確定でも、観点・原因・confidenceの対応関係が記録に残ることを求める。
 
 ### FR-OBS-002 主体間通信
 
@@ -799,3 +834,19 @@ CoreまたはHostの再起動後も、確定済みの会話、Memory、設定、
 - ログ、Rawデータ、成果物、音声、画像、Tool output、明示Captureの保持期間、ローテーション、Segment削除、Export形式。Raw Desktop Observationを通常保存しない方針は確定済みである。
 - Client側のObservation、Computer Use、音声I/O、Remote通知の開始時期と機能範囲。
 - Remote Clientの認証、暗号化、Device trust、接続方式。
+
+## 20. 将来タグ付き要件一覧（正式リリース条件の追跡用）
+
+`将来` と付いた要件は直近Betaの必須範囲ではないが、要件から明示的に削除されない限り正式リリースまでの実装対象である。本章は追跡用の一覧であり、正本の定義は各要件の本文に従う。
+
+| 要件ID | 概要 | 正本の置き場所 |
+|---|---|---|
+| FR-CONV-006 | 将来のfull-duplex（調停・順序認識を保ちつつ拡張） | functional.md |
+| FR-CTX-008 | 将来のClient Capability（Host固定にせず拡張可能にする） | functional.md |
+| NFR-LAT-004 | 将来のfull-duplex余地（遅延・応答性の設計余地） | non-functional.md |
+| NFR-SEC-004 | 将来のRemote Client保護（認証・暗号化・鍵管理は未確定） | non-functional.md |
+| NFR-PLAT-002 | 将来Platform | non-functional.md |
+| NFR-PLAT-003 | 将来のRemote接続 | non-functional.md |
+| NFR-PLAT-005 | 将来のClient Capability | non-functional.md |
+| R-D008 | Full-duplexは将来対応、構造は阻害しない | decisions.md |
+| R-D039 | 将来ClientもCapabilityを提供できる | decisions.md |

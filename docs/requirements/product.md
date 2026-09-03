@@ -49,14 +49,11 @@ Ene は「高性能なAgentにキャラクターを貼る」ことを第一目�
 
 直近Betaは実装順上の一区切りであり、製品全体の正式リリースではない。後続実装対象も、要件から明示的に削除されない限り正式リリースまでに実装する。各対象の実装時期、対応機能、配布形態の詳細は未確定であり、現時点で完全な詳細設計を要求しない。ただし、Remote Client等の既知の後続要件を追加するためにCoreの大規模な置換を必要とする構造へ固定しない。直近BetaのDesktop Observation / Computer UseはHost PCを主対象とし、後続Clientは音声I/O、Observation、Body、Computer Use等のCapabilityを提供できるようにする。
 
-### 3.4 直近Betaの最小垂直スライス
+### 3.4 直近Betaの最小垂直スライス（正本は FR-CORE-012）
 
-直近Betaは、少なくとも次の一連の利用ループを実際に完了できることを受け入れ基準とする。
+直近Betaの受け入れ基準の正本は `FR-CORE-012`（functional.md）とする。本節の記述と `FR-CORE-012` が食い違う場合は、`FR-CORE-012` を優先する。
 
-1. WindowsまたはLinuxのHost上で、Desktop ClientとCoreを起動できる。
-2. 1体のデフォルトCompanion（現時点ではAlicia）と、テキスト入力・テキスト表示による会話を開始できる。利用可能なSTT / TTSをユーザーが明示的に選択した場合は、同じ会話で音声入力・音声出力も利用できる。
-3. ユーザーがCompanionへ自然言語でPC作業を依頼し、少なくともローカルファイルの読み取りと、許可された範囲での新規作成または編集の一つを実行できる。作業はPermission評価を通り、Taskの状態と結果をユーザーへ返す。
-4. 会話、確定したTask状態、Permission判断等のローカル状態を保存し、再起動後に復元できる。再起動前に実行中だった外部変更を自動Replayしない。
+概要として、直近Betaは少なくとも、WindowsまたはLinuxのHost / Desktop Client上での起動、1体のデフォルトCompanionとのテキスト会話（STT / TTSを明示選択した場合は音声入出力）、自然言語で依頼した基本的なローカルPC作業のPermission評価付き実行、確定状態の保存・再起動復元までの一連の利用ループを完了できなければならない。詳細な完了条件と除外範囲は `FR-CORE-012` を参照すること。
 
 これは直近Betaの最低限の通し道であり、Betaへ他の機能を含めることを妨げない。複数Companion、Remote Client、full-duplex、Marketplace、高度なLearning等はこの受け入れ基準に含めないが、要件から削除されたことを意味しない。
 
