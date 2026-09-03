@@ -395,13 +395,13 @@ Decision: Eneが自己生成したSkill、およびユーザーが明示的にIn
 Reason: Skillの実用的な再利用性を保ちながら、外部Contentに埋め込まれた指示が制御面を書き換えるPrompt Injection経路を分離するため。
 Consequences: Skillの信頼もPermissionやSandbox例外を付与しない。外部Dataはprovenanceを保持し、Memory / Skillへ反映する場合もconfidenceを失わない。Prompt Injection検出は追加可能だが、機械的なPermission、Sandbox、Broker、Credential、Data Egress境界の代替にはしない。
 
-### R-D048: 直近Betaは最小垂直スライスを受け入れ基準とする
+### R-D048: 直近Betaは最小垂直スライスを受け入れ基準とする（正本は FR-CORE-012）
 
 Status: confirmed
 Nature: product decision
-Decision: 直近Betaは、WindowsまたはLinuxのHost / Desktop Client上で、1体のデフォルトCompanion（現時点ではAlicia）とのテキスト会話、選択した音声Providerが利用可能な場合の音声入出力、自然言語で依頼した基本的なローカルPC作業、Permission評価、Task結果の提示、確定状態の保存・再起動復元までを一つの通し道として成立させる。基本的なローカルPC作業は、少なくともファイルの読み取りと、許可された範囲での新規作成または編集の一つを含む。
+Decision: 直近Betaの受け入れ基準の正本は `FR-CORE-012` とする。本決定はその理由と位置づけを記録し、詳細な完了条件は `FR-CORE-012` に従う。概要として、WindowsまたはLinuxのHost / Desktop Client上で、1体のデフォルトCompanion（現時点ではAlicia）とのテキスト会話、選択した音声Providerが利用可能な場合の音声入出力、自然言語で依頼した基本的なローカルPC作業、Permission評価、Task結果の提示、確定状態の保存・再起動復元までを一つの通し道として成立させる。基本的なローカルPC作業は、少なくともファイルの読み取りと、許可された範囲での新規作成または編集の一つを含む。
 Reason: 製品の主役であるCompanion体験と、実際に役立つ作業能力を早期に同時検証し、各機能を個別に作り込んでから接続できないリスクを避けるため。
-Consequences: この通し道は直近Betaの最低限の受け入れ基準であり、複数Companion、Remote Client、full-duplex、Marketplace、高度なLearning等をBetaから全面的に除外する決定ではない。再起動前の外部変更Taskは自動Replayしない。
+Consequences: この通し道は直近Betaの最低限の受け入れ基準であり、複数Companion、Remote Client、full-duplex、Marketplace、高度なLearning等をBetaから全面的に除外する決定ではない。再起動前の外部変更Taskは自動Replayしない。product.md 3.4とuse-cases.md受け入れシナリオは `FR-CORE-012` への参照とし、重複定義しない。
 
 ### R-D049: 承認待ちは永続化し、ユーザー復帰時に明示する
 

@@ -178,7 +178,7 @@ Eneは1対1の利用を基本とし、声紋等による話者認識・本人認
 4. 重複統合、矛盾整理、抽象化、重要度・confidence・recall優先度の調整など重い処理はConsolidationとしてアイドル時に行う。
 5. 日常の小さな学習で毎回承認を求めない。
 6. ユーザーは「覚えておいて」「忘れて」「それは違う」「次からこのやり方で」等を自然言語で伝え、後からMemoryを修正・削除できる。
-7. 「忘れて」はMemory Systemだけへ適用し、対象Memoryの本文、検索Index、Embedding、派生Cacheを削除する。会話・監査ログは独立した履歴として残り、通常のログ検索から参照できる。
+7. 「忘れて」はMemory Systemだけへ適用し、対象Memoryの本文、検索Index、Embedding、派生Cacheを削除する。会話・監査ログは独立した履歴として残り、通常のログ検索から参照できる。この違いはCompanionの説明と管理UIでユーザーへ明示し、「忘れて」がPrivacy Erasureやログ削除を意味すると誤解させないようにする。
 8. 残存ログを参照しただけで、削除済みMemoryをLearning ReviewやConsolidationから自動再生成しない。ユーザーが後から明示的に「再び覚えて」と指示した場合は、新しいMemoryとして作成できる。
 
 **失敗時の挙動**: 推測を確認済み事実として固定しない。Permissionで保存不可の情報を学習しない。削除済み・再学習禁止として扱う情報をバックグラウンド処理で復活させない。
@@ -213,7 +213,7 @@ Eneは1対1の利用を基本とし、声紋等による話者認識・本人認
 2. Companion自身によるSchedule作成を含むすべてのActionについて、実行前にHard DenyとユーザーのPermission Policyを評価する。
 3. Allow、Ask、Denyを同じRule集合で管理する。Hard Denyに該当しないActionは、明示Rule、該当scopeの既定結果の順に解決し、どちらもない場合は `Ask` とする。
 4. `Ask` は、設定に応じてユーザーへ承認Popupを表示するか、Main Companionとは独立したApproval Reviewerへ判断を委ねる。
-5. Approval Reviewerは、信頼できるユーザー委任・Policyと、対象、作用、Data Egress、不可逆性、由来を含む構造化されたAction情報だけを受け取り、`今回のみAllow`、`Deny`、`ユーザーへAsk` のいずれかを返す。Main Companionの人格、未整理の会話全文、隠れた推論に判断を左右させない。
+5. Approval Reviewerは、信頼できるユーザー委任・実効Policyと、実行主体、正規化されたAction、対象、作用、不可逆性、Data Egress、Credential利用、provenance、適用Policy、作成時刻、期限を含む構造化されたAction情報だけを受け取り、`今回のみAllow`、`Deny`、`ユーザーへAsk` のいずれかを返す。必須フィールドの欠落がある要求は判定不能として `ユーザーへAsk` とする。Main Companionの人格、未整理の会話全文、隠れた推論に判断を左右させない。
 6. 事前委任済み・Schedule済みで明示Allowに一致する作業や、提案の根拠を集める許可済み内部調査は、設定範囲で通知なしに進められる。新しい外部変更作業は原則として開始前に通知する。
 7. Approval ReviewerもHard Denyを越える権限を付与できない。判定不能、Timeout、Reviewer障害時はユーザーへAskとし、ユーザー不在時は実行せず保留する。
 8. ユーザーへのAskまたはReviewerからの `ユーザーへAsk` は、目的、Action、対象、作用、不可逆性、Data Egress、Credential利用、適用Policy、作成時刻、期限を含む `pending approval` としてHostへ保存される。保存後に自動実行や自動Retryを行わない。
@@ -329,14 +329,11 @@ Eneは1対1の利用を基本とし、声紋等による話者認識・本人認
 **失敗時の挙動**: Directoryが不完全、破損、または利用中のEneと互換でない場合は、状態を黙って初期化・上書きせず、診断可能なエラーを示す。
 **完了条件**: 明示された例外を除き、Directoryの移動だけで同じローカルEne状態を利用できる。
 
-## 直近Betaの受け入れシナリオ
+## 直近Betaの受け入れシナリオ（正本は FR-CORE-012）
 
-直近Betaでは、少なくとも次の一連のシナリオを完了できることを確認する。
+直近Betaの受け入れ基準の正本は `FR-CORE-012`（functional.md）とする。本節はその利用者視点の読み替えであり、記述が食い違う場合は `FR-CORE-012` を優先する。
 
-1. WindowsまたはLinuxのHostでEneを起動し、1体のデフォルトCompanion（現時点ではAlicia）を表示する。
-2. テキスト入力・テキスト表示で会話する。ユーザーが利用可能なSTT / TTSを明示選択した場合は、同じCompanionとの音声入出力も確認する。
-3. ユーザーがCompanionへローカルファイルの読み取りと、許可された範囲での新規作成または編集の一つを自然言語で依頼する。CompanionはPermission評価を経てTaskを開始し、状態と結果を返す。
-4. Eneを再起動し、会話、確定したTask状態、Permission判断等が復元されることを確認する。再起動前に実行中だった外部変更を自動Replayしない。
+確認する利用者視点の流れは、Hostでの起動とデフォルトCompanionの表示、テキスト会話（STT / TTS明示選択時は音声入出力）、ローカルファイル読み取りと許可範囲での新規作成または編集の一つの自然言語依頼とPermission評価付き実行、再起動後の状態復元（実行中だった外部変更は自動Replayしない）である。
 
 複数Companion、Remote Client、full-duplex、Marketplace、高度なLearning等はこの最低限のシナリオの完了条件ではないが、後続要件から削除されたものではない。
 
