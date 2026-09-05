@@ -73,9 +73,10 @@
 7. 「覚えておいて」という明示的な依頼は強い形成signalとして扱われる一方、Password、token、秘密鍵等はその依頼があってもExperience SummaryまたはMemoryへ保存されないことを確認する。
 8. 一時的な気分、Task内だけの状態、一般世界知識、Raw Tool payload、明白に偶発的な外部情報を、長期Memoryとして無条件に形成しないことをfixtureで確認する。
 9. 同じ情報を繰り返し伝えた場合は無条件に重複Memoryを増やさず、既存Memoryの補強、精密化、統合等として扱えることを確認する。
-10. PrivacyまたはSecurity目的で形成済みMemoryをtargeted deletionし、現在値だけでなく、その情報を復元できる過去revision、Experience Summary/evidence、保持済みsourceの該当情報、検索用派生dataからも対象情報を取得できなくなることを確認する。
-11. Targeted deletion後に通常のconsolidationや再起動を行っても、削除前から存在した根拠だけを使って同じMemoryが自動再形成されないことを確認する。
+10. PrivacyまたはSecurity目的で、形成済みMemoryまたはその根拠となったConversation History内の特定情報をtargeted deletionし、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision/evidence、検索用派生dataから対象情報を取得できなくなることを確認する。
+11. Targeted deletion後に通常のconsolidationや再起動を行っても、削除前から存在した根拠だけを使って同じ情報がMemoryとして自動再形成されないことを確認する。
 12. 削除対象を含むExperience Summaryが別の無関係なMemoryの根拠でもあるfixtureでは、分離可能な無関係情報まで不必要に削除しないことを確認する。
+13. 同じConversation Historyを容量管理目的の通常削除として削除したfixtureでは、形成済みMemory、Experience Summary等へtargeted deletionと同じcascadeが発生しないことを確認する。
 
 ### Workspaceでのfile Task
 
