@@ -1,7 +1,7 @@
 # 製品定義
 
 状態: **再構成済みBaseline**
-最終確認: 2026-09-05
+最終確認: 2026-09-06
 
 ## 製品の要約
 
@@ -14,8 +14,8 @@ eneはCompanionを体験上の中心に置くが、汎用作業Agentとしての
 ## 利用者と実行場所
 
 - 一つのene環境は一人のOwnerに属する。複数人の独立した利用者を同じ環境へ収容しない。
-- Hostはene Coreを実行し、eneが管理する永続状態の正本を保持するOwner管理下のPCである。
-- Clientは同じHostへ接続する表示・会話・操作の入口であり、永続状態の正本ではない。
+- Hostはene Coreを実行し、eneが管理する永続状態の正本と継続実行を担うOwner管理下のPCである。通常のTask・Task Agentの作業は、Computer Use等のClient依存部分を除き、CompanionのClient間移動から独立してHost上で継続する。
+- Clientは同じHostへ接続し、Companionが存在してOwnerと対話し、そのPCの画面・device・Computer Use等と関わる場所である。表示・会話・操作の入口であり、永続状態の正本ではない。Hostと同じPCにも別PCにも置ける。
 - 推論はHost、OwnerのLAN、またはOwnerが選んだCloud Providerで実行できる。
 
 ## 主要概念
@@ -23,6 +23,8 @@ eneはCompanionを体験上の中心に置くが、汎用作業Agentとしての
 ### Companion
 
 Characterを基に作られ、Memory、Relationship、Companion State、設定をExperienceから形成する継続的な個体。同じCharacterから作ったCompanionも別個体である。
+
+基本的に同時に一つのClientへ存在し、Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useがその存在場所に結び付く。必要に応じてClient間を移動できる。active Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わず、伝えられなかった事項は次に移動したClientでまとめて報告する。Ownerとの継続的な会話、判断、Taskの開始・委任・調整、steering、結果の受領・統合の中心であり、多数のまとまった実作業を本体で直接抱えることを基本にしない。
 
 ### Character
 
@@ -36,11 +38,15 @@ Memory、Skill、Relationship、比較的持続するCompanion State等へ利用
 
 ### Task
 
-OwnerからCompanionへ依頼され、開始、進行、判断待ち、完了、失敗、Cancel等の状態を持つ作業単位。Companionは必要に応じてTask Agentへ一部を委任できる。
+開始、進行、判断待ち、完了、失敗、Cancel等の状態を追跡する作業単位。Ownerの依頼によるものとCompanionが自発的に始めるものを含む。ある程度まとまった作業は基本的にTaskとして扱い、実行は原則Task Agentへ委任する。Taskは実行主体そのものではない。
 
 ### Task Agent
 
-CompanionからTaskの一部を委任された一時的な主体。独立した長期人格やRelationshipを持たず、委任元Companionの権限とTask境界内で作業し、結果を返す。
+CompanionからTaskまたはその一部を委任された一時的な実行主体。独立した長期人格やRelationshipを持たず、委任元Companionの権限とTask境界内で作業し、結果を返す。Companion自身の軽微な処理や判断のための情報取得まで、一律にTask Agentへ委任するものではない。
+
+### ObservationとObserver
+
+ObservationはClientの画面やComputerの操作状況を観測する活動である。Observerは、そのCapture・候補検知をClient単位で共有し、文脈上関係がありそうなCompanionへeventを伝える役割を指す。Companionごとの自発性とは異なる制御単位であり、専用processや内部subsystemを意味しない。
 
 ### Workspace
 

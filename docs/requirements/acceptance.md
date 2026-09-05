@@ -1,7 +1,7 @@
 # 現在の受け入れ条件
 
 状態: **最初のmilestone**
-最終確認: 2026-09-05
+最終確認: 2026-09-06
 
 本書は、[製品要件](requirements.md)のうち最初に実装して検証する範囲を定める。記載のない要件を否定せず、製品全体に新しい必須挙動を追加しない。Milestone完了後は、実測結果と次のRelease計画に合わせて更新する。
 
@@ -25,7 +25,7 @@
 - 基本的なDesktop Body
 - 一対一のテキストtimeline
 - Companion scopeのExperience Summary、Memory形成、由来表示、想起、継続的な更新、会話による訂正、Privacy/Security目的のtargeted deletion
-- 一つのWorkspace folderを対象とするfile作業Task
+- 一つのWorkspace folderを対象とし、Task Agentへ委任するfile作業Task
 - Companionを通じたTaskの進捗確認、steering、Cancel、結果報告
 - Client不在時のTask継続と、Host再起動後の明示再開
 - OpenAI利用量と費用の確認、およびCredential漏えい防止
@@ -84,8 +84,8 @@
 
 1. Ownerが既存fileを含む一つのfolderをTaskのWorkspaceとして指定し、Companionへ既存fileを読み、新しいMarkdown成果物を同じfolderへ作るよう依頼する。
 2. TaskのWorkspaceがそのTaskに従属し、Taskより上位の独立した作業containerの作成を要求しないことを確認する。
-3. Task Agentには、そのfolder内の一覧、読取、新規作成、編集だけを許可する。
-4. Task中に担当Companionから進捗を確認し、成果物への追加指示を送り、反映を確認する。
+3. まとまったfile作業がTaskとして追跡され、その実行がTask Agentへ委任されることを確認する。Task Agentには、そのfolder内の一覧、読取、新規作成、編集だけを許可する。
+4. Task中も担当Companionと通常会話でき、進捗の確認と成果物への追加指示を行い、その反映を確認する。
 5. Taskを別の実行でCancelし、best-effortの結果と残った変更を確認する。
 6. 正常終了時に、変更したfile、保存場所、未完了事項を担当Companionが報告することを確認する。
 7. Delete、shell、Network、MCP、Workspace外のpath、path traversalが拒否され、別経路で迂回されないことを確認する。

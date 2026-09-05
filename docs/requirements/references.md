@@ -1,7 +1,7 @@
 # 参考資料
 
 状態: **非規範**
-最終確認: 2026-09-05
+最終確認: 2026-09-06
 
 本書は、eneの要件を考える際に参照した製品、標準、公式文書と、その採用理由を記録する。リンク先の仕様や製品挙動はeneの要件そのものではない。リンク先が変更された場合や本書と[製品要件](requirements.md)が矛盾する場合は、製品要件を正本とする。
 
@@ -98,7 +98,7 @@ Hermes AgentではMemoryを主にfacts、Skillsをproceduresとして分離し�
 | 参考 | 採用した考え方 | eneでの差分 | 確認日 |
 |---|---|---|---|
 | [OpenClaw](https://github.com/openclaw/openclaw) | 常駐するPersonal AgentがOwner管理環境のToolやSkillを使い、自律的に作業する方向性 | ambient Observationと明示TaskのComputer Useを分離し、画面内の指示をOwnerの依頼や承認として扱わない | 2026-09-05 |
-| [Grok Bot](https://x.ai/bot) | AI自身がComputerを持ち、アプリやWebサイトを人間のように操作して実作業を完了する体験 | 専用Cloud computerを前提にせず、Owner管理Host上のComputer UseをPermission、観測、Action承認の共通基盤で制御する | 2026-09-05 |
+| [Grok Bot](https://x.ai/bot) | AI自身がComputerを持ち、アプリやWebサイトを人間のように操作して実作業を完了する体験 | 専用Cloud computerを前提にせず、Hostによる継続実行の管理と、Companionが存在するClientへのComputer Useを区別する。対象と安全契約は[製品要件](requirements.md#computer-use)を参照する | 2026-09-05 |
 | [AIRI](https://github.com/moeru-ai/airi) | Characterがapplication awarenessやComputer Useを持ち、ユーザーの活動と同じDesktop環境に関与できるCompanion体験 | 自発性を演出だけにせず、Observation source、費用、Permission、quiet rule、loop上限等の制御下に置く | 2026-09-05 |
 
 ## Host、Client、Self-hosting
