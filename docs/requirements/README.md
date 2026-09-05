@@ -23,15 +23,19 @@
 - 製品の価値と範囲
 - ユーザーから確認できる能力、制御、状態、失敗時の挙動
 - Privacy、Security、Permission、データ保持に関する契約
+- Eneが機能、相互運用性、安全境界として採用すると決めた標準、protocol、形式、隔離方針等
 - 実装方法を変えても維持すべき品質
 
 要件へ置かないもの:
 
+- 要件で定めた機能や契約を実現するためだけの内部設計詳細
 - DB schema、内部型、分類、数式、検索・更新アルゴリズム
-- process、crate、IPC、wire format、Prompt本文やcontextの組み立て順
-- sandbox、暗号、cache、描画、OS統合の具体技術
+- processやcrateの分割、内部IPC、内部wire format、Prompt本文やcontextの組み立て順
+- 特定library、OS API、暗号方式、cache key、sandbox実装方式等、同じ製品契約を満たす範囲で交換可能な実装選択
 - model、価格、OS version、hardware、数値thresholdの固定一覧
 - 色、widget、popup等の画面実装詳細
 - 既存実装との互換性だけを目的とする制約
+
+MCP、Agent Skills、VRM等の外部互換形式を採用することや、拡張をsandboxへ隔離すること自体が製品機能または安全契約である場合は要件に記載できる。その具体的なlibrary、process構成、OS機構、設定値等は設計で定める。
 
 `する`、`できる`、`しない` と記載した要件本文を製品契約として扱う。個別のFR/NFR等のIDは付けず、意味のある見出しを参照する。具体的なProvider catalog、Support Matrix、性能budgetは、実測と公開範囲に応じて受け入れ条件側で更新する。

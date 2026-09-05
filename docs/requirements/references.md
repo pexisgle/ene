@@ -20,37 +20,54 @@
 
 | 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
 |---|---|---|---|
-| [Nomi: Long-term memory in group chat](https://wiki.nomi.ai/Long_term_memory_in_group_chat) | 一対一とグループで、個体ごとのMemory境界を保つ | MemoryとSkillの両方をCompanion、Project、Global scopeへ統一する | 2026-09-05 |
+| [Nomi: Long-term memory in group chat](https://wiki.nomi.ai/Long_term_memory_in_group_chat) | 一対一とグループで、個体ごとのMemory境界を保つ | Ene内部MemoryはCompanionとGlobalのscopeを持ち、Task固有情報はTask contextとWorkspaceへ分離する | 2026-09-05 |
 | [Kindroid: Groupchats](https://kindroid.ai/v2/docs/groupchats/) | 複数Characterが同じ会話に参加し、相互に応答できる空間 | 自発性、Permission、費用、loopの共通上限を優先する | 2026-09-05 |
-| [Replika: Conversation deletion](https://help.replika.com/hc/en-us/articles/4410750548493-Can-I-delete-my-conversations) | 会話履歴の削除と、学習済みMemoryの管理を別の問題として扱う | Account削除に結び付けず、指定日以前の履歴削除と独立したLearning管理を提供する | 2026-09-05 |
+| [Hermes Agent: Persistent Memory](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/memory.md) | 長期Memoryをraw transcriptとは分け、継続的に有用な情報へ絞る | Eneでは専用User Profileを設けず、CompanionとGlobal Memoryへ統合し、Experience Summaryを根拠に意味的な形成判断を行う | 2026-09-05 |
+| [nanobot: AI Agent Memory](https://github.com/HKUDS/nanobot/blob/main/docs/guides/ai-agent-memory.md) | Session historyとcuratedな長期Memoryを分離する | 一般知識やraw logをMemoryの保存領域にせず、Conversation History、Experience Summary、Learningを役割ごとに分ける | 2026-09-05 |
+| [Mem0: Add Memory](https://docs.mem0.ai/core-concepts/memory-operations/add) | LLMで会話から再利用価値のある情報を抽出し、既存Memoryとの重複や矛盾を考慮して形成する | Eneは保存判断とretrieval判断を分け、Security、Privacy、scope等のhard guardをLLMだけへ委ねず、変更履歴とExperience根拠を保持する | 2026-09-05 |
+| [Mem0: Update Memory](https://docs.mem0.ai/core-concepts/memory-operations/update) | Preference変更や事実の訂正に応じて既存Memoryを更新する | Eneは単純な現在値上書きだけにせず、誤りの訂正と正しかった状況の時間的変化を区別し、過去revisionを残す | 2026-09-05 |
+| [Kindroid: Learned Context](https://kindroid.ai/v2/docs/chat-features-and-tools/) | `Growth & relationship`、`Important facts`、`Ongoing context`を、会話の発達に合わせて更新されるpersistent running notesとして持つ | EneはMemoryを主要な知識状態、Relationshipをその補助となるcompactな関係解釈として分け、共通のExperience Summary、evidence、revision基盤を使う。Relationshipへ詳細事実を第二のMemoryとして複製しない | 2026-09-05 |
+| [Kindroid: Memory](https://kindroid.ai/v2/docs/memory/) | Learned Contextをretrievable long-term memoryとは別のpersistent contextとして利用する | Eneも現在のRelationship認識を毎回Memory検索だけから再構成せずcompactなcurrent stateとして利用できるが、事実認識ではMemoryを優先する | 2026-09-05 |
+| [Nomi: Identity Core](https://nomi.ai/updates/introducing-the-nomi-identity-core-fostering-dynamic-and-authentic-identities/) | 通常Memoryとは別に、personality、relationship、重要なExperience等から発達する動的な自己理解を持つ | EneではRelationshipをより小さい補助stateとして切り出し、主体CompanionからOwnerまたは別Companionへの現在の関係認識として一般化する | 2026-09-05 |
+| [Nomi: What is Identity Core?](https://wiki.nomi.ai/What_Is_The_Identity_Core) | Identity Coreをユーザーが直接編集せず、会話とshared experienceによって継続的に変化させる | Eneも数値meterや一般editorをsource of truthにせず、会話による訂正と、根拠Experienceの説明可能性を両立する | 2026-09-05 |
+| [Nomi: 2025 July Q&A](https://wiki.nomi.ai/2025_July_Q%26A_Summary) | 個体固有のIdentity Coreをgroup chatで安易に共有すると、別個体へのfeedbackが混ざる問題が起こり得る | Eneでは同じgroup Experienceを根拠にできてもRelationshipを主体Companionごとに独立して更新し、Companion AからBへの認識とBからAへの認識も自動的に共有・対称化しない | 2026-09-05 |
+| [Replika: Conversation deletion](https://help.replika.com/hc/en-us/articles/4410750548493-Can-I-delete-my-conversations) | 会話履歴の削除と、学習済みMemoryの管理を別の問題として扱う | 通常の履歴retentionとは別にPrivacy/Security目的のtargeted deletionを持ち、対象情報を復元できるrevision、Experience Summary/evidence、派生data等にも削除を伝播させる | 2026-09-05 |
 | [Replika: Chat history](https://help.replika.com/hc/en-us/articles/4411154990605-Is-the-chat-history-infinite) | 表示できる会話履歴と、学習されたMemoryを別に扱う | Hostを正本とし、履歴は既定で保持したうえで保持期間と手動削除をOwnerが管理する | 2026-09-05 |
+
+Eneでは、Raw History、意味的なまとまりへ圧縮したExperience Summary、そこから形成されるMemoryとRelationshipを分ける。Memory形成時の保存価値と、後の会話でのretrieval優先度は別の判断とし、Memoryは内容、重要度、scope、時間的意味等をExperienceに応じて継続更新できる一方、過去revisionと根拠を保持する。Privacy/Security目的のtargeted deletionだけはこの保持原則より優先し、対象情報を復元できるrevision、Experience Summary/evidence、派生data等も削除対象にする。
+
+Relationshipは同じExperience/evidence/revision基盤を利用できるが、Memoryより優先度の低い補助状態であり、詳細な事実や出来事を複製せず関係そのもののcompactな現在解釈へ絞る。Relationshipの相手はOwnerだけに限定せず別Companionも含め、各Companion自身の認識として独立に更新する。
 
 Eneの忘却は、会話相手らしい自然さを参考にしつつ、内容削除ではなく通常想起の抑制として定義した。重要度とscopeを分離し、Privacy削除を忘却の演出に代用しない点はEne固有の安全上の差分である。
 
-## Project、Task、Schedule
+## Task、Workspace、Schedule
 
 | 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
 |---|---|---|---|
-| [Codex: Long-running work](https://learn.chatgpt.com/docs/long-running-work) | 会話を塞がずに長い作業を進め、進捗確認と追加指示を行う体験 | Main Companionを継続的な窓口とし、一時Task Agentを長期人格にしない | 2026-09-05 |
-| [Claude Cowork: Getting started](https://support.claude.com/en/articles/13345190-get-started-with-claude-cowork) | Ownerが選んだfolderをWorkspaceとしてAgentに作業させるmodel | Projectをfolderそのものやdata所有者にせず、Companion、Task、Learningとの接続として扱う | 2026-09-05 |
-| [AGENTS.md](https://agents.md/) | Project内の通常fileでAgent向けの作業指示を共有する慣習 | Ene固有の固定Brief型を作らず、標準的な案内fileと会話を利用する | 2026-09-05 |
+| [Codex: Long-running work](https://learn.chatgpt.com/docs/long-running-work) | 会話を塞がずに長い作業を進め、進捗確認と追加指示を行う体験 | Companionを継続的な窓口とし、一時Task Agentを長期人格にしない | 2026-09-05 |
+| [Claude Cowork: Getting started](https://support.claude.com/en/articles/13345190-get-started-with-claude-cowork) | Ownerが選んだfolderをWorkspaceとしてAgentに作業させるmodel | Workspaceを独立containerにせずTaskへ従属させ、外部fileの所有権とlifecycleをTaskから分離する | 2026-09-05 |
+| [AGENTS.md](https://agents.md/) | 作業folder内の通常fileでAgent向けの作業指示を共有する慣習 | Ene固有の固定Brief型を作らず、Task context、標準的な案内file、会話を利用する | 2026-09-05 |
 | [Home Assistant: Automation basics](https://www.home-assistant.io/docs/automation/basics/) | 保存されたautomationがUI不在でもeventまたは時刻で実行されるmodel | 各回を新しいTaskにし、その時点のPermissionと状態を再評価してmissed runを自動補完しない | 2026-09-05 |
 
 ## Tool、Skill、拡張
 
 | 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
 |---|---|---|---|
-| [Model Context Protocol](https://modelcontextprotocol.io/specification) | Tool、Resource、PromptをProviderから独立したprotocolで接続する | Permission、Credential、Control planeはMCP contentから変更できない | 2026-09-05 |
+| [Model Context Protocol](https://modelcontextprotocol.io/specification) | Tool、Resource、PromptをProviderから独立したprotocolで接続する | Permission、Credential、Control planeはMCP contentから変更できず、Credentialはmodel contextへ露出しない | 2026-09-05 |
 | [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview) | Toolが必要に応じて対話型UIを返す標準的な仕組み | 第一者UI全体の恒久置換には使わず、Tool単位のUIに限定する | 2026-09-05 |
-| [Agent Skills specification](https://agentskills.io/specification) | 読み取り可能な手順と付属resourceをportableなSkillとして配布する | Experienceから形成したSkillにも検証、由来、scope、revisionを加える | 2026-09-05 |
+| [Agent Skills specification](https://agentskills.io/specification) | 読み取り可能な手順、知識、付属resourceをportableなSkillとして配布する | Skillであること自体に成功検証を必須とせず、Ene側で由来、revision、実行結果を関連付ける | 2026-09-05 |
 | [Agent Skills client implementation](https://agentskills.io/client-implementation) | 必要なSkillを段階的に読み込む実装model | 読込方式やcache方式は要件に固定せず、ユーザーから見える互換性だけを採用する | 2026-09-05 |
+| [Hermes Agent: Skills System](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/skills.md) | Skillを必要時に読み込む再利用可能なknowledge/instructionとして扱い、agent自身も作成・更新できる | Experienceから再利用価値のある手順をSkill化し、import原本と学習revisionを区別する | 2026-09-05 |
+| [nanobot: Skills](https://github.com/HKUDS/nanobot/blob/main/nanobot/skills/README.md) | `SKILL.md`を中心とする軽量なinstruction packageとしてSkillを扱う | Agent Skillsとの相互運用を優先し、Ene独自形式だけへ閉じない | 2026-09-05 |
 | [LM Studio: Tool use](https://lmstudio.ai/docs/developer/openai-compat/tools) | Local model serverを既知のAPI互換面で直接利用する | 通常のProvider差をPlugin化せず、利用Capabilityとdata送信先をOwnerが割り当てる | 2026-09-05 |
+
+Hermes AgentではMemoryを主にfacts、Skillsをproceduresとして分離し、nanobotでもSkillを具体的な手順やinstructionの単位として扱う。Eneもこの分離を参考にするが、MemoryとSkillに関連情報が存在すること自体を禁止せず、役割の違いと不要な重複回避を優先する。
 
 ## ProviderとPrompt cache
 
 | 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
 |---|---|---|---|
-| [OpenAI Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching) | Cache利用量をProviderのusage情報として観測し、費用とlatencyを最適化する | Cacheを正本にせず、hitまたはmissで結果の正しさを変えない | 2026-09-05 |
+| [OpenAI Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching) | Cache利用量をProviderのusage情報として観測し、費用とlatencyを最適化する | Cacheを正本にせず、hitまたはmissで論理的context、安全境界、永続化契約を変えない | 2026-09-05 |
 | [Anthropic Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) | Providerごとに異なるcache制御と課金情報があること | Provider固有のbreakpointやTTLを製品要件に固定しない | 2026-09-05 |
 | [Gemini Context caching](https://ai.google.dev/gemini-api/docs/caching) | 明示cacheと暗黙cacheを含むProvider差を想定する | Cacheの有無をMemory、履歴、Task継続の契約にしない | 2026-09-05 |
 
@@ -60,17 +77,17 @@ Eneの忘却は、会話相手らしい自然さを参考にしつつ、内容�
 
 | 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
 |---|---|---|---|
-| [MCP Security best practices](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices) | 外部server、token、confused deputy、権限境界を明示的に扱う | MCP以外のLLM、Skill、Character、Project fileにも同じ信頼境界を適用する | 2026-09-05 |
+| [MCP Security best practices](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices) | 外部server、token、confused deputy、権限境界を明示的に扱う | MCP以外のLLM、Experience Summary、Memory、Relationship、Skill、Character、Workspace fileにも同じ信頼境界を適用する | 2026-09-05 |
 | [OWASP: Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) | 外部content内の指示とOwnerの指示を分離する | Prompt防御だけに依存せず、機械的Capability境界とOwner確認を併用する | 2026-09-05 |
-| [Android app-specific storage](https://developer.android.com/training/data-storage/app-specific) | App内部dataとOwnerが扱う通常fileのlifecycleを分ける | Host OSはDesktopだが、Ene内部dataと外部Project fileを分離する原則を採用する | 2026-09-05 |
-| [Android shared documents](https://developer.android.com/training/data-storage/shared/documents-files) | ユーザーが選んだfileやfolderへの範囲限定access | DesktopでもOwnerが接続した範囲と操作種別をPermission境界にする | 2026-09-05 |
+| [Android app-specific storage](https://developer.android.com/training/data-storage/app-specific) | App内部dataとOwnerが扱う通常fileのlifecycleを分ける | Host OSはDesktopだが、Ene内部dataと外部Workspace fileを分離する原則を採用する | 2026-09-05 |
+| [Android shared documents](https://developer.android.com/training/data-storage/shared/documents-files) | ユーザーが選んだfileやfolderへの範囲限定access | DesktopでもOwnerがTaskへ接続した範囲と操作種別をPermission境界にする | 2026-09-05 |
 
 ## Setup、Backup、Reset、Remote
 
 | 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
 |---|---|---|---|
 | [Home Assistant onboarding](https://www.home-assistant.io/getting-started/onboarding/) | Local-first製品を少ない手順で利用可能にし、後から管理を拡張する | Companion、Cloud data egress、費用、model選択をEneのSetupへ加える | 2026-09-05 |
-| [Home Assistant backup](https://www.home-assistant.io/common-tasks/general/) | Ownerが保存先、schedule、保持とrestoreを管理するfull backup | Portable backupを常に暗号化し、Credentialと外部Project fileを除外する | 2026-09-05 |
+| [Home Assistant backup](https://www.home-assistant.io/common-tasks/general/) | Ownerが保存先、schedule、保持、保護、restoreを管理するfull backup | Eneはportable backupへConversation History、Experience Summary、Learning、Relationship等の内部状態を含め、Credentialと外部Workspace fileを除外する。暗号化は利用可能にするが全backupへの絶対要件にはしない | 2026-09-05 |
 | [Chrome: Reset settings](https://support.google.com/chrome/answer/3296214?hl=ja) | 設定Resetとuser data削除を別操作にする | EneではLearning、Permission Rule、Provider同意、費用capも設定Resetから保護する | 2026-09-05 |
 | [Blender: Factory settings](https://docs.blender.org/manual/en/latest/getting_started/configuration/defaults.html) | 初期設定への復帰を、作成dataの削除と分離して扱う | 全データResetは外部fileとOwner保存backupを対象外にする | 2026-09-05 |
 | [Tailscale: What is Tailscale](https://tailscale.com/kb/1151/what-is-tailscale) | Owner管理VPNを通じたdevice間の保護された接続 | 特定VPNを必須にせず、Ene運営relayやaccountを置かない | 2026-09-05 |
