@@ -338,7 +338,7 @@
 ### Privacy/Security目的のtargeted deletionと履歴保持
 
 - Conversation Historyは既定で保持する。
-- OwnerはPrivacyまたはSecurityのため、指定したConversation History、Memory、またはそれらに含まれる特定情報を対象として削除できる。
+- OwnerはPrivacyまたはSecurityのため、Ene内部に保存された特定情報を対象として削除できる。Conversation History、Experience Summary、Memory、Relationship、Skill、Task等のどこに保存されているかをOwnerが事前に特定する必要はない。
 - PrivacyまたはSecurity目的で対象情報を削除する場合は、選択した保存対象だけでなく、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision、evidence、Relationship、Skill、保持済みsourceの該当情報、検索index、embedding、cache等のEne内部dataも削除または対象情報を復元できない状態にする。
 - 一つのExperience Summaryやsourceが削除対象と無関係な情報の根拠にもなっている場合は、可能な範囲で対象情報だけを除去し、無関係な情報を不必要に削除しない。分離できない場合は削除の影響範囲をOwnerへ示す。
 - PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報を自動再形成しない。後の新しいExperienceによってOwnerが改めて同じ情報を提供した場合は、新しい根拠として扱える。
