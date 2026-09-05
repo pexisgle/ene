@@ -335,19 +335,19 @@
 
 ## 履歴、保持、Privacy
 
-### Conversation History、Memoryと関連根拠の削除
+### Privacy/Security目的のtargeted deletionと履歴保持
 
 - Conversation Historyは既定で保持する。
-- OwnerはPrivacyまたはSecurityのため、指定したConversation HistoryまたはMemoryを対象として削除できる。
-- PrivacyまたはSecurity目的でMemoryを削除する場合は、現在のMemoryだけでなく、その対象情報を復元できる過去revision、関連するExperience Summaryやevidence、保持済みsourceの該当情報、検索index、embedding、cache等の派生dataも削除または対象情報を復元できない状態にする。
+- OwnerはPrivacyまたはSecurityのため、指定したConversation History、Memory、またはそれらに含まれる特定情報を対象として削除できる。
+- PrivacyまたはSecurity目的で対象情報を削除する場合は、選択した保存対象だけでなく、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision、evidence、Relationship、Skill、保持済みsourceの該当情報、検索index、embedding、cache等のEne内部dataも削除または対象情報を復元できない状態にする。
 - 一つのExperience Summaryやsourceが削除対象と無関係な情報の根拠にもなっている場合は、可能な範囲で対象情報だけを除去し、無関係な情報を不必要に削除しない。分離できない場合は削除の影響範囲をOwnerへ示す。
-- 削除対象の情報がRelationship、Skillその他の保存済み状態にも複製されている場合は、それらに残る同一情報も削除または復元不能にし、対象情報を別の内部状態から再構成できる状態を残さない。
 - PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報を自動再形成しない。後の新しいExperienceによってOwnerが改めて同じ情報を提供した場合は、新しい根拠として扱える。
 - PrivacyまたはSecurity目的のtargeted deletionは、通常のrevision保持、evidence保持、Conversation HistoryとLearningの独立性より優先する。
 - Targeted deletionは、Memoryの内容、重要度、Relationship等を調整する一般editorとして扱わない。通常の訂正や「忘れてほしい」という依頼はCompanionとの対話で処理できる。
 - Ownerは容量肥大化を避けるため、指定日以前のConversation HistoryやTask等のlogを手動削除できる。
 - OwnerはConversation Historyや対象logについて任意の保持期間による自動削除を明示設定でき、既定では自動削除しない。
-- 削除前に対象範囲、影響するCompanionまたはTask、形成済みLearning、Experience Summary、Relationship等への影響を示す。
+- 容量管理目的の保持期間短縮や通常のHistory/log削除はtargeted deletionとは区別し、それだけを理由に形成済みMemory、Skill、RelationshipやExperience Summaryへ削除をcascadeさせない。
+- 削除前に対象範囲、目的、影響するCompanionまたはTask、形成済みLearning、Experience Summary、Relationship等への影響を示す。
 - 保持期間の短縮や手動削除は、保持対象をEne内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。
 
 ### 通常保存しないdata
