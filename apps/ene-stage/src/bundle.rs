@@ -23,7 +23,7 @@ pub(crate) const BUNDLED_ALICIA_B_ID: &str = "char.alicia-b";
 #[cfg(test)]
 pub(crate) const BUNDLED_ALICIA_B_NAME: &str = "Alicia B";
 
-/// Build an Ene character archive from the repo-shipped Alicia body assets.
+/// Build an ene character archive from the repo-shipped Alicia body assets.
 pub fn pack_bundled_alicia() -> Result<Vec<u8>, BundleError> {
     pack_bundled_named("char.alicia", "Alicia")
 }

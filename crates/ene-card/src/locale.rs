@@ -184,7 +184,7 @@ pub struct LocalizedLorebookEntry {
     /// Matched against conversation text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<Vec<String>>,
-    /// Translated secondary trigger keys; Ene's matcher requires at least
+    /// Translated secondary trigger keys; ene's matcher requires at least
     /// one primary AND one secondary key to fire, so untranslated
     /// `secondary_keys` would leave the entry dead in every other language.
     #[serde(default, skip_serializing_if = "Option::is_none")]

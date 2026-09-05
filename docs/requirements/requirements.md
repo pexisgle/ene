@@ -1,14 +1,14 @@
-# Ene 要件
+# ene 要件
 
 状態: **再構成済みBaseline**
 最終確認: 2026-09-05
 
-本書は、[製品定義](product.md)に記載したEneの行動要件を定義する唯一の正本である。ここでは、Ownerから観測できる挙動、安全境界、データ契約、および製品機能として採用する相互運用方式や隔離方針を定める。それらを実現するための内部設計詳細は定めない。
+本書は、[製品定義](product.md)に記載したeneの行動要件を定義する唯一の正本である。ここでは、Ownerから観測できる挙動、安全境界、データ契約、および製品機能として採用する相互運用方式や隔離方針を定める。それらを実現するための内部設計詳細は定めない。
 
 ## 所有と実行
 
-- 一つのEne環境は一人のOwnerが所有し、Ownerが管理するHostをEne内部データの正本とする。
-- ClientはHostへ接続して表示、会話、操作を提供する。Clientだけに存在するEneの永続状態を作らない。
+- 一つのene環境は一人のOwnerが所有し、Ownerが管理するHostをene内部データの正本とする。
+- ClientはHostへ接続して表示、会話、操作を提供する。Clientだけに存在するeneの永続状態を作らない。
 - 推論先は、CapabilityごとにHost、OwnerのLAN内、またはCloudから選択できる。
 - HostはClientが閉じていても、許可済みのTask、Schedule、保存を継続する。
 - Hostは、進行中の作業や外部eventを待つためだけにLLMへ反復問い合わせを行わない。
@@ -23,7 +23,7 @@
 - Setup完了後は、同梱Character `ene` から作られたCompanionとテキストで会話できる。
 - Voice、Observation、外部Tool等の追加Capabilityは、初回Setupを不必要に長くせず、初めて使う時点で必要な説明と同意を示す。
 - 日常的な会話やTaskの開始に、管理画面の反復操作を要求しない。
-- Ownerに内部の隔離方式や権限機構の理解を要求しない。安全な実行方法の選択はEneが担い、確認は目的、対象、外部作用、費用等の判断に必要な内容へ絞る。既存の依頼、同意、Ruleで判断できる事項を繰り返し確認しない。
+- Ownerに内部の隔離方式や権限機構の理解を要求しない。安全な実行方法の選択はeneが担い、確認は目的、対象、外部作用、費用等の判断に必要な内容へ絞る。既存の依頼、同意、Ruleで判断できる事項を繰り返し確認しない。
 
 ## CompanionとCharacter
 
@@ -38,8 +38,8 @@
 - Character Packageは、静的人格、VRM 1.0 Body、Voice設定、motion設定、推奨Skillを任意に含められる。
 - Character Packageに、特定OwnerまたはCompanionのExperience Summary、Memory、Relationship、Companion State、Conversation History、Credential、Permissionを含めない。
 - OwnerはCharacter Packageをimportおよびexportできる。export前に、含まれる内容と権利上の注意を確認できる。
-- Ene内のCharacter編集は、静的な人格テキストの基本編集、既存部品の選択・差替え、import、exportを扱う。
-- 3D model制作、Voice学習、高度なSkill編集は、それぞれの既存ツールで行えるよう外部形式を尊重し、Ene内に同等の制作環境を複製しない。
+- ene内のCharacter編集は、静的な人格テキストの基本編集、既存部品の選択・差替え、import、exportを扱う。
+- 3D model制作、Voice学習、高度なSkill編集は、それぞれの既存ツールで行えるよう外部形式を尊重し、ene内に同等の制作環境を複製しない。
 - Character Packageの更新は新しいrevisionとして識別できる。
 - 既存CompanionへCharacter更新を適用するときは、Ownerが部品ごとに明示して選ぶ。更新はCompanionがExperienceから形成した状態を黙って上書きしない。
 
@@ -90,7 +90,7 @@
 
 - Voiceは低遅延のRealtime会話とbarge-inを優先し、利用できない場合はturn-based Voice、さらにTextへ段階的に切り替えられる。
 - Voiceが有効な間はVADによる待受状態をOwnerへ常に識別可能にし、即時Muteを提供する。
-- Eneは話者認証を行わない。Microphoneが拾った周囲の発話をOwnerからの入力として扱う可能性を、Voice有効化時と管理面で明示する。
+- eneは話者認証を行わない。Microphoneが拾った周囲の発話をOwnerからの入力として扱う可能性を、Voice有効化時と管理面で明示する。
 - Mute、Voice停止、会話停止、承認拒否は、Voiceだけに依存せずkeyboardで操作できる。
 - Voice Providerやdeviceの障害はText利用を妨げず、切替と失敗理由を示す。
 
@@ -139,7 +139,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 ### MemoryとSkill
 
-- EneはExperienceからMemoryとSkillを形成できる。
+- eneはExperienceからMemoryとSkillを形成できる。
 - Memoryは、出来事、事実、意味、好み等を後の理解に用いるLearningとし、一般世界知識、Raw History、Raw dataの保存領域として扱わない。
 - MemoryはOwner、Companion、出来事、状況等についての長期的な理解における主要な知識状態とし、RelationshipはMemoryを補助する状態として扱う。
 - Skillは、将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningとする。
@@ -164,11 +164,11 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 ### Scope
 
-- Ene内部で管理するMemoryとSkillはCompanionまたはGlobalのscopeを持てる。
+- ene内部で管理するMemoryとSkillはCompanionまたはGlobalのscopeを持てる。
 - Companion scopeは、そのCompanionだけが使う経験、呼び方、私的な文脈、個体固有のLearningに用いる。
 - Global scopeは、複数Companionから共通に利用することに明確な意味があるOwner固有の知識や再利用可能なLearningに用いる。一般世界知識をGlobal Memoryとして蓄積することを意味しない。
 - Taskだけで必要な情報はTask contextとして扱い、永続Learningへ自動的に昇格させない。
-- Workspace内に置かれたAgent Skillや案内fileは通常の外部fileとして扱い、Ene内部Learningのscopeとは区別する。
+- Workspace内に置かれたAgent Skillや案内fileは通常の外部fileとして扱い、ene内部Learningのscopeとは区別する。
 - 特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とする。
 - Global scopeへの形成または変更は、Ownerが明示的に共有を求めた場合、または内容、由来、Ownerとの文脈から複数Companionで共通に利用すべきことが明確な場合に限る。単に重要、将来有用、一般的な好みであることだけを理由にGlobal scopeへ昇格させない。
 - Globalにすべきか明確でない場合はCompanion scopeに留める。Global化の判断だけを目的とする逐次確認は通常要求しない。
@@ -177,7 +177,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 ### Skillの保護と相互運用
 
-- Skillの交換形式にはAgent Skillsを採用し、Ene独自の同等形式だけを必須にしない。
+- Skillの交換形式にはAgent Skillsを採用し、ene独自の同等形式だけを必須にしない。
 - Skillの変更はrevisionとして追跡でき、以前の有効なrevisionへ戻せる。
 - 同梱またはimportされた原本をExperienceによる変更で破壊しない。変更版は由来を保った別revisionとして扱う。
 - Experienceから形成または改善したSkillには、その根拠と実行結果を関連付け、未検証、成功、失敗等を区別できる。
@@ -188,7 +188,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - Learningの重要度とscopeは別の概念として扱う。重要度と想起優先度は、Experienceと現在の文脈に応じてLLMが調整する。
 - Learningの通常lifecycleでは、忘却、訂正、精密化、補強、統合、失効または置換を理由に、保存済みLearningやその過去revision・根拠を削除しない。
 - 通常の忘却は内容の削除や過去revisionの破棄ではなく想起の抑制とし、関連する手掛かりによって再び利用できる。
-- Ownerの「忘れてほしい」「もう気にしないで」等の依頼は、PrivacyまたはSecurityのため保存済み情報そのものをEne内部から消去する意図が明示されていない限り、通常の忘却または訂正として扱い、targeted deletionにはしない。
+- Ownerの「忘れてほしい」「もう気にしないで」等の依頼は、PrivacyまたはSecurityのため保存済み情報そのものをene内部から消去する意図が明示されていない限り、通常の忘却または訂正として扱い、targeted deletionにはしない。
 - 事実の訂正や通常の状況変化は、会話と新しいExperienceを通じて反映できる。
 - Conversation Historyを削除しても、それを根拠に形成済みのMemory、Skill、Relationship、Companion Stateを黙って変更しない。ただしPrivacyまたはSecurity目的のtargeted deletionは後述の削除契約を優先する。
 
@@ -243,11 +243,11 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 ### Fileと成果物
 
-- 成果物はEne専用libraryへ複製せず、Ownerが扱える通常のfileとして保存する。
+- 成果物はene専用libraryへ複製せず、Ownerが扱える通常のfileとして保存する。
 - TaskにWorkspace folderがある場合は、Ownerの依頼とPermissionの範囲でそこを既定の作業場所とする。
 - 永続成果物を保存すべきfolderが決まっていない場合は、最終保存前にOwnerへ保存先を尋ねる。
 - 一時的な中間fileは、永続成果物と区別し、Taskの終了または保持方針に従って安全に整理する。
-- 外部WorkspaceのfileはEne内部データではなく、TaskやCompanionの削除、全データReset、backupによって黙って変更または削除しない。
+- 外部Workspaceのfileはene内部データではなく、TaskやCompanionの削除、全データReset、backupによって黙って変更または削除しない。
 
 ## Schedule
 
@@ -296,7 +296,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 ### 割当と同意
 
 - Hostの既定Provider設定とCompanionごとのoverrideを持てる。Task Agentは担当Companionの設定を継承する。
-- Providerの接続情報を登録しただけでは、EneのCapabilityに利用しない。
+- Providerの接続情報を登録しただけでは、eneのCapabilityに利用しない。
 - OwnerがCapabilityへProviderを割り当てる画面で、送信先、送信され得るdata、Host／LAN／Cloudの別、費用の発生可能性、Provider側の取扱いを示し、その選択を利用同意とする。
 - Providerまたはmodelが必要なCapabilityを満たさない場合は、利用前に不足を示す。
 - Providerまたはmodelを切り替えても、利用可能なCharacter、Memory、Relationship、Companion State、Conversation context、Skill、Rule等の情報をProviderごとに意図的に差別化しない。
@@ -308,7 +308,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - FallbackはOwnerが事前に承認したProviderと順序だけを使う。
 - LocalまたはLANから未承認のCloud Providerへ自動的にdataを移さない。
 - Providerごと、および全体に、任意の費用capまたは利用上限を設定できる。
-- 利用量と費用は、Providerが報告した値、Eneによる推定値、不明を区別して表示する。
+- 利用量と費用は、Providerが報告した値、eneによる推定値、不明を区別して表示する。
 - Cap到達または費用情報が不明で安全に継続できない場合は、既存dataを保ったまま対象処理を停止し、Ownerへ選択肢を示す。
 
 ### OfflineとPrompt cache
@@ -321,7 +321,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 ### Credential
 
-- Eneへ登録されたCredentialは一般App Dataと分離して保護し、UI、Conversation History、Experience Summary、Memory、Relationship、Companion State、Skill、Task結果、通常log、Debug captureへ平文を出さない。
+- eneへ登録されたCredentialは一般App Dataと分離して保護し、UI、Conversation History、Experience Summary、Memory、Relationship、Companion State、Skill、Task結果、通常log、Debug captureへ平文を出さない。
 - CredentialはOwnerによる設定、ProviderやMCP等の認証flow、その他の明示的な接続設定によって登録する。
 - 登録されたCredential値をLLMのmodel context、LLMが生成するTool argument、Conversation、Experience Summary、Memory、Relationship、Companion State、Skill contentへ渡さない。
 - Provider、Plugin、MCP等は、Ownerが設定または認証した接続の実行に必要な範囲でCredentialを利用できる。その値をLLMや通常のTool resultへ露出しない。
@@ -332,37 +332,37 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 - 外部Tool、Resource、Promptの相互運用にはMCPを採用する。
 - Toolが提供する対話型UIにはMCP Appsを採用する。
-- 再利用可能な手順の交換形式にはAgent Skillsを採用し、Ene独自の同等形式を必須にしない。
+- 再利用可能な手順の交換形式にはAgent Skillsを採用し、ene独自の同等形式を必須にしない。
 - 既知のProvider protocolは直接接続し、Providerごとの通常差異を汎用Pluginへ転嫁しない。
-- Ene固有Pluginは、未対応Provider protocol、Observation adapter、Body renderer等、明確な型と境界を持つ拡張点に限定する。
+- ene固有Pluginは、未対応Provider protocol、Observation adapter、Body renderer等、明確な型と境界を持つ拡張点に限定する。
 - Pluginに任意のCore改変、Control plane変更、Permission回避、恒久的な第一者UI置換を許さない。
 - Local MCPはsandbox内での実行を既定とする。
 - Local MCPが通常の保護範囲では動作できない場合も、黙ってsandbox外の実行へ切り替えない。
-- Ownerは、特定のLocal MCPについて、実行command、設定の由来、既知のaccessとrisk、およびEneが強制できなくなる境界の説明を受けたうえで、sandbox外の実行を明示的に許可できる。この許可は保存および失効でき、command、由来、実行権限等に重要な変更がある場合は再確認する。
-- Sandbox外実行の許可は、Eneが仲介する個々のActionの包括的な承認として扱わず、通常のPermissionとRuleを引き続き適用する。ただし、外部process自身の内部作用にEneのCapability境界を強制できるとは表示しない。
-- 拡張が利用不能、拒否、停止した場合も、Eneの管理面と保存済みdataを利用できる。
+- Ownerは、特定のLocal MCPについて、実行command、設定の由来、既知のaccessとrisk、およびeneが強制できなくなる境界の説明を受けたうえで、sandbox外の実行を明示的に許可できる。この許可は保存および失効でき、command、由来、実行権限等に重要な変更がある場合は再確認する。
+- Sandbox外実行の許可は、eneが仲介する個々のActionの包括的な承認として扱わず、通常のPermissionとRuleを引き続き適用する。ただし、外部process自身の内部作用にeneのCapability境界を強制できるとは表示しない。
+- 拡張が利用不能、拒否、停止した場合も、eneの管理面と保存済みdataを利用できる。
 
 ## 履歴、保持、Privacy
 
 ### Privacy/Security目的のtargeted deletionと履歴保持
 
-- 本節のtargeted deletionは、通常の忘却、訂正、失効、置換、統合とは異なり、OwnerがPrivacyまたはSecurityのため特定情報そのものをEne内部から強制消去するよう明示した場合だけ行う例外的な削除である。
+- 本節のtargeted deletionは、通常の忘却、訂正、失効、置換、統合とは異なり、OwnerがPrivacyまたはSecurityのため特定情報そのものをene内部から強制消去するよう明示した場合だけ行う例外的な削除である。
 - Conversation Historyは既定で保持する。
-- OwnerはPrivacyまたはSecurityのため、Ene内部に保存された特定情報を対象として削除できる。Conversation History、Experience Summary、Memory、Relationship、Companion State、Skill、Task等のどこに保存されているかをOwnerが事前に特定する必要はない。
-- PrivacyまたはSecurity目的で対象情報を削除する場合は、選択した保存対象だけでなく、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision、evidence、Relationship、その情報から形成され対象情報を直接または実質的に復元できるCompanion Stateとその保持済み根拠、Skill、保持済みsourceの該当情報、検索index、embedding、cache、接続中Clientの一時data等のEne内部dataも削除または対象情報を復元できない状態にする。
-- 特定の文字列の削除が指定された場合は、Ene内部dataを機械的に検索して該当文字列を削除し、残存を検証する。LLMによる忘却、要約、重要度判断で代替しない。言い換えや意味的に同じ情報の特定にはLLMを利用できるが、完全な検出を保証しない。
+- OwnerはPrivacyまたはSecurityのため、ene内部に保存された特定情報を対象として削除できる。Conversation History、Experience Summary、Memory、Relationship、Companion State、Skill、Task等のどこに保存されているかをOwnerが事前に特定する必要はない。
+- PrivacyまたはSecurity目的で対象情報を削除する場合は、選択した保存対象だけでなく、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision、evidence、Relationship、その情報から形成され対象情報を直接または実質的に復元できるCompanion Stateとその保持済み根拠、Skill、保持済みsourceの該当情報、検索index、embedding、cache、接続中Clientの一時data等のene内部dataも削除または対象情報を復元できない状態にする。
+- 特定の文字列の削除が指定された場合は、ene内部dataを機械的に検索して該当文字列を削除し、残存を検証する。LLMによる忘却、要約、重要度判断で代替しない。言い換えや意味的に同じ情報の特定にはLLMを利用できるが、完全な検出を保証しない。
 - 一つのExperience Summaryやsourceが削除対象と無関係な情報の根拠にもなっている場合は、可能な範囲で対象情報だけを除去し、無関係な情報を不必要に削除しない。分離できない場合は削除の影響範囲をOwnerへ示す。
 - PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報をMemory、RelationshipまたはCompanion Stateとして自動再形成しない。後の新しいExperienceによってOwnerが改めて同じ情報を提供した場合は、新しい根拠として扱える。
 - 削除前の情報を利用する実行中処理によって、削除済み情報を再保存しない。削除処理または残存検証が完了していない場合は、完了したと表示しない。
 - PrivacyまたはSecurity目的のtargeted deletionは、通常のrevision保持、evidence保持、Conversation Historyと形成済み状態の独立性より優先する。
-- 「忘れてほしい」等の通常依頼だけをtargeted deletionへ自動昇格させない。OwnerがPrivacyまたはSecurityのため保存済み情報そのものをEne内部から消去する意図を明示した場合に限り、本節のtargeted deletionとして扱う。
+- 「忘れてほしい」等の通常依頼だけをtargeted deletionへ自動昇格させない。OwnerがPrivacyまたはSecurityのため保存済み情報そのものをene内部から消去する意図を明示した場合に限り、本節のtargeted deletionとして扱う。
 - Targeted deletionは、Memoryの内容、重要度、Relationship、Companion State等を調整する一般editorとして扱わない。
 - Ownerは容量肥大化を避けるため、指定日以前のConversation HistoryやTask等のlogを手動削除できる。
 - OwnerはConversation Historyや対象logについて任意の保持期間による自動削除を明示設定でき、既定では自動削除しない。
 - 容量管理目的の保持期間短縮や通常のHistory/log削除はtargeted deletionとは区別し、それだけを理由に形成済みMemory、Skill、Relationship、Companion StateやExperience Summaryへ削除をcascadeさせない。
-- EneはOwnerが示した削除対象の意味的な特定を補助し、保存場所をOwnerへ選ばせない。対象が明確な場合は不要な確認を繰り返さず、無関係な情報へ大きな影響がある場合等に必要な説明と確認を行う。
+- eneはOwnerが示した削除対象の意味的な特定を補助し、保存場所をOwnerへ選ばせない。対象が明確な場合は不要な確認を繰り返さず、無関係な情報へ大きな影響がある場合等に必要な説明と確認を行う。
 - 削除前に対象範囲、目的、影響するCompanionまたはTask、形成済みLearning、Experience Summary、Relationship、Companion State等への重要な影響を示す。
-- Targeted deletion、保持期間の短縮、手動削除は、対象をEne内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。
+- Targeted deletion、保持期間の短縮、手動削除は、対象をene内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。
 
 ### 通常保存しないdata
 
@@ -387,13 +387,13 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 ### Backupとrestore
 
-- OwnerはEne内部dataのportable full backupを作成できる。
+- Ownerはene内部dataのportable full backupを作成できる。
 - Ownerはbackupの保存先、schedule、保持数を選択でき、作成結果と失敗を確認できる。
 - BackupにはCompanion、Character設定、Conversation History、Experience Summary、Learning、Relationship、Companion State、Task、TaskとWorkspaceの関連付け、Schedule、Rule、同意、費用設定、Auditを含める。
 - Backupに含まれるCompanion Stateをrestoreするときも、backup後に経過した時間を無視して時間的に一時的な状態を保存時点の値のまま無期限に固定しない。
 - BackupにCredentialと外部Workspaceのfileまたは外部sourceそのものを含めない。
 - Ownerはbackupを暗号化して保護できる。暗号化されていないbackupを作成する場合は、Conversation History、Experience Summary、Memory、Relationship、Companion State等のprivate dataが含まれることを事前に明示する。
-- Restoreは対応するbackupからEne内部dataをそのbackup時点の状態へ全置換する操作とし、対象、version互換性、外部fileを変更しないこと、削除済み情報や以前のRule・同意・Scheduleが戻り得ること、ProviderやMCP等の再認証が必要になり得ることを事前に示す。
+- Restoreは対応するbackupからene内部dataをそのbackup時点の状態へ全置換する操作とし、対象、version互換性、外部fileを変更しないこと、削除済み情報や以前のRule・同意・Scheduleが戻り得ること、ProviderやMCP等の再認証が必要になり得ることを事前に示す。
 - Restore後のTask、Schedule、外部接続による自動処理は一旦保留し、Ownerが復元内容を確認してまとめて有効化できる。個々の設定を一件ずつ再承認することは要求しない。
 - Restore失敗時は復元前の正常な状態を破壊しない。
 
@@ -406,13 +406,13 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 ### Reset
 
 - 設定Resetは、UI、Body、Voice等の一般設定を既定へ戻すが、Companion、Conversation History、Experience Summary、Learning、Relationship、Companion State、Task、Schedule、Credential、Permission Rule、Provider同意、費用capを削除しない。
-- 全データResetは、削除対象を列挙した強い確認の後、Host内部のEne dataとCredentialを削除する。
+- 全データResetは、削除対象を列挙した強い確認の後、Host内部のene dataとCredentialを削除する。
 - 全データResetは、外部Workspaceのfile、Workspace内に置かれたSkill、Ownerが別の保存先へ作成したbackupを削除しない。
 - Reset後は、何が削除され、何が外部に残っているかを確認できる。
 
 ## Remote Client
 
-- Remote Clientは、同じLANまたはOwnerが管理するVPNを通じてHostへ接続する。Ene運営のrelay、Ene account、Ene Cloudを接続要件にしない。
+- Remote Clientは、同じLANまたはOwnerが管理するVPNを通じてHostへ接続する。ene運営のrelay、ene account、ene Cloudを接続要件にしない。
 - 新しいClientはOwnerがHost側で確認できるdevice pairingを必要とする。
 - HostとClientの通信を保護し、Ownerはpairing済みdevice、最終接続、許可された機能を確認し、deviceごとに失効できる。
 - Clientは表示と一時的な操作に必要なdataだけを受け取り、Conversation History、Experience Summary、Learning、Relationship、Companion State、Credential等を永続cacheしない。

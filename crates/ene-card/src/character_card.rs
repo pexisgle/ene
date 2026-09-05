@@ -89,8 +89,8 @@ pub struct CharacterCardData {
     /// Alternative greetings shown only in group chats.
     ///
     /// Parsed and preserved for cards authored against the `CCv3` spec, but
-    /// unused: Ene renders a single character, so group-chat greetings have
-    /// no consumer. The field becomes meaningful if Ene ever displays
+    /// unused: ene renders a single character, so group-chat greetings have
+    /// no consumer. The field becomes meaningful if ene ever displays
     /// multiple characters at once.
     #[serde(default)]
     pub group_only_greetings: Vec<String>,
@@ -122,7 +122,7 @@ pub struct CharacterCardData {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(crate = "crate::serde")]
 pub struct Extensions {
-    /// Ene-specific extension block (motions, expressions, etc.).
+    /// ene-specific extension block (motions, expressions, etc.).
     #[serde(default, deserialize_with = "deserialize_ene")]
     pub ene: Option<EneExtension>,
     /// Catch-all for other extension keys.
@@ -670,7 +670,7 @@ impl AffectBaseline {
     }
 }
 
-/// Ene extension block stored in character.json under `data.extensions.ene`.
+/// ene extension block stored in character.json under `data.extensions.ene`.
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "crate::schemars")]

@@ -821,7 +821,7 @@ fn validate_card_assets(card: &CharacterCardV3) -> Result<(), EneConfigError> {
                     "Skipping asset with unsupported URI scheme"
                 );
             }
-            // A malformed URI on a type Ene does not consume is not a
+            // A malformed URI on a type ene does not consume is not a
             // security boundary; unsafe paths above still fail the import.
             Err(EneConfigError::InvalidAssetUri(_)) if !consumed => {
                 tracing::warn!(

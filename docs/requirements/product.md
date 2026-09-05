@@ -5,16 +5,16 @@
 
 ## 製品の要約
 
-Eneは、一人のOwnerが管理するHost上で継続する、Companion中心のパーソナルAIシステムである。
+eneは、一人のOwnerが管理するHost上で継続する、Companion中心のパーソナルAIシステムである。
 
 日常的な体験の主役は、身体を持ち、同じ個として時間を越えて続くCompanionである。会話、Memory、Relationship、Companion State、身体表現と、実際のPC作業を一つの存在から利用できる。
 
-EneはCompanionを体験上の中心に置くが、汎用作業Agentとしての能力を劣後させない。Tool、MCP、Skill、Provider、Task AgentはCompanionが使う能力であり、別の主役や劣化した付属機能ではない。
+eneはCompanionを体験上の中心に置くが、汎用作業Agentとしての能力を劣後させない。Tool、MCP、Skill、Provider、Task AgentはCompanionが使う能力であり、別の主役や劣化した付属機能ではない。
 
 ## 利用者と実行場所
 
-- 一つのEne環境は一人のOwnerに属する。複数人の独立した利用者を同じ環境へ収容しない。
-- HostはEne Coreを実行し、Eneが管理する永続状態の正本を保持するOwner管理下のPCである。
+- 一つのene環境は一人のOwnerに属する。複数人の独立した利用者を同じ環境へ収容しない。
+- Hostはene Coreを実行し、eneが管理する永続状態の正本を保持するOwner管理下のPCである。
 - Clientは同じHostへ接続する表示・会話・操作の入口であり、永続状態の正本ではない。
 - 推論はHost、OwnerのLAN、またはOwnerが選んだCloud Providerで実行できる。
 
@@ -48,9 +48,9 @@ Taskが作業対象として利用するfolder、file、外部source等との関
 
 ### MemoryとSkill
 
-Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Memoryは後のExperienceによって内容、重要度、scope、時間的意味等を継続的に更新できる。通常の忘却、訂正、失効、置換、統合では保存済みMemoryやその過去revision・根拠を削除せず、現在の認識や重要度、想起優先度等を更新する。OwnerがPrivacyまたはSecurityのため特定情報そのものをEne内部から強制消去するよう明示したtargeted deletionだけは、この保持原則より優先する。MemoryはOwner、Companion、出来事、状況等についての長期的な理解ではRelationshipより優先される主要な知識状態である。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
+Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Memoryは後のExperienceによって内容、重要度、scope、時間的意味等を継続的に更新できる。通常の忘却、訂正、失効、置換、統合では保存済みMemoryやその過去revision・根拠を削除せず、現在の認識や重要度、想起優先度等を更新する。OwnerがPrivacyまたはSecurityのため特定情報そのものをene内部から強制消去するよう明示したtargeted deletionだけは、この保持原則より優先する。MemoryはOwner、Companion、出来事、状況等についての長期的な理解ではRelationshipより優先される主要な知識状態である。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
 
-Ene内部のMemoryとSkillはCompanionまたはGlobalのscopeを持ち得る。特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とし、Ownerが明示的に共有を求めた場合、または内容と文脈から複数Companionで共通に利用すべきことが明確な場合だけGlobal scopeにする。単に重要、有用、一般的な好みであることだけを理由にGlobal scopeへ昇格させない。
+ene内部のMemoryとSkillはCompanionまたはGlobalのscopeを持ち得る。特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とし、Ownerが明示的に共有を求めた場合、または内容と文脈から複数Companionで共通に利用すべきことが明確な場合だけGlobal scopeにする。単に重要、有用、一般的な好みであることだけを理由にGlobal scopeへ昇格させない。
 
 ### Relationship
 
@@ -81,18 +81,18 @@ CapabilityはFilesystem、Network、Device等を利用する実行能力、Actio
 
 ## 同梱Character
 
-Eneは再配布可能なオリジナルCharacter `ene` を同梱する。Aliciaは開発・検証fixtureに限定し、製品配布へ含めない。
+eneは再配布可能なオリジナルCharacter `ene` を同梱する。Aliciaは開発・検証fixtureに限定し、製品配布へ含めない。
 
 ## 非目標
 
 - 複数Owner向けの共有Coreや企業向けmulti-tenant SaaS
-- Eneの永続状態をCloud Providerだけへ置くこと
+- eneの永続状態をCloud Providerだけへ置くこと
 - Companion体験と切り離された単用途Agent製品
 - Tool call、Task Agent構成、内部推論を日常UIの主役にすること
-- Ene独自の3D、Voice、Skill制作環境を一から提供すること
+- ene独自の3D、Voice、Skill制作環境を一から提供すること
 - Taskより上位の恒久的な作業containerや独自lifecycle、成果物専用libraryを作ること
 - 任意のCore改変や恒久的UI置換を許す汎用Plugin API
-- Ene所有のMarketplace、relay、Cloud account、課金基盤を現在の製品範囲に含めること
+- ene所有のMarketplace、relay、Cloud account、課金基盤を現在の製品範囲に含めること
 - すべての構成で完全Offline推論を保証すること
 - 内部思考、Raw画面、Raw音声、全Tool payloadを常時保存すること
 - 既存config、IPC、Plugin protocol、保存形式、CLIとの互換性を維持すること

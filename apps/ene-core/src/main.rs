@@ -6,7 +6,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "ene-core", about = "Ene core")]
+#[command(name = "ene-core", about = "ene core")]
 struct Args {
     /// Data directory (sessions.db + exclusive lock).
     #[arg(long)]

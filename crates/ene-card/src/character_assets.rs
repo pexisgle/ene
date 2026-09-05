@@ -27,7 +27,7 @@ pub enum EneAssetKind {
 }
 
 impl CharacterAsset {
-    /// Maps the card-declared asset type to a kind Ene consumes.
+    /// Maps the card-declared asset type to a kind ene consumes.
     ///
     /// `x_vrm` / `x_vrma` are the app-specific types defined by the spec;
     /// the unprefixed forms are tolerated for cards produced by other tools.

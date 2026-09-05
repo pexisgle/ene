@@ -49,7 +49,7 @@
 
 ### Setupと最初の会話
 
-1. 新規環境でEneを起動する。
+1. 新規環境でeneを起動する。
 2. 日本語または英語、同梱Character `ene`、Cloudへ送信されるdataと費用説明、OpenAI Credential、利用modelを選ぶ。
 3. Credentialを登録しただけでは送信が始まらず、Main LLMへの割当を明示してSetupを完了する。
 4. `ene` から作られたCompanionへテキストを送り、同じtimelineで応答を受け取る。
@@ -117,7 +117,7 @@
 
 1. OpenAIを利用する会話とTaskを実行する。
 2. Providerが報告するinput token、output token、cached tokenと、それぞれに対応する費用内訳を管理面で確認する。
-3. Provider報告値とEneの推定値または不明な値が混同されないことを確認する。
+3. Provider報告値とeneの推定値または不明な値が混同されないことを確認する。
 4. 登録したCredentialがLLMへ送信されるmodel contextやTool argument、Conversation History、Experience Summary、Memory、Relationship、Task結果、通常log、Error表示に現れないことを自動検査と目視の両方で確認する。
 5. 登録したCredentialがDebug captureにも現れないことを確認する。
 
@@ -134,9 +134,9 @@ WindowsとLinuxで同じ操作手順と観測区間を用い、少なくとも�
 - 同一fixtureを用いたfile作業Taskの所要時間
 - 会話、Experience Summary、Memory、Taskを反復したときの保存容量増加
 
-最初のmilestoneでは、modelや外部Provider processを除くEne自身について次を最低Gateとする。
+最初のmilestoneでは、modelや外部Provider processを除くene自身について次を最低Gateとする。
 
-- Setup完了後かつ推論を行っていないidle状態を5分観測し、Ene process群の平均CPU使用率がsystem全体の10%を超えない。
+- Setup完了後かつ推論を行っていないidle状態を5分観測し、ene process群の平均CPU使用率がsystem全体の10%を超えない。
 - 同じidle状態で、Hostとactive Clientを合わせた常用Memoryが2 GiBを超えない。
 - 基本Bodyを通常表示している間、対応環境で平均30 FPS以上を維持し、通常のUI操作を1秒を超えて継続的にblockしない。
 - Stop、Cancel、Mute、Permission拒否等のlocal操作は、入力から1秒以内にUI上で受付状態または状態変化を示す。外部処理そのものの停止完了までを1秒以内とはしない。

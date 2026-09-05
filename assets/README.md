@@ -63,10 +63,10 @@ the check recomputes every hash against the manifest.
 | Path | Purpose | License |
 | --- | --- | --- |
 | `icon.png` | Application icon | Root [`LICENSE`](../LICENSE) (MIT), owned by ene contributors |
-| `characters/Alicia/character.json` | Default character card (Character Card V3) | Root LICENSE, authored for Ene |
-| `characters/Alicia/character_settings.json` | Per-character stage settings | Root LICENSE, authored for Ene |
-| `lang/en/patterns.json`, `lang/ja/patterns.json` | Language pattern tables | Root LICENSE, authored for Ene |
-| `settings.json` | Default application settings seed | Root LICENSE, authored for Ene |
+| `characters/Alicia/character.json` | Default character card (Character Card V3) | Root LICENSE, authored for ene |
+| `characters/Alicia/character_settings.json` | Per-character stage settings | Root LICENSE, authored for ene |
+| `lang/en/patterns.json`, `lang/ja/patterns.json` | Language pattern tables | Root LICENSE, authored for ene |
+| `settings.json` | Default application settings seed | Root LICENSE, authored for ene |
 
 These files are original project content, so they inherit the repository
 license rather than requiring separate attribution.

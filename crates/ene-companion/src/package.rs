@@ -152,7 +152,7 @@ pub fn looks_like_zip(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0x50, 0x4b, 0x03, 0x04]) || bytes.starts_with(&[0x50, 0x4b, 0x05, 0x06])
 }
 
-/// True when `bytes` is a zip that contains `manifest.toml` (Ene package).
+/// True when `bytes` is a zip that contains `manifest.toml` (ene package).
 #[must_use]
 pub fn looks_like_package_zip(bytes: &[u8]) -> bool {
     if !looks_like_zip(bytes) {
