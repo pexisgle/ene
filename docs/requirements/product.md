@@ -72,7 +72,7 @@ Eneは再配布可能なオリジナルCharacter `ene` を同梱する。Alicia�
 - Companion体験と切り離された単用途Agent製品
 - Tool call、Task Agent構成、内部推論を日常UIの主役にすること
 - Ene独自の3D、Voice、Skill制作環境を一から提供すること
-- Taskより上位の恒久的なProject container、Project lifecycle、成果物専用libraryを作ること
+- Taskより上位の恒久的な作業containerや独自lifecycle、成果物専用libraryを作ること
 - 任意のCore改変や恒久的UI置換を許す汎用Plugin API
 - Ene所有のMarketplace、relay、Cloud account、課金基盤を現在の製品範囲に含めること
 - すべての構成で完全Offline推論を保証すること
