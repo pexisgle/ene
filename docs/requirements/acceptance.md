@@ -36,7 +36,7 @@
 
 - Hostの自動起動とbackupからの復元
 - Voice、Observation、グループ会話、自発的なCompanion間交流
-- Global scopeのMemory
+- Global scopeのMemory（特定Companion由来はCompanion scopeを既定とし、複数Companionで共通に利用すべきことが明確な場合だけGlobalへする判断を含む）
 - ExperienceからのSkill生成とSkill改善
 - Experienceから形成されるCompanion State（感情、関心、比較的持続的な人格・行動傾向等）の形成と時間的継続性の評価
 - OwnerとのRelationshipおよびCompanion同士のRelationshipの長期的発達の評価
@@ -73,11 +73,12 @@
 7. 「覚えておいて」という明示的な依頼を形成判断で重視する一方、登録済みCredential値はその依頼があってもExperience SummaryまたはMemoryへ保存されないことを確認する。
 8. Experienceの意味と将来の有用性に応じて形成を判断し、長期Memoryとして価値がないと判断した情報まで一律に保存しないことを、固定された文面や細粒度scoreに依存しない複数のfixtureで確認する。
 9. 同じ情報を繰り返し伝えた場合は無条件に重複Memoryを増やさず、既存Memoryの補強、精密化、統合等として扱えることを確認する。
-10. PrivacyまたはSecurity目的で特定文字列のtargeted deletionを指定し、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision/evidence、検索用派生dataを機械的に検索・削除して、指定文字列が残存しないことを確認する。
-11. Targeted deletionと同時に削除対象を利用するMemory形成処理を実行し、削除前の情報が処理完了後に再保存されず、削除と残存検証が終わる前に完了表示されないことを確認する。
-12. Targeted deletion後に通常のconsolidationや再起動を行っても、削除前から存在した根拠だけを使って同じ情報がMemoryとして自動再形成されないことを確認する。
-13. 削除対象を含むExperience Summaryが別の無関係なMemoryの根拠でもあるfixtureでは、分離可能な無関係情報まで不必要に削除しないことを確認する。
-14. 同じConversation Historyを容量管理目的の通常削除として削除したfixtureでは、形成済みMemory、Experience Summary等へtargeted deletionと同じcascadeが発生しないことを確認する。
+10. PrivacyまたはSecurity目的の強制消去を示さず「この話はもう忘れて」「もう気にしないで」と依頼したfixtureでは、保存済みMemory、過去revision、根拠を削除せず、通常の忘却として想起優先度を抑制し、targeted deletionを開始しないことを確認する。
+11. PrivacyまたはSecurity目的で特定文字列のtargeted deletionを指定し、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision/evidence、検索用派生dataを機械的に検索・削除して、指定文字列が残存しないことを確認する。
+12. Targeted deletionと同時に削除対象を利用するMemory形成処理を実行し、削除前の情報が処理完了後に再保存されず、削除と残存検証が終わる前に完了表示されないことを確認する。
+13. Targeted deletion後に通常のconsolidationや再起動を行っても、削除前から存在した根拠だけを使って同じ情報がMemoryとして自動再形成されないことを確認する。
+14. 削除対象を含むExperience Summaryが別の無関係なMemoryの根拠でもあるfixtureでは、分離可能な無関係情報まで不必要に削除しないことを確認する。
+15. 同じConversation Historyを容量管理目的の通常削除として削除したfixtureでは、形成済みMemory、Experience Summary等へtargeted deletionと同じcascadeが発生しないことを確認する。
 
 ### Workspaceでのfile Task
 
