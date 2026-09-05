@@ -34,7 +34,7 @@ Eneの忘却は、会話相手らしい自然さを参考にしつつ、内容�
 | 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
 |---|---|---|---|
 | [Codex: Long-running work](https://learn.chatgpt.com/docs/long-running-work) | 会話を塞がずに長い作業を進め、進捗確認と追加指示を行う体験 | Companionを継続的な窓口とし、一時Task Agentを長期人格にしない | 2026-09-05 |
-| [Claude Cowork: Getting started](https://support.claude.com/en/articles/13345190-get-started-with-claude-cowork) | Ownerが選んだfolderをWorkspaceとしてAgentに作業させるmodel | Workspaceを独立ProjectにせずTaskへ従属させ、外部fileの所有権とlifecycleをTaskから分離する | 2026-09-05 |
+| [Claude Cowork: Getting started](https://support.claude.com/en/articles/13345190-get-started-with-claude-cowork) | Ownerが選んだfolderをWorkspaceとしてAgentに作業させるmodel | Workspaceを独立containerにせずTaskへ従属させ、外部fileの所有権とlifecycleをTaskから分離する | 2026-09-05 |
 | [AGENTS.md](https://agents.md/) | 作業folder内の通常fileでAgent向けの作業指示を共有する慣習 | Ene固有の固定Brief型を作らず、Task context、標準的な案内file、会話を利用する | 2026-09-05 |
 | [Home Assistant: Automation basics](https://www.home-assistant.io/docs/automation/basics/) | 保存されたautomationがUI不在でもeventまたは時刻で実行されるmodel | 各回を新しいTaskにし、その時点のPermissionと状態を再評価してmissed runを自動補完しない | 2026-09-05 |
 
