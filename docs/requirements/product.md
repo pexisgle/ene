@@ -32,7 +32,7 @@ Characterを基に作られ、Memory、Relationship、状態、関心、設定�
 
 CompanionがOwnerとの対話、Task、Tool利用、Observation、他のCompanionとの交流その他の活動を通じて経験した出来事とその結果。ExperienceはMemory、Skill、Relationship、状態等が形成または更新される根拠になり得る。Experienceであることは、そのRaw dataを恒久保存することを意味しない。
 
-Memory、Skill、Relationship等の長期状態へ利用するときは、必要に応じて複数messageや一連の行動を、topic、出来事、Task、意思決定、共有体験等の意味的なまとまりとして要約したExperience Summaryを根拠にできる。Experience SummaryはRaw Historyの代替ではなく、長期状態を形成・説明するための圧縮された根拠である。
+Memory、Skill、Relationship等の長期状態へ利用するときは、必要に応じて複数messageや一連の行動を、topic、出来事、Task、意思決定、共有体験等の意味的なまとまりとして要約したExperience Summaryを根拠にできる。Experience SummaryはRaw Historyの代替でも独立した知識の正本でもなく、長期状態を形成・説明するための圧縮された根拠である。
 
 ### Task
 
@@ -48,11 +48,13 @@ Taskが作業対象として利用するfolder、file、外部source等との関
 
 ### MemoryとSkill
 
-Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Memoryは後のExperienceによって内容、重要度、scope、時間的意味等を継続的に更新でき、過去の認識と根拠を失わない。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
+Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Memoryは後のExperienceによって内容、重要度、scope、時間的意味等を継続的に更新でき、過去の認識と根拠を失わない。MemoryはOwner、Companion、出来事、状況等についての長期的な理解ではRelationshipより優先される主要な知識状態である。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
 
 ### Relationship
 
-Ownerと特定Companionの間で共有されたExperienceから形成される、そのCompanion自身による現在の関係認識。RelationshipはMemoryの集合や固定された関係typeではなく、Characterを出発点としながらExperienceに応じて継続的に変化する個体固有の状態である。過去の状態と根拠を保持しつつ、現在の関係はcompactな自然言語の理解として利用できる。
+Relationshipは、あるCompanionとその相手であるOwnerまたは別のCompanionとの共有Experienceから形成される、そのCompanion自身による現在の関係認識である。各RelationshipはCompanion側の個体固有状態であり、相手側の認識と自動的に同一または対称にはしない。
+
+RelationshipはMemoryの補助となるcompactな状態であり、人物情報、出来事、Preference等の詳細を第二のMemoryとして複製しない。必要な事実はMemoryやExperience Summaryを参照し、Relationship自身は距離感、交流傾向、関係の変化等、関係そのものの現在の解釈へ絞る。Memoryと矛盾する事実認識をRelationshipで上書きせず、Permission、Rule、安全境界にも影響しない。
 
 ### Capability、Action、Rule
 
