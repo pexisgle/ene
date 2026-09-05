@@ -196,7 +196,7 @@
 - 同じ外部folderやsourceを複数Taskが利用することはできるが、各TaskのPermissionと作業状態は独立して扱う。
 - Taskが削除された場合、そのTask固有のWorkspace関連付けも削除する。
 - Workspace関連付けの削除によって、外部folder内のfile、外部source、Ownerが管理する成果物を黙って削除または変更しない。
-- Task固有の目的や指示は、Ownerとの会話、Task context、Workspace内の標準的な案内file等から取得できる。独立したProject Brief型を必須にしない。
+- Task固有の目的や指示は、Ownerとの会話、Task context、Workspace内の標準的な案内file等から取得できる。独立した固定Brief型を必須にしない。
 
 ### Fileと成果物
 
@@ -297,11 +297,11 @@
 
 ## 履歴、保持、Privacy
 
-### Conversation HistoryとLearningの削除
+### Conversation HistoryとMemoryの削除
 
 - Conversation Historyは既定で保持する。
-- OwnerはPrivacyまたはSecurityのため、指定したConversation HistoryまたはLearningを対象として削除できる。
-- Targeted deletionは、Learningの内容、重要度、Relationship等を調整する一般editorとして扱わない。通常の訂正や「忘れてほしい」という依頼はCompanionとの対話で処理できる。
+- OwnerはPrivacyまたはSecurityのため、指定したConversation HistoryまたはMemoryを対象として削除できる。
+- Targeted deletionは、Memoryの内容、重要度、Relationship等を調整する一般editorとして扱わない。通常の訂正や「忘れてほしい」という依頼はCompanionとの対話で処理できる。
 - Ownerは容量肥大化を避けるため、指定日以前のConversation HistoryやTask等のlogを手動削除できる。
 - OwnerはConversation Historyや対象logについて任意の保持期間による自動削除を明示設定でき、既定では自動削除しない。
 - 削除前に対象範囲、影響するCompanionまたはTask、形成済みLearningが別に残る可能性を示す。
