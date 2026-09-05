@@ -13,17 +13,17 @@ Eneは単一製品の模倣ではなく、複数の既存製品から異なる�
 
 | 参考 | Eneで参考にした中心的な考え方 | Eneでの差分 | 確認日 |
 |---|---|---|---|
-| [OpenClaw](https://github.com/openclaw/openclaw) | Owner自身が管理する環境でPersonal Agentを常駐させ、Tool、Skill、channel等を利用して継続的・自律的に作業させるという、EneのNon-Companion Agent Systemの主要な参考 | EneではPC操作、Task、Workspace、Credential、Observation、Permissionの境界を明示し、そのAgent能力を継続的なCompanionから利用する | 2026-09-05 |
-| [Grok Bot](https://x.ai/bot) | 専用Computerを持つpersistentなAI teammateへ実作業を委任し、アプリやWebを操作させ、複数Botで並列作業し、Routineとして継続実行できる体験 | Eneでは専用Cloud computerや複数の作業人格を製品の前提にせず、Owner管理Host上のCapabilityをCharacter/Companion、Memory、Relationship、Emotion、Bodyと統合する | 2026-09-05 |
+| [Grok Bot](https://x.ai/bot) | 専用Computerを持つpersistentなAI teammateへ実作業を委任し、アプリやWebを操作させ、複数Botで並列作業し、Routineとして継続実行できる体験。EneのAgent側の製品体験に特に近い参考 | Eneでは専用Cloud computerや複数の作業人格を製品の前提にせず、Owner管理Host上のCapabilityをCharacter/Companion、Memory、Relationship、Emotion、Bodyと統合する | 2026-09-05 |
+| [OpenClaw](https://github.com/openclaw/openclaw) | Owner自身が管理する環境でPersonal Agentを常駐させ、Tool、Skill、channel等を利用して継続的・自律的に作業させるself-hosted / owner-managedなmodel | EneではPC操作、Task、Workspace、Credential、Observation、Permissionの境界を明示し、そのAgent能力を継続的なCompanionから利用する | 2026-09-05 |
 | [Claude Cowork](https://support.claude.com/en/articles/13345190-get-started-with-claude-cowork) | AIへPC上の作業を委任し、folderやfileを扱わせながら人間の作業を自動化するproduct model | Eneでは一時的な作業Agentを長期人格にせず、TaskとWorkspaceを継続Companionから利用するCapabilityとして扱う | 2026-09-05 |
 | [ChatGPT Work](https://openai.com/ja-JP/chatgpt-work/) | 会話からAIへ複数stepの作業や成果物作成を委任し、app、file、tool、browser等を横断して人間の作業を自動化するproduct model | Claude Coworkと同系統の参考元として扱うが、EneではHost上のCapability、Permission、Task lifecycleをOwner管理のローカル基盤へ統合する | 2026-09-05 |
 | [OpenCode](https://dev.opencode.ai/docs/agents/) | Model、Tool、Agent、Permission、sub-agent等を分離したAgent Harness / execution architecture | Eneではcoding agent専用のHarnessにはせず、Companion会話、Computer Use、Schedule、Memory、Skill等から共通利用できる実行基盤へ一般化する | 2026-09-05 |
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Agent loop、Tool、execution backend、Memory、Skill、sub-agent等を組み合わせるAgent Harness全体と、Agent自身が再利用可能な知識・手順を形成できる考え方 | EneではEntry、Core Loop、Tool/Intelligence、Execution Environment、Persistenceを疎結合に保ち、自己改善もPermission、安全境界、revision、Experience根拠の管理下に置く | 2026-09-05 |
 | [nanobot](https://github.com/HKUDS/nanobot) | 軽量なAgent構成でSession、Memory、Skill等を分離し、必要十分な部品からHarnessを構成する考え方 | Eneではより広いPC操作、Companion、Relationship、Emotion、複数Client等を扱うため、そのままの軽量構成ではなく概念上の参考とする | 2026-09-05 |
-| [AIRI](https://github.com/moeru-ai/airi) | AI能力を所有可能なCharacter/Companionとして提示し、Voice、avatar、application awareness、Computer Use等を一つの存在へまとめる方向性 | EneではCompanion体験だけでなく、OpenClaw/Grok Bot系の自律作業能力、長期Memory、Relationship等を同じ個体へ統合し、Hostを正本とする | 2026-09-05 |
+| [AIRI](https://github.com/moeru-ai/airi) | AI能力を所有可能なCharacter/Companionとして提示し、Voice、avatar、application awareness、Computer Use等を一つの存在へまとめる方向性 | EneではCompanion体験だけでなく、Grok Bot/OpenClaw系の自律作業能力、長期Memory、Relationship等を同じ個体へ統合し、Hostを正本とする | 2026-09-05 |
 | [Desktop Mate](https://store.steampowered.com/app/3301060/Desktop_Mate/) | Desktop上にCharacter Bodyが常駐し、通常のPC利用と共存するUX | 観賞用mascotではなく、会話、Learning、Task、Computer Useを同じCompanionへ統合する | 2026-09-05 |
 
-大きく分けると、Eneは **OpenClaw / Grok Bot / Claude Cowork / ChatGPT Work系の自律作業AI**、**OpenCode / Hermes Agent / nanobot系のAgent Harness**、**AIRI / Desktop Mate系のCompanion interface** の3系統を組み合わせている。
+大きく分けると、Eneは **Grok Bot / OpenClaw / Claude Cowork / ChatGPT Work系の自律作業AI**、**OpenCode / Hermes Agent / nanobot系のAgent Harness**、**AIRI / Desktop Mate系のCompanion interface** の3系統を組み合わせている。
 
 ## CompanionとDesktop Body
 
