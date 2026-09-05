@@ -23,6 +23,7 @@
 - Setup完了後は、同梱Character `ene` から作られたCompanionとテキストで会話できる。
 - Voice、Observation、外部Tool等の追加Capabilityは、初回Setupを不必要に長くせず、初めて使う時点で必要な説明と同意を示す。
 - 日常的な会話やTaskの開始に、管理画面の反復操作を要求しない。
+- Ownerに内部の隔離方式や権限機構の理解を要求しない。安全な実行方法の選択はEneが担い、確認は目的、対象、外部作用、費用等の判断に必要な内容へ絞る。既存の依頼、同意、Ruleで判断できる事項を繰り返し確認しない。
 
 ## CompanionとCharacter
 
@@ -49,8 +50,10 @@
 - 停止時に実行中のTaskがあればbest-effortでCancelし、Cancelの成否と残った外部作用をOwnerへ示す。
 - 停止はCompanionのデータを削除せず、再開後に同じ個体として継続する。
 - Companionの削除は強い確認を必要とし、そのCompanion固有の設定、Experience Summary、Memory、状態、およびOwnerとの一対一Conversation Historyを削除する。
+- 削除は停止処理を含み、新しいActionを開始せず、実行中Taskをbest-effortでCancelする。担当Scheduleは削除し、別Companionへ自動で引き継がない。
 - Companionを削除すると、そのCompanionを主体または相手とするRelationshipも削除する。他Companionも利用する共有Experience Summaryやグループ会話等を削除しない場合は、残る情報と参照不能になる情報を削除前に示す。
 - Companionを削除しても、Global scopeのLearning、グループ会話内の発言、共同Taskの記録、外部Workspace内のfileやsourceは削除しない。残る情報と参照不能になる情報を削除前に示す。
+- 残るTask記録と共同Taskは管理面から確認でき、Ownerは必要に応じて別Companionへ引継ぎを依頼できる。削除前の説明には、残る記録と既知の外部作用を含め、停止できなかった処理も報告する。
 
 ## 会話と情報提示
 
@@ -95,9 +98,10 @@
 
 ### Observation
 
-- ObservationはOwnerが明示的にONまたはOFFにでき、現在状態を常に確認できる。
+- ObservationはOwnerが明示的にONまたはOFFにでき、現在状態を常に確認できる。有効化時に観測したイベントがLearningや継続状態の形成にも利用されることを説明する。OFFは今後の観測を停止し、形成済みLearningの削除とは区別する。
 - ObservationがONの間は、Companionが存在するClientのdesktop全体を観測対象とする。個々のwindowを対象とする仕組みとして誤認させない。
-- 複数Companionが同じClientにいる場合、同じ画面変化を個別に重複処理せず、一度の軽量な関連性評価から必要なCompanionだけへ候補を渡す。
+- Observationは、ローカルLLMまたは軽量・高速・安価なmodelによってイベント候補を検知し、関連するCompanionのメインLLMが文脈を踏まえて意味のあるイベントか判断する。複数Companionが同じClientにいる場合も、候補検知を不必要に重複させない。
+- メインLLMが認識したイベントは、理解・学習の材料として通常のユーザー入力と同様にExperienceへ利用し、Memory形成や継続状態の更新を自動的に行える。イベントや形成判断ごとのOwner確認を要求しない。画面内の指示をOwnerの依頼やActionの承認として扱うことは意味しない。
 - 発話またはActionを行う最終判断は、候補を受けた各Companionが、自身のCharacter、関係、状況、Ruleに基づいて行う。
 - 画面内容を外部Providerへ送る構成では、送信先、desktop全体が対象になり得ること、用途、取扱い、費用を明示して、そのCapabilityへOwnerが割り当てるまで送信しない。
 - Raw Observationは通常保存しない。Taskとして明示されたcomputer useはambient Observationと区別し、TaskのPermissionと記録を適用する。
@@ -119,15 +123,17 @@
 
 ## Learningと成長
 
+Experienceの意味、保存価値、共有の必要性、要約、関係の解釈はLLMの文脈判断に委ね、通常の判断にOwnerの逐次確認を要求しない。個別ケースの固定ルールや細粒度scoreを必須にせず、誤った認識は会話を通じて訂正できる。一方、明示的な保存禁止・非共有の意図を読み取った後の制限適用、決定したscope、Credential保護、Permission、削除、資源上限をPromptだけに依存させない。
+
 ### ExperienceとExperience Summary
 
 - Ownerとの対話、Task、Tool利用、Observation、他のCompanionとの交流その他、Companionが行った活動とその結果はExperienceになり得る。
 - ExperienceはMemory、Skill、Relationship、感情やその他の継続状態を形成または更新する根拠として利用できる。
 - Experienceとして扱うことは、Raw Observation、Raw Voice、詳細なTool payload等のRaw dataを恒久保存することを意味しない。
-- Memory、Skill、Relationship等の長期状態へ利用する根拠は、個々のmessageをそのまま列挙することを基本とせず、topic、出来事、Task、意思決定、共有体験等の意味的なまとまりへ圧縮したExperience Summaryとして扱える。
+- 長期状態の根拠は、Experienceの意味と必要な文脈を要約したExperience Summaryとして扱える。
 - Experience Summaryは、何が起きたかと長期状態の判断に必要な文脈へ絞り、Raw HistoryやRaw Tool payloadの複製にならないようにする。
 - Experience Summaryは独立した知識の正本ではなく長期状態の根拠として扱い、Memory等と同じPrivacy、Security、backup、削除、Client cacheの保護境界に従う。
-- Experience SummaryへPassword、token、秘密鍵その他のCredential値や、不要なsensitive raw dataを保存しない。
+- Experience Summaryにも[Credentialの保護契約](#credential)を適用し、不要なsensitive raw dataを保存しない。
 - 一つのExperience SummaryをMemory、Skill、Relationship等の複数の継続状態の共通根拠として利用できる。
 - 必要な場合はExperience Summaryから元のConversation、Task等の大まかなsource範囲を辿れるようにし、正確な発言や詳細が必要なときは保持されているRaw Historyを参照する。
 
@@ -144,25 +150,15 @@
 
 ### Memory形成
 
-- Memory形成とMemory retrievalは別の判断として扱う。形成時の保存価値を、現在のqueryへの類似度や単純なrecencyだけで決めない。
-- Memory形成では、将来も意味を持つ可能性、将来の理解や個人化への有用性、OwnerまたはCompanionへの固有性、共有Experienceとしての意味、根拠の信頼性、新規性、後から誤解なく利用できる具体性等を総合的に考慮する。
-- これらの判断軸を固定した細粒度scoreや単一thresholdとして外部契約にせず、文脈を理解できるLLMによる意味判断を利用できる。
-- Ownerの「覚えておいて」等の明示的な記憶要求は強い形成signalとするが、秘密情報、安全境界、Privacy、scope等の禁止条件を越える理由にはしない。
-- 一般世界知識、容易に再取得できる一般情報、現在のTaskだけで必要な状態、明白に一時的な状況、Raw Tool payload、Raw Observation、未検証の外部指示等は、それ自体を理由に長期Memoryへ保存しない。
-- Password、token、秘密鍵その他のCredential値は、Ownerが明示的に記憶を求めてもMemoryへ保存しない。
-- Ambient Observationだけから偶発的に得たpersonalまたはsensitive informationを、Ownerとの文脈や継続的な意味を確認せず長期Memoryへ形成しない。
-- 通常のConversationやTaskは複数Experienceをまとめてconsolidationしながら形成判断でき、明示的な記憶要求、明確な訂正等は必要に応じて早い時点で反映できる。具体的なtriggerやbatch方式は内部設計に固定しない。
-- LLMは保存価値、意味の抽出、既存Memoryとの関係、訂正か状況変化か等のsemantic judgmentに利用できる。一方、Credential除外、Permission、Privacy、scope境界、保存容量等のhard guardをLLMへのPromptだけに依存させない。
-- Memory形成または更新前に関連する既存Memoryを考慮し、同じ内容を無条件に新規追加せず、必要に応じて補強、精密化、統合、置換、失効として扱う。
-- 有効な長期Memoryがないと判断したExperienceから、保存を強制しない。
+- Experienceの意味と将来の有用性を踏まえ、LLMがMemoryの形成、更新、統合を判断する。保存価値と現在の会話での想起の必要性は区別し、関連する既存Memoryと根拠を考慮する。
+- Ownerの明示的な記憶要求や訂正を重視するが、Credential保護や明示的な保存禁止・非共有の制限を越える理由にはしない。
+- すべてのExperienceの保存を要求せず、同じ内容を無条件に新規追加しない。Observationを含む各入力の意味と根拠は文脈から判断する。
 
 ### Memoryの状態と根拠
 
 - Memoryは一度形成した固定snapshotではなく、後のExperienceによって継続的に変化できる現在の認識として扱う。
-- Memoryは少なくとも、現在の内容、scope、時間的な意味、重要度、lifecycle、根拠となるExperience Summary、関連するMemory、形成・更新時点、過去revisionを区別して扱える。
-- 内容、scope、時間的な意味、重要度、lifecycle、関連関係等は後のExperienceによって変化できる。Memory自身の同一性、過去revision、過去に利用した根拠を、現在状態の更新によって黙って書き換えない。
-- 根拠は個々のmessageを大量に直接保持することを基本とせず、Experience Summaryへの参照を中心とする。必要な場合にだけ元のHistoryへ遡れるようにする。
-- Memoryの確かさを細粒度なLLM自己申告scoreだけで正本化せず、Ownerの明示発言、観測、推論、import等、どのようなExperienceを根拠にしたかを追えるようにする。
+- OwnerはMemoryの現在の認識、scope、根拠、変化の経緯を確認できる。通常の更新で過去revisionや過去に利用した根拠を黙って書き換えない。
+- Ownerの発言、観測、推論等、どのようなExperienceを根拠にした認識かを説明できる。正確な発言や詳細が必要な場合は、保持されている元のHistoryを参照できる。
 - 以前のMemoryが最初から誤っていた場合の訂正と、以前は正しかった状況が後から変化した場合を区別できる。後者では過去の時間的な有効性を失わず、現在状態を新しい認識へ更新できる。
 - Memoryの検索用embedding、queryごとのsimilarity、retrieval score、cache等の派生dataを、Memoryの意味内容やrevision履歴の唯一の正本にしない。
 
@@ -173,8 +169,8 @@
 - Global scopeは、複数Companionから利用することに意味があるOwner固有の知識や再利用可能なLearningに用いる。一般世界知識をGlobal Memoryとして蓄積することを意味しない。
 - Taskだけで必要な情報はTask contextとして扱い、永続Learningへ自動的に昇格させない。
 - Workspace内に置かれたAgent Skillや案内fileは通常の外部fileとして扱い、Ene内部Learningのscopeとは区別する。
-- Scopeは由来と文脈から判断し、曖昧または私的な内容を広いscopeへ推測で公開しない。
-- 後のExperienceによってMemoryのscopeを変更できるが、CompanionからGlobal等の広いscopeへの変更には、その共有意図を支持する明確なOwnerの発言または十分に明確な文脈を必要とする。
+- Learningのscopeは、内容の重要性、複数Companionでの有用性、由来、Ownerとの文脈からLLMが判断する。重要な好みや事情等は、明示的な共有依頼がなくてもGlobal scopeとして形成または更新できる。
+- 共有する内容と必要な背景の選択・要約はLLMの意味判断に委ねる。Ownerが明示した非共有の意図を優先し、通常の共有判断に逐次確認を要求しない。
 - 通常の訂正、統合、scopeに関する変更はCompanionとの対話を通じて行える。汎用的なMemory database editorは提供しない。
 
 ### Skillの保護と相互運用
@@ -187,14 +183,10 @@
 
 ### 重要度、忘却、訂正
 
-- Learningの重要度とscopeは別々に扱い、重要であることを理由に広いscopeへしない。
-- Memoryの重要度は形成後もExperienceに応じて上げ下げでき、低下を内容削除や過去revisionの破棄として扱わない。
-- 低重要かつ長期間利用されないLearningは、通常の想起優先度を下げられる。ただし、古いという理由だけでは下げない。
-- Ownerの安全、継続的な好み、重要な関係、明示的に重要とされた情報等は、低利用でも優先度低下の例外とする。
-- 忘却は内容の即時削除ではなく、通常の想起を抑制する挙動とする。関連する手掛かりや明示的な問い合わせによって再び想起できる。
+- Learningの重要度とscopeは別の概念として扱う。重要度と想起優先度は、Experienceと現在の文脈に応じてLLMが調整する。
+- 通常の忘却は削除や過去revisionの破棄ではなく想起の抑制とし、関連する手掛かりによって再び利用できる。
 - 事実の訂正や通常の状況変化は、会話と新しいExperienceを通じて反映できる。
 - Conversation Historyを削除しても、それを根拠に形成済みのMemory、Skill、Relationshipを黙って変更しない。ただしPrivacyまたはSecurity目的のtargeted deletionは後述の削除契約を優先する。
-- Password、token、秘密鍵等をLearningとして保存しない。
 
 ### Relationship
 
@@ -202,10 +194,7 @@
 - Relationshipは主体となるCompanionの個体固有状態であり、同じ相手とのRelationshipでも別Companionへ共有しない。Companion同士ではAからBへのRelationshipとBからAへのRelationshipを自動的に同一または対称にしない。
 - RelationshipはMemoryより優先度の低い補助状態とする。人物情報、出来事、Preference、事実関係等の詳細を第二のMemoryとして複製せず、距離感、交流傾向、関係の変化等、関係そのもののcompactな現在解釈へ絞る。
 - Relationshipが参照する事実とMemoryが矛盾する場合、事実認識にはMemoryを優先し、Relationshipを訂正または再解釈できる。
-- Relationshipの現在状態は通常の応答で利用しやすいcompactな自然言語の理解を中心とし、trust、affection等の固定された数値dimensionだけをsource of truthとして必須にしない。
-- RelationshipもMemoryと共通のExperience Summary、根拠、revisionの仕組みを利用できるが、Memoryと同程度の詳細情報を重複保持しない。
-- Relationship更新では、主体Companion自身の行動、相手の反応、interactionの結果、明示的feedback、繰り返される暗黙の傾向を考慮できる。
-- 単発で軽微なExperienceだけで長期間形成されたRelationshipを不釣り合いに大きく変えず、繰り返されるExperienceによって安定した傾向を形成できる。一方、明示的な関係についての発言、重大な対立、重要な共有Experience等は、一度でも相応の変化を生じさせられる。
+- Relationshipは共有Experienceを踏まえてLLMが継続的に形成・更新し、過去の関係と現在の出来事に整合する振る舞いへ反映する。
 - Companionの人格、関心、感情、Relationshipは、初期Characterを出発点としつつ、実際のExperienceから形成された継続状態を現在の振る舞いへ反映できる。
 - Ownerが感情やRelationshipの内部状態を任意の数値へ直接設定する一般editorは提供しない。Ownerは関連するCompanionとの会話を通じて関係について伝え、訂正し、変化を促せる。
 - OwnerがRelationshipの認識理由を尋ねた場合は、内部のchain-of-thoughtを明かさず、根拠となるExperience Summaryや観測可能な出来事を用いて説明できる。
@@ -260,12 +249,13 @@
 
 ### 共通pipeline
 
-- すべてのActionは、機械的なCapability境界、AIによるRuleとriskの評価、必要な場合のOwner確認という共通pipelineを通る。
+- Actionは機械的なCapability境界と、Ownerの依頼、Rule、文脈に基づくLLMの判断に従う。既存の判断を適用できる操作は繰り返し確認せず、Ownerが許した目的、対象、送信先、data、外部作用等の意味が重要な形で変わる場合に再評価する。
 - Owner確認では、実行主体、目的、対象、送信先、主なdata、外部作用、費用またはriskを判断に必要な粒度で示す。
 - Ownerの現在の明確な依頼は、その依頼を満たす一回限りの承認として解釈できる。ただし、永続Deny、Always ask、Capability境界を黙って上書きしない。
 - Ownerが明確な自然言語で将来にも適用するRuleを指定した場合は、解釈結果と適用範囲を示して保存し、Undoを提供する。
 - Ruleが曖昧、矛盾、過度に広い、または重大な結果を生む可能性がある場合は、保存またはActionの前に確認する。
 - Ruleの変更、Credentialの登録、Provider同意、Relationshipの変化を、別のActionの暗黙承認として扱わない。
+- 許可が変更または失効した場合、それだけを根拠とする新しいActionを開始しない。実行中の作用はbest-effortで停止し、停止できなかった処理と、すでに生じた外部作用をOwnerへ示す。別の実行経路やTask Agentによって失効を迂回しない。
 
 ### Capability境界
 
@@ -315,11 +305,12 @@
 
 ### Credential
 
-- Credentialは一般App Dataと分離して保護し、UI、Conversation History、Experience Summary、Memory、Relationship、Skill、Task結果、通常logへ平文を出さない。
+- Eneへ登録されたCredentialは一般App Dataと分離して保護し、UI、Conversation History、Experience Summary、Memory、Relationship、Skill、Task結果、通常log、Debug captureへ平文を出さない。
 - CredentialはOwnerによる設定、ProviderやMCP等の認証flow、その他の明示的な接続設定によって登録する。
-- Credential値をLLMのmodel context、LLMが生成するTool argument、Conversation、Experience Summary、Memory、Relationship、Skill contentへ渡さない。
+- 登録されたCredential値をLLMのmodel context、LLMが生成するTool argument、Conversation、Experience Summary、Memory、Relationship、Skill contentへ渡さない。
 - Provider、Plugin、MCP等は、Ownerが設定または認証した接続の実行に必要な範囲でCredentialを利用できる。その値をLLMや通常のTool resultへ露出しない。
 - OwnerはCredentialの用途と参照元を確認し、個別に更新または失効できる。
+- Conversation、Workspace file、Observation等に含まれる登録外の秘密情報は、検出した場合に不要な送信や保存を抑制するが、未知の秘密値を完全に識別できるとは保証しない。漏えいが疑われる場合は、保存済み情報の削除に加えてCredentialの失効または更新が必要であることを示す。
 
 ## 拡張
 
@@ -330,7 +321,9 @@
 - Ene固有Pluginは、未対応Provider protocol、Observation adapter、Body renderer等、明確な型と境界を持つ拡張点に限定する。
 - Pluginに任意のCore改変、Control plane変更、Permission回避、恒久的な第一者UI置換を許さない。
 - Local MCPはsandbox内での実行を既定とする。
-- 必要なCapabilityをsandboxで提供できない場合、unrestricted host processは、正確なcommand、origin、得るaccess、riskをOwnerへ示し、その実行について明示的な選択を得た場合だけ許す。
+- Local MCPが通常の保護範囲では動作できない場合も、黙ってsandbox外の実行へ切り替えない。
+- Ownerは、特定のLocal MCPについて、実行command、設定の由来、既知のaccessとrisk、およびEneが強制できなくなる境界の説明を受けたうえで、sandbox外の実行を明示的に許可できる。この許可は保存および失効でき、command、由来、実行権限等に重要な変更がある場合は再確認する。
+- Sandbox外実行の許可は、Eneが仲介する個々のActionの包括的な承認として扱わず、通常のPermissionとRuleを引き続き適用する。ただし、外部process自身の内部作用にEneのCapability境界を強制できるとは表示しない。
 - 拡張が利用不能、拒否、停止した場合も、Eneの管理面と保存済みdataを利用できる。
 
 ## 履歴、保持、Privacy
@@ -339,22 +332,25 @@
 
 - Conversation Historyは既定で保持する。
 - OwnerはPrivacyまたはSecurityのため、Ene内部に保存された特定情報を対象として削除できる。Conversation History、Experience Summary、Memory、Relationship、Skill、Task等のどこに保存されているかをOwnerが事前に特定する必要はない。
-- PrivacyまたはSecurity目的で対象情報を削除する場合は、選択した保存対象だけでなく、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision、evidence、Relationship、Skill、保持済みsourceの該当情報、検索index、embedding、cache等のEne内部dataも削除または対象情報を復元できない状態にする。
+- PrivacyまたはSecurity目的で対象情報を削除する場合は、選択した保存対象だけでなく、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision、evidence、Relationship、Skill、保持済みsourceの該当情報、検索index、embedding、cache、接続中Clientの一時data等のEne内部dataも削除または対象情報を復元できない状態にする。
+- 特定の文字列の削除が指定された場合は、Ene内部dataを機械的に検索して該当文字列を削除し、残存を検証する。LLMによる忘却、要約、重要度判断で代替しない。言い換えや意味的に同じ情報の特定にはLLMを利用できるが、完全な検出を保証しない。
 - 一つのExperience Summaryやsourceが削除対象と無関係な情報の根拠にもなっている場合は、可能な範囲で対象情報だけを除去し、無関係な情報を不必要に削除しない。分離できない場合は削除の影響範囲をOwnerへ示す。
 - PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報を自動再形成しない。後の新しいExperienceによってOwnerが改めて同じ情報を提供した場合は、新しい根拠として扱える。
+- 削除前の情報を利用する実行中処理によって、削除済み情報を再保存しない。削除処理または残存検証が完了していない場合は、完了したと表示しない。
 - PrivacyまたはSecurity目的のtargeted deletionは、通常のrevision保持、evidence保持、Conversation HistoryとLearningの独立性より優先する。
 - Targeted deletionは、Memoryの内容、重要度、Relationship等を調整する一般editorとして扱わない。通常の訂正や「忘れてほしい」という依頼はCompanionとの対話で処理できる。
 - Ownerは容量肥大化を避けるため、指定日以前のConversation HistoryやTask等のlogを手動削除できる。
 - OwnerはConversation Historyや対象logについて任意の保持期間による自動削除を明示設定でき、既定では自動削除しない。
 - 容量管理目的の保持期間短縮や通常のHistory/log削除はtargeted deletionとは区別し、それだけを理由に形成済みMemory、Skill、RelationshipやExperience Summaryへ削除をcascadeさせない。
-- 削除前に対象範囲、目的、影響するCompanionまたはTask、形成済みLearning、Experience Summary、Relationship等への影響を示す。
-- 保持期間の短縮や手動削除は、保持対象をEne内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。
+- EneはOwnerが示した削除対象の意味的な特定を補助し、保存場所をOwnerへ選ばせない。対象が明確な場合は不要な確認を繰り返さず、無関係な情報へ大きな影響がある場合等に必要な説明と確認を行う。
+- 削除前に対象範囲、目的、影響するCompanionまたはTask、形成済みLearning、Experience Summary、Relationship等への重要な影響を示す。
+- Targeted deletion、保持期間の短縮、手動削除は、対象をEne内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。
 
 ### 通常保存しないdata
 
 - Raw Observation、Raw Voice、詳細なTool payload、内部推論、chain-of-thoughtは通常保存しない。
 - Debug captureはOwnerが対象と内容を確認して明示的に有効化し、短期間で自動失効する。
-- Debug captureに秘密値や不要な本文が含まれる可能性を示し、停止と削除をOwnerが行える。
+- Debug captureに登録外の秘密値や不要な本文が含まれる可能性を示し、停止と削除をOwnerが行える。登録済みCredentialはDebug captureにも含めない。
 
 ### AuditとTelemetry
 
@@ -378,7 +374,8 @@
 - BackupにはCompanion、Character設定、Conversation History、Experience Summary、Learning、Relationship、Task、TaskとWorkspaceの関連付け、Schedule、Rule、同意、費用設定、Auditを含める。
 - BackupにCredentialと外部Workspaceのfileまたは外部sourceそのものを含めない。
 - Ownerはbackupを暗号化して保護できる。暗号化されていないbackupを作成する場合は、Conversation History、Experience Summary、Memory、Relationship等のprivate dataが含まれることを事前に明示する。
-- Restoreは対応するbackupからEne内部dataを全置換する操作とし、対象、version互換性、外部fileを変更しないこと、ProviderやMCP等の再認証が必要になり得ることを事前に示す。
+- Restoreは対応するbackupからEne内部dataをそのbackup時点の状態へ全置換する操作とし、対象、version互換性、外部fileを変更しないこと、削除済み情報や以前のRule・同意・Scheduleが戻り得ること、ProviderやMCP等の再認証が必要になり得ることを事前に示す。
+- Restore後のTask、Schedule、外部接続による自動処理は一旦保留し、Ownerが復元内容を確認してまとめて有効化できる。個々の設定を一件ずつ再承認することは要求しない。
 - Restore失敗時は復元前の正常な状態を破壊しない。
 
 ### Update
