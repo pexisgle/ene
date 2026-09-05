@@ -48,7 +48,7 @@ Taskが作業対象として利用するfolder、file、外部source等との関
 
 ### MemoryとSkill
 
-Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Memoryは後のExperienceによって内容、重要度、scope、時間的意味等を継続的に更新でき、過去の認識と根拠を失わない。MemoryはOwner、Companion、出来事、状況等についての長期的な理解ではRelationshipより優先される主要な知識状態である。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
+Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Memoryは後のExperienceによって内容、重要度、scope、時間的意味等を継続的に更新でき、通常の更新では過去の認識と根拠を失わない。Privacy/Security目的のtargeted deletionはこの保持原則より優先する。MemoryはOwner、Companion、出来事、状況等についての長期的な理解ではRelationshipより優先される主要な知識状態である。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
 
 ### Relationship
 
