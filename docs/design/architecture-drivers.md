@@ -27,18 +27,20 @@ Eneのarchitectureを最も強く形作るのは、**Owner管理Hostを正本と
 
 一つの環境は一人のOwnerに属し、Owner管理Hostがene内部の永続状態の正本と実行の継続を担う。Clientは表示・会話・操作の入口であり、Clientだけに存在する永続状態や長期private dataの永続cacheを持たない。Client終了やRemote切断だけでは、許可済みのHost上のTask、Schedule、保存を終了させない。
 
+Hostは、進行中の作業や外部eventを待つためだけにLLMへ反復問い合わせを行わない。Scheduleの到来待ちもこの制約に含まれる。
+
 **Requirements basis**
 
 - [製品定義](../requirements/product.md)「利用者と実行場所」「非目標」。
-- [要件](../requirements/requirements.md)「所有と実行」「Remote Client」「保護、Backup、復旧／Local data」。
+- [要件](../requirements/requirements.md)「所有と実行」「Schedule」「Remote Client」「保護、Backup、復旧／Local data」。
 
 **Architectural significance**
 
-表示入口の寿命と、作業・正本状態の寿命が異なる。接続の有無をTask存続や保存完了の基準にできず、再接続時にHostの進捗・結果へ到達できる必要がある。また、Ownerが同一でも新Clientは無条件に信頼されず、Host側で確認できるpairing、通信保護、deviceごとの機能確認と失効が必要になる。状態の置き場所、接続時のdata授受、実行継続と接続権限の境界に直接影響する。
+表示入口の寿命と、作業・正本状態の寿命が異なる。接続の有無をTask存続や保存完了の基準にできず、再接続時にHostの進捗・結果へ到達できる必要がある。また、Ownerが同一でも新しいRemote Clientは無条件に信頼されず、Host側で確認できるpairing、通信保護、deviceごとの機能確認と失効が必要になる。状態の置き場所、接続時のdata授受、実行継続と接続権限の境界に直接影響する。Task・Task Agentの完了待ちやScheduleの到来待ちをLLMの反復判断で実現できないことも、開始・待機・再開の設計を制約する。
 
 **Design freedom**
 
-Host正本、Clientへの必要最小限の一時data、LANまたはOwner管理VPN経由のRemote接続は固定される。内部process配置、通信方式、再接続時の同期方式、pairingの具体的手段は未決定である。全推論のHost内完結は要求されない。Cloudに永続状態の唯一の正本を置くこと、ene運営のrelay・accountを接続要件にすることは製品範囲から除かれる。
+Host正本、Clientへの必要最小限の一時data、LANまたはOwner管理VPN経由のRemote接続、待機だけのLLM反復問い合わせ禁止は固定される。内部process配置、通信方式、再接続時の同期方式、pairingの具体的手段、実行の駆動・待機方式は未決定である。全推論のHost内完結は要求されない。Cloudに永続状態の唯一の正本を置くこと、ene運営のrelay・accountを接続要件にすることは製品範囲から除かれる。Clientのscreen・device等に依存するTaskの操作対象と継続条件はIssue G-01に留保する。
 
 ### AD-02 — 個体の存在場所の排他性と作業継続の独立性
 
@@ -48,15 +50,15 @@ Host正本、Clientへの必要最小限の一時data、LANまたはOwner管理V
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「Remote Client」「BodyとVoice／Desktop Body」「CompanionとCharacter／停止と削除」。
+- [要件](../requirements/requirements.md)「Remote Client」「会話と情報提示」「BodyとVoice／Desktop Body」「CompanionとCharacter／停止と削除」。
 
 **Architectural significance**
 
-単なる画面同期ではなく、発話・入力・観測・身体表現を行う場所の切替である。移動中の入力や出力の扱い、Clientごとのfullscreen抑制、切断と再接続時の重複存在防止を、作業全体の停止と混同できない。一方、Companionの停止はTaskのbest-effort Cancelも伴うため、「Clientを閉じる」「個体を移動する」「個体を停止する」は異なる状態遷移になる。
+単なる画面同期ではなく、active Clientに属する入出力・観測・身体表現を行う場所の切替である。移動中の入力や出力の扱い、fullscreen時のそのClient上のBody・ambient Observation・自発発話の休止、切断と再接続時の重複存在防止を、作業全体の停止と混同できない。一方、Companionの停止はTaskのbest-effort Cancelも伴うため、「Clientを閉じる」「個体を移動する」「個体を停止する」は異なる状態遷移になる。
 
 **Design freedom**
 
-排他性と安全なround境界は固定されるが、切替の調停方法、切断検知、状態反映の方式は自由である。複数Clientからの表示・管理操作すべてを禁止することや、active ClientをTask状態の所有者にすることは要件ではない。Remote時の具体的な操作対象はIssue G-01に留保する。
+排他性と安全なround境界は固定されるが、切替の調停方法、切断検知、状態反映の方式は自由である。必要な管理経路と排他性を満たす範囲で表示・管理面を配置でき、active ClientをTask状態の所有者にする要求はない。「Realtime会話」に含まれる入力・応答、特に非active ClientからのText会話の可否はIssue A-04、Remote時のComputer Useの操作対象はIssue G-01に留保する。
 
 ### AD-03 — Companionを窓口とする会話・実作業・管理の共存
 
@@ -85,6 +87,8 @@ Characterは配布可能な静的な出発点であり、Companionは経験に�
 
 Global化は明示的な共有依頼、または共通利用すべきことが内容と文脈から明確な場合に限る。重要度や有用性はGlobal化の十分条件ではない。Relationshipは主体Companionごとの相手への認識であり、別個体へ共有せず、相互の認識を自動的に同一・対称にしない。グループ参加も他個体の私的状態へのaccessを与えない。
 
+Companion削除時は、そのCompanionを主体または相手とするRelationshipを削除する。他Companionも利用する共有Experience Summary等を残す場合は、残る情報と参照不能になる情報を削除前に示す。
+
 **Requirements basis**
 
 - [製品定義](../requirements/product.md)「主要概念／Companion」「Character」「MemoryとSkill」「Relationship」「Companion State」。
@@ -92,7 +96,7 @@ Global化は明示的な共有依頼、または共通利用すべきことが�
 
 **Architectural significance**
 
-単一Owner環境でも、すべての状態を全Companionで共用する設計は成立しない。共有Experienceから別々の関係認識が形成されることや、削除後もGlobal Learning・グループ発言・共同Taskが残ることは、個体所属と共有参照を区別する理由になる。Character配布には個体の私的状態を含められず、部品ごとの明示適用とrevision識別が必要なため、配布物の更新と個体の成長にも異なる契約がある。
+単一Owner環境でも、すべての状態を全Companionで共用する設計は成立しない。共有Experienceから別々の関係認識が形成されることや、削除後もGlobal Learning・グループ発言が残ることは、個体所属と共有参照を区別する理由になる。Relationshipの認識は主体ごとに独立していても、相手の削除によって他個体側のRelationshipも削除対象になる。Character配布には個体の私的状態を含められず、部品ごとの明示適用とrevision識別が必要なため、配布物の更新と個体の成長にも異なる契約がある。
 
 **Design freedom**
 
@@ -167,22 +171,24 @@ LLMの柔軟な判断をすべて固定ルールへ置換することも、LLM�
 
 **Driver**
 
-作業はTaskとして追跡し、必要な一部を一時Task Agentへ並列委任できる。Task Agentは独立した長期人格やRelationshipを持たず、委任元へ結果を返す。委任は元CompanionのCapability、Permission、費用、Task・Workspace境界を超えない。WorkspaceはTaskに従属する外部folder・file・sourceとの関連付けであり、上位の恒久containerや独立したデータ所有主体ではない。
+Ownerから依頼された作業はTaskとして追跡し、必要な一部を一時Task Agentへ並列委任できる。Task Agentは独立した長期人格やRelationshipを持たず、委任元へ結果を返す。委任は元CompanionのCapability、Permission、費用、Task・Workspace境界を超えない。WorkspaceはTaskに従属する外部folder・file・sourceとの関連付けであり、上位の恒久containerや独立したデータ所有主体ではない。
+
+担当Companionの削除をTask記録の一括削除と同一視しない。残るTask記録と共同Taskは管理面から確認でき、Ownerは必要に応じて別Companionへ引継ぎを依頼できる。削除前には残る記録と既知の外部作用を説明し、停止できなかった処理も報告する。
 
 成果物はOwnerが扱える通常のfileとして保存し、ene専用libraryへ複製しない。外部fileとsourceは、Task関連付けやCompanionの削除、全データReset、backupによって黙って変更・削除しない。
 
 **Requirements basis**
 
 - [製品定義](../requirements/product.md)「主要概念／Task」「Task Agent」「Workspace」「非目標」。
-- [要件](../requirements/requirements.md)「Task、Workspace、成果物」全節、「Learningと成長／Scope」「Skillの保護と相互運用」「Permissionと安全境界／Capability境界」。
+- [要件](../requirements/requirements.md)「Task、Workspace、成果物」全節、「CompanionとCharacter／停止と削除」「Learningと成長／Scope」「Skillの保護と相互運用」「Permissionと安全境界／Capability境界」。
 
 **Architectural significance**
 
-同じfolderを複数Taskが使っても、承認と作業状態を共有したことにはならない。内部Task context、永続Learning、外部のSkillや案内fileは別の所属・保存契約を持つ。Taskの作業記録を管理することと外部成果物を所有することを分ける必要があり、Task終了時の中間file整理、保存先確認、削除・backupの対象範囲を左右する。
+Taskの担当Companionと、作業記録の存続・管理経路は分けて考える必要がある。単独Taskも含め、残る記録の確認・引継ぎを削除済みCompanionからの応答に依存させられない。同じfolderを複数Taskが使っても、承認と作業状態を共有したことにはならない。内部Task context、永続Learning、外部のSkillや案内fileは別の所属・保存契約を持つ。Taskの作業記録を管理することと外部成果物を所有することも異なり、Task終了時の中間file整理、保存先確認、削除・backupの対象範囲を左右する。
 
 **Design freedom**
 
-Taskへの従属、Taskごとの権限独立、通常fileへの成果物保存は固定される。委任分割、並列実行の実現方法、Workspace関連付けの表現、一時fileの扱いの具体策は自由である。固定Brief型は必須ではなく、恒久的な上位Workspaceや成果物専用libraryは非目標である。永続保存先が未定なら最終保存前にOwnerへ尋ねる必要がある。
+WorkspaceのTaskへの従属、Taskごとの権限独立、Companion削除後の残る記録への到達と引継ぎ依頼、通常fileへの成果物保存は固定される。Task記録の所有・参照の内部表現、委任分割、並列実行の実現方法、Workspace関連付けの表現、一時fileの扱いの具体策は自由である。固定Brief型は必須ではなく、恒久的な上位Workspaceや成果物専用libraryは非目標である。永続保存先が未定なら最終保存前にOwnerへ尋ねる必要がある。自発作業へのTask契約の適用範囲はIssue A-02に留保する。
 
 ### AD-09 — 外部作用の不確実性を保った停止・再開・定期実行
 
@@ -190,7 +196,9 @@ Taskへの従属、Taskごとの権限独立、通常fileへの成果物保存�
 
 Taskの進捗、判断待ち、結果、既知の外部作用を追跡し、追加指示を可能な範囲で反映する。Cancel、Companion停止・削除、許可失効時は定義された範囲の新規開始を止め、進行中処理をbest-effortで停止し、残った作用を報告する。外部作用の成功が不明なら自動再実行しない。Host再起動後の途中TaskにはOwnerの明示再開を必要とする。
 
-Scheduleは各回を新しいTaskとし、実行時点の権限、費用、Provider、Companion・Host状態を再評価する。確認が必要なら判断待ちとし、停止中に到来した回はmissedとして自動補完しない。Network／Provider失敗でもActionを自動queue・replayしない。
+Companion停止中はBodyを表示せず、応答・自発動作・新しいTask・新しいSchedule実行を開始しない。停止は個体dataを削除せず、再開後も同じ個体として継続する。
+
+Scheduleは各回を新しいTaskとし、実行時点の権限、費用、Provider、Companion・Host状態を再評価する。確認が必要なら判断待ちとし、Hostまたは担当Companionの停止中に到来した回はmissedとして自動補完しない。担当Companionの削除時はScheduleを削除し、別Companionへ自動で引き継がない。Network／Provider失敗でもActionを自動queue・replayしない。
 
 **Requirements basis**
 
@@ -198,7 +206,7 @@ Scheduleは各回を新しいTaskとし、実行時点の権限、費用、Provi
 
 **Architectural significance**
 
-内部の進捗と外部世界の作用は同時に確定するとは限らず、「不明」を失敗や未実行へ潰すと重複作用を起こす。停止要求の受付と実際の停止完了も別である。Client不在、Host再起動、Schedule到来、接続回復は異なる継続条件を持つため、単一の自動再開方針では満たせない。実行制御、進捗保存、権限再評価、Ownerへの説明の境界を横断する。
+内部の進捗と外部世界の作用は同時に確定するとは限らず、「不明」を失敗や未実行へ潰すと重複作用を起こす。停止要求の受付と実際の停止完了も別である。Client不在、Host再起動、Schedule到来、接続回復は異なる継続条件を持つため、単一の自動再開方針では満たせない。実行制御、進捗保存、権限再評価、Ownerへの説明の境界を横断する。待機方法にはAD-01のHost全体の制約を適用し、Companion削除で残るTask記録（AD-08）と消えるScheduleも区別する。
 
 **Design freedom**
 
@@ -229,7 +237,7 @@ Providerやmodelを変更しても、利用可能な個体状態・Learning・�
 
 **Driver**
 
-外部Tool・Resource・PromptにはMCP、Toolの対話型UIにはMCP Apps、Skill交換にはAgent Skills、Desktop BodyにはVRM 1.0を採用する。既知のProvider protocolは直接接続し、通常差異を汎用Pluginへ転嫁しない。ene固有Pluginは明確な型と境界を持つ拡張点に限定し、任意Core改変、Control plane変更、Permission回避、恒久的な第一者UI置換を許さない。
+外部Tool・Resource・PromptにはMCP、Toolの対話型UIにはMCP Apps、Skill交換にはAgent Skills、Desktop BodyにはVRM 1.0を採用する。既知のProvider protocolは直接接続し、通常差異を汎用Pluginへ転嫁しない。ene固有Pluginは、未対応Provider protocol、Observation adapter、Body renderer等、明確な型と境界を持つ拡張点に限定し、任意Core改変、Control plane変更、Permission回避、恒久的な第一者UI置換を許さない。
 
 Local MCPはsandbox内実行を既定とし、動かないことを理由に黙って隔離を解除しない。特定Local MCPのsandbox外実行は、Ownerが失われる強制境界等を理解して明示許可した場合に限り、保存・失効・重要変更時の再確認を行う。
 
@@ -244,7 +252,7 @@ Local MCPはsandbox内実行を既定とし、動かないことを理由に黙�
 
 **Design freedom**
 
-採用形式、拡張権限の限定、Local MCPの既定隔離と明示例外は固定される。library、process構成、OS隔離機構、内部API、wire formatは未決定である。Local MCPの隔離例外をすべてのPluginへ一般化しない。3D制作・Voice学習・高度なSkill制作環境をene内へ複製することや、独自Marketplaceを設けることは現在の範囲にない。
+採用形式、拡張権限の限定、Local MCPの既定隔離と明示例外は固定される。Pluginの例示は拡張対象を検討する根拠だが、網羅的な必須拡張点一覧や、各機能全体のPlugin化・配置を指定するものではない。具体的な拡張APIと型、library、process構成、OS隔離機構、内部API、wire formatは未決定である。Local MCPの隔離例外をすべてのPluginへ一般化しない。3D制作・Voice学習・高度なSkill制作環境をene内へ複製することや、独自Marketplaceを設けることは現在の範囲にない。
 
 ### AD-12 — 観測からの自動学習と、制限下での個体ごとの自発性
 
@@ -252,19 +260,19 @@ Local MCPはsandbox内実行を既定とし、動かないことを理由に黙�
 
 ambient Observationは明示ON/OFFと常時確認可能な状態を持ち、Companionが存在するClientのdesktop全体を対象とする。ローカルLLMまたは軽量・高速・安価なmodelによる候補検知と、関連CompanionのメインLLMによる文脈上の意味判断を行い、同じClientの複数Companionで候補検知を不必要に重複させない。
 
-認識されたイベントは逐次確認なしでExperience・Learning・Companion Stateへ利用できるが、画面内の指示はOwnerの依頼やAction承認にならない。発話・Actionの最終判断は各Companionが行い、Quiet hours、Mute、未応答、費用・資源・loop上限、Permissionを優先する。RuleだけではActionを開始しない。
+認識されたイベントは逐次確認なしでExperience・Learning・Companion Stateへ利用できるが、画面内の指示はOwnerの依頼やAction承認にならない。自発会話、通知、内部調査、Companion間交流には、OwnerがそれぞれOFFを含む頻度または上限を設定できる。発話・Actionの最終判断は各Companionが行い、Quiet hours、Mute、未応答、費用・資源・loop上限、Permissionを優先する。RuleだけではActionを開始しない。
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「Observationと自発性」全節、「BodyとVoice／Desktop Body」「Learningと成長」冒頭、「所有と実行」「Schedule」。
+- [要件](../requirements/requirements.md)「Observationと自発性」全節、「BodyとVoice／Desktop Body」「Learningと成長」冒頭、「Provider、費用、接続障害／割当と同意」「Remote Client」。
 
 **Architectural significance**
 
-観測対象はClient単位、意味解釈と最終的なinteractionは個体単位、制約は共通という異なる範囲を同時に扱う。観測して学ぶことと、発話・外部作用を許すことも同じ判断ではない。Observation OFFは将来の観測停止であり既存学習の消去ではない。Ownerの未応答やCompanion間応答による無制限な反復を防ぎつつ、待機だけのLLM pollingを避ける必要があり、開始条件と実行抑制の設計に影響する。
+観測対象のClient、意味解釈と最終判断を行うCompanion、送信に用いるCapabilityのProvider割当を対応付ける必要がある。同じClientの候補検知を共有しても、保存禁止・非共有制限や送信同意（AD-06・10）を広げる理由にはならない。観測して学ぶことと、発話・外部作用を許すことも同じ判断ではない。Observation OFFは将来の観測停止であり既存学習の消去ではない。Ownerの未応答やCompanion間応答による無制限な反復を防ぐ必要があり、開始条件と実行抑制の設計に影響する。待機方法にはAD-01のHost全体の制約を適用する。
 
 **Design freedom**
 
-候補検知とメインLLM判断の役割、desktop全体という説明、外部送信前のCapability割当、個体ごとの最終判断、共通上限は固定される。候補の収集・伝達・抑制方法、model選択、内部配置、頻度の数値は未決定である。この役割の区別を特定のprocess分割へ置き換えない。明示TaskのComputer Useはambient Observationと別のPermission・記録を持つ。自発作業とTaskの対応はIssue A-02に留保する。
+候補検知とメインLLM判断の役割、desktop全体という説明、外部送信前のCapability割当、個体ごとの最終判断、OwnerによるOFFを含む自発性制御と制限の優先は固定される。候補の収集・伝達・抑制方法、model選択、内部配置、頻度の数値は未決定である。この役割の区別を特定のprocess分割へ置き換えない。明示TaskのComputer Useはambient Observationと別のPermission・記録を持つ。自発作業とTaskの対応はIssue A-02、Observation有効化・自発性制御の適用単位はIssue A-03に留保する。
 
 ### AD-13 — 身体・Realtime体験と、負荷・障害下の操作可能性の両立
 
@@ -341,14 +349,16 @@ Restoreは対応backup時点への内部dataの全置換であり、削除済み
 | 個体の継続（AD-04・05）と消去（AD-07） | 通常の認識更新では履歴と根拠を保持する。明示的なtargeted deletionが例外として優先する。 |
 | 学習・自発性（AD-05・12）と安全（AD-06・10・14） | 自動で理解・学習できることは、権限・共有制限・送信同意・秘密保護を変更できることではない。 |
 | 継続実行（AD-01・02）と再開制御（AD-09・15） | Client不在での継続、Host再起動後の明示再開、restore後の保留を区別する。可用性を理由に外部Actionを自動replayしない。 |
+| 個体の停止・削除（AD-04・09）と作業記録（AD-08） | 停止はdataを保持する。個体削除ではTask記録の確認・引継ぎ依頼を維持する一方、担当Scheduleと、その個体を主体または相手とするRelationshipは削除する。一律の所有・削除関係へまとめない。 |
 | 配布・共有（AD-04・11）と所有（AD-08・14・15） | Character Package、内部Learning、外部Workspace file、Credential、full backupは異なる内容・権限・削除範囲を持つ。 |
 | 個体の一体感（AD-03）と操作可能性（AD-13） | Body・Voice・実作業を同じ個体から利用するが、どれかの障害や長時間処理が会話・安全操作・復旧を塞がない。 |
+| 負荷による縮退（AD-13）とTask継続・停止（AD-01・09・10） | 処理品質や速度の調整を、Task記録の破棄や説明のない停止へ置き換えない。費用・資源上限による安全な停止・判断要求は維持し、保存済みdataへの影響と既知の外部作用を示す。 |
 | 保持・由来（AD-05・07・14）と資源上限（AD-13） | 通常Learningの保持を、容量都合の黙った削除で解決しない。上限到達時の停止・判断要求と、Ownerが管理するHistory・log保持を契約に沿って扱う。 |
 | 削除（AD-07）と復元（AD-15） | 削除前の内部根拠からの自動再形成は禁止されるが、Ownerが説明を受けて旧backupをrestoreすると情報が戻り得る。外部copyまでの消去保証や復元後の自動実行許可とはしない。 |
 
 ## 3. Requirement Issues
 
-以下は、内部方式を選ぶだけでは決まらず、Ownerから見える挙動・dataの残存範囲・操作対象が変わる事項である。本書では解釈を補って確定せず、関係する設計判断の留保点とする。
+以下は、既存の契約だけでは利用可否・制御の適用範囲・dataの残存範囲・操作対象を確定できず、内部方式の選択に先立つ確認が必要な事項である。本書では解釈を補って確定せず、関係する設計判断の留保点とする。要件を満たす画面配置や内部方式の違いまで、Ownerに観測可能という理由だけでIssueにはしない。
 
 ### Requirement Ambiguity
 
@@ -368,6 +378,22 @@ Restoreは対応backup時点への内部dataの全置換であり、削除済み
 
 **確認すべき契約:** どの自発作業がTaskになるか、Task外の活動がある場合にOwnerがどう追跡・停止できるべきか。すべての発話・観測をTask化することも、自発作業をTaskの制御対象外にすることも、現時点では導出しない。
 
+#### A-03 — Observation有効化・自発性制御の適用単位
+
+**根拠と曖昧さ:** [要件](../requirements/requirements.md)「Observationと自発性」はObservationの明示ON/OFFと状態確認、自発会話・通知・内部調査・Companion間交流それぞれのOFFを含む頻度または上限、Quiet hours・Mute等による抑制を定める。ただし、これらをHost全体、Client、Companionのどの範囲へ適用するかは明記していない。「Remote Client」のdeviceごとの許可機能や「割当と同意」のHost既定・Companion overrideだけでは、有効化・抑制を個別に選べる範囲や移動時の適用を確定できない。
+
+**設計への影響:** AD-01・02・10・12に関わる。Ownerが一部の観測・自発性だけを停止できるか、Companion移動で何が引き継がれるかが変わる。同じClientで共有する候補検知と、CompanionごとのProvider割当を対応付ける際にも、どの範囲への有効化とどの割当に基づく処理かが必要になる。内部の設定保存先や共有処理の配置を選ぶだけでは、これらの製品上の制御範囲は確定しない。
+
+**確認すべき契約:** Ownerが有効化・抑制できる単位と移動時の適用、および共有候補検知に用いるCapabilityのProvider割当との対応。desktop全体という観測対象、fullscreen時のClient単位の休止、Provider割当のHost既定・Companion override、Provider別と全体の費用capは既に定められており、この留保で未決定へ戻さない。既存の送信同意を候補検知の共有によって拡張せず、全Companionへの一律設定や単一budgetも導かない。
+
+#### A-04 — Realtime会話の範囲と非active ClientからのText会話
+
+**根拠と曖昧さ:** [要件](../requirements/requirements.md)「Remote Client」はRealtime会話等をactive Clientへ帰属させ、移動時に現在の入出力roundを安全に区切ると定める。「会話と情報提示／一続きの会話」はTextとVoiceを一続きのtimelineにするが、「Realtime会話」がTextの入力・応答も含むかは明確でない。このため、非active Clientから同じCompanionへText会話を行えるかは確定できない。
+
+**設計への影響:** AD-02・03に関わる。会話の入力・応答がどのClientに属するか、非active Clientから入力できる場合に同時入力や移動とどのように両立すべきかが変わる。一続きのtimelineという提示契約だけでは、この入力範囲は決まらない。
+
+**確認すべき契約:** active Clientへ帰属する会話の範囲と、非active ClientからのText入力・応答の可否、許す場合の移動時の扱い。具体的なround調停方式は設計に残す。一方、履歴閲覧・Task管理・一般管理面は、要件で求める到達経路と排他性を満たす範囲で配置できる。これらまで非active Clientで一律に禁止または提供必須とする要件は導かず、管理面の配置自体を本Issueの確認対象に広げない。
+
 ### Requirement Gap
 
 #### G-01 — Remote利用時にComputer Useが操作するdevice／desktopの範囲
@@ -376,7 +402,7 @@ Restoreは対応backup時点への内部dataの全置換であり、削除済み
 
 **設計への影響:** AD-01・02・06・08・11・12に関わる。どのdeviceから画面を取得し、どこへ入力やfile操作の作用が及ぶかによって、外部作用の説明、device失効・切断・Companion移動時の継続条件、実行配置に必要な境界が変わる。これは通信方式の選択以前の製品上の操作対象の問題である。
 
-**確認すべき契約:** Remote利用時に操作可能なdevice／desktopと、その対象の選択・表示・切断時の挙動。Host上でTaskが続くことから、Clientのdesktopも操作できると推測しない。ambient Observationの帰属をそのままComputer Useへ流用しない。
+**確認すべき契約:** Remote利用時に操作可能なdevice／desktopと、その対象の選択・表示、およびClientのscreen・device等に依存するTaskの切断・device失効・Companion移動時の継続条件。Client不在でも許可済みのHost上の処理を継続することや、許可失効時の新規Action禁止・best-effort停止（AD-06・09）は既に定められており、Remote接続時の条件すべてが未定なのではない。Host上でTaskが続くことからClientのdesktopも操作できると推測せず、ambient Observationの帰属もそのままComputer Useへ流用しない。
 
 ### Issueとして扱わない未決定事項
 
@@ -388,9 +414,9 @@ DB schema、内部型、subsystem・process分割、IPC、検索・更新・減�
 
 | 後続の設計対象 | 特に注意すべきDriverと理由 |
 |---|---|
-| **System Context / Runtime Topology** | **AD-01・02**: Hostの正本・実行継続と、active Clientに排他的に属する身体・入出力を区別する。**AD-10・11・12**: Host／LAN／CloudへのCapability別送信、Remoteのpairing、外部拡張の隔離と例外、Clientの観測範囲を可視化する。**AD-13**: Windows／Linuxと部分障害時の操作可能性を満たす配置条件を評価する。Computer Useの実行対象は**G-01**を未決定として残す。 |
-| **Subsystem Decomposition** | **AD-03・08・09**: 同じCompanionを窓口にしつつ、長い作業、通常会話、判断待ちが互いを占有しない責務境界を検討する。**AD-05・06・07・14**: 意味判断、強制する制限、根拠・由来、削除完了、秘密保護が一部経路だけの実装にならないか確認する。**AD-11・13**: 拡張や描画・音声の故障から管理・復旧を維持できる境界を評価する。Driverや参考資料の層をそのままsubsystem一覧にしない。 |
-| **State Ownership** | **AD-04・05**: Character、個体固有状態、Global Learning、Task context、根拠、Raw History、派生dataの意味と利用範囲を混同しない。**AD-01・02・08**: Host正本、Client一時data、外部file所有、Task従属の関連付けを区別する。**AD-07・14・15**: 保持・削除・Credential除外・restoreの単位が異なることと、実行中処理からの再保存を含む整合性を評価する。固有Skillの削除境界は**A-01**に留保する。 |
+| **System Context / Runtime Topology** | **AD-01・02**: Hostの正本・実行継続と、active Clientに排他的に属する身体・入出力を区別する。**AD-10・11・12**: Host／LAN／CloudへのCapability別送信、Remoteのpairing、外部拡張の隔離と例外、Clientの観測範囲を可視化する。**AD-13**: Windows／Linuxと部分障害時の操作可能性を満たす配置条件を評価する。Observation制御・割当の対応は**A-03**、非active ClientからのText会話は**A-04**、Computer Useの実行対象とClient依存時の継続条件は**G-01**に留保する。 |
+| **Subsystem Decomposition** | **AD-01・03・08・09**: 同じCompanionを窓口にしつつ、長い作業、通常会話、判断待ちが互いを占有せず、待機だけにLLMを反復利用しない責務境界を検討する。**AD-05・06・07・14**: 意味判断、強制する制限、根拠・由来、削除完了、秘密保護が一部経路だけの実装にならないか確認する。**AD-11・13**: 要件が例示するProvider protocol・Observation adapter・Body renderer等の拡張と、部分障害時の管理・復旧を両立する境界を評価する。Driverや参考資料の層をそのままsubsystem一覧にしない。 |
+| **State Ownership** | **AD-04・05**: Character、個体固有状態、Global Learning、Task context、根拠、Raw History、派生dataの意味と利用範囲を混同しない。**AD-01・02・08**: Host正本、Client一時data、外部file所有、Task従属の関連付けを区別する。**AD-04・08・09**: Companion削除を越えて残るTask記録、削除される担当Schedule、主体・相手の削除が及ぶRelationshipを一律のlifecycleにしない。**AD-07・14・15**: 保持・削除・Credential除外・restoreの単位差と、実行中処理からの再保存を含む整合性を評価する。固有Skillの削除境界は**A-01**、観測・自発性制御の適用範囲と会話入力の帰属に依存する判断は**A-03・04**に留保する。 |
 | **Dependency Rules** | **AD-06・10・11・14**: 信頼できないcontentや推論結果、拡張、認識の変化から、権限・同意・費用・Credentialを直接変更できる依存を許さない。**AD-05・10**: 検索用派生dataやProvider cacheを意味状態の正本にしない。**AD-01・03・13**: Task継続や安全操作をClient表示・Body・Voiceの成功へ従属させない。**AD-07・09・15**: 削除・失効・復元時の制約を委任や別実行経路が迂回しないか確認する。自発作業へのTask契約適用範囲は**A-02**に留保する。 |
 
 各段階では、上記の意味上の境界・優先関係を満たす複数の設計を比較する。ここから特定のarchitecture pattern、subsystem数、crate構成、型、API、DB schema、IPC方式、algorithm、libraryを一意に決めることはしない。
