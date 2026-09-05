@@ -24,7 +24,7 @@
 - 最小Setupから最初のテキスト会話まで
 - 基本的なDesktop Body
 - 一対一のテキストtimeline
-- Companion scopeのExperience Summary、Memory形成、由来表示、想起、継続的な更新と会話による訂正
+- Companion scopeのExperience Summary、Memory形成、由来表示、想起、継続的な更新、会話による訂正、Privacy/Security目的のtargeted deletion
 - 一つのWorkspace folderを対象とするfile作業Task
 - Companionを通じたTaskの進捗確認、steering、Cancel、結果報告
 - Client不在時のTask継続と、Host再起動後の明示再開
@@ -39,7 +39,7 @@
 - Voice、Observation、グループ会話、自発的なCompanion間交流
 - Global scopeのMemory
 - ExperienceからのSkill生成とSkill改善
-- 長期的なRelationship発達の評価
+- OwnerとのRelationshipおよびCompanion同士のRelationshipの長期的発達の評価
 - Schedule、Remote Client、Character編集とPackage配布
 - OpenAI以外のProviderとfallback
 
@@ -70,9 +70,12 @@
 4. ClientとHostを正常終了して再起動し、関連する会話でそのMemoryを自然に想起できることを確認する。
 5. Ownerが会話で内容を訂正した場合は誤っていた認識として更新でき、以前は正しかった状況が後に変化した場合は過去の有効性を失わず新しい現在状態へ更新できることを確認する。
 6. 更新後のMemoryから、現在の内容だけでなく、根拠となったExperience Summaryと過去revisionを確認できることを確認する。
-7. 「覚えておいて」という明示的な依頼は強い形成signalとして扱われる一方、Password、token、秘密鍵等はその依頼があってもMemoryへ保存されないことを確認する。
+7. 「覚えておいて」という明示的な依頼は強い形成signalとして扱われる一方、Password、token、秘密鍵等はその依頼があってもExperience SummaryまたはMemoryへ保存されないことを確認する。
 8. 一時的な気分、Task内だけの状態、一般世界知識、Raw Tool payload、明白に偶発的な外部情報を、長期Memoryとして無条件に形成しないことをfixtureで確認する。
 9. 同じ情報を繰り返し伝えた場合は無条件に重複Memoryを増やさず、既存Memoryの補強、精密化、統合等として扱えることを確認する。
+10. PrivacyまたはSecurity目的で形成済みMemoryをtargeted deletionし、現在値だけでなく、その情報を復元できる過去revision、Experience Summary/evidence、保持済みsourceの該当情報、検索用派生dataからも対象情報を取得できなくなることを確認する。
+11. Targeted deletion後に通常のconsolidationや再起動を行っても、削除前から存在した根拠だけを使って同じMemoryが自動再形成されないことを確認する。
+12. 削除対象を含むExperience Summaryが別の無関係なMemoryの根拠でもあるfixtureでは、分離可能な無関係情報まで不必要に削除しないことを確認する。
 
 ### Workspaceでのfile Task
 
@@ -94,7 +97,7 @@
 
 ### 障害と安全境界
 
-次の各条件を独立して発生させ、保存済みのConversation History、Memory、Task記録、Workspace関連付けが破損せず、Text管理面から状態と安全な次の操作を確認できることを検証する。
+次の各条件を独立して発生させ、保存済みのConversation History、Experience Summary、Memory、Task記録、Workspace関連付けが破損せず、Text管理面から状態と安全な次の操作を確認できることを検証する。
 
 - 不正なCredential
 - Provider停止またはNetwork切断
@@ -112,7 +115,7 @@
 1. OpenAIを利用する会話とTaskを実行する。
 2. Providerが報告するinput token、output token、cached tokenと、それぞれに対応する費用内訳を管理面で確認する。
 3. Provider報告値とEneの推定値または不明な値が混同されないことを確認する。
-4. 登録したCredentialがLLMへ送信されるmodel contextやTool argument、Conversation History、Memory、Task結果、通常log、Error表示に現れないことを自動検査と目視の両方で確認する。
+4. 登録したCredentialがLLMへ送信されるmodel contextやTool argument、Conversation History、Experience Summary、Memory、Relationship、Task結果、通常log、Error表示に現れないことを自動検査と目視の両方で確認する。
 
 ## 性能Gateとbaseline
 
@@ -123,7 +126,7 @@ WindowsとLinuxで同じ操作手順と観測区間を用い、少なくとも�
 - Body表示時のCPU、GPU、frame安定性
 - テキスト会話の送信から最初のtoken表示までの時間
 - 同一fixtureを用いたfile作業Taskの所要時間
-- 会話、Memory、Taskを反復したときの保存容量増加
+- 会話、Experience Summary、Memory、Taskを反復したときの保存容量増加
 
 最初のmilestoneでは、modelや外部Provider processを除くEne自身について次を最低Gateとする。
 
