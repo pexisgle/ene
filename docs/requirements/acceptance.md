@@ -73,7 +73,7 @@
 ### Workspaceでのfile Task
 
 1. Ownerが既存fileを含む一つのfolderをTaskのWorkspaceとして指定し、Companionへ既存fileを読み、新しいMarkdown成果物を同じfolderへ作るよう依頼する。
-2. TaskのWorkspaceがそのTaskに従属し、独立したProjectの作成を要求しないことを確認する。
+2. TaskのWorkspaceがそのTaskに従属し、Taskより上位の独立した作業containerの作成を要求しないことを確認する。
 3. Task Agentには、そのfolder内の一覧、読取、新規作成、編集だけを許可する。
 4. Task中に担当Companionから進捗を確認し、成果物への追加指示を送り、反映を確認する。
 5. Taskを別の実行でCancelし、best-effortの結果と残った変更を確認する。
