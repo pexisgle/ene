@@ -49,7 +49,7 @@
 - 停止中のCompanionはBodyを表示せず、応答、自発動作、新しいTask、新しいSchedule実行を開始しない。
 - 停止時に実行中のTaskがあればbest-effortでCancelし、Cancelの成否と残った外部作用をOwnerへ示す。
 - 停止はCompanionのデータを削除せず、再開後に同じ個体として継続する。
-- Companionの削除は強い確認を必要とし、そのCompanion固有の設定、Experience Summary、Memory、Relationship、Companion State、およびOwnerとの一対一Conversation Historyを削除する。
+- Companionの削除は強い確認を必要とし、そのCompanion固有の設定、Experience Summary、Memory、Companion State、およびOwnerとの一対一Conversation Historyを削除する。
 - 削除は停止処理を含み、新しいActionを開始せず、実行中Taskをbest-effortでCancelする。担当Scheduleは削除し、別Companionへ自動で引き継がない。
 - Companionを削除すると、そのCompanionを主体または相手とするRelationshipも削除する。他Companionも利用する共有Experience Summaryやグループ会話等を削除しない場合は、残る情報と参照不能になる情報を削除前に示す。
 - Companionを削除しても、Global scopeのLearning、グループ会話内の発言、共同Taskの記録、外部Workspace内のfileやsourceは削除しない。残る情報と参照不能になる情報を削除前に示す。
@@ -119,7 +119,7 @@
 - Ownerは複数Companionとのグループ会話を作成でき、参加者を明示できる。
 - CompanionはOwnerの発言への応答だけでなく、会話上必要な範囲で他のCompanionへ応答できる。
 - 発話はOwnerが追える順序で提示し、Companion同士が無制限に会話を継続しない。
-- 各Companionは自分が利用できるLearningだけを使い、他のCompanion固有のMemoryをグループ参加だけで取得しない。
+- 各Companionは自分が利用できるLearning、Relationship、Companion Stateだけを使い、他のCompanion固有のMemory、Relationship、Companion Stateをグループ参加だけで取得しない。
 
 ## Learningと成長
 
@@ -349,7 +349,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - 一つのExperience Summaryやsourceが削除対象と無関係な情報の根拠にもなっている場合は、可能な範囲で対象情報だけを除去し、無関係な情報を不必要に削除しない。分離できない場合は削除の影響範囲をOwnerへ示す。
 - PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報をMemory、RelationshipまたはCompanion Stateとして自動再形成しない。後の新しいExperienceによってOwnerが改めて同じ情報を提供した場合は、新しい根拠として扱える。
 - 削除前の情報を利用する実行中処理によって、削除済み情報を再保存しない。削除処理または残存検証が完了していない場合は、完了したと表示しない。
-- PrivacyまたはSecurity目的のtargeted deletionは、通常のrevision保持、evidence保持、Conversation HistoryとLearningおよびCompanion Stateの独立性より優先する。
+- PrivacyまたはSecurity目的のtargeted deletionは、通常のrevision保持、evidence保持、Conversation Historyと形成済み状態の独立性より優先する。
 - Targeted deletionは、Memoryの内容、重要度、Relationship、Companion State等を調整する一般editorとして扱わない。通常の訂正や「忘れてほしい」という依頼はCompanionとの対話で処理できる。
 - Ownerは容量肥大化を避けるため、指定日以前のConversation HistoryやTask等のlogを手動削除できる。
 - OwnerはConversation Historyや対象logについて任意の保持期間による自動削除を明示設定でき、既定では自動削除しない。
