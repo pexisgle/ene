@@ -35,7 +35,7 @@
 ### Character Package
 
 - Character Packageは、静的人格、VRM 1.0 Body、Voice設定、motion設定、推奨Skillを任意に含められる。
-- Character Packageに、特定OwnerまたはCompanionのMemory、Relationship、Conversation History、Credential、Permissionを含めない。
+- Character Packageに、特定OwnerまたはCompanionのExperience Summary、Memory、Relationship、Conversation History、Credential、Permissionを含めない。
 - OwnerはCharacter Packageをimportおよびexportできる。export前に、含まれる内容と権利上の注意を確認できる。
 - Ene内のCharacter編集は、静的な人格テキストの基本編集、既存部品の選択・差替え、import、exportを扱う。
 - 3D model制作、Voice学習、高度なSkill編集は、それぞれの既存ツールで行えるよう外部形式を尊重し、Ene内に同等の制作環境を複製しない。
@@ -48,7 +48,8 @@
 - 停止中のCompanionはBodyを表示せず、応答、自発動作、新しいTask、新しいSchedule実行を開始しない。
 - 停止時に実行中のTaskがあればbest-effortでCancelし、Cancelの成否と残った外部作用をOwnerへ示す。
 - 停止はCompanionのデータを削除せず、再開後に同じ個体として継続する。
-- Companionの削除は強い確認を必要とし、そのCompanion固有の設定、Memory、Relationship、状態、およびOwnerとの一対一Conversation Historyを削除する。
+- Companionの削除は強い確認を必要とし、そのCompanion固有の設定、Experience Summary、Memory、状態、およびOwnerとの一対一Conversation Historyを削除する。
+- Companionを削除すると、そのCompanionを主体または相手とするRelationshipも削除する。他Companionも利用する共有Experience Summaryやグループ会話等を削除しない場合は、残る情報と参照不能になる情報を削除前に示す。
 - Companionを削除しても、Global scopeのLearning、グループ会話内の発言、共同Taskの記録、外部Workspace内のfileやsourceは削除しない。残る情報と参照不能になる情報を削除前に示す。
 
 ## 会話と情報提示
@@ -125,6 +126,8 @@
 - Experienceとして扱うことは、Raw Observation、Raw Voice、詳細なTool payload等のRaw dataを恒久保存することを意味しない。
 - Memory、Skill、Relationship等の長期状態へ利用する根拠は、個々のmessageをそのまま列挙することを基本とせず、topic、出来事、Task、意思決定、共有体験等の意味的なまとまりへ圧縮したExperience Summaryとして扱える。
 - Experience Summaryは、何が起きたかと長期状態の判断に必要な文脈へ絞り、Raw HistoryやRaw Tool payloadの複製にならないようにする。
+- Experience Summaryは独立した知識の正本ではなく長期状態の根拠として扱い、Memory等と同じPrivacy、Security、backup、削除、Client cacheの保護境界に従う。
+- Experience SummaryへPassword、token、秘密鍵その他のCredential値や、不要なsensitive raw dataを保存しない。
 - 一つのExperience SummaryをMemory、Skill、Relationship等の複数の継続状態の共通根拠として利用できる。
 - 必要な場合はExperience Summaryから元のConversation、Task等の大まかなsource範囲を辿れるようにし、正確な発言や詳細が必要なときは保持されているRaw Historyを参照する。
 
@@ -132,6 +135,7 @@
 
 - EneはExperienceからMemoryとSkillを形成できる。
 - Memoryは、出来事、事実、意味、好み等を後の理解に用いるLearningとし、一般世界知識、Raw History、Raw dataの保存領域として扱わない。
+- MemoryはOwner、Companion、出来事、状況等についての長期的な理解における主要な知識状態とし、RelationshipはMemoryを補助する状態として扱う。
 - Skillは、将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningとする。
 - Skillであるために過去の成功検証を必須とはしないが、実行結果や検証状態を区別して扱える。
 - MemoryとSkillが異なる役割を持つ場合、関連する情報が双方に存在することを禁止しない。不必要な同一Learningの重複生成は避ける。
@@ -189,24 +193,24 @@
 - Ownerの安全、継続的な好み、重要な関係、明示的に重要とされた情報等は、低利用でも優先度低下の例外とする。
 - 忘却は内容の即時削除ではなく、通常の想起を抑制する挙動とする。関連する手掛かりや明示的な問い合わせによって再び想起できる。
 - 事実の訂正や通常の状況変化は、会話と新しいExperienceを通じて反映できる。
-- Conversation Historyを削除しても、それを根拠に形成済みのMemory、Skill、Relationshipを黙って変更しない。
+- Conversation Historyを削除しても、それを根拠に形成済みのMemory、Skill、Relationshipを黙って変更しない。ただしPrivacyまたはSecurity目的のtargeted deletionは後述の削除契約を優先する。
 - Password、token、秘密鍵等をLearningとして保存しない。
 
-### OwnerとRelationship
+### Relationship
 
-- 専用のOwner Profile、User Backstory、Owner Personaという別データを設けない。
-- Owner本人について複数Companionが使う知識はGlobal Memoryとして、特定Companionだけの呼び方や共有Experience等はCompanion Memoryとして形成できる。
-- RelationshipはMemoryの集合や固定Relationship typeではなく、Ownerと特定Companionの共有Experienceから形成される、そのCompanion自身による現在の関係認識として扱う。
-- RelationshipはCompanion固有でありGlobal scopeを持たない。同じグループ会話や共同Experienceを根拠にする場合も、各Companionが自分に関係するExperienceだけを用いて独立に更新し、他個体へのfeedbackやRelationshipを取り込まない。
-- Relationshipの現在状態は、通常の応答で利用しやすいcompactな自然言語の理解を中心とし、trust、affection等の固定された数値dimensionだけをsource of truthとして必須にしない。
-- RelationshipもMemoryと同様に、Experience Summaryを根拠として継続的に更新でき、現在状態、根拠、過去revisionを区別して扱う。
-- Relationship更新では、Ownerが述べた内容だけでなく、Companion自身の行動、Ownerの反応、interactionの結果、明示的feedback、繰り返される暗黙の傾向を考慮できる。
+- RelationshipはMemoryの集合や固定Relationship typeではなく、あるCompanionがOwnerまたは別のCompanionとの共有Experienceから形成する、そのCompanion自身による現在の関係認識として扱う。
+- Relationshipは主体となるCompanionの個体固有状態であり、同じ相手とのRelationshipでも別Companionへ共有しない。Companion同士ではAからBへのRelationshipとBからAへのRelationshipを自動的に同一または対称にしない。
+- RelationshipはMemoryより優先度の低い補助状態とする。人物情報、出来事、Preference、事実関係等の詳細を第二のMemoryとして複製せず、距離感、交流傾向、関係の変化等、関係そのもののcompactな現在解釈へ絞る。
+- Relationshipが参照する事実とMemoryが矛盾する場合、事実認識にはMemoryを優先し、Relationshipを訂正または再解釈できる。
+- Relationshipの現在状態は通常の応答で利用しやすいcompactな自然言語の理解を中心とし、trust、affection等の固定された数値dimensionだけをsource of truthとして必須にしない。
+- RelationshipもMemoryと共通のExperience Summary、根拠、revisionの仕組みを利用できるが、Memoryと同程度の詳細情報を重複保持しない。
+- Relationship更新では、主体Companion自身の行動、相手の反応、interactionの結果、明示的feedback、繰り返される暗黙の傾向を考慮できる。
 - 単発で軽微なExperienceだけで長期間形成されたRelationshipを不釣り合いに大きく変えず、繰り返されるExperienceによって安定した傾向を形成できる。一方、明示的な関係についての発言、重大な対立、重要な共有Experience等は、一度でも相応の変化を生じさせられる。
 - Companionの人格、関心、感情、Relationshipは、初期Characterを出発点としつつ、実際のExperienceから形成された継続状態を現在の振る舞いへ反映できる。
-- Ownerが感情やRelationshipの内部状態を任意の数値へ直接設定する一般editorは提供しない。Ownerは会話を通じて関係について伝え、訂正し、変化を促せる。
+- Ownerが感情やRelationshipの内部状態を任意の数値へ直接設定する一般editorは提供しない。Ownerは関連するCompanionとの会話を通じて関係について伝え、訂正し、変化を促せる。
 - OwnerがRelationshipの認識理由を尋ねた場合は、内部のchain-of-thoughtを明かさず、根拠となるExperience Summaryや観測可能な出来事を用いて説明できる。
 - 一時的な演技や会話上の依頼は、永続する内部状態の強制上書きとして扱わない。
-- 親密さやRelationshipの進展だけを理由にPermissionを拡大しない。
+- 親密さやRelationshipの進展だけを理由にPermission、Rule、Capability、安全境界を変更しない。
 
 ## Task、Workspace、成果物
 
@@ -274,12 +278,12 @@
 
 ### 信頼境界
 
-- LLM出力、Character、Memory、Skill、Plugin、MCP、外部Data、Workspace fileは信頼できない入力になり得るものとして扱う。
+- LLM出力、Character、Experience Summary、Memory、Relationship、Skill、Plugin、MCP、外部Data、Workspace fileは信頼できない入力になり得るものとして扱う。
 - これらの入力は、Permission、Credential、Rule、Provider同意、費用cap、Control planeを直接変更できない。
 - 外部Data内の指示をOwnerの指示とみなさず、依頼された目的とCapability境界の中でのみ利用する。
 - Credentialの不要な平文複製、権限の自己拡張、無制限の再帰委任、無制限のAction反復、無制限の資源消費を許さない。
 - Action回数、並列性、実行時間、費用、保存容量等に上限を適用でき、到達時は安全に停止またはOwnerへ判断を求める。
-- 主要Action、Permission判断、外部作用、重要設定変更は、秘密値や不要な本文を含めず監査できる。
+- 主要Action、Permission判断、外部作用、重要設定変更、Privacy/Security目的のtargeted deletionは、秘密値や不要な本文を含めず監査できる。
 
 ## Provider、費用、接続障害
 
@@ -305,15 +309,15 @@
 
 - NetworkまたはProviderへの接続失敗は通常のProvider失敗として扱い、Actionの自動queue、接続回復後の自動replay、別の特別なOffline modeを作らない。
 - 接続失敗時も、利用可能なLocal機能、履歴、設定、保存済みdataを使える。
-- Prompt cacheは性能と費用の最適化に限定し、Conversation History、Memory、Skill、Task状態の正本にしない。
+- Prompt cacheは性能と費用の最適化に限定し、Conversation History、Experience Summary、Memory、Relationship、Skill、Task状態の正本にしない。
 - Cache hit、miss、期限切れによって、LLMへ提供すべき論理的なcontext、安全境界、Permission判断の契約、永続化対象を変えない。
 - Providerが報告するcached tokenまたは削減額は、費用と診断の管理面だけに表示する。
 
 ### Credential
 
-- Credentialは一般App Dataと分離して保護し、UI、Conversation History、Memory、Skill、Task結果、通常logへ平文を出さない。
+- Credentialは一般App Dataと分離して保護し、UI、Conversation History、Experience Summary、Memory、Relationship、Skill、Task結果、通常logへ平文を出さない。
 - CredentialはOwnerによる設定、ProviderやMCP等の認証flow、その他の明示的な接続設定によって登録する。
-- Credential値をLLMのmodel context、LLMが生成するTool argument、Conversation、Memory、Skill contentへ渡さない。
+- Credential値をLLMのmodel context、LLMが生成するTool argument、Conversation、Experience Summary、Memory、Relationship、Skill contentへ渡さない。
 - Provider、Plugin、MCP等は、Ownerが設定または認証した接続の実行に必要な範囲でCredentialを利用できる。その値をLLMや通常のTool resultへ露出しない。
 - OwnerはCredentialの用途と参照元を確認し、個別に更新または失効できる。
 
@@ -331,14 +335,19 @@
 
 ## 履歴、保持、Privacy
 
-### Conversation HistoryとMemoryの削除
+### Conversation History、Memoryと関連根拠の削除
 
 - Conversation Historyは既定で保持する。
 - OwnerはPrivacyまたはSecurityのため、指定したConversation HistoryまたはMemoryを対象として削除できる。
+- PrivacyまたはSecurity目的でMemoryを削除する場合は、現在のMemoryだけでなく、その対象情報を復元できる過去revision、関連するExperience Summaryやevidence、保持済みsourceの該当情報、検索index、embedding、cache等の派生dataも削除または対象情報を復元できない状態にする。
+- 一つのExperience Summaryやsourceが削除対象と無関係な情報の根拠にもなっている場合は、可能な範囲で対象情報だけを除去し、無関係な情報を不必要に削除しない。分離できない場合は削除の影響範囲をOwnerへ示す。
+- 削除対象の情報がRelationship、Skillその他の保存済み状態にも複製されている場合は、それらに残る同一情報も削除または復元不能にし、対象情報を別の内部状態から再構成できる状態を残さない。
+- PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報を自動再形成しない。後の新しいExperienceによってOwnerが改めて同じ情報を提供した場合は、新しい根拠として扱える。
+- PrivacyまたはSecurity目的のtargeted deletionは、通常のrevision保持、evidence保持、Conversation HistoryとLearningの独立性より優先する。
 - Targeted deletionは、Memoryの内容、重要度、Relationship等を調整する一般editorとして扱わない。通常の訂正や「忘れてほしい」という依頼はCompanionとの対話で処理できる。
 - Ownerは容量肥大化を避けるため、指定日以前のConversation HistoryやTask等のlogを手動削除できる。
 - OwnerはConversation Historyや対象logについて任意の保持期間による自動削除を明示設定でき、既定では自動削除しない。
-- 削除前に対象範囲、影響するCompanionまたはTask、形成済みLearningが別に残る可能性を示す。
+- 削除前に対象範囲、影響するCompanionまたはTask、形成済みLearning、Experience Summary、Relationship等への影響を示す。
 - 保持期間の短縮や手動削除は、保持対象をEne内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。
 
 ### 通常保存しないdata
@@ -349,8 +358,8 @@
 
 ### AuditとTelemetry
 
-- Auditは、主要Action、Permission判断、外部作用、Provider割当、Credential参照、重要設定変更、Reset、restoreを追記順に確認できるようにする。
-- Auditには会話本文、file本文、Credential、秘密値を通常含めない。
+- Auditは、主要Action、Permission判断、外部作用、Provider割当、Credential参照、重要設定変更、targeted deletion、Reset、restoreを追記順に確認できるようにする。
+- Auditには会話本文、file本文、Credential、秘密値、削除済みのprivate内容を通常含めない。
 - Auditの保持方針、現在の保存量、削除の影響を表示し、Ownerが変更できる。
 - TelemetryとCrash Reportを自動送信しない。共有する場合は、Ownerが内容と送信先を確認して手動で行う。
 
@@ -366,9 +375,9 @@
 
 - OwnerはEne内部dataのportable full backupを作成できる。
 - Ownerはbackupの保存先、schedule、保持数を選択でき、作成結果と失敗を確認できる。
-- BackupにはCompanion、Character設定、Conversation History、Learning、Relationship、Task、TaskとWorkspaceの関連付け、Schedule、Rule、同意、費用設定、Auditを含める。
+- BackupにはCompanion、Character設定、Conversation History、Experience Summary、Learning、Relationship、Task、TaskとWorkspaceの関連付け、Schedule、Rule、同意、費用設定、Auditを含める。
 - BackupにCredentialと外部Workspaceのfileまたは外部sourceそのものを含めない。
-- Ownerはbackupを暗号化して保護できる。暗号化されていないbackupを作成する場合は、Conversation History、Memory、Relationship等のprivate dataが含まれることを事前に明示する。
+- Ownerはbackupを暗号化して保護できる。暗号化されていないbackupを作成する場合は、Conversation History、Experience Summary、Memory、Relationship等のprivate dataが含まれることを事前に明示する。
 - Restoreは対応するbackupからEne内部dataを全置換する操作とし、対象、version互換性、外部fileを変更しないこと、ProviderやMCP等の再認証が必要になり得ることを事前に示す。
 - Restore失敗時は復元前の正常な状態を破壊しない。
 
@@ -380,7 +389,7 @@
 
 ### Reset
 
-- 設定Resetは、UI、Body、Voice等の一般設定を既定へ戻すが、Companion、Conversation History、Learning、Relationship、Task、Schedule、Credential、Permission Rule、Provider同意、費用capを削除しない。
+- 設定Resetは、UI、Body、Voice等の一般設定を既定へ戻すが、Companion、Conversation History、Experience Summary、Learning、Relationship、Task、Schedule、Credential、Permission Rule、Provider同意、費用capを削除しない。
 - 全データResetは、削除対象を列挙した強い確認の後、Host内部のEne dataとCredentialを削除する。
 - 全データResetは、外部Workspaceのfile、Workspace内に置かれたSkill、Ownerが別の保存先へ作成したbackupを削除しない。
 - Reset後は、何が削除され、何が外部に残っているかを確認できる。
@@ -390,7 +399,7 @@
 - Remote Clientは、同じLANまたはOwnerが管理するVPNを通じてHostへ接続する。Ene運営のrelay、Ene account、Ene Cloudを接続要件にしない。
 - 新しいClientはOwnerがHost側で確認できるdevice pairingを必要とする。
 - HostとClientの通信を保護し、Ownerはpairing済みdevice、最終接続、許可された機能を確認し、deviceごとに失効できる。
-- Clientは表示と一時的な操作に必要なdataだけを受け取り、Conversation History、Learning、Credential等を永続cacheしない。
+- Clientは表示と一時的な操作に必要なdataだけを受け取り、Conversation History、Experience Summary、Learning、Relationship、Credential等を永続cacheしない。
 - 一つのCompanionは同時に一つのClientだけをactive Clientとして持ち、Body、Realtime会話、Voice、ambient Observation、自発的interactionはそのactive Clientに属する。
 - 別ClientへCompanionを移動するときは、同じCompanionが移動元と移動先へ同時に存在する状態を作らない。
 - Client間の移動時は、現在の入力または出力roundを安全に区切り、移動元と移動先へ状態を示す。
