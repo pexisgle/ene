@@ -24,7 +24,7 @@
 - 最小Setupから最初のテキスト会話まで
 - 基本的なDesktop Body
 - 一対一のテキストtimeline
-- Companion scopeのMemory形成、由来表示、想起、会話による訂正
+- Companion scopeのExperience Summary、Memory形成、由来表示、想起、継続的な更新と会話による訂正
 - 一つのWorkspace folderを対象とするfile作業Task
 - Companionを通じたTaskの進捗確認、steering、Cancel、結果報告
 - Client不在時のTask継続と、Host再起動後の明示再開
@@ -64,11 +64,15 @@
 
 ### 会話からのMemory
 
-1. 一続きのテキスト会話で、後に役立つOwnerとの出来事または好みを伝える。
-2. Companion scopeのMemoryが自動形成され、根拠となった会話、scope、形成時点を管理面で確認する。
-3. ClientとHostを正常終了して再起動し、関連する会話でそのMemoryを自然に想起できることを確認する。
-4. Ownerが会話で内容を訂正し、新しい内容が使われ、訂正の由来と変更履歴を確認できることを確認する。
-5. 詳細なMemory形成基準は後続設計でfixture化する。このmilestoneでは、明白に一時的または無関係な発言を継続Memoryとして扱わないことを最低確認する。
+1. 一続きのテキスト会話で、複数messageにまたがる後に役立つOwnerとの出来事または継続的な好みを伝える。
+2. Messageを一件ずつMemoryへ複製せず、その出来事を意味的なまとまりとして圧縮したExperience Summaryを根拠にCompanion scopeのMemoryが形成されることを確認する。
+3. 管理面から、Memoryの内容、scope、時間的な意味、重要度、根拠となるExperience Summary、形成または更新時点を確認できることを確認する。
+4. ClientとHostを正常終了して再起動し、関連する会話でそのMemoryを自然に想起できることを確認する。
+5. Ownerが会話で内容を訂正した場合は誤っていた認識として更新でき、以前は正しかった状況が後に変化した場合は過去の有効性を失わず新しい現在状態へ更新できることを確認する。
+6. 更新後のMemoryから、現在の内容だけでなく、根拠となったExperience Summaryと過去revisionを確認できることを確認する。
+7. 「覚えておいて」という明示的な依頼は強い形成signalとして扱われる一方、Password、token、秘密鍵等はその依頼があってもMemoryへ保存されないことを確認する。
+8. 一時的な気分、Task内だけの状態、一般世界知識、Raw Tool payload、明白に偶発的な外部情報を、長期Memoryとして無条件に形成しないことをfixtureで確認する。
+9. 同じ情報を繰り返し伝えた場合は無条件に重複Memoryを増やさず、既存Memoryの補強、精密化、統合等として扱えることを確認する。
 
 ### Workspaceでのfile Task
 
