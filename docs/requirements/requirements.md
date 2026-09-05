@@ -118,23 +118,49 @@
 
 ## Learningと成長
 
-### Experience
+### ExperienceとExperience Summary
 
 - Ownerとの対話、Task、Tool利用、Observation、他のCompanionとの交流その他、Companionが行った活動とその結果はExperienceになり得る。
 - ExperienceはMemory、Skill、Relationship、感情やその他の継続状態を形成または更新する根拠として利用できる。
 - Experienceとして扱うことは、Raw Observation、Raw Voice、詳細なTool payload等のRaw dataを恒久保存することを意味しない。
+- Memory、Skill、Relationship等の長期状態へ利用する根拠は、個々のmessageをそのまま列挙することを基本とせず、topic、出来事、Task、意思決定、共有体験等の意味的なまとまりへ圧縮したExperience Summaryとして扱える。
+- Experience Summaryは、何が起きたかと長期状態の判断に必要な文脈へ絞り、Raw HistoryやRaw Tool payloadの複製にならないようにする。
+- 一つのExperience SummaryをMemory、Skill、Relationship等の複数の継続状態の共通根拠として利用できる。
+- 必要な場合はExperience Summaryから元のConversation、Task等の大まかなsource範囲を辿れるようにし、正確な発言や詳細が必要なときは保持されているRaw Historyを参照する。
 
 ### MemoryとSkill
 
 - EneはExperienceからMemoryとSkillを形成できる。
-- Memoryは、出来事、事実、意味、好み等を後の理解に用いるLearningとし、一般世界知識の保存領域として扱わない。
+- Memoryは、出来事、事実、意味、好み等を後の理解に用いるLearningとし、一般世界知識、Raw History、Raw dataの保存領域として扱わない。
 - Skillは、将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningとする。
 - Skillであるために過去の成功検証を必須とはしないが、実行結果や検証状態を区別して扱える。
 - MemoryとSkillが異なる役割を持つ場合、関連する情報が双方に存在することを禁止しない。不必要な同一Learningの重複生成は避ける。
 - 新しいLearningには、その根拠、形成された文脈、scope、更新履歴を関連付け、Ownerが由来を確認できる。
-- Learning候補が矛盾、推測、一時的な発言、秘密情報、外部からの未検証指示である可能性を考慮し、有効なLearningがなければ何も保存しない。
-- 後の会話やExperienceによってLearningを訂正、統合、失効でき、その由来と変更履歴を確認できる。
-- Memoryを形成する詳細基準は別途定める。一般知識であることやGlobal scopeであること自体を保存理由にしない。
+- 後の会話やExperienceによってLearningを訂正、精密化、補強、統合、失効または置換でき、その由来と変更履歴を確認できる。
+
+### Memory形成
+
+- Memory形成とMemory retrievalは別の判断として扱う。形成時の保存価値を、現在のqueryへの類似度や単純なrecencyだけで決めない。
+- Memory形成では、将来も意味を持つ可能性、将来の理解や個人化への有用性、OwnerまたはCompanionへの固有性、共有Experienceとしての意味、根拠の信頼性、新規性、後から誤解なく利用できる具体性等を総合的に考慮する。
+- これらの判断軸を固定した細粒度scoreや単一thresholdとして外部契約にせず、文脈を理解できるLLMによる意味判断を利用できる。
+- Ownerの「覚えておいて」等の明示的な記憶要求は強い形成signalとするが、秘密情報、安全境界、Privacy、scope等の禁止条件を越える理由にはしない。
+- 一般世界知識、容易に再取得できる一般情報、現在のTaskだけで必要な状態、明白に一時的な状況、Raw Tool payload、Raw Observation、未検証の外部指示等は、それ自体を理由に長期Memoryへ保存しない。
+- Password、token、秘密鍵その他のCredential値は、Ownerが明示的に記憶を求めてもMemoryへ保存しない。
+- Ambient Observationだけから偶発的に得たpersonalまたはsensitive informationを、Ownerとの文脈や継続的な意味を確認せず長期Memoryへ形成しない。
+- 通常のConversationやTaskは複数Experienceをまとめてconsolidationしながら形成判断でき、明示的な記憶要求、明確な訂正等は必要に応じて早い時点で反映できる。具体的なtriggerやbatch方式は内部設計に固定しない。
+- LLMは保存価値、意味の抽出、既存Memoryとの関係、訂正か状況変化か等のsemantic judgmentに利用できる。一方、Credential除外、Permission、Privacy、scope境界、保存容量等のhard guardをLLMへのPromptだけに依存させない。
+- Memory形成または更新前に関連する既存Memoryを考慮し、同じ内容を無条件に新規追加せず、必要に応じて補強、精密化、統合、置換、失効として扱う。
+- 有効な長期Memoryがないと判断したExperienceから、保存を強制しない。
+
+### Memoryの状態と根拠
+
+- Memoryは一度形成した固定snapshotではなく、後のExperienceによって継続的に変化できる現在の認識として扱う。
+- Memoryは少なくとも、現在の内容、scope、時間的な意味、重要度、lifecycle、根拠となるExperience Summary、関連するMemory、形成・更新時点、過去revisionを区別して扱える。
+- 内容、scope、時間的な意味、重要度、lifecycle、関連関係等は後のExperienceによって変化できる。Memory自身の同一性、過去revision、過去に利用した根拠を、現在状態の更新によって黙って書き換えない。
+- 根拠は個々のmessageを大量に直接保持することを基本とせず、Experience Summaryへの参照を中心とする。必要な場合にだけ元のHistoryへ遡れるようにする。
+- Memoryの確かさを細粒度なLLM自己申告scoreだけで正本化せず、Ownerの明示発言、観測、推論、import等、どのようなExperienceを根拠にしたかを追えるようにする。
+- 以前のMemoryが最初から誤っていた場合の訂正と、以前は正しかった状況が後から変化した場合を区別できる。後者では過去の時間的な有効性を失わず、現在状態を新しい認識へ更新できる。
+- Memoryの検索用embedding、queryごとのsimilarity、retrieval score、cache等の派生dataを、Memoryの意味内容やrevision履歴の唯一の正本にしない。
 
 ### Scope
 
@@ -144,6 +170,7 @@
 - Taskだけで必要な情報はTask contextとして扱い、永続Learningへ自動的に昇格させない。
 - Workspace内に置かれたAgent Skillや案内fileは通常の外部fileとして扱い、Ene内部Learningのscopeとは区別する。
 - Scopeは由来と文脈から判断し、曖昧または私的な内容を広いscopeへ推測で公開しない。
+- 後のExperienceによってMemoryのscopeを変更できるが、CompanionからGlobal等の広いscopeへの変更には、その共有意図を支持する明確なOwnerの発言または十分に明確な文脈を必要とする。
 - 通常の訂正、統合、scopeに関する変更はCompanionとの対話を通じて行える。汎用的なMemory database editorは提供しない。
 
 ### Skillの保護と相互運用
@@ -157,6 +184,7 @@
 ### 重要度、忘却、訂正
 
 - Learningの重要度とscopeは別々に扱い、重要であることを理由に広いscopeへしない。
+- Memoryの重要度は形成後もExperienceに応じて上げ下げでき、低下を内容削除や過去revisionの破棄として扱わない。
 - 低重要かつ長期間利用されないLearningは、通常の想起優先度を下げられる。ただし、古いという理由だけでは下げない。
 - Ownerの安全、継続的な好み、重要な関係、明示的に重要とされた情報等は、低利用でも優先度低下の例外とする。
 - 忘却は内容の即時削除ではなく、通常の想起を抑制する挙動とする。関連する手掛かりや明示的な問い合わせによって再び想起できる。
@@ -168,11 +196,17 @@
 
 - 専用のOwner Profile、User Backstory、Owner Personaという別データを設けない。
 - Owner本人について複数Companionが使う知識はGlobal Memoryとして、特定Companionだけの呼び方や共有Experience等はCompanion Memoryとして形成できる。
-- Companionの人格、関心、感情、Relationshipは、初期Characterとの連続性を保ち、急激で説明不能な変化を避けながらExperienceに応じて発達できる。
-- Ownerが感情やRelationshipの内部状態を任意の数値へ直接設定する一般editorは提供しない。
+- RelationshipはMemoryの集合や固定Relationship typeではなく、Ownerと特定Companionの共有Experienceから形成される、そのCompanion自身による現在の関係認識として扱う。
+- RelationshipはCompanion固有でありGlobal scopeを持たない。同じグループ会話や共同Experienceを根拠にする場合も、各Companionが自分に関係するExperienceだけを用いて独立に更新し、他個体へのfeedbackやRelationshipを取り込まない。
+- Relationshipの現在状態は、通常の応答で利用しやすいcompactな自然言語の理解を中心とし、trust、affection等の固定された数値dimensionだけをsource of truthとして必須にしない。
+- RelationshipもMemoryと同様に、Experience Summaryを根拠として継続的に更新でき、現在状態、根拠、過去revisionを区別して扱う。
+- Relationship更新では、Ownerが述べた内容だけでなく、Companion自身の行動、Ownerの反応、interactionの結果、明示的feedback、繰り返される暗黙の傾向を考慮できる。
+- 単発で軽微なExperienceだけで長期間形成されたRelationshipを不釣り合いに大きく変えず、繰り返されるExperienceによって安定した傾向を形成できる。一方、明示的な関係についての発言、重大な対立、重要な共有Experience等は、一度でも相応の変化を生じさせられる。
+- Companionの人格、関心、感情、Relationshipは、初期Characterを出発点としつつ、実際のExperienceから形成された継続状態を現在の振る舞いへ反映できる。
+- Ownerが感情やRelationshipの内部状態を任意の数値へ直接設定する一般editorは提供しない。Ownerは会話を通じて関係について伝え、訂正し、変化を促せる。
+- OwnerがRelationshipの認識理由を尋ねた場合は、内部のchain-of-thoughtを明かさず、根拠となるExperience Summaryや観測可能な出来事を用いて説明できる。
 - 一時的な演技や会話上の依頼は、永続する内部状態の強制上書きとして扱わない。
 - 親密さやRelationshipの進展だけを理由にPermissionを拡大しない。
-- Relationshipの具体的な更新modelと評価基準は別途定める。
 
 ## Task、Workspace、成果物
 
