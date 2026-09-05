@@ -123,7 +123,7 @@
 
 ## Learningと成長
 
-Experienceの意味、保存価値、共有の必要性、要約、関係やCompanion Stateの解釈はLLMの文脈判断に委ね、通常の判断にOwnerの逐次確認を要求しない。個別ケースの固定ルールや細粒度scoreを必須にせず、誤った認識は会話を通じて訂正できる。一方、明示的な保存禁止・非共有の意図を読み取った後の制限適用、決定したscope、Credential保護、Permission、削除、資源上限をPromptだけに依存させない。
+Experienceの意味、保存価値、共有の必要性、要約、関係やCompanion Stateの解釈はLLMの文脈判断に委ね、通常の判断にOwnerの逐次確認を要求しない。個別ケースの固定ルールや細粒度scoreを必須にせず、誤った認識は会話を通じて訂正できる。一方、明示的な保存禁止・非共有の意図を読み取った後の制限適用、決定したscope、Credential保護、Permission、Privacy/Security目的のtargeted deletion、資源上限をPromptだけに依存させない。
 
 ### ExperienceとExperience Summary
 
@@ -132,7 +132,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - Experienceとして扱うことは、Raw Observation、Raw Voice、詳細なTool payload等のRaw dataを恒久保存することを意味しない。
 - Memory、Skill、Relationship、比較的持続するCompanion State等の長期状態の根拠は、Experienceの意味と必要な文脈を要約したExperience Summaryとして扱える。
 - Experience Summaryは、何が起きたかと長期状態の判断に必要な文脈へ絞り、Raw HistoryやRaw Tool payloadの複製にならないようにする。
-- Experience Summaryは独立した知識の正本ではなく長期状態の根拠として扱い、Memory等と同じPrivacy、Security、backup、削除、Client cacheの保護境界に従う。
+- Experience Summaryは独立した知識の正本ではなく長期状態の根拠として扱い、Memory等と同じPrivacy、Security、backup、Privacy/Security目的のtargeted deletion、Client cacheの保護境界に従う。
 - Experience Summaryにも[Credentialの保護契約](#credential)を適用し、不要なsensitive raw dataを保存しない。
 - 一つのExperience SummaryをMemory、Skill、Relationship、比較的持続するCompanion State等の複数の継続状態の共通根拠として利用できる。
 - 必要な場合はExperience Summaryから元のConversation、Task等の大まかなsource範囲を辿れるようにし、正確な発言や詳細が必要なときは保持されているRaw Historyを参照する。
@@ -166,10 +166,12 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 - Ene内部で管理するMemoryとSkillはCompanionまたはGlobalのscopeを持てる。
 - Companion scopeは、そのCompanionだけが使う経験、呼び方、私的な文脈、個体固有のLearningに用いる。
-- Global scopeは、複数Companionから利用することに意味があるOwner固有の知識や再利用可能なLearningに用いる。一般世界知識をGlobal Memoryとして蓄積することを意味しない。
+- Global scopeは、複数Companionから共通に利用することに明確な意味があるOwner固有の知識や再利用可能なLearningに用いる。一般世界知識をGlobal Memoryとして蓄積することを意味しない。
 - Taskだけで必要な情報はTask contextとして扱い、永続Learningへ自動的に昇格させない。
 - Workspace内に置かれたAgent Skillや案内fileは通常の外部fileとして扱い、Ene内部Learningのscopeとは区別する。
-- Learningのscopeは、内容の重要性、複数Companionでの有用性、由来、Ownerとの文脈からLLMが判断する。重要な好みや事情等は、明示的な共有依頼がなくてもGlobal scopeとして形成または更新できる。
+- 特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とする。
+- Global scopeへの形成または変更は、Ownerが明示的に共有を求めた場合、または内容、由来、Ownerとの文脈から複数Companionで共通に利用すべきことが明確な場合に限る。単に重要、将来有用、一般的な好みであることだけを理由にGlobal scopeへ昇格させない。
+- Globalにすべきか明確でない場合はCompanion scopeに留める。Global化の判断だけを目的とする逐次確認は通常要求しない。
 - 共有する内容と必要な背景の選択・要約はLLMの意味判断に委ねる。Ownerが明示した非共有の意図を優先し、通常の共有判断に逐次確認を要求しない。
 - 通常の訂正、統合、scopeに関する変更はCompanionとの対話を通じて行える。汎用的なMemory database editorは提供しない。
 
@@ -184,7 +186,9 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 ### 重要度、忘却、訂正
 
 - Learningの重要度とscopeは別の概念として扱う。重要度と想起優先度は、Experienceと現在の文脈に応じてLLMが調整する。
-- 通常の忘却は削除や過去revisionの破棄ではなく想起の抑制とし、関連する手掛かりによって再び利用できる。
+- Learningの通常lifecycleでは、忘却、訂正、精密化、補強、統合、失効または置換を理由に、保存済みLearningやその過去revision・根拠を削除しない。
+- 通常の忘却は内容の削除や過去revisionの破棄ではなく想起の抑制とし、関連する手掛かりによって再び利用できる。
+- Ownerの「忘れてほしい」「もう気にしないで」等の依頼は、PrivacyまたはSecurityのため保存済み情報そのものをEne内部から消去する意図が明示されていない限り、通常の忘却または訂正として扱い、targeted deletionにはしない。
 - 事実の訂正や通常の状況変化は、会話と新しいExperienceを通じて反映できる。
 - Conversation Historyを削除しても、それを根拠に形成済みのMemory、Skill、Relationship、Companion Stateを黙って変更しない。ただしPrivacyまたはSecurity目的のtargeted deletionは後述の削除契約を優先する。
 
@@ -342,6 +346,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 ### Privacy/Security目的のtargeted deletionと履歴保持
 
+- 本節のtargeted deletionは、通常の忘却、訂正、失効、置換、統合とは異なり、OwnerがPrivacyまたはSecurityのため特定情報そのものをEne内部から強制消去するよう明示した場合だけ行う例外的な削除である。
 - Conversation Historyは既定で保持する。
 - OwnerはPrivacyまたはSecurityのため、Ene内部に保存された特定情報を対象として削除できる。Conversation History、Experience Summary、Memory、Relationship、Companion State、Skill、Task等のどこに保存されているかをOwnerが事前に特定する必要はない。
 - PrivacyまたはSecurity目的で対象情報を削除する場合は、選択した保存対象だけでなく、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision、evidence、Relationship、その情報から形成され対象情報を直接または実質的に復元できるCompanion Stateとその保持済み根拠、Skill、保持済みsourceの該当情報、検索index、embedding、cache、接続中Clientの一時data等のEne内部dataも削除または対象情報を復元できない状態にする。
@@ -350,7 +355,8 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報をMemory、RelationshipまたはCompanion Stateとして自動再形成しない。後の新しいExperienceによってOwnerが改めて同じ情報を提供した場合は、新しい根拠として扱える。
 - 削除前の情報を利用する実行中処理によって、削除済み情報を再保存しない。削除処理または残存検証が完了していない場合は、完了したと表示しない。
 - PrivacyまたはSecurity目的のtargeted deletionは、通常のrevision保持、evidence保持、Conversation Historyと形成済み状態の独立性より優先する。
-- Targeted deletionは、Memoryの内容、重要度、Relationship、Companion State等を調整する一般editorとして扱わない。通常の訂正や「忘れてほしい」という依頼はCompanionとの対話で処理できる。
+- 「忘れてほしい」等の通常依頼だけをtargeted deletionへ自動昇格させない。OwnerがPrivacyまたはSecurityのため保存済み情報そのものをEne内部から消去する意図を明示した場合に限り、本節のtargeted deletionとして扱う。
+- Targeted deletionは、Memoryの内容、重要度、Relationship、Companion State等を調整する一般editorとして扱わない。
 - Ownerは容量肥大化を避けるため、指定日以前のConversation HistoryやTask等のlogを手動削除できる。
 - OwnerはConversation Historyや対象logについて任意の保持期間による自動削除を明示設定でき、既定では自動削除しない。
 - 容量管理目的の保持期間短縮や通常のHistory/log削除はtargeted deletionとは区別し、それだけを理由に形成済みMemory、Skill、Relationship、Companion StateやExperience Summaryへ削除をcascadeさせない。

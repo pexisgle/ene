@@ -20,11 +20,11 @@
 
 | 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
 |---|---|---|---|
-| [Nomi: Long-term memory in group chat](https://wiki.nomi.ai/Long_term_memory_in_group_chat) | 一対一とグループで、個体ごとのMemory境界を保つ | Ene内部MemoryはCompanionとGlobalのscopeを持ち、Task固有情報はTask contextとWorkspaceへ分離する | 2026-09-05 |
+| [Nomi: Long-term memory in group chat](https://wiki.nomi.ai/Long_term_memory_in_group_chat) | 一対一とグループで、個体ごとのMemory境界を保つ | Ene内部Memoryは特定CompanionとのExperienceではCompanion scopeを既定とし、複数Companionで共通利用すべきことが明確なLearningだけをGlobal scopeにする。Task固有情報はTask contextとWorkspaceへ分離する | 2026-09-05 |
 | [Kindroid: Groupchats](https://kindroid.ai/v2/docs/groupchats/) | 複数Characterが同じ会話に参加し、相互に応答できる空間 | 自発性、Permission、費用、loopの共通上限を優先する | 2026-09-05 |
 | [Hermes Agent: Persistent Memory](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/memory.md) | 長期Memoryをraw transcriptとは分け、継続的に有用な情報へ絞る | EneではCompanionとGlobal Memoryを利用し、Experience Summaryを根拠に意味的な形成判断を行う | 2026-09-05 |
 | [nanobot: AI Agent Memory](https://github.com/HKUDS/nanobot/blob/main/docs/guides/ai-agent-memory.md) | Session historyとcuratedな長期Memoryを分離する | 一般知識やraw logをMemoryの保存領域にせず、Conversation History、Experience Summary、Learningを役割ごとに分ける | 2026-09-05 |
-| [Mem0: Add Memory](https://docs.mem0.ai/core-concepts/memory-operations/add) | LLMで会話から再利用価値のある情報を抽出し、既存Memoryとの重複や矛盾を考慮して形成する | Eneは保存判断とretrieval判断を分け、意味判断をLLMへ委ねつつ、Credential、Permission、削除等の安全境界と、変更履歴およびExperience根拠を保持する | 2026-09-05 |
+| [Mem0: Add Memory](https://docs.mem0.ai/core-concepts/memory-operations/add) | LLMで会話から再利用価値のある情報を抽出し、既存Memoryとの重複や矛盾を考慮して形成する | Eneは保存判断とretrieval判断を分け、意味判断をLLMへ委ねつつ、Credential、Permission、Privacy/Security目的のtargeted deletion等の安全境界と、変更履歴およびExperience根拠を保持する | 2026-09-05 |
 | [Mem0: Update Memory](https://docs.mem0.ai/core-concepts/memory-operations/update) | Preference変更や事実の訂正に応じて既存Memoryを更新する | Eneは単純な現在値上書きだけにせず、誤りの訂正と正しかった状況の時間的変化を区別し、過去revisionを残す | 2026-09-05 |
 | [Kindroid: Learned Context](https://kindroid.ai/v2/docs/chat-features-and-tools/) | `Growth & relationship`、`Important facts`、`Ongoing context`を、会話の発達に合わせて更新されるpersistent running notesとして持つ | EneはMemoryを主要な知識状態、Relationshipをその補助となるcompactな関係解釈として分け、共通のExperience Summary、evidence、revision基盤を使う。Relationshipへ詳細事実を第二のMemoryとして複製しない | 2026-09-05 |
 | [Kindroid: Memory](https://kindroid.ai/v2/docs/memory/) | Learned Contextをretrievable long-term memoryとは別のpersistent contextとして利用する | Eneも現在のRelationship認識を毎回Memory検索だけから再構成せずcompactなcurrent stateとして利用できるが、事実認識ではMemoryを優先する | 2026-09-05 |
@@ -34,11 +34,13 @@
 | [Replika: Conversation deletion](https://help.replika.com/hc/en-us/articles/4410750548493-Can-I-delete-my-conversations) | 会話履歴の削除と、学習済みMemoryの管理を別の問題として扱う | 通常の履歴retentionとは別にPrivacy/Security目的のtargeted deletionを持ち、対象情報を復元できるrevision、Experience Summary/evidence、派生data等にも削除を伝播させる | 2026-09-05 |
 | [Replika: Chat history](https://help.replika.com/hc/en-us/articles/4411154990605-Is-the-chat-history-infinite) | 表示できる会話履歴と、学習されたMemoryを別に扱う | Hostを正本とし、履歴は既定で保持したうえで保持期間と手動削除をOwnerが管理する | 2026-09-05 |
 
-Eneでは、Raw History、意味的なまとまりへ圧縮したExperience Summary、そこから形成されるMemoryとRelationshipを分ける。Memory形成時の保存価値と、後の会話でのretrieval優先度は別の判断とし、Memoryは内容、重要度、scope、時間的意味等をExperienceに応じて継続更新できる一方、過去revisionと根拠を保持する。Privacy/Security目的のtargeted deletionだけはこの保持原則より優先し、対象情報を復元できるrevision、Experience Summary/evidence、派生data等も削除対象にする。
+Eneでは、Raw History、意味的なまとまりへ圧縮したExperience Summary、そこから形成されるMemoryとRelationshipを分ける。Memory形成時の保存価値と、後の会話でのretrieval優先度は別の判断とし、Memoryは内容、重要度、scope、時間的意味等をExperienceに応じて継続更新できる一方、過去revisionと根拠を保持する。通常の忘却、訂正、失効、置換、統合は保存済みMemoryや過去revision・根拠の削除を意味しない。Privacy/Security目的で特定情報そのものの強制消去を明示したtargeted deletionだけがこの保持原則より優先し、対象情報を復元できるrevision、Experience Summary/evidence、派生data等も削除対象にする。
+
+特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とする。Global scopeはOwnerが明示的に共有を求めた場合、または複数Companionで共通に利用すべきことが内容と文脈から明確な場合に限り、単に重要、有用、一般的な好みであることだけをGlobal化の理由にしない。
 
 Relationshipは同じExperience/evidence/revision基盤を利用できるが、Memoryより優先度の低い補助状態であり、詳細な事実や出来事を複製せず関係そのもののcompactな現在解釈へ絞る。Relationshipの相手はOwnerだけに限定せず別Companionも含め、各Companion自身の認識として独立に更新する。
 
-Eneの忘却は、会話相手らしい自然さを参考にしつつ、内容削除ではなく通常想起の抑制として定義した。重要度とscopeを別の概念として扱いながら、重要性と複数Companionでの有用性をscope判断に利用できる。Privacy削除を忘却の演出に代用しない点はEne固有の安全上の差分である。
+Eneの忘却は、会話相手らしい自然さを参考にしつつ、内容削除ではなく通常想起の抑制として定義した。「忘れてほしい」等の通常依頼も、Privacy/Security目的で保存済み情報そのものの消去を明示しない限りこの通常忘却として扱う。重要度とscopeは別の概念であり、重要度だけを理由にGlobal scopeへ昇格させない。Privacy/Security目的のtargeted deletionを忘却の演出に代用しない点はEne固有の安全上の差分である。
 
 ## Task、Workspace、Schedule
 
