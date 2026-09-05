@@ -38,6 +38,7 @@
 - Voice、Observation、グループ会話、自発的なCompanion間交流
 - Global scopeのMemory
 - ExperienceからのSkill生成とSkill改善
+- Experienceから形成されるCompanion State（感情、関心、比較的持続的な人格・行動傾向等）の形成と時間的継続性の評価
 - OwnerとのRelationshipおよびCompanion同士のRelationshipの長期的発達の評価
 - Schedule、Remote Client、Character編集とPackage配布
 - OpenAI以外のProviderとfallback

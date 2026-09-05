@@ -7,7 +7,7 @@
 
 Eneは、一人のOwnerが管理するHost上で継続する、Companion中心のパーソナルAIシステムである。
 
-日常的な体験の主役は、身体を持ち、同じ個として時間を越えて続くCompanionである。会話、Memory、Relationship、関心、身体表現と、実際のPC作業を一つの存在から利用できる。
+日常的な体験の主役は、身体を持ち、同じ個として時間を越えて続くCompanionである。会話、Memory、Relationship、Companion State、身体表現と、実際のPC作業を一つの存在から利用できる。
 
 EneはCompanionを体験上の中心に置くが、汎用作業Agentとしての能力を劣後させない。Tool、MCP、Skill、Provider、Task AgentはCompanionが使う能力であり、別の主役や劣化した付属機能ではない。
 
@@ -22,7 +22,7 @@ EneはCompanionを体験上の中心に置くが、汎用作業Agentとしての
 
 ### Companion
 
-Characterを基に作られ、Memory、Relationship、状態、関心、設定をExperienceから形成する継続的な個体。同じCharacterから作ったCompanionも別個体である。
+Characterを基に作られ、Memory、Relationship、Companion State、設定をExperienceから形成する継続的な個体。同じCharacterから作ったCompanionも別個体である。
 
 ### Character
 
@@ -30,9 +30,9 @@ Characterを基に作られ、Memory、Relationship、状態、関心、設定�
 
 ### Experience
 
-CompanionがOwnerとの対話、Task、Tool利用、Observation、他のCompanionとの交流その他の活動を通じて経験した出来事とその結果。ExperienceはMemory、Skill、Relationship、状態等が形成または更新される根拠になり得る。Experienceであることは、そのRaw dataを恒久保存することを意味しない。
+CompanionがOwnerとの対話、Task、Tool利用、Observation、他のCompanionとの交流その他の活動を通じて経験した出来事とその結果。ExperienceはMemory、Skill、Relationship、Companion State等が形成または更新される根拠になり得る。Experienceであることは、そのRaw dataを恒久保存することを意味しない。
 
-Memory、Skill、Relationship等の長期状態へ利用するときは、必要に応じて複数messageや一連の行動を、topic、出来事、Task、意思決定、共有体験等の意味的なまとまりとして要約したExperience Summaryを根拠にできる。Experience SummaryはRaw Historyの代替でも独立した知識の正本でもなく、長期状態を形成・説明するための圧縮された根拠である。
+Memory、Skill、Relationship、比較的持続するCompanion State等へ利用するときは、必要に応じて複数messageや一連の行動を、topic、出来事、Task、意思決定、共有体験等の意味的なまとまりとして要約したExperience Summaryを根拠にできる。Experience SummaryはRaw Historyの代替でも独立した知識の正本でもなく、長期状態を形成・説明するための圧縮された根拠である。
 
 ### Task
 
@@ -55,6 +55,14 @@ Experienceから形成され得るLearning。Memoryは出来事、事実、意�
 Relationshipは、あるCompanionとその相手であるOwnerまたは別のCompanionとの共有Experienceから形成される、そのCompanion自身による現在の関係認識である。各RelationshipはCompanion側の個体固有状態であり、相手側の認識と自動的に同一または対称にはしない。
 
 RelationshipはMemoryの補助となるcompactな状態であり、人物情報、出来事、Preference等の詳細を第二のMemoryとして複製しない。必要な事実はMemoryやExperience Summaryを参照し、Relationship自身は距離感、交流傾向、関係の変化等、関係そのものの現在の解釈へ絞る。Memoryと矛盾する事実認識をRelationshipで上書きせず、Permission、Rule、安全境界にも影響しない。
+
+### Companion State
+
+Companion Stateは、Experienceから形成される、あるCompanion自身の現在の内的状態と振る舞いの傾向である。感情、関心、Experienceによって形成された人格上の傾向等を含み得る。
+
+Memoryが出来事、事実、意味等についての現在の認識を扱い、Relationshipが相手との関係についての現在解釈を扱うのに対し、Companion Stateは、それらを現在の表現、注意、会話や行動の傾向へどう反映するかを扱う。MemoryやRelationshipの内容を第二の正本として複製しない。
+
+Companion Stateには、最近のExperienceや時間経過によって変化する一時的な状態と、Experienceの蓄積によって形成される比較的持続的な傾向があり得る。具体的な分類、dimension、内部表現、数値scale、更新・減衰方式は設計で定める。
 
 ### Capability、Action、Rule
 
