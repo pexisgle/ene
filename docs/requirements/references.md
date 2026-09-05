@@ -89,3 +89,22 @@ OpenCode、Hermes Agent、nanobotは個別機能だけでなく、EneのAgent Ha
 | [Agent Skills client implementation](https://agentskills.io/client-implementation) | 必要なSkillを段階的に読み込む実装model | 読込方式やcache方式は要件に固定せず、ユーザーから見える互換性だけを採用する | 2026-09-05 |
 | [Hermes Agent: Skills System](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/skills.md) | Skillを必要時に読み込む再利用可能なknowledge/instructionとして扱い、agent自身も作成・更新できる | Experienceから再利用価値のある手順をSkill化し、import原本と学習revisionを区別する | 2026-09-05 |
 | [nanobot: Skills](https://github.com/HKUDS/nanobot/blob/main/nanobot/skills/README.md) | `SKILL.md`を中心とする軽量なinstruction packageとしてSkillを扱う | Agent Skillsとの相互運用を優先し、Ene独自形式だけへ閉じない | 2026-09-05 |
+
+## Computer Use、Observation、自発性
+
+| 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
+|---|---|---|---|
+| OpenClaw | Self-hosted AgentがOwnerのPCを広く操作し、必要な情報を観測しながら自律的に作業する方向性 | ambient Observationと明示TaskのComputer Useを分離し、画面内の指示をOwnerの依頼や承認として扱わない | 2026-09-05 |
+| Grok Bot | 会話する常駐AI自身がComputer Use能力を持ち、OwnerのPC環境で作業できる統合体験 | Computer Useを別人格へ切り離さずCompanionから利用する一方、Permission、観測、Action承認を共通基盤で制御する | 2026-09-05 |
+| AIRI | Characterが周辺状況やユーザーとのinteractionに反応し、自発的に振る舞うCompanion体験 | 自発性を演出だけにせず、Observation source、費用、Permission、quiet rule、loop上限等の制御下に置く | 2026-09-05 |
+
+## Host、Client、Self-hosting
+
+| 参考 | 採用した考え方 | Eneでの差分 | 確認日 |
+|---|---|---|---|
+| OpenClaw | Owner自身が管理する環境でAgentをself-hostし、その環境をAgentの実行基盤とする | HostをConversation、Memory、Task、Credential等の正本とし、Clientを表示・操作面として明確に分離する | 2026-09-05 |
+| Grok Bot | 一つの常駐AIを複数のinterface/deviceから利用できる体験 | Ene Cloudや必須relayに依存せず、Owner管理Hostへのdevice pairingとactive Clientの概念を持つ | 2026-09-05 |
+
+## 補足
+
+本書の製品比較は、各製品の内部実装がEneと同一であることを示すものではない。特に、公開情報から内部architectureを確認できない製品については、参考にしたのは観測可能なproduct conceptまたはUXであり、未公開の内部構造を推測して要件化しない。
