@@ -506,7 +506,7 @@ AD-01・04・05・07〜09・14・15。要件「履歴、保持、Privacy」「�
 | 判断 | 分離・統合の理由と、残す区別 |
 |---|---|
 | Companionの個体調整と作業遂行を分離 | 依頼を受け、委任・steering・結果統合をする中心と、一時主体が長い作業を遂行する責任は異なる。軽微な処理は本体が行え、すべての判断をTask Agent化しない。単なる二種類のAgent loopの区別ではない。 |
-| Task・Task Agent・Scheduleを作業内に統合 | 共通の責任は、担当・制限・結果を持つ作業の開始と遂行である。Task記録は実行主体の終了後も残り、Scheduleは回の前後を越えて存続し、各回は新Taskになる。Scheduleのtimezone・missed・CRUDをTaskの進捗へ潰さず、一つのAgent停止をTask記録削除にしない。内部の実行・状態管理方法は共通化必須ではない。この統合は一つのstateまたはlifecycleを意味しない。Task、Task Agentの一時委任・試行、Schedule設定、Schedule各回として作られるTask、Workspace関連付け、外部Workspace実体、永続成果物、一時中間file、保存先未定時の確認は要件上異なるlifecycle・所有契約を持ち、Step 4では別契約として扱う。同じSubsystem内を一つの型・保存単位・実行loop・障害単位へまとめる根拠にしない。 |
+| Task・Task Agent・Scheduleを作業内に統合 | 共通の責任は、担当・制限・結果を持つ作業の開始と遂行である。Task記録は実行主体の終了後も残り、Scheduleは回の前後を越えて存続し、各回は新Taskになる。Scheduleのtimezone・missed・CRUDをTaskの進捗へ潰さず、一つのAgent停止をTask記録削除にしない。内部の実行・状態管理方法は共通化必須ではない。この統合は一つのstateまたはlifecycleを意味しない。Task、Task Agentという一時的な実行主体とその委任、Schedule設定、Schedule各回として作られるTask、Workspace関連付け、外部Workspace実体、永続成果物、一時中間file、保存先未定時の確認は要件上異なるlifecycle・所有契約を持ち、Step 4では別契約として扱う。同じSubsystem内を一つの型・保存単位・実行loop・障害単位へまとめる根拠にしない。 |
 | Scheduleをすべての時刻待ちへ一般化しない | 製品のScheduleは担当Companionと各回のTaskを持つ。観測のCapture時機は共有観測、backupのschedule・保持数は保全・消去の責任に置く。共通の時計や待機機構は後続で選べるが、backupへ未要求の担当CompanionやTask化を課さない。 |
 | Characterと個体・学習を分離 | 配布可能な静的構成の変更は、Ownerとの経験の形成・訂正とは異なる。個体の成長をPackageへ含めず、Package更新を個体の初期化にしない。資材種別ごとの独立Subsystemは不要。 |
 | Memory・Skill・Relationship・Companion State・Summaryを認識・学習に統合 | 共通経験に基づく形成・訂正と根拠説明が中心であり、概念の数だけ独立した形成主体を作らない。知識と手順、関係と内的状態、現在認識と圧縮根拠、個体scopeとGlobal、恒久revisionと一時状態は別契約として残す。一つのcanonical state、一つのschema、一つのrevision model、一つのretention policy、一律の同時更新は導かない。各概念の既存要件上の意味・scope・lifecycle・根拠関係は維持し、Step 4では別状態として扱う。概念ごとのSubsystem分割は行わない。 |
