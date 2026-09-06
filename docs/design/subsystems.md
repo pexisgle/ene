@@ -140,7 +140,7 @@ AD-04・11・15。製品定義「Character」「同梱Character」「非目標�
 - 追加指示を可能な範囲で反映し、反映不能の理由と選択肢を返す。Cancelの受付と停止結果を区別し、未保存の作業、既知の外部作用、成功不明を保持して報告する。
 - Host再起動後の途中Taskは明示再開待ちとし、外部作用不明時の自動再実行、Client間移動や接続回復によるreplayを行わない。待機だけのLLM反復問い合わせを行わない。
 - Scheduleの作成・変更・停止・削除・Run now、保持したtimezoneと次回時刻、各回の新Task、missed・失敗を扱う。毎回の現在の制限を再評価し、停止中の回を自動補完しない。担当Companion削除時はScheduleを削除し、自動引継ぎしない。
-- Task context、Workspace関連付け、作業場所と成果物の保存先確認、中間fileの整理を扱う。許されたWorkspace folderを既定の作業場所とし、永続保存先が未定なら最終保存前にOwnerへ尋ねる。同じfolderを使うTaskも作業状態・承認を共有せず、Task削除ではその関連付けを削除する。
+- Task context、Workspace関連付け、作業場所と成果物の保存先確認、中間fileの整理を扱う。許されたWorkspace folderを既定の作業場所とし、永続保存先が未定なら最終保存前にOwnerへ尋ねる。同じfolderを使うTaskも作業状態・承認を共有せず、Task削除ではその関連付けを削除する。これらを一つのTask状態へ潰さず、Task・Task Agent・Schedule設定・各回・関連付け・外部実体・永続成果物・一時中間fileの区別をStep 4へ渡す。
 
 **Non-responsibilities**
 
@@ -148,7 +148,7 @@ Companionの継続人格、通常会話の占有、永続Learningへの自動昇
 
 **Why this boundary exists**
 
-作業記録はTask Agentの寿命や担当Companionの削除を越えて残り得る。作業管理を個体調整、表示、Tool接続へ吸収すると、この存続と明示再開の契約が失われる。Task・Task Agent・Scheduleは内部で別のlifecycleとして扱うが、別Subsystemへ細分化するだけでは、作業の開始条件、委任境界、判断待ち、結果の責任が受け渡しの連鎖になる。現在のScheduleは各回のTaskを開始する機能であり、独立した汎用workflow製品ではない。
+作業記録はTask Agentの寿命や担当Companionの削除を越えて残り得る。作業管理を個体調整、表示、Tool接続へ吸収すると、この存続と明示再開の契約が失われる。Task・Task Agent・Scheduleは内部で別のlifecycleとして扱うが、別Subsystemへ細分化するだけでは、作業の開始条件、委任境界、判断待ち、結果の責任が受け渡しの連鎖になる。現在のScheduleは各回のTaskを開始する機能であり、独立した汎用workflow製品ではない。ここへの統合は、Task、Task Agent、Schedule設定、Schedule各回として作られるTask、Workspace関連付け、外部Workspace実体、永続成果物、一時中間fileが一つのstateまたはlifecycleであることを意味しない。これらは要件上異なるlifecycle・所有契約を持ち、Step 4では別契約として扱うことを制約とする。
 
 **Runtime relation**
 
@@ -174,7 +174,7 @@ AD-01〜03・08・09・15。要件「Task、Workspace、成果物」「Schedule�
 - Memoryを現在の主要な知識、Skillを再利用手順等、Relationshipを主体Companionごとのcompactな関係解釈、Companion Stateを現在の表現・注意・行動傾向へ反映する内的状態として扱う。後二者を第二のMemoryにせず、事実認識ではMemoryを優先する。
 - Experience Summaryを複数の継続状態に共通利用できる圧縮された根拠として形成・参照する。必要な場合は元のConversation・Task等の大まかなsource範囲へ辿れるようにする。
 - 現在の認識、過去revision、根拠、誤りの訂正と時間的な状況変化を区別する。通常の忘却・訂正・失効等では保存済みLearning・過去revision・根拠を消去しない。
-- Companion／Global scopeの意味判断を扱い、個体由来はCompanionを既定にする。重要度と共有を分け、非共有意図、利用範囲、権限・制約が扱う保存制限を守る。Task限定情報を自動でLearningへ昇格させない。
+- 要件に従ってLearningの内容・由来・scopeを形成・変更する意味上の責任を持つ。Memory・SkillのCompanion／Global scopeはLearningの意味状態の一部であり、その形成・変更の意味判断はここに残る。個体由来はCompanionを既定にし、重要度と共有を分ける。Ownerの明示的な保存禁止・非共有等のcontrol constraintは意味状態とは区別して扱い、権限・制約と各利用箇所の協調による強制に従う。Task限定情報を自動でLearningへ昇格させない。
 - SkillのAgent Skills相互運用、原本保護、変更revision、以前の有効revisionへの復帰、根拠と未検証・成功・失敗の区別を扱う。Workspace内Skillは外部fileとして参照する。
 - 一時的なCompanion Stateと持続的な傾向を区別し、時間経過を考慮した継続・再解釈を扱う。再起動・Client切替・Provider変更で不自然に初期化せず、一時状態の全過去値の恒久保存も要求しない。
 
@@ -184,7 +184,7 @@ Raw Historyの代替保管、一般世界知識の蓄積、Relationshipの対称
 
 **Why this boundary exists**
 
-共通Experienceをどの状態の理解・変化へ用いるかは相互に関係し、認識の訂正と由来説明も同じ責任に属する。各概念を別Subsystemにすると、Summaryの複製や意味判断・scope判断の重複が起きやすい。一方、History保管や個体のその場の応答まで統合すると、原記録と解釈、保存価値と即時の想起が混ざる。内部で各概念の役割・保持契約を保つことが、この統合の条件である。
+共通Experienceをどの状態の理解・変化へ用いるかは相互に関係し、認識の訂正と由来説明も同じ責任に属する。各概念を別Subsystemにすると、Summaryの複製や意味判断・scope判断の重複が起きやすい。一方、History保管や個体のその場の応答まで統合すると、原記録と解釈、保存価値と即時の想起が混ざる。内部で各概念の役割・保持契約を保つことが、この統合の条件である。この統合から、Memory・Skill・Relationship・Companion State・Experience Summaryについて一つのcanonical state、一つのschema、一つのrevision model、一つのretention policy、一律の同時更新を導かない。各概念の既存要件上の意味・scope・lifecycle・根拠関係は維持し、Step 4では別状態として扱うことを制約とする。
 
 **Runtime relation**
 
@@ -192,7 +192,7 @@ Raw Historyの代替保管、一般世界知識の蓄積、Relationshipの対称
 
 **Key collaborations**
 
-個体調整・作業から経験と訂正を受け、利用範囲内の理解・Skill・由来を返す。共有観測には関連付けに必要かつ利用可能な文脈だけを提供する。意味判断は推論を利用し、保存禁止・scope等は権限・制約と協調して適用する。保全・消去へ根拠・派生data・形成中処理の関係を示し、削除前の根拠や遅延結果からの再形成・再保存防止に参加する。
+個体調整・作業から経験と訂正を受け、利用範囲内の理解・Skill・由来を返す。共有観測には関連付けに必要かつ利用可能な文脈だけを提供する。意味判断は推論を利用し、Ownerの明示的な保存禁止・非共有等のcontrol constraintと決定後の迂回不能な適用は権限・制約と各利用箇所の協調に従う。保全・消去へ根拠・派生data・形成中処理の関係を示し、削除前の根拠や遅延結果からの再形成・再保存防止に参加する。
 
 **Traceability**
 
@@ -206,7 +206,7 @@ AD-04〜07・10・12・14・15。要件「Learningと成長」「一続きの会
 
 **Responsibilities**
 
-- Local／Remote Clientの接続、切断、再接続、利用可能な機能を扱う。RemoteではHost側で確認可能なpairing、通信保護、device別の許可・失効の適用を権限・制約と協調する。
+- Local／Remote Clientの接続、切断、再接続、利用可能な機能を扱う。RemoteではHost側で確認可能なpairing、通信保護、device別の許可・失効の適用を権限・制約と協調する。ここでいう適用は、権限・制約が扱う制御契約を存在・接続調停へ反映することであり、device許可の意味・失効範囲自体の正本は移さない。
 - 一つのCompanionにつき同時に一つのactive Clientを維持し、呼出し、明示・事前指示・文脈上の自発移動、切断時の復帰を調停する。通常は現在のClientに留まる。
 - Textを含む入出力roundとClient依存Actionの安全な区切りを関係Subsystemから受け、移動元・移動先の状態を対応付ける。排他性を確認できないClientでは対象の入出力・観測・自発的interaction・Computer Useを継続させない。
 - 切断時は基本的に利用可能なHost PC上のClientへ移動し、利用可能なClient環境がなければactive Clientなしで個体を存続させる。Host側Client環境を自動起動しない。
@@ -252,7 +252,7 @@ Taskの開始条件や成功、Learning形成、Permission承認の妥当性、�
 
 **Why this boundary exists**
 
-提示はdomainの意味をOwnerが扱える形へ変える責任であり、その意味の正本とは異なる。domain判断と結合すると、描画・音声障害やUI変更が継続・権限へ波及する。Body、Text、Voice、各管理画面を別Subsystemへ機械的に分割すると、入力切替や安全操作、失敗説明を重複させる。ただし同じ責務にまとめても、Body・Voice・Tool UIの障害がTextや管理へ波及しない内部の分離は必要である。
+提示はdomainの意味をOwnerが扱える形へ変える責任であり、その意味の正本とは異なる。domain判断と結合すると、描画・音声障害やUI変更が継続・権限へ波及する。Body、Text、Voice、各管理画面を別Subsystemへ機械的に分割すると、入力切替や安全操作、失敗説明を重複させる。ただし同じ責務にまとめても、Body・Voice・Text・第一者管理・安全操作・MCP Apps等の外部Tool UIを一つのstate、trust level、failure domainとして扱わない。Step 4への制約として、Body・Voice・外部Tool UIの障害がTextや管理操作を塞がないこと、Client上の表示copyがHost canonical stateにならないこと、操作要求を受け付けたこと・処理が完了したこと・結果が不明であることを混同しないこと、MCP Apps等の外部UIを第一者Control planeへ昇格させないことを保つ。Subsystem分割は行わない。
 
 **Runtime relation**
 
@@ -343,7 +343,7 @@ AD-01・05・06・10・11・13・14。要件「所有と実行」「Provider、�
 
 - Filesystem、Network、shell、device、外部account等へのActionを、目的・対象・操作・data・送信先に対応する現在の制限内で実行する。Filesystemでは操作種別と選択範囲を守り、path traversal・link・mount等からの境界外accessを拒否する。
 - 実行された作用、未完了、成功不明、停止できなかった処理を利用元へ返す。停止要求の受付と外部作用の停止完了を分け、別Tool・Client・経路への自動再実行で不明を解消しない。
-- Computer Useを委任元Companionの現在のactive Clientへ限定し、device別の許可と通常のPermissionを適用する。移動の安全な区切りと切断時のbest-effort停止を接続・存在へ伝える。
+- Computer Useを委任元Companionの現在のactive Clientへ限定し、device別の許可と通常のPermissionを適用する。ここでいう適用はAction実行時に現在の条件を適用した結果であり、許可の意味自体は権限・制約に残る。移動の安全な区切りと切断時のbest-effort停止を接続・存在へ伝える。
 - MCP Tool／Resource／Promptの接続・利用・結果受入を扱う。Host上の作業用Local MCPはHost側の既定sandboxを使い、明示的な特定MCPの例外以外に黙って解除しない。
 - Pluginを限定された拡張点へ受け入れ、利用機能と協調して外部codeの実行範囲・停止・障害を扱う。外部codeを第一者の正本・Control planeへ昇格させない。
 - MCP Appsのresource・操作とMCP側の作用を、入出力・提示と協調して制限する。Tool UI終了とserver・Task・Actionの終了を区別する。
@@ -376,10 +376,10 @@ LLMの文脈判断を利用しつつ、Ownerに由来する許可・同意と機
 
 **Responsibilities**
 
-- Capability境界、Permission、永続Deny・Always ask、Rule、deviceごとの許可機能、Provider割当同意、承認済みfallback、費用・資源上限を扱う。異なる許可を一つの包括承認へ潰さない。
+- Capability境界、Permission、永続Deny・Always ask、Rule、deviceごとの許可機能、Provider割当同意、承認済みfallback、費用・資源上限を扱う。異なる許可を一つの包括承認へ潰さない。deviceについては、Ownerに由来するdeviceごとの許可機能・失効等の制御状態を扱い、active Client・Companion存在場所等の帰属状態や実際のActionでの適用結果とは区別する。
 - Ownerの現在の依頼を一回の承認として解釈できる範囲と、将来Ruleの保存を区別する。Ruleの解釈・適用範囲表示、Undo、曖昧・矛盾・重大な場合の確認を支える。既存の依頼・同意・Ruleを適用できる場合に再確認を要求しない。
 - 意味判断の責務から目的・対象・data・送信先・外部作用の解釈を受け、実際の利用との対応、必要な再評価、Owner判断待ちを扱う。LLM出力や取り込んだcontentを、Ownerに由来する制御変更として直接受け入れない。
-- 明示的な保存禁止・非共有意図を解釈した後の制限、決定したscope、個体・Taskの利用範囲を、保存・参照・共有の各責務と協調して適用する。
+- Ownerの明示的な保存禁止・非共有等のcontrol constraintと、一度決定したscopeや明示的制約を参照・共有・形成・Action等の別経路が迂回しないよう強制することを、保存・参照・共有・実行の各利用箇所との協調として扱う。Learningの意味状態としてのscopeそのものの形成・変更は認識・学習に残り、ここでは所有しない。Learningや外部Prompt等が自身の内容だけからRule、Permission、Provider同意、費用cap等を変更できないことを、各利用箇所との協調で保つ。具体的な依存方向・API・制約表現はStep 5へ残す。
 - 権限失効、Companion停止、device失効、cap到達等に対応する新規利用の禁止と進行中処理への停止要求を関係責務へ結び付ける。委任による権限・費用・再帰・loop・並列性等の制限回避を許さない。
 - 費用情報が不明で安全に続行できない場合も、既存dataを保って対象処理を停止し、Ownerへ選択肢を示す。上限の適用を既知の外部作用の取消成功やdata破棄へ置き換えない。
 - Local MCPの特定のsandbox外例外の明示許可、説明、失効、重要変更時の再確認を扱う。例外を個々のAction承認やPluginへの例外に転用しない。
@@ -390,7 +390,7 @@ Ruleをtriggerにして活動を始めること、MemoryやRelationshipの意味
 
 **Why this boundary exists**
 
-制約が依頼・自発性・Schedule・委任・拡張ごとに独立すると、別経路での迂回や再承認の不一致を生む。一方、個体の意味判断と一体化すると、認識や親密さの変化が権限の変更になる。ここへまとめる理由は共通のOwner由来の制御契約にあり、秘密保護、消去、実行機構まで一つに集めるためではない。Permission、同意、上限は内部で別の意味・失効範囲を維持する。
+制約が依頼・自発性・Schedule・委任・拡張ごとに独立すると、別経路での迂回や再承認の不一致を生む。一方、個体の意味判断と一体化すると、認識や親密さの変化が権限の変更になる。ここへまとめる理由は共通のOwner由来の制御契約にあり、秘密保護、消去、実行機構まで一つに集めるためではない。Permission、同意、上限は内部で別の意味・失効範囲を維持する。deviceの制御契約は権限・制約が扱い、接続・存在はそれを存在・接続調停へ反映し、実行・拡張はAction実行時に現在の条件を適用するという責務差であり、Step 4のstate representationやStep 5の依存方向・APIの完成ではない。「意味を決める責任」と「決定された条件を強制する責任」を分け、前者は目的を持つ判断責務（認識・学習を含む）に、後者は権限・制約と各利用箇所の協調に置く。
 
 **Runtime relation**
 
@@ -440,7 +440,7 @@ AD-06・10・11・14・15。要件「Credential」「信頼境界」「Local dat
 
 **Purpose**
 
-内部data全体の保全・保持変更・消去・復元について、局所処理の成功を全域の成功と取り違えず、Ownerへ影響と成立状況を説明可能にする。
+内部data全体の保全・保持変更・消去・復元について、局所処理の成功を全域の成功と取り違えず、Ownerへ影響と成立状況を説明可能にする。本Subsystemはcross-domain coordinatorであり、全domain stateのsemantic owner、唯一のwriter、一つのPersistence owner、一つのlifecycle、一つのtransactionではない。通常時の意味上の責任は各domain responsibilityに残る。backup・restore・reset・retention・targeted deletion等の横断操作について、各責務の参加を調整し、全体としての成立・完了を確認する。
 
 **Responsibilities**
 
@@ -455,11 +455,11 @@ AD-06・10・11・14・15。要件「Credential」「信頼境界」「Local dat
 
 **Non-responsibilities**
 
-すべての状態の意味決定、唯一の保存writer、DB・repositoryの一元所有は決めない。通常の学習更新、Action結果の判定、外部copy・外部Workspace fileの消去、外部作用のrollbackは担当しない。Targeted deletionを通常忘却や一般的な状態editorに転用しない。保存されたRule・同意の復元は自動処理の開始許可ではない。
+全domain stateのsemantic owner、唯一のwriter、一つのPersistence owner、一つのlifecycle、一つのtransactionにはならない。通常時の意味上の責任（会話記録の意味は個体調整、作業記録は作業、学習の意味は認識・学習、秘密は認証秘密、制御条件は権限・制約）は各domain responsibilityに残り、すべての状態の意味決定、唯一の保存writer、DB・repositoryの一元所有は決めない。通常の学習更新、Action結果の判定、外部copy・外部Workspace fileの消去、外部作用のrollbackは担当しない。Targeted deletionを通常忘却や一般的な状態editorに転用しない。保存されたRule・同意の復元は自動処理の開始許可ではない。
 
 **Why this boundary exists**
 
-消去・backup・restoreは一つのdomainの範囲では完結せず、全域の対象・除外・進行中処理と完了根拠を対応付ける責任がある。これらの操作に共通するのは、内部dataの範囲と現在の利用を各意味責務に照合し、正常状態と操作後の成立状況を確かめる責任である。局所保存機能へ分散するだけでは対象漏れや再保存を見落とす。逆に、全dataの意味と更新まで統合すると巨大なdomain兼storage責務になる。目的別の契約は別に保ち、独立した汎用History製品・backup基盤・削除基盤へは拡大しない。
+消去・backup・restoreは一つのdomainの範囲では完結せず、全域の対象・除外・進行中処理と完了根拠を対応付ける責任がある。これらの操作に共通するのは、内部dataの範囲と現在の利用を各意味責務に照合し、正常状態と操作後の成立状況を確かめる責任である。局所保存機能へ分散するだけでは対象漏れや再保存を見落とす。逆に、全dataの意味と更新まで統合すると巨大なdomain兼storage責務になる。この統合から、全domainの意味上の所有、一つの保存単位、一つのlifecycle、一つのtransactionを導かない。backup scheduleとTask Schedule、History保持とAudit保持、通常削除とtargeted deletion等の目的別の所有差は別に保ち、独立した汎用History製品・backup基盤・削除基盤へは拡大しない。
 
 **Runtime relation**
 
@@ -506,17 +506,17 @@ AD-01・04・05・07〜09・14・15。要件「履歴、保持、Privacy」「�
 | 判断 | 分離・統合の理由と、残す区別 |
 |---|---|
 | Companionの個体調整と作業遂行を分離 | 依頼を受け、委任・steering・結果統合をする中心と、一時主体が長い作業を遂行する責任は異なる。軽微な処理は本体が行え、すべての判断をTask Agent化しない。単なる二種類のAgent loopの区別ではない。 |
-| Task・Task Agent・Scheduleを作業内に統合 | 共通の責任は、担当・制限・結果を持つ作業の開始と遂行である。Task記録は実行主体の終了後も残り、Scheduleは回の前後を越えて存続し、各回は新Taskになる。Scheduleのtimezone・missed・CRUDをTaskの進捗へ潰さず、一つのAgent停止をTask記録削除にしない。内部の実行・状態管理方法は共通化必須ではない。 |
+| Task・Task Agent・Scheduleを作業内に統合 | 共通の責任は、担当・制限・結果を持つ作業の開始と遂行である。Task記録は実行主体の終了後も残り、Scheduleは回の前後を越えて存続し、各回は新Taskになる。Scheduleのtimezone・missed・CRUDをTaskの進捗へ潰さず、一つのAgent停止をTask記録削除にしない。内部の実行・状態管理方法は共通化必須ではない。この統合は一つのstateまたはlifecycleを意味しない。Task、Task Agentという一時的な実行主体とその委任、Schedule設定、Schedule各回として作られるTask、Workspace関連付け、外部Workspace実体、永続成果物、一時中間file、保存先未定時の確認は要件上異なるlifecycle・所有契約を持ち、Step 4では別契約として扱う。同じSubsystem内を一つの型・保存単位・実行loop・障害単位へまとめる根拠にしない。 |
 | Scheduleをすべての時刻待ちへ一般化しない | 製品のScheduleは担当Companionと各回のTaskを持つ。観測のCapture時機は共有観測、backupのschedule・保持数は保全・消去の責任に置く。共通の時計や待機機構は後続で選べるが、backupへ未要求の担当CompanionやTask化を課さない。 |
 | Characterと個体・学習を分離 | 配布可能な静的構成の変更は、Ownerとの経験の形成・訂正とは異なる。個体の成長をPackageへ含めず、Package更新を個体の初期化にしない。資材種別ごとの独立Subsystemは不要。 |
-| Memory・Skill・Relationship・Companion State・Summaryを認識・学習に統合 | 共通経験に基づく形成・訂正と根拠説明が中心であり、概念の数だけ独立した形成主体を作らない。知識と手順、関係と内的状態、現在認識と圧縮根拠、個体scopeとGlobal、恒久revisionと一時状態は別契約として残す。共通schema・同時更新・一律の保持期間は導かない。 |
+| Memory・Skill・Relationship・Companion State・Summaryを認識・学習に統合 | 共通経験に基づく形成・訂正と根拠説明が中心であり、概念の数だけ独立した形成主体を作らない。知識と手順、関係と内的状態、現在認識と圧縮根拠、個体scopeとGlobal、恒久revisionと一時状態は別契約として残す。一つのcanonical state、一つのschema、一つのrevision model、一つのretention policy、一律の同時更新は導かない。各概念の既存要件上の意味・scope・lifecycle・根拠関係は維持し、Step 4では別状態として扱う。概念ごとのSubsystem分割は行わない。 |
 | 原履歴を独立した「全活動の正本Subsystem」にしない | 会話の発言・参加者は個体調整、作業の進捗・作用は作業等の責任から記録される。Summaryの形成や一般的な保全・保持管理と、記録内容の意味は分ける。全Raw dataを一つのHistoryへ蓄積する必要もない。 |
 | 存在調停と提示を分離し、Host／Client別には分割しない | 排他性は入力、Body、観測、Computer Useを横断するdomain上の制約で、画面状態ではない。提示はOS・device・言語・縮退に責任を持つ。双方ともHost／Clientの協調を持ち得るが、Client正本やRemote用の重複domainを作らない。 |
-| Body・Voice・Textを入出力・提示へ統合 | 同じ個体の入出力切替、状態説明、安全操作、代替経路を一つの体験責任に置く。BodyとVoiceの独立した失敗・停止は保ち、同じSubsystemを一つの障害単位にしない。MCP Appsはこの責務が提示しても、外部code・UIのtrust boundaryを維持する。 |
+| Body・Voice・Textを入出力・提示へ統合 | 同じ個体の入出力切替、状態説明、安全操作、代替経路を一つの体験責任に置く。BodyとVoiceの独立した失敗・停止は保ち、同じSubsystemを一つの障害単位・一つのtrust level・一つのstateにしない。Body・Voice・外部Tool UIの障害がTextや管理操作を塞がず、Client上の表示copyをHost canonical stateにせず、受付・完了・不明を混同せず、MCP Apps等の外部UIを第一者Control planeへ昇格させないことをStep 4への制約とする。MCP Appsはこの責務が提示しても、外部code・UIのtrust boundaryを維持する。 |
 | 共有観測と個体の自発性・Computer Useを分離 | Capture・関連付けはClient単位、自発判断・抑制は個体単位、Computer UseはTask等のAction制約を持つ。画面取得技術を共用できても、制御scope、利用目的、Permission、記録を統合しない。 |
 | 推論とAction実行を分離し、adapter別には分割しない | 推論の能力・context・fallbackと、作用の対象・停止・成功不明は異なる契約である。Provider・MCP・Pluginという名称だけを分割理由にせず、限定拡張の受入は実行・拡張、拡張される機能の意味は各利用元へ置く。 |
-| 意味判断、権限・制約、認証秘密を分離 | 解釈や学習済み内容が許可・同意を自己変更せず、認証に必要な秘密も説明やLLMへ流れない。権限・制約は全実行経路の契約をまとめるが、強制箇所は各利用責務にも必要。 |
-| 保全・消去を独立させ、全状態の意味やwriterは集めない | 全域消去と復元には、各保存対象・処理中利用からの完了根拠が必要。専門の協調責任を置いて局所完了と全体完了を区別する。保持・消去・restoreは目的が異なり、この統合から一律cascadeや一つのtransactionを導かない。 |
+| 意味判断、権限・制約、認証秘密を分離 | 解釈や学習済み内容が許可・同意を自己変更せず、認証に必要な秘密も説明やLLMへ流れない。権限・制約は全実行経路の契約をまとめるが、強制箇所は各利用責務にも必要。Learningの内容・由来・scopeの形成・変更の意味責任は認識・学習に残し、権限・制約がその意味自体を所有しない。一度決定したscopeや明示的制約の迂回不能な強制は権限・制約と各利用箇所の協調に属し、具体的な依存方向・API・制約表現はStep 5へ残す。 |
+| 保全・消去を独立させ、全状態の意味やwriterは集めない | 全域消去と復元には、各保存対象・処理中利用からの完了根拠が必要。専門の協調責任（cross-domain coordinator）を置いて局所完了と全体完了を区別する。通常時の意味上の責任は各domain responsibilityに残し、保全・消去はbackup・restore・reset・retention・targeted deletion等の横断操作について各責務の参加を調整し全体の成立・完了を確認する。保持・消去・restoreは目的が異なり、この統合から全domainの意味上の所有、唯一のwriter、一つのPersistence owner、一つのlifecycle、一つのtransaction、一律cascadeを導かない。 |
 
 ## 6. Cross-cutting Responsibilities
 
@@ -524,7 +524,7 @@ AD-01・04・05・07〜09・14・15。要件「履歴、保持、Privacy」「�
 
 | 責務 | この工程での扱い | 次工程に残す点 |
 |---|---|---|
-| Permission・同意・scope・失効 | 独立した権限・制約と、実行・送信・参照・保存箇所での適用の協調。自然言語解釈は目的を持つ判断責務に残す。 | 制御変更の由来、現在の有効条件、変更中・失効中の利用との整合性、すべての経路が制約へ接続する依存。 |
+| Permission・同意・scope・失効 | 独立した権限・制約と、実行・送信・参照・保存箇所での適用の協調。自然言語解釈は目的を持つ判断責務に残す。Learningの内容・由来・scope形成の意味責任は認識・学習に残し、決定後の迂回不能な適用は権限・制約と各利用箇所の協調に置く。deviceの制御状態（権限・制約）、帰属への反映（接続・存在）、実行時の適用結果（実行・拡張）を混同しない。 | 制御変更の由来、現在の有効条件、変更中・失効中の利用との整合性、すべての経路が制約へ接続する依存。state representationと厳密な依存方向・APIはStep 4・5へ残す。 |
 | Credentialと秘密の非露出 | 認証秘密を独立させる。推論、実行、提示、記録、Debug captureも値を通常dataへ出さない。登録外の秘密は検出時の不要な保存・送信抑制と失効・更新案内を分担し、完全検出を保証しない。 | 認証用途への受渡しと通常result経路の依存分離。秘密を含まない参照・診断情報の所属。 |
 | Targeted deletion | 保全・消去が全域の対象・影響・完了を協調し、全参加先が局所消去、処理中利用・遅延結果の無効化、検証へ参加する。局所Subsystemだけでは完結しない。 | 根拠・派生物の追跡、再保存防止、接続中Clientを含む完了根拠と再起動後の未完了操作。 |
 | 保存・backup・restore・Reset | 保全・消去の協調責任と各状態の意味を分ける。Credential除外、外部file非所有、復元後保留、設定Resetの保護範囲を維持する。 | 状態の整合範囲と、保存された設定／現在の実行可能性の区別。具体transactionはここで固定しない。 |
@@ -540,7 +540,7 @@ AD-01・04・05・07〜09・14・15。要件「履歴、保持、Privacy」「�
 
 ## 7. State Ownership Questions for Step 4
 
-以下は責務境界を成立させるための問いであり、特定のwriterや保存単位の回答ではない。Host正本、Client非正本、外部所有物の非所有は既決事項として扱う。
+以下は責務境界を成立させるための問いであり、特定のwriterや保存単位の回答ではない。Host正本、Client非正本、外部所有物の非所有は既決事項として扱う。F-07〜F-13のState Ownership Riskはpre-state-ownership-review.mdに残し、本節の問いと併せてStep 4への入力とする。ここではownershipの答えを決めない。
 
 | 問い | 関係する境界と、明確化が必要な理由 |
 |---|---|
@@ -559,9 +559,9 @@ AD-01・04・05・07〜09・14・15。要件「履歴、保持、Privacy」「�
 
 ## 8. Dependency Questions for Step 5
 
-ここでは厳密な依存方向、許可API、参照interfaceを完成させない。次の問いへの回答で、既決のtrust boundaryと本書のcollaborationを両立させる。
+ここでは厳密な依存方向、許可API、参照interfaceを完成させない。次の問いへの回答で、既決のtrust boundaryと本書のcollaborationを両立させる。F-07〜F-13の扱いはStep 4へ残し、ここでは依存の答えを先取りしない。
 
-- **意味判断から制御変更へ何を渡せるか。** 個体調整・作業・学習・観測の解釈と、Ownerに由来する管理操作をどう区別するか。保存されたLearningや外部Promptから、Rule・同意・Credential・capへ直接到達できない関係が必要になる。
+- **意味判断から制御変更へ何を渡せるか。** 個体調整・作業・学習・観測の解釈と、Ownerに由来する管理操作をどう区別するか。Learningの内容・由来・scope形成の意味責任は認識・学習に残すことを前提に、保存されたLearningや外部Promptから、Rule・同意・Credential・capへ直接到達できない関係が必要になる。具体的な依存方向・API・制約表現はここでは完成させない。
 - **各利用経路はどう現在の制約へ結び付くか。** Task Agent、軽微な本体処理、Schedule、共有観測、Provider fallback、MCP Apps、Client側の経路でも、scope・Deny・費用・device失効を迂回しない参照と適用をどう成立させるか。一つの中央呼出し列の採用を答えとして先取りしない。
 - **何を基準にClient依存を限定するか。** 作業は接続・存在のどの情報を必要とし、どの情報を必要としないか。Computer Useはactive Clientと安全な区切りへ結び付け、通常のHost作業はClient表示の成功に依存させない関係が必要になる。
 - **停止・管理・復旧はどの成功から独立するか。** Body・Voice・推論・Task Agent・MCP Appsの終了待ちをせず、OwnerのCancel、承認拒否、停止、保存済みdata確認へ到達する関係をどう構成するか。Companion削除後のTask管理経路も含む。
