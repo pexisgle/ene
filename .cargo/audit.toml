@@ -1,0 +1,29 @@
+# RustSec audit suppressions.
+#
+# Each `ignore` entry below is an *informational* "unmaintained" advisory for a
+# transitive dependency reachable only via `slint 1.17` (the latest release).
+# None has an upstream fix we can adopt without forking/patching third-party
+# crates, which we deliberately avoid. Re-check on every Slint upgrade and drop
+# the entry once the crate disappears from `cargo tree`.
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0206: `rustybuzz` is unmaintained.
+    # Path: rustybuzz <- usvg/resvg 0.47 <- slint 1.17 <- ene-stage/ene-stage-ui.
+    # Fix is upstream: resvg 0.48 migrated text shaping to `harfrust`
+    # (and font parsing to `skrifa`, which also resolves RUSTSEC-2026-0192).
+    # Unblocks when Slint bumps resvg to >= 0.48.
+    "RUSTSEC-2026-0206",
+    # RUSTSEC-2026-0192: `ttf-parser` is unmaintained.
+    # Path: ttf-parser <- fontdb/rustybuzz/usvg 0.47 <- resvg 0.47 <- slint 1.17.
+    # Same upstream fix as above (resvg 0.48 -> skrifa). Previously filed as
+    # #1293 and closed without a fix, so it would be re-filed without this.
+    "RUSTSEC-2026-0192",
+    # RUSTSEC-2024-0436: `paste` is unmaintained.
+    # Path: paste <- pulp/exr/image and rav1e/ravif/image <- i-slint-compiler
+    #   <- slint 1.17. Upstream needs to migrate to `pastey` or equivalent.
+    "RUSTSEC-2024-0436",
+    # RUSTSEC-2025-0141: `bincode` (2.x) is unmaintained.
+    # Path: bincode <- typed-index-collections <- i-slint-compiler <- slint 1.17.
+    # Upstream needs to migrate to `postcard`/`bitcode`/etc.
+    "RUSTSEC-2025-0141",
+]

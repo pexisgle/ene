@@ -108,7 +108,7 @@ toml = "0.8"
 slint = { version = "~1.17", default-features = false, features = ["std", "compat-1-2", "renderer-femtovg-wgpu", "unstable-wgpu-29"] }
 slint-build = { version = "~1.17" }
 htmd = "0.5"
-scraper = "0.23"
+scraper = "0.27"
 diffy = "0.4"
 globset = "0.4"
 ignore = "0.4"
