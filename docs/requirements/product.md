@@ -1,7 +1,7 @@
 # 製品定義
 
 状態: **再構成済みBaseline**
-最終確認: 2026-09-06
+最終確認: 2026-09-07
 
 ## 製品の要約
 
@@ -24,7 +24,7 @@ eneはCompanionを体験上の中心に置くが、汎用作業Agentとしての
 
 Characterを基に作られ、Memory、Relationship、Companion State、設定をExperienceから形成する継続的な個体。同じCharacterから作ったCompanionも別個体である。
 
-基本的に同時に一つのClientへ存在し、Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useがその存在場所に結び付く。必要に応じてClient間を移動できる。active Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わず、伝えられなかった事項は次に移動したClientでまとめて報告する。Ownerとの継続的な会話、判断、Taskの開始・委任・調整、steering、結果の受領・統合の中心であり、多数のまとまった実作業を本体で直接抱えることを基本にしない。
+Running Companionは基本的に同時に一つのClientへ存在し、Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useがその存在場所に結び付く。必要に応じてClient間を移動できる。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わず、伝えられなかった事項は次に移動したClientでまとめて報告する。Stopped Companionはデータを保持して再開できるが、どのClientにもHostにもpresenceを持たない。Ownerとの継続的な会話、判断、Taskの開始・委任・調整、steering、結果の受領・統合の中心であり、多数のまとまった実作業を本体で直接抱えることを基本にしない。
 
 ### Character
 
@@ -46,7 +46,7 @@ CompanionからTaskまたはその一部を委任された一時的な実行主�
 
 ### ObservationとObserver
 
-ObservationはClientの画面やComputerの操作状況を観測する活動である。Observerは、そのCapture・候補検知をClient単位で共有し、文脈上関係がありそうなCompanionへeventを伝える役割を指す。Companionごとの自発性とは異なる制御単位であり、専用processや内部subsystemを意味しない。
+ObservationはClientの画面やComputerの操作状況を観測する活動である。ObserverはClientに紐づく特殊な共有主体であり、専用のmodel／Provider assignmentの下でCapture・候補検知を共有し、文脈上関係がありそうなCompanionへeventを伝える役割を指す。CompanionやTask Agentではなく、Companionごとの自発性・Provider overrideとは異なる制御単位である。専用processや内部subsystemを意味しない。
 
 ### Workspace
 

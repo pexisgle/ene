@@ -1,12 +1,14 @@
 # System Context
 
-対象: [要件Baseline](../requirements/README.md)（最終確認 2026-09-06）と[Architecture Drivers](architecture-drivers.md)。本書はEneの製品責任と外部環境の境界を決定する。実行配置は[Runtime Topology](runtime-topology.md)で扱い、内部subsystemや実装構造は定めない。
+対象: [要件Baseline](../requirements/README.md)（2026-09-07のOwner decisions反映済み）と[Architecture Drivers](architecture-drivers.md)。本書はEneの製品責任と外部環境の境界を決定する。実行配置は[Runtime Topology](runtime-topology.md)で扱い、内部subsystemや実装構造は定めない。
 
 ## Overview
 
 Eneは、一人のOwnerに属する、継続的なCompanionと実作業のためのシステムである。Owner管理Host上のCoreと、そのHostへ接続する第一者Clientを、一つのEneの内側に置く。Companionは外部の利用者や独立したCloud Agentではなく、Eneが個体性と継続状態を管理する主体である。
 
 この境界はPCやprocessの境界とは一致しない。Clientが別PCにあってもEneの一部であり、Host上にある外部Provider、MCP、Workspace fileは、その所在だけを理由にEne内部へ含めない。Eneは内部状態、実行許可、送信同意とOwnerへの説明に責任を持つが、外部サービスの状態、外部fileの所有、実行済みの外部作用を支配しない。
+
+本書のClient不在時のCompanion活動継続はRunning個体に限る。Stopped Companionはactive Clientを持たず、ClientにもHostにもpresenceがなく、Observer対象人数にも数えない。Hostに保持される個体dataや復帰候補は現在のpresenceではない（SC-02）。
 
 推論をHost、LAN、Cloudへ配置できても、Eneの正本と継続実行の責任はHostから移らない。身体・入出力の場所の切替、推論先の変更、Clientや拡張の障害を、同じCompanionの消失や作業記録の喪失に結び付けないことが中心となる。
 
@@ -23,6 +25,8 @@ Eneは、一人のOwnerに属する、継続的なCompanionと実作業のため
 | 外部形式の受入・出力、拡張の接続と制限 | MCP、MCP Apps、Agent Skills、VRM 1.0との相互運用、Local MCPの既定sandbox、限定されたPlugin拡張点はEne側の責任である。外部codeやcontentそのものを第一者の制御権限へ取り込むことは意味しない。 |
 
 一般App DataはHostのOwnerのOS accountだけが扱える領域に置き、登録済みCredentialはそれと分離して保護する。この保護範囲は保存先の製品契約であり、DB、暗号方式、専用storage serviceの指定ではない。
+
+個体削除後も、一対一・グループ・Companion間交流のHistory、Task記録、保存された非会話活動記録はEne内部のhistorical recordとして残る。通常保持・backup・targeted deletionの責任は維持し、個体固有のMemory／Learning・Summary・Relationship・Companion Stateの削除とは分離する（SC-06・07）。
 
 ### Eneの外側に残すもの
 
@@ -81,6 +85,8 @@ flowchart LR
 
 Host／ClientのOS・deviceはEneを動かす側、第一者ClientはEneそのものの一部である。外部拡張がHost内で実行される場合も、そのcodeの信頼境界は図の外側に残る。Companion間交流は同じEne内部の関係であり、別system間の連携として描かない。
 
+ObserverもClientに紐づくEne内部の特殊な共有主体であり、独立Companion・Task Agent・外部actorではない。Observer専用model／Provider assignmentを使い、Companion overrideは適用しない。delivery後の個体reasoningは各Companion設定に従う。共有検知にもCloud送信同意・privacy・費用制約を適用し、共有による同意拡張を認めない（SC-03・04）。
+
 ## Boundary Invariants
 
 SC番号は本設計内の判断を参照するための識別子であり、新たな要件IDではない。Driverの詳細な要件根拠は[Architecture Drivers](architecture-drivers.md)を参照する。
@@ -88,7 +94,7 @@ SC番号は本設計内の判断を参照するための識別子であり、新
 | 判断 | 後続設計で維持するinvariant | 根拠 |
 |---|---|---|
 | **SC-01: 一環境・一Owner・Host正本** | 第一者Clientを含む一つのEneとして提供するが、ClientやCloudを独立した正本にしない。Client不在でも、Schedule起動および継続中の許可済みHost上のTask・Schedule・保存を継続する。Clientがないために伝えられなかった事項は、次に移動したClientでまとめて報告する。 | AD-01・09／[製品定義](../requirements/product.md)「利用者と実行場所」、[要件](../requirements/requirements.md)「所有と実行」「Remote Client」 |
-| **SC-02: 個体・存在場所・作業の区別** | 同一Character由来でも個体を混同しない。Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useを、一個体につき一つのactive Clientへ結び付ける。active Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。Companion間交流、通知の生成、Clientを必要としない内部調査は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。active Clientに属する身体・入出力・操作対象の移動を個体の複製やHost上の通常Taskの所有移転にしない。別ClientからのText会話は呼出し・移動を経る。Companionの削除では内部Companion scope Skillを過去revisionを含めて削除し、Globalへの自動昇格を行わない。まとまった作業は基本的にTaskとして扱い、原則としてTask Agentへ委任する。TaskとTask Agentは区別する。 | AD-02・03・04・08・09・12／要件「CompanionとCharacter」「Remote Client」「Task」「Computer Use」「Observationと自発性」 |
+| **SC-02: 個体・存在場所・作業の区別** | 同一Character由来でも個体を混同しない。Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useを、一個体につき一つのactive Clientへ結び付ける。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。Companion間交流、通知の生成、Clientを必要としない内部調査は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。active Clientに属する身体・入出力・操作対象の移動を個体の複製やHost上の通常Taskの所有移転にしない。別ClientからのText会話は呼出し・移動を経る。Companionの削除では内部Companion scope Skillを過去revisionを含めて削除し、Globalへの自動昇格を行わない。まとまった作業は基本的にTaskとして扱い、原則としてTask Agentへ委任する。TaskとTask Agentは区別する。 | AD-02・03・04・08・09・12／要件「CompanionとCharacter」「Remote Client」「Task」「Computer Use」「Observationと自発性」 |
 | **SC-03: 制御権限とcontentの境界** | 外部content、推論結果、Character、内部Learning・関係・状態も制御権限を直接変更できない。自発性・Schedule・委任・拡張を通じたPermission、Deny、費用・資源制限の迂回を許さない。Observerの共有検知・routingによる同意の拡張も許さない。単一Ownerでも個体固有状態の利用範囲を守る。 | AD-04・06・12／要件「Permissionと安全境界」「Learningと成長」「Observationと自発性」 |
 | **SC-04: 外部送信と認証の限定** | Providerの所在地や登録済み接続を同意と同一視しない。割当同意・承認済みfallback内でのみ送信し、認証用Credentialの利用をmodel contextや通常resultへの露出から分ける。Provider変更でEneの継続状態を分断したり、利用可能な情報を意図的に差別化したりしない。 | AD-10・14／要件「Provider、費用、接続障害」 |
 | **SC-05: 外部codeの限定的な参加** | MCP・MCP Apps・Agent Skills・VRM 1.0を採用し、Pluginを限定された拡張点に置く。Local MCPのsandbox例外は明示的かつ失効可能な個別許可であり、Action承認でも汎用Plugin例外でもない。外部Tool UIを第一者の管理権限へ昇格させず、受入後もEne管理下のdataには内部Privacy契約を適用する。 | AD-06・07・11・14／要件「拡張」「信頼境界」「履歴、保持、Privacy」 |

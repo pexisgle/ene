@@ -1,6 +1,6 @@
 # Ene Architecture Drivers
 
-分析対象: `docs/requirements/` の再構成済みBaseline（最終確認 2026-09-06）。本書は要件から設計上の重要性を導出する分析であり、新たな製品要件や具体的なarchitectureの決定ではない。
+分析対象: `docs/requirements/` の再構成済みBaseline（2026-09-07のOwner decisions反映済み）。本書は要件から設計上の重要性を導出する分析であり、新たな製品要件や具体的なarchitectureの決定ではない。
 
 ## 1. Overview
 
@@ -11,6 +11,8 @@ Eneのarchitectureを最も強く形作るのは、**Owner管理Hostを正本と
 さらに、Client不在でも進む作業と、一つのactive Clientにだけ存在する身体・Voice・Observationを両立する必要がある。Provider、Body、Voice、拡張等の変動や障害に対しても、同意、安全判断、保存済み状態、Ownerの停止・復旧手段を維持する。これらが、後続の実行配置、責務境界、状態所有、依存方向を判断する主な軸になる。
 
 本書では、独立して破ることができ、異なる設計判断へ影響する契約をDriverの単位とした。AD番号は本書内の参照用であり、要件IDやsubsystem名ではない。各Driverを一つのmoduleや永続化単位に対応させることも要求しない。
+
+本書のClient不在時の活動継続・自発復帰はRunning Companionについての契約である。Stopped CompanionはどのClientにもHostにもpresenceを持たず、保存された個体dataはpresenceではない。停止時の活動禁止・best-effort CancelをClient非依存という理由で緩めない。
 
 根拠の扱いは次のとおりである。
 
@@ -46,7 +48,9 @@ Host正本、Clientへの必要最小限の一時data、LANまたはOwner管理V
 
 **Driver**
 
-一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientに結び付く。Companionは通常は現在のClientに留まり、別Clientから会話・操作するにはそのClientへの呼出し・移動を経る。移動時には入出力roundを安全に区切り、両Clientに状態を示し、同じ個体を同時に二か所へ存在させない。active Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。通常のHost上のTask、Task Agent、Scheduleはその移動とは独立して継続でき、作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。
+Running Companionのactive Clientは同時に一つまでとする。Stopではactive帰属を解除し、どのClientにもHostにもpresenceを残さない。Body・通常interaction・Computer Use対象・自発活動はなく、Observer対象人数にも数えない。最後のClient等は再配置hintとして保持でき、Resumeで適切なClientへ再配置できるが、配置algorithmは固定しない。Running個体のdisconnect時のHost PC側Clientへの移動とは区別する。
+
+一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientに結び付く。Companionは通常は現在のClientに留まり、別Clientから会話・操作するにはそのClientへの呼出し・移動を経る。移動時には入出力roundを安全に区切り、両Clientに状態を示し、同じ個体を同時に二か所へ存在させない。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。通常のHost上のTask、Task Agent、Scheduleはその移動とは独立して継続でき、作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。
 
 **Requirements basis**
 
@@ -89,7 +93,9 @@ Characterは配布可能な静的な出発点であり、Companionは経験に�
 
 Global化は明示的な共有依頼、または共通利用すべきことが内容と文脈から明確な場合に限る。重要度や有用性はGlobal化の十分条件ではない。Relationshipは主体Companionごとの相手への認識であり、別個体へ共有せず、相互の認識を自動的に同一・対称にしない。グループ参加も他個体の私的状態へのaccessを与えない。
 
-Companion削除時は、そのCompanionを主体または相手とするRelationshipを削除する。ene内部のCompanion scope Skillは過去revisionを含めて削除し、削除を契機とするGlobal scopeへの自動昇格は行わない。他Companionも利用する共有Experience Summary等を残す場合は、残る情報と参照不能になる情報を削除前に示す。Global scopeのSkillを含むLearning、グループ発言、共同Task記録、Workspace等の外部Skill・file・sourceは残す。
+Companion削除時は、個体固有設定・Experience Summary・Companion scope Memory・内部Skill・Companion State・その他個体固有Learning、およびそのCompanionを主体または相手とするRelationshipを削除する。内部Companion scope Skillは過去revisionを含めて削除し、削除を契機とするGlobal scopeへの自動昇格は行わない。他Companionも利用する共有Experience Summary等を残す場合は、残る情報と参照不能になる情報を削除前に示す。Global scopeのSkillを含むLearning、Workspace等の外部Skill・file・sourceは残す。
+
+一対一・グループ・Owner不参加のCompanion間交流のConversation History、単独・共同Task記録、保存された非会話活動のHistory／Log／evidenceは、Companion削除だけでは消さない。過去記録と個体固有の現在Memory／Learningは別lifecycleであり、前者の保持が後者の削除を弱めない。記録自身の通常削除・retention・targeted deletionは維持する。
 
 **Requirements basis**
 
@@ -165,6 +171,8 @@ LLMの柔軟な判断をすべて固定ルールへ置換することも、LLM�
 
 削除対象は現在のMemoryだけでなく、History、Summary、revision、Skill、Task、復元に寄与するCompanion State、検索用派生data、cache、接続中Clientの一時dataへ及ぶ。保存済みdataと進行中の形成・更新を横断する整合性が必要であり、保存先ごとの局所的削除では契約を満たせない。共有根拠の無関係な情報を可能な範囲で保護するため、単なる個体単位・file単位の全消去とも異なる。
 
+Companion間交流のHistoryと保存された非会話活動記録・historical evidenceも、この全域消去、通常保持管理、full backupから漏らさない。個体削除後の残存記録も対象である。結果説明・未伝達報告・由来・監査等に必要な保持範囲を超え、全reasoningやRaw画面の保存を要求するものではない。
+
 **Design freedom**
 
 目的によるlifecycleの違い、消去の優先、競合時の再保存防止、完了表示の条件は固定される。対象探索、参照追跡、削除中の実行制御、物理消去または復元不能化の方法は未決定である。言い換え・意味的同一性の検出に完全性は保証されず、LLMを利用できる。後の新しいExperienceからの形成は可能であり、永久に同じ知識を学べなくする要求ではない。外部送信・export・backup済みcopyの消去保証も含まない。
@@ -198,7 +206,7 @@ WorkspaceのTaskへの従属、Taskごとの権限独立、まとまった作業
 
 Taskの進捗、判断待ち、結果、既知の外部作用を追跡し、追加指示を可能な範囲で反映する。Cancel、Companion停止・削除、許可失効時は定義された範囲の新規開始を止め、進行中処理をbest-effortで停止し、残った作用を報告する。外部作用の成功が不明なら自動再実行しない。Computer Use等のClient依存Actionの実行中に移動が必要になった場合は、安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。Companionが存在するClientの切断時は基本的にHost PC上のClientへCompanionを移動し、利用可能なClient環境がない場合はactive ClientなしでHost正本に存続するが、切断したClientでの未確定ActionをHostで自動再実行しない。active Clientがない間も、Schedule起動および継続中の許可済みHost上のTask・保存は継続できる。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。Host再起動後の途中TaskにはOwnerの明示再開を必要とする。
 
-Companion停止中はBodyを表示せず、応答・自発動作・新しいTask・新しいSchedule実行を開始しない。停止は個体dataを削除せず、再開後も同じ個体として継続する。
+Companion停止中はactive ClientもHost上のpresenceも持たず、Body・Computer Use対象を持たない。応答・通常interaction・Host内を含む自発活動・新しいTask・新しいSchedule実行を開始しない。停止は個体dataを削除せず、再開後も同じ個体として継続する。
 
 Scheduleは各回を新しいTaskとし、実行時点の権限、費用、Provider、Companion・Host状態を再評価する。確認が必要なら判断待ちとし、Hostまたは担当Companionの停止中に到来した回はmissedとして自動補完しない。担当Companionの削除時はScheduleを削除し、別Companionへ自動で引き継がない。Network／Provider失敗でもActionを自動queue・replayしない。
 
@@ -219,6 +227,8 @@ Scheduleは各回を新しいTaskとし、実行時点の権限、費用、Provi
 **Driver**
 
 推論先はCapabilityごとにHost、LAN、Cloudから選択でき、Host既定・Companion override・Task Agentへの継承を扱う。接続情報の登録とCapabilityへの割当同意を区別し、送信先、送信され得るdata、取扱い、費用をOwnerが理解して選ぶ。Fallbackも事前承認されたProviderと順序に限定する。
+
+Clientに紐づく共有Observerは特殊なconsumerとしてObserver専用model／Provider assignmentを持ち、Companion overrideを適用・合成しない。event delivery後の個体reasoningはそのCompanionの設定に従う。ObserverのCloud利用にも同意・privacy・費用制約を適用する。全Client共通化、Client別UI、Host defaultからの継承階層はDesign Freedomとする。
 
 Providerやmodelを変更しても、利用可能な個体状態・Learning・会話context・Rule等を意図的に差別化せず、能力・context長の差には同じ選択方針で対応する。Prompt cacheは最適化であり、正本や安全契約、論理的contextを決めない。
 
@@ -262,7 +272,7 @@ Local MCPはsandbox内実行を既定とし、動かないことを理由に黙�
 
 ambient ObservationのCapture・候補検知はClient単位で共有する。観測を有効にしたClientのうちCompanionが1体以上存在するClientだけを対象とし、Companionが存在しないClientは観測しない。対象Clientのdesktop全体を対象とし、複数の対象Clientは同時にCaptureせず順番に実行タイミングをずらす。Clientごとに指定された観測頻度を満たしつつ可能な範囲で負荷を分散し、不必要に同時実行しない。
 
-ローカルLLMまたは軽量・高速・安価なmodelによる候補検知と、文脈との関係判断による関係がありそうなCompanionだけへのevent routingを行い、関連CompanionのメインLLMによる文脈上の意味判断へつなぐ。同じClientの複数Companionへ無条件に配信せず、Companionごとに候補検知を重複させない。
+Observer専用assignmentによる候補検知と、文脈との関係判断による関係がありそうなCompanionだけへのevent routingを行い、関連CompanionのメインLLMによる文脈上の意味判断へつなぐ。同じClientの複数Companionへ無条件に配信せず、Companionごとに候補検知を重複させない。頻繁な観測には軽量Local LLMまたは安価で信頼できるCloud LLMを推奨するが、必須model条件にはしない。Stopped Companionを存在人数・routing対象に数えない。
 
 ObserverはClientごとのPause／OFFと全体のPause／OFFを持ち、明示ON/OFFと常時確認可能な状態を持つ。雑談・自発会話、通知、内部調査、Companion間交流等の自発性はCompanion単位でOFFを含む頻度または上限を設定し、ObserverのClient単位・全体制御と同じscopeへまとめない。
 
@@ -390,7 +400,17 @@ CompanionがComputer Useできる対象は、そのCompanionが現在存在す�
 
 #### G-02 — active Clientがない場合の継続・復帰（解決）
 
-Companionにactive Clientがない場合でも、Schedule起動および継続中の許可済みHost上のTask・Task Agent・Schedule・保存は継続できる。判断基準はClientが必要かどうかとし、Clientが必要なこと以外のTask等は可能、Clientに依存することは不可能とする。Body、Realtime／Text会話、Voice、Computer Useはactive Clientがない間は行わず、対象Clientがない間の新規観測は発生しない。Companion間交流、通知の生成、Clientを必要としない内部調査等のHost内で完結する活動は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host側Client環境の自動起動は行わない。AD-01・02・09・12の前提とする。
+Running Companionにactive Clientがない場合でも、Schedule起動および継続中の許可済みHost上のTask・Task Agent・Schedule・保存は継続できる。判断基準はClientが必要かどうかとし、Clientが必要なこと以外のTask等は可能、Clientに依存することは不可能とする。Body、Realtime／Text会話、Voice、Computer Useはactive Clientがない間は行わず、対象Clientがない間の新規観測は発生しない。Companion間交流、通知の生成、Clientを必要としない内部調査等のHost内で完結する活動は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host側Client環境の自動起動は行わない。AD-01・02・09・12の前提とする。
+
+### Architecture Review #1のRequirement Issues（解決済み）
+
+#### RI-01 — Companion間交流の記録（解決）
+
+Owner不参加の自発交流で実際に交わされた発話をConversation Historyとして保持し、片方・両方の個体削除でも消さない。通常保持管理・backup・targeted deletionはHistoryの契約を適用し、交流由来のMemory・Relationship・Companion State・Learningとは別lifecycleとする。AD-04・05・07・15に反映した。
+
+#### RI-02 — Stopped Companionのpresence（解決）
+
+停止中はactive Clientを持たず、ClientにもHostにもpresenceがない。Observer対象人数・routingから除外し、Host内の自発活動も禁止する。再配置hintの保持とResume時の再配置は許すが、具体algorithmは未固定。Running個体のdisconnect契約とは分離し、AD-01・02・09・12に反映した。
 
 ### Requirement Gap
 

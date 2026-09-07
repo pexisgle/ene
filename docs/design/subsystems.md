@@ -1,6 +1,6 @@
 # Subsystem Decomposition
 
-対象: [要件Baseline](../requirements/README.md)（最終確認 2026-09-06）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)。本書はStep 3の責務境界を決定し、State OwnershipとDependency Rulesへの入力を示す。
+対象: [要件Baseline](../requirements/README.md)（2026-09-07のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)。本書はStep 3の責務境界を決定し、State OwnershipとDependency Rulesへの入力を示す。
 
 ## 1. Overview
 
@@ -26,6 +26,8 @@ Runtime Topologyは、Host／Client等の実行場所、寿命、接続、trust�
 Step 4のState Ownershipでは、この責任分担の下で状態の所属、更新・参照・削除・復元の整合性を決める。本書で「扱う」「管理する」と記したことから、唯一のwriter、transaction owner、repository owner、保存単位を導かない。Step 5ではcollaborationを成立させる許可・禁止依存を定める。本書の関係は、そのための意味上の入力である。
 
 実装構造はさらに別の選択である。Subsystemとcrate、module、process、service、threadを一対一に対応させず、Host側とClient側に同名のSubsystemを複製する指定もしない。
+
+本書のactive Client不在時の活動継続はRunning Companionに限る。Stopped個体はどのClientにもHostにもpresenceを持たず、Hostの保持dataや復帰hintはpresenceではない。停止時の活動禁止とbest-effort CancelはClient非依存の活動にも適用する。
 
 ## 2. Decomposition Rationale
 
@@ -71,6 +73,7 @@ AD-07・15の消去・復元は、複数の活動と保存対象を横断した�
 
 - 同じCharacter由来でも別個体として生成・継続し、停止・再開・削除を、その個体の活動に対する操作として取り扱う。停止・削除の管理経路はLLM応答の成功を必要としない。
 - Text／Voiceを一続きの会話として解釈し、最近の会話と利用可能なLearningを用いる。正確な過去発言は保持されたConversation Historyへ参照を戻す。会話の参加者・発言・文脈と、その記録の意味を扱う。
+- Owner不参加のCompanion間交流の発話もHistoryとして扱う。保存するObservation認識結果・notification・軽微な内部調査等の活動記録は個体調整が意味ownerとなり、Task・Action・Auditの事実は既存ownerを参照する。これらのhistorical recordは個体削除だけでは消さず、通常保持・backup・targeted deletionへ参加させる。個体固有Memory／Learning・Summary等の削除とは分け、全reasoning・Raw保存は要求しない。
 - 依頼を受ける、条件を確認する、断る、まとまった作業を基本的にTaskとして委任する、steeringを反映させる、結果を受けてOwnerへ統合して返す、という個体としての判断を担う。軽微な情報取得や補助処理は自身で行える。
 - 観測eventを各CompanionのメインLLMが個体文脈で意味判断し、自発的な発話・通知・内部調査・Companion間交流、移動の必要性を判断する。個体ごとの各自発性のOFFを含む頻度・上限、未応答による抑制、会話上の順序とloop抑制を扱う。Quiet hours、Mute、未応答、Permission、費用・資源・loop制限を自発性より優先する。
 - グループの参加者と会話上の応答を調整し、参加だけによる私的状態の共有を行わない。active Client不在でも可能なHost内活動を続け、伝えられなかった事項を次Clientでまとめて報告する。
@@ -85,7 +88,7 @@ AD-07・15の消去・復元は、複数の活動と保存対象を横断した�
 
 **Runtime relation**
 
-Hostで個体の活動と継続を扱う。OwnerとのText／Realtime会話・Voiceは接続・存在と入出力・提示を通じてactive Clientへ結び付く。Client不在は個体停止ではなく、Owner向け伝達を延期する条件である。
+Hostで個体の活動と継続を扱う。OwnerとのText／Realtime会話・Voiceは接続・存在と入出力・提示を通じてactive Clientへ結び付く。Running個体のClient不在は個体停止ではなく、Owner向け伝達を延期する条件である。
 
 **Key collaborations**
 
@@ -207,7 +210,8 @@ AD-04〜07・10・12・14・15。要件「Learningと成長」「一続きの会
 **Responsibilities**
 
 - Local／Remote Clientの接続、切断、再接続、利用可能な機能を扱う。RemoteではHost側で確認可能なpairing、通信保護、device別の許可・失効の適用を権限・制約と協調する。ここでいう適用は、権限・制約が扱う制御契約を存在・接続調停へ反映することであり、device許可の意味・失効範囲自体の正本は移さない。
-- 一つのCompanionにつき同時に一つのactive Clientを維持し、呼出し、明示・事前指示・文脈上の自発移動、切断時の復帰を調停する。通常は現在のClientに留まる。
+- Running Companionにつき同時に一つまでのactive Clientを維持し、呼出し、明示・事前指示・文脈上の自発移動、切断時の復帰を調停する。通常は現在のClientに留まる。
+- 個体調整の停止状態に従いactive帰属を解除し、Stopped個体をClient・Hostのpresence、Observer人数・routing対象に含めない。保持する最後のClient・復帰候補等は再配置hintとして扱い、再開時の配置algorithmは固定しない。Running個体のdisconnectによるHost PC側Clientへの移動とは区別する。
 - Textを含む入出力roundとClient依存Actionの安全な区切りを関係Subsystemから受け、移動元・移動先の状態を対応付ける。排他性を確認できないClientでは対象の入出力・観測・自発的interaction・Computer Useを継続させない。
 - 切断時は基本的に利用可能なHost PC上のClientへ移動し、利用可能なClient環境がなければactive Clientなしで個体を存続させる。Host側Client環境を自動起動しない。
 
@@ -243,6 +247,7 @@ AD-01・02・06・09・12・13。要件「Remote Client」「Computer Use」。S
 - Windows／LinuxのVRM 1.0 overlay、移動・resize・hide、活動状態の表現を扱う。表情やmotionは内的状態の出力であり、その正本にはしない。
 - Voiceの物理的入出力、VAD待受の常時識別、即時Mute、barge-in、Realtimeからturn-based Voice・Textへの段階的切替を扱う。話者認証を行わないことを有効化時と管理面で伝える。
 - Setup、段階的Capability導入、許可・費用・Privacy・由来・診断・復旧へ到達できる管理経路を提供する。各操作の意味・適用・成功判定は担当Subsystemから受ける。
+- UI・Body・Voiceの一般設定と、Ownerが選ぶHost自動起動設定の意味を管理する。Host自動起動は起動・日常利用体験の選択としてここへ置き、OSへの設定作用・適用結果は実行・拡張、保全・復旧への参加調整は保全・消去へ分ける。入力画面を提供する他domain設定のownerにはならない。
 - Mute・Stop・Cancel・承認拒否のkeyboard経路、重要な音声内容のText代替、日英で同じ意味の説明を維持する。受付と完了、保存済みdataへの影響、既知の作用と不明を区別して提示する。
 - Fullscreenや負荷・device障害を関係責務へ知らせ、Body・Voiceの失敗からText・管理・復旧を保護する。MCP Appsを外部Tool UIとして提示し、第一者の承認・設定権限と区別する。
 
@@ -276,12 +281,14 @@ Client単位の観測コストと制御を共有し、個体ごとの判断に�
 
 - ONになっておりCompanionが一体以上存在するClientのdesktop全体をCaptureする。Companionの出入りに合わせて対象を見直す。
 - Clientごとの指定頻度を満たしつつ、複数対象Clientは同時にCaptureせず順番に時機をずらし、可能な範囲で負荷を分散する。Client別・全体のPause／OFF、fullscreen、費用・資源制限を頻度より優先する。
-- ローカルLLMまたは軽量・高速・安価なmodelで候補を検知し、利用可能な文脈との関係から、そのClient上の関連Companionだけへroutingする。複数該当を許し、全個体への無条件配信や個体ごとの検知重複を避ける。
+- Clientに紐づくObserver専用model／Provider assignmentで候補を検知し、利用可能な文脈との関係から、そのClient上の関連するRunning Companionだけへroutingする。Companion overrideを適用・合成せず、全個体への無条件配信や個体ごとの検知重複を避ける。軽量Localまたは安価で信頼できるCloudは推奨に留め、Cloudにも通常の同意・privacy・費用制約を適用する。
 - 観測の状態・対象範囲・Learning利用を説明可能にし、Raw Observationを通常保存しない。共有処理にも個体の利用範囲、送信同意、秘密保護を適用する。
 
 **Non-responsibilities**
 
 各Companionの最終的な意味・発話・Action判断、個体の自発性設定、形成済みLearningの削除、Computer Useの操作・承認は担わない。画面上の指示をOwnerの依頼へ昇格させない。関連付けのために全Companionの私的状態へ無制限にaccessしない。
+
+Observerを独立CompanionやTask Agentにせず、delivery後の個体reasoningには当該CompanionのProvider設定を使う。全Client共通model、Client別設定UI、Host defaultからの継承階層は固定しない。
 
 **Why this boundary exists**
 
@@ -308,6 +315,7 @@ AD-02・06・07・10・12〜14。要件「Observation」「自発的な発話と
 **Responsibilities**
 
 - CapabilityごとのHost既定、Companion override、Task Agentへの継承を解決し、必要な能力の不足を利用前に示す。接続登録と割当同意を区別し、権限・制約が扱う現在の同意内で利用する。
+- Client共有Observerは特殊なconsumerとして専用assignmentを解決し、Companion overrideに依存させない。割当同意のownerは権限・制約に残し、対象ClientのObserverの利用量をProvider別・全体capへ対応付ける。個体数による重複計上や個体側同意の流用をしない。
 - 既知のProvider protocolへ直接接続し、承認済みProviderと順序の範囲でfallbackする。Host／LAN／Cloudの所在地だけで同意を省略しない。
 - 各判断責務が必要とする論理的contextとProviderの能力・context長の制約を対応付ける。利用可能な情報をProviderごとに意図的に差別化せず、同じ情報選択方針を維持する。
 - Providerの結果・不足・接続失敗と利用量を返し、費用の報告値・推定値・不明を区別する。費用cap等の適用に必要な情報を権限・制約へ渡す。
@@ -460,6 +468,8 @@ AD-06・10・11・14・15。要件「Credential」「信頼境界」「Local dat
 **Why this boundary exists**
 
 消去・backup・restoreは一つのdomainの範囲では完結せず、全域の対象・除外・進行中処理と完了根拠を対応付ける責任がある。これらの操作に共通するのは、内部dataの範囲と現在の利用を各意味責務に照合し、正常状態と操作後の成立状況を確かめる責任である。局所保存機能へ分散するだけでは対象漏れや再保存を見落とす。逆に、全dataの意味と更新まで統合すると巨大なdomain兼storage責務になる。この統合から、全domainの意味上の所有、一つの保存単位、一つのlifecycle、一つのtransactionを導かない。backup scheduleとTask Schedule、History保持とAudit保持、通常削除とtargeted deletion等の目的別の所有差は別に保ち、独立した汎用History製品・backup基盤・削除基盤へは拡大しない。
+
+保持方針・Auditの順序・Debug captureの明示対象と短期失効・backup設定・全域操作状況は、data保全・消去・復旧そのものの意味を持つため保全・消去が所有する。一般的なHost運用設定のownerにはならず、Host自動起動の選択は入出力・提示へ残す。参加調整や保存先共有をcatch-allな所有の理由にしない。
 
 **Runtime relation**
 

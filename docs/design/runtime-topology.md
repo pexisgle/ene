@@ -1,6 +1,6 @@
 # Runtime Topology
 
-対象: [要件Baseline](../requirements/README.md)（最終確認 2026-09-06）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)。本書は実行場所、主体の寿命、接続、信頼・障害境界を決定する。図の箱はprocessやsubsystemを意味しない。
+対象: [要件Baseline](../requirements/README.md)（2026-09-07のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)。本書は実行場所、主体の寿命、接続、信頼・障害境界を決定する。図の箱はprocessやsubsystemを意味しない。
 
 ## Overview
 
@@ -9,6 +9,8 @@ Eneの実行の軸は、**Owner管理Hostで継続する実行・正本と、Cli
 推論はCapabilityごとにHost／LAN／Cloudへ配置できる。これはHostの実行管理や個体の所有を推論先へ移すことではない。外部MCPやPluginは利用する実行環境へ接続するが、第一者の制御権限から区別する。特にLocal MCPの既定sandboxと、その外で動く明示例外は、同じ拡張の異なる強制境界として表す。MCP AppsはClient側の外部Tool UIとして扱い、第一者UIの権限や提供serverの寿命と同一視しない。
 
 Local構成ではHostとClientを同じPCに置ける。Remote構成ではClientを同じLANまたはOwner管理VPN上の別PCに置く。どちらでも同じ責任分担を維持する。このTopologyには、必要性が導かれないRemote専用Core、Cloud coordinator、Workspace server、Companionごとの専用runtime serviceを追加しない。
+
+本書のClient不在時のCompanion活動継続・移動はRunning個体に適用する。Stopではactive Clientを解除し、どのClientにもHostにもpresenceを持たない。Hostでdataを保持することや再配置hintの保存はpresenceではなく、停止中の通常interaction・自発活動・新Task・Schedule実行を許さない。
 
 ## Runtime Elements
 
@@ -58,10 +60,10 @@ RT番号は本設計の追跡用である。「固定」は今回の配置・関
 | 判断・関係 | 固定するcontrol / data movement | 後続設計へ残す部分 |
 |---|---|---|
 | **RT-01: HostとClient** | Clientから会話入力、依頼・追加指示、承認・拒否、停止・管理操作を送り、Hostの状態・進捗・結果・説明を必要範囲で返す。Textの入力・応答もCompanionが現在存在するactive Clientに属し、別Clientからの会話は呼出し・移動を経る。内部状態の確定はHost側。Host–Client通信を保護し、Remoteの新ClientはHost側で確認可能なpairingを経て、deviceごとの許可機能に従う。 | 同居時の呼出し方式、Remote通信方式、同期粒度、接続検知、pairing手段、管理画面の配置。具体的なround調停方式は設計に残す。 |
-| **RT-02: Companionとactive Client** | 排他性の対象となるBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、一個体につき一か所へ結び付ける。Companionは通常は現在のClientに留まり、別Clientからの会話・操作は呼出し・移動を経る。事前指示や文脈上の必要性による自発的な移動を妨げず、接続済みClientへの自発的な移動も同一の仕組み・条件で可能とし、自動化・義務化しない。active Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。移動は入出力roundを安全に区切り、両Clientへ状態を示す。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。Hostの正本・通常のTask・Task Agent・Scheduleを移送しない。切断時は基本的にHost PC上のClientへCompanionを移動し、利用可能なClient環境がない場合はactive Clientなしで存続する。 | 排他性の調停と切替・復帰方法、切断検知、安全な区切りの具体的方法、メモの保持方式。Clientから独立した専用の「presence service」は指定しない。Host側Client環境の自動起動は行わない。 |
+| **RT-02: Companionとactive Client** | 排他性の対象となるBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、一個体につき一か所へ結び付ける。Companionは通常は現在のClientに留まり、別Clientからの会話・操作は呼出し・移動を経る。事前指示や文脈上の必要性による自発的な移動を妨げず、接続済みClientへの自発的な移動も同一の仕組み・条件で可能とし、自動化・義務化しない。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。移動は入出力roundを安全に区切り、両Clientへ状態を示す。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。Hostの正本・通常のTask・Task Agent・Scheduleを移送しない。切断時は基本的にHost PC上のClientへCompanionを移動し、利用可能なClient環境がない場合はactive Clientなしで存続する。 | 排他性の調停と切替・復帰方法、切断検知、安全な区切りの具体的方法、メモの保持方式。Clientから独立した専用の「presence service」は指定しない。Host側Client環境の自動起動は行わない。 |
 | **RT-03: Host内の作業と委任** | ある程度まとまった作業は基本的にTaskとして扱い、一時Task Agentへ境界内で原則委任する。TaskとTask Agentは区別する。Ownerの依頼による作業と自発的に始める作業を含む。自発的な発話や軽微な内部調査まで一律にTask化・Task Agent化しない。結果・判断待ち・外部作用をHostで管理し、通常会話と安全操作を作業の完了待ちへ従属させない。Scheduleの各回は新Taskとし、実行時点の条件を再評価する。 | Harness、実行単位、並列実行機構、進捗保存粒度、駆動・待機方式、Task化の閾値・分類algorithm。単に待つためのLLM反復問い合わせは許さない。 |
-| **RT-04: Clientの観測・音声と推論** | ambient Observationの取得元はCompanionが存在するClientのdesktop全体とし、Companionが存在しないClientは観測しない。ObserverのCapture・候補検知はClient単位で共有し、複数の対象Clientは同時にCaptureせず順番に実行タイミングをずらす。Clientごとに指定された観測頻度を満たしつつ可能な範囲で負荷を分散する。ローカルLLMまたは軽量・高速・安価なmodelによる候補検知から、関係がありそうなCompanionだけへのroutingを経て関連CompanionのメインLLMの意味判断へつなぎ、最終的な発話・Action判断は各個体で行う。同じClientの候補検知を不必要に重複させない。共有処理による同意の拡張は行わない。Voiceの物理的入出力もactive Clientに帰属し、VAD待受・Observationの状態確認と即時Muteを利用可能にする。ObserverはClientごとのPause／OFFと全体のPause／OFFを持ち、自発性のCompanionごとの制御とはscopeをまとめない。 | 取得・伝達方法、候補検知の計算配置、音声処理配置、具体的な間隔値・scheduling algorithm。候補検知の専用service化はこの段階では決めない。明示TaskのComputer Useは対象をactive Clientに限定し、ambient Observationと別のPermission・記録を持つ。 |
-| **RT-05: EneとProvider** | CapabilityごとのHost既定・Companion override・Task Agent継承と、割当同意内のdata送信を維持する。結果は意味判断の材料であり実行権限ではない。Provider変更で継続状態を分断せず、能力差には同じ情報選択方針で対応する。費用capはProvider別と全体の双方を扱う。fallbackは承認済みのProvider・順序に限る。 | データをHostで中継するか、条件を満たしたClientからの入出力経路を使うか、接続・session方式、model・protocol adapter・cache。どの経路もHostで管理する現在の同意・権限・費用制限、Credential非露出、Client一時data制約を実効的に適用できることが条件。 |
+| **RT-04: Clientの観測・音声と推論** | ambient Observationの取得元はRunning Companionが存在するClientのdesktop全体とし、Stopped個体は人数・routing対象に数えない。ObserverはClientに紐づく共有主体であり、Capture・候補検知を共有する。複数対象Clientは同時Captureせず、指定頻度を満たしつつ時機をずらす。Observer専用assignmentで候補検知・関連付けを行い、関連Companionへeventを届ける。delivery後の個体reasoningは各CompanionのProvider設定に従う。個体ごとの重複検知・全個体への無条件配信・同意拡張はしない。軽量Local LLMまたは安価で信頼できるCloud LLMは推奨に留まる。Voice入出力はactive Clientへ帰属し、VAD待受・Observationの状態確認と即時Muteを提供する。ObserverのClient別・全体Pause／OFFと個体自発性は別scopeとする。 | 取得・伝達・routing context、計算配置、音声処理、間隔・scheduling algorithm。ObserverはCompanion・Task Agent・専用processを意味しない。明示TaskのComputer Useはactive Client限定で、ambient Observationと別のPermission・記録を持つ。 |
+| **RT-05: EneとProvider** | Companion側はCapabilityごとのHost既定・Companion override・Task Agent継承を扱う。Clientに紐づくObserverは特殊なconsumerとして専用model／Provider assignmentを使い、Companion overrideを適用・合成しない。両consumerとも割当同意内で送信し、Cloud利用のprivacy・費用制約を維持する。結果は実行権限ではない。Provider変更でも同じ情報選択方針を保ち、Provider別・全体capと承認済みfallback・順序を適用する。 | Observer modelの全Client共通化、Client別UI、Host defaultからの継承階層は未固定。データ中継・条件を満たすClient経路、接続・session・model・adapter・cacheも未固定。どの経路も現在の同意・権限・費用制限、秘密非露出、Client一時data制約を適用できることが条件。 |
 | **RT-06: Eneと外部実行・作用先** | 許可されたActionを必要な外部resourceへ作用させる。Host上で継続するTaskをClientの外部Tool起動に不要に依存させないため、その作業用Local MCPはHost側とする。Computer UseはCompanionが現在存在するactive Clientだけを対象とし、任意のpairing済みClientの選択や存在場所との分離を行わない。MCPのResource／Prompt／resultを制限下で受け入れる。既知のProvider protocolは直接接続し、通常差異をPlugin必須にしない。 | 内部Tool API、MCP接続・起動管理、Pluginの具体的拡張APIと配置方法、Client側作用経路の実現方式。すべてのToolをMCP化することや、すべてのActionを専用workerで実行することは指定しない。Body・Voice・ambient ObservationのClient帰属とComputer Useの対象限定は固定された前提とする。 |
 | **RT-07: 認証dataの利用** | Credentialは設定・認証flowで登録し、明示された接続の実行に必要な範囲でのみ用いる。認証先へ使う経路と、LLM context・生成Tool argument・通常result・表示・学習・診断へ渡す経路を区別する。 | Credential保護方式と受渡し実装。外部secret serviceやClient上のCredential正本を追加しない。認証の成功からAction承認を導かない。 |
 | **RT-08: 保存・一時data・消去** | Hostの正本から必要最小限のdataをClientへ渡す。targeted deletionでは接続中Clientの一時dataと実行中処理を含め、削除前の情報からの再保存・再形成を防ぎ、残存検証前に完了としない。外部作用やProvider保有copyは別の境界。 | 保存方式、削除の探索・協調・残存検証、Client一時dataの無効化方法。Clientを永続replicaにしない。通常保持管理をtargeted deletionへ置き換えない。 |
@@ -69,6 +71,10 @@ RT番号は本設計の追跡用である。「固定」は今回の配置・関
 | **RT-10: Clientと外部Tool UI** | MのUI resourceをUで提示し、操作と結果を扱う。第一者の承認・管理経路と分け、UからのTool利用や外部送信にもRT-05・06・07の制約を適用する。外部UIを閉じることとTask Cancelを同一視しない。 | UI実行・隔離方式、Mとのdata経路、表示状態の再取得、Client内の組込み方法。専用UI serviceや独自の代替protocolは追加しない。 |
 
 Hostを制御と正本の継続点にすることは、全Raw画面・Raw音声・全payloadをHost経由で永続保存する決定ではない。Clientの一時data、Eneが管理する一時処理、外部へ送信されたcopyを区別し、論理的な許可の適用と物理的な通信経路を同一視しない。
+
+RT-02のactive帰属はStopped個体には成立しない。停止時はBody・Voice／Text等の通常interaction・Computer Use対象を持たず、共有Observerの人数・routing対象から除く。Resume時は保存した最後のClient・復帰候補等から再配置できるが、hintを現在帰属にせず、具体algorithmは固定しない。disconnect時のHost PC側Clientへの移動はRunning個体に限る。
+
+RT-08・09の保存・消去・backupでは、一対一・グループ・Companion間交流のHistoryと保存された非会話活動記録・evidenceも扱う。Companion削除だけで過去記録を消さず、個体固有のMemory／Learning・Summary・Relationship・Companion Stateは既存lifecycleに従って削除する。記録の通常保持管理・targeted deletionは別途適用する。
 
 ## Lifecycle and Failure Boundaries
 

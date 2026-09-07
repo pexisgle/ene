@@ -1,6 +1,6 @@
 # Dependency Rules
 
-対象: [要件Baseline](../requirements/README.md)（最終確認 2026-09-06）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)、[State Ownership](state-ownership.md)。本書はStep 5の責務間の依存規則を決定する。Subsystemの名称・略称とsemantic ownerは既存設計を維持する。
+対象: [要件Baseline](../requirements/README.md)（2026-09-07のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)、[State Ownership](state-ownership.md)。本書はStep 5の責務間の依存規則を決定する。Subsystemの名称・略称とsemantic ownerは既存設計を維持する。
 
 ## 1. Overview
 
@@ -20,6 +20,8 @@ Dependency Rulesは、**ある責務が別の責務のどの判断・状態・�
 これらは説明用の役割であり、内部型やinterface分類ではない。Runtime communicationは要求・応答・通知等の実際のやり取りであり、上記依存の実現手段である。Bの結果がAへ返ることだけで `B → A` という別のarchitectural dependencyを追加しない。一方、BがAの活動状態を判断根拠として必要とするなら、それは明記すべき逆向きの参照依存である。Callback、event、request、IPCへ置き換えても、意味上の依存と強制責任は消えない。
 
 実装module dependencyはcodeが何を参照するかという別の設計であり、本書の矢印をcrate・Rust module・processへ直写しない。図を非循環にすることより、各判断の確定責任と、強制・停止が成立する条件を優先する。新しい汎用mediator、Context、Settings、Persistence等のSubsystemは追加しない。
+
+本書のactive Client不在時の活動継続・移動はRunning Companionの契約である。Stopped個体はどのClientにもHostにもpresenceを持たず、保存dataや再配置hintを現在帰属として扱わない。Clientに依存しない活動も個体停止の禁止を迂回しない。
 
 ## 2. Dependency Principles
 
@@ -52,7 +54,7 @@ DR番号は本書内の設計規則の参照用であり、製品要件IDでは�
 | 個体調整 → 作業 | まとまった作業のTask化・委任、steering、Cancel、結果・進捗参照を要求する。 | Taskへの受理・反映・達成は作業。会話上の受付・結果統合は個体調整。 |
 | 作業 → 個体調整 | 委任元・担当の現在の活動状態、必要な調整判断、結果統合への参加を求める。 | 個体の意味判断が必要な事項だけを依頼する。Taskの各stepを本体に再実行させず、通常遂行・Cancel・残る記録管理を本体LLMの応答待ちにしない。 |
 | 作業 → 認識・学習 | 委任範囲内の知識・手順を利用し、実行経験・検証状態を形成判断へ渡す。 | Agentが長期状態を直接保存しない。Task限定情報は作業のcontext、Learning化は別判断。 |
-| 認識・学習 → 個体調整／作業／実行・拡張 | 形成・訂正・由来説明に必要な保持済み発言、Task事実、作用の確定度を参照する。 | 原記録を所有せず、履歴の消失を架空の復元で埋めない。参照対象は利用可能な範囲に限る。 |
+| 認識・学習 → 個体調整／作業／実行・拡張 | 形成・訂正・由来説明に必要な保持済み発言（Companion間交流を含む）、非会話活動記録・evidence、Task事実、作用の確定度を参照する。 | 原記録を所有せず、履歴の消失を架空の復元で埋めない。参照対象は利用可能な範囲に限る。 |
 | Character → 認識・学習 | 推奨Skillと取り込む内部Skillの由来・revisionを対応付ける。 | Packageの推奨は実行許可でも既存内部Skillの有効revision変更でもない。 |
 
 認識・学習内では、Relationshipの事実参照はMemoryを優先し、Companion StateはMemoryとRelationshipを表現・注意・傾向へ反映するために利用する。Memory・Skill等はSummaryを根拠として利用できる。これらは別の意味の状態であり、相互に直接書換えを要求する連鎖は作らない。矛盾時は認識・学習が必要な状態を再解釈し、根拠と変更対象を確定する。MemoryとSkillに役割の異なる関連情報が存在することは許される。
@@ -92,6 +94,8 @@ DR番号は本書内の設計規則の参照用であり、製品要件IDでは�
 第一者の入出力・提示は、作業へCancel・Schedule管理・記録確認、個体調整へ個体停止・削除、権限・制約へ承認拒否・Rule・同意・cap・device管理、認証秘密へ明示的な認証設定、保全・消去へ消去・backup・restore・Resetを直接要求できる。ここで「直接」は本体LLMの承認や長時間Taskの完了を介在させないという意味であり、具体APIの指定ではない。各ownerの受理・確認・結果に従い、UIに任意stateの書換権を与えない。
 
 保全・消去は全参加ownerへ、目的に限定した対象特定・影響・処理・検証を要求できる。各ownerは保全・消去が管理する操作範囲・未完了・保留へ依存し、自身の内部dataと進行中利用を参加させる。Auditの発生元は保全・消去の監査記録・保持責務を利用するが、元事実の意味は発生元に残す。通常保存・復旧可能性への参加から、全内容の意味変更権や単一Persistence層を導かない。
+
+Host自動起動のOwner選択は入出力・提示が一般起動設定として管理し、OSへの適用は入出力・提示 → 実行・拡張の作用要求として現在の制約に従う。保存選択と実際のOS適用結果は別の正本を参照する。保全・消去への依存はbackup・restore・Reset等への参加に限り、一般Host運用設定のsemantic ownershipを渡さない（SO 4.17・4.24、DR-09）。
 
 ## 4. Prohibited and Constrained Dependencies
 
@@ -177,7 +181,7 @@ Permissionの意味責任は権限・制約、domainの活動可否・達成の�
 | Task Agent・再委任・並列遂行 | 作業がTaskと委任範囲を管理し、Agentの推論・Actionは推論／実行・拡張の責任下に置く。 | 別AgentでのDeny迂回、別TaskのCredential流用、独立予算・Provider overrideの作成。 |
 | Schedule到来・Run now | 作業が担当・Host状態と現在条件を確認し、各回を新Taskへ対応付ける。 | 作成依頼を特別tokenにしない。停止中の回はmissedで、自動補完しない。Owner確認が必要なら判断待ち。 |
 | 自発発話・通知・内部調査・Companion間交流 | 個体調整が個体別抑制と権限・制約を参照する。まとまった自発作業は作業へ、軽微な作用も実行・拡張へ依存する。 | Ruleだけで起動しない。Quiet hours・Mute・未応答・費用・資源・loop制限を意欲や親密さで緩めない。 |
-| ambient Observation | 共有観測 → 接続・存在／入出力・提示／権限・制約。取得・拡張境界は実行・拡張、検知は推論、候補の意味判断は個体調整へ依存する。 | ONでもCompanionが存在しないClient・fullscreen・Pause／OFF等では観測しない。画面内指示は承認でなく、観測ONはComputer Use許可でない。 |
+| ambient Observation | 共有観測 → 接続・存在／入出力・提示／権限・制約。取得・拡張境界は実行・拡張、共有検知はObserver専用assignmentを解決する推論、候補の個体側意味判断は個体調整へ依存する。 | Stopped個体を存在人数・routing対象に数えず、Running個体のいないClient・fullscreen・Pause／OFF等では観測しない。Companion override・同意を共有検知へ流用しない。画面内指示は承認でなく、観測ONはComputer Use許可でない。 |
 | 観測eventからの学習・Action | 個体調整の理解を認識・学習へ渡す。発話・軽微Action・Taskはそれぞれ通常の責任へ依存する。 | Observerのroutingで個体判断を代行しない。候補検知の送信同意をメインLLMや共有先へ自動拡張しない。 |
 | Learning形成・統合・検索・由来説明 | 認識・学習 → 原記録owner／推論／権限・制約、全利用先がscope・禁止・消去を適用する。 | background consolidation、過去revision、Summary全文、embedding送信からprivacyを迂回しない。 |
 | Provider fallback・Voice縮退 | 利用元 → 推論 → 権限・制約／認証秘密。実際の代替送信先と内容を照合する。 | 安価なCloud、別protocol、cache再利用、Client直結を同意・capの例外にしない。 |
@@ -188,9 +192,13 @@ Permissionの意味責任は権限・制約、domainの活動可否・達成の�
 
 共有観測は対象Clientごとに候補検知を共有し、複数Clientを同時Captureせず時機をずらす。routing用contextは必要な範囲へ限り、同じClientにいる全Companionの私的状態を合併して一つのProviderへ送らない。各個体の最終判断への推論利用にも、その用途の割当同意と費用制約が別途適用される。
 
+ObserverはClientに紐づく特殊な推論consumerであり、Host既定 → Companion override → Task Agent継承の個体側modelへ押し込まない。権限・制約のObserver専用assignment・同意を推論が解決する。Companion overrideの選択・合成は禁じ、delivery後のCompanion reasoningにだけその個体の設定を適用する。全Clientでのmodel共通化、Client別UI、Host defaultからの継承階層、routing contextの構成方式は固定しない。
+
 ### 5.4 Provider fallback・費用の連続性
 
 推論は権限・制約の割当同意を参照し、非秘密の接続設定と能力情報から利用経路を解決する。登録先の変更、Companion overrideの削除、model・protocol・送信経路の変更によって同意の意味が重要に変わるなら、以前の同意をそのまま適用しない。Fallbackは承認済みのProviderと順序に限り、候補ごとに現在の用途・data・privacy・Credential・cap条件を満たす必要がある。
+
+Observerにもこの条件を適用し、専用assignmentがCloudである場合も同意・privacy・費用上限を省かない。Observerの利用量は対象Client・専用assignmentに対応付けてProvider別・全体capへ含め、Companion数による重複計上やCompanion overrideへの付替えをしない。軽量Local／安価で信頼できるCloudは推奨であり、安価さを利用許可にしない。
 
 利用元は用途と論理的な情報選択を、情報ownerは利用可能な内容・根拠・scopeを、推論は能力・context長への適応を担う。Provider別に意図的に異なる個体状態を持たせず、同じ選択方針を保つ。ただし「同じ情報」を理由に送信同意を広げない。条件を満たせない経路は使わず、不足・失敗を返す。Prompt cache・sessionはこの契約の最適化に限る。
 
@@ -262,7 +270,7 @@ Backupは選択した内部状態のcopyであり、Workspace関連付けを辿�
 
 保全・消去がOwnerの明示的なPrivacy/Security目的と対象、重要な影響を確認し、保存場所をOwnerに指定させず参加ownerへ対象探索・除去・検証を要求する。意味的な探索補助には個体調整・認識・学習を利用できるが、特定文字列の機械的な検索・削除・残存検証をLLMへ依存させない。意味的同一情報の完全検出は保証しない。
 
-対象範囲は現在値に閉じず、History、Summary、過去revision・evidence、Relationship、対象を復元できるCompanion Stateと保持済み根拠、Skill、Task context・source copy、index・embedding・cache、Audit・Debug内の該当情報、接続中Client、Ene管理下の拡張一時data、処理中context・遅延結果を含む。各保持・利用責務は原記録と派生物への関係を参加させ、記録ownerだけへの削除要求で完了にしない。
+対象範囲は現在値に閉じず、History（Companion間交流を含む）、非会話活動記録・historical log／evidence、Summary、過去revision・evidence、Relationship、対象を復元できるCompanion Stateと保持済み根拠、Skill、Task context・source copy、index・embedding・cache、Audit・Debug内の該当情報、接続中Client、Ene管理下の拡張一時data、処理中context・遅延結果を含む。Companion削除後に残る記録も対象である。各保持・利用責務は原記録と派生物への関係を参加させ、記録ownerだけへの削除要求で完了にしない。
 
 権限・制約と各利用箇所は必要な保留・再保存防止を適用する。削除前から存在する根拠だけによる自動再形成と、削除前の情報を使う処理の遅延した再保存を防ぐ。局所削除が済んでも、別の保存先・context・Clientから戻る可能性を未処理なら全域完了にしない。新しいExperienceとしてOwnerが改めて提供する情報は別の根拠として扱える。
 
@@ -286,6 +294,8 @@ Restoreの説明には、削除済み情報や以前のRule・同意・Schedule�
 
 未完了の消去・復旧と並行するbackupも、必要な状況・保留を無視した「即実行可能な正常copy」にしない。待機させるか、未完了状態を復旧可能に含めるかは方法の選択に残す。通常のHistory／log保持整理は形成済みLearning・Summaryへcascadeせず、失われるsource参照を扱う。
 
+Companion間交流のHistoryと保存された非会話活動記録・historical evidenceも、個体削除後の残存分を含めfull backup・通常保持管理へ参加する。個体調整が記録の意味を、作業・実行・拡張・保全・消去がそれぞれTask・Action・Auditの既存契約を提供する。新しい汎用Activity ownerや全reasoningの保存は要求しない。
+
 ### 7.4 停止・Cancel・shutdown・失効
 
 入出力・提示から各担当ownerへの管理経路は本体LLM・Agent・Providerの応答成功を必要としない。作業がCancelの受付・遂行停止、実行・拡張が個別作用の停止結果、個体調整が個体活動停止、権限・制約が失効後の利用禁止、認証秘密が秘密の失効を扱う。Mute等の即時local操作も利用可能にするが、Host未受理の要求をHost作業の停止成功にしない。
@@ -298,7 +308,9 @@ Host shutdownでも必要な進捗・作用不明・未伝達・全域操作の�
 
 個体調整がlifecycleを調整し、内部削除の全域成立は保全・消去へ依存する。作業は実行中Taskのbest-effort Cancelと担当Schedule削除、認識・学習は固有状態・内部Companion scope Skillの過去revision・主体または相手のRelationship削除、接続・存在と入出力・提示は帰属・Body・対話停止、各利用箇所は新規開始禁止に参加する。
 
-削除は強い確認を経て、固有設定・一対一History等の対象、残すGlobal Learning・共有Summary・グループ発言・Task記録・外部file、参照不能と既知の外部作用を説明する。削除時Global化やScheduleの自動引継ぎはしない。通常のCompanion削除はその個体に関する情報をすべて消すtargeted deletionではなく、残るTask管理を削除済み個体の生存やLLMに依存させない。
+Stopの成立には接続・存在によるactive帰属の解除を必要とし、Client・Hostのどこにもpresenceを残さない。共有観測は人数・routing対象から除外し、Body・通常interaction・Computer Use対象・Host内の自発活動を持たせない。再配置hintは現在帰属とは別であり、再開時の適切な再配置を可能にしても具体algorithmは固定しない。Running個体のdisconnect復帰をStopへ適用しない。
+
+削除は強い確認を経て、固有設定・個体固有Summary・Companion scope Memory／内部Skillとrevision・Companion State・その他個体固有Learning・Relationship・Scheduleの対象、残すGlobal Learning・共有Summary・historical record・外部file、参照不能と既知の外部作用を説明する。一対一・グループ・Companion間交流のHistory、非会話活動記録・historical log／evidence、Task記録は個体削除だけでは消さず、本来の通常削除・retention・targeted deletionに従う。記録保持を個体固有Memory／Learning・根拠の削除回避にしない。削除時Global化やScheduleの自動引継ぎはしない。残る記録管理を削除済み個体の生存やLLMに依存させない。
 
 遅延した作用結果は残るTaskの記録へ必要範囲で反映できるが、削除済みCompanionのMemory・Relationship等を再作成しない。削除完了は内部対象の処理と新規活動禁止・残存説明に依存し、外部作用の完全rollbackを条件にも成功の意味にもしない。
 
@@ -308,7 +320,7 @@ Host shutdownでも必要な進捗・作用不明・未伝達・全域操作の�
 
 切断時は基本的に利用可能なHost上のClientへ移動し、なければactiveなしで継続する。Host側Client環境を自動起動しない。旧Actionの不明を新Clientでの再実行で解消しない。移動後のObservationは移動先Client設定と全体制御、自発性は引き続き個体設定へ依存する。
 
-activeなしでも許可済みHost作業・Schedule起動・保存、Clientを必要としない交流・内部調査・通知生成は可能である。Body・Text／Realtime会話・Voice・Computer Useは行わず、存在個体のないClientで新規観測しない。個体調整は伝えられなかった事項と元結果の関係をHostに残し、次Clientで要約報告する。報告状況は実際の提示に依存し、Task完了や接続だけで更新しない。
+Runningのままactiveなしでも許可済みHost作業・Schedule起動・保存、Clientを必要としない交流・内部調査・通知生成は可能である。Body・Text／Realtime会話・Voice・Computer Useは行わず、存在個体のないClientで新規観測しない。個体調整は伝えられなかった事項と元結果の関係をHostに残し、次Clientで要約報告する。報告状況は実際の提示に依存し、Task完了や接続だけで更新しない。
 
 ## 8. Dependency Diagram
 
@@ -333,7 +345,7 @@ flowchart LR
     individual -->|"委任・steering・結果"| work
     work -->|"担当状態・必要な個体判断"| individual
     work -->|"知識・手順・経験形成"| learning
-    learning -->|"会話の原記録"| individual
+    learning -->|"会話・非会話活動の原記録"| individual
     learning -->|"Taskの原記録"| work
     individual -->|"移動要求・帰属"| presence
     observer -->|"対象Client・存在個体"| presence
@@ -497,4 +509,16 @@ flowchart LR
 
 この設計を妨げる**新たなRequirement Ambiguity／Gapは見つかっていない**。解決済みA-01〜A-04／G-01・G-02を維持する。認可・鮮度・競合・隔離・検証・経路の具体mechanismは設計自由度であり、未解決の製品要件へ昇格させない。
 
-**Architecture Review #1へ進める状態である。** レビュー対象は、本書の役割付き依存と強制箇所が既存boundary・ownershipを満たすかである。crate／module／API／DB等の実装構造や、実装による強制保証の検証にはまだ進んでいない。
+### 11.4 Architecture Review #1の統合結果（2026-09-07）
+
+[Architecture Review #1](reviews/architecture-review-1.md)は独立レビュー原本として変更しない。以下は更新後のrequirementsと全architectureを基準にした統合判断であり、レビューを製品要件の正本にはしない。
+
+| Finding | Decision | 独立再評価と対応 |
+|---|---|---|
+| F-01 | ACCEPT | 保持する記録の全域消去・backup参加には意味ownerとlifecycleの明示が必要。SO 3・4.3・4.4・6.3〜6.5で補った。Companion間の発話は非会話活動に分類せずHistoryへ置き、保存された非会話記録も個体調整が扱う。Task・Action・AuditのownerとRaw非保存は維持し、個体固有Summary／Learningの削除は弱めない。 |
+| F-02 | ACCEPT | 共有検知に個体overrideを適用するmodelはClient単位共有と整合しない。Owner決定を要件化し、Observer専用assignment・同意を権限・制約、解決と使用量を推論へ対応付けた。Host-only割当やClient別UIは固定せず、Cloud同意・privacy・capは維持した。 |
+| F-03 | ACCEPT | Host自動起動の選択はdata保全操作ではなく一般起動・日常利用設定であり、coordinatorであることを所有理由にできない。SO 4.17・Subsystem・本書3.4で入出力・提示へ帰属させ、OS作用を実行・拡張に分離した。Audit・Debug・保持・backup・全域操作状況はdata lifecycle固有の意味があるため保全・消去に残し、SO 4.24で理由を明示した。 |
+
+RI-01はCompanion間交流の発話をHistoryとして保持し片方・両方の削除では消さない契約、RI-02はStopped個体のClient／Host presenceなし・Observer人数除外と再配置hintの分離によって解消した。[Architecture Driversの解決記録](architecture-drivers.md#3-requirement-issues)と要件へ反映済みであり、未決定Issueとしては残さない。
+
+要件 → Drivers → System Context → Runtime Topology → Subsystems → State Ownership → Dependency Rulesの横断確認により、F-01〜03とRI-01・02はclosedとして扱える。新たなRequirement Ambiguity／Gapはない。12 Subsystemと既存trust・failure boundaryは維持した。**Step 6へ進める状態であるが、今回Runtime Flowや実装構造の設計は行わない。** Context Assembly、Owner intent provenance、Observer routing context、restore手順、Client bootstrap material、自発性のmechanical gating等のLater-design Notesは後続設計に残す。
