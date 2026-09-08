@@ -386,10 +386,10 @@ enum TransportFrame {
 
 ### 11.2 wire property
 
-- すべての Client→Host message の envelope は `sender{ device_id, incarnation_id, connection_id }` を載せる（第5節）。欠落は不受理の理由にする（「制約なし」への変換禁止）。唯一の例外は pairing 前の最初の `PairingRequest` であり、`device_id: None` で送る（§5 の方向別規則・§9.2）。
+- すべての Client→Host message の envelope は `sender{ device_id, incarnation_id, connection_id }` を載せる（第5節）。欠落は不受理の理由にする（「制約なし」への変換禁止）。例外は pre-auth の pairing・auth 用 message のみ：pairing 前の最初の `PairingRequest` は `device_id: None, connection_id: None`、paired Client の `AuthProof` 等は `device_id: Some`・`connection_id: None` で送る（§5 の方向別規則・§9.2・§9.3）。
 - Host は device ごとの current `(incarnation_id, connection_id)` を保持する（durable の最終接続管理 record＋runtime の live 表）。受信時に次を照合する：
   1. `device_id` が pairing 済み・非失効であること（pairing 前の最初の `PairingRequest` を除く）。
-  2. `connection_id` が当該 device の current であること。
+  2. `connection_id` が当該 device の current であること（authentication 成功後の message にだけ適用する。pre-auth の pairing・auth 用 message は `None` を許可する）。
   3. `incarnation_id` が current incarnation と対応すること（旧 incarnation からの到着は stale）。
   4. `observed.presence_generation_view` が現在の帰属 generation と対応すること（Client 依存操作の場合）。
   5. `round_view` / `ticket_view` が現在の round / ticket と対応すること（該当操作の場合）。
