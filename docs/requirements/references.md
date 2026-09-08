@@ -1,7 +1,7 @@
 # 参考資料
 
 状態: **非規範**
-最終確認: 2026-09-06
+最終確認: 2026-09-08
 
 本書は、eneの要件を考える際に参照した製品、標準、公式文書と、その採用理由を記録する。リンク先の仕様や製品挙動はeneの要件そのものではない。リンク先が変更された場合や本書と[製品要件](requirements.md)が矛盾する場合は、製品要件を正本とする。
 
@@ -54,7 +54,7 @@ eneは単一製品の模倣ではなく、複数の既存製品から異なる�
 | [Replika: Conversation deletion](https://help.replika.com/hc/en-us/articles/4410750548493-Can-I-delete-my-conversations) | 会話履歴の削除と、学習済みMemoryの管理を別の問題として扱う | 通常の履歴retentionとは別にPrivacy/Security目的のtargeted deletionを持ち、対象情報を復元できるrevision、Experience Summary/evidence、派生data等にも削除を伝播させる | 2026-09-05 |
 | [Replika: Chat history](https://help.replika.com/hc/en-us/articles/4411154990605-Is-the-chat-history-infinite) | 表示できる会話履歴と、学習されたMemoryを別に扱う | Hostを正本とし、履歴は既定で保持したうえで保持期間と手動削除をOwnerが管理する | 2026-09-05 |
 
-eneでは、Raw History、意味的なまとまりへ圧縮したExperience Summary、そこから形成されるMemoryとRelationshipを分ける。Memory形成時の保存価値と、後の会話でのretrieval優先度は別の判断とし、Memoryは内容、重要度、scope、時間的意味等をExperienceに応じて継続更新できる一方、過去revisionと根拠を保持する。通常の忘却、訂正、失効、置換、統合は保存済みMemoryや過去revision・根拠の削除を意味しない。Privacy/Security目的で特定情報そのものの強制消去を明示したtargeted deletionだけがこの保持原則より優先し、対象情報を復元できるrevision、Experience Summary/evidence、派生data等も削除対象にする。
+eneでは、Raw History、意味的なまとまりへ圧縮したExperience Summary、そこから形成されるMemoryとRelationshipを分ける。Memory形成時の保存価値と、後の会話でのretrieval優先度は別の判断とし、Memoryは内容、重要度、scope、時間的意味等をExperienceに応じて継続更新できる一方、過去revisionと根拠を保持する。通常の忘却、訂正、失効、置換、統合は保存済みMemoryや過去revision・根拠の削除を意味しない。Privacy/Security目的で特定情報そのものの強制消去を明示したtargeted deletionはこの保持原則より優先し、対象情報を復元できるrevision、Experience Summary/evidence、派生data等も削除対象にする。容量管理の自動cleanupは通常の忘却とは別のretention policyとし、既定OFF、Ownerの明示的な有効化により設定可能とする。
 
 特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とする。Global scopeはOwnerが明示的に共有を求めた場合、または複数Companionで共通に利用すべきことが内容と文脈から明確な場合に限り、単に重要、有用、一般的な好みであることだけをGlobal化の理由にしない。
 

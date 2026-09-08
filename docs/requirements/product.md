@@ -1,7 +1,7 @@
 # 製品定義
 
 状態: **再構成済みBaseline**
-最終確認: 2026-09-07
+最終確認: 2026-09-08
 
 ## 製品の要約
 
@@ -54,7 +54,7 @@ Taskが作業対象として利用するfolder、file、外部source等との関
 
 ### MemoryとSkill
 
-Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Memoryは後のExperienceによって内容、重要度、scope、時間的意味等を継続的に更新できる。通常の忘却、訂正、失効、置換、統合では保存済みMemoryやその過去revision・根拠を削除せず、現在の認識や重要度、想起優先度等を更新する。OwnerがPrivacyまたはSecurityのため特定情報そのものをene内部から強制消去するよう明示したtargeted deletionだけは、この保持原則より優先する。MemoryはOwner、Companion、出来事、状況等についての長期的な理解ではRelationshipより優先される主要な知識状態である。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
+Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Memoryは後のExperienceによって内容、重要度、scope、時間的意味等を継続的に更新できる。通常の忘却、訂正、失効、置換、統合では保存済みMemoryやその過去revision・根拠を削除せず、現在の認識や重要度、想起優先度等を更新する。OwnerがPrivacyまたはSecurityのため特定情報そのものをene内部から強制消去するよう明示したtargeted deletionは、この保持原則より優先する。容量管理は通常の忘却とは別であり、過去revision・Experience Summary等の自動cleanupは既定OFF、Ownerの明示的な有効化により設定可能とする。MemoryはOwner、Companion、出来事、状況等についての長期的な理解ではRelationshipより優先される主要な知識状態である。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
 
 ene内部のMemoryとSkillはCompanionまたはGlobalのscopeを持ち得る。特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とし、Ownerが明示的に共有を求めた場合、または内容と文脈から複数Companionで共通に利用すべきことが明確な場合だけGlobal scopeにする。単に重要、有用、一般的な好みであることだけを理由にGlobal scopeへ昇格させない。
 

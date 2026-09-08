@@ -1,7 +1,7 @@
 # 現在の受け入れ条件
 
 状態: **最初のmilestone**
-最終確認: 2026-09-06
+最終確認: 2026-09-08
 
 本書は、[製品要件](requirements.md)のうち最初に実装して検証する範囲を定める。記載のない要件を否定せず、製品全体に新しい必須挙動を追加しない。Milestone完了後は、実測結果と次のRelease計画に合わせて更新する。
 
@@ -79,6 +79,8 @@
 13. Targeted deletion後に通常のconsolidationや再起動を行っても、削除前から存在した根拠だけを使って同じ情報がMemoryとして自動再形成されないことを確認する。
 14. 削除対象を含むExperience Summaryが別の無関係なMemoryの根拠でもあるfixtureでは、分離可能な無関係情報まで不必要に削除しないことを確認する。
 15. 同じConversation Historyを容量管理目的の通常削除として削除したfixtureでは、形成済みMemory、Experience Summary等へtargeted deletionと同じcascadeが発生しないことを確認する。
+16. Targeted deletionの開始から完了までに対象情報を再入力・内部生成したfixtureでも同じ消去対象となり、完了後にOwnerが改めて提供した場合は新しいExperienceとして扱えることを確認する。
+17. 容量不足のfixtureで、Ownerが自動cleanupを明示設定していなければ、Learningの過去revisionやExperience Summary・根拠を自動削除しないことを確認する。
 
 ### Workspaceでのfile Task
 
@@ -97,6 +99,7 @@
 2. Host上ではTaskが継続し、Client再接続後に進捗または結果を確認できることを確認する。
 3. 別の進行中TaskでHostを終了し、再起動する。
 4. Taskが自動再開せず、保存済み進捗と既知の外部作用を示したうえでOwnerの明示再開を待つことを確認する。
+5. Running CompanionのpresenceはHost再起動前のClientへ自動復元され、Taskの明示再開とは独立であることを確認する。元のClientが利用不能ならactiveなしで待て、別Clientへ無条件に移動しないこと、Stopped Companionへ適用しないことも確認する。
 
 ### 障害と安全境界
 

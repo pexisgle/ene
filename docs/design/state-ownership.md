@@ -4,7 +4,7 @@
 
 ## 1. Overview
 
-State Ownershipは、**何についての状態を正しいものとして扱い、その意味をどの責務が変更し、いつまで何のために利用するか**という契約である。HostをEne内部永続状態の正本とする既決事項の下で、個体、学習、記録、制御、作業等の意味上の責任を分ける。
+State Ownershipは、**何についての状態を正しいものとして扱い、その意味をどの責務が変更し、いつまで何のために利用するか**という契約である。HostをEne内部domain dataの正本とする既決事項の下で、個体、学習、記録、制御、作業等の意味上の責任を分ける。
 
 本書のsemantic ownerは、その状態の意味・通常の変更・lifecycle判断を引き受ける責務を指す。Companionへの所属、Taskへの従属、複数箇所からの参照、実行場所、保存処理の担当とは異なる。同じSubsystemが複数stateのsemantic ownerになっても、一つの状態やlifecycleへ統合することを意味しない。
 
@@ -15,14 +15,14 @@ State Ownershipは、**何についての状態を正しいものとして扱い
 ## 2. Ownership Principles
 
 1. **同じ意味には一つの正本を置く。** 表示、検索、結果報告、監査、外部送信用の表現を作っても、元の状態を独自に変更する正本へ昇格させない。異なる意味の状態に同じ情報が関係することは許す。
-2. **Host正本とsemantic ownerを分ける。** 永続する内部状態はHostに残り、各domainの責務がその意味を管理する。Client、Provider、MCP、Pluginが内部状態の唯一の保持者になる設計は成立しない。
+2. **Host正本とsemantic ownerを分ける。** 個体・会話・Learning・Task・制御条件等の永続domain stateはHostに残り、各domainの責務がその意味を管理する。Client、Provider、MCP、Pluginがdomain stateの唯一の保持者になる設計は成立しない。端末固有の接続材料は第8節の別分類としてEneの保護対象に置く。
 3. **意味変更、制約の強制、保存、全域操作への参加を分ける。** 権限・制約が拒否できてもTaskやLearningを所有しない。保全・消去が削除・復元を調整しても、その対象の通常ownerにはならない。
 4. **静的構成、継続個体、形成済み状態を分ける。** CharacterのrevisionとCompanionへの部品適用、Experience由来のMemory・Relationship・Companion Stateは別の変更である。Package更新を成長の初期化にしない。
 5. **現在認識、過去認識、根拠、原記録を分ける。** Memoryを主要な知識状態とし、Summaryを根拠、Historyを発言や活動の記録として扱う。RelationshipとCompanion Stateに詳細事実の第二の正本を置かない。
 6. **所属と参照は削除の同義ではない。** 担当Companionへの参照はTask記録の寿命を決めない。共有Summaryを参照しても他個体の状態を取得せず、Workspaceへの関連付けで外部fileを所有しない。
 7. **Learningのscopeは意味状態、明示的な禁止は制御条件とする。** Scopeの意味判断は認識・学習に残す。決定後のscopeとOwnerの保存禁止・非共有は各利用箇所でも強制する。重要度、想起優先度、同じClient・グループへの参加をGlobal化の根拠にしない。
 8. **生成されたcontentを制御の正本へ直結しない。** 許可・Rule・同意・cap等はOwnerに由来する判断と適用範囲を必要とする。LLMは解釈を支援できるが、その出力や形成済み状態だけでは変更できない。
-9. **通常の意味更新と消去の目的を分ける。** Learningの忘却・訂正・統合等では保存済み内容・過去revision・根拠を削除しない。通常History/log削除は形成済み状態へcascadeしない。明示的なPrivacy/Security目的のtargeted deletionはこれらの保持原則より優先する。
+9. **通常の意味更新と消去の目的を分ける。** Learningの忘却・訂正・統合等では保存済み内容・過去revision・根拠を削除しない。通常History/log削除は形成済み状態へcascadeしない。容量retentionは通常忘却と別であり、Learning revision・Summary等の自動cleanupは既定OFF、Ownerの明示opt-in時に限り設定可能とする（4.24・6.5）。明示的なPrivacy/Security目的のtargeted deletionはこれらの保持原則より優先する。
 10. **停止要求、内部状態の確定、外部作用の結果は別である。** Cancelや切断から外部作用の取消・不存在を推測せず、不明を未実行に戻さない。状態参照やClient移動をAction replayの理由にしない。
 11. **Copyと一時dataにも内部での利用責任がある。** 派生物を正本にしないことは、消去・秘密保護の対象外にすることではない。Ene管理下の処理中data・遅延結果・Client一時dataも全域操作へ参加する。
 12. **復元する内容と、現在使える権限を分ける。** Backupはcopyであり、restoreが成功して初めて復元内容がHostの正本になる。復元された設定や作業記録だけで自動処理を再有効化しない。
@@ -74,7 +74,7 @@ flowchart TB
 
 Experienceは出来事とその結果という概念であり、全活動を格納する新しいcanonicalなRaw storeを設けない。Summaryを作らずに終わる出来事や、Rawを保存せずにSummaryを根拠として残す形成もある。図の出力からCharacterや永続状態への自動的な逆更新は導かれない。
 
-Companion／Globalは内部Memory・Skillの利用scopeである。会話の参加者、Relationshipの主体と相手、Taskの担当、Summaryの利用範囲、Clientの存在場所をこの二択へ押し込まない。これらはそれぞれ別の所属・参照関係であり、Globalという名称の包括的な共有領域を新設しない。
+Companion／Globalは内部Memory・Skillの利用scopeである。4.16のObserverへの限定されたrouting用文脈の提供は、このscopeのGlobal化や他Companionへの共有ではない。会話の参加者、Relationshipの主体と相手、Taskの担当、Summaryの利用範囲、Clientの存在場所をこの二択へ押し込まない。これらはそれぞれ別の所属・参照関係であり、Globalという名称の包括的な共有領域を新設しない。
 
 ## 4. Ownership by State
 
@@ -136,7 +136,7 @@ Host上の個体の継続dataとして、報告に必要な内容・参照と状
 
 Summaryの個体固有性と、他個体・Global Learningも利用する共有根拠であることを識別する。**共有根拠の保持は、全内容の共通利用許可ではない。** 利用可能な内容と背景は形成判断と制約に従い、Global化したLearningから元の私的History・revision・Summary全文へのaccessを広げない。
 
-Companion削除ではその個体固有Summaryを削除する。共有Summaryを残す場合は利用中の関係を照合し、残存内容と失われる参照を説明する。Targeted deletionでは過去根拠も対象になり、可能なら無関係情報を分離して保つ。これらのために全Summaryへ同じretentionやrevision方式を課さない。
+Companion削除ではその個体固有Summaryを削除する。共有Summaryを残す場合は利用中の関係を照合し、残存内容と失われる参照を説明する。Targeted deletionでは過去根拠も対象になり、可能なら無関係情報を分離して保つ。容量管理は4.24・6.5の明示opt-in契約に従う。これらのために全Summaryへ同じretentionやrevision方式を課さない。
 
 ### 4.6 Memoryの現在認識、重要度、scope、過去revision
 
@@ -146,7 +146,7 @@ MemoryはOwner、Companion、出来事、状況等についての長期理解の
 
 現在の認識と過去revision・利用根拠を区別する。最初から誤っていた認識の訂正では誤りだったことを、以前は正しかった状況の変化では過去の有効性を表せる関係を保つ。過去revisionは変更経緯の正本であり、現在認識と同格の競合する正本ではない。
 
-通常の忘却は想起の抑制であり、保存済みMemory、過去revision、根拠を削除しない。失効・置換・統合も同様で、容量上限をこの保持の迂回に使わない。Companion scopeのMemoryは個体削除の対象、Global Memoryは個体削除後も残る。Scope変更条件と旧根拠の非共有は第6・7節に従う。Targeted deletionでは通常保持より消去が優先する。
+通常の忘却は想起の抑制であり、保存済みMemory、過去revision、根拠を削除しない。失効・置換・統合も同様で、容量上限をこの保持の迂回に使わない。Ownerが明示した容量retentionは4.24・6.5の別契約に従う。Companion scopeのMemoryは個体削除の対象、Global Memoryは個体削除後も残る。Scope変更条件と旧根拠の非共有は第6・7節に従う。Targeted deletionでは通常保持より消去が優先する。
 
 特定CompanionとのExperienceから形成した内部Memory・SkillはCompanion scopeを既定とする。Ownerが明示的に共有を求めた場合、または内容・由来・文脈から複数Companionで共通利用すべきことが明確な場合だけGlobalにする。不明ならCompanion scopeに留め、Global化の判断だけのために通常の逐次確認は要求しない。Ownerの保存禁止・非共有は意味判断より優先する。「忘れてほしい」等も、Privacy/Securityのため保存済み情報そのものを消去する意図が明示されない限り、通常忘却・訂正として扱う。
 
@@ -156,11 +156,13 @@ Ownerは会話を通じて訂正・統合・scope変更を伝え、現在認識�
 
 **正本と変更責任:** **認識・学習**が、内部Skillの再利用手順・専門知識・注意・補助resource、有効なrevision、由来、scopeを管理する。Agent Skillsとして交換できる内部Learningであり、成功検証済みであることは定義条件にしない。
 
-同梱・importされた内部原本を学習変更で破壊せず、改善は由来を持つ別revisionとする。以前の有効revisionへの復帰は「どの手順を現在利用するか」の変更であり、後続revisionや実行結果をなかったことにはしない。実行の事実はTask／Action記録を参照し、Skill側はどのrevisionに対する未検証・成功・失敗等かを対応付ける。LLMの成功評価だけで外部作用を確定しない。
+同梱・importされた内部原本を学習変更で破壊せず、改善は由来を持つ別revisionとする。保持されている以前の有効revisionへの復帰は「どの手順を現在利用するか」の変更であり、後続revisionや実行結果をなかったことにはしない。実行の事実はTask／Action記録を参照し、Skill側はどのrevisionに対する未検証・成功・失敗等かを対応付ける。LLMの成功評価だけで外部作用を確定しない。
 
-Companion／Global scopeの条件はMemoryと共通だが、手順の改善・原本保護・revision復帰はSkill固有の契約である。通常変更では保存済みSkill・過去revision・根拠を削除しない。Companion削除では内部Companion scope Skillとその過去revisionを削除し、自動Global化しない。Global Skillは残す。
+Character Packageの推奨Skillから取り込む内部SkillはCompanion scopeを既定とし、同じCharacterから作る各Companionに別々に属する。単体Skill importではOwnerがCompanion／Global scopeを選択できる。以後のCompanion／Global scopeの条件はMemoryと共通だが、手順の改善・原本保護・revision復帰はSkill固有の契約である。通常変更では保存済みSkill・過去revision・根拠を削除しない。Companion削除では内部Companion scope Skillとその過去revisionを削除し、自動Global化しない。Global Skillは残す。
 
 Characterにおける推奨は静的な構成上の指定であり、内部Skillの有効revisionを黙って切り替えたり、実行許可を与えたりしない。外部Packageの原本、Workspace内のSkill・付属scriptは通常の外部fileであり、内部Skillとは別の正本とlifecycleを持つ。内部へ取り込んだ場合だけ、その取り込んだ内容を内部Skillとして管理する。内部更新を外部原本へ自動反映しない。
+
+容量都合の自動cleanupは4.24のOwner opt-inに従い、通常のSkill改善・revision切替から削除を導かない。明示cleanupで削除されたrevisionへの復帰を保証しない。
 
 ### 4.8 Relationship
 
@@ -168,7 +170,7 @@ Characterにおける推奨は静的な構成上の指定であり、内部Skill
 
 Relationshipは距離感、交流傾向、関係の変化等のcompactな解釈の正本である。人物情報・Preference・出来事の詳細はMemoryやSummaryを参照し、事実が矛盾する場合はMemoryを優先して関係解釈を訂正・再解釈する。関係状態がMemory検索だけから毎回再生成されるcacheであることも要求しない。
 
-個体調整は会話・交流・訂正を届け、現在解釈を振る舞いへ利用する。一時的な演技や任意数値の編集を永続Relationshipの強制更新にしない。形成・説明に用いる根拠を保持し、通常History削除だけでは関係を変更しない。Memoryと同一のrevision粒度を要求せず、保持している過去状態・根拠はtargeted deletionの対象となる。
+個体調整は会話・交流・訂正を届け、現在解釈を振る舞いへ利用する。一時的な演技や任意数値の編集を永続Relationshipの強制更新にしない。形成・説明に用いる根拠の保持は4.24・6.5のretention契約に従い、通常History削除だけでは関係を変更しない。Memoryと同一のrevision粒度を要求せず、保持している過去状態・根拠はtargeted deletionの対象となる。
 
 主体Companionの削除だけでなく、相手Companionの削除でも該当Relationshipを削除する。他Companionが主体のRelationshipでも、この相手削除契約へ参加する。関連する共有Summary・グループ発言まで一律に削除する意味ではない。関係の進展はPermission・Rule・同意・capを変更しない。
 
@@ -246,7 +248,7 @@ Schedule停止・変更・削除は将来の起動条件に対する操作であ
 | Host側の確認に基づくpairingの許可、device別の許可機能・失効 | **権限・制約**。Owner由来の信頼・利用範囲を管理する。 | 接続・存在が接続と帰属へ、実行・拡張がActionへ適用する。接続側に同じ許可の独立正本を作らない。秘密値を要する認証材料は認証秘密の境界に置く。 |
 | Companionのactive Client帰属、移動中・activeなしの扱い | **接続・存在**。個体ごとの排他性と移動成立を管理する。 | 個体調整が移動の必要性を判断し、入出力・提示、共有観測、実行・拡張が現在の帰属を利用する。Task担当や操作許可とは別。 |
 
-帰属はHostが管理する現在の有効な状態であり、Clientの表示や過去にactiveだった記録を正本にしない。Host管理の帰属とClient側の実際の利用可能性を合わせて扱い、排他性が確認できないClientは対象入出力・観測・自発的interaction・Computer Useを続けない。保存の有無・具体的な調停方式は定めない。
+帰属はHostが管理する現在の有効な状態であり、Clientの表示や過去にactiveだった記録を正本にしない。Host管理の帰属とClient側の実際の利用可能性を合わせて扱い、排他性が確認できないClientは対象入出力・観測・自発的interaction・Computer Useを続けない。Running CompanionについてはHost再起動前のClientを復旧先としてHostで保持し、現在の接続・許可・排他性を確認できればそのClientへ自動的にpresenceを復元する。元のClientが利用可能になるまではactiveなしとして扱え、再起動を理由に別Clientへ無条件に移動しない。Stopped Companionには適用せず、Taskの明示再開とも別である。復旧先の記録は接続・存在が管理し、記録だけで現在presenceが成立したとは扱わない。再接続・待機・timeout・pairing・調停方式は定めない。
 
 Running Companionのactive Clientは同時に一つまでで、Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useをそこへ結び付ける。別ClientからのText会話やComputer Useは先に呼出し・移動を経る。Runningのままactiveなしである場合は、許可済みのHost作業・Schedule起動やClientを必要としない交流・調査は継続できるが、Client依存の対話・操作は行わない。
 
@@ -263,6 +265,10 @@ Pairing済み、接続済み、active、Action許可済みは四つの異なる�
 存在個体にStopped Companionを数えない。共有観測はClientに紐づくObserverを推論consumerとして扱い、4.18のObserver専用assignmentを利用する。Companion overrideとその同意の合成では選択しない。観測運用設定のownerは共有観測、assignment・送信同意のownerは権限・制約、実効経路の解決は推論であり、Observerを独立CompanionやTask Agentにしない。
 
 CaptureされたRaw、候補検知・routing用dataは**共有観測**が扱う一時dataであり、通常保存しない。候補は出来事の意味やLearningの正本ではない。delivery後の各CompanionのメインLLMによる認識は個体調整が扱い、その推論には当該CompanionのProvider設定を適用する。保存する認識結果等の活動記録は4.3、形成されたsemantic stateとSummaryは4.5〜4.9に従う。共有候補から全個体の私的情報の利用やProvider同意の拡大を導かない。
+
+**Companion固有のrouting用文脈:** 共有観測は、routingに必要な範囲へ要約・制限されたCompanion固有文脈を受け取れる。History・個体文脈は個体調整、Memory・Learningは認識・学習、Task contextは作業が元情報の意味と提供範囲に責任を持つ。Task contextの参照は既存の個体調整と作業の協調を通じて行い、共有観測へTaskの所有や一般的な参照権限を移さない。
+
+この文脈は元情報に従属するrouting用途の一時的な派生表現であり、Experience Summaryや新たなLearning正本ではない。Companion scopeからGlobal scopeへの変更、他Companionへの共有、private context全体の公開を意味しない。提供元と共有観測は、元情報・対象Companion・用途・適用される制約の対応を保ち、権限・制約と各利用箇所が元情報の利用制約とObserver専用assignmentの送信同意をともに適用する。Companion側の同意だけでObserverから送信できるとは扱わず、要約・変換で制約を消さない。scope変更・同意失効・targeted deletion等はこの派生表現と処理中利用にも反映する。生成方法、生成に用いるmodel／Provider、形式、更新頻度、鮮度、選択algorithmは固定しない。
 
 Quiet hours等のRule、Permission・費用・資源・loopの強制上限は**権限・制約**、実際のMute・入出力状況は**入出力・提示**の正本を参照する。個体調整の未応答・反復抑制はこれらを緩める権限を持たない。Observer Pause／OFF、fullscreen、Client不在は今後の観測・提示可否を変え、形成済みLearning・Companion Stateを消去しない。
 
@@ -284,7 +290,7 @@ Setupや設定画面は各状態への入力経路であり、全設定のowner�
 
 **権限・制約**が管理するCapability別の割当同意には、選択されたProvider／model、送信先・data・用途・取扱い・費用の範囲、Host既定・Companion override、承認済みfallbackと順序が対応する。推論側で独立した「利用してよい割当」を保存しない。推論はこの正本と現在の担当から有効な割当を解決し、Task Agentは担当Companionの条件を継承する。解決済み経路は派生結果であり、設定・同意変更後も以前の選択を有効とする根拠にはならない。
 
-Host既定 → Companion override → Task Agent継承はCompanion側の割当modelである。Clientに紐づく共有Observerは特殊なconsumerとして、**権限・制約**が管理するObserver専用model／Provider assignmentとその割当同意を使う。推論は対象ClientのObserverと用途を基にこれを解決し、存在Companionのoverride・同意の選択や合成を行わない。共有Capture・candidate detectionとdelivery後のCompanion reasoningは別consumerであり、後者だけがCompanion設定に従う。
+Host既定 → Companion override → Task Agent継承はCompanion側の割当modelである。Clientに紐づく共有Observerは特殊なconsumerとして、**権限・制約**が管理するObserver専用model／Provider assignmentとその割当同意を使う。推論は対象ClientのObserverと用途を基にこれを解決し、存在Companionのoverride・同意の選択や合成を行わない。共有Capture・candidate detection・routingとdelivery後のCompanion reasoningは別consumerであり、後者だけがCompanion設定に従う。
 
 ObserverにもCloudを含む送信同意・privacy・承認済みfallback・費用cap・秘密保護を適用する。軽量Localまたは安価で信頼できるCloudは推奨に留まる。全Clientでmodelを共通化するか、Client別UIを設けるか、Host defaultからどう継承するかはDesign Freedomとし、Companion overrideの適用禁止だけを固定する。
 
@@ -298,7 +304,7 @@ ObserverにもCloudを含む送信同意・privacy・承認済みfallback・費�
 |---|---|---|
 | Capability境界、永続Deny・Always ask、Rule | Ownerが許した目的・対象・操作等と将来方針。明確な自然言語Ruleは解釈と範囲を示して保存し、Undoを提供する。 | Ruleはtriggerではない。現在の依頼は永続Deny等を上書きしない。Undoは現在の方針変更であり、過去のAction結果を書き換えない。 |
 | 個別のPermission判断・Owner判断待ち | 現在の依頼やRule・文脈と具体的Actionへの対応。Ownerの明確な依頼を一回の承認と解釈できる。 | 対象・目的・送信先・data・作用等の重要な変更で再評価する。過去承認記録やTaskの判断待ち表示自体は再利用可能な包括承認ではない。 |
-| Provider割当同意、承認済みfallback | Ownerが説明を受けて選んだCapability別の利用範囲。 | 接続登録・認証成功では成立しない。同意失効・重要変更後は旧同意だけで送信しない。Companion override削除で無条件に送信範囲を広げない。 |
+| Provider割当同意、承認済みfallback | Ownerが説明を受けて選んだCapability別の利用範囲。Observer専用assignmentでは、送信され得るdataに4.16の限定されたCompanion固有routing文脈も含め、元情報の利用制約を維持する。 | 接続登録・認証成功では成立しない。同意失効・重要変更後は旧同意だけで送信しない。Companion override削除で無条件に送信範囲を広げない。 |
 | device許可と失効、Local MCPの個別sandbox外許可 | 前者は確認したdeviceの機能範囲、後者はcommand・設定の由来・権限等へ対応した隔離例外。 | それぞれ失効可能。MCP例外の重要変更は再確認し、個々のAction承認やPlugin例外へ転用しない。 |
 | Ownerが明示した保存禁止・非共有 | 意味判断側が読み取ったOwnerの意図を、適用対象・範囲を持つcontrol constraintとして扱う。 | Memoryの重要度やLLMの有用性判断では解除しない。Learningのscope自体の意味ownerは認識・学習に残す。 |
 | Provider別・全体の費用cap、利用・資源・反復等の上限 | Ownerの選択と製品の強制境界として定めた制限。 | 委任・並列・別経路を通じても適用する。cap到達、不明で安全に続行不能ならdataを保持して停止・判断待ちにする。 |
@@ -327,7 +333,7 @@ LLM出力、Character、Memory、Skill、Summary、Relationship、Companion Stat
 
 認証に必要な利用経路だけで値を扱い、model context、LLM生成Tool argument、通常result、UI、History、Summary、Learning、Relationship、Companion State、Task結果、log、Audit、Debug captureへ露出させない。用途・参照元・失効・再認証の説明は非秘密情報で行う。
 
-Credentialはfull backupから除外し、設定Resetでは維持、全データResetでは削除する。参照がbackupから戻っても値が復元されたとは扱わず、利用前に存在・用途・有効性を照合し、必要な再認証を示す。CompanionやTaskから参照されるだけでCredential全体を個体／Task所有へcascadeさせない。個別Credential更新・失効は別の明示操作として扱う。
+Credential等のsecretはfull backupから除外する。Restoreは開始前からHostに存在する現在のCredential storeを維持し、secretの復元・過去時点への巻戻しを行わない。復元されたProvider／MCP等の参照と現在のstoreを認証秘密が照合し、存在・用途・有効性が利用可能なら現在のCredentialを利用し、不足・無効なら再認証を要求する。復元されたassignment／consentは現在のCredential・制約・該当するrestore後保留を無視した自動利用の根拠にならない。設定Resetでも維持するが、全データResetでは削除する。CompanionやTaskから参照されるだけでCredential全体を個体／Task所有へcascadeさせない。個別Credential更新・失効は別の明示操作として扱う。
 
 登録外の秘密を検知した場合は各受入・利用責務が不要な保存・送信を抑制するが、完全検出を保証しない。内部の漏えいcopyのtargeted deletionと、外部で有効なCredentialの失効・更新は別であり、片方の成功で他方も完了したと扱わない。
 
@@ -358,6 +364,7 @@ Debug captureの明示的な対象・内容・有効期間・停止・削除と�
 | State | 管理する意味・立場 | 他stateとの違い |
 |---|---|---|
 | History／対象log／Audit等の保持方針 | Ownerが選んだ対象・期間・手動削除の範囲と影響。 | 対象種別ごとの契約を保ち、Learningや根拠へ一律の保持期間を適用しない。Conversation History・対象logの自動削除は既定で行わない。 |
+| Learning revision・Experience Summary等の容量管理方針 | 自動retention／cleanupは既定OFF。Ownerの明示的な有効化により設定可能。 | 通常の忘却やHistory／log保持整理とは別。認識・学習が対象の意味と根拠・復帰への影響を示し、保全・消去が明示方針の適用を調整する。data class・期間・容量・優先順位・algorithmは固定しない。 |
 | Targeted deletion、Reset、restore等の操作状況 | 目的・対象範囲、参加先、影響、完了した範囲、未完了・失敗・検証結果、必要な処理保留。 | 完了根拠は各参加ownerから得る。domainの通常変更判断や許可状態を所有せず、共通の一状態機械を課さない。 |
 | Backup設定・作成結果 | 保存先、backup独自のschedule、保持数、保護選択、対象時点・対応性、結果・失敗。 | Task Scheduleとは別。backup作成に担当CompanionやTaskを必須にしない。 |
 | 作成済みbackup | 内部状態の対応関係を持つcopy。 | live stateの正本ではない。保存先が同じHostでも外部copyとして境界を保つ。明示restoreを経ずに内容を通常参照・実行の正本へ戻さない。 |
@@ -445,28 +452,29 @@ Companion削除は「そのCompanionに関する情報を一切残さない」�
 
 1. 対象範囲・重要な影響を説明し、必要な確認を経ている。無関係な共有情報は可能な範囲で分離し、分離不能な影響を説明している。
 2. 対象情報を復元できる内部History（Companion間交流を含む）、非会話活動記録・historical log／evidence、Summary、Memoryと過去revision、Relationship、Companion Stateと保持済み根拠、Skill、Task・source copy、index・embedding・cache、Audit／Debug等に残った該当情報、接続中Client・Ene管理下の拡張一時dataを除去または復元不能にしている。Companion削除後の残存記録も除外しない。
-3. 削除前の情報を使う処理、処理中context、遅延した推論・Tool結果からの再保存を防いでいる。古い根拠・revision・indexだけによる自動再形成も防いでいる。
+3. 開始から完了までに対象情報が再び内部へ到着・生成した場合も同じ消去対象として扱い、新しいExperienceとして除外しない。削除前の情報を使う処理、処理中context、遅延した推論・Tool結果からの再保存を防いでいる。古い根拠・revision・indexだけによる自動再形成も防いでいる。
 4. 指定文字列は内部dataを機械的に検索・削除し、残存を検証している。LLMの要約や想起抑制で代用しない。言い換え・意味的同一情報の探索補助と、その完全検出を保証しない範囲を区別している。
 5. 各参加先の未完了・失敗を集約しており、未確認の局所結果を全域完了にしていない。途中再起動でも未完了の認識と必要な保留を維持する。完了記録自体に削除内容を再保存していない。
 
 切断したClientを放置して永続copyが残ることを許すものではない。Clientはもともと長期private dataを永続cacheせず、切断・再接続でも古い一時dataをHostへ戻して再形成しない責任を持つ。消去中の接続変化や確認不能は保全・消去へ通知し、必要な確認を飛ばして成功にしない。具体的な到達性・消去確認方法は後続設計に残す。
 
-通常の根拠保持・Historyと形成済み状態の独立性に反する変更を、この操作の目的・対象範囲に限って認める。保全・消去がMemoryの重要度や関係解釈を普段から編集する権限は生じない。後にOwnerが新しいExperienceとして改めて情報を提供することは禁止しない。外部送信・export・backup済みcopyや外部Workspaceの消去を完了範囲に含めない。
+Targeted deletionによる通常の根拠保持・Historyと形成済み状態の独立性に反する変更は、この操作の目的・対象範囲に限って認める。容量retentionは6.5の明示opt-inに従う別操作とする。保全・消去がMemoryの重要度や関係解釈を普段から編集する権限は生じない。削除完了後にOwnerが改めて情報を提供した場合は新しいExperienceとして扱える。外部送信・export・backup済みcopyや外部Workspaceの消去を完了範囲に含めない。
 
 ### 6.5 保持整理、保存、backup、restore、Reset
 
 | 操作 | Coordinationと参加責任 | 成立条件 |
 |---|---|---|
 | 通常History／log削除・保持期間変更 | **保全・消去**がOwner指定の対象・影響・保持適用を調整。個体調整・作業等が対象記録、認識・学習が残る根拠関係を確認する。 | 指定対象が整理され、形成済みLearning等・Summaryへ削除がcascadeしていない。失われたsource参照を説明でき、外部copyまで消したと表示しない。 |
+| Learning revision・Summary等の明示retention cleanup | **保全・消去**がOwnerのopt-in設定に従って適用を調整し、**認識・学習**等の既存ownerが対象と残る参照の整合を扱う。 | 既定OFFで、明示設定なしに容量不足を理由として過去revision・根拠を削除しない。設定範囲と根拠参照・revision復帰への影響を説明し、通常の忘却やtargeted deletionへ読み替えない。 |
 | 正常保存・migration・対応upgrade | **保全・消去**が保全・復旧可能性を調整し、各ownerが意味上の整合を確認する。 | 成功するまで最後の正常状態を破壊しない。利用・復旧可能な状態と失敗を説明し、不完全な状態を保存成功として出さない。具体的保存単位は決めない。 |
-| Full backup | **保全・消去**が対象時点・内部範囲・除外・作成結果を調整。全state ownerが必要な内部内容と参照対応を提供し、認証秘密が秘密値の除外へ参加する。 | 個体・構成、会話History（Companion間交流を含む）・保存された非会話活動記録／evidence・未伝達管理、Summary・Learning・関係・内的状態と必要な変更経緯、Task／作用記録・Workspace関連付け、Schedule、Rule・Observer専用assignmentを含む同意・費用設定、Audit等を復元可能な対応で含む。削除済み個体の残存記録も含め、外部実体・Credentialを含まない。単に各部のcopyが作れたことだけをfull backup成功にしない。 |
-| Restore | **保全・消去**が対応backupによる内部全置換を調整。各ownerが復元内容・参照・利用可能性を確認し、認識・学習がCompanion Stateの経過時間、認証秘密が認証不足、権限・制約と活動ownerが保留を扱う。 | 失敗時は復元前の正常状態を維持する。成功後は復元内容をHost正本とし、旧live状態と二重の正本にしない。Task・Schedule・外部接続の自動処理を保留し、Ownerが確認してまとめて有効化できる。 |
+| Full backup | **保全・消去**が対象時点・内部範囲・除外・作成結果を調整。全state ownerが必要な内部内容と参照対応を提供し、認証秘密が秘密値の除外へ参加する。 | 個体・構成、会話History（Companion間交流を含む）・保存された非会話活動記録／evidence・未伝達管理、Summary・Learning・関係・内的状態と必要な変更経緯、Task／作用記録・Workspace関連付け、Schedule、Rule・Observer専用assignmentを含む同意・費用設定、Audit等を復元可能な対応で含む。削除済み個体の残存記録も含め、外部実体・Credential等のsecretを含まない。単に各部のcopyが作れたことだけをfull backup成功にしない。 |
+| Restore | **保全・消去**が対応backupによる対象内部dataの全置換を調整し、現在のCredential storeは置換対象から除外して維持する。各ownerが復元内容・参照・利用可能性を確認し、認識・学習がCompanion Stateの経過時間、認証秘密が復元参照と現在のCredentialの照合・不足／無効時の再認証、権限・制約と活動ownerが保留を扱う。 | 失敗時は復元前の正常状態を維持する。成功後は復元内容をHost正本とし、旧live状態と二重の正本にしない。Task・Schedule・外部接続の自動処理を保留し、Ownerが確認してまとめて有効化できる。 |
 | 設定Reset | **保全・消去**が一般設定へのReset範囲を調整し、各設定ownerが既定化と保護対象の保持を確認する。 | UI・Body・Voice等の一般設定を戻し、個体・履歴・Summary・Learning・関係・内的状態・Task・Schedule・Credential・Permission Rule・Provider同意・費用capを削除しない。 |
 | 全データReset | **保全・消去**が列挙と強い確認、内部消去、処理中data・Client一時copyの扱いを調整し、認証秘密を含む全ownerが参加する。 | Host内部Ene dataとCredentialが削除され、旧処理・一時copyから内部状態を戻さない。外部Workspace・外部Skill・Ownerが別保存先へ作成したbackupを削除せず、何が残るかを示す。 |
 
 Backupは処理中memoryの丸ごと保存を要求しない。意味上の継続に必要な内部状態を対応させ、一時buffer・Provider session等の復元を前提にしない。未完了の消去・復旧操作がある場合も、その状況と利用上の制約を無視した「正常・即実行可能」なcopyとして扱わない。具体的に作成を待たせるか、未完了状態も復旧可能に含めるかは整合条件を満たす方法の選択に残す。
 
-Restore前には、対応version、全置換、外部fileを変更しないこと、削除済み情報と旧Rule・同意・Scheduleの復活、再認証の可能性を説明する。Restore成立と実行再有効化は別々に確認する。復元された許可条件の記録は直ちに開始根拠にならず、保留解除後も現在のDeny・Capability境界・同意範囲・cap・外部作用不明等を再評価する。一件ずつの再承認は要求せず、Ownerの明示的な一括判断を利用できる。
+Restore前には、対応version、現在のCredential storeを維持する全置換、外部fileを変更しないこと、削除済み情報と旧Rule・同意・Scheduleの復活、再認証の可能性を説明する。Restore成立と実行再有効化は別々に確認する。復元された許可条件の記録は直ちに開始根拠にならず、保留解除後も現在のCredentialの利用可能性、Deny・Capability境界・同意範囲・cap・外部作用不明等を再評価する。一件ずつの再承認は要求せず、Ownerの明示的な一括判断を利用できる。
 
 ## 7. Lifecycle and Ownership Transitions
 
@@ -485,12 +493,12 @@ Lifecycle変更の多くはownerの移転ではなく、同じownerが管理す�
 | Learningの通常忘却・訂正・統合・失効・置換 | 認識・重要度・想起・現在利用するrevision等を変更する。 | 保存済み内容・過去revision・根拠を保持し、誤りと時間的変化を区別する。 |
 | Scope変更 | 認識・学習が共有する意味内容と必要背景を判断し、決定した利用範囲を変更する。 | semantic ownerは移らない。重要度を共有根拠にせず、現在内容の共有から私的な過去revisionやsource全体を共有しない。 |
 | 通常History／log削除・retention cleanup | 保存している原記録の範囲を減らす。 | 形成済み状態とSummaryは残し、Raw参照不能を明示する。消去目的をtargeted deletionへ変えない。 |
-| Targeted deletion | 復元に寄与する内部dataと処理を横断して対象情報を除去・復元不能化する。 | 通常ownerは移らず、将来の新Experienceや外部copyの消去保証と分ける。 |
+| Targeted deletion | 復元に寄与する内部dataと処理を横断して対象情報を除去・復元不能化する。 | 通常ownerは移らず、削除完了後にOwnerが提供する新Experienceや外部copyの消去保証と分ける。 |
 | Running CompanionのClient移動・切断／activeなし | 接続・存在が帰属を切り替え、Client依存活動を区切る。必要なら利用可能なHost側Clientへ移動し、なければactiveなしとする。 | Stopによるpresence解除とは別。個体・通常Host作業・内部状態のownerは移らない。未伝達事項をHostで保持し、未確定Actionは移動先へreplayしない。Host側Clientを自動起動しない。 |
 | Fullscreen・Observer Pause／OFF・Mute | それぞれ対象Clientの表示・観測・自発発話、今後の観測、音声等を抑制する。 | 個体停止、Host Task停止、Learning削除とは別。設定scopeを統合しない。 |
-| Host再起動 | 個体と保存済み状態を継続し、途中Taskは明示再開待ち、停止中の回はmissedにする。 | 接続・active帰属の現在性を再確認する。過去作用不明・未伝達・未完了消去の状況をなかったことにしない。 |
+| Host再起動 | Running Companionは4.15に従い再起動前のClientへpresenceを自動復元する。元Clientが利用不能ならactiveなしとし、Stoppedには適用しない。個体と保存済み状態を継続し、途中Taskは明示再開待ち、停止中の回はmissedにする。 | 接続・active帰属の現在性を再確認する。過去作用不明・未伝達・未完了消去の状況をなかったことにしない。 |
 | Provider／model変更・障害・cache失効 | 推論の利用可能性・能力・承認済み経路を扱う。 | 内部の個体・履歴・Learning等を初期化せず、同じ情報選択方針と安全境界を維持する。接続回復でActionをreplayしない。 |
-| Backup／restore | Copyを作成し、明示restore成功で内部状態をbackup時点へ全置換する。 | Copyはlive正本でない。復元後も実行は保留、外部世界は巻き戻らず、Credentialは復元されない。 |
+| Backup／restore | Copyを作成し、明示restore成功で現在のCredential storeを除く対象内部状態をbackup時点へ全置換する。 | Copyはlive正本でない。復元後も実行は保留、外部世界は巻き戻らず、Credentialは現在のstoreを維持して照合し、不足・無効なら再認証を要求する。 |
 | 設定Reset／全データReset | 前者は一般設定の既定化、後者は強い確認後の内部data・Credential削除。 | 前者の保護対象と後者の外部除外を混同しない。 |
 
 Globalへ形成・変更済みのLearningは、その後に由来Companionが削除されてもGlobalとして残る。ただし削除時に残す根拠と失うsource参照を説明する。逆にscopeを狭める変更も、過去の参照・送信をなかったことにする操作ではなく、以後の利用範囲と保持された履歴のaccessを対応付ける。過去revisionの保持は、現在の利用範囲を迂回する許可ではない。
@@ -505,14 +513,18 @@ Runtime TopologyのH／C／P／M／X／Uを維持する。ここでは配置を�
 
 | 境界 | 渡す／保持し得るdata | Ownership上の契約 |
 |---|---|---|
-| Host → 第一者Client | 必要範囲の会話・進捗・結果・由来説明、現在状態、Body資材、操作・確認用のrepresentation。 | Clientは一時的な利用者であり、History・Summary・Learning・Relationship・Companion State・Credential等を永続cacheしない。正本はHostの各意味ownerに残る。 |
+| Host → 第一者Client | 必要範囲の会話・進捗・結果・由来説明、現在状態、Body資材、操作・確認用のrepresentation。 | ClientはHostからのdataの一時的な利用者であり、History・Summary・Learning・Relationship・Companion State・Provider／MCP等の登録済みCredentialを永続cacheしない。端末固有の接続材料は本節後述の別分類とする。正本はHostの各意味ownerに残る。 |
 | 第一者Client → Host | 会話入力、依頼・steering、承認・拒否、Mute・停止・管理操作の意図、実際の入出力・接続・device状況。 | 意味のある変更はHostの担当ownerが受理・確定する。入力・承認の由来と対象を保持し、Clientの表示値を丸ごと正本へ昇格させない。 |
 | Host管理の帰属 ↔ Clientの実際の入出力 | 現在のactive帰属と利用可能性、round・Actionの安全な区切り、切断・提示状況。 | Client側は不明時に活動を続けない。Hostも現地での作用・提示が成功したと推定しない。記録と未伝達状態はClient消失で失わない。 |
 | Ene ↔ Provider | 割当同意内の推論data、結果、能力情報、利用量、session／cache等の補助情報。 | Providerの所在地にかかわらず外部利用先。推論結果の意味変更判断は利用元へ戻す。Provider保持copyは内部正本にも内部消去保証にも含めない。 |
 | Ene ↔ MCP／Plugin | 許可された作用要求、Resource・Prompt・result、限定された機能の入出力。 | 外部codeは内部stateや制御のownerにならない。Ene管理下で保持するcopy・一時dataは内部契約へ参加する。外部process自身の状態・作用とは区別する。 |
 | 第一者Client ↔ MCP Apps | Tool UI表示・操作用の必要最小限の一時data。 | 第一者のPermission／設定／復旧の正本を持たず、接続中の内部消去にも参加する。UI終了と外部server・Action・Taskの終了は別。 |
 | Ene ↔ Workspace／外部制作file | Taskの関連付けを通じた許可範囲の読書き、Character・Skill等のimport／export。 | 外部fileの現在内容と内部取込copyを区別し、関連付け・内部stateの削除を外部へcascadeさせない。 |
-| Ene ↔ backup／export先 | 対象範囲を選んだcopyの出力と、明示restoreの入力。 | 出力後はlive正本でなく、内部削除でcopyも消えたとしない。Restoreは全置換の別操作で、過去の実行許可を無条件に復活させない。 |
+| Ene ↔ backup／export先 | 対象範囲を選んだcopyの出力と、明示restoreの入力。 | 出力後はlive正本でなく、内部削除でcopyも消えたとしない。Restoreは現在のHost Credential storeを維持する対象内部dataの全置換で、過去の実行許可を無条件に復活させない。 |
+
+**Clientのpairing・接続材料:** 端末に属する接続材料は、Hostから複製するHistory／Learning等のdomain dataやProvider／MCP向け登録Credentialとは別の分類であり、必要に応じてClient側に保持できる。Eneの管理・保護対象から除外する意味ではなく、Hostの個体・Task・制御条件の代替正本にもならない。接続・存在が接続材料の利用・更新・再pairingへの対応を担い、秘密を含む部分の保護は認証秘密、Host側のpairing許可・device機能許可・失効の正本は権限・制約に残る。具体的な鍵形式・保存方式やstore共有は固定しない。
+
+Device失効・全データResetではHost側の信頼を失効させ、旧Client材料だけで再接続の信頼を復活させない。接続・存在は認証秘密と協調して不要な端末材料の消去・更新を扱うが、到達不能Clientの物理的な消去を確認済みとは表示しない。再pairingは現在のHost側確認に基づき、旧材料や表示上のpairing済み状態だけで成立させない。Restoreも復元されたdevice参照・許可と現在の接続・認証の成立を照合し、secretをbackupから戻さない。これは4.21のProvider／MCP等に用いる現在のCredential store維持を変更せず、新しいClient永続cache一般を認めるものでもない。
 
 Client切断時に失われてよいのは未確定の編集・入力、描画・再生buffer、再取得できる表示copy等である。Hostが受理したTask指示、会話記録、報告すべき結果、作用不明、制御変更・全域操作の進捗はClientだけに置かない。Clientの未送信操作を接続回復後の自動Action queueとして扱わず、Host不在時に代替正本や独立したOffline実行を作らない。
 
@@ -592,7 +604,7 @@ Step 5では次の問いに答え、ここで決めたowner・参照・強制・
 | 共有根拠と個体固有の所属 | 4.5〜4.8、6.2・6.3、7。共有参照は共同所有・全内容へのaccessではなく、削除と残存を分ける。 |
 | 一時状態と継続的傾向の復帰 | 4.9、6.5、7。Host保全と経過時間の再解釈を両立する。 |
 | 解釈・許可設定・現在有効性 | 4.18〜4.20、6.2・6.5。Owner由来条件とdomain状態・現在消費に基づく有効性を分ける。 |
-| Credential参照と秘密値 | 4.21、8。用途参照は値でなく、backup除外後の利用に再認証の確認が必要。 |
+| Credential参照と秘密値 | 4.21、8。用途参照は値でなく、Restoreで維持した現在Credential storeへ復元参照を照合し、利用可能なら現在Credential、不足・無効なら再認証を要求する。 |
 | 全域消去の対象と完了根拠 | 4.24、6.4。各ownerが派生物・処理中利用まで参加し、再保存・再形成防止と残存検証を完了条件にする。 |
 | Backup・restore・Resetの整合と保留 | 4.24、6.5、7。Copy・復元された正本・現在の実行可能性を分離する。 |
 
@@ -611,7 +623,7 @@ Step 5では次の問いに答え、ここで決めたowner・参照・強制・
 - Host正本、Client一時data、Provider／MCP／Pluginの外部境界を維持し、session・cache・embedding・index・表示を意味や権限の唯一の正本にしていない。
 - Credentialの秘密値と通常参照を分離し、生成contentからPermission・Rule・Provider同意・cap等を直接変更できない。
 - Targeted deletionの全域coordinationと通常ownerを分離し、過去根拠・遅延結果・Client一時dataからの復元防止、未完了と残存検証を扱っている。
-- Backupはcopy、restoreは内部全置換、実行再有効化はOwner確認後の別判断とし、外部世界や認証状態まで復元されたと扱っていない。
+- Backupはcopy、restoreは現在のHost Credential storeを除く対象内部dataの全置換、実行再有効化はOwner確認後の別判断とし、外部世界や認証状態まで復元されたと扱っていない。
 - Implementation mechanism、統一state machine、共通schema／revision model、厳密なDependency Rulesを先取りしていない。
 
 このownership設計を妨げる新たなRequirement Ambiguity／Gapは見つかっていない。解決済みA-01〜A-04／G-01・G-02は維持する。未伝達事項の保持、Auditの事実と順序、現在の有効性、全域操作の未完了状況は既存契約を成立させるownership判断として明確化しており、新たな独立製品機能・Subsystemを追加していない。

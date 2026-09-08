@@ -1,6 +1,6 @@
 # System Context
 
-対象: [要件Baseline](../requirements/README.md)（2026-09-07のOwner decisions反映済み）と[Architecture Drivers](architecture-drivers.md)。本書はEneの製品責任と外部環境の境界を決定する。実行配置は[Runtime Topology](runtime-topology.md)で扱い、内部subsystemや実装構造は定めない。
+対象: [要件Baseline](../requirements/README.md)（2026-09-08のOwner decisions反映済み）と[Architecture Drivers](architecture-drivers.md)。本書はEneの製品責任と外部環境の境界を決定する。実行配置は[Runtime Topology](runtime-topology.md)で扱い、内部subsystemや実装構造は定めない。
 
 ## Overview
 
@@ -38,7 +38,7 @@ Eneは、一人のOwnerに属する、継続的なCompanionと実作業のため
 
 **作業対象と成果物。** Workspaceとして関連付けたfolder、file、外部source、外部account、その上の通常fileとしての成果物は外部に残す。Eneが所有するのはTaskとWorkspaceの関連付け、作業記録等である。関連付けの削除や内部Resetを外部fileの削除へ伝播させない。同じfolderを複数Taskが利用しても、Taskごとの作業状態・承認は独立する。作業に必要なcontentをEne内部へ保持した場合、その保持済みcopyには内部Privacy契約が適用される。
 
-**交換物とbackup。** Character PackageやAgent Skillsの外部原本、Ownerへexportしたcopy、portable full backupは、Eneの稼働中の正本とは別に扱う。Import後にEneが管理するCharacterや内部Skillは内部dataとなるが、外部原本の所有権を取得しない。Character Packageには特定Owner／CompanionのExperience Summary、Memory、Relationship、Companion State、Conversation History、Credential、Permissionを入れず、full backupには要件で指定された内部状態を含める一方、Credentialと外部Workspaceの実体を含めない。Backupの作成・保持管理はEneの機能でも、作成済みcopyまで内部削除で消えたとは説明しない。
+**交換物とbackup。** Character PackageやAgent Skillsの外部原本、Ownerへexportしたcopy、portable full backupは、Eneの稼働中の正本とは別に扱う。Import後にEneが管理するCharacterや内部Skillは内部dataとなるが、外部原本の所有権を取得しない。Character Packageには特定Owner／CompanionのExperience Summary、Memory、Relationship、Companion State、Conversation History、Credential、Permissionを入れず、full backupには要件で指定された内部状態を含める一方、Credential等のsecretと外部Workspaceの実体を含めない。Restoreは現在のHost Credential storeを維持して対象内部dataを置換し、復元参照と現在のCredentialを照合する。不足・無効時は再認証を要求し、復元されたassignment／consentだけで現在条件や自動処理の保留を解除しない。Backupの作成・保持管理はEneの機能でも、作成済みcopyまで内部削除で消えたとは説明しない。
 
 Ene運営のrelay、account、Cloud正本、Marketplace、課金基盤、独自の高度な制作環境は、このsystem boundaryに追加しない。既存製品の構成や将来の拡張可能性を、その追加理由にしない。
 
@@ -85,7 +85,7 @@ flowchart LR
 
 Host／ClientのOS・deviceはEneを動かす側、第一者ClientはEneそのものの一部である。外部拡張がHost内で実行される場合も、そのcodeの信頼境界は図の外側に残る。Companion間交流は同じEne内部の関係であり、別system間の連携として描かない。
 
-ObserverもClientに紐づくEne内部の特殊な共有主体であり、独立Companion・Task Agent・外部actorではない。Observer専用model／Provider assignmentを使い、Companion overrideは適用しない。delivery後の個体reasoningは各Companion設定に従う。共有検知にもCloud送信同意・privacy・費用制約を適用し、共有による同意拡張を認めない（SC-03・04）。
+ObserverもClientに紐づくEne内部の特殊な共有主体であり、独立Companion・Task Agent・外部actorではない。Observer専用model／Provider assignmentを使い、Companion overrideは適用しない。delivery後の個体reasoningは各Companion設定に従う。routingには元のsemantic ownerを通じて必要な範囲へ要約・制限したCompanion固有文脈を利用できる。元のprivate context全体の公開や他Companionへの共有ではなく、変換後にも元情報の利用制約とObserver専用assignmentの送信同意を適用する。共有検知にもCloud送信同意・privacy・費用制約を適用し、共有による同意拡張を認めない（SC-03・04）。
 
 ## Boundary Invariants
 
@@ -94,14 +94,14 @@ SC番号は本設計内の判断を参照するための識別子であり、新
 | 判断 | 後続設計で維持するinvariant | 根拠 |
 |---|---|---|
 | **SC-01: 一環境・一Owner・Host正本** | 第一者Clientを含む一つのEneとして提供するが、ClientやCloudを独立した正本にしない。Client不在でも、Schedule起動および継続中の許可済みHost上のTask・Schedule・保存を継続する。Clientがないために伝えられなかった事項は、次に移動したClientでまとめて報告する。 | AD-01・09／[製品定義](../requirements/product.md)「利用者と実行場所」、[要件](../requirements/requirements.md)「所有と実行」「Remote Client」 |
-| **SC-02: 個体・存在場所・作業の区別** | 同一Character由来でも個体を混同しない。Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useを、一個体につき一つのactive Clientへ結び付ける。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。Companion間交流、通知の生成、Clientを必要としない内部調査は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。active Clientに属する身体・入出力・操作対象の移動を個体の複製やHost上の通常Taskの所有移転にしない。別ClientからのText会話は呼出し・移動を経る。Companionの削除では内部Companion scope Skillを過去revisionを含めて削除し、Globalへの自動昇格を行わない。まとまった作業は基本的にTaskとして扱い、原則としてTask Agentへ委任する。TaskとTask Agentは区別する。 | AD-02・03・04・08・09・12／要件「CompanionとCharacter」「Remote Client」「Task」「Computer Use」「Observationと自発性」 |
+| **SC-02: 個体・存在場所・作業の区別** | 同一Character由来でも個体を混同しない。Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useを、一個体につき一つのactive Clientへ結び付ける。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。Companion間交流、通知の生成、Clientを必要としない内部調査は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動時はRunning Companionのpresenceを再起動前のClientへ自動復元し、元Clientが利用可能になるまではactiveなしとする。別Clientへの無条件移動やStoppedへの復旧は行わず、途中Taskの明示再開とは区別する。active Clientに属する身体・入出力・操作対象の移動を個体の複製やHost上の通常Taskの所有移転にしない。別ClientからのText会話は呼出し・移動を経る。Companionの削除では内部Companion scope Skillを過去revisionを含めて削除し、Globalへの自動昇格を行わない。まとまった作業は基本的にTaskとして扱い、原則としてTask Agentへ委任する。TaskとTask Agentは区別する。 | AD-02・03・04・08・09・12／要件「CompanionとCharacter」「Remote Client」「Task」「Computer Use」「Observationと自発性」 |
 | **SC-03: 制御権限とcontentの境界** | 外部content、推論結果、Character、内部Learning・関係・状態も制御権限を直接変更できない。自発性・Schedule・委任・拡張を通じたPermission、Deny、費用・資源制限の迂回を許さない。Observerの共有検知・routingによる同意の拡張も許さない。単一Ownerでも個体固有状態の利用範囲を守る。 | AD-04・06・12／要件「Permissionと安全境界」「Learningと成長」「Observationと自発性」 |
 | **SC-04: 外部送信と認証の限定** | Providerの所在地や登録済み接続を同意と同一視しない。割当同意・承認済みfallback内でのみ送信し、認証用Credentialの利用をmodel contextや通常resultへの露出から分ける。Provider変更でEneの継続状態を分断したり、利用可能な情報を意図的に差別化したりしない。 | AD-10・14／要件「Provider、費用、接続障害」 |
 | **SC-05: 外部codeの限定的な参加** | MCP・MCP Apps・Agent Skills・VRM 1.0を採用し、Pluginを限定された拡張点に置く。Local MCPのsandbox例外は明示的かつ失効可能な個別許可であり、Action承認でも汎用Plugin例外でもない。外部Tool UIを第一者の管理権限へ昇格させず、受入後もEne管理下のdataには内部Privacy契約を適用する。 | AD-06・07・11・14／要件「拡張」「信頼境界」「履歴、保持、Privacy」 |
 | **SC-06: 内部状態と外部所有物の区別** | WorkspaceはTaskの関連付けであり独立した上位containerではない。成果物は通常fileに保存し、内部削除・Reset・backupで外部実体を黙って変更・削除しない。配布Packageへ個体のprivate状態を混入させない。Companion削除ではGlobal scopeのSkillを含むLearningを残し、Workspace等の外部Skill・file・sourceを削除しない。 | AD-04・08・15／要件「Task、Workspace、成果物」「Character Package」「保護、Backup、復旧」 |
-| **SC-07: 内部消去の全域性と外部copyの限界** | Targeted deletionは内部の根拠・派生data・接続中Clientの一時dataと実行中処理からの再保存まで対象にする。未完了を完了とせず、外部送信・export・backup済みcopyの消去まで保証しない。通常の認識更新・History保持管理とは区別する。 | AD-05・07・14・15／要件「履歴、保持、Privacy」 |
+| **SC-07: 内部消去の全域性と外部copyの限界** | Targeted deletionは内部の根拠・派生data・接続中Clientの一時dataと実行中処理からの再保存まで対象にする。削除開始から完了までの対象情報の再到着・生成も同じ消去対象となる。未完了を完了とせず、外部送信・export・backup済みcopyの消去まで保証しない。通常の認識更新・History保持管理とは区別する。 | AD-05・07・14・15／要件「履歴、保持、Privacy」 |
 | **SC-08: 外部作用と内部記録の非同一性** | Cancelや切断から外部作用の不存在・取消成功を推測しない。成功不明時の自動再実行、接続回復・Client間移動を理由とする別Client・Hostでの自動再実行、接続回復によるAction replayを行わず、既知の作用と不明を説明する。Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。RestoreしたRule・同意を即座の自動処理へ接続しない。 | AD-09・15／要件「Task」「Schedule」「OfflineとPrompt cache」「Backupとrestore」「Remote Client」 |
 | **SC-09: 部分障害下の入口と状態の保護** | Body・Voice・Provider・拡張の成功を、残せるText操作・管理・安全・復旧・保存済みdataへの到達の前提にしない。Host自体の不在をClientの独立実行で補う保証にはしない。 | AD-01・03・13／要件「BodyとVoice」「拡張」「品質と利用可能性」 |
-| **SC-10: 最小限のdataと説明** | Clientは必要最小限の一時dataに限定し、Raw画面・音声・詳細payload・内部推論の常時保存を診断や継続性の前提にしない。ObserverのClient単位・全体のPause／OFFと、Companion単位の自発性制御を同じscopeへまとめない。Audit・Debug captureにも秘密保護を適用し、診断情報を自動送信しない。 | AD-01・05・12・14／要件「Remote Client」「通常保存しないdata」「AuditとTelemetry」「Observationと自発性」 |
+| **SC-10: 最小限のdataと説明** | ClientがHostから受け取るdomain dataは必要最小限の一時copyに限定する。端末固有の接続材料はHostのdomain正本・登録済みCredentialのcacheと区別し、保持する場合もEneが接続目的・秘密非露出・device失効を適用する（SO第8節）。Raw画面・音声・詳細payload・内部推論の常時保存を診断や継続性の前提にしない。ObserverのClient単位・全体のPause／OFFと、Companion単位の自発性制御を同じscopeへまとめない。Audit・Debug captureにも秘密保護を適用し、診断情報を自動送信しない。 | AD-01・05・12・14／要件「Remote Client」「通常保存しないdata」「AuditとTelemetry」「Observationと自発性」 |
 
 未解決Issueは残っていない。A-01〜A-04／G-01・G-02は解決済みである。確定済み境界の適用範囲は[Runtime TopologyのUnresolved Topology Decisions](runtime-topology.md#unresolved-topology-decisions)にまとめる。

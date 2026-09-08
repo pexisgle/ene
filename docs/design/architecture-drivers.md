@@ -1,6 +1,6 @@
 # Ene Architecture Drivers
 
-分析対象: `docs/requirements/` の再構成済みBaseline（2026-09-07のOwner decisions反映済み）。本書は要件から設計上の重要性を導出する分析であり、新たな製品要件や具体的なarchitectureの決定ではない。
+分析対象: `docs/requirements/` の再構成済みBaseline（2026-09-08のOwner decisions反映済み）。本書は要件から設計上の重要性を導出する分析であり、新たな製品要件や具体的なarchitectureの決定ではない。
 
 ## 1. Overview
 
@@ -27,7 +27,7 @@ Eneのarchitectureを最も強く形作るのは、**Owner管理Hostを正本と
 
 **Driver**
 
-一つの環境は一人のOwnerに属し、Owner管理Hostがene内部の永続状態の正本と実行の継続を担う。Clientは表示・会話・操作の入口であり、Clientだけに存在する永続状態や長期private dataの永続cacheを持たない。Client終了やRemote切断だけでは、許可済みのHost上のTask、Schedule、保存を終了させない。
+一つの環境は一人のOwnerに属し、Owner管理Hostがene内部domain dataの正本と実行の継続を担う。Clientは表示・会話・操作の入口であり、Host正本のdomain dataや登録済みCredentialの永続cacheを持たない。端末固有の接続材料は別分類として必要時にClientで保持できるが、Eneの保護対象に残し、接続目的・秘密非露出・Host側のdevice許可と失効に従う（SO第8節）。Client終了やRemote切断だけでは、許可済みのHost上のTask、Schedule、保存を終了させない。
 
 Hostは、進行中の作業や外部eventを待つためだけにLLMへ反復問い合わせを行わない。Scheduleの到来待ちもこの制約に含まれる。
 
@@ -50,7 +50,7 @@ Host正本、Clientへの必要最小限の一時data、LANまたはOwner管理V
 
 Running Companionのactive Clientは同時に一つまでとする。Stopではactive帰属を解除し、どのClientにもHostにもpresenceを残さない。Body・通常interaction・Computer Use対象・自発活動はなく、Observer対象人数にも数えない。最後のClient等は再配置hintとして保持でき、Resumeで適切なClientへ再配置できるが、配置algorithmは固定しない。Running個体のdisconnect時のHost PC側Clientへの移動とは区別する。
 
-一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientに結び付く。Companionは通常は現在のClientに留まり、別Clientから会話・操作するにはそのClientへの呼出し・移動を経る。移動時には入出力roundを安全に区切り、両Clientに状態を示し、同じ個体を同時に二か所へ存在させない。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。通常のHost上のTask、Task Agent、Scheduleはその移動とは独立して継続でき、作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。
+一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientに結び付く。Companionは通常は現在のClientに留まり、別Clientから会話・操作するにはそのClientへの呼出し・移動を経る。移動時には入出力roundを安全に区切り、両Clientに状態を示し、同じ個体を同時に二か所へ存在させない。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動前のClientへのpresence復旧は自発移動と区別し、RA-06・AD-09の自動復旧契約に従う。通常のHost上のTask、Task Agent、Scheduleはその移動とは独立して継続でき、作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。
 
 **Requirements basis**
 
@@ -58,7 +58,7 @@ Running Companionのactive Clientは同時に一つまでとする。Stopではa
 
 **Architectural significance**
 
-単なる画面同期ではなく、active Clientに属する入出力・観測・身体表現・Computer Useを行う場所の切替である。移動中の入力や出力の扱い、fullscreen時のそのClient上のBody・ambient Observation・自発発話の休止、切断と再接続時およびactive Clientがない間の重複存在防止を、作業全体の停止と混同できない。切断時は基本的にHost PC上のClientへCompanionを移動するが、利用可能なClient環境がない場合はactive ClientなしでHost正本に存続し、未確定のClient依存Actionの再実行とは区別する。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。一方、Companionの停止はTaskのbest-effort Cancelも伴うため、「Clientを閉じる」「個体を移動する」「個体を停止する」は異なる状態遷移になる。
+単なる画面同期ではなく、active Clientに属する入出力・観測・身体表現・Computer Useを行う場所の切替である。移動中の入力や出力の扱い、fullscreen時のそのClient上のBody・ambient Observation・自発発話の休止、切断と再接続時およびactive Clientがない間の重複存在防止を、作業全体の停止と混同できない。通常のClient切断時は基本的にHost PC上のClientへCompanionを移動するが、利用可能なClient環境がない場合はactive ClientなしでHost正本に存続し、未確定のClient依存Actionの再実行とは区別する。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。一方、Companionの停止はTaskのbest-effort Cancelも伴うため、「Clientを閉じる」「個体を移動する」「個体を停止する」は異なる状態遷移になる。
 
 **Design freedom**
 
@@ -89,7 +89,7 @@ Companion中心の体験と汎用作業Agentの能力を両立する。同じCom
 
 **Driver**
 
-Characterは配布可能な静的な出発点であり、Companionは経験によって変化する別個体である。経験から形成した継続状態をCharacter初期設定より優先し、Package更新で黙って上書きしない。個体固有のExperience・Learning・Relationship・Companion Stateを混同せず、特定Companion由来の内部LearningはCompanion scopeを既定とする。
+Characterは配布可能な静的な出発点であり、Companionは経験によって変化する別個体である。経験から形成した継続状態をCharacter初期設定より優先し、Package更新で黙って上書きしない。個体固有のExperience・Learning・Relationship・Companion Stateを混同せず、特定Companion由来の内部LearningはCompanion scopeを既定とする。Character Packageの推奨Skillから取り込む内部SkillもCompanion scopeを既定とし、同じCharacterから作る各Companionにそれぞれ属する。単体Skill importではOwnerがCompanion／Global scopeを選べる。
 
 Global化は明示的な共有依頼、または共通利用すべきことが内容と文脈から明確な場合に限る。重要度や有用性はGlobal化の十分条件ではない。Relationshipは主体Companionごとの相手への認識であり、別個体へ共有せず、相互の認識を自動的に同一・対称にしない。グループ参加も他個体の私的状態へのaccessを与えない。
 
@@ -127,7 +127,7 @@ Memoryは長期理解の主要な知識状態として継続更新される。Ex
 
 知識の意味、由来、時間的有効性、利用時の優先度を一つの現在値へ潰せない。検索用embeddingやcacheからだけでは、過去の認識や訂正理由を説明できない。複数の継続状態が同じSummaryを根拠にできること、原履歴が保持方針で消えても形成済み状態は独立して残ることは、参照とlifecycleの設計に影響する。Bodyの表情やVoice出力も内的状態の唯一の正本にはできない。
 
-認識や関係・持続的傾向は会話を通じて訂正・変化させられ、汎用Memory editorや内部数値を任意設定する一般editorは提供しない。このため、由来を閲覧することと、現在状態を変更することには異なる契約がある。一時的な演技の依頼を永続Relationshipの強制上書きにせず、Skillの改善では原本を保護し、以前の有効なrevisionへ戻せることも維持する。
+認識や関係・持続的傾向は会話を通じて訂正・変化させられ、汎用Memory editorや内部数値を任意設定する一般editorは提供しない。このため、由来を閲覧することと、現在状態を変更することには異なる契約がある。一時的な演技の依頼を永続Relationshipの強制上書きにせず、Skillの改善では原本を保護し、保持されている以前の有効なrevisionへ戻せることも維持する。
 
 **Design freedom**
 
@@ -158,7 +158,7 @@ LLMの柔軟な判断をすべて固定ルールへ置換することも、LLM�
 
 **Driver**
 
-通常の忘却・訂正・統合・失効・置換では保存済みLearningの内容、過去revision、根拠を削除しない。容量管理のHistory／log削除も形成済み状態やExperience Summaryへ自動cascadeさせない。これに対し、明示的なPrivacy/Security目的のtargeted deletionは保持原則より優先し、対象情報を復元できるene内部dataを保存場所横断で除去または復元不能にする。
+通常の忘却・訂正・統合・失効・置換では保存済みLearningの内容、過去revision、根拠を削除しない。容量管理のHistory／log削除も形成済み状態やExperience Summaryへ自動cascadeさせない。Learning revision・Experience Summary等の容量retention／cleanupは通常忘却と別で、既定OFF、Ownerの明示opt-in時だけ設定可能とする。削除によるrevision復帰・根拠参照への影響を示し、対象class・期間・容量・algorithmは固定しない。これに対し、明示的なPrivacy/Security目的のtargeted deletionは保持原則より優先し、対象情報を復元できるene内部dataを保存場所横断で除去または復元不能にする。
 
 指定文字列は機械的に検索・削除し残存を検証する。過去の根拠だけによる自動再形成や、削除前の情報を利用中の処理による再保存を防ぎ、削除と残存検証が未完了なら完了表示しない。Ownerへ内部の保存場所の特定を要求しない。
 
@@ -175,7 +175,7 @@ Companion間交流のHistoryと保存された非会話活動記録・historical
 
 **Design freedom**
 
-目的によるlifecycleの違い、消去の優先、競合時の再保存防止、完了表示の条件は固定される。対象探索、参照追跡、削除中の実行制御、物理消去または復元不能化の方法は未決定である。言い換え・意味的同一性の検出に完全性は保証されず、LLMを利用できる。後の新しいExperienceからの形成は可能であり、永久に同じ知識を学べなくする要求ではない。外部送信・export・backup済みcopyの消去保証も含まない。
+目的によるlifecycleの違い、消去の優先、競合時の再保存防止、完了表示の条件は固定される。対象探索、参照追跡、削除中の実行制御、物理消去または復元不能化の方法は未決定である。言い換え・意味的同一性の検出に完全性は保証されず、LLMを利用できる。削除開始から完了までに再到着・生成した対象情報も同じ消去対象とする。完了後にOwnerが改めて提供した情報からの形成は可能であり、永久に同じ知識を学べなくする要求ではない。外部送信・export・backup済みcopyの消去保証も含まない。
 
 ### AD-08 — Taskを作業単位とし、Task Agentへ原則委任し、外部Workspaceの所有権を持たない
 
@@ -204,7 +204,7 @@ WorkspaceのTaskへの従属、Taskごとの権限独立、まとまった作業
 
 **Driver**
 
-Taskの進捗、判断待ち、結果、既知の外部作用を追跡し、追加指示を可能な範囲で反映する。Cancel、Companion停止・削除、許可失効時は定義された範囲の新規開始を止め、進行中処理をbest-effortで停止し、残った作用を報告する。外部作用の成功が不明なら自動再実行しない。Computer Use等のClient依存Actionの実行中に移動が必要になった場合は、安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。Companionが存在するClientの切断時は基本的にHost PC上のClientへCompanionを移動し、利用可能なClient環境がない場合はactive ClientなしでHost正本に存続するが、切断したClientでの未確定ActionをHostで自動再実行しない。active Clientがない間も、Schedule起動および継続中の許可済みHost上のTask・保存は継続できる。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。Host再起動後の途中TaskにはOwnerの明示再開を必要とする。
+Taskの進捗、判断待ち、結果、既知の外部作用を追跡し、追加指示を可能な範囲で反映する。Cancel、Companion停止・削除、許可失効時は定義された範囲の新規開始を止め、進行中処理をbest-effortで停止し、残った作用を報告する。外部作用の成功が不明なら自動再実行しない。Computer Use等のClient依存Actionの実行中に移動が必要になった場合は、安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。Companionが存在するClientの通常切断時は基本的にHost PC上のClientへCompanionを移動し、利用可能なClient環境がない場合はactive ClientなしでHost正本に存続するが、切断したClientでの未確定ActionをHostで自動再実行しない。active Clientがない間も、Schedule起動および継続中の許可済みHost上のTask・保存は継続できる。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。Host再起動後の途中TaskにはOwnerの明示再開を必要とする。Running Companionのpresenceは再起動前のClientへ自動復元し、元Clientが利用可能になるまではactiveなしとする。これは自発移動とは別の復旧であり、別Clientへの無条件移動・Stoppedへの適用・Host側Clientの自動起動を導かない。
 
 Companion停止中はactive ClientもHost上のpresenceも持たず、Body・Computer Use対象を持たない。応答・通常interaction・Host内を含む自発活動・新しいTask・新しいSchedule実行を開始しない。停止は個体dataを削除せず、再開後も同じ個体として継続する。
 
@@ -272,7 +272,7 @@ Local MCPはsandbox内実行を既定とし、動かないことを理由に黙�
 
 ambient ObservationのCapture・候補検知はClient単位で共有する。観測を有効にしたClientのうちCompanionが1体以上存在するClientだけを対象とし、Companionが存在しないClientは観測しない。対象Clientのdesktop全体を対象とし、複数の対象Clientは同時にCaptureせず順番に実行タイミングをずらす。Clientごとに指定された観測頻度を満たしつつ可能な範囲で負荷を分散し、不必要に同時実行しない。
 
-Observer専用assignmentによる候補検知と、文脈との関係判断による関係がありそうなCompanionだけへのevent routingを行い、関連CompanionのメインLLMによる文脈上の意味判断へつなぐ。同じClientの複数Companionへ無条件に配信せず、Companionごとに候補検知を重複させない。頻繁な観測には軽量Local LLMまたは安価で信頼できるCloud LLMを推奨するが、必須model条件にはしない。Stopped Companionを存在人数・routing対象に数えない。
+Observer専用assignmentによる候補検知と、文脈との関係判断による関係がありそうなCompanionだけへのevent routingを行い、関連CompanionのメインLLMによる文脈上の意味判断へつなぐ。同じClientの複数Companionへ無条件に配信せず、Companionごとに候補検知を重複させない。頻繁な観測には軽量Local LLMまたは安価で信頼できるCloud LLMを推奨するが、必須model条件にはしない。Stopped Companionを存在人数・routing対象に数えない。Observerは元のsemantic ownerを通じて、Memory・History・Task context等をroutingに必要な範囲へ要約・制限したCompanion固有文脈を利用できる。private context全体を渡さず、元情報の利用制約とObserver専用assignmentの送信同意を変換後にも適用する。Companion overrideを適用・合成せず、生成方法・model／Provider・形式・更新頻度・鮮度・選択algorithmは後続設計へ残す。
 
 ObserverはClientごとのPause／OFFと全体のPause／OFFを持ち、明示ON/OFFと常時確認可能な状態を持つ。雑談・自発会話、通知、内部調査、Companion間交流等の自発性はCompanion単位でOFFを含む頻度または上限を設定し、ObserverのClient単位・全体制御と同じscopeへまとめない。
 
@@ -339,9 +339,9 @@ Toolへ秘密値を渡してよい範囲と、LLMが参照・生成する内容�
 
 **Driver**
 
-保存・migration・対応versionへのupgrade・restoreの失敗で、最後の正常状態または復元前の正常状態を破壊しない。Ownerがportable full backupの保存先・schedule・保持数・保護を選べる。Backupには個体・学習・履歴だけでなくTask、Workspace関連付け、Schedule、Rule、同意、費用設定、Audit等の内部状態を含め、Credentialと外部file・sourceを含めない。
+保存・migration・対応versionへのupgrade・restoreの失敗で、最後の正常状態または復元前の正常状態を破壊しない。Ownerがportable full backupの保存先・schedule・保持数・保護を選べる。Backupには個体・学習・履歴だけでなくTask、Workspace関連付け、Schedule、Rule、同意、費用設定、Audit等の内部状態を含め、Credential等のsecretと外部file・sourceを含めない。
 
-Restoreは対応backup時点への内部dataの全置換であり、削除済み情報や旧Rule・同意・Scheduleが戻り得ることを説明する。復元後のTask・Schedule・外部接続による自動処理は保留し、Ownerの内容確認後にまとめて有効化できる。設定Resetと全データResetは異なる削除範囲を持つ。
+Restoreは開始前からHostに存在する現在のCredential storeを維持し、それを除く対象内部dataを対応backup時点へ全置換する操作であり、削除済み情報や旧Rule・同意・Scheduleが戻り得ることを説明する。復元後のTask・Schedule・外部接続による自動処理は保留し、Ownerの内容確認後にまとめて有効化できる。認証秘密と接続ownerが復元参照を現在のCredential storeと照合し、利用可能なら現在のCredentialを使い、不足・無効なら再認証を要求する。assignment／consentの復元だけで現在のCredential・制約・保留条件を無視した自動利用を始めない。設定Resetと全データResetは異なる削除範囲を持つ。
 
 **Requirements basis**
 
@@ -356,7 +356,7 @@ Restoreは対応backup時点への内部dataの全置換であり、削除済み
 
 **Design freedom**
 
-正常状態の保全、対応backupからの全置換、復元後の自動処理保留、外部fileとOwner保存backupの非削除は固定される。backup形式、整合性確保、migration・復旧方式、対応version範囲は未決定である。Backup暗号化は利用可能にするが一律必須ではなく、非暗号化時にはprivate dataを含むことを説明する。旧実装形式との互換性は非目標だが、今後の対応upgrade・restoreの安全契約まで免除されるわけではない。Downgradeは保証しない。
+正常状態の保全、現在のHost Credential storeを維持する対応backupからの対象内部dataの全置換、復元後の自動処理保留、外部fileとOwner保存backupの非削除は固定される。backup形式、整合性確保、migration・復旧方式、対応version範囲は未決定である。Backup暗号化は利用可能にするが一律必須ではなく、非暗号化時にはprivate dataを含むことを説明する。旧実装形式との互換性は非目標だが、今後の対応upgrade・restoreの安全契約まで免除されるわけではない。Downgradeは保証しない。
 
 ### Driver間の関係と優先関係
 
@@ -364,12 +364,12 @@ Restoreは対応backup時点への内部dataの全置換であり、削除済み
 |---|---|
 | 個体の継続（AD-04・05）と消去（AD-07） | 通常の認識更新では履歴と根拠を保持する。明示的なtargeted deletionが例外として優先する。 |
 | 学習・自発性（AD-05・12）と安全（AD-06・10・14） | 自動で理解・学習できることは、権限・共有制限・送信同意・秘密保護を変更できることではない。 |
-| 継続実行（AD-01・02）と再開制御（AD-09・15） | Client不在での継続、Host再起動後の明示再開、restore後の保留を区別する。可用性を理由に外部Actionを自動replayしない。 |
+| 継続実行（AD-01・02）と再開制御（AD-09・15） | Client不在での継続、Host再起動後の同じClientへのpresence自動復旧と途中Taskの明示再開、restore後の保留を区別する。可用性を理由に外部Actionを自動replayしない。 |
 | 個体の停止・削除（AD-04・09）と作業記録（AD-08） | 停止はdataを保持する。個体削除ではTask記録の確認・引継ぎ依頼を維持する一方、担当Scheduleと、その個体を主体または相手とするRelationshipは削除し、ene内部のCompanion scope Skillは過去revisionを含めて削除する。削除を契機とするGlobalへの自動昇格は行わず、Global Learningと外部Workspace fileは残す。一律の所有・削除関係へまとめない。 |
 | 配布・共有（AD-04・11）と所有（AD-08・14・15） | Character Package、内部Learning、外部Workspace file、Credential、full backupは異なる内容・権限・削除範囲を持つ。 |
 | 個体の一体感（AD-03）と操作可能性（AD-13） | Body・Voice・実作業を同じ個体から利用するが、どれかの障害や長時間処理が会話・安全操作・復旧を塞がない。 |
 | 負荷による縮退（AD-13）とTask継続・停止（AD-01・09・10） | 処理品質や速度の調整を、Task記録の破棄や説明のない停止へ置き換えない。費用・資源上限による安全な停止・判断要求は維持し、保存済みdataへの影響と既知の外部作用を示す。 |
-| 保持・由来（AD-05・07・14）と資源上限（AD-13） | 通常Learningの保持を、容量都合の黙った削除で解決しない。上限到達時の停止・判断要求と、Ownerが管理するHistory・log保持を契約に沿って扱う。 |
+| 保持・由来（AD-05・07・14）と資源上限（AD-13） | 通常Learningの保持を、容量都合の黙った削除で解決しない。上限到達時の停止・判断要求と、Ownerが管理するHistory・log保持、および明示opt-inによるLearning・根拠のretentionを別の契約として扱う。 |
 | 削除（AD-07）と復元（AD-15） | 削除前の内部根拠からの自動再形成は禁止されるが、Ownerが説明を受けて旧backupをrestoreすると情報が戻り得る。外部copyまでの消去保証や復元後の自動実行許可とはしない。 |
 
 ## 3. Requirement Issues
@@ -396,11 +396,11 @@ Textの入力・応答もactive Clientに属する。Companionは通常は現在
 
 #### G-01 — Computer Useの操作対象（解決）
 
-CompanionがComputer Useできる対象は、そのCompanionが現在存在するactive Clientだけとする。TaskやTask Agentから任意のpairing済みClientを独立に操作対象として選ばない。別Clientを操作するには先にそのClientへ移動し、存在場所と操作対象を分離しない。Host PCを対象にする場合もHost上のClientへの存在を必要とする。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。切断時は基本的にHost PC上のClientへCompanionを移動するが、未確定ActionのHostでの自動再実行とは区別し、成功不明時の非再実行・重複時のOwner判断・best-effort停止の契約を維持する。AD-01・02・06・08・09・11・12の前提とする。
+CompanionがComputer Useできる対象は、そのCompanionが現在存在するactive Clientだけとする。TaskやTask Agentから任意のpairing済みClientを独立に操作対象として選ばない。別Clientを操作するには先にそのClientへ移動し、存在場所と操作対象を分離しない。Host PCを対象にする場合もHost上のClientへの存在を必要とする。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。通常のClient切断時は基本的にHost PC上のClientへCompanionを移動するが、未確定ActionのHostでの自動再実行とは区別し、成功不明時の非再実行・重複時のOwner判断・best-effort停止の契約を維持する。AD-01・02・06・08・09・11・12の前提とする。
 
 #### G-02 — active Clientがない場合の継続・復帰（解決）
 
-Running Companionにactive Clientがない場合でも、Schedule起動および継続中の許可済みHost上のTask・Task Agent・Schedule・保存は継続できる。判断基準はClientが必要かどうかとし、Clientが必要なこと以外のTask等は可能、Clientに依存することは不可能とする。Body、Realtime／Text会話、Voice、Computer Useはactive Clientがない間は行わず、対象Clientがない間の新規観測は発生しない。Companion間交流、通知の生成、Clientを必要としない内部調査等のHost内で完結する活動は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host側Client環境の自動起動は行わない。AD-01・02・09・12の前提とする。
+Running Companionにactive Clientがない場合でも、Schedule起動および継続中の許可済みHost上のTask・Task Agent・Schedule・保存は継続できる。判断基準はClientが必要かどうかとし、Clientが必要なこと以外のTask等は可能、Clientに依存することは不可能とする。Body、Realtime／Text会話、Voice、Computer Useはactive Clientがない間は行わず、対象Clientがない間の新規観測は発生しない。Companion間交流、通知の生成、Clientを必要としない内部調査等のHost内で完結する活動は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動前のClientへのpresence復旧は自発移動と区別し、RA-06・AD-09の自動復旧契約に従う。Host側Client環境の自動起動は行わない。AD-01・02・09・12の前提とする。
 
 ### Architecture Review #1のRequirement Issues（解決済み）
 
@@ -411,6 +411,27 @@ Owner不参加の自発交流で実際に交わされた発話をConversation Hi
 #### RI-02 — Stopped Companionのpresence（解決）
 
 停止中はactive Clientを持たず、ClientにもHostにもpresenceがない。Observer対象人数・routingから除外し、Host内の自発活動も禁止する。再配置hintの保持とResume時の再配置は許すが、具体algorithmは未固定。Running個体のdisconnect契約とは分離し、AD-01・02・09・12に反映した。
+
+### Architecture Review #2の統合判断（2026-09-08）
+
+[独立レビュー記録](reviews/architecture-review-2.md)は参考・検証材料として維持し、変更しない。以下は現在の要件とOwner decisionsに照らした統合判断であり、ReviewのRecommended dispositionを製品要件にはしない。
+
+| Finding | 判断 | 採用する問題と統合内容 | 採用しない拘束 |
+|---|---|---|---|
+| F-01 | PARTIAL | routing文脈の出所・利用範囲の不足を認める。既存の情報ownerが所有するCompanion固有文脈を、routingに必要な範囲へ要約・制限して提供できる契約とし、元情報の制約とObserver専用assignmentの送信同意を維持する（AD-12、SO 4.16・4.18・4.19、DR文書5.3、CC-02）。 | 新たなscope区分や、各CompanionのProviderによる生成を必須にしない。変換しただけでCompanion固有情報としての制約が消えるとも扱わない。 |
+| F-02 | PARTIAL | Client固有の接続材料を、Hostのdomain正本・登録Credentialの永続cacheと区別する。既存の接続・存在、認証秘密、権限・制約で用途・保護・失効・Reset／Restore時の現在認証照合を担う（RT-07、SO第8節、DR文書6.3、CC-02）。 | 接続材料をEneの保護対象外へ分類しない。永続保持方式や鍵形式を必須にせず、新しいownerも作らない。 |
+| F-03 | ACCEPT | Restore時の現在Credential storeの扱いの欠落を認める。RA-02に従い現在storeを維持し、復元参照を照合する（AD-15、SO 4.21・6.5、RF-08、CC-05）。 | — |
+
+| Requirement Issue | Owner決定の反映先と解決内容 |
+|---|---|
+| RA-01 | 要件「Observation」「Scope」「割当と同意」。限定したCompanion固有routing文脈の経路と制約継承、Observer専用assignmentを確定。生成方法・形式・更新頻度・鮮度・選択は設計へ残す。AD-12、SO 4.16を中心に同期。 |
+| RA-02 | 要件「Backupとrestore」。secret非保存、現在Credential store維持、参照照合、利用可能なら現在Credential・不足／無効なら再認証、現在制約・復元後保留を確定。全データResetの削除と区別。AD-15、SO 4.21・6.5を中心に同期。 |
+| RA-03 | 要件「Learningと根拠の容量管理」。通常忘却と別のretentionとしてdefault自動削除OFF、明示Owner opt-inでcleanup設定可能。無断の容量削除を禁止し、data class・期間・容量・優先順位・algorithmは固定しない。AD-07、SO 4.24・6.5、CC-05へ同期。 |
+| RA-04 | 要件「Scope」。推奨内部Skillは作成先Companion scopeを既定とし、複数個体にも各個体所属。単体importではOwnerがCompanion／Globalを選択。既存個体削除契約に従う。AD-04、SO 4.7へ同期。 |
+| RA-05 | 要件「Privacy/Security目的のtargeted deletionと履歴保持」。開始から完了までの再到着・生成も同じ対象とし、途中の新規Experience例外を作らない。完了後のOwner再提供は新しいExperienceとして扱える。AD-07、SO 6.4、RF-07、CC-03・05へ同期。 |
+| RA-06 | 要件「Remote Client」。Running個体のpresenceを再起動前のClientへ自動復旧し、元Clientが利用不能なら成立までactiveなし。別Clientへの無条件移動・Stopped復帰・途中Task自動再開には広げない。AD-09、SO 4.15、RF-05、CC-04へ同期。 |
+
+RA-01〜06は解決済みであり、F-01〜03の必要な修正も統合した。新しいSubsystem・semantic owner・汎用layerは追加しない。要件からCC-01〜07までの横断照合結果とStep 8への引渡しは[Cross-cutting Design第10節](cross-cutting.md#10-design-freedomと新たなissue)に記す。
 
 ### Requirement Gap
 

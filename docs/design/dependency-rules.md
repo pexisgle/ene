@@ -1,6 +1,6 @@
 # Dependency Rules
 
-対象: [要件Baseline](../requirements/README.md)（2026-09-07のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)、[State Ownership](state-ownership.md)。本書はStep 5の責務間の依存規則を決定する。Subsystemの名称・略称とsemantic ownerは既存設計を維持する。
+対象: [要件Baseline](../requirements/README.md)（2026-09-08のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)、[State Ownership](state-ownership.md)。本書はStep 5の責務間の依存規則を決定する。Subsystemの名称・略称とsemantic ownerは既存設計を維持する。
 
 ## 1. Overview
 
@@ -84,7 +84,7 @@ DR番号は本書内の設計規則の参照用であり、製品要件IDでは�
 | 共有観測／入出力・提示／推論 → 実行・拡張 | device・限定adapter・renderer・未対応Provider protocolの拡張受入を利用する。 | 機能の意味は利用元、外部codeの受入・制限は実行・拡張。全推論・描画payloadの一元中継は要求しない。 |
 | 利用・保存・実行を担う各責務 → 権限・制約 | Permission、割当同意、scope適用、device、費用・資源、失効等の現在条件に従う。 | 各箇所に独立したAllow正本を作らず、LLMの自己申告を制御変更として扱わない。 |
 | 権限・制約 → 個体調整／作業／接続・存在／認識・学習／推論／保全・消去等 | 活動状態、委任範囲、帰属、決定済みscope、利用量、保留等を現在可否の判断に必要な範囲で参照する。 | 制約側は参照したstateの意味を更新せず、学習内容全体や秘密値を取得する包括権限を持たない。 |
-| 推論／実行・拡張 → 認証秘密 | 設定・認証された接続の用途に限定した認証利用、失効・不足の確認。 | 秘密値を通常dataとして取得する許可ではない。認証成功は同意・Permissionではない。 |
+| 推論／実行・拡張／接続・存在 → 認証秘密 | 設定・認証された接続の用途に限定した認証利用、失効・不足の確認。 | 秘密値を通常dataとして取得する許可ではない。認証成功は同意・Permissionではない。 |
 | 認証秘密 → 権限・制約、および接続を担う責務 | 認証用途の制限、参照元と接続先、認証結果の事実を照合する。 | 相手に制約変更を委ねず、用途参照の存在だけで秘密利用を許さない。 |
 
 権限・制約がLLMによる解釈材料を必要とする場合も、目的を持つ判断責務が提供するOwner意図・文脈と解釈を利用する関係とする。通常Permissionの意味判断を禁止したり固定ルールだけへ置換したりしない。解釈に用いる推論は自身のCapability割当・秘密保護・費用制限の下で行い、審査対象Actionを先に許可することを推論の前提にしない（5.2）。
@@ -190,7 +190,7 @@ Permissionの意味責任は権限・制約、domainの活動可否・達成の�
 | Client再接続・移動・Host再起動 | 接続・存在は現在の帰属を確定し、作業は保存済み状態と再開条件、個体調整は未伝達を扱う。 | 再表示・移動を再実行にしない。Host再起動後の途中Taskは明示再開待ち。 |
 | backup・restore・Reset・retention・targeted deletion | 入出力・提示または各操作の有効な設定 → 保全・消去 → 参加owner。外部file作用は実行・拡張、制約は権限・制約。 | 保守目的を任意編集権・秘密読取権・無条件実行権にしない。backupの時機をTask Scheduleへ依存させない。 |
 
-共有観測は対象Clientごとに候補検知を共有し、複数Clientを同時Captureせず時機をずらす。routing用contextは必要な範囲へ限り、同じClientにいる全Companionの私的状態を合併して一つのProviderへ送らない。各個体の最終判断への推論利用にも、その用途の割当同意と費用制約が別途適用される。
+共有観測は対象Clientごとに候補検知を共有し、複数Clientを同時Captureせず時機をずらす。routing用contextには、History・個体文脈を個体調整、Memory・Learningを認識・学習から、必要な範囲へ要約・制限したCompanion固有文脈として受け取れる。Task contextは作業が意味と提供範囲を管理し、既存の個体調整–作業の協調を通じて参照する。全private contextを合併して渡さず、新しいLearning正本・Global化・他Companionへの共有にもならない。元情報・対象Companion・用途・制約の対応を保ち、変換後も元情報の利用制約とObserver専用assignmentの送信同意をともに適用する。Companion側の同意・overrideを選択・合成して代用しない。scope変更・同意失効・消去は処理中の派生表現にも反映する。生成方法・生成model／Provider・形式・頻度・鮮度・選択algorithmは固定しない。各個体の最終判断への推論利用にも、その用途の割当同意と費用制約が別途適用される。
 
 ObserverはClientに紐づく特殊な推論consumerであり、Host既定 → Companion override → Task Agent継承の個体側modelへ押し込まない。権限・制約のObserver専用assignment・同意を推論が解決する。Companion overrideの選択・合成は禁じ、delivery後のCompanion reasoningにだけその個体の設定を適用する。全Clientでのmodel共通化、Client別UI、Host defaultからの継承階層、routing contextの構成方式は固定しない。
 
@@ -242,7 +242,7 @@ Host／LAN／Cloudは所在地の違いであり、ローカルだから無条�
 
 ### 6.3 第一者Client・OS・Network
 
-第一者ClientはSystem Context上Ene内部である。ここでいうClient境界は外部主体への所有移転ではなく、Hostと異なるruntime・到達性・device trustの境界である。必要最小限の表示・一時操作dataを利用し、接続・入出力の実際の状態を報告できるが、Host canonical stateの独立編集・永続private cache・Host不在時の独立Action実行を許さない。
+第一者ClientはSystem Context上Ene内部である。ここでいうClient境界は外部主体への所有移転ではなく、Hostと異なるruntime・到達性・device trustの境界である。必要最小限の表示・一時操作dataを利用し、接続・入出力の実際の状態を報告できるが、Host canonical stateの独立編集・Host由来のprivate dataや登録済みCredentialの永続cache・Host不在時の独立Action実行を許さない。端末固有の接続材料は別分類としてClientで保持できるがEneの保護対象に残す。接続・存在が利用・更新・再pairing、認証秘密が秘密保護、権限・制約がHost側の信頼・許可・失効を担う。device失効・全データReset後に旧材料だけでHostの信頼を復活させず、Restoreされたdevice参照・許可も現在の接続・認証成立と照合する（SO第8節）。鍵形式・保存方式は固定しない。
 
 接続・存在はLANまたはOwner管理VPNとOSの接続事実に依存し、権限・制約のHost側確認によるpairing、device機能・失効を適用する。入出力・提示はOSの表示・keyboard・音声、共有観測は対象desktop、実行・拡張は許可された作用のためOS・deviceを利用する。OSで可能であることはEneの許可ではない。全payloadのHost中継を要求しないが、Clientからの経路でも現在の制約・秘密非露出・一時data保護を実効的に守れない利用は行わない。
 
@@ -252,9 +252,9 @@ Bodyの描画・音声処理の失敗はText・管理経路へ波及させず、
 
 作業はWorkspace関連付けとTask contextを管理し、外部file・sourceは実行・拡張による許可範囲のActionで利用する。同じfolderでもTaskの作業状態と承認を共有しない。外部案内file・Agent Skillは指示材料でありcontrol planeではない。成果物は通常fileとして保存し、保存先未定なら最終保存前にOwnerの選択を得る。一時中間fileの整理も、その実体が外部なら許された外部作用として行う。
 
-CharacterはPackage・VRM等の静的内容、認識・学習は内部Skillの取込内容を所有するが、外部原本のownerにはならない。Character exportへ個体経験・履歴・Credential・Permissionを混入させず、内部Skillの改善でimport原本を破壊しない。
+CharacterはPackage・VRM等の静的内容、認識・学習は内部Skillの取込内容を所有するが、外部原本のownerにはならない。Character exportへ個体経験・履歴・Credential・Permissionを混入させず、内部Skillの改善でimport原本を破壊しない。Packageから取り込む推奨内部SkillはCompanion scopeを既定として各個体に別々に属する。単体Skill importはOwnerがCompanion／Global scopeを選べる。以後の共有・個体削除は通常のscope契約に従う。
 
-Backupは選択した内部状態のcopyであり、Workspace関連付けを辿って外部実体を収集しない。Credentialは除外する。内部削除でOwner保存backup・export・外部送信copyも消えたと説明せず、明示restore以外に古いcopyをlive正本として読み戻さない。
+Backupは選択した内部状態のcopyであり、Workspace関連付けを辿って外部実体を収集しない。Credential等のsecretは除外する。内部削除でOwner保存backup・export・外部送信copyも消えたと説明せず、明示restore以外に古いcopyをlive正本として読み戻さない。
 
 ## 7. Cross-cutting Operations
 
@@ -272,11 +272,11 @@ Backupは選択した内部状態のcopyであり、Workspace関連付けを辿�
 
 対象範囲は現在値に閉じず、History（Companion間交流を含む）、非会話活動記録・historical log／evidence、Summary、過去revision・evidence、Relationship、対象を復元できるCompanion Stateと保持済み根拠、Skill、Task context・source copy、index・embedding・cache、Audit・Debug内の該当情報、接続中Client、Ene管理下の拡張一時data、処理中context・遅延結果を含む。Companion削除後に残る記録も対象である。各保持・利用責務は原記録と派生物への関係を参加させ、記録ownerだけへの削除要求で完了にしない。
 
-権限・制約と各利用箇所は必要な保留・再保存防止を適用する。削除前から存在する根拠だけによる自動再形成と、削除前の情報を使う処理の遅延した再保存を防ぐ。局所削除が済んでも、別の保存先・context・Clientから戻る可能性を未処理なら全域完了にしない。新しいExperienceとしてOwnerが改めて提供する情報は別の根拠として扱える。
+権限・制約と各利用箇所は必要な保留・再保存防止を適用する。削除前から存在する根拠だけによる自動再形成と、削除前の情報を使う処理の遅延した再保存を防ぐ。局所削除が済んでも、別の保存先・context・Clientから戻る可能性を未処理なら全域完了にしない。削除開始から完了までに対象情報が再到着・生成した場合も同じ消去対象とする。完了後にOwnerが改めて提供する情報は新しいExperienceの根拠として扱える。
 
 接続・存在は消去中のClient接続変化・確認不能を参加先へ結び付け、入出力・提示等は一時dataの扱いを報告する。切断したClientも古い一時dataを再接続時にHostへ戻して再形成しない。確認不能を成功に読み替えない。共有根拠では可能な範囲で無関係情報を分離し、分離不能な重要影響を説明する。
 
-通常保持を越える除去はこの目的・対象に限定する。CoordinatorはMemoryの重要度・Relationshipの解釈を日常的に編集せず、通常ownerも根拠保持を理由に消去を拒まない。完了記録へ削除したprivate本文を再保存しない。外部copy・Workspaceの消去やCredentialの外部失効は、この操作の完了とは別である。
+Targeted deletionによる通常保持を越える除去はこの目的・対象に限定する。容量retentionは7.3の明示opt-inに従う別操作とする。CoordinatorはMemoryの重要度・Relationshipの解釈を日常的に編集せず、通常ownerも根拠保持を理由に消去を拒まない。完了記録へ削除したprivate本文を再保存しない。外部copy・Workspaceの消去やCredentialの外部失効は、この操作の完了とは別である。
 
 ### 7.3 Backup・restore・Reset・正常保存
 
@@ -285,14 +285,14 @@ Backupは選択した内部状態のcopyであり、Workspace関連付けを辿�
 | 正常保存・migration・対応upgrade | 保全・消去が復旧可能性を、各ownerが意味上の整合を確かめる。成功するまで最後の正常状態を破壊せず、不完全な更新を成功と表示しない。 |
 | Full backup | 保全・消去 → 全state ownerの参加。対象時点・参照対応・除外を整合させ、個体・構成・会話・未伝達・Summary・Learning・関係・内的状態・Task／作用・Workspace関連付け・Schedule・Rule・同意・費用・Audit等を扱う。認証秘密は秘密値の除外を担い、外部実体は収集しない。 |
 | Backupの運用 | 保存先・独自schedule・保持数・保護選択は保全・消去が管理する。暗号化を利用でき、非暗号化時はprivate dataを含むことを説明する。担当CompanionやTask Agentの稼働を必要としない。 |
-| Restore | 保全・消去 → 各ownerの復元・整合確認。対応backupで内部を全置換し、失敗時は復元前の正常状態を守る。成功後は復元内容をHost正本とし、旧live状態と競合させない。 |
-| 復元後の有効化 | 保全・消去の復元成立・保留理由、認識・学習の経過時間解釈、認証秘密の認証不足、権限・制約の現在条件、作業等の活動ownerの再開条件に依存する。Ownerが内容確認後まとめて有効化でき、一件ずつの再承認を要求しない。 |
+| Restore | 保全・消去 → 各ownerの復元・整合確認。Restore開始前のHost Credential storeを維持し、それを除く対象内部dataを対応backupで全置換する。secretの復元・巻戻しを行わず、失敗時は復元前の正常状態を守る。成功後は復元内容をHost正本とし、旧live状態と競合させない。 |
+| 復元後の有効化 | 保全・消去の復元成立・保留理由、認識・学習の経過時間解釈、認証秘密と接続ownerによる復元参照と現在のCredentialの用途・有効性の照合（利用可能なら現在のCredentialを利用、不足・無効なら再認証）、権限・制約の現在条件、作業等の活動ownerの再開条件に依存する。Ownerが内容確認後まとめて有効化でき、一件ずつの再承認を要求しない。 |
 | 設定Reset | 各設定ownerが一般設定を既定化し、個体・学習・履歴・Task・Schedule・Credential・Permission Rule・Provider同意・費用cap等の保護対象を維持する。「設定」という名称だけで対象を広げない。 |
 | 全データReset | 対象列挙と強い確認の後、認証秘密を含む全ownerがHost内部data・秘密の削除に参加し、旧処理・Client copyからの復活を防ぐ。外部Workspace・外部Skill・Ownerが別保存先へ作成したbackupを削除しない。 |
 
-Restoreの説明には、削除済み情報や以前のRule・同意・Scheduleが戻り得ること、外部fileを変えないこと、対応version、再認証の可能性を含める。復元成立だけでTask・Schedule・外部接続の自動処理を再開しない。Ownerの一括有効化後も、現在のCapability・Deny・同意・cap・帰属・外部作用不明を守る。Credential参照の復元は秘密値や認証成功の復元ではない。
+Restoreの説明には、削除済み情報や以前のRule・同意・Scheduleが戻り得ること、外部fileを変えないこと、対応version、再認証の可能性を含める。復元成立だけでTask・Schedule・外部接続の自動処理を再開しない。Ownerの一括有効化後も、現在のCapability・Deny・同意・cap・帰属・外部作用不明を守る。Credential参照の復元は秘密値や認証成功の復元ではない。復元されたassignment／consentだけで自動利用を始めず、Owner起点の利用にも現在のCredential・制約・該当する保留条件を適用する。
 
-未完了の消去・復旧と並行するbackupも、必要な状況・保留を無視した「即実行可能な正常copy」にしない。待機させるか、未完了状態を復旧可能に含めるかは方法の選択に残す。通常のHistory／log保持整理は形成済みLearning・Summaryへcascadeせず、失われるsource参照を扱う。
+未完了の消去・復旧と並行するbackupも、必要な状況・保留を無視した「即実行可能な正常copy」にしない。待機させるか、未完了状態を復旧可能に含めるかは方法の選択に残す。通常のHistory／log保持整理は形成済みLearning・Summaryへcascadeせず、失われるsource参照を扱う。別の容量retentionとして、Learning revision・Summary等の自動cleanupは既定OFF、Ownerの明示opt-in時に設定可能とする。保持方針を持つ保全・消去と認識・学習等のsemantic ownerがrevision復帰・根拠参照への影響を照合し、通常忘却を削除へ変えない。対象class・期間・容量・algorithmは未固定。
 
 Companion間交流のHistoryと保存された非会話活動記録・historical evidenceも、個体削除後の残存分を含めfull backup・通常保持管理へ参加する。個体調整が記録の意味を、作業・実行・拡張・保全・消去がそれぞれTask・Action・Auditの既存契約を提供する。新しい汎用Activity ownerや全reasoningの保存は要求しない。
 
@@ -302,7 +302,7 @@ Companion間交流のHistoryと保存された非会話活動記録・historical
 
 失効やCompanion停止後、その条件だけを根拠とする新しいActionを開始しない。進行中の作用はbest-effortで止め、停止不能・既知作用・不明・未保存を保持して説明する。停止の受付・新規開始の禁止・状態参照を、外部processの終了や全Taskの正常完了待ちにしない。停止経路の名で新しい未承認作用を始めることも許さない。
 
-Host shutdownでも必要な進捗・作用不明・未伝達・全域操作の未完了を保全し、外部作用がHostと同時に消えると推定しない。再起動後の途中TaskはOwnerの明示再開を必要とし、停止中のScheduleはmissedとして自動補完しない。待機・停止受付のためだけにLLMをpollingしない。
+Host shutdownでも必要な進捗・作用不明・未伝達・全域操作の未完了を保全し、外部作用がHostと同時に消えると推定しない。接続・存在はRunning個体の再起動前のClientをHostに保持し、再起動後に現在の接続・許可・排他性を確認して同じClientへpresenceを自動復元する。元Clientが利用可能になるまではactiveなしとし、Stoppedや別Clientへの無条件移動に広げない。再起動後の途中TaskはOwnerの明示再開を必要とし、停止中のScheduleはmissedとして自動補完しない。待機・停止受付のためだけにLLMをpollingしない。
 
 ### 7.5 Companion停止・削除
 
@@ -318,7 +318,7 @@ Stopの成立には接続・存在によるactive帰属の解除を必要とし�
 
 接続・存在は、個体調整の移動意図、入出力・提示のround、実行・拡張のClient依存作用の区切りを利用して帰属を調停する。新旧Clientで二重存在させず、排他性・利用可能性を確認できないClientは対象活動を続けない。通常Host作業の終了・移送を要求しない。
 
-切断時は基本的に利用可能なHost上のClientへ移動し、なければactiveなしで継続する。Host側Client環境を自動起動しない。旧Actionの不明を新Clientでの再実行で解消しない。移動後のObservationは移動先Client設定と全体制御、自発性は引き続き個体設定へ依存する。
+通常のClient切断時は基本的に利用可能なHost上のClientへ移動し、なければactiveなしで継続する。Host側Client環境を自動起動しない。Host再起動時は7.4の同じClientへの復旧契約に従う。旧Actionの不明を新Clientでの再実行で解消しない。移動後のObservationは移動先Client設定と全体制御、自発性は引き続き個体設定へ依存する。
 
 Runningのままactiveなしでも許可済みHost作業・Schedule起動・保存、Clientを必要としない交流・内部調査・通知生成は可能である。Body・Text／Realtime会話・Voice・Computer Useは行わず、存在個体のないClientで新規観測しない。個体調整は伝えられなかった事項と元結果の関係をHostに残し、次Clientで要約報告する。報告状況は実際の提示に依存し、Task完了や接続だけで更新しない。
 

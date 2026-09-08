@@ -1,14 +1,14 @@
 # ene 要件
 
 状態: **再構成済みBaseline**
-最終確認: 2026-09-07
+最終確認: 2026-09-08
 
 本書は、[製品定義](product.md)に記載したeneの行動要件を定義する唯一の正本である。ここでは、Ownerから観測できる挙動、安全境界、データ契約、および製品機能として採用する相互運用方式や隔離方針を定める。それらを実現するための内部設計詳細は定めない。
 
 ## 所有と実行
 
 - 一つのene環境は一人のOwnerが所有し、Ownerが管理するHostをene内部データの正本とする。
-- ClientはHostへ接続して表示、会話、操作を提供する。Clientだけに存在するeneの永続状態を作らない。
+- ClientはHostへ接続して表示、会話、操作を提供する。個体・会話・Learning・Task・設定等のdomain dataについて、Clientだけに存在するeneの永続的な正本を作らない。Client固有の接続材料は[Remote Client](#remote-client)の保護境界で扱う。
 - 推論先は、CapabilityごとにHost、OwnerのLAN内、またはCloudから選択できる。
 - HostはClientが閉じていても、許可済みのHost上のTask、Schedule、保存を継続する。通常のTask・Task Agentの作業は基本的にHost上で実行し、Computer Use等のClient依存部分は、そのClientの利用可能性と安全契約に従う。
 - Hostは、進行中の作業や外部eventを待つためだけにLLMへ反復問い合わせを行わない。
@@ -112,7 +112,8 @@
 - メインLLMが認識したイベントは、理解・学習の材料として通常のユーザー入力と同様にExperienceへ利用し、Memory形成やCompanion Stateの更新を自動的に行える。イベントや形成判断ごとのOwner確認を要求しない。画面内の指示をOwnerの依頼やActionの承認として扱うことは意味しない。
 - 発話またはActionを行う最終判断は、候補を受けた各Companionが、自身のCharacter、関係、状況、Ruleに基づいて行う。
 - 画面内容を外部Providerへ送る構成では、送信先、desktop全体が対象になり得ること、用途、取扱い、費用を明示して、そのCapabilityへOwnerが割り当てるまで送信しない。
-- 共有候補検知やeventのroutingを理由に、Companion固有情報の利用範囲やProviderへの送信同意を広げない。[割当と同意](#割当と同意)の制約は共有処理にも適用する。
+- ObserverはroutingのためにCompanion固有の文脈を利用できる。Memory、History、Task context等のprivate context全体を大量に渡さず、routingに必要な範囲へ適切に要約・制限した文脈を利用する。
+- routing用文脈にも元情報の利用制約とProviderへの送信同意を適用する。要約・変換だけで制約や同意が不要になることはなく、元のprivate context全体や他用途へのaccessを許可しない。[割当と同意](#割当と同意)のObserver専用assignmentで送信され得るdataとして説明し、必要な同意を満たして利用する。生成方法、形式、更新頻度、鮮度、選択algorithmは後続設計で定める。
 - Raw Observationは通常保存しない。Taskで行う[Computer Use](#computer-use)は、依頼・自発の別によらずambient Observationと区別し、TaskのPermissionと記録を適用する。
 
 ### 自発的な発話と行動
@@ -180,11 +181,13 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 ### Scope
 
 - ene内部で管理するMemoryとSkillはCompanionまたはGlobalのscopeを持てる。
-- Companion scopeは、そのCompanionだけが使う経験、呼び方、私的な文脈、個体固有のLearningに用いる。
+- Companion scopeは、そのCompanionだけが使う経験、呼び方、私的な文脈、個体固有のLearningに用いる。[Observation](#observation)に従うObserverへの限定されたrouting用文脈の提供は、Global化や他Companionへの共有を意味しない。
 - Global scopeは、複数Companionから共通に利用することに明確な意味があるOwner固有の知識や再利用可能なLearningに用いる。一般世界知識をGlobal Memoryとして蓄積することを意味しない。
 - Taskだけで必要な情報はTask contextとして扱い、永続Learningへ自動的に昇格させない。
 - Workspace内に置かれたAgent Skillや案内fileは通常の外部fileとして扱い、ene内部Learningのscopeとは区別する。
 - 特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とする。
+- Character Packageの推奨Skillから取り込む内部SkillはCompanion scopeを既定とする。同じCharacterから複数Companionを作成しても、それぞれに属するSkillとして扱い、Companion削除時は既存のCompanion scope Skill削除契約に従う。
+- Skillを単体でimportする場合は、OwnerがCompanion scope／Global scopeを選択できる。具体的なimport UIは固定しない。
 - Global scopeへの形成または変更は、Ownerが明示的に共有を求めた場合、または内容、由来、Ownerとの文脈から複数Companionで共通に利用すべきことが明確な場合に限る。単に重要、将来有用、一般的な好みであることだけを理由にGlobal scopeへ昇格させない。
 - Globalにすべきか明確でない場合はCompanion scopeに留める。Global化の判断だけを目的とする逐次確認は通常要求しない。
 - 共有する内容と必要な背景の選択・要約はLLMの意味判断に委ねる。Ownerが明示した非共有の意図を優先し、通常の共有判断に逐次確認を要求しない。
@@ -193,7 +196,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 ### Skillの保護と相互運用
 
 - Skillの交換形式にはAgent Skillsを採用し、ene独自の同等形式だけを必須にしない。
-- Skillの変更はrevisionとして追跡でき、以前の有効なrevisionへ戻せる。
+- Skillの変更はrevisionとして追跡でき、保持されている以前の有効なrevisionへ戻せる。容量管理には[Learningと根拠の容量管理](#learningと根拠の容量管理)を適用する。
 - 同梱またはimportされた原本をExperienceによる変更で破壊しない。変更版は由来を保った別revisionとして扱う。
 - Experienceから形成または改善したSkillには、その根拠と実行結果を関連付け、未検証、成功、失敗等を区別できる。
 - Workspace内のSkillは通常のWorkspace fileとして扱い、そのfolderのPermissionとOwnerのversion管理方針に従う。
@@ -322,7 +325,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 ### 割当と同意
 
 - Hostの既定Provider設定とCompanionごとのoverrideを持てる。Task Agentは担当Companionの設定を継承する。
-- Clientに紐づくObserverは、共有Capture・candidate detection用推論にObserver専用のmodel／Provider assignmentを持つ。これはCompanion scopeではなく、同じClientのCompanionのProvider overrideを適用・合成して選択しない。event delivery後にCompanion自身が行うreasoningには、そのCompanionの通常のProvider設定を適用する。
+- Clientに紐づくObserverは、共有Capture・candidate detection・routing用推論にObserver専用のmodel／Provider assignmentを持つ。これはCompanion scopeではなく、同じClientのCompanionのProvider overrideを適用・合成して選択しない。event delivery後にCompanion自身が行うreasoningには、そのCompanionの通常のProvider設定を適用する。
 - Observerにも本節の割当同意、送信先・data・用途・取扱いの説明、Privacy、fallback、費用・資源上限を適用する。Observer専用であることはCloud送信の同意を省く理由にならない。全Clientでのmodel共通化、Client別設定UIの有無、Host defaultからの継承階層は固定しない。
 - Providerの接続情報を登録しただけでは、eneのCapabilityに利用しない。
 - OwnerがCapabilityへProviderを割り当てる画面で、送信先、送信され得るdata、Host／LAN／Cloudの別、費用の発生可能性、Provider側の取扱いを示し、その選択を利用同意とする。
@@ -386,7 +389,8 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - PrivacyまたはSecurity目的で対象情報を削除する場合は、選択した保存対象だけでなく、その情報を復元できるConversation History、Experience Summary、Memoryと過去revision、evidence、Relationship、その情報から形成され対象情報を直接または実質的に復元できるCompanion Stateとその保持済み根拠、Skill、保持済みsourceの該当情報、検索index、embedding、cache、接続中Clientの一時data等のene内部dataも削除または対象情報を復元できない状態にする。
 - 特定の文字列の削除が指定された場合は、ene内部dataを機械的に検索して該当文字列を削除し、残存を検証する。LLMによる忘却、要約、重要度判断で代替しない。言い換えや意味的に同じ情報の特定にはLLMを利用できるが、完全な検出を保証しない。
 - 一つのExperience Summaryやsourceが削除対象と無関係な情報の根拠にもなっている場合は、可能な範囲で対象情報だけを除去し、無関係な情報を不必要に削除しない。分離できない場合は削除の影響範囲をOwnerへ示す。
-- PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報をMemory、RelationshipまたはCompanion Stateとして自動再形成しない。後の新しいExperienceによってOwnerが改めて同じ情報を提供した場合は、新しい根拠として扱える。
+- PrivacyまたはSecurity目的の削除後は、削除前から存在していたConversation History、Experience Summary、revision、indexその他の根拠だけを使って同じ情報をMemory、RelationshipまたはCompanion Stateとして自動再形成しない。削除完了後にOwnerが改めて同じ情報を提供した場合は、新しいExperienceの根拠として扱える。
+- targeted deletionの開始から完了までに対象情報が再び内部へ到着・生成した場合も、同じ消去対象として扱う。削除途中の到着・生成を新しいExperienceとして救済する例外は設けない。具体的なtransaction、lock、snapshot方式は固定しない。
 - 削除前の情報を利用する実行中処理によって、削除済み情報を再保存しない。削除処理または残存検証が完了していない場合は、完了したと表示しない。
 - PrivacyまたはSecurity目的のtargeted deletionは、通常のrevision保持、evidence保持、Conversation Historyと形成済み状態の独立性より優先する。
 - 「忘れてほしい」等の通常依頼だけをtargeted deletionへ自動昇格させない。OwnerがPrivacyまたはSecurityのため保存済み情報そのものをene内部から消去する意図を明示した場合に限り、本節のtargeted deletionとして扱う。
@@ -397,6 +401,12 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - eneはOwnerが示した削除対象の意味的な特定を補助し、保存場所をOwnerへ選ばせない。対象が明確な場合は不要な確認を繰り返さず、無関係な情報へ大きな影響がある場合等に必要な説明と確認を行う。
 - 削除前に対象範囲、目的、影響するCompanionまたはTask、形成済みLearning、Experience Summary、Relationship、Companion State等への重要な影響を示す。
 - Targeted deletion、保持期間の短縮、手動削除は、対象をene内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。
+
+### Learningと根拠の容量管理
+
+- Learningの過去revision、Experience Summary等の保存dataは、容量都合でEneがデフォルトで自動削除しない。自動retention／cleanupは既定OFFとし、Ownerが明示的に有効化した場合は設定可能とする。
+- これは通常のLearning上の忘却とは別のretention policyである。Ownerの明示設定なしに、容量不足を理由として過去revisionや根拠を黙って削除しない。通常のHistory／Log削除からのcascadeも許可しない。
+- 明示設定によるcleanupでは、適用範囲とrevision復帰・根拠参照への影響をOwnerへ示す。削除済みのrevisionや根拠を保持・復帰可能であると扱わない。選択可能なdata class、期間、容量、優先順位、具体algorithmは本要件で固定しない。
 
 ### 通常保存しないdata
 
@@ -425,9 +435,11 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - Ownerはbackupの保存先、schedule、保持数を選択でき、作成結果と失敗を確認できる。
 - BackupにはCompanion、Character設定、Conversation History（Companion間交流を含む）、保存された非会話活動記録・historical log／evidence、Experience Summary、Learning、Relationship、Companion State、Task、TaskとWorkspaceの関連付け、Schedule、Rule、同意、費用設定、Auditを含める。Companion削除後に残るhistorical recordも対象とする。
 - Backupに含まれるCompanion Stateをrestoreするときも、backup後に経過した時間を無視して時間的に一時的な状態を保存時点の値のまま無期限に固定しない。
-- BackupにCredentialと外部Workspaceのfileまたは外部sourceそのものを含めない。
+- BackupにCredential等のsecretと外部Workspaceのfileまたは外部sourceそのものを含めない。
 - Ownerはbackupを暗号化して保護できる。暗号化されていないbackupを作成する場合は、Conversation History、Experience Summary、Memory、Relationship、Companion State等のprivate dataが含まれることを事前に明示する。
-- Restoreは対応するbackupからene内部dataをそのbackup時点の状態へ全置換する操作とし、対象、version互換性、外部fileを変更しないこと、削除済み情報や以前のRule・同意・Scheduleが戻り得ること、ProviderやMCP等の再認証が必要になり得ることを事前に示す。
+- Restoreは現在のCredential storeを除く対象のene内部dataをbackup時点へ全置換する操作とし、対象、version互換性、外部fileを変更しないこと、削除済み情報や以前のRule・同意・Scheduleが戻り得ること、ProviderやMCP等の再認証が必要になり得ることを事前に示す。
+- Restore開始前からHostに存在する現在のCredential storeを維持し、Backupからsecretを復元したり過去時点へ巻き戻したりしない。復元されたProvider／MCP等の参照を現在のCredential storeと照合し、利用可能なら現在のCredentialを利用し、不足・無効なら再認証を要求する。
+- 復元されたassignment／consentだけで自動利用を開始しない。現在のCredential、現在の制約、既存のRestore後保留条件を満たす必要がある。この維持契約は全データResetによるCredential削除とは別である。
 - Restore後のTask、Schedule、外部接続による自動処理は一旦保留し、Ownerが復元内容を確認してまとめて有効化できる。個々の設定を一件ずつ再承認することは要求しない。
 - Restore失敗時は復元前の正常な状態を破壊しない。
 
@@ -449,7 +461,8 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - Remote Clientは、同じLANまたはOwnerが管理するVPNを通じてHostへ接続する。ene運営のrelay、ene account、ene Cloudを接続要件にしない。
 - 新しいClientはOwnerがHost側で確認できるdevice pairingを必要とする。
 - HostとClientの通信を保護し、Ownerはpairing済みdevice、最終接続、許可された機能を確認し、deviceごとに失効できる。
-- Clientは表示と一時的な操作に必要なdataだけを受け取り、Conversation History、Experience Summary、Learning、Relationship、Companion State、Credential等を永続cacheしない。
+- ClientはHostから表示と一時的な操作に必要なdataだけを受け取り、Conversation History、Experience Summary、Learning、Relationship、Companion State、Provider／MCP等の登録済みCredentialのcopyを永続cacheしない。
+- Client固有の接続材料は、Host正本のdomain dataや登録済みCredentialのcacheとは区別する。Clientで保持する場合もene内部の保護対象とし、接続目的へ限定して秘密の非露出とdevice失効を適用する。古い接続材料だけでHost側のpairing・許可を復活させない。具体的な鍵形式・保存方式は固定しない。
 - Running Companionは同時に一つまでのClientをactive Clientとして持ち、Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useはそのactive Clientに結び付く。停止中はactive ClientもHostでのpresenceも持たず、Observer対象人数にも数えない。これらの存在場所の契約は、HostとClientが同じPCにある場合も適用する。
 - Companionは通常、Ownerの指示や移動の必要性がなければ現在のClientに留まる。別ClientからText会話したい場合は、そのClientからCompanionを呼び出して移動させた後に会話する。Companionを元Clientに残したまま、別ClientからTextだけを送って応答させることを基本モデルにしない。
 - 移動はOwnerのその場の明示的な呼出しだけに限定しない。Ownerから事前に指示されている場合や、文脈上必要だとCompanion自身が判断した場合にも別Clientへ移動できる。自発的な移動も通常の自発性・Permission等の制限に従う。
@@ -457,7 +470,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - Client間の移動時は、現在の入力または出力roundを安全に区切り、移動元と移動先へ状態を示す。
 - 通常のHost上のTask、Task Agent、Scheduleはactive Clientの移動とは独立して継続でき、それらの作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Computer Use等のClient依存部分には[Computer Use](#computer-use)の安全な移動・非再実行契約を適用する。
 - 移動後のambient Observationは移動先ClientのObserver設定とene全体のObserver制御に従い、自発性設定はCompanion単位で引き続き適用する。Companionの出入りに応じて、[Observation](#observation)の対象Clientとevent routing先を扱う。
-- Running Companionのactive Clientが切断された場合は、基本的にHost PC上のClientへCompanionを移動する。切断したClientでの未確定ActionをHostで自動再実行することは意味しない。Stopはdisconnectとは異なり、停止中CompanionをHost側へ移動してpresenceを残さない。
+- 通常のClient切断では、Running Companionを基本的にHost PC上のClientへ移動する。Host再起動時は後述の再起動前のClientへのpresence復旧契約を適用する。切断したClientでの未確定ActionをHostで自動再実行することは意味しない。Stopはdisconnectとは異なり、停止中CompanionをHost側へ移動してpresenceを残さない。
 - Remote接続が切れてもHost上のTaskとScheduleは定義された条件で継続し、再接続時に結果を確認できる。
 
 以下のactive Client不在時の活動・復帰契約はRunning Companionに適用する。停止中は[停止と削除](#停止と削除)の活動禁止・best-effort Cancelが優先し、保存dataの保持をHost上のCompanion presenceとは扱わない。
@@ -467,6 +480,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 - Companion間交流、通知の生成、Clientを必要としない内部調査等のHost内で完結する活動は継続できる。Ownerへの提示・伝達は、Companionが次に移動したClientへ延期する。
 - ClientがあればすぐにそのままOwnerへ伝えられたはずの、Clientがないために伝えられなかった事項はメモし、Companionが次に移動したClientでまとめて要約して報告する。
 - 接続済みClientへの自発的な移動は、通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host側Client環境の自動起動は行わない。
+- Running CompanionはHost再起動後、再起動前に存在していたClientへ自動的にpresenceを復元する。これは別Clientへの自発移動とは別の復旧であり、元のClientが利用可能になるまでactiveなしとして扱える。別Clientへの無条件の自動移動へ広げず、Stopped Companionには適用しない。再接続、待機、timeout、pairingの具体方式は後続設計に残す。
 
 ## 品質と利用可能性
 

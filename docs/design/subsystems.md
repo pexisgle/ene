@@ -1,6 +1,6 @@
 # Subsystem Decomposition
 
-対象: [要件Baseline](../requirements/README.md)（2026-09-07のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)。本書はStep 3の責務境界を決定し、State OwnershipとDependency Rulesへの入力を示す。
+対象: [要件Baseline](../requirements/README.md)（2026-09-08のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)。本書はStep 3の責務境界を決定し、State OwnershipとDependency Rulesへの入力を示す。
 
 ## 1. Overview
 
@@ -21,7 +21,7 @@ Ene内部を、**異なる判断・継続条件・保護契約を引き受ける
 | 認証秘密の保護 | 認証秘密 | Credentialを保護し、認証に必要な利用と通常の情報経路を分離する。 |
 | 内部データ保全・消去 | 保全・消去 | 内部dataの保全、保持管理、全域消去、backup・復旧の成立を各責務と協調して確かめる。 |
 
-Runtime Topologyは、Host／Client等の実行場所、寿命、接続、trust・failure boundaryを決めている。本書はそれらの場所を横断し得る**責任の分担**を決める。Hostはすべての内部永続状態の正本と継続実行を担い、Clientは必要最小限の一時dataを使うという前提を維持する。
+Runtime Topologyは、Host／Client等の実行場所、寿命、接続、trust・failure boundaryを決めている。本書はそれらの場所を横断し得る**責任の分担**を決める。Hostは内部domain dataの正本と継続実行を担い、ClientはHostから必要最小限の一時dataを受け取る。Client固有の接続材料はHostのdomain正本や登録Credentialのcacheと区別し、既存の接続・存在、認証秘密、権限・制約の保護責任に置く（SO第8節）。
 
 Step 4のState Ownershipでは、この責任分担の下で状態の所属、更新・参照・削除・復元の整合性を決める。本書で「扱う」「管理する」と記したことから、唯一のwriter、transaction owner、repository owner、保存単位を導かない。Step 5ではcollaborationを成立させる許可・禁止依存を定める。本書の関係は、そのための意味上の入力である。
 
@@ -124,7 +124,7 @@ AD-01〜05・08・09・12。要件「個体性」「停止と削除」「一続�
 
 **Key collaborations**
 
-個体調整へ初期構成・選択済み更新を渡し、入出力・提示へ表示資材と編集・export確認情報を提供する。内部Skillとして扱う内容は認識・学習と由来を対応付ける。file操作は権限・制約と実行・拡張、内部保存とbackup・消去は保全・消去と協調する。
+個体調整へ初期構成・選択済み更新を渡し、入出力・提示へ表示資材と編集・export確認情報を提供する。内部Skillとして扱う内容は認識・学習と由来を対応付ける。Packageの推奨Skillから取り込む内部SkillはCompanion scopeを既定とし、同じCharacterから作る各個体に別々に属し、個体削除時は既存のCompanion-scope削除契約に従う。単体Skill importではOwnerがCompanion／Global scopeを選べる。file操作は権限・制約と実行・拡張、内部保存とbackup・消去は保全・消去と協調する。
 
 **Traceability**
 
@@ -209,11 +209,11 @@ AD-04〜07・10・12・14・15。要件「Learningと成長」「一続きの会
 
 **Responsibilities**
 
-- Local／Remote Clientの接続、切断、再接続、利用可能な機能を扱う。RemoteではHost側で確認可能なpairing、通信保護、device別の許可・失効の適用を権限・制約と協調する。ここでいう適用は、権限・制約が扱う制御契約を存在・接続調停へ反映することであり、device許可の意味・失効範囲自体の正本は移さない。
-- Running Companionにつき同時に一つまでのactive Clientを維持し、呼出し、明示・事前指示・文脈上の自発移動、切断時の復帰を調停する。通常は現在のClientに留まる。
+- Local／Remote Clientの接続、切断、再接続、利用可能な機能を扱う。RemoteではHost側で確認可能なpairing、通信保護、device別の許可・失効の適用を権限・制約と協調する。Client固有の接続材料はHostのdomain data・登録済みCredentialのcacheと別に扱い、利用・更新・再pairingを接続・存在、秘密保護を認証秘密、Host側の信頼・許可・失効を権限・制約が担う（SO第8節）。ここでいう適用は、権限・制約が扱う制御契約を存在・接続調停へ反映することであり、device許可の意味・失効範囲自体の正本は移さない。
+- Running Companionにつき同時に一つまでのactive Clientを維持し、呼出し、明示・事前指示・文脈上の自発移動、切断時の復帰を調停する。通常は現在のClientに留まる。Host再起動後はRunning個体のpresenceを再起動前のClientへ自動復元する。復旧先をHostで保持し、現在の接続・許可・排他性を確認する。元Clientが利用可能になるまではactiveなしとし、別Clientへの無条件移動・Stoppedへの適用・途中Taskの自動再開とは区別する。
 - 個体調整の停止状態に従いactive帰属を解除し、Stopped個体をClient・Hostのpresence、Observer人数・routing対象に含めない。保持する最後のClient・復帰候補等は再配置hintとして扱い、再開時の配置algorithmは固定しない。Running個体のdisconnectによるHost PC側Clientへの移動とは区別する。
 - Textを含む入出力roundとClient依存Actionの安全な区切りを関係Subsystemから受け、移動元・移動先の状態を対応付ける。排他性を確認できないClientでは対象の入出力・観測・自発的interaction・Computer Useを継続させない。
-- 切断時は基本的に利用可能なHost PC上のClientへ移動し、利用可能なClient環境がなければactive Clientなしで個体を存続させる。Host側Client環境を自動起動しない。
+- 通常のClient切断時は基本的に利用可能なHost PC上のClientへ移動し、利用可能なClient環境がなければactive Clientなしで個体を存続させる。Host側Client環境を自動起動しない。
 
 **Non-responsibilities**
 
@@ -300,7 +300,7 @@ Observerを独立CompanionやTask Agentにせず、delivery後の個体reasoning
 
 **Key collaborations**
 
-接続・存在から対象Clientと存在個体、入出力・提示からfullscreen等を受ける。個体調整・認識・学習から許された関連付け用文脈を参照し、個体調整へeventを通知する。推論を利用し、権限・制約の送信・利用制限と実行・拡張のdevice・adapter境界を適用する。保全・消去にはCapture・処理中の一時dataを含めて参加する。
+接続・存在から対象Clientと存在個体、入出力・提示からfullscreen等を受ける。History・個体文脈は個体調整、Memory・Learningは認識・学習から、routingに必要な範囲へ要約・制限されたCompanion固有文脈を受ける。Task contextは既存の個体調整–作業の協調を通じて作業の意味責任の下で提供し、共有観測へTask所有や包括accessを移さない。元情報・Companion・用途・制約の対応を保った派生表現として、元情報の利用制約とObserver専用assignmentの送信同意を変換後にも適用する。新たなLearning正本や他Companionへの共有とはせず、生成方法・model／Provider・形式・更新頻度・鮮度・選択algorithmは後続設計に残す。個体調整へeventを通知する。推論を利用し、権限・制約の送信・利用制限と実行・拡張のdevice・adapter境界を適用する。保全・消去にはCapture・処理中の一時dataを含めて参加する。
 
 **Traceability**
 
@@ -422,7 +422,7 @@ AD-04・06・07・09〜15。要件「Permissionと安全境界」「Scope」「�
 
 - 明示的な設定や認証flowによるCredential登録、用途・参照元の確認、更新、失効を扱う。一般App Dataから分離して保護する。
 - Ownerが設定・認証した接続の実行に必要な範囲だけで秘密を利用可能にし、model context、LLM生成Tool argument、通常result、UI、Learning、履歴、Task結果、log、Debug captureへの平文露出を防ぐ。
-- 認証失敗・失効・再認証の必要性を秘密値を含めず伝え、full backupからの除外と全データReset時の削除に参加する。
+- 認証失敗・失効・再認証の必要性を秘密値を含めず伝え、Credential等のsecretのfull backup除外と全データReset時の削除に参加する。Restore開始前のHost Credential storeは維持し、復元参照と現在の用途・有効性を接続ownerと照合して、利用可能なら現在のCredentialを利用、不足・無効なら再認証を要求する。assignment／consentの復元だけでは現在の認証・制約・restore後保留を解除しない。
 
 **Non-responsibilities**
 
@@ -434,7 +434,7 @@ Credentialには一般状態と異なる保護・更新・失効・backup除外�
 
 **Runtime relation**
 
-Hostが保護するCredentialと、実際の認証先との境界を扱う。Client上のCredential正本や外部secret serviceを追加しない。RT-05・07を満たす範囲で受渡し方式は後続へ残す。
+Hostが保護するCredentialと、実際の認証先との境界を扱う。Provider／MCP等の登録済みCredentialのClient正本や外部secret serviceを追加しない。Client固有の接続材料はEneの保護対象に残し、その秘密部分の保護にも接続・存在と協調して責任を持つ。RT-05・07を満たす範囲で受渡し方式は後続へ残す。
 
 **Key collaborations**
 
@@ -453,12 +453,12 @@ AD-06・10・11・14・15。要件「Credential」「信頼境界」「Local dat
 **Responsibilities**
 
 - 各責務が扱う内部状態の正常保存と復旧可能性を支え、保存・migration・対応upgradeの失敗で最後の正常状態を破壊しない。一般App DataのOS account保護とCredentialの分離を維持する。
-- Conversation History・Task等のlog・Auditの通常保持、明示された手動削除・保持期間、保存量と影響を各記録の責務と協調する。通常のHistory/log削除から形成済み状態やSummaryへ消去をcascadeさせない。
+- Conversation History・Task等のlog・Auditの通常保持、明示された手動削除・保持期間、保存量と影響を各記録の責務と協調する。通常のHistory/log削除から形成済み状態やSummaryへ消去をcascadeさせない。Learning revision・Summary等の容量retention／cleanupも保全・消去の保持方針として既定OFF、Ownerの明示opt-in時のみ設定可能とする。認識・学習等のsemantic ownerとrevision復帰・根拠参照への影響を照合し、通常忘却と区別する。対象class・期間・容量・algorithmは固定しない。
 - 明示的なPrivacy/Security目的のtargeted deletionで、保存場所をOwnerへ選ばせず、対象の特定支援、影響説明、内部全域の除去または復元不能化、残存検証、未完了の把握を調整する。この消去は通常のrevision・根拠保持より優先する。
 - 指定文字列の機械的検索・削除・残存検証を成立させ、意味的な同一情報の探索補助と検出限界を区別する。共有根拠の無関係な部分は可能な範囲で残し、分離不能時の影響を示す。
-- 根拠・過去revision・保持済みsource・派生data・cache・接続中Client・Ene管理下の拡張data・処理中dataを含む消去に、各参加責務を結び付ける。削除前の結果からの再保存と、古い根拠だけからの自動再形成を防いだことも完了の条件に含める。
-- Portable full backupの保存先、schedule、保持数、任意の暗号化、結果・失敗を扱う。要件で指定された内部状態を含め、Credentialと外部Workspace実体を除外する。
-- 対応backupからの全置換restore、対応upgrade、設定Resetと全データResetの異なる範囲を調整する。全データResetでは対象を列挙した強い確認を経る。Restore失敗時は復元前の正常状態を保護し、成功後も自動処理の保留とOwnerによる内容確認・一括有効化を関係責務と成立させる。
+- 根拠・過去revision・保持済みsource・派生data・cache・接続中Client・Ene管理下の拡張data・処理中dataを含む消去に、各参加責務を結び付ける。削除開始から完了までに再到着・生成した対象情報も同じ消去へ参加させ、削除前の結果からの再保存と、古い根拠だけからの自動再形成を防いだことも完了の条件に含める。完了後にOwnerが改めて提供した場合は新しいExperienceとして扱える。
+- Portable full backupの保存先、schedule、保持数、任意の暗号化、結果・失敗を扱う。要件で指定された内部状態を含め、Credential等のsecretと外部Workspace実体を除外する。
+- 現在のHost Credential storeを維持する対応backupからの対象内部dataの全置換restore、対応upgrade、設定Resetと全データResetの異なる範囲を調整する。全データResetでは対象を列挙した強い確認を経る。Restore失敗時は復元前の正常状態を保護し、成功後も自動処理の保留とOwnerによる内容確認・一括有効化を関係責務と成立させる。
 - Auditを追記順で確認できる保全・保持管理と、明示的なDebug captureの対象・内容・短期失効・停止・削除を支える。自動Telemetry／Crash Report送信は行わない。
 
 **Non-responsibilities**
@@ -477,7 +477,7 @@ Host正本の保存・全体操作が中心で、Client一時dataとEne管理下
 
 **Key collaborations**
 
-各Subsystemからdataの意味上の範囲、根拠・参照、保持済みcopy、派生物、進行中利用、完了・未完了の情報を受け、保存・消去・復旧を協調する。権限・制約、作業、個体調整、接続・存在と処理の保留・再開条件を、認証秘密と除外・削除を対応付ける。入出力・提示へ影響、進捗、検証結果を返す。
+各Subsystemからdataの意味上の範囲、根拠・参照、保持済みcopy、派生物、進行中利用、完了・未完了の情報を受け、保存・消去・復旧を協調する。権限・制約、作業、個体調整、接続・存在と処理の保留・再開条件を、認証秘密とsecret除外・Restore時の現在store維持・全データReset時の削除を対応付ける。入出力・提示へ影響、進捗、検証結果を返す。
 
 **Traceability**
 
@@ -497,7 +497,7 @@ AD-01・04・05・07〜09・14・15。要件「履歴、保持、Privacy」「�
 | 各判断責務 ↔ 推論 | 用途と必要な論理的contextを渡し、結果、能力不足、利用量を受ける。何を意味するかは利用元が判断し、Providerやcacheは正本を持たない。 |
 | 個体調整・作業等 ↔ 実行・拡張 | 対象と目的を持つActionを依頼し、作用の既知・不明・停止不能を受ける。Skillや外部Promptの読込みは制御権限の獲得ではない。 |
 | 入出力・提示／各判断責務 ↔ 権限・制約 ↔ 利用・実行・保存の各責務 | Ownerの依頼・管理操作の由来と解釈を制約へ対応付ける。各利用箇所は現在の条件を適用し、失効・上限・判断待ちを反映する。意味判断の出力だけで権限を変更しない。 |
-| 推論・実行・拡張 ↔ 認証秘密 | 認証先と用途を限定して秘密を利用する。通常のcontext・Tool argument・resultとは別の情報の扱いであり、wire formatは未定。 |
+| 推論・実行・拡張・接続・存在 ↔ 認証秘密 | 認証先と用途を限定して秘密を利用する。通常のcontext・Tool argument・resultとは別の情報の扱いであり、wire formatは未定。 |
 | 入出力・提示 ↔ 実行・拡張 ↔ 外部MCP Apps／MCP | Tool UIの表示・操作を、MCP側の作用と制限へ対応付ける。UI操作は第一者の承認・設定操作にはならず、UI終了はTask・server終了ではない。 |
 | 保全・消去 ↔ 全参加Subsystem | 内部data、根拠、派生物、一時data、処理中利用を対象とする全域操作を協調する。完了は各参加先の処理・検証を含み、一箇所の削除成功だけでは決まらない。 |
 
@@ -507,9 +507,9 @@ AD-01・04・05・07〜09・14・15。要件「履歴、保持、Privacy」「�
 
 **Companion停止・削除。** 個体調整が個体活動の停止を扱い、入出力・提示はBodyを表示せず、個体調整・作業は応答・自発動作・新Task・新Schedule実行を開始しない。権限・制約と各実行箇所も新規開始を止め、作業が実行中Taskをbest-effort Cancelする。削除は強い確認を経て停止を含み、保全・消去と各参加先が個体固有data、内部Companion scope Skillの過去revision、主体・相手のRelationship、担当Schedule等を取り扱う。Global Learning、グループ発言、残るTask記録、外部Workspaceは一括消去へ巻き込まない。削除を契機とするLearningの自動Global化を行わず、共有根拠等の残存・参照不能と既知の外部作用は削除前に説明し、停止できなかった処理も報告する。
 
-**Targeted deletion中の推論完了。** 保全・消去は保存済み状態だけでなく、個体調整、作業、認識・学習、推論、観測、拡張、Clientの利用中dataを含めて協調する。遅延結果の内部再保存と古い根拠からの再形成を防ぎ、指定文字列の機械的な残存検証が終わるまでは完了と表示しない。後の新しいExperienceからの形成は別に扱う。具体的な競合制御はStep 4以降で定める。
+**Targeted deletion中の推論完了。** 保全・消去は保存済み状態だけでなく、個体調整、作業、認識・学習、推論、観測、拡張、Clientの利用中dataを含めて協調する。遅延結果の内部再保存と古い根拠からの再形成を防ぎ、指定文字列の機械的な残存検証が終わるまでは完了と表示しない。開始から完了までに再到着・生成した対象情報も同じ消去対象とする。完了後にOwnerが改めて提供した同じ情報は新しいExperienceとして扱える。具体的な競合制御は後続設計で定める。
 
-**Restoreと実行再開。** 保全・消去が対応backupによる内部全置換と正常状態の保護を扱い、作業、個体調整、権限・制約、推論、実行・拡張が復元された自動処理を保留する。認証秘密はbackupに含まれず、必要なら再認証へつなぐ。Ownerは復元内容を確認してまとめて有効化できる。これは通常のHost再起動後の途中Taskの明示再開とも、Client再接続時の状態表示とも異なる。
+**Restoreと実行再開。** 保全・消去が現在のHost Credential storeを除く対応backupによる対象内部dataの全置換と正常状態の保護を扱い、作業、個体調整、権限・制約、推論、実行・拡張が復元された自動処理を保留する。認証秘密はsecretをbackupから除外し、Restore前の現在のHost Credential storeを維持する。接続ownerと復元参照を照合し、利用可能なら現在のCredentialを利用、不足・無効なら再認証へつなぐ。現在の制約と保留条件も満たす必要がある。Ownerは復元内容を確認してまとめて有効化できる。これは通常のHost再起動後の途中Taskの明示再開とも、Client再接続時の状態表示とも異なる。
 
 ## 5. Boundary Decisions
 
