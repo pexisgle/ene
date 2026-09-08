@@ -109,3 +109,11 @@ string_wire_ref!(
     WireMessageType,
     "Payload discriminator for routing. The Host rejects unknown values as `UnsupportedMessage` (Stage 2); senders never guess."
 );
+string_wire_ref!(
+    ManagementTargetWire,
+    "Opaque management target reference: wire refs only, never control state."
+);
+string_wire_ref!(
+    BaseViewMark,
+    "Opaque display-revision mark an intent was built on. Comparison material, never authority."
+);

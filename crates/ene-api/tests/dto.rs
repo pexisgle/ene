@@ -4,9 +4,12 @@
 use ene_api::v1::envelope::WireSender;
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, new_outgoing_envelope};
 use ene_api::v1::handshake::{CapabilityAdvertise, PairingRequest};
-use ene_api::v1::management::{ManagementIntent, SetupIntentKind};
+use ene_api::v1::management::{IntentRationaleWire, RationaleOrigin};
+use ene_api::v1::management::{ManagementIntent, ManagementIntentKind};
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::presence::{PresenceAttributionWire, PresenceStateWire};
+use ene_api::v1::refs::ManagementTargetWire;
+use ene_api::v1::refs::{BaseViewMark, CommandWireId};
 use ene_api::v1::refs::{
     ClientIncarnationId, ClientWireRef, CompanionWireRef, RoundWireId, WireMessageType,
 };
@@ -100,11 +103,14 @@ fn presence_and_management_roundtrip() {
         move_reason: None,
     });
     roundtrip(&ManagementIntent {
-        intent_id: Uuid::new_v4(),
-        kind: SetupIntentKind::CompleteSetup,
-        target: String::from("setup"),
-        base_view: None,
-        rationale: None,
+        intent_id: CommandWireId(Uuid::new_v4()),
+        kind: ManagementIntentKind::ManageSchedule,
+        target: ManagementTargetWire(String::from("schedule-1")),
+        base_view: BaseViewMark(String::from("mark-1")),
+        rationale: IntentRationaleWire {
+            origin: RationaleOrigin::Conversation,
+            quote: None,
+        },
     });
 }
 

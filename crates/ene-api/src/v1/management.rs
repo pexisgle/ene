@@ -1,43 +1,58 @@
-//! Setup management inlet: intent in, filtered view out.
+//! Setup management inlet: intent in, filtered view out (IPC §18).
 //!
 //! The Client expresses intent and reads filtered views; every acceptance,
 //! confirmation, and high-privilege final check happens Host-side. Secrets,
 //! judgment copies, and full internal conditions never appear in views.
+//! High-privilege final confirmation additionally never travels this wire:
+//! it stays on the Host-local trusted first-party surface (IPC §18.1).
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-/// Setup intent kinds for Stage 1. Stored-rule views and broader control
-/// intents arrive with their owners in later stages.
+use super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
+
+/// Management intent kinds (IPC §18.2). Stage 1 exercises the Setup range;
+/// the remaining kinds arrive with their owners, which alone may accept
+/// them. The kind name never decides the trust class: the Host classifies
+/// by operation, target, and impact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SetupIntentKind {
-    /// General settings configuration.
-    ConfigureGeneralSettings,
-    /// Inference provider selection.
-    SelectProvider,
-    /// Credential registration intent (values travel the protected
+pub enum ManagementIntentKind {
+    /// Companion shutdown.
+    StopCompanion,
+    /// Companion deletion.
+    DeleteCompanion,
+    /// Task cancellation.
+    CancelTask,
+    /// Schedule management.
+    ManageSchedule,
+    /// Deny or refuse rule/consent handling.
+    DenyOrRefuse,
+    /// Rule, consent, and cap management.
+    ManageRuleConsentCap,
+    /// Device management.
+    ManageDevice,
+    /// Credential configuration intent (values travel the protected
     /// Host-local path only, never this payload).
-    RegisterCredentialIntent,
-    /// Setup completion declaration for Host enforcement.
-    CompleteSetup,
+    ConfigureCredentialIntent,
+    /// Deletion, backup, restore, and reset requests.
+    RequestDeletionBackupRestoreReset,
 }
 
 /// One management intent: idempotent by key, advisory by nature. The Host
-/// may apply, clarify, deny, or hold; the Client never self-declares the
-/// result (least of all Setup completeness).
+/// maps it to a domain premise and answers with [`ManagementOutcome`];
+/// the Client never self-declares the result.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManagementIntent {
-    /// Idempotency key, minted per intent.
-    pub intent_id: Uuid,
+    /// Idempotency key: the envelope command ID family.
+    pub intent_id: CommandWireId,
     /// What is being proposed.
-    pub kind: SetupIntentKind,
-    /// Opaque target reference. Echoed, never interpreted.
-    pub target: String,
-    /// Base view the intent was built on, for staleness checks.
-    pub base_view: Option<String>,
-    /// Owner-written rationale. Free text: redacted from
-    /// [`core::fmt::Debug`].
-    pub rationale: Option<String>,
+    pub kind: ManagementIntentKind,
+    /// Target reference: wire refs only, never control state.
+    pub target: ManagementTargetWire,
+    /// Display-revision mark the intent was built on. Required: staleness
+    /// is checked, never defaulted to unconstrained.
+    pub base_view: BaseViewMark,
+    /// Owner intent record. Redacted from [`core::fmt::Debug`].
+    pub rationale: IntentRationaleWire,
 }
 
 impl core::fmt::Debug for ManagementIntent {
@@ -48,32 +63,62 @@ impl core::fmt::Debug for ManagementIntent {
             .field("kind", &self.kind)
             .field("target", &self.target)
             .field("base_view", &self.base_view)
-            .field("rationale", &self.rationale.as_ref().map(|_| "[redacted]"))
+            .field("rationale", &"[redacted]")
             .finish()
     }
 }
 
-/// Management outcome: an Ok-side domain outcome, never an error.
+/// Owner intent record: where the intent came from plus the quoted
+/// correspondence. The quote may reproduce managed content, so it is
+/// redacted from [`core::fmt::Debug`].
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct IntentRationaleWire {
+    /// Whether the intent originates from conversation or surface operation.
+    pub origin: RationaleOrigin,
+    /// Quoted correspondence. Redacted from [`core::fmt::Debug`].
+    pub quote: Option<String>,
+}
+
+impl core::fmt::Debug for IntentRationaleWire {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("IntentRationaleWire")
+            .field("origin", &self.origin)
+            .field("quote", &self.quote.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+/// Intent provenance vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RationaleOrigin {
+    /// The intent came from conversation.
+    Conversation,
+    /// The intent came from management-surface operation.
+    ManagementSurface,
+}
+
+/// Management outcome: an Ok-side domain outcome, never an error (IPC
+/// §18.2, §24).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManagementOutcome {
-    /// Applied as a one-time change. Never a standing rule.
+    /// Applied as a one-time approval. Never a standing rule.
     AppliedAsOneTime,
-    /// The Host needs clarification before deciding.
-    NeedsClarification {
-        /// Operational detail. Never a secret or a body copy.
-        detail: String,
+    /// Stored as a rule or similar, with its revision view.
+    StoredAsRuleView {
+        /// Revision view of what was stored.
+        revision: ViewMarkWire,
     },
-    /// Denied at the permission/control boundary.
-    DeniedByBoundary {
-        /// Operational reason. Never a secret or a body copy.
-        reason: String,
-    },
+    /// Too ambiguous, contradictory, excessive, or grave to decide.
+    NeedsClarification,
+    /// Silent control-boundary overwrite or trusted-surface violation.
+    DeniedByBoundary,
     /// The base view moved underneath the intent.
     StaleBaseView {
         /// Current mark the sender should build on next time.
-        current: String,
+        current: ViewMarkWire,
     },
-    /// Held by an ongoing operation.
+    /// Held by deletion, restore, stop, or similar prohibitions.
     HeldByOperation,
 }
 
@@ -112,31 +157,58 @@ impl core::fmt::Debug for ViewSection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagementView {
     /// Opaque display-revision mark.
-    pub mark: super::refs::ViewMarkWire,
+    pub mark: ViewMarkWire,
     /// Filtered sections.
     pub sections: Vec<ViewSection>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ManagementIntent, SetupIntentKind, ViewSection};
+    use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
+    use super::{IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin};
+    use super::{ManagementOutcome, ViewSection};
     use uuid::Uuid;
+
+    fn intent() -> ManagementIntent {
+        ManagementIntent {
+            intent_id: CommandWireId(Uuid::new_v4()),
+            kind: ManagementIntentKind::ManageSchedule,
+            target: ManagementTargetWire(String::from("schedule-1")),
+            base_view: BaseViewMark(String::from("mark-1")),
+            rationale: IntentRationaleWire {
+                origin: RationaleOrigin::ManagementSurface,
+                quote: Some(String::from("quoted private words")),
+            },
+        }
+    }
 
     #[test]
     fn intent_debug_redacts_rationale() {
-        let intent = ManagementIntent {
-            intent_id: Uuid::new_v4(),
-            kind: SetupIntentKind::CompleteSetup,
-            target: String::from("setup"),
-            base_view: None,
-            rationale: Some(String::from("because I pasted something private")),
-        };
-        let rendered = format!("{intent:?}");
+        let rendered = format!("{:?}", intent());
         assert!(
-            !rendered.contains("pasted something private"),
+            !rendered.contains("quoted private words"),
             "rationale redacted: {rendered}"
         );
-        assert!(rendered.contains("setup"), "refs stay visible: {rendered}");
+        assert!(
+            rendered.contains("schedule-1"),
+            "refs stay visible: {rendered}"
+        );
+        assert!(
+            rendered.contains("mark-1"),
+            "marks stay visible: {rendered}"
+        );
+    }
+
+    #[test]
+    fn stale_base_view_points_at_the_current_mark() {
+        let outcome = ManagementOutcome::StaleBaseView {
+            current: ViewMarkWire(String::from("mark-2")),
+        };
+        let rendered = format!("{outcome:?}");
+        assert!(
+            rendered.contains("mark-2"),
+            "current mark stays visible: {rendered}"
+        );
     }
 
     #[test]
