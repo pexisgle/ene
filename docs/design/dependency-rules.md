@@ -1,6 +1,6 @@
 # Dependency Rules
 
-対象: [要件Baseline](../requirements/README.md)（2026-09-08のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)、[State Ownership](state-ownership.md)。本書はStep 5の責務間の依存規則を決定する。Subsystemの名称・略称とsemantic ownerは既存設計を維持する。
+対象: [要件Baseline](../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)、[State Ownership](state-ownership.md)。本書は責務間の依存規則を決定する。Subsystemの名称・略称とsemantic ownerは既存設計を維持する。
 
 ## 1. Overview
 
@@ -507,18 +507,4 @@ flowchart LR
 
 既存文書で問題名として独立に列挙されていなかった、**通常Toolからene自身の管理入口・保存領域へ回り込む依存**と、**Permission等の意味判断に必要な推論の循環した許可待ち**も分析対象とした。前者は信頼境界とsemantic ownership、後者は割当同意・費用制限と管理経路の独立から導出した規則である。新機能や安全保証の追加ではなく、既存契約を破らず成立させる条件として4.1・4.3・5.2へ明示した。外部process内部の強制限界も6.2で保持する。
 
-この設計を妨げる**新たなRequirement Ambiguity／Gapは見つかっていない**。解決済みA-01〜A-04／G-01・G-02を維持する。認可・鮮度・競合・隔離・検証・経路の具体mechanismは設計自由度であり、未解決の製品要件へ昇格させない。
-
-### 11.4 Architecture Review #1の統合結果（2026-09-07）
-
-[Architecture Review #1](reviews/architecture-review-1.md)は独立レビュー原本として変更しない。以下は更新後のrequirementsと全architectureを基準にした統合判断であり、レビューを製品要件の正本にはしない。
-
-| Finding | Decision | 独立再評価と対応 |
-|---|---|---|
-| F-01 | ACCEPT | 保持する記録の全域消去・backup参加には意味ownerとlifecycleの明示が必要。SO 3・4.3・4.4・6.3〜6.5で補った。Companion間の発話は非会話活動に分類せずHistoryへ置き、保存された非会話記録も個体調整が扱う。Task・Action・AuditのownerとRaw非保存は維持し、個体固有Summary／Learningの削除は弱めない。 |
-| F-02 | ACCEPT | 共有検知に個体overrideを適用するmodelはClient単位共有と整合しない。Owner決定を要件化し、Observer専用assignment・同意を権限・制約、解決と使用量を推論へ対応付けた。Host-only割当やClient別UIは固定せず、Cloud同意・privacy・capは維持した。 |
-| F-03 | ACCEPT | Host自動起動の選択はdata保全操作ではなく一般起動・日常利用設定であり、coordinatorであることを所有理由にできない。SO 4.17・Subsystem・本書3.4で入出力・提示へ帰属させ、OS作用を実行・拡張に分離した。Audit・Debug・保持・backup・全域操作状況はdata lifecycle固有の意味があるため保全・消去に残し、SO 4.24で理由を明示した。 |
-
-RI-01はCompanion間交流の発話をHistoryとして保持し片方・両方の削除では消さない契約、RI-02はStopped個体のClient／Host presenceなし・Observer人数除外と再配置hintの分離によって解消した。[Architecture Driversの解決記録](architecture-drivers.md#3-requirement-issues)と要件へ反映済みであり、未決定Issueとしては残さない。
-
-要件 → Drivers → System Context → Runtime Topology → Subsystems → State Ownership → Dependency Rulesの横断確認により、F-01〜03とRI-01・02はclosedとして扱える。新たなRequirement Ambiguity／Gapはない。12 Subsystemと既存trust・failure boundaryは維持した。**Step 6へ進める状態であるが、今回Runtime Flowや実装構造の設計は行わない。** Context Assembly、Owner intent provenance、Observer routing context、restore手順、Client bootstrap material、自発性のmechanical gating等のLater-design Notesは後続設計に残す。
+解決済みA-01〜A-04／G-01・G-02を維持する。認可・鮮度・競合・隔離・検証・経路の具体mechanismは設計自由度であり、未解決の製品要件へ昇格させない。

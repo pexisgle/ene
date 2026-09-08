@@ -1,6 +1,6 @@
 # Cross-cutting Design
 
-対象: [要件Baseline](../requirements/README.md)と、Architecture Review #1に続き、2026-09-08のOwner decisions（RA-01〜06）とArchitecture Review #2の再評価結果を統合したarchitecture。Step 7の複数Subsystem・Runtime Flowに共通する意味・制約・成立条件を定め、詳細設計は扱わない。Reviewは検証材料であり、製品挙動のsource of truthは要件とする。
+本書は、複数Subsystem・Runtime Flowに共通する意味・制約・成立条件を定め、詳細設計は扱わない。
 
 ## 1. 独立して設計する理由と対象の選定
 
@@ -247,8 +247,6 @@ Debug captureは明示した対象・内容と短期失効・停止・削除に�
 
 Targeted deletionは指定範囲の通常revision・根拠・History保持に優先するが、外部copyの消去やCredential失効を代行しない。結果記録の必要性も対象private本文を保持する例外にしない。現在scope・明示非共有・送信同意は、共有の有用性、Providerの情報量、cache効率より優先する。停止・cap・復旧保留は新規活動を制限するが、必要事実の返却・停止受付・機械的検証を同じ未承認活動の成功待ちにしない。
 
-作成後、要件の全章と既存architectureを再照合し、特に次の交差で契約を検証した。ここでの検証はarchitectureの整合確認であり、実装・性能・分散障害耐性のテスト完了ではない。
-
 | 交差させた状況 | 確認した性質と責任の接続 |
 |---|---|
 | RF-01の共有・訂正とRF-03のrouting、Provider変更 | current共有から私的根拠へaccessを広げず、Observerと個体の同意を別々に満たす。古い検索結果・Relationshipから訂正前の事実を復活させない（CC-02・03）。 |
@@ -281,14 +279,14 @@ crate／module、Rust trait／type、concrete API、middleware・interceptor・h
 
 ### 新たなarchitecture contradiction
 
-本工程の横断照合では、新たなarchitecture contradictionは発見していない。遅延結果の記録と活動禁止、個体削除後の記録保持と固有Learning消去、復元後の保留と通常再起動後の継続は、用途・目的・lifecycleを分ける既存契約で成立する。これらを単一の成功・停止・共有状態へ潰す実現方法は本書の契約違反となるが、既存architecture自体の矛盾としては扱わない。
+遅延結果の記録と活動禁止、個体削除後の記録保持と固有Learning消去、復元後の保留と通常再起動後の継続は、用途・目的・lifecycleを分ける既存契約で成立する。これらを単一の成功・停止・共有状態へ潰す実現方法は本書の契約違反となるが、既存architecture自体の矛盾としては扱わない。
 
 ### 新たなRequirement Ambiguity／Gap
 
-本工程で新たなRequirement Ambiguity／Gapは発見していない。観測停止時の取得済み候補をどこまで処理するか、切断Clientの消去完了根拠、旧live結果を区別する具体手段等は、既決の制約を満たす後続設計上の自由度として残る。必要な確認を省く、現在同意を広げる、未完了を成功とする自由度はない。意味的一致の完全検出、外部作用のrollback、exactly-once実行・配信等の未保証事項を新しい保証へ変えていない。
+観測停止時の取得済み候補をどこまで処理するか、切断Clientの消去完了根拠、旧live結果を区別する具体手段等は、既決の制約を満たす後続設計上の自由度として残る。必要な確認を省く、現在同意を広げる、未完了を成功とする自由度はない。意味的一致の完全検出、外部作用のrollback、exactly-once実行・配信等の未保証事項を新しい保証へ変えていない。
 
 Architecture Review #1の解決済み事項は維持した。Stopped個体のpresenceなし、Observer専用assignment、個体削除後のhistorical record保持、Host自動起動設定の入出力・提示による所有を変更していない。公開地域・対象年齢等の留保、ReleaseごとのSupport Matrix・性能budgetも既存文書に残す。
 
 ### 引渡し
 
-Architecture Review #2は、Owner decisions RA-01〜06を要件へ反映し、F-01〜03を独立に再評価して既存architectureへ統合したことでclosedとして扱える。判断と対応は[Architecture Drivers第3節](architecture-drivers.md#3-requirement-issues)に記録し、独立レビュー記録自体は変更しない。Step 8へ進める状態であり、後続の詳細設計では各mechanismがCC-01〜07の参加責任・失敗時条件を満たすことを示す必要がある。本工程では詳細設計は行わない。
+Architecture Review #2は、Owner decisions RA-01〜06を要件へ反映し、F-01〜03を独立に再評価して既存architectureへ統合したことでclosedとして扱える。判断と対応は[Architecture Drivers第3節](architecture-drivers.md#3-requirement-issues)に記録し、独立レビュー記録自体は変更しない。後続の詳細設計では各mechanismがCC-01〜07の参加責任・失敗時条件を満たすことを示す必要がある。

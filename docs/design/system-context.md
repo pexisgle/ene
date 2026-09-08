@@ -1,6 +1,6 @@
 # System Context
 
-対象: [要件Baseline](../requirements/README.md)（2026-09-08のOwner decisions反映済み）と[Architecture Drivers](architecture-drivers.md)。本書はeneの製品責任と外部環境の境界を決定する。実行配置は[Runtime Topology](runtime-topology.md)で扱い、内部subsystemや実装構造は定めない。
+対象: [要件Baseline](../requirements/README.md)と[Architecture Drivers](architecture-drivers.md)。本書はeneの製品責任と外部環境の境界を決定する。実行配置は[Runtime Topology](runtime-topology.md)で扱い、内部subsystemや実装構造は定めない。
 
 ## Overview
 
@@ -103,5 +103,3 @@ SC番号は本設計内の判断を参照するための識別子であり、新
 | **SC-08: 外部作用と内部記録の非同一性** | Cancelや切断から外部作用の不存在・取消成功を推測しない。成功不明時の自動再実行、接続回復・Client間移動を理由とする別Client・Hostでの自動再実行、接続回復によるAction replayを行わず、既知の作用と不明を説明する。Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。RestoreしたRule・同意を即座の自動処理へ接続しない。 | AD-09・15／要件「Task」「Schedule」「OfflineとPrompt cache」「Backupとrestore」「Remote Client」 |
 | **SC-09: 部分障害下の入口と状態の保護** | Body・Voice・Provider・拡張の成功を、残せるText操作・管理・安全・復旧・保存済みdataへの到達の前提にしない。Host自体の不在をClientの独立実行で補う保証にはしない。 | AD-01・03・13／要件「BodyとVoice」「拡張」「品質と利用可能性」 |
 | **SC-10: 最小限のdataと説明** | ClientがHostから受け取るdomain dataは必要最小限の一時copyに限定する。端末固有の接続材料はHostのdomain正本・登録済みCredentialのcacheと区別し、保持する場合もeneが接続目的・秘密非露出・device失効を適用する（SO第8節）。Raw画面・音声・詳細payload・内部推論の常時保存を診断や継続性の前提にしない。ObserverのClient単位・全体のPause／OFFと、Companion単位の自発性制御を同じscopeへまとめない。Audit・Debug captureにも秘密保護を適用し、診断情報を自動送信しない。 | AD-01・05・12・14／要件「Remote Client」「通常保存しないdata」「AuditとTelemetry」「Observationと自発性」 |
-
-未解決Issueは残っていない。A-01〜A-04／G-01・G-02は解決済みである。確定済み境界の適用範囲は[Runtime TopologyのUnresolved Topology Decisions](runtime-topology.md#unresolved-topology-decisions)にまとめる。

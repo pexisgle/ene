@@ -1,6 +1,6 @@
 # Major Runtime Flows
 
-対象: [要件Baseline](../requirements/README.md)とArchitecture Review #1の修正を統合済みのarchitecture。Step 6として、主要な活動を時間軸に乗せ、既決の責務・正本・制御・lifecycleが正常系と異常系で接続できるかを検証する。
+対象: [要件Baseline](../requirements/README.md)。本書は、主要な活動を時間軸に乗せ、既決の責務・正本・制御・lifecycleが正常系と異常系で接続できるかを検証する。
 
 ## 1. この文書の読み方
 
@@ -304,10 +304,6 @@ Ownerの要求または保全・消去が管理する有効なbackup設定を契
 
 各交差で、state正本が途中の表示・Agent・Provider・coordinatorへ移らないこと、結果返却を別のsemantic ownershipと誤認しないことを確認した。通常の意味変更は各ownerへ、制約の現在判断は権限・制約へ、実際の適用は利用箇所へ戻る。双方向依存は必要事実・局所結果を返せる関係として成立し、相手の全体成功を互いに待つ構造を必要としない。
 
-### 新しい矛盾・Requirement Issueの判定
-
-本検証では、**新たなarchitecture contradiction、Requirement Ambiguity、Requirement Gapは発見していない。** 既決のowner・依存・lifecycleだけで主要経路とその中断先を記述できた。Architecture Review #1の解決済み事項を再解釈していない。とくにStopped個体のpresenceなし、Observer専用assignment、個体削除後のhistorical record保持と固有Learning削除を全Flowで維持した。
-
 Flowを辿って重要性が明確になった次の事項は、既決の成立条件を実現する後続設計課題であり、未解決の製品判断をここで補ったものではない。
 
 | 後続設計で具体化する事項 | 本工程で固定した必要な性質 | 意図的に残すmechanism・自由度 |
@@ -321,9 +317,3 @@ Flowを辿って重要性が明確になった次の事項は、既決の成立�
 | 並列消費と自発性の強制 | 処理中・不明な消費をゼロにせず、個体設定と共通上限を守る。 | 費用予約・集計、資源配分、mechanical gating、Capture時機・待機の実装。 |
 
 失効後の新規開始禁止、消去後の再保存禁止、帰属不明時の利用停止、復元成立と有効化の分離は、mechanismの未決定を理由に後続へ判断そのものを延期していない。一方、どのlock・event・process・DB・APIで実現するか、正確なretry／timeout、sandbox方式、Provider SDK、prompt、UI画面は決めていない。意味判断の対象であるTask分割、Summaryや一時状態の扱いも固定algorithmへ変えていない。
-
-### 最終照合と引渡し
-
-要件全5文書と既存architecture全6文書を入力にし、作成したFlowの正常系・異常系を同じowner・境界・依存へ戻して照合した。機能網羅のためのFlow増設、汎用coordinator、独立Activity store、Task Agent scope Learning、Observer人格、統一state machineは追加していない。保持記録・由来・監査は既存契約に必要な範囲に限り、全Raw・内部思考の保存を要求しない。
-
-**Step 7へ進めるarchitecture上の状態である。** 本書は実装方法の成立を未検証のまま保証するものではなく、後続では上表の性質を具体設計で満たす必要がある。新しい矛盾や製品判断の不足がその段階で判明した場合は、Flow側の意味変更で隠さず既存artifactとの問題として扱う。本工程ではStep 7および実装設計へ進まない。

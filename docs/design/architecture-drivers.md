@@ -1,6 +1,6 @@
 # ene Architecture Drivers
 
-分析対象: `docs/requirements/` の再構成済みBaseline（2026-09-08のOwner decisions反映済み）。本書は要件から設計上の重要性を導出する分析であり、新たな製品要件や具体的なarchitectureの決定ではない。
+分析対象: `docs/requirements/` の再構成済みBaseline。本書は要件から設計上の重要性を導出する分析であり、新たな製品要件や具体的なarchitectureの決定ではない。
 
 ## 1. Overview
 
@@ -401,55 +401,3 @@ CompanionがComputer Useできる対象は、そのCompanionが現在存在す�
 #### G-02 — active Clientがない場合の継続・復帰（解決）
 
 Running Companionにactive Clientがない場合でも、Schedule起動および継続中の許可済みHost上のTask・Task Agent・Schedule・保存は継続できる。判断基準はClientが必要かどうかとし、Clientが必要なこと以外のTask等は可能、Clientに依存することは不可能とする。Body、Realtime／Text会話、Voice、Computer Useはactive Clientがない間は行わず、対象Clientがない間の新規観測は発生しない。Companion間交流、通知の生成、Clientを必要としない内部調査等のHost内で完結する活動は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動前のClientへのpresence復旧は自発移動と区別し、RA-06・AD-09の自動復旧契約に従う。Host側Client環境の自動起動は行わない。AD-01・02・09・12の前提とする。
-
-### Architecture Review #1のRequirement Issues（解決済み）
-
-#### RI-01 — Companion間交流の記録（解決）
-
-Owner不参加の自発交流で実際に交わされた発話をConversation Historyとして保持し、片方・両方の個体削除でも消さない。通常保持管理・backup・targeted deletionはHistoryの契約を適用し、交流由来のMemory・Relationship・Companion State・Learningとは別lifecycleとする。AD-04・05・07・15に反映した。
-
-#### RI-02 — Stopped Companionのpresence（解決）
-
-停止中はactive Clientを持たず、ClientにもHostにもpresenceがない。Observer対象人数・routingから除外し、Host内の自発活動も禁止する。再配置hintの保持とResume時の再配置は許すが、具体algorithmは未固定。Running個体のdisconnect契約とは分離し、AD-01・02・09・12に反映した。
-
-### Architecture Review #2の統合判断（2026-09-08）
-
-[独立レビュー記録](reviews/architecture-review-2.md)は参考・検証材料として維持し、変更しない。以下は現在の要件とOwner decisionsに照らした統合判断であり、ReviewのRecommended dispositionを製品要件にはしない。
-
-| Finding | 判断 | 採用する問題と統合内容 | 採用しない拘束 |
-|---|---|---|---|
-| F-01 | PARTIAL | routing文脈の出所・利用範囲の不足を認める。既存の情報ownerが所有するCompanion固有文脈を、routingに必要な範囲へ要約・制限して提供できる契約とし、元情報の制約とObserver専用assignmentの送信同意を維持する（AD-12、SO 4.16・4.18・4.19、DR文書5.3、CC-02）。 | 新たなscope区分や、各CompanionのProviderによる生成を必須にしない。変換しただけでCompanion固有情報としての制約が消えるとも扱わない。 |
-| F-02 | PARTIAL | Client固有の接続材料を、Hostのdomain正本・登録Credentialの永続cacheと区別する。既存の接続・存在、認証秘密、権限・制約で用途・保護・失効・Reset／Restore時の現在認証照合を担う（RT-07、SO第8節、DR文書6.3、CC-02）。 | 接続材料をeneの保護対象外へ分類しない。永続保持方式や鍵形式を必須にせず、新しいownerも作らない。 |
-| F-03 | ACCEPT | Restore時の現在Credential storeの扱いの欠落を認める。RA-02に従い現在storeを維持し、復元参照を照合する（AD-15、SO 4.21・6.5、RF-08、CC-05）。 | — |
-
-| Requirement Issue | Owner決定の反映先と解決内容 |
-|---|---|
-| RA-01 | 要件「Observation」「Scope」「割当と同意」。限定したCompanion固有routing文脈の経路と制約継承、Observer専用assignmentを確定。生成方法・形式・更新頻度・鮮度・選択は設計へ残す。AD-12、SO 4.16を中心に同期。 |
-| RA-02 | 要件「Backupとrestore」。secret非保存、現在Credential store維持、参照照合、利用可能なら現在Credential・不足／無効なら再認証、現在制約・復元後保留を確定。全データResetの削除と区別。AD-15、SO 4.21・6.5を中心に同期。 |
-| RA-03 | 要件「Learningと根拠の容量管理」。通常忘却と別のretentionとしてdefault自動削除OFF、明示Owner opt-inでcleanup設定可能。無断の容量削除を禁止し、data class・期間・容量・優先順位・algorithmは固定しない。AD-07、SO 4.24・6.5、CC-05へ同期。 |
-| RA-04 | 要件「Scope」。推奨内部Skillは作成先Companion scopeを既定とし、複数個体にも各個体所属。単体importではOwnerがCompanion／Globalを選択。既存個体削除契約に従う。AD-04、SO 4.7へ同期。 |
-| RA-05 | 要件「Privacy/Security目的のtargeted deletionと履歴保持」。開始から完了までの再到着・生成も同じ対象とし、途中の新規Experience例外を作らない。完了後のOwner再提供は新しいExperienceとして扱える。AD-07、SO 6.4、RF-07、CC-03・05へ同期。 |
-| RA-06 | 要件「Remote Client」。Running個体のpresenceを再起動前のClientへ自動復旧し、元Clientが利用不能なら成立までactiveなし。別Clientへの無条件移動・Stopped復帰・途中Task自動再開には広げない。AD-09、SO 4.15、RF-05、CC-04へ同期。 |
-
-RA-01〜06は解決済みであり、F-01〜03の必要な修正も統合した。新しいSubsystem・semantic owner・汎用layerは追加しない。要件からCC-01〜07までの横断照合結果とStep 8への引渡しは[Cross-cutting Design第10節](cross-cutting.md#10-design-freedomと新たなissue)に記す。
-
-### Requirement Gap
-
-現在、未解決のRequirement Gapはない。
-
-### Issueとして扱わない未決定事項
-
-DB schema、内部型、subsystem・process分割、IPC、検索・更新・減衰algorithm、Prompt構成、sandbox機構、cache key等は、要件が明示的に設計へ委ねた自由度である。Support Matrix、Provider catalog、性能budgetのReleaseごとの更新も既定の扱いであり、値が恒久固定されていないことを欠落とはしない。
-
-公開地域・対象年齢・年齢確認・地域別のAI表示／Content policy・Marketplace提供は、[製品定義](../requirements/product.md)「公開時に決める事項」により公開計画時へ留保されている。現段階のDriverには追加しないが、公開判断で要件が確定した時点で本書を再評価する必要がある。後続milestoneの機能は未実装予定であって、要件未決定ではない。
-
-## 4. Design Implications Summary
-
-| 後続の設計対象 | 特に注意すべきDriverと理由 |
-|---|---|
-| **System Context / Runtime Topology** | **AD-01・02**: Hostの正本・実行継続と、active Clientに排他的に結び付く身体・入出力・Computer Useを区別する。active Clientがない間はHost正本に存続し、Client依存を休止し、次Clientで要約報告する。**AD-10・11・12**: Host／LAN／CloudへのCapability別送信、Remoteのpairing、外部拡張の隔離と例外、Client単位で共有する観測範囲とCompanion単位の自発性を可視化する。**AD-13**: Windows／Linuxと部分障害時の操作可能性を満たす配置条件を評価する。 |
-| **Subsystem Decomposition** | **AD-01・03・08・09**: 同じCompanionを窓口にしつつ、長い作業、通常会話、判断待ちが互いを占有せず、待機だけにLLMを反復利用しない責務境界を検討する。**AD-05・06・07・14**: 意味判断、強制する制限、根拠・由来、削除完了、秘密保護が一部経路だけの実装にならないか確認する。**AD-11・13**: 要件が例示するProvider protocol・Observation adapter・Body renderer等の拡張と、部分障害時の管理・復旧を両立する境界を評価する。Driverや参考資料の層をそのままsubsystem一覧にしない。 |
-| **State Ownership** | **AD-04・05**: Character、個体固有状態、Global Learning、Task context、根拠、Raw History、派生dataの意味と利用範囲を混同しない。内部Companion scope Skillの削除と自動昇格の禁止、Global・外部の残存を含む。**AD-01・02・08**: Host正本、Client一時data、外部file所有、Task従属の関連付けを区別する。通常作業のHost継続とClient依存部分を分ける。**AD-04・08・09**: Companion削除を越えて残るTask記録、削除される担当Scheduleと内部Companion scope Skill、主体・相手の削除が及ぶRelationshipを一律のlifecycleにしない。**AD-07・14・15**: 保持・削除・Credential除外・restoreの単位差と、実行中処理からの再保存を含む整合性を評価する。 |
-| **Dependency Rules** | **AD-06・10・11・14**: 信頼できないcontentや推論結果、拡張、認識の変化から、権限・同意・費用・Credentialを直接変更できる依存を許さない。共有観測処理による同意の拡張も許さない。**AD-05・10**: 検索用派生dataやProvider cacheを意味状態の正本にしない。**AD-01・03・13**: Task継続や安全操作をClient表示・Body・Voiceの成功へ従属させない。**AD-07・09・15**: 削除・失効・復元時の制約を委任や別実行経路・別Clientでの再実行が迂回しないか確認する。 |
-
-各段階では、上記の意味上の境界・優先関係を満たす複数の設計を比較する。ここから特定のarchitecture pattern、subsystem数、crate構成、型、API、DB schema、IPC方式、algorithm、libraryを一意に決めることはしない。

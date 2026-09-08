@@ -1,7 +1,5 @@
 # Context Assembly — 受渡し・利用・結果受入の詳細設計
 
-対象: Architecture Review #1／#2のFindingとOwner decisionsを統合済みのarchitectureに対する、Step 11 Critical Area Detailed Design。2026-09-08時点。
-
 本書は、用途の異なる責務間で情報を選び、変換し、推論へ渡し、その結果を利用するときの契約を詳細化する。Context Assemblyは新しいSubsystemでも情報の正本でもない。以下の「要求」「利用単位」「対応」は論理的な関係であり、共通object、永続record、protocolを指定しない。
 
 製品挙動のsource of truthは[要件Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
@@ -238,7 +236,7 @@ Contextを保持・変換・送信・受入する各責務は、保全・消去�
 
 ## 9. Runtime FlowsとCross-cutting Designへ戻した検証
 
-以下は文書上の契約walkthroughであり、実装試験の成功宣言ではない。[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08へ、正常系と意味のある競合を戻して照合した。
+[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08へ、正常系と意味のある競合を戻して照合した。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -292,8 +290,4 @@ Cross-cutting契約との照合結果は次のとおりである。
 - 一時的な対応の保持期間・保存要否、永続化を必要とする未完了状態との接続、消去参加先の探索・検証・全域完了手順。通常のRaw非保存と必要な保全を維持する。
 - Rust crate／module、struct／enum／trait、concrete function／API、IPC protocol、DB schema・SQL table、serialization、event bus／actor／queue、process／thread、locking／transaction、retry／timeout値、library／framework。これらを選ぶ工程には進んでいない。
 
-**新しいRequirement Ambiguity／Gapおよび上位architectureの変更を要するIssueは、今回の対象範囲では発見していない。** Observer出力の配送境界とProvider sessionの再利用条件は、CC-02・03・05から導く詳細化であり、新scopeや外部消去保証ではない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
-
-次は**Actionの認可判断と実作用の対応・現在性・作用不明**を詳細化するのが適切である。本書の由来・用途・受入契約を前提に、判断対象と実対象の一致、委任・制約変更・Cancelとの競合、作用後の不明を扱える。その後の全域消去設計では、本書第8.2節の参加契約を含めた完了根拠と再起動を詰める。
-
-**Step 11は続行可能である。** 本書の範囲は後続設計への入力として利用できるが、Step 11全体の完了やStep 12への移行を宣言するものではない。
+Observer出力の配送境界とProvider sessionの再利用条件は、CC-02・03・05から導く詳細化であり、新scopeや外部消去保証ではない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。

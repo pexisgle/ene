@@ -1,7 +1,5 @@
 # Targeted Deletion — 全域成立と再出現防止の詳細設計
 
-対象: Architecture Review #1／#2のFindingとOwner decisionsを統合済みのarchitectureに対する、Step 11 Critical Area Detailed Design。2026-09-08時点。
-
 本書は、OwnerがPrivacyまたはSecurityのため特定情報そのものの内部消去を明示した場合に、ene内部のどこに保存・派生・処理中・再利用されていても対象を除去し、古いcopy・遅延結果・再接続・再起動・restore等によって復活させないためのlogical contractを詳細化する。後続のstate representation／persistence／concurrency／interface設計が安全に依存できる水準まで定め、具体的なmechanismは固定しない。
 
 製品挙動のsource of truthは[要件Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
@@ -311,7 +309,7 @@ Companion削除は個体固有の現在状態・学習状態等の削除であ�
 
 ## 10. Runtime FlowsとCross-cutting Designへ戻した検証
 
-以下は文書上の契約walkthroughであり、実装試験の成功宣言ではない。[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)へ、正常系と意味のある競合・障害を戻して照合した。
+[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)へ、正常系と意味のある競合・障害を戻して照合した。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -377,8 +375,4 @@ State Ownership、Dependency Rulesとの照合では、semantic owner、Host／C
 
 crate／module、Rust trait／type、concrete API・error型、middleware・interceptor・hook、event bus／queue／actor、IPC format、DB schema、transaction／lock、具体的Credential保護・sandbox・Plugin隔離、特定library・SDK・OS API、concrete deletion query、index implementation、queue／event bus、exact retry／timeout、specific storage engine、exact audit formatも固定しない。上表の対応関係から統一Context layer、Policy Engine、Manager、Service、Coordinatorの追加を導かない。既存の12責務、semantic owner、Host／Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-**新しいRequirement Ambiguity／Gapおよび上位architectureの変更を要するIssueは、今回の対象範囲では発見していない。** 対象探索・検証・到達性確認・backupとの交差等の具体mechanismが未決定であることはIssueにしない。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
-
-次は**Client帰属切替と活動の区切り**を詳細化するのが適切である。本書の消去条件・再保存防止・未完了保全を前提に、排他帰属と安全な区切り・再接続・復旧の全設計を独立して詰めることができる。
-
-**Step 11は続行可能である。** 本書の範囲は後続設計への入力として利用できるが、Step 11全体の完了やStep 12への移行を宣言するものではない。
+対象探索・検証・到達性確認・backupとの交差等の具体mechanismが未決定であることはIssueにしない。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。

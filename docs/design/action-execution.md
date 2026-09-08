@@ -1,7 +1,5 @@
 # Action Execution — 認可判断から実作用・結果確定・作用不明までの詳細設計
 
-対象: Architecture Review #1／#2のFindingとOwner decisionsを統合済みのarchitectureに対する、Step 11 Critical Area Detailed Design。2026-09-08時点。
-
 本書は、Ownerの意図やPermission判断から実際の外部作用が発生し、その結果がTask・記録・Ownerへの報告へ戻るまでの間で、「何を許可したのか」と「実際に何が行われたのか」の対応が失われないためのlogical contractを詳細化する。後続のconcurrency／state representation／persistence／interface設計が安全に依存できる水準まで定め、具体的なmechanismは固定しない。
 
 製品挙動のsource of truthは[要件Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
@@ -237,7 +235,7 @@ Ownerへの最終報告・管理面の表示・Body・Voiceの演出・自然な
 
 ## 10. Runtime FlowsとCross-cutting Designへ戻した検証
 
-以下は文書上の契約walkthroughであり、実装試験の成功宣言ではない。[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](cross-cutting.md)CC-01〜07へ、正常系と意味のある競合を戻して照合した。
+[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](cross-cutting.md)CC-01〜07へ、正常系と意味のある競合を戻して照合した。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -295,8 +293,4 @@ Cross-cutting契約との照合結果は次のとおりである。
 
 crate／module、Rust trait／type、concrete API・error型、middleware・interceptor・hook、event bus／queue／actor、IPC format、DB schema、transaction／lock、具体的Credential保護・sandbox・Plugin隔離、特定library・SDK・OS APIも固定しない。上表の対応関係から統一Context layer、Policy Engine、Manager、Service、Coordinatorの追加を導かない。既存の12責務、semantic owner、Host／Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-**新しいRequirement Ambiguity／Gapおよび上位architectureの変更を要するIssueは、今回の対象範囲では発見していない。** transport再送と論理試行の切分け、実対象解決の配置、試行識別の表現等は、既決の制約を満たす後続設計上の自由度として残る。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
-
-次は**Targeted deletionの全域成立と再起動を跨ぐ完了根拠**、または**Client帰属切替と活動の区切り**のいずれかを詳細化するのが適切である。前者では本書第9節の作用事実と消去参加の両立を含めた完了・再保存防止を、後者では本書第8.4節の安全な区切り・排他性・不明保持を前提に、それぞれ独立して詰めることができる。
-
-**Step 11は続行可能である。** 本書の範囲は後続設計への入力として利用できるが、Step 11全体の完了やStep 12への移行を宣言するものではない。
+transport再送と論理試行の切分け、実対象解決の配置、試行識別の表現等は、既決の制約を満たす後続設計上の自由度として残る。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。

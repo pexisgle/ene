@@ -1,6 +1,6 @@
 # Runtime Topology
 
-対象: [要件Baseline](../requirements/README.md)（2026-09-08のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)。本書は実行場所、主体の寿命、接続、信頼・障害境界を決定する。図の箱はprocessやsubsystemを意味しない。
+対象: [要件Baseline](../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)。本書は実行場所、主体の寿命、接続、信頼・障害境界を決定する。図の箱はprocessやsubsystemを意味しない。
 
 ## Overview
 
@@ -176,10 +176,6 @@ PのHost／LAN／Cloudは選択できる配置であり、三段のruntime layer
 
 LocalとRemoteで変わるのはClientへの接続と入出力・操作対象の所在地であり、Host正本・Host上の許可済み作業の継続は変わらない。Host／LAN／Cloudの推論選択もClientの所在地と別軸である。Computer Useの対象はCompanionが現在存在するactive Clientだけとし、任意のpairing済みClientの選択や存在場所との分離を行わない。
 
-## Unresolved Topology Decisions
-
-既存Issueは[Architecture DriversのRequirement Issues](architecture-drivers.md#3-requirement-issues)を正とする。A-01〜A-04／G-01・G-02は解決済みであり、未解決のTopology decisionはない。
-
 ## Design Freedom
 
 以下は未解決の製品要件ではなく、確定した境界を満たす方法の選択である。
@@ -212,11 +208,3 @@ LocalとRemoteで変わるのはClientへの接続と入出力・操作対象の
 | Clientからの観測と個体ごとの自動学習・自発性 | C・P、RT-04、SC-02・03・04・10 | AD-02・06・10・12／「Observationと自発性」「Desktop Body」「割当と同意」「Computer Use」 |
 | Body・Voice・Provider・拡張の部分障害から管理と保存済みdataを保護 | C・P・M・X・U、Lifecycle and Failure Boundaries、SC-09 | AD-03・11・13／「BodyとVoice」「拡張」「品質と利用可能性」 |
 | Backup・復旧・Resetと実行権限の再有効化を分ける | 外部resource、RT-09、SC-06・07・08 | AD-15／「保護、Backup、復旧」 |
-
-### 全体照合と後続工程への引渡し
-
-要件の全章、製品定義の対象・非目標、AD-01〜15とDriver間の優先関係、解決済みのA-01〜A-04・G-01・G-02を照合した。[受け入れ条件](../requirements/acceptance.md)の後続milestone項目も確定済み要件として対象に含め、[参考資料](../requirements/references.md)の製品例・Harnessの層分け・過去実装を配置根拠にしていない。
-
-後続のSubsystem Decompositionでは、H／Cの配置と寿命、P／M／X／Uの信頼・障害境界、RT-01〜10の関係を入力にできる。State OwnershipにはHost正本・Client一時data・外部所有物の区別と個体／Task／削除／復旧の異なるlifecycleを、Dependency Rulesにはcontent・推論・拡張・共有観測処理から制御権限・同意を変更できないことと部分障害下の維持条件を渡す。
-
-**Step 3: Subsystem Decompositionにはまだ進まない。** A-01〜A-04・G-01・G-02に依存する責務・関係は本書で確定済みとして扱う。本書はSubsystem Decompositionそのものを実施していない。

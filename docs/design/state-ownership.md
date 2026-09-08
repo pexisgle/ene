@@ -1,6 +1,6 @@
 # State Ownership
 
-対象: [要件Baseline](../requirements/README.md)（2026-09-07のOwner decisions反映済み）、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)。本書はStep 4のconceptual / architectural state ownershipを決定する。本文のSubsystem略称はSubsystem Decompositionに従う。
+対象: [要件Baseline](../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)。本書はconceptual / architectural state ownershipを決定する。本文のSubsystem略称はSubsystem Decompositionに従う。
 
 ## 1. Overview
 
@@ -10,7 +10,7 @@ State Ownershipは、**何についての状態を正しいものとして扱い
 
 ここでいうcanonicalは、eneがその意味について参照すべき正本であり、内容が客観的に真であることや信頼できる指示であることを意味しない。Memoryは訂正可能な現在認識、Conversation Historyは保持された発言の記録、Action結果はeneが把握した作用と確定度の記録である。これらはそれぞれの意味について正本でも、互いを代替しない。
 
-決定するのは意味・正本・変更責任・所属／利用範囲・根拠・lifecycleと横断整合条件である。DB、repository、Rust object、process memoryの所有や唯一のwriterは決めない。第6節のcoordinationは、Step 5のallowed dependency graphやtransaction protocolを指定しない。
+決定するのは意味・正本・変更責任・所属／利用範囲・根拠・lifecycleと横断整合条件である。DB、repository、Rust object、process memoryの所有や唯一のwriterは決めない。第6節のcoordinationは、allowed dependency graphやtransaction protocolを指定しない。
 
 ## 2. Ownership Principles
 
@@ -534,7 +534,7 @@ Credential値の利用は上表の通常representation・contentの経路とは�
 
 ## 9. Questions for Dependency Rules
 
-Step 5では次の問いに答え、ここで決めたowner・参照・強制・coordinationを実効的な依存の許可／禁止／制約へ落とす。本書では呼出し方向や経路を完成させない。
+次の問いは、ここで決めたowner・参照・強制・coordinationを実効的な依存の許可／禁止／制約へ落とすためのものである。本書では呼出し方向や経路を完成させない。
 
 | 問い | 依存設計が守る必要のあるownership境界 |
 |---|---|
@@ -591,7 +591,7 @@ Step 5では次の問いに答え、ここで決めたowner・参照・強制・
 | Audit・Debug・保持方針・全域消去（4.23・4.24、6.3〜6.5） | 履歴、保持、Privacy、停止と削除 | AD-07・14、SC-07・10、RT-08・10。保全・消去が協調し全ownerが参加。 |
 | 正常保存・backup・全置換・保留・Reset（4.24、6.5、7） | 保護、Backup、復旧、Setupと日常利用 | AD-15、SC-06〜09、RT-08・09。保全・消去、認証秘密、権限・制約、認識・学習、活動owner。 |
 
-### 11.2 Step 3から渡された問いの回答
+### 11.2 Subsystem境界からの問いへの回答
 
 | Subsystem Decomposition第7節の問い | 本書の回答箇所と主要判断 |
 |---|---|
@@ -609,23 +609,3 @@ Step 5では次の問いに答え、ここで決めたowner・参照・強制・
 | Backup・restore・Resetの整合と保留 | 4.24、6.5、7。Copy・復元された正本・現在の実行可能性を分離する。 |
 
 [Step 4前レビュー](reviews/pre-state-ownership-review.md)は非規範の点検入力として使用した。F-07は4.4、F-08は4.5〜4.9と6.2・6.3、F-09は4.18〜4.20と6.2・6.5、F-10は4.3・4.15、F-11は4.10・4.13、F-12は4.9、F-13は4.21・4.23・4.24と6.4・6.5へ対応する。レビューの列挙をstate categoryの必須一覧にはしていない。
-
-### 11.3 全体照合と引渡し
-
-要件全5文書、AD-01〜15と優先関係、SC-01〜10、RT-01〜10とlifecycle・trust・failure boundary、12 Subsystemの責務・非責務・Step 4への問いを本書全体と照合した。後続milestoneの機能も含め、現在実装や過去architectureを判断根拠にしていない。
-
-特に次の境界を確認対象とした。
-
-- Memoryを主要な知識状態とし、Historyの正確な発言、Summaryの根拠、Relationshipの関係解釈、Companion Stateの内的状態を代替・二重正本にしていない。
-- Characterと経験状態、Companion所属とsemantic owner、Task担当と記録の存続を分離し、Task・Agent・Schedule・Workspace・外部fileのlifecycleを潰していない。
-- Companion削除で内部Companion scope Skillと過去revision、主体または相手のRelationship、担当Scheduleを対象とし、Global・共有記録・外部所有物を一律cascadeや自動昇格へ結び付けていない。
-- Scopeと重要度、共有根拠と利用許可、観測制御と個体自発性、接続・pairing許可とactive帰属を区別している。
-- Host正本、Client一時data、Provider／MCP／Pluginの外部境界を維持し、session・cache・embedding・index・表示を意味や権限の唯一の正本にしていない。
-- Credentialの秘密値と通常参照を分離し、生成contentからPermission・Rule・Provider同意・cap等を直接変更できない。
-- Targeted deletionの全域coordinationと通常ownerを分離し、過去根拠・遅延結果・Client一時dataからの復元防止、未完了と残存検証を扱っている。
-- Backupはcopy、restoreは現在のHost Credential storeを除く対象内部dataの全置換、実行再有効化はOwner確認後の別判断とし、外部世界や認証状態まで復元されたと扱っていない。
-- Implementation mechanism、統一state machine、共通schema／revision model、厳密なDependency Rulesを先取りしていない。
-
-このownership設計を妨げる新たなRequirement Ambiguity／Gapは見つかっていない。解決済みA-01〜A-04／G-01・G-02は維持する。未伝達事項の保持、Auditの事実と順序、現在の有効性、全域操作の未完了状況は既存契約を成立させるownership判断として明確化しており、新たな独立製品機能・Subsystemを追加していない。
-
-**Step 5へ進めるstate ownershipの境界が揃っている。** 第9節の問いを入力とし、各意味ownerへの変更・参照、制約の適用、全域操作への参加を許可・禁止・制約する依存関係を次に決定できる。本書ではDependency Rules、crate／module、DB、実装へは進まない。
