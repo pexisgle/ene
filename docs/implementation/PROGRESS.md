@@ -2,16 +2,16 @@
 
 ## 現在の milestone
 
-- M1 基盤 crate の新規構築（作業中）
+- Stage 1 最小 foundation と共有 contract（作業中）
 
 ## 完了した milestone
 
-- M0 旧実装の退避確認と workspace の再構成
+- Stage 0 repository / build foundation
 
 ## 次に進む領域
 
-- M1: `ene-primitive` / `ene-config` / `ene-error` の実装（stub manifest 配置済み）
-- M2 以降: 対象 crate 登場時に CI へ feature-matrix / windows-native を追加
+- Stage 1 残り: `ene-api` の最小 wire-neutral contract、Host / Client app の最小 entrypoint、必要になった範囲の error / outcome 規約（owner-local に置く。共有 error crate は作らない）
+- `ene-primitive` / `ene-config`（この stack の上位 PR）
 
 ## 未解決 blocker
 

@@ -120,13 +120,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-error"
-version = "0.1.0"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
 name = "ene-primitive"
 version = "0.1.0"
 dependencies = [
