@@ -183,6 +183,20 @@ impl Store {
                 None,
             ));
         }
+        if let Some(local_id) = cmd.local_id.as_deref() {
+            let existing: Option<String> = tx
+                .query_row(
+                    SQL_SELECT_HISTORY_ID_BY_LOCAL_ID,
+                    params![companion_text, local_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            if let Some(existing) = existing {
+                let message = decode_id(&existing).map_err(companion_unavailable)?;
+                return Ok((HistoryAppendOutcome::CommittedAs { message }, None));
+            }
+        }
         tx.execute(
             SQL_INSERT_HISTORY,
             params![
@@ -194,11 +208,7 @@ impl Store {
                 cmd.lang,
                 at_text,
                 generation_raw,
-                // The contracts crate carries no caller-supplied local id on
-                // `AppendHistoryCommand` yet, so every row stores NULL here.
-                // `lookup_local_id` still queries this column and matches
-                // nothing until the contracts scope adds the field.
-                Option::<String>::None,
+                cmd.local_id.as_deref(),
             ],
         )
         .map_err(|error| companion_unavailable(error.to_string()))?;
@@ -396,6 +406,7 @@ const SQL_INSERT_TRANSITION: &str = "INSERT INTO presence_transition_log (compan
 const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, local_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
 const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_ID_BY_LOCAL_ID: &str = "SELECT message_id FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 const SQL_SELECT_UNDELIVERED_STATUS: &str =
