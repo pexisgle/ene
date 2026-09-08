@@ -108,6 +108,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ene-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "ene-config"
 version = "0.1.0"
 dependencies = [
@@ -117,6 +126,22 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "ene-core"
+version = "0.1.0"
+dependencies = [
+ "ene-config",
+ "thiserror",
+]
+
+[[package]]
+name = "ene-ctl"
+version = "0.1.0"
+dependencies = [
+ "ene-config",
  "thiserror",
 ]
 

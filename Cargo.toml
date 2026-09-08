@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ene-primitive", "crates/ene-config"]
+members = ["crates/ene-primitive", "crates/ene-config", "crates/ene-api", "apps/ene-core", "apps/ene-ctl"]
 # Retired implementation. Never add members under .old/.
 exclude = [".old"]
 resolver = "2"
