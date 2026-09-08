@@ -4,8 +4,6 @@
 //! optional explicit data directory override. It carries no domain state, no
 //! secret-typed fields, and no runtime judgments such as autostart selection.
 
-use std::error::Error;
-use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
 use std::ffi::OsString;
@@ -62,40 +60,23 @@ impl Default for Config {
     }
 }
 
-/// Local configuration failure.
+/// Local configuration failure, derived with `thiserror` per the repository
+/// convention for library errors.
 ///
-/// Defined with `std` only: this crate takes no `ene` dependencies and adds
-/// no error-crate dependency for two variants. The `figment` failure is
-/// boxed: `figment::Error` is over 200 bytes and must not bloat the enum or
-/// every `Result` that carries it.
-#[derive(Debug)]
+/// The `figment` failure is boxed: `figment::Error` is over 200 bytes and
+/// must not bloat the enum or every `Result` that carries it.
+#[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     /// [`Config::language`] was empty or whitespace-only.
+    #[error("language must not be empty")]
     EmptyLanguage,
     /// Layered loading or extraction through `figment` failed.
-    Figment(Box<figment::Error>),
-}
-
-impl Display for ConfigError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyLanguage => formatter.write_str("language must not be empty"),
-            Self::Figment(error) => write!(formatter, "configuration load failed: {error}"),
-        }
-    }
-}
-
-impl Error for ConfigError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::EmptyLanguage => None,
-            Self::Figment(error) => Some(&**error),
-        }
-    }
+    #[error("configuration load failed: {0}")]
+    Figment(#[from] Box<figment::Error>),
 }
 
 impl From<figment::Error> for ConfigError {
-    /// Wraps a `figment` loading or extraction failure.
+    /// Boxes a `figment` loading or extraction failure.
     fn from(error: figment::Error) -> Self {
         Self::Figment(Box::new(error))
     }

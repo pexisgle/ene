@@ -16,11 +16,12 @@ publish = false
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["clock", "serde"] }
 directories = "6"
-figment = { version = "0.10", features = ["env", "json"] }
+figment = { version = "0.10", features = ["json"] }
 schemars = { version = "1.2", features = ["derive", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+thiserror = "2.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [workspace.lints.clippy]
