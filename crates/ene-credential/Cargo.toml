@@ -1,0 +1,17 @@
+[package]
+name = "ene-credential"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ene-primitive = { path = "../ene-primitive" }
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
