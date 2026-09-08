@@ -69,6 +69,7 @@
 - [Architecture Drivers Review](reviews/architecture-drivers-review.md)
 - [Architecture Review #1](reviews/architecture-review-1.md)
 - [Architecture Review #2](reviews/architecture-review-2.md)
+- [Architecture Review #3](reviews/architecture-review-3.md)
 - [Step 4 前独立レビュー](reviews/pre-state-ownership-review.md)
 
 レビュー本文は歴史的記録として維持する。レビュー中の旧 `docs/design/<file>.md` 表記は当時の path の引用であり、現行配置への読み替えは本 README の対応表で行う。ナビゲーションとして機能する Markdown link target のみ現行配置へ更新している。

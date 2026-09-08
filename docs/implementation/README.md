@@ -16,37 +16,37 @@
 
 ## 2. 実装全体の規律（全 milestone 共通）
 
-### 2.1 検証コマンド（[AGENTS.md](../../AGENTS.md)）
+### 2.1 検証コマンド（旧 `AGENTS.md` を参考に新 workspace で再現）
 
 - 整形: `cargo fmt --all`（check: `cargo fmt --all -- --check`）
 - focused iteration: `cargo check -p <pkg>` / `cargo test -p <pkg>`
 - 全体 lint: `cargo clippy --workspace --all-targets -- -D warnings`
 - 全体 test: `cargo test --workspace`
 - docs: `cargo doc --workspace --no-deps`
-- **注意**: `default-members = ["apps/ene-ctl"]` のため bare `cargo test` は workspace 全体を検証しない。全体確認には必ず `--workspace` を付ける。
-- CI は [.github/workflows/ci.yml](../../.github/workflows/ci.yml) が fmt / clippy / feature matrix / workspace test / docs / windows-native を実行する。workspace clippy policy は厳格（`unwrap_used` / `panic` / `print_stdout` / `todo` / `unimplemented` 等が deny）。lint を弱めて通すのではなく実装を直す。
-- Linux ネイティブ作業は Nix flake 前提（`direnv` 未使用時は `nix develop --command`）。Windows は MSVC + VS Build Tools + Windows SDK。
+- **注意**: 旧 workspace（`.old/Cargo.toml:10`）は `default-members = ["apps/ene-ctl"]` のため bare `cargo test` は workspace 全体を検証しない。新 workspace でも全体確認には必ず `--workspace` を付ける。なお現時点では root に `Cargo.toml` / `AGENTS.md` が無く（M0 未完了）、上記コマンドは新 workspace 作成後に成立する。`Cargo.toml.new-workspace` 案では `default-members` は最初の crate 確定まで意図的に未設定である。
+- CI は旧 [`.old/.github/workflows/ci.yml`](../../.old/.github/workflows/ci.yml) が fmt / clippy / feature matrix / workspace test / docs / windows-native を実行する。新 workspace では同等の job を用意する。注意: 旧 CI では `docs` は `push main` 時のみ、`windows-native` は条件実行（`push main` / dispatch / `area:windows` label）であり、asset provenance / sidecar template の追加 check も含む。workspace clippy policy は旧 `.old/Cargo.toml:139-175` の `[workspace.lints.clippy]` が正本であり厳格（`unwrap_used` / `panic` / `print_stdout`・`print_stderr` / `todo` / `unimplemented` 等が deny）。`clippy.toml` は `too-many-arguments-threshold` のみである。lint を弱めて通すのではなく実装を直す。
+- Linux ネイティブ作業は Nix flake 前提（`direnv` 未使用時は `nix develop --command`）。Windows は MSVC + VS Build Tools + Windows SDK。いずれも旧 `.old/AGENTS.md:17-19` / `.old/flake.nix` の前提であり、新 workspace でも維持する（現時点で root に `flake.nix` は無いため M0 で用意する）。
 
 ### 2.2 Scope control（スコープ制御）
 
 - 「将来必要になりそう」という理由だけで先行実装しない。現在の milestone を成立させるために必要なものだけを実装し、後続機能は後続 milestone へ送る。
 - 一時的な Architecture bypass や「後で必ず捨てる偽実装」で milestone を通過させない。薄い実装・単一 Provider 対応から始めてよいが、既存 interface / ownership / authority boundary は必ず通す。
-- 旧実装（`.old/`）は退避済みであり、workspace の対象外。実装は**新規に行う**。旧コードを参考にするのは「どうしても必要な場合」だけとし、その場合も**十分なテストを伴って**参考にする（旧コードはバグを含む可能性が高いため、挙動を無検証で引き継がない）。
-- 旧実装の `apps/ene-desktop` は frozen 扱い（`.old/`）。新実装では `crates/*` を新規に構築し、旧実装の crate 構成に依存しない。
+- 旧実装（`.old/`）は退避済みであり、新 workspace の対象外とする。実装は**新規に行う**。旧コードを参考にするのは「どうしても必要な場合」だけとし、その場合も**十分なテストを伴って**参考にする（旧コードはバグを含む可能性が高いため、挙動を無検証で引き継がない）。
+- 旧実装の `apps/ene-desktop` は frozen 扱いとする（文書上の決定。freeze marker は無く、`.old/apps/ene-desktop` に現物が残る）。新実装では `crates/*` を新規に構築し、旧実装の crate 構成に依存しない。
 
 ### 2.3 自律判断してよい範囲（Design Freedom）
 
-**旧実装 `.old/` の取り扱い**：既存の Rust workspace（crates / apps / plugins / templates / scripts / assets / third_party）は `.old/` へ退避済みで、新workspace からは除外されている（`.old/` は workspace の `members` 対象外であり、`exclude` に含める）。
+**旧実装 `.old/` の取り扱い**：既存の Rust workspace（crates / apps / plugins / templates / scripts / assets / third_party）は `.old/` へ退避済みである。新 workspace は未作成のため（M0）、新 `Cargo.toml` で `.old/` を `members` 対象外・`exclude` に含めるのは M0 の作業である（参考案 `.old/Cargo.toml.new-workspace:2-3` は `exclude = ["old/**"]` とドット抜けのためそのまま使わない）。
 
 - Requirements / Design が実装の source of truth。旧コードの挙動を要件へ昇格させない。
 - 旧コードは「どうしても必要な場合」のみ参照する（例: 既存 asset 形式、外部 protocol の実装例、設計文書が旧実装を前提にした参照）。参照した場合は、その旨と範囲を PR に明記し、該当部分は必ずテストを書く。
-- 旧実装との互換性・移行段階（旧 CM §13 の Stage 0〜5 や shim 維持）は実行しない。要件と新設計に基づき新規に構築する。
+- CM §13 の Stage 0〜5 や shim 維持は、現行 CM が定める移行方針である。新規構築で適用しない場合は意味を上書きせず §7.2 の Issue として記録し、人間の判断を待つ。要件と新設計に基づき新規に構築する。
 
 既存 Design が「意図的に残した Design Freedom」として列挙する項目は、実装者が合理的な方式を自身で選択してよい。人間の確認は要求しない。
 
 - Rust type の細部（型名・method 名・module 粒度・crate 内構造）
 - SQL column / index、migration の具体形（PR §4 の table group と owner 注記に従う範囲）
-- library の利用方法、concurrency mechanism の選択（CCT §17 の三択：CAS / owner-local mailbox / 短 transaction 内 atomic read+insert）
+- library の利用方法、concurrency mechanism の選択（CCT §5.3 の三択：CAS / owner-local mailbox / 短 transaction 内 atomic read+insert）
 - retry / timeout 値、費用予約量の算定式、観測頻度・scheduling algorithm、prompt 組立、cache 実装
 - test の実装内容（検証すべき contract は Design が定めるが、test 自体は自由）
 - performance 上の局所判断、同期 / 非同期の粒度
@@ -58,17 +58,17 @@
 
 - **caller ≠ authority**: 呼べたこと・Client message が届いたこと・Task Agent result が到着したことを成立・確定にしない（IB §2）。
 - **compare-before-commit**: current 条件（typed expected revision / presence generation / restore generation）を短 transaction で atomic に比較してから commit する（CCT §5）。
-- **secret 非返却**: `SecretValue` を public に返さない。wire・context・History・Learning・log・Debug capture へ平文を出さない（DR-05）。
-- **Transaction 非露出**: `rusqlite::Transaction` や生 SQL を business layer / Client / Provider / MCP へ露出しない（PR §7）。
+- **secret 非返却**: `SecretValue` を public に返さない。wire・context・History・Learning・log・Debug capture へ平文を出さない（architecture DR-05 / IB §2 原則 8・K-C）。
+- **Transaction 非露出**: `rusqlite::Transaction` や生 SQL を business layer / Client / Provider / MCP へ露出しない（IB §13・CM §9 / §10。PR §7 は atomic 更新境界であり露出則の正本ではない）。
 - **保存分類**: durable（app.db）と derived（derived.db / sqlite-vec / index / cache）と external（E）の区別を保ち、derived を正本にしない（PR §3・§5）。
 - **通常の忘却と削除の区別**: 忘却・訂正・失効・置換・統合は保存済み Learning / revision を削除しない。削除は Privacy/Security 目的の targeted deletion と、Owner 明示の容量管理 cleanup に限る（requirements「重要度、忘却、訂正」）。
-- **Host 正本 / Client 一時 data**: Client に永続正本を作らない。Client は `ene-api` のみに依存し、Host domain crate・`ene-store`・secret に直接依存しない（CM §11、IPC 原則）。
+- **Host 正本 / Client 一時 data**: Client に永続正本を作らない。Client は `ene-api` のみに依存し、Host domain crate・`ene-store`・secret に直接依存しない（CM §9・§10.1、IPC 原則）。
 
 ## 3. Walking Skeleton の定義
 
-この Project の Walking Skeleton は「テキスト timeline と一対一会話」「Companion scope の Experience Summary / Memory 形成」「一つの Workspace folder を対象とする Task Agent 委任の file 作業」「Client 不在時の Task 継続」「Host 再起動後の明示再開」「presence 復旧」「Text 管理面」を縦断 slice として同時に成立させる段階である（[CM §13](../design/concrete/crate-module-decomposition.md) の定義に従う）。Walking Skeleton は単一 milestone ではなく、M1〜M5 を通じて段階的に構築され、M6〜M7 で acceptance の範囲を満たす。
+この Project の Walking Skeleton は「テキスト timeline と一対一会話」「Companion scope の Experience Summary / Memory 形成」「一つの Workspace folder を対象とする Task Agent 委任の file 作業」「Client 不在時の Task 継続」「Host 再起動後の明示再開」「presence 復旧」「Text 管理面」を縦断 slice として同時に成立させる段階である（[CM §13](../design/concrete/crate-module-decomposition.md) の定義に従う。CM §13 の文言に「一対一」「Experience」「一つの Workspace folder」の限定は無いため、本Guide の付加である）。Walking Skeleton は単一 milestone ではなく、M1〜M5 を通じて段階的に構築され、M6〜M7 で acceptance の範囲を満たす。
 
-Walking Skeleton 成立の判定は、[acceptance.md](../requirements/acceptance.md) の代表シナリオ（Setupと最初の会話 / 会話からのMemory / Workspaceでのfile Task / ClientとHostのlifecycle / 障害と安全境界 / 利用量と秘密情報）の主経路が、Support Matrix の両 OS で再現可能な手順により完了することである。性能 Gate と baseline は M7 で判定する。Voice・Observation・Schedule・Remote Client・backup からの復元・Skill 生成・Character 配布・Global scope・Companion State・Relationship は Walking Skeleton に含めない（M8 以降）。
+Walking Skeleton 成立の判定は、[acceptance.md](../requirements/acceptance.md) の代表シナリオ（Setupと最初の会話 / 基本Body / 会話からのMemory / Workspaceでのfile Task / ClientとHostのlifecycle / 障害と安全境界 / 利用量と秘密情報）の主経路と、性能 Gate と baseline の記録が、Support Matrix の両 OS で再現可能な手順により完了することである。性能 Gate の合否判定は M7 で行う。Voice・Observation・グループ会話・自発的なCompanion間交流・Schedule・Remote Client・Hostの自動起動とbackupからの復元・ExperienceからのSkill生成とSkill改善・Companion State・Relationship・Global scope・Character編集とPackage配布・OpenAI以外のProviderとfallback は Walking Skeleton に含めない（M8 以降）。
 
 ## 4. Milestone の全体像と dependency
 
@@ -77,7 +77,7 @@ milestone は依存関係と Architecture validation の観点から区切る。
 | ID | 名前 | 依存（先に必要） | 並行・入替可能 |
 |---|---|---|---|
 | M0 | 旧実装退避と workspace 再構成 | — | — |
-| M1 | 基盤 crate の新規構築（primitive / config / error） | M0 | — |
+| M1 | 基盤 crate の新規構築（primitive / config 等） | M0 | — |
 | M2 | テキスト会話の縦断 slice（round・保存・Host/Client 境界） | M1 | — |
 | M3 | Experience Summary / Memory 形成（Learning） | M2 | M4 と入替可 |
 | M4 | Task Agent 委任 file 作業（Workspace） | M2 | M3 と入替可 |
@@ -102,30 +102,30 @@ milestone は依存関係と Architecture validation の観点から区切る。
 
 ### M0 — 旧実装の退避確認と workspace の再構成
 
-- **目的**: 旧実装（`.old/`）の退避状況と、新規 workspace の構成（`Cargo.toml` の members / exclude）を確認し、実装の土台を整える。旧コードへの依存を遮断する。
-- **完了状態**: `.old/` に旧実装一式が退避され、workspace から除外されている。`cargo test --workspace` が空集合で green（または最小の新規 crate のみ）、`cargo clippy --workspace --all-targets -- -D warnings` が green。
-- **次へ進む前の validation**: workspace 全体の test / clippy / fmt green。旧実装の crate が新 workspace に含まれないことを `cargo metadata` で確認。
+- **目的**: 旧実装（`.old/`）の退避状況を確認し、新規 workspace の `Cargo.toml`（`members` / `exclude`）を作成して実装の土台を整える。旧コードへの依存を遮断する。現時点では root に `Cargo.toml` が無く M0 未完了である。
+- **完了状態**: `.old/` に旧実装一式が退避され、新 workspace から除外されている（`.old/` を `members` 対象外・`exclude` に含める）。`cargo test --workspace` が空集合で green（または最小の新規 crate のみ）、`cargo clippy --workspace --all-targets -- -D warnings` が green。
+- **次へ進む前の validation**: workspace 全体の test / clippy / fmt green。旧実装の crate が新 workspace に含まれないことを `cargo metadata` で確認。`exclude = ["old/**"]` のようなドット抜けに注意する。
 - **実装しなくてよいもの**: 新機能、リファクタリング、旧実装の移行・shim 維持、旧 crate への依存追加。
 - **注意点**: `.old/` は reference として保持するが、挙動の source of truth にしない。Requirements / Design に基づき新規構築する。
 
-### M1 — 基盤 crate の新規構築（primitive / config / error）
+### M1 — 基盤 crate の新規構築（primitive / config 等）
 
-- **目的**: 新規実装の第一歩として、依存の葉から crate を構築する。`ene-primitive` を新設し（`RawId` / `RevisionInner` / `GenerationInner` / `WallClockWithTz`）、`ene-config`・`ene-error` 等の基盤 crate を定義する。旧実装の `ene-card` 等は参照しない。
-- **完了状態**: 新規 crate が workspace に追加され、`cargo test --workspace` / clippy / fmt green。依存方向が CM §4 の方向（葉 → domain）に従う。
+- **目的**: 新規実装の第一歩として、依存の葉から crate を構築する。`ene-primitive` を新設し（`RawId` / `RevisionInner` / `GenerationInner` / `WallClockWithTz`）、`ene-config` 等の基盤 crate を定義する。`ene-error` という crate は CM の目標構成（CM §4）に存在しないため新設しない。旧実装の `ene-card`（現行 CM では `ene-character` への rename 元）は参照しない。
+- **完了状態**: 新規 crate が workspace に追加され、`cargo test --workspace` / clippy / fmt green。依存方向が CM §10.1 の方向（葉 → domain）に従う。
 - **次へ進む前の validation**:
   - `cargo test --workspace` / clippy / fmt green。
-  - CM §12 の crate 依存 walkthrough のうち、この段階で成立する crate hop を確認（`ene-primitive` への依存追加が leaf 方向のみであること）。
+  - CM §12 の crate hop 確認のうち、この段階で成立する範囲を確認（`ene-primitive` への依存追加が leaf 方向のみであること）。
   - CI（feature matrix 含む）green。
 - **実装しなくてよいもの**: `ene-store` 新設、`ene-presence` / `ene-task` / `ene-learning` の本格新設、wire / IPC、domain 挙動。
-- **注意点**: `SecretValue` を public に返さない。`Transaction` を公開しない。旧実装の型・crate を流用せず、要件と設計（CI §4, CM §4）に基づき新規に定義する。
+- **注意点**: `SecretValue` を public に返さない。`Transaction` を公開しない。旧実装の型・crate を流用せず、要件と設計（CM §4.1・§5.1、CM §10）に基づき新規に定義する。型名 `RawId` 等の正本は CI §4 ではなく CM §4.1・§5.1 である。
 
 ### M2 — テキスト会話の縦断 slice（Walking Skeleton 第 1 slice）
 
 - **目的**: Setup → 最初のテキスト会話 → 保存 → 再起動跨ぎの復元、を Host 正本と Client 表示に分けて動かす。round 発行（F-04 解決済み）、Host / Client 境界、`ene-store` の基盤（app.db, Conversation History, 最小 presence）を実コードで固定する。
-- **完了状態**: acceptance「Setupと最初の会話」が通る。新規環境で言語と Character `ene` と Provider / model / Credential を選択し、Main LLM への割当を明示して Setup 完了 → テキスト送信 → 同一 timeline で応答 → UI 言語切替で維持、まで。Host 再起動後も保存済み会話が timeline として復元される。
+- **完了状態**: acceptance「Setupと最初の会話」が通る。新規環境で言語と Character `ene` と Provider / model / Credential を選択し、Main LLM への割当を明示して Setup 完了 → テキスト送信 → 同一 timeline で応答 → UI 言語切替で維持、まで。Host 再起動後も保存済み会話が timeline として復元される（再起動復元は acceptance Setup 1〜5 の verbatim ではなく Memory 4・lifecycle・requirements 由来の派生要件であり、M2 の拡張として扱う）。
 - **次へ進む前の validation**:
   - IPC §26 V-1（connect / authenticate / capability advertise）と V-2（Owner Text → response stream → presentation ack）を実装・テストで成立。
-  - CM §12 walkthrough 1（Client input → Companion → inference → response、Learning は後続）の crate hop を確認。
+  - CM §12 の「Owner text → Companion → inference → response」（Learning は後続）の crate hop を確認。
   - `ene-api` が wire-neutral DTO のみで Host 内部 newtype / row / secret を出さないことをテストまたは型で保証。
   - 保存済み round / Conversation History の再起動復元テスト。`cargo test --workspace` / clippy green。
 - **実装しなくてよいもの**: Learning / Memory（M3）、Task（M4）、presence 移動・復旧の完全実装（M5）、Body（M7）、Voice / Observation / Schedule / Remote Client / backup、性能測定。
@@ -137,35 +137,35 @@ milestone は依存関係と Architecture validation の観点から区切る。
 
 ### M3 — Experience Summary / Memory 形成（Learning）
 
-- **目的**: `ene-learning` を新設し、Experience Summary を根拠に Companion scope の Memory を形成・更新・訂正できるようにする。由来表示・scope・更新履歴を Text 管理面で確認できるようにする。
+- **目的**: `ene-learning` を新設し、Experience Summary を根拠に Companion scope の Memory を形成・更新・訂正できるようにする。内容・scope・時間的な意味・重要度・根拠 Summary・形成または更新時点の由来表示を Text 管理面で確認できるようにする。
 - **完了状態**: acceptance「会話からのMemory」のうち 1〜9（message を Summary に圧縮し個別複製しない、Companion scope、由来表示、再起動跨ぎの自然想起、会話による訂正で誤認識の訂正と状況変化を区別、`revision` と根拠の保持、「覚えておいて」の重視と Credential 非保存、過剰保存しない、重複追加しない）が成立する。10〜17（targeted deletion 関係）は M6 で扱う。
 - **次へ進む前の validation**:
-  - CM §12 walkthrough 1 を Learning までの全 crate hop で成立（`ene-companion` は premise 供給、`ene-learning` が形成判断）。
+  - CM §12 の「Owner text → Companion → inference → response → Learning」の全 crate hop で成立（`ene-companion` は premise 供給、`ene-learning` が形成判断）。
   - IB V-1 / H-B〜H-E の contract をテストで固定（candidate / decision の分離、scope 変更は `ene-learning` 判断 + `ene-permission` 強制）。
-  - 通常の忘却・訂正・失効・置換が保存済み Memory / revision を削除しないことのテスト（requirements「重要度、忘却、订正」）。
-  - Credential 値が Summary / Memory / evidence に現れない自動検査（acceptance「利用量と秘密情報」4 の一部）。
-  - 保存は PR の Learning group（D2 想定）に従い、derived（embedding 等）を正本にしない。
+  - 通常の忘却・訂正・失効・置換が保存済み Memory / revision を削除しないことのテスト（requirements「重要度、忘却、訂正」）。
+  - Credential 値が model context / Tool argument / History / Summary / Memory / Relationship / Task 結果 / log / Error に現れない自動検査（acceptance「利用量と秘密情報」4）。
+  - 保存は PR Group C（Learning）に従い、derived（embedding 等）を正本にしない。
 - **実装しなくてよいもの**: Skill 形成・改善、Relationship、Companion State、Global scope 昇格の完全実装（M13）、targeted deletion（M6）、容量管理の自動 cleanup（既定 OFF。UI は M6）、Observation の形成利用（M11）、グループ会話（M12）。
 - **注意点**:
   - Memory / Skill / Relationship / Companion State は互いに第二の正本を作らない。Summary は Raw History の複製にしない。
   - 重要度と scope は別概念。Global へは明示共有または文脈で明確な場合のみ（黙って昇格しない）。
-  - 通常の update で過去 revision や根拠を書き換えない。一方で「既存実装の判断」を設計へ逆輸入しない（AGENTS.md の source of truth 規則）。
+  - 通常の update で過去 revision や根拠を書き換えない。一方で「既存実装の判断」を設計へ逆輸入しない（本Guide §1 の source of truth 規則）。
   - derived 検索 data は Memory の意味内容の唯一の正本にしない。
 
 ### M4 — Task Agent 委任 file 作業（Workspace）
 
 - **目的**: `ene-task`（Task・委任・WorkspaceAssoc・TaskContext）と `ene-action`（作用・確定度・file adapter）を新設し、一つの Workspace folder を対象とする file 作業を Task Agent へ委任できるようにする。`ene-permission` の live check・`ene-sandbox` 利用を開始する。
-- **完了状態**: acceptance「Workspaceでのfile Task」1〜8 が成立する（既存 file 読取 + 新規 Markdown 作成、Workspace が Task に従属、Task 追跡と Task Agent 委任、Task 中も通常会話・進捗確認・追加指示反映、Cancel は best-effort、正常終了時の変更 file / 保存場所 / 未完了事項の報告、Delete / shell / Network / MCP / 外 path / path traversal の拒否と迂回不能、Workspace 関連付け消失でも file を黙って削除しない）。
+- **完了状態**: acceptance「Workspaceでのfile Task」1〜8 が成立する（既存 file 読取 + 新規 Markdown 作成、Workspace が Task に従属、Task 追跡と Task Agent 委任（Task Agent には folder 内の一覧・読取・新規作成・編集だけを許可）、Task 中も通常会話・進捗確認・追加指示反映、Cancel は best-effort、正常終了時の変更 file / 保存場所 / 未完了事項の報告、Delete / shell / Network / MCP / 外 path / path traversal の拒否と迂回不能、Workspace 関連付け消失でも file を黙って削除しない）。
 - **次へ進む前の validation**:
-  - CM §12 walkthrough 2（Task → Task Agent → Action）と 3（Permission → Credential → effect）を成立。
+  - CM §12 の「Task → Task Agent → Action」と「Permission → Credential → effect」を成立。
   - IB V-2（Task creation → delegation → steering → result）・V-3（candidate → authorization → external effect → timeout → late result）・V-4（cap 近傍 reservation → usage）をテストで固定。
-  - CCT §7（SD-Task steering 競合）・§8（SD-Action 開始前 atomic compare・outcome tracking）・§9（SD-Cap reservation / commit / release）の race walkthrough をテスト化。
+  - CCT §7（SD-Task steering 競合）・§8（SD-Attempt 開始前 atomic compare・outcome tracking）・§9（SD-Cap reservation / commit / release）の race walkthrough をテスト化。
   - 作用不明（`Unknown`）の自動再実行が無いこと、crash 後の `Reserved` が release されず「不明」確定されること（F-05 解決済み契約）のテスト。
   - 外部 file への破壊的操作（Delete / shell / Network 等）の拒否と Workspace 外 path の拒否テスト。
 - **実装しなくてよいもの**: Schedule（M8）、Computer Use の Client 依存部分（M14）、MCP ツール・Plugin の一般受入（後続）、費用 cap の管理面（M7）、Skill 実行（M13）、Observation タスク（M11）。
 - **注意点**:
   - caller ≠ authority：`ene-task` は `ene-permission` / `ene-credential` の具体に直接依存せず、premise 供給で満たす（F-06 是正済み）。live check の caller は `ene-action` / `ene-inference`。
-  - 委任・実行に `ExpectedRevision` / `ExpectedGeneration` の CAS を使い、保存済み Allow や copy を authority にしない（Review#3 S-09）。
+  - 委任・実行に `ExpectedRevision` / `ExpectedGeneration` の CAS を使い、保存済み Allow や copy を authority にしない（IB K-B / K-H・PR §10・CCT §5 の契約。Review#3 S-09 の趣旨）。
   - Cancel は best-effort。drop を停止完了とみなさない（CCT §14）。停止できなかった処理・外部作用・未保存作業を報告する。
   - 成果物は外部 file として保存し、ene 専用 library へ複製しない（requirements「Fileと成果物」）。Task 削除で Workspace file を削除しない。
 
@@ -176,7 +176,7 @@ milestone は依存関係と Architecture validation の観点から区切る。
 - **次へ進む前の validation**:
   - IPC §26 V-3（Companion move A→B）・V-4（stale A の late input）・V-5（disconnect during Computer Use）・V-6（reconnect with unresolved Action）・V-10（Host restart → reconnect → presence restoration）を成立。
   - CCT §10（SD-Presence の presence generation / CAS による切替）と、通常切断確定 → 利用可能な Host PC Client へ fallback（`DisconnectFallback`）・無ければ `NoActive`、再接続だけで帰属復帰しない（F-01 解決済み）ことをテストで固定。
-  - CM の presence 関連 walkthrough（X-A / X-F / X-G / X-H）を crate hop で確認。未伝達の要約報告と提示確認（`ConfirmPresentationObservation`）まで。
+  - IB §6 の presence 関連 walkthrough（X-A / X-F / X-G / X-H）を crate hop で確認。未伝達の要約報告と提示確認（`ConfirmPresentationObservation`）まで。
   - 明確な自動再開・自動移動がないことのテスト。PR Group G の recovery（`RecoveryWait` は Host restart 復旧に限定）。
 - **実装しなくてよいもの**: Remote Client（不必要な pairing・TLS。M14）、Host 側 Client 環境の自動起動、Observation の existence 連動（M11）、Store の自動再開。
 - **注意点**:
@@ -188,9 +188,9 @@ milestone は依存関係と Architecture validation の観点から区切る。
 ### M6 — Targeted Deletion・容量管理・Audit
 
 - **目的**: `ene-preservation` を本格実装し、Privacy / Security 目的の targeted deletion（機械検索・削除・残存検証・再形成防止）、容量管理の自動 cleanup（既定 OFF）、Audit の追記順記録を成立させる。
-- **完了状態**: acceptance「会話からのMemory」10〜17 と「障害と安全境界」の関連項目が成立する（特定文字列の機械検索・削除・残存検証、復元可能な copy（History / Summary / Memory / revision / evidence / index / embedding / cache / Client 一時 data）の削除または復元不能化、削除完了前に完了表示しない、削除中に再入力・内部生成されても同一消去対象、削除後 consolidation / 再起動でも再形成されない、無関係情報を不必要に削除しない、通常の History 削除は Learning へ cascade しない、容量不足でも自動 cleanup しない、「忘れて」だけでは targeted deletion に昇格しない）。
+- **完了状態**: acceptance「会話からのMemory」10〜17 と「障害と安全境界」のうち外部作用不明の非再実行・重複 risk 表示の関連項目が成立する（特定文字列の機械検索・削除・残存検証、復元可能な copy（History / Summary / Memory / 過去 revision / evidence / Relationship / Companion State / Skill / 保持済み source 該当情報 / index / embedding / cache / 接続中 Client 一時 data）の削除または復元不能化、削除完了前に完了表示しない、削除中に再入力・内部生成されても同一消去対象（完了後に改めて提供した場合は新 Experience として扱う）、削除後 consolidation / 再起動でも再形成されない、無関係情報を不必要に削除しない、通常の History 削除は Learning へ cascade しない、容量不足でも自動 cleanup しない、「忘れて」だけでは targeted deletion に昇格しない）。外部に送信・export・backup 済みの copy まで削除したとは表示しない。
 - **次へ進む前の validation**:
-  - CM §12 walkthrough 7（全域 fan-out / participant completion / 残存検証）を成立。
+  - CM §12 の「Targeted Deletion across owners」（全域 fan-out / participant completion / 残存検証）を成立。
   - IB V-7（削除中の delayed Learning result）をテストで固定。CCT §11（SD-Deletion の durable-before-enforce）を race walkthrough で確認。
   - IPC §26 V-9（Client 不在時の targeted deletion）を Host 同居 Client で成立。
   - PR §8（追跡不能にしないための persistence・過剰設計にしない制限）と Audit（秘密・本文を含まない）のテスト。
@@ -204,11 +204,11 @@ milestone は依存関係と Architecture validation の観点から区切る。
 ### M7 — 管理面・基本 Body・性能 Gate・両 OS 受け入れ
 
 - **目的**: Text 管理面を整備し、基本 Desktop Body（VRM overlay・idle / 応答中の区別・move / resize / hide）を追加し、Support Matrix の両 OS で acceptance の性能 Gate と baseline を記録する。
-- **完了状態**: acceptance「基本Body」1〜4 と「性能Gateとbaseline」が成立する（透明 overlay 表示、移動 / resize / hide と通常操作の継続、idle と応答中の区別、Body 故障時も Text 会話と管理面が使える、idle CPU / Memory / Body FPS / local 操作 1 秒以内の Gate を両 OS で記録）。
+- **完了状態**: acceptance「基本Body」1〜4 と「性能Gateとbaseline」が成立する（対応 OS で透明 overlay 表示、移動 / resize / hide と通常操作の継続、少なくとも idle と応答中の区別、Body 故障時も Text 会話と管理面が使える、idle 5 分平均 CPU 10% / Host+active Client 常用 Memory 2GiB / Body 平均 30FPS かつ UI 1 秒超 block なし / Stop・Cancel・Mute・Permission 拒否等の local 操作 1 秒以内受付表示の Gate を両 OS で記録）。
 - **次へ進む前の validation**:
   - IB V-9（Character revision apply の基盤）を含む、管理面からの操作が各 owner の authority を迂回しないことの walkthrough。
   - IPC §18（高権限操作は Host PC 上の trusted first-party management surface に限定）の契約を管理面の実装で担保。
-  - 性能測定期間・手法・試行回数を記録し、両 OS で同一手順の baseline を取得。`cargo test --workspace` / clippy green。
+  - 性能測定期間・手法・試行回数・基準 hardware・fixture・表示条件・集計方法を記録し、両 OS で同一手順の baseline を取得。異なる環境の測定値を混在させない。`cargo test --workspace` / clippy green。
 - **実装しなくてよいもの**: Voice（M10）、Observation（M11）、Schedule の UI（M8）、Remote Client（M14）、費用 cap の広域設定（M16）。
 - **注意点**:
   - Body は Client 側の表示であり、Host 正本の状態から staging して提示する。表示成功を保存・作用の成立にしない。
@@ -220,26 +220,27 @@ milestone は依存関係と Architecture validation の観点から区切る。
 M8 以降は acceptance が「後続」とした範囲（requirements の一部）である。各機能は、依存を満たした順に milestone を追加してよい。各 milestone は本Guide の形式（目的 / 完了状態 / validation / 実装しないもの / 注意点）に従い、対応する design artifact を正本とする。
 
 - M8 Schedule: IB H-H、requirements「Schedule」。依存 M4。
-  - 完了状態の目安: 作成・変更・停止・削除・即時実行、各回を新 Task として追跡、missed 記録と Run now、timezone 保持。確認が必要な Action は実行せず判断待ち。
+  - 完了状態の目安: 作成・変更・停止・削除・即時実行、各回を新 Task として追跡、missed 記録と Run now、timezone 保持（夏時間確認を含む）。担当 Companion 指定と初期 Workspace 入力を保持し、結果・失敗を個別追跡する。確認が必要な Action は実行せず判断待ち。自動補完しない。
   - 注意: Schedule 作成依頼を特別な Permission token にしない。LLM polling しない。
 - M9 Backup / Restore / Update・自動起動: CA-BR、IB D-D、PR §9、IPC §26 V-13/V-14。依存 M6, M7。
-  - 完了状態の目安: portable full backup（secret・外部 Workspace file 含まない）、暗号化と非暗号の明示、Restore の全置換・旧 live 混入防止・一括有効化、現在の Credential store 維持、失敗時に復元前状態を破壊しない。
+  - 完了状態の目安: portable full backup（Credential secret・外部 Workspace 実体・source 原本を含まない）、暗号化と非暗号 private の明示、Restore の全置換・旧 live 混入防止・一括有効化、現在の Credential store 維持・巻戻し防止、失敗時に復元前状態を破壊しない。自動起動は Owner の起動選択（`host_autostart_choice`）として保持し、Task 再開・restore 有効化・Host 側 Client 自動起動を導かない。version 互換・外部 file 不変・削除済み非復活・再認証の事前表示を満たす。
   - 注意: Backup は Audit と合わせて保持方針を表示する。Restore 後の自動利用を開始しない。
 - M10 Voice: IPC §13.2・V-7、requirements「Voice」。依存 M7。
-  - 完了状態の目安: 低遅延（barge-in）→ turn-based → Text の段階的切替、VAD 待受の識別表示と即時 Mute、keyboard 経路。
+  - 完了状態の目安: 低遅延（barge-in）→ turn-based → Text の段階的切替、VAD 待受の識別表示と即時 Mute、keyboard 経路。話者認証はしない前提を明示し、失敗理由を表示する。
   - 注意: Voice 障害は Text を妨げない。安全操作（Mute / 停止 / 拒否）は keyboard でも行える。
 - M11 Observation / Observer: IB X-D/X-E/X-F・H-F、IPC §14・V-8、requirements「Observation」。依存 M4, M5, M7。
-  - 完了状態の目安: Client 単位の Capture / 候補検知 / routing（三層分離）、Observer 専用 Provider assignment、Pause / OFF、観測頻度、fullscreen 休止。
-  - 注意: Raw は保存しない。routing 文脈は各 source owner が範囲限定で供給し、`ene-core` は中継のみ（F-07 解決済み）。
+  - 完了状態の目安: Client 単位の Capture / 候補検知 / routing（IB の三層分離）、Observer 専用 Provider assignment、Pause / OFF、観測頻度、fullscreen 休止。
+  - 注意: Raw は保存しない。同時 Capture の負荷分散・無条件配信と重複実行の禁止・送信先用途取扱費用の明示同意を守る。routing 文脈は各 source owner が範囲限定で供給し、`ene-core` は中継のみ（F-07 解決済み）。
 - M12 グループ会話・Companion 間交流・自発性: requirements「グループ会話」「自発的な発話と行動」「Companion間交流の記録」。依存 M3, M5。
   - 注意: 交流 History と Learning を別 lifecycle にし、一方・両方の削除を理由に History を削除しない。
 - M13 Global scope・Skill 形成改善・Companion State・Relationship: IB H-E、requirements「Learningと成長」。依存 M3。
   - 完了状態の目安: Global scope 条件（明示共有・文脈から明確）、Skill の revision / 未検証・成功・失敗の区別、Companion State の一時的 / 持続的傾向の区別、Relationship の主体別状態。
   - 注意: Global 昇格を黙って行わない。Relationship で Permission / Rule / Capability / 安全境界を変更しない。
 - M14 Remote Client: IPC §9〜§12・§18、CA-CPT、PR Group E/G/K、requirements「Remote Client」。依存 M5, M7, M9。
-  - 完了状態の目安: device pairing（Host PC 上の trusted first-party management surface で最終確認）、LAN/VPN、TLS、device ごとの失効、presence 移動、Client 一時 data の非永続。
+  - 完了状態の目安: device pairing（Host PC 上の trusted first-party management surface で最終確認）、LAN/VPN、通信保護（TLS）、device ごとの失効、presence 移動、Client 一時 data の非永続。
   - 注意: 失効が Restore で巻き戻らないこと（F-02 解決済み：Host device-auth は E 分類・backup 除外）。通常切断 → Host PC Client への fallback（F-01）。
 - M15 Character 編集・Package 配布: IB C-A〜C-D、requirements「Character Package」。依存 M1（ene-character 拡張）。
+  - 完了状態の目安: import 受入と export、部品ごとの明示選択、新 revision 識別。Experience Summary / Memory / Relationship / State / History / Credential / Permission を package に含めない。
   - 注意: export 前に内容と権利上の注意を確認。適用は Companion の Experience 由来状態を黙って上書きしない。
 - M16 複数 Provider・fallback・費用 cap 完成: IB K-D/K-E/K-F、requirements「割当と同意」「Fallbackと費用」。依存 M6, M7。
   - 完了状態の目安: Provider ごと・全体の cap、承認済み fallback 順序、能力不足の事前提示、Provider 報告値 / 推定値 / 不明の区別表示。
@@ -254,7 +255,7 @@ M8 以降は acceptance が「後続」とした範囲（requirements の一部�
 - Rust type 細部 / method 名 / module 内部構造 / library 利用方法
 - SQL column / index / migration の具体形（table group・owner 注記に従う範囲）
 - retry / timeout / backoff 値、費用予約量の算定式、観測頻度・scheduling algorithm、prompt 組立、cache 実装
-- concurrency mechanism の選択（CAS / owner-local mailbox / 短 transaction 内 atomic read+insert 等）
+- concurrency mechanism の選択（CAS / owner-local mailbox / 短 transaction 内 atomic read+insert 等、CCT §5.3）
 - sync / async 粒度、test 実装、performance 上の局所判断
 
 ### 7.2 人間へ escalate すべき条件（Issue として扱う）
@@ -336,11 +337,11 @@ M8 以降は acceptance が「後続」とした範囲（requirements の一部�
 | 境界 | M1 | M2 | M3 | M4 | M5 | M6 | M7 |
 |---|---|---|---|---|---|---|---|
 | caller ≠ authority（IB §2） | 型で担保 | round 受理で確認 | task で確認 | action 認可で確認 | presence で確認 | deletion 集約で確認 | 管理面で確認 |
-| compare-before-commit（CCT §5） | — | round / History 保存 | Memory 更新 | Task / Action / Cap | presence CAS | deletion token | restore 前置き |
-| secret 非返却（DR-05 / IB §11） | credential split で開始 | 自動検査 | Summary / Memory 検査 | Tool arg 検査 | 移動時検査 | deletion 検査 | Debug capture 検査 |
-| 保存分類（PR §3） | — | app.db 導入 | derived 分離 | Group D/F | Group G | Group J | 容量測定 |
-| Host / Client 境界（CM §11 / IPC） | ene-api narrow | IPC V-2 | — | — | IPC V-3〜V-6 | IPC V-9 | IPC §18 |
-| SD 分離（CCT §4） | — | SD-Round | SD-Learn | SD-Task / Action / Cap | SD-Presence | SD-Deletion | — |
+| compare-before-commit（CCT §5） | — | round / History 保存 | Memory 更新 | Task / Attempt / Cap | presence CAS | deletion token | restore 前置き |
+| secret 非返却（architecture DR-05 / IB §2 原則 8・K-C） | credential split で開始 | 自動検査 | Summary / Memory 検査 | Tool arg 検査 | 移動時検査 | deletion 検査 | Debug capture 検査 |
+| 保存分類（PR §3） | — | app.db 導入 | derived 分離 | Group D/E/F | Group G | Group J | 容量測定 |
+| Host / Client 境界（CM §9・§10 / IPC） | ene-api narrow | IPC V-2 | — | — | IPC V-3〜V-6 | IPC V-9 | IPC §18 |
+| SD 分離（CCT §4） | — | SD-Undelivered | —（Learning 専用 SD 無し） | SD-Task / SD-Attempt / SD-Cap | SD-Presence | SD-Deletion | — |
 
 ### 9.3 テストの置き場所
 
