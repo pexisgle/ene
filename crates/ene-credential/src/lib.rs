@@ -605,6 +605,93 @@ fn hex_val(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
+/// Name of the process environment variable carrying the `OpenAI` bearer.
+///
+/// The only environment input [`EnvCredentialStore`] ever reads, and only
+/// inside [`CredentialStore::with_bearer`] and [`CredentialStore::contains`],
+/// at call time.
+pub const ENV_API_KEY: &str = "ENE_OPENAI_API_KEY";
+
+/// Environment-backed bearer store for the `OpenAI` provider.
+///
+/// The struct is fieldless by design: the bearer is read from
+/// [`ENV_API_KEY`] on every call and never cached in memory, so backup
+/// exclusion holds trivially (there is nothing to back up) and key rotation
+/// takes effect on the next call without a restart. Only the `"openai"`
+/// provider is served (closed world until real OS stores arrive); every other
+/// provider reports absent.
+///
+/// Request-builder discipline (shared with every [`CredentialStore`]): the
+/// bearer is wrapped in [`SecretValue`] internally and lent as `&str` into
+/// the caller's closure, which must build its owned request (headers, body)
+/// there and perform I/O after it returns. Nothing borrows the key out, and
+/// errors carry a status class only, never key material.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnvCredentialStore;
+
+impl EnvCredentialStore {
+    /// Creates the store. Performs no I/O; the environment is read per call.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+// Pure-over-closure lookup shared by `contains` and `with_bearer`, so both
+// agree on provider gating and emptiness. Production passes
+// `|name| std::env::var(name).ok()` (a safe function; no `unsafe` involved)
+// as `lookup`; tests inject closures, which keeps them hermetic: only the
+// one-line wiring at each call site touches the real process environment. An
+// empty value counts as absent, matching an unset variable.
+fn resolve_for(provider: &str, lookup: impl FnOnce(&str) -> Option<String>) -> Option<SecretValue> {
+    if provider != "openai" {
+        return None;
+    }
+    let raw = lookup(ENV_API_KEY)?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(SecretValue::new(raw.into_bytes()))
+}
+
+impl CredentialStore for EnvCredentialStore {
+    fn with_bearer<R>(
+        &self,
+        cred: &CredentialRef,
+        f: impl FnOnce(&str) -> R,
+    ) -> Result<R, CredentialTechnicalError> {
+        // Single live read of the process environment per call: never cached,
+        // rotation-friendly. `std::env::var` is a safe function.
+        let Some(secret) = resolve_for(&cred.provider, |name| std::env::var(name).ok()) else {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: "env credential missing".to_owned(),
+            });
+        };
+        // Defensive: values arriving via `std::env::var` are Unicode by
+        // construction, but the store contract reports non-UTF-8 bearers.
+        let Ok(bearer) = core::str::from_utf8(secret.bytes()) else {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: "env credential is not valid UTF-8".to_owned(),
+            });
+        };
+        // The borrow of `bearer` cannot escape: `f` must build its owned
+        // request inside this closure.
+        Ok(f(bearer))
+    }
+
+    fn delete(&self, _cred: &CredentialRef) -> Result<(), CredentialTechnicalError> {
+        // Nothing durable to remove: the bearer lives in the process
+        // environment, not in this store. Revocation is ref-side, by removing
+        // the `CredentialRef` from the `CredentialRefRepository`.
+        Ok(())
+    }
+
+    fn contains(&self, cred: &CredentialRef) -> bool {
+        // Same predicate as `with_bearer`'s gate, so availability and access
+        // never disagree. Existence is non-secret metadata.
+        resolve_for(&cred.provider, |name| std::env::var(name).ok()).is_some()
+    }
+}
 
 use std::collections::BTreeMap;
 #[cfg(unix)]
@@ -1655,5 +1742,129 @@ mod tests {
         assert!(!rendered.contains(marker));
         assert!(!rendered.contains(marker_hex.as_str()));
         assert!(!rendered.contains(descriptor));
+    }
+}
+
+#[cfg(test)]
+mod env_credential_store_tests {
+    use super::{
+        CredentialRef, CredentialStore, CredentialTechnicalError, ENV_API_KEY, EnvCredentialStore,
+        resolve_for,
+    };
+    use std::cell::Cell;
+
+    fn openai_cred() -> CredentialRef {
+        CredentialRef {
+            id: "openai:main".to_owned(),
+            provider: "openai".to_owned(),
+            label: "main".to_owned(),
+        }
+    }
+
+    fn other_cred() -> CredentialRef {
+        CredentialRef {
+            id: "acme:main".to_owned(),
+            provider: "acme".to_owned(),
+            label: "main".to_owned(),
+        }
+    }
+
+    #[test]
+    fn env_var_name_is_pinned() {
+        assert_eq!(ENV_API_KEY, "ENE_OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn constructors_create_a_fieldless_store() {
+        fn assert_default<T: Default>() {}
+        assert_default::<EnvCredentialStore>();
+        let via_new = EnvCredentialStore::new();
+        assert!(!via_new.contains(&other_cred()));
+        assert!(!EnvCredentialStore.contains(&other_cred()));
+    }
+
+    #[test]
+    fn lookup_gates_on_provider_before_reading_env() {
+        let calls = Cell::new(0_u32);
+        let resolved = resolve_for("acme", |_| {
+            calls.set(calls.get() + 1);
+            Some("test-key".to_owned())
+        });
+        assert!(resolved.is_none());
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn lookup_accepts_a_present_non_empty_value() {
+        let resolved = resolve_for("openai", |name| {
+            assert_eq!(name, ENV_API_KEY);
+            Some("test-key".to_owned())
+        });
+        assert!(resolved.is_some());
+        let Some(secret) = resolved else {
+            return;
+        };
+        assert!(matches!(
+            core::str::from_utf8(secret.bytes()),
+            Ok("test-key")
+        ));
+    }
+
+    #[test]
+    fn resolved_bearer_builds_an_owned_request() {
+        let resolved = resolve_for("openai", |_| Some("test-key".to_owned()));
+        assert!(resolved.is_some());
+        let Some(secret) = resolved else {
+            return;
+        };
+        let Ok(bearer) = core::str::from_utf8(secret.bytes()) else {
+            return;
+        };
+        let authorization = format!("Bearer {bearer}");
+        drop(secret);
+        assert_eq!(authorization, "Bearer test-key");
+    }
+
+    #[test]
+    fn lookup_treats_a_missing_value_as_absent() {
+        let resolved = resolve_for("openai", |_| None);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn lookup_treats_an_empty_value_as_absent() {
+        let resolved = resolve_for("openai", |_| Some(String::new()));
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn store_reports_other_providers_absent_without_reading_env() {
+        let store = EnvCredentialStore;
+        assert!(!store.contains(&other_cred()));
+    }
+
+    #[test]
+    fn store_with_bearer_rejects_other_providers() {
+        let store = EnvCredentialStore;
+        let outcome = store.with_bearer(&other_cred(), str::len);
+        assert!(outcome.is_err());
+        let Err(CredentialTechnicalError::StorageUnavailable { reason }) = outcome else {
+            return;
+        };
+        assert_eq!(reason, "env credential missing");
+    }
+
+    #[test]
+    fn delete_reports_success_with_nothing_durable() {
+        let store = EnvCredentialStore;
+        assert!(store.delete(&openai_cred()).is_ok());
+        assert!(store.delete(&other_cred()).is_ok());
+    }
+
+    #[test]
+    fn debug_rendering_names_the_store_only() {
+        let store = EnvCredentialStore;
+        let rendered = format!("{store:?}");
+        assert_eq!(rendered, "EnvCredentialStore");
     }
 }

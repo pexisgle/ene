@@ -18,6 +18,8 @@
 //! Usage token counts are [`Option`]s with [`UsageSource::Unknown`], never
 //! zero, when the provider reports nothing.
 
+pub mod provider;
+
 use ene_credential::CredentialRef;
 use ene_permission::{ConsentRevision, InferenceUseCandidate, PermissionEvaluationId};
 use ene_primitive::RawId;
