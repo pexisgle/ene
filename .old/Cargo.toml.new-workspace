@@ -1,0 +1,34 @@
+[workspace]
+members = ["crates/*", "apps/*"]
+exclude = ["old/**"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/pexisgle/ene"
+publish = false
+
+# ===========================================================================
+# 依存関係（workspace.dependencies）
+# 旧実装（old/）の Cargo.toml から、新規実装で使用が見込まれるものだけを残す。
+# crate 追加時にここへ追記し、バージョンは old/Cargo.toml を参考にしつつ
+# 実装段階で必要なものに絞る（利用するまで追加しない）。
+# ===========================================================================
+[workspace.dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3"
+thiserror = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws"] }
+reqwest = { version = "0.13", default-features = false }
+
+# 編成時の注意: `default-members` は旧実装の ene-ctl を指していた。新規実装の最初の crate が決まるまで指定しない。
