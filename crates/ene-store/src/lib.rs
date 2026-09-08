@@ -404,8 +404,8 @@ const SQL_SELECT_ATTRIBUTION: &str =
 const SQL_UPDATE_ATTRIBUTION: &str = "UPDATE presence_attribution SET state = ?1, active_client = ?2, generation = ?3 WHERE companion_id = ?4";
 const SQL_INSERT_TRANSITION: &str = "INSERT INTO presence_transition_log (companion_id, old_state, new_state, old_gen, new_gen, reason, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, local_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
-const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
-const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, local_id FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
+const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, local_id FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_SELECT_HISTORY_ID_BY_LOCAL_ID: &str = "SELECT message_id FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
@@ -641,6 +641,19 @@ fn decode_pending_pairing(
     })
 }
 
+/// One decoded history row: identity, round, role, body, language,
+// timestamp, generation, and optional client-local correspondence ID.
+type HistoryRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+);
+
 /// Reads one history row into its domain message.
 fn decode_history_message(
     companion: CompanionId,
@@ -651,6 +664,7 @@ fn decode_history_message(
     lang: String,
     at_text: &str,
     generation_raw: i64,
+    local_id: Option<String>,
 ) -> Result<HistoryMessage, String> {
     let at = WallClockWithTz::parse_rfc3339(at_text)
         .map_err(|_| String::from("malformed timeline timestamp"))?;
@@ -663,6 +677,7 @@ fn decode_history_message(
         lang,
         at,
         presence_generation: PresenceGeneration::from_u64(decode_u64(generation_raw)?),
+        local_id,
     })
 }
 /// Reads one attribution row into its domain fact.
@@ -997,7 +1012,7 @@ impl HistoryRepository for Store {
         // until the contracts scope adds a local id to
         // `AppendHistoryCommand`, so this matches nothing today; the replay
         // path in the caller still pre-checks through this method.
-        let found: Option<(String, String, String, String, String, String, i64)> = guard
+        let found: Option<HistoryRow> = guard
             .query_row(
                 SQL_SELECT_HISTORY_BY_LOCAL_ID,
                 params![key, local_id],
@@ -1010,13 +1025,23 @@ impl HistoryRepository for Store {
                         row.get(4)?,
                         row.get(5)?,
                         row.get(6)?,
+                        row.get::<_, Option<String>>(7)?,
                     ))
                 },
             )
             .optional()
             .map_err(|error| companion_unavailable(error.to_string()))?;
         match found {
-            Some((message_text, round_text, role_text, body, lang, at_text, generation_raw)) => {
+            Some((
+                message_text,
+                round_text,
+                role_text,
+                body,
+                lang,
+                at_text,
+                generation_raw,
+                local_id,
+            )) => {
                 let message = decode_history_message(
                     companion,
                     &message_text,
@@ -1026,6 +1051,7 @@ impl HistoryRepository for Store {
                     lang,
                     &at_text,
                     generation_raw,
+                    local_id,
                 )
                 .map_err(companion_unavailable)?;
                 Ok(Some(message))
@@ -1059,13 +1085,22 @@ impl HistoryRepository for Store {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .map_err(|error| companion_unavailable(error.to_string()))?;
         let mut timeline = Vec::new();
         for row in rows {
-            let (message_text, round_text, role_text, body, lang, at_text, generation_raw) =
-                row.map_err(|error| companion_unavailable(error.to_string()))?;
+            let (
+                message_text,
+                round_text,
+                role_text,
+                body,
+                lang,
+                at_text,
+                generation_raw,
+                local_id,
+            ) = row.map_err(|error| companion_unavailable(error.to_string()))?;
             let at = WallClockWithTz::parse_rfc3339(&at_text)
                 .map_err(|_| companion_unavailable(String::from("malformed timeline timestamp")))?;
             if let Some(lower) = since
@@ -1084,6 +1119,7 @@ impl HistoryRepository for Store {
                 presence_generation: PresenceGeneration::from_u64(
                     decode_u64(generation_raw).map_err(companion_unavailable)?,
                 ),
+                local_id,
             });
         }
         let cap = match usize::try_from(limit) {
@@ -1657,6 +1693,7 @@ mod tests {
             lang: String::from("en"),
             at: fixture_clock(),
             expected_generation: generation,
+            local_id: None,
         }
     }
 
