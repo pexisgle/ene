@@ -4,7 +4,7 @@
 //!
 //! The crate owns three pieces and nothing else:
 //!
-//! * [`Config`] ([`typed`]): the minimal `M1` configuration value with
+//! * [`Config`] ([`typed`]): the minimal `Stage 1` configuration value with
 //!   layered loading and validation.
 //! * OS data directory resolution ([`paths`]): explicit override handling on
 //!   top of the OS default, without side effects.

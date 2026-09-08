@@ -21,13 +21,14 @@ pub fn config_schema() -> Schema {
 /// Returns [`config_schema`] as a [`serde_json::Value`] for embedding or
 /// inspection.
 ///
-/// Schema serialization is infallible in practice; a JSON null is returned
-/// if it ever fails so this helper stays total without file output.
-pub fn config_schema_json() -> serde_json::Value {
-    match serde_json::to_value(config_schema()) {
-        Ok(value) => value,
-        Err(_) => serde_json::Value::Null,
-    }
+/// Serialization failure is reported, never hidden: a schema that cannot be
+/// represented is an error, not a null schema.
+///
+/// # Errors
+///
+/// Returns [`serde_json::Error`] when the schema cannot be serialized.
+pub fn config_schema_json() -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(config_schema())
 }
 
 #[cfg(test)]
@@ -39,6 +40,10 @@ mod tests {
     fn schema_is_generated_for_config() {
         let schema = config_schema();
         let json = config_schema_json();
+        assert!(json.is_ok(), "schema serialization must succeed");
+        let Some(json) = json.ok() else {
+            return;
+        };
         let title = match json.get("title") {
             Some(title) => title.as_str().unwrap_or_default().to_string(),
             None => String::new(),
@@ -51,7 +56,11 @@ mod tests {
 
     #[test]
     fn schema_declares_language_and_data_dir() {
-        let value = config_schema_json();
+        let json = config_schema_json();
+        assert!(json.is_ok(), "schema serialization must succeed");
+        let Some(value) = json.ok() else {
+            return;
+        };
         let properties = value.get("properties");
         assert!(
             properties.is_some(),
@@ -73,6 +82,10 @@ mod tests {
     #[test]
     fn schema_and_default_config_carry_no_secret_or_runtime_fields() {
         let schema = config_schema_json();
+        assert!(schema.is_ok(), "schema serialization must succeed");
+        let Some(schema) = schema.ok() else {
+            return;
+        };
         let default_value: Option<serde_json::Value> = serde_json::to_value(Config::default()).ok();
         assert!(
             default_value.is_some(),

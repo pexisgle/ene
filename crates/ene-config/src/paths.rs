@@ -13,7 +13,7 @@ use crate::typed::Config;
 /// when the OS cannot provide one.
 ///
 /// The underlying qualifier/organization/application triple is `"dev"` /
-/// `"ene"` / `"ene"`. That choice is `M1`-provisional and user-visible: it
+/// `"ene"` / `"ene"`. That choice is `Stage 1`-provisional and user-visible: it
 /// determines concrete paths such as `~/.local/share/ene` on Linux, so any
 /// future change must migrate existing directories instead of silently
 /// switching paths.

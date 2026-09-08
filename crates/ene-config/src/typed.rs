@@ -1,6 +1,6 @@
 //! Typed configuration values with layered loading and validation.
 //!
-//! [`Config`] is the minimal `M1` configuration: a UI locale name and an
+//! [`Config`] is the minimal `Stage 1` configuration: a UI locale name and an
 //! optional explicit data directory override. It carries no domain state, no
 //! secret-typed fields, and no runtime judgments such as autostart selection.
 
@@ -8,17 +8,28 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
+use std::ffi::OsString;
+
 use figment::Figment;
-use figment::providers::{Env, Format, Json, Serialized};
+use figment::providers::{Format, Json, Serialized};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+/// Prefix for environment-sourced overrides such as `ENE_LANGUAGE`.
+const ENV_PREFIX: &str = "ENE_";
+
+/// Suffix selecting [`Config::language`].
+const LANGUAGE_SUFFIX: &str = "LANGUAGE";
+
+/// Suffix selecting [`Config::data_dir`].
+const DATA_DIR_SUFFIX: &str = "DATA_DIR";
 
 /// Returns the built-in default for [`Config::language`].
 fn default_language() -> String {
     "ja".to_string()
 }
 
-/// Minimal `M1` process configuration.
+/// Minimal `Stage 1` process configuration.
 ///
 /// Holds only general startup values owned by no domain: the UI locale name
 /// and an optional explicit data directory override. There are deliberately
@@ -111,9 +122,13 @@ impl Config {
     /// `ENE_LANGUAGE` or `ENE_DATA_DIR`).
     ///
     /// A missing file contributes no values; a present but unreadable or
-    /// malformed file is reported as [`ConfigError::Figment`]. The merged
-    /// result is checked with [`Config::validate`] before it is returned, so
-    /// an empty `ENE_LANGUAGE` fails the load.
+    /// malformed file is reported as [`ConfigError::Figment`]. Environment
+    /// selection and application are pure ([`select_env`], [`apply_env`]) so
+    /// precedence is unit-testable without mutating the process environment;
+    /// only this entry point reads the real one, and non-UTF-8 entries are
+    /// ignored rather than read at all. The merged result is checked with
+    /// [`Config::validate`] before it is returned, so an empty
+    /// `ENE_LANGUAGE` fails the load.
     ///
     /// # Errors
     ///
@@ -122,89 +137,92 @@ impl Config {
     /// [`ConfigError::EmptyLanguage`] when the merged [`Config::language`]
     /// is empty or whitespace-only.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
-        let mut figment = Figment::from(Serialized::defaults(Self::default()));
-        if let Some(path) = path {
-            figment = figment.merge(Json::file(path));
-        }
-        let configured: Self = figment.merge(Env::prefixed("ENE_")).extract()?;
-        configured.validate()?;
-        Ok(configured)
+        let base = file_layers(path)?;
+        let selected = select_env(Self::native_env_pairs());
+        let merged = apply_env(base, selected);
+        merged.validate()?;
+        Ok(merged)
     }
+
+    /// Reads the process environment without claiming UTF-8 handling.
+    ///
+    /// Entries that are not valid Unicode on either side are dropped here,
+    /// before selection, so a stray non-UTF-8 variable can neither panic the
+    /// load nor leak undecodable bytes into configuration values.
+    fn native_env_pairs() -> Vec<(OsString, OsString)> {
+        std::env::vars_os().collect()
+    }
+}
+
+/// Loads the file-backed layers (built-in defaults, then the JSON file at
+/// `path` when [`Some`]) without consulting the environment and without
+/// validating.
+///
+/// A missing file contributes no values; a present but unreadable or
+/// malformed file is reported as [`ConfigError::Figment`]. Callers apply
+/// [`select_env`]/[`apply_env`] and then [`Config::validate`].
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Figment`] when the file cannot be read or the
+/// merged values cannot be extracted.
+fn file_layers(path: Option<&Path>) -> Result<Config, ConfigError> {
+    let mut figment = Figment::from(Serialized::defaults(Config::default()));
+    if let Some(path) = path {
+        figment = figment.merge(Json::file(path));
+    }
+    Ok(figment.extract()?)
+}
+
+/// Selects this crate's overrides from environment-style pairs.
+///
+/// Only keys starting with `ENE_` are kept, with the prefix stripped, so
+/// `ENE_LANGUAGE` becomes `("LANGUAGE", value)`. Unknown suffixes are kept
+/// as well; [`apply_env`] decides which ones take effect. Selection is a
+/// pure function of its input, which keeps precedence testable without
+/// touching the process environment.
+fn select_env(pairs: Vec<(OsString, OsString)>) -> Vec<(String, String)> {
+    let mut selected = Vec::new();
+    for (key, value) in pairs {
+        let (Some(key), Some(value)) = (key.into_string().ok(), value.into_string().ok()) else {
+            continue;
+        };
+        if let Some(suffix) = key.strip_prefix(ENV_PREFIX) {
+            selected.push((suffix.to_owned(), value));
+        }
+    }
+    selected
+}
+
+/// Applies previously selected environment overrides to `base`.
+///
+/// `LANGUAGE` replaces the locale, `DATA_DIR` replaces the data directory
+/// override, and any other suffix is ignored. Application is a pure function
+/// of its inputs; validation stays with the caller.
+fn apply_env(mut base: Config, overrides: Vec<(String, String)>) -> Config {
+    for (suffix, value) in overrides {
+        if suffix == LANGUAGE_SUFFIX {
+            base.language = value;
+        } else if suffix == DATA_DIR_SUFFIX {
+            base.data_dir = Some(PathBuf::from(value));
+        }
+    }
+    base
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigError};
+    use super::{Config, ConfigError, apply_env, file_layers, select_env};
+    use std::ffi::OsString;
     use std::io::Write as _;
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
-    /// Serializes tests that read or mutate the process environment.
-    ///
-    /// [`Config::load`] always consults `ENE_*` variables and the process
-    /// environment is global, so every test that calls `load` holds this
-    /// lock and sanitizes the variables it reads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Acquires [`ENV_LOCK`], recovering from poisoning so one failing test
-    /// cannot deadlock the rest.
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        match ENV_LOCK.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    /// Clears the `ENE_*` variables this crate reads and returns their
-    /// previous values for later restoration with [`restore_env`].
-    ///
-    /// Must only be called while holding the guard returned by [`lock_env`].
-    fn stash_env() -> (Option<String>, Option<String>) {
-        let language = std::env::var("ENE_LANGUAGE").ok();
-        let data_dir = std::env::var("ENE_DATA_DIR").ok();
-        remove_env_var("ENE_LANGUAGE");
-        remove_env_var("ENE_DATA_DIR");
-        (language, data_dir)
-    }
-
-    /// Restores variables previously saved by [`stash_env`].
-    ///
-    /// Must only be called while holding the guard returned by [`lock_env`].
-    fn restore_env(previous: (Option<String>, Option<String>)) {
-        let (language, data_dir) = previous;
-        match language {
-            Some(value) => set_env_var("ENE_LANGUAGE", &value),
-            None => remove_env_var("ENE_LANGUAGE"),
-        }
-        match data_dir {
-            Some(value) => set_env_var("ENE_DATA_DIR", &value),
-            None => remove_env_var("ENE_DATA_DIR"),
-        }
-    }
-
-    /// Sets a process environment variable for these tests.
-    ///
-    /// Must only be called while holding the guard returned by [`lock_env`].
-    fn set_env_var(key: &str, value: &str) {
-        // SAFETY: every environment mutation in this test module goes through
-        // this helper (or `remove_env_var` below) while holding `ENV_LOCK`,
-        // and every environment read this crate performs (`stash_env` and
-        // `Config::load`) happens under that same lock, so the mutation
-        // cannot race with another environment access from this test binary.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-    }
-
-    /// Removes a process environment variable for these tests.
-    ///
-    /// Must only be called while holding the guard returned by [`lock_env`].
-    fn remove_env_var(key: &str) {
-        // SAFETY: same serialization argument as in `set_env_var`: all
-        // mutation and all reads by this crate happen under `ENV_LOCK`.
-        unsafe {
-            std::env::remove_var(key);
-        }
+    /// Builds native-style pairs from plain strings for [`select_env`].
+    fn native(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect()
     }
 
     /// Writes `contents` to a fresh temporary file.
@@ -263,34 +281,28 @@ mod tests {
     }
 
     #[test]
-    fn load_without_file_or_env_returns_defaults() {
-        let _guard = lock_env();
-        let previous = stash_env();
-        let loaded = Config::load(None);
-        restore_env(previous);
-        assert!(loaded.is_ok(), "load with no layers must succeed");
+    fn file_layers_without_a_file_return_defaults() {
+        let loaded = file_layers(None);
+        assert!(loaded.is_ok(), "no layers must succeed");
         let Some(config) = loaded.ok() else {
             return;
         };
         assert!(
             config == Config::default(),
-            "load with no layers must return the built-in defaults"
+            "no layers must return the built-in defaults"
         );
     }
 
     #[test]
     fn json_file_overrides_builtin_defaults() {
-        let _guard = lock_env();
-        let previous = stash_env();
         let written = write_config_file(r#"{"language": "de"}"#);
-        let mut loaded: Option<Config> = None;
-        if let Some((_, path)) = written.as_ref() {
-            loaded = Config::load(Some(path.as_path())).ok();
-        }
-        restore_env(previous);
         assert!(written.is_some(), "temp config file must be created");
-        assert!(loaded.is_some(), "load from a JSON file must succeed");
-        let Some(config) = loaded else {
+        let Some((_, path)) = written.as_ref() else {
+            return;
+        };
+        let loaded = file_layers(Some(path.as_path()));
+        assert!(loaded.is_ok(), "load from a JSON file must succeed");
+        let Some(config) = loaded.ok() else {
             return;
         };
         assert!(
@@ -305,17 +317,14 @@ mod tests {
 
     #[test]
     fn json_file_can_set_data_dir() {
-        let _guard = lock_env();
-        let previous = stash_env();
         let written = write_config_file(r#"{"language": "ja", "data_dir": "/tmp/ene-json-data"}"#);
-        let mut loaded: Option<Config> = None;
-        if let Some((_, path)) = written.as_ref() {
-            loaded = Config::load(Some(path.as_path())).ok();
-        }
-        restore_env(previous);
         assert!(written.is_some(), "temp config file must be created");
-        assert!(loaded.is_some(), "load from a JSON file must succeed");
-        let Some(config) = loaded else {
+        let Some((_, path)) = written.as_ref() else {
+            return;
+        };
+        let loaded = file_layers(Some(path.as_path()));
+        assert!(loaded.is_ok(), "load from a JSON file must succeed");
+        let Some(config) = loaded.ok() else {
             return;
         };
         assert!(
@@ -325,57 +334,119 @@ mod tests {
     }
 
     #[test]
-    fn env_vars_take_precedence_over_the_json_file() {
-        let _guard = lock_env();
-        let previous = stash_env();
-        let written = write_config_file(r#"{"language": "fr"}"#);
-        set_env_var("ENE_LANGUAGE", "en");
-        let mut loaded: Option<Config> = None;
-        if let Some((_, path)) = written.as_ref() {
-            loaded = Config::load(Some(path.as_path())).ok();
-        }
-        restore_env(previous);
+    fn malformed_json_file_is_reported_not_absorbed() {
+        let written = write_config_file(r#"{"language": "#);
         assert!(written.is_some(), "temp config file must be created");
-        assert!(loaded.is_some(), "load with an env override must succeed");
-        let Some(config) = loaded else {
+        let Some((_, path)) = written.as_ref() else {
             return;
         };
         assert!(
-            config.language == "en",
-            "ENE_LANGUAGE must win over the JSON file"
+            matches!(
+                file_layers(Some(path.as_path())),
+                Err(ConfigError::Figment(_))
+            ),
+            "a malformed JSON file must fail the load"
+        );
+    }
+
+    #[test]
+    fn selection_strips_the_prefix_and_ignores_other_variables() {
+        let selected = select_env(native(&[
+            ("ENE_LANGUAGE", "en"),
+            ("ENE_DATA_DIR", "/tmp/ene-env-data"),
+            ("ENE_UNRECOGNISED", "kept for apply_env to ignore"),
+            ("UNRELATED", "dropped"),
+            ("ENE_", "empty suffix, kept for apply_env to ignore"),
+        ]));
+        assert!(
+            selected.contains(&("LANGUAGE".to_string(), "en".to_string())),
+            "ENE_LANGUAGE must be selected: {selected:?}"
+        );
+        assert!(
+            selected.contains(&("DATA_DIR".to_string(), "/tmp/ene-env-data".to_string())),
+            "ENE_DATA_DIR must be selected: {selected:?}"
+        );
+        assert!(
+            !selected.iter().any(|(suffix, _)| suffix == "UNRELATED"),
+            "unprefixed variables must be dropped: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn env_overrides_win_over_file_values() {
+        let base = Config {
+            language: "fr".to_string(),
+            data_dir: None,
+        };
+        let merged = apply_env(base, vec![("LANGUAGE".to_string(), "en".to_string())]);
+        assert!(
+            merged.language == "en",
+            "an env language must win over the file value"
+        );
+        assert!(
+            merged.data_dir.is_none(),
+            "an untouched data_dir must stay no override"
         );
     }
 
     #[test]
     fn env_data_dir_overrides_the_default() {
-        let _guard = lock_env();
-        let previous = stash_env();
-        set_env_var("ENE_DATA_DIR", "/tmp/ene-env-data");
-        let loaded = Config::load(None);
-        restore_env(previous);
-        assert!(
-            loaded.is_ok(),
-            "load with ENE_DATA_DIR must succeed: {loaded:?}"
+        let merged = apply_env(
+            Config::default(),
+            vec![("DATA_DIR".to_string(), "/tmp/ene-env-data".to_string())],
         );
-        let Some(config) = loaded.ok() else {
-            return;
-        };
         assert!(
-            config.data_dir == Some(PathBuf::from("/tmp/ene-env-data")),
-            "ENE_DATA_DIR must set the data_dir override"
+            merged.data_dir == Some(PathBuf::from("/tmp/ene-env-data")),
+            "an env data_dir must set the override"
         );
     }
 
     #[test]
-    fn load_rejects_an_empty_language_from_the_env() {
-        let _guard = lock_env();
-        let previous = stash_env();
-        set_env_var("ENE_LANGUAGE", "   ");
-        let loaded = Config::load(None);
-        restore_env(previous);
+    fn unknown_suffixes_are_ignored() {
+        let base = Config::default();
+        let merged = apply_env(
+            base.clone(),
+            vec![("UNRECOGNISED".to_string(), "x".to_string())],
+        );
         assert!(
-            matches!(loaded, Err(ConfigError::EmptyLanguage)),
-            "a whitespace ENE_LANGUAGE must fail the load: {loaded:?}"
+            merged == base,
+            "unknown env suffixes must not change the configuration"
+        );
+    }
+
+    #[test]
+    fn file_then_env_compose_like_load() {
+        let written = write_config_file(r#"{"language": "fr"}"#);
+        assert!(written.is_some(), "temp config file must be created");
+        let Some((_, path)) = written.as_ref() else {
+            return;
+        };
+        let base = file_layers(Some(path.as_path()));
+        assert!(base.is_ok(), "file layers must load");
+        let Some(base) = base.ok() else {
+            return;
+        };
+        let selected = select_env(native(&[("ENE_LANGUAGE", "en")]));
+        let merged = apply_env(base, selected);
+        assert!(
+            merged.language == "en",
+            "an env language must win over the file value"
+        );
+        assert!(
+            merged.validate().is_ok(),
+            "the composed configuration must validate"
+        );
+    }
+
+    #[test]
+    fn empty_env_language_fails_validation() {
+        let merged = apply_env(
+            Config::default(),
+            vec![("LANGUAGE".to_string(), "   ".to_string())],
+        );
+        assert!(
+            matches!(merged.validate(), Err(ConfigError::EmptyLanguage)),
+            "a whitespace env language must fail validation"
         );
     }
 
