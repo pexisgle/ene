@@ -2,7 +2,7 @@
 
 本書は、用途の異なる責務間で情報を選び、変換し、推論へ渡し、その結果を利用するときの契約を詳細化する。Context Assemblyは新しいSubsystemでも情報の正本でもない。以下の「要求」「利用単位」「対応」は論理的な関係であり、共通object、永続record、protocolを指定しない。
 
-製品挙動のsource of truthは[要件Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+製品挙動のsource of truthは[要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
 
 ## 1. 最初に詳細化する領域の選定
 
@@ -17,13 +17,13 @@
 
 Contextは情報を集めるだけの処理に見えるが、受け手、目的、時点が変わる境界である。ここで「内部にあるから信頼できる」「取得済みだから送信可能」「推論成功だから採用可能」と扱うと、各Subsystemを後から正しく設計しても境界がつながらない。
 
-[Architecture Review #1](reviews/architecture-review-1.md)のObserver assignment分離とLater-design Notes、[Architecture Review #2](reviews/architecture-review-2.md)の限定routing context・制約伝播・鮮度に関する指摘も選定材料にした。ただしレビュー原本の提案を再採用するのではなく、[Architecture Drivers](architecture-drivers.md)第3節と現在のarchitectureへ統合された判断に従う。特に、新scopeの追加や各CompanionのProviderによるrouting要約生成の必須化は行わない。
+[Architecture Review #1](../reviews/architecture-review-1.md)のObserver assignment分離とLater-design Notes、[Architecture Review #2](../reviews/architecture-review-2.md)の限定routing context・制約伝播・鮮度に関する指摘も選定材料にした。ただしレビュー原本の提案を再採用するのではなく、[Architecture Drivers](../architecture/architecture-drivers.md)第3節と現在のarchitectureへ統合された判断に従う。特に、新scopeの追加や各CompanionのProviderによるrouting要約生成の必須化は行わない。
 
 ## 2. 上位architectureとの位置関係
 
-主な詳細化対象は[Cross-cutting Design](cross-cutting.md)のCC-02・03である。CC-01のOwner意図、CC-04の活動条件、CC-05の消去参加、CC-06の推論利用、CC-07の事実の確定度が、contextを通っても失われない条件を接続する。
+主な詳細化対象は[Cross-cutting Design](../architecture/cross-cutting.md)のCC-02・03である。CC-01のOwner意図、CC-04の活動条件、CC-05の消去参加、CC-06の推論利用、CC-07の事実の確定度が、contextを通っても失われない条件を接続する。
 
-責務・正本・依存は[Subsystem Decomposition](subsystems.md)、[State Ownership](state-ownership.md)（SO）第4〜8節、[Dependency Rules](dependency-rules.md)（DR）第3〜7節を維持する。[System Context](system-context.md)のHost／外部境界、[Runtime Topology](runtime-topology.md)のClient・Provider・MCP・Plugin・MCP Appsのtrust／failure boundaryも変更しない。
+責務・正本・依存は[Subsystem Decomposition](../architecture/subsystems.md)、[State Ownership](../architecture/state-ownership.md)（SO）第4〜8節、[Dependency Rules](../architecture/dependency-rules.md)（DR）第3〜7節を維持する。[System Context](../architecture/system-context.md)のHost／外部境界、[Runtime Topology](../architecture/runtime-topology.md)のClient・Provider・MCP・Plugin・MCP Appsのtrust／failure boundaryも変更しない。
 
 | 本書内の役割 | 既存の責任とauthoritativeな判断 | Contextが持ってはならない正本 |
 |---|---|---|
@@ -236,7 +236,7 @@ Contextを保持・変換・送信・受入する各責務は、保全・消去�
 
 ## 9. Runtime FlowsとCross-cutting Designへ戻した検証
 
-[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08へ、正常系と意味のある競合を戻して照合した。
+[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08へ、正常系と意味のある競合を戻して照合した。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|

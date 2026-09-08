@@ -1,12 +1,12 @@
 # Major Runtime Flows
 
-対象: [要件Baseline](../requirements/README.md)。本書は、主要な活動を時間軸に乗せ、既決の責務・正本・制御・lifecycleが正常系と異常系で接続できるかを検証する。
+対象: [要件Baseline](../../requirements/README.md)。本書は、主要な活動を時間軸に乗せ、既決の責務・正本・制御・lifecycleが正常系と異常系で接続できるかを検証する。
 
 ## 1. この文書の読み方
 
 Runtime Flowは、triggerを受けてから、判断・状態変更・作用・結果統合を経て、完了、判断待ち、中断、失敗、後の継続へ至る**責任の連なり**を表す。具体的なfunction call、IPC、event schema、queue、process、transaction、実装state machineは表さない。番号付きの段階は必要な前後関係を示し、すべてを直列実行する指定ではない。以下のRF番号は文書内参照であり、新しい要件IDではない。
 
-製品挙動の正本は[製品定義](../requirements/product.md)と[要件](../requirements/requirements.md)である。[受け入れ条件](../requirements/acceptance.md)の後続milestoneも対象から外さず、[参考資料](../requirements/references.md)は非規範として扱った。既存実装や外部製品の仕組みから不足を補っていない。
+製品挙動の正本は[製品定義](../../requirements/product.md)と[要件](../../requirements/requirements.md)である。[受け入れ条件](../../requirements/acceptance.md)の後続milestoneも対象から外さず、[参考資料](../../requirements/references.md)は非規範として扱った。既存実装や外部製品の仕組みから不足を補っていない。
 
 設計上の前提は次の全6文書を維持する。
 

@@ -11,17 +11,17 @@
 
 ## 0. 位置付けと不変条件
 
-製品挙動の source of truth は [要件Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+製品挙動の source of truth は [要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
 
-責務・非責務は [Subsystem Decomposition](subsystems.md)第3・5・6節、意味owner・lifecycleは [State Ownership](state-ownership.md)（以下SO）第4〜8節、依存の許可・禁止・制約は [Dependency Rules](dependency-rules.md)（以下DR）第3〜7節、内外境界は [System Context](system-context.md)、配置・寿命・trust / failure boundary は [Runtime Topology](runtime-topology.md)を維持する。[Cross-cutting Design](cross-cutting.md)の CC-01〜07 を前提とし、再定義しない。
+責務・非責務は [Subsystem Decomposition](../architecture/subsystems.md)第3・5・6節、意味owner・lifecycleは [State Ownership](../architecture/state-ownership.md)（以下SO）第4〜8節、依存の許可・禁止・制約は [Dependency Rules](../architecture/dependency-rules.md)（以下DR）第3〜7節、内外境界は [System Context](../architecture/system-context.md)、配置・寿命・trust / failure boundary は [Runtime Topology](../architecture/runtime-topology.md)を維持する。[Cross-cutting Design](../architecture/cross-cutting.md)の CC-01〜07 を前提とし、再定義しない。
 
 Step 11 の5詳細設計は特定Subsystemの新しいownerではない。本書は次を隣接する確定済みcontractとして利用し、再定義も所有権の移動もしない。
 
-- [Context Assembly](context-assembly.md)：由来・用途・現在性・用途別結果受入・処理中無効化の一般契約
-- [Action Execution](action-execution.md)：判断対象と実対象の対応・委任不変・確定度・不明保持・遅延帰属の一般契約
-- [Targeted Deletion](targeted-deletion.md)：消去区間・再保存防止・未完了保全・完了条件の一般契約
-- [Client Presence Transition](client-presence-transition.md)：authoritative帰属・切替区間・活動別区切り・到着物帰属・Host継続の一般契約
-- [Backup / Restore](backup-restore.md)：復元範囲・正本切替・再有効化・stale・旧backup交差の一般契約
+- [Context Assembly](../critical-areas/context-assembly.md)：由来・用途・現在性・用途別結果受入・処理中無効化の一般契約
+- [Action Execution](../critical-areas/action-execution.md)：判断対象と実対象の対応・委任不変・確定度・不明保持・遅延帰属の一般契約
+- [Targeted Deletion](../critical-areas/targeted-deletion.md)：消去区間・再保存防止・未完了保全・完了条件の一般契約
+- [Client Presence Transition](../critical-areas/client-presence-transition.md)：authoritative帰属・切替区間・活動別区切り・到着物帰属・Host継続の一般契約
+- [Backup / Restore](../critical-areas/backup-restore.md)：復元範囲・正本切替・再有効化・stale・旧backup交差の一般契約
 
 新しい semantic owner、第二の正本、万能Manager / Coordinator / Runtime / Policy Engine、統一state machine、共通Context layerを追加しない。Subsystem と crate / process / service を一対一に対応させない。Host側とClient側に同名Subsystemを複製しない。
 
@@ -363,4 +363,4 @@ State Ownership・Dependency Rulesとの照合では、semantic owner、Host / C
 
 本書の範囲では、Requirement Ambiguity / Gap、上位architecture変更、subsystem boundary変更、semantic owner変更、Security / Privacy / Permission semanticsの変更を必要とする事項は見つかっていない。具体mechanismの未決定は Issueにしない。
 
-古いBackupに Backup作成後に Targeted Deletionされた情報が含まれる場合の製品判断（自動改変・再消去しない／Restore前に再導入可能性を説明する／明示Restoreは意図的な再導入として扱う／自動再適用しない／旧cache・遅延結果・session等の意図しない再出現と区別する／Restoreの事実は Audit可能にするが削除対象本文を別保存しない）について、要件との矛盾・不足を確認した。要件「Backupとrestore」は削除済み情報や旧Rule・同意・Scheduleが戻り得ることの事前説明を要求し、要件「Privacy / Security目的のtargeted deletionと履歴保持」は自動再形成の禁止と完了後の Owner再提供の新Experience扱いを定め、外部copyまでの消去保証を含めない。本書第7.5節はこの両立（明示restoreは別操作・新正本・保留と現在再評価を経る、意図しない再出現は防止する、本文の別保存をしない）を Step 11 [Backup / Restore](backup-restore.md)第8節の確定契約どおりに各参加責務へ落としており、新しい Privacy semanticsの追加・別挙動への変更は行っていない。したがって本件を Requirement Issueとして新たに報告する必要はない。
+古いBackupに Backup作成後に Targeted Deletionされた情報が含まれる場合の製品判断（自動改変・再消去しない／Restore前に再導入可能性を説明する／明示Restoreは意図的な再導入として扱う／自動再適用しない／旧cache・遅延結果・session等の意図しない再出現と区別する／Restoreの事実は Audit可能にするが削除対象本文を別保存しない）について、要件との矛盾・不足を確認した。要件「Backupとrestore」は削除済み情報や旧Rule・同意・Scheduleが戻り得ることの事前説明を要求し、要件「Privacy / Security目的のtargeted deletionと履歴保持」は自動再形成の禁止と完了後の Owner再提供の新Experience扱いを定め、外部copyまでの消去保証を含めない。本書第7.5節はこの両立（明示restoreは別操作・新正本・保留と現在再評価を経る、意図しない再出現は防止する、本文の別保存をしない）を Step 11 [Backup / Restore](../critical-areas/backup-restore.md)第8節の確定契約どおりに各参加責務へ落としており、新しい Privacy semanticsの追加・別挙動への変更は行っていない。したがって本件を Requirement Issueとして新たに報告する必要はない。

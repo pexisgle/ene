@@ -1,6 +1,6 @@
 # Runtime Topology
 
-対象: [要件Baseline](../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)。本書は実行場所、主体の寿命、接続、信頼・障害境界を決定する。図の箱はprocessやsubsystemを意味しない。
+対象: [要件Baseline](../../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)。本書は実行場所、主体の寿命、接続、信頼・障害境界を決定する。図の箱はprocessやsubsystemを意味しない。
 
 ## Overview
 
@@ -186,13 +186,13 @@ LocalとRemoteで変わるのはClientへの接続と入出力・操作対象の
 - **状態と永続化:** domain object、所有・参照の詳細、DB schema、repository構造、保存・backup・migration実装、暗号方式、削除の協調方式。Host正本だけを理由に全状態を一つの保存単位や一つのlifecycleへまとめない。
 - **意味判断と推論:** context assembly、Memory・Skill・Relationship・Companion Stateの内部表現とalgorithm、検索・要約・更新・減衰、Provider session・Prompt cache・費用推定。意味状態・根拠・原履歴と派生dataの契約は維持する。
 - **UIと縮退:** 重要な管理操作への到達とkeyboard経路を満たす画面構成、品質調整、資源配分、停止伝達・進捗保存の粒度。管理をBodyやLLMの成功へ従属させず、受付と停止完了を区別する。
-- **検証環境:** model・Provider catalog、OS version・hardware、性能budgetはReleaseのSupport Matrixと[受け入れ条件](../requirements/acceptance.md)で検証する。現milestoneのOpenAI Responses APIや数値Gateを恒久的なTopology制約へ固定しない。
+- **検証環境:** model・Provider catalog、OS version・hardware、性能budgetはReleaseのSupport Matrixと[受け入れ条件](../../requirements/acceptance.md)で検証する。現milestoneのOpenAI Responses APIや数値Gateを恒久的なTopology制約へ固定しない。
 
 これらの自由度は、Cloudへの正本移転、恒久Workspace container、独自成果物library、ene運営relay・account・Marketplace等の非目標を再導入できるという意味ではない。
 
 ## Traceability
 
-[Architecture Drivers](architecture-drivers.md)のADは要件から導出された制約として使用した。下表の要件欄は[要件](../requirements/requirements.md)の見出しを示す。SC番号は[System Context](system-context.md#boundary-invariants)の判断を参照する。
+[Architecture Drivers](architecture-drivers.md)のADは要件から導出された制約として使用した。下表の要件欄は[要件](../../requirements/requirements.md)の見出しを示す。SC番号は[System Context](system-context.md#boundary-invariants)の判断を参照する。
 
 | 重要な設計判断 | 本書・System Contextでの対応 | Driver / 要件の根拠 |
 |---|---|---|

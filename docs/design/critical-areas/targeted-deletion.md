@@ -2,7 +2,7 @@
 
 本書は、OwnerがPrivacyまたはSecurityのため特定情報そのものの内部消去を明示した場合に、ene内部のどこに保存・派生・処理中・再利用されていても対象を除去し、古いcopy・遅延結果・再接続・再起動・restore等によって復活させないためのlogical contractを詳細化する。後続のstate representation／persistence／concurrency／interface設計が安全に依存できる水準まで定め、具体的なmechanismは固定しない。
 
-製品挙動のsource of truthは[要件Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+製品挙動のsource of truthは[要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
 
 本書の「要求」「対象記述」「参加」「局所完了」「保留」「検証」「全域完了」「再保存防止」は論理的な関係であり、共通object、永続record、protocol、state machine、enumを指定しない。番号付きの段階は必要な前後関係を示し、すべてを直列実行する指定ではない。
 
@@ -25,7 +25,7 @@ Targeted deletionは、通常の忘却、訂正、失効、置換、統合、His
 
 ## 2. 上位architectureとの位置関係
 
-[Subsystem Decomposition](subsystems.md)の12責務、[State Ownership](state-ownership.md)（SO）第4〜8節、[Dependency Rules](dependency-rules.md)（DR）第3〜7節、[System Context](system-context.md)の内外境界、[Runtime Topology](runtime-topology.md)の配置・寿命・trust／failure boundaryを変更しない。新しいsemantic owner、中央Persistence owner、万能Deletion Manager、統一deletion state machineを追加しない。
+[Subsystem Decomposition](../architecture/subsystems.md)の12責務、[State Ownership](../architecture/state-ownership.md)（SO）第4〜8節、[Dependency Rules](../architecture/dependency-rules.md)（DR）第3〜7節、[System Context](../architecture/system-context.md)の内外境界、[Runtime Topology](../architecture/runtime-topology.md)の配置・寿命・trust／failure boundaryを変更しない。新しいsemantic owner、中央Persistence owner、万能Deletion Manager、統一deletion state machineを追加しない。
 
 | 本書内の役割 | 既存の責任とauthoritativeな判断 | 本書が持ってはならない正本 |
 |---|---|---|
@@ -37,7 +37,7 @@ Targeted deletionは、通常の忘却、訂正、失効、置換、統合、His
 | 秘密の扱い | 認証秘密が登録済みCredentialの用途・有効性・除外を扱う。 | 消去対象であることを理由とする外部Credential失効の自動実行 |
 | 全域成立の調整 | 保全・消去が参加結果・検証・未完了・保留を対応付けて全域成立を確定する。 | 全domainの通常writer、単一transaction、内部全構造への無制限access |
 
-[Cross-cutting Design](cross-cutting.md)のCC-05（目的別lifecycleと全域操作の成立）を中心に、CC-02（利用範囲と変換後の意味）、CC-03（現在性と用途別の結果受入）、CC-04（停止範囲と継続・再開）、CC-07（確定度）を消去固有の意味へ詳細化する。CC-01の意図対応、CC-06の消費連続性は前提として利用し、再定義しない。Context Assemblyで確定した由来・用途・現在性・用途別結果受入、Action Executionで確定した判断対象と実対象の対応・委任不変・確定度・不明保持へ、消去のsemantic ownershipを移さない。
+[Cross-cutting Design](../architecture/cross-cutting.md)のCC-05（目的別lifecycleと全域操作の成立）を中心に、CC-02（利用範囲と変換後の意味）、CC-03（現在性と用途別の結果受入）、CC-04（停止範囲と継続・再開）、CC-07（確定度）を消去固有の意味へ詳細化する。CC-01の意図対応、CC-06の消費連続性は前提として利用し、再定義しない。Context Assemblyで確定した由来・用途・現在性・用途別結果受入、Action Executionで確定した判断対象と実対象の対応・委任不変・確定度・不明保持へ、消去のsemantic ownershipを移さない。
 
 ## 3. 消去要求と対象の追跡・識別
 
@@ -309,7 +309,7 @@ Companion削除は個体固有の現在状態・学習状態等の削除であ�
 
 ## 10. Runtime FlowsとCross-cutting Designへ戻した検証
 
-[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)へ、正常系と意味のある競合・障害を戻して照合した。
+[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](../architecture/cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)へ、正常系と意味のある競合・障害を戻して照合した。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|

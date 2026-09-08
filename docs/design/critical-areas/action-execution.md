@@ -2,7 +2,7 @@
 
 本書は、Ownerの意図やPermission判断から実際の外部作用が発生し、その結果がTask・記録・Ownerへの報告へ戻るまでの間で、「何を許可したのか」と「実際に何が行われたのか」の対応が失われないためのlogical contractを詳細化する。後続のconcurrency／state representation／persistence／interface設計が安全に依存できる水準まで定め、具体的なmechanismは固定しない。
 
-製品挙動のsource of truthは[要件Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+製品挙動のsource of truthは[要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
 
 本書の「要求」「判断」「成立」「試行」「作用」「確定度」は論理的な関係であり、共通object、永続record、protocol、state machineを指定しない。番号付きの段階は必要な前後関係を示し、すべてを直列実行する指定ではない。
 
@@ -23,7 +23,7 @@
 
 ## 2. 上位architectureとの位置関係
 
-[Subsystem Decomposition](subsystems.md)の12責務、[State Ownership](state-ownership.md)（SO）第4〜8節、[Dependency Rules](dependency-rules.md)（DR）第3〜7節、[System Context](system-context.md)の内外境界、[Runtime Topology](runtime-topology.md)の配置・寿命・trust／failure boundaryを変更しない。新しいsemantic owner、万能Action Manager、統一Permission pipeline、共通Action state machineを追加しない。
+[Subsystem Decomposition](../architecture/subsystems.md)の12責務、[State Ownership](../architecture/state-ownership.md)（SO）第4〜8節、[Dependency Rules](../architecture/dependency-rules.md)（DR）第3〜7節、[System Context](../architecture/system-context.md)の内外境界、[Runtime Topology](../architecture/runtime-topology.md)の配置・寿命・trust／failure boundaryを変更しない。新しいsemantic owner、万能Action Manager、統一Permission pipeline、共通Action state machineを追加しない。
 
 | 本書内の役割 | 既存の責任とauthoritativeな判断 | 本書が持ってはならない正本 |
 |---|---|---|
@@ -36,7 +36,7 @@
 | 帰属・活動条件 | 接続・存在、個体調整、保全・消去等。移動・停止・消去・復旧の現在条件を供給する。 | Actionの実行権限の付与 |
 | 記録の保全 | 保全・消去と各参加owner。Audit順序・保持、全域操作の成立を扱う。 | 元事実の意味の再判定、作用のrollback |
 
-[Cross-cutting Design](cross-cutting.md)のCC-01（意図と実利用の対応）、CC-03（現在性と用途別受入）、CC-04（停止・再開）、CC-07（確定度）を、Action固有の意味へ詳細化する。CC-02の情報利用範囲、CC-05の消去参加、CC-06の消費連続性は前提として利用し、再定義しない。Context Assemblyで確定した由来・用途・現在性・用途別結果受入へActionのsemantic ownershipを移さない。
+[Cross-cutting Design](../architecture/cross-cutting.md)のCC-01（意図と実利用の対応）、CC-03（現在性と用途別受入）、CC-04（停止・再開）、CC-07（確定度）を、Action固有の意味へ詳細化する。CC-02の情報利用範囲、CC-05の消去参加、CC-06の消費連続性は前提として利用し、再定義しない。Context Assemblyで確定した由来・用途・現在性・用途別結果受入へActionのsemantic ownershipを移さない。
 
 ## 3. 認可判断が結び付ける対応
 
@@ -235,7 +235,7 @@ Ownerへの最終報告・管理面の表示・Body・Voiceの演出・自然な
 
 ## 10. Runtime FlowsとCross-cutting Designへ戻した検証
 
-[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](cross-cutting.md)CC-01〜07へ、正常系と意味のある競合を戻して照合した。
+[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](../architecture/cross-cutting.md)CC-01〜07へ、正常系と意味のある競合を戻して照合した。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|

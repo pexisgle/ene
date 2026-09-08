@@ -2,7 +2,7 @@
 
 本書は Step 13 の Crate / Module 分解 artifact である。Step 11（Context Assembly, Action Execution, Targeted Deletion, Client Presence Transition, Backup / Restore）および Step 12（Subsystem Decomposition, 各 subsystem 詳細設計, State Ownership (SO), Dependency Rules (DR), Cross-cutting Design (CC), Runtime Topology, Runtime Flows, System Context）と Step 13 の `correspondence-identity.md`（CI）、`persistence-recovery.md`（PR）、`concurrency-control.md`（CCT）、`interface-boundaries.md`（IB）を**固定前提**とする。12 Subsystem の semantic ownership、identity / revision / generation / correlation / boundary token の型分離、`app.db` / `derived.db + sqlite-vec` / filesystem internal copies / OS credential store / external backup の役割分離、serialization domain / compare-before-commit / 短 transaction / 長時間処理の lock 外実行、caller ≠ authority / typed expected revision / generation / domain-specific acceptance / technical error 分離 / secret 非返却 / Host-local・remote-capable の区別を変更しない。変更が必要に見えた場合は設計で吸収せず Issue として報告する（第15節）。
 
-製品挙動の source of truth は[要件 Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+製品挙動の source of truth は[要件 Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
 
 実装コードは変更しない。本書の Rust pseudo-type / module 名は提案であり、コンパイル対象ではない。型名・crate 名の同義改名は許すが、ownership 分離・依存方向・public boundary の意味は維持すること。
 

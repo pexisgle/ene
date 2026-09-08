@@ -10,7 +10,7 @@ eneでは、ある責務で正しく受理した入力・結果が、別の責�
 
 入力とする文書の立場は次のとおりである。
 
-- [製品定義](../requirements/product.md)は概念・対象・非目標、[要件](../requirements/requirements.md)は製品挙動のsource of truthとする。[受け入れ条件](../requirements/acceptance.md)は検証範囲であり、後続milestoneの確定済み要件も分析対象に含める。[参考資料](../requirements/references.md)は非規範として扱う。
+- [製品定義](../../requirements/product.md)は概念・対象・非目標、[要件](../../requirements/requirements.md)は製品挙動のsource of truthとする。[受け入れ条件](../../requirements/acceptance.md)は検証範囲であり、後続milestoneの確定済み要件も分析対象に含める。[参考資料](../../requirements/references.md)は非規範として扱う。
 - [Architecture Drivers](architecture-drivers.md)のAD-01〜15、[System Context](system-context.md)のSC-01〜10、[Runtime Topology](runtime-topology.md)のRT-01〜10とtrust・failure boundaryを維持する。
 - [Subsystem Decomposition](subsystems.md)の12責務・略称、[State Ownership](state-ownership.md)（以下SO）のsemantic ownerとlifecycle、[Dependency Rules](dependency-rules.md)（以下DR文書）の依存規則を維持する。
 - [Major Runtime Flows](runtime-flows.md)のRF-01〜08と第3節を、時間軸で検証された既存設計として使う。実装や過去設計から未確認の製品挙動を補わない。

@@ -16,9 +16,9 @@ eneのarchitectureを最も強く形作るのは、**Owner管理Hostを正本と
 
 根拠の扱いは次のとおりである。
 
-- [要件定義 README](../requirements/README.md)「文書」「要件と設計の境界」に従い、[製品定義](../requirements/product.md)を概念・対象・非目標の根拠、[要件](../requirements/requirements.md)を必須挙動の唯一の根拠とする。
-- [受け入れ条件](../requirements/acceptance.md)は現milestoneの検証制約として扱う。後続項目も確定済みの製品要件であり、OpenAI Responses APIや特定OS環境を恒久的な制約にはしない。
-- [参考資料](../requirements/references.md)は非規範として全体を参照した。そこにあるAgent Harnessの層分け、参考製品の構造、リンク先の仕様詳細はDriverの追加根拠にしない。
+- [要件定義 README](../../requirements/README.md)「文書」「要件と設計の境界」に従い、[製品定義](../../requirements/product.md)を概念・対象・非目標の根拠、[要件](../../requirements/requirements.md)を必須挙動の唯一の根拠とする。
+- [受け入れ条件](../../requirements/acceptance.md)は現milestoneの検証制約として扱う。後続項目も確定済みの製品要件であり、OpenAI Responses APIや特定OS環境を恒久的な制約にはしない。
+- [参考資料](../../requirements/references.md)は非規範として全体を参照した。そこにあるAgent Harnessの層分け、参考製品の構造、リンク先の仕様詳細はDriverの追加根拠にしない。
 - 既存実装・crate・過去設計は根拠にしていない。既存形式との互換性、複数Owner、ene運営のCloud基盤等の非目標を、将来拡張への備えという理由で設計要件へ戻さない。
 
 ## 2. Architecture Drivers
@@ -33,8 +33,8 @@ Hostは、進行中の作業や外部eventを待つためだけにLLMへ反復�
 
 **Requirements basis**
 
-- [製品定義](../requirements/product.md)「利用者と実行場所」「非目標」。
-- [要件](../requirements/requirements.md)「所有と実行」「Schedule」「Remote Client」「保護、Backup、復旧／Local data」。
+- [製品定義](../../requirements/product.md)「利用者と実行場所」「非目標」。
+- [要件](../../requirements/requirements.md)「所有と実行」「Schedule」「Remote Client」「保護、Backup、復旧／Local data」。
 
 **Architectural significance**
 
@@ -54,7 +54,7 @@ Running Companionのactive Clientは同時に一つまでとする。Stopではa
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「Remote Client」「会話と情報提示」「BodyとVoice／Desktop Body」「CompanionとCharacter／停止と削除」「Task、Workspace、成果物／Computer Use」。
+- [要件](../../requirements/requirements.md)「Remote Client」「会話と情報提示」「BodyとVoice／Desktop Body」「CompanionとCharacter／停止と削除」「Task、Workspace、成果物／Computer Use」。
 
 **Architectural significance**
 
@@ -74,8 +74,8 @@ Companion中心の体験と汎用作業Agentの能力を両立する。同じCom
 
 **Requirements basis**
 
-- [製品定義](../requirements/product.md)「製品の要約」「主要概念／Task」「主要概念／Task Agent」「非目標」。
-- [要件](../requirements/requirements.md)「Setupと日常利用」「会話と情報提示」「Task、Workspace、成果物／Task」「Task、Workspace、成果物／Computer Use」「品質と利用可能性」。
+- [製品定義](../../requirements/product.md)「製品の要約」「主要概念／Task」「主要概念／Task Agent」「非目標」。
+- [要件](../../requirements/requirements.md)「Setupと日常利用」「会話と情報提示」「Task、Workspace、成果物／Task」「Task、Workspace、成果物／Computer Use」「品質と利用可能性」。
 
 **Architectural significance**
 
@@ -99,8 +99,8 @@ Companion削除時は、個体固有設定・Experience Summary・Companion scop
 
 **Requirements basis**
 
-- [製品定義](../requirements/product.md)「主要概念／Companion」「Character」「MemoryとSkill」「Relationship」「Companion State」。
-- [要件](../requirements/requirements.md)「CompanionとCharacter」「Learningと成長／Scope」「Relationship」「Companion State」「Observationと自発性／グループ会話」。
+- [製品定義](../../requirements/product.md)「主要概念／Companion」「Character」「MemoryとSkill」「Relationship」「Companion State」。
+- [要件](../../requirements/requirements.md)「CompanionとCharacter」「Learningと成長／Scope」「Relationship」「Companion State」「Observationと自発性／グループ会話」。
 
 **Architectural significance**
 
@@ -120,8 +120,8 @@ Memoryは長期理解の主要な知識状態として継続更新される。Ex
 
 **Requirements basis**
 
-- [製品定義](../requirements/product.md)「主要概念／Experience」「MemoryとSkill」「Relationship」「Companion State」。
-- [要件](../requirements/requirements.md)「会話と情報提示／一続きの会話」「Learningと成長／ExperienceとExperience Summary」「MemoryとSkill」「Memory形成」「Memoryの状態と根拠」「Scope」「Skillの保護と相互運用」「Relationship」「Companion State」。
+- [製品定義](../../requirements/product.md)「主要概念／Experience」「MemoryとSkill」「Relationship」「Companion State」。
+- [要件](../../requirements/requirements.md)「会話と情報提示／一続きの会話」「Learningと成長／ExperienceとExperience Summary」「MemoryとSkill」「Memory形成」「Memoryの状態と根拠」「Scope」「Skillの保護と相互運用」「Relationship」「Companion State」。
 
 **Architectural significance**
 
@@ -143,8 +143,8 @@ Ownerの現在の明確な依頼は一回限りの承認として扱えるが、
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「Setupと日常利用」「Learningと成長」冒頭、「Scope」「Relationship」「Companion State」、「Permissionと安全境界」全節、「Schedule」「Observationと自発性／自発的な発話と行動」。
-- [製品定義](../requirements/product.md)「主要概念／Capability、Action、Rule」。
+- [要件](../../requirements/requirements.md)「Setupと日常利用」「Learningと成長」冒頭、「Scope」「Relationship」「Companion State」、「Permissionと安全境界」全節、「Schedule」「Observationと自発性／自発的な発話と行動」。
+- [製品定義](../../requirements/product.md)「主要概念／Capability、Action、Rule」。
 
 **Architectural significance**
 
@@ -164,8 +164,8 @@ LLMの柔軟な判断をすべて固定ルールへ置換することも、LLM�
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「Learningと成長／重要度、忘却、訂正」「履歴、保持、Privacy／Privacy/Security目的のtargeted deletionと履歴保持」「CompanionとCharacter／停止と削除」。
-- [受け入れ条件](../requirements/acceptance.md)「代表的なend-to-endシナリオ／会話からのMemory」は、文字列残存、形成処理との競合、再形成、共有根拠の部分削除を現milestoneで検証する。
+- [要件](../../requirements/requirements.md)「Learningと成長／重要度、忘却、訂正」「履歴、保持、Privacy／Privacy/Security目的のtargeted deletionと履歴保持」「CompanionとCharacter／停止と削除」。
+- [受け入れ条件](../../requirements/acceptance.md)「代表的なend-to-endシナリオ／会話からのMemory」は、文字列残存、形成処理との競合、再形成、共有根拠の部分削除を現milestoneで検証する。
 
 **Architectural significance**
 
@@ -189,8 +189,8 @@ Ownerから依頼された作業とCompanionが自発的に始める作業のう
 
 **Requirements basis**
 
-- [製品定義](../requirements/product.md)「主要概念／Task」「Task Agent」「Workspace」「非目標」。
-- [要件](../requirements/requirements.md)「Task、Workspace、成果物」全節、「CompanionとCharacter／停止と削除」「Learningと成長／Scope」「Skillの保護と相互運用」「Permissionと安全境界／Capability境界」「Observationと自発性／自発的な発話と行動」。
+- [製品定義](../../requirements/product.md)「主要概念／Task」「Task Agent」「Workspace」「非目標」。
+- [要件](../../requirements/requirements.md)「Task、Workspace、成果物」全節、「CompanionとCharacter／停止と削除」「Learningと成長／Scope」「Skillの保護と相互運用」「Permissionと安全境界／Capability境界」「Observationと自発性／自発的な発話と行動」。
 
 **Architectural significance**
 
@@ -212,7 +212,7 @@ Scheduleは各回を新しいTaskとし、実行時点の権限、費用、Provi
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「Task、Workspace、成果物／Task」「Task、Workspace、成果物／Computer Use」「Schedule」「CompanionとCharacter／停止と削除」「Remote Client」「Permissionと安全境界／共通pipeline」「Provider、費用、接続障害／OfflineとPrompt cache」「品質と利用可能性」。
+- [要件](../../requirements/requirements.md)「Task、Workspace、成果物／Task」「Task、Workspace、成果物／Computer Use」「Schedule」「CompanionとCharacter／停止と削除」「Remote Client」「Permissionと安全境界／共通pipeline」「Provider、費用、接続障害／OfflineとPrompt cache」「品質と利用可能性」。
 
 **Architectural significance**
 
@@ -234,8 +234,8 @@ Providerやmodelを変更しても、利用可能な個体状態・Learning・�
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「所有と実行」「Setupと日常利用」「Provider、費用、接続障害／割当と同意」「Fallbackと費用」「OfflineとPrompt cache」。
-- [受け入れ条件](../requirements/acceptance.md)「Support Matrix」「Milestone範囲」。
+- [要件](../../requirements/requirements.md)「所有と実行」「Setupと日常利用」「Provider、費用、接続障害／割当と同意」「Fallbackと費用」「OfflineとPrompt cache」。
+- [受け入れ条件](../../requirements/acceptance.md)「Support Matrix」「Milestone範囲」。
 
 **Architectural significance**
 
@@ -255,8 +255,8 @@ Local MCPはsandbox内実行を既定とし、動かないことを理由に黙�
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「拡張」「CompanionとCharacter／Character Package」「Learningと成長／Skillの保護と相互運用」「BodyとVoice／Desktop Body」。
-- [製品定義](../requirements/product.md)「非目標」。
+- [要件](../../requirements/requirements.md)「拡張」「CompanionとCharacter／Character Package」「Learningと成長／Skillの保護と相互運用」「BodyとVoice／Desktop Body」。
+- [製品定義](../../requirements/product.md)「非目標」。
 
 **Architectural significance**
 
@@ -280,7 +280,7 @@ ObserverはClientごとのPause／OFFと全体のPause／OFFを持ち、明示ON
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「Observationと自発性」全節、「BodyとVoice／Desktop Body」「Learningと成長」冒頭、「Provider、費用、接続障害／割当と同意」「Remote Client」。
+- [要件](../../requirements/requirements.md)「Observationと自発性」全節、「BodyとVoice／Desktop Body」「Learningと成長」冒頭、「Provider、費用、接続障害／割当と同意」「Remote Client」。
 
 **Architectural significance**
 
@@ -300,8 +300,8 @@ Windows／LinuxでVRM 1.0の透明overlay Bodyを通常のPC操作と共存さ�
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「BodyとVoice」「品質と利用可能性」「Permissionと安全境界／信頼境界」「Provider、費用、接続障害／Fallbackと費用」。
-- [受け入れ条件](../requirements/acceptance.md)「Support Matrix」「性能Gateとbaseline」。
+- [要件](../../requirements/requirements.md)「BodyとVoice」「品質と利用可能性」「Permissionと安全境界／信頼境界」「Provider、費用、接続障害／Fallbackと費用」。
+- [受け入れ条件](../../requirements/acceptance.md)「Support Matrix」「性能Gateとbaseline」。
 
 **Architectural significance**
 
@@ -325,7 +325,7 @@ Action回数、並列性、実行時間、費用、保存容量等に上限を�
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「Provider、費用、接続障害／Credential」「履歴、保持、Privacy／通常保存しないdata」「AuditとTelemetry」「会話と情報提示／UIの優先順位」「Learningと成長／ExperienceとExperience Summary」「品質と利用可能性」。
+- [要件](../../requirements/requirements.md)「Provider、費用、接続障害／Credential」「履歴、保持、Privacy／通常保存しないdata」「AuditとTelemetry」「会話と情報提示／UIの優先順位」「Learningと成長／ExperienceとExperience Summary」「品質と利用可能性」。
 
 **Architectural significance**
 
@@ -345,8 +345,8 @@ Restoreは開始前からHostに存在する現在のCredential storeを維持�
 
 **Requirements basis**
 
-- [要件](../requirements/requirements.md)「保護、Backup、復旧」全節、「Setupと日常利用」「履歴、保持、Privacy／Privacy/Security目的のtargeted deletionと履歴保持」。
-- [製品定義](../requirements/product.md)「非目標」。
+- [要件](../../requirements/requirements.md)「保護、Backup、復旧」全節、「Setupと日常利用」「履歴、保持、Privacy／Privacy/Security目的のtargeted deletionと履歴保持」。
+- [製品定義](../../requirements/product.md)「非目標」。
 
 **Architectural significance**
 
@@ -374,7 +374,7 @@ Restoreは開始前からHostに存在する現在のCredential storeを維持�
 
 ## 3. Requirement Issues
 
-A-01〜A-04／G-01・G-02はOwner判断により解消し、未解決Issueとして残さない。各決定は[要件](../requirements/requirements.md)と[製品定義](../requirements/product.md)へ反映し、本書のDriverへ組み込んだ。以下は解消結果の記録であり、新たな製品要件の追加ではない。
+A-01〜A-04／G-01・G-02はOwner判断により解消し、未解決Issueとして残さない。各決定は[要件](../../requirements/requirements.md)と[製品定義](../../requirements/product.md)へ反映し、本書のDriverへ組み込んだ。以下は解消結果の記録であり、新たな製品要件の追加ではない。
 
 ### 解決済み決定
 

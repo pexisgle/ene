@@ -1,6 +1,6 @@
 # Subsystem Decomposition
 
-対象: [要件Baseline](../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)。本書は責務境界を決定し、State OwnershipとDependency Rulesへの入力を示す。
+対象: [要件Baseline](../../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)。本書は責務境界を決定し、State OwnershipとDependency Rulesへの入力を示す。
 
 ## 1. Overview
 
@@ -59,7 +59,7 @@ AD-12・RT-04から、Capture、候補検知、関連付けはClient単位で共
 
 AD-07・15の消去・復元は、複数の活動と保存対象を横断した完了を必要とする。各Subsystemの個別処理だけでは全域の成立を説明できないため、**保全・消去**を置く。ただし、全状態の意味や書込みを集める汎用Persistence層ではない。各活動が何を記録したかを説明し、保全・消去が全域操作を調整し、各参加責務が自身のdataと進行中処理について完了根拠を返す関係にする。
 
-この導出に、既存実装、crate、過去architecture、参考製品の層分けは用いていない。[参考資料](../requirements/references.md)は非規範として読み、[受け入れ条件](../requirements/acceptance.md)は検証条件として扱った。後続milestoneの確定済み要件も分解対象に含める。
+この導出に、既存実装、crate、過去architecture、参考製品の層分けは用いていない。[参考資料](../../requirements/references.md)は非規範として読み、[受け入れ条件](../../requirements/acceptance.md)は検証条件として扱った。後続milestoneの確定済み要件も分解対象に含める。
 
 ## 3. Subsystems
 

@@ -1,6 +1,6 @@
 # Dependency Rules
 
-対象: [要件Baseline](../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)、[State Ownership](state-ownership.md)。本書は責務間の依存規則を決定する。Subsystemの名称・略称とsemantic ownerは既存設計を維持する。
+対象: [要件Baseline](../../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)、[State Ownership](state-ownership.md)。本書は責務間の依存規則を決定する。Subsystemの名称・略称とsemantic ownerは既存設計を維持する。
 
 ## 1. Overview
 
@@ -450,7 +450,7 @@ flowchart LR
 
 ### 11.1 根拠と全体対応
 
-[製品定義](../requirements/product.md)を概念と非目標、[要件](../requirements/requirements.md)を必須挙動の唯一の正本として扱う。[受け入れ条件](../requirements/acceptance.md)は検証範囲であり、後続milestoneの確定済み契約も含めた。[参考資料](../requirements/references.md)は非規範として読み、参考製品の構造・外部リンクの仕様・既存実装・Git履歴から依存規則を追加していない。
+[製品定義](../../requirements/product.md)を概念と非目標、[要件](../../requirements/requirements.md)を必須挙動の唯一の正本として扱う。[受け入れ条件](../../requirements/acceptance.md)は検証範囲であり、後続milestoneの確定済み契約も含めた。[参考資料](../../requirements/references.md)は非規範として読み、参考製品の構造・外部リンクの仕様・既存実装・Git履歴から依存規則を追加していない。
 
 下表のSOは[State Ownership](state-ownership.md)の節番号。Subsystemの責務・非責務・collaborationは[Subsystem Decomposition](subsystems.md)第3〜6節を維持する。AD・SC・RTは既存文書の識別子を参照する。
 

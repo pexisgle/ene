@@ -1,6 +1,6 @@
 # Architecture Drivers Review
 
-レビュー対象: [`docs/design/architecture-drivers.md`](../architecture-drivers.md)（分析対象Baseline 2026-09-05）
+レビュー対象: [`docs/design/architecture-drivers.md`](../architecture/architecture-drivers.md)（分析対象Baseline 2026-09-05）
 要件正本: [`docs/requirements/`](../../requirements/README.md)（再構成済みBaseline、最終確認 2026-09-05）
 
 レビュー方法: 要件文書（製品定義、要件、受け入れ条件、参考資料）を先に独立して読み、後続設計へ引き継ぐべき設計圧力を自分で導出したうえで、各Driverの「Driver」「Architectural significance」「Design freedom」と Section 3 の Requirement Issues を要件本文と照合した。照合の観点は次の四つである。

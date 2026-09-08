@@ -1,6 +1,6 @@
 # State Ownership
 
-対象: [要件Baseline](../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)。本書はconceptual / architectural state ownershipを決定する。本文のSubsystem略称はSubsystem Decompositionに従う。
+対象: [要件Baseline](../../requirements/README.md)、[Architecture Drivers](architecture-drivers.md)、[System Context](system-context.md)、[Runtime Topology](runtime-topology.md)、[Subsystem Decomposition](subsystems.md)。本書はconceptual / architectural state ownershipを決定する。本文のSubsystem略称はSubsystem Decompositionに従う。
 
 ## 1. Overview
 
@@ -570,7 +570,7 @@ Credential値の利用は上表の通常representation・contentの経路とは�
 
 ### 11.1 根拠と対応
 
-[製品定義](../requirements/product.md)を概念・非目標、[要件](../requirements/requirements.md)を必須挙動の唯一の正本とする。[受け入れ条件](../requirements/acceptance.md)は検証上の範囲であり、後続milestoneの確定済み要件も対象に含める。[参考資料](../requirements/references.md)は非規範であり、参考製品・外部仕様・既存実装をownershipの根拠にしていない。
+[製品定義](../../requirements/product.md)を概念・非目標、[要件](../../requirements/requirements.md)を必須挙動の唯一の正本とする。[受け入れ条件](../../requirements/acceptance.md)は検証上の範囲であり、後続milestoneの確定済み要件も対象に含める。[参考資料](../../requirements/references.md)は非規範であり、参考製品・外部仕様・既存実装をownershipの根拠にしていない。
 
 下表の要件欄は要件文書の見出しを示す。ADはArchitecture Drivers、SCはSystem Context、RTはRuntime Topologyの参照であり、Subsystemは本書で通常変更責任と参加責任を具体化した境界である。
 
@@ -608,4 +608,4 @@ Credential値の利用は上表の通常representation・contentの経路とは�
 | 全域消去の対象と完了根拠 | 4.24、6.4。各ownerが派生物・処理中利用まで参加し、再保存・再形成防止と残存検証を完了条件にする。 |
 | Backup・restore・Resetの整合と保留 | 4.24、6.5、7。Copy・復元された正本・現在の実行可能性を分離する。 |
 
-[Step 4前レビュー](reviews/pre-state-ownership-review.md)は非規範の点検入力として使用した。F-07は4.4、F-08は4.5〜4.9と6.2・6.3、F-09は4.18〜4.20と6.2・6.5、F-10は4.3・4.15、F-11は4.10・4.13、F-12は4.9、F-13は4.21・4.23・4.24と6.4・6.5へ対応する。レビューの列挙をstate categoryの必須一覧にはしていない。
+[Step 4前レビュー](../reviews/pre-state-ownership-review.md)は非規範の点検入力として使用した。F-07は4.4、F-08は4.5〜4.9と6.2・6.3、F-09は4.18〜4.20と6.2・6.5、F-10は4.3・4.15、F-11は4.10・4.13、F-12は4.9、F-13は4.21・4.23・4.24と6.4・6.5へ対応する。レビューの列挙をstate categoryの必須一覧にはしていない。

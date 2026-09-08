@@ -2,7 +2,7 @@
 
 本書は、CompanionがClientへ存在し、呼び出され、移動し、切断され、再接続し、Host再起動後にpresenceを復旧する過程で、**presenceとClient依存活動の帰属が曖昧にならず、二重存在・古いClientでの作用・誤った再実行を起こさないためのlogical contract**を詳細化する。後続のstate representation／concurrency／persistence／IPC／interface設計が安全に依存できる水準まで定め、具体的なmechanismは固定しない。
 
-製品挙動のsource of truthは[要件Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+製品挙動のsource of truthは[要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
 
 本書の「presence」「帰属」「区切り」「round」「試行」「作用」「確定度」「未伝達」「復旧」は論理的な関係であり、共通object、永続record、protocol、state machine、enumを指定しない。番号付きの段階は必要な前後関係を示し、すべてを直列実行する指定ではない。
 
@@ -25,7 +25,7 @@ Client移動を「active Client fieldの瞬間的な代入」へ落とすと、�
 
 ## 2. 上位architectureとの位置関係
 
-[Subsystem Decomposition](subsystems.md)の12責務、[State Ownership](state-ownership.md)（SO）第4〜8節、[Dependency Rules](dependency-rules.md)（DR）第3〜7節、[System Context](system-context.md)の内外境界、[Runtime Topology](runtime-topology.md)の配置・寿命・trust／failure boundaryを変更しない。新しいsemantic owner、万能Presence Manager、統一presence state machine、共通Client session layerを追加しない。
+[Subsystem Decomposition](../architecture/subsystems.md)の12責務、[State Ownership](../architecture/state-ownership.md)（SO）第4〜8節、[Dependency Rules](../architecture/dependency-rules.md)（DR）第3〜7節、[System Context](../architecture/system-context.md)の内外境界、[Runtime Topology](../architecture/runtime-topology.md)の配置・寿命・trust／failure boundaryを変更しない。新しいsemantic owner、万能Presence Manager、統一presence state machine、共通Client session layerを追加しない。
 
 | 本書内の役割 | 既存の責任とauthoritativeな判断 | 本書が持ってはならない正本 |
 |---|---|---|
@@ -39,7 +39,7 @@ Client移動を「active Client fieldの瞬間的な代入」へ落とすと、�
 | 秘密の扱い | 認証秘密。接続材料・Credentialの用途・有効性・除外を扱う。 | 帰属・許可・実行可否の確定 |
 | 保全・復旧の調整 | 保全・消去。全域操作の成立・未完了・保留を対応付ける。 | 帰属の成立、通常意味変更権 |
 
-[Cross-cutting Design](cross-cutting.md)のCC-03（現在性と用途別受入）、CC-04（停止範囲と継続・再開）、CC-07（確定度）を、帰属切替固有の意味へ詳細化する。CC-01の意図対応、CC-02の利用範囲、CC-05の消去参加、CC-06の消費連続性は前提として利用し、再定義しない。Context Assemblyで確定した由来・用途・現在性・用途別結果受入、Action Executionで確定した判断対象と実対象の対応・委任不変・確定度・不明保持へ、帰属のsemantic ownershipを移さない。
+[Cross-cutting Design](../architecture/cross-cutting.md)のCC-03（現在性と用途別受入）、CC-04（停止範囲と継続・再開）、CC-07（確定度）を、帰属切替固有の意味へ詳細化する。CC-01の意図対応、CC-02の利用範囲、CC-05の消去参加、CC-06の消費連続性は前提として利用し、再定義しない。Context Assemblyで確定した由来・用途・現在性・用途別結果受入、Action Executionで確定した判断対象と実対象の対応・委任不変・確定度・不明保持へ、帰属のsemantic ownershipを移さない。
 
 ## 3. Authoritative presenceの契約
 
@@ -240,7 +240,7 @@ Computer Useでは特に次の既存contractを維持する。具体的なComput
 
 ## 11. Runtime FlowsとCross-cutting Designおよび既存3詳細設計へ戻した検証
 
-[Major Runtime Flows](runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)、[Targeted Deletion](targeted-deletion.md)へ、正常系と意味のある競合・障害を戻して照合した。
+[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](../architecture/cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)、[Targeted Deletion](targeted-deletion.md)へ、正常系と意味のある競合・障害を戻して照合した。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
