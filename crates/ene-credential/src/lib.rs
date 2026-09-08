@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use ene_primitive::{RawId, WallClockWithTz};
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -304,12 +305,125 @@ impl CredentialStore for MemoryCredentialStore {
     }
 }
 
+/// Opaque device identity for device pairing (Group K, Stage 2 thin scope).
+///
+/// Wraps a [`RawId`] with no `From` implementations to or from any other
+/// type: a `DeviceId` names one logical device in this crate's pairing
+/// records only. It is distinct from the wire `DeviceWireId` carried in
+/// `ene-api` envelopes: mapping between wire and domain identities happens in
+/// Host composition at the call boundary, never in this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeviceId(
+    /// Wrapped opaque identity; meaningful only as a device name in this crate.
+    pub RawId,
+);
+
+/// One paired device: its minted identity, display string, and pairing time.
+///
+/// `descriptor` is an owner-supplied display string (for example `"phone"`);
+/// it carries no secret material, so derived [`core::fmt::Debug`] is safe.
+/// `paired_at` records when pairing completed, for display and audit only.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeviceRecord {
+    /// Device identity minted at approval; never reused.
+    pub id: DeviceId,
+    /// Owner-visible display string naming the device.
+    pub descriptor: String,
+    /// Wall-clock time with its creation offset recording when pairing completed.
+    pub paired_at: WallClockWithTz,
+}
+
+/// One requested-but-not-yet-approved pairing.
+///
+/// `descriptor` is the owner-supplied display string from the request; it
+/// carries no secret material, so derived [`core::fmt::Debug`] is safe.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PendingPairing {
+    /// Owner-visible display string naming the requesting device.
+    pub descriptor: String,
+    /// Wall-clock time with its creation offset recording when requested.
+    pub requested_at: WallClockWithTz,
+}
+
+/// Outcome of a pairing request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DevicePairingStatus {
+    /// The descriptor is already paired; carries the existing record.
+    Paired {
+        /// Existing paired-device record, unchanged.
+        device: DeviceRecord,
+    },
+    /// The descriptor is not yet paired; carries the pending request.
+    Pending {
+        /// Pending request, newly recorded or previously stored.
+        pending: PendingPairing,
+    },
+}
+
+/// Persistence boundary for device pairing requests and approvals.
+///
+/// Revocation is explicitly deferred: Stage 2 thin scope provides no
+/// remove/revoke method, so paired records only accumulate.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
+)]
+pub trait DevicePairingRepository: Send + Sync {
+    /// Records a pairing request for `descriptor`.
+    ///
+    /// Returns [`DevicePairingStatus::Paired`] only when `descriptor` is
+    /// already paired (idempotent re-request leaves the stored record
+    /// untouched). Otherwise records a pending request — or returns the
+    /// existing pending entry when one is already stored — and returns
+    /// [`DevicePairingStatus::Pending`].
+    ///
+    /// Blank-descriptor contract: Host ingress validates that the descriptor
+    /// is non-blank before calling. Implementations perform no blank check
+    /// themselves: a blank `descriptor` is recorded as pending like any other
+    /// string, never rejected here, so callers must not rely on this method
+    /// to catch blank input.
+    async fn request_pairing(
+        &self,
+        descriptor: String,
+    ) -> Result<DevicePairingStatus, CredentialTechnicalError>;
+
+    /// Approves the pending request for `descriptor`, pairing the device.
+    ///
+    /// On a known pending descriptor this mints a fresh identity via
+    /// [`RawId::new`], moves the entry from pending to paired, and returns
+    /// the new record. An unknown descriptor yields `Ok(None)` — not an
+    /// error; the caller maps that outcome to a clarification request.
+    /// Re-approving an already-paired descriptor is idempotent: the existing
+    /// record is returned unchanged and no fresh identity is minted.
+    ///
+    /// Approval records an Owner decision transported from a trusted inlet;
+    /// the repository never decides whether pairing is allowed, it records
+    /// the decision it was given.
+    async fn approve_pending(
+        &self,
+        descriptor: &str,
+    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError>;
+
+    /// Loads the paired record for `id`, if any.
+    async fn find_device(
+        &self,
+        id: &DeviceId,
+    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError>;
+
+    /// Lists all currently pending pairing requests.
+    async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CredentialRef, CredentialStore, CredentialTechnicalError, MemoryCredentialStore,
         RegisterCredentialCommand, RegisterOutcome, credential_availability, register,
     };
+    use super::{
+        DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord, PendingPairing,
+    };
+    use ene_primitive::{RawId, WallClockWithTz};
     use std::collections::HashMap;
     use tokio::sync::Mutex;
 
@@ -467,5 +581,207 @@ mod tests {
         let rendered = format!("{cred:?}");
         assert!(rendered.contains("acme"));
         assert!(!rendered.contains("bearer-token"));
+    }
+
+    struct FakePairingRepo {
+        pending: Mutex<HashMap<String, PendingPairing>>,
+        paired: Mutex<HashMap<String, DeviceRecord>>,
+    }
+
+    impl FakePairingRepo {
+        fn new() -> Self {
+            Self {
+                pending: Mutex::new(HashMap::new()),
+                paired: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl DevicePairingRepository for FakePairingRepo {
+        async fn request_pairing(
+            &self,
+            descriptor: String,
+        ) -> Result<DevicePairingStatus, CredentialTechnicalError> {
+            if let Some(device) = self.paired.lock().await.get(&descriptor).cloned() {
+                return Ok(DevicePairingStatus::Paired { device });
+            }
+            if let Some(pending) = self.pending.lock().await.get(&descriptor).cloned() {
+                return Ok(DevicePairingStatus::Pending { pending });
+            }
+            let pending = PendingPairing {
+                descriptor: descriptor.clone(),
+                requested_at: WallClockWithTz::now(),
+            };
+            self.pending
+                .lock()
+                .await
+                .insert(descriptor, pending.clone());
+            Ok(DevicePairingStatus::Pending { pending })
+        }
+
+        async fn approve_pending(
+            &self,
+            descriptor: &str,
+        ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
+            if let Some(device) = self.paired.lock().await.get(descriptor).cloned() {
+                return Ok(Some(device));
+            }
+            let pending = self.pending.lock().await.remove(descriptor);
+            let Some(stored) = pending else {
+                return Ok(None);
+            };
+            let device = DeviceRecord {
+                id: DeviceId(RawId::new()),
+                descriptor: stored.descriptor,
+                paired_at: WallClockWithTz::now(),
+            };
+            self.paired
+                .lock()
+                .await
+                .insert(descriptor.to_owned(), device.clone());
+            Ok(Some(device))
+        }
+
+        async fn find_device(
+            &self,
+            id: &DeviceId,
+        ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
+            let paired = self.paired.lock().await;
+            Ok(paired.values().find(|device| device.id == *id).cloned())
+        }
+
+        async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError> {
+            let pending = self.pending.lock().await;
+            Ok(pending.values().cloned().collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn first_request_yields_pending() {
+        let repo = FakePairingRepo::new();
+        let status = repo.request_pairing("phone".to_owned()).await;
+        assert!(matches!(status, Ok(DevicePairingStatus::Pending { .. })));
+        let Ok(DevicePairingStatus::Pending { pending }) = status else {
+            return;
+        };
+        assert_eq!(pending.descriptor.as_str(), "phone");
+        let listed = repo.list_pending().await;
+        let Ok(items) = listed else {
+            return;
+        };
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn second_request_for_same_descriptor_stays_pending_without_duplicate() {
+        let repo = FakePairingRepo::new();
+        let first = repo.request_pairing("phone".to_owned()).await;
+        assert!(matches!(first, Ok(DevicePairingStatus::Pending { .. })));
+        let second = repo.request_pairing("phone".to_owned()).await;
+        assert!(matches!(second, Ok(DevicePairingStatus::Pending { .. })));
+        let Ok(DevicePairingStatus::Pending {
+            pending: first_pending,
+        }) = first
+        else {
+            return;
+        };
+        let Ok(DevicePairingStatus::Pending {
+            pending: second_pending,
+        }) = second
+        else {
+            return;
+        };
+        assert_eq!(first_pending.descriptor, second_pending.descriptor);
+        let listed = repo.list_pending().await;
+        let Ok(items) = listed else {
+            return;
+        };
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn approve_unknown_descriptor_returns_none() {
+        let repo = FakePairingRepo::new();
+        let approved = repo.approve_pending("unknown").await;
+        assert!(matches!(approved, Ok(None)));
+        let found = repo.find_device(&DeviceId(RawId::new())).await;
+        assert!(matches!(found, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn approve_moves_pending_to_paired() {
+        let repo = FakePairingRepo::new();
+        let requested = repo.request_pairing("phone".to_owned()).await;
+        assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
+        let approved = repo.approve_pending("phone").await;
+        assert!(matches!(approved, Ok(Some(_))));
+        let Ok(Some(device)) = approved else {
+            return;
+        };
+        assert_eq!(device.descriptor.as_str(), "phone");
+        let listed = repo.list_pending().await;
+        let Ok(items) = listed else {
+            return;
+        };
+        assert!(items.is_empty());
+        let found = repo.find_device(&device.id).await;
+        assert!(matches!(found, Ok(Some(_))));
+        let Ok(Some(stored)) = found else {
+            return;
+        };
+        assert_eq!(stored, device);
+    }
+
+    #[tokio::test]
+    async fn re_request_after_paired_returns_paired_with_same_id() {
+        let repo = FakePairingRepo::new();
+        let requested = repo.request_pairing("phone".to_owned()).await;
+        assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
+        let approved = repo.approve_pending("phone").await;
+        let Ok(Some(device)) = approved else {
+            return;
+        };
+        let again = repo.request_pairing("phone".to_owned()).await;
+        assert!(matches!(again, Ok(DevicePairingStatus::Paired { .. })));
+        let Ok(DevicePairingStatus::Paired { device: existing }) = again else {
+            return;
+        };
+        assert_eq!(existing.id, device.id);
+        assert_eq!(existing, device);
+    }
+
+    #[tokio::test]
+    async fn re_approve_returns_the_existing_record() {
+        let repo = FakePairingRepo::new();
+        let requested = repo.request_pairing("phone".to_owned()).await;
+        assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
+        let approved = repo.approve_pending("phone").await;
+        let Ok(Some(first)) = approved else {
+            return;
+        };
+        let reapproved = repo.approve_pending("phone").await;
+        assert!(matches!(reapproved, Ok(Some(_))));
+        let Ok(Some(second)) = reapproved else {
+            return;
+        };
+        assert_eq!(second.id, first.id);
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn list_pending_reports_each_descriptor_once() {
+        let repo = FakePairingRepo::new();
+        let first = repo.request_pairing("phone".to_owned()).await;
+        assert!(matches!(first, Ok(DevicePairingStatus::Pending { .. })));
+        let second = repo.request_pairing("tablet".to_owned()).await;
+        assert!(matches!(second, Ok(DevicePairingStatus::Pending { .. })));
+        let listed = repo.list_pending().await;
+        let Ok(items) = listed else {
+            return;
+        };
+        let descriptors: Vec<&str> = items.iter().map(|item| item.descriptor.as_str()).collect();
+        assert_eq!(descriptors.len(), 2);
+        assert!(descriptors.contains(&"phone"));
+        assert!(descriptors.contains(&"tablet"));
     }
 }

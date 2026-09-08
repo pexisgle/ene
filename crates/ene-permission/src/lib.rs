@@ -235,7 +235,31 @@ pub enum PermissionTechnicalError {
     },
 }
 
+/// Outcome of a compare-and-save consent commit.
+///
+/// An `Ok`-side domain outcome, never an error. Stale expectations return
+/// `StaleCurrent` and are never retried automatically; the caller re-reads
+/// and retries with a fresh expectation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsentCommitOutcome {
+    /// The expected view matched; `record` was stored.
+    Committed {
+        /// Stored consent record.
+        record: ConsentRecord,
+    },
+    /// The expected view did not match; nothing was stored.
+    StaleCurrent {
+        /// Current stored record, or `None` when no consent is stored.
+        current: Option<ConsentRecord>,
+    },
+}
+
 /// Persistence boundary for the current consent record.
+///
+/// Writes use compare-and-save: the caller passes the consent view its
+/// intent was built on, and the store commits only when that view is still
+/// current. This closes the lost-update window where two intents read the
+/// same revision and the second silently overwrites the first.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
@@ -244,8 +268,22 @@ pub trait ConsentRepository: Send + Sync {
     /// Loads the current consent record, if any.
     async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError>;
 
-    /// Persists the current consent record, replacing any previous one.
-    async fn save_current(&self, record: ConsentRecord) -> Result<(), PermissionTechnicalError>;
+    /// Commits `record` iff `expected` still matches the stored view.
+    ///
+    /// `expected` comes from the intent's base-view mark as parsed by the
+    /// caller: a `consent-rev-N` mark carries `Some((consent id, revision))`
+    /// and a `consent-none` mark carries `None`.
+    ///
+    /// `None` with an existing row returns `StaleCurrent` and never
+    /// overwrites; `Some((id, rev))` with a missing row or a differing id or
+    /// revision returns `StaleCurrent`; a match stores `record` and returns
+    /// `Committed`. Callers map `StaleCurrent` to `StaleBaseView` at ingress,
+    /// re-read, and retry.
+    async fn compare_and_save(
+        &self,
+        expected: Option<(String, ConsentRevision)>,
+        record: ConsentRecord,
+    ) -> Result<ConsentCommitOutcome, PermissionTechnicalError>;
 }
 
 /// Tracks minted evaluation ids and enforces single use.
@@ -374,10 +412,12 @@ pub fn check_live_authorization(
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRevision, ConsumerKind,
-        DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision, PurposeKind,
+        CapabilityKind, CheckLiveAuthorizationQuery, ConsentCommitOutcome, ConsentRecord,
+        ConsentRepository, ConsentRevision, ConsumerKind, DenyCode, EvaluationTracker,
+        InferenceUseCandidate, LiveAuthorizationDecision, PermissionTechnicalError, PurposeKind,
         check_live_authorization,
     };
+    use std::sync::Mutex;
 
     fn candidate() -> InferenceUseCandidate {
         InferenceUseCandidate {
@@ -565,5 +605,210 @@ mod tests {
             decision,
             LiveAuthorizationDecision::AllowForThisUse(_)
         ));
+    }
+
+    fn block_on<Fut>(future: Fut) -> Fut::Output
+    where
+        Fut: core::future::Future,
+    {
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        let mut pinned = std::pin::pin!(future);
+        loop {
+            match pinned.as_mut().poll(&mut context) {
+                core::task::Poll::Ready(value) => return value,
+                core::task::Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    struct FakeConsentRepository {
+        current: Mutex<Option<ConsentRecord>>,
+    }
+
+    impl FakeConsentRepository {
+        fn new(initial: Option<ConsentRecord>) -> Self {
+            Self {
+                current: Mutex::new(initial),
+            }
+        }
+
+        fn stored(&self) -> Option<ConsentRecord> {
+            match self.current.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+    }
+
+    impl ConsentRepository for FakeConsentRepository {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake holds a mutex; async matches the repository contract"
+        )]
+        async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
+            Ok(self.stored())
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake holds a mutex; async matches the repository contract"
+        )]
+        async fn compare_and_save(
+            &self,
+            expected: Option<(String, ConsentRevision)>,
+            record: ConsentRecord,
+        ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
+            let mut guard = match self.current.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let matches = match (&expected, &*guard) {
+                (None, None) => true,
+                (Some((expected_id, expected_rev)), Some(current)) => {
+                    expected_id == &current.id && expected_rev == &current.rev
+                }
+                (None, Some(_)) | (Some(_), None) => false,
+            };
+            if matches {
+                *guard = Some(record.clone());
+                Ok(ConsentCommitOutcome::Committed { record })
+            } else {
+                Ok(ConsentCommitOutcome::StaleCurrent {
+                    current: guard.clone(),
+                })
+            }
+        }
+    }
+
+    fn revised_record(rev: u64) -> ConsentRecord {
+        ConsentRecord {
+            id: "consent-1".to_owned(),
+            rev: ConsentRevision::from_u64(rev),
+            provider: "acme".to_owned(),
+            model: "dialogue-1".to_owned(),
+            credential_id: "cred-1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn compare_and_save_commits_on_match() {
+        let repo = FakeConsentRepository::new(Some(revised_record(3)));
+        let next = revised_record(4);
+        let outcome = block_on(repo.compare_and_save(
+            Some(("consent-1".to_owned(), ConsentRevision::from_u64(3))),
+            next.clone(),
+        ));
+        assert!(outcome.is_ok());
+        let Ok(outcome) = outcome else {
+            return;
+        };
+        assert_eq!(
+            outcome,
+            ConsentCommitOutcome::Committed {
+                record: next.clone()
+            }
+        );
+        assert_eq!(repo.stored(), Some(next));
+    }
+
+    #[test]
+    fn compare_and_save_commits_on_empty_match() {
+        let repo = FakeConsentRepository::new(None);
+        let next = revised_record(1);
+        let outcome = block_on(repo.compare_and_save(None, next.clone()));
+        assert!(outcome.is_ok());
+        let Ok(outcome) = outcome else {
+            return;
+        };
+        assert_eq!(
+            outcome,
+            ConsentCommitOutcome::Committed {
+                record: next.clone()
+            }
+        );
+        assert_eq!(repo.stored(), Some(next));
+    }
+
+    #[test]
+    fn compare_and_save_is_stale_on_rev_mismatch() {
+        let stored = revised_record(3);
+        let repo = FakeConsentRepository::new(Some(stored.clone()));
+        let next = revised_record(4);
+        let outcome = block_on(repo.compare_and_save(
+            Some(("consent-1".to_owned(), ConsentRevision::from_u64(1))),
+            next,
+        ));
+        assert!(outcome.is_ok());
+        let Ok(outcome) = outcome else {
+            return;
+        };
+        assert_eq!(
+            outcome,
+            ConsentCommitOutcome::StaleCurrent {
+                current: Some(stored.clone()),
+            }
+        );
+        assert_eq!(repo.stored(), Some(stored));
+    }
+
+    #[test]
+    fn compare_and_save_is_stale_on_unexpected_existing() {
+        let stored = revised_record(3);
+        let repo = FakeConsentRepository::new(Some(stored.clone()));
+        let next = revised_record(4);
+        let outcome = block_on(repo.compare_and_save(None, next));
+        assert!(outcome.is_ok());
+        let Ok(outcome) = outcome else {
+            return;
+        };
+        assert_eq!(
+            outcome,
+            ConsentCommitOutcome::StaleCurrent {
+                current: Some(stored.clone()),
+            }
+        );
+        assert_eq!(repo.stored(), Some(stored));
+    }
+
+    #[test]
+    fn compare_and_save_is_stale_on_id_mismatch() {
+        let stored = revised_record(3);
+        let repo = FakeConsentRepository::new(Some(stored.clone()));
+        let next = revised_record(3);
+        let outcome = block_on(repo.compare_and_save(
+            Some(("consent-2".to_owned(), ConsentRevision::from_u64(3))),
+            next,
+        ));
+        assert!(outcome.is_ok());
+        let Ok(outcome) = outcome else {
+            return;
+        };
+        assert_eq!(
+            outcome,
+            ConsentCommitOutcome::StaleCurrent {
+                current: Some(stored.clone()),
+            }
+        );
+        assert_eq!(repo.stored(), Some(stored));
+    }
+
+    #[test]
+    fn compare_and_save_is_stale_on_expected_but_empty() {
+        let repo = FakeConsentRepository::new(None);
+        let next = revised_record(1);
+        let outcome = block_on(repo.compare_and_save(
+            Some(("consent-1".to_owned(), ConsentRevision::from_u64(1))),
+            next.clone(),
+        ));
+        assert!(outcome.is_ok());
+        let Ok(outcome) = outcome else {
+            return;
+        };
+        assert_eq!(
+            outcome,
+            ConsentCommitOutcome::StaleCurrent { current: None }
+        );
+        assert_eq!(repo.stored(), None);
     }
 }

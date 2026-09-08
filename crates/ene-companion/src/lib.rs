@@ -319,6 +319,19 @@ pub trait HistoryRepository {
         since: Option<WallClockWithTz>,
         limit: u64,
     ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError>;
+
+    /// Looks up one previously accepted message by caller-supplied local id.
+    ///
+    /// The replay path calls this before appending: when a record exists the
+    /// caller returns the original acceptance without re-appending, so
+    /// retries of the same local send stay idempotent. Stream outcomes are
+    /// not replayed through this lookup; a caller that needs missed stream
+    /// items recovers via `HistoryRequest`.
+    async fn lookup_local_id(
+        &self,
+        companion: CompanionId,
+        local_id: &str,
+    ) -> Result<Option<HistoryMessage>, CompanionTechnicalError>;
 }
 
 /// Undelivered registration and reporting contract.
