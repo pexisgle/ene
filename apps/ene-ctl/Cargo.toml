@@ -7,6 +7,10 @@ publish.workspace = true
 
 [dependencies]
 ene-config = { path = "../../crates/ene-config" }
+ene-api = { path = "../../crates/ene-api" }
+ene-plugin-ipc = { path = "../../crates/ene-plugin-ipc" }
+tokio.workspace = true
+uuid.workspace = true
 thiserror.workspace = true
 
 [lints]

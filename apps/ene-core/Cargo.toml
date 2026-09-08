@@ -7,7 +7,23 @@ publish.workspace = true
 
 [dependencies]
 ene-config = { path = "../../crates/ene-config" }
+ene-api = { path = "../../crates/ene-api" }
+ene-companion = { path = "../../crates/ene-companion" }
+ene-credential = { path = "../../crates/ene-credential" }
+ene-inference = { path = "../../crates/ene-inference" }
+ene-permission = { path = "../../crates/ene-permission" }
+ene-plugin-ipc = { path = "../../crates/ene-plugin-ipc" }
+ene-presence = { path = "../../crates/ene-presence" }
+ene-presentation = { path = "../../crates/ene-presentation" }
+ene-primitive = { path = "../../crates/ene-primitive" }
+ene-store = { path = "../../crates/ene-store" }
+tokio.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
