@@ -76,16 +76,9 @@ impl DirectedPair {
 /// Rejection reason for a directed pair with no explanatory purpose.
 ///
 /// Returned by [`DirectedPair::try_new`] when `purpose` is empty.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("directed pair purpose must not be empty")]
 pub struct EmptyPurpose;
-
-impl core::fmt::Display for EmptyPurpose {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "directed pair purpose must not be empty")
-    }
-}
-
-impl std::error::Error for EmptyPurpose {}
 
 #[cfg(test)]
 mod tests {
