@@ -404,7 +404,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 ### Learningと根拠の容量管理
 
-- Learningの過去revision、Experience Summary等の保存dataは、容量都合でEneがデフォルトで自動削除しない。自動retention／cleanupは既定OFFとし、Ownerが明示的に有効化した場合は設定可能とする。
+- Learningの過去revision、Experience Summary等の保存dataは、容量都合でeneがデフォルトで自動削除しない。自動retention／cleanupは既定OFFとし、Ownerが明示的に有効化した場合は設定可能とする。
 - これは通常のLearning上の忘却とは別のretention policyである。Ownerの明示設定なしに、容量不足を理由として過去revisionや根拠を黙って削除しない。通常のHistory／Log削除からのcascadeも許可しない。
 - 明示設定によるcleanupでは、適用範囲とrevision復帰・根拠参照への影響をOwnerへ示す。削除済みのrevisionや根拠を保持・復帰可能であると扱わない。選択可能なdata class、期間、容量、優先順位、具体algorithmは本要件で固定しない。
 

@@ -1,4 +1,4 @@
-app-title = Ene Stage
+app-title = ene Stage
 surface-title = Companion
 detail-title = Detail
 caption-title = Caption
@@ -11,7 +11,7 @@ chat-new-session-hint = Ends this lane and starts a fresh conversation. The old 
 chat-new-session-ready = New chat started.
 chat-placeholder = Type a message…
 chat-you = You
-chat-ene = Ene
+chat-ene = ene
 chat-error = Error
 chat-tool = Tool
 chat-system = System

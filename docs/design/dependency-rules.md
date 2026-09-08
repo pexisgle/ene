@@ -37,7 +37,7 @@ DR番号は本書内の設計規則の参照用であり、製品要件IDでは�
 8. **DR-08: Ownerの制御経路を意味判断の完了から独立させる。** 停止・Cancel・拒否・管理・復旧は、LLM、長時間Task、Body、Voice、拡張の協力・正常終了を前提にしない。操作受付と、適用・停止・復旧の完了は区別する。
 9. **DR-09: coordinationは目的に限定する。** 保全・消去等のcoordinatorは参加範囲・整合・全体完了を扱い、参加ownerは自分の状態と利用への処理・検証を担う。通常ownerは正当な全域消去への参加を拒めず、coordinatorも任意の通常変更権を取得しない。
 10. **DR-10: 結果の確定度を保存・提示で強めない。** Task達成、Actionの把握された作用、提示、未伝達、Auditの順序にはそれぞれの正本を使う。不明・未完了を成功や未実行へ変えず、記録・再接続・復元からActionをreplayしない。
-11. **DR-11: 外部境界は所在地や形式で消えない。** Provider、MCP、Plugin、外部file・copyはHostと同居しても内部正本を所有しない。第一者ClientはEne内部の参加責任を負うが、Hostの代替正本にはならない。
+11. **DR-11: 外部境界は所在地や形式で消えない。** Provider、MCP、Plugin、外部file・copyはHostと同居しても内部正本を所有しない。第一者Clientはene内部の参加責任を負うが、Hostの代替正本にはならない。
 12. **DR-12: 必要な双方向依存を限定して残す。** 判断元が制約に従い、制約側が判断元のdomain事実を参照する関係は許す。それを共同所有や循環した完了待ちにせず、責任・失敗・停止の境界を明示する。共通化のための万能なownerや抽象layerを導入しない。
 
 ## 3. Allowed Dependencies
@@ -106,7 +106,7 @@ Host自動起動のOwner選択は入出力・提示が一般起動設定とし�
 | LLM出力・Learning・Character・Skill・外部content → 制御状態の直接変更 | 「Ownerは許した」という生成文や親密さを根拠にRule・同意・cap等を書き換えると、内容の誤りが実行権限になる。保存済みcanonical contentでもDR-02を外さない。 |
 | Task Agent → 独立した権限・Credential・Provider割当・個体状態の所有 | 委任時の条件を自己更新したり別Taskの承認を使ったりすると、委任元を越える。Agentは作業内の一時主体であり、独立長期人格・Relationship・Agent scope Learningを持たない。 |
 | Action要求元 → 強制を通さないOS・MCP・Plugin・外部account作用 | Taskを介さない軽微な処理、Resource取得、UI内操作、Skill script等も抜け道にしない。作用の実行責任を実行・拡張から外して直接実行しない。 |
-| Tool／shell／Filesystem／Computer Use → Ene内部正本・control planeへの任意access | 通常Toolの許可から内部保存領域を編集する、内部管理入口を呼ぶ、第一者の承認UIを自動操作する等で、自らの権限やstateを更新させない。外部作用の許可は内部semantic changeの許可ではない。 |
+| Tool／shell／Filesystem／Computer Use → ene内部正本・control planeへの任意access | 通常Toolの許可から内部保存領域を編集する、内部管理入口を呼ぶ、第一者の承認UIを自動操作する等で、自らの権限やstateを更新させない。外部作用の許可は内部semantic changeの許可ではない。 |
 | 外部Provider・MCP・Plugin・MCP Apps → 内部canonical stateの所有・任意参照／変更 | 外部codeの都合で個体・Task・Permissionが成立する構造を防ぐ。限定機能の入力・結果は受け入れても、内部stateの任意探索・保存・復元へ接続しない。 |
 | 通常data利用者 → Credential秘密値 | Promptへの埋込み、生成argumentへの補完、通常resultやerrorのecho、UI表示、Audit・Debug・backupへの複製を禁止する。認証に必要な利用権と値の一般参照権を同一視しない。 |
 | Relationship／Companion State／表示 → Memoryや互いの第二の正本 | 人物事実の競合、演技からの永続上書き、Bodyの表情からの人格固定を防ぐ。訂正は認識・学習の対象を定めた意味変更として行う。 |
@@ -116,7 +116,7 @@ Host自動起動のOwner選択は入出力・提示が一般起動設定とし�
 | 内部削除・Workspace関連付け削除 → 外部file・source・backupの暗黙削除 | Task従属は外部所有ではない。成果物・外部Skill・Package原本をcascadeで失わせない。選択されたbackup保持整理は別の許された操作。 |
 | Rule保存・Credential登録・Provider認証・復元・再接続 → 別Actionの開始 | 方針、認証、保存、到達性と、具体的作用の開始を混同しない。不明Actionやmissed回のreplayにしない。 |
 
-内部管理領域の保護は、通常Toolを「ファイルを操作するだけ」と分類して迂回可能にしてはならないというDR-01・02・04からの導出である。Owner管理PCのOS全体への絶対的防御を新たに約束するものではない。特に明示sandbox外MCPの外部process内部には6.2の強制限界があるが、その例外をEne側の正本・control planeを渡す理由にしない。
+内部管理領域の保護は、通常Toolを「ファイルを操作するだけ」と分類して迂回可能にしてはならないというDR-01・02・04からの導出である。Owner管理PCのOS全体への絶対的防御を新たに約束するものではない。特に明示sandbox外MCPの外部process内部には6.2の強制限界があるが、その例外をene側の正本・control planeを渡す理由にしない。
 
 ### 4.2 条件付きで許す依存
 
@@ -224,9 +224,9 @@ Computer Useは、実行・拡張が接続・存在の現在帰属と、権限�
 
 ### 6.1 Provider
 
-Eneの推論利用はProviderの能力・protocol・結果・利用量に依存してよい。Providerはdomainの意味変更、Permission、割当同意、Credential、capのownerではなく、推論結果は利用元への材料に戻す。Providerが生成するTool要求も、実行・拡張のAction境界を省略する許可にはならない。外部側で作用する機能を利用する場合も、Eneが許した目的・作用として取り扱い、その外部内部まで制御できると説明しない。
+eneの推論利用はProviderの能力・protocol・結果・利用量に依存してよい。Providerはdomainの意味変更、Permission、割当同意、Credential、capのownerではなく、推論結果は利用元への材料に戻す。Providerが生成するTool要求も、実行・拡張のAction境界を省略する許可にはならない。外部側で作用する機能を利用する場合も、eneが許した目的・作用として取り扱い、その外部内部まで制御できると説明しない。
 
-Host／LAN／Cloudは所在地の違いであり、ローカルだから無条件に送れるわけではない。既知protocolは直接接続でき、通常差異を汎用Plugin必須にしない。未対応protocolをPluginが補っても、推論の同意・費用・context方針と実行・拡張の受入責任を保つ。Provider内session・cache・copyは内部正本や内部消去保証に含めず、Ene管理下の送信context・cacheは内部消去に参加する。
+Host／LAN／Cloudは所在地の違いであり、ローカルだから無条件に送れるわけではない。既知protocolは直接接続でき、通常差異を汎用Plugin必須にしない。未対応protocolをPluginが補っても、推論の同意・費用・context方針と実行・拡張の受入責任を保つ。Provider内session・cache・copyは内部正本や内部消去保証に含めず、ene管理下の送信context・cacheは内部消去に参加する。
 
 ### 6.2 MCP・Plugin・MCP Apps
 
@@ -234,17 +234,17 @@ Host／LAN／Cloudは所在地の違いであり、ローカルだから無条�
 |---|---|---|
 | Local MCP | 実行・拡張がTool／Resource／Promptを利用する。通常Host作業用はHost側の既定sandboxで利用する。 | 外部code・結果を信頼済みcontrolにしない。動作不能を理由に隔離を黙って解除しない。 |
 | 特定Local MCPのsandbox外例外 | 権限・制約がOwnerの明示許可、command・由来・既知access・risk・失う強制境界を管理する。失効可能とし重要変更で再確認する。 | 個々の仲介Actionは通常Permissionに従う。外部process自身の内部作用に同じCapability強制が及ぶとは表示しない。例外を内部正本accessやPluginへ流用しない。 |
-| Remote MCP | 呼出し、data授受、必要な認証をEne側の制限内で利用する。 | Remote内部は外部管理であり、Local sandboxと同じ強制や確実な停止・rollbackを保証しない。 |
+| Remote MCP | 呼出し、data授受、必要な認証をene側の制限内で利用する。 | Remote内部は外部管理であり、Local sandboxと同じ強制や確実な停止・rollbackを保証しない。 |
 | Plugin | 機能ownerが必要な限定拡張を、実行・拡張の受入・制限の下で利用する。 | Provider protocol、Observation adapter、Body renderer等の機能参加から、任意Core改変・control変更・恒久UI置換を導かない。 |
 | MCP Apps | 入出力・提示が一時的なTool UIを扱い、実行・拡張がMCP側の作用・data授受を制限する。 | 外部UIのclickや生成要求を第一者の承認・設定操作へ昇格しない。UI終了はTask・server・Action終了でなく、再表示はreplay契機でない。 |
 
-拡張がEneへ追加要求を返せる場合も、元の用途・主体・範囲を保ち、担当ownerへの限定要求として再び制約を適用する。Callback等の仕組みを外部codeの任意内部呼出し権にしない。Ene管理下の拡張buffer・保持result・UI一時dataはprivacyと全域消去の参加対象であり、「外部code」を理由に対象外へ逃がさない。一方、外部server保有copyの消去まで内部完了に含めない。
+拡張がeneへ追加要求を返せる場合も、元の用途・主体・範囲を保ち、担当ownerへの限定要求として再び制約を適用する。Callback等の仕組みを外部codeの任意内部呼出し権にしない。ene管理下の拡張buffer・保持result・UI一時dataはprivacyと全域消去の参加対象であり、「外部code」を理由に対象外へ逃がさない。一方、外部server保有copyの消去まで内部完了に含めない。
 
 ### 6.3 第一者Client・OS・Network
 
-第一者ClientはSystem Context上Ene内部である。ここでいうClient境界は外部主体への所有移転ではなく、Hostと異なるruntime・到達性・device trustの境界である。必要最小限の表示・一時操作dataを利用し、接続・入出力の実際の状態を報告できるが、Host canonical stateの独立編集・Host由来のprivate dataや登録済みCredentialの永続cache・Host不在時の独立Action実行を許さない。端末固有の接続材料は別分類としてClientで保持できるがEneの保護対象に残す。接続・存在が利用・更新・再pairing、認証秘密が秘密保護、権限・制約がHost側の信頼・許可・失効を担う。device失効・全データReset後に旧材料だけでHostの信頼を復活させず、Restoreされたdevice参照・許可も現在の接続・認証成立と照合する（SO第8節）。鍵形式・保存方式は固定しない。
+第一者ClientはSystem Context上ene内部である。ここでいうClient境界は外部主体への所有移転ではなく、Hostと異なるruntime・到達性・device trustの境界である。必要最小限の表示・一時操作dataを利用し、接続・入出力の実際の状態を報告できるが、Host canonical stateの独立編集・Host由来のprivate dataや登録済みCredentialの永続cache・Host不在時の独立Action実行を許さない。端末固有の接続材料は別分類としてClientで保持できるがeneの保護対象に残す。接続・存在が利用・更新・再pairing、認証秘密が秘密保護、権限・制約がHost側の信頼・許可・失効を担う。device失効・全データReset後に旧材料だけでHostの信頼を復活させず、Restoreされたdevice参照・許可も現在の接続・認証成立と照合する（SO第8節）。鍵形式・保存方式は固定しない。
 
-接続・存在はLANまたはOwner管理VPNとOSの接続事実に依存し、権限・制約のHost側確認によるpairing、device機能・失効を適用する。入出力・提示はOSの表示・keyboard・音声、共有観測は対象desktop、実行・拡張は許可された作用のためOS・deviceを利用する。OSで可能であることはEneの許可ではない。全payloadのHost中継を要求しないが、Clientからの経路でも現在の制約・秘密非露出・一時data保護を実効的に守れない利用は行わない。
+接続・存在はLANまたはOwner管理VPNとOSの接続事実に依存し、権限・制約のHost側確認によるpairing、device機能・失効を適用する。入出力・提示はOSの表示・keyboard・音声、共有観測は対象desktop、実行・拡張は許可された作用のためOS・deviceを利用する。OSで可能であることはeneの許可ではない。全payloadのHost中継を要求しないが、Clientからの経路でも現在の制約・秘密非露出・一時data保護を実効的に守れない利用は行わない。
 
 Bodyの描画・音声処理の失敗はText・管理経路へ波及させず、fullscreenは対象ClientのBody・ambient Observation・自発発話を休止する。高負荷は各機能が縮退を引き受け、会話・Owner操作・安全判断を背景処理の成功待ちにしない。OS・Host自体の不在を無停止保証やClientによる代替正本で補うものではない。
 
@@ -270,7 +270,7 @@ Backupは選択した内部状態のcopyであり、Workspace関連付けを辿�
 
 保全・消去がOwnerの明示的なPrivacy/Security目的と対象、重要な影響を確認し、保存場所をOwnerに指定させず参加ownerへ対象探索・除去・検証を要求する。意味的な探索補助には個体調整・認識・学習を利用できるが、特定文字列の機械的な検索・削除・残存検証をLLMへ依存させない。意味的同一情報の完全検出は保証しない。
 
-対象範囲は現在値に閉じず、History（Companion間交流を含む）、非会話活動記録・historical log／evidence、Summary、過去revision・evidence、Relationship、対象を復元できるCompanion Stateと保持済み根拠、Skill、Task context・source copy、index・embedding・cache、Audit・Debug内の該当情報、接続中Client、Ene管理下の拡張一時data、処理中context・遅延結果を含む。Companion削除後に残る記録も対象である。各保持・利用責務は原記録と派生物への関係を参加させ、記録ownerだけへの削除要求で完了にしない。
+対象範囲は現在値に閉じず、History（Companion間交流を含む）、非会話活動記録・historical log／evidence、Summary、過去revision・evidence、Relationship、対象を復元できるCompanion Stateと保持済み根拠、Skill、Task context・source copy、index・embedding・cache、Audit・Debug内の該当情報、接続中Client、ene管理下の拡張一時data、処理中context・遅延結果を含む。Companion削除後に残る記録も対象である。各保持・利用責務は原記録と派生物への関係を参加させ、記録ownerだけへの削除要求で完了にしない。
 
 権限・制約と各利用箇所は必要な保留・再保存防止を適用する。削除前から存在する根拠だけによる自動再形成と、削除前の情報を使う処理の遅延した再保存を防ぐ。局所削除が済んでも、別の保存先・context・Clientから戻る可能性を未処理なら全域完了にしない。削除開始から完了までに対象情報が再到着・生成した場合も同じ消去対象とする。完了後にOwnerが改めて提供する情報は新しいExperienceの根拠として扱える。
 
@@ -406,15 +406,15 @@ flowchart LR
 
 ## 9. Forbidden Shortcuts
 
-後続設計で次の近道を採らない。いずれもEneで必要な責任の区別を失わせる。
+後続設計で次の近道を採らない。いずれもeneで必要な責任の区別を失わせる。
 
 | 一見便利な近道 | 破る契約と、必要な関係 |
 |---|---|
 | Companionの全設定とLearningを一つの編集可能contextへ載せる。 | 学習や人格が同意・capを更新できる。経験状態の利用とOwner由来のcontrol変更を分ける（DR-01・02）。 |
 | Task Agentに委任元のAllow・Provider設定・Credentialを丸ごとcopyする。 | 失効後利用、独立予算、別Taskへの流用が可能になる。現在の委任・制約と限定認証利用へ依存させる（DR-03〜05）。 |
 | Permissionで拒否されたfile操作をshell、MCP、画面操作で実現する。 | Tool名を境界と誤認する。実対象・操作・同等作用の制限を維持する（5.5）。 |
-| 許可済みComputer UseでEne自身の承認ボタンや設定画面を操作する。 | AgentがOwner操作を偽装する。内部管理意図の由来を外部作用の許可から生成させない（4.1、5.2）。 |
-| WorkspaceにEneの内部保存領域を指定してstateを修復する。 | 通常Toolから正本・Rule・秘密へ任意accessできる。内部復旧は担当ownerと保全・消去の管理契約へ戻す（4.1）。 |
+| 許可済みComputer Useでene自身の承認ボタンや設定画面を操作する。 | AgentがOwner操作を偽装する。内部管理意図の由来を外部作用の許可から生成させない（4.1、5.2）。 |
+| Workspaceにeneの内部保存領域を指定してstateを修復する。 | 通常Toolから正本・Rule・秘密へ任意accessできる。内部復旧は担当ownerと保全・消去の管理契約へ戻す（4.1）。 |
 | Schedule作成時に将来分の許可を固め、無人時は自動承認する。 | 作成意図を特別tokenにし、失効・capを迂回する。毎回新Taskと現在評価・判断待ちを使う（5.3）。 |
 | Observerが全個体のcontextをまとめ、最も安いProviderへ送る。 | 共有検知がprivate scopeと割当同意を拡張する。関連付け用の限定contextと用途ごとの推論制約を守る（5.3・5.4）。 |
 | Global Memoryの由来リンクから私的Summary・旧revisionを全文取得する。 | 内容の共有を根拠全体へのaccessへ変えてしまう。参照先ごとの利用範囲を守る（DR-06）。 |
@@ -444,7 +444,7 @@ flowchart LR
 
 共通の保存処理や時計を使えるが、同じ保存先・同じtimerからsemantic ownerを統合しない。通常の内部state変更をすべてAction化したり、観測・backupの時機をすべてTask Schedule化したりしない。層・依存反転は実際に必要な契約を満たす場合に選べるが、将来の便利さや図の非循環化だけを導入理由にしない。
 
-未決定の実装方式をRequirement Gapにしない。公開地域・対象年齢等は製品定義の公開計画時留保を維持する。現在のmilestoneのProvider・性能Gateを恒久的な依存条件へ昇格させず、Cloud正本・恒久Workspace・成果物library・汎用Plugin改変・Ene運営relay等の非目標も再導入しない。
+未決定の実装方式をRequirement Gapにしない。公開地域・対象年齢等は製品定義の公開計画時留保を維持する。現在のmilestoneのProvider・性能Gateを恒久的な依存条件へ昇格させず、Cloud正本・恒久Workspace・成果物library・汎用Plugin改変・ene運営relay等の非目標も再導入しない。
 
 ## 11. Traceability and Completeness
 
@@ -505,7 +505,7 @@ flowchart LR
 | 管理操作やPermission解釈が、LLM・長いTask・同じ未承認Actionを待つ。 | 管理経路の独立と、判断用推論の利用条件を審査対象Actionから分離（4.3、5.2、7.4）。 |
 | Client runtime境界をHost内Subsystem階層へ直写する。 | 責務はruntimeを横断でき、Client依存活動だけに帰属を要求。単一layer・新mediator・固定moduleを導入しない（1、3.2、8、10）。 |
 
-既存文書で問題名として独立に列挙されていなかった、**通常ToolからEne自身の管理入口・保存領域へ回り込む依存**と、**Permission等の意味判断に必要な推論の循環した許可待ち**も分析対象とした。前者は信頼境界とsemantic ownership、後者は割当同意・費用制限と管理経路の独立から導出した規則である。新機能や安全保証の追加ではなく、既存契約を破らず成立させる条件として4.1・4.3・5.2へ明示した。外部process内部の強制限界も6.2で保持する。
+既存文書で問題名として独立に列挙されていなかった、**通常Toolからene自身の管理入口・保存領域へ回り込む依存**と、**Permission等の意味判断に必要な推論の循環した許可待ち**も分析対象とした。前者は信頼境界とsemantic ownership、後者は割当同意・費用制限と管理経路の独立から導出した規則である。新機能や安全保証の追加ではなく、既存契約を破らず成立させる条件として4.1・4.3・5.2へ明示した。外部process内部の強制限界も6.2で保持する。
 
 この設計を妨げる**新たなRequirement Ambiguity／Gapは見つかっていない**。解決済みA-01〜A-04／G-01・G-02を維持する。認可・鮮度・競合・隔離・検証・経路の具体mechanismは設計自由度であり、未解決の製品要件へ昇格させない。
 

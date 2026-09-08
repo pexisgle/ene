@@ -82,12 +82,12 @@ Observationの詳細設計は、この点を最初に決めなければ着手で
 **分類:** architecture artifactの欠陥
 
 **Affected artifacts:**
-`runtime-topology.md` Runtime Elements「C: Client上のEne実行」Authoritative state列、Trust Boundaries「HostとClient device」。`state-ownership.md` 4.15（pairing行）、4.21、§8（Host → 第一者Client行、末尾段落）。`dependency-rules.md` 6.3、11.4 Later-design Notes。`runtime-flows.md` §12「Client排他性と安全な区切り」。
+`runtime-topology.md` Runtime Elements「C: Client上のene実行」Authoritative state列、Trust Boundaries「HostとClient device」。`state-ownership.md` 4.15（pairing行）、4.21、§8（Host → 第一者Client行、末尾段落）。`dependency-rules.md` 6.3、11.4 Later-design Notes。`runtime-flows.md` §12「Client排他性と安全な区切り」。
 
 **Finding:**
 Remote Clientは、再起動をまたいでHostへ再接続するために、少なくともHost到達情報と自身のdevice identityを証明する材料を永続的に保持する必要がある。要件は「新しいClientはOwnerがHost側で確認できるdevice pairingを必要とする」「HostとClientの通信を保護し…deviceごとに失効できる」と定めており、失効可能なdevice別の認証材料が存在することを前提にしている。
 
-一方、architectureはClientについて「Ene内部永続状態の正本を持たない」「長期private状態やCredentialを永続cacheしない」（RT）、「History・Summary・Learning・Relationship・Companion State・Credential等を永続cacheしない」（SO §8）と繰り返し、`state-ownership.md` 4.15でHost側については「秘密値を要する認証材料は認証秘密の境界に置く」と決めている。しかしClient側に残る認証材料については、それが「Eneの永続状態」なのか、「Credential」に該当するのか、どの責務がその保護・失効・全データReset時の扱いを担うのかを、いずれのartifactも決めていない。`dependency-rules.md` 11.4と`runtime-flows.md` §12は「Client bootstrap／認証材料の受渡し」をLater-design Noteおよび自由度に置くが、受渡し方式ではなく、Clientがそれを**保持してよいか**という位置付け自体が未定義である。
+一方、architectureはClientについて「ene内部永続状態の正本を持たない」「長期private状態やCredentialを永続cacheしない」（RT）、「History・Summary・Learning・Relationship・Companion State・Credential等を永続cacheしない」（SO §8）と繰り返し、`state-ownership.md` 4.15でHost側については「秘密値を要する認証材料は認証秘密の境界に置く」と決めている。しかしClient側に残る認証材料については、それが「eneの永続状態」なのか、「Credential」に該当するのか、どの責務がその保護・失効・全データReset時の扱いを担うのかを、いずれのartifactも決めていない。`dependency-rules.md` 11.4と`runtime-flows.md` §12は「Client bootstrap／認証材料の受渡し」をLater-design Noteおよび自由度に置くが、受渡し方式ではなく、Clientがそれを**保持してよいか**という位置付け自体が未定義である。
 
 **Evidence:**
 
@@ -100,7 +100,7 @@ Remote Clientは、再起動をまたいでHostへ再接続するために、少
 Remote Clientの詳細設計は、Clientに何かを永続保持させた時点で「Client非正本」「Credential非cache」の文言と衝突する。位置付けを決めずに進めると、(a) 認証材料を「Credential」に分類して認証秘密の契約（一般App Data分離、full backup除外、全データReset削除、失効）を機械的に当てて過剰になる、(b) 逆に「一時data」に分類してHost側で失効しても端末側に残る材料の保護・破棄を誰も引き受けない、のどちらかに滑る。SO 4.15の「秘密値を要する認証材料は認証秘密の境界に置く」がHost側の記述であることも、Client側まで認証秘密が責任を持つと誤読されやすい。境界の変更は不要であり、RTのC列とSO §8への一段落の追記で閉じる。
 
 **Recommended disposition:**
-`runtime-topology.md` CのAuthoritative state列と`state-ownership.md` §8に、Clientが保持する接続認証材料（device identity・Host到達情報・失効可能な認証材料）を「Ene内部永続状態でも登録Credentialでもない、Client deviceに属する接続材料」として明示し、Host側の失効（権限・制約が正本）に対する端末側の破棄・無効化責任と、全データReset・device失効・再pairing時の扱いをどの責務が担うか（接続・存在が有力だが本レビューでは決めない）を記す。受渡し方式・鍵の形式・保護方式は引き続き自由度に残す。Remote Clientの詳細設計前に閉じる。
+`runtime-topology.md` CのAuthoritative state列と`state-ownership.md` §8に、Clientが保持する接続認証材料（device identity・Host到達情報・失効可能な認証材料）を「ene内部永続状態でも登録Credentialでもない、Client deviceに属する接続材料」として明示し、Host側の失効（権限・制約が正本）に対する端末側の破棄・無効化責任と、全データReset・device失効・再pairing時の扱いをどの責務が担うか（接続・存在が有力だが本レビューでは決めない）を記す。受渡し方式・鍵の形式・保護方式は引き続き自由度に残す。Remote Clientの詳細設計前に閉じる。
 
 ### F-03 — Restoreで現在のCredential storeがどうなるかが未決定であり、SO 4.21の場合分けから欠けている
 
@@ -159,7 +159,7 @@ Finding数を増やさないために、疑問として検討した事項の分�
 ### Driverから下位artifactへ
 
 - 意味の変化: 確認できなかった。特に、個体削除で残るHistory・非会話活動記録・Task記録と消える個体固有状態・Relationship・Scheduleの区別、切断時のHost PC上Clientへの移動とStopの区別、Running個体のactiveなしとStoppedの区別は、全artifactで一致している。
-- 要件にない強い制約の追加: 下位が追加した制約は、通常ToolからEne内部正本・管理入口への回り込み禁止（DR 4.1）、判断用推論への割当同意・費用制限の適用（DR 5.2）、未伝達事項のfull backup包含（SO 4.4）、Host上の作業用Local MCPのHost配置（RT-06）の四点に限られ、いずれも要件の信頼境界・同意契約・Client非依存継続から導出可能な範囲にある。
+- 要件にない強い制約の追加: 下位が追加した制約は、通常Toolからene内部正本・管理入口への回り込み禁止（DR 4.1）、判断用推論への割当同意・費用制限の適用（DR 5.2）、未伝達事項のfull backup包含（SO 4.4）、Host上の作業用Local MCPのHost配置（RT-06）の四点に限られ、いずれも要件の信頼境界・同意契約・Client非依存継続から導出可能な範囲にある。
 - Design Freedomの喪失: 確認できなかった。process配置、IPC、pairing手段、駆動・待機方式、調停方式、Summary粒度、減衰式、Permission評価algorithm、sandbox機構、backup形式、Task化閾値、Capture時機は各artifactのDesign Freedom節で維持されている。
 - 要件の取りこぼし: 確認できなかった。
 

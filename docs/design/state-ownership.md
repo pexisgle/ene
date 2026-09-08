@@ -4,18 +4,18 @@
 
 ## 1. Overview
 
-State Ownershipは、**何についての状態を正しいものとして扱い、その意味をどの責務が変更し、いつまで何のために利用するか**という契約である。HostをEne内部domain dataの正本とする既決事項の下で、個体、学習、記録、制御、作業等の意味上の責任を分ける。
+State Ownershipは、**何についての状態を正しいものとして扱い、その意味をどの責務が変更し、いつまで何のために利用するか**という契約である。Hostをene内部domain dataの正本とする既決事項の下で、個体、学習、記録、制御、作業等の意味上の責任を分ける。
 
 本書のsemantic ownerは、その状態の意味・通常の変更・lifecycle判断を引き受ける責務を指す。Companionへの所属、Taskへの従属、複数箇所からの参照、実行場所、保存処理の担当とは異なる。同じSubsystemが複数stateのsemantic ownerになっても、一つの状態やlifecycleへ統合することを意味しない。
 
-ここでいうcanonicalは、Eneがその意味について参照すべき正本であり、内容が客観的に真であることや信頼できる指示であることを意味しない。Memoryは訂正可能な現在認識、Conversation Historyは保持された発言の記録、Action結果はEneが把握した作用と確定度の記録である。これらはそれぞれの意味について正本でも、互いを代替しない。
+ここでいうcanonicalは、eneがその意味について参照すべき正本であり、内容が客観的に真であることや信頼できる指示であることを意味しない。Memoryは訂正可能な現在認識、Conversation Historyは保持された発言の記録、Action結果はeneが把握した作用と確定度の記録である。これらはそれぞれの意味について正本でも、互いを代替しない。
 
 決定するのは意味・正本・変更責任・所属／利用範囲・根拠・lifecycleと横断整合条件である。DB、repository、Rust object、process memoryの所有や唯一のwriterは決めない。第6節のcoordinationは、Step 5のallowed dependency graphやtransaction protocolを指定しない。
 
 ## 2. Ownership Principles
 
 1. **同じ意味には一つの正本を置く。** 表示、検索、結果報告、監査、外部送信用の表現を作っても、元の状態を独自に変更する正本へ昇格させない。異なる意味の状態に同じ情報が関係することは許す。
-2. **Host正本とsemantic ownerを分ける。** 個体・会話・Learning・Task・制御条件等の永続domain stateはHostに残り、各domainの責務がその意味を管理する。Client、Provider、MCP、Pluginがdomain stateの唯一の保持者になる設計は成立しない。端末固有の接続材料は第8節の別分類としてEneの保護対象に置く。
+2. **Host正本とsemantic ownerを分ける。** 個体・会話・Learning・Task・制御条件等の永続domain stateはHostに残り、各domainの責務がその意味を管理する。Client、Provider、MCP、Pluginがdomain stateの唯一の保持者になる設計は成立しない。端末固有の接続材料は第8節の別分類としてeneの保護対象に置く。
 3. **意味変更、制約の強制、保存、全域操作への参加を分ける。** 権限・制約が拒否できてもTaskやLearningを所有しない。保全・消去が削除・復元を調整しても、その対象の通常ownerにはならない。
 4. **静的構成、継続個体、形成済み状態を分ける。** CharacterのrevisionとCompanionへの部品適用、Experience由来のMemory・Relationship・Companion Stateは別の変更である。Package更新を成長の初期化にしない。
 5. **現在認識、過去認識、根拠、原記録を分ける。** Memoryを主要な知識状態とし、Summaryを根拠、Historyを発言や活動の記録として扱う。RelationshipとCompanion Stateに詳細事実の第二の正本を置かない。
@@ -24,7 +24,7 @@ State Ownershipは、**何についての状態を正しいものとして扱い
 8. **生成されたcontentを制御の正本へ直結しない。** 許可・Rule・同意・cap等はOwnerに由来する判断と適用範囲を必要とする。LLMは解釈を支援できるが、その出力や形成済み状態だけでは変更できない。
 9. **通常の意味更新と消去の目的を分ける。** Learningの忘却・訂正・統合等では保存済み内容・過去revision・根拠を削除しない。通常History/log削除は形成済み状態へcascadeしない。容量retentionは通常忘却と別であり、Learning revision・Summary等の自動cleanupは既定OFF、Ownerの明示opt-in時に限り設定可能とする（4.24・6.5）。明示的なPrivacy/Security目的のtargeted deletionはこれらの保持原則より優先する。
 10. **停止要求、内部状態の確定、外部作用の結果は別である。** Cancelや切断から外部作用の取消・不存在を推測せず、不明を未実行に戻さない。状態参照やClient移動をAction replayの理由にしない。
-11. **Copyと一時dataにも内部での利用責任がある。** 派生物を正本にしないことは、消去・秘密保護の対象外にすることではない。Ene管理下の処理中data・遅延結果・Client一時dataも全域操作へ参加する。
+11. **Copyと一時dataにも内部での利用責任がある。** 派生物を正本にしないことは、消去・秘密保護の対象外にすることではない。ene管理下の処理中data・遅延結果・Client一時dataも全域操作へ参加する。
 12. **復元する内容と、現在使える権限を分ける。** Backupはcopyであり、restoreが成功して初めて復元内容がHostの正本になる。復元された設定や作業記録だけで自動処理を再有効化しない。
 
 一般App DataはOwnerのOS accountだけが扱える領域で保護し、Credentialは分離する。すべての内部状態へ一律のapplication-level暗号化を課すことは、このownership契約から導かない。
@@ -82,7 +82,7 @@ Companion／Globalは内部Memory・Skillの利用scopeである。4.16のObserv
 
 ### 4.1 Characterの静的構成とrevision
 
-**正本と変更責任:** Eneへ取り込んだ静的人格、Body、Voice・motion構成、推奨Skillとそのrevisionは**Character**が管理する。Ownerによる基本編集・部品差替え・importを通常変更の根拠とし、外部Package原本は別の所有物として扱う。外部fileの変更だけで内部Characterの更新済み状態にはならない。
+**正本と変更責任:** eneへ取り込んだ静的人格、Body、Voice・motion構成、推奨Skillとそのrevisionは**Character**が管理する。Ownerによる基本編集・部品差替え・importを通常変更の根拠とし、外部Package原本は別の所有物として扱う。外部fileの変更だけで内部Characterの更新済み状態にはならない。
 
 Characterのrevisionは配布可能な静的構成についての正本であり、「そのCompanionが現在どの部品を使うか」は4.2の正本を参照する。推奨Skillの構成上の指定と、取り込んだ内部Skillの有効revision・学習による改善は別である。
 
@@ -210,7 +210,7 @@ Taskの削除と、指定日以前のTask logの保持整理も区別する。�
 
 ### 4.12 Actionの実行状況、作用の確定度、停止結果
 
-**正本と変更責任:** **実行・拡張**が、依頼された作用について、実対象・操作・送信先、実行の受付、把握できた作用、未完了・成功不明、停止要求と停止結果を管理する。これは外部世界そのものの正本ではなく、**Eneが何を実行し、何を確認できたか**の正本である。外部resultも由来と確認できた範囲を保ち、Task Agentの申告だけで成功を確定しない。
+**正本と変更責任:** **実行・拡張**が、依頼された作用について、実対象・操作・送信先、実行の受付、把握できた作用、未完了・成功不明、停止要求と停止結果を管理する。これは外部世界そのものの正本ではなく、**eneが何を実行し、何を確認できたか**の正本である。外部resultも由来と確認できた範囲を保ち、Task Agentの申告だけで成功を確定しない。
 
 Task内のActionはTask／委任に対応付け、Taskの進捗・作用報告はこの結果を参照・集約する。同じ作用の確定度を作業側で独立更新しない。保存先やrecord構造の分割は要求せず、Task記録に含めて保持する場合もこの意味責任は維持する。Task外の軽微なActionも同じ作用契約を持ち、個体調整の活動やAuditへ必要な事実を返す。これを理由に全ActionをTask化しない。
 
@@ -224,7 +224,7 @@ Permission評価の正本は権限・制約、外部作用の把握は実行・�
 |---|---|---|
 | Taskとfolder・file・sourceのWorkspace関連付け | **作業**がTask従属の内部stateとして管理する。 | Task削除時に関連付けを削除する。同じ外部sourceを参照するTask間で作業状態やPermissionを共有しない。backupには関連付けを含める。 |
 | 永続成果物の保存先の選択・判断待ち | **作業**がOwnerの依頼とPermissionに対応付ける。 | Workspace folderを許された既定先にできる。未定なら最終保存前にOwnerへ尋ねる。外部fileの作成成功やその所有とは別。 |
-| 外部Workspaceの実体、案内file・Skill、通常fileとしての成果物 | **Ownerまたは外部system**の所有物。Eneは許されたActionで利用する。 | Eneが作成した成果物も通常fileとして外部に保存する。Task・Companion削除、Reset、backup、restoreによって黙って変更・削除しない。 |
+| 外部Workspaceの実体、案内file・Skill、通常fileとしての成果物 | **Ownerまたは外部system**の所有物。eneは許されたActionで利用する。 | eneが作成した成果物も通常fileとして外部に保存する。Task・Companion削除、Reset、backup、restoreによって黙って変更・削除しない。 |
 | 作業のため内部に保持したsource / resultのcopy | **作業**がTask contextとして採用・保持する意味を管理する。実行・拡張は取得結果の由来・確定度を供給する。 | 元の外部fileの現在内容とは別。内部copyにはPrivacy・秘密保護・retention・targeted deletionを適用する。外部所有を理由に内部消去から除外しない。 |
 | 一時中間file | **作業**が一時作業物としての用途・必要期間・安全な整理対象を管理し、実際の作用は実行・拡張が担う。 | Task終了または保持方針で整理する。外部Workspace内に置いた中間fileも外部fileへの作用としてPermissionに従い、内部Resetの一括削除対象へ取り込まない。永久成果物と誤認・混同しない。 |
 
@@ -258,7 +258,7 @@ Pairing済み、接続済み、active、Action許可済みは四つの異なる�
 
 ### 4.16 観測設定・観測候補と、自発性の設定・抑制
 
-**共有観測**はClientごと・Ene全体のObserver ON／Pause／OFF、Clientごとの頻度という観測運用設定を管理する。**個体調整**はCompanionごとの雑談・通知・内部調査・Companion間交流のOFFを含む頻度・上限、未応答等を踏まえた活動抑制を管理する。Ownerが設定する内容はHost正本とし、観測adapterやClient内の表示設定へ所有を移さない。学習された関心がこれらのOwner設定を直接変更することはない。
+**共有観測**はClientごと・ene全体のObserver ON／Pause／OFF、Clientごとの頻度という観測運用設定を管理する。**個体調整**はCompanionごとの雑談・通知・内部調査・Companion間交流のOFFを含む頻度・上限、未応答等を踏まえた活動抑制を管理する。Ownerが設定する内容はHost正本とし、観測adapterやClient内の表示設定へ所有を移さない。学習された関心がこれらのOwner設定を直接変更することはない。
 
 観測の実効的な可否・時機は、観測設定、現在の存在個体、接続、fullscreen、送信同意、費用・資源制限を参照した結果である。観測が有効でCompanionが一体以上存在するClientのdesktop全体を対象とし、個別windowの所有・観測設定に置き換えない。設定ONそのものを常時実行中と表示しない。複数ClientのCaptureは同時に行わず、Clientごとに共有する。時機の調整状態は共有観測のruntime状態であり、Task Scheduleではない。
 
@@ -280,7 +280,7 @@ Quiet hours等のRule、Permission・費用・資源・loopの強制上限は**�
 
 Voice入力には話者認証済みという属性を与えない。周囲の発話をOwner入力として扱う可能性を説明し、音声の入力経路や認識結果そのものを認証・制御権限の正本にしない。
 
-OSのfullscreen・負荷・device状態は外部の現在事実であり、Ene側の検知結果には鮮度と利用可能性がある。Bodyの品質低下・休止、Voiceのfallback、Text管理面の利用可否を一つの成功フラグへまとめない。日英の表示やVoice／Textの切替で元のPermission・結果・失敗の意味を変えない。
+OSのfullscreen・負荷・device状態は外部の現在事実であり、ene側の検知結果には鮮度と利用可能性がある。Bodyの品質低下・休止、Voiceのfallback、Text管理面の利用可否を一つの成功フラグへまとめない。日英の表示やVoice／Textの切替で元のPermission・結果・失敗の意味を変えない。
 
 Setupや設定画面は各状態への入力経路であり、全設定のownerにはならない。Host自動起動の選択は、Ownerが選ぶ一般的な起動・日常利用設定として**入出力・提示**がsemantic ownerとなる。これは各domain設定の入力画面を所有することからの一般化ではなく、本設定の意味が起動時の利用体験と説明・選択に限られるためである。選択の正本はHostに置き、OSへの設定作用・確認できた適用結果は**実行・拡張**、backup・restore・Reset等の全域操作への参加調整は**保全・消去**が担う。選択済みとOS適用済みを混同しない。この設定からTaskの明示再開、restore後の有効化、active Client不在時のHost側Client環境の自動起動を導かない。新しいSettings／Setup state layerは作らない。
 
@@ -315,7 +315,7 @@ LLM出力、Character、Memory、Skill、Summary、Relationship、Companion Stat
 
 ### 4.20 利用量・費用・資源の記録と制限適用
 
-**推論**がProvider利用量、Provider報告値・Ene推定値・不明の区別、費用推定の根拠を管理する。Provider報告値は外部からの報告という原記録、推定費用や表示集計はその根拠に基づく派生値として区別する。Eneの推定をProviderの請求確定値へ昇格させない。
+**推論**がProvider利用量、Provider報告値・ene推定値・不明の区別、費用推定の根拠を管理する。Provider報告値は外部からの報告という原記録、推定費用や表示集計はその根拠に基づく派生値として区別する。eneの推定をProviderの請求確定値へ昇格させない。
 
 推論以外のAction回数・実行時間・並列稼働等は**その利用を管理する責務**が把握した事実を供給する。例えば作業は委任稼働、実行・拡張はAction実行、保全・消去は保存量の把握に責任を持つ。権限・制約は各事実を用いて上限に対する現在の利用・継続可否を管理し、独自の使用実績を競合する正本として作らない。
 
@@ -341,9 +341,9 @@ Credential等のsecretはfull backupから除外する。Restoreは開始前か�
 
 **実行・拡張**が、利用するMCPの非秘密接続設定・command・設定の由来、Pluginの限定された拡張点への受入・有効化・利用状況を管理する。Ownerによる設定や受入が変更の根拠であり、外部codeの自己申告は機能情報の入力にとどまる。機能側の状態、例えばBodyの表現やObservation routingの意味はそれぞれのownerに残す。
 
-Local MCPのsandbox外許可の正本は権限・制約、秘密値は認証秘密である。接続・起動成功から包括的な許可を作らない。外部serverの保存内容や外部processの継続は外部所有であり、Eneが把握した接続・停止結果と区別する。Eneに取り込んだresultやEne管理下の拡張一時dataは内部Privacy・消去契約に従う。
+Local MCPのsandbox外許可の正本は権限・制約、秘密値は認証秘密である。接続・起動成功から包括的な許可を作らない。外部serverの保存内容や外部processの継続は外部所有であり、eneが把握した接続・停止結果と区別する。eneに取り込んだresultやene管理下の拡張一時dataは内部Privacy・消去契約に従う。
 
-MCP Appsの表示・操作中dataは入出力・提示が扱う一時表現であり、MCP側の業務状態やEneのPermissionの正本ではない。Tool UIが閉じてもTask・Action・serverの終了とはせず、再表示で作用を自動replayしない。
+MCP Appsの表示・操作中dataは入出力・提示が扱う一時表現であり、MCP側の業務状態やeneのPermissionの正本ではない。Tool UIが閉じてもTask・Action・serverの終了とはせず、再表示で作用を自動replayしない。
 
 ### 4.23 Audit、診断、Debug capture
 
@@ -406,7 +406,7 @@ Backupの保護はOwnerが選択し、暗号化を利用できる。非暗号化
 
 Raw Observation、Raw Voice、詳細Tool payload、内部推論・chain-of-thoughtは通常保存しない。Clientの表示copy、入力途中data、音声buffer、観測候補、推論中context、MCP Appsの表示data等は、目的に必要な期間・範囲だけで利用する。**失ってよいのは一時表現であり、受理済みの指示、必要な作業記録、未伝達事項、作用不明まで失ってよいわけではない。** 意味を残す必要がある時点で対応するHost正本へ反映し、正本への反映が不明なものを保存・完了済みと表示しない。
 
-外部Workspace・成果物、Provider／MCP側の固有状態、外部Package／Skill原本、export済みcopy、Owner保存backupはEneのlive stateではない。Targeted deletion・Reset・通常削除の成功に、それらの消去を含めない。Eneが保持したsource copy、内部Skillとして取り込んだ内容、Ene管理下のPlugin・Tool UI内dataは内部の利用・消去責任に戻る。外部code由来であることを内部dataの消去除外条件にしない。
+外部Workspace・成果物、Provider／MCP側の固有状態、外部Package／Skill原本、export済みcopy、Owner保存backupはeneのlive stateではない。Targeted deletion・Reset・通常削除の成功に、それらの消去を含めない。eneが保持したsource copy、内部Skillとして取り込んだ内容、ene管理下のPlugin・Tool UI内dataは内部の利用・消去責任に戻る。外部code由来であることを内部dataの消去除外条件にしない。
 
 ## 6. Cross-state Consistency
 
@@ -451,7 +451,7 @@ Companion削除は「そのCompanionに関する情報を一切残さない」�
 完了条件は次の全体である。
 
 1. 対象範囲・重要な影響を説明し、必要な確認を経ている。無関係な共有情報は可能な範囲で分離し、分離不能な影響を説明している。
-2. 対象情報を復元できる内部History（Companion間交流を含む）、非会話活動記録・historical log／evidence、Summary、Memoryと過去revision、Relationship、Companion Stateと保持済み根拠、Skill、Task・source copy、index・embedding・cache、Audit／Debug等に残った該当情報、接続中Client・Ene管理下の拡張一時dataを除去または復元不能にしている。Companion削除後の残存記録も除外しない。
+2. 対象情報を復元できる内部History（Companion間交流を含む）、非会話活動記録・historical log／evidence、Summary、Memoryと過去revision、Relationship、Companion Stateと保持済み根拠、Skill、Task・source copy、index・embedding・cache、Audit／Debug等に残った該当情報、接続中Client・ene管理下の拡張一時dataを除去または復元不能にしている。Companion削除後の残存記録も除外しない。
 3. 開始から完了までに対象情報が再び内部へ到着・生成した場合も同じ消去対象として扱い、新しいExperienceとして除外しない。削除前の情報を使う処理、処理中context、遅延した推論・Tool結果からの再保存を防いでいる。古い根拠・revision・indexだけによる自動再形成も防いでいる。
 4. 指定文字列は内部dataを機械的に検索・削除し、残存を検証している。LLMの要約や想起抑制で代用しない。言い換え・意味的同一情報の探索補助と、その完全検出を保証しない範囲を区別している。
 5. 各参加先の未完了・失敗を集約しており、未確認の局所結果を全域完了にしていない。途中再起動でも未完了の認識と必要な保留を維持する。完了記録自体に削除内容を再保存していない。
@@ -470,7 +470,7 @@ Targeted deletionによる通常の根拠保持・Historyと形成済み状態�
 | Full backup | **保全・消去**が対象時点・内部範囲・除外・作成結果を調整。全state ownerが必要な内部内容と参照対応を提供し、認証秘密が秘密値の除外へ参加する。 | 個体・構成、会話History（Companion間交流を含む）・保存された非会話活動記録／evidence・未伝達管理、Summary・Learning・関係・内的状態と必要な変更経緯、Task／作用記録・Workspace関連付け、Schedule、Rule・Observer専用assignmentを含む同意・費用設定、Audit等を復元可能な対応で含む。削除済み個体の残存記録も含め、外部実体・Credential等のsecretを含まない。単に各部のcopyが作れたことだけをfull backup成功にしない。 |
 | Restore | **保全・消去**が対応backupによる対象内部dataの全置換を調整し、現在のCredential storeは置換対象から除外して維持する。各ownerが復元内容・参照・利用可能性を確認し、認識・学習がCompanion Stateの経過時間、認証秘密が復元参照と現在のCredentialの照合・不足／無効時の再認証、権限・制約と活動ownerが保留を扱う。 | 失敗時は復元前の正常状態を維持する。成功後は復元内容をHost正本とし、旧live状態と二重の正本にしない。Task・Schedule・外部接続の自動処理を保留し、Ownerが確認してまとめて有効化できる。 |
 | 設定Reset | **保全・消去**が一般設定へのReset範囲を調整し、各設定ownerが既定化と保護対象の保持を確認する。 | UI・Body・Voice等の一般設定を戻し、個体・履歴・Summary・Learning・関係・内的状態・Task・Schedule・Credential・Permission Rule・Provider同意・費用capを削除しない。 |
-| 全データReset | **保全・消去**が列挙と強い確認、内部消去、処理中data・Client一時copyの扱いを調整し、認証秘密を含む全ownerが参加する。 | Host内部Ene dataとCredentialが削除され、旧処理・一時copyから内部状態を戻さない。外部Workspace・外部Skill・Ownerが別保存先へ作成したbackupを削除せず、何が残るかを示す。 |
+| 全データReset | **保全・消去**が列挙と強い確認、内部消去、処理中data・Client一時copyの扱いを調整し、認証秘密を含む全ownerが参加する。 | Host内部ene dataとCredentialが削除され、旧処理・一時copyから内部状態を戻さない。外部Workspace・外部Skill・Ownerが別保存先へ作成したbackupを削除せず、何が残るかを示す。 |
 
 Backupは処理中memoryの丸ごと保存を要求しない。意味上の継続に必要な内部状態を対応させ、一時buffer・Provider session等の復元を前提にしない。未完了の消去・復旧操作がある場合も、その状況と利用上の制約を無視した「正常・即実行可能」なcopyとして扱わない。具体的に作成を待たせるか、未完了状態も復旧可能に含めるかは整合条件を満たす方法の選択に残す。
 
@@ -516,13 +516,13 @@ Runtime TopologyのH／C／P／M／X／Uを維持する。ここでは配置を�
 | Host → 第一者Client | 必要範囲の会話・進捗・結果・由来説明、現在状態、Body資材、操作・確認用のrepresentation。 | ClientはHostからのdataの一時的な利用者であり、History・Summary・Learning・Relationship・Companion State・Provider／MCP等の登録済みCredentialを永続cacheしない。端末固有の接続材料は本節後述の別分類とする。正本はHostの各意味ownerに残る。 |
 | 第一者Client → Host | 会話入力、依頼・steering、承認・拒否、Mute・停止・管理操作の意図、実際の入出力・接続・device状況。 | 意味のある変更はHostの担当ownerが受理・確定する。入力・承認の由来と対象を保持し、Clientの表示値を丸ごと正本へ昇格させない。 |
 | Host管理の帰属 ↔ Clientの実際の入出力 | 現在のactive帰属と利用可能性、round・Actionの安全な区切り、切断・提示状況。 | Client側は不明時に活動を続けない。Hostも現地での作用・提示が成功したと推定しない。記録と未伝達状態はClient消失で失わない。 |
-| Ene ↔ Provider | 割当同意内の推論data、結果、能力情報、利用量、session／cache等の補助情報。 | Providerの所在地にかかわらず外部利用先。推論結果の意味変更判断は利用元へ戻す。Provider保持copyは内部正本にも内部消去保証にも含めない。 |
-| Ene ↔ MCP／Plugin | 許可された作用要求、Resource・Prompt・result、限定された機能の入出力。 | 外部codeは内部stateや制御のownerにならない。Ene管理下で保持するcopy・一時dataは内部契約へ参加する。外部process自身の状態・作用とは区別する。 |
+| ene ↔ Provider | 割当同意内の推論data、結果、能力情報、利用量、session／cache等の補助情報。 | Providerの所在地にかかわらず外部利用先。推論結果の意味変更判断は利用元へ戻す。Provider保持copyは内部正本にも内部消去保証にも含めない。 |
+| ene ↔ MCP／Plugin | 許可された作用要求、Resource・Prompt・result、限定された機能の入出力。 | 外部codeは内部stateや制御のownerにならない。ene管理下で保持するcopy・一時dataは内部契約へ参加する。外部process自身の状態・作用とは区別する。 |
 | 第一者Client ↔ MCP Apps | Tool UI表示・操作用の必要最小限の一時data。 | 第一者のPermission／設定／復旧の正本を持たず、接続中の内部消去にも参加する。UI終了と外部server・Action・Taskの終了は別。 |
-| Ene ↔ Workspace／外部制作file | Taskの関連付けを通じた許可範囲の読書き、Character・Skill等のimport／export。 | 外部fileの現在内容と内部取込copyを区別し、関連付け・内部stateの削除を外部へcascadeさせない。 |
-| Ene ↔ backup／export先 | 対象範囲を選んだcopyの出力と、明示restoreの入力。 | 出力後はlive正本でなく、内部削除でcopyも消えたとしない。Restoreは現在のHost Credential storeを維持する対象内部dataの全置換で、過去の実行許可を無条件に復活させない。 |
+| ene ↔ Workspace／外部制作file | Taskの関連付けを通じた許可範囲の読書き、Character・Skill等のimport／export。 | 外部fileの現在内容と内部取込copyを区別し、関連付け・内部stateの削除を外部へcascadeさせない。 |
+| ene ↔ backup／export先 | 対象範囲を選んだcopyの出力と、明示restoreの入力。 | 出力後はlive正本でなく、内部削除でcopyも消えたとしない。Restoreは現在のHost Credential storeを維持する対象内部dataの全置換で、過去の実行許可を無条件に復活させない。 |
 
-**Clientのpairing・接続材料:** 端末に属する接続材料は、Hostから複製するHistory／Learning等のdomain dataやProvider／MCP向け登録Credentialとは別の分類であり、必要に応じてClient側に保持できる。Eneの管理・保護対象から除外する意味ではなく、Hostの個体・Task・制御条件の代替正本にもならない。接続・存在が接続材料の利用・更新・再pairingへの対応を担い、秘密を含む部分の保護は認証秘密、Host側のpairing許可・device機能許可・失効の正本は権限・制約に残る。具体的な鍵形式・保存方式やstore共有は固定しない。
+**Clientのpairing・接続材料:** 端末に属する接続材料は、Hostから複製するHistory／Learning等のdomain dataやProvider／MCP向け登録Credentialとは別の分類であり、必要に応じてClient側に保持できる。eneの管理・保護対象から除外する意味ではなく、Hostの個体・Task・制御条件の代替正本にもならない。接続・存在が接続材料の利用・更新・再pairingへの対応を担い、秘密を含む部分の保護は認証秘密、Host側のpairing許可・device機能許可・失効の正本は権限・制約に残る。具体的な鍵形式・保存方式やstore共有は固定しない。
 
 Device失効・全データResetではHost側の信頼を失効させ、旧Client材料だけで再接続の信頼を復活させない。接続・存在は認証秘密と協調して不要な端末材料の消去・更新を扱うが、到達不能Clientの物理的な消去を確認済みとは表示しない。再pairingは現在のHost側確認に基づき、旧材料や表示上のpairing済み状態だけで成立させない。Restoreも復元されたdevice参照・許可と現在の接続・認証の成立を照合し、secretをbackupから戻さない。これは4.21のProvider／MCP等に用いる現在のCredential store維持を変更せず、新しいClient永続cache一般を認めるものでもない。
 
@@ -530,7 +530,7 @@ Client切断時に失われてよいのは未確定の編集・入力、描画�
 
 Credential値の利用は上表の通常representation・contentの経路とは分離する。推論・作用の認証に必要な経路だけで利用し、Clientの通常表示、model context、Tool argument・result、Auditやbackupへ流さない。これを満たす物理経路はRT-05・07の自由度に残し、全音声・画面のHost中継や保存を新たに要求しない。
 
-同じHost PCの外部Provider・MCP・fileも外部であり、Remoteの第一者ClientもEne内部の一時data保護に責任を持つ。物理的な所在、process、sandboxへの収容は、semantic ownershipを移す理由ではない。
+同じHost PCの外部Provider・MCP・fileも外部であり、Remoteの第一者Clientもene内部の一時data保護に責任を持つ。物理的な所在、process、sandboxへの収容は、semantic ownershipを移す理由ではない。
 
 ## 9. Questions for Dependency Rules
 
@@ -564,7 +564,7 @@ Step 5では次の問いに答え、ここで決めたowner・参照・強制・
 
 同じ意味ownerでも全stateを同じ保存・revision・retention方式にする必要はない。逆に物理保存を共有してもsemantic ownerを一つへ統合しない。設定Resetの一般設定の具体的な列挙は各設定の詳細設計で確かめ、保護対象であるRule・同意・cap等を「設定」という名前だけでResetへ含めない。
 
-公開地域・対象年齢等の公開計画時留保は引き続き製品定義に従う。過去形式の互換性、Cloud正本、恒久Workspace、成果物library、汎用Plugin改変、Ene運営のrelay・account等は将来拡張を理由に再導入しない。
+公開地域・対象年齢等の公開計画時留保は引き続き製品定義に従う。過去形式の互換性、Cloud正本、恒久Workspace、成果物library、汎用Plugin改変、ene運営のrelay・account等は将来拡張を理由に再導入しない。
 
 ## 11. Traceability and Completeness
 

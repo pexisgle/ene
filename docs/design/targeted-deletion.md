@@ -2,7 +2,7 @@
 
 対象: Architecture Review #1／#2のFindingとOwner decisionsを統合済みのarchitectureに対する、Step 11 Critical Area Detailed Design。2026-09-08時点。
 
-本書は、OwnerがPrivacyまたはSecurityのため特定情報そのものの内部消去を明示した場合に、Ene内部のどこに保存・派生・処理中・再利用されていても対象を除去し、古いcopy・遅延結果・再接続・再起動・restore等によって復活させないためのlogical contractを詳細化する。後続のstate representation／persistence／concurrency／interface設計が安全に依存できる水準まで定め、具体的なmechanismは固定しない。
+本書は、OwnerがPrivacyまたはSecurityのため特定情報そのものの内部消去を明示した場合に、ene内部のどこに保存・派生・処理中・再利用されていても対象を除去し、古いcopy・遅延結果・再接続・再起動・restore等によって復活させないためのlogical contractを詳細化する。後続のstate representation／persistence／concurrency／interface設計が安全に依存できる水準まで定め、具体的なmechanismは固定しない。
 
 製品挙動のsource of truthは[要件Baseline](../requirements/README.md)、[製品定義](../requirements/product.md)、[要件](../requirements/requirements.md)とする。[受け入れ条件](../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
 
@@ -108,16 +108,16 @@ Targeted deletionは、通常の忘却、訂正、失効、置換、統合、His
 | 接続の事実・active帰属・Client一時data | 接続・存在が消去中のClient接続変化・確認不能を参加先へ結び付け、入出力・提示等が表示・一時操作dataの消去状況を報告する。Clientは長期private dataを永続cacheせず、古い一時dataを再接続時にHostへ戻さない。 | SO 4.15・第8節、RT-08 |
 | 観測候補・routing用派生表現・処理中利用 | 共有観測がCapture・候補・限定routing文脈・処理中結果を参加させる。scope変更・同意失効・消去は生成済み要約や処理中結果にも適用する。 | SO 4.16、Context 6 |
 | Body・Voiceの出力と一時状態 | 入出力・提示が表示・音声buffer等の該当情報を参加させる。出力済みであることを消去済みの根拠にしない。すでに起きた露出・作用は取り消せたと推定せず、把握できた事実を維持する。 | SO 4.17 |
-| 推論のcontext・cache・session・派生物 | 推論と各利用元がEne管理下のcache・embedding・検索結果・圧縮contextを参加させる。hitしたという理由でsource参照や制約確認を省かない。Provider保有copyの外部保持まで内部消去の保証へ含めないことと、そのcopyをEneが再利用してよいことは別であり、現在条件を満たせないsessionは再利用しない。 | SO 5.2、Context 5.2 |
+| 推論のcontext・cache・session・派生物 | 推論と各利用元がene管理下のcache・embedding・検索結果・圧縮contextを参加させる。hitしたという理由でsource参照や制約確認を省かない。Provider保有copyの外部保持まで内部消去の保証へ含めないことと、そのcopyをeneが再利用してよいことは別であり、現在条件を満たせないsessionは再利用しない。 | SO 5.2、Context 5.2 |
 | 検索index・embedding・query派生物 | 認識・学習等の検索対象ownerが対象との対応と利用制限を参加させる。派生物がなければ機能が縮退しても、意味・由来の正本が失われてはならない。 | SO 5.2、DR 4.1 |
 | Rule・Permission判断・同意・禁止・上限の記録 | 権限・制約が判断記録等の該当情報を参加させる。保存されたAllow・判定copyを現在条件として再利用しない。 | SO 4.19 |
 | 利用量・費用の記録 | 推論等の利用ownerが報告値等の該当情報を参加させる。未報告をゼロとせず、消去を消費リセットの理由にしない。 | SO 4.20 |
 | Credentialの露出copy | 認証秘密と各受入・保存・提示箇所が、History・Summary・Learning・Task結果・通常log・Debug capture等へ露出した登録済みCredentialのcopyを参加させる。内部露出copyの消去と、外部で有効なCredentialの失効・更新は別の操作として説明し、片方の成功で他方も完了としない。 | SO 4.21、CC-02 |
-| MCP・Pluginの接続設定とEne管理下の一時data | 実行・拡張が取り込んだresult・保持result・一時dataを参加させる。「外部code」を理由に対象外へ逃がさない。外部server保有copyの消去まで内部完了に含めない。 | SO 4.22、DR 6.2 |
+| MCP・Pluginの接続設定とene管理下の一時data | 実行・拡張が取り込んだresult・保持result・一時dataを参加させる。「外部code」を理由に対象外へ逃がさない。外部server保有copyの消去まで内部完了に含めない。 | SO 4.22、DR 6.2 |
 | Audit・診断・Debug capture | 保全・消去と各発生元が追記順・保持の中の該当情報を参加させる。監査記録を元stateの再生・自動実行の入力にしない。完了記録・Audit・Owner説明自体へ対象本文を再保存しない。 | SO 4.23 |
 | 保持方針・全域操作の状況・backup設定とcopy | 保全・消去が操作状況・保持方針の中の該当情報を参加させる。記録に削除対象の秘密・private本文を残すことは完了根拠の代わりにならない。 | SO 4.24 |
 
-Ene管理下の内部copyを外部扱いして除外しない。外部Workspace、Owner保管backup、Provider保有copy等の外部copyをEne内部Targeted deletionの成功条件へ勝手に含めない。内部削除で外部copyも消えたと表示しない。
+ene管理下の内部copyを外部扱いして除外しない。外部Workspace、Owner保管backup、Provider保有copy等の外部copyをene内部Targeted deletionの成功条件へ勝手に含めない。内部削除で外部copyも消えたと表示しない。
 
 Characterの静的revisionそのものは経験由来の対象情報を通常保持しないが、対象情報を復元できる内容を持つ場合は同じ参加原則に従う。参加先の列挙漏れを不参加の理由にしない。
 
@@ -188,9 +188,9 @@ Permission解釈・消去対象の意味探索のための推論にも、その�
 
 ### 6.3 cache・session・Client経路の再利用禁止
 
-Ene管理下のcache・embedding・検索結果・圧縮contextを再利用する場合も、内容だけでなく元の範囲・用途・現在性・消去状況を確認できる必要がある。hitしたという理由でsource参照や制約確認を省かない。元のHistoryが通常保持で失われた場合と、targeted deletionで利用を除去すべき場合を区別する。前者で形成済みLearningを自動削除せず、後者でcacheを代替根拠にしない。
+ene管理下のcache・embedding・検索結果・圧縮contextを再利用する場合も、内容だけでなく元の範囲・用途・現在性・消去状況を確認できる必要がある。hitしたという理由でsource参照や制約確認を省かない。元のHistoryが通常保持で失われた場合と、targeted deletionで利用を除去すべき場合を区別する。前者で形成済みLearningを自動削除せず、後者でcacheを代替根拠にしない。
 
-Provider sessionに過去の情報が残る場合、その情報も後続生成へ寄与し得る入力として扱う。現在使えない情報を含むsessionへの新規依頼は、現在のcontextを短く渡すだけでは成立しない。利用対象から除外できる経路へ切り替える等、現在条件を満たせなければそのsessionを再利用しない。Provider保有copyの外部保持までEne内部消去の保証へ含めないことと、そのcopyをEneが再利用してよいことは別である。
+Provider sessionに過去の情報が残る場合、その情報も後続生成へ寄与し得る入力として扱う。現在使えない情報を含むsessionへの新規依頼は、現在のcontextを短く渡すだけでは成立しない。利用対象から除外できる経路へ切り替える等、現在条件を満たせなければそのsessionを再利用しない。Provider保有copyの外部保持までene内部消去の保証へ含めないことと、そのcopyをeneが再利用してよいことは別である。
 
 Clientからの直接送信やprotocol Pluginにも同じ成立条件を適用する。Hostの現在条件を確認できないClientは該当活動を継続せず、一時copyを第二の正本にしない。再接続しても古い表示copy・入力・Tool UI dataをHostへ戻して対象を再形成しない。
 
@@ -268,7 +268,7 @@ Targeted deletionの完了を、単一のstoreや一つのcoordinatorの成功�
 全域完了には、次の全体が必要である。意味的な探索の完全性と文字列検証を混同しない。
 
 1. 対象範囲・重要な影響を説明し、必要な確認を経ている。無関係な共有情報は可能な範囲で分離し、分離不能な影響を説明している。
-2. 対象情報を復元できる内部History、非会話活動記録・historical log／evidence、未伝達・処理中報告を含むSummary、Memoryと過去revision、Relationship、Companion Stateと保持済み根拠、Skill、Task・source copy、観測候補・routing用派生表現、index・embedding・cache、推論context、Audit／Debug等の該当情報、接続中Client・Ene管理下の拡張一時dataを、第4節の参加原則に従って除去または復元不能にしている。Companion削除後の残存記録も除外しない。以下の列挙は例示であり、参加原則に属する範囲を列挙漏れで除外しない。
+2. 対象情報を復元できる内部History、非会話活動記録・historical log／evidence、未伝達・処理中報告を含むSummary、Memoryと過去revision、Relationship、Companion Stateと保持済み根拠、Skill、Task・source copy、観測候補・routing用派生表現、index・embedding・cache、推論context、Audit／Debug等の該当情報、接続中Client・ene管理下の拡張一時dataを、第4節の参加原則に従って除去または復元不能にしている。Companion削除後の残存記録も除外しない。以下の列挙は例示であり、参加原則に属する範囲を列挙漏れで除外しない。
 3. 開始から完了までに対象情報が再び内部へ到着・生成した場合も同じ消去対象として扱い、新しいExperienceとして除外しない。削除前の情報を使う処理、処理中context、遅延した推論・Tool結果からの再保存を防いでいる。古い根拠・revision・indexだけによる自動再形成も防いでいる。
 4. 指定文字列は内部dataを機械的に検索・削除し、残存を検証している。LLMの要約や想起抑制で代用しない。言い換え・意味的同一情報の探索補助と、その完全検出を保証しない範囲を区別している。
 5. 各参加先の未完了・失敗を集約しており、未確認の局所結果を全域完了にしていない。途中再起動でも未完了の認識と必要な保留を維持する。完了記録自体に削除内容を再保存していない。
@@ -282,12 +282,12 @@ Targeted deletionの完了を、単一のstoreや一つのcoordinatorの成功�
 - 機械的残存検証が失敗・未実施で、対象文字列の残存を否定できない場合。
 - 消去区間の再到着・再生成の取込み、遅延結果からの再保存防止、古い根拠だけからの再形成防止のいずれかが未成立の場合。
 - 意味的探索の検出限界を、既知依存の追跡省略や未確認範囲の完了扱いに読み替える場合。
-- 外部Workspace・Owner保管backup・Provider保有copy等の外部copyの消去を内部完了の条件に含める場合。逆に、Ene管理下の内部copyを外部扱いして除外する場合。
+- 外部Workspace・Owner保管backup・Provider保有copy等の外部copyの消去を内部完了の条件に含める場合。逆に、ene管理下の内部copyを外部扱いして除外する場合。
 - 完了記録・監査・説明へ削除本文を戻すことで、完了根拠自体が復元源になる場合。
 
 完了記録・Audit・Owner説明自体へ対象private本文を再保存しない。Auditの追記順は永久不変・削除不能を意味せず、通常保持管理とtargeted deletionへ参加する。
 
-Targeted deletion、保持期間の短縮、手動削除は、対象をEne内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。内部copyの消去と外部で有効なCredentialの更新・失効は別操作として説明する。
+Targeted deletion、保持期間の短縮、手動削除は、対象をene内部から削除するが、すでに外部へ送信、export、backupされたcopyまで削除したと表示しない。内部copyの消去と外部で有効なCredentialの更新・失効は別操作として説明する。
 
 ## 9. 消去後も保持すべき事実と保持してはいけない対象本文の区別
 
@@ -354,7 +354,7 @@ State Ownership、Dependency Rulesとの照合では、semantic owner、Host／C
 後続のstate representation／persistence／concurrency／interface設計は、次を固定された契約として利用できる。
 
 - 消去要求は目的・対象記述・消去区間・完了境界の対応であり、保存場所の指定ではない。機械的条件は必須・LLM非依存、意味的条件は補助・完全性なし、既知依存の追跡は免除されない。
-- 各ownerは自分の保持・利用範囲について参加し、coordinatorは成立を調整する。対象を復元できる内部state・過去根拠・派生物・一時data・処理中利用は列挙の有無にかかわらず参加する。Ene管理下の内部copyは除外せず、外部copyは成功条件に含めない。
+- 各ownerは自分の保持・利用範囲について参加し、coordinatorは成立を調整する。対象を復元できる内部state・過去根拠・派生物・一時data・処理中利用は列挙の有無にかかわらず参加する。ene管理下の内部copyは除外せず、外部copyは成功条件に含めない。
 - 新規利用は対象範囲で禁じ、進行中はbest-effortで扱い、遅延結果は用途別受入で消去条件へ照合する。確定度を消去理由で書き換えない。
 - 消去区間の再到着・再生成は同じ対象とし、旧由来の遅延結果と完了後の新規提供は由来・対応で区別する。cache・session・Client copyの再利用・復帰で対象を戻さない。古い根拠だけからの自動再形成をしない。
 - 未完了・保留・再保存防止はHostで保全し、再起動・再接続・restoreを跨ぐ。確認不能を成功にせず、局所完了を全域完了にしない。

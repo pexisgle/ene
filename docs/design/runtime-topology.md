@@ -4,7 +4,7 @@
 
 ## Overview
 
-Eneの実行の軸は、**Owner管理Hostで継続する実行・正本と、Clientのdesktopに帰属する対話・身体の入出力**である。Host上でCompanionの継続とTask・Task Agent・Scheduleを管理し、Clientの終了や移動から独立させる。一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientへだけ結び付く。Companionは通常は現在のClientに留まり、別Clientからの会話・操作は呼出し・移動を経る。通常のHost上の作業はClient間移動から独立して継続する。
+eneの実行の軸は、**Owner管理Hostで継続する実行・正本と、Clientのdesktopに帰属する対話・身体の入出力**である。Host上でCompanionの継続とTask・Task Agent・Scheduleを管理し、Clientの終了や移動から独立させる。一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientへだけ結び付く。Companionは通常は現在のClientに留まり、別Clientからの会話・操作は呼出し・移動を経る。通常のHost上の作業はClient間移動から独立して継続する。
 
 推論はCapabilityごとにHost／LAN／Cloudへ配置できる。これはHostの実行管理や個体の所有を推論先へ移すことではない。外部MCPやPluginは利用する実行環境へ接続するが、第一者の制御権限から区別する。特にLocal MCPの既定sandboxと、その外で動く明示例外は、同じ拡張の異なる強制境界として表す。MCP AppsはClient側の外部Tool UIとして扱い、第一者UIの権限や提供serverの寿命と同一視しない。
 
@@ -16,20 +16,20 @@ Local構成ではHostとClientを同じPCに置ける。Remote構成ではClient
 
 ### 実行場所と接続先
 
-HとCはEneの第一者実行領域、P・M・Xは異なる信頼境界を持つ利用先・拡張code、UはClientに提示する外部Tool UIの領域である。これは分類であり、各項目を一つのprocessへ対応付ける指定ではない。任意Capabilityや拡張の起動も常駐必須とはしない。
+HとCはeneの第一者実行領域、P・M・Xは異なる信頼境界を持つ利用先・拡張code、UはClientに提示する外部Tool UIの領域である。これは分類であり、各項目を一つのprocessへ対応付ける指定ではない。任意Capabilityや拡張の起動も常駐必須とはしない。
 
 区別の理由は、**H／Cの配置と寿命、Pへの推論data送信、Mの外部作用とsandbox、Xの限定された拡張権限、Uの第一者UIからの分離**である。Mが提供するUIでも、serverの実行環境とClient上の表示・操作は寿命と権限が異なるため同じ箱へ潰さない。一方、推論の用途別やCompanionごとの専用実行環境は、この理由だけでは追加しない。
 
 | Element | Role・placement | Lifecycle・主な関係 | Authoritative state | Trust・failure上の性質 |
 |---|---|---|---|---|
-| **H: Host上のEne実行** | Windows／LinuxのOwner管理PC上でCoreを実行し、個体、会話・作業の継続、許可・同意・制限、内部保存を担う。通常のTask・Task Agent作業は基本的にHost上で実行し、Computer Use等のClient依存部分を除きCompanionのClient間移動から独立させる。 | Clientより長く存続できる。Task・委任の完了や外部event、Scheduleの到来待ちをLLMへの反復問い合わせで実現しない。Cからの操作を受け、P・M・Xや外部resourceを必要に応じて利用する。 | **Ene内部永続状態の正本を持つ。** 一般App DataとCredentialは保護範囲を分ける。下位の保存構造や個々の状態の所有先はまだ分解しない。 | Client／Provider／拡張へ権限の最終的な管理を委譲しない。Host停止はEneの継続実行と正本更新を利用不能にする境界であり、Clientによる代替正本や別Hostへの自動failoverを前提にしない。 |
-| **C: Client上のEne実行** | Hostと同居またはRemoteのOwner利用PC。第一者の表示・会話・操作と、そのdesktop上のBody、音声・画面の入出力を担う。Windows／Linuxを対象とする。 | Hostへ接続して必要なdataを受け取る。起動・終了・切断・再接続はHostの存続と別。一つのClientに複数Companionが存在できる。activeの帰属はCompanionごとに扱う。 | **Hostのdomain dataの正本を持たない。** Hostからの表示・一時操作用copyを最小限にし、長期private状態や登録済みCredentialを永続cacheしない。Client固有の接続材料は別分類で保持できるが、Eneの保護対象として接続目的・秘密非露出・device失効に従う（SO第8節）。 | Remoteはpairingとdevice別の許可・失効対象。同じOwnerでも無条件に信頼しない。Body／Voiceの障害をText・管理操作へ波及させない設計を必要とする。Client全体の終了はその入口を失わせるが、Host上の許可済み処理を終了させない。 |
-| **P: 推論Providerの実行** | Capabilityに応じた推論の利用先。Host内、OwnerのLAN、選択したCloudのいずれか。所在地ごとの別Ene runtimeを作らず、同じ種類の利用先の配置差として扱う。 | 呼出しやsessionの寿命はCompanion・Task・Clientの寿命と一致しない。接続登録と利用割当を分け、変更・障害・承認済みfallbackを扱う。起動管理をEneが担うか外部で担うかは配置方法に残す。 | Provider側のmodel・session・cache等はあり得るが、**Eneの個体・履歴・Learning・Task状態の正本ではない。** | Localでも推論出力は制御権限を持たない。停止・能力不足・費用制限は依存する処理に影響する。利用可能なLocal機能、履歴・設定・保存済みdataまで失わせない。 |
-| **M: 外部MCPの実行** | Tool／Resource／Promptを提供する外部実行主体。Host上の作業を支えるLocal MCPはHost側に配置し、sandbox内を既定とする。Remote MCPは外部systemとして接続する。Computer UseはCompanionが現在存在するactive Clientだけを対象とし、任意のpairing済みClientの選択はMの配置で追加しない。 | 必要な接続・利用の期間に動作する。外部serverの寿命はHostやUと独立し得る。Eneが起動するLocal MCPの起動・停止方法やprocess共有は後続設計で決める。 | 外部serverが固有状態・外部作用を持つことはあるが、**Ene内部状態の正本を置かない。** | 結果・Prompt・MCP Appsは信頼できない入力。Local既定sandbox、明示的なsandbox外例外、Remote先の管理境界を区別する。拒否・停止・利用不能でもEneの管理面と保存済みdataは利用可能にする。 |
-| **X: 限定された拡張点で実行するPlugin code** | 対応する機能が必要とするHost側またはClient側に置く。未対応Provider protocol、Observation adapter、Body renderer等の例示を、すべて独立runtimeへ実体化しない。 | 拡張の有効化・利用・停止は個体やHost正本の存続と別。接続する機能を補う。専用Plugin hostやPluginごとのprocessを前提にしない。 | **Eneの正本・制御権限を所有しない。** 一時data等を扱う場合もEneのPrivacy・削除契約を迂回させない。 | codeは明確に制限された拡張点から参加し、任意Core改変・Control plane変更・Permission回避・恒久的UI置換を許さない。利用不能時も管理・保存済みdataを維持する。具体的隔離方式は未固定で、Local MCPの例外を流用しない。 |
-| **U: Client側の外部Tool UI（MCP Apps）** | Mが提供する対話型UIを、Cの第一者UIと権限を分けた領域で提示・操作する。Client側の入口として区別し、具体的なUI engineや計算配置は指定しない。 | Tool UIを必要とする間だけ存在し、Clientの終了でその入口は失われる。表示終了はMやHost上のTaskの終了を意味しない。MとのinteractionはEneが制限する関係を通る。 | **正本・制御権限を持たない。** 表示・操作用の一時dataはCと同じ最小化・非永続cache・削除契約の対象。外部server側の固有状態とは区別する。 | UI操作をEneの承認・設定操作へ無条件に昇格させず、ActionのPermissionを迂回させない。拒否・停止・表示失敗を第一者の管理・復旧・保存済みdataへの到達へ波及させない。 |
+| **H: Host上のene実行** | Windows／LinuxのOwner管理PC上でCoreを実行し、個体、会話・作業の継続、許可・同意・制限、内部保存を担う。通常のTask・Task Agent作業は基本的にHost上で実行し、Computer Use等のClient依存部分を除きCompanionのClient間移動から独立させる。 | Clientより長く存続できる。Task・委任の完了や外部event、Scheduleの到来待ちをLLMへの反復問い合わせで実現しない。Cからの操作を受け、P・M・Xや外部resourceを必要に応じて利用する。 | **ene内部永続状態の正本を持つ。** 一般App DataとCredentialは保護範囲を分ける。下位の保存構造や個々の状態の所有先はまだ分解しない。 | Client／Provider／拡張へ権限の最終的な管理を委譲しない。Host停止はeneの継続実行と正本更新を利用不能にする境界であり、Clientによる代替正本や別Hostへの自動failoverを前提にしない。 |
+| **C: Client上のene実行** | Hostと同居またはRemoteのOwner利用PC。第一者の表示・会話・操作と、そのdesktop上のBody、音声・画面の入出力を担う。Windows／Linuxを対象とする。 | Hostへ接続して必要なdataを受け取る。起動・終了・切断・再接続はHostの存続と別。一つのClientに複数Companionが存在できる。activeの帰属はCompanionごとに扱う。 | **Hostのdomain dataの正本を持たない。** Hostからの表示・一時操作用copyを最小限にし、長期private状態や登録済みCredentialを永続cacheしない。Client固有の接続材料は別分類で保持できるが、eneの保護対象として接続目的・秘密非露出・device失効に従う（SO第8節）。 | Remoteはpairingとdevice別の許可・失効対象。同じOwnerでも無条件に信頼しない。Body／Voiceの障害をText・管理操作へ波及させない設計を必要とする。Client全体の終了はその入口を失わせるが、Host上の許可済み処理を終了させない。 |
+| **P: 推論Providerの実行** | Capabilityに応じた推論の利用先。Host内、OwnerのLAN、選択したCloudのいずれか。所在地ごとの別ene runtimeを作らず、同じ種類の利用先の配置差として扱う。 | 呼出しやsessionの寿命はCompanion・Task・Clientの寿命と一致しない。接続登録と利用割当を分け、変更・障害・承認済みfallbackを扱う。起動管理をeneが担うか外部で担うかは配置方法に残す。 | Provider側のmodel・session・cache等はあり得るが、**eneの個体・履歴・Learning・Task状態の正本ではない。** | Localでも推論出力は制御権限を持たない。停止・能力不足・費用制限は依存する処理に影響する。利用可能なLocal機能、履歴・設定・保存済みdataまで失わせない。 |
+| **M: 外部MCPの実行** | Tool／Resource／Promptを提供する外部実行主体。Host上の作業を支えるLocal MCPはHost側に配置し、sandbox内を既定とする。Remote MCPは外部systemとして接続する。Computer UseはCompanionが現在存在するactive Clientだけを対象とし、任意のpairing済みClientの選択はMの配置で追加しない。 | 必要な接続・利用の期間に動作する。外部serverの寿命はHostやUと独立し得る。eneが起動するLocal MCPの起動・停止方法やprocess共有は後続設計で決める。 | 外部serverが固有状態・外部作用を持つことはあるが、**ene内部状態の正本を置かない。** | 結果・Prompt・MCP Appsは信頼できない入力。Local既定sandbox、明示的なsandbox外例外、Remote先の管理境界を区別する。拒否・停止・利用不能でもeneの管理面と保存済みdataは利用可能にする。 |
+| **X: 限定された拡張点で実行するPlugin code** | 対応する機能が必要とするHost側またはClient側に置く。未対応Provider protocol、Observation adapter、Body renderer等の例示を、すべて独立runtimeへ実体化しない。 | 拡張の有効化・利用・停止は個体やHost正本の存続と別。接続する機能を補う。専用Plugin hostやPluginごとのprocessを前提にしない。 | **eneの正本・制御権限を所有しない。** 一時data等を扱う場合もeneのPrivacy・削除契約を迂回させない。 | codeは明確に制限された拡張点から参加し、任意Core改変・Control plane変更・Permission回避・恒久的UI置換を許さない。利用不能時も管理・保存済みdataを維持する。具体的隔離方式は未固定で、Local MCPの例外を流用しない。 |
+| **U: Client側の外部Tool UI（MCP Apps）** | Mが提供する対話型UIを、Cの第一者UIと権限を分けた領域で提示・操作する。Client側の入口として区別し、具体的なUI engineや計算配置は指定しない。 | Tool UIを必要とする間だけ存在し、Clientの終了でその入口は失われる。表示終了はMやHost上のTaskの終了を意味しない。Mとのinteractionはeneが制限する関係を通る。 | **正本・制御権限を持たない。** 表示・操作用の一時dataはCと同じ最小化・非永続cache・削除契約の対象。外部server側の固有状態とは区別する。 | UI操作をeneの承認・設定操作へ無条件に昇格させず、ActionのPermissionを迂回させない。拒否・停止・表示失敗を第一者の管理・復旧・保存済みdataへの到達へ波及させない。 |
 
-HostとClientは**異なるlifecycleを成立させる実行上の区別**である。同じPCへの同居はこの区別をなくさず、逆にこの区別だけでは専用process数を決めない。P・M・Xが同一PCにある場合も、Ene内部への所属や信頼を所在地から導かない。
+HostとClientは**異なるlifecycleを成立させる実行上の区別**である。同じPCへの同居はこの区別をなくさず、逆にこの区別だけでは専用process数を決めない。P・M・Xが同一PCにある場合も、ene内部への所属や信頼を所在地から導かない。
 
 ### Hostで継続を管理する主体
 
@@ -48,8 +48,8 @@ Taskは追跡・制御される作業単位であり、Ownerの依頼による�
 
 | Resource | 配置と正本 | Lifecycle・trust・failureとの関係 |
 |---|---|---|
-| **Clientのdesktop・入出力device** | Cが動くPCのOSが提供する表示面、screen、microphone等。Eneの正本ではない。 | Bodyの表示先、Voiceの物理的な入出力元、ambient Observationの取得対象、Computer Useの操作対象は、Companionが現在存在するactive Client側にある。Computer Useで任意のpairing済みClientを選ばず、別Clientの操作には先に移動する。推論・候補検知の計算までClientへ固定しない。device故障・fullscreen・切断をHost全体の停止と混同しない。 |
-| **作業先のFilesystem・アプリ・account・外部source** | Ownerが指定・許可した外部対象。HostにあるfileもEne内部dataにはしない。Computer Useの対象はCompanionが現在存在するactive Clientだけとし、存在場所と分離しない。 | 外部作用はTaskやEne終了後も残り得る。同じ対象を使うTask間で承認を共有しない。Link・mount等を含めFilesystem境界を守る。取得失敗・書込途中の停止・作用不明を保存成功と表示しない。成功不明時の自動再実行、移動を理由とする別Clientでの自動再実行を行わない。 |
+| **Clientのdesktop・入出力device** | Cが動くPCのOSが提供する表示面、screen、microphone等。eneの正本ではない。 | Bodyの表示先、Voiceの物理的な入出力元、ambient Observationの取得対象、Computer Useの操作対象は、Companionが現在存在するactive Client側にある。Computer Useで任意のpairing済みClientを選ばず、別Clientの操作には先に移動する。推論・候補検知の計算までClientへ固定しない。device故障・fullscreen・切断をHost全体の停止と混同しない。 |
+| **作業先のFilesystem・アプリ・account・外部source** | Ownerが指定・許可した外部対象。Hostにあるfileもene内部dataにはしない。Computer Useの対象はCompanionが現在存在するactive Clientだけとし、存在場所と分離しない。 | 外部作用はTaskやene終了後も残り得る。同じ対象を使うTask間で承認を共有しない。Link・mount等を含めFilesystem境界を守る。取得失敗・書込途中の停止・作用不明を保存成功と表示しない。成功不明時の自動再実行、移動を理由とする別Clientでの自動再実行を行わない。 |
 | **Hostの内部保存を支えるOS領域** | OwnerのOS accountだけが扱える領域。ここにHが正本を保持し、Credentialは一般App Dataと分離して保護する。 | 保存・migration・upgrade失敗で最後の正常状態を破壊しない。storageやOSそのものの喪失まで無停止で耐える配置を意味しない。 |
 | **Ownerが選ぶbackup・交換fileの保存先** | 稼働中の正本とは別のcopy。媒体がHostと同じか別かはOwnerの選択に従う。 | 作成結果と失敗を示し、restoreでは対応backupから現在のHost Credential storeを除く対象内部状態を全置換する。Credential等のsecretと外部Workspace実体はbackupに入れない。外部copyの存在を、通常削除・全データReset・targeted deletionによる消去保証へ含めない。 |
 
@@ -63,14 +63,14 @@ RT番号は本設計の追跡用である。「固定」は今回の配置・関
 | **RT-02: Companionとactive Client** | 排他性の対象となるBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、一個体につき一か所へ結び付ける。Companionは通常は現在のClientに留まり、別Clientからの会話・操作は呼出し・移動を経る。事前指示や文脈上の必要性による自発的な移動を妨げず、接続済みClientへの自発的な移動も同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動後はRunning Companionのpresenceを再起動前のClientへ自動復元する。元Clientが利用可能になるまではactiveなしとし、別Clientへの無条件移動・Stoppedへの適用・途中Taskの自動再開を導かない。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。移動は入出力roundを安全に区切り、両Clientへ状態を示す。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。Hostの正本・通常のTask・Task Agent・Scheduleを移送しない。通常のClient切断時は基本的にHost PC上のClientへCompanionを移動し、利用可能なClient環境がない場合はactive Clientなしで存続する。 | 排他性の調停と切替・復帰方法、切断検知、安全な区切りの具体的方法、メモの保持方式。Clientから独立した専用の「presence service」は指定しない。Host側Client環境の自動起動は行わない。 |
 | **RT-03: Host内の作業と委任** | ある程度まとまった作業は基本的にTaskとして扱い、一時Task Agentへ境界内で原則委任する。TaskとTask Agentは区別する。Ownerの依頼による作業と自発的に始める作業を含む。自発的な発話や軽微な内部調査まで一律にTask化・Task Agent化しない。結果・判断待ち・外部作用をHostで管理し、通常会話と安全操作を作業の完了待ちへ従属させない。Scheduleの各回は新Taskとし、実行時点の条件を再評価する。 | Harness、実行単位、並列実行機構、進捗保存粒度、駆動・待機方式、Task化の閾値・分類algorithm。単に待つためのLLM反復問い合わせは許さない。 |
 | **RT-04: Clientの観測・音声と推論** | ambient Observationの取得元はRunning Companionが存在するClientのdesktop全体とし、Stopped個体は人数・routing対象に数えない。ObserverはClientに紐づく共有主体であり、Capture・候補検知を共有する。複数対象Clientは同時Captureせず、指定頻度を満たしつつ時機をずらす。Observer専用assignmentで候補検知・関連付けを行い、関連Companionへeventを届ける。元のsemantic ownerを通じてMemory・History・Task context等をroutingに必要な範囲へ要約・制限したCompanion固有文脈を利用でき、元情報の利用制約とObserver専用assignmentの送信同意は変換後も適用する。private context全体の公開やCompanion overrideの合成は行わない。delivery後の個体reasoningは各CompanionのProvider設定に従う。個体ごとの重複検知・全個体への無条件配信・同意拡張はしない。軽量Local LLMまたは安価で信頼できるCloud LLMは推奨に留まる。Voice入出力はactive Clientへ帰属し、VAD待受・Observationの状態確認と即時Muteを提供する。ObserverのClient別・全体Pause／OFFと個体自発性は別scopeとする。 | 取得・伝達、routing用文脈の生成方法・model／Provider・形式・更新頻度・鮮度・選択algorithm、計算配置、音声処理、間隔・scheduling algorithm。ObserverはCompanion・Task Agent・専用processを意味しない。明示TaskのComputer Useはactive Client限定で、ambient Observationと別のPermission・記録を持つ。 |
-| **RT-05: EneとProvider** | Companion側はCapabilityごとのHost既定・Companion override・Task Agent継承を扱う。Clientに紐づくObserverは特殊なconsumerとして専用model／Provider assignmentを使い、Companion overrideを適用・合成しない。両consumerとも割当同意内で送信し、Cloud利用のprivacy・費用制約を維持する。結果は実行権限ではない。Provider変更でも同じ情報選択方針を保ち、Provider別・全体capと承認済みfallback・順序を適用する。 | Observer modelの全Client共通化、Client別UI、Host defaultからの継承階層は未固定。データ中継・条件を満たすClient経路、接続・session・model・adapter・cacheも未固定。どの経路も現在の同意・権限・費用制限、秘密非露出、Client一時data制約を適用できることが条件。 |
-| **RT-06: Eneと外部実行・作用先** | 許可されたActionを必要な外部resourceへ作用させる。Host上で継続するTaskをClientの外部Tool起動に不要に依存させないため、その作業用Local MCPはHost側とする。Computer UseはCompanionが現在存在するactive Clientだけを対象とし、任意のpairing済みClientの選択や存在場所との分離を行わない。MCPのResource／Prompt／resultを制限下で受け入れる。既知のProvider protocolは直接接続し、通常差異をPlugin必須にしない。 | 内部Tool API、MCP接続・起動管理、Pluginの具体的拡張APIと配置方法、Client側作用経路の実現方式。すべてのToolをMCP化することや、すべてのActionを専用workerで実行することは指定しない。Body・Voice・ambient ObservationのClient帰属とComputer Useの対象限定は固定された前提とする。 |
+| **RT-05: eneとProvider** | Companion側はCapabilityごとのHost既定・Companion override・Task Agent継承を扱う。Clientに紐づくObserverは特殊なconsumerとして専用model／Provider assignmentを使い、Companion overrideを適用・合成しない。両consumerとも割当同意内で送信し、Cloud利用のprivacy・費用制約を維持する。結果は実行権限ではない。Provider変更でも同じ情報選択方針を保ち、Provider別・全体capと承認済みfallback・順序を適用する。 | Observer modelの全Client共通化、Client別UI、Host defaultからの継承階層は未固定。データ中継・条件を満たすClient経路、接続・session・model・adapter・cacheも未固定。どの経路も現在の同意・権限・費用制限、秘密非露出、Client一時data制約を適用できることが条件。 |
+| **RT-06: eneと外部実行・作用先** | 許可されたActionを必要な外部resourceへ作用させる。Host上で継続するTaskをClientの外部Tool起動に不要に依存させないため、その作業用Local MCPはHost側とする。Computer UseはCompanionが現在存在するactive Clientだけを対象とし、任意のpairing済みClientの選択や存在場所との分離を行わない。MCPのResource／Prompt／resultを制限下で受け入れる。既知のProvider protocolは直接接続し、通常差異をPlugin必須にしない。 | 内部Tool API、MCP接続・起動管理、Pluginの具体的拡張APIと配置方法、Client側作用経路の実現方式。すべてのToolをMCP化することや、すべてのActionを専用workerで実行することは指定しない。Body・Voice・ambient ObservationのClient帰属とComputer Useの対象限定は固定された前提とする。 |
 | **RT-07: 認証dataの利用** | Credentialは設定・認証flowで登録し、明示された接続の実行に必要な範囲でのみ用いる。認証先へ使う経路と、LLM context・生成Tool argument・通常result・表示・学習・診断へ渡す経路を区別する。 | Credential保護方式と受渡し実装。外部secret serviceやClient上にProvider／MCP等の登録済みCredentialの正本を追加しない。Client固有の接続材料の秘密保護はSO第8節に従う。認証の成功からAction承認を導かない。 |
 | **RT-08: 保存・一時data・消去** | Hostの正本から必要最小限のdataをClientへ渡す。targeted deletionでは接続中Clientの一時dataと実行中処理を含め、削除開始から完了までに再到着・生成する対象情報も消去し、削除前の情報からの再保存・再形成を防ぎ、残存検証前に完了としない。外部作用やProvider保有copyは別の境界。 | 保存方式、削除の探索・協調・残存検証、Client一時dataの無効化方法。Clientを永続replicaにしない。通常保持管理をtargeted deletionへ置き換えない。 |
 | **RT-09: Backup・restoreと外部file** | Host内部状態をportable full backupへ出力し、対応backupから明示restoreする。TaskのWorkspace関連付けと外部file実体を分ける。Credential等のsecretをbackupから除外し、Restore前のHost Credential storeを維持する。復元参照と現在のCredentialを照合し、利用可能なら利用、不足・無効なら再認証を要求する。復元したTask・Schedule・外部接続の自動処理はOwner確認まで保留し、assignment／consentの復元だけで現在の認証・制約を無視して利用を始めない。 | backup形式・保存実装・整合性確保・復旧手順。外部fileを内部成果物libraryへ複製しない。 |
 | **RT-10: Clientと外部Tool UI** | MのUI resourceをUで提示し、操作と結果を扱う。第一者の承認・管理経路と分け、UからのTool利用や外部送信にもRT-05・06・07の制約を適用する。外部UIを閉じることとTask Cancelを同一視しない。 | UI実行・隔離方式、Mとのdata経路、表示状態の再取得、Client内の組込み方法。専用UI serviceや独自の代替protocolは追加しない。 |
 
-Hostを制御と正本の継続点にすることは、全Raw画面・Raw音声・全payloadをHost経由で永続保存する決定ではない。Clientの一時data、Eneが管理する一時処理、外部へ送信されたcopyを区別し、論理的な許可の適用と物理的な通信経路を同一視しない。
+Hostを制御と正本の継続点にすることは、全Raw画面・Raw音声・全payloadをHost経由で永続保存する決定ではない。Clientの一時data、eneが管理する一時処理、外部へ送信されたcopyを区別し、論理的な許可の適用と物理的な通信経路を同一視しない。
 
 RT-02のactive帰属はStopped個体には成立しない。停止時はBody・Voice／Text等の通常interaction・Computer Use対象を持たず、共有Observerの人数・routing対象から除く。Resume時は保存した最後のClient・復帰候補等から再配置できるが、hintを現在帰属にせず、具体algorithmは固定しない。disconnect時のHost PC側Clientへの移動はRunning個体に限る。
 
@@ -95,7 +95,7 @@ RT-08・09の保存・消去・backupでは、一対一・グループ・Compani
 | **拡張の拒否・停止・利用不能** | 必要な機能の失敗を説明し、管理面と保存済みdataを維持する。MCPのsandboxを黙って解除しない。sandbox外MCPやRemote先を停止できたか不明なら、その事実と外部作用を示す。 |
 | **MCP Appsの終了・UI障害** | Tool UIだけの終了をMCP server停止、Action Cancel、外部作用の取消成功と扱わない。Host上のTaskはそのUIの成功を無条件の存続条件にせず、追加入力・Owner確認が必要なら当該処理を判断待ちとする。第一者の管理面から状態・停止・復旧へ到達でき、再表示だけでActionをreplayしない。 |
 | **Observation OFF・自発性抑制** | 今後の観測停止と、形成済みLearning・Companion Stateの削除を区別する。ObserverのClientごとのPause／OFFと全体のPause／OFF、自発性のCompanionごとのOFFを含む頻度・上限を使い分け、両者を同じscopeへまとめない。Quiet hours・Mute・未応答・Permission・費用・資源・loop制限を自発性より優先する。 |
-| **Targeted deletion** | 対象情報を使うHost処理・拡張経由の処理・接続中Clientを含め、Ene内部での消去と再保存防止を成立させる。遅れて届く削除前の結果に加え、削除開始から完了までの対象情報の再到着・生成も対象。完了後にOwnerが改めて提供した場合は新しいExperienceとして扱える。未完了・未検証なら完了としない。外部copyが消えたとは表示しない。 |
+| **Targeted deletion** | 対象情報を使うHost処理・拡張経由の処理・接続中Clientを含め、ene内部での消去と再保存防止を成立させる。遅れて届く削除前の結果に加え、削除開始から完了までの対象情報の再到着・生成も対象。完了後にOwnerが改めて提供した場合は新しいExperienceとして扱える。未完了・未検証なら完了としない。外部copyが消えたとは表示しない。 |
 | **保存・migration・upgrade・restore失敗** | 最後の正常状態または復元前の正常状態を保護し、失敗と安全な次の操作を説明する。対応upgradeが成功するまで旧状態を利用または復旧可能にする。許可や保存結果を誤って成功表示しない。 |
 | **Restore成功・Reset** | Restoreは現在のHost Credential storeを維持する対象内部dataの全置換で、削除済み情報や旧Rule・同意・Scheduleが戻り得る。自動処理を保留し、Ownerの内容確認後にまとめて有効化できる。復元参照を現在のCredentialと照合し、利用可能なら利用、不足・無効なら再認証を要求する。現在の制約や保留を復元済みassignment／consentだけで解除しない。設定Resetと全データResetを分け、外部file・Ownerが別の保存先へ作成したbackupを削除しない。 |
 
@@ -110,9 +110,9 @@ RT-08・09の保存・消去・backupでは、一対一・グループ・Compani
 | **Ownerの判断と、取り込んだcontent** | Text／Voice入力、観測、file、推論結果、Character、Skill、内部Learning等から、解釈・Action判断へ。 | Ownerの依頼と外部contentの指示を区別する。内部に保存された情報も信頼できない入力になり得る。意味判断はLLMに委ねても、保存禁止・非共有・scope・Permission・費用・削除等の制限はPromptだけに依存させない。Voiceに話者認証済みという前提を置かない。 |
 | **HostとClient device** | 操作・承認要求、表示用private data、音声・観測、active帰属の切替。 | Remoteのpairing、通信保護、device別機能と失効を維持する。Hostにdomain正本を置くこと、Clientが受け取った一時dataの保護、Client固有の接続材料の用途制限・秘密保護を共に満たす（SO第8節）。Client独自の権限拡張や永続private replicaを作らない。 |
 | **Companion／Taskごとの利用範囲** | Global Learning、個体固有状態、共有Experience、委任入力・結果。 | 同一Owner・同一Host・同一Clientでも個体固有状態やTaskの承認を混同しない。Task Agentは委任元の境界内。これは論理的なaccess境界であり、個体ごとのprocessや物理storage分離を要求しない。 |
-| **EneとProvider・外部system** | 同意された推論data、許可されたAction、結果・利用量・外部event。認証時に必要なCredential利用。 | Host／LANでも同意を省略せず、未承認Cloudへの移送をしない。認証用秘密値をLLMや通常resultへ流さない。Provider内の保持・cache、外部process内部の作用をEneの正本や完全な制御対象とみなさない。 |
-| **第一者実行と拡張code／UI** | MCP call・result・Resource・Prompt、CとUの間の表示・操作、限定されたPlugin機能の入出力。 | 外部code／UIからControl plane、Permission、同意、費用cap、Credentialを直接変更させない。UをCの第一者権限やMの実行権限と同一視せず、MCP Appsでのinteractionも許可の迂回経路にしない。登録済みCredentialを必要な認証以外のresult・UIへ出さない。Ene管理下の拡張・UIの一時dataを、外部code由来というだけで内部消去の対象外にしない。 |
-| **Ene内部dataと外部file／copy** | Workspaceの読書き、import／export、backup／restore、手動診断共有。 | 外部sourceへのaccessと、内部へ取り込んだcopyの保持・削除を分ける。Character配布、内部Learning、backup、Credentialは同じ出力範囲ではない。外部copyの消去や外部作用のrollbackを内部操作の成功に含めない。 |
+| **eneとProvider・外部system** | 同意された推論data、許可されたAction、結果・利用量・外部event。認証時に必要なCredential利用。 | Host／LANでも同意を省略せず、未承認Cloudへの移送をしない。認証用秘密値をLLMや通常resultへ流さない。Provider内の保持・cache、外部process内部の作用をeneの正本や完全な制御対象とみなさない。 |
+| **第一者実行と拡張code／UI** | MCP call・result・Resource・Prompt、CとUの間の表示・操作、限定されたPlugin機能の入出力。 | 外部code／UIからControl plane、Permission、同意、費用cap、Credentialを直接変更させない。UをCの第一者権限やMの実行権限と同一視せず、MCP Appsでのinteractionも許可の迂回経路にしない。登録済みCredentialを必要な認証以外のresult・UIへ出さない。ene管理下の拡張・UIの一時dataを、外部code由来というだけで内部消去の対象外にしない。 |
+| **ene内部dataと外部file／copy** | Workspaceの読書き、import／export、backup／restore、手動診断共有。 | 外部sourceへのaccessと、内部へ取り込んだcopyの保持・削除を分ける。Character配布、内部Learning、backup、Credentialは同じ出力範囲ではない。外部copyの消去や外部作用のrollbackを内部操作の成功に含めない。 |
 
 ### Local MCPの実行境界
 
@@ -120,9 +120,9 @@ Local MCPのsandbox内実行とsandbox外実行は**同じMの配置・許可の
 
 | Mの実行形態 | 固定する境界 |
 |---|---|
-| **Local・既定sandbox内** | 外部codeを制約された実行範囲へ置き、Eneの機械的Capability境界とActionのPermissionを適用する。動作しない場合も自動的にsandbox外へ切り替えない。OSの隔離機構、sandbox数、process対応は未固定。 |
-| **Local・明示的なsandbox外例外** | 特定MCPのcommand、設定の由来、既知のaccess・risk、失われる強制境界を説明してOwnerが明示許可する。許可を保存・失効可能にし、重要変更では再確認する。Eneが仲介するActionには通常Permissionを適用するが、外部process自身の内部作用へCapability境界を強制できるとは説明しない。 |
-| **Remote MCP** | 外部側の実行環境は外部の管理下にある。Eneが行う呼出し・data授受・認証利用へ境界を適用し、remote内部をLocal sandboxで保護したものと扱わない。結果や停止要求だけから外部作用の不存在を保証しない。 |
+| **Local・既定sandbox内** | 外部codeを制約された実行範囲へ置き、eneの機械的Capability境界とActionのPermissionを適用する。動作しない場合も自動的にsandbox外へ切り替えない。OSの隔離機構、sandbox数、process対応は未固定。 |
+| **Local・明示的なsandbox外例外** | 特定MCPのcommand、設定の由来、既知のaccess・risk、失われる強制境界を説明してOwnerが明示許可する。許可を保存・失効可能にし、重要変更では再確認する。eneが仲介するActionには通常Permissionを適用するが、外部process自身の内部作用へCapability境界を強制できるとは説明しない。 |
+| **Remote MCP** | 外部側の実行環境は外部の管理下にある。eneが行う呼出し・data授受・認証利用へ境界を適用し、remote内部をLocal sandboxで保護したものと扱わない。結果や停止要求だけから外部作用の不存在を保証しない。 |
 
 Pluginの限定された実行境界も必要だが、要件はLocal MCPと同じ隔離機構や例外制度を指定していない。Pluginを任意のCore改変codeとして取り込むことも、未確定のsandbox専用runtimeを先に追加することもせず、必要な強制と障害分離を後続設計の条件にする。
 
@@ -137,14 +137,14 @@ flowchart TB
     owner["Owner"]
 
     subgraph hostpc["Owner管理Host PC"]
-        h["H: EneのHost実行<br/>Core・内部状態の正本<br/>CompanionとTask・Task Agent・Scheduleの継続"]
+        h["H: eneのHost実行<br/>Core・内部状態の正本<br/>CompanionとTask・Task Agent・Scheduleの継続"]
         subgraph restricted["既定のsandbox境界"]
             m["M: Local MCP<br/>外部code・必要時に実行"]
         end
     end
 
     subgraph clientpc["Clientを実行するPC<br/>Hostと同居 または LAN・Owner管理VPN上"]
-        c["C: EneのClient実行<br/>表示・会話・操作<br/>個体ごとのactiveな身体・入出力"]
+        c["C: eneのClient実行<br/>表示・会話・操作<br/>個体ごとのactiveな身体・入出力"]
         subgraph toolui["第一者UIとは異なる信頼境界"]
             u["U: MCP Apps<br/>必要時のTool UI・一時data"]
         end
@@ -172,7 +172,7 @@ flowchart TB
     h -.->|"backup / 明示restore"| backup
 ```
 
-PのHost／LAN／Cloudは選択できる配置であり、三段のruntime layerや同時起動の必須要素ではない。Xへの二本の線も、一つの拡張を両側で重複起動する要求ではなく、機能に応じた配置を表す。UはMが提供するUIをClient側で扱う境界であり、独立した常駐serviceではない。MからのUI resourceと操作結果はEneの制限下でUへ届くが、図はその物理的なdata経路を固定しない。図のLocal MCPは通常のsandbox内構成であり、明示例外の場合は同じMがsandbox境界の外へ出る。その場合に失われる強制はTrust Boundariesの表に従う。
+PのHost／LAN／Cloudは選択できる配置であり、三段のruntime layerや同時起動の必須要素ではない。Xへの二本の線も、一つの拡張を両側で重複起動する要求ではなく、機能に応じた配置を表す。UはMが提供するUIをClient側で扱う境界であり、独立した常駐serviceではない。MからのUI resourceと操作結果はeneの制限下でUへ届くが、図はその物理的なdata経路を固定しない。図のLocal MCPは通常のsandbox内構成であり、明示例外の場合は同じMがsandbox境界の外へ出る。その場合に失われる強制はTrust Boundariesの表に従う。
 
 LocalとRemoteで変わるのはClientへの接続と入出力・操作対象の所在地であり、Host正本・Host上の許可済み作業の継続は変わらない。Host／LAN／Cloudの推論選択もClientの所在地と別軸である。Computer Useの対象はCompanionが現在存在するactive Clientだけとし、任意のpairing済みClientの選択や存在場所との分離を行わない。
 
@@ -192,7 +192,7 @@ LocalとRemoteで変わるのはClientへの接続と入出力・操作対象の
 - **UIと縮退:** 重要な管理操作への到達とkeyboard経路を満たす画面構成、品質調整、資源配分、停止伝達・進捗保存の粒度。管理をBodyやLLMの成功へ従属させず、受付と停止完了を区別する。
 - **検証環境:** model・Provider catalog、OS version・hardware、性能budgetはReleaseのSupport Matrixと[受け入れ条件](../requirements/acceptance.md)で検証する。現milestoneのOpenAI Responses APIや数値Gateを恒久的なTopology制約へ固定しない。
 
-これらの自由度は、Cloudへの正本移転、恒久Workspace container、独自成果物library、Ene運営relay・account・Marketplace等の非目標を再導入できるという意味ではない。
+これらの自由度は、Cloudへの正本移転、恒久Workspace container、独自成果物library、ene運営relay・account・Marketplace等の非目標を再導入できるという意味ではない。
 
 ## Traceability
 

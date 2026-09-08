@@ -23,7 +23,7 @@ Runtime Flowは、triggerを受けてから、判断・状態変更・作用・�
 
 | Flow | 選定理由 |
 |---|---|
-| RF-01 会話から認識形成・訂正・再利用へ | Eneの個体継続の中心。発言・現在認識・根拠・関係・表現の正本が入れ替わらないかを検証する。グループ・Companion間交流、Character更新を関連分岐として扱う。 |
+| RF-01 会話から認識形成・訂正・再利用へ | eneの個体継続の中心。発言・現在認識・根拠・関係・表現の正本が入れ替わらないかを検証する。グループ・Companion間交流、Character更新を関連分岐として扱う。 |
 | RF-02 委任Taskから外部作用・steering・結果へ | 会話と長い作業の独立、TaskとAgentの区別、Permissionから作用・保存・報告までの責任を検証する。MCP Appsと隔離例外も同じ作用経路で辿る。 |
 | RF-03 共有観測から個体の理解・自発活動へ | Client共有処理と個体判断の二段階で、scope・Provider同意・費用が拡張されないかを検証する。 |
 | RF-04 作業中のClient移動・切断・未伝達報告 | presenceとTask実行場所の独立、現地作用の不明、移動失敗、再接続時の二重存在防止を検証する。 |
@@ -101,9 +101,9 @@ OwnerがWorkspaceのfileを調べ成果物を作る等のまとまった仕事�
 1. 個体調整は目的を理解し、受ける、条件を確認する、断るを判断する。受ける場合は作業へTask化・委任を要求する。作業が目的・担当・Task context・Workspace関連付け・作業状態を確定する。会話で依頼を受け付けたことだけでTaskへの反映完了としない。
 2. 作業は原則一つ以上の一時Task AgentへTaskまたは一部を委任する。独立部分は並行できる。委任元の現在のCapability・Permission・費用・Provider条件、Task／Workspace範囲を維持し、独立したAllow・Credential・長期人格を渡さない。作業中も個体調整は通常会話を続ける。
 3. 作業／AgentのAction意図について、権限・制約がOwner依頼・Rule・文脈と具体的な目的・対象・data・送信先・作用を対応付ける。明確な依頼を一回の承認と解釈できても、Deny・Always ask・Capabilityを越えない。必要な確認では対象等を示し、作業が判断待ちを管理する。確認が不要なら繰り返さない。
-4. 実行・拡張が現在条件を実対象へ適用する。Read／Create／Edit／Delete／Executeを区別し、link・mount等を含め選択範囲外を拒否する。取得した案内file・Skill・MCP Promptは由来を保つcontentとして利用し、含まれる指示をOwner管理意図へ昇格させない。Ene自身の保存領域や承認UIへ通常Toolから回り込むことも許さない。
+4. 実行・拡張が現在条件を実対象へ適用する。Read／Create／Edit／Delete／Executeを区別し、link・mount等を含め選択範囲外を拒否する。取得した案内file・Skill・MCP Promptは由来を保つcontentとして利用し、含まれる指示をOwner管理意図へ昇格させない。ene自身の保存領域や承認UIへ通常Toolから回り込むことも許さない。
 5. 実行・拡張が把握した作用・未完了・成功不明を作業へ返す。作業はこれを参照してTask全体の進捗・達成・未完了を確定する。Agentの「成功」という申告を作用の証拠の代わりにしない。必要な記録はHostへ保全し、外部作用成功と内部記録保存成功も混同しない。
-6. 永続保存先が未定なら、作業は最終保存前にOwnerの選択を得る。許されたWorkspaceがあれば既定先にできる。通常fileとして保存し、Eneの成果物libraryへ複製しない。Taskの終了・保持方針に従う中間file整理にも外部fileのPermissionを適用し、整理できなければ残存を説明する。
+6. 永続保存先が未定なら、作業は最終保存前にOwnerの選択を得る。許されたWorkspaceがあれば既定先にできる。通常fileとして保存し、eneの成果物libraryへ複製しない。Taskの終了・保持方針に従う中間file整理にも外部fileのPermissionを適用し、整理できなければ残存を説明する。
 7. 個体調整がTask正本を参照し、結果、変更file、保存先、失敗・未完了、次の判断をOwnerへ統合して報告する。実際の提示は入出力・提示が扱い、active Client不在ならRF-04の未伝達管理へ接続する。作業経験はRF-01の形成判断へ渡せる。逐次確認なしのLearning形成は可能だが、Task限定情報の無条件な永続昇格やTask Agent固有Learningは行わない。
 
 ### 進行中のsteering・承認・Cancel
@@ -235,7 +235,7 @@ OwnerがPrivacy／Securityのため特定情報そのものの内部消去を明
 
 1. 保全・消去はOwnerの目的と対象を受理し、個体調整・認識・学習等の支援と各ownerの対象関係を用いて影響を特定する。Ownerに保存場所の選択を要求しない。共有根拠の無関係情報は可能な範囲で分離し、分離不能な重要影響を説明して必要な確認を行う。明確な対象に不要な再確認は加えない。
 2. 対象探索と同時に、各参加ownerは対象情報の保存先だけでなく、revision・根拠・source・派生物・内部copy・Client一時data・処理中利用・遅延結果の関係を引き受ける。権限・制約と利用箇所は必要な保留・再保存防止を適用する。これが成立しないまま、局所削除だけを最終検証の対象にしない。
-3. 各ownerが内部対象を除去または復元不能化する。削除開始から完了までの対象情報の再到着・生成も同じ消去対象とし、途中の新しい入力を新しいExperienceとして除外しない。対象には個体削除後のHistory・非会話log、Task context、Memory過去revision、Summary、対象を復元できるRelationship・Companion Stateと保持根拠、Skill、index・embedding・cache、Audit・Debugの該当情報、接続中Client、Ene管理下のPlugin・MCP Apps dataを含む。通常保持原則は対象範囲に限って消去より下位となる。
+3. 各ownerが内部対象を除去または復元不能化する。削除開始から完了までの対象情報の再到着・生成も同じ消去対象とし、途中の新しい入力を新しいExperienceとして除外しない。対象には個体削除後のHistory・非会話log、Task context、Memory過去revision、Summary、対象を復元できるRelationship・Companion Stateと保持根拠、Skill、index・embedding・cache、Audit・Debugの該当情報、接続中Client、ene管理下のPlugin・MCP Apps dataを含む。通常保持原則は対象範囲に限って消去より下位となる。
 4. 指定文字列は内部全域で機械的に検索・削除・残存検証する。LLMの要約・重要度低下を証明にしない。言い換えや意味的一致の探索に推論を使う場合は第3節の条件と検出限界を保ち、完全検出を保証しない。
 5. 各参加ownerは局所の処理・検証結果と未確認箇所を返す。保全・消去は全域の処理、残存検証、再保存・古い根拠からの再形成防止が揃った場合にだけ完了を確定する。完了記録・Audit・Owner説明自体へ対象private本文を再保存しない。
 

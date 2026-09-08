@@ -119,9 +119,9 @@ LLMへ説明する由来・制限と、第一者側が参照・送信・保存�
 
 ### 5.2 cache・session・Client経路
 
-Ene管理下のcache・embedding・検索結果・圧縮contextを再利用する場合も、内容だけでなく元の範囲・用途・現在性を確認できる必要がある。hitしたという理由でsource参照や制約確認を省かない。元のHistoryが通常保持で失われた場合と、targeted deletionで利用を除去すべき場合を区別する。前者で形成済みLearningを自動削除せず、後者でcacheを代替根拠にしない。
+ene管理下のcache・embedding・検索結果・圧縮contextを再利用する場合も、内容だけでなく元の範囲・用途・現在性を確認できる必要がある。hitしたという理由でsource参照や制約確認を省かない。元のHistoryが通常保持で失われた場合と、targeted deletionで利用を除去すべき場合を区別する。前者で形成済みLearningを自動削除せず、後者でcacheを代替根拠にしない。
 
-Provider sessionに過去の情報が残る場合、その情報も後続生成へ寄与し得る入力として扱う。現在使えない情報を含むsessionへの新規依頼は、現在のcontextを短く渡すだけでは成立しない。利用対象から除外できる経路へ切り替える等、現在条件を満たせなければそのsessionを再利用しない。Provider保有copyの外部保持までEne内部消去の保証へ含めないことと、そのcopyをEneが再利用してよいことは別である。
+Provider sessionに過去の情報が残る場合、その情報も後続生成へ寄与し得る入力として扱う。現在使えない情報を含むsessionへの新規依頼は、現在のcontextを短く渡すだけでは成立しない。利用対象から除外できる経路へ切り替える等、現在条件を満たせなければそのsessionを再利用しない。Provider保有copyの外部保持までene内部消去の保証へ含めないことと、そのcopyをeneが再利用してよいことは別である。
 
 Clientからの直接送信やprotocol Pluginにも同じ成立条件を適用する。全payloadのHost中継は要求しないが、Clientの古い設定copyや外部codeが独立に同意・現在性を決めてはならない。Hostの現在条件を確認できないClientは該当活動を継続せず、一時copyを第二の正本へしない。
 
@@ -224,7 +224,7 @@ Restoreでは旧live要求・結果と復元正本を区別する。復元後の
 
 ### 8.2 Targeted deletionの参加単位
 
-Contextを保持・変換・送信・受入する各責務は、保全・消去に対して自分の参加範囲を説明できる必要がある。情報ownerだけを参加先にせず、処理中context、検索・圧縮派生物、Ene管理下のcache、Client・拡張の一時copy、戻り得る結果を含める。
+Contextを保持・変換・送信・受入する各責務は、保全・消去に対して自分の参加範囲を説明できる必要がある。情報ownerだけを参加先にせず、処理中context、検索・圧縮派生物、ene管理下のcache、Client・拡張の一時copy、戻り得る結果を含める。
 
 各保持・利用先は、対象sourceや対象情報との関係、処理中の利用、局所処理・検証、再保存防止、確認不能・未完了を対応付ける。正確な内部一覧の表現や参加先の探索方式は未定でも、sourceを消した後に依存関係も消失し、遅延結果を識別できなくなる実装は不可とする。必要な関係は本文を保持せず維持できるようにし、関係自体に対象情報が残る場合も消去へ参加させる。
 
@@ -234,7 +234,7 @@ Contextを保持・変換・送信・受入する各責務は、保全・消去�
 
 再起動で未完了消去と必要な保留を失わない。完了後も削除前の根拠だけによる再形成・遅延再保存を防ぐ。一方、完了後にOwnerが改めて提供した情報は新しいExperienceになり得るため、同じ文字列への永久禁止を新設しない。
 
-この節は全域完了判定の完全設計ではない。通常History保持、Companion削除、targeted deletion、backup／restoreはSO・DRの異なるlifecycleを維持する。外部Workspace・Owner保存backup・Provider保有copyの削除を内部context消去の成功条件へ加えず、Ene管理下の内部copyは除外しない。
+この節は全域完了判定の完全設計ではない。通常History保持、Companion削除、targeted deletion、backup／restoreはSO・DRの異なるlifecycleを維持する。外部Workspace・Owner保存backup・Provider保有copyの削除を内部context消去の成功条件へ加えず、ene管理下の内部copyは除外しない。
 
 ## 9. Runtime FlowsとCross-cutting Designへ戻した検証
 

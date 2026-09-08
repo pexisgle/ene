@@ -20,7 +20,7 @@ Reviewer: architecture作成者とは独立したArchitecture Reviewer
 - Major: 0
 - Minor: 3
 
-総括。六つのartifactは、要件の必須挙動を欠落・改変・過剰拘束なく設計上の境界へ変換しており、artifact間に成立を妨げる矛盾はない。Host正本とClient一時data、一個体一active Clientと通常Host作業の独立継続、CompanionとTask／Task Agentのlifecycle差、Character／個体／Learningの所属差、LLM意味判断と迂回不能な強制境界の分離、通常忘却とtargeted deletionの目的差、外部作用の不明の保持、external state（Provider・MCP・Workspace・backup copy）の非正本化は、Driver・SC・RT・Subsystem・State Ownership・Dependency Rulesで同じ意味を保っている。上位で残したDesign Freedomは下位で失われておらず、下位が追加した制約（通常ToolからEne内部正本への回り込み禁止、判断用推論への割当同意適用等）は要件の信頼境界から導出可能な範囲にある。
+総括。六つのartifactは、要件の必須挙動を欠落・改変・過剰拘束なく設計上の境界へ変換しており、artifact間に成立を妨げる矛盾はない。Host正本とClient一時data、一個体一active Clientと通常Host作業の独立継続、CompanionとTask／Task Agentのlifecycle差、Character／個体／Learningの所属差、LLM意味判断と迂回不能な強制境界の分離、通常忘却とtargeted deletionの目的差、外部作用の不明の保持、external state（Provider・MCP・Workspace・backup copy）の非正本化は、Driver・SC・RT・Subsystem・State Ownership・Dependency Rulesで同じ意味を保っている。上位で残したDesign Freedomは下位で失われておらず、下位が追加した制約（通常Toolからene内部正本への回り込み禁止、判断用推論への割当同意適用等）は要件の信頼境界から導出可能な範囲にある。
 
 残るMinorは、State Modelに明示されていない活動記録の所属、Client共有Observer推論への割当単位、保全・消去への周辺設定の所有集約の三点であり、いずれも既存境界の分割・統合を要さない小規模な明確化で閉じる。architecture gateを再度閉じる必要はない。
 
@@ -107,7 +107,7 @@ Host自動起動の所有を再検討する（Setup導線を持つ入出力・�
 
 - 意味の変化: 確認できなかった。Computer Useのactive Client限定、切断時のHost PC上Clientへの移動、自発移動の非自動化、missedの非補完、明示再開、不明時非再実行、Companion削除時のSkill／Relationship／Scheduleの扱いは、六つのartifactで同一の意味を保っている。
 - 要件にない強い制約の追加: 下位が追加した制約は次の三つに限られ、いずれも要件の信頼境界・同意契約から導出可能な範囲にある。
-  - `dependency-rules.md` 4.1「通常Tool／shell／Filesystem／Computer Use → Ene内部正本・control planeへの任意access」の禁止。要件「信頼境界」「Capability境界」からの導出。
+  - `dependency-rules.md` 4.1「通常Tool／shell／Filesystem／Computer Use → ene内部正本・control planeへの任意access」の禁止。要件「信頼境界」「Capability境界」からの導出。
   - `dependency-rules.md` 5.2「判断のための推論も無条件の例外にしない」（Permission解釈・消去対象特定に用いる推論にも割当同意・費用制限を適用）。要件「割当と同意」からの導出。
   - `state-ownership.md` 4.4 未伝達事項をfull backupの対象に含める。要件のbackup対象列挙には現れないが、Companion継続dataとしての導出であり、Ownerから見える挙動を狭めない。
 - Design Freedomの喪失: 確認できなかった。AD-01〜15が残した自由度（process配置、IPC、pairing手段、駆動・待機方式、調停方式、Summary粒度、減衰式、Permission評価algorithm、sandbox機構、backup形式等）は、RT・subsystems・SO・DRの各Design Freedom節で維持されている。
@@ -132,7 +132,7 @@ requirements → drivers → system context / runtime topology → subsystems �
 ### State Ownership
 
 - 同じ意味に対する正本は一つに保たれている。競合しやすい組合せ（Task進捗と個別Actionの確定度、Provider登録情報と割当同意、接続事実・device許可・active帰属、Rule解釈と確定、Memory／Relationship／Companion State）は、いずれも意味を分けたうえで境界が明示されている。
-- external stateとinternal stateは混同されていない。Provider session・cache、MCP server状態、Workspace実体、Package原本、backup copy、OSのfullscreen・負荷は、いずれも「Eneが把握した事実」または「外部所有」として扱われ、正本にも消去保証の範囲にも含められていない。
+- external stateとinternal stateは混同されていない。Provider session・cache、MCP server状態、Workspace実体、Package原本、backup copy、OSのfullscreen・負荷は、いずれも「eneが把握した事実」または「外部所有」として扱われ、正本にも消去保証の範囲にも含められていない。
 - Memory／History／Summary／Relationship／Companion Stateは第二の正本として重複していない。Summaryを「判断時に用いた圧縮evidence」とし現在知識の正本にしない判断は、要件「独立した知識の正本ではなく長期状態の根拠」に正確に対応する。
 - 未明示の所属（F-01）と、coordinatorへの周辺所有の集約（F-03）が残る。
 
@@ -200,7 +200,7 @@ Findingではないが、後続工程で忘れると境界が形骸化する事�
 1. **Owner意図の由来の機械的保持。** 個体調整が権限・制約へ渡すRule提案・一回承認の解釈には、起点となったClient入力（Historyのentry）への参照を必ず付け、権限・制約が「由来がTool result・Workspace file・MCP Prompt・画面内容ではない」ことを機械的に確認できる形にする。これがなければDR-02・5.2は文章上の原則に留まる。
 2. **Owner確認の表示内容。** Permission確認では、実行・拡張が把握する機械的事実（実際のpath、送信先host、操作種別）をLLMの目的解釈と並べて表示し、LLM記述だけを確認材料にしない。要件「実行主体、目的、対象、送信先、主なdata、外部作用、費用またはrisk」の対象・送信先は機械的事実から供給する。
 3. **Context Assemblyの早期設計。** 四つのSubsystemに分散した責務を、一つの明示的な設計対象として初期に定義する。scope適用、Credential非露出、割当同意、費用制限、Provider能力差への適応が同じ経路で交差するため、後付けでは「同じ選択方針」の検証ができない。
-4. **Client直結経路と Client側bootstrap material。** Realtime VoiceをClientからProviderへ直結する場合、Clientが持つ認証材料は短期のものに限り、転写・turn結果のHost正本への反映状況を明示する。Clientが持たざるを得ないpairing・Host到達情報は「Eneの永続状態」ではないことと、その保護・失効の扱いを定義する。
+4. **Client直結経路と Client側bootstrap material。** Realtime VoiceをClientからProviderへ直結する場合、Clientが持つ認証材料は短期のものに限り、転写・turn結果のHost正本への反映状況を明示する。Clientが持たざるを得ないpairing・Host到達情報は「eneの永続状態」ではないことと、その保護・失効の扱いを定義する。
 5. **Observer routing用contextの取得方式。** 「Companionごとに検知を重複させない」と「全個体の私的contextを合併して送らない」を同時に満たす方式（例: 各Companionが自身の割当下で提供する限定的な関連性情報）をObservation設計の入口で決める。F-02と併せて閉じる。
 6. **Restoreの前提条件。** 「旧live状態と競合させない」を満たすため、全置換の前に進行中Task・Task Agent・consolidation・観測をどう静止させるか、静止不能時に何を保留・報告するかを定義する。
 7. **自発性OFF・上限の強制方式。** Companion単位の自発性設定は個体調整が所有するが、その強制はPromptだけに依存せず機械的gatingで行う。要件「資源上限をPromptだけに依存させない」の趣旨を、権限・制約の外にある設定にも適用する。

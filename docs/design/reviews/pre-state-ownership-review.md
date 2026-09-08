@@ -373,7 +373,7 @@ Step 4 で明確化すべき。時間経過・保持根拠の関連付け、保�
 
 **Finding**
 
-登録 Credential の一般分離・model context・生成 Tool argument・通常 result・UI・学習・履歴・Task・log・Debug 非露出、設定・認証 flow 登録・用途・参照元確認・更新・失効、接続実行の必要範囲利用・LLM・通常 result 非露出、backup 除外・全データ Reset 削除・restore 後再認証、未登録秘密の抑制と完全検出非保証・漏えい時失効案内、targeted deletion の内部全域（History・Summary・revision・evidence・Relationship・State 根拠・Skill・source・index・embedding・cache・接続中 Client 一時・Ene 管理下拡張・処理中・遅延結果）・機械的検索・残存検証・再保存・再形成防止・未完了表示禁止・外部 copy 非保証・通常保持との区別が要件で定められ、Subsystem は認証秘密の独立、推論・実行・提示・記録の各経路の非露出分担、保全の全域協調、権限の実行制約協調とする。参照と値、除外と dangling、supplier redaction と store、部分削除と検証、遅延・再起動後の未完了は Step 4 へ委ねられ、現時点で欠落ではない。
+登録 Credential の一般分離・model context・生成 Tool argument・通常 result・UI・学習・履歴・Task・log・Debug 非露出、設定・認証 flow 登録・用途・参照元確認・更新・失効、接続実行の必要範囲利用・LLM・通常 result 非露出、backup 除外・全データ Reset 削除・restore 後再認証、未登録秘密の抑制と完全検出非保証・漏えい時失効案内、targeted deletion の内部全域（History・Summary・revision・evidence・Relationship・State 根拠・Skill・source・index・embedding・cache・接続中 Client 一時・ene 管理下拡張・処理中・遅延結果）・機械的検索・残存検証・再保存・再形成防止・未完了表示禁止・外部 copy 非保証・通常保持との区別が要件で定められ、Subsystem は認証秘密の独立、推論・実行・提示・記録の各経路の非露出分担、保全の全域協調、権限の実行制約協調とする。参照と値、除外と dangling、supplier redaction と store、部分削除と検証、遅延・再起動後の未完了は Step 4 へ委ねられ、現時点で欠落ではない。
 
 **Evidence**
 

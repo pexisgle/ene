@@ -1,4 +1,4 @@
-app-title = Ene Stage
+app-title = ene Stage
 surface-title = コンパニオン
 detail-title = 詳細
 caption-title = キャプション
@@ -11,7 +11,7 @@ chat-new-session-hint = このレーンを終了して新しい会話を始め�
 chat-new-session-ready = 新しいチャットを開始しました。
 chat-placeholder = メッセージを入力…
 chat-you = あなた
-chat-ene = Ene
+chat-ene = ene
 chat-error = エラー
 chat-tool = ツール
 chat-system = システム

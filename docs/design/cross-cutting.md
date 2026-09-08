@@ -4,7 +4,7 @@
 
 ## 1. 独立して設計する理由と対象の選定
 
-Eneでは、ある責務で正しく受理した入力・結果が、別の責務でも同じ用途に使えるとは限らない。Ownerの発言を記録できてもActionの承認が成立したとは限らず、Observerが画面を送信できても各Companionの推論先へ送信できるとは限らない。Cancel後の作用結果は記録へ反映する必要がある一方、それを次の実行の根拠にしてはならない。共有したMemoryから私的な根拠を辿る場合や、消去中に推論結果が戻る場合も、局所の成功だけでは契約が成立しない。
+eneでは、ある責務で正しく受理した入力・結果が、別の責務でも同じ用途に使えるとは限らない。Ownerの発言を記録できてもActionの承認が成立したとは限らず、Observerが画面を送信できても各Companionの推論先へ送信できるとは限らない。Cancel後の作用結果は記録へ反映する必要がある一方、それを次の実行の根拠にしてはならない。共有したMemoryから私的な根拠を辿る場合や、消去中に推論結果が戻る場合も、局所の成功だけでは契約が成立しない。
 
 本書は、こうした受渡しで失ってはいけない意味をFlowに依存しない契約へまとめる。Subsystem設計の責務一覧、State Ownershipの状態一覧、Runtime Flowの手順を複製するものではない。各Flowの順序・固有分岐はその文書に残し、本書では経路・時点・利用目的が変わる交差を扱う。
 
@@ -43,11 +43,11 @@ Ownerに由来する入力・管理操作、入力中に引用された外部con
 
 Actionでは実行主体・委任元、TaskとWorkspaceの範囲、目的、実対象と操作、送信先、主なdata、外部作用、費用・riskについて、判断対象と実利用の対応が必要である。これらの重要な意味が変われば現在の条件で再評価する。Permissionの意味判断は権限・制約、作用の適用と把握は実行・拡張、Taskの目的・達成は作業に残る。すべての項目を常に同じ形式で保持・表示する指定ではない。
 
-複合Tool、shell、MCP、Skill付属script、Computer Use、Providerが生成したAction要求、MCP Appsからの追加要求も、実際の作用に対して境界を適用する。名前や経路の変更で同等のDenyを迂回しない。Filesystemは選択範囲と操作種別を守り、link・mount・path traversalで実対象が外へ出ることを許さない。通常Toolの許可からEne自身の保存領域・管理入口・第一者承認UIへ回り込み、内部state変更や自己承認を成立させない。
+複合Tool、shell、MCP、Skill付属script、Computer Use、Providerが生成したAction要求、MCP Appsからの追加要求も、実際の作用に対して境界を適用する。名前や経路の変更で同等のDenyを迂回しない。Filesystemは選択範囲と操作種別を守り、link・mount・path traversalで実対象が外へ出ることを許さない。通常Toolの許可からene自身の保存領域・管理入口・第一者承認UIへ回り込み、内部state変更や自己承認を成立させない。
 
 Task Agentは委任元とTaskの現在境界に参加し、独立したAllow・Credential・Provider override・予算を所有しない。同じfolderを使う別Taskの承認も利用できない。Schedule作成、Rule保存、Credential登録、Provider同意、個体の親密さ・関心、観測ON、Clientへのpresenceは、それだけで別Actionの承認にならない。Rule保存自体はActionのtriggerにしない。Schedule到来や観測を契機とする活動は、それぞれのownerが現在の開始条件を満たすか判断する。
 
-Local MCPのsandbox外許可は特定command・由来・権限等に対応する隔離例外として扱う。重要変更は再確認し、失効を反映する。個々の仲介ActionのPermissionは残るが、外部process内部にEneの機械的境界が及ぶと説明しない。この例外をPluginへ流用しない。MCP Appsの操作は外部Tool UIの入力であり、第一者の制御変更を直接成立させない。
+Local MCPのsandbox外許可は特定command・由来・権限等に対応する隔離例外として扱う。重要変更は再確認し、失効を反映する。個々の仲介ActionのPermissionは残るが、外部process内部にeneの機械的境界が及ぶと説明しない。この例外をPluginへ流用しない。MCP Appsの操作は外部Tool UIの入力であり、第一者の制御変更を直接成立させない。
 
 判断用の推論にも、その推論自身の割当同意・認証用途・費用制限を適用する。Permission審査や消去対象の意味的特定を理由に送信を無条件許可しない。審査対象Actionを先に許可・実行しないと審査できない循環を作らず、推論条件が不足する場合は不足・判断待ちを管理面へ返す。明確な停止・拒否・管理操作と機械的検証は、その推論の成功を待たない。
 
@@ -73,13 +73,13 @@ Provider送信では、参照範囲に加え、そのconsumer・Capabilityの送
 
 Observerの共有検知・関連付けはClientに対応する専用assignmentで行い、存在Companionのoverride・同意を選択・合成しない。routingにはCompanion固有の文脈を利用できる。共有観測は既存の個体調整との協働を通じ、Historyは個体調整、Memory等は認識・学習、Task contextは作業の所有を保って、routingに必要な範囲へ要約・制限された文脈を受け取る。private context全体を公開せず、新しい正本・意味ownerも作らない。要約・変換後も元情報の利用制約とCloud送信同意を維持し、Observer専用assignmentでその情報・用途の利用条件を満たす。生成方法・形式・更新頻度・鮮度・選択algorithmは後続設計へ残す。delivery後の各Companionの推論は別consumerとして自身の設定・同意を満たす。Observerで送信できた画面や背景を、そのまま各個体のProviderへ送れるとはみなさない。一方の個体の判断成功を、失敗した他個体の理解へコピーしない。
 
-Prompt cacheは性能・費用の最適化、Provider sessionは実行補助、embedding等は検索用派生dataとして扱い、いずれもcanonical stateを代替しない。cacheのhit／miss・期限切れで論理的context・安全境界・永続化契約を変えず、個体の継続や根拠をProvider側にしか残さない構成を作らない。Ene管理下のcacheは内部保護・消去へ参加し、Provider保有copyとは区別する。Host中継を省くClient経路やprotocol Pluginでも同じ送信・保護契約を成立させる。全payloadのHost中継は固定しない。
+Prompt cacheは性能・費用の最適化、Provider sessionは実行補助、embedding等は検索用派生dataとして扱い、いずれもcanonical stateを代替しない。cacheのhit／miss・期限切れで論理的context・安全境界・永続化契約を変えず、個体の継続や根拠をProvider側にしか残さない構成を作らない。ene管理下のcacheは内部保護・消去へ参加し、Provider保有copyとは区別する。Host中継を省くClient経路やprotocol Pluginでも同じ送信・保護契約を成立させる。全payloadのHost中継は固定しない。
 
 ### Credentialの情報経路は通常contentと合流させない
 
 認証秘密と接続ownerは、設定済み接続・認証用途・現在の有効性を照合して秘密値を必要範囲で利用する。非秘密の用途参照を持つことは値を読めることではない。LLM生成argumentへ値を補完せず、model context、通常Tool result、UI、History、Summary、Learning、Task結果、Audit、log、Debug capture、backupへ流さない。認証先のerrorやresultによる秘密の反射にも、受入・保存・提示箇所が参加して非露出を維持する。
 
-Client固有のpairing／再接続用材料は、Hostのdomain正本や登録済みProvider／MCP CredentialのClient cacheとは区別する。ただしEneの保護対象からは除外しない。接続・存在がdevice・接続用途を、認証秘密がsecretの保護を、権限・制約がdevice許可・失効を担当する。旧材料だけで失効・全データReset後の信頼を復活させず、Restoreされた参照も現在の認証成立と照合する。具体形式・保存・受渡しは固定しない（SO第8節）。
+Client固有のpairing／再接続用材料は、Hostのdomain正本や登録済みProvider／MCP CredentialのClient cacheとは区別する。ただしeneの保護対象からは除外しない。接続・存在がdevice・接続用途を、認証秘密がsecretの保護を、権限・制約がdevice許可・失効を担当する。旧材料だけで失効・全データReset後の信頼を復活させず、Restoreされた参照も現在の認証成立と照合する。具体形式・保存・受渡しは固定しない（SO第8節）。
 
 登録済みCredentialの保護を、通常の要約や事後的なLearning削除へ委ねない。登録外の秘密は検知時に不要な送信・保存を抑制するが、完全検出は保証しない。内部copyの消去と外部で有効なCredentialの更新・失効は別操作として説明する。
 
@@ -179,7 +179,7 @@ Character Packageの推奨内部Skillは作成先のCompanion scopeを既定と�
 
 Targeted deletionの完了には、内部全域の除去または復元不能化、指定文字列の機械的残存検証、開始から完了までに再到着・生成した対象情報の消去、削除前の処理・遅延結果からの再保存防止、古い根拠だけからの再形成防止が必要である。意味的な探索の完全性と文字列検証を混同しない。共有根拠の無関係情報は可能な範囲で分離し、分離不能な重要影響を示す。完了記録・監査・説明へ削除本文を戻さない。
 
-Client・MCP Apps・Ene管理下のPlugin一時dataも参加する。切断や応答なしを消去成功とせず、接続変化・未確認範囲を保全・消去へ伝える。再接続時に旧copyを戻さない。途中再起動でも未完了・必要な保留・再保存防止をHostで維持する。外部Provider／MCPが保有するcopy、export、Owner保存backup、外部Workspaceの消去は内部完了へ含めない。
+Client・MCP Apps・ene管理下のPlugin一時dataも参加する。切断や応答なしを消去成功とせず、接続変化・未確認範囲を保全・消去へ伝える。再接続時に旧copyを戻さない。途中再起動でも未完了・必要な保留・再保存防止をHostで維持する。外部Provider／MCPが保有するcopy、export、Owner保存backup、外部Workspaceの消去は内部完了へ含めない。
 
 ### 正常状態の保全と正本切替
 
@@ -195,7 +195,7 @@ Restoreは開始前からHostにある現在のCredential storeを維持し、�
 
 ## 7. CC-06 — 並列消費を同じ上限へ結び付け、制御・保全を維持する
 
-利用実績の意味は利用を管理する責務に残る。推論はProvider報告値・Ene推定値・不明と根拠、作業は委任稼働、実行・拡張はAction、保全・消去は保存量等を供給し、権限・制約が同じProvider別・全体等の適用範囲へ結び付ける。会話・学習・Voice・観測・Task Agentの並列利用で、各処理が同じ残額を独立に使い切れる構造にしない。
+利用実績の意味は利用を管理する責務に残る。推論はProvider報告値・ene推定値・不明と根拠、作業は委任稼働、実行・拡張はAction、保全・消去は保存量等を供給し、権限・制約が同じProvider別・全体等の適用範囲へ結び付ける。会話・学習・Voice・観測・Task Agentの並列利用で、各処理が同じ残額を独立に使い切れる構造にしない。
 
 処理中・遅延報告・不明な消費をゼロと扱わず、fallback、再委任、Agent終了、Companion削除、Client移動、cache破棄、通常log整理で適用中の使用量をリセットしない。Observer検知は対象Client・専用assignmentの一つの利用として扱い、個体数分の重複計上をしない。delivery後の個体推論は別の実利用として同じ全体capへ含める。
 
@@ -261,7 +261,7 @@ Targeted deletionは指定範囲の通常revision・根拠・History保持に優
 | RF-08の正本切替と旧live結果、一括有効化 | 旧処理を復元stateへ混ぜず、外部作用・外部file・認証成功を巻き戻さない。一括有効化は現在のDeny・cap・同意・不明作用を無視しない（CC-01・03〜05・07）。 |
 | 全Flowの停止・保全とLLM・Body・Voice・MCP Apps障害 | 管理・keyboard・Text代替を維持し、Host未受理の要求は完了にしない。内部管理のための通常Toolによる自己承認も許さない（CC-01・04・06・07）。 |
 
-一般的なlogging、caching、configuration、security等を項目として追加することはしていない。それぞれがEneで守るべき情報・制御・保持・説明の契約へ参加する範囲を示した。Characterの部品選択手順、Task分割、具体的なObservation候補処理等、特定Flowやdomain内で決まる詳細は独立concernへ昇格させていない。
+一般的なlogging、caching、configuration、security等を項目として追加することはしていない。それぞれがeneで守るべき情報・制御・保持・説明の契約へ参加する範囲を示した。Characterの部品選択手順、Task分割、具体的なObservation候補処理等、特定Flowやdomain内で決まる詳細は独立concernへ昇格させていない。
 
 ## 10. Design Freedomと新たなIssue
 

@@ -1,10 +1,10 @@
-# Ene Architecture Drivers
+# ene Architecture Drivers
 
 分析対象: `docs/requirements/` の再構成済みBaseline（2026-09-08のOwner decisions反映済み）。本書は要件から設計上の重要性を導出する分析であり、新たな製品要件や具体的なarchitectureの決定ではない。
 
 ## 1. Overview
 
-Eneのarchitectureを最も強く形作るのは、**Owner管理Hostを正本として、経験から変化する同じCompanionが継続し、その個体から実作業も利用できること**である。Companionは会話の装飾でもTask Agentの別名でもなく、Characterとも異なる。体験は一つの存在へ統合する一方、個体ごとの知識・関係・内的状態、Taskの権限と作業状態、外部fileの所有権は混同できない。
+eneのarchitectureを最も強く形作るのは、**Owner管理Hostを正本として、経験から変化する同じCompanionが継続し、その個体から実作業も利用できること**である。Companionは会話の装飾でもTask Agentの別名でもなく、Characterとも異なる。体験は一つの存在へ統合する一方、個体ごとの知識・関係・内的状態、Taskの権限と作業状態、外部fileの所有権は混同できない。
 
 この継続性には二つの強い制約が重なる。第一に、学習・共有・行動の意味判断はLLMへ委ねるが、その判断や学習済み内容から安全境界を直接変更できない。第二に、認識の変更と通常の忘却では根拠と履歴を残す一方、明示的なPrivacy/Security目的のtargeted deletionでは、復元可能な根拠・派生data・実行中処理まで含めて消去を成立させる。単なる会話履歴保存や現在値の更新では、この製品契約を満たせない。
 
@@ -27,7 +27,7 @@ Eneのarchitectureを最も強く形作るのは、**Owner管理Hostを正本と
 
 **Driver**
 
-一つの環境は一人のOwnerに属し、Owner管理Hostがene内部domain dataの正本と実行の継続を担う。Clientは表示・会話・操作の入口であり、Host正本のdomain dataや登録済みCredentialの永続cacheを持たない。端末固有の接続材料は別分類として必要時にClientで保持できるが、Eneの保護対象に残し、接続目的・秘密非露出・Host側のdevice許可と失効に従う（SO第8節）。Client終了やRemote切断だけでは、許可済みのHost上のTask、Schedule、保存を終了させない。
+一つの環境は一人のOwnerに属し、Owner管理Hostがene内部domain dataの正本と実行の継続を担う。Clientは表示・会話・操作の入口であり、Host正本のdomain dataや登録済みCredentialの永続cacheを持たない。端末固有の接続材料は別分類として必要時にClientで保持できるが、eneの保護対象に残し、接続目的・秘密非露出・Host側のdevice許可と失効に従う（SO第8節）。Client終了やRemote切断だけでは、許可済みのHost上のTask、Schedule、保存を終了させない。
 
 Hostは、進行中の作業や外部eventを待つためだけにLLMへ反復問い合わせを行わない。Scheduleの到来待ちもこの制約に含まれる。
 
@@ -419,7 +419,7 @@ Owner不参加の自発交流で実際に交わされた発話をConversation Hi
 | Finding | 判断 | 採用する問題と統合内容 | 採用しない拘束 |
 |---|---|---|---|
 | F-01 | PARTIAL | routing文脈の出所・利用範囲の不足を認める。既存の情報ownerが所有するCompanion固有文脈を、routingに必要な範囲へ要約・制限して提供できる契約とし、元情報の制約とObserver専用assignmentの送信同意を維持する（AD-12、SO 4.16・4.18・4.19、DR文書5.3、CC-02）。 | 新たなscope区分や、各CompanionのProviderによる生成を必須にしない。変換しただけでCompanion固有情報としての制約が消えるとも扱わない。 |
-| F-02 | PARTIAL | Client固有の接続材料を、Hostのdomain正本・登録Credentialの永続cacheと区別する。既存の接続・存在、認証秘密、権限・制約で用途・保護・失効・Reset／Restore時の現在認証照合を担う（RT-07、SO第8節、DR文書6.3、CC-02）。 | 接続材料をEneの保護対象外へ分類しない。永続保持方式や鍵形式を必須にせず、新しいownerも作らない。 |
+| F-02 | PARTIAL | Client固有の接続材料を、Hostのdomain正本・登録Credentialの永続cacheと区別する。既存の接続・存在、認証秘密、権限・制約で用途・保護・失効・Reset／Restore時の現在認証照合を担う（RT-07、SO第8節、DR文書6.3、CC-02）。 | 接続材料をeneの保護対象外へ分類しない。永続保持方式や鍵形式を必須にせず、新しいownerも作らない。 |
 | F-03 | ACCEPT | Restore時の現在Credential storeの扱いの欠落を認める。RA-02に従い現在storeを維持し、復元参照を照合する（AD-15、SO 4.21・6.5、RF-08、CC-05）。 | — |
 
 | Requirement Issue | Owner決定の反映先と解決内容 |
