@@ -386,9 +386,9 @@ enum TransportFrame {
 
 ### 11.2 wire property
 
-- すべての Client→Host message の envelope は `sender{ device_id, incarnation_id, connection_id }` を載せる（第5節）。欠落は不受理の理由にする（「制約なし」への変換禁止）。
+- すべての Client→Host message の envelope は `sender{ device_id, incarnation_id, connection_id }` を載せる（第5節）。欠落は不受理の理由にする（「制約なし」への変換禁止）。唯一の例外は pairing 前の最初の `PairingRequest` であり、`device_id: None` で送る（§5 の方向別規則・§9.2）。
 - Host は device ごとの current `(incarnation_id, connection_id)` を保持する（durable の最終接続管理 record＋runtime の live 表）。受信時に次を照合する：
-  1. `device_id` が pairing 済み・非失効であること。
+  1. `device_id` が pairing 済み・非失効であること（pairing 前の最初の `PairingRequest` を除く）。
   2. `connection_id` が当該 device の current であること。
   3. `incarnation_id` が current incarnation と対応すること（旧 incarnation からの到着は stale）。
   4. `observed.presence_generation_view` が現在の帰属 generation と対応すること（Client 依存操作の場合）。
