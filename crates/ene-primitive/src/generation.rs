@@ -29,7 +29,8 @@ use serde::{Deserialize, Serialize};
 /// use ene_primitive::generation::GenerationInner;
 ///
 /// let first = GenerationInner::first();
-/// assert_eq!(first.next(), GenerationInner::from_u64(1));
+/// assert_eq!(first.checked_next(), Some(GenerationInner::from_u64(1)));
+/// assert_eq!(GenerationInner::from_u64(u64::MAX).checked_next(), None);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GenerationInner(u64);
@@ -47,21 +48,24 @@ impl GenerationInner {
         Self(0)
     }
 
-    /// Successor in the sequence, saturating at [`u64::MAX`].
+    /// Successor in the sequence, or [`None`] when no further distinct value
+    /// exists.
     ///
-    /// Saturation keeps the order total without wrapping back to
-    /// [`Self::first`]: once the maximum is reached, every further step stays
-    /// at the maximum rather than aliasing an old interval.
+    /// Exhaustion is reported, never hidden: at [`u64::MAX`] there is no
+    /// successor, so this returns [`None`] instead of aliasing the maximum.
+    /// A new lifecycle interval must be distinguishable from the previous
+    /// one; a silent `MAX -> MAX` step would merge two intervals into one
+    /// generation.
     ///
     /// ```
     /// use ene_primitive::generation::GenerationInner;
     ///
     /// let max = GenerationInner::from_u64(u64::MAX);
-    /// assert_eq!(max.next(), max);
+    /// assert_eq!(max.checked_next(), None);
     /// ```
     #[must_use]
-    pub fn next(&self) -> Self {
-        Self(self.0.saturating_add(1))
+    pub fn checked_next(&self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
     }
 
     /// Reconstitutes a stored value.
@@ -87,7 +91,7 @@ impl GenerationInner {
     /// ```
     /// use ene_primitive::generation::GenerationInner;
     ///
-    /// assert_eq!(GenerationInner::first().next().as_u64(), 1);
+    /// assert_eq!(GenerationInner::from_u64(1).as_u64(), 1);
     /// ```
     #[must_use]
     pub fn as_u64(&self) -> u64 {
@@ -103,14 +107,13 @@ mod tests {
     fn starts_at_zero_and_advances_by_one() {
         let first = GenerationInner::first();
         assert_eq!(first.as_u64(), 0);
-        assert_eq!(first.next().as_u64(), 1);
+        assert_eq!(first.checked_next(), Some(GenerationInner::from_u64(1)));
     }
 
     #[test]
-    fn saturates_instead_of_wrapping() {
+    fn exhaustion_reports_none_instead_of_aliasing_the_maximum() {
         let max = GenerationInner::from_u64(u64::MAX);
-        assert_eq!(max.next(), max);
-        assert_eq!(max.next().as_u64(), u64::MAX);
+        assert_eq!(max.checked_next(), None);
     }
 
     #[test]
@@ -121,7 +124,9 @@ mod tests {
     #[test]
     fn orders_within_one_lifecycle() {
         let first = GenerationInner::first();
-        let second = first.next();
+        let Some(second) = first.checked_next() else {
+            return;
+        };
         assert!(first < second);
         assert!(second > first);
     }

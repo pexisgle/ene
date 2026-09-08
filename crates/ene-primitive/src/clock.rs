@@ -1,18 +1,27 @@
-//! Wall-clock timestamp with its creation timezone.
+//! Wall-clock timestamp with its creation offset.
 //!
-//! [`WallClockWithTz`] records when something happened in human time. It is
-//! never a revision substitute: currentness is decided by comparing
-//! `(identity, revision)` or `(lifecycle, generation)` pairs under their
-//! owners, never by comparing timestamps (correspondence-identity §4.2).
+//! [`WallClockWithTz`] records when something happened in human time: a UTC
+//! instant plus the fixed offset observed where it was created. It deliberately
+//! holds no timezone identity (`Asia/Tokyo`, DST rules, ...): schedule math
+//! that needs those keeps the identifier in domain types. It is never a
+//! revision substitute and never a monotonic clock: the system wall clock can
+//! move backwards (NTP correction, manual changes), so currentness is decided
+//! by comparing `(identity, revision)` or `(lifecycle, generation)` pairs
+//! under their owners, never by comparing timestamps
+//! (correspondence-identity §4.2). Elapsed-time measurement belongs to
+//! [`std::time::Instant`], not here.
 
 use chrono::{DateTime, FixedOffset, Local};
 use serde::{Deserialize, Serialize};
 
-/// Wall-clock timestamp plus the timezone where it was created.
+/// Wall-clock timestamp plus the fixed offset observed at creation.
 ///
-/// The offset is part of the value: rendering and schedule math keep the
-/// creation timezone instead of silently normalising to UTC. Timestamps serve
-/// explanation, display, and schedule computation only.
+/// The offset shapes rendering and schedule math, but it is not a timezone
+/// identity and it does not participate in equality: [`PartialEq`], [`Eq`],
+/// and [`Hash`] follow chrono's `DateTime<FixedOffset>` semantics, which
+/// compare the represented instant. The same instant written with different
+/// offsets compares equal. Timestamps serve explanation, display, and
+/// schedule computation only.
 ///
 /// ```
 /// use ene_primitive::clock::WallClockWithTz;
@@ -24,14 +33,17 @@ use serde::{Deserialize, Serialize};
 pub struct WallClockWithTz(DateTime<FixedOffset>);
 
 impl WallClockWithTz {
-    /// Captures the current wall-clock time with the local timezone.
+    /// Captures the current wall-clock time with the local offset.
+    ///
+    /// The reading can move backwards between calls (NTP correction, manual
+    /// clock changes): never use successive readings as a monotonic order.
     ///
     /// ```
     /// use ene_primitive::clock::WallClockWithTz;
     ///
-    /// let first = WallClockWithTz::now();
-    /// let second = WallClockWithTz::now();
-    /// assert!(first.as_datetime() <= second.as_datetime());
+    /// let taken = WallClockWithTz::now();
+    /// let rendered = taken.to_rfc3339();
+    /// assert!(WallClockWithTz::parse_rfc3339(&rendered).is_ok());
     /// ```
     #[must_use]
     pub fn now() -> Self {
@@ -121,10 +133,18 @@ mod tests {
     }
 
     #[test]
-    fn now_never_runs_backwards_between_two_reads() {
-        let first = WallClockWithTz::now();
-        let second = WallClockWithTz::now();
-        assert!(first.as_datetime() <= second.as_datetime());
+    fn same_instant_with_different_offsets_compares_equal() {
+        let tokyo = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00");
+        let utc = WallClockWithTz::parse_rfc3339("2026-09-08T03:00:00+00:00");
+        assert!(tokyo.is_ok(), "offset timestamp must parse");
+        assert!(utc.is_ok(), "UTC timestamp must parse");
+        let (Some(tokyo), Some(utc)) = (tokyo.ok(), utc.ok()) else {
+            return;
+        };
+        assert_eq!(
+            tokyo, utc,
+            "equality follows the instant, not the stored offset"
+        );
     }
 
     #[test]

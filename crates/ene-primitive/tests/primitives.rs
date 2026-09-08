@@ -472,23 +472,27 @@ fn generated_ids_are_unique_across_many_draws() {
 }
 
 #[test]
-fn revision_advances_monotonically_and_saturates() {
+fn revision_advances_and_reports_exhaustion() {
     let first = RevisionInner::first();
-    let second = first.next();
+    let Some(second) = first.checked_next() else {
+        return;
+    };
     assert!(first < second);
     assert_eq!(first.as_u64(), 0);
     let max = RevisionInner::from_u64(u64::MAX);
-    assert_eq!(max.next(), max);
+    assert_eq!(max.checked_next(), None);
 }
 
 #[test]
-fn generation_advances_monotonically_and_saturates() {
+fn generation_advances_and_reports_exhaustion() {
     let first = GenerationInner::first();
-    let second = first.next();
+    let Some(second) = first.checked_next() else {
+        return;
+    };
     assert!(first < second);
     assert_eq!(first.as_u64(), 0);
     let max = GenerationInner::from_u64(u64::MAX);
-    assert_eq!(max.next(), max);
+    assert_eq!(max.checked_next(), None);
 }
 
 #[test]
