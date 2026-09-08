@@ -3,7 +3,8 @@
 //! [`Store`] owns one `rusqlite::Connection` and implements every repository
 //! contract owned elsewhere: [`PresenceRepository`], [`CompanionRepository`],
 //! [`HistoryRepository`], [`UndeliveredRepository`], [`ConsentRepository`],
-//! [`CredentialRefRepository`], and [`UsageRepository`]. Owners never depend
+//! [`CredentialRefRepository`], [`DevicePairingRepository`], and
+//! [`UsageRepository`]. Owners never depend
 //! on this crate; they program against their own traits.
 //!
 //! Concurrency shape: the connection is `Send` but not `Sync`, so a
@@ -24,9 +25,15 @@ use ene_companion::{
     PresentationMark, ReportStatus, ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
     UndeliveredTechnicalError,
 };
-use ene_credential::{CredentialRef, CredentialRefRepository, CredentialTechnicalError};
+use ene_credential::{
+    CredentialRef, CredentialRefRepository, CredentialTechnicalError, DeviceId,
+    DevicePairingRepository, DevicePairingStatus, DeviceRecord, PendingPairing,
+};
 use ene_inference::{InferenceTechnicalError, UsageFact, UsageRepository, UsageSource};
-use ene_permission::{ConsentRecord, ConsentRepository, ConsentRevision, PermissionTechnicalError};
+use ene_permission::{
+    ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
+    PermissionTechnicalError,
+};
 use ene_presence::{
     ClientId, LiveReachabilityRef, MoveDecision, PresenceAttribution, PresenceCheckRef,
     PresenceGeneration, PresenceRepository, PresenceState, PresenceTechnicalError, ThinMoveReason,
@@ -186,7 +193,12 @@ impl Store {
                 cmd.text,
                 cmd.lang,
                 at_text,
-                generation_raw
+                generation_raw,
+                // The contracts crate carries no caller-supplied local id on
+                // `AppendHistoryCommand` yet, so every row stores NULL here.
+                // `lookup_local_id` still queries this column and matches
+                // nothing until the contracts scope adds the field.
+                Option::<String>::None,
             ],
         )
         .map_err(|error| companion_unavailable(error.to_string()))?;
@@ -225,13 +237,16 @@ impl Store {
 /// The `_schema_version` singleton records the applied version. Setup runs
 /// `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` statements and
 /// then bumps the singleton, so reopening a migrated file changes nothing.
-/// No other tables exist here: device, hint, settings, provider, and
-/// consent-history storage are explicitly deferred.
+/// No other tables exist here: hint, settings, provider, and consent-history
+/// storage are explicitly deferred.
 mod migrate {
     use rusqlite::{Connection, OptionalExtension};
 
     /// Schema version applied by [`run`](run).
-    const CURRENT_VERSION: u64 = 1;
+    ///
+    /// Version 2 adds the nullable `history_message.local_id` column with its
+    /// unique lookup index, plus the device-pairing tables.
+    const CURRENT_VERSION: u64 = 2;
 
     /// Forward-only schema: tables first, then the supporting indexes.
     const SCHEMA: &str = "
@@ -301,6 +316,27 @@ CREATE INDEX IF NOT EXISTS idx_history_message_round ON history_message (round_i
 CREATE INDEX IF NOT EXISTS idx_undelivered_companion_status ON undelivered (companion_id, status);
 ";
 
+    /// Version 2 upgrade, applied once when the stored version is below 2.
+    ///
+    /// Forward-only: existing history rows keep `local_id` NULL, and the new
+    /// tables use `IF NOT EXISTS` so a fresh database and an upgraded one
+    /// converge on the same shape. `NULL` local ids never collide under the
+    /// unique index because SQLite treats each `NULL` as distinct.
+    const MIGRATION_V2: &str = "
+ALTER TABLE history_message ADD COLUMN local_id TEXT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_companion_local ON history_message (companion_id, local_id);
+CREATE TABLE IF NOT EXISTS pairing_pending (
+    descriptor TEXT PRIMARY KEY,
+    requested_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paired_device (
+    device_id TEXT PRIMARY KEY,
+    descriptor TEXT NOT NULL,
+    paired_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_paired_device_descriptor ON paired_device (descriptor);
+";
+
     /// Creates or upgrades the schema on an open connection.
     ///
     /// Idempotent: rerunning on a migrated database changes nothing. Rejects
@@ -325,6 +361,10 @@ CREATE INDEX IF NOT EXISTS idx_undelivered_companion_status ON undelivered (comp
         }
         conn.execute_batch(SCHEMA)
             .map_err(|error| error.to_string())?;
+        if stored_version < 2 {
+            conn.execute_batch(MIGRATION_V2)
+                .map_err(|error| error.to_string())?;
+        }
         let current = i64::try_from(CURRENT_VERSION)
             .map_err(|_| String::from("schema version out of range"))?;
         if stored.is_none() {
@@ -353,8 +393,9 @@ const SQL_SELECT_ATTRIBUTION: &str =
     "SELECT state, active_client, generation FROM presence_attribution WHERE companion_id = ?1";
 const SQL_UPDATE_ATTRIBUTION: &str = "UPDATE presence_attribution SET state = ?1, active_client = ?2, generation = ?3 WHERE companion_id = ?4";
 const SQL_INSERT_TRANSITION: &str = "INSERT INTO presence_transition_log (companion_id, old_state, new_state, old_gen, new_gen, reason, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
-const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, local_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
+const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 const SQL_SELECT_UNDELIVERED_STATUS: &str =
@@ -364,13 +405,27 @@ const SQL_UPDATE_UNDELIVERED_STATUS: &str =
 const SQL_SELECT_PENDING: &str = "SELECT undelivered_id, companion_id, source_message, status, round_id, presence_generation FROM undelivered WHERE companion_id = ?1 AND status = ?2 ORDER BY rowid ASC";
 const SQL_SELECT_CONSENT: &str =
     "SELECT id, rev, provider, model, credential_id FROM consent_record LIMIT 1";
-const SQL_DELETE_CONSENT: &str = "DELETE FROM consent_record";
 const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (id, rev, provider, model, credential_id) VALUES (?1, ?2, ?3, ?4, ?5)";
+const SQL_UPDATE_CONSENT: &str =
+    "UPDATE consent_record SET id = ?1, rev = ?2, provider = ?3, model = ?4, credential_id = ?5";
 const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
 const SQL_SELECT_CREDENTIAL: &str =
     "SELECT id, provider, label FROM credential_ref WHERE provider = ?1 AND label = ?2";
 const SQL_LIST_CREDENTIALS: &str = "SELECT id, provider, label FROM credential_ref ORDER BY id ASC";
 const SQL_INSERT_USAGE: &str = "INSERT INTO usage_fact (ticket, provider, model, input_tokens, output_tokens, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const SQL_SELECT_PAIRED_BY_DESCRIPTOR: &str =
+    "SELECT device_id, descriptor, paired_at FROM paired_device WHERE descriptor = ?1";
+const SQL_SELECT_DEVICE_BY_ID: &str =
+    "SELECT device_id, descriptor, paired_at FROM paired_device WHERE device_id = ?1";
+const SQL_SELECT_PENDING_BY_DESCRIPTOR: &str =
+    "SELECT descriptor, requested_at FROM pairing_pending WHERE descriptor = ?1";
+const SQL_INSERT_PENDING_IGNORE: &str =
+    "INSERT OR IGNORE INTO pairing_pending (descriptor, requested_at) VALUES (?1, ?2)";
+const SQL_DELETE_PENDING: &str = "DELETE FROM pairing_pending WHERE descriptor = ?1";
+const SQL_INSERT_PAIRED: &str =
+    "INSERT INTO paired_device (device_id, descriptor, paired_at) VALUES (?1, ?2, ?3)";
+const SQL_LIST_PENDING_PAIRINGS: &str =
+    "SELECT descriptor, requested_at FROM pairing_pending ORDER BY rowid ASC";
 
 /// Locks the shared connection, recovering from poisoning.
 ///
@@ -529,6 +584,76 @@ fn inference_unavailable(reason: String) -> InferenceTechnicalError {
     InferenceTechnicalError::StorageUnavailable { reason }
 }
 
+/// Reads one consent row into its domain record.
+fn decode_consent(
+    id: String,
+    rev_raw: i64,
+    provider: String,
+    model: String,
+    credential_id: String,
+) -> Result<ConsentRecord, String> {
+    let number = decode_u64(rev_raw)?;
+    Ok(ConsentRecord {
+        id,
+        rev: ConsentRevision::from_u64(number),
+        provider,
+        model,
+        credential_id,
+    })
+}
+
+/// Reads one paired-device row into its domain record.
+fn decode_device_record(
+    device_text: &str,
+    descriptor: String,
+    paired_text: &str,
+) -> Result<DeviceRecord, String> {
+    let paired_at = WallClockWithTz::parse_rfc3339(paired_text)
+        .map_err(|_| String::from("malformed device pairing timestamp"))?;
+    Ok(DeviceRecord {
+        id: DeviceId(decode_id(device_text)?),
+        descriptor,
+        paired_at,
+    })
+}
+
+/// Reads one pending-pairing row into its domain fact.
+fn decode_pending_pairing(
+    descriptor: String,
+    requested_text: &str,
+) -> Result<PendingPairing, String> {
+    let requested_at = WallClockWithTz::parse_rfc3339(requested_text)
+        .map_err(|_| String::from("malformed pairing request timestamp"))?;
+    Ok(PendingPairing {
+        descriptor,
+        requested_at,
+    })
+}
+
+/// Reads one history row into its domain message.
+fn decode_history_message(
+    companion: CompanionId,
+    message_text: &str,
+    round_text: &str,
+    role_text: &str,
+    body: String,
+    lang: String,
+    at_text: &str,
+    generation_raw: i64,
+) -> Result<HistoryMessage, String> {
+    let at = WallClockWithTz::parse_rfc3339(at_text)
+        .map_err(|_| String::from("malformed timeline timestamp"))?;
+    Ok(HistoryMessage {
+        id: decode_id(message_text)?,
+        companion,
+        round: decode_id(round_text)?,
+        role: decode_role(role_text)?,
+        text: body,
+        lang,
+        at,
+        presence_generation: PresenceGeneration::from_u64(decode_u64(generation_raw)?),
+    })
+}
 /// Reads one attribution row into its domain fact.
 fn decode_attribution(
     companion: RawId,
@@ -850,6 +975,58 @@ impl HistoryRepository for Store {
         clippy::unused_async_trait_impl,
         reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
     )]
+    async fn lookup_local_id(
+        &self,
+        companion: CompanionId,
+        local_id: &str,
+    ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
+        let key = encode_id(companion.as_raw());
+        let guard = lock_shared(&self.conn);
+        // Pure load: one statement, no transaction. Rows store NULL here
+        // until the contracts scope adds a local id to
+        // `AppendHistoryCommand`, so this matches nothing today; the replay
+        // path in the caller still pre-checks through this method.
+        let found: Option<(String, String, String, String, String, String, i64)> = guard
+            .query_row(
+                SQL_SELECT_HISTORY_BY_LOCAL_ID,
+                params![key, local_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| companion_unavailable(error.to_string()))?;
+        match found {
+            Some((message_text, round_text, role_text, body, lang, at_text, generation_raw)) => {
+                let message = decode_history_message(
+                    companion,
+                    &message_text,
+                    &round_text,
+                    &role_text,
+                    body,
+                    lang,
+                    &at_text,
+                    generation_raw,
+                )
+                .map_err(companion_unavailable)?;
+                Ok(Some(message))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
     async fn load_timeline(
         &self,
         companion: CompanionId,
@@ -1074,14 +1251,9 @@ impl ConsentRepository for Store {
             .map_err(|error| permission_unavailable(error.to_string()))?;
         match found {
             Some((id, rev_raw, provider, model, credential_id)) => {
-                let number = decode_u64(rev_raw).map_err(permission_unavailable)?;
-                Ok(Some(ConsentRecord {
-                    id,
-                    rev: ConsentRevision::from_u64(number),
-                    provider,
-                    model,
-                    credential_id,
-                }))
+                let record = decode_consent(id, rev_raw, provider, model, credential_id)
+                    .map_err(permission_unavailable)?;
+                Ok(Some(record))
             }
             None => Ok(None),
         }
@@ -1091,29 +1263,72 @@ impl ConsentRepository for Store {
         clippy::unused_async_trait_impl,
         reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
     )]
-    async fn save_current(&self, record: ConsentRecord) -> Result<(), PermissionTechnicalError> {
+    async fn compare_and_save(
+        &self,
+        expected: Option<(String, ConsentRevision)>,
+        record: ConsentRecord,
+    ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
         let rev_raw = encode_u64(record.rev.as_u64()).map_err(permission_unavailable)?;
         let mut guard = lock_shared(&self.conn);
         let tx = guard
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| permission_unavailable(error.to_string()))?;
-        // Single logical row: evict any previous consent before inserting.
-        tx.execute(SQL_DELETE_CONSENT, ())
+        let found: Option<(String, i64, String, String, String)> = tx
+            .query_row(SQL_SELECT_CONSENT, (), |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .optional()
             .map_err(|error| permission_unavailable(error.to_string()))?;
-        tx.execute(
-            SQL_INSERT_CONSENT,
-            params![
-                record.id,
-                rev_raw,
-                record.provider,
-                record.model,
-                record.credential_id
-            ],
-        )
-        .map_err(|error| permission_unavailable(error.to_string()))?;
+        let current = match found {
+            Some((id, stored_rev, provider, model, credential_id)) => Some(
+                decode_consent(id, stored_rev, provider, model, credential_id)
+                    .map_err(permission_unavailable)?,
+            ),
+            None => None,
+        };
+        let matches = match (&current, &expected) {
+            (None, None) => true,
+            (Some(stored), Some((id, rev))) => stored.id == *id && stored.rev == *rev,
+            _ => false,
+        };
+        if !matches {
+            return Ok(ConsentCommitOutcome::StaleCurrent { current });
+        }
+        if current.is_none() {
+            tx.execute(
+                SQL_INSERT_CONSENT,
+                params![
+                    record.id,
+                    rev_raw,
+                    record.provider,
+                    record.model,
+                    record.credential_id
+                ],
+            )
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        } else {
+            // Single logical row: the expectation matched, so overwrite it.
+            tx.execute(
+                SQL_UPDATE_CONSENT,
+                params![
+                    record.id,
+                    rev_raw,
+                    record.provider,
+                    record.model,
+                    record.credential_id
+                ],
+            )
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        }
         tx.commit()
             .map_err(|error| permission_unavailable(error.to_string()))?;
-        Ok(())
+        Ok(ConsentCommitOutcome::Committed { record })
     }
 }
 
@@ -1188,6 +1403,176 @@ impl CredentialRefRepository for Store {
     }
 }
 
+impl DevicePairingRepository for Store {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn request_pairing(
+        &self,
+        descriptor: String,
+    ) -> Result<DevicePairingStatus, CredentialTechnicalError> {
+        let requested = WallClockWithTz::now();
+        let requested_text = requested.to_rfc3339();
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        // An already-paired descriptor short-circuits: re-requests leave the
+        // stored record untouched.
+        let paired: Option<(String, String, String)> = tx
+            .query_row(
+                SQL_SELECT_PAIRED_BY_DESCRIPTOR,
+                params![descriptor],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        if let Some((device_text, stored_descriptor, paired_text)) = paired {
+            let device = decode_device_record(&device_text, stored_descriptor, &paired_text)
+                .map_err(credential_unavailable)?;
+            return Ok(DevicePairingStatus::Paired { device });
+        }
+        // `INSERT OR IGNORE` keeps a previously stored pending entry: the
+        // re-read below returns it unchanged instead of refreshing its time.
+        tx.execute(
+            SQL_INSERT_PENDING_IGNORE,
+            params![descriptor, requested_text],
+        )
+        .map_err(|error| credential_unavailable(error.to_string()))?;
+        let stored: Option<(String, String)> = tx
+            .query_row(
+                SQL_SELECT_PENDING_BY_DESCRIPTOR,
+                params![descriptor],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        let Some((stored_descriptor, stored_requested)) = stored else {
+            return Err(credential_unavailable(String::from(
+                "pairing request vanished after insert",
+            )));
+        };
+        let pending = decode_pending_pairing(stored_descriptor, &stored_requested)
+            .map_err(credential_unavailable)?;
+        tx.commit()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        Ok(DevicePairingStatus::Pending { pending })
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn approve_pending(
+        &self,
+        descriptor: &str,
+    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
+        let device_id = RawId::new();
+        let device_text = encode_id(device_id);
+        let paired_at = WallClockWithTz::now();
+        let paired_text = paired_at.to_rfc3339();
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        // Re-approving an already-paired descriptor returns the existing
+        // record unchanged; no fresh identity is minted or stored.
+        let paired: Option<(String, String, String)> = tx
+            .query_row(
+                SQL_SELECT_PAIRED_BY_DESCRIPTOR,
+                params![descriptor],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        if let Some((stored_text, stored_descriptor, stored_paired)) = paired {
+            let device = decode_device_record(&stored_text, stored_descriptor, &stored_paired)
+                .map_err(credential_unavailable)?;
+            return Ok(Some(device));
+        }
+        let pending: Option<(String, String)> = tx
+            .query_row(
+                SQL_SELECT_PENDING_BY_DESCRIPTOR,
+                params![descriptor],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        let Some((stored_descriptor, _)) = pending else {
+            return Ok(None);
+        };
+        // The pending delete and the paired insert share one transaction so
+        // an approval never strands a descriptor in both tables or neither.
+        tx.execute(SQL_DELETE_PENDING, params![descriptor])
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        tx.execute(
+            SQL_INSERT_PAIRED,
+            params![device_text, stored_descriptor, paired_text],
+        )
+        .map_err(|error| credential_unavailable(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        Ok(Some(DeviceRecord {
+            id: DeviceId(device_id),
+            descriptor: stored_descriptor,
+            paired_at,
+        }))
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn find_device(
+        &self,
+        id: &DeviceId,
+    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
+        let key = encode_id(id.0);
+        let guard = lock_shared(&self.conn);
+        let found: Option<(String, String, String)> = guard
+            .query_row(SQL_SELECT_DEVICE_BY_ID, params![key], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        match found {
+            Some((device_text, descriptor, paired_text)) => {
+                let device = decode_device_record(&device_text, descriptor, &paired_text)
+                    .map_err(credential_unavailable)?;
+                Ok(Some(device))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError> {
+        let guard = lock_shared(&self.conn);
+        let mut query = guard
+            .prepare(SQL_LIST_PENDING_PAIRINGS)
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        let rows = query
+            .query_map((), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (descriptor, requested_text) =
+                row.map_err(|error| credential_unavailable(error.to_string()))?;
+            pending.push(
+                decode_pending_pairing(descriptor, &requested_text)
+                    .map_err(credential_unavailable)?,
+            );
+        }
+        Ok(pending)
+    }
+}
+
 impl UsageRepository for Store {
     #[expect(
         clippy::unused_async_trait_impl,
@@ -1227,9 +1612,12 @@ mod tests {
         HistoryAppendOutcome, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
         ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
     };
-    use ene_credential::{CredentialRef, CredentialRefRepository};
+    use ene_credential::{
+        CredentialRef, CredentialRefRepository, DeviceId, DevicePairingRepository,
+        DevicePairingStatus,
+    };
     use ene_inference::{InferenceTicketId, UsageFact, UsageRepository, UsageSource};
-    use ene_permission::{ConsentRecord, ConsentRepository, ConsentRevision};
+    use ene_permission::{ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision};
     use ene_presence::{
         ClientId, LiveReachabilityRef, MoveDecision, PresenceCheckRef, PresenceGeneration,
         PresenceRepository, PresenceState, ThinMoveReason,
@@ -1471,7 +1859,7 @@ mod tests {
             return;
         };
         assert_eq!(entry.status, ReportStatus::Pending);
-        let pending = store.list_pending(companion).await;
+        let pending = UndeliveredRepository::list_pending(&store, companion).await;
         assert!(pending.is_ok(), "pending list must succeed");
         let Ok(items) = pending else {
             return;
@@ -1492,7 +1880,7 @@ mod tests {
             Ok(ReportStatusTransition::PendingToPresented),
             "pending to presented must compare-and-mark"
         );
-        let pending_after = store.list_pending(companion).await;
+        let pending_after = UndeliveredRepository::list_pending(&store, companion).await;
         let Ok(drained) = pending_after else {
             return;
         };
@@ -1599,39 +1987,118 @@ mod tests {
         assert_eq!(fact.generation, next);
     }
 
+    fn consent_record(id: &str, rev: u64) -> ConsentRecord {
+        ConsentRecord {
+            id: String::from(id),
+            rev: ConsentRevision::from_u64(rev),
+            provider: String::from("acme"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("cred-1"),
+        }
+    }
+
     #[tokio::test]
-    async fn consent_save_and_load_roundtrip() {
+    async fn consent_compare_and_save_commit_and_stale_matrix() {
         let Some(store) = open_memory().await else {
             return;
         };
         let empty = store.load_current().await;
         assert!(matches!(empty, Ok(None)), "fresh store holds no consent");
-        let record = ConsentRecord {
-            id: String::from("consent-1"),
-            rev: ConsentRevision::from_u64(3),
-            provider: String::from("acme"),
-            model: String::from("dialogue-1"),
-            credential_id: String::from("cred-1"),
-        };
-        let saved = store.save_current(record.clone()).await;
-        assert!(saved.is_ok(), "consent save must succeed");
+        // No row plus no expectation: insert and commit.
+        let first = consent_record("consent-1", 3);
+        let committed = store.compare_and_save(None, first.clone()).await;
+        assert!(
+            matches!(
+                committed,
+                Ok(ConsentCommitOutcome::Committed { ref record }) if *record == first
+            ),
+            "empty store with no expectation must commit"
+        );
         let loaded = store.load_current().await;
-        assert!(loaded.is_ok(), "consent load must succeed");
-        let Ok(Some(current)) = loaded else {
+        assert!(matches!(loaded, Ok(Some(ref current)) if *current == first));
+        // A row plus no expectation: stale, never overwritten.
+        let intruder = consent_record("consent-9", 1);
+        let unexpected = store.compare_and_save(None, intruder).await;
+        assert!(
+            matches!(
+                unexpected,
+                Ok(ConsentCommitOutcome::StaleCurrent { ref current }) if *current == Some(first.clone())
+            ),
+            "existing row with no expectation must be stale"
+        );
+        // Matching id and revision: overwrite and commit.
+        let next = consent_record("consent-1", 4);
+        let recommitted = store
+            .compare_and_save(
+                Some((String::from("consent-1"), ConsentRevision::from_u64(3))),
+                next.clone(),
+            )
+            .await;
+        assert!(
+            matches!(
+                recommitted,
+                Ok(ConsentCommitOutcome::Committed { ref record }) if *record == next
+            ),
+            "matching expectation must commit the replacement"
+        );
+        // Same id, older revision: stale, stored row untouched.
+        let replay = consent_record("consent-1", 5);
+        let stale_rev = store
+            .compare_and_save(
+                Some((String::from("consent-1"), ConsentRevision::from_u64(3))),
+                replay,
+            )
+            .await;
+        assert!(
+            matches!(
+                stale_rev,
+                Ok(ConsentCommitOutcome::StaleCurrent { ref current }) if *current == Some(next.clone())
+            ),
+            "revision mismatch must be stale"
+        );
+        // Different id, same revision: stale, stored row untouched.
+        let fork = consent_record("consent-2", 4);
+        let stale_id = store
+            .compare_and_save(
+                Some((String::from("consent-2"), ConsentRevision::from_u64(4))),
+                fork,
+            )
+            .await;
+        assert!(
+            matches!(
+                stale_id,
+                Ok(ConsentCommitOutcome::StaleCurrent { ref current }) if *current == Some(next.clone())
+            ),
+            "id mismatch must be stale"
+        );
+        let kept = store.load_current().await;
+        assert!(
+            matches!(kept, Ok(Some(ref current)) if *current == next),
+            "stale attempts must leave the stored row untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn consent_compare_and_save_expected_but_empty_is_stale() {
+        let Some(store) = open_memory().await else {
             return;
         };
-        assert_eq!(current, record, "consent must round-trip");
-        let replacement = ConsentRecord {
-            rev: ConsentRevision::from_u64(4),
-            ..record
-        };
-        let replaced = store.save_current(replacement.clone()).await;
-        assert!(replaced.is_ok(), "consent replacement must succeed");
-        let reloaded = store.load_current().await;
-        let Ok(Some(single)) = reloaded else {
-            return;
-        };
-        assert_eq!(single, replacement, "save must replace the single row");
+        let record = consent_record("consent-1", 1);
+        let outcome = store
+            .compare_and_save(
+                Some((String::from("consent-1"), ConsentRevision::from_u64(1))),
+                record,
+            )
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(ConsentCommitOutcome::StaleCurrent { current: None })
+            ),
+            "an expectation against an empty store must be stale"
+        );
+        let empty = store.load_current().await;
+        assert!(matches!(empty, Ok(None)), "stale save must store nothing");
     }
 
     #[tokio::test]
@@ -1733,6 +2200,184 @@ mod tests {
         assert!(
             repeated.is_err(),
             "duplicate ticket must fail without panicking"
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_local_id_matches_nothing_until_contracts_carry_it() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let Some((companion, generation)) = running_companion(&store).await else {
+            return;
+        };
+        let absent = store.lookup_local_id(companion, "send-1").await;
+        assert!(
+            matches!(absent, Ok(None)),
+            "unknown local id must find nothing"
+        );
+        let appended = store
+            .append_message(history_command(companion, generation, "local body"))
+            .await;
+        assert!(
+            matches!(appended, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "append must commit"
+        );
+        // `AppendHistoryCommand` carries no local id yet, so the store
+        // persists NULL and this lookup matches nothing by design; the replay
+        // path in the caller still pre-checks through this method.
+        let unmapped = store.lookup_local_id(companion, "send-1").await;
+        assert!(
+            matches!(unmapped, Ok(None)),
+            "lookup must match nothing while rows store NULL"
+        );
+        let loaded = store.load_timeline(companion, None, 10).await;
+        let Ok(timeline) = loaded else {
+            return;
+        };
+        assert_eq!(timeline.len(), 1, "the appended item must still read back");
+    }
+
+    #[tokio::test]
+    async fn device_request_approve_find_and_list() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let missing = store.find_device(&DeviceId(RawId::new())).await;
+        assert!(matches!(missing, Ok(None)), "fresh store pairs nothing");
+        let listed_empty = DevicePairingRepository::list_pending(&store).await;
+        assert!(
+            matches!(listed_empty, Ok(ref items) if items.is_empty()),
+            "fresh store pends nothing"
+        );
+        let first = store.request_pairing(String::from("phone")).await;
+        assert!(
+            matches!(first, Ok(DevicePairingStatus::Pending { .. })),
+            "first request must pend"
+        );
+        let Ok(DevicePairingStatus::Pending {
+            pending: first_pending,
+        }) = first
+        else {
+            return;
+        };
+        assert_eq!(first_pending.descriptor.as_str(), "phone");
+        // A second request returns the stored entry without refreshing it.
+        let second = store.request_pairing(String::from("phone")).await;
+        assert!(
+            matches!(second, Ok(DevicePairingStatus::Pending { .. })),
+            "repeat request must stay pending"
+        );
+        let Ok(DevicePairingStatus::Pending {
+            pending: second_pending,
+        }) = second
+        else {
+            return;
+        };
+        assert_eq!(
+            second_pending.requested_at, first_pending.requested_at,
+            "repeat request must not refresh the stored time"
+        );
+        let tablet = store.request_pairing(String::from("tablet")).await;
+        assert!(
+            matches!(tablet, Ok(DevicePairingStatus::Pending { .. })),
+            "second descriptor must pend"
+        );
+        let listed = DevicePairingRepository::list_pending(&store).await;
+        let Ok(items) = listed else {
+            return;
+        };
+        assert_eq!(items.len(), 2, "both descriptors must list as pending");
+        let unknown = store.approve_pending("unknown").await;
+        assert!(
+            matches!(unknown, Ok(None)),
+            "approving an unknown descriptor must yield none"
+        );
+        let approved = store.approve_pending("phone").await;
+        assert!(approved.is_ok(), "approval must succeed");
+        let Ok(Some(device)) = approved else {
+            return;
+        };
+        assert_eq!(device.descriptor.as_str(), "phone");
+        let pending_after = DevicePairingRepository::list_pending(&store).await;
+        let Ok(remaining) = pending_after else {
+            return;
+        };
+        assert_eq!(remaining.len(), 1, "approval must drain one entry");
+        assert_eq!(remaining[0].descriptor.as_str(), "tablet");
+        let found = store.find_device(&device.id).await;
+        assert!(
+            matches!(found, Ok(Some(ref stored)) if *stored == device),
+            "approved device must be findable by id"
+        );
+        // Re-requesting a paired descriptor returns the stored record.
+        let again = store.request_pairing(String::from("phone")).await;
+        assert!(
+            matches!(
+                again,
+                Ok(DevicePairingStatus::Paired { device: ref existing }) if *existing == device
+            ),
+            "re-request after pairing must return the stored record"
+        );
+        // Re-approving returns the same record without minting a new id.
+        let reapproved = store.approve_pending("phone").await;
+        assert!(
+            matches!(reapproved, Ok(Some(ref stored)) if *stored == device),
+            "re-approval must return the existing record"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_v2_reopen_keeps_pairing_state() {
+        let dir = tempfile::tempdir();
+        assert!(dir.is_ok(), "tempdir must open");
+        let Ok(dir) = dir else {
+            return;
+        };
+        let path = dir.path().join("store.db");
+        let opened = Store::open(&path).await;
+        assert!(opened.is_ok(), "file open must succeed");
+        let Ok(first) = opened else {
+            return;
+        };
+        let requested = first.request_pairing(String::from("phone")).await;
+        assert!(
+            matches!(requested, Ok(DevicePairingStatus::Pending { .. })),
+            "request must pend"
+        );
+        let approved = first.approve_pending("phone").await;
+        let Ok(Some(device)) = approved else {
+            return;
+        };
+        drop(first);
+        let reopened = Store::open(&path).await;
+        assert!(reopened.is_ok(), "reopen after pairing must succeed");
+        let Ok(second) = reopened else {
+            return;
+        };
+        let found = second.find_device(&device.id).await;
+        assert!(
+            matches!(found, Ok(Some(ref stored)) if *stored == device),
+            "paired device must survive reopen"
+        );
+        let again = second.request_pairing(String::from("phone")).await;
+        assert!(
+            matches!(
+                again,
+                Ok(DevicePairingStatus::Paired { device: ref existing }) if *existing == device
+            ),
+            "paired state must survive reopen"
+        );
+        let guard = match second.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
+            row.get::<_, i64>(0)
+        });
+        assert!(
+            matches!(version, Ok(2)),
+            "reopened database must record schema version 2"
         );
     }
 
