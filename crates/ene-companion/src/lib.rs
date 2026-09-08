@@ -95,6 +95,10 @@ pub struct HistoryMessage {
     pub at: WallClockWithTz,
     /// Presence generation the item belongs to.
     pub presence_generation: PresenceGeneration,
+    /// Client-local correspondence ID, for idempotent replay: a retry with
+    /// the same ID returns the original acceptance without re-append.
+    /// Non-secret correspondence, visible in Debug.
+    pub local_id: Option<String>,
 }
 
 impl core::fmt::Debug for HistoryMessage {
@@ -110,6 +114,7 @@ impl core::fmt::Debug for HistoryMessage {
             .field("lang", &self.lang)
             .field("at", &self.at)
             .field("presence_generation", &self.presence_generation)
+            .field("local_id", &self.local_id)
             .finish()
     }
 }
@@ -131,6 +136,9 @@ pub struct AppendHistoryCommand {
     pub at: WallClockWithTz,
     /// Generation value the caller relied on.
     pub expected_generation: PresenceGeneration,
+    /// Client-local correspondence ID for idempotent retry, if the caller
+    /// carries one. [`None`] stores NULL (no replay key).
+    pub local_id: Option<String>,
 }
 
 impl core::fmt::Debug for AppendHistoryCommand {
@@ -145,6 +153,7 @@ impl core::fmt::Debug for AppendHistoryCommand {
             .field("lang", &self.lang)
             .field("at", &self.at)
             .field("expected_generation", &self.expected_generation)
+            .field("local_id", &self.local_id)
             .finish()
     }
 }
@@ -401,6 +410,7 @@ mod tests {
             lang: String::from("en"),
             at: clock(),
             expected_generation: PresenceGeneration::first(),
+            local_id: Some(String::from("local-1")),
         }
     }
 
@@ -414,6 +424,7 @@ mod tests {
             lang: String::from("en"),
             at: clock(),
             presence_generation: PresenceGeneration::first(),
+            local_id: None,
         }
     }
 
