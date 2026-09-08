@@ -1,0 +1,13 @@
+[package]
+name = "ene-presentation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ene-primitive = { path = "../ene-primitive" }
+ene-presence = { path = "../ene-presence" }
+
+[lints]
+workspace = true
