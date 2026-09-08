@@ -177,10 +177,15 @@ struct WireCorrelation {
 }
 
 struct WireSender {
-    device_id: DeviceWireId,           // pairing 紐付け（第9節）
+    device_id: Option<DeviceWireId>, // pairing 紐付け（第9節）。None は pairing 前の PairingRequest のみ
     incarnation_id: ClientIncarnationId, // Client process incarnation（第11節）
     connection_id: Option<ConnectionWireId>, // auth 後に Host が付与。auth 前は None
 }
+// sender の方向別規則：Client→Host は自 device・自 incarnation・自 connection を載せる（device_id の None は
+// pairing 前の PairingRequest に限定し、それ以外の欠落は不受理）。Host→Client は宛先 device・当該 Client の
+// 最新 incarnation・当該 connection を載せる（connection_id の None は auth 前の応答に限定）。pairing 発行前の
+// 応答（PairingResult の Pending / Denied 等）では device_id・connection_id とも None とし、request との対応付けは
+// message_id / reply_to で行う。incarnation の echo は対応付けの補助であり、authority にはならない。
 
 struct ObservedMarks {
     presence_generation_view: Option<u64>, // Client が見た presence generation 値の写し
@@ -312,7 +317,7 @@ struct NegotiatedConnection {
 
 ### 9.2 pairing
 
-1. 新しい Client は Owner が Host 側で確認できる device pairing を必要とする（要件 Remote Client）。pairing 開始は Client からの `PairingRequest{ device_descriptor }` とし、Host PC 上の trusted first-party management surface での Owner 最終確認待ちにする（§18）。pairing 済み Remote Client による承認だけでは成立させない。
+1. 新しい Client は Owner が Host 側で確認できる device pairing を必要とする（要件 Remote Client）。pairing 開始は Client からの `PairingRequest{ device_descriptor }` とし、Host PC 上の trusted first-party management surface での Owner 最終確認待ちにする（§18）。pairing 済み Remote Client による承認だけでは成立させない。最初の `PairingRequest` は `DeviceWireId` 未発行のため envelope sender を `device_id: None`・自 incarnation・`connection_id: None` とし、これ以外の `device_id` 欠落は不受理にする（§5 の方向別規則）。
 2. Owner 確認後、Host は新しい pairing identity と `DeviceWireId` を発行する。device record の非秘密表示参照（descriptor・pairing identity / wire 対応）は PR Group G、許可機能の記録は Group F、Host 側所有証明検証材料・現在 trust 範囲・失効状態は Group K の device-auth store（E）に保持する。最終接続は Group G に置く。pairing material は auth 専用 frame で Client へ渡し、通常 payload へ載せない。
 3. 古い接続材料だけで Host 側の pairing・許可を復活させない。pairing 失効後の再 pairing は新規 pairing として Owner 確認を必要とする。
 
