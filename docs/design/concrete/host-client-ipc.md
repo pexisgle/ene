@@ -23,7 +23,7 @@
 - Host↔Client 間を越える必要がある semantic interface の選別（第2節）。
 - protocol layer 構成（wire semantic と transport の分離、envelope と payload の分離）（第3・5節）。
 - interaction pattern の区別（第4節）。
-- message / domain identity の分離と correlation（第6節）。
+- message / domain identity の分離と correlation、retry admissibility・idempotency retention・command identity conflict の typed wire 表現（第6・21・24節）。
 - Client incarnation / stale rejection（第11節）。
 - Presence / Text / Voice / presentation（第12・13節）。
 - Observation（第14節）。
@@ -177,8 +177,8 @@ struct WireCorrelation {
 }
 
 struct WireSender {
-    device_id: Option<DeviceWireId>, // pairing 紐付け（第9節）。None は pairing 前の PairingRequest のみ
-    incarnation_id: ClientIncarnationId, // Client process incarnation（第11節）
+    device_id: Option<DeviceWireId>, // pairing 前の PairingRequest のみ None
+    incarnation_id: ClientIncarnationId,
     connection_id: Option<ConnectionWireId>, // auth 後に Host が付与。auth 前は None
 }
 // sender の方向別規則：Client→Host は自 device・自 incarnation・自 connection を載せる（device_id の None は
@@ -209,7 +209,7 @@ envelope の扱い：
 |---|---|---|---|---|
 | `WireMessageId` | 送信者（両方向） | 当該 message のみ。receiver cache は短期間（例：数分〜接続期間。値は Freedom） | transport duplicate suppression のみ | しない。新規送信・retry は新 ID |
 | `RequestWireId` | request 送信者 | request/response 対 | request/response 対応 | しない |
-| `CommandWireId` | command 送信者（方向別に発行者固定。第6.2節） | command→ack→completion の saga 範囲 | domain idempotency key（Host durable） | retry は同 ID＋新 `message_id` |
+| `CommandWireId` | command 送信者（方向別に発行者固定。第6.2節） | command→ack→completion の saga。semantic no-reexecute marker は、当該 authenticated sender epoch で command retry を受理し得る期間の全体を少なくとも覆う | domain idempotency key。詳細 outcome を compact しても再実行禁止の対応を失わない | transport retry は同 ID＋新 `message_id`。新しい user intent / effect retry では再利用しない |
 | `StreamWireId` | Host が既定（Client は提案のみ） | stream open〜close | frame の帰属。旧 stream の frame を新 stream へ付け替えない | しない。再接続で旧 stream を継続しない |
 | domain wire ref（`CompanionWireRef`・`ClientWireRef`・`RoundWireId`・`AttemptWireRef`・`OperationWireId`・`TicketWireId` 等） | Host が既定（Client-local ID は別系列） | 用途別（round・attempt・ticket・operation） | wire 上の対応付け。Host が内部 identity へ mapping する | しない。削除後に再発行しない |
 | `ClientInputLocalId`・`CaptureLocalId` | Client | Client-local。Host へ送るのは対応付け用のみ | Client 側の送信物と ack・結果の対応 | Client 内で単調。Host の正本にしない |
@@ -217,11 +217,18 @@ envelope の扱い：
 
 wire ref と domain identity の関係：wire ref は Host mapping が内部 identity へ解決する opaque な参照であり、内部 newtype の文字列表現ではない。Client は wire ref の内部構造を解釈・合成・推測しない。Host は解決不能な ref を `UnknownRef`（domain outcome）として不受理にし、guess しない。
 
-### 6.2 発行者規則
+### 6.2 発行者規則・retry admissibility・idempotency retention
 
-- Client→Host の input・ack・fact・capability・availability の `command_id` / `request_id` は Client が発行する。Host は `command_id` を idempotency key として durable（短期間）に保持し、同一 `command_id` の再送には再実行せず prior outcome を返す。
+- Pairing / authentication の pre-auth request / response は authenticated sender epoch をまだ持たないため、本節の command retry idempotency の対象にしない。`PairingRequest` / auth frame は `request_id`・`message_id`・`reply_to` と第9節の単発 nonce / proof 規則で対応付け、認証前の sender tuple を domain command の idempotency namespace として使わない。
+- Client→Host の input・ack・fact・capability・availability の `command_id` / `request_id` は Client が発行する。Host は認証後の domain command の `command_id` を domain idempotency key として扱い、同一 sender epoch 内の同一 `command_id` の再送には再実行せず prior outcome（または再実行を禁止できる typed 既処理結果）を返す。
 - Host→Client の move transition・action command・deletion demand・capture ticket の `command_id` / `operation_id` / `stream_id` は Host が発行する。Client はこれらを minted しない。Client が command を合成・推測して送ることは protocol 違反として拒否する。
-- retry の関係：transport retry（同一内容の再送）は**同一 `command_id`＋新規 `message_id`**で行う。receiver は `message_id` cache で重複配送を沈黙破棄し（再実行なし、ack 再送は可）、`command_id` の既処理記録で二重実行を抑止する。前者を transport duplicate suppression、後者を domain idempotency とし、混同しない。
+- **retry-admissible sender epoch。** Client→Host では、Host が current として受理している authenticated `(device_id, incarnation_id, connection_id)` の組を command retry の epoch とする。connection replacement・incarnation replacement・device revoke 等でその epoch が current でなくなった後は、旧 epoch の command を semantic 実行へ進める前に `StaleConnection` / `StaleIncarnation` 等で拒否する。Host→Client も同様に、当該 authenticated Client connection / incarnation へ発行した command を新 connection へ自動継続・replay しない。
+- **保持期間の不変条件。** receiver は、retry を受理し得る sender epoch が current な間、受理済み `command_id` ごとに少なくとも「再実行禁止」を判定できる idempotency marker を保持する。詳細 response / progress を compact することはできるが、marker を先に捨てて同じ `command_id` を新規 command として実行してはならない。round 等の新しい durable identity を発行した command は、retry に同じ identity を返せる最小結果（例：`AcceptedForRound { round }`）も epoch の間保持するか、同じ durable 対応から再構成できること。
+- marker は同じ `command_id` が同じ semantic command であることを確認できる fingerprint を持つ。fingerprint は少なくとも message kind、payload、target / premise に関係する `observed` field を含み、`message_id`・`reply_to`・診断用 span 等の送信ごとに変わる transport metadata を含めない。同一性を判定できる限り、canonical encoding / hash の具体方式は Freedom とする。
+- sender epoch が stale になった後は、旧 envelope の sender tuple を stale check で拒否できるため、その epoch の idempotency marker を cleanup してよい。**marker eviction と old-command retry の受理を同時に許す状態を作らない。** exact retention 秒数を別契約として固定せず、受理可能範囲と保持範囲を同じ境界に結び付ける。
+- retry の関係：transport retry（同一内容の再送）は**同一 `command_id`＋新規 `message_id`**で行う。receiver は `message_id` cache で重複配送を沈黙破棄し（再実行なし、ack 再送は可）、`command_id` の既処理 marker で二重実行を抑止する。前者を transport duplicate suppression、後者を domain idempotency とし、混同しない。`message_id` cache の短期 eviction は `command_id` の semantic no-reexecute 保証を弱めない。
+- 同一 `(sender epoch, command_id)` で fingerprint が既処理時と一致しない場合は、owner の domain command へ mapping する前に `CommandReplayRejectWire::CommandIdConflict` を返し、副作用なしに拒否する。以前の結果を別内容へ流用したり、別 command として実行したりしない。
+- fingerprint が一致する retry は prior domain outcome を再現して返す。詳細 prior outcome を保持できない command だけ `CommandReplayRejectWire::AlreadyProcessed` を返せるが、新しい identity を発行した command（例：`round=None`）はこの fallback を使わず、初回に発行した identity / outcome を保持または durable relation から再構成する。caller は `AlreadyProcessed` を新しい `command_id` で黙って retry する根拠にせず、現在 view の再取得・新しい user intent の明示へ戻す。
 - external effect retry（作用の再実行）は transport retry ではなく**新しい attempt / operation**とし、Owner 判断を経る（第15節）。transport の再送で作用が二重実行される設計にしない。
 
 ### 6.3 Round・presence generation・incarnation の区別
@@ -237,8 +244,8 @@ wire ref と domain identity の関係：wire ref は Host mapping が内部 ide
 | 候補 | debuggability | Rust / 他言語 | schema 進化 | 評価 |
 |---|---|---|---|---|
 | JSON（text） | ◎（そのまま可読） | ◎ | △（field 規約次第） | control の可読性は最良だが、audio・capture・asset の binary を含む stream で size・encode 効率が悪い。binary を base64 で包む設計は避けたい |
-| MessagePack | ○（JSON へ機械変換可） | ◎（serde＋多言語 library） | ○（field 規約＋version と併用） | JSON-compatible な論理 model のまま byte 効率を得られる。既存 `ene-plugin-ipc` の frame 実績とも整合する |
-| CBOR | ○（JSON へ機械変換可） | ○ | ○ | MessagePack と同系統。Rust・将来 Client 言語の library 普及と既存実績では MessagePack が優位 |
+| MessagePack | ○（JSON へ機械変換可） | ◎（serde＋多言語 library） | ○（field 規約＋version と併用） | JSON-compatible な論理 model のまま byte 効率を得られる。transport frame として素直に扱える |
+| CBOR | ○（JSON へ機械変換可） | ○ | ○ | MessagePack と同系統。Rust・将来 Client 言語の library 普及では MessagePack が優位 |
 | Protobuf | △（decode なしに読めない） | ○（codegen が必要） | ◎（field 番号） | schema registry 的運用・codegen 配布・可読 log の追加機構が必要になり、単一 Owner-managed Host の topology には過剰。custom binary protocol も作らない方針と衝突する |
 
 **採用：MessagePack を canonical wire encoding とし、論理 data model は JSON-compatible に保つ。** すなわちすべての DTO は JSON としても表現できる形（string・integer・boolean・array・map のみ。binary は attachment へ分離）に定義し、wire 上は MessagePack で encode する。debug・log・監査表示では JSON rendering を用いる。binary blob（audio・capture・asset chunk）は payload に base64 埋めせず、binary attachment frame として descriptor と対応付けて送る（第21節）。
@@ -325,7 +332,7 @@ struct NegotiatedConnection {
 
 1. connection 確立ごとに `AuthChallenge (Host nonce) → AuthProof (Client 証明) → AuthResult (Host 判定＋ConnectionWireId 付与)` を行う。Host は現在の device-auth store（E）にある有効な pairing identity・検証材料へ照合し、不在・失効・確認不能なら拒否する。Client は秘密を平文で送らず、所有証明のみ送る。具体方式は Freedom とするが、「秘密の非露出」「nonce の単発性」「旧 proof の再利用禁止」の property を満たすこと。
 2. 認証成功時に Host は当該 connection の `ConnectionWireId` を発行し、current connection（device ごと）を更新する。以後の Client→Host message は `sender.connection_id` を載せる。auth 前の message は pairing・auth 用に限定し、domain 操作を受け付けない。
-3. reconnect は新規 connection として認証する。旧 `ConnectionWireId`・旧 stream・旧 ticket・旧 round を引き継がない。旧 connection の message は `StaleConnection` として拒否する。
+3. reconnect は新規 connection として認証する。旧 `ConnectionWireId`・旧 stream・旧 ticket・旧 round を引き継がない。旧 connection の message は semantic idempotency lookup / domain 実行へ進める前に `StaleConnection` として拒否する。
 
 ### 9.4 revoke
 
@@ -341,7 +348,7 @@ wire semantic と transport を分離し、以下を共通化の範囲とする�
 
 | transport | 用途 | 選択 |
 |---|---|---|
-| same-machine | Host と同 PC の Client | OS local socket（Linux: Unix domain socket、Windows: named pipe または loopback＋OS peer 認証相当）。OS account 保護を前提とし、TLS は必須にしない。frame は length-prefixed（既存 `ene-plugin-ipc` frame と同型の 4-byte BE exclusive-length、上限付き） |
+| same-machine | Host と同 PC の Client | OS local socket（Linux: Unix domain socket、Windows: named pipe または loopback＋OS peer 認証相当）。OS account 保護を前提とし、TLS は必須にしない。frame は length-prefixed（4-byte BE exclusive-length、上限付き） |
 | LAN / remote device | 別 PC の Client（同一 LAN・Owner 管理 VPN） | WebSocket（binary message）＋TLS。ene 運営 relay・account・Cloud を接続要件にしない。単一 connection で論理 stream を多重する（`stream_id` で mux） |
 | future transport | 将来の追加 | adapter 追加で対応する。wire semantic・DTO・version・auth property を変えない |
 
@@ -354,18 +361,14 @@ QUIC 等の採用は現時点でしない。理由：現在の topology（単一
 ```rust
 // Host / Client 共有の adapter 概念（pseudo-trait。crate 配置は第25節）
 trait TransportAdapter {
-    // frame 送受信。frame payload は envelope＋payload の MessagePack byte 列、
-    // または binary attachment frame（descriptor 対応付き）である。
     async fn send_frame(&self, frame: TransportFrame) -> Result<(), TransportError>;
     async fn recv_frame(&self) -> Result<TransportFrame, TransportError>;
-    // liveness。heartbeat・keepalive の値自体は Freedom。liveness を
-    // presence・許可・報告完了の根拠にしない。
     async fn peer_liveness(&self) -> PeerLiveness; // Reachable | Suspected | Lost
 }
 
 enum TransportFrame {
-    ControlFrame { bytes: Vec<u8> },          // envelope＋payload（上限付き）
-    BinaryFrame { descriptor_ref: WireMessageId, bytes: Vec<u8> }, // attachment
+    ControlFrame { bytes: Vec<u8> },
+    BinaryFrame { descriptor_ref: WireMessageId, bytes: Vec<u8> },
 }
 ```
 
@@ -387,12 +390,13 @@ enum TransportFrame {
 ### 11.2 wire property
 
 - すべての Client→Host message の envelope は `sender{ device_id, incarnation_id, connection_id }` を載せる（第5節）。欠落は不受理の理由にする（「制約なし」への変換禁止）。例外は pre-auth の pairing・auth 用 message のみ：pairing 前の最初の `PairingRequest` は `device_id: None, connection_id: None`、paired Client の `AuthProof` 等は `device_id: Some`・`connection_id: None` で送る（§5 の方向別規則・§9.2・§9.3）。
-- Host は device ごとの current `(incarnation_id, connection_id)` を保持する（durable の最終接続管理 record＋runtime の live 表）。受信時に次を照合する：
+- Host は device ごとの current `(incarnation_id, connection_id)` を保持する（durable の最終接続管理 record＋runtime の live 表）。認証後の domain command では、**command idempotency lookup / semantic execution より先に**次を照合する：
   1. `device_id` が pairing 済み・非失効であること（pairing 前の最初の `PairingRequest` を除く）。
   2. `connection_id` が当該 device の current であること（authentication 成功後の message にだけ適用する。pre-auth の pairing・auth 用 message は `None` を許可する）。
   3. `incarnation_id` が current incarnation と対応すること（旧 incarnation からの到着は stale）。
   4. `observed.presence_generation_view` が現在の帰属 generation と対応すること（Client 依存操作の場合）。
   5. `round_view` / `ticket_view` が現在の round / ticket と対応すること（該当操作の場合）。
+- authenticated domain command では 1〜3 を満たした current sender epoch の command だけが第6.2節の semantic idempotency 判定へ進む。旧 epoch は stale reject されるため、旧 epoch の marker cleanup 後でも semantic 再実行へ到達しない。pre-auth pairing / auth message はこの idempotency lookup へ入れない。
 - Client 側が自身を current だと宣言しただけでは成立しない。Host の durable・live との照合が必須である。確認不能を現在と推定しない。
 
 ### 11.3 stale 時の扱い
@@ -430,15 +434,15 @@ struct MoveIntent {
     companion: CompanionWireRef,
     from_client: Option<ClientWireRef>,
     to_client: ClientWireRef,
-    reason: MoveIntentReason, // Client が提案できる理由だけ
-    expected_generation: u64, // presence generation の写し（authority ではない）
-    intent_id: CommandWireId, // idempotency key
+    reason: MoveIntentReason,
+    expected_generation: u64,
+    intent_id: CommandWireId,
 }
 enum MoveIntentReason { OwnerSummon, PriorInstruction, SpontaneousNeed }
 enum MoveReason {
     OwnerSummon, PriorInstruction, SpontaneousNeed,
-    DisconnectFallback, // Host が通常切断確定後に開始する fallback / NoActive
-    ReconnectRecovery,  // Host restart の RecoveryWait に限る
+    DisconnectFallback,
+    ReconnectRecovery,
 }
 enum MoveOutcome {
     Transitioning { new_generation: u64 },
@@ -467,7 +471,8 @@ enum MoveOutcome {
 
 - input attribution：入力は「どの Client のどの round で Owner が送ったか」の対応（companion・client・round・generation）を伴う。話者認証の意味を足さない。
 - round identity：round は Host 発行の `RoundWireId` である。移動・切断・再起動で旧 round の入力・未提示出力を新 round へ付け替えない。
-- 初回入力は `SubmitTextInput.round = None` で新規 round の開始を要求できる。`observed.presence_generation_view` は必須、`observed.round_view` は None とする。Host の `ene-presentation::round` が現接続・帰属・許可・停止・保留を照合して round を発行し、IB X-B の非 optional `RoundId` へ解決して受理し、`AcceptedForRound { round }` を返す。mapping 自体は round を発行しない。以後の当該 round 入力は `Some(round)` を使い、旧 round の拒否を None への自動再送で迂回しない。None 要求の retry も同一 `command_id`・同一内容とし、初回の発行 round / outcome を返して二重発行・二重受理しない。
+- 初回入力は `SubmitTextInput.round = None` で新規 round の開始を要求できる。`observed.presence_generation_view` は必須、`observed.round_view` は None とする。Host の `ene-presentation::round` が現接続・帰属・許可・停止・保留を照合して round を発行し、IB X-B の非 optional `RoundId` へ解決して受理し、`AcceptedForRound { round }` を返す。mapping 自体は round を発行しない。以後の当該 round 入力は `Some(round)` を使い、旧 round の拒否を None への自動再送で迂回しない。
+- **None 要求の retry は第6.2節の semantic idempotency に従う。** current sender epoch で同一 `command_id`・同一 fingerprint を再送した場合、Host は初回に発行した round / outcome を再現して返し、別 round を発行・別入力として受理しない。少なくともその epoch の間はこの対応を再構成できる marker / result を保持する。marker を evict した後も retry を新規 None 要求として受理する状態は作らない。sender epoch が stale なら round 発行より先に stale reject する。同じ ID で fingerprint が違えば `CommandReplayRejectWire::CommandIdConflict` とする。
 - partial / streaming output：`stream_id`＋`seq`＋`is_final` で順序付ける。`is_final` なしの frame を完了にしない。
 - 未提示出力は `UndeliveredSummary`（第18節・W-3）へ接続し、次 Client で現在の結果・利用制限・削除状況へ照合して要約報告する。送信・受信を報告完了にしない。
 
@@ -532,7 +537,7 @@ Host での現在認可・Client target・attempt identity・presence generation
 - Host は現在認可（K-B の今回確定）を経て初めて `ClientActionCommand` を発行する。command には `AttemptWireRef`（当該試行）・`OperationWireId`（論理操作。retry を束ねる対応）・presence generation・target client・concrete 操作を載せる。Task revision 前提・委任 scope・実対象・操作種別・依拠 Permission の全文は載せない（Host が mapping で保持する）。
 - Client は受信したら `ActionReceiptAck` を返す。`Received` は「受け取った」ことであり、成功・実行開始・完了のいずれでもない。stale（旧 generation・旧 connection・旧 attempt・ capability 不足）は `RejectedStale` 等で返す。
 - 効果の確定は `EffectReport` の certainty で行う。`Unknown`（disconnect・response loss・確認不能）は未実行・成功・失敗へ書き換えない。Host は attempt を `Unknown` のまま durable に保持し、重複 risk 付き Owner 判断へ戻す（CCT §8）。
-- disconnect / response loss 時の自動 retry をしない。transport の再送（同一 `command_id`＋新 `message_id`）は受信・ack の再送に留め、作用の再実行ではない。作用の再実行は新しい attempt（新 `AttemptWireRef`）＋Owner 判断を必要とする。Client は再接続時に旧 command を自動再実行しない。
+- disconnect / response loss 時の自動 retry をしない。transport の再送（同一 `command_id`＋新 `message_id`）は、同じ sender epoch 内で第6.2節の marker により再実行を防ぎつつ受信・ack の再送に留める。作用の再実行は新しい attempt（新 `AttemptWireRef`）＋Owner 判断を必要とする。Client は再接続時に旧 command を自動再実行しない。
 - Computer Use の対象は現在の active Client に限定する（要件）。移動時は安全に区切れるところまで移動を遅らせ、元 Client の Action を別 Client で自動再実行しない。ambient Observation の有効化を操作の承認にしない。
 
 ## 16. Cancellation
@@ -560,24 +565,20 @@ Client 内に Ene 管理下の temporary copy が存在する場合の wire 参�
 | `DeletionDemand` | Host→Client | command | local 削除要求（`DeletionOpWireId`・sweep・valid interval・target descriptor。本文なし） |
 | `DeletionProgress` | Client→Host | progress | 処理中報告（任意） |
 | `LocalErasureResult` | Client→Host | completion（局所） | local 検証・結果（wiped・unverified range・unreachable の区別）。全域完了ではない |
-| `DeletionCompletedNotice` | Host→Client | fact | 全域完了の通知（Client の後続再保存防止・token 破棄用）。Client の完了証拠にしない |
+| `DeletionCompletedNotice` | Host→Client | fact | 全参加・残存検証・区間内再到着取込み・検索 token の除去 / 復元不能化まで完了した後の全域完了通知。Client の完了証拠にしない |
 
 ### 17.2 target / condition の Client 向け representation（本文を送らない）
 
 ```rust
 struct DeletionDemand {
-    operation: DeletionOpWireId,   // 全域操作 identity
-    sweep: u64,                    // 消去区間の順序（写し）
-    valid_interval: ValidIntervalWire, // 開始〜検証完了（区間内再到着を含む）
-    targets: Vec<DeletionTargetWire>,  // 本文なし。class＋interval＋item ref のみ
+    operation: DeletionOpWireId,
+    sweep: u64,
+    valid_interval: ValidIntervalWire,
+    targets: Vec<DeletionTargetWire>,
 }
 
 enum DeletionTargetWire {
-    // Client 一時 class の全量 wipe（本文照合なし）。例：入力途中・表示 cache・
-    // audio buffer・capture cache・asset cache・未送信操作・Tool UI data。
     WipeClass { class: ClientTempClass, range: TimeRangeWire },
-    // Host が管理する特定 item の ref 指定（ID のみ。本文なし）。
-    // 例：undelivered copy・asset chunk・capture ticket 対応物。
     EraseItemRef { item: ItemWireRef },
 }
 ```
@@ -585,7 +586,7 @@ enum DeletionTargetWire {
 - 機械的条件の文字列そのものを Client へ送らない。Client は class＋interval＋item ref で特定できる一時 data を wipe し、範囲・未確認を報告する。Host 側の機械的検索・残存検証は Host が行う。意味的補助（言換え特定）の完全性は保証しない（CI §3.6）。
 - Client は `LocalErasureResult{ wiped, unverified_range, unreachable_detail }` を返す。到達不能・未確認を成功と読まない。再接続時に旧 copy を Host へ戻して再形成しない。
 - stale Client result（旧 operation・旧 sweep の結果）は現在の全域完了に採用しない。元 operation への記録に留める。
-- `DeletionDemand` の target descriptor・検索 token は操作期間のみ保持し、完了時に破棄する。完了記録・Audit へ対象本文を戻さない。
+- `DeletionDemand` の Client-side target descriptor は操作期間のみ保持し、完了時に破棄する。Host の機械的検索 token は PR / CCT の契約に従い、全参加・残存検証・区間内再到着取込みの後に除去または復元不能化し、その成立を確認してから全域完了を durable に確定する。最終消去と完了 marker が不可分でない間は `finalizing` の未完了として扱う。完了記録・Audit へ対象本文を戻さない。
 
 ## 18. Management surface
 
@@ -605,21 +606,19 @@ device pairing 承認など trust root を変更する高権限操作の最終�
 
 ```rust
 struct ManagementIntent {
-    intent_id: CommandWireId,      // idempotency key
-    kind: ManagementIntentKind,    // StopCompanion | DeleteCompanion | CancelTask |
-                                   // ManageSchedule | DenyOrRefuse | ManageRuleConsentCap |
-                                   // ManageDevice | ConfigureCredentialIntent | RequestDeletionBackupRestoreReset
-    target: ManagementTargetWire,  // 対象参照（wire ref のみ）
-    base_view: BaseViewMark,       // Client が見た表示 revision の写し（authority ではない）
-    rationale: IntentRationaleWire, // Owner の意図の写し（会話由来 / 管理面操作の別＋引用対応）
+    intent_id: CommandWireId,
+    kind: ManagementIntentKind,
+    target: ManagementTargetWire,
+    base_view: BaseViewMark,
+    rationale: IntentRationaleWire,
 }
 enum ManagementOutcome {
-    AppliedAsOneTime,              // 一回承認として適用
-    StoredAsRuleView,              // Rule 等として保存（revision view 付き）
-    NeedsClarification,            // 曖昧・矛盾・過度・重大のため確認へ戻す
-    DeniedByBoundary,              // 制御境界の黙上書き・高権限操作の最終確認境界違反
-    StaleBaseView { current: ViewMark }, // 表示が古い。再取得・再評価へ戻す
-    HeldByOperation,               // 消去・復元保留・停止等で新規禁止
+    AppliedAsOneTime,
+    StoredAsRuleView,
+    NeedsClarification,
+    DeniedByBoundary,
+    StaleBaseView { current: ViewMark },
+    HeldByOperation,
 }
 ```
 
@@ -662,6 +661,7 @@ pattern・方向・authority の所在を一覧する。envelope 自体は含め
 | M-21 | `BodyStateHint` | H→C | fact | 個体調整（活動状態）＋認識・学習（内的状態の意味）。表示 staging ではない |
 | M-22 | `RevocationNotice` | H→C | fact | 権限・制約＋接続・存在。到達不能でも失効は成立 |
 | M-23 | `UnsupportedMessage / IncompatibleProtocol` | H→C（主に） | reject（第24節） | transport / mapping。副作用なし |
+| M-24 | `CommandReplayRejectWire` | receiver→command sender | typed wire reject | command correlation / idempotency boundary。domain owner へ mapping 前に `CommandIdConflict`、または replayable prior outcome を失った非 identity-minting command の `AlreadyProcessed` を返す。副作用なし |
 
 ## 21. Wire DTO（pseudo-code）
 
@@ -687,23 +687,30 @@ struct AttemptWireRef(/* opaque; Host 発行 */);
 struct DeletionOpWireId(/* opaque; Host 発行 */);
 struct ItemWireRef(/* opaque; Host 発行 */);
 
+enum CommandReplayRejectWire {
+    CommandIdConflict { command_id: CommandWireId },
+    AlreadyProcessed { command_id: CommandWireId },
+}
+// command correlation 専用の typed reject。transport error でも domain owner の巨大共通 error でもない。
+// identity を発行した command では AlreadyProcessed に逃がさず prior outcome / identity を再現する。
+
 // ---- presence ----
 struct PresenceAttributionWire {
     companion: CompanionWireRef,
-    state: PresenceStateWire, // Present | NoActive | InTransition | Stopped | RecoveryWait
+    state: PresenceStateWire,
     active_client: Option<ClientWireRef>,
-    generation: u64, // PresenceGeneration の値の写し
-    move_reason: Option<MoveReason>, // §12.3。移動・復旧に伴う fact のみ Some。初期状態・Stop 等は None
+    generation: u64,
+    move_reason: Option<MoveReason>,
 }
 
 // ---- text ----
 struct SubmitTextInput {
     companion: CompanionWireRef,
-    round: Option<RoundWireId>, // None は新規開始要求。発行・照合・retry は §13.1
-    local_id: ClientLocalId, // Client の対応付け用
-    body: TextBodyWire,      // 本文（一時表現。Host は History へ正本化する）
+    round: Option<RoundWireId>,
+    local_id: ClientLocalId,
+    body: TextBodyWire,
 }
-struct TextBodyWire { text: String /* 上限付き */, lang: TextLangWire }
+struct TextBodyWire { text: String, lang: TextLangWire }
 enum RoundIntakeOutcomeWire {
     AcceptedForRound { round: RoundWireId },
     StaleRound { current_round: Option<RoundWireId>, current_generation: u64 },
@@ -712,42 +719,41 @@ enum RoundIntakeOutcomeWire {
 }
 struct TextStreamFrameWire {
     stream: StreamWireId,
-    seq: u64,          // stream 内順序。欠落・重複は破棄・再要求の対象であり guess しない
-    delta: String,     // 部分 text（上限付き）
+    seq: u64,
+    delta: String,
     is_final: bool,
 }
 struct ConfirmPresentationWire {
     round: RoundWireId,
     stream: Option<StreamWireId>,
-    status: PresentationStatusWire, // Presented | Unknown | Failed
-    detail: Option<String>, // 理由の表示用（秘密・本文の複製を含めない）
+    status: PresentationStatusWire,
+    detail: Option<String>,
 }
 
 // ---- voice ----
 struct VoiceStreamOpenWire {
     session: VoiceSessionWireId,
     round: RoundWireId,
-    codec: VoiceCodecWire, // 採用 codec・rate の合意表示
+    codec: VoiceCodecWire,
     generation: u64,
 }
 struct VoiceControlWire {
     session: VoiceSessionWireId,
-    control: VoiceControlKindWire, // MuteOn | MuteOff | BargeIn | Interrupt | StopVoice
+    control: VoiceControlKindWire,
 }
 
 // ---- observation ----
 struct CaptureTicketWire {
     ticket: TicketWireId,
-    scope: CaptureScopeWire, // desktop 全体（window 個別対象と誤認させない表示）
-    expires_at: WallClockWire, // wall-clock＋tz。stale 判定の根拠にはしない（ticket 失効は Host が確定）
+    scope: CaptureScopeWire,
+    expires_at: WallClockWire,
     generation: u64,
 }
 struct CaptureFrameWire {
     ticket: TicketWireId,
     local_id: ClientLocalId,
     captured_at: WallClockWire,
-    descriptor: CaptureDescriptorWire, // 解像度・形式等の表示（上限付き）
-    // binary 本体は attachment frame で送り、descriptor_ref で対応付ける。
+    descriptor: CaptureDescriptorWire,
 }
 enum CaptureOutcomeWire {
     AcceptedForRouting,
@@ -761,15 +767,15 @@ struct ClientActionCommandWire {
     operation: OperationWireId,
     attempt: AttemptWireRef,
     target_client: ClientWireRef,
-    generation: u64, // presence generation の写し
-    device_op: DeviceOpWire, // concrete device operation（種別＋対象＋参数。上限付き）
-    constraint: ActionConstraintWire, // timeout・中断条件等の実行制約（許可条件ではない）
+    generation: u64,
+    device_op: DeviceOpWire,
+    constraint: ActionConstraintWire,
     idempotency_key: CommandWireId,
 }
 struct DeviceOpWire {
-    kind: DeviceOpKindWire, // Click | TypeText | KeyPress | FileOpWithinTask | ...（閉じた enum）
-    target: DeviceTargetWire, // 対象記述（解決済み実対象の投影。文字列一致を対応にしない）
-    params: DeviceParamsWire, // 参数（上限付き。secret・credential を含めない）
+    kind: DeviceOpKindWire,
+    target: DeviceTargetWire,
+    params: DeviceParamsWire,
 }
 enum ActionReceiptAckWire {
     Received,
@@ -780,13 +786,13 @@ enum ActionReceiptAckWire {
 struct EffectReportWire {
     operation: OperationWireId,
     attempt: AttemptWireRef,
-    certainty: CertaintyWire, // ConfirmedSuccess | ConfirmedFailure | Unknown
-    grounds_ref: GroundsRefWire, // 根拠への参照（evidence 本文を含めない）
+    certainty: CertaintyWire,
+    grounds_ref: GroundsRefWire,
 }
 
 // ---- cancel ----
 struct CancelRequestWire {
-    target: CancelTargetWire, // Operation | Stream | Attempt の wire ref
+    target: CancelTargetWire,
     reason: CancelReasonWire,
 }
 enum CancelReceivedWire { Recorded }
@@ -797,20 +803,19 @@ struct DeletionDemandWire {
     operation: DeletionOpWireId,
     sweep: u64,
     valid_interval: ValidIntervalWire,
-    targets: Vec<DeletionTargetWire>, // 第17.2節。本文なし
+    targets: Vec<DeletionTargetWire>,
 }
 struct LocalErasureResultWire {
     operation: DeletionOpWireId,
     wiped: Vec<WipedClassWire>,
     item_results: Vec<ItemErasureResultWire>,
-    unverified_range: Vec<UnverifiedRangeWire>, // 未確認範囲（成功にしない）
+    unverified_range: Vec<UnverifiedRangeWire>,
 }
 
 // ---- management ----
 struct ManagementViewWire {
-    mark: ViewMarkWire, // 表示 revision の写し
-    sections: Vec<ViewSectionWire>, // rule 概要・consent 概要・cap・device・schedule 等の filtered 表示
-    // secret・判定 copy・内部条件全文を含めない。
+    mark: ViewMarkWire,
+    sections: Vec<ViewSectionWire>,
 }
 ```
 
@@ -825,6 +830,7 @@ DTO → Host domain command への変換点（Host ingress mapping。判断は�
 | `ActionReceiptAck`・`EffectReport` | `ReportEffectFact` の Client 由来部分（IB K-H） | 実行・拡張 |
 | `LocalErasureResult` | `ParticipantCompletionFact` の Client 参加分（IB D-B） | 保全・消去（集約） |
 | `ManagementIntent` | `ProposeControlChangeCommand` 等の intent 供給（IB K-A・第9節） | 権限・制約＋各 owner |
+| `CommandReplayRejectWire` | domain mapping しない。sender epoch / fingerprint / idempotency marker の wire boundary で処理する | protocol correlation boundary（authority ではない） |
 
 ## 22. Backpressure and streams
 
@@ -852,7 +858,7 @@ transport adapter は backpressure を上位へ伝える（`send_frame` の pend
 
 ## 24. Error and rejection model
 
-transport error と domain rejection を区別する。domain rejection は `Ok` 側の typed DTO で返し、`Err` 側の retry 対象にしない（IB §11）。
+transport error と domain rejection を区別する。domain rejection は `Ok` 側の typed DTO で返し、`Err` 側の retry 対象にしない（IB §11）。command correlation の整合性違反は domain owner の判断へ入る前の **typed wire reject** とし、transport failure にも共通 domain error にも潰さない。
 
 | 層 | 種別 | 例 | 扱い |
 |---|---|---|---|
@@ -860,6 +866,7 @@ transport error と domain rejection を区別する。domain rejection は `Ok`
 | transport | decode failure | MessagePack decode 失敗・frame 上限超過 | 当該 frame を破棄し `DecodeFailed` を通知（可能な場合）。副作用なし。累積する場合は connection を切断する |
 | transport | unsupported protocol | major 不一致・auth 前の domain 操作 | `IncompatibleProtocol` で拒否。guess しない |
 | transport | auth failure | proof 不一致・失効 device・nonce 再利用 | `AuthFailed` で拒否。旧 material で復活させない |
+| wire reject | command identity conflict / prior result unavailable | `CommandReplayRejectWire::CommandIdConflict`・`AlreadyProcessed` | current authenticated sender epoch の marker と fingerprint を照合して domain mapping 前に返す。`CommandIdConflict` は同じ ID の別内容を副作用なしに拒否する。`AlreadyProcessed` は exact prior outcome を保持しない非 identity-minting command に限る。新 ID への黙った再送を誘発しない |
 | domain reject | stale generation / connection / incarnation | `StaleConnection`・`StaleIncarnation`・`StalePresence`・`StaleRound`・`StaleTicket`・`StaleStream` | 現在への不採用。元 round・元 attempt・元 ticket への対応付けに留める。新 round・新 attempt への付け替えをしない |
 | domain reject | no current presence | `NoCurrentPresence` | 新規開始しない。判断待ち・保留へ戻す |
 | domain reject | denied / held | `DeniedByConstraint`・`DeniedByHold`・`HeldForTransition`・`HeldForSafeClosure` | 実行せず待機・判断待ちにする。黙って queue・replay しない |
@@ -867,7 +874,7 @@ transport error と domain rejection を区別する。domain rejection は `Ok`
 | domain reject | deletion no longer current | `DeletionSuperseded{ current_operation }` | 旧 operation の結果を全域完了に採用しない |
 | domain reject | needs revalidation | `NeedsRevalidation{ reason }` | 現在条件の再照合へ戻す |
 
-必要な domain-specific reject DTO は第21節の各 outcome enum が担う。共通巨大 error enum・単一 error code へ潰さない。`stale` / `denied` / `held` / `not-current` / `cap exceeded` を `Err` 側に混ぜない。呼び出し側が `Err` を `Denied` と誤読して誤った成功・拒否表示をしないこと（CC-07）。
+必要な domain-specific reject DTO は第21節の各 outcome enum が担う。`CommandReplayRejectWire` は command correlation だけの狭い wire 型であり、共通巨大 error enum・単一 error code ではない。`stale` / `denied` / `held` / `not-current` / `cap exceeded` を `Err` 側に混ぜない。呼び出し側が `Err` を `Denied` と誤読して誤った成功・拒否表示をしないこと（CC-07）。
 
 ## 25. IPC crate placement
 
@@ -875,15 +882,17 @@ CM を前提とし、crate 追加・依存方向の変更をしない。mapping 
 
 | 配置 | 責務 | 持つもの / 持たないもの |
 |---|---|---|
-| `ene-api`（`ene-api::v1::*`） | wire DTO のみ。versioned module（`v1`）に envelope・payload・capability・auth frame 型・reject DTO を置く | 持つ：serde DTO・version 型・message type 識別・JSON rendering helper。持たない：business logic・authority 判定・Host domain 型・secret・durable row・transport I/O。Ene 内依存なし（serde 等の外部のみ）を維持する |
-| Host adapter（`apps/ene-core` の `ipc_map` module＋各 domain の premise 受付） | DTO validation、wire ref → domain premise mapping、domain fact → DTO 投影、connection・incarnation・version・capability の保持（durable は各 owner の record） | 持つ：`validate()`・mapping 関数・subscription 管理・stream mux。持たない：採否・達成・許可・確定度の判断（各 owner）。domain crate に wire 依存を持ち込まない |
-| Client adapter（`apps/ene-stage`・`apps/ene-ctl` 内の `ipc` module＋device adapter） | DTO → 表示・device 操作、device fact → DTO、transient cache 管理、削除参加時の local wipe | 持つ：presentation・capture・audio・tray adapter。持たない：Host domain crate への依存・canonical mutation・正本保持。依存は `ene-api`・`ene-primitive`・Client adapter のみ |
+| `ene-api`（`ene-api::v1::*`） | wire DTO のみ。versioned module（`v1`）に envelope・payload・capability・auth frame 型・reject DTO を置く。`CommandReplayRejectWire` は `v1::command` 等の狭い command-correlation module に置く | 持つ：serde DTO・version 型・message type 識別・JSON rendering helper。持たない：business logic・authority 判定・Host domain 型・secret・durable row・transport I/O。Ene 内依存なし（serde 等の外部のみ）を維持する |
+| Host adapter（`apps/ene-core` の `ipc_map` module＋各 domain の premise 受付） | DTO validation、wire ref → domain premise mapping、domain fact → DTO 投影、connection・incarnation・version・capability の保持（durable は各 owner の record）、current sender epoch の command idempotency marker 参照 | 持つ：`validate()`・mapping 関数・subscription 管理・stream mux・sender stale check・command fingerprint check。持たない：採否・達成・許可・確定度の判断（各 owner）。domain crate に wire 依存を持ち込まない |
+| Client adapter（`apps/ene-stage`・`apps/ene-ctl` 内の `ipc` module＋device adapter） | DTO → 表示・device 操作、device fact → DTO、transient cache 管理、削除参加時の local wipe、Host→Client command の idempotency marker | 持つ：presentation・capture・audio・tray adapter。持たない：Host domain crate への依存・canonical mutation・正本保持。依存は `ene-api`・`ene-primitive`・Client adapter のみ |
 
 mapping の方向（CM §5.3・§10 の inversion に従う）：
 
 - Host mapping は wire ref → domain premise の解決だけを行い、domain newtype 間の `From` を設けない。cross-domain 参照は `RawId`＋用途別 premise による inversion で解決し、crate 依存を一方向に保つ。
-- `ene-api` に `ene-primitive` への依存を持ち込まない（CM §10.1 の現行条件を維持）。opaque 性質の共有が必要な場合は byte・integer の表現に留め、semantic newtype を集めない。
+- `ene-api` に `ene-primitive` への依存を持ち込まない（CM §10.1 の条件を維持）。opaque 性質の共有が必要な場合は byte・integer の表現に留め、semantic newtype を集めない。
 - `rusqlite::Transaction`・生 SQL・`SecretValue` を mapping・DTO へ露出させない。repository compare は Host domain 側の短 transaction で行う（IB §13）。
+- idempotency marker の保存先・fingerprint 表現は実装自由度だが、Host→Client / Client→Host のどちらも第6.2節の「retry を受理する期間より先に再実行防止情報を失わない」契約を満たす。Client を canonical domain state holder にする意味ではなく、受領済み command の side-effect suppression に必要な protocol state である。
+- 現在の Stage 1 `ene-api::v1` が `CommandReplayRejectWire` をまだ持たないことは Stage 2 の transport / reject DTO 実装範囲であり、既存 `RoundIntakeOutcomeWire` / `ManagementOutcome` へ generic variant を後付けする理由にしない。
 
 ## 26. Validation — wire message だけを追う walkthrough
 
@@ -891,16 +900,17 @@ transport success を domain success へ読み替えないことを、各 walkth
 
 ### V-1 Client connect → authenticate → capability advertise
 
-1. Client が transport 接続し、`PairingRequest`（未 pairing 時。§18 の trusted Host-local Owner 最終確認待ち）または `AuthChallenge→AuthProof`（pairing 済み）を行う。秘密を通常 payload へ載せない。
-2. Host は auth 成功時に `ConnectionWireId` を発行し、`CapabilityAdvertise` を受けて negotiated version・accepted features を確定する。申告は availability fact であり、許可・presence ではない。
-3. 失格条件：auth なしの domain 操作は不受理にする。失効 device の旧 material では復活させない。
+1. 未 pairing Client の最初の `PairingRequest` は `sender.device_id=None`・自 incarnation・`connection_id=None` で送り、`request_id` / `message_id` で対応付ける。これは authenticated command sender epoch ではない。pairing 済み Client は `AuthChallenge→AuthProof` を行い、`AuthProof` 等は `device_id=Some`・`connection_id=None` を許す。秘密を通常 payload へ載せない。
+2. Host は auth 成功時に `ConnectionWireId` を発行し、以後の domain command で current authenticated sender epoch を成立させる。`CapabilityAdvertise` を受けて negotiated version・accepted features を確定する。申告は availability fact であり、許可・presence ではない。
+3. 失格条件：上記 pre-auth 例外以外で sender field を欠落させない。auth なしの domain 操作は不受理にし、失効 device の旧 material では復活させない。
 
 ### V-2 Owner Text → Host → response stream → presentation acknowledgement
 
 1. Client が `SubmitTextInput`（初回は round=None・現在 generation の写し・local_id・本文）を送る。Host が §13.1 の照合と round 発行を行い、受理時に返す round を以後の当該 round 入力に用いる。送信成功は受理ではない。
 2. Host mapping が validation→`SubmitClientInputCandidate` へ mapping し、現在帰属・現接続・許可・停止・保留を照合して `RoundIntakeOutcome::AcceptedForRound` を返す。旧 round なら `StaleRound` とし、新 round へ付け替えない。
-3. Host は `TextStreamOpen→Frame(seq,is_final)→Close(Completed)` を送る。生成完了・送信・受信を同一事実にしない。
-4. Client は提示後に `ConfirmPresentation::Presented` を送る。送信・受信だけでは報告完了にしない。提示不明は `Unknown` を保持する。
+3. ack が失われ同じ sender epoch で初回 None command を同じ fingerprint で再送しても、同じ `command_id` の marker / result から同じ `AcceptedForRound { round }` を返し、別 round を発行しない。同じ ID で本文・対象・premise が変われば domain mapping 前に `CommandIdConflict` とする。
+4. Host は `TextStreamOpen→Frame(seq,is_final)→Close(Completed)` を送る。生成完了・送信・受信を同一事実にしない。
+5. Client は提示後に `ConfirmPresentation::Presented` を送る。送信・受信だけでは報告完了にしない。提示不明は `Unknown` を保持する。
 
 ### V-3 Companion move A → B
 
@@ -922,9 +932,9 @@ transport success を domain success へ読み替えないことを、各 walkth
 
 ### V-6 reconnect with unresolved Action
 
-1. Client が新規 connection として再認証する。旧 stream・旧 ticket・旧 round を引き継がない。
+1. Client が新規 connection として再認証する。旧 stream・旧 ticket・旧 round・旧 sender epoch を引き継がない。
 2. Host は未確定 attempt を `Unknown` のまま提示し、重複 risk を示して Owner 判断を求める。旧 command の自動再実行・旧 ack の復活をしない。
-3. transport の再送（同一 `command_id`＋新 `message_id`）は ack・受信の再送に留め、作用の再実行ではないことを確認する。
+3. 旧 connection を載せた transport retry は `StaleConnection` で semantic execution 前に拒否する。新 connection で同じ外部作用を行うには transport retry ではなく新 attempt＋Owner 判断を必要とする。
 
 ### V-7 Voice interruption
 
@@ -942,7 +952,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 
 1. Host が `DeletionDemand{ operation }` を発行する。到達不能 Client は `pending/unreachable` として保全し、成功と読まない。
 2. Client 再接続時、Host は現 operation の demand を再送する（旧 copy の Host への持ち帰りをさせない）。Client は class wipe＋item ref 消去を行い、`LocalErasureResult{ wiped, unverified_range }` を返す。
-3. Host は全参加の集約＋機械的残存検証＋区間内再到着の取込みを満たして初めて全域完了とする。局所完了だけで hold を解除しない。完了記録へ対象本文を戻さない。
+3. Host は全参加の集約＋機械的残存検証＋区間内再到着の取込みを満たした後、検索 token を除去または復元不能化し、その成立を確認してから全域完了を durable に確定する。token の最終消去と完了 marker を一つにできない間は `finalizing` として hold を維持する。局所完了だけで hold を解除せず、完了記録へ対象本文を戻さない。
 
 ### V-10 Host restart → reconnect → presence restoration
 
@@ -955,11 +965,14 @@ transport success を domain success へ読み替えないことを、各 walkth
 1. negotiated version が older major の共通範囲にない場合、`IncompatibleProtocol{ host_max, client_max, hint }` で拒否する。自動互換・guess をしない。
 2. 共通 major がある場合、Host は older の理解範囲で話す。unknown optional field は無視し、required 意味は送らない。理解できない newer 意味を older へ黙って送らない。
 
-### V-12 duplicate / delayed message
+### V-12 duplicate / delayed message and idempotency retention
 
-1. 同一 `message_id` の重複配送は沈黙破棄する（再実行なし、ack 再送は可）。
-2. 同一 `command_id`＋新 `message_id` の retry は domain idempotency で prior outcome を返す（二重実行しない）。
-3. 遅延到着物は元の round・attempt・ticket・operation へ対応付け、現在の目的への自動採用・後続自動開始をしない。到着順が最後であることを受入根拠にしない。
+1. 同一 `message_id` の重複配送は transport cache で沈黙破棄する（再実行なし、ack 再送は可）。その cache が eviction されても semantic `command_id` marker は別契約で残る。
+2. current sender epoch 内で同一 `command_id`＋新 `message_id` の retry が同じ fingerprint で来たら、prior outcome を返し二重実行しない。`SubmitTextInput.round=None` なら初回の round を返し、二つ目の round を発行しない。
+3. 同じ `(sender epoch, command_id)` で fingerprint が違えば `CommandReplayRejectWire::CommandIdConflict` とし、副作用なしに拒否する。`RoundIntakeOutcomeWire` 等の既存 domain enum に generic conflict variant を混ぜない。
+4. sender epoch が current な間は idempotency marker を eviction しない。詳細 outcome を compact しても no-reexecute marker と、identity minting command に必要な最小 result は保持 / 再構成できること。exact prior outcome を保持しない非 identity-minting command だけ `AlreadyProcessed` を返せる。
+5. connection / incarnation が置換され sender epoch が stale になった後は、旧 message を idempotency lookup / semantic execution より先に stale reject できる。その条件が成立して初めて旧 marker を cleanup してよい。
+6. 遅延到着物は元の round・attempt・ticket・operation へ対応付け、現在の目的への自動採用・後続自動開始をしない。到着順が最後であることを受入根拠にしない。
 
 ### V-13 device 失効前 backup → 失効 → Restore / Full Reset
 
@@ -975,7 +988,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 
 ## 27. Avoid over-engineering — 導入しないもの
 
-- exactly-once transport。at-least-once 配送＋`message_id` による重複抑止＋`command_id` による domain idempotency で足りる。
+- exactly-once transport。at-least-once 配送＋`message_id` による transport 重複抑止＋第6.2節の sender-epoch-scoped `command_id` idempotency で足りる。semantic marker の lifetime を短い transport cache と同じにしない。
 - distributed consensus・global message ordering・universal event log・universal RPC interface。単一 Owner-managed Host の topology では不要であり、per-stream 順序・世代対応・短 commit compare で成立させる。
 - schema registry service・custom binary protocol。MessagePack＋versioned DTO＋field 規約で足りる。
 - QUIC 等の新 transport の先行導入。必要になれば adapter として追加する。
@@ -986,13 +999,16 @@ transport success を domain success へ読み替えないことを、各 walkth
 
 - **Authority 維持。** Host canonical・Client 非正本・client message 非 authority・Host-local 非公開・Client の Host crate 非依存を維持した。envelope・ID・ack・subscription・view のいずれも authority 化していない。UI ack を presence 成立にせず、受信・送信・表示を効果・完了・許可・報告完了にしていない。
 - **Currentness 維持。** identity・revision・generation・typed correspondence・expected current・stale / delayed handling を wire へ落とした。Host 内部 boundary token の全文渡しをせず、Client が保持・返送する最小 correlation（wire ref・generation 写し・round / ticket view・command / stream ID）に限定した。三者（connection・incarnation・generation）を一つの session id へ潰していない。`MessageId` を domain identity に再利用せず、transport 抑止と domain idempotency を分離した。
-- **Remote-capable 選別。** IB・CM の 7 群起点で wire 化の要否を再判定し、Host-local（形成・制御確定・秘密利用・割当・予約・認可・作用確定・範囲確定・完了確定・switch・repository compare）を越境させていない。Observer assignment・routing semantic を公開していない。
+- **Pairing bootstrap と authenticated retry の分離。** pre-pairing `device_id=None` / pre-auth `connection_id=None` の正当な sender 形を維持し、これらを authenticated command sender epoch と混同していない。認証後の domain command だけ sender-epoch-scoped idempotency へ入る。
+- **Retry / idempotency。** retry を受理し得る current authenticated sender epoch と semantic marker の保持期間を結び、marker eviction 後の旧 command を新規 command として実行できる穴を作っていない。transport `message_id` cache は短期でよいが、`command_id` marker は current sender epoch の間維持する。`round=None` の再送は同じ round / outcome を返す。同じ ID の別 fingerprint は `CommandReplayRejectWire::CommandIdConflict` として domain mapping 前に拒否し、既存 domain outcome enum を generic conflict variant で汚さない。
+- **Remote-capable 選別。** IB・CM の7群起点で wire 化の要否を再判定し、Host-local（形成・制御確定・秘密利用・割当・予約・認可・作用確定・範囲確定・完了確定・switch・repository compare）を越境させていない。Observer assignment・routing semantic を公開していない。
 - **Pattern 分離。** request/response・command+ack・fact・subscription・stream・progress+completion を区別し、generic Event へ統合していない。envelope と payload を分離し、envelope を owner にしていない。
 - **Presence / I/O / Observation / Action。** 二重 active 禁止・移行中新規開始禁止・旧 round 付け替え禁止・生成≠提示・旧 stream 非継続・ticket 制・class wipe（本文非再送）・command 到着≠成功・自動 retry 禁止・cancel 四分離をいずれも満たす。
+- **Targeted Deletion。** Client 局所完了を全域完了にせず、Host 残存検証・区間内再到着取込みに加えて検索 token の除去 / 復元不能化を全域完了の前提に揃えた。不可分でない間は `finalizing` を未完了として維持する。
 - **Versioning / capability / auth / transport。** claim≠Permission、秘密の通常 payload 非載せ・pairing・revoke・re-auth、version matrix・unknown 拒否・guess 禁止、wire/transport 分離・adapter boundary、per-domain backpressure・global ordering 不要求を満たす。
-- **Security / error。** 非露出・untrusted validation・DTO≠boundary、transport/domain error 分離・typed reject・共通 enum 化の禁止を満たす。
+- **Security / error。** 非露出・untrusted validation・DTO≠boundary、transport/domain error 分離・typed reject・共通巨大 enum 化の禁止を満たす。
 - **Crate。** `ene-api` の DTO 限定・mapping の別配置・依存方向の維持を満たす。新規 crate・依存追加をしていない。
-- **修正。** レビューで見つけた表現上の不足（retry 時の `command_id`＋新 `message_id` の関係の明記、capability 変化時の既発行 ticket 延命禁止の明記、asset cache の transient 扱い・wipe 参加の明記）は本書へ反映済みである。Step 11・Step 12・CI・PR・CCT・IB・CM・requirements の変更は不要であった。
+- **修正。** レビューで見つけた不足（retry admissibility と `command_id` marker retention の関係、`round=None` の marker eviction 後再実行防止、同一 ID 別内容の typed wire conflict、Targeted Deletion の token 最終消去順序）を本書へ反映し、後から追加された pairing bootstrap sender contract とも統合した。requirements / semantic owner / architecture boundary の変更は不要である。
 
 ## 29. Escalation — Requirement / Architecture Issue の有無
 
@@ -1007,7 +1023,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 ## 30. 意図的に残した Design Freedom
 
 - 具体暗号 library・key format・鍵導出・証明書運用、pairing material の具体形式・保存方式、nonce・proof の具体方式。
-- heartbeat / keepalive / timeout / retry 回数・値、`message_id` cache 期間・`command_id` 保持期間、frame 上限値・同時 stream 上限値。
+- heartbeat / keepalive / timeout / retry 回数・値、`message_id` cache 期間、`command_id` marker の保存形式・詳細 outcome の compact 方法・sender epoch 終了後の cleanup 時機、command fingerprint の canonical encoding / hash 方式。**retry を受理し得る current sender epoch より先に no-reexecute marker を失うこと、または同じ ID の別 semantic command を一致扱いすることは Freedom に含まれない。**
 - 具体 TCP port・mDNS 有無・NAT traversal（relay は導入しない）。
 - audio codec・capture 画像形式・解像度上限・chunk size、asset chunk size・cache 上限。
 - capture 時機・stagger algorithm、費用予約量算定式・集計期間、BodyState hint の粒度・更新頻度。
@@ -1019,11 +1035,11 @@ transport success を domain success へ読み替えないことを、各 walkth
 ### 31.1 固定前提として使えるもの
 
 - 第2節の remote-capable 選別（W-1〜W-10 と Host-local の区別）。
-- 第3〜5節の layer・pattern・envelope。
-- 第6節の identity 分離と発行者規則、第11節の incarnation / stale 拒否。
+- 第3〜5節の layer・pattern・envelope、および pairing 前 / auth 前 sender の例外。
+- 第6節の identity 分離、authenticated sender epoch、retry admissibility / idempotency retention / fingerprint、第11節の incarnation / stale 拒否。
 - 第7節の serialization・version matrix・field 規約、第8節の capability、第9節の pairing / auth / revoke、第10節の transport・adapter boundary。
 - 第12〜19節の domain 別 wire semantics。
-- 第20・21節の inventory・DTO、第22節の stream semantics、第24節の rejection model。
+- 第20・21節の inventory・DTO（`CommandReplayRejectWire` を含む）、第22節の stream semantics、第24節の rejection model。
 - 第25節の crate placement（`ene-api::v1`・Host `ipc_map`・Client `ipc`）。
 
 ### 31.2 Step 13 でまだ具体化すべき領域（本書の対象外として残したもの）

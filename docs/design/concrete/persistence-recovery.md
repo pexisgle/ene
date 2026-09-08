@@ -230,9 +230,9 @@ retry・再送・fallback・再委任は新しい `attempt_id` とする。重�
 | `capacity_policy` | `policy_id` | Learning revision・Summary 等の opt-in retention（既定 OFF）・範囲・影響 | D1 | — | 明示 opt-in 時のみ適用する |
 | `backup_setting` | `singleton` | 保存先・backup 独自 schedule・保持数・保護選択 | D1 | Task Schedule とは別 | backup 作成の入力として読む |
 | `backup_point` | `backup_point_id` | 対象時点・参照対応・除外（secret・外部実体）・未完了状況・結果・失敗・保管参照（filesystem path）・暗号化 flag | D2 | 内部削除で Owner 保存 copy も消えたとしない | restore 選択・説明として読む。各部 copy 成功だけを成功にしない |
-| `deletion_operation` | `operation_id` | GEN=`deletion_sweep_generation`、目的・対象記述（機械的条件は検索用 token として操作期間のみ保持し完了時に wipe。完了記録・Audit へ本文を残さない。未完了の間は backup に復旧可能な対応として含めてよく、完了後の backup に token を残さない）・意味的条件・影響・除外・要確認対応・有効区間（開始〜検証完了）・状態（進行中/局所完了/pending/unreachable/failed/全域完了） | D3 | 完了後も事実（目的・範囲・影響・除外・確認・結果）は Audit として残し本文は残さない | restart 後に未完了・保留・再保存防止を再構成する |
+| `deletion_operation` | `operation_id` | GEN=`deletion_sweep_generation`、目的・対象記述（機械的条件は検索用 token として操作期間だけ保持する。全域完了へ遷移する前に token を除去または復元不能化し、完了記録・Audit へ本文を残さない。未完了の間は backup に復旧可能な対応として含めてよいが、token が復元可能な状態を全域完了として保存しない）・意味的条件・影響・除外・要確認対応・有効区間（開始〜検証完了）・状態（進行中/局所完了/finalizing/pending/unreachable/failed/全域完了） | D3 | 完了後も事実（目的・範囲・影響・除外・確認・結果）は Audit として残し本文は残さない | restart 後に未完了・保留・再保存防止を再構成する。`finalizing` または token が復元可能なら全域完了として扱わない |
 | `deletion_participant` | `(operation_id, participant_owner)` | 局所処理・検証・未完了・失敗・未確認範囲・報告時点 | D3 | 同上 | 全域完了の集約として読む。局所返却で hold を解除しない |
-| `erasure_condition` | `(operation_id, deletion_sweep_generation)` | 対象範囲の利用・再保存を制限するための条件・有効区間・完了境界。 ingestion 時の照合用 index | D3 | 完了時に区間を閉じ条件本体（検索 token）を wipe する。完了後の Owner 新規提供は新 Experience として区別する | 各受入・保存先が進行中の消去条件として読む |
+| `erasure_condition` | `(operation_id, deletion_sweep_generation)` | 対象範囲の利用・再保存を制限するための条件・有効区間・完了境界。 ingestion 時の照合用 index | D3 | 全域完了の確定前に区間を閉じ、復元可能な検索 token を除去または復元不能化する。完了後の Owner 新規提供は新 Experience として区別する | 各受入・保存先が進行中・finalizing の消去条件として読む。token 消去未完了なら hold を維持する |
 | `restore_operation` | `restore_id` | CORR→`backup_point_id`、GEN=`restore_generation`、受理・説明・隔離・照合・置換・保留・一括有効化対応・状態 | D3 | 完了後も事実は Audit へ追記し本文・秘密は残さない | restart 後に旧 live 分離・保留を再構成する |
 | `restore_generation_state` | `singleton` | 現在 `restore_generation`（成功した Restore ごとの順序） | D1 | — | 復元 vs 旧 live の区別・stale 判定として読む |
 | `reset_operation` | `reset_id` | 種別（設定/全データ）・列挙・強い確認・範囲・状態。クラッシュ中の継続のための進行 marker（filesystem marker と併用し DB 削除後も継続できる） | D3 | 全データ Reset 完了後は Host 内部 data と共に除去される（外部 Workspace・保存 backup は残す） | restart 後に Reset の継続・完了を再構成する |
@@ -290,12 +290,13 @@ struct PresenceRow {
 struct DeletionOperationRow {
     operation: DeletionOperationId,
     sweep: DeletionSweepGeneration,
-    // 機械的条件の検索 token は操作期間のみ保持し完了時に wipe する。
+    // 機械的条件の検索 token は操作期間だけ保持する。
+    // 全域完了を durable に確定する前に除去または復元不能化し、
     // 完了記録・Audit へ対象本文を残さない。
     mechanical_search: Option<SealedSearchToken>, // 要暗号化・操作期間限定
     semantic_hint: Option<SemanticHintRef>,       // 完全性を保証しない
     valid_interval: ErasureInterval,
-    status: OperationStatus,             // 進行中/局所完了/pending/unreachable/failed/全域完了を潰さない
+    status: OperationStatus,             // 進行中/局所完了/finalizing/pending/unreachable/failed/全域完了を潰さない
 }
 
 struct RestoreOperationRow {
@@ -307,7 +308,7 @@ struct RestoreOperationRow {
 }
 ```
 
-`SealedSearchToken` の実装（暗号化・hash・平文の扱い）は固定しない。固定するのは「完了記録・Audit・説明へ対象本文を戻さない」「完了時に検索 token を wipe する」「token 保持中も通常 model context・他個体・外部送信へ渡す権限が生じない」ことである。
+`SealedSearchToken` の実装（暗号化・hash・平文の扱い）は固定しない。固定するのは「完了記録・Audit・説明へ対象本文を戻さない」「全域完了を durable に確定する前に検索 token を除去または復元不能化する」「token が復元可能な間は operation / hold を未完了として復旧できる」「token 保持中も通常 model context・他個体・外部送信へ渡す権限が生じない」ことである。
 
 ### 4.4 所有・durability matrix（要約）
 
@@ -356,7 +357,7 @@ derived の生成・保持・破棄を行う責務が、元 state との対応�
 | 委任された作業 | `delegation` + `task` | 委任範囲・進捗・待機・停止・受領の対応。Agent 一時 context は失われたものとして扱う | Agent を自動再起動しない。Task 記録が残るだけで Agent を再起動しない。新委任は新 Task revision 前提で開始する |
 | Unknown Action | `action_attempt`（`Unknown` + 根拠対応・hold + `prior_attempt` 対応 + generation タグ） | Unknown の保持・既知作用の説明・重複 risk の提示 | 自動再実行・replay しない。不明試行の再実行は重複 risk を示した Owner 判断を必要とし、新 `attempt_id` とする。確認済み失敗と不明を同じ retry 経路へ潰さない |
 | 未伝達（undelivered） | `undelivered` + `history_message` / `task`（元 record）+ 報告状況 | 未伝達一覧・要約報告材料。次 Client で現在の結果・利用制限・削除状況へ照合して報告する | 自動報告済みにしない。接続・表示 copy 送信・Task 完了だけで報告済みにしない。提示不明を保持する |
-| 削除 operation | `deletion_operation` + `deletion_participant` + `erasure_condition` | 未完了範囲・必要な保留・再保存防止・pending/unreachable/failed の区別 | 自動完了・自動解除しない。検証を継続する。局所結果返却で hold を解除しない。完了後に削除前根拠だけによる再形成・遅延再保存を防ぐ |
+| 削除 operation | `deletion_operation` + `deletion_participant` + `erasure_condition` | 未完了範囲・必要な保留・再保存防止・pending/unreachable/failed/finalizing の区別。検索 token が復元可能なら finalization 未完了として扱う | 自動完了・自動解除しない。検証と最終消去を継続する。局所結果返却で hold を解除しない。検索 token の除去・復元不能化前に全域完了へ遷移しない。完了後に削除前根拠だけによる再形成・遅延再保存を防ぐ |
 | 復元 operation | `restore_operation` + `restore_generation_state` + `backup_point` | 旧 live 分離（`restore_generation`）・受理・説明・保留・一括有効化の対応。置換成立前は復元前正常が正本、成立後は復元内容が正本 | 置換成立前は旧正常を破壊しない。成立後も自動処理を開始しない。部分置換を新正本にしない。再起動で保留を解除しない |
 | retention / reset 等の全域操作 | `retention_policy` + `capacity_policy` + `reset_operation`（+ filesystem marker）+ `deletion_operation` / `restore_operation` | 未完了・保留・再保存防止の維持。設定 Reset の保護対象と全データ Reset の外部除外の区別 | 未完了を完了としない。全データ Reset の途中で再起動しても旧処理・一時 copy から復活させない。到達不能 Client の物理消去を確認済みにしない |
 | 現在 Character 適用 revision | `character_revision` + `companion_applied_current` + `OwnerSelectionRef` | 現在適用関係。未適用 revision は未適用のまま | 自動適用しない。Package 更新を成長の初期化にしない。適用禁止種別を authority にしない |
@@ -385,7 +386,7 @@ Host shutdown でも必要な進捗・作用不明・未伝達・全域操作の
 | Permission / usage / cap | Rule revision・同意 revision・device・cap 定義・利用事実（報告/推定/不明/処理中の別）・失効・停止・保留 | 評価時は保存 Allow・委任時 copy・事前判定・復元 Rule・context 内許可文・cache 判定を現在許可として再利用しない。並列消費は同一 SQLite transaction 内で利用事実の atomic insert + cap 照合を行い、同一残額の独立使い切りを許さない（mechanism 共有であり owner 統合ではない）。処理中・不明をゼロにしない | 利用事実の原記録は各 owner に残し、権限・制約は可否だけを管理する。Task・推論側に独立許可・使用実績の正本を作らない |
 | presence attribution / generation | 帰属 state・active_client・presence generation・現接続・許可・排他性・hint・復旧先 | 帰属切替は `expected_generation + expected_state` の atomic compare による `旧→移行中→新` の durable 遷移とし、新旧いずれも新規開始しない区間を保つ。hint・復旧先の更新と帰属成立を同一視しない。現在接続を古い保存値から再成立させない | 帰属成立（接続・存在）と移動必要性（個体調整）と許可確定（権限・制約）を同一更新にしない。live 到達性は DB 外の確認であり DB atomic に含めない |
 | undelivered 登録 / delivery 確定 | History / Task 元 record・未伝達必要内容・報告状況・提示状況・帰属・消去条件 | 会話由来の登録は History append と原子にする。Task 由来の登録は Task 結果 durable 後の別 transaction で `undelivered` を原子に登録し、Task durable→未伝達可視の順序を保つ（Task と未伝達を単一 transaction にしない。共有 SQLite transaction は mechanism 共有として許すが、Task 達成と報告管理の owner を統合しない）。delivery 確定（Presented）は実際の提示確認（入出力・提示→個体調整）を受けてから durable 更新し、送信だけで確定しない（durable-after-confirmed） | 接続・表示 copy 送信・Task 完了を報告完了にしない。報告済みを承認・再開にしない |
-| Targeted Deletion 進行 | 削除 operation・sweep・消去条件・有効区間・完了境界・参加者局所結果・hold・再保存防止 | operation + erasure_condition の durable を参加開始より先行させる（durable-before-enforce）。各参加者の局所完了・検証は durable 化してから coordinator へ返し、返却で hold を解除しない。全域完了は全参加の集約＋機械的残存検証＋区間内再到着の取込みを満たして原子に確定する | 全 domain の通常意味変更権・単一 transaction・無制限 access を coordinator に与えない。対象外の通常活動の一律停止を必須にしない |
+| Targeted Deletion 進行 | 削除 operation・sweep・消去条件・有効区間・完了境界・参加者局所結果・hold・再保存防止・検索 token の復元不能化 | operation + erasure_condition の durable を参加開始より先行させる（durable-before-enforce）。各参加者の局所完了・検証は durable 化してから coordinator へ返し、返却で hold を解除しない。全参加の集約＋機械的残存検証＋区間内再到着の取込みを満たした後、検索 token を除去または復元不能化し、その成立を確認してから全域完了を原子に確定する。token の最終消去と完了 marker を同じ durable commit に含められない場合、その間は `finalizing` の未完了状態を維持する | 全 domain の通常意味変更権・単一 transaction・無制限 access を coordinator に与えない。対象外の通常活動の一律停止を必須にしない |
 | Backup 作成 | 対象時点・参照対応・除外・保護・各 owner 提供・未完了状況・保管 file | file durable を `backup_point` 成功 marking より先行させる（durable-before-mark-success）。対象時点・参照・履歴・未完了の対応が揃って初めて成功とし、各部 copy 成功だけを成功にしない。未完了消去・復旧と重なる場合は制約を無視した正常 copy を作らない | 処理中 memory の丸ごと保存を要求しない。一時 buffer・Provider session の復元を前提にしない |
 | Restore 正本切替 | 復元内容・Credential 維持・外部非巻戻し・単一正本・非混合・権限先行復活の禁止・旧 live 分離・保留・一括有効化 | staging（別 file / 別 group）での照合・検証を先行させ、`restore_generation` の原子 switch で正本を切り替える。switch 前は復元前正常が正本、switch 後は復元内容が正本とし、第三の混合を作らない。switch 前の crash は旧正本＋pending、switch 後の crash は新正本＋保留とする。復元済み assignment/consent だけで自動利用を開始しない | Credential store・外部現実・現在の到達性・未完了の保留は置換対象から除外して維持する。Audit は backup 時点置換＋成立後の Restore 事実追記とする |
 | Character revision / applied relation | Character revision・差分提示・Owner 明示選択・適用関係・経験状態 | 新 revision insert と適用は分離する。適用は `expected_character_revision + OwnerSelectionRef` の atomic compare による current pointer 更新＋履歴 append とし、未確認部品を更新済みにしない。適用禁止種別を revision に含めない・適用対象にしない | 内容の正本（Character）と適用関係の正本（個体調整）と経験状態（認識・学習）を同一更新にしない。Package 更新を成長の初期化にしない |
@@ -402,7 +403,7 @@ Host shutdown でも必要な進捗・作用不明・未伝達・全域操作の
 - AU6（cross-owner atomic read）: `usage_fact_*` insert + cap 照合（`cap_limit` + 関連 `usage_fact_*` の合計読み取り）。同一 transaction 内で判定し、cap・不明で継続不可なら data 保持のまま停止・判断待ちにする。
 - AU7（同 owner 原子）: `presence_attribution` の `expected_generation + expected_state` 照合付き更新 + `presence_transition_log` append + `relocation_hint` 更新（要時）。
 - AU8（順序）: 未伝達 `Presented` は提示確認後の durable 更新とする。送信時には更新しない。
-- AU9（順序＋原子確定）: `deletion_operation` + `erasure_condition` durable → 各 `deletion_participant` durable → 全域完了の原子確定 → 検索 token wipe。
+- AU9（順序＋完了境界）: `deletion_operation` + `erasure_condition` durable → 各 `deletion_participant` durable → 全参加の集約・機械的残存検証・区間内再到着の取込み → 検索 token の除去または復元不能化 → 全域完了の durable 原子確定。token の最終消去と完了 marker を同一 durable commit にできない場合、その間は `finalizing` として D3 を維持し、crash 後に最終消去を再開する。検索 token が復元可能な状態で `全域完了` を保存しない。
 - AU10（順序）: backup file durable → `backup_point` 成功 marking。失敗時は最後の正常を破壊しない。
 - AU11（原子 switch）: restore staging 検証 → `restore_generation_state` bump + 正本 pointer switch の原子確定。失敗時は復元前正常を維持する。
 - AU12（同 owner 原子 + cross-owner 照合）: `companion_applied_current` 更新 + `companion_applied_history` append（`expected_character_revision` 照合付き）。
@@ -427,11 +428,12 @@ cross-owner の atomic read（AU3/AU6 等）は同一 SQLite file の transactio
 - 「すべての文字列の意味的依存を DB graph へ保存する」ことはしない。graph 全体を永続 object にせず、必要な対応だけを CORR として保持し辿れればよい。
 - 全 Summary へ同じ retention / revision 方式を課さない。分離を確認できない混合出力は全入力に依存し得るものとして扱うが、LLM 自己申告だけで依存を外さないという contract で足り、完全な意味 graph を要求しない。
 - 指定文字列の機械的検索・除去・残存検証を LLM へ依存させない。意味的同一情報の特定に LLM を利用できるが完全検出を保証しない。検出限界を既知依存の追跡省略・未確認範囲の完了扱いにしない。
-- 対象記述の伝達・保持に private 本文の複製を増やさない。`deletion_operation.mechanical_search` は操作期間限定の `SealedSearchToken` とし、完了時に wipe する。完了記録・Audit・説明へ対象本文を戻さない。制限情報・識別用の値も復元できるなら保護・消去対象である。
+- 対象記述の伝達・保持に private 本文の複製を増やさない。`deletion_operation.mechanical_search` は操作期間限定の `SealedSearchToken` とし、全域完了を durable に確定する前に除去または復元不能化する。最終消去と完了 marker が不可分でない場合は `finalizing` を durable に保ち、token が復元可能なまま完了記録・Audit・説明へ進めない。制限情報・識別用の値も復元できるなら保護・消去対象である。
 
 ### 8.3 Crash 中の deletion の persistence
 
 - 操作途中の restart でも未完了の認識と必要な保留・再保存防止を `deletion_operation` + `erasure_condition` + `deletion_participant` として Host で保全する。完了と誤認したり保留を黙って解除したりしない。
+- 参加者・残存検証が終了していても検索 token の最終消去が未完了なら `finalizing` として扱う。restart 後は token を再利用して通常処理を開始せず、最終消去と完了確定だけを再開する。token の復元不能化を確認するまで hold を解除しない。
 - 消去中に Client が切断した場合、確認不能を成功に読み替えず、`deletion_participant` を pending/unreachable として保全する。古い一時 data を再接続時に Host へ戻して再形成しない。
 - 未完了消去と backup 作成が重なる場合、制約を無視した正常・即実行可能な copy を作らない。作成を待たせるか未完了・制約も復旧可能に含めるかは自由度である（§9）。
 
@@ -517,7 +519,7 @@ concurrency mechanism そのものは設計しない。成立のために persis
 | 権限・Rule 解釈の採用 | 過去 Allow・復元 Rule・context 内許可文・cache 判定 × 現在の `(rule revision, 同意, device, cap, 失効・停止・帰属・消去・復元保留)` | 制御を変更しない。将来 Rule は解釈・表示・保存・Undo を経る |
 | 費用・資源の継続判断 | 消費の `(用途・送信先対応, 報告/推定/不明/処理中の別)` × 現在 cap・資源・不明の扱い | 処理中・遅延・不明をゼロにしない。並列で同一残額を使い切れる扱いにしない |
 | Character 適用 | `(character_id, expected_character_revision)` × 現在適用関係 × `OwnerSelectionRef` | 未確認部品を更新済みにしない。適用禁止種別を適用しない |
-| 全域完了の確定 | 各 `participant` の局所完了・検証・未完了・失敗 × 機械的残存検証 × 区間内再到着の取込み × 本文非再保存 | 未確認・検証失敗・pending/unreachable を成功に読み替えない。局所完了の集合だけを全域完了にしない |
+| 全域完了の確定 | 各 `participant` の局所完了・検証・未完了・失敗 × 機械的残存検証 × 区間内再到着の取込み × 本文非再保存 × 検索 token の除去・復元不能化 | 未確認・検証失敗・pending/unreachable・token 残存を成功に読み替えない。局所完了の集合だけを全域完了にしない |
 
 「最新の値を読んだ」「cache に hit した」「到着順で最後」であることは、いずれも単独では受入根拠にならない。revision と generation は混ぜない。
 
@@ -545,7 +547,7 @@ DB を分ける / 同一にする判断は上表の必要性に限る。Host dur
 | Task delegation → result | Task 作成の AU2 原子 durable（task+revision+context+関連付けの durable-before-visible）。委任は `expected_task_revision` の atomic compare。結果は attempt→Task revision→現在 Task の順に辿り、記録（元へ残す）と採用（現在の受入）を分ける。旧目的の結果を新目的に自動採用しない | §4 Group D/E, §7 AU2/AU3/AU5, §10 |
 | unknown external Action → restart | `action_attempt(Unknown + 根拠・hold + generation タグ)` を D3 として保全し、restart 後に Unknown のまま再構成する。自動再実行・replay せず、重複 risk を示した Owner 判断による新 attempt とする。記録保存失敗を未実行の根拠にしない | §4 Group E, §6, §7 AU5 |
 | Client move → restart → stale reconnect | `presence_attribution(generation)` + hint・復旧先（非現在）+ 現接続・許可・排他性の確認で stale を識別する。再接続の古い一時 state・旧承認・解決済み経路だけで presence・Permission・再開を成立させない。元 Client 利用不能なら active なしで待つ。旧 round・旧試行を replay しない | §4 Group G, §6, §7 AU7, §10 |
-| Targeted Deletion 中の crash | `deletion_operation` + `erasure_condition` + `deletion_participant` を Host で保全し、未完了・保留・再保存防止を維持する。再起動後に検証を継続し、完了・解除と誤認しない。区間内再到着・遅延再保存・古い根拠からの再形成を防ぐ。完了記録・Audit へ本文を残さない | §4 Group J, §6, §7 AU9, §8 |
+| Targeted Deletion 中の crash | `deletion_operation` + `erasure_condition` + `deletion_participant` を Host で保全し、未完了・保留・再保存防止を維持する。参加者・残存検証完了後でも検索 token が復元可能なら `finalizing` として再起動後に最終消去を続け、token の除去・復元不能化を確認する前に全域完了・hold 解除へ進まない。区間内再到着・遅延再保存・古い根拠からの再形成を防ぎ、完了記録・Audit へ本文を残さない | §4 Group J, §6, §7 AU9, §8 |
 | Restore 途中の crash | 置換成立前は復元前正常を正本とし、成立後は復元内容を正本とする単一正本を守る。staging 検証→`restore_generation` switch の原子確定とし、部分置換を新正本にしない。成立後も自動処理は保留し一括有効化待ちとする。再起動で保留を解除しない | §4 Group J, §6, §7 AU11, §9 |
 | delayed result arrival | 用途別受入（会話・Task・Learning・Permission・次 Action・必要事実）で現在の対象・制限・意味へ照合し、記録・更新・次実行・提示を分ける。到着が遅いことだけで出来事を新しくせず、最新到着だけで現在値を決めない。消去・復元・steering・Cancel 後の到着物は元 Action/Task へ事実を残し後続を自動開始しない | §7, §10（CC-03 の persistence 側の保持） |
 | Companion / Character deletion | Companion 削除は個体固有 Summary・Companion scope・Skill 過去 revision・State・主体/相手 Relationship・担当 Schedule を削除し、History・活動記録・Task 記録・Global・共有 Summary・外部 file を残す。各 owner の局所 durable の集約とし単一 transaction にしない。新規禁止 hold を先行させる。Character 削除は静的定義の除去であり経験・記録へ cascade しない。dangling は未解決とする | §4 Group A/B/C/D, §6, §7 AU12/AU13 |

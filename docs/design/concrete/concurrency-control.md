@@ -37,6 +37,7 @@
 - **stale**: premise が現在の owner / lifecycle の revision / generation・許可・保留・消去・復元条件と対応しなくなったこと。到着順・時刻・TTL だけでは判定しない。
 - **delayed result の帰属**: 遅延到着物を元の試行・区間・世代へ記録すること。現在への自動採用と区別する。
 - **reservation**: 費用・資源の並列消費で「まだ cap 以下」の同時判断による使い切りを防ぐための、commit 前の上限引き当て。費用計算法そのものではない。
+- **publication guard**: filesystem 上で durable 化・rename 済みだが DB pointer commit が完了していない file を、周期的 orphan cleanup の削除候補から除外するための短い排他・登録。実装は lock・in-progress registry 等から選べるが、cleanup の削除判定と不可分に照合できることを要求する。
 
 ## 2. 原則（固定 premise の再掲＋ concurrency 側の帰結）
 
@@ -82,7 +83,7 @@ Ene は単一 Host 上の非同期 system であり、並行の源泉は Host �
 | Learning 形成 vs Targeted Deletion | 消去条件・scope・保存禁止と対応した形成のみ。区間内再到着・再生成は消去対象 | 削除前情報を使う実行中処理による再保存。旧根拠だけの自動再形成。完了前の完了表示 |
 | deletion 完了 vs 遅延結果 | provenance が新区間・新提供と確認できたもの。旧 provenance の遅延物は破棄または元記録に留め再保存しない | 完了後の旧 provenance 遅延物の再保存。cache / session 由来の意図しない再出現 |
 | Restore switch vs 旧 live 結果 | 新 generation 前提と対応し、復元後保留・一括有効化・現在条件を満たしたもの | 旧 generation 前提の旧 live 結果の新正本への混入。復元成立だけでの自動処理開始 |
-| crash at filesystem / DB boundary | durable-before-visible / durable-before-mark-success の順序を満たした側。orphan は cleanup 対象 | DB 指標のみ・file のみの中間を正本・成功として可視化すること |
+| crash at filesystem / DB boundary | durable-before-visible / durable-before-mark-success の順序を満たした側。公開中でない orphan だけを cleanup 対象にする | DB 指標のみ・file のみの中間を正本・成功として可視化すること。rename 済みだが pointer commit 前の公開中 file を cleanup が削除すること |
 
 ## 4. Unit of serialization（serialization domain）
 
@@ -102,7 +103,7 @@ Ene は単一 Host 上の非同期 system であり、並行の源泉は Host �
 | SD-Cap | per `CapId`（＋ provider / 全体 scope） | `usage_fact_*` の予約 insert＋ cap 照合、確定時の予約→実績 commit、release | 異なる cap の消費。同一 cap の読取・集計表示。予約後の inference 実行そのもの | PR AU6。同一 SQLite transaction 内で判定。処理中・不明をゼロにしない |
 | SD-CharApply | per `CompanionId` の適用 pointer | `companion_applied_current` 更新＋履歴 append（`expected_character_revision` 照合付き） | 異なる Companion の適用。新 `character_revision` の insert 自体 | PR AU12。内容の正本（Character）と適用関係の正本（個体調整）を同一更新にしない |
 | SD-Undelivered | per `undelivered_id`（＋登録時の親原子） | 報告状況 `Pending→Summarized→Presented/Unknown` の更新。会話由来は History append と同一原子、Task 由来は Task durable 後の別 transaction 原子登録 | 異なる undelivered 間の報告。同一物の読取・要約生成（commit 前） | PR AU1a/AU1b/AU8。送信だけで `Presented` にしない（durable-after-confirmed） |
-| SD-Deletion | per `DeletionOperationId`＋sweep | operation＋`erasure_condition` の先行 durable、全域完了の原子確定、検索 token wipe。参加者の局所完了は各 owner で durable 化してから返却 | 参加者の局所処理・検証そのもの。対象外の通常活動。異なる operation 間 | PR AU9。durable-before-enforce。局所返却で hold を解除しない。全 domain の lock ではない |
+| SD-Deletion | per `DeletionOperationId`＋sweep | operation＋`erasure_condition` の先行 durable、参加者集約・残存検証、検索 token の除去 / 復元不能化、全域完了の原子確定。token と完了 marker を同じ durable commit にできない間は `finalizing` を維持 | 参加者の局所処理・検証そのもの。対象外の通常活動。異なる operation 間 | PR AU9。durable-before-enforce。局所返却で hold を解除しない。token が復元可能な状態を全域完了にしない。全 domain の lock ではない |
 | SD-Restore | singleton `restore_generation_state` の switch 瞬間のみ | staging 検証後の `restore_generation` bump＋正本 pointer switch の原子確定 | staging 作業、live mutation（switch 瞬間を除く）、異なる時点の backup 作成、derived 再構築 | PR AU11。switch 前は復元前正常が正本、switch 後は復元内容が正本。第三の混合を作らない。switch 全期間の read 停止はしない（第12節） |
 | SD-RuleConsent | per `RuleId` / `AssignmentId` / `DevicePermission` / `SandboxException` | 本文・解釈・scope・同意 revision の更新、Undo 対応の付記 | 評価（読取＋判断）そのもの。異なる rule / assignment 間 | 評価時は保存 Allow を再利用しない。更新と評価を同一更新にしない |
 | SD-CompanionLife | per `CompanionId` の lifecycle | Running / Stopped / Deleted（tombstone 最小）の遷移、新規禁止 hold の先行 | 異なる Companion の lifecycle。各 owner の局所削除・検証作業 | PR AU13。単一 global transaction にしない。各 owner の局所 durable の集約 |
@@ -148,7 +149,7 @@ CI 第6節の述語を concurrency の commit 境界へ落としたものであ�
 | 権限・Rule 解釈の採用 | 過去 Allow・復元 Rule・context 内許可文・cache 判定 × 現在の `(rule revision, 同意, device, cap, 失効・停止・帰属・消去・復元保留)` | 制御を変更しない |
 | 費用・資源の継続判断 | 消費の `(用途・送信先対応, 報告/推定/不明/処理中の別)` × 現在 cap・資源・不明の扱い。並列は予約＋commit の原子照合 | 処理中・遅延・不明をゼロにしない。並列で同一残額を使い切れる扱いにしない |
 | Character 適用 | `(character_id, expected_character_revision)` × 現在適用関係 × `OwnerSelectionRef` | 未確認部品を更新済みにしない |
-| 全域完了の確定 | 各 participant の局所完了・検証・未完了・失敗 × 機械的残存検証 × 区間内再到着の取込み × 本文非再保存 | 未確認・検証失敗・pending / unreachable を成功に読み替えない |
+| 全域完了の確定 | 各 participant の局所完了・検証・未完了・失敗 × 機械的残存検証 × 区間内再到着の取込み × 本文非再保存 × 検索 token の除去 / 復元不能化 | 未確認・検証失敗・pending / unreachable・token 残存を成功に読み替えない。token が復元可能なら `finalizing` の未完了として扱う |
 
 ### 5.3 一律 pipeline として強制しないこと
 
@@ -173,9 +174,9 @@ CI 第6節の述語を concurrency の commit 境界へ落としたものであ�
 | Presence 帰属 | per-Companion serialization（帰属 actor / 短い Mutex）＋ `expected_generation + expected_state` の CAS（PR AU7）＋ `旧→移行中→新` の durable 遷移。live 到達性は DB 外確認 | 同一 Companion の二重 active を防ぐには逐次化が必須。異なる Companion は並列。Client 側 lock だけに依存しない |
 | Character 適用 | per-Companion CAS（`expected_character_revision + OwnerSelectionRef`）＋短い transaction（PR AU12） | 適用 pointer の単一性だけ守ればよく、revision insert 自体は並列可 |
 | Undelivered | 登録は親原子（AU1a/AU1b）、確定は per-row CAS（提示確認後のみ）。要約生成は並列 | 送信≠報告の区別は commit 順序（durable-after-confirmed）で守る |
-| Targeted Deletion | `operation + erasure_condition` の durable-before-enforce＋各受入箇所での lock-free 照合＋ per-operation の完了集約 serialization（第11節）。全 domain の長大 lock はしない | 新規禁止と in-flight best-effort の分離のため。完了集約だけ逐次化すれば足りる |
+| Targeted Deletion | `operation + erasure_condition` の durable-before-enforce＋各受入箇所での lock-free 照合＋ per-operation の完了集約 serialization（第11節）。検索 token の最終消去が完了 marker と不可分でなければ `finalizing` を durable に維持する。全 domain の長大 lock はしない | 新規禁止と in-flight best-effort の分離のため。完了集約だけ逐次化すれば足りる |
 | Backup / Restore | staging 並列＋ switch 瞬間のみ singleton 短期排他（第12節）。live read の全面停止はしない | 単一正本 switch の atomicity だけ守ればよく、全期間の global lock は過剰 |
-| Filesystem＋DB | temp 書込→ fsync → atomic rename → DB pointer commit → orphan cleanup（第13節）。DB transaction のみで atomic にしない | DB と filesystem は別 durability domain のため順序＋ cleanup で守る。OS API は過度に固定しない |
+| Filesystem＋DB | temp 書込→ fsync → publication guard / cleanup 除外の確立→ atomic rename → DB pointer commit → guard 解除→ orphan cleanup（第13節）。DB transaction のみで atomic にしない | DB と filesystem は別 durability domain のため順序＋ cleanup との同期で守る。周期 cleanup が publish 中 file を削除しないことが必要。OS API は過度に固定しない |
 | Cancellation | signal（`Notify` / cancellation token 系）＋協調停止＋ commit 禁止の三層分離（第14節の取消分離）。future drop を停止完了とみなさない | 外部作用は rollback 不能のため、取消伝達と停止完了と結果隔離を分ける必要がある |
 
 採用しないもの：distributed consensus、global scheduler lock、global transaction、universal actor、universal event ordering、Lamport / vector clock、distributed lease protocol。いずれも単一 Host canonical の topology では必要性がない。
@@ -327,9 +328,9 @@ COMMIT;
 
 ### 11.1 先行 durable と各箇所の照合
 
-- `deletion_operation + erasure_condition` の durable を参加開始より先行させる（durable-before-enforce）。各参加者の局所完了・検証は durable 化してから coordinator へ返し、返却で hold を解除しない。全域完了は全参加の集約＋機械的残存検証＋区間内再到着の取込みを満たして原子に確定する（PR AU9）。
+- `deletion_operation + erasure_condition` の durable を参加開始より先行させる（durable-before-enforce）。各参加者の局所完了・検証は durable 化してから coordinator へ返し、返却で hold を解除しない。全参加の集約＋機械的残存検証＋区間内再到着の取込みを満たした後、検索 token を除去または復元不能化し、その成立を確認してから全域完了を原子に確定する（PR AU9）。token の最終消去と完了 marker を同じ durable commit にできない場合、その間は `finalizing` を未完了として durable に保つ。
 - 各受入・保存先（会話・Task・Learning・Action・undelivered・cache / index・Client / 拡張一時 copy・返却可能結果の保持者を含む全 holder）は、保存・採用の commit 時に飛行中の `ErasureConditionRef(operation, sweep, valid_interval)` を lock-free に照合する。既知 source の追跡だけでは区間内再到着を扱えないため、`erasure_condition` を durable かつ index 付きで保持する。
-- 実行中処理による再保存をしない。削除処理・残存検証が完了していない場合は完了と表示しない。
+- 実行中処理による再保存をしない。削除処理・残存検証・検索 token の最終消去が完了していない場合は完了と表示しない。
 
 ### 11.2 競合制御
 
@@ -338,8 +339,9 @@ COMMIT;
 - **Learning update vs 削除。** 形成 commit 時に現在の Memory revision・scope・制約に加えて消去条件を照合する。遅延形成が現在を無条件上書きしない。到着順を根拠の新旧にしない。旧根拠だけの自動再形成をしない。
 - **cache / index rebuild vs 削除。** derived の invalidation key に消去条件を含める（PR §5）。hit を理由に制約確認を省かない。古い index から権限・状態を復活させない。
 - **Task / inference の結果到着 vs 削除。** Task 由来・推論由来のいずれも現在 Task・現在認識への採用前に消去条件を照合する。削除前情報を利用する実行中処理は best-effort で停止・非対象 scope へ縮小し、停止不能・既外部・不明を残す。
-- **verification / completion vs 遅延。** 局所完了 ≠ 全域完了。未確認・到達不能を成功と読まず、局所返却だけで hold を解除しない。機械的残存検証＋区間内再到着の取込みを満たして初めて全域完了とする。
-- **完了後の遅延物。** 完了時に機械的条件の検索 token を wipe し、完了記録・Audit へ対象本文を残さない。一方、完了後に届いた旧 provenance（削除区間開始前の attempt・Task revision・source 範囲に対応する）遅延物は、完了 operation の scope との provenance linkage で再保存を抑止する。本文保持なしに対応を維持できること（CA §8.2）。完了後の Owner 新規提供は provenance が新区間であるため新 Experience として区別する。文字列一致だけで新旧を判定しない。
+- **verification / completion vs 遅延。** 局所完了 ≠ 全域完了。未確認・到達不能を成功と読まず、局所返却だけで hold を解除しない。機械的残存検証＋区間内再到着の取込み＋検索 token の除去 / 復元不能化を満たして初めて全域完了とする。
+- **finalizing 中の crash。** 参加者・残存検証が完了していても検索 token が復元可能なら operation は未完了である。restart 後は通常処理へ token を再利用せず、最終消去と完了確定だけを続行し、token の復元不能化を確認するまで hold を解除しない。
+- **完了後の遅延物。** 機械的条件の検索 token は全域完了の durable 確定前に wipe / 復元不能化し、完了記録・Audit へ対象本文を残さない。一方、完了後に届いた旧 provenance（削除区間開始前の attempt・Task revision・source 範囲に対応する）遅延物は、完了 operation の scope との provenance linkage で再保存を抑止する。本文保持なしに対応を維持できること（CA §8.2）。完了後の Owner 新規提供は provenance が新区間であるため新 Experience として区別する。文字列一致だけで新旧を判定しない。
 
 ### 11.3 `ErasureConditionRef` / operation identity / participant state の利用
 
@@ -377,26 +379,31 @@ PR §4.1・§11 の technology mapping を前提とする。Host durable（D1/D2
 ```
 1. write temp（同 filesystem 上の一時名へ書込）
 2. durable write（fsync / 同等の durable 化。具体 API は固定しない）
-3. atomic rename（同 filesystem 内での原子置換。読取側が中間を見ない）
-4. DB pointer commit（短い transaction で参照・由来・用途・削除 marker を durable 化）
-5. orphan cleanup（起動時 scan＋周期的整理。live 参照を持たない temp・旧 file を除去）
+3. publication guard / in-progress 登録（この publish と orphan cleanup の削除判定を同期し、対象 path を cleanup 候補から除外）
+4. atomic rename（同 filesystem 内での原子置換。読取側が中間を見ない）
+5. DB pointer commit（短い transaction で参照・由来・用途・削除 marker を durable 化）
+6. publication guard 解除（DB pointer の durable を確認した後）
+7. orphan cleanup（起動時 scan＋周期的整理。live 参照も active publication も持たない temp・旧 file のみ除去）
 ```
 
-順序の要点は **file durable → DB pointer commit → 可視化**（durable-before-visible / durable-before-mark-success）である。DB commit を先行させて「DB 指標はあるが file がない」可視中間を作らない。逆に「file はあるが DB 指標がない」orphan は cleanup で除去できる安全な残存とする。
+順序の要点は **file durable → publish 保護 → DB pointer commit → 可視化**（durable-before-visible / durable-before-mark-success）である。DB commit を先行させて「DB 指標はあるが file がない」可視中間を作らない。同時に、周期的 cleanup が「まだ DB 指標がない」ことだけを根拠に、rename 後・pointer commit 前の file を削除してはならない。
+
+publication guard の具体実装は固定しない。process 内の lock / in-progress registry、cleanup 側の exclusion token 等を選べる。ただし cleanup は削除直前に同じ同期境界の下で **(a) live DB / backup / restore 参照がないこと** と **(b) active publication がないこと** を再確認しなければならない。先に「参照なし」と読んだ結果だけを保持して、publish / DB commit と競合した後に unlink してはならない。crash により publication guard が失われ、かつ DB pointer が存在しない file は通常の orphan として cleanup / recovery 対象にできる。
 
 ### 13.2 failure の各位置で残ってよいもの
 
 | failure 位置 | 残ってよいもの | 残してはいけないもの（可視化禁止） |
 |---|---|---|
 | temp 書込前・書込中 | 壊れた temp（cleanup 対象）。旧正本・旧 pointer は無傷 | 新 pointer・成功 marking・完了表示 |
-| temp durable 後・rename 前 | 隔離された temp（cleanup 対象）。旧正本は正本のまま | 新内容の正本化・成功表示 |
-| rename 後・DB commit 前 | 参照なしの孤立 file（cleanup で除去または再連結）。旧 pointer は旧 file を指したまま | 参照なし file の正本扱い・成功表示 |
-| DB commit 後・可視化前 | 新旧両 file＋新 pointer（durable 済み）。crash 後は新 pointer を正本として再構成する | 旧 pointer への巻戻し・部分正本の混在 |
-| backup file durable 後・`backup_point` 成功 marking 前 | 未成功の file（再試行・除去の対象）。最後の正常を破壊しない | 各部 copy 成功だけでの成功表示 |
+| temp durable 後・rename 前 | 隔離された temp（active publication 中は cleanup しない。crash 後は cleanup 対象）。旧正本は正本のまま | 新内容の正本化・成功表示 |
+| rename 後・DB commit 前 | 参照なしの file。正常な publish 中は publication guard により cleanup から保護し、crash 後に guard が失われた場合は orphan として除去または recovery で再連結できる。旧 pointer は旧 file を指したまま | publish 中 file の cleanup、参照なし file の正本扱い・成功表示 |
+| DB commit 後・可視化前 | 新旧両 file＋新 pointer（durable 済み）。crash 後は新 pointer を正本として再構成する | cleanup による新 file 削除、旧 pointer への巻戻し・部分正本の混在 |
+| backup file durable 後・`backup_point` 成功 marking 前 | 未成功の file（publish 中は保護し、crash 後は再試行・除去の対象）。最後の正常を破壊しない | 各部 copy 成功だけでの成功表示 |
 | restore staging 検証前・switch 前 | 隔離 staging（旧正本は無傷）。`restore_operation` は pending | 部分置換の新正本扱い・自動処理開始 |
 | switch 後 | 新正本＋保留。旧正本は Audit・rollback 用の隔離 copy としてのみ残せる（live 正本ではない） | 第三の混合・権限先行復活・旧 live 混入 |
 
-- orphan cleanup は live 参照（DB pointer・`backup_point`・`restore_operation` の保管参照）を持つ file を削除しない。到達不能 Client の物理消去を確認済みにしない。
+- orphan cleanup は live 参照（DB pointer・`backup_point`・`restore_operation` の保管参照）または active publication を持つ file を削除しない。削除判定は publication と同期し、unlink 直前に参照と publication を再確認する。到達不能 Client の物理消去を確認済みにしない。
+- startup cleanup では process crash により残った active publication は存在しないため、DB 等の durable 参照と recovery marker を照合した上で orphan を整理できる。周期 cleanup と通常 publish は上記 guard で競合を防ぐ。
 - 全データ Reset の途中 crash でも旧処理・一時 copy から復活させない（filesystem marker と DB 削除後の継続を併用する。PR §4 Group J）。
 - Credential 秘密値・外部 Workspace 実体・Provider / MCP 側状態は上表の file 扱いに含めない（E であり backup 除外・Restore 維持）。
 
@@ -422,16 +429,17 @@ PR §4.1・§11 の technology mapping を前提とする。Host durable（D1/D2
 
 - **DB transaction（`Immediate`）。** commit compare＋durable 更新のための ms オーダーの排他。所有は呼出側の短い closure に限り、await・外部 I/O・inference を内部で行わない。複数 owner の atomic read に使うことは mechanism 共有であり ownership 統合ではない。
 - **owner-local mutex / mailbox。** SD-Task・SD-Presence・SD-Deletion（完了集約）・SD-Restore（switch 瞬間）の順序付けのため。各 domain の coordinator が所有し、他 domain の mutex と二重保持しない。
+- **publication guard。** filesystem publish と orphan cleanup の削除判定の間だけ使う狭い同期境界。domain commit の global lock に流用せず、external I/O・長時間処理を跨いで保持しない。file durable 後から pointer commit 後までの publish critical section と、cleanup の最終 recheck + unlink を相互排他にできればよい。
 - **cancellation signal（`Notify` / token）。** 所有は実行単位。lock ではなく協調停止の伝達に使う。
 - **filesystem lock（例: `ene-core.lock` の exclusive）。** process 多重起動防止等の粗い境界に限り、domain commit の逐次化に流用しない。
 - granularity は第4節の domain 表に従う。global lock・全 domain の長大 lock・単一 global transaction は設けない。
 
 ### 15.2 acquisition ordering と await 中の保持可否
 
-- 原則：**await 中（`.await` を跨ぐ間）に DB transaction / domain mutex を保持しない。** premise read と commit compare を分け、長時間処理を外に置く（第5節）。
+- 原則：**await 中（`.await` を跨ぐ間）に DB transaction / domain mutex を保持しない。** premise read と commit compare を分け、長時間処理を外に置く（第5節）。filesystem publication guard は第13節の短い publish / cleanup critical section に限り、非同期の長時間 I/O を跨がせない。
 - 複数 domain の compare が一つの commit tx に必要な場合（例: Action 開始時の Task＋cap＋presence＋消去・復元保留）、**async mutex の多重保持ではなく単一の短い DB transaction 内の ordered read** で行う。transaction 内の read 順序を固定する（例: `restore_generation_state` → `deletion_operation / erasure_condition` → `task / delegation` → `presence_attribution` → `cap_limit / usage_fact` → `action_attempt`）。順序外の access・条件分岐による逆順取得をしない。
 - mailbox（mpsc receiver 処理）の中で他 domain の mutex・DB transaction を await 付きで待たない。必要な compare は mailbox 外の短い tx へ委譲するか、mailbox 処理自体を短く保つ。
-- broadcast（LiveBus / CoreBus 等）は観測・表示のための配信に限り、authority・commit 順序・排他に使わない。`Lagged` は skip し、欠落を成功・現在と読まない。
+- broadcast は観測・表示のための配信に限り、authority・commit 順序・排他に使わない。`Lagged` は skip し、欠落を成功・現在と読まない。
 - 上記により、複数 owner を跨ぐ処理でも global lock ではなく compare / commit 境界で成立させる。循環承認待ち・管理経路の循環依存を作らない（DR-08）。
 
 ## 16. Interface handoff（次の interface 設計で要求すべき concurrency property）
@@ -447,7 +455,7 @@ PR §4.1・§11 の technology mapping を前提とする。Host durable（D1/D2
 | Client 依存活動の開始・継続 | `PresenceAttribution`（個体・状態・active・generation）、`ClientPresenceClaim.claimed_generation`、`ConversationRound`、旧・新・移行中・active なし・停止・復旧待ちの区別、現接続・可用性 |
 | Observer routing | `RoutingContextRef`（source・target・目的・制約・選択前提）、起源 Client・取得時点・候補対応、`PresenceGeneration`、消去・失効条件 |
 | Learning・Summary・根拠 | `SummaryGroundsRef`、`(learning_id, learning_revision)`、source 範囲・取得時点、scope・制約、訂正と状況変化の別、消去条件 |
-| 消去・保持・backup・復元 | `DeletionOperationRef`・`ErasureConditionRef`（目的・範囲・影響・除外・要確認、参加者・未完了・検証・hold）、backup 時点・参照・除外・保護・結果、`RestoreGeneration`・保留・一括有効化対応、Audit 順序・保持 |
+| 消去・保持・backup・復元 | `DeletionOperationRef`・`ErasureConditionRef`（目的・範囲・影響・除外・要確認、参加者・未完了・検証・hold、検索 token の最終消去 / `finalizing`）、backup 時点・参照・除外・保護・結果、`RestoreGeneration`・保留・一括有効化対応、Audit 順序・保持 |
 | 利用量・費用 | 用途・送信先の対応、報告 / 推定 / 不明 / 処理中の別、cap・資源の現在条件、予約 `usage_id` |
 | Character 適用 | `(character_id, expected_character_revision)`、`OwnerSelectionRef`、適用部品群 |
 
@@ -456,30 +464,30 @@ PR §4.1・§11 の technology mapping を前提とする。Host durable（D1/D2
 
 ## 17. Concrete Rust implications（実装方針の具体化範囲）
 
-特定 library の導入は必要性が明確な場合だけ固定する。以下は現行実装（Tokio・rusqlite 同期・単一 writer・lane actor 等）と PR の technology mapping に沿った方針である。
+特定 library の導入は必要性が明確な場合だけ固定する。以下は本書の concurrency property と PR の technology mapping から導く**実装候補**であり、旧実装の型名・actor・writer・shutdown 構造を互換性要件として引き継がない。新規実装は要件・設計を満たす最小の機構を選び、旧実装と同型であること自体を採用理由にしない。
 
 ### 17.1 `tokio::sync` primitive のカテゴリ
 
 | 用途 | 使うもの | 使わない・避けること |
 |---|---|---|
-| serialization domain の順序付け | `mpsc::unbounded_channel`＋ owner-local task / actor（`lane_actor`・`SessionStore` writer の既存 pattern を踏襲）。per-Task / per-Companion / per-Operation の mailbox 化 | 万能 actor・global coordinator・全 domain 共通 mailbox。mailbox 内での長時間 await・他 domain lock 待ち |
-| request / reply | `oneshot`（既存の `LaneCmd` 応答・writer 応答と同型） | 応答を authority・完了証拠にしないこと（受付と完了を分ける） |
-| 観測・表示の配信 | `broadcast`（`LiveBus` / `CoreBus` と同型。`Lagged → skip`） | commit 順序・排他・許可・報告完了の根拠にしない |
-| 協調 cancel | `Notify + AtomicBool`（既存の `RunningTurn` と同型）または必要が明確になれば cancellation token 系。`select!`＋ `timeout` による中断 | future drop を停止完了とみなすこと。Cancel を LLM・Agent 正常終了待ちにすること |
-| 短い排他 | `tokio::sync::Mutex` は短い順序付けに限定し、`.await` を跨ぐ保持・外部 I/O 中の保持をしない。DB 側の同期 state は `parking_lot::Mutex`＋ `spawn_blocking` の既存配置を維持する | `tokio::sync::Mutex` の長時間保持・DB `Connection` の async 共有・transaction の await 跨ぎ保持 |
-| hold / cap 変更の通知 | `Notify`・必要なら `watch`（現行未使用。新規導入は hold 購読の必要性が明確になってから） | 待機 polling（要件で禁止）。`watch` 値を authority にしないこと |
+| serialization domain の順序付け | `mpsc`＋ owner-local task / actor、または短い Mutex。per-Task / per-Companion / per-Operation の狭い mailbox 化 | 万能 actor・global coordinator・全 domain 共通 mailbox。mailbox 内での長時間 await・他 domain lock 待ち |
+| request / reply | `oneshot` 等の一回応答 primitive | 応答を authority・完了証拠にしないこと（受付と完了を分ける） |
+| 観測・表示の配信 | `broadcast` 等の fan-out。`Lagged → skip` を許す用途に限定 | commit 順序・排他・許可・報告完了の根拠にしない |
+| 協調 cancel | `Notify + AtomicBool` または必要性が明確なら cancellation token 系。`select!`＋ `timeout` による中断 | future drop を停止完了とみなすこと。Cancel を LLM・Agent 正常終了待ちにすること |
+| 短い排他 | `tokio::sync::Mutex` は短い順序付けに限定し、`.await` を跨ぐ保持・外部 I/O 中の保持をしない。同期 DB connection を採る場合は狭い同期 ownership＋`spawn_blocking` 等で async executor から隔離する | `tokio::sync::Mutex` の長時間保持・DB `Connection` の async 共有・transaction の await 跨ぎ保持 |
+| hold / cap 変更の通知 | `Notify`・必要なら `watch`。導入は hold 購読の必要性が明確になってから | 待機 polling（要件で禁止）。`watch` 値を authority にしないこと |
 
 `watch`・`CancellationToken`・`JoinSet`・`LocalSet` の導入は本書で固定しない。必要性が明確になったときに、authority 化・lifecycle 統合をしない範囲で選ぶこと。
 
 ### 17.2 owner-local task / actor の目安
 
-- per-Task 受付、per-Companion 帰属、per-Operation 完了集約、cap 予約の commit（短い tx）は actor / mailbox または短い Mutex で順序付ける。既存の `SessionStore` 単一 writer・`lane_actor`・`DelegationHost::question_gate` はこの方向の実例であり、新設は同型の狭い範囲に留める。
-- inference 実行・外部作用・staging・派生再構築は actor の外の `tokio::spawn`＋ `spawn_blocking`（DB 同期部）に置き、actor は premise・token・結果受入だけを扱う。
-- shutdown は `oneshot`＋ `JoinHandle` の既存 pattern を維持し、一時 buffer 消失を成功・完了の根拠にしない。
+- per-Task 受付、per-Companion 帰属、per-Operation 完了集約、cap 予約の commit（短い tx）は actor / mailbox または短い Mutex で順序付ける。実装は各 serialization domain の invariant に必要な最小範囲に留め、旧 crate の actor / writer / gate を移植することを要求しない。
+- inference 実行・外部作用・staging・派生再構築は owner-local serialization の外の async task と、同期 DB / CPU-bound 処理に必要な `spawn_blocking` 等へ分離し、serialization 側は premise・token・結果受入だけを扱う。
+- shutdown は受付停止・協調停止・完了待ち・未完了 durable 化を分離する。`oneshot`＋`JoinHandle` は一つの実装候補にすぎず、旧 shutdown pattern の維持を要求しない。一時 buffer 消失を成功・完了の根拠にしない。
 
 ### 17.3 transaction closure と compare-and-swap style repository method の目安
 
-DB は現行どおり同期 `rusqlite`＋ `WAL`＋ `Immediate` transaction を `spawn_blocking` 経由で使う想定であり、async transaction library の導入は固定しない。pseudo-code（コンパイル対象ではない）：
+PR の SQLite mapping を実装する際、同期 `rusqlite`＋`WAL`＋`Immediate` transaction を `spawn_blocking` 経由で使う構成は一つの候補であり、async transaction library の導入も含めて最終 mechanism は固定しない。どの実装でも短 transaction・await 非保持・§5 の compare-and-commit を守る。pseudo-code（コンパイル対象ではない）：
 
 ```rust
 /// 短い Immediate transaction の closure。内部で await しない。
@@ -547,9 +555,10 @@ fn reserve_usage(
 | summon A→B vs disconnect | 両方を SD-Presence の順序で直列化し、`expected_generation + expected_state` の CAS で単一帰属だけ成立させる。移行中は新旧いずれも新規開始しない。旧 in-flight は安全な区切りまで、旧作用の別 Client 自動継続をしない | §10 |
 | reconnect stale Client vs restored presence | `claimed_generation` × 現在 generation × 現接続・可用性 × 現在許可・停止・保留を照合する。古い一時 state・旧承認・解決済み経路だけでは成立させず、確認不能を現在と推定しない。旧 round 付け替え・旧承認復活をしない | §10 |
 | Learning update vs Targeted Deletion | 形成 commit 時に現在認識・scope・保存条件に加えて飛行中の `ErasureConditionRef` を照合する。区間内再到着・再生成は消去対象とし、実行中処理による再保存・旧根拠だけの自動再形成をしない。完了前に完了表示しない | §11 |
-| deletion completion vs delayed result | 全域完了は参加者集約＋残存検証＋区間内再到着の取込みを満たして原子確定し、検索 token を wipe する。完了後の旧 provenance 遅延物は provenance linkage で再保存を抑止し、新規提供は新 Experience として区別する。cache / session 由来の再出現を抑止する | §11 |
+| deletion completion vs delayed result / crash | 全参加集約＋残存検証＋区間内再到着の取込み後に検索 token を wipe / 復元不能化し、その成立確認後に全域完了を durable 確定する。最終消去前 crash は `finalizing` から再開し、完了・hold 解除へ進まない。完了後の旧 provenance 遅延物は provenance linkage で再保存を抑止し、新規提供は新 Experience として区別する | §11 |
 | Restore switch vs old live result | staging 検証→ `restore_generation` switch の原子確定とし、switch 前は旧正本・switch 後は新正本＋保留とする。旧 generation 前提の旧 live 結果は新正本へ混入せず、用途別受入で現在照合する。成立後も自動処理は保留し一括有効化待ちとする | §12 |
-| Host crash at filesystem / DB boundary | file durable→ DB pointer commit→ 可視化の順序を守り、中間 crash は orphan（cleanup 対象）または旧正本＋pending として再構成する。DB 指標のみ・file のみを成功・正本にしない。全データ Reset の途中 crash でも旧処理・一時 copy から復活させない | §13 |
+| periodic cleanup vs file publication | writer を rename 後・DB pointer commit 前で停止し、その間に周期 cleanup を走らせても active publication により file は削除されない。pointer commit 後に guard を解除し、その後の cleanup は新 live 参照を再確認するため file を削除しない。writer が crash して guard と pointer の双方が残らない場合のみ orphan として整理できる | §13, §15 |
+| Host crash at filesystem / DB boundary | file durable→ publish 保護→ DB pointer commit→ 可視化の順序を守り、中間 crash は orphan（cleanup / recovery 対象）または旧正本＋pending として再構成する。DB 指標のみ・file のみを成功・正本にしない。全データ Reset の途中 crash でも旧処理・一時 copy から復活させない | §13 |
 | steering 連打 vs 委任作成（追加） | SD-Task の順序で revision forward を直列化し、旧 revision 前提の委任作成を不受理・再評価へ戻す。新委任は新 revision 前提で開始する | §7 |
 | revocation during use（追加） | 新規予約を deny し、実行中を best-effort で停止する。既確定消費を事後取消にせず、別経路迂回をしない | §9, §14 |
 | Character 更新 vs 適用競合（追加） | 新 revision insert と適用を分離し、適用は `expected_character_revision + OwnerSelectionRef` の CAS で確定する。未確認部品を更新済みにしない | §4, §5 |
@@ -559,11 +568,11 @@ fn reserve_usage(
 本書完成後に requirements・Step 11・Step 12・CI・PR へ戻して自己レビューした。観点と結果は次のとおりである。
 
 - **固定 premise 維持。** identity / revision / generation / directed correlation / boundary token の意味と分離、owner 別 durable・D1/D2/D3/R/T/E・atomicity / ordering・recovery・compare 対象・durable-before-visible の境界を維持した。arrival order・wall-clock / TTL・global revision counter・unknown 推定・retry 新 Attempt・遅延帰属・replay 禁止・判断記録 / 解決経路 / Client 主張の非 authority 化のいずれも崩していない。
-- **単一 mechanism 強制の回避。** 楽観 CAS・owner-local serialization・短い DB transaction・予約・mailbox・cancel signal を domain 別に選択し、「全部 actor / mutex / DB transaction / global coordinator」を設けていない。global version・universal ordering・consensus・lease を導入していない。
-- **serialization の過不足。** 同一 Task・同一 Companion 帰属・同一 attempt 確定度・同一 cap・同一 operation 完了集約・switch 瞬間のみ逐次化し、異なる Task・Companion・attempt・cap・operation 間と長時間処理を並列に残した。全 domain の長大 lock・全 read 停止を避けた。
+- **単一 mechanism 強制の回避。** 楽観 CAS・owner-local serialization・短い DB transaction・予約・mailbox・cancel signal・filesystem publication guard を必要な domain にだけ選択し、「全部 actor / mutex / DB transaction / global coordinator」を設けていない。global version・universal ordering・consensus・lease を導入していない。
+- **serialization の過不足。** 同一 Task・同一 Companion 帰属・同一 attempt 確定度・同一 cap・同一 operation 完了集約・switch 瞬間のみ逐次化し、異なる Task・Companion・attempt・cap・operation 間と長時間処理を並列に残した。filesystem publish と cleanup の race は path publication の狭い境界だけ同期する。全 domain の長大 lock・全 read 停止を避けた。
 - **stale / delayed の隔離。** 全競合で「元への記録」と「現在への採用」を分け、旧目的・旧承認・旧 provenance の自動採用・自動再実行・自動復活をしないことを walkthrough で確認した。
 - **外部作用の不可逆性。** 開始前 compare と開始後 tracking を分離し、DB rollback で外部作用を取り消せる想定を置いていない。Unknown 粘着・新 evidence 更新・新 Attempt retry を維持した。
-- **修正。** レビューで見つけた不足（acceptance result と lifecycle `Status` の混同防止の明記、完了後遅延物の provenance linkage による抑止の明記、transaction 内 read 順序の固定、mailbox 内での他 domain 待ち禁止）は本書へ反映済みである。Step 11・Step 12・CI・PR・requirements の変更は不要であった。
+- **修正。** レビューで見つけた不足（acceptance result と lifecycle `Status` の混同防止、完了後遅延物の provenance linkage による抑止、Targeted Deletion の検索 token 最終消去を全域完了前の必須条件化、filesystem publish 中 file と周期 cleanup の排他、transaction 内 read 順序、mailbox 内での他 domain 待ち禁止、旧実装 pattern を実装要件にしないこと）を本書へ反映した。Step 11・Step 12・CI・requirements の変更は不要であった。
 
 ## 20. 後続設計への引渡しと残す Design Freedom
 
@@ -576,17 +585,17 @@ fn reserve_usage(
 - compare-before-commit の一般形と原子比較表（第5節）。DB transaction 長時間保持の禁止、token 欠落の不受理を含む。
 - domain 別 mechanism 選択（第6節）。単一 mechanism 強制・global 系・consensus 系の不採用を含む。
 - Task / Action / Permission-cost / Presence / Deletion / Restore の競合制御（第7–12節）。
-- filesystem＋DB の順序と failure 残存条件（第13節）。
+- filesystem＋DB の順序、publication guard と cleanup の同期、failure 残存条件（第13節）。
 - cancellation の五層分離（第14節）。
 - lock ownership・granularity・ordering・await 中の保持禁止（第15節）。
 - interface handoff の concurrency property と acceptance result の区別（第16節）。
-- Rust 方針の具体化範囲（第17節）。primitive カテゴリ・actor 目安・transaction closure / CAS method の形。
+- Rust 方針の具体化範囲（第17節）。primitive カテゴリ・actor 目安・transaction closure / CAS method の形。旧実装 pattern の互換維持は含まない。
 
 ### 20.2 意図的に残した Design Freedom
 
 | 設計対象 | 固定済みの architecture property | 残す Design Freedom |
 |---|---|---|
-| 保存・transaction 実装 | PR §7 の atomicity / ordering / durable-before-visible、本書 §5 の atomic compare、§13 の file→DB 順序を守る | 具体 SQL 方言・index・migration・vacuum・transaction library・filesystem layout・blob inline / file の選択・fsync API の選択・orphan scan 周期 |
+| 保存・transaction 実装 | PR §7 の atomicity / ordering / durable-before-visible、本書 §5 の atomic compare、§13 の file→DB 順序と publish / cleanup 排他を守る | 具体 SQL 方言・index・migration・vacuum・transaction library・filesystem layout・blob inline / file の選択・fsync API・publication guard の具体方式・orphan scan 周期 |
 | 並行機構の実装 | §4 の serialization 範囲、§6 の mechanism 選択、§15 の ordering・await 保持禁止を守る。確認不能を許可・現在・完了へ変換しない | actor / mailbox の crate 配置・queue 種別・Mutex / RwLock の最終選択・`watch` / token 系の要否・IPC・process 配置・retry / timeout 値・exact progress 表現 |
 | 費用・資源 | 同一残額の独立使い切り禁止、処理中・不明のゼロ化禁止を守る | 予約量算定式・集計期間・推定方式・上限値・表示粒度 |
 | 派生・ routing・要約 | 第二正本化の禁止、invalidation key（revision / generation / 消去条件）の保持、消去参加を守る | embedding / scoring・cache 実装・routing 生成方式・model・形式・頻度・再構築時機 |
