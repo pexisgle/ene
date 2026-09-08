@@ -271,6 +271,7 @@ state: Reserved(処理中・上限引き当て) → Committed(確定) / Released
 - **実行（lock なし）。** 予約後の inference・Tool 実行は並列に行う。予約保持を理由に他 request を block しない。失効・停止・保留が発生したら best-effort で停止する。
 - **commit（確定時、短い tx）。** 実績（報告値 / 推定 / 不明の別）を `Reserved` 行に原子更新するか、差分を `Committed` として確定し、余剰を `Released` する。遅延 usage 報告は元の `usage_id`・attempt・task・assignment 対応へ帰属させ、現在 cap の再評価材料にする。未報告・処理中・不明をゼロ化・リセットしない（Companion 削除・Agent 終了・移動・cache clear・log 整理でも reset しない）。
 - **release（Cancel・失敗・失効時、短い tx）。** 未使用予約を `Released` にし、上限を回復させる。既に生じた外部消費・不明消費は release しない（事実として残す）。
+- **孤立予約の recovery。** Host crash / Agent 停止で所有 in-flight を失った `Reserved` は、当該利用 owner の再評価が元 reservation に対して IB K-G `CommitUsageCommand(actual = 不明)` を呼び、SD-Cap の短 transaction で `Reserved` を照合して `Committed / Unknown` へ確定する。再評価の重複は二重計上せず、確定済み報告を不明へ巻き戻さない。引当を release・ゼロ化せず不明として cap 集計に一度だけ含め、後着報告は元利用対応への更新として再評価する。不明・孤立理由は費用管理面へ示す（PR §6.2）。
 - **revocation during use。** 失効は新規予約の deny と実行中の best-effort 停止にとどめ、既確定消費の事後的取消にしない。別実行経路・Task Agent による迂回をしない。
 
 費用の具体計算法・Provider billing 仕様は本書の対象外であり、reservation 量の算定式・集計期間・推定方式は Design Freedom とする。固定するのは「同一残額の独立使い切りを許さない」ことと「処理中・不明をゼロにしない」ことである。
@@ -292,8 +293,9 @@ state: Reserved(処理中・上限引き当て) → Committed(確定) / Released
 
 - **同一 Companion への二重 active 禁止。** `presence_attribution` の `(companion_id, generation, active_client)` を Host canonical とし、同時に二つの `Present` を成立させない。simultaneous summon は CAS の先勝ちのみ成立させ、後着は不受理・再評価へ戻す。Client 側 lock だけに依存しない。
 - **move。** 切替区間は `旧 / 移行中 / 新 / active なし / 停止中 / 復旧待ち` を区別し、移行中は新旧いずれでも Client 依存の新規開始をしない。旧 in-flight は安全な区切りまで継続し、旧作用の別 Client 自動継続をしない。
-- **disconnect。** 切断検知の一時状態と帰属 durable を分け、切断だけで帰属を即時破棄しない。到達性・排他性が確認不能な間は新規開始をしない。Client 依存 Action の停止は best-effort とし、停止不能・既知作用・不明を残す。
+- **disconnect。** 一時的な到達不能は帰属 durable を即時破棄せず、到達性・排他性が確認不能な間は新規開始をしない。通常切断・process 終了が確定したら、`ene-presence` が利用可能な Host PC Client（IPC §10.1 の Host 確定 SameMachine、live 認証・device 許可・排他性を再照合）へ SD-Presence の CAS で `旧→移行中→新` と遷移し、候補なし・確認不能なら `NoActive` とする（`DisconnectFallback`）。Host 側 Client を自動起動せず、通常切断を `RecoveryWait` にしない。検知から切断確定への timeout 等は Freedom。Client 依存 Action の停止は best-effort とし、停止不能・既知作用・不明を残す。
 - **reconnect。** `ClientPresenceClaim.claimed_generation` × 現在 `generation` × 現接続・可用性 × 現在許可・停止・保留を照合する。古い一時 state・旧承認・判定 copy・解決済み経路だけでは成立させない。確認不能を現在と推定しない。旧 round の入力・未提示出力を新 round へ付け替えない。
+- 通常切断後は再接続だけで fallback / `NoActive` を元 Client へ戻さない。呼出し・事前指示・通常の自発判断を必要とする。`ReconnectRecovery` は Host restart の `RecoveryWait` と復旧先に対する確認だけに使う。
 - **Host restart restoration。** `presence_attribution`＋hint・復旧先（非現在）＋現接続・許可・排他性の live 確認で再構成する。Running presence は現確認ができれば復元前 Client へ自動復元し、できなければ active なしにする。Stopped に移動・復旧しない。復旧は presence のみであり、Task・Action の再開権限にしない。
 - **Stop。** Stop は帰属解除として保持し（hint と区別）、Stop 競合では Stop が勝つ。接続回復だけで Resume・再配置しない。
 - **summon A→B vs disconnect。** 両方を SD-Presence の順序で直列化する。先に確定した遷移の generation が現在になり、後着は新現在に対する再要求として評価する。二重 presence・旧 in-flight の自動継続・未終了作用の別 Client 再実行のいずれもしない。

@@ -68,7 +68,7 @@ IB 第15節・CM 第11節の remote-capable 7 群を起点に、「network / pro
 | W-6 | shared observation / capture の Client 側入出力 | Capture 実行者が Client であり、Host が ticket で統制するため | X-E（routing の両端のみ） | capture ticket、capture frame（candidate）、受入結果。routing semantic・専用 assignment は出さない |
 | W-7 | Body / presentation resources | 表示資材の供給元が Host（Character 静的資材）で利用者が Client のため | C-A の資材利用分 | asset descriptor＋binary chunk。適用関係・経験状態は出さない |
 | W-8 | Client-side Targeted Deletion 参加 | 接続中 Client の一時 data も holder として参加するため | D-B の Client 宛て分 | deletion demand（本文なし）、local result。対象本文・検索 token の永続化はしない |
-| W-9 | Owner 管理面の入口と表示 | 管理操作の入口が Client にあっても確定は各 owner のため | 第9節 `ManagementOperationCommand` の Client 側入口 | management intent（candidate）、filtered view。control 正本・secret・判定 copy は出さない |
+| W-9 | Owner 管理面の入口と表示 | 管理操作の入口が Client にあっても確定は各 owner のため | IB 第9節 `ManagementOperationCommand` の Client 側入口 | management intent（candidate）、filtered view。高権限操作の要求は送れるが、最終確認は Host PC 上の trusted first-party management surface に限定する（§18）。control 正本・secret・判定 copy は出さない |
 | W-10 | Client-dependent Action（Computer Use 等）の遂行 | 作用の実行者が Client device であるため | K-J（Client 限定）＋ K-H の Client 向け投影 | action command（concrete device op のみ）、receipt ack、progress、effect report。認可判断・許可条件は出さない |
 
 ### 2.2 越境させないもの（Host-local に留める）
@@ -76,6 +76,7 @@ IB 第15節・CM 第11節の remote-capable 7 群を起点に、「network / pro
 - H-B〜H-E の形成・訂正・scope 意味判断、K-A〜K-C の制御確定・秘密利用、K-D〜K-G の割当解決・送信条件・予約確定、K-H の認可・作用確定、D-A・D-C・D-D の範囲確定・完了確定・switch、第13節の repository compare-and-commit 群。理由は IB 第15節・CM 第11節のとおり。durable compare を Host 単一 SQLite transaction で不可分にするため、DB transaction を Client へ露出させない。秘密値を通常経路に載せない。
 - Observer 専用 Provider assignment・routing semantic そのもの。Client へ authority として公開しない。Client が見るのは ticket と自身の capture 受入結果だけである。
 - repository compare、cost reservation、Restore switch。wire へ出さない。
+- 高権限操作の最終確認（§18）。remote の intent・確認済み申告を Host-local の確認として取り込まない。
 
 ### 2.3 選別の帰結
 
@@ -311,21 +312,21 @@ struct NegotiatedConnection {
 
 ### 9.2 pairing
 
-1. 新しい Client は Owner が Host 側で確認できる device pairing を必要とする（要件 Remote Client）。pairing 開始は Client からの `PairingRequest{ device_descriptor }` とし、Host は Owner 確認待ち（管理面）にする。Owner 確認なしに pairing を成立させない。
-2. Owner 確認後、Host は `DeviceWireId` を発行し、device record（descriptor・許可された機能範囲・失効 flag・最終接続）を durable に保持する。pairing material は auth 専用 frame で Client へ渡す。通常 payload へ載せない。
+1. 新しい Client は Owner が Host 側で確認できる device pairing を必要とする（要件 Remote Client）。pairing 開始は Client からの `PairingRequest{ device_descriptor }` とし、Host PC 上の trusted first-party management surface での Owner 最終確認待ちにする（§18）。pairing 済み Remote Client による承認だけでは成立させない。
+2. Owner 確認後、Host は新しい pairing identity と `DeviceWireId` を発行する。device record の非秘密表示参照（descriptor・pairing identity / wire 対応）は PR Group G、許可機能の記録は Group F、Host 側所有証明検証材料・現在 trust 範囲・失効状態は Group K の device-auth store（E）に保持する。最終接続は Group G に置く。pairing material は auth 専用 frame で Client へ渡し、通常 payload へ載せない。
 3. 古い接続材料だけで Host 側の pairing・許可を復活させない。pairing 失効後の再 pairing は新規 pairing として Owner 確認を必要とする。
 
 ### 9.3 connection authentication・reconnect authentication
 
-1. connection 確立ごとに `AuthChallenge (Host nonce) → AuthProof (Client 証明) → AuthResult (Host 判定＋ConnectionWireId 付与)` を行う。Client は秘密を平文で送らず、所有証明のみ送る。具体方式は Freedom とするが、「秘密の非露出」「nonce の単発性」「旧 proof の再利用禁止」の property を満たすこと。
+1. connection 確立ごとに `AuthChallenge (Host nonce) → AuthProof (Client 証明) → AuthResult (Host 判定＋ConnectionWireId 付与)` を行う。Host は現在の device-auth store（E）にある有効な pairing identity・検証材料へ照合し、不在・失効・確認不能なら拒否する。Client は秘密を平文で送らず、所有証明のみ送る。具体方式は Freedom とするが、「秘密の非露出」「nonce の単発性」「旧 proof の再利用禁止」の property を満たすこと。
 2. 認証成功時に Host は当該 connection の `ConnectionWireId` を発行し、current connection（device ごと）を更新する。以後の Client→Host message は `sender.connection_id` を載せる。auth 前の message は pairing・auth 用に限定し、domain 操作を受け付けない。
 3. reconnect は新規 connection として認証する。旧 `ConnectionWireId`・旧 stream・旧 ticket・旧 round を引き継がない。旧 connection の message は `StaleConnection` として拒否する。
 
 ### 9.4 revoke
 
-- Owner は pairing 済み device・最終接続・許可された機能を確認し、device ごとに失効できる（要件）。失効は Host の device record に durable に記録し、現 connection を切断し、以後の auth を拒否する。
+- Owner は pairing 済み device・最終接続・許可された機能を確認し、device ごとに失効できる（要件）。§18 の最終確認を経て、`ene-permission` が失効を判断し、`ene-credential` の device-auth store（E）の Host 側検証材料を durable に無効化・削除する。`ene-presence` は現 connection・session を無効化して切断する。以後の auth 拒否は E 側の有効材料の不在を根拠とし、DB の表示用 flag だけに依存しない。E の無効化完了前に失効完了と返さず、途中失敗は未完了・利用保留として扱う。
 - 失効した device の旧 material・旧 session では再接続・復活できない。失効の伝達は `RevocationNotice` fact で当該 Client へ知らせる（到達不能でも失効は成立する）。
-- Host restart・Restore 後も失効は維持する。Restore で過去の pairing・許可を復活させない（PR §9）。
+- Host restart・Restore 後も失効は維持する。現在の device-auth store は backup 除外・Restore 維持対象であり（PR §9.2）、復元された device 参照・機能許可は現在の E 側 trust 範囲を広げない。全データ Reset では E 側 trust と検証材料も削除し、旧材料だけで復活させない。再 pairing は新 identity と現在の Host-local 最終確認を必要とする。
 
 ## 10. Transport
 
@@ -340,6 +341,8 @@ wire semantic と transport を分離し、以下を共通化の範囲とする�
 | future transport | 将来の追加 | adapter 追加で対応する。wire semantic・DTO・version・auth property を変えない |
 
 QUIC 等の採用は現時点でしない。理由：現在の topology（単一 Owner-managed Host、少数 Client、ticket 制御の低頻度 capture、WebSocket で足りる stream 多重）では必要性がなく、over-engineering になるためである。将来 transport は adapter として追加できる（第30節）。
+
+「Host PC 上の Client」の判定材料は、Host transport adapter が接続経路と OS peer 認証から確定する `transport_class = SameMachine | Remote` とする。Client の platform・device descriptor・loopback アドレスの自己申告では確定しない。PR Group G の最終観測に記録し、現在の利用時には live connection の同じ分類と認証を再確認する。presence fallback はこの材料を使うが、管理面の trusted first-party 性はさらに §18 の確認境界を必要とする。
 
 ### 10.2 transport adapter boundary
 
@@ -412,7 +415,7 @@ Host 側の authoritative presence generation を基準とする。二つの Cli
 - 移動は Host の `expected_generation＋expected_state` の CAS による `旧→移行中→新` の durable 遷移で確定する（CCT §10）。simultaneous summon は先勝ちのみ成立させ、後着は `StalePresence` として不受理・再評価へ戻す。
 - 移行中は新旧いずれでも Client 依存の新規開始をしない。旧 in-flight は安全な区切りまで継続し、旧作用の別 Client 自動継続をしない。
 - Client の UI ack（`PresencePresentedAck`）は「表示した」ことの確認であり、presence 成立の authority ではない。ack がなくても帰属は成立し、ack があっても帰属は変わらない。
-- 通常の Client 切断では Running Companion の帰属は Host 側の current として保持し、再接続・復旧の確認を経て確定する。Stop は disconnect とは異なり、停止中 Companion を Host 側へ移動して presence を残さない（要件）。
+- 一時的な到達不能では帰属を直ちに捨てず、新規 Client 依存開始を抑止する。通常の Client 切断・process 終了が確定したら、Host の `ene-presence` は利用可能な Host PC 上の Client（§10.1 の SameMachine・現認証・`ene-permission` の device 許可・排他性を確認可能）へ、SD-Presence の CAS で `旧→移行中→Host PC Client` と遷移する。候補なし・確認不能なら `NoActive` に確定する。Host 側 Client 環境を自動起動しない。切断 Client 待ちの `RecoveryWait` は Host restart restoration に限る。通常切断後の再接続だけでは帰属を復帰させず、呼出し・事前指示・通常の自発判断を経る。Stop は disconnect と異なり、停止中 Companion に fallback・復旧を適用しない。
 - Host restart restoration：Host は `presence_attribution`＋hint・復旧先（非現在の参照）を読み、`RecoveryWait` として再構成し、復元前 Client へ `RecoveryInvite` を送る。現接続・許可・排他性の確認ができれば `Present` へ確定し、できなければ active なしにする。別 Client への無条件自動移動・Stopped への適用・Task 再開権限化をしない。
 
 ### 12.3 DTO（抜粋。全体は第21節）
@@ -422,9 +425,15 @@ struct MoveIntent {
     companion: CompanionWireRef,
     from_client: Option<ClientWireRef>,
     to_client: ClientWireRef,
-    reason: MoveReason, // OwnerSummon | PriorInstruction | SpontaneousNeed | ReconnectRecovery
+    reason: MoveIntentReason, // Client が提案できる理由だけ
     expected_generation: u64, // presence generation の写し（authority ではない）
     intent_id: CommandWireId, // idempotency key
+}
+enum MoveIntentReason { OwnerSummon, PriorInstruction, SpontaneousNeed }
+enum MoveReason {
+    OwnerSummon, PriorInstruction, SpontaneousNeed,
+    DisconnectFallback, // Host が通常切断確定後に開始する fallback / NoActive
+    ReconnectRecovery,  // Host restart の RecoveryWait に限る
 }
 enum MoveOutcome {
     Transitioning { new_generation: u64 },
@@ -434,6 +443,8 @@ enum MoveOutcome {
 }
 ```
 
+`MoveReason` は Host の遷移記録と `TransitionAck` / `PresenceAttributionFact` の理由投影に使う。Client 起点の `MoveIntent` では Host 専用の二理由を送れない。`ReconnectRecovery` は Host が現在の `RecoveryWait`・復旧先へ対応付けた `RecoveryInvite` に対する再認証・`ReconnectHello` の応答事実を照合した場合だけ記録する。hello 単独では復旧待ちを作らない。
+
 ## 13. Text / Voice / presentation
 
 生成完了、Host 送信、Client 受信、Owner への提示を同一事実として扱わない。
@@ -442,7 +453,7 @@ enum MoveOutcome {
 
 | message | 方向 | pattern | 意味 |
 |---|---|---|---|
-| `SubmitTextInput` | Client→Host | command | Owner 入力 candidate（companion 参照・round 参照・`ClientInputLocalId`・本文）。受理ではなく提案 |
+| `SubmitTextInput` | Client→Host | command | Owner 入力 candidate（companion 参照・round 参照または新規開始 None・`ClientInputLocalId`・本文）。受理ではなく提案 |
 | `RoundIntakeOutcome` | Host→Client | ack（domain outcome） | `AcceptedForRound \| StaleRound \| HeldForTransition \| NeedsRevalidation`。旧 round なら元 round へ対応付け、新 round へ付け替えない |
 | `TextStreamOpen` | Host→Client | stream open | 応答 stream の開始（`stream_id`・round・generation 付き）。open 成功は提示・達成ではない |
 | `TextStreamFrame` | Host→Client | stream frame | 部分出力（`seq`・delta text・`is_final`）。`seq` 順に提示する |
@@ -451,6 +462,7 @@ enum MoveOutcome {
 
 - input attribution：入力は「どの Client のどの round で Owner が送ったか」の対応（companion・client・round・generation）を伴う。話者認証の意味を足さない。
 - round identity：round は Host 発行の `RoundWireId` である。移動・切断・再起動で旧 round の入力・未提示出力を新 round へ付け替えない。
+- 初回入力は `SubmitTextInput.round = None` で新規 round の開始を要求できる。`observed.presence_generation_view` は必須、`observed.round_view` は None とする。Host の `ene-presentation::round` が現接続・帰属・許可・停止・保留を照合して round を発行し、IB X-B の非 optional `RoundId` へ解決して受理し、`AcceptedForRound { round }` を返す。mapping 自体は round を発行しない。以後の当該 round 入力は `Some(round)` を使い、旧 round の拒否を None への自動再送で迂回しない。None 要求の retry も同一 `command_id`・同一内容とし、初回の発行 round / outcome を返して二重発行・二重受理しない。
 - partial / streaming output：`stream_id`＋`seq`＋`is_final` で順序付ける。`is_final` なしの frame を完了にしない。
 - 未提示出力は `UndeliveredSummary`（第18節・W-3）へ接続し、次 Client で現在の結果・利用制限・削除状況へ照合して要約報告する。送信・受信を報告完了にしない。
 
@@ -574,6 +586,18 @@ enum DeletionTargetWire {
 
 Owner 管理面が Client に存在しても、Client から送られる control 変更は **Owner intent / candidate request** であり、Host-side control owner が最終的に成立させる既存 contract（IB 第9節・K-A）を維持する。管理画面から Permission・Provider・Rule 等を変更できる場合でも、Client が control state 正本を所有する protocol にしない。
 
+### 18.1 高権限操作の確認境界（RA-01 Owner decision）
+
+device pairing 承認など trust root を変更する高権限操作の最終確認は、**Host PC 上の trusted first-party management surface** で行う。Remote Client から要求を送ることは許すが、Remote Client だけでは成立させない。これは既存の Host 側確認 contract の具体化である。
+
+- 対象は pairing / 再 pairing、device trust・機能許可の変更・revocation（自身の device を含む）、Credential の登録・更新・差替え・失効、Restore の実行確認と復元後の一括有効化、Full Reset の削除対象を列挙した強い確認である。同じ trust / 強制境界を変更する操作（Local MCP の sandbox 外許可・重要変更や、その境界を緩和する管理変更）も同じ確認を通す。`ManagementIntentKind` の名前でなく実際の操作・対象・影響で分類し、Rule・設定 Reset・別の汎用管理入口を経由して迂回しない。
+- Host は §10.1 の SameMachine と OS peer 認証に加え、Host 管理下の第一者管理入口であることを確認する。任意の同居 Client、pairing 済みであること、capability claim、`rationale`、`base_view` はこの資格を与えない。初回 Setup も remote pairing に依存せず利用できるこの Host-local 入口を使う。具体的な OS 上の入口識別・保護方式は Freedom だが、自己申告では代替しない。
+- Remote の高権限 intent は要求として受け付け、`NeedsClarification` と filtered view で Host PC での最終確認待ちを示す。承認済みの申告や最終確認の代行は `DeniedByBoundary` とし、変更を適用しない。Host-local 入口で Owner が対象・変更内容・影響を確認した事実を、Host 内で当該操作と現在の前提に結び付けて担当 owner へ渡す。最終確認は remote wire DTO に載せず、確認後の対象・内容変更や stale 前提には再確認を必要とする。確認の replay・包括的流用をしない。
+- 第一者管理入口を Computer Use・Tool・MCP Apps・Plugin・LLM 出力や remote からの代理入力で操作しても、Owner の最終確認として受理しない。管理面の active presence は必須ではなく、Text から到達でき、本体 LLM・長時間 Task・Body・Voice の成功を待たない。
+- 通常の filtered view・停止・Cancel・承認拒否等は既存の remote-capable 経路を使う。backup 作成や通常削除を含む複合 kind 全体を高権限と一括扱いせず、上記対象と既存の個別確認条件を担当 owner が適用する。Credential の秘密値入力・保管は保護された Host-local 認証設定経路で扱い、管理 wire payload に載せない。
+
+### 18.2 DTO と受入
+
 ```rust
 struct ManagementIntent {
     intent_id: CommandWireId,      // idempotency key
@@ -588,7 +612,7 @@ enum ManagementOutcome {
     AppliedAsOneTime,              // 一回承認として適用
     StoredAsRuleView,              // Rule 等として保存（revision view 付き）
     NeedsClarification,            // 曖昧・矛盾・過度・重大のため確認へ戻す
-    DeniedByBoundary,              // 永続 Deny・Always ask・Capability 境界の黙上書きに当たる
+    DeniedByBoundary,              // 制御境界の黙上書き・高権限操作の最終確認境界違反
     StaleBaseView { current: ViewMark }, // 表示が古い。再取得・再評価へ戻す
     HeldByOperation,               // 消去・復元保留・停止等で新規禁止
 }
@@ -610,14 +634,14 @@ pattern・方向・authority の所在を一覧する。envelope 自体は含め
 
 | # | message | 方向 | pattern | authority / 確定者 |
 |---|---|---|---|---|
-| M-1 | `PairingRequest / PairingResult` | C→H / H→C | request/response | Host（Owner 確認）。Client 要求は申込み |
+| M-1 | `PairingRequest / PairingResult` | C→H / H→C | request/response | Host（§18 の trusted Host-local Owner 最終確認）。Client 要求は申込み |
 | M-2 | `AuthChallenge / AuthProof / AuthResult` | H→C / C→H / H→C | request/response（auth 専用） | Host。旧 material で復活させない |
 | M-3 | `CapabilityAdvertise / NegotiatedConnection` | C→H / H→C | request/response（接続時） | Host（選択）。申告は availability fact |
 | M-4 | `CapabilityUpdate / AvailabilityFact` | C→H | fact | Host（材料）。許可・presence ではない |
 | M-5 | `MoveIntent / MoveOutcome(TransitionAck)` | C→H / H→C | command+ack | 接続・存在（帰属成立）。意図は個体調整・Client |
 | M-6 | `PresenceAttributionFact` | H→C | fact（subscribe） | 接続・存在。最新値意味 |
 | M-7 | `DisconnectNotice / ReconnectHello / RecoveryInvite` | 両方向 | fact / command / fact | 帰属は接続・存在。hello は申告 |
-| M-8 | `SubmitTextInput / RoundIntakeOutcome` | C→H / H→C | command+ack | 個体調整（会話受理）＋接続・存在（帰属照合） |
+| M-8 | `SubmitTextInput / RoundIntakeOutcome` | C→H / H→C | command+ack | 入出力・提示（None 要求の round 発行）＋個体調整（会話受理）＋接続・存在（帰属照合） |
 | M-9 | `TextStreamOpen / Frame / Close` | H→C | stream | 入出力・提示（round 実際）。意味は個体調整 |
 | M-10 | `ConfirmPresentation` | C→H | observation | 個体調整（報告状況）。送信≠報告 |
 | M-11 | `UndeliveredSummary / UndeliveredAck` | H→C / C→H | subscription＋fact / observation | 個体調整（必要性）＋入出力・提示（提示事実） |
@@ -627,7 +651,7 @@ pattern・方向・authority の所在を一覧する。envelope 自体は含め
 | M-15 | `ClientActionCommand / ActionReceiptAck / ActionProgress / EffectReport` | H→C / C→H | command+ack＋progress+completion | 実行・拡張（作用・確定度）。command 到着≠成功 |
 | M-16 | `ActionCancel(CancelRequest) / CancelReceived / StopAck / EffectCertaintyUpdate` | 両方向 | command+ack＋completion＋fact | 各 owner（事実の帰属）。delivery≠停止完了 |
 | M-17 | `DeletionDemand / DeletionProgress / LocalErasureResult / DeletionCompletedNotice` | H→C / C→H | command+ack相当＋fact | 保全・消去（全域確定）。局所完了≠全域完了 |
-| M-18 | `ManagementIntent / ManagementOutcome` | C→H / H→C | command+ack（candidate+decision 投影） | 各 control owner。intent は提案 |
+| M-18 | `ManagementIntent / ManagementOutcome` | C→H / H→C | command+ack（candidate+decision 投影） | 各 control owner。intent は提案。高権限の最終確認はこの remote wire を通さず §18 の Host-local 入口で行う |
 | M-19 | `ManagementViewRequest / ManagementView` | C→H / H→C | request/response | 各 owner（表示用投影）。view は正本ではない |
 | M-20 | `AssetDescriptorRequest / AssetDescriptor / AssetChunkStream` | C→H / H→C | request/response＋stream | Character（静的内容供給）。適用確定は個体調整 |
 | M-21 | `BodyStateHint` | H→C | fact | 個体調整（活動状態）＋認識・学習（内的状態の意味）。表示 staging ではない |
@@ -664,12 +688,13 @@ struct PresenceAttributionWire {
     state: PresenceStateWire, // Present | NoActive | InTransition | Stopped | RecoveryWait
     active_client: Option<ClientWireRef>,
     generation: u64, // PresenceGeneration の値の写し
+    move_reason: Option<MoveReason>, // §12.3。移動・復旧に伴う fact のみ Some。初期状態・Stop 等は None
 }
 
 // ---- text ----
 struct SubmitTextInput {
     companion: CompanionWireRef,
-    round: RoundWireId,
+    round: Option<RoundWireId>, // None は新規開始要求。発行・照合・retry は §13.1
     local_id: ClientLocalId, // Client の対応付け用
     body: TextBodyWire,      // 本文（一時表現。Host は History へ正本化する）
 }
@@ -788,7 +813,7 @@ DTO → Host domain command への変換点（Host ingress mapping。判断は�
 
 | wire DTO | mapping 先（domain premise） | 判断 owner |
 |---|---|---|
-| `SubmitTextInput` | `SubmitClientInputCandidate{ companion, client, claimed_generation, round }`（IB X-B） | 個体調整（受理）＋接続・存在（帰属照合） |
+| `SubmitTextInput` | §13.1 に従い入出力・提示が None を新規 `RoundId` へ解決した後、`SubmitClientInputCandidate{ companion, client, claimed_generation, round }`（IB X-B） | 入出力・提示（round 発行）＋個体調整（受理）＋接続・存在（帰属照合） |
 | `ConfirmPresentation` | `ConfirmPresentationObservation`（IB X-B） | 入出力・提示＋個体調整 |
 | `MoveIntent` | `RequestMoveCommand`（IB X-A） | 接続・存在 |
 | `CaptureFrame` | `PublishObservationCandidate` の Client 由来部分（IB X-E） | 共有観測 |
@@ -861,13 +886,13 @@ transport success を domain success へ読み替えないことを、各 walkth
 
 ### V-1 Client connect → authenticate → capability advertise
 
-1. Client が transport 接続し、`PairingRequest`（未 pairing 時。Owner 確認待ち）または `AuthChallenge→AuthProof`（pairing 済み）を行う。秘密を通常 payload へ載せない。
+1. Client が transport 接続し、`PairingRequest`（未 pairing 時。§18 の trusted Host-local Owner 最終確認待ち）または `AuthChallenge→AuthProof`（pairing 済み）を行う。秘密を通常 payload へ載せない。
 2. Host は auth 成功時に `ConnectionWireId` を発行し、`CapabilityAdvertise` を受けて negotiated version・accepted features を確定する。申告は availability fact であり、許可・presence ではない。
 3. 失格条件：auth なしの domain 操作は不受理にする。失効 device の旧 material では復活させない。
 
 ### V-2 Owner Text → Host → response stream → presentation acknowledgement
 
-1. Client が `SubmitTextInput`（round・local_id・本文）を送る。送信成功は受理ではない。
+1. Client が `SubmitTextInput`（初回は round=None・現在 generation の写し・local_id・本文）を送る。Host が §13.1 の照合と round 発行を行い、受理時に返す round を以後の当該 round 入力に用いる。送信成功は受理ではない。
 2. Host mapping が validation→`SubmitClientInputCandidate` へ mapping し、現在帰属・現接続・許可・停止・保留を照合して `RoundIntakeOutcome::AcceptedForRound` を返す。旧 round なら `StaleRound` とし、新 round へ付け替えない。
 3. Host は `TextStreamOpen→Frame(seq,is_final)→Close(Completed)` を送る。生成完了・送信・受信を同一事実にしない。
 4. Client は提示後に `ConfirmPresentation::Presented` を送る。送信・受信だけでは報告完了にしない。提示不明は `Unknown` を保持する。
@@ -888,6 +913,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 1. 実行中の `ClientActionCommand{ operation, attempt }` に対し、Client 切断を検知する。切断検知は帰属 durable の即時破棄ではない。
 2. Host は attempt を `Unknown` のまま保持し、best-effort 停止を試み、停止不能・既知作用・不明を残して報告する。成功・未実行へ書き換えない。
 3. 自動 retry・別 Client での自動再実行をしない。再実行は新 attempt＋Owner 判断を必要とする。
+4. 通常切断が確定したら、Running presence は SD-Presence の CAS で利用可能な Host PC Client へ fallback し、候補なし・確認不能なら `NoActive` にする（理由 `DisconnectFallback`）。Host 側 Client を自動起動せず、旧 Action は元 attempt に残す。切断 Client が再接続してもこの帰属を自動で戻さない。
 
 ### V-6 reconnect with unresolved Action
 
@@ -916,7 +942,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 ### V-10 Host restart → reconnect → presence restoration
 
 1. Host restart 後、presence は `RecoveryWait` として再構成する。Task は明示再開待ち、Unknown attempt は `Unknown` のまま、未完了消去・保留は維持する。
-2. Host は復元前 Client へ `RecoveryInvite` を送り、Client は新規 connection として再認証する。現接続・許可・排他性の確認ができれば `Present` へ確定し、できなければ active なしにする。
+2. Host は復元前 Client へ `RecoveryInvite` を送り、Client は新規 connection として再認証・`ReconnectHello` で応答する。Host は現在の `RecoveryWait` と復旧先への対応および現接続・許可・排他性を照合し、確認できれば `Present`（理由 `ReconnectRecovery`）へ確定し、できなければ active なしにする。Client の `MoveIntent` でこの理由を要求できない。
 3. 古い一時 state・旧承認・解決済み経路だけでの presence・許可・再開の成立をしない。Task・Action の再開権限化をしない。
 
 ### V-11 Host newer / old Client
@@ -929,6 +955,18 @@ transport success を domain success へ読み替えないことを、各 walkth
 1. 同一 `message_id` の重複配送は沈黙破棄する（再実行なし、ack 再送は可）。
 2. 同一 `command_id`＋新 `message_id` の retry は domain idempotency で prior outcome を返す（二重実行しない）。
 3. 遅延到着物は元の round・attempt・ticket・operation へ対応付け、現在の目的への自動採用・後続自動開始をしない。到着順が最後であることを受入根拠にしない。
+
+### V-13 device 失効前 backup → 失効 → Restore / Full Reset
+
+1. device D の有効時点の backup を取り、その後 Host-local 最終確認を経て失効する。Host は E 側検証材料を durable に無効化・削除し、現 session を無効化する。
+2. backup を Restore しても `device_ref` / `device_permission` の復元だけでは E 側材料は戻らず、D の旧 proof による auth は拒否される。機能のみの失効でも、復元許可は現在 E 側 trust 範囲を超えない。
+3. Full Reset は E 側 trust・検証材料も削除する。その後の旧 backup Restore・旧 Client material で trust を復活させない。再 pairing は新 identity と現在の trusted Host-local 最終確認を必要とする。
+
+### V-14 Remote 管理要求 → Host-local 最終確認
+
+1. pairing 済み Remote Client が新 device 承認・Credential 差替え・device 失効・Restore / Full Reset の intent を送る。要求受付は `NeedsClarification` と Host PC での確認待ち表示に留まり、変更・破壊的処理を開始しない。
+2. remote の承認申告、same-machine 自己申告、Computer Use 等による代理確認は最終確認として受理しない（`DeniedByBoundary`）。別の汎用管理 kind でも実操作で同じ判定を行う。
+3. trusted Host-local surface で Owner が対象・内容・影響を確認した後、担当 owner が現在前提を照合して適用する。対象変更・stale 確認は再確認へ戻す。Restore の実行と復元後の一括有効化は別確認とする。
 
 ## 27. Avoid over-engineering — 導入しないもの
 

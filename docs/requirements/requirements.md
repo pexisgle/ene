@@ -312,6 +312,8 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 
 ### 信頼境界
 
+- device pairing承認などtrust rootを変更する高権限操作の最終確認は、OwnerがHost PC上のtrusted first-party management surface（信頼された第一者管理面）で行う。Remote Clientから要求を送ることはできても、Remote Clientだけでは成立しない。Hostと同じPC上で動作することやpairing済みであることだけで、この最終確認を行える管理面とはみなさない。
+- この確認境界は、pairing／再pairing、device trust・許可機能の変更・失効（自身のdeviceを含む）、Credentialの登録・更新・差替え・失効、Restoreの実行確認と復元後の一括有効化、全データResetの強い確認、Local MCPのsandbox外許可・重要変更等の同種の高権限操作に適用する。要求の送信や代理入力をOwnerの最終確認の代わりにしない。
 - LLM出力、Character、Experience Summary、Memory、Relationship、Companion State、Skill、Plugin、MCP、外部Data、Workspace fileは信頼できない入力になり得るものとして扱う。
 - これらの入力は、Permission、Credential、Rule、Provider同意、費用cap、Control planeを直接変更できない。
 - 外部Data内の指示をOwnerの指示とみなさず、依頼された目的とCapability境界の中でのみ利用する。
@@ -458,7 +460,7 @@ Experienceの意味、保存価値、共有の必要性、要約、関係やComp
 ## Remote Client
 
 - Remote Clientは、同じLANまたはOwnerが管理するVPNを通じてHostへ接続する。ene運営のrelay、ene account、ene Cloudを接続要件にしない。
-- 新しいClientはOwnerがHost側で確認できるdevice pairingを必要とする。
+- 新しいClientは、[信頼境界](#信頼境界)に従いOwnerがHost PC上のtrusted first-party management surfaceで最終確認するdevice pairingを必要とする。
 - HostとClientの通信を保護し、Ownerはpairing済みdevice、最終接続、許可された機能を確認し、deviceごとに失効できる。
 - ClientはHostから表示と一時的な操作に必要なdataだけを受け取り、Conversation History、Experience Summary、Learning、Relationship、Companion State、Provider／MCP等の登録済みCredentialのcopyを永続cacheしない。
 - Client固有の接続材料は、Host正本のdomain dataや登録済みCredentialのcacheとは区別する。Clientで保持する場合もene内部の保護対象とし、接続目的へ限定して秘密の非露出とdevice失効を適用する。古い接続材料だけでHost側のpairing・許可を復活させない。具体的な鍵形式・保存方式は固定しない。

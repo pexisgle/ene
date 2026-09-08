@@ -31,7 +31,7 @@
 - **durable operation/recovery**: 全域操作・未完了・保留・再保存防止・不明等、crash を跨いで守る進行・条件。対応は失わず、本文は保持しない。
 - **rebuildable derived**: durable primary から再構築できる派生。独立復元対象にしない。第二の正本にしない。
 - **transient**: process / round / Client 一時表現。失ってよい。受理済み指示・作業記録・未伝達・不明・全域未完了は含めない。
-- **external / credential-store**: ene live state ではない外部所有物と、秘密値の分離保管。参照だけを durable に持つ。
+- **external / credential-store**: ene live state ではない外部所有物と、秘密値・device-auth の分離保管。DB の durable には参照だけを持つ。device-auth は検証材料が非秘密でも backup から trust を復活させないためこの境界に置く。
 - **semantic owner**: SO で定めた意味・通常変更・lifecycle 判断の引受先。persistence の table / record は owner にならない。
 - **storage 共有**: 同じ SQLite / filesystem 技術を使うこと。ownership の統合を意味しない。
 
@@ -58,7 +58,7 @@
 | durable operation/recovery (D3) | 未完了・保留・消去条件・復元操作・不明・未伝達報告状況等。継続して守る条件 | 未完了として再構成し、保留・再保存防止を維持する。完了・解除と誤認しない |
 | rebuildable derived (R) | embedding / index / cache / session / 有効経路 / 表示集計 / routing 派生物等 | 失っても正本は失わない。再構築または縮退する。古い派生物で現在を復活させない |
 | transient (T) | Client 入力途中・表示 timeline・audio buffer・VAD・Raw・候補・推論中 context・Agent 一時 context・実行中 buffer・MCP Apps 表示等 | 失ってよい。受理済み・作業記録・未伝達・不明・全域未完了は含めない |
-| external / credential-store (E) | 外部 Workspace 実体・Provider/MCP 側状態・外部 Package 原本・export / backup copy・秘密値 | 参照だけを durable に持つ。内容・秘密を DB / Backup / Audit へ流さない |
+| external / credential-store (E) | 外部 Workspace 実体・Provider/MCP 側状態・外部 Package 原本・export / backup copy・秘密値・Host device-auth store | DB の durable には参照だけを持つ。内容・秘密・device 検証材料を DB / Backup / Audit へ流さない |
 
 ### 3.2 状態 inventory と分類
 
@@ -88,6 +88,7 @@
 - Client temporary state（入力途中・表示 timeline・audio buffer・未送信操作・Tool UI data）や Raw capture（Raw Observation / Raw Voice / 詳細 Tool payload / 内部推論 / chain-of-thought）は canonical persistent 化しない（固定 premise）。
 - Backup copy は canonical ではない。明示 restore を経ずに live 正本として読み戻さない。
 - Credential secret は通常 DB / Backup / Audit へ流さず、現在 credential-store 側で扱う（固定 premise）。
+- Host 側 device-auth（pairing identity に対応する検証材料・現在 trust 範囲・失効）も E とし、非秘密の検証材料であっても backup へ含めず Restore で巻き戻さない（Group K）。DB の device 参照・許可記録だけでは認証・利用を成立させない。
 - 派生物（embedding / index / query 派生 / Prompt cache / Provider session / 有効経路 / 次回表示 / 集計表示）は独立復元対象にしない。古い派生物から権限・状態・帰属を復活させない。
 
 ## 4. Logical persistence groups と schema  concretization
@@ -180,7 +181,7 @@ retry・再送・fallback・再委任は新しい `attempt_id` とする。重�
 | `rule_revision` | `(rule_id, rule_revision)` | 過去本文・解釈・scope | D2 | — | 変更経緯として読む |
 | `permission_evaluation` | `evaluation_id` | 実行主体＋委任 chain・Task＋Workspace 範囲・目的・実対象＋操作＋送信先・利用 data＋目的・費用・risk・依拠 Owner 意図・Rule の対応、判断（Allow/Deny/Ask/Wait）、評価時点の boundary snapshot（rule revision・consent・device・cap・失効・停止・保留・消去・復元条件の写し） | D2（判断記録。生きた許可ではない） | targeted deletion に参加する。保存された Allow を現在許可として復活させない | Audit・説明・対応付けとして読む。開始前に現在条件と再照合する |
 | `assignment_consent` | `assignment_id` | Capability・Provider/model・送信先・data・用途・取扱い・費用範囲・Host 既定/Companion override/Observer 専用・fallback 順序、REV（同意 revision）・CORR→`restore_generation` | D1 | — | 現在同意として読む。登録・認証成功で成立させない |
-| `device_permission` | `(device_id, function)` | 許可機能・失効状態 | D1 | — | 現在可否として読む |
+| `device_permission` | `(device_id, function)` | 許可機能の記録・CORR→pairing identity。失効表示は現在 E 側 trust との照合で導出する | D1 | — | 復元対象の許可記録。現在 E 側の同一 pairing・trust 範囲・非失効と照合してのみ利用する。認証・失効の正本にはしない |
 | `sandbox_exception` | `exception_id` | 特定 Local MCP・command・由来・既知 access・risk・失う強制境界・保存・失効・重要変更時の再確認状態。Plugin へ流用しない | D1 | — | 隔離例外として読む。包括承認にしない |
 | `control_constraint` | `constraint_id` | Owner の明示的な保存禁止・非共有の適用対象・範囲。Learning scope 意味と区別する | D1 | — | 各利用箇所で迂回不能に適用する |
 | `cap_limit` | `cap_id` | Provider 別・全体の費用・資源・反復・並列等の上限定義 | D1 | — | 現在可否の上限として読む |
@@ -194,11 +195,12 @@ retry・再送・fallback・再委任は新しい `attempt_id` とする。重�
 | logical table | PK | 主な field | durability | deletion | reconstruction source |
 |---|---|---|---|---|---|
 | `presence_attribution` | `companion_id` | state `Present/NoActive/InTransition/Stopped/RecoveryWait`・`active_client`・GEN=`presence_generation`（個体ごとの帰属 lifecycle 順序）。`active_client` は再起動前の帰属記録であり、起動直後は `RecoveryWait` として解釈し現接続・許可・排他性の確認を経て `Present/NoActive` へ確定する | D1+D3 | Stopped は帰属解除として保持する（hint と区別） | restart 後に現接続・許可・排他性の確認と合わせて presence を再構成する |
-| `presence_transition_log` | `transition_seq` | CORR→`companion_id`、旧 state/新 state・旧 GEN/新 GEN・理由・時点 | D2 | — | stale 診断・Audit として読む。authority ではない |
-| `client_last_connection` | `client_id` | 最終接続管理 record・機能利用可能性の最終観測 | D1 | — | 管理記録として読む。現在接続として再成立させない |
+| `presence_transition_log` | `transition_seq` | CORR→`companion_id`、旧 state/新 state・旧 GEN/新 GEN・理由（Owner 呼出し・事前指示・自発判断・`DisconnectFallback`・Host restart 限定の `ReconnectRecovery`）・時点 | D2 | — | stale 診断・Audit として読む。authority ではない |
+| `device_ref` | `device_id` | descriptor・CORR→pairing identity・`DeviceWireId` 対応（非秘密表示参照のみ） | D1 | 全データ Reset で削除 | 表示・対応解決用。検証材料は Group K（E）であり、行の復元だけで pairing を成立させない |
+| `client_last_connection` | `client_id` | 最終接続管理 record・CORR→device / incarnation / connection・機能利用可能性・`transport_class`（SameMachine / Remote）の最終観測。分類は IPC §10.1 の Host transport adapter が確定 | D1 | — | 管理記録として読む。現在接続として再成立させない。fallback 候補判定では live connection の分類・認証・device 許可・排他性を再照合する |
 | `relocation_hint` | `companion_id` | `last_client`・`recovery_destination`（非現在の参照） | D1 | — | 復旧先・再配置候補として読む。記録だけで presence にしない |
 
-現在接続（到達性）は T であり、古い保存値から再成立させない。Running presence は現接続・許可・排他性の確認ができれば復元前 Client へ自動復元し、できなければ active なしにする。Stopped に移動・復旧しない。
+現在接続（到達性）は T であり、古い保存値から再成立させない。通常切断確定時は `ene-presence` が利用可能な Host PC Client（SameMachine）へ SD-Presence / AU7 で fallback し、なければ `NoActive` とする。Host 側 Client を自動起動せず、切断 Client の再接続だけで帰属を戻さない。Host restart に限り、Running presence は現接続・許可・排他性の確認ができれば復元前 Client へ自動復元し、できなければ active なしにする。Stopped に移動・復旧しない。
 
 #### Group H — 入出力・提示 / 観測設定（owner: 入出力・提示 / 共有観測）
 
@@ -239,14 +241,17 @@ retry・再送・fallback・再委任は新しい `attempt_id` とする。重�
 
 `audit_seq` は Audit 追記順の確認のための scope 内順序であり、全 state 共通の snapshot id・transaction id・global version counter ではない。
 
-#### Group K — Credential 参照（owner: 認証秘密。秘密値は E）
+#### Group K — Credential 参照・device-auth（保管 owner: 認証秘密。device trust の意味は権限・制約）
 
 | logical table | PK | 主な field | durability | deletion | reconstruction source |
 |---|---|---|---|---|---|
 | `credential_ref` | `credential_id` | 用途・参照元（非秘密）・有効性・登録・更新・失効の対応。秘密値を含めない。非秘密参照は backup の復元対象に含めるが、秘密値（E）は除外・維持し、復元後に現在の store と照合する | D1 | 全データ Reset で削除する。設定 Reset で維持する。Companion/Task 参照で全体へ cascade させない | 現在 store 照合・再認証要求として読む |
 | 秘密値本体 | `credential_id`（credential-store 側 key） | 値・用途限定利用 | E（OS credential store 等） | 失効・更新は別操作。内部露出 copy の消去と外部失効を混同しない | 認証用途に限定して利用する。model context・Tool argument・通常 result・UI・Learning・History・Task 結果・log・Audit・Debug・backup へ流さない |
+| Host device-auth record | pairing identity（store 側 key） | device 対応・Host 側所有証明検証材料（公開鍵等の非秘密材料も含む）・現在 trust 範囲（許可機能の上限）・有効/失効状態 | E（credential-store の device-auth 用途。Provider/MCP Credential と用途分離） | device 失効で検証材料を無効化・削除。機能失効は現在 trust 範囲にも適用。全データ Reset で trust・材料を削除、設定 Reset では維持 | backup 除外・Restore 非置換。E 側の有効材料なしには auth を拒否。DB の許可と現在 trust 範囲の両方を満たす機能だけ利用できる |
 
 Client 固有の接続材料の秘密部分も同様に E とし、DB 側は非秘密の用途参照だけを持つ。形式・保存方式は固定しない（SO §8）。
+
+device-auth の保護・検証材料保持は `ene-credential`、trust / 許可変更・失効の意味判断は `ene-permission`、現在接続・帰属への適用は `ene-presence` に残す。E 側 trust は権限・制約が決めた現在範囲の保持であり、認証秘密の独立許可判断ではない。既存の premise 供給・Host 媒介で接続し、owner 間の具体 crate 依存を追加しない。変更の完了は E 側 durable 更新と DB 側記録の対応が揃ってから返し、部分失敗では対象の利用を保留して再評価する。失効完了を DB flag だけで返さない。再 pairing は新 identity と Host PC 上の trusted first-party management surface の最終確認（IPC §18）を必要とし、旧 DB 行・旧材料を再有効化しない。
 
 ### 4.3 Rust persistence-facing type（例示）
 
@@ -311,7 +316,7 @@ struct RestoreOperationRow {
 | Host SQLite `app.db`（durable） | A〜K の D1/D2/D3（秘密値・blob 本体・derived を除く） | いいえ。table group ごとに owner を明示する。transaction 共有は mechanism であり ownership ではない | はい（D1/D2/D3 の対応を復旧可能な形で。secret・外部実体・derived・transient を除く） |
 | Host SQLite `derived.db` / 同技術の derived group（sqlite-vec 含む） | R（embedding / index / score / cache / 有効経路 / 集計） | いいえ。元 state の owner が対応・利用範囲を説明する | いいえ。再構築可能なので含めない |
 | filesystem `internal_copies/` | D1 の blob 本体（内部 copy・中間 file） | いいえ。意味は作業等に残る | 内容を含める（Task 内部 data。外部 Workspace 実体は収集しない） |
-| credential store（OS 分離） | E の秘密値・Client 接続材料の秘密部分 | はい（認証秘密が保護責任を持つ） | いいえ。除外し Restore で巻き戻さない |
+| credential store（OS 分離） | E の秘密値・Client 接続材料の秘密部分・Host device-auth record（非秘密検証材料も含む） | 保管・保護は認証秘密。device trust の意味判断は権限・制約のまま | いいえ。除外し Restore で巻き戻さない |
 | filesystem `*.ene-backup` | portable full backup copy（外部 copy） | いいえ。live 正本ではない | 自身が backup である。内部削除で copy も消えたとしない |
 | Client / Provider / MCP / 外部 file | T / R の一時・派生・外部所有 | いいえ。Client・Provider・MCP を正本・owner にしない | いいえ（外部 copy 消去を内部完了に含めない） |
 
@@ -358,6 +363,8 @@ derived の生成・保持・破棄を行う責務が、元 state との対応�
 | Learning 現在・revision | `memory_current` + `memory_revision` + `skill_current`/`skill_revision` + `relationship_current`/`history` + `companion_state` + `summary` + `summary_grounds_link` | 現在認識・過去 revision・根拠・誤訂正 vs 時間変化の区別・scope | 遅延形成が現在を無条件上書きしない。到着順を根拠の新旧にしない。古い根拠だけによる自動再形成をしない |
 
 Host shutdown でも必要な進捗・作用不明・未伝達・全域操作の未完了を保全し、外部作用が Host と同時に消えると推定しない。一時 buffer の消失は成功・完了の根拠にしない。
+
+再起動時、および Agent 停止で所有 in-flight を失った `Reserved` は、当該利用 owner の再評価経路が元の reservation・利用対応を読み、IB K-G `CommitUsageCommand(actual = 不明)` で `Committed / Unknown` に確定する（CCT §9.2）。release・ゼロ化せず、cap 集計に引き続き含める。不明消費と孤立理由を費用管理面で報告値・推定値と区別して示し、安全継続不能なら停止・Owner 判断待ちとする。具体的な Owner の扱い・表示方式はこの非ゼロ化契約内の Freedom とする。
 
 ### 6.3 再開してよいもの / 復旧するだけで自動実行してはいけないもの
 
@@ -432,6 +439,8 @@ cross-owner の atomic read（AU3/AU6 等）は同一 SQLite file の transactio
 
 `backup-restore.md` の Owner decision を維持する。古い Backup Restore に関する既存 decision を変更しない。
 
+Restore の実行確認・復元後の一括有効化、および Full Reset の強い確認は IPC §18 の Host PC 上の trusted first-party management surface で行う。remote 要求の受付を確認済みとして扱わない。復元成立と再有効化は別確認のまま保つ。
+
 ### 9.1 Backup に含めるもの / 含めないもの
 
 | 扱い | 対象 |
@@ -440,11 +449,14 @@ cross-owner の atomic read（AU3/AU6 等）は同一 SQLite file の transactio
 | 含めない（rebuild / transient / external / secret） | 派生物（embedding・index・query 派生・Prompt cache・Provider session・有効経路・次回表示・集計表示等）、一時 data（Raw・詳細 payload・内部推論・Client 表示 copy・入力途中・audio buffer・観測候補・推論中 context・MCP Apps 表示等。ただし受理済み指示・作業記録・未伝達・作用不明まで失ってよいわけではなく Host 正本の範囲で復元する）、Credential 等の secret・外部 Workspace 実体・Provider/MCP 側固有状態・保有 copy・外部 Package 原本・export 済み copy、Client 接続材料の secret 部分 |
 | 作成成功の条件 | 各部の copy 出力成功だけを成功にしない。対象時点・参照・必要な履歴と未完了状況の対応が揃って初めて成功とする。実行中の不明がある場合、最後の正常記録が外部最新とは限らないことを保ち、不明を未実行へ戻して正常 copy と偽らない |
 
+上表の device は Group G の `device_ref` / `client_last_connection` と Group F の `device_permission` 等の非秘密参照・記録だけを指す。Host device-auth record（Group K、E）の検証材料・現在 trust 範囲・失効状態は、非秘密部分を含めて backup から除外する。現在環境で維持する認証・trust を、復元 data の一部として扱わない（§9.2）。
+
 Backup 作成に担当 Companion や Task Agent の稼働を必要とせず、管理面と保存済み data の利用可能性を Body・Voice・Provider・拡張の成功へ従属させない。Backup 設定自体が復元対象に含まれる場合、保存先・schedule・保持数・保護は backup 時点へ置換されるが、Owner が別保存先へ作成した既存 copy そのものは削除しない。
 
 ### 9.2 現在 environment から維持するもの
 
 - Restore 開始前から Host にある現在の Credential store の秘密値本体（E）とその登録・更新・失効の状態（Backup から復元・巻戻ししない）。DB 側の非秘密参照（`credential_ref`）は backup の復元対象に含めるが、復元後は現在の秘密値・用途・有効性と照合し、利用可能なら現在の Credential を利用し、不足・無効なら再認証を要求する。復元された assignment/consent だけで自動利用を開始しない。
+- 現在の Host device-auth store（Group K、E）の pairing identity・検証材料・現在 trust 範囲・失効状態。検証材料が非秘密でも backup 除外・Restore 非置換とし、失効で削除した材料の不在も維持する。新 Host 等で対応材料がなければ未認証とし、Host-local 最終確認による新規 pairing を必要とする。復元した `device_ref` / `device_permission` から E 側 record を生成・再有効化しない。
 - 外部 Workspace の現在内容・存在・access、外部 account・source 状態、Provider・MCP 側固有状態・保有 copy、外部作用の既成事実、OS・device・Network の現在状態、現在日時・tz。
 - 現在の接続・到達性・device 利用可能性・排他性の事実。保存された接続・帰属を現在の到達性とみなさない。
 - Restore 前に未完了の全域操作の保留・再保存防止に必要な条件（特に未完了 targeted deletion の消去条件・検証未完了・再保存防止は置換で黙って解除しない。§9.4 に従う）。
@@ -453,12 +465,12 @@ Backup 作成に担当 Companion や Task Agent の稼働を必要とせず、�
 
 ### 9.3 Restore 時の全置換対象・正本切替前後の識別
 
-- 置換対象は現在の Credential store の秘密値本体（E）を除く対象内部 data の対応 backup 時点への全置換であり、旧 live との merge ではない。DB 側の非秘密参照（`credential_ref`）は置換対象に含めるが、秘密値の維持・照合は §9.2 に従う。局所 copy 成功の集合だけを成立にしない。
+- 置換対象は現在の Credential store（秘密値・Host device-auth record、E）を除く対象内部 data の対応 backup 時点への全置換であり、旧 live との merge ではない。DB 側の非秘密参照（`credential_ref`・`device_ref`）と `device_permission` は置換対象に含めるが、現在 store の維持・照合は §9.2 に従う。局所 copy 成功の集合だけを成立にしない。
 - いかなる時点でも Host 正本は一つである。置換成立前は復元前正常が正本、成立後は復元内容が正本であり、backup copy・部分置換状態を正本にしない。旧 state と復元 state を意味的に混ぜた第三の状態を作らない。
 - 実行 authority だけ先に復活させない。復元成立・一括有効化・現在条件の確認前に新規 Action・送信・外部作用を開始しない。
 - 識別は `restore_generation_state` の現在 generation と各参照の `restore_generation` 前提タグで行う。復元を跨ぐ参照（Task・Rule・同意・assignment・作用・未伝達・全域未完了）には generation を添え、旧世代の参照だけで復元後に利用・実行・送信しない。Task の目的変更は `task_revision` の前進であり generation 変化で代替しない（revision と generation を混同しない）。
 - 復元成立と実行再有効化は別々に確認する。復元成立後も Task・Schedule・外部接続の自動処理は保留し、Owner が内容確認後まとめて有効化できる。一件ずつの再承認は要求しないが、Deny・同意・cap・認証不足・外部作用不明を無視しない。
-- 復元された assignment/consent・Rule・Schedule・Client device 参照・Provider/MCP 参照は、現在の Credential・制約・保留・到達性・排他性と照合して初めて利用できる。stale な Permission・Provider・Client・作用結果・外部参照を現在事実にしない。dangling 参照は未解決とし、不明は不明のまま保持し replay しない。
+- 復元された assignment/consent・Rule・Schedule・Client device 参照・Provider/MCP 参照は、現在の Credential・device-auth の同一 pairing identity / 有効検証材料 / trust 範囲 / 非失効・制約・保留・到達性・排他性と照合して初めて利用できる。device 行だけでは auth・許可を復活させず、過去の機能許可も現在 E 側 trust 範囲を超えない。stale な Permission・Provider・Client・作用結果・外部参照を現在事実にしない。dangling 参照は未解決とし、不明は不明のまま保持し replay しない。
 - 旧 live 要求・結果・Client copy を復元正本へ混ぜない。切替前に開始した推論・Tool 結果が切替後に届いても用途別受入で現在の対象・制限・意味へ照合し、旧作用説明と区別する。Client copy で Host を上書きせず、未送信操作を自動 queue にしない。
 
 ### 9.4 旧 backup 交差（確定済み Owner decision の落とし込み）
@@ -517,7 +529,7 @@ concurrency mechanism そのものは設計しない。成立のために persis
 | embedding / index / score（R） | sqlite-vec（derived file / group。例: `derived.db`） | 検索用派生は元 state との対応・利用制限に従い、派生物なしでも正本が失われないこと、targeted deletion へ参加しつつ primary を破壊せず再構築できることが必要であるため。古い派生物から権限・状態を復活させない |
 | cache / session / 一時 context（R/T） | SQLite derived group または process memory（永続化しない） | hit/miss・期限切れで論理 context・権限・永続化契約を変えないこと、Provider 側にしか継続状態が残らない構造を作らないことが必要であるため |
 | 内部保持 copy・中間 file の blob 本体 | filesystem（例: `internal_copies/`）+ DB 側の参照・由来・用途・削除 marker | 大きい blob を DB inline に必須としないため。意味は作業等に残り、外部所有を理由に内部消去から除外しない。backup には内容を含め、外部 Workspace 実体は収集しない |
-| Credential 秘密値・Client 接続材料の秘密部分 | credential store（OS 分離保管の抽象。DPAPI / libsecret / Keychain 等。具体方式は固定しない） | model context・Tool argument・通常 result・UI・Learning・History・Task 結果・log・Audit・Debug・backup への非露出、backup 除外・Restore 維持・Reset 範囲の分離が必要であるため。DB 側は非秘密参照だけを持つ |
+| Credential 秘密値・Client 接続材料の秘密部分・Host device-auth record | credential store（OS 分離保管の抽象。DPAPI / libsecret / Keychain 等。具体方式は固定しない） | 秘密の通常経路への非露出、device 検証材料・trust の backup 除外・Restore 維持・Reset 範囲の分離が必要であるため。DB 側は非秘密参照だけを持つ（Group K） |
 | portable full backup copy | filesystem（例: `*.ene-backup`。暗号化選択可能） | 稼働中の正本とは別の外部 copy として境界を保ち、明示 restore を経ずに live 正本へ戻さないことが必要であるため。保存先・schedule・保持数・保護は Owner が選ぶ |
 | Client 一時・Provider 保有・MCP 側状態・外部 Workspace 実体・外部 Package 原本 | 各所在のまま（ene の durable としない） | Client を正本・永続 cache にしないこと、Provider/MCP 側を内部正本・内部消去保証に含めないこと、外部所有を内部所有にしないことが必要であるため |
 

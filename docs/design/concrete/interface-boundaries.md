@@ -541,6 +541,7 @@ struct ReleaseUsageCommand {
 ```
 
 - 原記録は各利用 owner（推論・作業・実行・拡張・保全・消去）に残し、権限・制約は可否だけを管理する。persistence は PR Group F（`usage_fact_*`）の D2+D3。commit は短い transaction 内の原子照合（CCT SD-Cap）。予約後の inference 実行は lock なし並列。費用計算法・集計期間・推定方式は Design Freedom。
+- `CommitUsageCommand` は当該利用 owner の再起動・Agent 停止後の再評価経路からも呼べる。所有 in-flight を失った `Reserved` を元の reservation / 利用対応に基づいて不明として確定し、release しない（PR §6.2、CCT §9.2）。caller の process 生存を必要条件にせず、別 owner に利用事実の変更権を移さない。不明と理由は費用管理面で区別して表示する。
 
 ### K-H Action 候補 → 認可 → 実作用 → 結果確定
 
@@ -668,7 +669,7 @@ struct RequestMoveCommand {
     companion: CompanionId,
     from_client: Option<ClientId>,
     to_client: ClientId,
-    reason: MoveReasonRef,           // Owner呼出し / 事前指示 / 文脈上の自発 / 切断復帰 / 再起動復旧の別
+    reason: MoveReasonRef,           // Owner呼出し / 事前指示 / 文脈上の自発 / Host発の通常切断fallback / Host再起動復旧の別
     expected_generation: PresenceGeneration, // boundary token
     expected_state: PresenceStateExpectation,
     round_closure: RoundClosureRef,  // 入出力・提示と実行・拡張からの区切り・利用不能・作用不明の対応
@@ -726,6 +727,7 @@ struct ConfirmPresentationObservation {
 ```
 
 - 会話の意味・History は個体調整、round の実際・提示・区切りは入出力・提示、帰属成立は接続・存在。旧 round の入力・生成途中・未提示を新 round へ付け替えない。生成済み＝提示済みにしない。Voice に話者認証済みの意味を足さない。
+- wire の新規 round 開始要求（IPC §13.1 の `SubmitTextInput.round = None`）は入出力・提示が現在条件の照合と round 発行を行ってから、本 interface の `RoundId` を満たす。Client や ingress mapping が domain identity を発行せず、旧 round の拒否を新規開始へ自動読替えしない。
 
 ### X-C Body 表示の帰属
 
@@ -1044,6 +1046,8 @@ struct ResetCommand {
 ## 9. 管理経路の独立（第一者管理面 → 各 owner）
 
 第一者の入出力・提示は、作業への Cancel・Schedule 管理・記録確認、個体調整への個体停止・削除、権限・制約への承認拒否・Rule・同意・cap・device 管理、認証秘密への明示的な認証設定、保全・消去への消去・backup・restore・Reset を直接要求できる。ここで「直接」は本体 LLM の承認や長時間 Task の完了を介在させない意味であり、具体 API の指定ではない。各 owner の受理・確認・結果に従い、UI に任意 state の書換権を与えない。受付と完了、保存済み data への影響、既知作用と不明を区別して提示する（H-10 / X-10 / K-1 / D-A〜D-E の管理入口の共通性質）。
+
+高権限操作の最終確認は Host PC 上の trusted first-party management surface に限定する（RA-01 Owner decision、具体的な対象・確認境界は IPC §18）。pairing / device trust・revocation、Credential 変更、Restore・復元後一括有効化、Full Reset 等の要求を Remote Client が送れても、remote の確認申告だけでは成立させない。担当 owner は Host が確認した入口の由来と当該操作・対象・現在前提に結び付く確認事実を必要とし、下記 command の存在を確認済みと読まない。同居 transport や pairing だけでは trusted first-party 性を与えず、Tool / Computer Use 等の代理入力による最終確認も受け入れない。管理面全体に会話の active 制約は課さない。
 
 ```rust
 struct ManagementOperationCommand {
@@ -1401,7 +1405,7 @@ trait UndeliveredRepository {
 | remote-capable | X-D eligibility 通知の一部（`NotifyPresenceChangeFact` の Client 向け表示） | 観測状態・対象範囲の説明可能性のため。Raw・候補・routing 用 data・私的 context は送らない |
 | remote-capable | D-B の Client 一時 data 参加（`DemandLocalErasureCommand` の Client 宛て分） | 接続中 Client の一時 data・拡張一時 data も参加する。切断・応答なしを消去成功とせず、未確認範囲を保全・消去へ伝える。再接続時に旧 copy を戻さない |
 | remote-capable | C-A の表示資材利用（Body・Voice 資材） | Character 静的資材の表示利用。適用関係・経験状態は送らない。内部正本の主 key として再利用できる形で渡さない |
-| remote-capable | 管理面の表示・操作（第9節の `ManagementOperationCommand` の Client 側入口） | 管理操作の意味・適用・成功判定は担当 owner から受ける。UI に任意 state の書換権を与えない |
+| remote-capable（高権限の最終確認を除く） | 管理面の表示・操作（第9節の `ManagementOperationCommand` の Client 側入口） | 管理操作の意味・適用・成功判定は担当 owner から受ける。高権限の要求は送れても最終確認は Host PC 上の trusted first-party management surface で行う（IPC §18）。UI に任意 state の書換権を与えない |
 | Host-local（越境させない） | H-B〜H-E の形成・訂正・scope 意味判断、K-A〜K-C の制御確定・秘密利用、K-D〜K-G の割当解決・送信条件・予約の確定、K-H の認可・作用確定、D-A・D-C・D-D の範囲確定・完了確定・switch | 現在条件の照合・秘密・世代・消去条件を Host canonical で確定するため。Client・Provider・MCP・Plugin を正本・owner にしない。解決済み経路・判定 copy・Client 主張をそのまま越境先の authority にしない |
 | Host-local（越境させない） | 第13節の repository compare-and-commit 群 | durable primary の compare を Host 単一 SQLite transaction で不可分にするため。DB transaction を Client・Provider・MCP へ露出させない |
 | 外部境界（Host→Provider / MCP / Plugin / 外部 file） | K-E の実送信、K-I の拡張利用、K-C の認証用途供給、C-C の import 受入 | 用途・data・送信先・同意・費用・秘密保護の条件付き。Provider・MCP・Plugin を domain owner にしない。秘密値を通常経路に載せない |
