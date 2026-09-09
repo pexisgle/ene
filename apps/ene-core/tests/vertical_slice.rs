@@ -216,9 +216,13 @@ async fn send_round(
     client: &mut Client,
     text: &str,
 ) -> Result<(String, Option<ene_api::v1::refs::StreamWireId>, String), String> {
+    // The client echoes the companion projection its session learned from
+    // presence (public API end to end); scaffolding never hardcodes it.
+    let companion = client.companion_ref();
     let send = ask(
         client,
         WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
             None,
             String::from(text),
             String::from("en"),
@@ -290,9 +294,10 @@ async fn ask_stream(client: &mut Client) -> Result<WirePayload, String> {
 }
 
 async fn history_count(client: &mut Client) -> Result<(usize, bool, bool), String> {
+    let companion = client.companion_ref();
     let history = ask(
         client,
-        WirePayload::HistoryRequest(cmds::history_request(50)),
+        WirePayload::HistoryRequest(cmds::history_request(&companion, 50)),
         "history",
     )
     .await;
@@ -462,9 +467,11 @@ async fn production_path_setup_to_restart() {
         "restart must preserve history ({before} -> {after})"
     );
 
+    let companion = client.companion_ref();
     let stale = ask(
         &mut client,
         WirePayload::SubmitTextInput(cmds::submit_input(
+            &companion,
             Some(round_wire),
             String::from("old round retry"),
             String::from("en"),
@@ -1110,7 +1117,7 @@ async fn binaries_drive_send_stream_history_and_restart() {
 
     let server = spawn_serve_binary(&core, &config, &server_env);
     assert!(server.is_some(), "serve must spawn");
-    let Some(mut server) = server else {
+    let Some(server) = server else {
         fake.abort();
         return;
     };
@@ -1207,11 +1214,14 @@ async fn binaries_drive_send_stream_history_and_restart() {
         "history must hold the reply text, got {history_out:?}"
     );
 
-    drop(server.0.take());
+    // Drop the whole guard: `KillOnDrop` kills the child on drop, while
+    // dropping a bare `std::process::Child` would leak the old server
+    // (still holding the unlinked socket) past the restart.
+    drop(server);
     drop(std::fs::remove_file(dir.join("ene.sock")));
     let server = spawn_serve_binary(&core, &config, &server_env);
     assert!(server.is_some(), "serve must respawn after restart");
-    let Some(mut server) = server else {
+    let Some(server) = server else {
         fake.abort();
         return;
     };
@@ -1245,6 +1255,6 @@ async fn binaries_drive_send_stream_history_and_restart() {
         matches!(&resend, Some((0, out, _)) if out.contains(PROD_FAKE_TEXT)),
         "the restarted server must serve new sends, got {resend:?}"
     );
-    drop(server.0.take());
+    drop(server);
     fake.abort();
 }
