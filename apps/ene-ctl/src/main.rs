@@ -198,8 +198,11 @@ async fn request_history(
     session: &mut client::Client,
     limit: u64,
 ) -> Result<ene_api::v1::round::HistoryView, CliError> {
+    let companion = session.companion_ref();
     match session
-        .request(WirePayload::HistoryRequest(cmds::history_request(limit)))
+        .request(WirePayload::HistoryRequest(cmds::history_request(
+            &companion, limit,
+        )))
         .await?
     {
         WirePayload::HistoryView(view) => Ok(view),
@@ -284,7 +287,12 @@ async fn run_send(
     language: &str,
     send: cmds::SendArgs,
 ) -> Result<(), CliError> {
-    let input = cmds::submit_input(send.round, send.text, String::from(language));
+    let input = cmds::submit_input(
+        &session.companion_ref(),
+        send.round,
+        send.text,
+        String::from(language),
+    );
     let outcome = match session.request(WirePayload::SubmitTextInput(input)).await? {
         WirePayload::RoundIntakeOutcome(outcome) => outcome,
         unexpected => {

@@ -200,6 +200,9 @@ pub const DEFERRED_CAP: usize = 32;
 pub struct SessionState {
     /// Latest observed presence generation, if any fact arrived yet.
     generation: Option<u64>,
+    /// Latest observed companion projection, echoed back on submits and
+    /// history requests so the Host resolves them through its mapping.
+    companion: Option<String>,
     /// Connection key the Host issued on authentication, if challenged yet.
     connection_id: Option<ConnectionWireId>,
     /// Pairing secret proving this device, if provisioned yet.
@@ -213,6 +216,7 @@ impl core::fmt::Debug for SessionState {
         formatter
             .debug_struct("SessionState")
             .field("generation", &self.generation)
+            .field("companion", &self.companion)
             .field("connection_id", &self.connection_id)
             .field(
                 "pairing_secret",
@@ -229,6 +233,7 @@ impl SessionState {
     pub fn new() -> Self {
         Self {
             generation: None,
+            companion: None,
             connection_id: None,
             pairing_secret: None,
             deferred: VecDeque::new(),
@@ -263,9 +268,23 @@ impl SessionState {
     }
 
     /// Records an authoritative presence fact: the fact's generation becomes
-    /// current (latest supersedes; the Host sends the fact post-capability).
+    /// current (latest supersedes; the Host sends the fact post-capability)
+    /// and its companion projection becomes the ref this session echoes on
+    /// submits and history requests, so the Host resolves them through its
+    /// mapping instead of guessing.
     pub fn observe_presence(&mut self, fact: &PresenceAttributionWire) {
         self.generation = Some(presence_generation_of_fact(fact));
+        self.companion = Some(fact.companion.0.clone());
+    }
+
+    /// Returns the companion projection to echo: the learned one, or the
+    /// [`DEFAULT_COMPANION_REF`](crate::cmds::DEFAULT_COMPANION_REF)
+    /// bootstrap until the first presence fact arrives (the Host
+    /// revalidates the bootstrap rather than attributing through it).
+    pub fn companion_ref(&self) -> String {
+        self.companion
+            .clone()
+            .unwrap_or_else(|| String::from(crate::cmds::DEFAULT_COMPANION_REF))
     }
 
     /// Records a stale-round answer's current generation during normal
@@ -443,13 +462,22 @@ pub fn decide_auth(payload: &WirePayload) -> AuthDecision {
 /// device per connection; the envelope's device field is a Client claim the
 /// Host must not trust for authentication). The incarnation still travels so
 /// the connection's pinned owner stays attributable.
-pub fn proof_frame(proof: &str, incarnation: ClientIncarnationId) -> WireFrame {
+/// Builds the proof frame: the wire sender names the paired device under
+/// proof (the Host attributes through its connection table and never trusts
+/// the claim, but the paired sender contract carries it), echoes the
+/// caller incarnation, and hides the connection id (still undisclosed
+/// pre-accept).
+pub fn proof_frame(
+    proof: &str,
+    incarnation: ClientIncarnationId,
+    device_id: DeviceWireId,
+) -> WireFrame {
     frame_for(
         WirePayload::AuthProof(AuthProof {
             proof: String::from(proof),
         }),
         WireSender {
-            device_id: None,
+            device_id: Some(device_id),
             incarnation_id: incarnation,
             connection_id: None,
         },
@@ -544,10 +572,12 @@ pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> Wire
 /// optional features (text is the baseline, not a capability), and carries
 /// the display platform string.
 ///
-/// `connect` passes [`None`] for the device: the Host attributes the frame
-/// through its connection table (paired moments earlier on this same
-/// connection), so no pre-auth device claim travels. The parameter stays so
-/// tests and future callers can thread a known device when one exists.
+/// `connect` passes the paired device: the paired-sender contract names it
+/// on capability and proof frames alike. The Host still attributes through
+/// its connection table (paired moments earlier on this same connection)
+/// and never trusts the claim — a mismatched claim drops the frame — so the
+/// value here satisfies the wire contract without becoming authority.
+/// Pre-pairing callers (and tests) pass [`None`].
 pub fn capability_frame(
     platform: &str,
     incarnation: ClientIncarnationId,
@@ -751,7 +781,11 @@ impl Client {
             }
             device::SecretSource::Missing => {}
         }
-        write_frame(&mut stream, &capability_frame(platform, incarnation, None)).await?;
+        write_frame(
+            &mut stream,
+            &capability_frame(platform, incarnation, Some(device_id)),
+        )
+        .await?;
         match read_frame(&mut stream).await?.payload {
             WirePayload::NegotiatedConnection(negotiated) => {
                 if !negotiated.version.shares_major_with(&ProtocolVersion::V1) {
@@ -820,9 +854,14 @@ impl Client {
             return Err(CliError::ServerOutcome(missing_secret_guidance()));
         };
         let proof = pairing_proof_hex(&secret, &challenge.nonce);
+        let Some(device) = self.sender.device_id else {
+            return Err(CliError::ServerRejected(String::from(
+                "cannot prove ownership without a paired device",
+            )));
+        };
         write_frame(
             &mut self.stream,
-            &proof_frame(&proof, self.sender.incarnation_id),
+            &proof_frame(&proof, self.sender.incarnation_id, device),
         )
         .await?;
         let answer = read_frame(&mut self.stream).await?.payload;
@@ -835,6 +874,14 @@ impl Client {
             AuthDecision::Guidance { message } => Err(CliError::ServerOutcome(message)),
             AuthDecision::Unexpected { message } => Err(CliError::ServerRejected(message)),
         }
+    }
+
+    /// Returns the companion projection to echo on submits and history
+    /// requests: the presence-learned one, or the bootstrap fallback until
+    /// the first fact arrives (see
+    /// [`SessionState::companion_ref`]).
+    pub fn companion_ref(&self) -> String {
+        self.state.companion_ref()
     }
 
     /// Sends one payload frame and reads the correlated answer, absorbing
@@ -1193,7 +1240,7 @@ mod tests {
             connection_id: None,
         };
         let frame = frame_for(
-            WirePayload::HistoryRequest(crate::cmds::history_request(3)),
+            WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 3)),
             sender,
         );
         assert!(
@@ -1313,7 +1360,7 @@ mod tests {
             stale_generation_of(&accepted).is_none(),
             "a non-stale answer yields nothing"
         );
-        let history = WirePayload::HistoryRequest(crate::cmds::history_request(1));
+        let history = WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 1));
         assert!(
             stale_generation_of(&history).is_none(),
             "an unrelated payload yields nothing"
@@ -1328,6 +1375,7 @@ mod tests {
             connection_id: None,
         };
         let input = WirePayload::SubmitTextInput(crate::cmds::submit_input(
+            "companion-1",
             None,
             String::from("hello"),
             String::from("en"),
@@ -1339,6 +1387,7 @@ mod tests {
         );
         let bootstrap = frame_for_session(
             WirePayload::SubmitTextInput(crate::cmds::submit_input(
+                "companion-1",
                 None,
                 String::from("hello"),
                 String::from("en"),
@@ -1355,7 +1404,7 @@ mod tests {
             "pre-fact bootstrap stamps None (NeedsRevalidation is correct)"
         );
         let history = frame_for_session(
-            WirePayload::HistoryRequest(crate::cmds::history_request(1)),
+            WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 1)),
             sender,
             Some(6),
         );
@@ -1414,7 +1463,7 @@ mod tests {
 
     /// Builds an answer payload (the kind never matters to selection).
     fn answer_payload() -> WirePayload {
-        WirePayload::HistoryRequest(crate::cmds::history_request(1))
+        WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 1))
     }
 
     #[test]
@@ -1453,6 +1502,31 @@ mod tests {
     }
 
     #[test]
+    fn session_echoes_the_learned_companion_projection() {
+        use super::SessionState;
+
+        let mut state = SessionState::new();
+        assert_eq!(
+            state.companion_ref(),
+            String::from(crate::cmds::DEFAULT_COMPANION_REF),
+            "bootstrap echoes the fallback until the first fact"
+        );
+        let mut fact = presence_fact(3);
+        fact.companion = CompanionWireRef(String::from("host-issued-projection"));
+        state.observe_presence(&fact);
+        assert_eq!(
+            state.companion_ref(),
+            String::from("host-issued-projection"),
+            "after presence the session echoes the learned projection"
+        );
+        assert_eq!(
+            state.generation(),
+            Some(3),
+            "generation bookkeeping is untouched"
+        );
+    }
+
+    #[test]
     fn retry_frame_reuses_command_with_fresh_transport_ids() {
         let sender = WireSender {
             device_id: None,
@@ -1462,6 +1536,7 @@ mod tests {
         let command = CommandWireId(uuid::Uuid::new_v4());
         let input = || {
             WirePayload::SubmitTextInput(crate::cmds::submit_input(
+                "companion-1",
                 None,
                 String::from("hi"),
                 String::from("en"),
@@ -1632,7 +1707,7 @@ mod tests {
     /// Builds a history answer carrying `limit`, so out-of-order answers
     /// stay distinguishable by payload.
     fn history_answer(limit: u64) -> WirePayload {
-        WirePayload::HistoryRequest(crate::cmds::history_request(limit))
+        WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", limit))
     }
 
     #[test]
@@ -1770,8 +1845,10 @@ mod tests {
     }
 
     #[test]
-    fn proof_frame_authenticates_without_device_claims() {
-        let frame = proof_frame("proof-hex-abc", incarnation());
+    fn proof_frame_names_the_paired_device() {
+        use ene_api::v1::refs::DeviceWireId;
+        let device = DeviceWireId(uuid::Uuid::new_v4());
+        let frame = proof_frame("proof-hex-abc", incarnation(), device);
         let WirePayload::AuthProof(proof) = &frame.payload else {
             return;
         };
@@ -1780,10 +1857,10 @@ mod tests {
             "the proof value travels in the auth frame"
         );
         assert!(
-            frame.envelope.sender.device_id.is_none()
+            frame.envelope.sender.device_id == Some(device)
                 && frame.envelope.sender.connection_id.is_none()
                 && frame.envelope.sender.incarnation_id == incarnation(),
-            "the proof claims no device or connection: {:?}",
+            "the proof names the paired device but no connection: {:?}",
             frame.envelope.sender
         );
         let rendered = format!("{frame:?}");
@@ -1805,8 +1882,9 @@ mod tests {
 
     #[test]
     fn proof_derives_from_the_secret_and_the_single_use_nonce() {
+        use ene_api::v1::refs::DeviceWireId;
         let proof = ene_credential::pairing_proof_hex("pairing-secret", "nonce-1");
-        let frame = proof_frame(&proof, incarnation());
+        let frame = proof_frame(&proof, incarnation(), DeviceWireId(uuid::Uuid::new_v4()));
         let WirePayload::AuthProof(carried) = &frame.payload else {
             return;
         };

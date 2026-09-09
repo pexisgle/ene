@@ -7,10 +7,11 @@
 //!
 //! Wire-mapping decisions (all within the existing DTO shapes):
 //!
-//! * Companion reference: the CLI has no companion lifecycle yet, so every
-//!   request carries [`DEFAULT_COMPANION_REF`] (`"default"`). The Host maps
-//!   that bootstrap value to its singleton companion; real companion
-//!   references arrive with the companion lifecycle.
+//! * Companion reference: every request echoes the projection the session
+//!   learned from presence ([`DEFAULT_COMPANION_REF`] (`"default"`) until
+//!   the first fact). The Host resolves inbound refs through its own
+//!   mapping — exact match against the issued projection, never derived —
+//!   so a rotated or guessed ref revalidates instead of attributing.
 //! * `setup --provider openai --model MODEL` performs two intents in the
 //!   shared setup-target grammar
 //!   ([`credential_target`] and
@@ -58,8 +59,10 @@ use ene_api::v1::round::{
 
 use crate::errors::{CliError, USAGE};
 
-/// Bootstrap companion reference sent until the companion lifecycle issues
-/// real references. The Host maps this value to its singleton companion.
+/// Fallback companion reference sent until the first presence fact arrives.
+/// The Host only resolves projections it issued itself, so this fallback
+/// revalidates (rather than silently attributing) until the session learns
+/// the current projection from presence and echoes it back.
 pub const DEFAULT_COMPANION_REF: &str = "default";
 
 /// Default item cap for `history` when `--limit` is absent.
@@ -376,19 +379,25 @@ pub fn status_view_request() -> ManagementViewRequest {
 }
 
 /// Builds a timeline request against the bootstrap companion reference.
-pub fn history_request(limit: u64) -> HistoryRequest {
+pub fn history_request(companion: &str, limit: u64) -> HistoryRequest {
     HistoryRequest {
-        companion: CompanionWireRef(String::from(DEFAULT_COMPANION_REF)),
+        companion: CompanionWireRef(companion.to_string()),
         since: None,
         limit,
     }
 }
 
-/// Builds a text-input candidate: bootstrap companion, optional premise
-/// round, a fresh [`new_local_id`], and the given body.
-pub fn submit_input(round: Option<String>, text: String, lang: String) -> SubmitTextInput {
+/// Builds a text-input candidate: the caller-learned companion projection
+/// (echoed from presence; [`DEFAULT_COMPANION_REF`] until the first fact),
+/// optional premise round, a fresh [`new_local_id`], and the given body.
+pub fn submit_input(
+    companion: &str,
+    round: Option<String>,
+    text: String,
+    lang: String,
+) -> SubmitTextInput {
     SubmitTextInput {
-        companion: CompanionWireRef(String::from(DEFAULT_COMPANION_REF)),
+        companion: CompanionWireRef(companion.to_string()),
         round: round.map(RoundWireId),
         local_id: new_local_id(),
         body: TextBodyWire {
@@ -635,11 +644,11 @@ mod tests {
 
     use super::{Command, IntakeAction, ManagementAction, SendArgs, SetupMode};
     use super::{
-        DEFAULT_COMPANION_REF, DEFAULT_HISTORY_LIMIT, HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI,
-        assignment_intent, consent_target_for, credential_id_for, credential_intent,
-        credential_target_for, describe_intake, describe_management, history_request, new_local_id,
-        parse_command, render_history, render_round_history, render_view, role_label,
-        setup_view_request, status_view_request, submit_input,
+        DEFAULT_HISTORY_LIMIT, HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI, assignment_intent,
+        consent_target_for, credential_id_for, credential_intent, credential_target_for,
+        describe_intake, describe_management, history_request, new_local_id, parse_command,
+        render_history, render_round_history, render_view, role_label, setup_view_request,
+        status_view_request, submit_input,
     };
 
     /// Builds owned arguments from plain words.
@@ -1217,19 +1226,20 @@ mod tests {
             status.sections == setup.sections,
             "status requests the same four Host sections: {status:?}"
         );
-        let history = history_request(7);
+        let history = history_request("companion-1", 7);
         assert!(
-            history.companion.0 == DEFAULT_COMPANION_REF && history.limit == 7,
-            "history targets the bootstrap companion: {history:?}"
+            history.companion.0 == "companion-1" && history.limit == 7,
+            "history echoes the learned companion: {history:?}"
         );
         let input = submit_input(
+            "companion-1",
             Some(String::from("round-1")),
             String::from("hello"),
             String::from("en"),
         );
         assert!(
-            input.companion.0 == DEFAULT_COMPANION_REF,
-            "input targets the bootstrap companion: {input:?}"
+            input.companion.0 == "companion-1",
+            "input echoes the learned companion: {input:?}"
         );
         let Some(round) = input.round.as_ref() else {
             return;
@@ -1238,7 +1248,12 @@ mod tests {
             round.0 == "round-1",
             "input keeps the premise round: {input:?}"
         );
-        let fresh = submit_input(None, String::from("hello"), String::from("en"));
+        let fresh = submit_input(
+            "companion-1",
+            None,
+            String::from("hello"),
+            String::from("en"),
+        );
         assert!(
             fresh.round.is_none(),
             "no premise round must request a new round: {fresh:?}"
