@@ -19,6 +19,7 @@
 
 ## 未解決 blocker
 
-- #1360 レビュー第4ラウンド対応済み: duplicate→close の実バグ修正（三値 `LiveDecision`＋socket 回帰テスト）、companion mapping loop（Host 発行・resolve・Client echo）、paired-sender `Some` 化、E2E の kill 漏れ修正。codec 境界の unknown-variant 到達性は P2 hardening として明示 defer（reviewer 合意済み）。CI 待ち
+- #1360 レビュー第4ラウンド対応済み: duplicate→close の実バグ修正（三値 `LiveDecision`＋socket 回帰テスト）、companion mapping loop（Host 発行・resolve・Client echo）、paired-sender `Some` 化、E2E の kill 漏れ修正。codec 境界の unknown-variant 到達性は P2 hardening として明示 defer（reviewer 合意済み）
+- Windows CI red（`Client::companion_ref` の stub 欠落）を修正 — Unix-only surface を cross-platform の main から呼んでいたのが原因。ローカルで `x86_64-pc-windows-gnu` checkを通して確認、CI 再実行待ち
 - 残りはレビュアー判断待ち: pre-auth claim 厳格化（現状は無視＋drop で fail-closed）、intent replay table、presence fallback edge（Stage 5 へ defer 済み）
 - マージ順: #1355 → #1356 → #1358 → #1359 → #1360
