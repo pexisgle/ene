@@ -19,8 +19,8 @@
 //!   below notes as env-sourced.
 //! - `(ManageRuleConsentCap, "consent:{provider}:{model}:{credential-id}")`
 //!   assigns the route after verifying the credential is present (registry
-//!   knows it and the store holds its bearer), then saves consent at revision
-//!   previous-plus-one and answers
+//!   knows it and the store holds its bearer), then commits consent through
+//!   compare-and-save at revision previous-plus-one and answers
 //!   [`StoredAsRuleView`](ene_api::v1::management::ManagementOutcome::StoredAsRuleView)
 //!   carrying the new revision mark.
 //! - `(ManageRuleConsentCap, "setup:complete")` verifies consent plus
@@ -30,21 +30,31 @@
 //! - `(ManageRuleConsentCap, "setup:show")` answers a [`ManagementView`]
 //!   instead of an outcome.
 //!
-//! The `NeedsClarification` DTO carries no detail string, so the "not in
+//! Target parsing uses the shared `ene-api` setup grammar
+//! ([`parse_credential_target`],
+//! [`parse_consent_target`]):
+//! the Host parse is authoritative and builders never bypass validation. The
+//! `NeedsClarification` DTO carries no detail string, so the "not in
 //! `Stage 2` scope" note lives here in documentation, not on the wire.
-//! `base_view` staleness is checked on the consent-writing paths against the
-//! current consent mark; mismatch answers
-//! [`StaleBaseView`](ene_api::v1::management::ManagementOutcome::StaleBaseView).
-//! Registration takes no mark (no revision is involved) and views are reads.
+//! Consent writes compare-and-save against the expectation parsed from the
+//! intent `base_view`; mismatch answers
+//! [`StaleBaseView`](ene_api::v1::management::ManagementOutcome::StaleBaseView)
+//! with the rebuilt current mark. Registration takes no mark (no revision is
+//! involved) and views are reads.
 //!
 //! Views never carry secrets: sections report provider, model, consent
 //! revision, and credential presence only. A store failure behind a view
 //! answers zero sections under the `"unavailable"` mark (documented gap: there
 //! is no error DTO on the view path).
+//!
+//! Rationale provenance only: this inlet never reads the intent `rationale`.
+//! Assignment parameters come from the parsed consent target; the Host never
+//! sends intents, so no `quote` handling exists Host-side.
 
 use ene_api::v1::management::{
     ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
-    ManagementViewRequest, ViewSection,
+    ManagementViewRequest, SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, ViewSection,
+    parse_consent_target, parse_credential_target,
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
@@ -52,11 +62,11 @@ use ene_credential::{
     CredentialRef, CredentialRefRepository, CredentialStore, RegisterCredentialCommand,
     RegisterOutcome, register,
 };
-use ene_permission::{ConsentRecord, ConsentRepository, ConsentRevision};
+use ene_permission::{ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision};
 use ene_plugin_ipc::WireFrame;
 use ene_primitive::RawId;
 
-use crate::serve::{CredStore, HostHandle, outgoing_envelope, outgoing_frame};
+use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing_frame};
 
 /// Builds a management outcome reply, echoing the intent id.
 ///
@@ -64,10 +74,16 @@ use crate::serve::{CredStore, HostHandle, outgoing_envelope, outgoing_frame};
 /// intent id as `command_id` alongside the `reply_to` link.
 fn outcome_frame(
     frame: &WireFrame,
+    live: &LiveInput,
     intent: &ManagementIntent,
     outcome: ManagementOutcome,
 ) -> WireFrame {
-    let mut envelope = outgoing_envelope("ManagementOutcome", Some(frame.envelope.message_id));
+    let mut envelope = outgoing_envelope(
+        frame,
+        live,
+        "ManagementOutcome",
+        Some(frame.envelope.message_id),
+    );
     envelope.correlation.command_id = Some(intent.intent_id);
     WireFrame {
         envelope,
@@ -76,39 +92,66 @@ fn outcome_frame(
 }
 
 /// Builds a management view reply.
-fn view_frame(frame: &WireFrame, view: ManagementView) -> WireFrame {
-    outgoing_frame(frame, "ManagementView", WirePayload::ManagementView(view))
+fn view_frame(frame: &WireFrame, live: &LiveInput, view: ManagementView) -> WireFrame {
+    outgoing_frame(
+        frame,
+        live,
+        "ManagementView",
+        WirePayload::ManagementView(view),
+    )
 }
 
-/// Splits a `"credential:{provider}:{label}"` target.
-fn split_credential_target(target: &str) -> Option<(String, String)> {
-    let rest = target.strip_prefix("credential:")?;
-    let (provider, label) = rest.split_once(':')?;
-    if provider.is_empty() || label.is_empty() {
-        return None;
-    }
-    Some((provider.to_string(), label.to_string()))
-}
-
-/// Splits a `"consent:{provider}:{model}:{credential-id}"` target.
+/// Renders the consent display mark for an optional stored record.
 ///
-/// The credential id keeps its remainder verbatim (it is itself a
-/// `provider:label` pair), so the split is capped at three parts.
-fn split_consent_target(target: &str) -> Option<(String, String, String)> {
-    let rest = target.strip_prefix("consent:")?;
-    let mut parts = rest.splitn(3, ':');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(provider), Some(model), Some(credential))
-            if !provider.is_empty() && !model.is_empty() && !credential.is_empty() =>
-        {
-            Some((
-                provider.to_string(),
-                model.to_string(),
-                credential.to_string(),
-            ))
-        }
-        _ => None,
+/// `"consent-rev-{n}"` over the stored revision, or `"consent-none"` when
+/// nothing is stored. The same mark travels in views and in
+/// [`StaleBaseView`](ene_api::v1::management::ManagementOutcome::StaleBaseView)
+/// outcomes, so staleness checks compare against one vocabulary.
+fn consent_mark(current: Option<&ConsentRecord>) -> String {
+    match current {
+        Some(record) => format!("consent-rev-{}", record.rev.as_u64()),
+        None => String::from("consent-none"),
     }
+}
+
+/// Parsed consent `base_view` mark: a compare-and-save expectation.
+///
+/// Three cases, never collapsed: expecting empty, expecting a stored id at a
+/// parsed revision, or stale on its face. Callers answer `StaleBaseView` with
+/// the rebuilt current mark on [`ConsentExpectation::FaceStale`] instead of
+/// writing.
+enum ConsentExpectation {
+    /// The mark (`"consent-none"`) expects no stored row.
+    ExpectEmpty,
+    /// The mark (`"consent-rev-N"`) expects the loaded current consent id at
+    /// the parsed revision.
+    ExpectRevision(String, ConsentRevision),
+    /// The mark is stale on its face: unparseable, or a revision claim with
+    /// no stored row.
+    FaceStale,
+}
+
+/// Parses the intent `base_view` mark into a compare-and-save expectation.
+///
+/// `"consent-none"` expects no stored row; `"consent-rev-N"` expects the
+/// loaded current consent id at revision `N`.
+fn consent_expectation(base_view: &str, current: Option<&ConsentRecord>) -> ConsentExpectation {
+    if base_view == "consent-none" {
+        return ConsentExpectation::ExpectEmpty;
+    }
+    let Some(revision_text) = base_view.strip_prefix("consent-rev-") else {
+        return ConsentExpectation::FaceStale;
+    };
+    let Ok(revision_number) = revision_text.parse::<u64>() else {
+        return ConsentExpectation::FaceStale;
+    };
+    let Some(stored) = current else {
+        return ConsentExpectation::FaceStale;
+    };
+    ConsentExpectation::ExpectRevision(
+        stored.id.clone(),
+        ConsentRevision::from_u64(revision_number),
+    )
 }
 
 /// Default non-secret credential ref used before any consent exists.
@@ -152,17 +195,13 @@ impl HostHandle {
 
     /// Reads the current consent display mark, if the store answers.
     ///
-    /// The mark is `"consent-rev-{n}"` over the stored revision, or
-    /// `"consent-none"` when nothing is stored. [`None`] means the store
-    /// failed and the caller must hold rather than decide.
+    /// The mark follows [`consent_mark`]. [`None`] means the store failed and
+    /// the caller must hold rather than decide.
     pub(crate) async fn current_mark(&self) -> Option<String> {
         let Ok(current) = self.store.load_current().await else {
             return None;
         };
-        match current {
-            Some(record) => Some(format!("consent-rev-{}", record.rev.as_u64())),
-            None => Some(String::from("consent-none")),
-        }
+        Some(consent_mark(current.as_ref()))
     }
 
     /// Reports whether setup is complete: consent stored and bearer present.
@@ -194,19 +233,21 @@ impl HostHandle {
     /// [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation):
     /// nothing was decided, so a later retry is safe.
     pub(crate) async fn apply_intent(
-        &mut self,
+        &self,
         frame: &WireFrame,
         intent: &ManagementIntent,
+        live: &LiveInput,
     ) -> Vec<WireFrame> {
         match intent.kind {
             ManagementIntentKind::ConfigureCredentialIntent => {
-                self.register_credential(frame, intent).await
+                self.register_credential(frame, intent, live).await
             }
             ManagementIntentKind::ManageRuleConsentCap => {
-                self.apply_consent_or_setup(frame, intent).await
+                self.apply_consent_or_setup(frame, intent, live).await
             }
             _ => vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::NeedsClarification,
             )],
@@ -215,13 +256,15 @@ impl HostHandle {
 
     /// Registers the credential ref named by a `credential:` target.
     async fn register_credential(
-        &mut self,
+        &self,
         frame: &WireFrame,
         intent: &ManagementIntent,
+        live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let Some((provider, label)) = split_credential_target(&intent.target.0) else {
+        let Some((provider, label)) = parse_credential_target(&intent.target) else {
             return vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::NeedsClarification,
             )];
@@ -234,67 +277,80 @@ impl HostHandle {
                 Ok(RegisterOutcome::InvalidProvider) => ManagementOutcome::NeedsClarification,
                 Err(_) => ManagementOutcome::HeldByOperation,
             };
-        vec![outcome_frame(frame, intent, outcome)]
+        vec![outcome_frame(frame, live, intent, outcome)]
     }
 
     /// Routes a consent-scope intent to assign, complete, or show.
     async fn apply_consent_or_setup(
-        &mut self,
+        &self,
         frame: &WireFrame,
         intent: &ManagementIntent,
+        live: &LiveInput,
     ) -> Vec<WireFrame> {
         let target = intent.target.0.as_str();
-        if target == "setup:show" {
+        if target == SETUP_SHOW_TARGET {
             let view = self.build_view(&[]).await;
-            return vec![view_frame(frame, view)];
+            return vec![view_frame(frame, live, view)];
         }
-        if target == "setup:complete" {
-            return self.complete_setup(frame, intent).await;
+        if target == SETUP_COMPLETE_TARGET {
+            return self.complete_setup(frame, intent, live).await;
         }
-        let Some((provider, model, credential_id)) = split_consent_target(target) else {
+        let Some((provider, model, credential_id)) = parse_consent_target(&intent.target) else {
             return vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::NeedsClarification,
             )];
         };
-        self.assign_consent(frame, intent, &provider, &model, &credential_id)
+        self.assign_consent(frame, intent, &provider, &model, &credential_id, live)
             .await
     }
 
     /// Assigns the consent route after verifying credential presence.
     ///
-    /// Checks the intent `base_view` against the current consent mark first
-    /// (stale views re-read and retry), then requires the credential to be
+    /// Parses the intent `base_view` into a compare-and-save expectation
+    /// against the loaded current record, then requires the credential to be
     /// both registered and bearer-present. The saved record keeps the stored
-    /// id when one exists and bumps its revision by one, saturating.
+    /// id when one exists and bumps its revision by one, saturating. A lost
+    /// compare race (or a view that moved between read and write) answers
+    /// `StaleBaseView` with the rebuilt current mark instead of overwriting:
+    /// the caller re-reads and retries.
     async fn assign_consent(
-        &mut self,
+        &self,
         frame: &WireFrame,
         intent: &ManagementIntent,
         provider: &str,
         model: &str,
         credential_id: &str,
+        live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let Some(mark) = self.current_mark().await else {
+        let Ok(current) = self.store.load_current().await else {
             return vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::HeldByOperation,
             )];
         };
-        if intent.base_view.0 != mark {
-            return vec![outcome_frame(
-                frame,
-                intent,
-                ManagementOutcome::StaleBaseView {
-                    current: ViewMarkWire(mark),
-                },
-            )];
-        }
+        let expected = match consent_expectation(&intent.base_view.0, current.as_ref()) {
+            ConsentExpectation::ExpectEmpty => None,
+            ConsentExpectation::ExpectRevision(id, revision) => Some((id, revision)),
+            ConsentExpectation::FaceStale => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::StaleBaseView {
+                        current: ViewMarkWire(consent_mark(current.as_ref())),
+                    },
+                )];
+            }
+        };
         let Ok(refs) = self.store.list_refs().await else {
             return vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::HeldByOperation,
             )];
@@ -302,6 +358,7 @@ impl HostHandle {
         let Some(credential) = refs.iter().find(|known| known.id == credential_id).cloned() else {
             return vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::NeedsClarification,
             )];
@@ -309,17 +366,11 @@ impl HostHandle {
         if !self.cred_store.contains(&credential) {
             return vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::NeedsClarification,
             )];
         }
-        let Ok(current) = self.store.load_current().await else {
-            return vec![outcome_frame(
-                frame,
-                intent,
-                ManagementOutcome::HeldByOperation,
-            )];
-        };
         let next_rev = match current.as_ref() {
             Some(record) => record.rev.as_u64().saturating_add(1),
             None => 1,
@@ -335,16 +386,26 @@ impl HostHandle {
             model: model.to_string(),
             credential_id: credential_id.to_string(),
         };
-        match self.store.save_current(record).await {
-            Ok(()) => vec![outcome_frame(
+        match self.store.compare_and_save(expected, record).await {
+            Ok(ConsentCommitOutcome::Committed { record }) => vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::StoredAsRuleView {
-                    revision: ViewMarkWire(next_rev.to_string()),
+                    revision: ViewMarkWire(record.rev.as_u64().to_string()),
+                },
+            )],
+            Ok(ConsentCommitOutcome::StaleCurrent { current }) => vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::StaleBaseView {
+                    current: ViewMarkWire(consent_mark(current.as_ref())),
                 },
             )],
             Err(_) => vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::HeldByOperation,
             )],
@@ -358,13 +419,15 @@ impl HostHandle {
     /// A stale `base_view` answers `StaleBaseView`, an unreadable store holds,
     /// and an incomplete premise clarifies.
     async fn complete_setup(
-        &mut self,
+        &self,
         frame: &WireFrame,
         intent: &ManagementIntent,
+        live: &LiveInput,
     ) -> Vec<WireFrame> {
         let Some(mark) = self.current_mark().await else {
             return vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::HeldByOperation,
             )];
@@ -372,6 +435,7 @@ impl HostHandle {
         if intent.base_view.0 != mark {
             return vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::StaleBaseView {
                     current: ViewMarkWire(mark),
@@ -381,16 +445,19 @@ impl HostHandle {
         match self.setup_ready().await {
             Some(true) => vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::AppliedAsOneTime,
             )],
             Some(false) => vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::NeedsClarification,
             )],
             None => vec![outcome_frame(
                 frame,
+                live,
                 intent,
                 ManagementOutcome::HeldByOperation,
             )],
@@ -403,12 +470,13 @@ impl HostHandle {
     /// `model`, `consent`, `credential`); otherwise only requested known
     /// sections render and unknown names are skipped.
     pub(crate) async fn answer_view(
-        &mut self,
+        &self,
         frame: &WireFrame,
         request: &ManagementViewRequest,
+        live: &LiveInput,
     ) -> Vec<WireFrame> {
         let view = self.build_view(&request.sections).await;
-        vec![view_frame(frame, view)]
+        vec![view_frame(frame, live, view)]
     }
 
     /// Builds the filtered setup view for the wanted sections.
@@ -424,20 +492,19 @@ impl HostHandle {
         let Ok(refs) = self.store.list_refs().await else {
             return unavailable_view();
         };
-        let (provider_text, model_text, consent_text, mark_text) = match &current {
+        let (provider_text, model_text, consent_text) = match &current {
             Some(record) => (
                 record.provider.clone(),
                 record.model.clone(),
                 format!("rev {}", record.rev.as_u64()),
-                format!("consent-rev-{}", record.rev.as_u64()),
             ),
             None => (
                 String::from("unconfigured"),
                 String::from("unconfigured"),
                 String::from("none"),
-                String::from("consent-none"),
             ),
         };
+        let mark_text = consent_mark(current.as_ref());
         let source = match &self.cred_store {
             CredStore::Env(_) => "env-sourced",
             CredStore::Memory(_) => "memory",

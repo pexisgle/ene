@@ -14,94 +14,29 @@
 //! Stdout contract: view and history commands print their rendered lines (or
 //! nothing when empty). `send` prints `AcceptedForRound <round>`, then the
 //! stream deltas concatenated as they arrive (flushed per frame), then a
-//! trailing newline on [`TextStreamClose`](ene_api::v1::round::TextStreamClose).
-//! Deltas on stdout are the user's own conversation text by design; error
-//! paths (stderr, exit codes) never carry bodies or secrets.
+//! trailing newline on [`TextStreamClose`](ene_api::v1::round::TextStreamClose),
+//! and finally sends one `Presented` observation for the round (no reply is
+//! expected; nothing is sent when stdio failed mid-stream). Deltas on stdout
+//! are the user's own conversation text by design; error paths (stderr, exit
+//! codes) never carry bodies or secrets.
 //!
 //! Exit codes: `0` on success; `1` for usage and technical failures
 //! (transport, codec, terminal server refusals); `2` for retryable
 //! server-side domain outcomes (stale rounds, held transitions, stale base
 //! views, pending confirmations, and similar Ok-side declines).
 
-mod client;
-mod cmds;
+use ene_ctl::errors::{CliError, USAGE};
+use ene_ctl::{client, cmds};
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::refs::{BaseViewMark, CommandWireId};
+use ene_api::v1::refs::{BaseViewMark, CommandWireId, RoundWireId, StreamWireId};
+use ene_api::v1::round::{ConfirmPresentationWire, PresentationStatus, StreamClose};
 use ene_config::paths::resolve_data_dir;
-use ene_config::typed::{Config, ConfigError};
-
-/// Usage text reported with every [`CliError::Usage`].
-pub(crate) const USAGE: &str = "usage: ene-ctl [--config PATH] <command>\ncommands: setup [--show | --provider openai --model MODEL], status, send [--new | --round ROUND] TEXT..., watch --round ROUND, history [--limit N]";
-
-/// CLI failure: bad arguments, configuration, transport, codec, or
-/// Host-reported refusals and declines.
-///
-/// Message rule: variants carry operations, payload-kind names, refs,
-/// generations, and the Host's own operational reasons only — never secrets,
-/// key material, or conversation bodies. Codec messages rely on
-/// `ene-plugin-ipc` diagnostics, which never echo frame bytes.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum CliError {
-    /// Command-line usage failure; the message always ends with [`USAGE`].
-    #[error("{0}")]
-    Usage(String),
-    /// Layered configuration loading or validation failed.
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    /// Socket, stdio, or runtime movement failed; carries the operation and
-    /// I/O kind only.
-    #[error("transport: {0}")]
-    Transport(String),
-    /// Frame encode/decode failed; carries lengths and decoder reasons only.
-    #[error("codec: {0}")]
-    Codec(String),
-    /// The Host terminally refused the request (denied pairing, rejected
-    /// auth, incompatible version, unexpected payload kind). Retrying the
-    /// same request will not help. Exit code 1.
-    #[error("server rejected: {0}")]
-    ServerRejected(String),
-    /// The Host answered with a retryable Ok-side domain outcome (stale
-    /// round, held transition, stale base view, pending Owner confirmation).
-    /// Exit code 2.
-    #[error("server outcome: {0}")]
-    ServerOutcome(String),
-    /// The platform has no supported transport (non-Unix).
-    ///
-    /// Only the Windows transport stubs and the exit-code test construct
-    /// it, so Unix non-test builds need the scoped expectation below (test
-    /// builds and Windows builds use the variant, where the expectation
-    /// must be absent to avoid an unfulfilled-expectation error).
-    #[cfg_attr(
-        all(not(windows), not(test)),
-        expect(
-            dead_code,
-            reason = "built by the Windows stubs and the exit-code test only"
-        )
-    )]
-    #[error("unsupported platform: {0}")]
-    UnsupportedPlatform(&'static str),
-}
-
-impl CliError {
-    /// Maps a failure to its process exit code: retryable server-side
-    /// domain outcomes exit `2`, everything else exits `1`.
-    fn exit_code(&self) -> ExitCode {
-        match self {
-            Self::ServerOutcome(_) => ExitCode::from(2),
-            Self::Usage(_)
-            | Self::Config(_)
-            | Self::Transport(_)
-            | Self::Codec(_)
-            | Self::ServerRejected(_)
-            | Self::UnsupportedPlatform(_) => ExitCode::FAILURE,
-        }
-    }
-}
+use ene_config::typed::Config;
 
 /// Parses `--config PATH` from `args` (excluding the program name).
 ///
@@ -213,6 +148,9 @@ async fn run_command(
         }
         cmds::Command::Send(send) => run_send(&mut session, language, send).await,
         cmds::Command::Watch { round } => {
+            // No presentation observation here: watch prints already
+            // presented-or-unknown restored facts, and viewing them is not
+            // presenting a stream.
             let view = request_history(&mut session, cmds::DEFAULT_HISTORY_LIMIT).await?;
             emit(&cmds::render_round_history(&view, &round))
         }
@@ -298,10 +236,10 @@ async fn apply_intent(
     }
 }
 
-/// Runs `setup`: `--show` renders the setup section; `--provider/--model`
+/// Runs `setup`: `--show` renders the four Host sections; `--provider/--model`
 /// fetches the setup view for its mark, registers the credential intent
-/// (key sourced Host-side), then assigns provider/model, and reports the
-/// recorded assignment.
+/// (key sourced Host-side), then assigns provider/model over the shared
+/// consent target, and reports the recorded assignment.
 async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Result<(), CliError> {
     match mode {
         cmds::SetupMode::Show => {
@@ -311,7 +249,8 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
         cmds::SetupMode::Assign { provider, model } => {
             let view = request_view(session, cmds::setup_view_request()).await?;
             let base = BaseViewMark(view.mark.0.clone());
-            let credential = cmds::credential_intent(CommandWireId(uuid::Uuid::new_v4()), &base);
+            let credential =
+                cmds::credential_intent(CommandWireId(uuid::Uuid::new_v4()), &base, &provider);
             apply_intent(session, credential).await?;
             let assignment = cmds::assignment_intent(
                 CommandWireId(uuid::Uuid::new_v4()),
@@ -321,8 +260,7 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
             );
             apply_intent(session, assignment).await?;
             emit(&format!(
-                "setup complete: {}",
-                cmds::assignment_quote(&provider, &model)
+                "setup complete: provider={provider} model={model}"
             ))
         }
     }
@@ -331,6 +269,16 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
 /// Runs `send`: submits the candidate, prints the accepted round, streams
 /// deltas as they arrive, and ends with a newline on stream close. Intake
 /// declines become [`CliError::ServerOutcome`] (exit 2).
+///
+/// After the close frame and a successful flush of every buffered frame, the
+/// client sends one presentation observation for the round (the Host applies
+/// it silently and answers nothing): [`observe_close`] decides its status
+/// from the close reason and whether any frame was shown, and a
+/// non-completed close additionally fails with a `ServerOutcome` naming the
+/// status (exit 2) after the observation is sent. Any stdio failure before
+/// that point returns early and sends nothing, so the Host keeps the stream
+/// `Pending`/`Unknown` instead of recording a presentation the operator
+/// never saw.
 async fn run_send(
     session: &mut client::Client,
     language: &str,
@@ -355,20 +303,40 @@ async fn run_send(
     let mut stdout = std::io::stdout();
     writeln!(stdout, "AcceptedForRound {round}")
         .map_err(|error| CliError::Transport(format!("stdout write failed: {}", error.kind())))?;
-    loop {
+    let mut stream: Option<StreamWireId> = None;
+    let mut shown = false;
+    let close_status = loop {
         match session.next_frame().await? {
-            WirePayload::TextStreamOpen(_) => {
-                // Routing only (stream key, round, generation); nothing to show.
+            WirePayload::TextStreamOpen(open) => {
+                // Routing only (stream key, round, generation); the key is
+                // kept for the presentation observation after close. The
+                // open alone shows nothing, so it never marks `shown`.
+                if stream.is_none() {
+                    stream = Some(open.stream);
+                }
             }
             WirePayload::TextStreamFrame(frame) => {
+                if stream.is_none() {
+                    stream = Some(frame.stream);
+                }
                 write!(stdout, "{}", frame.delta).map_err(|error| {
                     CliError::Transport(format!("stdout write failed: {}", error.kind()))
                 })?;
                 stdout.flush().map_err(|error| {
                     CliError::Transport(format!("stdout flush failed: {}", error.kind()))
                 })?;
+                shown = true;
             }
-            WirePayload::TextStreamClose(_) => break,
+            WirePayload::TextStreamClose(close) => {
+                if stream.is_none() {
+                    stream = Some(close.stream);
+                }
+                break close.status;
+            }
+            WirePayload::PresenceAttribution(_) => {
+                // Latest-value fact: the session already recorded its
+                // generation in the frame loop; there is nothing to display.
+            }
             unexpected => {
                 return Err(CliError::ServerRejected(format!(
                     "unexpected {} while streaming text; expected TextStreamFrame",
@@ -376,13 +344,50 @@ async fn run_send(
                 )));
             }
         }
-    }
+    };
     writeln!(stdout)
         .map_err(|error| CliError::Transport(format!("stdout write failed: {}", error.kind())))?;
     stdout
         .flush()
         .map_err(|error| CliError::Transport(format!("stdout flush failed: {}", error.kind())))?;
-    Ok(())
+    let (status, success) = observe_close(close_status, shown);
+    session
+        .notify(WirePayload::ConfirmPresentation(ConfirmPresentationWire {
+            round: RoundWireId(round),
+            stream,
+            status,
+            detail: None,
+        }))
+        .await?;
+    if success {
+        Ok(())
+    } else {
+        Err(CliError::ServerOutcome(format!("stream {close_status:?}")))
+    }
+}
+
+/// Maps a stream close to its presentation observation plus completion
+/// success: presentation fact and completion success are separate claims.
+///
+/// A [`Completed`](StreamClose::Completed) stream always observes
+/// [`Presented`](PresentationStatus::Presented) and succeeds. Any other close
+/// still sends an observation — [`Presented`](PresentationStatus::Presented)
+/// when the operator saw at least one frame (shown text stays presented even
+/// though the stream did not complete), else sticky
+/// [`Unknown`](PresentationStatus::Unknown) — but reports non-success so the
+/// caller exits 2 with a `ServerOutcome` naming the close status. Only frames
+/// shown on this live stream count: the opening frame alone shows nothing.
+fn observe_close(status: StreamClose, frames_shown: bool) -> (PresentationStatus, bool) {
+    match status {
+        StreamClose::Completed => (PresentationStatus::Presented, true),
+        StreamClose::Interrupted | StreamClose::Cancelled | StreamClose::Stale => {
+            if frames_shown {
+                (PresentationStatus::Presented, false)
+            } else {
+                (PresentationStatus::Unknown, false)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -584,6 +589,39 @@ mod tests {
             assert!(
                 error.exit_code() == std::process::ExitCode::FAILURE,
                 "usage and technical failures must exit 1, got {error:?}"
+            );
+        }
+    }
+
+    /// Close-status matrix: completion always presents and succeeds; any
+    /// other close still observes (presented when frames were shown, unknown
+    /// otherwise) but reports non-success.
+    #[test]
+    fn close_status_maps_presentation_and_success_separately() {
+        use ene_api::v1::round::PresentationStatus;
+        use ene_api::v1::round::StreamClose;
+
+        use super::observe_close;
+
+        for shown in [false, true] {
+            assert!(
+                observe_close(StreamClose::Completed, shown)
+                    == (PresentationStatus::Presented, true),
+                "completion always presents and succeeds, shown={shown}"
+            );
+        }
+        for status in [
+            StreamClose::Interrupted,
+            StreamClose::Cancelled,
+            StreamClose::Stale,
+        ] {
+            assert!(
+                observe_close(status, true) == (PresentationStatus::Presented, false),
+                "a shown-but-{status:?} stream observes presented yet fails"
+            );
+            assert!(
+                observe_close(status, false) == (PresentationStatus::Unknown, false),
+                "an unshown {status:?} stream observes unknown and fails"
             );
         }
     }

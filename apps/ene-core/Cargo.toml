@@ -18,12 +18,14 @@ ene-presentation = { path = "../../crates/ene-presentation" }
 ene-primitive = { path = "../../crates/ene-primitive" }
 ene-store = { path = "../../crates/ene-store" }
 tokio.workspace = true
+uuid.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+ene-ctl = { path = "../ene-ctl" }
 
 [lints]
 workspace = true

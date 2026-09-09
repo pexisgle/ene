@@ -11,26 +11,33 @@
 //!   request carries [`DEFAULT_COMPANION_REF`] (`"default"`). The Host maps
 //!   that bootstrap value to its singleton companion; real companion
 //!   references arrive with the companion lifecycle.
-//! * `setup --provider openai --model MODEL` performs two intents. The
-//!   credential step uses [`ManagementIntentKind::ConfigureCredentialIntent`]
-//!   (the key itself comes from the Host process environment over the
-//!   Host-local path, never this wire). Provider/model assignment has no
-//!   dedicated intent kind, so it uses
-//!   [`ManagementIntentKind::ManageRuleConsentCap`] with an opaque target
-//!   from [`assignment_target`] (`"assignment/<provider>"`) and the
-//!   Owner-stated assignment in
-//!   [`IntentRationaleWire`]
-//!   `quote` (see [`assignment_quote`]). The quote slot is the provenance
-//!   record of what the Owner asked for, which is exactly what an
-//!   assignment statement is.
+//! * `setup --provider openai --model MODEL` performs two intents in the
+//!   shared setup-target grammar
+//!   ([`credential_target`] and
+//!   [`consent_target`], never a
+//!   CLI-local mini-language). The credential step uses
+//!   [`ManagementIntentKind::ConfigureCredentialIntent`]
+//!   with [`credential_target_for`] (`"credential:<provider>:main"`; the key
+//!   itself comes from the Host process environment over the Host-local path,
+//!   never this wire). Provider/model assignment uses
+//!   [`ManagementIntentKind::ManageRuleConsentCap`] with
+//!   [`consent_target_for`] (`"consent:<provider>:<model>:<credential-id>"`,
+//!   where the credential id is the `"<provider>:main"` ref the register step
+//!   created). Both rationales are provenance-only
+//!   ([`RationaleOrigin::ManagementSurface`], `quote` [`None`]): assignment
+//!   parameters travel in the consent target, never in the quote.
 //! * Both setup intents carry the display-revision mark of a freshly fetched
 //!   setup view as their `base_view`; staleness is therefore checked against
 //!   something the CLI actually saw, never defaulted to unconstrained.
+//! * `setup --show` and `status` both request [`HOST_SETUP_SECTIONS`] — the
+//!   four Host sections (`provider`, `model`, `consent`, `credential`).
 //! * `watch --round ROUND` prints that round's items from a
 //!   [`HistoryRequest`] (same fetch as
 //!   `history`, filtered by round). True stream-following needs a live `send`
 //!   in the same process because streams cannot resume; that follow mode is
 //!   deferred, and this limitation is documented on [`Command::Watch`].
+//!   Viewing restored facts is not presenting a stream, so `watch` never
+//!   sends [`ConfirmPresentation`](ene_api::v1::round::ConfirmPresentationWire).
 //!
 //! [`ManagementIntentKind::ConfigureCredentialIntent`]: ene_api::v1::management::ManagementIntentKind::ConfigureCredentialIntent
 //! [`ManagementIntentKind::ManageRuleConsentCap`]: ene_api::v1::management::ManagementIntentKind::ManageRuleConsentCap
@@ -39,7 +46,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
-    ManagementViewRequest, RationaleOrigin,
+    ManagementViewRequest, RationaleOrigin, consent_target, credential_target,
 };
 use ene_api::v1::refs::{
     BaseViewMark, ClientLocalId, CommandWireId, CompanionWireRef, ManagementTargetWire,
@@ -49,36 +56,44 @@ use ene_api::v1::round::{
     HistoryRequest, HistoryRole, HistoryView, RoundIntakeOutcomeWire, SubmitTextInput, TextBodyWire,
 };
 
-use crate::{CliError, USAGE};
+use crate::errors::{CliError, USAGE};
 
 /// Bootstrap companion reference sent until the companion lifecycle issues
 /// real references. The Host maps this value to its singleton companion.
-pub(crate) const DEFAULT_COMPANION_REF: &str = "default";
+pub const DEFAULT_COMPANION_REF: &str = "default";
 
 /// Default item cap for `history` when `--limit` is absent.
-pub(crate) const DEFAULT_HISTORY_LIMIT: u64 = 50;
+pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
 
-/// Credential-registration target for the `OpenAI` setup flow.
-pub(crate) const CREDENTIAL_TARGET_OPENAI: &str = "credential/openai";
+/// Label of the conventional main credential the setup flow registers.
+///
+/// The Host registers refs as `"<provider>:<label>"` and falls back to the
+/// `"<provider>:main"` ref before any consent exists, so the setup flow
+/// always uses this label: the consent step can then name the credential id
+/// it just created (see [`credential_id_for`]).
+pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
-/// Section requested by `setup --show`.
-pub(crate) const SETUP_SECTION: &str = "setup";
-
-/// Sections requested by `status`.
-pub(crate) const STATUS_SECTIONS: &[&str] = &["setup", "provider", "consent", "usage"];
+/// Management-view sections the setup and status flows request.
+///
+/// This mirrors the Host section set: `HostHandle::build_view` in
+/// `apps/ene-core/src/setup.rs` renders exactly `provider`, `model`,
+/// `consent`, and `credential` (an empty request selects the same four).
+/// The contract test below asserts these names against that documented Host
+/// set, so a Host rename fails the test instead of silently fetching nothing.
+pub const HOST_SETUP_SECTIONS: &[&str] = &["provider", "model", "consent", "credential"];
 
 /// Only provider the setup flow knows how to assign yet.
-pub(crate) const SETUP_PROVIDER_OPENAI: &str = "openai";
+pub const SETUP_PROVIDER_OPENAI: &str = "openai";
 
 /// Counter backing [`new_local_id`]: process-local, monotonically increasing.
 static LOCAL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Parsed subcommand with its operands.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Command {
+pub enum Command {
     /// Setup flow: show the filtered setup view, or register-then-assign.
     Setup(SetupMode),
-    /// Render the `setup`/`provider`/`consent`/`usage` view sections.
+    /// Render the `provider`/`model`/`consent`/`credential` view sections.
     Status,
     /// Submit text and stream the answering round.
     Send(SendArgs),
@@ -87,7 +102,8 @@ pub(crate) enum Command {
     /// Honest limitation: this is a round-scoped history print, not a live
     /// stream follow. Streams cannot resume across processes, so following a
     /// stream needs a live `send` in the same process; that follow mode is
-    /// deferred.
+    /// deferred. Viewing restored facts is not presenting a stream, so
+    /// `watch` never sends a presentation confirmation.
     Watch {
         /// Round whose items to print.
         round: String,
@@ -101,7 +117,7 @@ pub(crate) enum Command {
 
 /// `setup` mode: filtered-view display, or credential-plus-assignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SetupMode {
+pub enum SetupMode {
     /// Fetch and render the `setup` view section.
     Show,
     /// Register the credential (Host-sourced key), then assign provider/model.
@@ -115,18 +131,18 @@ pub(crate) enum SetupMode {
 
 /// `send` operands: optional premise round plus message text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SendArgs {
+pub struct SendArgs {
     /// Target round, or [`None`] for a new round (`--new` forces [`None`]).
-    pub(crate) round: Option<String>,
+    pub round: Option<String>,
     /// Message text: remaining words joined with single spaces.
-    pub(crate) text: String,
+    pub text: String,
 }
 
 /// Parses the words after the global flags: subcommand name plus operands.
 ///
 /// An empty slice, an unknown name, or malformed operands are all
 /// [`CliError::Usage`] whose message ends with the usage text.
-pub(crate) fn parse_command(words: &[String]) -> Result<Command, CliError> {
+pub fn parse_command(words: &[String]) -> Result<Command, CliError> {
     let Some((name, rest)) = words.split_first() else {
         return Err(CliError::Usage(format!("missing command\n{USAGE}")));
     };
@@ -337,17 +353,22 @@ fn parse_history(args: &[String]) -> Result<Command, CliError> {
     Ok(Command::History { limit })
 }
 
-/// Builds the `setup --show` view request.
-pub(crate) fn setup_view_request() -> ManagementViewRequest {
+/// Builds the `setup --show` view request: the four Host sections.
+pub fn setup_view_request() -> ManagementViewRequest {
     ManagementViewRequest {
-        sections: vec![String::from(SETUP_SECTION)],
+        sections: HOST_SETUP_SECTIONS
+            .iter()
+            .map(|section| (*section).to_string())
+            .collect(),
     }
 }
 
-/// Builds the `status` view request.
-pub(crate) fn status_view_request() -> ManagementViewRequest {
+/// Builds the `status` view request: the same four Host sections as
+/// [`setup_view_request`]. There are no `setup`- or `usage`-named sections
+/// Host-side, so neither name is requested.
+pub fn status_view_request() -> ManagementViewRequest {
     ManagementViewRequest {
-        sections: STATUS_SECTIONS
+        sections: HOST_SETUP_SECTIONS
             .iter()
             .map(|section| (*section).to_string())
             .collect(),
@@ -355,7 +376,7 @@ pub(crate) fn status_view_request() -> ManagementViewRequest {
 }
 
 /// Builds a timeline request against the bootstrap companion reference.
-pub(crate) fn history_request(limit: u64) -> HistoryRequest {
+pub fn history_request(limit: u64) -> HistoryRequest {
     HistoryRequest {
         companion: CompanionWireRef(String::from(DEFAULT_COMPANION_REF)),
         since: None,
@@ -365,7 +386,7 @@ pub(crate) fn history_request(limit: u64) -> HistoryRequest {
 
 /// Builds a text-input candidate: bootstrap companion, optional premise
 /// round, a fresh [`new_local_id`], and the given body.
-pub(crate) fn submit_input(round: Option<String>, text: String, lang: String) -> SubmitTextInput {
+pub fn submit_input(round: Option<String>, text: String, lang: String) -> SubmitTextInput {
     SubmitTextInput {
         companion: CompanionWireRef(String::from(DEFAULT_COMPANION_REF)),
         round: round.map(RoundWireId),
@@ -384,34 +405,51 @@ pub(crate) fn submit_input(round: Option<String>, text: String, lang: String) ->
 /// (`ctl-<pid>-<counter>`). That is unique per connection for this
 /// process, which is all `local_id` needs: it matches acks to sends
 /// within one Client and is never Host-canonical.
-pub(crate) fn new_local_id() -> ClientLocalId {
+pub fn new_local_id() -> ClientLocalId {
     let counter = LOCAL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     ClientLocalId(format!("ctl-{}-{counter}", std::process::id()))
 }
 
-/// Opaque assignment target for a provider: `"assignment/<provider>"`.
+/// Credential-registration target for a provider in the shared setup
+/// grammar: `"credential:<provider>:main"` (see [`SETUP_CREDENTIAL_LABEL`]).
 ///
-/// The target shape is Stage-2 provisional (see the module docs): the wire
-/// has no dedicated assignment kind, so the provider travels in the opaque
-/// target while the full statement travels in the rationale quote.
-pub(crate) fn assignment_target(provider: &str) -> ManagementTargetWire {
-    ManagementTargetWire(format!("assignment/{provider}"))
+/// This spells [`credential_target`]
+/// once for the setup flow; the grammar itself (validation, remainder rules)
+/// stays shared, never re-invented here.
+pub fn credential_target_for(provider: &str) -> ManagementTargetWire {
+    credential_target(provider, SETUP_CREDENTIAL_LABEL)
 }
 
-/// Owner-stated assignment record carried in the rationale quote:
-/// `"provider=<provider> model=<model>"`.
-pub(crate) fn assignment_quote(provider: &str, model: &str) -> String {
-    format!("provider={provider} model={model}")
+/// Credential id the register step creates for a provider:
+/// `"<provider>:main"`, matching the Host registry naming
+/// (`"<provider>:<label>"`) and its pre-consent default ref.
+pub fn credential_id_for(provider: &str) -> String {
+    format!("{provider}:{SETUP_CREDENTIAL_LABEL}")
+}
+
+/// Consent-assignment target for a provider/model pair in the shared setup
+/// grammar: `"consent:<provider>:<model>:<credential-id>"` (see
+/// [`consent_target`]).
+///
+/// This spells [`consent_target`]
+/// once for the setup flow; the grammar itself stays shared.
+pub fn consent_target_for(provider: &str, model: &str) -> ManagementTargetWire {
+    consent_target(provider, model, &credential_id_for(provider))
 }
 
 /// Builds the credential-registration intent: the Host sources the key from
 /// its own environment over the Host-local path, so this payload carries no
-/// secret, only the intent with an empty (non-quoting) rationale.
-pub(crate) fn credential_intent(intent_id: CommandWireId, base: &BaseViewMark) -> ManagementIntent {
+/// secret, only the intent with a provenance-only rationale (origin, no
+/// quote).
+pub fn credential_intent(
+    intent_id: CommandWireId,
+    base: &BaseViewMark,
+    provider: &str,
+) -> ManagementIntent {
     ManagementIntent {
         intent_id,
         kind: ManagementIntentKind::ConfigureCredentialIntent,
-        target: ManagementTargetWire(String::from(CREDENTIAL_TARGET_OPENAI)),
+        target: credential_target_for(provider),
         base_view: base.clone(),
         rationale: IntentRationaleWire {
             origin: RationaleOrigin::ManagementSurface,
@@ -422,8 +460,9 @@ pub(crate) fn credential_intent(intent_id: CommandWireId, base: &BaseViewMark) -
 
 /// Builds the provider/model assignment intent per the module-docs mapping:
 /// [`ManagementIntentKind::ManageRuleConsentCap`] with
-/// [`assignment_target`] and the statement in the rationale quote.
-pub(crate) fn assignment_intent(
+/// [`consent_target_for`] and a provenance-only rationale (origin, no
+/// quote). Assignment parameters travel in the target, never in the quote.
+pub fn assignment_intent(
     intent_id: CommandWireId,
     base: &BaseViewMark,
     provider: &str,
@@ -432,11 +471,11 @@ pub(crate) fn assignment_intent(
     ManagementIntent {
         intent_id,
         kind: ManagementIntentKind::ManageRuleConsentCap,
-        target: assignment_target(provider),
+        target: consent_target_for(provider, model),
         base_view: base.clone(),
         rationale: IntentRationaleWire {
             origin: RationaleOrigin::ManagementSurface,
-            quote: Some(assignment_quote(provider, model)),
+            quote: None,
         },
     }
 }
@@ -449,7 +488,7 @@ pub(crate) fn assignment_intent(
 /// text shown here is Host-filtered display fact by contract; secrecy of
 /// what reaches the CLI is a Host property, and this function adds no
 /// secret-bearing surface of its own.
-pub(crate) fn render_view(view: &ManagementView) -> String {
+pub fn render_view(view: &ManagementView) -> String {
     view.sections
         .iter()
         .map(|section| format!("{}: {} – {}", section.kind, section.title, section.body))
@@ -458,7 +497,7 @@ pub(crate) fn render_view(view: &ManagementView) -> String {
 }
 
 /// Owner/Companion label used by the history renderers.
-pub(crate) fn role_label(role: HistoryRole) -> &'static str {
+pub fn role_label(role: HistoryRole) -> &'static str {
     match role {
         HistoryRole::Owner => "owner",
         HistoryRole::Companion => "companion",
@@ -466,7 +505,7 @@ pub(crate) fn role_label(role: HistoryRole) -> &'static str {
 }
 
 /// Renders timeline items as one `[role] text` line each, oldest first.
-pub(crate) fn render_history(view: &HistoryView) -> String {
+pub fn render_history(view: &HistoryView) -> String {
     view.items
         .iter()
         .map(|item| format!("[{}] {}", role_label(item.role), item.text))
@@ -476,7 +515,7 @@ pub(crate) fn render_history(view: &HistoryView) -> String {
 
 /// Renders only the items belonging to `round`, same line shape as
 /// [`render_history`].
-pub(crate) fn render_round_history(view: &HistoryView, round: &str) -> String {
+pub fn render_round_history(view: &HistoryView, round: &str) -> String {
     view.items
         .iter()
         .filter(|item| item.round.0 == round)
@@ -489,7 +528,7 @@ pub(crate) fn render_round_history(view: &HistoryView, round: &str) -> String {
 /// accepted round, or a decline message carrying refs and generations only,
 /// never body text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum IntakeAction {
+pub enum IntakeAction {
     /// Accepted into this Host-issued round.
     Accepted {
         /// Round the input joined.
@@ -503,7 +542,7 @@ pub(crate) enum IntakeAction {
 }
 
 /// Maps an intake outcome to [`IntakeAction`].
-pub(crate) fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> IntakeAction {
+pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> IntakeAction {
     match outcome {
         RoundIntakeOutcomeWire::AcceptedForRound { round } => IntakeAction::Accepted {
             round: round.0.clone(),
@@ -537,7 +576,7 @@ pub(crate) fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> IntakeAction 
 /// are retryable (exit-code 2); clarification/denial are terminal (the
 /// crate root maps them to [`CliError::ServerRejected`], exit-code 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ManagementAction {
+pub enum ManagementAction {
     /// Applied with a display line (refs/marks only, no secrets).
     Applied {
         /// Operational line describing what was recorded.
@@ -556,7 +595,7 @@ pub(crate) enum ManagementAction {
 }
 
 /// Maps a management outcome to [`ManagementAction`].
-pub(crate) fn describe_management(outcome: &ManagementOutcome) -> ManagementAction {
+pub fn describe_management(outcome: &ManagementOutcome) -> ManagementAction {
     match outcome {
         ManagementOutcome::AppliedAsOneTime => ManagementAction::Applied {
             detail: String::from("applied as a one-time approval"),
@@ -596,11 +635,11 @@ mod tests {
 
     use super::{Command, IntakeAction, ManagementAction, SendArgs, SetupMode};
     use super::{
-        DEFAULT_COMPANION_REF, DEFAULT_HISTORY_LIMIT, SETUP_PROVIDER_OPENAI, assignment_intent,
-        assignment_quote, assignment_target, credential_intent, describe_intake,
-        describe_management, history_request, new_local_id, parse_command, render_history,
-        render_round_history, render_view, role_label, setup_view_request, status_view_request,
-        submit_input,
+        DEFAULT_COMPANION_REF, DEFAULT_HISTORY_LIMIT, HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI,
+        assignment_intent, consent_target_for, credential_id_for, credential_intent,
+        credential_target_for, describe_intake, describe_management, history_request, new_local_id,
+        parse_command, render_history, render_round_history, render_view, role_label,
+        setup_view_request, status_view_request, submit_input,
     };
 
     /// Builds owned arguments from plain words.
@@ -629,19 +668,19 @@ mod tests {
     }
 
     /// Asserts a usage error whose message ends with the usage text.
-    fn assert_usage(result: Result<Command, super::super::CliError>, what: &str) {
+    fn assert_usage(result: Result<Command, crate::errors::CliError>, what: &str) {
         let Some(error) = require_err(result, what) else {
             return;
         };
         assert!(
-            matches!(error, super::super::CliError::Usage(_)),
+            matches!(error, crate::errors::CliError::Usage(_)),
             "{what} must be a usage error, got {error:?}"
         );
-        let super::super::CliError::Usage(message) = error else {
+        let crate::errors::CliError::Usage(message) = error else {
             return;
         };
         assert!(
-            message.ends_with(super::super::USAGE),
+            message.ends_with(crate::errors::USAGE),
             "{what} must end with the usage text: {message:?}"
         );
     }
@@ -693,7 +732,7 @@ mod tests {
         let Some(error) = require_err(parse_command(&args(&["setup"])), "bare setup") else {
             return;
         };
-        let super::super::CliError::Usage(message) = error else {
+        let crate::errors::CliError::Usage(message) = error else {
             return;
         };
         assert!(
@@ -1155,21 +1194,28 @@ mod tests {
 
     #[test]
     fn request_builders_use_the_bootstrap_companion() {
+        // Documented Host section set: `HostHandle::build_view` in
+        // `apps/ene-core/src/setup.rs` renders exactly these four (an empty
+        // request selects the same four). This contract test pins the wire
+        // names, so a Host rename fails here instead of fetching nothing.
+        let documented = ["provider", "model", "consent", "credential"];
+        assert!(
+            HOST_SETUP_SECTIONS == documented,
+            "the requested sections must match the documented Host set: {HOST_SETUP_SECTIONS:?}"
+        );
         let setup = setup_view_request();
         assert!(
-            setup.sections == vec![String::from("setup")],
-            "setup --show requests the setup section: {setup:?}"
+            setup.sections
+                == documented
+                    .iter()
+                    .map(|section| (*section).to_string())
+                    .collect::<Vec<String>>(),
+            "setup --show requests the four Host sections: {setup:?}"
         );
         let status = status_view_request();
         assert!(
-            status.sections
-                == vec![
-                    String::from("setup"),
-                    String::from("provider"),
-                    String::from("consent"),
-                    String::from("usage"),
-                ],
-            "status requests all four sections: {status:?}"
+            status.sections == setup.sections,
+            "status requests the same four Host sections: {status:?}"
         );
         let history = history_request(7);
         assert!(
@@ -1200,22 +1246,55 @@ mod tests {
     }
 
     #[test]
-    fn assignment_mapping_uses_target_and_quote() {
+    fn setup_targets_use_the_shared_grammar() {
         assert!(
-            assignment_target("openai").0 == "assignment/openai",
-            "assignment target carries the provider"
+            credential_target_for("openai").0 == "credential:openai:main",
+            "credential target spells the shared grammar"
         );
         assert!(
-            assignment_quote("openai", "gpt-x") == "provider=openai model=gpt-x",
-            "assignment quote states provider and model"
+            credential_id_for("openai") == "openai:main",
+            "credential id names the registry ref the register step creates"
         );
+        assert!(
+            consent_target_for("openai", "gpt-x").0 == "consent:openai:gpt-x:openai:main",
+            "consent target spells the shared grammar over that credential id"
+        );
+        // Roundtrip through the shared parsers: the builders never bypass
+        // Host-side validation.
+        assert!(
+            ene_api::v1::management::parse_credential_target(&credential_target_for("openai"))
+                == Some((String::from("openai"), String::from("main"))),
+            "credential target must parse as (provider, label)"
+        );
+        assert!(
+            ene_api::v1::management::parse_consent_target(&consent_target_for("openai", "gpt-x"))
+                == Some((
+                    String::from("openai"),
+                    String::from("gpt-x"),
+                    String::from("openai:main"),
+                )),
+            "consent target must parse as (provider, model, credential-id)"
+        );
+    }
+
+    #[test]
+    fn setup_intents_carry_grammar_targets_and_provenance_only_rationales() {
+        use ene_api::v1::management::ManagementIntentKind;
+        use ene_api::v1::management::RationaleOrigin;
+
         let base = BaseViewMark(String::from("mark-1"));
-        let credential = credential_intent(CommandWireId(uuid::Uuid::new_v4()), &base);
+        let credential = credential_intent(
+            CommandWireId(uuid::Uuid::new_v4()),
+            &base,
+            SETUP_PROVIDER_OPENAI,
+        );
         assert!(
-            credential.target.0 == "credential/openai"
+            credential.kind == ManagementIntentKind::ConfigureCredentialIntent
+                && credential.target.0 == "credential:openai:main"
                 && credential.base_view == base
+                && credential.rationale.origin == RationaleOrigin::ManagementSurface
                 && credential.rationale.quote.is_none(),
-            "credential intent carries no secret or quote: {credential:?}"
+            "credential intent carries the grammar target and no quote: {credential:?}"
         );
         let assignment = assignment_intent(
             CommandWireId(uuid::Uuid::new_v4()),
@@ -1224,10 +1303,12 @@ mod tests {
             "gpt-x",
         );
         assert!(
-            assignment.target.0 == "assignment/openai"
+            assignment.kind == ManagementIntentKind::ManageRuleConsentCap
+                && assignment.target.0 == "consent:openai:gpt-x:openai:main"
                 && assignment.base_view == base
-                && assignment.rationale.quote == Some(String::from("provider=openai model=gpt-x")),
-            "assignment intent carries target plus quote: {assignment:?}"
+                && assignment.rationale.origin == RationaleOrigin::ManagementSurface
+                && assignment.rationale.quote.is_none(),
+            "assignment intent carries the consent target and no quote: {assignment:?}"
         );
     }
 

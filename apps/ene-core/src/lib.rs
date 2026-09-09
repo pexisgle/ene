@@ -2,10 +2,12 @@
 //!
 //! This library is the testable seam of the `ene-core` Host: [`serve::HostHandle`]
 //! owns the durable [`ene_store::Store`], the [`ene_permission::EvaluationTracker`],
-//! and the per-process Host maps (open rounds, idempotency keys, paired devices,
-//! wire clients, issued round refs), while [`serve::HostHandle::handle_frame`]
+//! and the per-process Host maps (open rounds, issued round refs), while
+//! [`serve::HostHandle::handle_frame`]
 //! runs the full transport-free orchestration pipeline over
-//! [`ene_plugin_ipc::WireFrame`] values.
+//! [`ene_plugin_ipc::WireFrame`] values. Pairing requests and input replay
+//! keys are durable in the store; presence clients map deterministically from
+//! paired device strings.
 //!
 //! Module layout:
 //!
@@ -23,7 +25,8 @@
 //!
 //! `message_type` convention (`Stage 2`, Host-side): outgoing envelopes name the
 //! [`ene_api::v1::payload::WirePayload`] variant (`"PairingResult"`,
-//! `"NegotiatedConnection"`, `"RoundIntakeOutcome"`, `"TextStreamOpen"`,
+//! `"NegotiatedConnection"`, `"AuthChallenge"`, `"AuthResult"`,
+//! `"PresenceAttribution"`, `"RoundIntakeOutcome"`, `"TextStreamOpen"`,
 //! `"TextStreamFrame"`, `"TextStreamClose"`, `"HistoryView"`, `"ManagementOutcome"`,
 //! `"ManagementView"`, `"DisconnectNotice"`). The envelope value is a routing hint
 //! only; the `MessagePack` body already carries the same variant name through its

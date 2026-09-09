@@ -11,12 +11,15 @@
 //! [`ene_config::resolve_data_dir`] proof without effects. With the `serve`
 //! subcommand it resolves the data directory and blocks on
 //! [`ene_core::serve::serve`]: the Unix socket listener serving the full
-//! orchestration pipeline.
+//! orchestration pipeline. With the `approve-device` subcommand it resolves
+//! the data directory and records one Owner pairing approval through
+//! [`HostHandle::approve_device`](ene_core::serve::HostHandle::approve_device):
+//! the Host-local trusted inlet for pending device requests.
 
 use std::path::{Path, PathBuf};
 
 use ene_config::Config;
-use ene_core::serve::{self, CoreError};
+use ene_core::serve::{self, CoreError, HostHandle};
 
 /// Command-line failure for the Host entrypoint.
 ///
@@ -28,10 +31,10 @@ enum CliError {
     /// Command-line usage was violated.
     ///
     /// The display always contains the usage line
-    /// `usage: ene-core [--config PATH] [serve]` followed by the detail, so
-    /// callers can assert on the usage line alone. The bracketed prefix keeps
-    /// the `Stage 1` usage line as a substring.
-    #[error("usage: ene-core [--config PATH] [serve]: {0}")]
+    /// `usage: ene-core [--config PATH] [serve | approve-device --descriptor EXACT]`
+    /// followed by the detail, so callers can assert on the usage line alone.
+    /// The bracketed prefix keeps the `Stage 1` usage line as a substring.
+    #[error("usage: ene-core [--config PATH] [serve | approve-device --descriptor EXACT]: {0}")]
     Usage(String),
     /// Layered configuration loading or validation failed.
     #[error(transparent)]
@@ -104,15 +107,85 @@ fn extract_serve(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
     Ok((serve, rest))
 }
 
-/// `Stage 2` Host entrypoint: parse arguments, load configuration, then stop
-/// or serve.
+/// Splits the `approve-device` subcommand off the argument list, order-independent.
 ///
-/// Without `serve` this keeps the `Stage 1` behavior: [`parse_args`],
+/// Scans `args` for exactly one `approve-device` token and returns it
+/// separately from the remaining arguments (which [`parse_args`] then parses
+/// for `--config` and [`extract_descriptor`] parses for `--descriptor`).
+/// Both `ene-core approve-device --descriptor EXACT` and
+/// `ene-core --descriptor EXACT approve-device` work; a repeated
+/// `approve-device` is a [`CliError::Usage`] failure.
+///
+/// The function is pure: it inspects only `args` and never touches the
+/// process environment, the filesystem, or `stdout`.
+///
+/// # Errors
+///
+/// Returns [`CliError::Usage`] when `approve-device` appears more than once.
+fn extract_approve_device(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
+    let mut approve = false;
+    let mut rest = Vec::new();
+    for arg in args {
+        if arg.as_str() == "approve-device" {
+            if approve {
+                return Err(CliError::Usage(
+                    "duplicate subcommand: approve-device".to_string(),
+                ));
+            }
+            approve = true;
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    Ok((approve, rest))
+}
+
+/// Splits `--descriptor VALUE` out of the argument list.
+///
+/// Scans `args` for `--descriptor` flags and returns the last value
+/// separately from the remaining arguments (which [`parse_args`] then parses
+/// for `--config`). The value following `--descriptor` is consumed verbatim,
+/// even when it starts with `--`. Later flags override earlier ones, matching
+/// the usual override convention.
+///
+/// The function is pure: it inspects only `args` and never touches the
+/// process environment, the filesystem, or `stdout`.
+///
+/// # Errors
+///
+/// Returns [`CliError::Usage`] when `--descriptor` has no following value.
+fn extract_descriptor(args: &[String]) -> Result<(Option<String>, Vec<String>), CliError> {
+    let mut descriptor: Option<String> = None;
+    let mut rest = Vec::new();
+    let mut pending = args.iter();
+    while let Some(arg) = pending.next() {
+        if arg.as_str() == "--descriptor" {
+            let Some(value) = pending.next() else {
+                return Err(CliError::Usage(
+                    "missing value for --descriptor".to_string(),
+                ));
+            };
+            descriptor = Some(value.clone());
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    Ok((descriptor, rest))
+}
+
+/// `Stage 2` Host entrypoint: parse arguments, load configuration, then stop,
+/// serve, or approve.
+///
+/// Without a subcommand this keeps the `Stage 1` behavior: [`parse_args`],
 /// [`Config::load`] (which validates), and [`ene_config::resolve_data_dir`]
 /// proof with no effects. With `serve` it resolves the data directory (which
 /// must exist as a value: an unresolvable directory is a [`CoreError::Store`]
 /// failure, since serving without durable state is meaningless) and blocks on
-/// [`serve::serve`] under a multi-threaded `Tokio` runtime.
+/// [`serve::serve`] under a multi-threaded `Tokio` runtime. With
+/// `approve-device` it resolves the data directory the same way and records
+/// one Owner pairing approval for the exact `--descriptor` value (surrounding
+/// whitespace trimmed, matching wire ingress normalization); an unknown
+/// descriptor fails with the pending set so the Owner can retry exactly.
 ///
 /// There is deliberately no `--help` or `--version` handling yet: there is no
 /// `stdout` mechanism under the workspace `print_stdout` deny, so they
@@ -125,6 +198,32 @@ fn extract_serve(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
 fn main() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (serve_mode, rest) = extract_serve(&args)?;
+    let (approve_mode, rest) = extract_approve_device(&rest)?;
+    if serve_mode && approve_mode {
+        return Err(CliError::Usage(
+            "serve and approve-device are mutually exclusive".to_string(),
+        ));
+    }
+    if approve_mode {
+        let (descriptor, rest) = extract_descriptor(&rest)?;
+        let Some(descriptor) = descriptor else {
+            return Err(CliError::Usage(
+                "approve-device requires --descriptor EXACT".to_string(),
+            ));
+        };
+        if descriptor.trim().is_empty() {
+            return Err(CliError::Usage(
+                "approve-device requires a non-blank --descriptor".to_string(),
+            ));
+        }
+        let path = parse_args(&rest)?;
+        let cfg = Config::load(path.as_deref())?;
+        let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
+            return Err(CoreError::Store("no data directory resolved".to_string()).into());
+        };
+        run_approve_device(&data_dir, descriptor.trim())?;
+        return Ok(());
+    }
     let path = parse_args(&rest)?;
     let cfg = Config::load(path.as_deref())?;
     if serve_mode {
@@ -157,9 +256,60 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
     runtime.block_on(serve::serve(data_dir))
 }
 
+/// Records one Owner pairing approval for `descriptor` under `data_dir`.
+///
+/// Opens the Host state, records the decision through
+/// [`HostHandle::approve_device`], and succeeds silently on approval. An
+/// unknown descriptor fails with the pending descriptor set so the Owner can
+/// retry with the exact value; descriptors are display strings only.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Store`] when the runtime cannot be built or the state
+/// cannot be opened, and [`CoreError::Approve`] when the descriptor is
+/// unknown (listing the pending descriptors) or the approval write fails.
+fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| CoreError::Store("tokio runtime unavailable".to_string()))?;
+    runtime.block_on(approve_device_async(data_dir, descriptor))
+}
+
+/// Opens the Host state and records one Owner pairing approval.
+///
+/// Split from [`run_approve_device`] so the async body stays runtime-free.
+/// The one-time pairing secret prints once to this Host-local console: that
+/// console is the trusted inlet, so displaying here (and nowhere else) is
+/// the distribution channel. The operator provisions it into the client's
+/// protected device file.
+async fn approve_device_async(data_dir: &Path, descriptor: &str) -> Result<(), CoreError> {
+    use std::io::Write as _;
+    let handle = HostHandle::open(data_dir).await?;
+    if let Some((_, secret)) = handle.approve_device(descriptor).await? {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "pairing secret (show once): {secret}").map_err(|error| {
+            CoreError::Store(format!(
+                "approved, but the secret could not be shown: {error}"
+            ))
+        })?;
+        stdout.flush().map_err(|error| {
+            CoreError::Store(format!(
+                "approved, but the secret could not be shown: {error}"
+            ))
+        })?;
+        return Ok(());
+    }
+    let pending = handle.pending_devices().await?;
+    Err(CoreError::Approve(format!(
+        "unknown device descriptor {descriptor:?}; pending: [{pending}]",
+        pending = pending.join(", ")
+    )))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract_serve, parse_args};
+    use super::{extract_approve_device, extract_descriptor, extract_serve, parse_args};
     use std::path::PathBuf;
 
     #[test]
@@ -269,5 +419,126 @@ mod tests {
             rendered.contains("usage: ene-core [--config PATH]"),
             "a repeated serve must render the usage line: {rendered}"
         );
+    }
+
+    #[test]
+    fn approve_device_token_splits_off_in_any_position() {
+        for args in [
+            vec![String::from("approve-device")],
+            vec![
+                String::from("approve-device"),
+                String::from("--descriptor"),
+                String::from("laptop"),
+            ],
+            vec![
+                String::from("--descriptor"),
+                String::from("laptop"),
+                String::from("approve-device"),
+            ],
+        ] {
+            let split = extract_approve_device(&args);
+            assert!(
+                split.is_ok(),
+                "a single approve-device must split: {args:?}"
+            );
+            let Some((approve, rest)) = split.ok() else {
+                return;
+            };
+            assert!(approve, "the token must select the subcommand");
+            assert!(
+                !rest.iter().any(|arg| arg == "approve-device"),
+                "the rest must not keep the token: {rest:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_approve_device_is_a_usage_error() {
+        let args = [
+            String::from("approve-device"),
+            String::from("approve-device"),
+        ];
+        let split = extract_approve_device(&args);
+        assert!(split.is_err(), "a repeated approve-device must fail");
+        let Some(error) = split.err() else {
+            return;
+        };
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("usage: ene-core [--config PATH]"),
+            "a repeated approve-device must render the usage line: {rendered}"
+        );
+    }
+
+    #[test]
+    fn descriptor_flag_captures_its_value_verbatim() {
+        let args = [
+            String::from("--descriptor"),
+            String::from("--odd-value"),
+            String::from("--config"),
+            String::from("/tmp/e.json"),
+        ];
+        let parsed = extract_descriptor(&args);
+        assert!(parsed.is_ok(), "--descriptor with a value must split");
+        let Some((descriptor, rest)) = parsed.ok() else {
+            return;
+        };
+        assert_eq!(
+            descriptor,
+            Some(String::from("--odd-value")),
+            "the value is consumed verbatim, even with a leading --"
+        );
+        assert_eq!(
+            rest,
+            vec![String::from("--config"), String::from("/tmp/e.json"),],
+            "the rest must pass through untouched"
+        );
+    }
+
+    #[test]
+    fn repeated_descriptor_keeps_the_last_value() {
+        let args = [
+            String::from("--descriptor"),
+            String::from("first"),
+            String::from("--descriptor"),
+            String::from("second"),
+        ];
+        let parsed = extract_descriptor(&args);
+        assert!(parsed.is_ok(), "a repeated --descriptor must split");
+        let Some((descriptor, _)) = parsed.ok() else {
+            return;
+        };
+        assert_eq!(
+            descriptor,
+            Some(String::from("second")),
+            "a repeated --descriptor must keep the last value"
+        );
+    }
+
+    #[test]
+    fn missing_descriptor_value_is_a_usage_error() {
+        let args = [String::from("--descriptor")];
+        let parsed = extract_descriptor(&args);
+        assert!(parsed.is_err(), "a missing --descriptor value must fail");
+        let Some(error) = parsed.err() else {
+            return;
+        };
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("usage: ene-core [--config PATH]"),
+            "a missing value must render the usage line: {rendered}"
+        );
+    }
+
+    #[test]
+    fn absent_descriptor_yields_no_value() {
+        let args = [String::from("--config"), String::from("/tmp/e.json")];
+        let parsed = extract_descriptor(&args);
+        assert!(parsed.is_ok(), "args without --descriptor must split");
+        let Some((descriptor, rest)) = parsed.ok() else {
+            return;
+        };
+        assert!(descriptor.is_none(), "no flag means no descriptor");
+        assert_eq!(rest, args, "the rest must pass through untouched");
     }
 }
