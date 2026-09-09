@@ -280,12 +280,35 @@ pub trait PresenceRepository {
     ///
     /// `live` is an out-of-band premise evaluated before this call; this
     /// method never performs reachability I/O inside the atomic section.
+    /// The confirm may only adopt the client pinned at begin time: when
+    /// `live` reports a live connection for a *different* client than the
+    /// stored transition target, the row stays untouched and the call
+    /// answers stale instead of crowning the newcomer. Authority flows
+    /// from the begin decision, never from a later self-report.
     async fn confirm_transition(
         &self,
         companion: RawId,
         transitioning_generation: PresenceGeneration,
         live: LiveReachabilityRef,
-    ) -> Result<PresenceAttribution, PresenceTechnicalError>;
+    ) -> Result<ConfirmTransitionOutcome, PresenceTechnicalError>;
+}
+
+/// Outcome of confirming a transitioning generation.
+///
+/// Stale / mismatch outcomes are `Ok`-side, never errors: only
+/// infrastructure failure is [`PresenceTechnicalError`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmTransitionOutcome {
+    /// The transition confirmed (or had already confirmed: idempotent
+    /// read-back carries the current fact).
+    Confirmed(PresenceAttribution),
+    /// The stored transition target differs from the confirming client, or
+    /// the generation already moved on; carries the current fact. Nothing
+    /// was written.
+    RejectedAsStalePresence {
+        /// Current [`PresenceAttribution`] the caller should observe next time.
+        current: PresenceAttribution,
+    },
 }
 
 #[cfg(test)]

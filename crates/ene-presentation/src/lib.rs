@@ -20,12 +20,13 @@
 //! failure is observed as unknown and sticky, never upgraded by resend.
 //!
 //! Minting versus acceptance: calling [`new_round`] mints a fresh [`RoundId`]
-//! but accepts nothing. [`check_intake`] accepts; on a `None`-round request
-//! that passes all checks with no matching [`OpenRound`], it mints a fresh
-//! [`RoundId`] inside and returns it as accepted. Minting is not authority,
-//! acceptance is: the caller still records the returned round as the open
-//! round. On a `None`-round request with a matching [`OpenRound`] for the
-//! same companion, client, and generation, the open round is returned.
+//! but accepts nothing. [`check_intake`] accepts; on an [`RoundIntent::Auto`]
+//! request that passes all checks with no matching [`OpenRound`], it mints
+//! a fresh [`RoundId`] inside and returns it as accepted, as it always does
+//! for [`RoundIntent::New`]. Minting is not authority, acceptance is: the
+//! caller still records the returned round as the open round. On an
+//! [`RoundIntent::Auto`] request with a matching [`OpenRound`] for the same
+//! companion, client, and generation, the open round is returned.
 
 use ene_presence::{
     ClientId, LiveReachabilityRef, PresenceAttribution, PresenceGeneration, PresenceState,
@@ -98,8 +99,10 @@ pub struct SubmitClientInputCandidate {
     /// Generation value the Client saw, if any. [`None`] means the
     /// generation token was missing.
     pub claimed_generation: Option<PresenceGeneration>,
-    /// Target round, or [`None`] to request a new round.
-    pub round: Option<RoundId>,
+    /// Which round the input wants: join-or-mint, always-mint, or one
+    /// specific open round. A single meaning per value — never an
+    /// `Option` doing double duty.
+    pub round: RoundIntent,
     /// Input body reference.
     pub input_ref: ClientInputRef,
     /// Client-local correspondence ID for matching acks to sends.
@@ -119,6 +122,22 @@ impl core::fmt::Debug for SubmitClientInputCandidate {
             .field("local_id", &self.local_id)
             .finish()
     }
+}
+
+/// Which round an intake candidate wants to join.
+///
+/// One value, one meaning: unlike the retired `Option<RoundId>` (where
+/// `None` meant both "join the open round" and "mint a fresh one"), each
+/// variant names exactly one intention, so replay fingerprints and round
+/// projections built downstream rest on a single meaning source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoundIntent {
+    /// Join the matching open round; mint a fresh one when none matches.
+    Auto,
+    /// Always mint a fresh round, even when an open round would match.
+    New,
+    /// Join this specific round; stale unless it is the matching open round.
+    Existing(RoundId),
 }
 
 /// Companion availability premise supplied Host-side.
@@ -198,7 +217,7 @@ pub enum RevalidationReason {
 /// Intake outcome: an `Ok`-side domain outcome, never an error.
 ///
 /// An old round maps back to its own round; nothing is rebound onto a new
-/// one, and a [`None`] request is never auto-resent to work around a
+/// one, and a rejected request is never auto-resent to work around a
 /// rejection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoundIntakeOutcome {
@@ -277,13 +296,13 @@ pub struct RoundClosureFact {
 ///    mismatch, a non-matching active client, a liveness client mismatch, or
 ///    a dead connection returns `StaleRound` with the current generation and
 ///    the open round, if any.
-/// 5. Round binding: `Some(round)` matching the open round for the same
-///    companion, client, and generation returns `AcceptedForRound(round)`;
-///    any other `Some(round)` returns `StaleRound`. A `None` request with a
-///    matching open round returns `AcceptedForRound(open)`; a `None` request
-///    with no matching open round mints a fresh [`RoundId`] via
-///    [`new_round`] and returns it as accepted. Minting is not authority;
-///    the caller records the returned round.
+/// 5. Round binding by intent: [`RoundIntent::Existing`] matching the open
+///    round for the same companion, client, and generation returns
+///    `AcceptedForRound(round)`; any other `Existing` returns `StaleRound`.
+///    [`RoundIntent::Auto`] joins a matching open round when one exists and
+///    mints a fresh [`RoundId`] otherwise; [`RoundIntent::New`] always
+///    mints. Minting is not authority; the caller records the returned
+///    round.
 #[must_use]
 pub fn check_intake(premise: IntakePremise) -> RoundIntakeOutcome {
     let IntakePremise {
@@ -344,7 +363,7 @@ pub fn check_intake(premise: IntakePremise) -> RoundIntakeOutcome {
     if live.client != candidate.client || !live.connection_live {
         return stale();
     }
-    if let Some(requested) = candidate.round {
+    if let RoundIntent::Existing(requested) = candidate.round {
         let accepted = open_round.is_some_and(|open| {
             open.round == requested
                 && open.companion == candidate.companion
@@ -356,7 +375,8 @@ pub fn check_intake(premise: IntakePremise) -> RoundIntakeOutcome {
         } else {
             stale()
         }
-    } else if let Some(open) = open_round
+    } else if matches!(candidate.round, RoundIntent::Auto)
+        && let Some(open) = open_round
         && open.companion == candidate.companion
         && open.client == candidate.client
         && open.generation == attribution.generation
@@ -372,7 +392,7 @@ mod tests {
     use super::{
         ClientInputRef, CompanionAvailability, ConfirmPresentationObservation, IntakePremise,
         OpenRound, PresentationStatus, RevalidationReason, RoundClosureFact, RoundId,
-        RoundIntakeOutcome, SubmitClientInputCandidate, check_intake, new_round,
+        RoundIntakeOutcome, RoundIntent, SubmitClientInputCandidate, check_intake, new_round,
     };
     use ene_presence::{
         ClientId, LiveReachabilityRef, PresenceAttribution, PresenceGeneration, PresenceState,
@@ -387,7 +407,7 @@ mod tests {
         companion: RawId,
         claimant: ClientId,
         generation: Option<PresenceGeneration>,
-        round: Option<RoundId>,
+        round: RoundIntent,
     ) -> SubmitClientInputCandidate {
         SubmitClientInputCandidate {
             companion,
@@ -444,7 +464,7 @@ mod tests {
     fn missing_generation_view_needs_revalidation() {
         let companion = RawId::new();
         let claimant = client();
-        let candidate = input_candidate(companion, claimant, None, None);
+        let candidate = input_candidate(companion, claimant, None, RoundIntent::Auto);
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
         assert_eq!(
@@ -459,8 +479,12 @@ mod tests {
     fn unknown_companion_needs_revalidation() {
         let companion = RawId::new();
         let claimant = client();
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let base = premise(candidate, fact, live_for(claimant), None);
         let unknown = IntakePremise {
@@ -483,8 +507,12 @@ mod tests {
     fn stopped_companion_needs_revalidation() {
         let companion = RawId::new();
         let claimant = client();
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let base = premise(candidate, fact, live_for(claimant), None);
         let stopped = IntakePremise {
@@ -507,8 +535,12 @@ mod tests {
     fn stopped_attribution_needs_revalidation() {
         let companion = RawId::new();
         let claimant = client();
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = PresenceAttribution {
             companion,
             state: PresenceState::Stopped,
@@ -528,8 +560,12 @@ mod tests {
     fn in_transition_holds_intake() {
         let companion = RawId::new();
         let claimant = client();
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = PresenceAttribution {
             companion,
             state: PresenceState::InTransition,
@@ -544,8 +580,12 @@ mod tests {
     fn recovery_wait_holds_intake() {
         let companion = RawId::new();
         let claimant = client();
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = PresenceAttribution {
             companion,
             state: PresenceState::RecoveryWait,
@@ -561,8 +601,12 @@ mod tests {
         let companion = RawId::new();
         let claimant = client();
         let current = PresenceGeneration::from_u64(7);
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = attribution_for(companion, claimant, current);
         let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
         assert_eq!(
@@ -579,8 +623,12 @@ mod tests {
         let companion = RawId::new();
         let claimant = client();
         let other = client();
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = attribution_for(companion, other, PresenceGeneration::first());
         let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
         assert!(matches!(outcome, RoundIntakeOutcome::StaleRound { .. }));
@@ -596,8 +644,12 @@ mod tests {
     fn dead_connection_is_stale() {
         let companion = RawId::new();
         let claimant = client();
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let dead = LiveReachabilityRef {
             client: claimant,
@@ -621,7 +673,7 @@ mod tests {
             companion,
             claimant,
             Some(PresenceGeneration::first()),
-            Some(new_round()),
+            RoundIntent::Existing(new_round()),
         );
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let outcome = check_intake(premise(candidate, fact, live_for(claimant), Some(open)));
@@ -650,7 +702,7 @@ mod tests {
             companion,
             claimant,
             Some(PresenceGeneration::first()),
-            Some(open.round),
+            RoundIntent::Existing(open.round),
         );
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let outcome = check_intake(premise(candidate, fact, live_for(claimant), Some(open)));
@@ -661,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn none_request_reuses_matching_open_round() {
+    fn auto_request_reuses_matching_open_round() {
         let companion = RawId::new();
         let claimant = client();
         let open = OpenRound {
@@ -670,8 +722,12 @@ mod tests {
             round: new_round(),
             generation: PresenceGeneration::first(),
         };
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let outcome = check_intake(premise(candidate, fact, live_for(claimant), Some(open)));
         assert_eq!(
@@ -681,11 +737,15 @@ mod tests {
     }
 
     #[test]
-    fn none_request_without_open_round_mints_fresh_round() {
+    fn auto_request_without_open_round_mints_fresh_round() {
         let companion = RawId::new();
         let claimant = client();
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
         assert!(matches!(
@@ -695,6 +755,33 @@ mod tests {
         if let RoundIntakeOutcome::AcceptedForRound { round } = outcome {
             assert_ne!(round, RoundId::from_raw(RawId::new()));
         }
+    }
+
+    #[test]
+    fn new_request_mints_fresh_round_despite_matching_open() {
+        let companion = RawId::new();
+        let claimant = client();
+        let open = OpenRound {
+            companion,
+            client: claimant,
+            round: new_round(),
+            generation: PresenceGeneration::first(),
+        };
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::New,
+        );
+        let fact = attribution_for(companion, claimant, PresenceGeneration::first());
+        let outcome = check_intake(premise(candidate, fact, live_for(claimant), Some(open)));
+        assert!(
+            matches!(
+                outcome,
+                RoundIntakeOutcome::AcceptedForRound { round } if round != open.round
+            ),
+            "New must mint instead of joining, got {outcome:?}"
+        );
     }
 
     #[test]
@@ -714,7 +801,7 @@ mod tests {
             companion: RawId::new(),
             client: client(),
             claimed_generation: Some(PresenceGeneration::first()),
-            round: Some(new_round()),
+            round: RoundIntent::Existing(new_round()),
             input_ref: ClientInputRef {
                 text: String::from("hello companion"),
                 lang: String::from("en"),
@@ -734,8 +821,12 @@ mod tests {
     fn premise_debug_redacts_body() {
         let companion = RawId::new();
         let claimant = client();
-        let candidate =
-            input_candidate(companion, claimant, Some(PresenceGeneration::first()), None);
+        let candidate = input_candidate(
+            companion,
+            claimant,
+            Some(PresenceGeneration::first()),
+            RoundIntent::Auto,
+        );
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let rendered = format!("{:?}", premise(candidate, fact, live_for(claimant), None));
         assert!(

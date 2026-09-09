@@ -16,9 +16,15 @@ use super::refs::{ClientLocalId, CompanionWireRef, RoundWireId, StreamWireId, Te
 pub struct SubmitTextInput {
     /// Opaque Companion reference. Echoed, never interpreted.
     pub companion: CompanionWireRef,
-    /// Target round, or [`None`] to request a new round. Old rounds are
-    /// never rebound from this field.
+    /// Target round, or [`None`] to join-or-mint. Old rounds are
+    /// never rebound from this field. Ignored when [`fresh`](Self::fresh)
+    /// is set: an explicit new-round intent beats a round hint.
     pub round: Option<RoundWireId>,
+    /// Force a fresh round: the Host mints instead of joining any open
+    /// round. Defaults to `false` when absent, preserving the join-or-mint
+    /// meaning of a bare `round: None`.
+    #[serde(default)]
+    pub fresh: bool,
     /// Client-local correspondence ID for matching acks to sends.
     pub local_id: ClientLocalId,
     /// Message body. Redacted from [`core::fmt::Debug`].
@@ -31,6 +37,7 @@ impl core::fmt::Debug for SubmitTextInput {
             .debug_struct("SubmitTextInput")
             .field("companion", &self.companion)
             .field("round", &self.round)
+            .field("fresh", &self.fresh)
             .field("local_id", &self.local_id)
             .field("body", &"[redacted]")
             .finish()
@@ -248,6 +255,7 @@ mod tests {
         SubmitTextInput {
             companion: CompanionWireRef(String::from("companion-1")),
             round: Some(RoundWireId(String::from("round-1"))),
+            fresh: false,
             local_id: ClientLocalId(String::from("local-1")),
             body: TextBodyWire {
                 text: String::from("hello companion"),

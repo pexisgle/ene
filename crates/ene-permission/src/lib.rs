@@ -17,7 +17,7 @@
 //! for this stage. Future stages may widen it, but only by extending the
 //! explicit match in [`check_live_authorization`], never by default-allow.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use ene_primitive::RawId;
 use thiserror::Error;
@@ -499,15 +499,18 @@ pub fn consent_mark_rev(rev: Option<u64>) -> String {
 }
 /// Tracks minted evaluation ids and enforces single use.
 ///
-/// Holds the issued `RawId -> EvalFingerprint` map plus the set of consumed
-/// ids. Minting binds an id to a candidate fingerprint; consuming requires
-/// the same fingerprint and succeeds at most once per id.
+/// Holds the issued `RawId -> EvalFingerprint` map only: a successful
+/// consume removes the entry, so presence means unused and absence means
+/// unknown or already consumed. Minting binds an id to a candidate
+/// fingerprint; consuming requires the same fingerprint and succeeds at
+/// most once per id.
 #[derive(Debug, Default)]
 pub struct EvaluationTracker {
-    /// Fingerprint each issued id was minted for.
+    /// Fingerprint each live issued id was minted for. A successful
+    /// [`consume`](EvaluationTracker::consume) removes the entry, so one
+    /// map carries both issuance and single-use state: present means
+    /// unused, absent means unknown or already consumed.
     issued: HashMap<RawId, EvalFingerprint>,
-    /// Ids already consumed; replays are rejected.
-    consumed: HashSet<RawId>,
 }
 
 impl EvaluationTracker {
@@ -516,7 +519,6 @@ impl EvaluationTracker {
     pub fn new() -> Self {
         Self {
             issued: HashMap::new(),
-            consumed: HashSet::new(),
         }
     }
 
@@ -530,19 +532,16 @@ impl EvaluationTracker {
     /// Consumes an id iff it is known, unused, and bound to `expected`.
     ///
     /// Returns `false` for unknown ids, replays, and fingerprint mismatches.
-    /// Only a matching presentation burns the id, so a caller that
-    /// misconstructed the fingerprint can retry with the correct one, while
-    /// a successful consume can never be replayed.
+    /// Only a matching presentation burns the id — removing it, so a second
+    /// consume finds nothing — while a fingerprint mismatch leaves the entry
+    /// so the caller can retry with the correct fingerprint.
     pub fn consume(&mut self, id: &PermissionEvaluationId, expected: &EvalFingerprint) -> bool {
         match self.issued.get(&id.0) {
-            None => false,
-            Some(bound) => {
-                if bound != expected || self.consumed.contains(&id.0) {
-                    return false;
-                }
-                self.consumed.insert(id.0);
+            Some(bound) if bound == expected => {
+                self.issued.remove(&id.0);
                 true
             }
+            _ => false,
         }
     }
 }
