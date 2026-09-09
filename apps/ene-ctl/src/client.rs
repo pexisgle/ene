@@ -659,7 +659,7 @@ impl Client {
         if let Some(secret_value) = secret {
             state.set_pairing_secret(secret_value);
         }
-        Ok(Self {
+        let mut session = Self {
             stream,
             sender: WireSender {
                 device_id: Some(device_id),
@@ -667,18 +667,31 @@ impl Client {
                 connection_id: None,
             },
             state,
-        })
+        };
+        let challenge = read_frame(&mut session.stream).await?.payload;
+        let WirePayload::AuthChallenge(challenge) = challenge else {
+            return Err(CliError::ServerRejected(format!(
+                "unexpected {} after negotiation; expected AuthChallenge",
+                payload_kind(&challenge)
+            )));
+        };
+        session.authenticate(&challenge).await?;
+        let fact = session.next_frame().await?;
+        if !matches!(fact, WirePayload::PresenceAttribution(_)) {
+            return Err(CliError::ServerRejected(format!(
+                "unexpected {} after authentication; expected PresenceAttribution",
+                payload_kind(&fact)
+            )));
+        }
+        Ok(session)
     }
 
     /// Answers one authentication challenge: derives the ownership proof
     /// from the session secret and stores the accepted connection key into
     /// the sender (for all later frames) plus the session mirror.
     ///
-    /// Call this only with a Host-minted [`AuthChallenge`]: the proof frame
-    /// answers nothing on a Host that never challenged, so a speculative
-    /// call blocks waiting for an `AuthResult` that never comes. The current
-    /// Host emits no challenge, which is why [`Client::connect`] does not
-    /// call this.
+    /// [`Client::connect`] calls this for the post-negotiation challenge;
+    /// call it only with a Host-minted [`AuthChallenge`].
     ///
     /// # Errors
     ///

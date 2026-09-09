@@ -433,7 +433,7 @@ impl HostHandle {
                 }
                 self.advertise(&frame, advertise, &live)
             }
-            WirePayload::AuthProof(proof) => self.verify_proof(&frame, proof, &live),
+            WirePayload::AuthProof(proof) => self.verify_proof(&frame, proof, &live).await,
             // Inbound challenges and results are never solicited (the Host
             // mints challenges and issues results), so both answer nothing —
             // the same empty vector as the catch-all below, spelled out so
@@ -771,18 +771,19 @@ impl HostHandle {
     /// carrying this connection's table id, which the Client echoes on every
     /// later frame as the auth binding the gate checks. Proof comparison
     /// itself runs in constant time inside [`verify_pairing_proof`].
-    fn verify_proof(
+    async fn verify_proof(
         &self,
         frame: &WireFrame,
         proof: &AuthProof,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         let nonce = lock_map(&self.pending_nonces).remove(&conn_key(&live.connection_id));
-        let device = frame
-            .envelope
-            .sender
-            .device_id
-            .map(|id| id.0.as_hyphenated().to_string());
+        // Device attribution comes from the connection table (paired moments
+        // earlier on this same connection), never from the envelope claim:
+        // the proof authenticates the pending pairing the Host recorded, and
+        // trusting a Client-supplied device here would let any peer claim
+        // any identity.
+        let device = live.paired_device.clone();
         let reason = match (nonce, device) {
             (Some(nonce), Some(device)) => {
                 let verified = lock_map(&self.pairing_secrets)
@@ -799,14 +800,28 @@ impl HostHandle {
             (None, _) => Some("no pending challenge"),
         };
         match reason {
-            None => vec![outgoing_frame(
-                frame,
-                live,
-                "AuthResult",
-                WirePayload::AuthResult(AuthResult::Accepted {
-                    connection_id: live.connection_id,
-                }),
-            )],
+            None => {
+                let mut out = vec![outgoing_frame(
+                    frame,
+                    live,
+                    "AuthResult",
+                    WirePayload::AuthResult(AuthResult::Accepted {
+                        connection_id: live.connection_id,
+                    }),
+                )];
+                if let Ok(companion) = self.store.ensure_running_companion().await
+                    && let Ok(Some(attribution)) =
+                        self.store.load_attribution(companion.as_raw()).await
+                {
+                    out.push(outgoing_frame(
+                        frame,
+                        live,
+                        "PresenceAttribution",
+                        WirePayload::PresenceAttribution(attribution_to_wire(&attribution)),
+                    ));
+                }
+                out
+            }
             Some(reason) => vec![outgoing_frame(
                 frame,
                 live,
@@ -816,6 +831,32 @@ impl HostHandle {
                 }),
             )],
         }
+    }
+}
+
+/// Maps a durable attribution to its wire fact: refs stay readable,
+/// generation travels as a value copy. Reporting only, never authority.
+fn attribution_to_wire(
+    attribution: &ene_presence::PresenceAttribution,
+) -> ene_api::v1::presence::PresenceAttributionWire {
+    use ene_api::v1::presence::PresenceStateWire;
+    use ene_api::v1::refs::{ClientWireRef, CompanionWireRef};
+    use ene_presence::PresenceState;
+    ene_api::v1::presence::PresenceAttributionWire {
+        companion: CompanionWireRef(attribution.companion.as_uuid().to_string()),
+        state: match attribution.state {
+            PresenceState::Present => PresenceStateWire::Present,
+            PresenceState::NoActive => PresenceStateWire::NoActive,
+            PresenceState::InTransition => PresenceStateWire::InTransition,
+            PresenceState::Stopped => PresenceStateWire::Stopped,
+            PresenceState::RecoveryWait => PresenceStateWire::RecoveryWait,
+        },
+        active_client: attribution
+            .active_client
+            .as_ref()
+            .map(|client| ClientWireRef(client.as_raw().as_uuid().to_string())),
+        generation: attribution.generation.as_u64(),
+        move_reason: None,
     }
 }
 
@@ -1431,7 +1472,7 @@ mod tests {
         let attempt = proof_frame(device_id, &proof);
         let expected_reply = attempt.envelope.message_id;
         let answered = handle.handle_frame(attempt, live.clone(), &transport).await;
-        assert_eq!(answered.len(), 1, "a proof answers exactly one frame");
+        assert_eq!(answered.len(), 2, "a proof answers result plus fact");
         let Some(accepted) = answered.first() else {
             remove_data_dir(&dir);
             return;
@@ -1467,6 +1508,15 @@ mod tests {
             accepted.envelope.sender.connection_id,
             Some(live.connection_id),
             "the result echoes the connection"
+        );
+        let Some(fact) = answered.get(1) else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(&fact.payload, WirePayload::PresenceAttribution(_)),
+            "acceptance carries the attribution fact, got {:?}",
+            fact.payload
         );
         let replayed = handle
             .handle_frame(proof_frame(device_id, &proof), live.clone(), &transport)
