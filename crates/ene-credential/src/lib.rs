@@ -1219,6 +1219,104 @@ impl JsonCursor<'_> {
     }
 }
 
+/// One requested-but-not-yet-approved credential registration.
+///
+/// `provider` and `label` name the requested credential exactly as the future
+/// [`CredentialRef`] would; they carry no secret material, so derived
+/// [`core::fmt::Debug`] is safe. `requested_at` records when the request was
+/// recorded, for display and audit only.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PendingCredentialApproval {
+    /// Provider the requested credential belongs to.
+    pub provider: String,
+    /// Owner-chosen label distinguishing credentials of one provider.
+    pub label: String,
+    /// Wall-clock time with its creation offset recording when requested.
+    pub requested_at: WallClockWithTz,
+}
+
+/// Persistence boundary for credential registration approvals.
+///
+/// Trust story: registration intent only proposes. A registration request
+/// (for example, one arriving over the wire) calls `request_approval`, which
+/// records a pending entry and never a usable credential. A Host-local
+/// trusted inlet carrying explicit owner confirmation then calls
+/// `approve_pending`, which flips the pending entry to usable. Availability
+/// stays two-part: [`credential_availability`] still reports ref-usable
+/// (repository) AND bearer-present (store); callers additionally gate on
+/// `is_approved`, and that gating lives in Host composition, NOT here. This
+/// crate provides the approval fact; it never combines it with availability
+/// itself.
+///
+/// Revocation is explicitly deferred: Stage 2 thin scope provides no
+/// remove/revoke method, so approvals only accumulate.
+///
+/// Blank-input contract: Host ingress validates that provider and label are
+/// non-blank before calling. Implementations perform no validation
+/// themselves beyond treating blank input as absent: when `provider` or
+/// `label` is empty or whitespace-only, `request_approval` records nothing
+/// and returns `Ok(false)`, `approve_pending` returns `Ok(false)`,
+/// `is_approved` returns `Ok(false)`, and `list_pending` never yields blank
+/// entries. A blank pair can therefore never become usable here; callers must
+/// not rely on these methods to report validation errors.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
+)]
+pub trait CredentialApprovalRepository: Send + Sync {
+    /// Records a credential registration approval request.
+    ///
+    /// Returns `Ok(true)` only when a new pending entry was recorded.
+    /// Returns `Ok(false)` without touching stored entries when a pending
+    /// entry already exists for `(provider, label)`, when the pair is already
+    /// approved, or when either input is blank (empty or whitespace-only;
+    /// Host ingress validates non-blank before calling, so this is a
+    /// defensive backstop, never validation feedback).
+    async fn request_approval(
+        &self,
+        provider: String,
+        label: String,
+    ) -> Result<bool, CredentialTechnicalError>;
+
+    /// Approves the pending request for `(provider, label)`, marking it usable.
+    ///
+    /// On a known pending pair this moves the entry from pending to usable
+    /// and returns `Ok(true)`. Re-approving an already-usable pair returns
+    /// `Ok(true)` idempotently with no state change. An unknown pair yields
+    /// `Ok(false)` — not an error; the caller maps that outcome to a
+    /// clarification request. A blank `provider` or `label` is treated as
+    /// absent and likewise yields `Ok(false)` without recording anything.
+    ///
+    /// Returns `bool` rather than `Option`, unlike
+    /// [`DevicePairingRepository::approve_pending`], because there is no
+    /// minted record or one-time secret to hand back: the approval fact
+    /// itself is the whole result.
+    ///
+    /// Approval records an Owner decision transported from a trusted inlet;
+    /// the repository never decides whether approval is allowed, it records
+    /// the decision it was given.
+    async fn approve_pending(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<bool, CredentialTechnicalError>;
+
+    /// Reports whether `(provider, label)` is approved (usable).
+    ///
+    /// Returns `Ok(true)` only after approval; pending-only, unknown, and
+    /// blank pairs all yield `Ok(false)`.
+    async fn is_approved(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<bool, CredentialTechnicalError>;
+
+    /// Lists all currently pending credential approval requests.
+    async fn list_pending(
+        &self,
+    ) -> Result<Vec<PendingCredentialApproval>, CredentialTechnicalError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::FileDeviceAuthStore;
@@ -1932,5 +2030,214 @@ mod tests {
         assert!(!rendered.contains(marker));
         assert!(!rendered.contains(marker_hex.as_str()));
         assert!(!rendered.contains(descriptor));
+    }
+
+    use super::{CredentialApprovalRepository, PendingCredentialApproval};
+
+    struct FakeApprovalRepo {
+        pending: Mutex<HashMap<(String, String), PendingCredentialApproval>>,
+        approved: Mutex<HashMap<(String, String), bool>>,
+    }
+
+    impl FakeApprovalRepo {
+        fn new() -> Self {
+            Self {
+                pending: Mutex::new(HashMap::new()),
+                approved: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn is_blank(provider: &str, label: &str) -> bool {
+            provider.trim().is_empty() || label.trim().is_empty()
+        }
+    }
+
+    impl CredentialApprovalRepository for FakeApprovalRepo {
+        async fn request_approval(
+            &self,
+            provider: String,
+            label: String,
+        ) -> Result<bool, CredentialTechnicalError> {
+            if Self::is_blank(&provider, &label) {
+                return Ok(false);
+            }
+            let key = (provider.clone(), label.clone());
+            if self.approved.lock().await.contains_key(&key) {
+                return Ok(false);
+            }
+            if self.pending.lock().await.contains_key(&key) {
+                return Ok(false);
+            }
+            let pending = PendingCredentialApproval {
+                provider: provider.clone(),
+                label: label.clone(),
+                requested_at: WallClockWithTz::now(),
+            };
+            self.pending.lock().await.insert(key, pending);
+            Ok(true)
+        }
+
+        async fn approve_pending(
+            &self,
+            provider: &str,
+            label: &str,
+        ) -> Result<bool, CredentialTechnicalError> {
+            if Self::is_blank(provider, label) {
+                return Ok(false);
+            }
+            let key = (provider.to_owned(), label.to_owned());
+            if self.approved.lock().await.contains_key(&key) {
+                return Ok(true);
+            }
+            let pending = self.pending.lock().await.remove(&key);
+            let Some(_) = pending else {
+                return Ok(false);
+            };
+            self.approved.lock().await.insert(key, true);
+            Ok(true)
+        }
+
+        async fn is_approved(
+            &self,
+            provider: &str,
+            label: &str,
+        ) -> Result<bool, CredentialTechnicalError> {
+            if Self::is_blank(provider, label) {
+                return Ok(false);
+            }
+            let key = (provider.to_owned(), label.to_owned());
+            Ok(self.approved.lock().await.contains_key(&key))
+        }
+
+        async fn list_pending(
+            &self,
+        ) -> Result<Vec<PendingCredentialApproval>, CredentialTechnicalError> {
+            let pending = self.pending.lock().await;
+            Ok(pending.values().cloned().collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_request_appears_in_pending_list_before_approval() {
+        let repo = FakeApprovalRepo::new();
+        let requested = repo
+            .request_approval("acme".to_owned(), "main".to_owned())
+            .await;
+        assert!(matches!(requested, Ok(true)));
+        let listed = repo.list_pending().await;
+        let Ok(items) = listed else {
+            return;
+        };
+        assert_eq!(items.len(), 1);
+        let Some(item) = items.first() else {
+            return;
+        };
+        assert_eq!(item.provider.as_str(), "acme");
+        assert_eq!(item.label.as_str(), "main");
+        let approved = repo.is_approved("acme", "main").await;
+        assert!(matches!(approved, Ok(false)));
+    }
+
+    #[tokio::test]
+    async fn credential_rerequest_is_not_newly_requested() {
+        let repo = FakeApprovalRepo::new();
+        let first = repo
+            .request_approval("acme".to_owned(), "main".to_owned())
+            .await;
+        assert!(matches!(first, Ok(true)));
+        let second = repo
+            .request_approval("acme".to_owned(), "main".to_owned())
+            .await;
+        assert!(matches!(second, Ok(false)));
+        let listed = repo.list_pending().await;
+        let Ok(items) = listed else {
+            return;
+        };
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn credential_approve_unknown_returns_false() {
+        let repo = FakeApprovalRepo::new();
+        let approved = repo.approve_pending("acme", "unknown").await;
+        assert!(matches!(approved, Ok(false)));
+        let flagged = repo.is_approved("acme", "unknown").await;
+        assert!(matches!(flagged, Ok(false)));
+    }
+
+    #[tokio::test]
+    async fn credential_approve_moves_pending_to_usable_and_is_idempotent() {
+        let repo = FakeApprovalRepo::new();
+        let requested = repo
+            .request_approval("acme".to_owned(), "main".to_owned())
+            .await;
+        assert!(matches!(requested, Ok(true)));
+        let approved = repo.approve_pending("acme", "main").await;
+        assert!(matches!(approved, Ok(true)));
+        let flagged = repo.is_approved("acme", "main").await;
+        assert!(matches!(flagged, Ok(true)));
+        let listed = repo.list_pending().await;
+        let Ok(items) = listed else {
+            return;
+        };
+        assert!(items.is_empty());
+        let reapproved = repo.approve_pending("acme", "main").await;
+        assert!(matches!(reapproved, Ok(true)));
+        let still_flagged = repo.is_approved("acme", "main").await;
+        assert!(matches!(still_flagged, Ok(true)));
+    }
+
+    #[tokio::test]
+    async fn credential_request_after_approval_is_not_newly_requested() {
+        let repo = FakeApprovalRepo::new();
+        let requested = repo
+            .request_approval("acme".to_owned(), "main".to_owned())
+            .await;
+        assert!(matches!(requested, Ok(true)));
+        let approved = repo.approve_pending("acme", "main").await;
+        assert!(matches!(approved, Ok(true)));
+        let again = repo
+            .request_approval("acme".to_owned(), "main".to_owned())
+            .await;
+        assert!(matches!(again, Ok(false)));
+        let listed = repo.list_pending().await;
+        let Ok(items) = listed else {
+            return;
+        };
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn credential_blank_inputs_are_treated_as_absent() {
+        let repo = FakeApprovalRepo::new();
+        let blank_provider = repo
+            .request_approval(String::new(), "main".to_owned())
+            .await;
+        assert!(matches!(blank_provider, Ok(false)));
+        let whitespace_provider = repo
+            .request_approval("   ".to_owned(), "main".to_owned())
+            .await;
+        assert!(matches!(whitespace_provider, Ok(false)));
+        let blank_label = repo
+            .request_approval("acme".to_owned(), String::new())
+            .await;
+        assert!(matches!(blank_label, Ok(false)));
+        let whitespace_label = repo
+            .request_approval("acme".to_owned(), "  ".to_owned())
+            .await;
+        assert!(matches!(whitespace_label, Ok(false)));
+        let listed = repo.list_pending().await;
+        let Ok(items) = listed else {
+            return;
+        };
+        assert!(items.is_empty());
+        let approve_blank = repo.approve_pending("", "main").await;
+        assert!(matches!(approve_blank, Ok(false)));
+        let approve_blank_label = repo.approve_pending("acme", "   ").await;
+        assert!(matches!(approve_blank_label, Ok(false)));
+        let flagged_blank = repo.is_approved("", "main").await;
+        assert!(matches!(flagged_blank, Ok(false)));
+        let flagged_blank_label = repo.is_approved("acme", "").await;
+        assert!(matches!(flagged_blank_label, Ok(false)));
     }
 }
