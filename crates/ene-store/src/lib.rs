@@ -129,12 +129,15 @@ impl Store {
     ///
     /// Durable idempotency rests on the client-minted `(companion,
     /// command_id)`: a retry reuses the same command id with a fresh message
-    /// id, so an in-transaction pre-check returns the original
-    /// [`HistoryAppendOutcome::AlreadyCommittedAs`] without re-appending or
-    /// re-registering undelivered. This replaces the retired `local_id`
-    /// pre-check; `local_id` is stored as correspondence metadata only and is
-    /// never consulted here. `NULL` command ids carry no replay key and never
-    /// collide.
+    /// id, so an in-transaction pre-check compares the stored fingerprint
+    /// (round, role, body, language, round wire, incarnation) and returns
+    /// the original [`HistoryAppendOutcome::AlreadyCommittedAs`] without
+    /// re-appending or re-registering undelivered. This replaces the retired
+    /// `local_id` pre-check; `local_id` is stored as correspondence metadata
+    /// only and is never consulted here. `NULL` command ids carry no replay
+    /// key and never collide. A reused key with different content answers
+    /// [`HistoryAppendOutcome::CommandConflict`] instead: declined without
+    /// side effects, never rebound.
     fn append_history(
         &self,
         cmd: &AppendHistoryCommand,
@@ -207,17 +210,65 @@ impl Store {
         }
         if let Some(command) = cmd.command_id {
             let command_text = encode_id(command.0);
-            let existing: Option<(String, String)> = tx
+            let existing: Option<CommandFingerprintRow> = tx
                 .query_row(
                     SQL_SELECT_HISTORY_ID_BY_COMMAND,
                     params![companion_text, command_text],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                        ))
+                    },
                 )
                 .optional()
                 .map_err(|error| companion_unavailable(error.to_string()))?;
-            if let Some((existing, existing_round)) = existing {
+            if let Some((
+                existing,
+                existing_round,
+                existing_role,
+                existing_body,
+                existing_lang,
+                existing_wire,
+                existing_counter,
+                existing_random,
+            )) = existing
+            {
                 let message = decode_id(&existing).map_err(companion_unavailable)?;
                 let round = decode_id(&existing_round).map_err(companion_unavailable)?;
+                // The durable key owns its fingerprint: an exact retry
+                // replays the original acceptance, while the same key with
+                // different content is declined without side effects. The
+                // generation premise stays out of the fingerprint: it is
+                // enforced separately above, so a retry under a newer
+                // generation view still replays instead of conflicting.
+                let stored_incarnation = match (existing_counter, existing_random) {
+                    (Some(counter_raw), Some(random_raw)) => Some((
+                        decode_u64(counter_raw).map_err(companion_unavailable)?,
+                        decode_u64(random_raw).map_err(companion_unavailable)?,
+                    )),
+                    (None, None) => None,
+                    _ => {
+                        return Err(companion_unavailable(String::from(
+                            "malformed history incarnation",
+                        )));
+                    }
+                };
+                if existing_role != role_text
+                    || existing_body != cmd.text
+                    || existing_lang != cmd.lang
+                    || encode_id(cmd.round) != existing_round
+                    || cmd.round_wire != existing_wire
+                    || cmd.incarnation != stored_incarnation
+                {
+                    return Ok((HistoryAppendOutcome::CommandConflict, None));
+                }
                 return Ok((
                     HistoryAppendOutcome::AlreadyCommittedAs { message, round },
                     None,
@@ -519,7 +570,7 @@ const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, compa
 const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
 const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
-const SQL_SELECT_HISTORY_ID_BY_COMMAND: &str = "SELECT message_id, round_id FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_ID_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 const SQL_SELECT_UNDELIVERED_STATUS: &str =
@@ -808,6 +859,21 @@ type HistoryRow = (
     i64,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// One stored replay fingerprint for a `(companion, command_id)` key:
+/// message and round identity plus the compared content (role, body,
+/// language, round wire, incarnation columns). The generation premise stays
+/// out: it is enforced separately before the replay check.
+type CommandFingerprintRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
     Option<String>,
     Option<i64>,
     Option<i64>,
@@ -2872,17 +2938,15 @@ mod tests {
             return;
         };
         let command = CommandId(RawId::new());
+        let base = history_command_with_ids(
+            companion,
+            generation,
+            "original body",
+            Some(command),
+            Some("send-1"),
+        );
         let first = store
-            .append_reply_with_undelivered(
-                history_command_with_ids(
-                    companion,
-                    generation,
-                    "original body",
-                    Some(command),
-                    Some("send-1"),
-                ),
-                true,
-            )
+            .append_reply_with_undelivered(base.clone(), true)
             .await;
         assert!(first.is_ok(), "first command append must succeed");
         let Ok((first_outcome, first_registered)) = first else {
@@ -2895,20 +2959,11 @@ mod tests {
             first_registered.is_some(),
             "first commit registers undelivered"
         );
-        // Transport retry reuses the command id with a fresh message id: the
-        // payload differs, but the replay must return the original accept
+        // Transport retry reuses the command id with a fresh message id but
+        // identical content: the replay must return the original accept
         // without a second row or a second undelivered registration.
         let retry = store
-            .append_reply_with_undelivered(
-                history_command_with_ids(
-                    companion,
-                    generation,
-                    "retry body",
-                    Some(command),
-                    Some("send-1"),
-                ),
-                true,
-            )
+            .append_reply_with_undelivered(base.clone(), true)
             .await;
         assert!(retry.is_ok(), "command retry must succeed");
         let Ok((retry_outcome, retry_registered)) = retry else {
@@ -2950,6 +3005,71 @@ mod tests {
         };
         assert_eq!(item.id, first_id);
         assert_eq!(item.text, "original body");
+    }
+
+    #[tokio::test]
+    async fn command_reuse_with_different_content_is_declined() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let Some((companion, generation)) = running_companion(&store).await else {
+            return;
+        };
+        let command = CommandId(RawId::new());
+        let base = history_command_with_ids(
+            companion,
+            generation,
+            "original body",
+            Some(command),
+            Some("send-1"),
+        );
+        let first = store.append_message(base.clone()).await;
+        assert!(
+            matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "first command append must commit"
+        );
+        for (label, mut conflicting) in [
+            ("body", {
+                let mut cmd = base.clone();
+                cmd.text = String::from("other body");
+                cmd
+            }),
+            ("lang", {
+                let mut cmd = base.clone();
+                cmd.lang = String::from("fr");
+                cmd
+            }),
+            ("wire", {
+                let mut cmd = base.clone();
+                cmd.round_wire = Some(String::from("other-wire"));
+                cmd
+            }),
+            ("incarnation", {
+                let mut cmd = base.clone();
+                cmd.incarnation = Some((9, 9));
+                cmd
+            }),
+        ] {
+            let attempt = store.append_message(conflicting.clone()).await;
+            assert!(
+                matches!(attempt, Ok(HistoryAppendOutcome::CommandConflict)),
+                "{label} mismatch must decline without side effects"
+            );
+            conflicting.text = String::from("original body");
+            conflicting.lang = String::from("en");
+            conflicting.round_wire = base.round_wire.clone();
+            conflicting.incarnation = base.incarnation;
+            let replayed = store.append_message(conflicting).await;
+            assert!(
+                matches!(
+                    replayed,
+                    Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. })
+                ),
+                "{label} restored content must replay the original accept"
+            );
+        }
+        let count = history_row_count(&store, companion);
+        assert_eq!(count, Some(1), "conflicts must never append rows");
     }
 
     #[tokio::test]
