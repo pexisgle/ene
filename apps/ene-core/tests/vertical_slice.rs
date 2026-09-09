@@ -133,7 +133,14 @@ async fn approve_and_provision(dir: &std::path::Path, approver: &HostHandle) -> 
     };
     store_device(
         dir,
-        &StoredDevice::new(DeviceWireId(record.id.0.as_uuid()), secret),
+        &StoredDevice::new(
+            record
+                .wire
+                .parse()
+                .map(DeviceWireId)
+                .map_err(|error| format!("opaque wire must stay UUID text: {error:?}"))?,
+            secret,
+        ),
     )
     .map_err(|error| format!("device file must store: {error:?}"))?;
     Ok(())
@@ -832,12 +839,12 @@ async fn tampered_secret_cannot_authenticate() {
     let Ok(Some((record, _secret))) = approval else {
         return;
     };
+    let Ok(wire) = record.wire.parse().map(DeviceWireId) else {
+        return;
+    };
     let stored = store_device(
         &dir,
-        &StoredDevice::new(
-            DeviceWireId(record.id.0.as_uuid()),
-            String::from("wrong-secret-not-from-approve"),
-        ),
+        &StoredDevice::new(wire, String::from("wrong-secret-not-from-approve")),
     );
     assert!(stored.is_ok(), "test device file must store");
     let tampered = Client::connect(&dir, DESCRIPTOR, "test").await;
@@ -891,4 +898,353 @@ async fn rotation_requires_reprovisioning() {
         "rotated secret must invalidate the old file"
     );
     server.abort();
+}
+
+/// Fixed provider text for the binary send path, distinct from the
+/// lib-level fake so a crossed wire would show.
+const PROD_FAKE_TEXT: &str = "production reply over the real binaries";
+
+/// Minimal fake Responses API over plain HTTP/1.1: reads one request's
+/// headers plus body, then answers a fixed non-streaming completion. No new
+/// dependencies: the production transport posts non-streaming JSON to
+/// `{base}/v1/responses`, so a hand-rolled `Content-Length` responder is
+/// enough to prove the real binary path end to end without network or keys.
+async fn spawn_fake_responses(
+    text: &'static str,
+) -> Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+    let addr = listener.local_addr().ok()?;
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if head.len() > 16_384 {
+                        return;
+                    }
+                    let Ok(read) = stream.read(&mut byte).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let head_text = String::from_utf8_lossy(&head).into_owned();
+                let mut content_length = 0_usize;
+                for line in head_text.lines().skip(1) {
+                    if let Some(value) = line.strip_prefix("Content-Length:")
+                        && let Ok(parsed) = value.trim().parse::<usize>()
+                    {
+                        content_length = parsed;
+                    }
+                }
+                let mut body = vec![0_u8; content_length.min(1_048_576)];
+                let mut filled = 0_usize;
+                while filled < body.len() {
+                    match stream.read(&mut body[filled..]).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => filled += read,
+                    }
+                }
+                let payload = serde_json::json!({
+                    "output": [{
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": text}],
+                    }],
+                    "usage": {"input_tokens": 7, "output_tokens": 9},
+                });
+                let payload = payload.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                drop(stream.write_all(response.as_bytes()).await);
+                drop(stream.shutdown().await);
+            });
+        }
+    });
+    Some((addr, handle))
+}
+
+/// Writes the CLI config pointing at `dir` and reports its path.
+fn write_test_config(dir: &std::path::Path) -> Option<String> {
+    let config_path = dir.join("ene.json");
+    let config = format!(
+        "{{\"language\": \"en\", \"data_dir\": \"{}\"}}",
+        escape_json_string(&dir.to_string_lossy())
+    );
+    if std::fs::write(&config_path, config).is_err() {
+        return None;
+    }
+    Some(config_path.to_string_lossy().into_owned())
+}
+
+/// Spawns the real `serve` binary as a child with `extra_env` (child env
+/// only; our own process env is never touched).
+fn spawn_serve_binary(
+    core: &std::path::Path,
+    config: &str,
+    extra_env: &[(&str, &str)],
+) -> Option<KillOnDrop> {
+    let mut server = std::process::Command::new(core);
+    for (key, value) in extra_env {
+        server.env(key, value);
+    }
+    server.args(["serve", "--config", config]);
+    server.stdout(std::process::Stdio::null());
+    server.stderr(std::process::Stdio::null());
+    server.spawn().ok().map(|child| KillOnDrop(Some(child)))
+}
+
+/// Runs the binary pairing ceremony: pending status, Host-local approval,
+/// then a paired status using the one-time secret. Reports the secret for
+/// callers that provision further children through it.
+async fn pair_via_binaries(
+    ctl: &std::path::Path,
+    core: &std::path::Path,
+    config: &str,
+) -> Option<String> {
+    let status = run_cli(
+        ctl,
+        &["--config", config, "status"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(status, Some((2, _, _))),
+        "pre-pairing status must pend pairing, got {status:?}"
+    );
+    // The real client pairs under its platform descriptor, so approve
+    // whatever it actually requested (like the operator channel would).
+    let listed = std::process::Command::new(core)
+        .args(["approve-device", "--config", config])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok();
+    let descriptor = listed
+        .as_ref()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .and_then(|out| {
+            out.lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_string)
+        });
+    let descriptor = descriptor?;
+    let mut approve = std::process::Command::new(core);
+    approve.args([
+        "approve-device",
+        "--descriptor",
+        descriptor.as_str(),
+        "--config",
+        config,
+    ]);
+    approve.stdout(std::process::Stdio::piped());
+    approve.stderr(std::process::Stdio::piped());
+    let approved = approve.output().ok()?;
+    assert!(
+        approved.status.success(),
+        "approve-device must exit 0: {}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let shown = String::from_utf8_lossy(&approved.stdout).into_owned();
+    let secret = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("pairing secret (show once): "))
+        .map(str::to_string)?;
+    assert!(!secret.trim().is_empty(), "secret must be non-blank");
+    let status = run_cli(
+        ctl,
+        &["--config", config, "status"],
+        &[("ENE_PAIRING_SECRET", secret.as_str())],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(status, Some((0, _, _))),
+        "paired status must exit 0, got {status:?}"
+    );
+    Some(secret)
+}
+
+/// Full production path through both binaries: pairing, setup, a real
+/// `ene-ctl send` against a local fake Responses server (proving inference,
+/// streaming, presentation, and history through the real `serve` binary),
+/// then a restart proving the history survives and the path still serves.
+#[tokio::test]
+async fn binaries_drive_send_stream_history_and_restart() {
+    let temp = tempfile::TempDir::new();
+    assert!(temp.is_ok(), "tempdir must create");
+    let Ok(temp) = temp else {
+        return;
+    };
+    let dir = temp.path().to_path_buf();
+    let binaries = (workspace_binary("ene-ctl"), workspace_binary("ene-core"));
+    assert!(
+        binaries.0.is_some() && binaries.1.is_some(),
+        "both binaries must be built"
+    );
+    let (Some(ctl), Some(core)) = binaries else {
+        return;
+    };
+    let Some(config) = write_test_config(&dir) else {
+        return;
+    };
+    let Some((fake_addr, fake)) = spawn_fake_responses(PROD_FAKE_TEXT).await else {
+        return;
+    };
+    let base_url = format!("http://{fake_addr}");
+    let server_env = [
+        ("ENE_OPENAI_API_KEY", "sk-test-only"),
+        ("ENE_OPENAI_BASE_URL", base_url.as_str()),
+    ];
+
+    let server = spawn_serve_binary(&core, &config, &server_env);
+    assert!(server.is_some(), "serve must spawn");
+    let Some(mut server) = server else {
+        fake.abort();
+        return;
+    };
+    assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
+
+    let secret = pair_via_binaries(&ctl, &core, &config).await;
+    assert!(secret.is_some(), "binary pairing must complete");
+    let setup_args = [
+        "--config",
+        &config,
+        "setup",
+        "--provider",
+        "openai",
+        "--model",
+        MODEL,
+    ];
+    let setup = run_cli(&ctl, &setup_args, &[], Duration::from_secs(10)).await;
+    assert!(
+        matches!(setup, Some((2, _, _))),
+        "unapproved setup must hold at exit 2, got {setup:?}"
+    );
+    let approve_cred = std::process::Command::new(&core)
+        .args([
+            "approve-credential",
+            "--provider",
+            "openai",
+            "--label",
+            "main",
+            "--config",
+            &config,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    assert!(
+        matches!(&approve_cred, Ok(output) if output.status.success()),
+        "approve-credential must exit 0"
+    );
+    let setup = run_cli(&ctl, &setup_args, &[], Duration::from_secs(10)).await;
+    assert!(
+        matches!(setup, Some((0, _, _))),
+        "approved setup must exit 0, got {setup:?}"
+    );
+
+    let send = run_cli(
+        &ctl,
+        &["--config", &config, "send", "hello production"],
+        &[],
+        Duration::from_secs(30),
+    )
+    .await;
+    assert!(
+        matches!(send, Some((0, _, _))),
+        "real send must exit 0, got {send:?}"
+    );
+    let Some((_, send_out, _)) = send else {
+        fake.abort();
+        return;
+    };
+    assert!(
+        send_out.contains("AcceptedForRound"),
+        "send must print its accept, got {send_out:?}"
+    );
+    assert!(
+        send_out.contains(PROD_FAKE_TEXT),
+        "send must stream provider text, got {send_out:?}"
+    );
+    assert!(
+        pending_empty(&dir).await,
+        "the presented reply must not linger undelivered"
+    );
+
+    let history = run_cli(
+        &ctl,
+        &["--config", &config, "history"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(history, Some((0, _, _))),
+        "history must exit 0, got {history:?}"
+    );
+    let Some((_, history_out, _)) = history else {
+        fake.abort();
+        return;
+    };
+    assert!(
+        history_out.contains("hello production"),
+        "history must hold the sent text, got {history_out:?}"
+    );
+    assert!(
+        history_out.contains(PROD_FAKE_TEXT),
+        "history must hold the reply text, got {history_out:?}"
+    );
+
+    drop(server.0.take());
+    drop(std::fs::remove_file(dir.join("ene.sock")));
+    let server = spawn_serve_binary(&core, &config, &server_env);
+    assert!(server.is_some(), "serve must respawn after restart");
+    let Some(mut server) = server else {
+        fake.abort();
+        return;
+    };
+    assert!(
+        wait_for_socket(&dir).await,
+        "listener must rebind after restart"
+    );
+    let again = run_cli(
+        &ctl,
+        &["--config", &config, "history"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    let Some((exit_code, history_again, _)) = again else {
+        fake.abort();
+        return;
+    };
+    assert!(
+        exit_code == 0 && history_again == history_out,
+        "restart must preserve history byte-for-byte, got code {exit_code} and {history_again:?}"
+    );
+    let resend = run_cli(
+        &ctl,
+        &["--config", &config, "send", "after restart"],
+        &[],
+        Duration::from_secs(30),
+    )
+    .await;
+    assert!(
+        matches!(&resend, Some((0, out, _)) if out.contains(PROD_FAKE_TEXT)),
+        "the restarted server must serve new sends, got {resend:?}"
+    );
+    drop(server.0.take());
+    fake.abort();
 }

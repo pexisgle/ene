@@ -309,6 +309,7 @@ dependencies = [
  "ene-presentation",
  "ene-primitive",
  "ene-store",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

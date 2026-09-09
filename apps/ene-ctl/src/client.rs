@@ -105,8 +105,8 @@ use ene_api::v1::handshake::{
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::presence::PresenceAttributionWire;
 use ene_api::v1::refs::{
-    ClientIncarnationId, CommandWireId, ConnectionWireId, DeviceWireId, WireMessageId,
-    WireMessageType,
+    ClientIncarnationId, CommandWireId, ConnectionWireId, DeviceWireId, RequestWireId,
+    WireMessageId, WireMessageType,
 };
 use ene_api::v1::round::RoundIntakeOutcomeWire;
 use ene_credential::pairing_proof_hex;
@@ -493,7 +493,22 @@ pub fn auth_rejected_guidance(reason: &str) -> String {
     )
 }
 
-/// Builds the session frame for `payload`: like [`frame_for`], but stamps
+/// Builds a retry frame: the caller's command id travels unchanged while
+/// message and request ids go fresh for this attempt only. Same incarnation
+/// only (see [`Client::retry`]): the sender, generation view, and payload
+/// are reused untouched. Pure: the transport pairing in [`Client::retry`]
+/// moves it unchanged.
+pub fn retry_frame(
+    payload: WirePayload,
+    sender: WireSender,
+    generation: Option<u64>,
+    command: CommandWireId,
+) -> WireFrame {
+    let mut frame = frame_for_session(payload, sender, generation);
+    frame.envelope.correlation.command_id = Some(command);
+    frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
+    frame
+}
 /// `observed.presence_generation_view` with the session value on
 /// [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) sends only. Other
 /// payloads keep the [`None`] default: the generation view is intake
@@ -567,9 +582,11 @@ pub fn frame_for(payload: WirePayload, sender: WireSender) -> WireFrame {
 /// message ID, and the command ID keeps every request uniformly pairable as
 /// command-side correlation grows. Handshake frames skip this (they rely on
 /// message-ID pairing only); fire-and-forget observations skip it too (no
-/// reply is ever paired to them).
+/// reply is ever paired to them). Transport retry of one logical send
+/// reuses the ID through [`Client::retry`] instead.
 fn stamp_request(frame: &mut WireFrame) -> WireMessageId {
     frame.envelope.correlation.command_id = Some(CommandWireId(uuid::Uuid::new_v4()));
+    frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
     frame.envelope.message_id
 }
 
@@ -599,6 +616,7 @@ pub fn payload_kind(payload: &WirePayload) -> &'static str {
         WirePayload::ManagementOutcome(_) => "ManagementOutcome",
         WirePayload::ManagementViewRequest(_) => "ManagementViewRequest",
         WirePayload::ManagementView(_) => "ManagementView",
+        WirePayload::Reject(_) => "Reject",
     }
 }
 
@@ -853,7 +871,39 @@ impl Client {
     /// generation bookkeeping above.
     pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, CliError> {
         let mut frame = frame_for_session(payload, self.sender, self.state.generation());
-        let own_message_id = stamp_request(&mut frame);
+        let _ = stamp_request(&mut frame);
+        self.roundtrip(frame).await
+    }
+
+    /// Retries one logical send: the same command id travels (durable
+    /// idempotency key on the Host), while message and request ids go fresh
+    /// (transport pairing for this attempt only). Use after a lost reply,
+    /// never to change what the command means — and only within one sender
+    /// incarnation: the Host binds the key to its sender epoch, so a
+    /// retry under a new incarnation is a conflict, not a replay. A new
+    /// epoch mints a fresh command instead.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Client::request`].
+    pub async fn retry(
+        &mut self,
+        payload: WirePayload,
+        command: CommandWireId,
+    ) -> Result<WirePayload, CliError> {
+        self.roundtrip(retry_frame(
+            payload,
+            self.sender,
+            self.state.generation(),
+            command,
+        ))
+        .await
+    }
+
+    /// Moves one framed request and returns its paired answer, absorbing
+    /// pipelined facts and deferring anything else.
+    async fn roundtrip(&mut self, frame: WireFrame) -> Result<WirePayload, CliError> {
+        let own_message_id = frame.envelope.message_id;
         write_frame(&mut self.stream, &frame).await?;
         if let Some(queued) = self.state.take_deferred_reply(own_message_id) {
             if let Some(current) = stale_generation_of(&queued) {
@@ -1040,9 +1090,10 @@ mod tests {
     use super::{
         auth_rejected_guidance, capability_frame, decide_auth, frame_for, frame_for_session,
         message_type_for, missing_secret_guidance, new_incarnation, pairing_frame, payload_kind,
-        pending_guidance, platform_display, presence_generation_of_fact, proof_frame,
+        pending_guidance, platform_display, presence_generation_of_fact, proof_frame, retry_frame,
         select_answer, socket_path, stale_generation_of, stamp_request,
     };
+    use ene_api::v1::refs::CommandWireId;
 
     /// Fixed incarnation so built frames are deterministic.
     fn incarnation() -> ClientIncarnationId {
@@ -1394,6 +1445,52 @@ mod tests {
         assert!(
             first_command != second_command,
             "every send mints a fresh command ID: {first_command:?} vs {second_command:?}"
+        );
+        assert!(
+            first.envelope.correlation.request_id.is_some(),
+            "every send carries a request ID for pairing"
+        );
+    }
+
+    #[test]
+    fn retry_frame_reuses_command_with_fresh_transport_ids() {
+        let sender = WireSender {
+            device_id: None,
+            incarnation_id: incarnation(),
+            connection_id: None,
+        };
+        let command = CommandWireId(uuid::Uuid::new_v4());
+        let input = || {
+            WirePayload::SubmitTextInput(crate::cmds::submit_input(
+                None,
+                String::from("hi"),
+                String::from("en"),
+            ))
+        };
+        let first = retry_frame(input(), sender, Some(3), command);
+        let second = retry_frame(input(), sender, Some(3), command);
+        assert_eq!(
+            first.envelope.correlation.command_id,
+            Some(command),
+            "retry reuses the logical command ID"
+        );
+        assert_eq!(
+            second.envelope.correlation.command_id,
+            Some(command),
+            "retry reuses the logical command ID"
+        );
+        assert!(
+            first.envelope.message_id != second.envelope.message_id,
+            "retries pair transport-fresh"
+        );
+        assert!(
+            first.envelope.correlation.request_id.is_some(),
+            "retries carry request IDs"
+        );
+        assert_eq!(
+            first.envelope.observed.presence_generation_view,
+            second.envelope.observed.presence_generation_view,
+            "retries preserve the observed premise"
         );
     }
 
