@@ -42,15 +42,16 @@
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::RevalidationReasonWire;
 use ene_api::v1::refs::{CommandWireId, RoundWireId, StreamWireId};
+use ene_api::v1::reject::RejectKind;
 use ene_api::v1::round::{
     ConfirmPresentationWire, HistoryItem, HistoryRequest, HistoryRole as HistoryRoleWire,
     HistoryView, PresentationStatus, RoundIntakeOutcomeWire, StreamClose, SubmitTextInput,
     TextStreamClose, TextStreamFrameWire, TextStreamOpen,
 };
 use ene_companion::{
-    AppendHistoryCommand, CommandId, CompanionLifecycle, CompanionRepository, HistoryAppendOutcome,
-    HistoryMessage, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
-    UndeliveredRepository,
+    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
+    HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole, PresentationMark,
+    ReportStatus, UndeliveredRepository,
 };
 use ene_credential::{CredentialRef, CredentialRefRepository, credential_availability};
 use ene_inference::{
@@ -74,7 +75,9 @@ use ene_presentation::{
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
 
-use crate::serve::{HostHandle, LiveInput, device_client, outgoing_frame, unpaired_close};
+use crate::serve::{
+    HostHandle, LiveInput, device_client, outgoing_frame, reject_frame, unpaired_close,
+};
 
 /// Maximum stream chunk size in Unicode scalar values.
 ///
@@ -111,27 +114,37 @@ pub fn chunk_text(text: &str) -> Vec<String> {
 /// Garbage maps to [`None`] (no replay key) rather than rejection: a
 /// malformed key only degrades that sender's own idempotency, and every
 /// well-formed client mints fresh UUIDs. Transport retry reuses the same
-/// command ID with a fresh message ID; the store answers replays with the
-/// original acceptance instead of re-appending.
+/// command ID with a fresh message ID within one sender incarnation; the
+/// store answers replays with the original acceptance instead of
+/// re-appending.
 fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<CommandId> {
     let CommandWireId(id) = envelope.correlation.command_id?;
     Some(CommandId(ene_primitive::RawId::from_uuid(id)))
 }
 
-/// Maps a closed-world denial gate to the `Stage 2` wire reason vocabulary.
 /// Whether a stored row carries the same intent as an incoming submit:
-/// text and language must match, and a claimed round must name the stored
-/// one. A reused key with different content is a sender bug, never a
-/// rebinding: the caller declines it instead of adopting new meaning. A
-/// round-less retry matches on content alone (its round resolves through
-/// the stored row).
-fn command_matches(found: &HistoryMessage, submit: &SubmitTextInput) -> bool {
+/// text, language, and sender incarnation must match, and a claimed round
+/// must name the stored round wire. The incarnation binds the key to its
+/// sender epoch: a new epoch retries under a fresh command, never by
+/// reusing the old key. A reused key with different content is a sender
+/// bug, never a rebinding: the caller declines it instead of adopting new
+/// meaning. A round-less retry matches on content and epoch alone (its
+/// round resolves through the stored row), as does a retry against a
+/// pre-opaque row, which carries no wire premise to violate.
+fn command_matches(
+    found: &HistoryMessage,
+    submit: &SubmitTextInput,
+    incarnation: (u64, u64),
+) -> bool {
     if found.text != submit.body.text || found.lang != submit.body.lang.0 {
         return false;
     }
-    match &submit.round {
-        Some(round) => found.round.as_uuid().to_string() == round.0,
-        None => true,
+    if found.incarnation != Some(incarnation) {
+        return false;
+    }
+    match (&submit.round, &found.round_wire) {
+        (Some(round), Some(wire)) => round.0 == *wire,
+        _ => true,
     }
 }
 
@@ -408,17 +421,17 @@ impl HostHandle {
     ///
     /// Idempotency is durable over the envelope `command_id`: a parseable
     /// command id first looks up the history row through
-    /// [`lookup_command`](HistoryRepository::lookup_command), and a hit
-    /// returns the original accept ack without re-appending or re-streaming
-    /// anything. The found round maps back to its wire ref through the
-    /// per-process rounds map; when the map no longer knows it (notably after
-    /// a restart) the intake answers stale instead of guessing, and the
-    /// Client recovers missed stream items through
-    /// [`HostHandle::answer_history`]. Stream outcome replay is explicitly out
-    /// of scope: only the accept ack replays. An unparsable or missing
-    /// command id carries no replay key: it skips the lookup and appends with
-    /// `command_id` [`None`], while `local_id` is still stored as metadata.
-    /// Response text is never presented unless its reply append committed.
+    /// [`lookup_command`](HistoryRepository::lookup_command). A hit with a
+    /// matching fingerprint (text, language, sender incarnation, and round
+    /// wire) returns the original accept ack from the stored projection
+    /// without re-appending or re-streaming anything — including after a
+    /// restart, since the ack no longer depends on the transient rounds map.
+    /// A hit with different client content answers a typed wire rejection
+    /// (`ConflictingCommand`), never an intake outcome. Stream outcome
+    /// replay is explicitly out of scope: only the accept ack replays. An
+    /// unparsable or missing command id carries no replay key: it is
+    /// declined before any state changes. Response text is never presented
+    /// unless its reply append committed.
     pub(crate) async fn submit_text(
         &self,
         frame: &WireFrame,
@@ -497,22 +510,30 @@ impl HostHandle {
         match self.store.lookup_command(companion, &command).await {
             Err(_) => return vec![held_frame(frame, live)],
             Ok(Some(found)) => {
-                if !command_matches(&found, submit) {
-                    return vec![revalidate_frame(
+                let sender = (
+                    frame.envelope.sender.incarnation_id.counter,
+                    frame.envelope.sender.incarnation_id.random,
+                );
+                if !command_matches(&found, submit, sender) {
+                    return vec![reject_frame(
                         frame,
                         live,
-                        intake_reason(&RevalidationReason::CommandMismatch),
+                        RejectKind::ConflictingCommand,
+                        format!(
+                            "command {} reused with different content",
+                            command.0.as_uuid().as_hyphenated()
+                        ),
                     )];
                 }
-                let Some(wire) = self.wire_for_round_value(found.round) else {
-                    return vec![stale_frame_with(
+                return self
+                    .replay_accept(
                         frame,
                         live,
-                        None,
+                        companion,
+                        &command,
                         attribution.generation.as_u64(),
-                    )];
-                };
-                return vec![accept_frame(frame, live, &RoundWireId(wire))];
+                    )
+                    .await;
             }
             Ok(None) => {}
         }
@@ -645,7 +666,11 @@ impl HostHandle {
         let Some(authorization) = authorization else {
             return vec![revalidate_frame(frame, live, "evaluation-consumed")];
         };
-        let round_wire = RoundWireId(accepted.as_raw().as_uuid().to_string());
+        let round_wire = RoundWireId(RawId::new().as_uuid().to_string());
+        let sender_incarnation = (
+            frame.envelope.sender.incarnation_id.counter,
+            frame.envelope.sender.incarnation_id.random,
+        );
         let generation_number = attribution.generation.as_u64();
         let owner_cmd = AppendHistoryCommand {
             companion,
@@ -655,19 +680,62 @@ impl HostHandle {
             lang: submit.body.lang.0.clone(),
             at: WallClockWithTz::now(),
             expected_generation: attribution.generation,
+            expected_consent: Some((consent.id.clone(), consent.rev.as_u64())),
             local_id: Some(submit.local_id.0.clone()).filter(|key| !key.is_empty()),
             command_id: Some(command),
+            round_wire: Some(round_wire.0.clone()),
+            incarnation: Some(sender_incarnation),
         };
         match self.store.append_message(owner_cmd).await {
             Ok(HistoryAppendOutcome::CommittedAs { .. }) => {}
-            Ok(HistoryAppendOutcome::AlreadyCommittedAs { round: prior, .. }) => {
-                let Some(wire) = self.wire_for_round_value(prior) else {
-                    return vec![stale_frame_with(frame, live, None, generation_number)];
-                };
-                return vec![accept_frame(frame, live, &RoundWireId(wire))];
+            Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. }) => {
+                // Lost the race with a concurrent same-command submit after
+                // the lookup above: resolve durably so the ack survives
+                // restarts like any other replay.
+                return self
+                    .replay_accept(frame, live, companion, &command, generation_number)
+                    .await;
             }
             Ok(HistoryAppendOutcome::StaleExpected { current }) => {
                 return vec![stale_frame_with(frame, live, None, current.as_u64())];
+            }
+            Ok(HistoryAppendOutcome::StaleConsent) => {
+                return vec![revalidate_frame(frame, live, "consent-stale")];
+            }
+            Ok(HistoryAppendOutcome::CommandConflict) => {
+                // The key already owns different stored bytes. When only the
+                // Host-minted components differ (round and its projection are
+                // minted per frame, so a frame-level duplicate of the same
+                // send always differs there), the send is the same and
+                // replays the stored accept; any client-content difference
+                // declines without side effects. Never an intake outcome
+                // (the intake already accepted this send) and never a retry
+                // signal.
+                let stored = self
+                    .store
+                    .lookup_command(companion, &command)
+                    .await
+                    .ok()
+                    .flatten();
+                let same_send = stored.as_ref().is_some_and(|row| {
+                    row.text == submit.body.text
+                        && row.lang == submit.body.lang.0
+                        && row.incarnation == Some(sender_incarnation)
+                });
+                if same_send {
+                    return self
+                        .replay_accept(frame, live, companion, &command, generation_number)
+                        .await;
+                }
+                return vec![reject_frame(
+                    frame,
+                    live,
+                    RejectKind::ConflictingCommand,
+                    format!(
+                        "command {} reused with different content",
+                        command.0.as_uuid().as_hyphenated()
+                    ),
+                )];
             }
             Ok(HistoryAppendOutcome::HeldByLifecycle { .. }) => {
                 return vec![revalidate_frame(frame, live, "stopped-companion")];
@@ -737,8 +805,14 @@ impl HostHandle {
             lang: submit.body.lang.0.clone(),
             at: WallClockWithTz::now(),
             expected_generation: attribution.generation,
+            expected_consent: Some((consent.id.clone(), consent.rev.as_u64())),
             local_id: None,
             command_id: None,
+            // Same round, same projection: the reply belongs to the accepted
+            // round. No incarnation: the reply is Host-produced, never sent
+            // by the client epoch.
+            round_wire: Some(round_wire.0.clone()),
+            incarnation: None,
         };
         match self
             .store
@@ -854,7 +928,16 @@ impl HostHandle {
         let view_items = items
             .iter()
             .map(|item| HistoryItem {
-                round: RoundWireId(item.round.as_uuid().to_string()),
+                // The stored projection travels verbatim so views agree with
+                // accept acks, including after a restart. Pre-opaque rows
+                // fall back to the transient map, then to the legacy domain
+                // rendering (continuity for pre-release rows only).
+                round: RoundWireId(
+                    item.round_wire
+                        .clone()
+                        .or_else(|| self.wire_for_round_value(item.round))
+                        .unwrap_or_else(|| item.round.as_uuid().to_string()),
+                ),
                 role: match item.role {
                     HistoryRole::Owner => HistoryRoleWire::Owner,
                     HistoryRole::Companion => HistoryRoleWire::Companion,
@@ -878,6 +961,40 @@ impl HostHandle {
     /// the caller answers stale.
     fn wire_for_round_value(&self, round: RawId) -> Option<String> {
         self.wire_for_round(&RoundId::from_raw(round))
+    }
+
+    /// Answers the original accept ack for a replayed command from durable
+    /// state: the stored round wire travels verbatim, so a retry after a
+    /// restart replays instead of going stale on the dropped transient map.
+    /// Pre-opaque rows (no stored wire) fall back to the transient map; only
+    /// when both miss does the intake answer stale with the current
+    /// generation, and the Client recovers missed items through history.
+    async fn replay_accept(
+        &self,
+        frame: &WireFrame,
+        live: &LiveInput,
+        companion: CompanionId,
+        command: &CommandId,
+        generation: u64,
+    ) -> Vec<WireFrame> {
+        let stored = self
+            .store
+            .lookup_command(companion, command)
+            .await
+            .ok()
+            .flatten();
+        let wire = stored
+            .as_ref()
+            .and_then(|row| row.round_wire.clone())
+            .or_else(|| {
+                stored
+                    .as_ref()
+                    .and_then(|row| self.wire_for_round_value(row.round))
+            });
+        let Some(wire) = wire else {
+            return vec![stale_frame_with(frame, live, None, generation)];
+        };
+        vec![accept_frame(frame, live, &RoundWireId(wire))]
     }
 }
 
@@ -946,6 +1063,7 @@ mod tests {
         BaseViewMark, ClientIncarnationId, ClientLocalId, CommandWireId, CompanionWireRef,
         ConnectionWireId, ManagementTargetWire, RoundWireId, TextLangWire, WireMessageType,
     };
+    use ene_api::v1::reject::RejectKind;
     use ene_api::v1::round::{
         ConfirmPresentationWire, PresentationStatus, RoundIntakeOutcomeWire, StreamClose,
         SubmitTextInput, TextBodyWire,
@@ -1621,7 +1739,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_after_restart_is_stale_without_remap() {
+    async fn replay_after_restart_replays_from_durable_wire() {
         let Some((handle, dir)) = setup_handle("dlg-restart").await else {
             return;
         };
@@ -1635,13 +1753,17 @@ mod tests {
         let accepted = handle
             .handle_frame(frame.clone(), live.clone(), &transport)
             .await;
-        assert!(
-            accepted.first().is_some_and(|first| matches!(
-                &first.payload,
-                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
-            )),
-            "the first send attaches and accepts, got {accepted:?}"
-        );
+        let Some(first) = accepted.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) =
+            &first.payload
+        else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let accepted_wire = round.0.clone();
         drop(handle);
         let fresh = MemoryCredentialStore::new();
         fresh.insert(
@@ -1675,12 +1797,11 @@ mod tests {
         assert!(
             matches!(
                 &replay.payload,
-                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound {
-                    current_round: None,
-                    current_generation: 1,
-                })
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
+                    round
+                }) if round.0 == accepted_wire
             ),
-            "an unmapped durable round replays as stale with the durable generation, got {:?}",
+            "the restart replay answers the original accept from durable state, got {:?}",
             replay.payload
         );
         let restored = reopened
@@ -1871,11 +1992,36 @@ mod tests {
         assert!(
             matches!(
                 &same.payload,
+                WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView { current })
+                if current.0 == "consent-rev-1"
+            ),
+            "the identical replay on its stale base reports staleness (not silent success), got {:?}",
+            same.payload
+        );
+        let converged = handle
+            .handle_frame(
+                intent_frame(
+                    ManagementIntentKind::ManageRuleConsentCap,
+                    "consent:openai:dialogue-1:openai:main",
+                    "consent-rev-1",
+                    live.connection_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        let Some(same) = converged.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &same.payload,
                 WirePayload::ManagementOutcome(ManagementOutcome::StoredAsRuleView {
                     revision
                 }) if revision.0 == "1"
             ),
-            "repeating the identical assign is a no-op at the same revision, got {:?}",
+            "repeating the identical assign on a fresh base is a no-op at the same revision, got {:?}",
             same.payload
         );
         let moved = handle
@@ -1984,9 +2130,7 @@ mod tests {
         assert!(
             matches!(
                 &only.payload,
-                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::NeedsRevalidation {
-                    reason
-                }) if reason.0 == "command-mismatch"
+                WirePayload::Reject(notice) if notice.kind == RejectKind::ConflictingCommand
             ),
             "a reused key with new content must decline, got {:?}",
             only.payload

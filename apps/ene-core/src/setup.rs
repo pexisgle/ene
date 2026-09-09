@@ -385,9 +385,29 @@ impl HostHandle {
         // Idempotent retry: when the stored route already equals the
         // requested one, answer the current revision without bumping. A
         // transport retry reuses the intent id with identical content, so
-        // bumping again would fork revisions for one Owner decision. Genuine
-        // changes still flow into compare_and_save below, where a moved base
-        // view answers stale instead of overwriting.
+        // bumping again would fork revisions for one Owner decision. The
+        // base premise is enforced BEFORE the shortcut: a stale base with a
+        // coincidentally equal route must answer stale (so the caller
+        // reloads and converges), never silent success — otherwise a
+        // different intent built on a moved base would succeed without ever
+        // observing the move. Genuine changes still flow into
+        // compare_and_save below, where a moved base answers stale instead
+        // of overwriting.
+        let base_fresh = match (&expected, current.as_ref()) {
+            (None, None) => true,
+            (Some((id, revision)), Some(record)) => record.id == *id && record.rev == *revision,
+            (None, Some(_)) | (Some(_), None) => false,
+        };
+        if !base_fresh {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::StaleBaseView {
+                    current: ViewMarkWire(consent_mark(current.as_ref())),
+                },
+            )];
+        }
         if let Some(current) = current.as_ref()
             && current.provider == provider
             && current.model == model
