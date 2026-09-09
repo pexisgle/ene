@@ -19,6 +19,8 @@ use std::sync::Mutex;
 
 use ene_primitive::{RawId, WallClockWithTz};
 use hmac::{Hmac, Mac};
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -815,7 +817,7 @@ impl FileDeviceAuthStore {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
         let tmp = self.path.with_extension(format!("tmp.{pid}.{nanos}"));
-        let rendered = render_device_auth_file(entries);
+        let rendered = render_device_auth_file(entries)?;
         if let Err(err) = stage_file(&tmp, rendered.as_bytes()) {
             remove_best_effort(&tmp);
             return Err(CredentialTechnicalError::StorageUnavailable {
@@ -832,9 +834,14 @@ impl FileDeviceAuthStore {
     }
 }
 
-// One validated file entry: secret bytes as lowercase hex plus display and
-// timing metadata. Keys live in the surrounding map, canonicalized to
-// hyphenated UUID text.
+// One file entry: secret bytes as lowercase hex plus display and timing
+// metadata. Keys live in the surrounding map, canonicalized to hyphenated
+// UUID text. Unknown fields are rejected at decode (`deny_unknown_fields`)
+// so a hand-edited file with stray keys fails closed instead of silently
+// dropping them; duplicate and missing fields are rejected by the derived
+// `Deserialize` impl itself.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredDeviceAuth {
     secret_hex: String,
     descriptor: String,
@@ -915,322 +922,81 @@ fn remove_best_effort(tmp: &Path) {
 }
 
 // Renders the whole document in one canonical shape: entries ordered by
-// device key, no whitespace, trailing newline.
-fn render_device_auth_file(entries: &BTreeMap<String, StoredDeviceAuth>) -> String {
-    let mut out = String::from("{\"devices\":{");
-    let mut first = true;
-    for (device, entry) in entries {
-        if !first {
-            out.push(',');
-        }
-        first = false;
-        append_json_string(&mut out, device);
-        out.push_str(":{\"secret_hex\":");
-        append_json_string(&mut out, &entry.secret_hex);
-        out.push_str(",\"descriptor\":");
-        append_json_string(&mut out, &entry.descriptor);
-        out.push_str(",\"paired_at\":");
-        append_json_string(&mut out, &entry.paired_at);
-        out.push('}');
+// device key (`BTreeMap` iteration), no whitespace, trailing newline.
+// Struct field order fixes the entry key order, so the rendering the doc
+// comment on [`FileDeviceAuthStore`] shows is exact. Rendering goes through
+// `serde_json` — one JSON implementation for both directions instead of a
+// hand-rolled renderer. The `Result` is propagated rather than unwrapped:
+// a custody file must never silently fall back to a default document.
+fn render_device_auth_file(
+    entries: &BTreeMap<String, StoredDeviceAuth>,
+) -> Result<String, CredentialTechnicalError> {
+    #[derive(Serialize)]
+    struct Document<'a> {
+        devices: &'a BTreeMap<String, StoredDeviceAuth>,
     }
-    out.push_str("}}\n");
-    out
+    let mut rendered = serde_json::to_string(&Document { devices: entries }).map_err(|_| {
+        CredentialTechnicalError::StorageUnavailable {
+            reason: String::from("device-auth entries cannot be rendered"),
+        }
+    })?;
+    rendered.push('\n');
+    Ok(rendered)
 }
 
-// Appends one JSON string literal with escaping for quotes, backslashes, and
-// control characters; other characters (including non-ASCII) pass through.
-fn append_json_string(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 => {
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                let scalar = ch as u32;
-                out.push_str("\\u");
-                out.push(HEX[((scalar >> 12) & 0x0f) as usize] as char);
-                out.push(HEX[((scalar >> 8) & 0x0f) as usize] as char);
-                out.push(HEX[((scalar >> 4) & 0x0f) as usize] as char);
-                out.push(HEX[(scalar & 0x0f) as usize] as char);
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
+// Parses the whole document with `serde_json`; every failure maps to one
+// fixed content-free detail. `serde_json` error displays can echo the
+// offending input (unexpected values, unknown field names), and this file
+// holds secrets and descriptors — so nothing from the decoder output ever
+// reaches an error string. Semantic checks (UUID keys, hex secrets,
+// RFC 3339 timestamps) happen in `read_entries`.
+fn parse_device_auth_file(bytes: &[u8]) -> Result<BTreeMap<String, StoredDeviceAuth>, String> {
+    serde_json::from_slice::<DeviceAuthFile>(bytes)
+        .map(|file| file.devices)
+        .map_err(|_| "file is not a valid device-auth document".to_owned())
 }
 
-// Parses the whole document into raw `(key, entry)` pairs; semantic checks
-// (UUID keys, hex secrets, RFC 3339 timestamps) happen in `read_entries`.
-// Every error is positional or structural, never file content.
-fn parse_device_auth_file(bytes: &[u8]) -> Result<Vec<(String, StoredDeviceAuth)>, String> {
-    let text = core::str::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_owned())?;
-    JsonCursor {
-        text: text.as_bytes(),
-        pos: 0,
-    }
-    .parse_file()
+// Whole-file document: exactly one `devices` section mapping canonical
+// device UUID text to entries. Unknown top-level fields are rejected, so a
+// hand-edited file with stray keys fails closed instead of silently
+// dropping them.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceAuthFile {
+    /// Device entries keyed by canonical UUID text; duplicates rejected.
+    #[serde(deserialize_with = "devices_without_duplicates")]
+    devices: BTreeMap<String, StoredDeviceAuth>,
 }
 
-// Byte cursor over the document for the fixed-shape parser below.
-struct JsonCursor<'a> {
-    text: &'a [u8],
-    pos: usize,
-}
-
-impl JsonCursor<'_> {
-    // Parses `{"devices": {<entry>, ...}}` with only whitespace elsewhere.
-    fn parse_file(&mut self) -> Result<Vec<(String, StoredDeviceAuth)>, String> {
-        self.skip_ws();
-        self.expect_byte(b'{')?;
-        self.skip_ws();
-        let section = self.parse_string()?;
-        if section != "devices" {
-            return Err(self.err("expected the devices section"));
+// Rejects duplicate device entries at decode: deserializing straight into
+// a map would let a later entry silently overwrite an earlier one, but the
+// custody contract fails closed on hand-edited files instead.
+fn devices_without_duplicates<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, StoredDeviceAuth>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct WithoutDuplicates;
+    impl<'de> Visitor<'de> for WithoutDuplicates {
+        type Value = BTreeMap<String, StoredDeviceAuth>;
+        fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter.write_str("a devices object without duplicate entries")
         }
-        self.skip_ws();
-        self.expect_byte(b':')?;
-        self.skip_ws();
-        self.expect_byte(b'{')?;
-        let mut entries = Vec::new();
-        self.skip_ws();
-        if self.consume_byte(b'}') {
-            self.skip_ws();
-            self.expect_byte(b'}')?;
-            self.skip_ws();
-            self.expect_end()?;
-            return Ok(entries);
-        }
-        loop {
-            self.skip_ws();
-            let device = self.parse_string()?;
-            self.skip_ws();
-            self.expect_byte(b':')?;
-            self.skip_ws();
-            let entry = self.parse_entry()?;
-            if entries.iter().any(|(known, _)| *known == device) {
-                return Err(self.err("duplicate device entry"));
-            }
-            entries.push((device, entry));
-            self.skip_ws();
-            if self.consume_byte(b',') {
-                continue;
-            }
-            self.expect_byte(b'}')?;
-            break;
-        }
-        self.skip_ws();
-        self.expect_byte(b'}')?;
-        self.skip_ws();
-        self.expect_end()?;
-        Ok(entries)
-    }
-
-    // Parses one entry object holding exactly the required string fields.
-    fn parse_entry(&mut self) -> Result<StoredDeviceAuth, String> {
-        self.expect_byte(b'{')?;
-        let mut secret_hex: Option<String> = None;
-        let mut descriptor: Option<String> = None;
-        let mut paired_at: Option<String> = None;
-        self.skip_ws();
-        if self.consume_byte(b'}') {
-            return Err(self.err("device entry is missing required fields"));
-        }
-        loop {
-            self.skip_ws();
-            let field = self.parse_string()?;
-            self.skip_ws();
-            self.expect_byte(b':')?;
-            self.skip_ws();
-            let value = self.parse_string()?;
-            if field == "secret_hex" {
-                if secret_hex.is_some() {
-                    return Err(self.err("duplicate device field"));
-                }
-                secret_hex = Some(value);
-            } else if field == "descriptor" {
-                if descriptor.is_some() {
-                    return Err(self.err("duplicate device field"));
-                }
-                descriptor = Some(value);
-            } else if field == "paired_at" {
-                if paired_at.is_some() {
-                    return Err(self.err("duplicate device field"));
-                }
-                paired_at = Some(value);
-            } else {
-                return Err(self.err("unknown device field"));
-            }
-            self.skip_ws();
-            if self.consume_byte(b',') {
-                continue;
-            }
-            self.expect_byte(b'}')?;
-            break;
-        }
-        let (Some(secret_hex), Some(descriptor), Some(paired_at)) =
-            (secret_hex, descriptor, paired_at)
-        else {
-            return Err(self.err("device entry is missing required fields"));
-        };
-        Ok(StoredDeviceAuth {
-            secret_hex,
-            descriptor,
-            paired_at,
-        })
-    }
-
-    // Parses one JSON string literal with escapes (including surrogate
-    // pairs); raw control characters and lone surrogates are rejected.
-    fn parse_string(&mut self) -> Result<String, String> {
-        self.expect_byte(b'"')?;
-        let mut out = String::new();
-        loop {
-            let byte = self
-                .text
-                .get(self.pos)
-                .copied()
-                .ok_or_else(|| self.err("unexpected end inside a string"))?;
-            match byte {
-                b'"' => {
-                    self.pos += 1;
-                    return Ok(out);
-                }
-                b'\\' => {
-                    self.pos += 1;
-                    self.parse_escape_into(&mut out)?;
-                }
-                byte if byte < 0x20 => {
-                    return Err(self.err("unescaped control character in string"));
-                }
-                _ => {
-                    let rest = core::str::from_utf8(&self.text[self.pos..])
-                        .map_err(|_| self.err("string is not valid UTF-8"))?;
-                    let Some(ch) = rest.chars().next() else {
-                        return Err(self.err("unexpected end inside a string"));
-                    };
-                    out.push(ch);
-                    self.pos += ch.len_utf8();
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut devices = BTreeMap::new();
+            while let Some((key, entry)) = access.next_entry::<String, StoredDeviceAuth>()? {
+                if devices.insert(key, entry).is_some() {
+                    return Err(serde::de::Error::custom("duplicate device entry"));
                 }
             }
+            Ok(devices)
         }
     }
-
-    // Parses one escape (the byte after the backslash was already consumed
-    // by advancing past it) into `out`.
-    fn parse_escape_into(&mut self, out: &mut String) -> Result<(), String> {
-        let esc = self
-            .text
-            .get(self.pos)
-            .copied()
-            .ok_or_else(|| self.err("unexpected end inside a string escape"))?;
-        self.pos += 1;
-        match esc {
-            b'"' => out.push('"'),
-            b'\\' => out.push('\\'),
-            b'/' => out.push('/'),
-            b'b' => out.push('\u{8}'),
-            b'f' => out.push('\u{c}'),
-            b'n' => out.push('\n'),
-            b'r' => out.push('\r'),
-            b't' => out.push('\t'),
-            b'u' => {
-                let high = self.parse_hex4()?;
-                if (0xd800..0xdc00).contains(&high) {
-                    if self.text.get(self.pos).copied() != Some(b'\\') {
-                        return Err(self.err("lone surrogate escape"));
-                    }
-                    self.pos += 1;
-                    if self.text.get(self.pos).copied() != Some(b'u') {
-                        return Err(self.err("lone surrogate escape"));
-                    }
-                    self.pos += 1;
-                    let low = self.parse_hex4()?;
-                    if !(0xdc00..0xe000).contains(&low) {
-                        return Err(self.err("lone surrogate escape"));
-                    }
-                    let scalar = 0x1_0000 + ((high - 0xd800) << 10) + (low - 0xdc00);
-                    let Some(ch) = char::from_u32(scalar) else {
-                        return Err(self.err("invalid string escape"));
-                    };
-                    out.push(ch);
-                } else if (0xdc00..0xe000).contains(&high) {
-                    return Err(self.err("lone surrogate escape"));
-                } else {
-                    let Some(ch) = char::from_u32(high) else {
-                        return Err(self.err("invalid string escape"));
-                    };
-                    out.push(ch);
-                }
-            }
-            _ => return Err(self.err("invalid string escape")),
-        }
-        Ok(())
-    }
-
-    // Parses exactly four hex digits into a scalar value.
-    fn parse_hex4(&mut self) -> Result<u32, String> {
-        let mut value: u32 = 0;
-        for _ in 0..4 {
-            let byte = self
-                .text
-                .get(self.pos)
-                .copied()
-                .ok_or_else(|| self.err("unexpected end inside a string escape"))?;
-            let Some(digit) = hex_val(byte) else {
-                return Err(self.err("invalid string escape"));
-            };
-            value = (value << 4) | u32::from(digit);
-            self.pos += 1;
-        }
-        Ok(value)
-    }
-
-    fn skip_ws(&mut self) {
-        while matches!(
-            self.text.get(self.pos).copied(),
-            Some(b' ' | b'\t' | b'\n' | b'\r')
-        ) {
-            self.pos += 1;
-        }
-    }
-
-    fn expect_byte(&mut self, want: u8) -> Result<(), String> {
-        if self.text.get(self.pos).copied() == Some(want) {
-            self.pos += 1;
-            Ok(())
-        } else {
-            Err(self.err("unexpected input"))
-        }
-    }
-
-    fn consume_byte(&mut self, want: u8) -> bool {
-        if self.text.get(self.pos).copied() == Some(want) {
-            self.pos += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn expect_end(&self) -> Result<(), String> {
-        if self.pos == self.text.len() {
-            Ok(())
-        } else {
-            Err(self.err("trailing input after the device-auth document"))
-        }
-    }
-
-    // Renders a positional, content-free error for the current cursor.
-    fn err(&self, detail: &str) -> String {
-        let offset = self.pos;
-        format!("{detail} at byte {offset}")
-    }
+    deserializer.deserialize_map(WithoutDuplicates)
 }
 
 /// One requested-but-not-yet-approved credential registration.
@@ -1902,6 +1668,14 @@ mod tests {
             "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
              {\"secret_hex\":\"00\",\"descriptor\":\"d\"}}}"
                 .to_owned(),
+            "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
+             {\"secret_hex\":\"00\",\"descriptor\":\"d\",\
+             \"paired_at\":\"2026-09-08T12:00:00+09:00\",\"unknown\":\"x\"}}}"
+                .to_owned(),
+            "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
+             {\"secret_hex\":\"00\",\"secret_hex\":\"00\",\"descriptor\":\"d\",\
+             \"paired_at\":\"2026-09-08T12:00:00+09:00\"}}}"
+                .to_owned(),
             extra_field,
             keyed.clone() + "}]",
             duplicate_key,
@@ -1926,6 +1700,69 @@ mod tests {
                 "saving over a malformed file must error, never clobber"
             );
         }
+    }
+
+    #[test]
+    fn device_auth_file_renders_canonical_json() {
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let Some(store) = open_device_auth_store(&path) else {
+            return;
+        };
+        let first = DeviceId(RawId::new());
+        let second = DeviceId(RawId::new());
+        assert!(store.save_secret(&first, "phone", "first-secret").is_ok());
+        assert!(
+            store
+                .save_secret(&second, "tablet", "second-secret")
+                .is_ok()
+        );
+        let raw = std::fs::read(&path);
+        assert!(raw.is_ok(), "rendered file must be readable");
+        let Ok(raw) = raw else {
+            return;
+        };
+        assert!(
+            raw.starts_with(b"{\"devices\":{"),
+            "rendering keeps the single-section shape"
+        );
+        assert!(
+            raw.ends_with(b"}}\n"),
+            "rendering is compact with a trailing newline"
+        );
+        assert!(
+            !raw.contains(&b' '),
+            "rendering carries no whitespace padding"
+        );
+    }
+
+    #[test]
+    fn device_auth_reads_pre_serde_documents() {
+        // Shape emitted by the retired hand-rolled renderer: field order and
+        // escape sequences must keep parsing after the serde migration.
+        let fixture = "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
+            {\"secret_hex\":\"00\",\"descriptor\":\"a\\\"b\\\\nc✓\",\
+            \"paired_at\":\"2026-09-08T12:00:00+09:00\"}}}\n";
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let written = std::fs::write(&path, fixture);
+        assert!(written.is_ok(), "fixture setup must succeed");
+        let Some(store) = open_device_auth_store(&path) else {
+            return;
+        };
+        let Some(device) = super::parse_device_key("123e4567-e89b-12d3-a456-426614174000") else {
+            return;
+        };
+        let loaded = store.load_secret(&device);
+        assert!(loaded.is_ok(), "old shape must keep parsing");
+        let Ok(Some(secret)) = loaded else {
+            return;
+        };
+        assert_eq!(secret.bytes(), &[0x00]);
     }
 
     #[cfg(unix)]
