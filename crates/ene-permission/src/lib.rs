@@ -301,18 +301,16 @@ pub trait ConsentRepository: Send + Sync {
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait IntentOutcomeRepository: Send + Sync {
-    /// Records one intent's terminal outcome snapshot.
+    /// Records one intent's outcome snapshot write-once.
     ///
-    /// Upserts on `intent_id`: re-recording refreshes rather than
-    /// duplicating. For read-only outcomes (shortcut successes, completion
-    /// checks, already-usable registers) this own transaction is atomic
-    /// enough — nothing else commits alongside. For state-changing outcomes
-    /// use the combined operations below so the commit and its replay row
-    /// share one transaction.
+    /// The intent row is immutable: a second write under the same id never
+    /// overwrites. Returns how the claim resolved so the caller answers
+    /// from the durable determination, never from a locally decided outcome
+    /// the store did not keep.
     async fn record_intent_outcome(
         &self,
         record: IntentOutcomeRecord,
-    ) -> Result<(), PermissionTechnicalError>;
+    ) -> Result<IntentResolution<()>, PermissionTechnicalError>;
 
     /// Loads the outcome snapshot for `intent_id`, if any.
     async fn lookup_intent_outcome(
@@ -322,41 +320,48 @@ pub trait IntentOutcomeRepository: Send + Sync {
 
     /// Assigns the consent route and records the intent outcome atomically.
     ///
-    /// One transaction: the compare-and-save plus the replay-row insert, so
-    /// a crash between commit and marker can neither strand an approval
+    /// One transaction: check the intent key first, then compare-and-save
+    /// plus the replay-row insert. An existing row is never rewritten — an
+    /// exact fingerprint replays the stored snapshot, a conflicting one
+    /// clarifies — so concurrent same-id sends cannot fork the answer and a
+    /// crash between commit and marker can neither strand an approval
     /// without its replay row nor replay a row without its commit. Commits
     /// record the `Stored` snapshot built from the committed revision;
-    /// stale attempts record the `Stale` snapshot with the current mark —
-    /// same id always observes the same answer. Replay answers either
-    /// verbatim.
+    /// stale attempts record the `Stale` snapshot with the current mark.
+    /// Replay answers either verbatim.
     async fn assign_with_intent(
         &self,
         expected: Option<(String, ConsentRevision)>,
         record: ConsentRecord,
         fingerprint: IntentFingerprint,
-    ) -> Result<ConsentCommitOutcome, PermissionTechnicalError>;
+    ) -> Result<IntentResolution<ConsentCommitOutcome>, PermissionTechnicalError>;
 
     /// Registers the credential approval request and records the intent
     /// outcome atomically.
     ///
-    /// One transaction: the pending insert (or usable recheck) plus the
-    /// replay-row insert. Returns the decided snapshot — `Held` when the
-    /// pair now pends approval, `Applied` when it is already usable — so
-    /// the caller answers from one durable determination.
+    /// One transaction: check the intent key first, then the pending insert
+    /// (or usable recheck) plus the replay-row insert. An existing row is
+    /// never rewritten. Returns the resolution — `Decided` carrying the
+    /// snapshot that was just stored (`Held` when the pair now pends
+    /// approval, `Applied` when it is already usable), `Replay` carrying
+    /// the prior snapshot, or `Conflict` — so the caller answers from one
+    /// durable determination.
     async fn request_approval_with_intent(
         &self,
         provider: String,
         label: String,
         fingerprint: IntentFingerprint,
-    ) -> Result<IntentOutcomeRecord, PermissionTechnicalError>;
+    ) -> Result<IntentResolution<IntentOutcomeRecord>, PermissionTechnicalError>;
 
     /// Claims a setup completion and records its outcome atomically.
     ///
-    /// One transaction: compare the expected base mark against current and
-    /// record the decided snapshot together — `Applied` when the base
-    /// matches, a row exists, and the bearer is present; `Clarify` when the
-    /// premise is empty or the bearer is absent; `Stale` (with the current
-    /// mark) when the base moved. Returns the decided record so the caller
+    /// One transaction: check the intent key first, then compare the
+    /// expected base mark against current and record the decided snapshot
+    /// together — `Applied` when the base matches, a row exists, and the
+    /// bearer is present; `Clarify` when the premise is empty or the bearer
+    /// is absent; `Stale` (with the current mark) when the base moved. An
+    /// existing row is never rewritten: exact replays and conflicts return
+    /// the stored snapshot instead. Returns the resolution so the caller
     /// answers from one durable determination. The bearer gate rides in as
     /// a flag because completion means consent-plus-bearer; it is
     /// Host-observed just before the call, and the transaction re-verifies
@@ -366,23 +371,43 @@ pub trait IntentOutcomeRepository: Send + Sync {
         expected_base: String,
         bearer_present: bool,
         fingerprint: IntentFingerprint,
-    ) -> Result<IntentOutcomeRecord, PermissionTechnicalError>;
+    ) -> Result<IntentResolution<IntentOutcomeRecord>, PermissionTechnicalError>;
 
     /// Claims a same-route shortcut and records its outcome atomically.
     ///
-    /// One transaction: read current, and — only when the stored route
-    /// already equals the requested one — insert the `Stored` snapshot for
-    /// the current revision. Returns `Hit` (recorded, answer the current
-    /// revision without bumping) or `Miss` (nothing recorded; the caller
-    /// continues through compare-and-save). State-changing assigns still
-    /// go through [`IntentOutcomeRepository::assign_with_intent`].
+    /// One transaction: check the intent key first, then read current, and
+    /// — only when the stored route already equals the requested one —
+    /// insert the `Stored` snapshot for the current revision. An existing
+    /// row is never rewritten. Returns `Decided(Hit)` (recorded, answer the
+    /// current revision without bumping), `Decided(Miss)` (nothing recorded;
+    /// the caller continues through compare-and-save), or the stored row on
+    /// replay/conflict. State-changing assigns still go through
+    /// [`IntentOutcomeRepository::assign_with_intent`].
     async fn shortcut_with_intent(
         &self,
         provider: String,
         model: String,
         credential_id: String,
         fingerprint: IntentFingerprint,
-    ) -> Result<ShortcutIntentOutcome, PermissionTechnicalError>;
+    ) -> Result<IntentResolution<ShortcutIntentOutcome>, PermissionTechnicalError>;
+}
+
+/// Result of a write-once intent claim: either this call decided, or an
+/// earlier row already did.
+///
+/// Every deciding operation checks the intent key first inside its
+/// transaction. The row is immutable: a second write under the same id —
+/// same content or not — never overwrites, so concurrent same-id sends
+/// cannot fork the answer and a crash between decision and marker is
+/// impossible by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntentResolution<T> {
+    /// No row existed; the fresh decision `T` was stored write-once.
+    Decided(T),
+    /// Exact fingerprint replay; nothing changed.
+    Replay(IntentOutcomeRecord),
+    /// Same id, different fingerprint; nothing changed.
+    Conflict(IntentOutcomeRecord),
 }
 
 /// Durable fingerprint of one management intent: the intent key plus the
