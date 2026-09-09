@@ -2508,6 +2508,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_target_reuse_conflicts_without_side_effects() {
+        use ene_permission::ConsentRepository as _;
+
+        let Some((handle, dir)) = setup_handle("dlg-malformed-reuse").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        assert!(
+            register_assign_complete(&handle, &live, &transport).await,
+            "setup must complete"
+        );
+        let intent_id = CommandWireId(RawId::new().as_uuid());
+        // Malformed target first: clarifies AND claims the id, so the row
+        // exists for what follows.
+        let malformed = handle
+            .handle_frame(
+                intent_frame_with_id(
+                    ManagementIntentKind::ManageRuleConsentCap,
+                    "consent:bogus",
+                    "consent-rev-1",
+                    live.connection_id,
+                    intent_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert!(
+            matches!(
+                &malformed.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(
+                    ManagementOutcome::NeedsClarification
+                ))
+            ),
+            "a malformed target must clarify, got {malformed:?}"
+        );
+        // Same id with a now-valid target: must conflict, never proceed to
+        // assign — the prior row owns this id.
+        let reused = handle
+            .handle_frame(
+                intent_frame_with_id(
+                    ManagementIntentKind::ManageRuleConsentCap,
+                    "consent:openai:dialogue-9:openai:main",
+                    "consent-rev-1",
+                    live.connection_id,
+                    intent_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        let Some(only) = reused.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &only.payload,
+                WirePayload::ManagementOutcome(ManagementOutcome::NeedsClarification)
+            ),
+            "reusing a clarified id with new content must clarify, got {:?}",
+            only.payload
+        );
+        let current = handle.store.load_current().await;
+        assert!(
+            matches!(&current, Ok(Some(record)) if record.model == "dialogue-1"),
+            "the conflict must not move consent, got {current:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
     async fn complete_replay_returns_the_stored_snapshot() {
         let Some((handle, dir)) = setup_handle("dlg-completeray").await else {
             return;

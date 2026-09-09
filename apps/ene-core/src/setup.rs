@@ -418,11 +418,20 @@ impl HostHandle {
             return self.complete_setup(frame, intent, live).await;
         }
         let Some((provider, model, credential_id)) = parse_consent_target(&intent.target) else {
+            // Malformed targets decide Clarify like any other outcome: the
+            // row closes the hole where a retry could otherwise swap in a
+            // valid target under the same id and reach assign. Recorded
+            // under the assign kind so the fingerprint stays comparable.
             return vec![outcome_frame(
                 frame,
                 live,
                 intent,
-                ManagementOutcome::NeedsClarification,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_ASSIGN,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
             )];
         };
         self.assign_consent(frame, intent, &provider, &model, &credential_id, live)
