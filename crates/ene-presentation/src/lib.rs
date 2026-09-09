@@ -184,6 +184,12 @@ pub enum RevalidationReason {
     UnknownCompanion,
     /// The companion is stopped.
     StoppedCompanion,
+    /// The command carried no idempotency key. Replay safety needs one, so
+    /// keyless commands are declined rather than accepted unkeyed.
+    MissingCommandId,
+    /// The command id arrived with different content than the stored row:
+    /// a reused key must never adopt new meaning.
+    CommandMismatch,
     /// The wire reason tag matched no known reason. Ingress-only; never
     /// emitted by [`check_intake`].
     UnknownReasonTag,
