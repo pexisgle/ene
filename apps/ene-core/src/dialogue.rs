@@ -49,7 +49,8 @@ use ene_api::v1::round::{
 };
 use ene_companion::{
     AppendHistoryCommand, CommandId, CompanionLifecycle, CompanionRepository, HistoryAppendOutcome,
-    HistoryRepository, HistoryRole, PresentationMark, ReportStatus, UndeliveredRepository,
+    HistoryMessage, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
+    UndeliveredRepository,
 };
 use ene_credential::{CredentialRef, CredentialRefRepository, credential_availability};
 use ene_inference::{
@@ -57,8 +58,9 @@ use ene_inference::{
     ResolvedRoute, UsageSource, send,
 };
 use ene_permission::{
-    CapabilityKind, CheckLiveAuthorizationQuery, ConsentRepository, ConsumerKind, DenyCode,
-    InferenceUseCandidate, LiveAuthorizationDecision, PurposeKind, check_live_authorization,
+    CapabilityKind, CheckLiveAuthorizationQuery, ConsentRepository, ConsentRevision, ConsumerKind,
+    DenyCode, InferenceUseCandidate, LiveAuthorizationDecision, PurposeKind,
+    check_live_authorization,
 };
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{
@@ -117,6 +119,22 @@ fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<Comm
 }
 
 /// Maps a closed-world denial gate to the `Stage 2` wire reason vocabulary.
+/// Whether a stored row carries the same intent as an incoming submit:
+/// text and language must match, and a claimed round must name the stored
+/// one. A reused key with different content is a sender bug, never a
+/// rebinding: the caller declines it instead of adopting new meaning. A
+/// round-less retry matches on content alone (its round resolves through
+/// the stored row).
+fn command_matches(found: &HistoryMessage, submit: &SubmitTextInput) -> bool {
+    if found.text != submit.body.text || found.lang != submit.body.lang.0 {
+        return false;
+    }
+    match &submit.round {
+        Some(round) => found.round.as_uuid().to_string() == round.0,
+        None => true,
+    }
+}
+
 fn deny_reason(code: DenyCode) -> &'static str {
     match code {
         DenyCode::SetupIncomplete => "setup-incomplete",
@@ -131,6 +149,8 @@ fn intake_reason(reason: &RevalidationReason) -> &'static str {
         RevalidationReason::MissingGenerationView => "missing-generation-view",
         RevalidationReason::UnknownCompanion => "unknown-companion",
         RevalidationReason::StoppedCompanion => "stopped-companion",
+        RevalidationReason::MissingCommandId => "missing-command-id",
+        RevalidationReason::CommandMismatch => "command-mismatch",
         RevalidationReason::UnknownReasonTag => "unknown-reason",
     }
 }
@@ -344,6 +364,18 @@ impl HostHandle {
         .await
     }
 
+    /// Reloads the consent record and checks it still names the authorized
+    /// route. Both the pre-send and the adoption gate funnel through here:
+    /// short compare-before-commit reads around the long provider await, so
+    /// a mid-flight consent move cannot silently ride on a stale check.
+    /// Store failures fail closed (`false`).
+    async fn consent_matches(&self, id: &str, rev: ConsentRevision) -> bool {
+        let Ok(Some(current)) = self.store.load_current().await else {
+            return false;
+        };
+        current.id == id && current.rev == rev
+    }
+
     /// Runs the submit pipeline for one [`SubmitTextInput`] frame.
     ///
     /// Order: durable idempotent replay, presence attach, intake evaluation,
@@ -406,6 +438,16 @@ impl HostHandle {
             return vec![held_frame(frame, live)];
         };
         let companion_key = companion.as_raw().as_uuid().to_string();
+        // Idempotency keys are mandatory: a command without one cannot be
+        // replayed safely, so it is declined before any state changes
+        // (before attach, before maps, before appends).
+        let Some(command) = command_id_for(&frame.envelope) else {
+            return vec![revalidate_frame(
+                frame,
+                live,
+                intake_reason(&RevalidationReason::MissingCommandId),
+            )];
+        };
         // The winner's intake premise below carries the fresh generation from
         // the committed fact. Any other path carries the envelope view
         // untouched: intake reports a missing or mismatched view honestly.
@@ -452,22 +494,27 @@ impl HostHandle {
                 }
             }
         }
-        if let Some(command) = command_id_for(&frame.envelope) {
-            match self.store.lookup_command(companion, &command).await {
-                Err(_) => return vec![held_frame(frame, live)],
-                Ok(Some(found)) => {
-                    let Some(wire) = self.wire_for_round_value(found.round) else {
-                        return vec![stale_frame_with(
-                            frame,
-                            live,
-                            None,
-                            attribution.generation.as_u64(),
-                        )];
-                    };
-                    return vec![accept_frame(frame, live, &RoundWireId(wire))];
+        match self.store.lookup_command(companion, &command).await {
+            Err(_) => return vec![held_frame(frame, live)],
+            Ok(Some(found)) => {
+                if !command_matches(&found, submit) {
+                    return vec![revalidate_frame(
+                        frame,
+                        live,
+                        intake_reason(&RevalidationReason::CommandMismatch),
+                    )];
                 }
-                Ok(None) => {}
+                let Some(wire) = self.wire_for_round_value(found.round) else {
+                    return vec![stale_frame_with(
+                        frame,
+                        live,
+                        None,
+                        attribution.generation.as_u64(),
+                    )];
+                };
+                return vec![accept_frame(frame, live, &RoundWireId(wire))];
             }
+            Ok(None) => {}
         }
         let round_hint = frame
             .envelope
@@ -599,17 +646,6 @@ impl HostHandle {
             return vec![revalidate_frame(frame, live, "evaluation-consumed")];
         };
         let round_wire = RoundWireId(accepted.as_raw().as_uuid().to_string());
-        self.record_round(&round_wire.0, accepted);
-        self.record_open_round(
-            &live.client_ref,
-            &companion_key,
-            OpenRound {
-                companion: companion.as_raw(),
-                client,
-                round: accepted,
-                generation: attribution.generation,
-            },
-        );
         let generation_number = attribution.generation.as_u64();
         let owner_cmd = AppendHistoryCommand {
             companion,
@@ -620,7 +656,7 @@ impl HostHandle {
             at: WallClockWithTz::now(),
             expected_generation: attribution.generation,
             local_id: Some(submit.local_id.0.clone()).filter(|key| !key.is_empty()),
-            command_id: command_id_for(&frame.envelope),
+            command_id: Some(command),
         };
         match self.store.append_message(owner_cmd).await {
             Ok(HistoryAppendOutcome::CommittedAs { .. }) => {}
@@ -638,6 +674,21 @@ impl HostHandle {
             }
             Err(_) => return vec![held_frame(frame, live)],
         }
+        // Transient claims follow durable commit only: recording the round
+        // maps before the append would advertise a round the store never
+        // accepted (notably on the StaleExpected/Held paths above, which now
+        // return map-clean).
+        self.record_round(&round_wire.0, accepted);
+        self.record_open_round(
+            &live.client_ref,
+            &companion_key,
+            OpenRound {
+                companion: companion.as_raw(),
+                client,
+                round: accepted,
+                generation: attribution.generation,
+            },
+        );
         let ticket = InferenceTicketId(RawId::new());
         let route = ResolvedRoute {
             provider: consent.provider.clone(),
@@ -652,6 +703,11 @@ impl HostHandle {
             route,
             input_text: submit.body.text.clone(),
         };
+        if !self.consent_matches(&consent.id, consent.rev).await {
+            self.record_unknown_usage(ticket, &consent.provider, &consent.model)
+                .await;
+            return interrupted_frames(frame, live, &round_wire, generation_number);
+        }
         let send_outcome = send(command, true, transport).await;
         let Ok((outcome, arrival)) = send_outcome else {
             self.record_unknown_usage(ticket, &consent.provider, &consent.model)
@@ -668,6 +724,11 @@ impl HostHandle {
                 .await;
             return interrupted_frames(frame, live, &round_wire, generation_number);
         };
+        if !self.consent_matches(&consent.id, consent.rev).await {
+            self.record_unknown_usage(ticket, &consent.provider, &consent.model)
+                .await;
+            return interrupted_frames(frame, live, &round_wire, generation_number);
+        }
         let reply_cmd = AppendHistoryCommand {
             companion,
             round: accepted.as_raw(),
@@ -1840,6 +1901,198 @@ mod tests {
                 if current.0 == "consent-rev-1"
             ),
             "a changed assign on a stale base reports the rebuilt current mark"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn submit_without_command_id_is_declined_without_side_effects() {
+        use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+
+        let Some((handle, dir)) = setup_handle("dlg-nocmd").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        assert!(
+            register_assign_complete(&handle, &live, &transport).await,
+            "setup must complete"
+        );
+        let mut frame = submit_frame(Some(0), None, "local-1", "hello", live.connection_id);
+        frame.envelope.correlation.command_id = None;
+        let declined = handle.handle_frame(frame, live.clone(), &transport).await;
+        let Some(only) = declined.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &only.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::NeedsRevalidation {
+                    reason
+                }) if reason.0 == "missing-command-id"
+            ),
+            "a keyless command must decline explicitly, got {:?}",
+            only.payload
+        );
+        let companion = handle.store.ensure_running_companion().await;
+        let Ok(companion) = companion else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let timeline = handle.store.load_timeline(companion, None, 50).await;
+        assert!(
+            matches!(&timeline, Ok(items) if items.is_empty()),
+            "a declined keyless input must leave no history row, got {timeline:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn submit_with_reused_command_and_new_text_is_declined() {
+        use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+
+        let Some((handle, dir)) = setup_handle("dlg-mismatch").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        assert!(
+            register_assign_complete(&handle, &live, &transport).await,
+            "setup must complete"
+        );
+        let frame = submit_frame(Some(0), None, "local-1", "hello", live.connection_id);
+        let first = handle
+            .handle_frame(frame.clone(), live.clone(), &transport)
+            .await;
+        assert!(
+            first.first().is_some_and(|answer| matches!(
+                &answer.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+            )),
+            "the first send must accept"
+        );
+        let mut forged = frame;
+        if let WirePayload::SubmitTextInput(ref mut input) = forged.payload {
+            input.body.text = String::from("different words, same command");
+        }
+        let declined = handle.handle_frame(forged, live.clone(), &transport).await;
+        let Some(only) = declined.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &only.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::NeedsRevalidation {
+                    reason
+                }) if reason.0 == "command-mismatch"
+            ),
+            "a reused key with new content must decline, got {:?}",
+            only.payload
+        );
+        let companion = handle.store.ensure_running_companion().await;
+        let Ok(companion) = companion else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let timeline = handle.store.load_timeline(companion, None, 50).await;
+        assert!(
+            matches!(&timeline, Ok(items) if items.len() == 2),
+            "the declined forgery must append nothing (owner plus reply only), got {timeline:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    /// Transport that revokes consent mid-flight: it bumps the stored
+    /// consent revision inside `complete` (before delegating to the inner
+    /// fake), so the adoption gate after the await sees a moved record.
+    /// Models a real revocation landing during a slow provider call.
+    struct RevokingTransport {
+        db: std::path::PathBuf,
+        inner: FakeProviderTransport,
+    }
+
+    impl ene_inference::ProviderTransport for RevokingTransport {
+        fn complete(
+            &self,
+            req: ene_inference::ProviderRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            ene_inference::ProviderResponse,
+                            ene_inference::InferenceTechnicalError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            let db = self.db.clone();
+            let inner = self.inner.clone();
+            Box::pin(async move {
+                use ene_permission::ConsentRepository as _;
+                if let Ok(store) = ene_store::Store::open(&db).await
+                    && let Ok(Some(current)) = store.load_current().await
+                {
+                    use ene_permission::{ConsentRepository as _, ConsentRevision};
+                    let bumped = ene_permission::ConsentRecord {
+                        id: current.id.clone(),
+                        rev: ConsentRevision::from_u64(current.rev.as_u64() + 1),
+                        provider: current.provider.clone(),
+                        model: current.model.clone(),
+                        credential_id: current.credential_id.clone(),
+                    };
+                    let _bumped = store
+                        .compare_and_save(Some((current.id, current.rev)), bumped)
+                        .await;
+                }
+                inner.complete(req).await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn consent_move_mid_flight_interrupts_adoption() {
+        use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+
+        let Some((handle, dir)) = setup_handle("dlg-midflight").await else {
+            return;
+        };
+        let live = live_input("client-a");
+        let fake = ok_transport();
+        assert!(
+            register_assign_complete(&handle, &live, &fake).await,
+            "setup must complete"
+        );
+        let transport = RevokingTransport {
+            db: dir.join("app.db"),
+            inner: fake,
+        };
+        let frame = submit_frame(Some(0), None, "local-1", "hello", live.connection_id);
+        let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+        let Some(last) = responses.last() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &last.payload,
+                WirePayload::TextStreamClose(close)
+                    if close.status == StreamClose::Interrupted
+            ),
+            "a mid-flight consent move must interrupt, got {:?}",
+            last.payload
+        );
+        let companion = handle.store.ensure_running_companion().await;
+        let Ok(companion) = companion else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let timeline = handle.store.load_timeline(companion, None, 50).await;
+        assert!(
+            matches!(&timeline, Ok(items) if items.len() == 1),
+            "only the owner row commits on interrupted adoption, got {timeline:?}"
         );
         remove_data_dir(&dir);
     }

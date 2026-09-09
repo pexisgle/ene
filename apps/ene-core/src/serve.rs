@@ -1107,12 +1107,25 @@ pub(crate) fn outgoing_frame_pre_auth(
 /// Ensures the Host data directory exists.
 #[cfg(unix)]
 fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
-    use std::os::unix::fs::DirBuilderExt as _;
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(data_dir)
         .map_err(|error| CoreError::Store(format!("create data directory: {error}")))?;
+    // Creation mode applies only to created directories: a pre-existing dir
+    // keeps whatever mode it had, which may predate this Host. The
+    // same-machine socket trust premise needs owner-only, so tighten rather
+    // than serve exposed; a tighten failure fails startup (fail-closed).
+    let mode = std::fs::metadata(data_dir)
+        .map_err(|error| CoreError::Store(format!("stat data directory: {error}")))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode & 0o077 != 0 {
+        std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| CoreError::Store(format!("protect data directory: {error}")))?;
+    }
     Ok(())
 }
 
