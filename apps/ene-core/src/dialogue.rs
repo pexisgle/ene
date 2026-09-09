@@ -1062,6 +1062,9 @@ mod tests {
         if registered.len() != 1 {
             return false;
         }
+        if !matches!(handle.approve_credential("openai", "main").await, Ok(true)) {
+            return false;
+        }
         let assigned = handle
             .handle_frame(
                 intent_frame(
@@ -1742,7 +1745,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consent_replayed_base_reports_staleness() {
+    async fn consent_replay_is_idempotent_and_moves_report_staleness() {
         let Some((handle, dir)) = setup_handle("dlg-cas").await else {
             return;
         };
@@ -1761,6 +1764,10 @@ mod tests {
             )
             .await;
         assert_eq!(registered.len(), 1, "register answers once");
+        assert!(
+            handle.approve_credential("openai", "main").await.is_ok(),
+            "approval must succeed"
+        );
         let assigned = handle
             .handle_frame(
                 intent_frame(
@@ -1796,7 +1803,33 @@ mod tests {
                 &transport,
             )
             .await;
-        let Some(stale) = replayed.first() else {
+        let Some(same) = replayed.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &same.payload,
+                WirePayload::ManagementOutcome(ManagementOutcome::StoredAsRuleView {
+                    revision
+                }) if revision.0 == "1"
+            ),
+            "repeating the identical assign is a no-op at the same revision, got {:?}",
+            same.payload
+        );
+        let moved = handle
+            .handle_frame(
+                intent_frame(
+                    ManagementIntentKind::ManageRuleConsentCap,
+                    "consent:openai:dialogue-2:openai:main",
+                    "consent-none",
+                    live.connection_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        let Some(stale) = moved.first() else {
             remove_data_dir(&dir);
             return;
         };
@@ -1806,7 +1839,69 @@ mod tests {
                 WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView { current })
                 if current.0 == "consent-rev-1"
             ),
-            "the replayed base reports the rebuilt current mark"
+            "a changed assign on a stale base reports the rebuilt current mark"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn register_holds_until_host_local_approval() {
+        let Some((handle, dir)) = memory_handle_with("dlg-credgate", |_| {}).await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        let pending = handle
+            .handle_frame(
+                intent_frame(
+                    ManagementIntentKind::ConfigureCredentialIntent,
+                    "credential:openai:main",
+                    "consent-none",
+                    live.connection_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        let Some(first) = pending.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &first.payload,
+                WirePayload::ManagementOutcome(ManagementOutcome::HeldByOperation)
+            ),
+            "an unapproved registration holds, got {:?}",
+            first.payload
+        );
+        assert!(
+            handle.approve_credential("openai", "main").await.is_ok(),
+            "host-local approval must succeed"
+        );
+        let usable = handle
+            .handle_frame(
+                intent_frame(
+                    ManagementIntentKind::ConfigureCredentialIntent,
+                    "credential:openai:main",
+                    "consent-none",
+                    live.connection_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        let Some(second) = usable.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &second.payload,
+                WirePayload::ManagementOutcome(ManagementOutcome::AppliedAsOneTime)
+            ),
+            "re-request after approval applies, got {:?}",
+            second.payload
         );
         remove_data_dir(&dir);
     }

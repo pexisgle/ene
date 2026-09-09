@@ -107,9 +107,9 @@ use ene_api::v1::refs::DeviceWireId;
 use ene_api::v1::refs::{ConnectionWireId, WireMessageId, WireMessageType};
 use ene_companion::CompanionRepository;
 use ene_credential::{
-    CredentialRef, CredentialStore, CredentialTechnicalError, DeviceId, DevicePairingRepository,
-    DevicePairingStatus, DeviceRecord, EnvCredentialStore, FileDeviceAuthStore,
-    MemoryCredentialStore,
+    CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialStore,
+    CredentialTechnicalError, DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord,
+    EnvCredentialStore, FileDeviceAuthStore, MemoryCredentialStore,
 };
 use ene_inference::ProviderTransport;
 use ene_inference::provider::{DEFAULT_BASE_URL, OpenAiResponsesTransport};
@@ -611,9 +611,7 @@ impl HostHandle {
         &self,
         descriptor: &str,
     ) -> Result<Option<(DeviceRecord, String)>, CoreError> {
-        let approved = self
-            .store
-            .approve_pending(descriptor)
+        let approved = DevicePairingRepository::approve_pending(&self.store, descriptor)
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
         if let Some((record, secret)) = approved.as_ref() {
@@ -635,12 +633,54 @@ impl HostHandle {
     /// Returns [`CoreError::Store`] when the durable pairing tables are
     /// unavailable.
     pub async fn pending_devices(&self) -> Result<Vec<String>, CoreError> {
-        let pending = self
-            .store
-            .list_pending()
+        let pending = DevicePairingRepository::list_pending(&self.store)
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
         Ok(pending.into_iter().map(|entry| entry.descriptor).collect())
+    }
+
+    /// Records one Owner credential approval, making the ref usable.
+    ///
+    /// Host-local trusted inlet: the wire intent only proposes (pending),
+    /// and this call flips it. On approval the credential ref row is
+    /// created (usable marker); re-approval is idempotent. Unknown pairs
+    /// return `Ok(false)` so the caller can list pendings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Store`] when the durable tables are unavailable.
+    pub async fn approve_credential(&self, provider: &str, label: &str) -> Result<bool, CoreError> {
+        let approved = CredentialApprovalRepository::approve_pending(&self.store, provider, label)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        if !approved {
+            return Ok(false);
+        }
+        let credential = CredentialRef {
+            id: format!("{provider}:{label}"),
+            provider: provider.to_string(),
+            label: label.to_string(),
+        };
+        self.store
+            .save_ref(credential)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        Ok(true)
+    }
+
+    /// Lists pending credential approvals as `provider:label` strings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Store`] when the durable tables are unavailable.
+    pub async fn pending_credentials(&self) -> Result<Vec<String>, CoreError> {
+        let pending = CredentialApprovalRepository::list_pending(&self.store)
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        Ok(pending
+            .into_iter()
+            .map(|entry| format!("{}:{}", entry.provider, entry.label))
+            .collect())
     }
 
     /// Observes a socket close for `client_ref` and clears presence when owned.
@@ -727,7 +767,7 @@ impl HostHandle {
         if descriptor.is_empty() {
             return vec![denied_pairing(frame, live, "blank device descriptor")];
         }
-        match self.store.request_pairing(descriptor).await {
+        match DevicePairingRepository::request_pairing(&self.store, descriptor).await {
             Ok(DevicePairingStatus::Paired { device }) => {
                 let device_id = DeviceWireId(device.id.0.as_uuid());
                 vec![outgoing_frame_pre_auth(

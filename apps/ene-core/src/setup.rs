@@ -59,8 +59,7 @@ use ene_api::v1::management::{
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
 use ene_credential::{
-    CredentialRef, CredentialRefRepository, CredentialStore, RegisterCredentialCommand,
-    RegisterOutcome, register,
+    CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialStore,
 };
 use ene_permission::{ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision};
 use ene_plugin_ipc::WireFrame;
@@ -255,6 +254,15 @@ impl HostHandle {
     }
 
     /// Registers the credential ref named by a `credential:` target.
+    /// Registers a credential ref request through the approval gate.
+    ///
+    /// The wire intent only PROPOSES: it records a pending approval and
+    /// answers [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation)
+    /// until a Host-local `approve-credential` flips it usable, at which
+    /// point re-requesting answers
+    /// [`AppliedAsOneTime`](ene_api::v1::management::ManagementOutcome::AppliedAsOneTime).
+    /// Credential registration is high-privilege (trusted confirmation
+    /// required), so the wire never creates usable refs directly.
     async fn register_credential(
         &self,
         frame: &WireFrame,
@@ -269,14 +277,17 @@ impl HostHandle {
                 ManagementOutcome::NeedsClarification,
             )];
         };
-        let outcome =
-            match register(RegisterCredentialCommand { provider, label }, &self.store).await {
-                Ok(RegisterOutcome::Registered(_) | RegisterOutcome::AlreadyExists(_)) => {
-                    ManagementOutcome::AppliedAsOneTime
-                }
-                Ok(RegisterOutcome::InvalidProvider) => ManagementOutcome::NeedsClarification,
-                Err(_) => ManagementOutcome::HeldByOperation,
-            };
+        let outcome = match self
+            .store
+            .request_approval(provider.clone(), label.clone())
+            .await
+        {
+            Ok(true) | Err(_) => ManagementOutcome::HeldByOperation,
+            Ok(false) => match self.store.is_approved(&provider, &label).await {
+                Ok(true) => ManagementOutcome::AppliedAsOneTime,
+                Ok(false) | Err(_) => ManagementOutcome::HeldByOperation,
+            },
+        };
         vec![outcome_frame(frame, live, intent, outcome)]
     }
 
@@ -369,6 +380,26 @@ impl HostHandle {
                 live,
                 intent,
                 ManagementOutcome::NeedsClarification,
+            )];
+        }
+        // Idempotent retry: when the stored route already equals the
+        // requested one, answer the current revision without bumping. A
+        // transport retry reuses the intent id with identical content, so
+        // bumping again would fork revisions for one Owner decision. Genuine
+        // changes still flow into compare_and_save below, where a moved base
+        // view answers stale instead of overwriting.
+        if let Some(current) = current.as_ref()
+            && current.provider == provider
+            && current.model == model
+            && current.credential_id == credential_id
+        {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::StoredAsRuleView {
+                    revision: ViewMarkWire(current.rev.as_u64().to_string()),
+                },
             )];
         }
         let next_rev = match current.as_ref() {

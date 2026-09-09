@@ -139,7 +139,7 @@ async fn approve_and_provision(dir: &std::path::Path, approver: &HostHandle) -> 
     Ok(())
 }
 
-async fn setup_flow(client: &mut Client) -> Result<(), String> {
+async fn setup_flow(client: &mut Client, approver: &HostHandle) -> Result<(), String> {
     let mark = view_mark(client).await?;
     let register = ask(
         client,
@@ -155,10 +155,15 @@ async fn setup_flow(client: &mut Client) -> Result<(), String> {
         matches!(
             register,
             Ok(WirePayload::ManagementOutcome(
-                ManagementOutcome::AppliedAsOneTime
+                ManagementOutcome::HeldByOperation
             ))
         ),
-        "register must apply, got {register:?}"
+        "unapproved register must hold, got {register:?}"
+    );
+    let credential_approved = approver.approve_credential("openai", "main").await;
+    assert!(
+        matches!(credential_approved, Ok(true)),
+        "host-local credential approval must succeed"
     );
     let mark = view_mark(client).await?;
     let assign = ask(
@@ -374,7 +379,7 @@ async fn production_path_setup_to_restart() {
             "show must carry the Host sections, got {sections:?}"
         );
     }
-    let setup = setup_flow(&mut client).await;
+    let setup = setup_flow(&mut client, &approver).await;
     assert!(setup.is_ok(), "setup must complete: {setup:?}");
 
     let sent = send_round(&mut client, "hello companion").await;

@@ -31,10 +31,12 @@ enum CliError {
     /// Command-line usage was violated.
     ///
     /// The display always contains the usage line
-    /// `usage: ene-core [--config PATH] [serve | approve-device --descriptor EXACT]`
+    /// `usage: ene-core [--config PATH] [serve | approve-device --descriptor EXACT | approve-credential --provider P --label L]`
     /// followed by the detail, so callers can assert on the usage line alone.
     /// The bracketed prefix keeps the `Stage 1` usage line as a substring.
-    #[error("usage: ene-core [--config PATH] [serve | approve-device --descriptor EXACT]: {0}")]
+    #[error(
+        "usage: ene-core [--config PATH] [serve | approve-device --descriptor EXACT | approve-credential --provider P --label L]: {0}"
+    )]
     Usage(String),
     /// Layered configuration loading or validation failed.
     #[error(transparent)]
@@ -105,6 +107,55 @@ fn extract_serve(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
         }
     }
     Ok((serve, rest))
+}
+
+/// Splits one `--name VALUE` flag out of the argument list, order-independent.
+///
+/// Later flags override earlier ones. The value following the flag is
+/// consumed verbatim, even when it starts with `--`.
+///
+/// # Errors
+///
+/// Returns [`CliError::Usage`] when the flag has no following value.
+fn extract_named(args: &[String], flag: &str) -> Result<(Option<String>, Vec<String>), CliError> {
+    let mut value: Option<String> = None;
+    let mut rest = Vec::new();
+    let mut pending = args.iter();
+    while let Some(arg) = pending.next() {
+        if arg.as_str() == flag {
+            let Some(next) = pending.next() else {
+                return Err(CliError::Usage(format!("missing value for {flag}")));
+            };
+            value = Some(next.clone());
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    Ok((value, rest))
+}
+
+/// Splits the `approve-credential` subcommand off the argument list,
+/// order-independent, mirroring [`extract_approve_device`].
+///
+/// # Errors
+///
+/// Returns [`CliError::Usage`] when `approve-credential` appears more than once.
+fn extract_approve_credential(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
+    let mut approve = false;
+    let mut rest = Vec::new();
+    for arg in args {
+        if arg.as_str() == "approve-credential" {
+            if approve {
+                return Err(CliError::Usage(
+                    "duplicate subcommand: approve-credential".to_string(),
+                ));
+            }
+            approve = true;
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    Ok((approve, rest))
 }
 
 /// Splits the `approve-device` subcommand off the argument list, order-independent.
@@ -199,10 +250,36 @@ fn main() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (serve_mode, rest) = extract_serve(&args)?;
     let (approve_mode, rest) = extract_approve_device(&rest)?;
-    if serve_mode && approve_mode {
+    let (approve_cred_mode, rest) = extract_approve_credential(&rest)?;
+    let modes = [serve_mode, approve_mode, approve_cred_mode]
+        .iter()
+        .filter(|selected| **selected)
+        .count();
+    if modes > 1 {
         return Err(CliError::Usage(
-            "serve and approve-device are mutually exclusive".to_string(),
+            "serve, approve-device, and approve-credential are mutually exclusive".to_string(),
         ));
+    }
+    if approve_cred_mode {
+        let (provider, rest) = extract_named(&rest, "--provider")?;
+        let (label, rest) = extract_named(&rest, "--label")?;
+        let (Some(provider), Some(label)) = (provider, label) else {
+            return Err(CliError::Usage(
+                "approve-credential requires --provider P and --label L".to_string(),
+            ));
+        };
+        if provider.trim().is_empty() || label.trim().is_empty() {
+            return Err(CliError::Usage(
+                "approve-credential requires non-blank --provider and --label".to_string(),
+            ));
+        }
+        let path = parse_args(&rest)?;
+        let cfg = Config::load(path.as_deref())?;
+        let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
+            return Err(CoreError::Store("no data directory resolved".to_string()).into());
+        };
+        run_approve_credential(&data_dir, provider.trim(), label.trim())?;
+        return Ok(());
     }
     if approve_mode {
         let (descriptor, rest) = extract_descriptor(&rest)?;
@@ -274,6 +351,43 @@ fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError
         .build()
         .map_err(|_| CoreError::Store("tokio runtime unavailable".to_string()))?;
     runtime.block_on(approve_device_async(data_dir, descriptor))
+}
+
+/// Records one Owner credential approval under `data_dir`.
+///
+/// Opens the Host state and flips the pending credential request usable.
+/// Unknown pairs fail with the pending set so the Owner can retry exactly.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Store`] when the runtime cannot be built or the
+/// state cannot be opened, and [`CoreError::Approve`] when the pair is
+/// unknown.
+fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Result<(), CoreError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| CoreError::Store("tokio runtime unavailable".to_string()))?;
+    runtime.block_on(approve_credential_async(data_dir, provider, label))
+}
+
+/// Opens the Host state and records one Owner credential approval.
+///
+/// Split from [`run_approve_credential`] so the async body stays runtime-free.
+async fn approve_credential_async(
+    data_dir: &Path,
+    provider: &str,
+    label: &str,
+) -> Result<(), CoreError> {
+    let handle = HostHandle::open(data_dir).await?;
+    if handle.approve_credential(provider, label).await? {
+        return Ok(());
+    }
+    let pending = handle.pending_credentials().await?;
+    Err(CoreError::Approve(format!(
+        "unknown credential {provider}:{label}; pending: [{pending}]",
+        pending = pending.join(", ")
+    )))
 }
 
 /// Opens the Host state and records one Owner pairing approval.
@@ -450,6 +564,39 @@ mod tests {
                 "the rest must not keep the token: {rest:?}"
             );
         }
+    }
+
+    #[test]
+    fn approve_credential_splits_and_parses_named_flags() {
+        use super::{extract_approve_credential, extract_named};
+        let args = [
+            String::from("approve-credential"),
+            String::from("--provider"),
+            String::from("openai"),
+            String::from("--label"),
+            String::from("main"),
+        ];
+        let split = extract_approve_credential(&args);
+        assert!(split.is_ok(), "a single approve-credential must split");
+        let Ok((approve, rest)) = split else {
+            return;
+        };
+        assert!(approve, "the token must select the subcommand");
+        let named = extract_named(&rest, "--provider");
+        assert!(named.is_ok(), "provider flag must parse");
+        let Ok((provider, rest)) = named else {
+            return;
+        };
+        assert_eq!(provider, Some(String::from("openai")));
+        let named = extract_named(&rest, "--label");
+        assert!(named.is_ok(), "label flag must parse");
+        let Ok((label, rest)) = named else {
+            return;
+        };
+        assert_eq!(label, Some(String::from("main")));
+        assert!(rest.is_empty(), "nothing must remain: {rest:?}");
+        let missing = extract_named(&[String::from("--provider")], "--provider");
+        assert!(missing.is_err(), "a valueless flag must fail");
     }
 
     #[test]
