@@ -232,6 +232,128 @@ fn extract_descriptor(args: &[String]) -> Result<(Option<String>, Vec<String>), 
 /// proof with no effects. With `serve` it resolves the data directory (which
 /// must exist as a value: an unresolvable directory is a [`CoreError::Store`]
 /// failure, since serving without durable state is meaningless) and blocks on
+/// Parsed Host command line: exactly one mode plus its flags.
+///
+/// Built purely by [`parse_cli`]; [`main`] only executes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CliCommand {
+    /// No subcommand: Stage 1 config proof without effects.
+    ShowConfig {
+        /// Explicit config file, if `--config PATH` was given.
+        config: Option<PathBuf>,
+    },
+    /// Run the socket listener.
+    Serve {
+        /// Explicit config file, if `--config PATH` was given.
+        config: Option<PathBuf>,
+    },
+    /// Pairing approval. [`None`] descriptor lists pendings.
+    ApproveDevice {
+        /// Explicit config file, if `--config PATH` was given.
+        config: Option<PathBuf>,
+        /// Exact device descriptor, if `--descriptor EXACT` was given.
+        descriptor: Option<String>,
+    },
+    /// Credential approval.
+    ApproveCredential {
+        /// Explicit config file, if `--config PATH` was given.
+        config: Option<PathBuf>,
+        /// Credential provider to approve.
+        provider: String,
+        /// Credential label to approve.
+        label: String,
+    },
+}
+
+/// Parses Host command-line arguments, excluding the program name.
+///
+/// Option flags (with their values) are extracted FIRST and subcommand
+/// tokens are scanned only in the remainder, so a legal value is never
+/// mistaken for a subcommand: `ene-core --config serve` selects config
+/// path `serve`, and `approve-device --descriptor serve` approves the
+/// `serve` descriptor. Flags for a different mode are rejected rather
+/// than silently ignored, keeping the previous strictness. The value
+/// following a flag is still consumed verbatim, even when it starts with
+/// `--` (see [`extract_named`]).
+///
+/// The function is pure: it inspects only `args` and never touches the
+/// process environment, the filesystem, or `stdout`.
+///
+/// # Errors
+///
+/// Returns [`CliError::Usage`] for argument misuse (duplicate or combined
+/// subcommands, missing or blank required values, flags belonging to
+/// another mode, or unknown trailing arguments).
+fn parse_cli(args: &[String]) -> Result<CliCommand, CliError> {
+    let (config, rest) = extract_named(args, "--config")?;
+    let (descriptor, rest) = extract_descriptor(&rest)?;
+    let (provider, rest) = extract_named(&rest, "--provider")?;
+    let (label, rest) = extract_named(&rest, "--label")?;
+    let (serve_mode, rest) = extract_serve(&rest)?;
+    let (approve_mode, rest) = extract_approve_device(&rest)?;
+    let (approve_cred_mode, rest) = extract_approve_credential(&rest)?;
+    let modes = [serve_mode, approve_mode, approve_cred_mode]
+        .iter()
+        .filter(|selected| **selected)
+        .count();
+    if modes > 1 {
+        return Err(CliError::Usage(
+            "serve, approve-device, and approve-credential are mutually exclusive".to_string(),
+        ));
+    }
+    // Anything left is an unknown argument: option values traveled with
+    // their flags above, so the remainder holds no legal values.
+    let path = parse_args(&rest)?;
+    let config = config.map(PathBuf::from).or(path);
+    if approve_cred_mode {
+        let (Some(provider), Some(label)) = (provider, label) else {
+            return Err(CliError::Usage(
+                "approve-credential requires --provider P and --label L".to_string(),
+            ));
+        };
+        if provider.trim().is_empty() || label.trim().is_empty() {
+            return Err(CliError::Usage(
+                "approve-credential requires non-blank --provider and --label".to_string(),
+            ));
+        }
+        if descriptor.is_some() {
+            return Err(CliError::Usage(
+                "approve-credential takes no --descriptor".to_string(),
+            ));
+        }
+        return Ok(CliCommand::ApproveCredential {
+            config,
+            provider,
+            label,
+        });
+    }
+    if approve_mode {
+        if provider.is_some() || label.is_some() {
+            return Err(CliError::Usage(
+                "approve-device takes no --provider or --label".to_string(),
+            ));
+        }
+        return Ok(CliCommand::ApproveDevice { config, descriptor });
+    }
+    if serve_mode {
+        if descriptor.is_some() || provider.is_some() || label.is_some() {
+            return Err(CliError::Usage(
+                "serve takes no --descriptor, --provider, or --label".to_string(),
+            ));
+        }
+        return Ok(CliCommand::Serve { config });
+    }
+    Ok(CliCommand::ShowConfig { config })
+}
+
+/// `Stage 2` Host entrypoint: parse arguments, load configuration, then stop,
+/// serve, or approve.
+///
+/// Without a subcommand this keeps the `Stage 1` behavior: [`Config::load`]
+/// (which validates), and [`ene_config::resolve_data_dir`] proof with no
+/// effects. With `serve` it resolves the data directory (which must exist
+/// as a value: an unresolvable directory is a [`CoreError::Store`] failure,
+/// since serving without durable state is meaningless) and blocks on
 /// [`serve::serve`] under a multi-threaded `Tokio` runtime. With
 /// `approve-device` it resolves the data directory the same way and records
 /// one Owner pairing approval for the exact `--descriptor` value (surrounding
@@ -248,69 +370,50 @@ fn extract_descriptor(args: &[String]) -> Result<(Option<String>, Vec<String>), 
 /// [`Config::load`] fails, and [`CliError::Serve`] when `serve` mode fails.
 fn main() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (serve_mode, rest) = extract_serve(&args)?;
-    let (approve_mode, rest) = extract_approve_device(&rest)?;
-    let (approve_cred_mode, rest) = extract_approve_credential(&rest)?;
-    let modes = [serve_mode, approve_mode, approve_cred_mode]
-        .iter()
-        .filter(|selected| **selected)
-        .count();
-    if modes > 1 {
-        return Err(CliError::Usage(
-            "serve, approve-device, and approve-credential are mutually exclusive".to_string(),
-        ));
-    }
-    if approve_cred_mode {
-        let (provider, rest) = extract_named(&rest, "--provider")?;
-        let (label, rest) = extract_named(&rest, "--label")?;
-        let (Some(provider), Some(label)) = (provider, label) else {
-            return Err(CliError::Usage(
-                "approve-credential requires --provider P and --label L".to_string(),
-            ));
-        };
-        if provider.trim().is_empty() || label.trim().is_empty() {
-            return Err(CliError::Usage(
-                "approve-credential requires non-blank --provider and --label".to_string(),
-            ));
+    match parse_cli(&args)? {
+        CliCommand::ApproveCredential {
+            config,
+            provider,
+            label,
+        } => {
+            let cfg = Config::load(config.as_deref())?;
+            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
+                return Err(CoreError::Store("no data directory resolved".to_string()).into());
+            };
+            run_approve_credential(&data_dir, provider.trim(), label.trim())?;
+            Ok(())
         }
-        let path = parse_args(&rest)?;
-        let cfg = Config::load(path.as_deref())?;
-        let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-            return Err(CoreError::Store("no data directory resolved".to_string()).into());
-        };
-        run_approve_credential(&data_dir, provider.trim(), label.trim())?;
-        return Ok(());
-    }
-    if approve_mode {
-        let (descriptor, rest) = extract_descriptor(&rest)?;
-        let path = parse_args(&rest)?;
-        let cfg = Config::load(path.as_deref())?;
-        let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-            return Err(CoreError::Store("no data directory resolved".to_string()).into());
-        };
-        let Some(descriptor) = descriptor else {
-            list_pending_devices(&data_dir)?;
-            return Ok(());
-        };
-        if descriptor.trim().is_empty() {
-            return Err(CliError::Usage(
-                "approve-device requires a non-blank --descriptor".to_string(),
-            ));
+        CliCommand::ApproveDevice { config, descriptor } => {
+            let cfg = Config::load(config.as_deref())?;
+            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
+                return Err(CoreError::Store("no data directory resolved".to_string()).into());
+            };
+            let Some(descriptor) = descriptor else {
+                list_pending_devices(&data_dir)?;
+                return Ok(());
+            };
+            if descriptor.trim().is_empty() {
+                return Err(CliError::Usage(
+                    "approve-device requires a non-blank --descriptor".to_string(),
+                ));
+            }
+            run_approve_device(&data_dir, descriptor.trim())?;
+            Ok(())
         }
-        run_approve_device(&data_dir, descriptor.trim())?;
-        return Ok(());
+        CliCommand::Serve { config } => {
+            let cfg = Config::load(config.as_deref())?;
+            let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
+                return Err(CoreError::Store("no data directory resolved".to_string()).into());
+            };
+            run_serve(&data_dir)?;
+            Ok(())
+        }
+        CliCommand::ShowConfig { config } => {
+            let cfg = Config::load(config.as_deref())?;
+            let _data_dir = ene_config::resolve_data_dir(&cfg);
+            Ok(())
+        }
     }
-    let path = parse_args(&rest)?;
-    let cfg = Config::load(path.as_deref())?;
-    if serve_mode {
-        let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-            return Err(CoreError::Store("no data directory resolved".to_string()).into());
-        };
-        run_serve(&data_dir)?;
-        return Ok(());
-    }
-    let _data_dir = ene_config::resolve_data_dir(&cfg);
-    Ok(())
 }
 
 /// Lists pending pairing descriptors on stdout, one per line.
@@ -454,8 +557,15 @@ async fn approve_device_async(data_dir: &Path, descriptor: &str) -> Result<(), C
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_approve_device, extract_descriptor, extract_serve, parse_args};
+    use super::{
+        CliCommand, extract_approve_device, extract_descriptor, extract_serve, parse_args,
+        parse_cli,
+    };
     use std::path::PathBuf;
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
 
     #[test]
     fn no_args_yields_no_override() {
@@ -718,5 +828,101 @@ mod tests {
         };
         assert!(descriptor.is_none(), "no flag means no descriptor");
         assert_eq!(rest, args, "the rest must pass through untouched");
+    }
+
+    #[test]
+    fn config_value_named_serve_is_not_a_subcommand() {
+        let parsed = parse_cli(&args(&["--config", "serve"]));
+        assert!(
+            matches!(
+                parsed,
+                Ok(CliCommand::ShowConfig {
+                    config: Some(_),
+                    ..
+                })
+            ),
+            "a --config value is data, never a subcommand, got {parsed:?}"
+        );
+        let Ok(CliCommand::ShowConfig { config }) = parsed else {
+            return;
+        };
+        assert_eq!(
+            config,
+            Some(PathBuf::from("serve")),
+            "the value must survive verbatim"
+        );
+    }
+
+    #[test]
+    fn descriptor_value_named_serve_is_not_a_subcommand() {
+        let parsed = parse_cli(&args(&["approve-device", "--descriptor", "serve"]));
+        assert!(
+            matches!(
+                parsed,
+                Ok(CliCommand::ApproveDevice {
+                    descriptor: Some(_),
+                    ..
+                })
+            ),
+            "a --descriptor value is data, got {parsed:?}"
+        );
+        let Ok(CliCommand::ApproveDevice { descriptor, .. }) = parsed else {
+            return;
+        };
+        assert_eq!(
+            descriptor.as_deref(),
+            Some("serve"),
+            "the descriptor value must survive verbatim"
+        );
+    }
+
+    #[test]
+    fn flags_before_the_subcommand_still_parse() {
+        let parsed = parse_cli(&args(&[
+            "--config",
+            "/tmp/e.json",
+            "--descriptor",
+            "laptop",
+            "approve-device",
+        ]));
+        assert!(
+            matches!(
+                parsed,
+                Ok(CliCommand::ApproveDevice {
+                    config: Some(_),
+                    descriptor: Some(_),
+                })
+            ),
+            "order-independent flags must parse, got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn stray_mode_flags_are_rejected() {
+        let parsed = parse_cli(&args(&["serve", "--descriptor", "laptop"]));
+        assert!(
+            parsed.is_err(),
+            "serve must not silently swallow --descriptor, got {parsed:?}"
+        );
+        let parsed = parse_cli(&args(&["approve-device", "--provider", "openai"]));
+        assert!(
+            parsed.is_err(),
+            "approve-device must not silently swallow --provider, got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_trailing_arguments_are_rejected() {
+        let parsed = parse_cli(&args(&["serve", "extra"]));
+        assert!(
+            parsed.is_err(),
+            "trailing garbage must fail, got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn combined_subcommands_are_rejected() {
+        let parsed = parse_cli(&args(&["serve", "approve-device"]));
+        assert!(parsed.is_err(), "combined modes must fail, got {parsed:?}");
     }
 }
