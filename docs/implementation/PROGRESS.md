@@ -19,6 +19,6 @@
 
 ## 未解決 blocker
 
-- #1360 レビュー第7ラウンド対応済み: complete の replay-first 並べ替え、`complete_with_intent`/`shortcut_with_intent` の atomic ops、全 outcome の uniform snapshot replay（stale/clarify 含む、mark 文法は共有化）。非terminal除外方針は撤回し、同一id→同一回答を徹底。CI 待ち
+- #1360 レビュー第8ラウンド対応中: `management_intent` write-once 化（`ON CONFLICT DO UPDATE` 廃止・tx内claim check・raceはwinner再読・`record_decided` durable-before-visible・assign fast-path先頭化）。前head CI success 確認済み、本ラウンド分はCI 待ち
 - 残りは返信済み：TOCTOU・intent・replay スレッドは実装で応答、transport retry P2 受諾、Stage 5 defer 群は継続
 - マージ順: #1355 → #1356 → #1358 → #1359 → #1360

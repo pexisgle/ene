@@ -693,14 +693,19 @@ impl Client {
     /// anywhere proceeds secretless — authentication simply guides later if
     /// the Host ever challenges.
     ///
-    /// Capability advertises with no device ID (the Host attributes the
-    /// frame through its per-connection pairing record); exactly one frame
-    /// is read back and must be the negotiated terms. No further frames are
-    /// read here: a pipelined presence fact stays buffered for the caller
-    /// (and for [`Client::request`]'s absorbing loop), and authentication
-    /// runs only through [`Client::authenticate`] once the Host actually
-    /// sends a challenge — which it does not yet, so no proof is attempted
-    /// here.
+    /// Capability advertises with the paired device ID (the paired-sender
+    /// contract names it on capability and proof frames alike); the Host
+    /// still attributes through its per-connection pairing record, never
+    /// trusting the claim. Exactly one frame is read back and must be the
+    /// negotiated terms. No further frames are read here: a pipelined
+    /// presence fact stays buffered for the caller (and for
+    /// [`Client::request`]'s absorbing loop).
+    ///
+    /// Authentication completes inside `connect`: the Host challenge that
+    /// follows negotiation is answered through [`Client::authenticate`]
+    /// (proof names the paired device, never the connection), and the
+    /// trailing presence fact is consumed as the session's first
+    /// attribution before returning.
     ///
     /// There is no Host "unknown device" outcome on capability — an ID the
     /// Host no longer knows fails later at the domain gate (close plus

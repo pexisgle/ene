@@ -63,7 +63,8 @@ use ene_api::v1::refs::ViewMarkWire;
 use ene_credential::{CredentialRef, CredentialRefRepository, CredentialStore};
 use ene_permission::{
     ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
-    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, ShortcutIntentOutcome,
+    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution,
+    ShortcutIntentOutcome,
 };
 use ene_plugin_ipc::WireFrame;
 use ene_primitive::RawId;
@@ -218,18 +219,17 @@ impl HostHandle {
             // Deferred scope answers clarify — recorded like any other
             // decided outcome, so a retried id observes one answer.
             _ => {
-                self.record_decided(
-                    intent,
-                    Self::intent_kind_name(intent.kind),
-                    IntentOutcome::NeedsClarification,
-                )
-                .await;
-                vec![outcome_frame(
+                return vec![outcome_frame(
                     frame,
                     live,
                     intent,
-                    ManagementOutcome::NeedsClarification,
-                )]
+                    self.record_decided(
+                        intent,
+                        Self::intent_kind_name(intent.kind),
+                        IntentOutcome::NeedsClarification,
+                    )
+                    .await,
+                )];
             }
         }
     }
@@ -274,17 +274,16 @@ impl HostHandle {
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         let Some((provider, label)) = parse_credential_target(&intent.target) else {
-            self.record_decided(
-                intent,
-                Self::INTENT_KIND_REGISTER,
-                IntentOutcome::NeedsClarification,
-            )
-            .await;
             return vec![outcome_frame(
                 frame,
                 live,
                 intent,
-                ManagementOutcome::NeedsClarification,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_REGISTER,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
             )];
         };
         // Durable replay first, same contract as assign: exact retry replays
@@ -323,18 +322,26 @@ impl HostHandle {
         }
         // One durable determination: propose-or-report plus the replay row
         // share a transaction, so the snapshot and the state it describes
-        // can never strand apart.
+        // can never strand apart. A raced insert answers from the winner.
         let fingerprint = Self::intent_fingerprint(intent, Self::INTENT_KIND_REGISTER);
         match self
             .store
             .request_approval_with_intent(provider, label, fingerprint)
             .await
         {
-            Ok(decided) => vec![outcome_frame(
+            Ok(IntentResolution::Decided(decided) | IntentResolution::Replay(decided)) => {
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    Self::replayed_outcome(&decided.outcome),
+                )]
+            }
+            Ok(IntentResolution::Conflict(_)) => vec![outcome_frame(
                 frame,
                 live,
                 intent,
-                Self::replayed_outcome(&decided.outcome),
+                ManagementOutcome::NeedsClarification,
             )],
             Err(_) => vec![outcome_frame(
                 frame,
@@ -422,18 +429,30 @@ impl HostHandle {
             .await
     }
 
-    /// Records a decided snapshot best-effort: the answer is already
-    /// determined from successful reads, so a failed record only costs a
-    /// future retry its replay (which then decides from newer state under
-    /// a new id, or replays an older row under this one).
-    async fn record_decided(&self, intent: &ManagementIntent, kind: &str, outcome: IntentOutcome) {
+    /// Stores a decided snapshot write-once and returns the wire answer.
+    ///
+    /// Durable-before-visible: a store failure answers
+    /// [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation)
+    /// rather than the decided outcome, so an id never observes an answer
+    /// its retry cannot reproduce. A lost write race answers the winner
+    /// (replay) or clarifies (conflict) — never the locally decided
+    /// outcome.
+    async fn record_decided(
+        &self,
+        intent: &ManagementIntent,
+        kind: &str,
+        outcome: IntentOutcome,
+    ) -> ManagementOutcome {
+        let answer = Self::replayed_outcome(&outcome);
         let record = IntentOutcomeRecord {
             fingerprint: Self::intent_fingerprint(intent, kind),
             outcome,
         };
-        if self.store.record_intent_outcome(record).await.is_err() {
-            // Best-effort durability gap, documented per call site: the
-            // answer below already responds from verified reads.
+        match self.store.record_intent_outcome(record).await {
+            Ok(IntentResolution::Decided(())) => answer,
+            Ok(IntentResolution::Replay(stored)) => Self::replayed_outcome(&stored.outcome),
+            Ok(IntentResolution::Conflict(_)) => ManagementOutcome::NeedsClarification,
+            Err(_) => ManagementOutcome::HeldByOperation,
         }
     }
 
@@ -455,80 +474,13 @@ impl HostHandle {
         credential_id: &str,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let Ok(current) = self.store.load_current().await else {
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::HeldByOperation,
-            )];
-        };
-        let expected = match consent_expectation(&intent.base_view.0, current.as_ref()) {
-            ConsentExpectation::ExpectEmpty => None,
-            ConsentExpectation::ExpectRevision(id, revision) => Some((id, revision)),
-            ConsentExpectation::FaceStale => {
-                // Decided from verified reads: record the stale snapshot so
-                // the id observes one answer forever.
-                self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_ASSIGN,
-                    IntentOutcome::StaleBaseView {
-                        current: consent_mark(current.as_ref()),
-                    },
-                )
-                .await;
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::StaleBaseView {
-                        current: ViewMarkWire(consent_mark(current.as_ref())),
-                    },
-                )];
-            }
-        };
-        let Ok(refs) = self.store.list_refs().await else {
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::HeldByOperation,
-            )];
-        };
-        let Some(credential) = refs.iter().find(|known| known.id == credential_id).cloned() else {
-            self.record_decided(
-                intent,
-                Self::INTENT_KIND_ASSIGN,
-                IntentOutcome::NeedsClarification,
-            )
-            .await;
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::NeedsClarification,
-            )];
-        };
-        if !self.cred_store.contains(&credential) {
-            self.record_decided(
-                intent,
-                Self::INTENT_KIND_ASSIGN,
-                IntentOutcome::NeedsClarification,
-            )
-            .await;
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::NeedsClarification,
-            )];
-        }
-        // Durable intent replay (§18.2): the same intent id either replays
-        // its stored snapshot or conflicts — it is never rebound. A hit
-        // with the same fingerprint answers the prior outcome verbatim
-        // (never re-executed); a hit with different content clarifies
-        // instead of adopting the new meaning. A miss falls through to the
-        // normal premise-checked path below.
+        // Durable intent replay first (§18.2): the stored snapshot precedes
+        // every check below — including current and credential reads — so a
+        // past-success exact retry reaches its prior outcome even after
+        // credential state moved on. A hit with the same fingerprint answers
+        // the prior outcome verbatim (never re-executed); a hit with
+        // different content clarifies instead of adopting the new meaning. A
+        // miss falls through to the normal premise-checked path below.
         let intent_key = intent.intent_id.0.as_hyphenated().to_string();
         match self.store.lookup_intent_outcome(&intent_key).await {
             Err(_) => {
@@ -557,6 +509,69 @@ impl HostHandle {
             }
             Ok(None) => {}
         }
+        let Ok(current) = self.store.load_current().await else {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::HeldByOperation,
+            )];
+        };
+        let expected = match consent_expectation(&intent.base_view.0, current.as_ref()) {
+            ConsentExpectation::ExpectEmpty => None,
+            ConsentExpectation::ExpectRevision(id, revision) => Some((id, revision)),
+            ConsentExpectation::FaceStale => {
+                // Decided from verified reads; the row makes the id observe
+                // one answer forever (or holds when the store is down).
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    self.record_decided(
+                        intent,
+                        Self::INTENT_KIND_ASSIGN,
+                        IntentOutcome::StaleBaseView {
+                            current: consent_mark(current.as_ref()),
+                        },
+                    )
+                    .await,
+                )];
+            }
+        };
+        let Ok(refs) = self.store.list_refs().await else {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::HeldByOperation,
+            )];
+        };
+        let Some(credential) = refs.iter().find(|known| known.id == credential_id).cloned() else {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_ASSIGN,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
+            )];
+        };
+        if !self.cred_store.contains(&credential) {
+            return vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_ASSIGN,
+                    IntentOutcome::NeedsClarification,
+                )
+                .await,
+            )];
+        }
         // Idempotent retry: when the stored route already equals the
         // requested one, answer the current revision without bumping. A
         // transport retry reuses the intent id with identical content, so
@@ -575,26 +590,24 @@ impl HostHandle {
             (None, Some(_)) | (Some(_), None) => false,
         };
         if !base_fresh {
-            self.record_decided(
-                intent,
-                Self::INTENT_KIND_ASSIGN,
-                IntentOutcome::StaleBaseView {
-                    current: consent_mark(current.as_ref()),
-                },
-            )
-            .await;
             return vec![outcome_frame(
                 frame,
                 live,
                 intent,
-                ManagementOutcome::StaleBaseView {
-                    current: ViewMarkWire(consent_mark(current.as_ref())),
-                },
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_ASSIGN,
+                    IntentOutcome::StaleBaseView {
+                        current: consent_mark(current.as_ref()),
+                    },
+                )
+                .await,
             )];
         }
         // Same-route shortcut through one atomic claim (1-d): read current
         // and record together, so the replay row can never strand apart
-        // from the state it describes.
+        // from the state it describes. A raced claim answers from the
+        // winner instead of forking.
         match self
             .store
             .shortcut_with_intent(
@@ -605,7 +618,7 @@ impl HostHandle {
             )
             .await
         {
-            Ok(ShortcutIntentOutcome::Hit { current }) => {
+            Ok(IntentResolution::Decided(ShortcutIntentOutcome::Hit { current })) => {
                 return vec![outcome_frame(
                     frame,
                     live,
@@ -615,7 +628,23 @@ impl HostHandle {
                     },
                 )];
             }
-            Ok(ShortcutIntentOutcome::Miss { .. }) => {}
+            Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss { .. })) => {}
+            Ok(IntentResolution::Replay(stored)) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    Self::replayed_outcome(&stored.outcome),
+                )];
+            }
+            Ok(IntentResolution::Conflict(_)) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::NeedsClarification,
+                )];
+            }
             Err(_) => {
                 return vec![outcome_frame(
                     frame,
@@ -649,21 +678,37 @@ impl HostHandle {
             )
             .await
         {
-            Ok(ConsentCommitOutcome::Committed { record }) => vec![outcome_frame(
+            Ok(IntentResolution::Decided(ConsentCommitOutcome::Committed { record })) => {
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::StoredAsRuleView {
+                        revision: ViewMarkWire(record.rev.as_u64().to_string()),
+                    },
+                )]
+            }
+            Ok(IntentResolution::Decided(ConsentCommitOutcome::StaleCurrent { current })) => {
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::StaleBaseView {
+                        current: ViewMarkWire(consent_mark(current.as_ref())),
+                    },
+                )]
+            }
+            Ok(IntentResolution::Replay(stored)) => vec![outcome_frame(
                 frame,
                 live,
                 intent,
-                ManagementOutcome::StoredAsRuleView {
-                    revision: ViewMarkWire(record.rev.as_u64().to_string()),
-                },
+                Self::replayed_outcome(&stored.outcome),
             )],
-            Ok(ConsentCommitOutcome::StaleCurrent { current }) => vec![outcome_frame(
+            Ok(IntentResolution::Conflict(_)) => vec![outcome_frame(
                 frame,
                 live,
                 intent,
-                ManagementOutcome::StaleBaseView {
-                    current: ViewMarkWire(consent_mark(current.as_ref())),
-                },
+                ManagementOutcome::NeedsClarification,
             )],
             Err(_) => vec![outcome_frame(
                 frame,
@@ -749,7 +794,7 @@ impl HostHandle {
         };
         // One durable determination (1-b): compare, completability, and
         // snapshot-save share a transaction; the answer below renders the
-        // decided snapshot verbatim.
+        // decided snapshot verbatim. A raced claim answers from the winner.
         match self
             .store
             .complete_with_intent(
@@ -759,11 +804,19 @@ impl HostHandle {
             )
             .await
         {
-            Ok(decided) => vec![outcome_frame(
+            Ok(IntentResolution::Decided(decided) | IntentResolution::Replay(decided)) => {
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    Self::replayed_outcome(&decided.outcome),
+                )]
+            }
+            Ok(IntentResolution::Conflict(_)) => vec![outcome_frame(
                 frame,
                 live,
                 intent,
-                Self::replayed_outcome(&decided.outcome),
+                ManagementOutcome::NeedsClarification,
             )],
             Err(_) => vec![outcome_frame(
                 frame,
