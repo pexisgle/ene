@@ -129,7 +129,7 @@ impl Store {
     /// Durable idempotency rests on the client-minted `(companion,
     /// command_id)`: a retry reuses the same command id with a fresh message
     /// id, so an in-transaction pre-check returns the original
-    /// [`HistoryAppendOutcome::CommittedAs`] without re-appending or
+    /// [`HistoryAppendOutcome::AlreadyCommittedAs`] without re-appending or
     /// re-registering undelivered. This replaces the retired `local_id`
     /// pre-check; `local_id` is stored as correspondence metadata only and is
     /// never consulted here. `NULL` command ids carry no replay key and never
@@ -194,17 +194,21 @@ impl Store {
         }
         if let Some(command) = cmd.command_id {
             let command_text = encode_id(command.0);
-            let existing: Option<String> = tx
+            let existing: Option<(String, String)> = tx
                 .query_row(
                     SQL_SELECT_HISTORY_ID_BY_COMMAND,
                     params![companion_text, command_text],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(|error| companion_unavailable(error.to_string()))?;
-            if let Some(existing) = existing {
+            if let Some((existing, existing_round)) = existing {
                 let message = decode_id(&existing).map_err(companion_unavailable)?;
-                return Ok((HistoryAppendOutcome::CommittedAs { message }, None));
+                let round = decode_id(&existing_round).map_err(companion_unavailable)?;
+                return Ok((
+                    HistoryAppendOutcome::AlreadyCommittedAs { message, round },
+                    None,
+                ));
             }
         }
         let command_text = cmd.command_id.map(|command| encode_id(command.0));
@@ -442,7 +446,7 @@ const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, compa
 const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
 const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
-const SQL_SELECT_HISTORY_ID_BY_COMMAND: &str = "SELECT message_id FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_ID_BY_COMMAND: &str = "SELECT message_id, round_id FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 const SQL_SELECT_UNDELIVERED_STATUS: &str =
@@ -2534,11 +2538,23 @@ mod tests {
         let Ok((retry_outcome, retry_registered)) = retry else {
             return;
         };
+        let HistoryAppendOutcome::AlreadyCommittedAs { message, round } = retry_outcome else {
+            assert!(
+                format!("{retry_outcome:?}").is_empty(),
+                "retry must replay the original accept, got {retry_outcome:?}"
+            );
+            return;
+        };
         assert_eq!(
-            retry_outcome,
-            HistoryAppendOutcome::CommittedAs { message: first_id },
-            "retry must replay the original accept"
+            message, first_id,
+            "retry must replay the original message identity"
         );
+        let looked_up = store.lookup_command(companion, &command).await;
+        assert!(looked_up.is_ok(), "replayed command must stay lookable");
+        let Ok(Some(original)) = looked_up else {
+            return;
+        };
+        assert_eq!(original.round, round, "replay must name the original round");
         assert!(
             retry_registered.is_none(),
             "replay must not re-register undelivered"
