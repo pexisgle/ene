@@ -3,8 +3,8 @@
 //! [`Store`] owns one `rusqlite::Connection` and implements every repository
 //! contract owned elsewhere: [`PresenceRepository`], [`CompanionRepository`],
 //! [`HistoryRepository`], [`UndeliveredRepository`], [`ConsentRepository`],
-//! [`CredentialRefRepository`], [`DevicePairingRepository`], and
-//! [`UsageRepository`]. Owners never depend
+//! [`CredentialRefRepository`], [`CredentialApprovalRepository`],
+//! [`DevicePairingRepository`], and [`UsageRepository`]. Owners never depend
 //! on this crate; they program against their own traits.
 //!
 //! Concurrency shape: the connection is `Send` but not `Sync`, so a
@@ -26,8 +26,9 @@ use ene_companion::{
     UndeliveredTechnicalError,
 };
 use ene_credential::{
-    CredentialRef, CredentialRefRepository, CredentialTechnicalError, DeviceId,
-    DevicePairingRepository, DevicePairingStatus, DeviceRecord, PendingPairing,
+    CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialTechnicalError,
+    DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord,
+    PendingCredentialApproval, PendingPairing,
 };
 use ene_inference::{InferenceTechnicalError, UsageFact, UsageRepository, UsageSource};
 use ene_permission::{
@@ -275,8 +276,10 @@ mod migrate {
     /// carried is dropped again by version 3). Version 3 adds the nullable
     /// `history_message.command_id` column with the durable
     /// `(companion_id, command_id)` unique replay index; `local_id` stays as
-    /// correspondence metadata only.
-    const CURRENT_VERSION: u64 = 3;
+    /// correspondence metadata only. Version 4 adds the `credential_pending`
+    /// table for registration approvals; the usable marker stays
+    /// `credential_ref`, so no approved table is created.
+    const CURRENT_VERSION: u64 = 4;
 
     /// Forward-only schema: tables first, then the supporting indexes.
     const SCHEMA: &str = "
@@ -382,6 +385,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_companion_command ON histo
 DROP INDEX IF EXISTS idx_history_message_companion_local;
 ";
 
+    /// Version 4 upgrade, applied once when the stored version is below 4.
+    ///
+    /// Forward-only: introduces `credential_pending` for registration
+    /// approvals. Fresh and upgraded databases converge via `IF NOT EXISTS`;
+    /// no pre-existing rows can reference the new table, so nothing is
+    /// backfilled. The usable marker stays `credential_ref` (the register
+    /// flow creates the ref only at approval time), so no approved table is
+    /// created here.
+    const MIGRATION_V4: &str = "
+CREATE TABLE IF NOT EXISTS credential_pending (
+    provider TEXT NOT NULL,
+    label TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    PRIMARY KEY (provider, label)
+);
+";
+
     /// Creates or upgrades the schema on an open connection.
     ///
     /// Idempotent: rerunning on a migrated database changes nothing. Rejects
@@ -412,6 +432,10 @@ DROP INDEX IF EXISTS idx_history_message_companion_local;
         }
         if stored_version < 3 {
             conn.execute_batch(MIGRATION_V3)
+                .map_err(|error| error.to_string())?;
+        }
+        if stored_version < 4 {
+            conn.execute_batch(MIGRATION_V4)
                 .map_err(|error| error.to_string())?;
         }
         let current = i64::try_from(CURRENT_VERSION)
@@ -477,6 +501,13 @@ const SQL_INSERT_PAIRED: &str =
     "INSERT INTO paired_device (device_id, descriptor, paired_at) VALUES (?1, ?2, ?3)";
 const SQL_LIST_PENDING_PAIRINGS: &str =
     "SELECT descriptor, requested_at FROM pairing_pending ORDER BY rowid ASC";
+const SQL_SELECT_CREDENTIAL_PENDING: &str = "SELECT provider, label, requested_at FROM credential_pending WHERE provider = ?1 AND label = ?2";
+const SQL_INSERT_CREDENTIAL_PENDING_IGNORE: &str =
+    "INSERT OR IGNORE INTO credential_pending (provider, label, requested_at) VALUES (?1, ?2, ?3)";
+const SQL_DELETE_CREDENTIAL_PENDING: &str =
+    "DELETE FROM credential_pending WHERE provider = ?1 AND label = ?2";
+const SQL_LIST_CREDENTIAL_PENDING: &str =
+    "SELECT provider, label, requested_at FROM credential_pending ORDER BY rowid ASC";
 
 /// Locks the shared connection, recovering from poisoning.
 ///
@@ -677,6 +708,29 @@ fn decode_pending_pairing(
         .map_err(|_| String::from("malformed pairing request timestamp"))?;
     Ok(PendingPairing {
         descriptor,
+        requested_at,
+    })
+}
+
+/// Reports whether a credential `(provider, label)` pair is blank.
+///
+/// Empty or whitespace-only input is treated as absent: callers check this
+/// before touching the store, so blank pairs never become stored rows.
+fn credential_pair_is_blank(provider: &str, label: &str) -> bool {
+    provider.trim().is_empty() || label.trim().is_empty()
+}
+
+/// Reads one pending-credential row into its domain fact.
+fn decode_pending_credential(
+    provider: String,
+    label: String,
+    requested_text: &str,
+) -> Result<PendingCredentialApproval, String> {
+    let requested_at = WallClockWithTz::parse_rfc3339(requested_text)
+        .map_err(|_| String::from("malformed credential approval timestamp"))?;
+    Ok(PendingCredentialApproval {
+        provider,
+        label,
         requested_at,
     })
 }
@@ -1754,6 +1808,157 @@ impl DevicePairingRepository for Store {
     }
 }
 
+impl CredentialApprovalRepository for Store {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn request_approval(
+        &self,
+        provider: String,
+        label: String,
+    ) -> Result<bool, CredentialTechnicalError> {
+        // Blank pairs are treated as absent before touching the store, so
+        // they never become stored rows.
+        if credential_pair_is_blank(&provider, &label) {
+            return Ok(false);
+        }
+        let requested_text = WallClockWithTz::now().to_rfc3339();
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        // An already-usable pair short-circuits: re-requests record nothing.
+        let usable: Option<(String, String, String)> = tx
+            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        if usable.is_some() {
+            return Ok(false);
+        }
+        // `INSERT OR IGNORE` keeps a previously stored pending entry: a
+        // repeat request reports `false` instead of refreshing its time.
+        let inserted = tx
+            .execute(
+                SQL_INSERT_CREDENTIAL_PENDING_IGNORE,
+                params![provider, label, requested_text],
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        if inserted == 0 {
+            return Ok(false);
+        }
+        tx.commit()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        Ok(true)
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn approve_pending(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<bool, CredentialTechnicalError> {
+        // Blank pairs are treated as absent before touching the store.
+        if credential_pair_is_blank(provider, label) {
+            return Ok(false);
+        }
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        // A known pending entry is consumed first so a pair that is somehow
+        // both pending and usable never strands its pending row.
+        let pending: Option<(String, String, String)> = tx
+            .query_row(
+                SQL_SELECT_CREDENTIAL_PENDING,
+                params![provider, label],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        if pending.is_some() {
+            // The usable marker is the `credential_ref` row itself, which
+            // Host records in its own approve path: here the approval only
+            // deletes the pending row.
+            tx.execute(SQL_DELETE_CREDENTIAL_PENDING, params![provider, label])
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            tx.commit()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            return Ok(true);
+        }
+        // Re-approving an already-usable pair is idempotent with no change.
+        let usable: Option<(String, String, String)> = tx
+            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        Ok(usable.is_some())
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn is_approved(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<bool, CredentialTechnicalError> {
+        // Blank pairs are treated as absent before touching the store.
+        if credential_pair_is_blank(provider, label) {
+            return Ok(false);
+        }
+        let guard = lock_shared(&self.conn);
+        // Pure load: one statement, no transaction. The `credential_ref`
+        // row is the usable marker; pending-only pairs report `false`.
+        let found: Option<(String, String, String)> = guard
+            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        Ok(found.is_some())
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn list_pending(
+        &self,
+    ) -> Result<Vec<PendingCredentialApproval>, CredentialTechnicalError> {
+        let guard = lock_shared(&self.conn);
+        let mut query = guard
+            .prepare(SQL_LIST_CREDENTIAL_PENDING)
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        let rows = query
+            .query_map((), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (provider, label, requested_text) =
+                row.map_err(|error| credential_unavailable(error.to_string()))?;
+            pending.push(
+                decode_pending_credential(provider, label, &requested_text)
+                    .map_err(credential_unavailable)?,
+            );
+        }
+        Ok(pending)
+    }
+}
+
 impl UsageRepository for Store {
     #[expect(
         clippy::unused_async_trait_impl,
@@ -1794,8 +1999,8 @@ mod tests {
         ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
     };
     use ene_credential::{
-        CredentialRef, CredentialRefRepository, DeviceId, DevicePairingRepository,
-        DevicePairingStatus,
+        CredentialApprovalRepository, CredentialRef, CredentialRefRepository, DeviceId,
+        DevicePairingRepository, DevicePairingStatus,
     };
     use ene_inference::{InferenceTicketId, UsageFact, UsageRepository, UsageSource};
     use ene_permission::{ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision};
@@ -2821,7 +3026,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
         let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
             row.get::<_, i64>(0)
         });
-        assert!(matches!(version, Ok(3)), "migration must record version 3");
+        assert!(matches!(version, Ok(4)), "migration must record version 4");
         let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
             (),
@@ -2892,12 +3097,12 @@ INSERT INTO _schema_version (version) VALUES (2);",
             return;
         };
         assert_eq!(items.len(), 2, "both descriptors must list as pending");
-        let unknown = store.approve_pending("unknown").await;
+        let unknown = DevicePairingRepository::approve_pending(&store, "unknown").await;
         assert!(
             matches!(unknown, Ok(None)),
             "approving an unknown descriptor must yield none"
         );
-        let approved = store.approve_pending("phone").await;
+        let approved = DevicePairingRepository::approve_pending(&store, "phone").await;
         assert!(approved.is_ok(), "approval must succeed");
         let Ok(Some((device, secret))) = approved else {
             return;
@@ -2929,7 +3134,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
         );
         // Re-approving returns the same record without minting a new id,
         // but with a freshly minted secret (rotation).
-        let reapproved = store.approve_pending("phone").await;
+        let reapproved = DevicePairingRepository::approve_pending(&store, "phone").await;
         assert!(reapproved.is_ok(), "re-approval must succeed");
         let Ok(Some((same, rotated))) = reapproved else {
             return;
@@ -2962,7 +3167,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
             matches!(requested, Ok(DevicePairingStatus::Pending { .. })),
             "request must pend"
         );
-        let approved = first.approve_pending("phone").await;
+        let approved = DevicePairingRepository::approve_pending(&first, "phone").await;
         let Ok(Some((device, _))) = approved else {
             return;
         };
@@ -2993,8 +3198,278 @@ INSERT INTO _schema_version (version) VALUES (2);",
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(3)),
-            "reopened database must record schema version 3"
+            matches!(version, Ok(4)),
+            "reopened database must record schema version 4"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_approval_request_approve_usable_cycle() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let unknown_approve =
+            CredentialApprovalRepository::approve_pending(&store, "acme", "nope").await;
+        assert!(
+            matches!(unknown_approve, Ok(false)),
+            "approving an unknown pair must yield false"
+        );
+        let unknown_flag = store.is_approved("acme", "nope").await;
+        assert!(
+            matches!(unknown_flag, Ok(false)),
+            "unknown pair must not read as approved"
+        );
+        let listed_empty = CredentialApprovalRepository::list_pending(&store).await;
+        assert!(
+            matches!(listed_empty, Ok(ref items) if items.is_empty()),
+            "fresh store pends no credential approvals"
+        );
+        let requested = store
+            .request_approval(String::from("acme"), String::from("main"))
+            .await;
+        assert!(
+            matches!(requested, Ok(true)),
+            "first request must record a pending entry"
+        );
+        let rerequested = store
+            .request_approval(String::from("acme"), String::from("main"))
+            .await;
+        assert!(
+            matches!(rerequested, Ok(false)),
+            "repeat request must not record again"
+        );
+        let listed = CredentialApprovalRepository::list_pending(&store).await;
+        assert!(listed.is_ok(), "pending list must succeed");
+        let Ok(items) = listed else {
+            return;
+        };
+        assert_eq!(items.len(), 1, "one approval must pend");
+        assert_eq!(items[0].provider.as_str(), "acme");
+        assert_eq!(items[0].label.as_str(), "main");
+        let flagged_pending = store.is_approved("acme", "main").await;
+        assert!(
+            matches!(flagged_pending, Ok(false)),
+            "pending-only pair must not read as approved"
+        );
+        let approved = CredentialApprovalRepository::approve_pending(&store, "acme", "main").await;
+        assert!(
+            matches!(approved, Ok(true)),
+            "approval of a pending pair must succeed"
+        );
+        let drained = CredentialApprovalRepository::list_pending(&store).await;
+        assert!(
+            matches!(drained, Ok(ref items) if items.is_empty()),
+            "approval must drain the pending entry"
+        );
+        let flagged_before_ref = store.is_approved("acme", "main").await;
+        assert!(
+            matches!(flagged_before_ref, Ok(false)),
+            "approval alone records no usable ref; Host records it"
+        );
+        let saved = store
+            .save_ref(CredentialRef {
+                id: String::from("acme:main"),
+                provider: String::from("acme"),
+                label: String::from("main"),
+            })
+            .await;
+        assert!(saved.is_ok(), "usable ref save must succeed");
+        let flagged = store.is_approved("acme", "main").await;
+        assert!(
+            matches!(flagged, Ok(true)),
+            "pair with a stored ref must read as approved"
+        );
+        let reapproved =
+            CredentialApprovalRepository::approve_pending(&store, "acme", "main").await;
+        assert!(
+            matches!(reapproved, Ok(true)),
+            "re-approving a usable pair must stay true"
+        );
+        let again = store
+            .request_approval(String::from("acme"), String::from("main"))
+            .await;
+        assert!(
+            matches!(again, Ok(false)),
+            "request after usable must not record"
+        );
+        let listed_after = CredentialApprovalRepository::list_pending(&store).await;
+        assert!(
+            matches!(listed_after, Ok(ref items) if items.is_empty()),
+            "usable pair must never linger as pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_approval_blank_inputs_are_absent() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let blank_provider = store
+            .request_approval(String::new(), String::from("main"))
+            .await;
+        assert!(
+            matches!(blank_provider, Ok(false)),
+            "blank provider must record nothing"
+        );
+        let whitespace_provider = store
+            .request_approval(String::from("   "), String::from("main"))
+            .await;
+        assert!(
+            matches!(whitespace_provider, Ok(false)),
+            "whitespace provider must record nothing"
+        );
+        let blank_label = store
+            .request_approval(String::from("acme"), String::new())
+            .await;
+        assert!(
+            matches!(blank_label, Ok(false)),
+            "blank label must record nothing"
+        );
+        let whitespace_label = store
+            .request_approval(String::from("acme"), String::from("  "))
+            .await;
+        assert!(
+            matches!(whitespace_label, Ok(false)),
+            "whitespace label must record nothing"
+        );
+        let both_blank = store.request_approval(String::new(), String::new()).await;
+        assert!(
+            matches!(both_blank, Ok(false)),
+            "blank pair must record nothing"
+        );
+        let listed = CredentialApprovalRepository::list_pending(&store).await;
+        assert!(
+            matches!(listed, Ok(ref items) if items.is_empty()),
+            "blank requests must leave pending empty"
+        );
+        let approve_blank_provider =
+            CredentialApprovalRepository::approve_pending(&store, "", "main").await;
+        assert!(
+            matches!(approve_blank_provider, Ok(false)),
+            "blank approve must yield false"
+        );
+        let approve_blank_label =
+            CredentialApprovalRepository::approve_pending(&store, "acme", "   ").await;
+        assert!(
+            matches!(approve_blank_label, Ok(false)),
+            "whitespace approve must yield false"
+        );
+        let approve_both_blank =
+            CredentialApprovalRepository::approve_pending(&store, "  ", "  ").await;
+        assert!(
+            matches!(approve_both_blank, Ok(false)),
+            "blank pair approve must yield false"
+        );
+        let flagged_blank = store.is_approved("", "main").await;
+        assert!(
+            matches!(flagged_blank, Ok(false)),
+            "blank pair must never read as approved"
+        );
+        let flagged_blank_label = store.is_approved("acme", "").await;
+        assert!(
+            matches!(flagged_blank_label, Ok(false)),
+            "blank label must never read as approved"
+        );
+        let flagged_both_blank = store.is_approved("   ", "  ").await;
+        assert!(
+            matches!(flagged_both_blank, Ok(false)),
+            "whitespace pair must never read as approved"
+        );
+        let listed_after = CredentialApprovalRepository::list_pending(&store).await;
+        assert!(
+            matches!(listed_after, Ok(ref items) if items.is_empty()),
+            "blank approves must record nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_v4_reopen_keeps_credential_approval_rows() {
+        let dir = tempfile::tempdir();
+        assert!(dir.is_ok(), "tempdir must open");
+        let Ok(dir) = dir else {
+            return;
+        };
+        let path = dir.path().join("store.db");
+        let opened = Store::open(&path).await;
+        assert!(opened.is_ok(), "file open must succeed");
+        let Ok(first) = opened else {
+            return;
+        };
+        let pending_requested = first
+            .request_approval(String::from("acme"), String::from("pending"))
+            .await;
+        assert!(
+            matches!(pending_requested, Ok(true)),
+            "pending request must record"
+        );
+        let usable_requested = first
+            .request_approval(String::from("acme"), String::from("usable"))
+            .await;
+        assert!(
+            matches!(usable_requested, Ok(true)),
+            "usable request must record"
+        );
+        let usable_approved =
+            CredentialApprovalRepository::approve_pending(&first, "acme", "usable").await;
+        assert!(
+            matches!(usable_approved, Ok(true)),
+            "usable approval must succeed"
+        );
+        let usable_saved = first
+            .save_ref(CredentialRef {
+                id: String::from("acme:usable"),
+                provider: String::from("acme"),
+                label: String::from("usable"),
+            })
+            .await;
+        assert!(usable_saved.is_ok(), "usable ref save must succeed");
+        drop(first);
+        let reopened = Store::open(&path).await;
+        assert!(reopened.is_ok(), "reopen must succeed");
+        let Ok(second) = reopened else {
+            return;
+        };
+        let listed = CredentialApprovalRepository::list_pending(&second).await;
+        assert!(listed.is_ok(), "pending list must survive reopen");
+        let Ok(items) = listed else {
+            return;
+        };
+        assert_eq!(items.len(), 1, "pending row must survive reopen");
+        assert_eq!(items[0].provider.as_str(), "acme");
+        assert_eq!(items[0].label.as_str(), "pending");
+        let usable_flag = second.is_approved("acme", "usable").await;
+        assert!(
+            matches!(usable_flag, Ok(true)),
+            "usable ref must survive reopen"
+        );
+        let pending_flag = second.is_approved("acme", "pending").await;
+        assert!(
+            matches!(pending_flag, Ok(false)),
+            "pending-only pair must stay unapproved after reopen"
+        );
+        let rerequest = second
+            .request_approval(String::from("acme"), String::from("pending"))
+            .await;
+        assert!(
+            matches!(rerequest, Ok(false)),
+            "pending state must survive reopen"
+        );
+        let reapprove =
+            CredentialApprovalRepository::approve_pending(&second, "acme", "usable").await;
+        assert!(
+            matches!(reapprove, Ok(true)),
+            "usable state must survive reopen"
+        );
+        let guard = match second.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
+            row.get::<_, i64>(0)
+        });
+        assert!(
+            matches!(version, Ok(4)),
+            "reopened database must record schema version 4"
         );
     }
 
