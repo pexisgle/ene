@@ -193,6 +193,18 @@ impl Store {
                 None,
             ));
         }
+        if let Some((expected_id, expected_rev)) = cmd.expected_consent.as_ref() {
+            let stored: Option<(String, i64)> = tx
+                .query_row(SQL_SELECT_CONSENT, (), |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
+                id == expected_id && decode_u64(*rev).is_ok_and(|value| value == *expected_rev)
+            });
+            if !current_matches {
+                return Ok((HistoryAppendOutcome::StaleConsent, None));
+            }
+        }
         if let Some(command) = cmd.command_id {
             let command_text = encode_id(command.0);
             let existing: Option<(String, String)> = tx
@@ -2032,6 +2044,7 @@ mod tests {
             lang: String::from("en"),
             at: fixture_clock(),
             expected_generation: generation,
+            expected_consent: None,
             command_id: None,
             local_id: None,
         }
@@ -2054,6 +2067,7 @@ mod tests {
             lang: String::from("en"),
             at: fixture_clock(),
             expected_generation: generation,
+            expected_consent: None,
             command_id,
             local_id: local_id.map(String::from),
         }
@@ -2218,6 +2232,35 @@ mod tests {
             return;
         };
         assert!(timeline.is_empty(), "stale append must store nothing");
+    }
+
+    #[tokio::test]
+    async fn append_with_moved_consent_is_rejected() {
+        use ene_companion::HistoryRepository as _;
+
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let Some((companion, generation)) = running_companion(&store).await else {
+            return;
+        };
+        let mut cmd = history_command(companion, generation, "consent body");
+        cmd.expected_consent = Some((String::from("consent-1"), 999));
+        let appended = store.append_message(cmd).await;
+        assert!(appended.is_ok(), "consent mismatch must be an outcome");
+        let Ok(outcome) = appended else {
+            return;
+        };
+        assert_eq!(
+            outcome,
+            HistoryAppendOutcome::StaleConsent,
+            "moved consent must answer stale-consent"
+        );
+        let loaded = store.load_timeline(companion, None, 10).await;
+        assert!(
+            matches!(&loaded, Ok(items) if items.is_empty()),
+            "stale-consent append must store nothing"
+        );
     }
 
     #[tokio::test]
