@@ -35,8 +35,8 @@ use ene_inference::{
     UsageFact, UsageRepository, UsageSource,
 };
 use ene_permission::{
-    ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentOutcome,
-    IntentOutcomeRecord, IntentOutcomeRepository, PermissionTechnicalError,
+    ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
+    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, PermissionTechnicalError,
 };
 use ene_presence::{
     ClientId, LiveReachabilityRef, MoveDecision, PresenceAttribution, PresenceCheckRef,
@@ -867,6 +867,60 @@ fn decode_intent_outcome(
         ("held", _) => Ok(IntentOutcome::HeldByOperation),
         _ => Err(String::from("malformed intent outcome")),
     }
+}
+
+/// Inserts one intent replay row outside any caller transaction.
+///
+/// Read-only outcomes only (commits use [`insert_intent_row_tx`] inside
+/// their own transaction), so a lone statement is atomic enough.
+fn insert_intent_row(
+    conn: &Connection,
+    fingerprint: &IntentFingerprint,
+    outcome: &IntentOutcome,
+) -> Result<(), String> {
+    let (outcome_text, mark) = encode_intent_outcome(outcome);
+    conn.execute(
+        SQL_UPSERT_INTENT_OUTCOME,
+        params![
+            fingerprint.intent_id,
+            fingerprint.kind,
+            fingerprint.target,
+            fingerprint.base,
+            fingerprint.rationale_origin,
+            fingerprint.rationale_quote.as_deref(),
+            outcome_text,
+            mark,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Inserts one intent replay row inside the caller's transaction.
+///
+/// Upserts on the intent key: re-establishing the same intent refreshes
+/// rather than duplicating rows.
+fn insert_intent_row_tx(
+    tx: &Transaction<'_>,
+    fingerprint: &IntentFingerprint,
+    outcome: &IntentOutcome,
+) -> Result<(), String> {
+    let (outcome_text, mark) = encode_intent_outcome(outcome);
+    tx.execute(
+        SQL_UPSERT_INTENT_OUTCOME,
+        params![
+            fingerprint.intent_id,
+            fingerprint.kind,
+            fingerprint.target,
+            fingerprint.base,
+            fingerprint.rationale_origin,
+            fingerprint.rationale_quote.as_deref(),
+            outcome_text,
+            mark,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// Reads one paired-device row into its domain record.
@@ -1852,26 +1906,12 @@ impl IntentOutcomeRepository for Store {
         &self,
         record: IntentOutcomeRecord,
     ) -> Result<(), PermissionTechnicalError> {
-        let (outcome_text, mark) = encode_intent_outcome(&record.outcome);
         let guard = lock_shared(&self.conn);
         // Upsert on the intent key: re-establishing the same intent refreshes
         // rather than duplicating. Read-only outcomes only (commits use the
         // combined operations below), so a lone statement is atomic enough.
-        guard
-            .execute(
-                SQL_UPSERT_INTENT_OUTCOME,
-                params![
-                    record.intent_id,
-                    record.kind,
-                    record.target,
-                    record.base,
-                    record.rationale_origin,
-                    record.rationale_quote.as_deref(),
-                    outcome_text,
-                    mark,
-                ],
-            )
-            .map_err(|error| permission_unavailable(error.to_string()))?;
+        insert_intent_row(&guard, &record.fingerprint, &record.outcome)
+            .map_err(permission_unavailable)?;
         Ok(())
     }
 
@@ -1903,12 +1943,14 @@ impl IntentOutcomeRepository for Store {
                 let outcome =
                     decode_intent_outcome(&outcome_text, mark).map_err(permission_unavailable)?;
                 Ok(Some(IntentOutcomeRecord {
-                    intent_id: intent_id.to_owned(),
-                    kind,
-                    target,
-                    base,
-                    rationale_origin,
-                    rationale_quote,
+                    fingerprint: IntentFingerprint {
+                        intent_id: intent_id.to_owned(),
+                        kind,
+                        target,
+                        base,
+                        rationale_origin,
+                        rationale_quote,
+                    },
                     outcome,
                 }))
             }
@@ -1924,7 +1966,7 @@ impl IntentOutcomeRepository for Store {
         &self,
         expected: Option<(String, ConsentRevision)>,
         record: ConsentRecord,
-        intent: IntentOutcomeRecord,
+        fingerprint: IntentFingerprint,
     ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
         let mut guard = lock_shared(&self.conn);
         let tx = guard
@@ -1939,22 +1981,13 @@ impl IntentOutcomeRepository for Store {
         // The replay row shares the commit transaction: a crash can neither
         // strand a commit without its marker nor a marker without its
         // commit. Stale outcomes record nothing (they recompute honestly).
-        if let ConsentCommitOutcome::Committed { .. } = outcome {
-            let (outcome_text, mark) = encode_intent_outcome(&intent.outcome);
-            tx.execute(
-                SQL_UPSERT_INTENT_OUTCOME,
-                params![
-                    intent.intent_id,
-                    intent.kind,
-                    intent.target,
-                    intent.base,
-                    intent.rationale_origin,
-                    intent.rationale_quote.as_deref(),
-                    outcome_text,
-                    mark,
-                ],
-            )
-            .map_err(|error| permission_unavailable(error.to_string()))?;
+        // The snapshot carries the committed revision, so replay answers it
+        // verbatim.
+        if let ConsentCommitOutcome::Committed { record } = &outcome {
+            let snapshot = IntentOutcome::StoredAsRuleView {
+                revision: record.rev.as_u64().to_string(),
+            };
+            insert_intent_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
         }
         tx.commit()
             .map_err(|error| permission_unavailable(error.to_string()))?;
@@ -1969,7 +2002,7 @@ impl IntentOutcomeRepository for Store {
         &self,
         provider: String,
         label: String,
-        intent: IntentOutcomeRecord,
+        fingerprint: IntentFingerprint,
     ) -> Result<IntentOutcomeRecord, PermissionTechnicalError> {
         if credential_pair_is_blank(&provider, &label) {
             return Err(permission_unavailable(String::from(
@@ -2000,22 +2033,12 @@ impl IntentOutcomeRepository for Store {
             .map_err(|error| permission_unavailable(error.to_string()))?;
             IntentOutcome::HeldByOperation
         };
-        let decided = IntentOutcomeRecord { outcome, ..intent };
-        let (outcome_text, mark) = encode_intent_outcome(&decided.outcome);
-        tx.execute(
-            SQL_UPSERT_INTENT_OUTCOME,
-            params![
-                decided.intent_id,
-                decided.kind,
-                decided.target,
-                decided.base,
-                decided.rationale_origin,
-                decided.rationale_quote.as_deref(),
-                outcome_text,
-                mark,
-            ],
-        )
-        .map_err(|error| permission_unavailable(error.to_string()))?;
+        let decided = IntentOutcomeRecord {
+            fingerprint,
+            outcome,
+        };
+        insert_intent_row_tx(&tx, &decided.fingerprint, &decided.outcome)
+            .map_err(permission_unavailable)?;
         tx.commit()
             .map_err(|error| permission_unavailable(error.to_string()))?;
         Ok(decided)
@@ -3597,24 +3620,24 @@ mod tests {
                 return;
             };
             let shaped = conn.execute_batch(
-                "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL);
-CREATE TABLE undelivered (undelivered_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, source_message TEXT NOT NULL, status TEXT NOT NULL, round_id TEXT NOT NULL, presence_generation INTEGER NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE presence_attribution (companion_id TEXT PRIMARY KEY, state TEXT NOT NULL, active_client TEXT, generation INTEGER NOT NULL);
-CREATE TABLE presence_transition_log (transition_seq INTEGER PRIMARY KEY AUTOINCREMENT, companion_id TEXT NOT NULL, old_state TEXT NOT NULL, new_state TEXT NOT NULL, old_gen INTEGER NOT NULL, new_gen INTEGER NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
-CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
-CREATE TABLE credential_ref (id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL, UNIQUE (provider, label));
-CREATE TABLE usage_fact (ticket TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, source TEXT NOT NULL);
-CREATE TABLE pairing_pending (descriptor TEXT PRIMARY KEY, requested_at TEXT NOT NULL);
-CREATE TABLE paired_device (device_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, paired_at TEXT NOT NULL);
-CREATE INDEX idx_history_message_companion ON history_message (companion_id);
-CREATE INDEX idx_history_message_round ON history_message (round_id);
-CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
-CREATE UNIQUE INDEX idx_history_message_companion_local ON history_message (companion_id, local_id);
-CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
-CREATE TABLE _schema_version (version INTEGER NOT NULL);
-INSERT INTO _schema_version (version) VALUES (2);",
-            );
+                    "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL);
+    CREATE TABLE undelivered (undelivered_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, source_message TEXT NOT NULL, status TEXT NOT NULL, round_id TEXT NOT NULL, presence_generation INTEGER NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE presence_attribution (companion_id TEXT PRIMARY KEY, state TEXT NOT NULL, active_client TEXT, generation INTEGER NOT NULL);
+    CREATE TABLE presence_transition_log (transition_seq INTEGER PRIMARY KEY AUTOINCREMENT, companion_id TEXT NOT NULL, old_state TEXT NOT NULL, new_state TEXT NOT NULL, old_gen INTEGER NOT NULL, new_gen INTEGER NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
+    CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
+    CREATE TABLE credential_ref (id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL, UNIQUE (provider, label));
+    CREATE TABLE usage_fact (ticket TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, source TEXT NOT NULL);
+    CREATE TABLE pairing_pending (descriptor TEXT PRIMARY KEY, requested_at TEXT NOT NULL);
+    CREATE TABLE paired_device (device_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, paired_at TEXT NOT NULL);
+    CREATE INDEX idx_history_message_companion ON history_message (companion_id);
+    CREATE INDEX idx_history_message_round ON history_message (round_id);
+    CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
+    CREATE UNIQUE INDEX idx_history_message_companion_local ON history_message (companion_id, local_id);
+    CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
+    CREATE TABLE _schema_version (version INTEGER NOT NULL);
+    INSERT INTO _schema_version (version) VALUES (2);",
+                );
             assert!(shaped.is_ok(), "v2 shape must apply");
             let seeded_companion = conn.execute(
                 "INSERT INTO companion (companion_id, lifecycle, created_at) VALUES (?1, ?2, ?3)",
@@ -3626,24 +3649,24 @@ INSERT INTO _schema_version (version) VALUES (2);",
             );
             assert!(seeded_companion.is_ok(), "v2 companion must seed");
             let seeded_attribution = conn.execute(
-                "INSERT INTO presence_attribution (companion_id, state, active_client, generation) VALUES (?1, ?2, ?3, ?4)",
-                params![companion_text, "no_active", Option::<String>::None, 0_i64],
-            );
+                    "INSERT INTO presence_attribution (companion_id, state, active_client, generation) VALUES (?1, ?2, ?3, ?4)",
+                    params![companion_text, "no_active", Option::<String>::None, 0_i64],
+                );
             assert!(seeded_attribution.is_ok(), "v2 attribution must seed");
             let seeded_history = conn.execute(
-                "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, local_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    message_text,
-                    companion_text,
-                    round_text,
-                    "owner",
-                    "legacy body",
-                    "en",
-                    fixture_clock().to_rfc3339(),
-                    0_i64,
-                    "legacy-1"
-                ],
-            );
+                    "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, local_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        message_text,
+                        companion_text,
+                        round_text,
+                        "owner",
+                        "legacy body",
+                        "en",
+                        fixture_clock().to_rfc3339(),
+                        0_i64,
+                        "legacy-1"
+                    ],
+                );
             assert!(seeded_history.is_ok(), "v2 history row must seed");
         }
         let opened = Store::open(&path).await;
@@ -3691,19 +3714,19 @@ INSERT INTO _schema_version (version) VALUES (2);",
         });
         assert!(matches!(version, Ok(7)), "migration must record version 7");
         let new_index: Result<String, _> = guard.query_row(
-            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
-            (),
-            |row| row.get(0),
-        );
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
+                (),
+                |row| row.get(0),
+            );
         assert!(
             new_index.is_ok(),
             "command replay index must exist after migration"
         );
         let old_index: Result<String, _> = guard.query_row(
-            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_local'",
-            (),
-            |row| row.get(0),
-        );
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_local'",
+                (),
+                |row| row.get(0),
+            );
         assert!(
             old_index.is_err(),
             "retired local id index must be gone after migration"
@@ -3892,25 +3915,25 @@ INSERT INTO _schema_version (version) VALUES (2);",
                 return;
             };
             let shaped = conn.execute_batch(
-                "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL, command_id TEXT NULL);
-CREATE TABLE undelivered (undelivered_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, source_message TEXT NOT NULL, status TEXT NOT NULL, round_id TEXT NOT NULL, presence_generation INTEGER NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE presence_attribution (companion_id TEXT PRIMARY KEY, state TEXT NOT NULL, active_client TEXT, generation INTEGER NOT NULL);
-CREATE TABLE presence_transition_log (transition_seq INTEGER PRIMARY KEY AUTOINCREMENT, companion_id TEXT NOT NULL, old_state TEXT NOT NULL, new_state TEXT NOT NULL, old_gen INTEGER NOT NULL, new_gen INTEGER NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
-CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
-CREATE TABLE credential_ref (id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL, UNIQUE (provider, label));
-CREATE TABLE usage_fact (ticket TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, source TEXT NOT NULL);
-CREATE TABLE pairing_pending (descriptor TEXT PRIMARY KEY, requested_at TEXT NOT NULL);
-CREATE TABLE paired_device (device_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, paired_at TEXT NOT NULL);
-CREATE TABLE credential_pending (provider TEXT NOT NULL, label TEXT NOT NULL, requested_at TEXT NOT NULL, PRIMARY KEY (provider, label));
-CREATE INDEX idx_history_message_companion ON history_message (companion_id);
-CREATE INDEX idx_history_message_round ON history_message (round_id);
-CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
-CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
-CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
-CREATE TABLE _schema_version (version INTEGER NOT NULL);
-INSERT INTO _schema_version (version) VALUES (4);",
-            );
+                    "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL, command_id TEXT NULL);
+    CREATE TABLE undelivered (undelivered_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, source_message TEXT NOT NULL, status TEXT NOT NULL, round_id TEXT NOT NULL, presence_generation INTEGER NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE presence_attribution (companion_id TEXT PRIMARY KEY, state TEXT NOT NULL, active_client TEXT, generation INTEGER NOT NULL);
+    CREATE TABLE presence_transition_log (transition_seq INTEGER PRIMARY KEY AUTOINCREMENT, companion_id TEXT NOT NULL, old_state TEXT NOT NULL, new_state TEXT NOT NULL, old_gen INTEGER NOT NULL, new_gen INTEGER NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
+    CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
+    CREATE TABLE credential_ref (id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL, UNIQUE (provider, label));
+    CREATE TABLE usage_fact (ticket TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, source TEXT NOT NULL);
+    CREATE TABLE pairing_pending (descriptor TEXT PRIMARY KEY, requested_at TEXT NOT NULL);
+    CREATE TABLE paired_device (device_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, paired_at TEXT NOT NULL);
+    CREATE TABLE credential_pending (provider TEXT NOT NULL, label TEXT NOT NULL, requested_at TEXT NOT NULL, PRIMARY KEY (provider, label));
+    CREATE INDEX idx_history_message_companion ON history_message (companion_id);
+    CREATE INDEX idx_history_message_round ON history_message (round_id);
+    CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
+    CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
+    CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
+    CREATE TABLE _schema_version (version INTEGER NOT NULL);
+    INSERT INTO _schema_version (version) VALUES (4);",
+                );
             assert!(shaped.is_ok(), "v4 shape must apply");
             let seeded = conn.execute(
                 "INSERT INTO paired_device (device_id, descriptor, paired_at) VALUES (?1, ?2, ?3)",
@@ -4089,16 +4112,20 @@ INSERT INTO _schema_version (version) VALUES (4);",
 
     #[tokio::test]
     async fn intent_outcome_roundtrips_and_refreshes() {
-        use ene_permission::{IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _};
+        use ene_permission::{
+            IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _,
+        };
 
         fn record() -> IntentOutcomeRecord {
             IntentOutcomeRecord {
-                intent_id: String::from("intent-1"),
-                kind: String::from("assign"),
-                target: String::from("consent:openai:dialogue-1:openai:main"),
-                base: String::from("consent-none"),
-                rationale_origin: String::from("management-surface"),
-                rationale_quote: None,
+                fingerprint: IntentFingerprint {
+                    intent_id: String::from("intent-1"),
+                    kind: String::from("assign"),
+                    target: String::from("consent:openai:dialogue-1:openai:main"),
+                    base: String::from("consent-none"),
+                    rationale_origin: String::from("management-surface"),
+                    rationale_quote: None,
+                },
                 outcome: IntentOutcome::StoredAsRuleView {
                     revision: String::from("1"),
                 },
@@ -4131,18 +4158,20 @@ INSERT INTO _schema_version (version) VALUES (4);",
     #[tokio::test]
     async fn assign_with_intent_commits_marker_atomically() {
         use ene_permission::{
-            ConsentRecord, ConsentRevision, IntentOutcome, IntentOutcomeRecord,
+            ConsentRecord, ConsentRevision, IntentFingerprint, IntentOutcome, IntentOutcomeRecord,
             IntentOutcomeRepository as _,
         };
 
         fn intent() -> IntentOutcomeRecord {
             IntentOutcomeRecord {
-                intent_id: String::from("assign-1"),
-                kind: String::from("assign"),
-                target: String::from("consent:openai:dialogue-1:openai:main"),
-                base: String::from("consent-none"),
-                rationale_origin: String::from("management-surface"),
-                rationale_quote: None,
+                fingerprint: IntentFingerprint {
+                    intent_id: String::from("assign-1"),
+                    kind: String::from("assign"),
+                    target: String::from("consent:openai:dialogue-1:openai:main"),
+                    base: String::from("consent-none"),
+                    rationale_origin: String::from("management-surface"),
+                    rationale_quote: None,
+                },
                 outcome: IntentOutcome::StoredAsRuleView {
                     revision: String::from("1"),
                 },
@@ -4162,7 +4191,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
                     model: String::from("dialogue-1"),
                     credential_id: String::from("openai:main"),
                 },
-                intent(),
+                intent().fingerprint,
             )
             .await;
         assert!(
@@ -4184,9 +4213,9 @@ INSERT INTO _schema_version (version) VALUES (4);",
                     model: String::from("dialogue-2"),
                     credential_id: String::from("openai:main"),
                 },
-                IntentOutcomeRecord {
+                IntentFingerprint {
                     intent_id: String::from("assign-2"),
-                    ..intent()
+                    ..intent().fingerprint
                 },
             )
             .await;
@@ -4203,16 +4232,20 @@ INSERT INTO _schema_version (version) VALUES (4);",
 
     #[tokio::test]
     async fn request_approval_with_intent_decides_atomically() {
-        use ene_permission::{IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _};
+        use ene_permission::{
+            IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _,
+        };
 
         fn intent(id: &str) -> IntentOutcomeRecord {
             IntentOutcomeRecord {
-                intent_id: id.to_owned(),
-                kind: String::from("register"),
-                target: String::from("credential:acme:main"),
-                base: String::from("consent-none"),
-                rationale_origin: String::from("management-surface"),
-                rationale_quote: None,
+                fingerprint: IntentFingerprint {
+                    intent_id: id.to_owned(),
+                    kind: String::from("register"),
+                    target: String::from("credential:acme:main"),
+                    base: String::from("consent-none"),
+                    rationale_origin: String::from("management-surface"),
+                    rationale_quote: None,
+                },
                 outcome: IntentOutcome::HeldByOperation,
             }
         }
@@ -4224,7 +4257,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
             .request_approval_with_intent(
                 String::from("acme"),
                 String::from("main"),
-                intent("reg-1"),
+                intent("reg-1").fingerprint,
             )
             .await;
         assert!(
@@ -4240,7 +4273,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
             .request_approval_with_intent(
                 String::from("acme"),
                 String::from("main"),
-                intent("reg-2"),
+                intent("reg-2").fingerprint,
             )
             .await;
         assert!(
