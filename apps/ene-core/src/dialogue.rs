@@ -1236,6 +1236,24 @@ mod tests {
         base: &str,
         connection: ConnectionWireId,
     ) -> ene_plugin_ipc::WireFrame {
+        intent_frame_with_id(
+            kind,
+            target,
+            base,
+            connection,
+            CommandWireId(RawId::new().as_uuid()),
+        )
+    }
+
+    /// Builds an intent frame with a caller-chosen idempotency key, so
+    /// replay tests can resend the same logical intent byte-for-byte.
+    fn intent_frame_with_id(
+        kind: ManagementIntentKind,
+        target: &str,
+        base: &str,
+        connection: ConnectionWireId,
+        intent_id: CommandWireId,
+    ) -> ene_plugin_ipc::WireFrame {
         let frame = ene_plugin_ipc::WireFrame {
             envelope: new_outgoing_envelope(
                 ProtocolVersion::V1,
@@ -1243,7 +1261,7 @@ mod tests {
                 WireMessageType(String::from("ManagementIntent")),
             ),
             payload: WirePayload::ManagementIntent(ManagementIntent {
-                intent_id: CommandWireId(RawId::new().as_uuid()),
+                intent_id,
                 kind,
                 target: ManagementTargetWire(target.to_string()),
                 base_view: BaseViewMark(base.to_string()),
@@ -2279,6 +2297,181 @@ mod tests {
                 if current.0 == "consent-rev-1"
             ),
             "a changed assign on a stale base reports the rebuilt current mark"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn assign_intent_replay_returns_the_stored_success() {
+        let Some((handle, dir)) = setup_handle("dlg-intentreplay").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        let registered = handle
+            .handle_frame(
+                intent_frame(
+                    ManagementIntentKind::ConfigureCredentialIntent,
+                    "credential:openai:main",
+                    "consent-none",
+                    live.connection_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert_eq!(registered.len(), 1, "register answers once");
+        assert!(
+            handle.approve_credential("openai", "main").await.is_ok(),
+            "approval must succeed"
+        );
+        let intent_id = CommandWireId(RawId::new().as_uuid());
+        let assign_x = |base: &str| {
+            intent_frame_with_id(
+                ManagementIntentKind::ManageRuleConsentCap,
+                "consent:openai:dialogue-1:openai:main",
+                base,
+                live.connection_id,
+                intent_id,
+            )
+        };
+        let assigned = handle
+            .handle_frame(assign_x("consent-none"), live.clone(), &transport)
+            .await;
+        assert!(
+            matches!(
+                &assigned.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(
+                    ManagementOutcome::StoredAsRuleView { .. }
+                ))
+            ),
+            "the first assign commits, got {assigned:?}"
+        );
+        // Exact retry (same id, same bytes; the base is stale now): the
+        // durable replay answers the stored success at the current revision
+        // instead of reporting staleness.
+        let replayed = handle
+            .handle_frame(assign_x("consent-none"), live.clone(), &transport)
+            .await;
+        let Some(same) = replayed.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &same.payload,
+                WirePayload::ManagementOutcome(ManagementOutcome::StoredAsRuleView {
+                    revision
+                }) if revision.0 == "1"
+            ),
+            "the exact retry must replay success at rev 1, got {:?}",
+            same.payload
+        );
+        // The route moves on under a different intent; retrying X now finds
+        // its route gone and reports staleness honestly (no blind replay).
+        let moved = handle
+            .handle_frame(
+                intent_frame(
+                    ManagementIntentKind::ManageRuleConsentCap,
+                    "consent:openai:dialogue-2:openai:main",
+                    "consent-rev-1",
+                    live.connection_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert!(
+            matches!(
+                &moved.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(
+                    ManagementOutcome::StoredAsRuleView { .. }
+                ))
+            ),
+            "the route move commits, got {moved:?}"
+        );
+        let stale_retry = handle
+            .handle_frame(assign_x("consent-none"), live.clone(), &transport)
+            .await;
+        assert!(
+            matches!(
+                &stale_retry.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView {
+                    current
+                })) if current.0 == "consent-rev-2"
+            ),
+            "a replay whose route moved on must report stale, got {stale_retry:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn assign_intent_conflict_clarifies_without_side_effects() {
+        use ene_permission::ConsentRepository as _;
+
+        let Some((handle, dir)) = setup_handle("dlg-intentconflict").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        assert!(
+            register_assign_complete(&handle, &live, &transport).await,
+            "setup must complete"
+        );
+        let intent_id = CommandWireId(RawId::new().as_uuid());
+        let assigned = handle
+            .handle_frame(
+                intent_frame_with_id(
+                    ManagementIntentKind::ManageRuleConsentCap,
+                    "consent:openai:dialogue-1:openai:main",
+                    "consent-rev-1",
+                    live.connection_id,
+                    intent_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert!(
+            matches!(
+                &assigned.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(
+                    ManagementOutcome::StoredAsRuleView { .. }
+                ))
+            ),
+            "the first assign commits, got {assigned:?}"
+        );
+        // Same intent id, different content: declined without adopting the
+        // new meaning, and the stored route is untouched.
+        let conflicted = handle
+            .handle_frame(
+                intent_frame_with_id(
+                    ManagementIntentKind::ManageRuleConsentCap,
+                    "consent:openai:dialogue-2:openai:main",
+                    "consent-rev-1",
+                    live.connection_id,
+                    intent_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        let Some(only) = conflicted.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &only.payload,
+                WirePayload::ManagementOutcome(ManagementOutcome::NeedsClarification)
+            ),
+            "a reused id with new content must clarify, got {:?}",
+            only.payload
+        );
+        let current = handle.store.load_current().await;
+        assert!(
+            matches!(&current, Ok(Some(record)) if record.model == "dialogue-1"),
+            "the conflict must not move consent, got {current:?}"
         );
         remove_data_dir(&dir);
     }

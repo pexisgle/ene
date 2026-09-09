@@ -61,7 +61,10 @@ use ene_api::v1::refs::ViewMarkWire;
 use ene_credential::{
     CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialStore,
 };
-use ene_permission::{ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision};
+use ene_permission::{
+    AssignIntentRecord, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
+    IntentReplayRepository,
+};
 use ene_plugin_ipc::WireFrame;
 use ene_primitive::RawId;
 
@@ -291,6 +294,26 @@ impl HostHandle {
         vec![outcome_frame(frame, live, intent, outcome)]
     }
 
+    /// Records one assign intent's fingerprint after it established its
+    /// route (by commit or by shortcut success).
+    ///
+    /// Best-effort: when the record itself fails, the committed answer
+    /// already returned stays authoritative — a later retry simply takes
+    /// the normal premise-checked path (stale base, then converge) instead
+    /// of the durable replay. The record never gates the answer, only
+    /// future retries.
+    async fn record_assign_intent(&self, intent: &ManagementIntent) {
+        let record = AssignIntentRecord {
+            intent_id: intent.intent_id.0.as_hyphenated().to_string(),
+            target: intent.target.0.clone(),
+            base: intent.base_view.0.clone(),
+        };
+        if self.store.record_assign_intent(record).await.is_err() {
+            // The commit below/above already answered; the missing replay
+            // row only costs a future retry one extra round trip.
+        }
+    }
+
     /// Routes a consent-scope intent to assign, complete, or show.
     async fn apply_consent_or_setup(
         &self,
@@ -382,6 +405,51 @@ impl HostHandle {
                 ManagementOutcome::NeedsClarification,
             )];
         }
+        // Durable intent replay (§18.2): the same intent id either replays
+        // or conflicts — it is never rebound. A hit with the same
+        // fingerprint whose route still holds succeeds at the CURRENT
+        // revision however stale the base has grown (the lost reply, not a
+        // new decision); a hit with different content clarifies instead of
+        // adopting the new meaning. A miss, or a hit whose route moved on,
+        // falls through to the normal premise-checked path below.
+        let intent_key = intent.intent_id.0.as_hyphenated().to_string();
+        match self.store.lookup_assign_intent(&intent_key).await {
+            Err(_) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )];
+            }
+            Ok(Some(record))
+                if record.target == intent.target.0 && record.base == intent.base_view.0 =>
+            {
+                if let Some(current) = current.as_ref()
+                    && current.provider == provider
+                    && current.model == model
+                    && current.credential_id == credential_id
+                {
+                    return vec![outcome_frame(
+                        frame,
+                        live,
+                        intent,
+                        ManagementOutcome::StoredAsRuleView {
+                            revision: ViewMarkWire(current.rev.as_u64().to_string()),
+                        },
+                    )];
+                }
+            }
+            Ok(Some(_)) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::NeedsClarification,
+                )];
+            }
+            Ok(None) => {}
+        }
         // Idempotent retry: when the stored route already equals the
         // requested one, answer the current revision without bumping. A
         // transport retry reuses the intent id with identical content, so
@@ -390,7 +458,8 @@ impl HostHandle {
         // coincidentally equal route must answer stale (so the caller
         // reloads and converges), never silent success — otherwise a
         // different intent built on a moved base would succeed without ever
-        // observing the move. Genuine changes still flow into
+        // observing the move. (The durable replay above is the only
+        // stale-base success: same intent id AND same fingerprint.) Genuine changes still flow into
         // compare_and_save below, where a moved base answers stale instead
         // of overwriting.
         let base_fresh = match (&expected, current.as_ref()) {
@@ -413,6 +482,7 @@ impl HostHandle {
             && current.model == model
             && current.credential_id == credential_id
         {
+            self.record_assign_intent(intent).await;
             return vec![outcome_frame(
                 frame,
                 live,
@@ -438,14 +508,17 @@ impl HostHandle {
             credential_id: credential_id.to_string(),
         };
         match self.store.compare_and_save(expected, record).await {
-            Ok(ConsentCommitOutcome::Committed { record }) => vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::StoredAsRuleView {
-                    revision: ViewMarkWire(record.rev.as_u64().to_string()),
-                },
-            )],
+            Ok(ConsentCommitOutcome::Committed { record }) => {
+                self.record_assign_intent(intent).await;
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::StoredAsRuleView {
+                        revision: ViewMarkWire(record.rev.as_u64().to_string()),
+                    },
+                )]
+            }
             Ok(ConsentCommitOutcome::StaleCurrent { current }) => vec![outcome_frame(
                 frame,
                 live,
