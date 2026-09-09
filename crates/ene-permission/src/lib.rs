@@ -286,6 +286,53 @@ pub trait ConsentRepository: Send + Sync {
     ) -> Result<ConsentCommitOutcome, PermissionTechnicalError>;
 }
 
+/// Durable intent replay for consent assignment.
+///
+/// Design §18.2 fixes `intent_id` as the idempotency key for management
+/// intents. The store binds each committed (or shortcut-succeeded) assign
+/// to the intent fingerprint `(target, base)`; a later send with the same
+/// intent id either replays (same fingerprint and the route still holds)
+/// or conflicts (same id, different content — never rebound). Only the
+/// assign path writes and reads these rows: register is propose-only and
+/// naturally convergent (`Held` → `Applied` as approval lands), and
+/// completion re-derives from state, so neither needs replay rows. A lost
+/// reply therefore converges without a fresh intent id, while a reused id
+/// with new meaning is declined instead of silently adopting it.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
+)]
+pub trait IntentReplayRepository: Send + Sync {
+    /// Records that `record` was established for one assign intent.
+    ///
+    /// Upserts on `intent_id`: re-recording the same intent refreshes its
+    /// fingerprint rather than duplicating rows.
+    async fn record_assign_intent(
+        &self,
+        record: AssignIntentRecord,
+    ) -> Result<(), PermissionTechnicalError>;
+
+    /// Loads the assign record for `intent_id`, if any.
+    async fn lookup_assign_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<AssignIntentRecord>, PermissionTechnicalError>;
+}
+
+/// Durable fingerprint of one consent-assign intent: the intent key plus
+/// the content it committed. The base premise rides along so a refreshed
+/// premise under a reused id counts as different content (new premise, new
+/// id — same rule as command keys).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AssignIntentRecord {
+    /// Intent key, as hyphenated UUID text.
+    pub intent_id: String,
+    /// Intent target text (`consent:<provider>:<model>:<credential>`).
+    pub target: String,
+    /// Base-view mark text the intent was built on.
+    pub base: String,
+}
+
 /// Tracks minted evaluation ids and enforces single use.
 ///
 /// Holds the issued `RawId -> EvalFingerprint` map plus the set of consumed
