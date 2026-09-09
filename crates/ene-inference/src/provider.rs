@@ -1,8 +1,8 @@
 //! `OpenAI` Responses API transport for inference dispatch.
 //!
-//! [`OpenAiResponsesTransport`] posts one `{"model", "input", "stream": false}`
-//! body per [`ProviderTransport::complete`] call. Key material never rests on
-//! the transport: each call borrows the bearer inside
+//! [`OpenAiResponsesTransport`] posts one `{"model", "input", "stream":
+//! false, "store": false}` body per [`ProviderTransport::complete`] call.
+//! Key material never rests on the transport: each call borrows the bearer inside
 //! [`CredentialStore::with_bearer`] and only the owned [`reqwest::Request`]
 //! escapes the closure. Error strings carry status classes only, never URLs,
 //! keys, or bodies. There is no retry, no streaming, and no model fallback.
@@ -12,6 +12,8 @@
 //! never by unit tests here; the pure `parse_response()` mapping below carries
 //! the unit tests.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use ene_credential::{CredentialRef, CredentialStore, CredentialTechnicalError};
@@ -66,21 +68,28 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
     ///
     /// The client enforces [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`]. No
     /// I/O happens here; pass [`DEFAULT_BASE_URL`] for production.
-    pub fn new(base_url: impl Into<String>, credential: CredentialRef, store: S) -> Self {
-        let http = match reqwest::Client::builder()
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InferenceTechnicalError::HttpClientBuildFailed`] when the
+    /// timeout-bound client cannot be built — the timeout invariant is
+    /// reported, never silently dropped for an unbounded default.
+    pub fn new(
+        base_url: impl Into<String>,
+        credential: CredentialRef,
+        store: S,
+    ) -> Result<Self, InferenceTechnicalError> {
+        let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
-        {
-            Ok(client) => client,
-            Err(_) => reqwest::Client::new(),
-        };
-        Self {
+            .map_err(|_| InferenceTechnicalError::HttpClientBuildFailed)?;
+        Ok(Self {
             base_url: base_url.into(),
             http,
             credential,
             store,
-        }
+        })
     }
 }
 
@@ -91,7 +100,17 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
     /// Over-limit input is rejected defensively here, but core guarantees the
     /// pre-check: such input normally surfaces as `NotSent(OverLimit)` from
     /// [`crate::send`] without ever reaching the transport.
-    async fn complete(
+    fn complete(
+        &self,
+        req: ProviderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>>
+    {
+        Box::pin(self.complete_inner(req))
+    }
+}
+
+impl<S: CredentialStore> OpenAiResponsesTransport<S> {
+    async fn complete_inner(
         &self,
         req: ProviderRequest,
     ) -> Result<ProviderResponse, InferenceTechnicalError> {
@@ -102,11 +121,7 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
         }
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{base}/v1/responses");
-        let body = serde_json::json!({
-            "model": req.model,
-            "input": req.input,
-            "stream": false,
-        });
+        let body = responses_body(&req.model, &req.input);
         let build = self
             .store
             .with_bearer(&self.credential, |key| {
@@ -151,6 +166,23 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
     }
 }
 
+/// Builds the Responses API request body: model, input, non-streaming —
+/// and an explicit `"store": false`.
+///
+/// History lives durably on the local side, which never needs server-side
+/// response state; leaving `store` unset would default it to `true` and
+/// retain conversation text provider-side for no reason. This is a
+/// storage-scope boundary, not a no-logging promise: it disables the
+/// Responses application-state store, nothing more.
+fn responses_body(model: &str, input: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "input": input,
+        "stream": false,
+        "store": false,
+    })
+}
+
 /// Maps a request I/O failure to a technical error without secrets.
 ///
 /// An elapsed timeout (connect or whole-request) means the call may have run,
@@ -165,14 +197,33 @@ fn io_error(err: &reqwest::Error, context: &'static str) -> InferenceTechnicalEr
 }
 
 /// Tolerantly decoded Responses API envelope; unknown fields are ignored.
+///
+/// `status` has no default: a response without one is a protocol failure,
+/// never a silent success (see [`parse_response`]).
 #[derive(Deserialize)]
 struct ResponsesBody {
+    /// Completion status (`completed`, `failed`, `incomplete`, ...); absent
+    /// when the provider reports none.
+    status: Option<String>,
     /// Message items; absent when the provider reports none.
     #[serde(default)]
     output: Vec<OutputItem>,
     /// Token counts; absent when the provider reports none.
     #[serde(default)]
     usage: Option<UsageObj>,
+    /// Failure detail for non-completed responses; only `reason`-class
+    /// strings are ever surfaced, never message bodies.
+    #[serde(default)]
+    incomplete_details: Option<IncompleteDetails>,
+}
+
+/// Reason class for a non-completed response. Only the bounded `reason`
+/// vocabulary is decoded; message bodies never leave the response.
+#[derive(Deserialize)]
+struct IncompleteDetails {
+    /// Bounded reason such as `"max_output_tokens"`.
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// One `output` item; only its `content` parts matter here.
@@ -210,11 +261,17 @@ struct UsageObj {
 ///
 /// Status mapping: 401 reports unauthorized (core surfaces reauthentication);
 /// 429 and 5xx report provider-unavailable with the status; other non-2xx
-/// reports a request failure with the status. On success, the text is the
-/// concatenation of every `output[].content[]` part of type `output_text`;
-/// usage is [`Some`] only when both counts are present, otherwise [`None`]
-/// (core maps that to [`crate::UsageSource::Unknown`]). A success body with
-/// the wrong shape reports a decode failure.
+/// reports a request failure with the status. On 2xx, only a response
+/// object with `status == "completed"` succeeds: `incomplete` reports the
+/// bounded reason class, `failed` / `cancelled` report their status, and
+/// `queued` / `in_progress` / unknown / missing statuses report an
+/// unexpected-state failure — this synchronous contract never waits on a
+/// background response. On success, the text is the concatenation of every
+/// `output[].content[]` part of type `output_text`; usage is [`Some`] only
+/// when both counts are present, otherwise [`None`] (core maps that to
+/// [`crate::UsageSource::Unknown`]). A success body with the wrong shape
+/// reports a decode failure. Reason strings carry only the bounded
+/// `incomplete_details.reason` vocabulary, never message bodies.
 fn parse_response(
     status: u16,
     body: serde_json::Value,
@@ -237,6 +294,39 @@ fn parse_response(
     let decoded: ResponsesBody = serde_json::from_value(body).map_err(|_| {
         InferenceTechnicalError::ProviderTransportFailed("decode provider response".to_owned())
     })?;
+    match decoded.status.as_deref() {
+        Some("completed") => {}
+        Some("incomplete") => {
+            let reason = decoded
+                .incomplete_details
+                .as_ref()
+                .and_then(|details| details.reason.clone())
+                .unwrap_or_else(|| String::from("unknown"));
+            return Err(InferenceTechnicalError::ProviderTransportFailed(format!(
+                "provider response incomplete: {reason}"
+            )));
+        }
+        Some("failed") => {
+            return Err(InferenceTechnicalError::ProviderTransportFailed(
+                "provider response failed".to_owned(),
+            ));
+        }
+        Some("cancelled") => {
+            return Err(InferenceTechnicalError::ProviderTransportFailed(
+                "provider response cancelled".to_owned(),
+            ));
+        }
+        Some(other) => {
+            return Err(InferenceTechnicalError::ProviderTransportFailed(format!(
+                "provider response unexpected state: {other}"
+            )));
+        }
+        None => {
+            return Err(InferenceTechnicalError::ProviderTransportFailed(
+                "provider response missing status".to_owned(),
+            ));
+        }
+    }
     let mut text = String::new();
     for item in &decoded.output {
         for part in &item.content {
@@ -282,6 +372,7 @@ mod tests {
         let body = serde_json::json!({
             "id": "resp_123",
             "object": "response",
+            "status": "completed",
             "output": [
                 {
                     "id": "msg_1",
@@ -321,6 +412,7 @@ mod tests {
     #[test]
     fn missing_usage_maps_to_none() {
         let body = serde_json::json!({
+            "status": "completed",
             "output": [
                 {
                     "type": "message",
@@ -338,25 +430,125 @@ mod tests {
     }
 
     #[test]
-    fn empty_output_yields_empty_text_and_no_usage() {
-        let result = parse_response(200, serde_json::json!({"output": []}));
-        assert!(result.is_ok());
-        let Ok(response) = result else {
-            return;
-        };
-        assert_eq!(response.text, "");
-        assert_eq!(response.usage, None);
+    fn request_body_disables_server_side_storage() {
+        let body = super::responses_body("gpt-test", "hello");
+        assert_eq!(
+            body.get("store"),
+            Some(&serde_json::Value::Bool(false)),
+            "history lives locally; the provider must not retain response state: {body}"
+        );
+        assert_eq!(body.get("stream"), Some(&serde_json::Value::Bool(false)));
     }
 
     #[test]
-    fn empty_object_maps_to_empty_text_and_no_usage() {
-        let result = parse_response(200, serde_json::json!({}));
-        assert!(result.is_ok());
-        let Ok(response) = result else {
+    fn empty_output_without_status_is_not_success() {
+        let result = parse_response(200, serde_json::json!({"output": []}));
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::ProviderTransportFailed(_))
+            ),
+            "a status-less body must fail, got {result:?}"
+        );
+        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
             return;
         };
-        assert_eq!(response.text, "");
-        assert_eq!(response.usage, None);
+        assert!(reason.contains("missing status"), "got {reason:?}");
+    }
+
+    #[test]
+    fn empty_object_without_status_is_not_success() {
+        let result = parse_response(200, serde_json::json!({}));
+        assert!(
+            matches!(
+                result,
+                Err(InferenceTechnicalError::ProviderTransportFailed(_))
+            ),
+            "a status-less body must fail, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn non_completed_statuses_fail_without_text_or_usage() {
+        for (status, body, marker) in [
+            (
+                "incomplete",
+                serde_json::json!({
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "output": [{"content": [{"type": "output_text", "text": "partial"}]}],
+                }),
+                "incomplete",
+            ),
+            (
+                "incomplete without reason",
+                serde_json::json!({"status": "incomplete"}),
+                "incomplete",
+            ),
+            (
+                "failed",
+                serde_json::json!({"status": "failed", "error": {"message": "boom"}}),
+                "failed",
+            ),
+            (
+                "cancelled",
+                serde_json::json!({"status": "cancelled"}),
+                "cancelled",
+            ),
+            (
+                "queued",
+                serde_json::json!({"status": "queued"}),
+                "unexpected state",
+            ),
+            (
+                "in_progress",
+                serde_json::json!({"status": "in_progress"}),
+                "unexpected state",
+            ),
+            (
+                "unknown future status",
+                serde_json::json!({"status": "super_completed"}),
+                "unexpected state",
+            ),
+        ] {
+            let result = parse_response(200, body);
+            assert!(
+                matches!(
+                    result,
+                    Err(InferenceTechnicalError::ProviderTransportFailed(_))
+                ),
+                "{status} must fail, got {result:?}"
+            );
+            let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
+                return;
+            };
+            assert!(
+                reason.contains(marker),
+                "{status} must report its class, got {reason:?}"
+            );
+            assert!(
+                !reason.contains("partial") && !reason.contains("boom"),
+                "{status} must not leak body text, got {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_reason_names_its_class() {
+        let result = parse_response(
+            200,
+            serde_json::json!({
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            }),
+        );
+        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
+            return;
+        };
+        assert!(
+            reason.contains("max_output_tokens"),
+            "bounded reason class must surface, got {reason:?}"
+        );
     }
 
     #[test]
@@ -375,6 +567,7 @@ mod tests {
     #[test]
     fn partial_usage_maps_to_none() {
         let body = serde_json::json!({
+            "status": "completed",
             "output": [],
             "usage": {"input_tokens": 7},
         });
@@ -466,7 +659,11 @@ mod tests {
             label: "main".to_owned(),
         };
         concrete.insert(credential.clone(), "sk-probe-bearer-material");
-        let transport = OpenAiResponsesTransport::new("http://127.0.0.1:9", credential, concrete);
+        let Ok(transport) =
+            OpenAiResponsesTransport::new("http://127.0.0.1:9", credential, concrete)
+        else {
+            return;
+        };
         let rendered = format!("{transport:?}");
         assert!(!rendered.contains("sk-probe-bearer-material"));
         assert!(!rendered.contains("Bearer"));

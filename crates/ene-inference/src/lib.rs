@@ -20,6 +20,9 @@
 
 pub mod provider;
 
+use std::future::Future;
+use std::pin::Pin;
+
 use ene_credential::CredentialRef;
 use ene_permission::{ConsentRevision, InferenceUseCandidate, PermissionEvaluationId};
 use ene_primitive::RawId;
@@ -79,16 +82,18 @@ impl core::fmt::Debug for RequestInferenceCommand {
 }
 
 /// Outcome of an inference dispatch attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InferenceUseOutcome {
-    /// The provider call completed; the arrival carries the result ref.
-    SentAndCompleted(InferenceResultRef),
+///
+/// State and data travel in the same variant: a completion always carries
+/// its arrival, and a refusal never does. Unrepresentable pairings such as
+/// "completed without arrival" cannot be constructed, so callers never
+/// re-check arrival presence after matching the outcome. Technical
+/// failures stay outside in the surrounding `Result`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchResult {
+    /// The provider call completed; carries the full arrival.
+    Completed(InferenceResultArrival),
     /// Nothing was sent; the reason names the failing gate.
     NotSent(NotSentReason),
-    /// Core capability gating refused the use before dispatch.
-    ///
-    /// Produced by Host-side pre-checks, never by [`send`].
-    InsufficientCapability,
 }
 
 /// Why an inference use was not sent.
@@ -115,6 +120,10 @@ pub enum NotSentReason {
 }
 
 /// Reference to a completed inference result.
+///
+/// Kept for boundary projections that name a completion without carrying
+/// its body; [`send`] itself returns the arrival inline via
+/// [`DispatchResult::Completed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InferenceResultRef {
     /// Ticket the result answers.
@@ -188,6 +197,11 @@ pub enum InferenceTechnicalError {
     /// The provider transport failed.
     #[error("provider transport failed: {0}")]
     ProviderTransportFailed(String),
+    /// The timeout-bound HTTP client could not be built. Reported instead
+    /// of falling back to an unbounded default, so the timeout invariant
+    /// can never silently disappear.
+    #[error("http client build failed")]
+    HttpClientBuildFailed,
     /// The provider may have run the call but the response was lost.
     #[error("provider response lost")]
     ResponseLost,
@@ -247,16 +261,16 @@ pub struct RawUsage {
 }
 
 /// Transport boundary for provider completions.
-#[expect(
-    async_fn_in_trait,
-    reason = "Stage 2 contract uses native async fn; Send bounds settle with the transport impl"
-)]
+///
+/// The method returns a boxed `Send` future (rather than native `async fn`)
+/// so connection tasks can spawn it on the multi-threaded runtime.
+/// Implementations keep their internals unchanged and box at the boundary.
 pub trait ProviderTransport: Send + Sync {
     /// Runs one completion with no retries or side effects beyond the call.
-    async fn complete(
+    fn complete(
         &self,
         req: ProviderRequest,
-    ) -> Result<ProviderResponse, InferenceTechnicalError>;
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>>;
 }
 
 /// Persistence boundary for usage facts.
@@ -340,28 +354,21 @@ pub trait InferenceAttemptRepository: Send + Sync {
 ///    [`UsageSource::Unknown`], never zero.
 ///
 /// [`NotSentReason::AuthRejected`], [`NotSentReason::CredentialUnavailable`],
-/// [`NotSentReason::EvaluationConsumed`], and
-/// [`InferenceUseOutcome::InsufficientCapability`] are Host-side pre-check
+/// and [`NotSentReason::EvaluationConsumed`] are Host-side pre-check
 /// outcomes and are never produced here.
 pub async fn send(
     cmd: RequestInferenceCommand,
     route_consent_match: bool,
     transport: &impl ProviderTransport,
-) -> Result<(InferenceUseOutcome, Option<InferenceResultArrival>), InferenceTechnicalError> {
+) -> Result<DispatchResult, InferenceTechnicalError> {
     if cmd.route.provider != cmd.candidate.provider_ref || cmd.route.model != cmd.candidate.model {
-        return Ok((
-            InferenceUseOutcome::NotSent(NotSentReason::ConsentMismatch),
-            None,
-        ));
+        return Ok(DispatchResult::NotSent(NotSentReason::ConsentMismatch));
     }
     if !route_consent_match {
-        return Ok((
-            InferenceUseOutcome::NotSent(NotSentReason::ConsentMismatch),
-            None,
-        ));
+        return Ok(DispatchResult::NotSent(NotSentReason::ConsentMismatch));
     }
     if cmd.input_text.chars().count() > MAX_INPUT_CHARS {
-        return Ok((InferenceUseOutcome::NotSent(NotSentReason::OverLimit), None));
+        return Ok(DispatchResult::NotSent(NotSentReason::OverLimit));
     }
     let response = transport
         .complete(ProviderRequest {
@@ -392,10 +399,7 @@ pub async fn send(
         output_text: response.text,
         usage,
     };
-    Ok((
-        InferenceUseOutcome::SentAndCompleted(InferenceResultRef { ticket: cmd.ticket }),
-        Some(arrival),
-    ))
+    Ok(DispatchResult::Completed(arrival))
 }
 
 /// In-memory provider transport for tests and core integration tests.
@@ -404,6 +408,9 @@ pub async fn send(
 /// failure. Provider adapters and retry policies are a behaviors-stage
 /// concern, not here.
 pub mod fake {
+    use std::future::Future;
+    use std::pin::Pin;
+
     use super::RawUsage;
     use super::{InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport};
 
@@ -451,26 +458,26 @@ pub mod fake {
 
     impl ProviderTransport for FakeProviderTransport {
         /// Replays the configured response or failure without I/O.
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "zero-I/O replay has nothing to await; async is required by the trait"
-        )]
-        async fn complete(
+        fn complete(
             &self,
             _req: ProviderRequest,
-        ) -> Result<ProviderResponse, InferenceTechnicalError> {
-            if let Some(fail) = &self.fail {
-                return Err(match fail {
+        ) -> Pin<
+            Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>,
+        > {
+            let result = if let Some(fail) = &self.fail {
+                Err(match fail {
                     FakeFailure::Transport(reason) => {
                         InferenceTechnicalError::ProviderTransportFailed(reason.clone())
                     }
                     FakeFailure::ResponseLost => InferenceTechnicalError::ResponseLost,
-                });
-            }
-            Ok(ProviderResponse {
-                text: self.text.clone(),
-                usage: self.usage,
-            })
+                })
+            } else {
+                Ok(ProviderResponse {
+                    text: self.text.clone(),
+                    usage: self.usage,
+                })
+            };
+            Box::pin(async move { result })
         }
     }
 }
@@ -479,7 +486,7 @@ pub mod fake {
 mod tests {
     use super::fake::{FakeFailure, FakeProviderTransport};
     use super::{
-        InferenceResultArrival, InferenceTicketId, InferenceUseOutcome, NotSentReason, RawUsage,
+        DispatchResult, InferenceResultArrival, InferenceTicketId, NotSentReason, RawUsage,
         RequestInferenceCommand, ResolvedRoute, UsageSource, send,
     };
     use ene_credential::CredentialRef;
@@ -529,11 +536,12 @@ mod tests {
                 output_tokens: 2,
             }),
         );
-        let (outcome, arrival) = send(cmd, true, &transport)
+        let result = send(cmd, true, &transport)
             .await
             .expect("inference dispatch answers an outcome");
-        assert!(matches!(outcome, InferenceUseOutcome::SentAndCompleted(_)));
-        let arrival = arrival.expect("a completed send carries an arrival");
+        let DispatchResult::Completed(arrival) = result else {
+            panic!("a successful provider call completes");
+        };
         assert_eq!(arrival.ticket, ticket);
         assert_eq!(arrival.output_text, "hi there");
         assert_eq!(arrival.usage.input_tokens, Some(4));
@@ -545,11 +553,12 @@ mod tests {
     async fn missing_usage_maps_to_unknown_not_zero() {
         let cmd = command("hello");
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let (outcome, arrival) = send(cmd, true, &transport)
+        let result = send(cmd, true, &transport)
             .await
             .expect("inference dispatch answers an outcome");
-        assert!(matches!(outcome, InferenceUseOutcome::SentAndCompleted(_)));
-        let arrival = arrival.expect("a completed send carries an arrival");
+        let DispatchResult::Completed(arrival) = result else {
+            panic!("a successful provider call completes");
+        };
         assert_eq!(arrival.usage.input_tokens, None);
         assert_eq!(arrival.usage.output_tokens, None);
         assert_eq!(arrival.usage.source, UsageSource::Unknown);
@@ -568,28 +577,26 @@ mod tests {
             input_text: "hello".to_owned(),
         };
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let (outcome, arrival) = send(cmd, true, &transport)
+        let result = send(cmd, true, &transport)
             .await
             .expect("inference dispatch answers an outcome");
         assert_eq!(
-            outcome,
-            InferenceUseOutcome::NotSent(NotSentReason::ConsentMismatch)
+            result,
+            DispatchResult::NotSent(NotSentReason::ConsentMismatch)
         );
-        assert_eq!(arrival, None);
     }
 
     #[tokio::test]
     async fn failed_consent_premise_is_not_sent() {
         let cmd = command("hello");
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let (outcome, arrival) = send(cmd, false, &transport)
+        let result = send(cmd, false, &transport)
             .await
             .expect("inference dispatch answers an outcome");
         assert_eq!(
-            outcome,
-            InferenceUseOutcome::NotSent(NotSentReason::ConsentMismatch)
+            result,
+            DispatchResult::NotSent(NotSentReason::ConsentMismatch)
         );
-        assert_eq!(arrival, None);
     }
 
     #[tokio::test]
@@ -597,14 +604,10 @@ mod tests {
         let big: String = "x".repeat(super::MAX_INPUT_CHARS + 1);
         let cmd = command(&big);
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let (outcome, arrival) = send(cmd, true, &transport)
+        let result = send(cmd, true, &transport)
             .await
             .expect("inference dispatch answers an outcome");
-        assert_eq!(
-            outcome,
-            InferenceUseOutcome::NotSent(NotSentReason::OverLimit)
-        );
-        assert_eq!(arrival, None);
+        assert_eq!(result, DispatchResult::NotSent(NotSentReason::OverLimit));
     }
 
     #[tokio::test]

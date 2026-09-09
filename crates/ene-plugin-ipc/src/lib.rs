@@ -177,6 +177,7 @@ mod tests {
         let payload = WirePayload::SubmitTextInput(SubmitTextInput {
             companion: CompanionWireRef(String::from("companion-1")),
             round: None,
+            fresh: false,
             local_id: ClientLocalId(String::from("local-1")),
             body: TextBodyWire {
                 text: String::from("hello"),
