@@ -15,6 +15,7 @@ use super::management::{
     ManagementIntent, ManagementOutcome, ManagementView, ManagementViewRequest,
 };
 use super::presence::PresenceAttributionWire;
+use super::reject::RejectNotice;
 use super::round::{
     ConfirmPresentationWire, HistoryRequest, HistoryView, RoundIntakeOutcomeWire, SubmitTextInput,
     TextStreamClose, TextStreamFrameWire, TextStreamOpen,
@@ -70,4 +71,6 @@ pub enum WirePayload {
     ManagementViewRequest(ManagementViewRequest),
     /// Filtered management view.
     ManagementView(ManagementView),
+    /// Typed wire rejection: no side effects, no retry signal.
+    Reject(RejectNotice),
 }
