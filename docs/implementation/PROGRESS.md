@@ -19,6 +19,6 @@
 
 ## 未解決 blocker
 
-- #1360 レビュー第6ラウンド対応済み: intent snapshot replay（`IntentOutcomeRepository`＋V6書換＋3種全対応・conflictはclarify、非terminalは非記録）＋atomic combined ops、inference attempt claim（`begin_inference_attempt`＋V7＋pre-send gate置換）。CI 待ち
-- 残りは返信済み：round_view P2 ルール了解、transport retry P2 受諾、TOCTOU・replay スレッドは実装で応答、Stage 5 defer 群は継続
+- #1360 レビュー第7ラウンド対応済み: complete の replay-first 並べ替え、`complete_with_intent`/`shortcut_with_intent` の atomic ops、全 outcome の uniform snapshot replay（stale/clarify 含む、mark 文法は共有化）。非terminal除外方針は撤回し、同一id→同一回答を徹底。CI 待ち
+- 残りは返信済み：TOCTOU・intent・replay スレッドは実装で応答、transport retry P2 受諾、Stage 5 defer 群は継続
 - マージ順: #1355 → #1356 → #1358 → #1359 → #1360
