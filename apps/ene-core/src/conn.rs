@@ -103,7 +103,7 @@ use ene_api::v1::handshake::{AuthResult, NegotiatedConnection, PairingResult};
 #[cfg(unix)]
 use ene_api::v1::payload::WirePayload;
 #[cfg(unix)]
-use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId};
+use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageId};
 #[cfg(unix)]
 use ene_plugin_ipc::{MAX_FRAME_BYTES, decode_frame, encode_frame};
 #[cfg(unix)]
@@ -111,6 +111,16 @@ use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(unix)]
 use crate::serve::LiveInput;
+
+/// Bound on the per-connection transport duplicate-suppression cache.
+///
+/// Enough to cover any realistic redelivery window on a local socket;
+/// beyond it the oldest ids roll off and a very late duplicate would
+/// re-process (message ids are sender-minted UUIDs, so a repeat after
+/// roll-off means a true transport duplicate, never a fresh send — fresh
+/// sends, including transport retries, always mint new ids).
+#[cfg(unix)]
+const SEEN_MESSAGE_CAP: usize = 128;
 
 /// Per-connection pairing, incarnation, and authentication record.
 #[cfg(unix)]
@@ -133,6 +143,13 @@ struct ConnectionRecord {
     /// capability. Re-advertising supersedes (latest wins); the ingress
     /// gate enforces the recorded major on every later frame.
     negotiated: Option<NegotiatedConnection>,
+    /// Recently seen transport message ids, oldest-first, for duplicate
+    /// suppression (IPC §6.1–6.2): a redelivered frame is dropped before
+    /// any domain mapping, so transport at-least-once never becomes
+    /// domain twice. Bounded by [`SEEN_MESSAGE_CAP`]; never a domain
+    /// identity, never consulted for correlation (that is `command_id` /
+    /// `request_id` / `reply_to`).
+    seen_messages: std::collections::VecDeque<WireMessageId>,
 }
 
 /// Per-connection table owned by the listener.
@@ -218,6 +235,7 @@ impl ConnectionTable {
                 incarnation: None,
                 authed: false,
                 negotiated: None,
+                seen_messages: std::collections::VecDeque::new(),
             },
         );
         id
@@ -249,10 +267,21 @@ impl ConnectionTable {
     /// though its record keeps the flag.
     fn live_for(&self, id: &ConnectionWireId, envelope: &WireEnvelope) -> Option<LiveInput> {
         let mut table = lock_table(&self.inner);
+        // Transport duplicate suppression first: a redelivered message id is
+        // dropped before it can pin incarnation, pair, or touch any domain
+        // mapping. Fresh sends — including transport retries, which always
+        // mint new ids — pass through and are recorded bounded-oldest-first.
         // The record borrow ends before the currency read below: both go
         // through the table guard, so they cannot overlap.
         let (device, record_authed) = {
             let record = table.records.get_mut(id)?;
+            if record.seen_messages.contains(&envelope.message_id) {
+                return None;
+            }
+            record.seen_messages.push_back(envelope.message_id);
+            while record.seen_messages.len() > SEEN_MESSAGE_CAP {
+                record.seen_messages.pop_front();
+            }
             let seen = envelope.sender.incarnation_id;
             match record.incarnation {
                 None => record.incarnation = Some(seen),
@@ -648,6 +677,49 @@ mod tests {
         assert!(
             other.is_none(),
             "an incarnation mismatch yields nothing so the caller drops"
+        );
+    }
+
+    #[test]
+    fn connection_table_suppresses_redelivered_message_ids() {
+        let table = ConnectionTable::new();
+        let id = table.note_accept();
+        let frame = envelope(incarnation(1, 2));
+        assert!(
+            table.live_for(&id, &frame).is_some(),
+            "the first delivery passes"
+        );
+        assert!(
+            table.live_for(&id, &frame).is_none(),
+            "a redelivered message id drops before any mapping"
+        );
+        assert!(
+            table.live_for(&id, &envelope(incarnation(1, 2))).is_some(),
+            "fresh message ids still pass"
+        );
+    }
+
+    #[test]
+    fn duplicate_cache_is_bounded_and_rolls_off() {
+        use super::SEEN_MESSAGE_CAP;
+
+        let table = ConnectionTable::new();
+        let id = table.note_accept();
+        let first = envelope(incarnation(3, 3));
+        assert!(
+            table.live_for(&id, &first).is_some(),
+            "the first delivery passes"
+        );
+        for _ in 0..SEEN_MESSAGE_CAP {
+            let _ = table.live_for(&id, &envelope(incarnation(3, 3)));
+        }
+        assert!(
+            table.live_for(&id, &first).is_some(),
+            "a rolled-off id processes again instead of growing memory without limit"
+        );
+        assert!(
+            table.live_for(&id, &first).is_none(),
+            "but the replay is still a duplicate once seen again"
         );
     }
 
