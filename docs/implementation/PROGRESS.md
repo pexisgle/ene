@@ -19,6 +19,6 @@
 
 ## 未解決 blocker
 
-- #1360 レビュー第5ラウンド対応済み: replay-before-attach 並べ替え（回帰テスト付き）、assign intent replay（`IntentReplayRepository`＋V6＋conflict は clarify、register/complete は収束性により対象外と明記）、Windows stub 修正。残りは返信済み：pre-send TOCTOU は具体策の指定待ち（lock-across-IO なしで観測可能な改善なしと分析）、round_view fingerprint は durable 列がない旨説明、transport retry API は P2 downgrade 受諾
-- CI 再実行待ち（Unix green、Windows は stub 修正で解消見込み）
+- #1360 レビュー第6ラウンド対応済み: intent snapshot replay（`IntentOutcomeRepository`＋V6書換＋3種全対応・conflictはclarify、非terminalは非記録）＋atomic combined ops、inference attempt claim（`begin_inference_attempt`＋V7＋pre-send gate置換）。CI 待ち
+- 残りは返信済み：round_view P2 ルール了解、transport retry P2 受諾、TOCTOU・replay スレッドは実装で応答、Stage 5 defer 群は継続
 - マージ順: #1355 → #1356 → #1358 → #1359 → #1360
