@@ -2074,7 +2074,12 @@ impl CredentialApprovalRepository for Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| credential_unavailable(error.to_string()))?;
         // A known pending entry is consumed first so a pair that is somehow
-        // both pending and usable never strands its pending row.
+        // both pending and usable never strands its pending row. The delete
+        // and the usable-ref upsert share this transaction: a crash between
+        // them could otherwise strand an approval with no usable marker (or
+        // vice versa), forcing the Owner to re-request and re-approve. The
+        // ref id follows the same `provider:label` convention the Host uses
+        // when it builds refs for assignment, so both paths name one row.
         let pending: Option<(String, String, String)> = tx
             .query_row(
                 SQL_SELECT_CREDENTIAL_PENDING,
@@ -2084,11 +2089,13 @@ impl CredentialApprovalRepository for Store {
             .optional()
             .map_err(|error| credential_unavailable(error.to_string()))?;
         if pending.is_some() {
-            // The usable marker is the `credential_ref` row itself, which
-            // Host records in its own approve path: here the approval only
-            // deletes the pending row.
             tx.execute(SQL_DELETE_CREDENTIAL_PENDING, params![provider, label])
                 .map_err(|error| credential_unavailable(error.to_string()))?;
+            tx.execute(
+                SQL_UPSERT_CREDENTIAL,
+                params![format!("{provider}:{label}"), provider, label,],
+            )
+            .map_err(|error| credential_unavailable(error.to_string()))?;
             tx.commit()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             return Ok(true);
@@ -3687,8 +3694,8 @@ INSERT INTO _schema_version (version) VALUES (4);",
         );
         let flagged_before_ref = store.is_approved("acme", "main").await;
         assert!(
-            matches!(flagged_before_ref, Ok(false)),
-            "approval alone records no usable ref; Host records it"
+            matches!(flagged_before_ref, Ok(true)),
+            "approval atomically records the usable ref in the same transaction"
         );
         let saved = store
             .save_ref(CredentialRef {
