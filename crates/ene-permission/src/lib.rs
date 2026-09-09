@@ -334,7 +334,7 @@ pub trait IntentOutcomeRepository: Send + Sync {
         &self,
         expected: Option<(String, ConsentRevision)>,
         record: ConsentRecord,
-        intent: IntentOutcomeRecord,
+        fingerprint: IntentFingerprint,
     ) -> Result<ConsentCommitOutcome, PermissionTechnicalError>;
 
     /// Registers the credential approval request and records the intent
@@ -348,20 +348,16 @@ pub trait IntentOutcomeRepository: Send + Sync {
         &self,
         provider: String,
         label: String,
-        intent: IntentOutcomeRecord,
+        fingerprint: IntentFingerprint,
     ) -> Result<IntentOutcomeRecord, PermissionTechnicalError>;
 }
 
-/// Durable fingerprint plus terminal outcome snapshot of one management
-/// intent: the intent key, the content it decided on, and the outcome that
-/// content produced. An exact retry (same id, same fingerprint) replays the
-/// snapshot verbatim — never re-executed, never rebound; the same id with
-/// different content is a conflict the caller clarifies. The base premise
-/// and the semantically effective rationale ride along, so a refreshed
-/// premise under a reused id counts as different content (new premise, new
-/// id — same rule as command keys).
+/// Durable fingerprint of one management intent: the intent key plus the
+/// content it decides on. The base premise and the semantically effective
+/// rationale ride along, so a refreshed premise under a reused id counts
+/// as different content (new premise, new id — same rule as command keys).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct IntentOutcomeRecord {
+pub struct IntentFingerprint {
     /// Intent key, as hyphenated UUID text.
     pub intent_id: String,
     /// Intent kind discriminator (`assign`, `register`, or `complete`).
@@ -374,6 +370,17 @@ pub struct IntentOutcomeRecord {
     pub rationale_origin: String,
     /// Rationale quote, if the intent carried one.
     pub rationale_quote: Option<String>,
+}
+
+/// Durable terminal outcome snapshot of one management intent: its
+/// fingerprint plus the outcome that content produced. An exact retry
+/// (same id, same fingerprint) replays the snapshot verbatim — never
+/// re-executed, never rebound; the same id with different content is a
+/// conflict the caller clarifies.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IntentOutcomeRecord {
+    /// What the intent asked.
+    pub fingerprint: IntentFingerprint,
     /// Terminal outcome snapshot.
     pub outcome: IntentOutcome,
 }
