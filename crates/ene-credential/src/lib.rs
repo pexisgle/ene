@@ -518,8 +518,710 @@ fn hex_val(byte: u8) -> Option<u8> {
     }
 }
 
+use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+/// File-backed custody for device-auth verification material.
+///
+/// Pairing secrets minted at approval must survive both process boundaries
+/// (a separate `approve-device` process persists them while the serving
+/// process verifies proofs) and Host restarts, so verification material
+/// cannot live only in the serving process's memory. This store keeps one
+/// entry per paired device in a protected file shared across processes and
+/// restarts. Reads are read-through on every call: nothing is cached, so a
+/// verifier always observes the latest persisted rotation or revocation.
+/// Authentication stays per-connection-once, so the extra file read costs
+/// correctness nothing it cannot afford.
+///
+/// The whole file is one JSON document mapping canonical device UUID text to
+/// an entry holding the secret (lowercase hex), the owner-visible
+/// descriptor, and the entry write time as RFC 3339:
+///
+/// ```json
+/// {"devices": {"123e4567-e89b-12d3-a456-426614174000": {"secret_hex": "00ab",
+/// "descriptor": "phone", "paired_at": "2026-09-08T12:00:00+09:00"}}}
+/// ```
+///
+/// Secret custody: generation stays with the caller (the pairing repository
+/// approve path mints the secret); this store only persists and returns
+/// custody. [`load_secret`](FileDeviceAuthStore::load_secret) hands back an
+/// owned [`SecretValue`], which is zeroized on drop and has no `Debug`
+/// rendering. Secrets and descriptors are never logged and never appear in
+/// this type's `Debug` output, which shows the path and the entry count
+/// only.
+///
+/// File protection: on Unix the file at rest must be mode `0600`. Opening an
+/// existing file with any other mode attempts to tighten it to `0600` and
+/// fails when tightening does not stick; newly written files (including the
+/// staging temp) are created `0600`. On non-Unix platforms there is no mode
+/// check: the OS-specific protection story is documented at the call site
+/// instead, and the file must still live in a directory only the owner can
+/// read.
+///
+/// Caller-owned directory: the caller creates the parent directory. Opening
+/// fails when the parent directory is missing, so a misconfigured data
+/// directory can never silently redirect the store. A missing file is not an
+/// error: opening succeeds empty and the file is created lazily on the first
+/// save. A malformed file is always an error, never a silent default.
+///
+/// Atomicity story: every mutation rewrites the whole file by staging the
+/// new bytes to a temp file in the same directory (created `0600` on Unix,
+/// flushed with `sync_all`) and renaming it over the target. The rename is
+/// the atomic replace: concurrent readers observe the old or the new
+/// document whole, so torn reads are impossible. Read-modify-write cycles
+/// still race across processes: concurrent approves of different devices are
+/// last-writer-wins and can drop an entry, and concurrent approves of one
+/// device are a rotation race. Approval is therefore an owner-serialized
+/// operation; this store provides durability, not mutual exclusion.
+///
+/// Backup-exclusion contract: this file holds Group K verification material
+/// with E classification. It must never enter backups or exports and must
+/// never live inside `app.db`: a future backup stage walks the data
+/// directory and must exclude it by name. The file name convention is
+/// `device-auth.json` directly under the caller's data directory; restore
+/// must not replace it, reset wipes it only on full-data reset, and a Host
+/// without this file authenticates nothing until fresh pairing mints new
+/// material.
+pub struct FileDeviceAuthStore {
+    /// Location of the protected JSON file; the parent directory is owned by
+    /// the caller.
+    path: PathBuf,
+}
+
+impl core::fmt::Debug for FileDeviceAuthStore {
+    /// Renders the path and the entry count only.
+    ///
+    /// The read is best-effort: when the file cannot be read or parsed, the
+    /// count renders as `"unreadable"` instead of failing. Secrets and
+    /// descriptors never appear here.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.read_entries() {
+            Ok(entries) => f
+                .debug_struct("FileDeviceAuthStore")
+                .field("path", &self.path)
+                .field("entries", &entries.len())
+                .finish(),
+            Err(_) => f
+                .debug_struct("FileDeviceAuthStore")
+                .field("path", &self.path)
+                .field("entries", &"unreadable")
+                .finish(),
+        }
+    }
+}
+
+impl FileDeviceAuthStore {
+    /// Opens the protected device-auth file at `path`.
+    ///
+    /// The caller owns directory creation: opening fails when the parent
+    /// directory is missing. A missing file opens as an empty store and is
+    /// created lazily on the first save. An existing file keeps its bytes
+    /// untouched, but on Unix its mode is verified (and tightened to `0600`
+    /// when lax; see the type-level contract). Paths naming no file, and
+    /// paths naming a directory, are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the path
+    /// names no file, the parent directory is missing, the path is a
+    /// directory, file metadata cannot be read, or Unix permissions cannot
+    /// be tightened to owner-only. Error reasons carry the path only, never
+    /// file content.
+    pub fn open(path: &Path) -> Result<Self, CredentialTechnicalError> {
+        let shown = path.display();
+        if path.file_name().is_none() {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("device-auth path {shown} names no file"),
+            });
+        }
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            Some(_) | None => Path::new("."),
+        };
+        if !parent.is_dir() {
+            let parent_shown = parent.display();
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("device-auth directory {parent_shown} is missing"),
+            });
+        }
+        if path.exists() {
+            if path.is_dir() {
+                return Err(CredentialTechnicalError::StorageUnavailable {
+                    reason: format!("device-auth path {shown} is a directory"),
+                });
+            }
+            enforce_owner_only(path)?;
+        }
+        Ok(Self {
+            path: path.to_owned(),
+        })
+    }
+
+    /// Persists `secret` for `device`, creating or rotating its entry.
+    ///
+    /// The caller mints the secret; this method performs no strength
+    /// validation on it, it only takes custody. The entry's `descriptor` is
+    /// the owner-visible display string and `paired_at` is stamped with the
+    /// write time for display and audit only (it is not the pairing record's
+    /// pairing time). The write goes through the atomic temp-plus-rename
+    /// path; concurrent approves must be owner-serialized by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// file cannot be read (including a malformed existing file), the
+    /// staging temp cannot be written, or the atomic replace fails.
+    pub fn save_secret(
+        &self,
+        device: &DeviceId,
+        descriptor: &str,
+        secret: &str,
+    ) -> Result<(), CredentialTechnicalError> {
+        let mut entries = self.read_entries()?;
+        entries.insert(
+            device_key(device),
+            StoredDeviceAuth {
+                secret_hex: encode_hex_lower(secret.as_bytes()),
+                descriptor: descriptor.to_owned(),
+                paired_at: WallClockWithTz::now().to_rfc3339(),
+            },
+        );
+        self.write_entries(&entries)
+    }
+
+    /// Loads the persisted secret for `device`, if any.
+    ///
+    /// Every call reads the file through: there is no cache, so a rotation
+    /// or revocation persisted by another process is observed immediately.
+    /// An unknown device (or a missing file) yields `Ok(None)`; only an
+    /// unreadable or malformed file yields an error, never a silent default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// file cannot be read or fails validation.
+    pub fn load_secret(
+        &self,
+        device: &DeviceId,
+    ) -> Result<Option<SecretValue>, CredentialTechnicalError> {
+        let entries = self.read_entries()?;
+        let key = device_key(device);
+        let Some(entry) = entries.get(&key) else {
+            return Ok(None);
+        };
+        let Some(bytes) = decode_hex_lower(&entry.secret_hex) else {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("device-auth entry for {key} holds malformed secret material"),
+            });
+        };
+        Ok(Some(SecretValue::new(bytes)))
+    }
+
+    /// Revokes `device` by deleting its entry from the protected file.
+    ///
+    /// This is the durable half of device revocation: once the atomic
+    /// rewrite completes, no process loading through this store will verify
+    /// proofs for the device again. Deleting an unknown device — or deleting
+    /// while the file is missing — succeeds without writing anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// file cannot be read (including a malformed existing file) or the
+    /// atomic rewrite fails.
+    pub fn delete_for(&self, device: &DeviceId) -> Result<(), CredentialTechnicalError> {
+        let mut entries = self.read_entries()?;
+        if entries.remove(&device_key(device)).is_none() {
+            return Ok(());
+        }
+        self.write_entries(&entries)
+    }
+
+    // Reads and validates the whole file; a missing file reads as empty.
+    fn read_entries(&self) -> Result<BTreeMap<String, StoredDeviceAuth>, CredentialTechnicalError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(err) => {
+                let shown = self.path.display();
+                return Err(CredentialTechnicalError::StorageUnavailable {
+                    reason: format!("device-auth file {shown} is unreadable: {err}"),
+                });
+            }
+        };
+        let parsed = parse_device_auth_file(&bytes).map_err(|detail| {
+            let shown = self.path.display();
+            CredentialTechnicalError::StorageUnavailable {
+                reason: format!("device-auth file {shown} is malformed: {detail}"),
+            }
+        })?;
+        let mut entries = BTreeMap::new();
+        for (device_text, entry) in parsed {
+            let Some(device) = parse_device_key(&device_text) else {
+                let shown = self.path.display();
+                return Err(CredentialTechnicalError::StorageUnavailable {
+                    reason: format!("device-auth file {shown} holds an invalid device key"),
+                });
+            };
+            if decode_hex_lower(&entry.secret_hex).is_none() {
+                let shown = self.path.display();
+                return Err(CredentialTechnicalError::StorageUnavailable {
+                    reason: format!("device-auth file {shown} holds malformed secret material"),
+                });
+            }
+            if WallClockWithTz::parse_rfc3339(&entry.paired_at).is_err() {
+                let shown = self.path.display();
+                return Err(CredentialTechnicalError::StorageUnavailable {
+                    reason: format!("device-auth file {shown} holds an invalid timestamp"),
+                });
+            }
+            if entries.insert(device_key(&device), entry).is_some() {
+                let shown = self.path.display();
+                return Err(CredentialTechnicalError::StorageUnavailable {
+                    reason: format!("device-auth file {shown} holds a duplicate device entry"),
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    // Renders the entries and replaces the file via temp-plus-rename in the
+    // same directory, so readers never observe a partial document.
+    fn write_entries(
+        &self,
+        entries: &BTreeMap<String, StoredDeviceAuth>,
+    ) -> Result<(), CredentialTechnicalError> {
+        let shown = self.path.display();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let tmp = self.path.with_extension(format!("tmp.{pid}.{nanos}"));
+        let rendered = render_device_auth_file(entries);
+        if let Err(err) = stage_file(&tmp, rendered.as_bytes()) {
+            remove_best_effort(&tmp);
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("device-auth write to {shown} failed: {err}"),
+            });
+        }
+        if let Err(err) = std::fs::rename(&tmp, &self.path) {
+            remove_best_effort(&tmp);
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: format!("device-auth write to {shown} failed: {err}"),
+            });
+        }
+        enforce_owner_only(&self.path)
+    }
+}
+
+// One validated file entry: secret bytes as lowercase hex plus display and
+// timing metadata. Keys live in the surrounding map, canonicalized to
+// hyphenated UUID text.
+struct StoredDeviceAuth {
+    secret_hex: String,
+    descriptor: String,
+    paired_at: String,
+}
+
+// Renders `device` as canonical hyphenated UUID text for use as a file key.
+fn device_key(device: &DeviceId) -> String {
+    device.0.as_uuid().to_string()
+}
+
+// Parses a file key back into a `DeviceId`; yields `None` for anything that
+// is not UUID text. The backing UUID type is inferred through
+// `RawId::from_uuid` and never named, so this stays on the existing
+// dependency set.
+fn parse_device_key(text: &str) -> Option<DeviceId> {
+    text.parse().ok().map(RawId::from_uuid).map(DeviceId)
+}
+
+// Enforces owner-only mode on an existing file (Unix): already-`0600` passes
+// through, anything else is tightened, and a tighten that does not stick is
+// an error. Non-Unix has no mode to enforce; the call still succeeds so the
+// documented directory-level protection applies instead.
+#[cfg(unix)]
+fn enforce_owner_only(path: &Path) -> Result<(), CredentialTechnicalError> {
+    let shown = path.display();
+    let current =
+        std::fs::metadata(path).map_err(|err| CredentialTechnicalError::StorageUnavailable {
+            reason: format!("device-auth file {shown} is unreadable: {err}"),
+        })?;
+    if current.permissions().mode() & 0o777 == 0o600 {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|err| {
+        CredentialTechnicalError::StorageUnavailable {
+            reason: format!("device-auth file {shown} cannot be tightened to owner-only: {err}"),
+        }
+    })?;
+    let tightened =
+        std::fs::metadata(path).map_err(|err| CredentialTechnicalError::StorageUnavailable {
+            reason: format!("device-auth file {shown} is unreadable: {err}"),
+        })?;
+    if tightened.permissions().mode() & 0o777 != 0o600 {
+        return Err(CredentialTechnicalError::StorageUnavailable {
+            reason: format!("device-auth file {shown} cannot be tightened to owner-only"),
+        });
+    }
+    Ok(())
+}
+
+// Non-Unix platforms have no Unix mode bits; protection rests on the
+// caller-owned directory, as documented on the store.
+#[cfg(not(unix))]
+fn enforce_owner_only(_path: &Path) -> Result<(), CredentialTechnicalError> {
+    Ok(())
+}
+
+// Stages the new document to a temp file in the same directory. On Unix the
+// temp is created `0600` so secrets are never briefly world-readable;
+// `sync_all` keeps a crash from leaving a truncated temp behind.
+fn stage_file(tmp: &Path, rendered: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut staged = options.open(tmp)?;
+    std::io::Write::write_all(&mut staged, rendered)?;
+    staged.sync_all()
+}
+
+// Best-effort temp cleanup after a failed write; leftovers stay in the same
+// directory for the owner to notice and remove.
+fn remove_best_effort(tmp: &Path) {
+    if std::fs::remove_file(tmp).is_err() {
+        // Nothing to do: the temp carries no trust beyond the store file
+        // itself, and reporting cleanup failure would mask the real error.
+    }
+}
+
+// Renders the whole document in one canonical shape: entries ordered by
+// device key, no whitespace, trailing newline.
+fn render_device_auth_file(entries: &BTreeMap<String, StoredDeviceAuth>) -> String {
+    let mut out = String::from("{\"devices\":{");
+    let mut first = true;
+    for (device, entry) in entries {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        append_json_string(&mut out, device);
+        out.push_str(":{\"secret_hex\":");
+        append_json_string(&mut out, &entry.secret_hex);
+        out.push_str(",\"descriptor\":");
+        append_json_string(&mut out, &entry.descriptor);
+        out.push_str(",\"paired_at\":");
+        append_json_string(&mut out, &entry.paired_at);
+        out.push('}');
+    }
+    out.push_str("}}\n");
+    out
+}
+
+// Appends one JSON string literal with escaping for quotes, backslashes, and
+// control characters; other characters (including non-ASCII) pass through.
+fn append_json_string(out: &mut String, text: &str) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            ch if (ch as u32) < 0x20 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let scalar = ch as u32;
+                out.push_str("\\u");
+                out.push(HEX[((scalar >> 12) & 0x0f) as usize] as char);
+                out.push(HEX[((scalar >> 8) & 0x0f) as usize] as char);
+                out.push(HEX[((scalar >> 4) & 0x0f) as usize] as char);
+                out.push(HEX[(scalar & 0x0f) as usize] as char);
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+}
+
+// Parses the whole document into raw `(key, entry)` pairs; semantic checks
+// (UUID keys, hex secrets, RFC 3339 timestamps) happen in `read_entries`.
+// Every error is positional or structural, never file content.
+fn parse_device_auth_file(bytes: &[u8]) -> Result<Vec<(String, StoredDeviceAuth)>, String> {
+    let text = core::str::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_owned())?;
+    JsonCursor {
+        text: text.as_bytes(),
+        pos: 0,
+    }
+    .parse_file()
+}
+
+// Byte cursor over the document for the fixed-shape parser below.
+struct JsonCursor<'a> {
+    text: &'a [u8],
+    pos: usize,
+}
+
+impl JsonCursor<'_> {
+    // Parses `{"devices": {<entry>, ...}}` with only whitespace elsewhere.
+    fn parse_file(&mut self) -> Result<Vec<(String, StoredDeviceAuth)>, String> {
+        self.skip_ws();
+        self.expect_byte(b'{')?;
+        self.skip_ws();
+        let section = self.parse_string()?;
+        if section != "devices" {
+            return Err(self.err("expected the devices section"));
+        }
+        self.skip_ws();
+        self.expect_byte(b':')?;
+        self.skip_ws();
+        self.expect_byte(b'{')?;
+        let mut entries = Vec::new();
+        self.skip_ws();
+        if self.consume_byte(b'}') {
+            self.skip_ws();
+            self.expect_byte(b'}')?;
+            self.skip_ws();
+            self.expect_end()?;
+            return Ok(entries);
+        }
+        loop {
+            self.skip_ws();
+            let device = self.parse_string()?;
+            self.skip_ws();
+            self.expect_byte(b':')?;
+            self.skip_ws();
+            let entry = self.parse_entry()?;
+            if entries.iter().any(|(known, _)| *known == device) {
+                return Err(self.err("duplicate device entry"));
+            }
+            entries.push((device, entry));
+            self.skip_ws();
+            if self.consume_byte(b',') {
+                continue;
+            }
+            self.expect_byte(b'}')?;
+            break;
+        }
+        self.skip_ws();
+        self.expect_byte(b'}')?;
+        self.skip_ws();
+        self.expect_end()?;
+        Ok(entries)
+    }
+
+    // Parses one entry object holding exactly the required string fields.
+    fn parse_entry(&mut self) -> Result<StoredDeviceAuth, String> {
+        self.expect_byte(b'{')?;
+        let mut secret_hex: Option<String> = None;
+        let mut descriptor: Option<String> = None;
+        let mut paired_at: Option<String> = None;
+        self.skip_ws();
+        if self.consume_byte(b'}') {
+            return Err(self.err("device entry is missing required fields"));
+        }
+        loop {
+            self.skip_ws();
+            let field = self.parse_string()?;
+            self.skip_ws();
+            self.expect_byte(b':')?;
+            self.skip_ws();
+            let value = self.parse_string()?;
+            if field == "secret_hex" {
+                if secret_hex.is_some() {
+                    return Err(self.err("duplicate device field"));
+                }
+                secret_hex = Some(value);
+            } else if field == "descriptor" {
+                if descriptor.is_some() {
+                    return Err(self.err("duplicate device field"));
+                }
+                descriptor = Some(value);
+            } else if field == "paired_at" {
+                if paired_at.is_some() {
+                    return Err(self.err("duplicate device field"));
+                }
+                paired_at = Some(value);
+            } else {
+                return Err(self.err("unknown device field"));
+            }
+            self.skip_ws();
+            if self.consume_byte(b',') {
+                continue;
+            }
+            self.expect_byte(b'}')?;
+            break;
+        }
+        let (Some(secret_hex), Some(descriptor), Some(paired_at)) =
+            (secret_hex, descriptor, paired_at)
+        else {
+            return Err(self.err("device entry is missing required fields"));
+        };
+        Ok(StoredDeviceAuth {
+            secret_hex,
+            descriptor,
+            paired_at,
+        })
+    }
+
+    // Parses one JSON string literal with escapes (including surrogate
+    // pairs); raw control characters and lone surrogates are rejected.
+    fn parse_string(&mut self) -> Result<String, String> {
+        self.expect_byte(b'"')?;
+        let mut out = String::new();
+        loop {
+            let byte = self
+                .text
+                .get(self.pos)
+                .copied()
+                .ok_or_else(|| self.err("unexpected end inside a string"))?;
+            match byte {
+                b'"' => {
+                    self.pos += 1;
+                    return Ok(out);
+                }
+                b'\\' => {
+                    self.pos += 1;
+                    self.parse_escape_into(&mut out)?;
+                }
+                byte if byte < 0x20 => {
+                    return Err(self.err("unescaped control character in string"));
+                }
+                _ => {
+                    let rest = core::str::from_utf8(&self.text[self.pos..])
+                        .map_err(|_| self.err("string is not valid UTF-8"))?;
+                    let Some(ch) = rest.chars().next() else {
+                        return Err(self.err("unexpected end inside a string"));
+                    };
+                    out.push(ch);
+                    self.pos += ch.len_utf8();
+                }
+            }
+        }
+    }
+
+    // Parses one escape (the byte after the backslash was already consumed
+    // by advancing past it) into `out`.
+    fn parse_escape_into(&mut self, out: &mut String) -> Result<(), String> {
+        let esc = self
+            .text
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| self.err("unexpected end inside a string escape"))?;
+        self.pos += 1;
+        match esc {
+            b'"' => out.push('"'),
+            b'\\' => out.push('\\'),
+            b'/' => out.push('/'),
+            b'b' => out.push('\u{8}'),
+            b'f' => out.push('\u{c}'),
+            b'n' => out.push('\n'),
+            b'r' => out.push('\r'),
+            b't' => out.push('\t'),
+            b'u' => {
+                let high = self.parse_hex4()?;
+                if (0xd800..0xdc00).contains(&high) {
+                    if self.text.get(self.pos).copied() != Some(b'\\') {
+                        return Err(self.err("lone surrogate escape"));
+                    }
+                    self.pos += 1;
+                    if self.text.get(self.pos).copied() != Some(b'u') {
+                        return Err(self.err("lone surrogate escape"));
+                    }
+                    self.pos += 1;
+                    let low = self.parse_hex4()?;
+                    if !(0xdc00..0xe000).contains(&low) {
+                        return Err(self.err("lone surrogate escape"));
+                    }
+                    let scalar = 0x1_0000 + ((high - 0xd800) << 10) + (low - 0xdc00);
+                    let Some(ch) = char::from_u32(scalar) else {
+                        return Err(self.err("invalid string escape"));
+                    };
+                    out.push(ch);
+                } else if (0xdc00..0xe000).contains(&high) {
+                    return Err(self.err("lone surrogate escape"));
+                } else {
+                    let Some(ch) = char::from_u32(high) else {
+                        return Err(self.err("invalid string escape"));
+                    };
+                    out.push(ch);
+                }
+            }
+            _ => return Err(self.err("invalid string escape")),
+        }
+        Ok(())
+    }
+
+    // Parses exactly four hex digits into a scalar value.
+    fn parse_hex4(&mut self) -> Result<u32, String> {
+        let mut value: u32 = 0;
+        for _ in 0..4 {
+            let byte = self
+                .text
+                .get(self.pos)
+                .copied()
+                .ok_or_else(|| self.err("unexpected end inside a string escape"))?;
+            let Some(digit) = hex_val(byte) else {
+                return Err(self.err("invalid string escape"));
+            };
+            value = (value << 4) | u32::from(digit);
+            self.pos += 1;
+        }
+        Ok(value)
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(
+            self.text.get(self.pos).copied(),
+            Some(b' ' | b'\t' | b'\n' | b'\r')
+        ) {
+            self.pos += 1;
+        }
+    }
+
+    fn expect_byte(&mut self, want: u8) -> Result<(), String> {
+        if self.text.get(self.pos).copied() == Some(want) {
+            self.pos += 1;
+            Ok(())
+        } else {
+            Err(self.err("unexpected input"))
+        }
+    }
+
+    fn consume_byte(&mut self, want: u8) -> bool {
+        if self.text.get(self.pos).copied() == Some(want) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_end(&self) -> Result<(), String> {
+        if self.pos == self.text.len() {
+            Ok(())
+        } else {
+            Err(self.err("trailing input after the device-auth document"))
+        }
+    }
+
+    // Renders a positional, content-free error for the current cursor.
+    fn err(&self, detail: &str) -> String {
+        let offset = self.pos;
+        format!("{detail} at byte {offset}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::FileDeviceAuthStore;
     use super::{
         CredentialRef, CredentialStore, CredentialTechnicalError, MemoryCredentialStore,
         RegisterCredentialCommand, RegisterOutcome, credential_availability, register,
@@ -967,5 +1669,268 @@ mod tests {
             "single-use-nonce",
             &tampered
         ));
+    }
+
+    fn fresh_tempdir() -> Option<tempfile::TempDir> {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok(), "tempdir must be available");
+        temp.ok()
+    }
+
+    fn open_device_auth_store(path: &std::path::Path) -> Option<FileDeviceAuthStore> {
+        let opened = FileDeviceAuthStore::open(path);
+        assert!(opened.is_ok(), "device-auth store must open");
+        opened.ok()
+    }
+
+    #[test]
+    fn device_auth_roundtrip_preserves_secret_bytes() {
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let Some(store) = open_device_auth_store(&path) else {
+            return;
+        };
+        let device = DeviceId(RawId::new());
+        let saved = store.save_secret(&device, "phone", "pairing-secret-value");
+        assert!(saved.is_ok(), "save must succeed");
+        let loaded = store.load_secret(&device);
+        assert!(loaded.is_ok(), "load must succeed");
+        let Ok(Some(secret)) = loaded else {
+            return;
+        };
+        assert_eq!(secret.bytes(), "pairing-secret-value".as_bytes());
+    }
+
+    #[test]
+    fn device_auth_missing_file_loads_none_and_missing_parent_fails_open() {
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let Some(store) = open_device_auth_store(&path) else {
+            return;
+        };
+        let loaded = store.load_secret(&DeviceId(RawId::new()));
+        assert!(matches!(loaded, Ok(None)));
+        let nested = temp.path().join("no-such-dir").join("device-auth.json");
+        assert!(FileDeviceAuthStore::open(&nested).is_err());
+    }
+
+    #[test]
+    fn device_auth_malformed_files_error_never_default() {
+        let entry = "{\"secret_hex\":\"00\",\"descriptor\":\"d\",\
+             \"paired_at\":\"2026-09-08T12:00:00+09:00\"}";
+        let key_prefix = "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":";
+        let keyed = key_prefix.to_owned() + entry + "}}";
+        let bad_key = "{\"devices\":{\"not-a-uuid\":".to_owned() + entry + "}}";
+        let extra_field = key_prefix.to_owned() + entry + ",\"extra\":\"x\"}}";
+        let duplicate_key = key_prefix.to_owned()
+            + entry
+            + ",\"123e4567-e89b-12d3-a456-426614174000\":"
+            + entry
+            + "}}";
+        let fixtures = [
+            "not json{{{".to_owned(),
+            "[]".to_owned(),
+            "{}".to_owned(),
+            "{\"other\":{}}".to_owned(),
+            "{\"devices\":[]}".to_owned(),
+            "{\"devices\":{}}trailing".to_owned(),
+            bad_key,
+            "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
+             {\"secret_hex\":\"zz\",\"descriptor\":\"d\",\
+             \"paired_at\":\"2026-09-08T12:00:00+09:00\"}}}"
+                .to_owned(),
+            "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
+             {\"secret_hex\":\"AABB\",\"descriptor\":\"d\",\
+             \"paired_at\":\"2026-09-08T12:00:00+09:00\"}}}"
+                .to_owned(),
+            "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
+             {\"secret_hex\":\"00\",\"descriptor\":\"d\",\"paired_at\":\"yesterday\"}}}"
+                .to_owned(),
+            "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
+             {\"secret_hex\":\"00\",\"descriptor\":\"d\"}}}"
+                .to_owned(),
+            extra_field,
+            keyed.clone() + "}]",
+            duplicate_key,
+        ];
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        for fixture in fixtures {
+            let written = std::fs::write(&path, &fixture);
+            assert!(written.is_ok(), "fixture setup must succeed");
+            let Some(store) = open_device_auth_store(&path) else {
+                return;
+            };
+            let device = DeviceId(RawId::new());
+            assert!(
+                store.load_secret(&device).is_err(),
+                "malformed file must error, never default"
+            );
+            assert!(
+                store.save_secret(&device, "phone", "secret").is_err(),
+                "saving over a malformed file must error, never clobber"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_auth_open_tightens_lax_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let written = std::fs::write(&path, "{\"devices\":{}}");
+        assert!(written.is_ok(), "fixture setup must succeed");
+        let lax = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        assert!(lax.is_ok(), "fixture setup must succeed");
+        let Some(store) = open_device_auth_store(&path) else {
+            return;
+        };
+        let meta = std::fs::metadata(&path);
+        assert!(meta.is_ok(), "metadata must be readable");
+        let Ok(meta) = meta else {
+            return;
+        };
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let loaded = store.load_secret(&DeviceId(RawId::new()));
+        assert!(matches!(loaded, Ok(None)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_auth_saved_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let Some(store) = open_device_auth_store(&path) else {
+            return;
+        };
+        let saved = store.save_secret(&DeviceId(RawId::new()), "phone", "pairing-secret");
+        assert!(saved.is_ok(), "save must succeed");
+        let meta = std::fs::metadata(&path);
+        assert!(meta.is_ok(), "metadata must be readable");
+        let Ok(meta) = meta else {
+            return;
+        };
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn device_auth_delete_removes_only_the_target() {
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let Some(store) = open_device_auth_store(&path) else {
+            return;
+        };
+        let first = DeviceId(RawId::new());
+        let second = DeviceId(RawId::new());
+        assert!(store.save_secret(&first, "phone", "first-secret").is_ok());
+        assert!(
+            store
+                .save_secret(&second, "tablet", "second-secret")
+                .is_ok()
+        );
+        assert!(store.delete_for(&first).is_ok());
+        let missing = store.load_secret(&first);
+        assert!(matches!(missing, Ok(None)));
+        let kept = store.load_secret(&second);
+        assert!(kept.is_ok(), "other device must survive the delete");
+        let Ok(Some(secret)) = kept else {
+            return;
+        };
+        assert_eq!(secret.bytes(), "second-secret".as_bytes());
+        assert!(store.delete_for(&first).is_ok());
+        assert!(store.delete_for(&DeviceId(RawId::new())).is_ok());
+        let absent = temp.path().join("absent.json");
+        let Some(absent_store) = open_device_auth_store(&absent) else {
+            return;
+        };
+        assert!(absent_store.delete_for(&first).is_ok());
+        assert!(!absent.exists(), "delete must not create the file");
+    }
+
+    #[test]
+    fn device_auth_second_save_rotates_the_secret() {
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let Some(store) = open_device_auth_store(&path) else {
+            return;
+        };
+        let device = DeviceId(RawId::new());
+        assert!(store.save_secret(&device, "phone", "first-secret").is_ok());
+        assert!(store.save_secret(&device, "phone", "second-secret").is_ok());
+        let loaded = store.load_secret(&device);
+        assert!(loaded.is_ok(), "load must succeed");
+        let Ok(Some(secret)) = loaded else {
+            return;
+        };
+        assert_eq!(secret.bytes(), "second-secret".as_bytes());
+    }
+
+    #[test]
+    fn device_auth_persists_across_store_instances() {
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let device = DeviceId(RawId::new());
+        let descriptor = "phone \"pro\"\nline2\t✓";
+        let Some(first) = open_device_auth_store(&path) else {
+            return;
+        };
+        assert!(
+            first
+                .save_secret(&device, descriptor, "pairing-secret-value")
+                .is_ok()
+        );
+        drop(first);
+        let Some(second) = open_device_auth_store(&path) else {
+            return;
+        };
+        let loaded = second.load_secret(&device);
+        assert!(loaded.is_ok(), "load must succeed");
+        let Ok(Some(secret)) = loaded else {
+            return;
+        };
+        assert_eq!(secret.bytes(), "pairing-secret-value".as_bytes());
+    }
+
+    #[test]
+    fn device_auth_debug_carries_no_secret_or_descriptor() {
+        let Some(temp) = fresh_tempdir() else {
+            return;
+        };
+        let path = temp.path().join("device-auth.json");
+        let Some(store) = open_device_auth_store(&path) else {
+            return;
+        };
+        let marker = "marker-secret-9d3f41";
+        let descriptor = "marker-descriptor-6be2";
+        assert!(
+            store
+                .save_secret(&DeviceId(RawId::new()), descriptor, marker)
+                .is_ok()
+        );
+        let rendered = format!("{store:?}");
+        let marker_hex = super::encode_hex_lower(marker.as_bytes());
+        assert!(rendered.contains("FileDeviceAuthStore"));
+        assert!(rendered.contains("entries"));
+        assert!(!rendered.contains(marker));
+        assert!(!rendered.contains(marker_hex.as_str()));
+        assert!(!rendered.contains(descriptor));
     }
 }
