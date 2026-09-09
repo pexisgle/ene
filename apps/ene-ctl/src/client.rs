@@ -1389,6 +1389,7 @@ mod tests {
         let input = WirePayload::SubmitTextInput(crate::cmds::submit_input(
             "companion-1",
             None,
+            false,
             String::from("hello"),
             String::from("en"),
         ));
@@ -1401,6 +1402,7 @@ mod tests {
             WirePayload::SubmitTextInput(crate::cmds::submit_input(
                 "companion-1",
                 None,
+                false,
                 String::from("hello"),
                 String::from("en"),
             )),
@@ -1550,6 +1552,7 @@ mod tests {
             WirePayload::SubmitTextInput(crate::cmds::submit_input(
                 "companion-1",
                 None,
+                false,
                 String::from("hi"),
                 String::from("en"),
             ))

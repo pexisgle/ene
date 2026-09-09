@@ -224,6 +224,7 @@ async fn send_round(
         WirePayload::SubmitTextInput(cmds::submit_input(
             &companion,
             None,
+            false,
             String::from(text),
             String::from("en"),
         )),
@@ -473,6 +474,7 @@ async fn production_path_setup_to_restart() {
         WirePayload::SubmitTextInput(cmds::submit_input(
             &companion,
             Some(round_wire),
+            false,
             String::from("old round retry"),
             String::from("en"),
         )),
@@ -918,16 +920,23 @@ const PROD_FAKE_TEXT: &str = "production reply over the real binaries";
 /// enough to prove the real binary path end to end without network or keys.
 async fn spawn_fake_responses(
     text: &'static str,
-) -> Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+) -> Option<(
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+)> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
     let addr = listener.local_addr().ok()?;
+    let saw_no_store = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&saw_no_store);
     let handle = tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
+            let flag = std::sync::Arc::clone(&flag);
             tokio::spawn(async move {
                 let mut head = Vec::new();
                 let mut byte = [0_u8; 1];
@@ -946,7 +955,10 @@ async fn spawn_fake_responses(
                 let head_text = String::from_utf8_lossy(&head).into_owned();
                 let mut content_length = 0_usize;
                 for line in head_text.lines().skip(1) {
-                    if let Some(value) = line.strip_prefix("Content-Length:")
+                    let Some((name, value)) = line.split_once(':') else {
+                        continue;
+                    };
+                    if name.trim().eq_ignore_ascii_case("content-length")
                         && let Ok(parsed) = value.trim().parse::<usize>()
                     {
                         content_length = parsed;
@@ -960,7 +972,15 @@ async fn spawn_fake_responses(
                         Ok(read) => filled += read,
                     }
                 }
+                // Lock the privacy boundary end to end: every production
+                // request must explicitly disable server-side storage.
+                if let Ok(seen) = serde_json::from_slice::<serde_json::Value>(&body)
+                    && seen.get("store") == Some(&serde_json::Value::Bool(false))
+                {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let payload = serde_json::json!({
+                    "status": "completed",
                     "output": [{
                         "type": "message",
                         "content": [{"type": "output_text", "text": text}],
@@ -977,7 +997,7 @@ async fn spawn_fake_responses(
             });
         }
     });
-    Some((addr, handle))
+    Some((addr, handle, saw_no_store))
 }
 
 /// Writes the CLI config pointing at `dir` and reports its path.
@@ -1106,7 +1126,7 @@ async fn binaries_drive_send_stream_history_and_restart() {
     let Some(config) = write_test_config(&dir) else {
         return;
     };
-    let Some((fake_addr, fake)) = spawn_fake_responses(PROD_FAKE_TEXT).await else {
+    let Some((fake_addr, fake, saw_no_store)) = spawn_fake_responses(PROD_FAKE_TEXT).await else {
         return;
     };
     let base_url = format!("http://{fake_addr}");
@@ -1184,6 +1204,10 @@ async fn binaries_drive_send_stream_history_and_restart() {
     assert!(
         send_out.contains(PROD_FAKE_TEXT),
         "send must stream provider text, got {send_out:?}"
+    );
+    assert!(
+        saw_no_store.load(std::sync::atomic::Ordering::Relaxed),
+        "the production request must disable server-side storage"
     );
     assert!(
         pending_empty(&dir).await,

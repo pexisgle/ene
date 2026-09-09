@@ -290,6 +290,7 @@ async fn run_send(
     let input = cmds::submit_input(
         &session.companion_ref(),
         send.round,
+        send.fresh,
         send.text,
         String::from(language),
     );

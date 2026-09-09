@@ -132,11 +132,16 @@ pub enum SetupMode {
     },
 }
 
-/// `send` operands: optional premise round plus message text.
+/// `send` operands: optional premise round, new-round force flag, plus
+/// message text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendArgs {
-    /// Target round, or [`None`] for a new round (`--new` forces [`None`]).
+    /// Target round wire ref, or [`None`] to join-or-mint. Never combined
+    /// with [`fresh`](Self::fresh): the parser rejects `--new --round`.
     pub round: Option<String>,
+    /// Force a fresh round (`--new`); the Host mints instead of joining
+    /// any open round.
+    pub fresh: bool,
     /// Message text: remaining words joined with single spaces.
     pub text: String,
 }
@@ -289,7 +294,8 @@ fn parse_send(args: &[String]) -> Result<SendArgs, CliError> {
         )));
     }
     Ok(SendArgs {
-        round: if fresh { None } else { round },
+        round,
+        fresh,
         text: text.join(" "),
     })
 }
@@ -389,16 +395,19 @@ pub fn history_request(companion: &str, limit: u64) -> HistoryRequest {
 
 /// Builds a text-input candidate: the caller-learned companion projection
 /// (echoed from presence; [`DEFAULT_COMPANION_REF`] until the first fact),
-/// optional premise round, a fresh [`new_local_id`], and the given body.
+/// optional premise round, new-round force flag, a fresh [`new_local_id`],
+/// and the given body.
 pub fn submit_input(
     companion: &str,
     round: Option<String>,
+    fresh: bool,
     text: String,
     lang: String,
 ) -> SubmitTextInput {
     SubmitTextInput {
         companion: CompanionWireRef(companion.to_string()),
         round: round.map(RoundWireId),
+        fresh,
         local_id: new_local_id(),
         body: TextBodyWire {
             text,
@@ -837,9 +846,10 @@ mod tests {
             command
                 == Command::Send(SendArgs {
                     round: None,
+                    fresh: true,
                     text: String::from("hello there"),
                 }),
-            "--new must force no round and join text, got {command:?}"
+            "--new must force a fresh round and join text, got {command:?}"
         );
     }
 
@@ -855,6 +865,7 @@ mod tests {
             command
                 == Command::Send(SendArgs {
                     round: Some(String::from("round-1")),
+                    fresh: false,
                     text: String::from("hi"),
                 }),
             "--round must set the premise round, got {command:?}"
@@ -870,9 +881,10 @@ mod tests {
             command
                 == Command::Send(SendArgs {
                     round: None,
+                    fresh: false,
                     text: String::from("hi"),
                 }),
-            "bare send must request a new round, got {command:?}"
+            "bare send must join-or-mint, got {command:?}"
         );
     }
 
@@ -1234,6 +1246,7 @@ mod tests {
         let input = submit_input(
             "companion-1",
             Some(String::from("round-1")),
+            false,
             String::from("hello"),
             String::from("en"),
         );
@@ -1251,12 +1264,17 @@ mod tests {
         let fresh = submit_input(
             "companion-1",
             None,
+            true,
             String::from("hello"),
             String::from("en"),
         );
         assert!(
             fresh.round.is_none(),
-            "no premise round must request a new round: {fresh:?}"
+            "no premise round keeps no hint: {fresh:?}"
+        );
+        assert!(
+            fresh.fresh,
+            "the force flag must travel to the wire: {fresh:?}"
         );
     }
 

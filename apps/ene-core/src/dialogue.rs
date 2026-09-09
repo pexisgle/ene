@@ -57,8 +57,8 @@ use ene_companion::{
 };
 use ene_credential::{CredentialRef, CredentialRefRepository, credential_availability};
 use ene_inference::{
-    AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository, InferenceTicketId,
-    InferenceUseOutcome, ProviderTransport, RequestInferenceCommand, ResolvedRoute, UsageFact,
+    AttemptBeginOutcome, DispatchResult, InferenceAttempt, InferenceAttemptRepository,
+    InferenceTicketId, ProviderTransport, RequestInferenceCommand, ResolvedRoute, UsageFact,
     UsageSource, send,
 };
 use ene_permission::{
@@ -68,12 +68,12 @@ use ene_permission::{
 };
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{
-    ClientId, LiveReachabilityRef, MoveDecision, PresenceAttribution, PresenceCheckRef,
-    PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
+    ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
+    PresenceCheckRef, PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
 };
 use ene_presentation::{
     ClientInputRef, CompanionAvailability, IntakePremise, OpenRound, RevalidationReason, RoundId,
-    RoundIntakeOutcome, SubmitClientInputCandidate, check_intake,
+    RoundIntakeOutcome, RoundIntent, SubmitClientInputCandidate, check_intake,
 };
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
@@ -634,6 +634,15 @@ impl HostHandle {
                 }
             },
         };
+        // One meaning per value: an explicit new-round force beats any
+        // round hint (the CLI already rejects combining them, so both set
+        // means a hand-built frame); otherwise a resolved hint joins that
+        // round and no hint joins-or-mints.
+        let intent = if submit.fresh {
+            RoundIntent::New
+        } else {
+            requested.map_or(RoundIntent::Auto, RoundIntent::Existing)
+        };
         let Ok(lifecycle) = self.store.load_lifecycle(companion).await else {
             return vec![held_frame(frame, live)];
         };
@@ -648,7 +657,7 @@ impl HostHandle {
                         .presence_generation_view
                         .map(PresenceGeneration::from_u64)
                 }),
-                round: requested,
+                round: intent,
                 input_ref: ClientInputRef {
                     text: submit.body.text.clone(),
                     lang: submit.body.lang.0.clone(),
@@ -880,12 +889,12 @@ impl HostHandle {
         // as defense in depth, but the durable determination already bound
         // this ticket to its consent premise.
         let send_outcome = send(command, true, transport).await;
-        let Ok((outcome, arrival)) = send_outcome else {
+        let Ok(dispatch) = send_outcome else {
             self.record_unknown_usage(ticket, &consent.provider, &consent.model)
                 .await;
             return interrupted_frames(frame, live, &round_wire, generation_number);
         };
-        let InferenceUseOutcome::SentAndCompleted(_) = outcome else {
+        let DispatchResult::Completed(arrival) = dispatch else {
             // Definitely never sent: the decision table records no fact.
             self.record_usage_decision(usage_for_disposition(
                 ticket,
@@ -894,11 +903,6 @@ impl HostHandle {
                 SendOutcomeClass::NeverSent,
             ))
             .await;
-            return interrupted_frames(frame, live, &round_wire, generation_number);
-        };
-        let Some(arrival) = arrival else {
-            self.record_unknown_usage(ticket, &consent.provider, &consent.model)
-                .await;
             return interrupted_frames(frame, live, &round_wire, generation_number);
         };
         if !self.consent_matches(&consent.id, consent.rev).await {
@@ -1163,8 +1167,10 @@ async fn attach_from(
         .confirm_transition(companion, generation, premise)
         .await
     {
-        Ok(confirmed) => AttachOutcome::Attached(confirmed),
-        Err(_) => AttachOutcome::Raced,
+        Ok(ConfirmTransitionOutcome::Confirmed(fact)) => AttachOutcome::Attached(fact),
+        Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { .. }) | Err(_) => {
+            AttachOutcome::Raced
+        }
     }
 }
 
@@ -1248,6 +1254,7 @@ mod tests {
             payload: WirePayload::SubmitTextInput(SubmitTextInput {
                 companion: CompanionWireRef(companion.to_string()),
                 round: None,
+                fresh: false,
                 local_id: ClientLocalId(local_id.to_string()),
                 body: TextBodyWire {
                     text: text.to_string(),
@@ -1920,6 +1927,84 @@ mod tests {
             return;
         };
         assert_eq!(second.items.len(), 2, "the replay appends nothing durable");
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn fresh_send_mints_despite_matching_open_round() {
+        use ene_companion::CompanionRepository as _;
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, dir)) = setup_handle("dlg-fresh").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        assert!(
+            register_assign_complete(&handle, &live, &transport).await,
+            "setup must complete"
+        );
+        let first = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
+        let responses = handle.handle_frame(first, live.clone(), &transport).await;
+        let Some(accepted) = responses.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
+            round: first_round,
+        }) = &accepted.payload
+        else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let first_round = first_round.clone();
+        // The second send observes the current generation so only the
+        // round intent differs from a plain continuation.
+        let companion = handle.store.ensure_running_companion().await;
+        let Ok(companion) = companion else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let attribution = handle.store.load_attribution(companion.as_raw()).await;
+        let Ok(Some(current)) = attribution else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let mut second = submit_frame(
+            handle.companion_wire(),
+            Some(current.generation.as_u64()),
+            None,
+            "local-2",
+            "again",
+            live.connection_id,
+        );
+        let WirePayload::SubmitTextInput(ref mut input) = second.payload else {
+            remove_data_dir(&dir);
+            return;
+        };
+        input.fresh = true;
+        let responses = handle.handle_frame(second, live.clone(), &transport).await;
+        let Some(accepted) = responses.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &accepted.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
+                    round
+                }) if *round != first_round
+            ),
+            "a fresh send must mint instead of joining, got {:?}",
+            accepted.payload
+        );
         remove_data_dir(&dir);
     }
 

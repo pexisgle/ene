@@ -116,8 +116,8 @@ use ene_inference::ProviderTransport;
 use ene_inference::provider::{DEFAULT_BASE_URL, OpenAiResponsesTransport};
 use ene_permission::EvaluationTracker;
 use ene_presence::{
-    ClientId, LiveReachabilityRef, MoveDecision, PresenceCheckRef, PresenceRepository,
-    PresenceState, ThinMoveReason,
+    ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
+    PresenceRepository, PresenceState, ThinMoveReason,
 };
 use ene_presentation::{OpenRound, RoundId};
 use ene_primitive::RawId;
@@ -781,15 +781,15 @@ impl HostHandle {
             client,
             connection_live: false,
         };
-        if self
-            .store
-            .confirm_transition(companion.as_raw(), generation, premise)
-            .await
-            .is_err()
-        {
-            // The transition stays unconfirmed; the next intake reads the
-            // `InTransition` attribution and reports held, which is honest.
-        }
+        // Rejected and errored confirms alike leave the transition
+        // unconfirmed; the next intake reads the `InTransition`
+        // attribution and reports held, which is honest.
+        if !matches!(
+            self.store
+                .confirm_transition(companion.as_raw(), generation, premise)
+                .await,
+            Ok(ConfirmTransitionOutcome::Confirmed(_))
+        ) {}
     }
 
     /// Handles one [`PairingRequest`]: deny unauthorized or blank peers, else
@@ -1274,7 +1274,8 @@ pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-    let transport = OpenAiResponsesTransport::new(base_url, credential, EnvCredentialStore::new());
+    let transport = OpenAiResponsesTransport::new(base_url, credential, EnvCredentialStore::new())
+        .map_err(|error| CoreError::Inference(error.to_string()))?;
     crate::conn::run(
         data_dir.to_path_buf(),
         Arc::new(handle),
@@ -1380,6 +1381,7 @@ mod tests {
             payload: WirePayload::SubmitTextInput(SubmitTextInput {
                 companion: CompanionWireRef(String::from("companion-echo")),
                 round: None,
+                fresh: false,
                 local_id: ClientLocalId(String::from("local-1")),
                 body: TextBodyWire {
                     text: String::from("hello"),
