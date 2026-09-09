@@ -225,6 +225,13 @@ impl Store {
             }
         }
         let command_text = cmd.command_id.map(|command| encode_id(command.0));
+        let (client_counter, client_random) = match cmd.incarnation {
+            Some((counter, random)) => (
+                Some(encode_u64(counter).map_err(companion_unavailable)?),
+                Some(encode_u64(random).map_err(companion_unavailable)?),
+            ),
+            None => (None, None),
+        };
         tx.execute(
             SQL_INSERT_HISTORY,
             params![
@@ -238,6 +245,9 @@ impl Store {
                 generation_raw,
                 command_text.as_deref(),
                 cmd.local_id.as_deref(),
+                cmd.round_wire.as_deref(),
+                client_counter,
+                client_random,
             ],
         )
         .map_err(|error| companion_unavailable(error.to_string()))?;
@@ -291,7 +301,7 @@ mod migrate {
     /// correspondence metadata only. Version 4 adds the `credential_pending`
     /// table for registration approvals; the usable marker stays
     /// `credential_ref`, so no approved table is created.
-    const CURRENT_VERSION: u64 = 4;
+    const CURRENT_VERSION: u64 = 5;
 
     /// Forward-only schema: tables first, then the supporting indexes.
     const SCHEMA: &str = "
@@ -414,6 +424,29 @@ CREATE TABLE IF NOT EXISTS credential_pending (
 );
 ";
 
+    /// Version 5 upgrade, applied once when the stored version is below 5.
+    ///
+    /// Forward-only: adds the opaque wire projections and the replay
+    /// fingerprint. `history_message.round_wire` carries the only round
+    /// string that ever crosses the wire (minted fresh per round,
+    /// unrelated to the domain bytes); `client_counter`/`client_random`
+    /// carry the sending incarnation for fingerprint comparison; all three
+    /// stay `NULL` on pre-existing rows, which read back as absent. Same
+    /// for `paired_device.wire` (opaque device projection with a uniqueness
+    /// guard for new rows), except pre-existing paired rows are backfilled
+    /// to the legacy continuity projection (their device identity rendering)
+    /// so already-provisioned clients keep resolving after migration; new
+    /// approvals mint a fresh opaque projection instead. Fresh and upgraded
+    /// databases converge via `IF NOT EXISTS`; nothing else is backfilled.
+    const MIGRATION_V5: &str = "
+ALTER TABLE history_message ADD COLUMN round_wire TEXT NULL;
+ALTER TABLE history_message ADD COLUMN client_counter INTEGER NULL;
+ALTER TABLE history_message ADD COLUMN client_random INTEGER NULL;
+ALTER TABLE paired_device ADD COLUMN wire TEXT NULL;
+UPDATE paired_device SET wire = device_id WHERE wire IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_device_wire ON paired_device (wire);
+";
+
     /// Creates or upgrades the schema on an open connection.
     ///
     /// Idempotent: rerunning on a migrated database changes nothing. Rejects
@@ -450,6 +483,10 @@ CREATE TABLE IF NOT EXISTS credential_pending (
             conn.execute_batch(MIGRATION_V4)
                 .map_err(|error| error.to_string())?;
         }
+        if stored_version < 5 {
+            conn.execute_batch(MIGRATION_V5)
+                .map_err(|error| error.to_string())?;
+        }
         let current = i64::try_from(CURRENT_VERSION)
             .map_err(|_| String::from("schema version out of range"))?;
         if stored.is_none() {
@@ -478,10 +515,10 @@ const SQL_SELECT_ATTRIBUTION: &str =
     "SELECT state, active_client, generation FROM presence_attribution WHERE companion_id = ?1";
 const SQL_UPDATE_ATTRIBUTION: &str = "UPDATE presence_attribution SET state = ?1, active_client = ?2, generation = ?3 WHERE companion_id = ?4";
 const SQL_INSERT_TRANSITION: &str = "INSERT INTO presence_transition_log (companion_id, old_state, new_state, old_gen, new_gen, reason, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
-const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, command_id, local_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
-const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
-const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
-const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
+const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_SELECT_HISTORY_ID_BY_COMMAND: &str = "SELECT message_id, round_id FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
@@ -501,16 +538,18 @@ const SQL_SELECT_CREDENTIAL: &str =
 const SQL_LIST_CREDENTIALS: &str = "SELECT id, provider, label FROM credential_ref ORDER BY id ASC";
 const SQL_INSERT_USAGE: &str = "INSERT INTO usage_fact (ticket, provider, model, input_tokens, output_tokens, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 const SQL_SELECT_PAIRED_BY_DESCRIPTOR: &str =
-    "SELECT device_id, descriptor, paired_at FROM paired_device WHERE descriptor = ?1";
+    "SELECT device_id, descriptor, paired_at, wire FROM paired_device WHERE descriptor = ?1";
 const SQL_SELECT_DEVICE_BY_ID: &str =
-    "SELECT device_id, descriptor, paired_at FROM paired_device WHERE device_id = ?1";
+    "SELECT device_id, descriptor, paired_at, wire FROM paired_device WHERE device_id = ?1";
 const SQL_SELECT_PENDING_BY_DESCRIPTOR: &str =
     "SELECT descriptor, requested_at FROM pairing_pending WHERE descriptor = ?1";
 const SQL_INSERT_PENDING_IGNORE: &str =
     "INSERT OR IGNORE INTO pairing_pending (descriptor, requested_at) VALUES (?1, ?2)";
 const SQL_DELETE_PENDING: &str = "DELETE FROM pairing_pending WHERE descriptor = ?1";
 const SQL_INSERT_PAIRED: &str =
-    "INSERT INTO paired_device (device_id, descriptor, paired_at) VALUES (?1, ?2, ?3)";
+    "INSERT INTO paired_device (device_id, descriptor, paired_at, wire) VALUES (?1, ?2, ?3, ?4)";
+const SQL_SELECT_DEVICE_BY_WIRE: &str =
+    "SELECT device_id, descriptor, paired_at, wire FROM paired_device WHERE wire = ?1";
 const SQL_LIST_PENDING_PAIRINGS: &str =
     "SELECT descriptor, requested_at FROM pairing_pending ORDER BY rowid ASC";
 const SQL_SELECT_CREDENTIAL_PENDING: &str = "SELECT provider, label, requested_at FROM credential_pending WHERE provider = ?1 AND label = ?2";
@@ -697,15 +736,22 @@ fn decode_consent(
 }
 
 /// Reads one paired-device row into its domain record.
+///
+/// `wire` carries the opaque wire projection; pre-opaque rows store `NULL`,
+/// which decodes to the legacy continuity projection (the device identity
+/// rendering) so already-provisioned clients keep resolving after migration.
+/// New approvals always store a fresh opaque projection instead.
 fn decode_device_record(
     device_text: &str,
     descriptor: String,
     paired_text: &str,
+    wire: Option<String>,
 ) -> Result<DeviceRecord, String> {
     let paired_at = WallClockWithTz::parse_rfc3339(paired_text)
         .map_err(|_| String::from("malformed device pairing timestamp"))?;
     Ok(DeviceRecord {
         id: DeviceId(decode_id(device_text)?),
+        wire: wire.unwrap_or_else(|| device_text.to_owned()),
         descriptor,
         paired_at,
     })
@@ -748,9 +794,10 @@ fn decode_pending_credential(
 }
 
 /// One decoded history row: identity, round, role, body, language,
-/// timestamp, generation, optional command-scoped replay identity, and
-/// optional client-local correspondence ID (`local_id` is stored metadata
-/// only, never a key).
+/// timestamp, generation, optional command-scoped replay identity, optional
+/// wire projection and incarnation for the replay fingerprint, and optional
+/// client-local correspondence ID (`local_id` is stored metadata only,
+/// never a key).
 type HistoryRow = (
     String,
     String,
@@ -761,13 +808,19 @@ type HistoryRow = (
     i64,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
 );
 
 /// Reads one history row into its domain message.
 ///
 /// `command_text` carries the client-minted replay identity (`None` stores
-/// `NULL`, meaning no replay key); `local_id` carries client-local
-/// correspondence metadata only.
+/// `NULL`, meaning no replay key); `round_wire` carries the opaque wire
+/// projection (`None` on pre-opaque rows); the client counter/random pair
+/// carries the sending incarnation only when both are present and decode
+/// (`None` otherwise, including pre-opaque rows); `local_id` carries
+/// client-local correspondence metadata only.
 fn decode_history_message(
     companion: CompanionId,
     message_text: &str,
@@ -778,6 +831,9 @@ fn decode_history_message(
     at_text: &str,
     generation_raw: i64,
     command_text: Option<&str>,
+    round_wire: Option<String>,
+    client_counter: Option<i64>,
+    client_random: Option<i64>,
     local_id: Option<String>,
 ) -> Result<HistoryMessage, String> {
     let at = WallClockWithTz::parse_rfc3339(at_text)
@@ -786,6 +842,13 @@ fn decode_history_message(
     if let Some(text) = command_text {
         command_id = Some(CommandId(decode_id(text)?));
     }
+    let incarnation = match (client_counter, client_random) {
+        (Some(counter_raw), Some(random_raw)) => {
+            Some((decode_u64(counter_raw)?, decode_u64(random_raw)?))
+        }
+        (None, None) => None,
+        _ => return Err(String::from("malformed history incarnation")),
+    };
     Ok(HistoryMessage {
         id: decode_id(message_text)?,
         companion,
@@ -796,6 +859,8 @@ fn decode_history_message(
         at,
         presence_generation: PresenceGeneration::from_u64(decode_u64(generation_raw)?),
         command_id,
+        round_wire,
+        incarnation,
         local_id,
     })
 }
@@ -1145,6 +1210,9 @@ impl HistoryRepository for Store {
                         row.get(6)?,
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
+                        row.get::<_, Option<i64>>(11)?,
                     ))
                 },
             )
@@ -1161,6 +1229,9 @@ impl HistoryRepository for Store {
                 generation_raw,
                 command_text,
                 stored_local_id,
+                round_wire,
+                client_counter,
+                client_random,
             )) => {
                 let message = decode_history_message(
                     companion,
@@ -1172,6 +1243,9 @@ impl HistoryRepository for Store {
                     &at_text,
                     generation_raw,
                     command_text.as_deref(),
+                    round_wire,
+                    client_counter,
+                    client_random,
                     stored_local_id,
                 )
                 .map_err(companion_unavailable)?;
@@ -1210,6 +1284,9 @@ impl HistoryRepository for Store {
                         row.get(6)?,
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
+                        row.get::<_, Option<i64>>(11)?,
                     ))
                 },
             )
@@ -1226,6 +1303,9 @@ impl HistoryRepository for Store {
                 generation_raw,
                 command_text,
                 stored_local_id,
+                round_wire,
+                client_counter,
+                client_random,
             )) => {
                 let message = decode_history_message(
                     companion,
@@ -1237,6 +1317,9 @@ impl HistoryRepository for Store {
                     &at_text,
                     generation_raw,
                     command_text.as_deref(),
+                    round_wire,
+                    client_counter,
+                    client_random,
                     stored_local_id,
                 )
                 .map_err(companion_unavailable)?;
@@ -1273,6 +1356,9 @@ impl HistoryRepository for Store {
                     row.get::<_, i64>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
                 ))
             })
             .map_err(|error| companion_unavailable(error.to_string()))?;
@@ -1288,6 +1374,9 @@ impl HistoryRepository for Store {
                 generation_raw,
                 command_text,
                 stored_local_id,
+                round_wire,
+                client_counter,
+                client_random,
             ) = row.map_err(|error| companion_unavailable(error.to_string()))?;
             let message = decode_history_message(
                 companion,
@@ -1299,6 +1388,9 @@ impl HistoryRepository for Store {
                 &at_text,
                 generation_raw,
                 command_text.as_deref(),
+                round_wire,
+                client_counter,
+                client_random,
                 stored_local_id,
             )
             .map_err(companion_unavailable)?;
@@ -1662,16 +1754,16 @@ impl DevicePairingRepository for Store {
             .map_err(|error| credential_unavailable(error.to_string()))?;
         // An already-paired descriptor short-circuits: re-requests leave the
         // stored record untouched.
-        let paired: Option<(String, String, String)> = tx
+        let paired: Option<(String, String, String, Option<String>)> = tx
             .query_row(
                 SQL_SELECT_PAIRED_BY_DESCRIPTOR,
                 params![descriptor],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(|error| credential_unavailable(error.to_string()))?;
-        if let Some((device_text, stored_descriptor, paired_text)) = paired {
-            let device = decode_device_record(&device_text, stored_descriptor, &paired_text)
+        if let Some((device_text, stored_descriptor, paired_text, wire)) = paired {
+            let device = decode_device_record(&device_text, stored_descriptor, &paired_text, wire)
                 .map_err(credential_unavailable)?;
             return Ok(DevicePairingStatus::Paired { device });
         }
@@ -1722,17 +1814,18 @@ impl DevicePairingRepository for Store {
         // record unchanged with a freshly minted secret (rotation); no
         // fresh identity is stored. Secrets are never stored: the caller
         // displays the returned string once on a trusted surface.
-        let paired: Option<(String, String, String)> = tx
+        let paired: Option<(String, String, String, Option<String>)> = tx
             .query_row(
                 SQL_SELECT_PAIRED_BY_DESCRIPTOR,
                 params![descriptor],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(|error| credential_unavailable(error.to_string()))?;
-        if let Some((stored_text, stored_descriptor, stored_paired)) = paired {
-            let device = decode_device_record(&stored_text, stored_descriptor, &stored_paired)
-                .map_err(credential_unavailable)?;
+        if let Some((stored_text, stored_descriptor, stored_paired, wire)) = paired {
+            let device =
+                decode_device_record(&stored_text, stored_descriptor, &stored_paired, wire)
+                    .map_err(credential_unavailable)?;
             return Ok(Some((device, fresh_pairing_secret())));
         }
         let pending: Option<(String, String)> = tx
@@ -1748,11 +1841,15 @@ impl DevicePairingRepository for Store {
         };
         // The pending delete and the paired insert share one transaction so
         // an approval never strands a descriptor in both tables or neither.
+        // The wire projection is minted fresh here, unrelated to the device
+        // identity bytes: it is the only device string that ever crosses
+        // the wire.
+        let wire = RawId::new().as_uuid().to_string();
         tx.execute(SQL_DELETE_PENDING, params![descriptor])
             .map_err(|error| credential_unavailable(error.to_string()))?;
         tx.execute(
             SQL_INSERT_PAIRED,
-            params![device_text, stored_descriptor, paired_text],
+            params![device_text, stored_descriptor, paired_text, wire],
         )
         .map_err(|error| credential_unavailable(error.to_string()))?;
         tx.commit()
@@ -1760,6 +1857,7 @@ impl DevicePairingRepository for Store {
         Ok(Some((
             DeviceRecord {
                 id: DeviceId(device_id),
+                wire,
                 descriptor: stored_descriptor,
                 paired_at,
             },
@@ -1777,16 +1875,42 @@ impl DevicePairingRepository for Store {
     ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
         let key = encode_id(id.0);
         let guard = lock_shared(&self.conn);
-        let found: Option<(String, String, String)> = guard
+        let found: Option<(String, String, String, Option<String>)> = guard
             .query_row(SQL_SELECT_DEVICE_BY_ID, params![key], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })
             .optional()
             .map_err(|error| credential_unavailable(error.to_string()))?;
         match found {
-            Some((device_text, descriptor, paired_text)) => {
-                let device = decode_device_record(&device_text, descriptor, &paired_text)
+            Some((device_text, descriptor, paired_text, wire)) => {
+                let device = decode_device_record(&device_text, descriptor, &paired_text, wire)
                     .map_err(credential_unavailable)?;
+                Ok(Some(device))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn find_device_by_wire(
+        &self,
+        wire: &str,
+    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
+        let guard = lock_shared(&self.conn);
+        let found: Option<(String, String, String, Option<String>)> = guard
+            .query_row(SQL_SELECT_DEVICE_BY_WIRE, params![wire], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .optional()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        match found {
+            Some((device_text, descriptor, paired_text, stored_wire)) => {
+                let device =
+                    decode_device_record(&device_text, descriptor, &paired_text, stored_wire)
+                        .map_err(credential_unavailable)?;
                 Ok(Some(device))
             }
             None => Ok(None),
@@ -2046,6 +2170,8 @@ mod tests {
             expected_generation: generation,
             expected_consent: None,
             command_id: None,
+            round_wire: Some(RawId::new().as_uuid().to_string()),
+            incarnation: Some((1, 2)),
             local_id: None,
         }
     }
@@ -2069,6 +2195,8 @@ mod tests {
             expected_generation: generation,
             expected_consent: None,
             command_id,
+            round_wire: Some(RawId::new().as_uuid().to_string()),
+            incarnation: Some((1, 2)),
             local_id: local_id.map(String::from),
         }
     }
@@ -3035,7 +3163,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
             assert!(seeded_history.is_ok(), "v2 history row must seed");
         }
         let opened = Store::open(&path).await;
-        assert!(opened.is_ok(), "open must migrate v2 to v3");
+        assert!(opened.is_ok(), "open must migrate v2 to v5");
         let Ok(store) = opened else {
             return;
         };
@@ -3049,6 +3177,14 @@ INSERT INTO _schema_version (version) VALUES (2);",
         assert_eq!(timeline[0].text, "legacy body");
         assert_eq!(timeline[0].local_id.as_deref(), Some("legacy-1"));
         assert_eq!(timeline[0].command_id, None);
+        assert_eq!(
+            timeline[0].round_wire, None,
+            "pre-opaque rows carry no wire projection"
+        );
+        assert_eq!(
+            timeline[0].incarnation, None,
+            "pre-opaque rows carry no incarnation"
+        );
         let by_local = store.lookup_local_id(companion, "legacy-1").await;
         assert!(by_local.is_ok(), "legacy local lookup must succeed");
         let Ok(Some(legacy)) = by_local else {
@@ -3069,7 +3205,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
         let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
             row.get::<_, i64>(0)
         });
-        assert!(matches!(version, Ok(4)), "migration must record version 4");
+        assert!(matches!(version, Ok(5)), "migration must record version 5");
         let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
             (),
@@ -3193,6 +3329,131 @@ INSERT INTO _schema_version (version) VALUES (2);",
     }
 
     #[tokio::test]
+    async fn device_wire_is_opaque_and_resolvable() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let requested = store.request_pairing(String::from("phone")).await;
+        assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
+        let approved = DevicePairingRepository::approve_pending(&store, "phone").await;
+        let Ok(Some((device, _))) = approved else {
+            return;
+        };
+        assert_ne!(
+            device.wire,
+            super::encode_id(device.id.0),
+            "wire projection must not render the domain identity"
+        );
+        let by_wire = store.find_device_by_wire(&device.wire).await;
+        assert!(
+            matches!(by_wire, Ok(Some(ref stored)) if *stored == device),
+            "wire lookup must resolve the approved record"
+        );
+        let unknown = store.find_device_by_wire("no-such-wire").await;
+        assert!(matches!(unknown, Ok(None)), "unknown wire must miss");
+    }
+
+    #[tokio::test]
+    async fn history_wire_projection_and_incarnation_roundtrip() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let Some((companion, generation)) = running_companion(&store).await else {
+            return;
+        };
+        let mut cmd = history_command(companion, generation, "opaque body");
+        cmd.round_wire = Some(String::from("round-wire-9"));
+        cmd.incarnation = Some((7, 11));
+        let appended = store.append_message(cmd).await;
+        let Ok(HistoryAppendOutcome::CommittedAs { message }) = appended else {
+            return;
+        };
+        let loaded = store.load_timeline(companion, None, 10).await;
+        let Ok(timeline) = loaded else {
+            return;
+        };
+        assert_eq!(timeline.len(), 1, "one item must read back");
+        assert_eq!(timeline[0].id, message);
+        assert_eq!(
+            timeline[0].round_wire.as_deref(),
+            Some("round-wire-9"),
+            "timeline must echo the stored wire projection"
+        );
+        assert_eq!(
+            timeline[0].incarnation,
+            Some((7, 11)),
+            "timeline must echo the stored incarnation"
+        );
+        let by_local_none = store.lookup_local_id(companion, "missing").await;
+        assert!(
+            matches!(by_local_none, Ok(None)),
+            "unrelated correspondence lookup must miss"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_v4_backfills_legacy_device_wire() {
+        let dir = tempfile::tempdir();
+        assert!(dir.is_ok(), "tempdir must open");
+        let Ok(dir) = dir else {
+            return;
+        };
+        let path = dir.path().join("store.db");
+        let device_id = RawId::new();
+        let device_text = super::encode_id(device_id);
+        {
+            let conn = rusqlite::Connection::open(&path);
+            assert!(conn.is_ok(), "raw v4 file must open");
+            let Ok(conn) = conn else {
+                return;
+            };
+            let shaped = conn.execute_batch(
+                "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL, command_id TEXT NULL);
+CREATE TABLE undelivered (undelivered_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, source_message TEXT NOT NULL, status TEXT NOT NULL, round_id TEXT NOT NULL, presence_generation INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE presence_attribution (companion_id TEXT PRIMARY KEY, state TEXT NOT NULL, active_client TEXT, generation INTEGER NOT NULL);
+CREATE TABLE presence_transition_log (transition_seq INTEGER PRIMARY KEY AUTOINCREMENT, companion_id TEXT NOT NULL, old_state TEXT NOT NULL, new_state TEXT NOT NULL, old_gen INTEGER NOT NULL, new_gen INTEGER NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
+CREATE TABLE credential_ref (id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL, UNIQUE (provider, label));
+CREATE TABLE usage_fact (ticket TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, source TEXT NOT NULL);
+CREATE TABLE pairing_pending (descriptor TEXT PRIMARY KEY, requested_at TEXT NOT NULL);
+CREATE TABLE paired_device (device_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, paired_at TEXT NOT NULL);
+CREATE TABLE credential_pending (provider TEXT NOT NULL, label TEXT NOT NULL, requested_at TEXT NOT NULL, PRIMARY KEY (provider, label));
+CREATE INDEX idx_history_message_companion ON history_message (companion_id);
+CREATE INDEX idx_history_message_round ON history_message (round_id);
+CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
+CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
+CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
+CREATE TABLE _schema_version (version INTEGER NOT NULL);
+INSERT INTO _schema_version (version) VALUES (4);",
+            );
+            assert!(shaped.is_ok(), "v4 shape must apply");
+            let seeded = conn.execute(
+                "INSERT INTO paired_device (device_id, descriptor, paired_at) VALUES (?1, ?2, ?3)",
+                params![device_text, "legacy-phone", fixture_clock().to_rfc3339()],
+            );
+            assert!(seeded.is_ok(), "v4 paired row must seed");
+        }
+        let opened = Store::open(&path).await;
+        assert!(opened.is_ok(), "open must migrate v4 to v5");
+        let Ok(store) = opened else {
+            return;
+        };
+        let found = store.find_device_by_wire(&device_text).await;
+        assert!(
+            matches!(found, Ok(Some(ref stored)) if stored.id == DeviceId(device_id)),
+            "legacy device must stay resolvable through the continuity projection"
+        );
+        let Ok(Some(stored)) = found else {
+            return;
+        };
+        assert_eq!(
+            stored.wire, device_text,
+            "legacy backfill keeps the identity rendering so provisioned clients resolve"
+        );
+    }
+
+    #[tokio::test]
     async fn migration_v3_reopen_keeps_pairing_state() {
         let dir = tempfile::tempdir();
         assert!(dir.is_ok(), "tempdir must open");
@@ -3241,8 +3502,8 @@ INSERT INTO _schema_version (version) VALUES (2);",
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(4)),
-            "reopened database must record schema version 4"
+            matches!(version, Ok(5)),
+            "reopened database must record schema version 5"
         );
     }
 
@@ -3511,8 +3772,8 @@ INSERT INTO _schema_version (version) VALUES (2);",
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(4)),
-            "reopened database must record schema version 4"
+            matches!(version, Ok(5)),
+            "reopened database must record schema version 5"
         );
     }
 
