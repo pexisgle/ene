@@ -19,5 +19,6 @@
 
 ## 未解決 blocker
 
-- #1360 レビュー第3ラウンド（2026-09-09 08:30 の inline 2件）対応済み: `WireMessageId` 重複抑止（connection-local bounded cache）、usage certainty 分離（未送信は無記録・stale adoption は Reported 保持）。CI 待ち + レビュアー判断待ち2点（pre-auth claim 厳格化、intent replay table）は継続
+- #1360 レビュー第4ラウンド対応済み: duplicate→close の実バグ修正（三値 `LiveDecision`＋socket 回帰テスト）、companion mapping loop（Host 発行・resolve・Client echo）、paired-sender `Some` 化、E2E の kill 漏れ修正。codec 境界の unknown-variant 到達性は P2 hardening として明示 defer（reviewer 合意済み）。CI 待ち
+- 残りはレビュアー判断待ち: pre-auth claim 厳格化（現状は無視＋drop で fail-closed）、intent replay table、presence fallback edge（Stage 5 へ defer 済み）
 - マージ順: #1355 → #1356 → #1358 → #1359 → #1360
