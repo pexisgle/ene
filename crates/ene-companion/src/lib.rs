@@ -182,6 +182,7 @@ impl core::fmt::Debug for AppendHistoryCommand {
             .field("lang", &self.lang)
             .field("at", &self.at)
             .field("expected_generation", &self.expected_generation)
+            .field("expected_consent", &self.expected_consent)
             .field("command_id", &self.command_id)
             .field("local_id", &self.local_id)
             .finish()
