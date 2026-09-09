@@ -2508,6 +2508,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_replay_returns_the_stored_snapshot() {
+        let Some((handle, dir)) = setup_handle("dlg-completeray").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        assert!(
+            register_assign_complete(&handle, &live, &transport).await,
+            "setup must complete"
+        );
+        let intent_id = CommandWireId(RawId::new().as_uuid());
+        let complete = intent_frame_with_id(
+            ManagementIntentKind::ManageRuleConsentCap,
+            "setup:complete",
+            "consent-rev-1",
+            live.connection_id,
+            intent_id,
+        );
+        let applied = handle
+            .handle_frame(complete.clone(), live.clone(), &transport)
+            .await;
+        assert!(
+            matches!(
+                &applied.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(
+                    ManagementOutcome::AppliedAsOneTime
+                ))
+            ),
+            "the first completion applies, got {applied:?}"
+        );
+        let replayed = handle
+            .handle_frame(complete, live.clone(), &transport)
+            .await;
+        assert!(
+            matches!(
+                &replayed.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(
+                    ManagementOutcome::AppliedAsOneTime
+                ))
+            ),
+            "the exact retry must replay applied, got {replayed:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn complete_stale_replay_returns_its_own_mark() {
+        let Some((handle, dir)) = setup_handle("dlg-completestale").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        assert!(
+            register_assign_complete(&handle, &live, &transport).await,
+            "setup must complete"
+        );
+        let intent_id = CommandWireId(RawId::new().as_uuid());
+        let stale = intent_frame_with_id(
+            ManagementIntentKind::ManageRuleConsentCap,
+            "setup:complete",
+            "consent-none",
+            live.connection_id,
+            intent_id,
+        );
+        let first = handle
+            .handle_frame(stale.clone(), live.clone(), &transport)
+            .await;
+        assert!(
+            matches!(
+                &first.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView {
+                    current
+                })) if current.0 == "consent-rev-1"
+            ),
+            "the stale completion reports rev 1, got {first:?}"
+        );
+        // Move the route on under a different id, then retry the stale id:
+        // the snapshot still names rev 1 (history, not present).
+        let moved = handle
+            .handle_frame(
+                intent_frame(
+                    ManagementIntentKind::ManageRuleConsentCap,
+                    "consent:openai:dialogue-2:openai:main",
+                    "consent-rev-1",
+                    live.connection_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert!(
+            matches!(
+                &moved.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(
+                    ManagementOutcome::StoredAsRuleView { .. }
+                ))
+            ),
+            "the route move commits, got {moved:?}"
+        );
+        let replayed = handle.handle_frame(stale, live.clone(), &transport).await;
+        assert!(
+            matches!(
+                &replayed.first().map(|first| &first.payload),
+                Some(WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView {
+                    current
+                })) if current.0 == "consent-rev-1"
+            ),
+            "the stale retry must replay its own mark, got {replayed:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn assign_stale_replay_returns_its_own_mark() {
+        let Some((handle, dir)) = setup_handle("dlg-assignstale").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        let intent_id = CommandWireId(RawId::new().as_uuid());
+        // No consent yet: a rev-9 base is stale on its face.
+        let stale = intent_frame_with_id(
+            ManagementIntentKind::ManageRuleConsentCap,
+            "consent:openai:dialogue-1:openai:main",
+            "consent-rev-9",
+            live.connection_id,
+            intent_id,
+        );
+        for attempt in 0..2 {
+            let answered = handle
+                .handle_frame(stale.clone(), live.clone(), &transport)
+                .await;
+            assert!(
+                matches!(
+                    &answered.first().map(|first| &first.payload),
+                    Some(WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView {
+                        current
+                    })) if current.0 == "consent-none"
+                ),
+                "attempt {attempt} must report the empty mark, got {answered:?}"
+            );
+        }
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
     async fn submit_without_command_id_is_declined_without_side_effects() {
         use ene_companion::{CompanionRepository as _, HistoryRepository as _};
 

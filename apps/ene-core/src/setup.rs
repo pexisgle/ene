@@ -63,7 +63,7 @@ use ene_api::v1::refs::ViewMarkWire;
 use ene_credential::{CredentialRef, CredentialRefRepository, CredentialStore};
 use ene_permission::{
     ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
-    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
+    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, ShortcutIntentOutcome,
 };
 use ene_plugin_ipc::WireFrame;
 use ene_primitive::RawId;
@@ -195,38 +195,6 @@ impl HostHandle {
         }
     }
 
-    /// Reads the current consent display mark, if the store answers.
-    ///
-    /// The mark follows [`consent_mark`]. [`None`] means the store failed and
-    /// the caller must hold rather than decide.
-    pub(crate) async fn current_mark(&self) -> Option<String> {
-        let Ok(current) = self.store.load_current().await else {
-            return None;
-        };
-        Some(consent_mark(current.as_ref()))
-    }
-
-    /// Reports whether setup is complete: consent stored and bearer present.
-    ///
-    /// Returns [`None`] when the store fails, so callers hold rather than
-    /// treat an unreadable store as incomplete setup.
-    pub(crate) async fn setup_ready(&self) -> Option<bool> {
-        let Ok(current) = self.store.load_current().await else {
-            return None;
-        };
-        let Some(consent) = current else {
-            return Some(false);
-        };
-        let Ok(refs) = self.store.list_refs().await else {
-            return None;
-        };
-        let credential = match refs.iter().find(|known| known.id == consent.credential_id) {
-            Some(known) => known.clone(),
-            None => return Some(false),
-        };
-        Some(self.cred_store.contains(&credential))
-    }
-
     /// Maps one [`ManagementIntent`] to its `Stage 2` outcome frames.
     ///
     /// Setup pairs route through the register/assign/complete/show paths
@@ -247,12 +215,42 @@ impl HostHandle {
             ManagementIntentKind::ManageRuleConsentCap => {
                 self.apply_consent_or_setup(frame, intent, live).await
             }
-            _ => vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::NeedsClarification,
-            )],
+            // Deferred scope answers clarify — recorded like any other
+            // decided outcome, so a retried id observes one answer.
+            _ => {
+                self.record_decided(
+                    intent,
+                    Self::intent_kind_name(intent.kind),
+                    IntentOutcome::NeedsClarification,
+                )
+                .await;
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::NeedsClarification,
+                )]
+            }
+        }
+    }
+
+    /// Renders a wire intent kind into its replay-fingerprint discriminator.
+    ///
+    /// Explicit match, never derived: the stored text must stay stable
+    /// across refactors that do not change the wire.
+    fn intent_kind_name(kind: ManagementIntentKind) -> &'static str {
+        match kind {
+            ManagementIntentKind::StopCompanion => "stop-companion",
+            ManagementIntentKind::DeleteCompanion => "delete-companion",
+            ManagementIntentKind::CancelTask => "cancel-task",
+            ManagementIntentKind::ManageSchedule => "manage-schedule",
+            ManagementIntentKind::DenyOrRefuse => "deny-or-refuse",
+            ManagementIntentKind::ManageRuleConsentCap => "manage-rule-consent-cap",
+            ManagementIntentKind::ManageDevice => "manage-device",
+            ManagementIntentKind::ConfigureCredentialIntent => "configure-credential",
+            ManagementIntentKind::RequestDeletionBackupRestoreReset => {
+                "deletion-backup-restore-reset"
+            }
         }
     }
 
@@ -276,6 +274,12 @@ impl HostHandle {
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         let Some((provider, label)) = parse_credential_target(&intent.target) else {
+            self.record_decided(
+                intent,
+                Self::INTENT_KIND_REGISTER,
+                IntentOutcome::NeedsClarification,
+            )
+            .await;
             return vec![outcome_frame(
                 frame,
                 live,
@@ -384,6 +388,10 @@ impl HostHandle {
             },
             IntentOutcome::AppliedAsOneTime => ManagementOutcome::AppliedAsOneTime,
             IntentOutcome::HeldByOperation => ManagementOutcome::HeldByOperation,
+            IntentOutcome::NeedsClarification => ManagementOutcome::NeedsClarification,
+            IntentOutcome::StaleBaseView { current } => ManagementOutcome::StaleBaseView {
+                current: ViewMarkWire(current.clone()),
+            },
         }
     }
 
@@ -412,6 +420,21 @@ impl HostHandle {
         };
         self.assign_consent(frame, intent, &provider, &model, &credential_id, live)
             .await
+    }
+
+    /// Records a decided snapshot best-effort: the answer is already
+    /// determined from successful reads, so a failed record only costs a
+    /// future retry its replay (which then decides from newer state under
+    /// a new id, or replays an older row under this one).
+    async fn record_decided(&self, intent: &ManagementIntent, kind: &str, outcome: IntentOutcome) {
+        let record = IntentOutcomeRecord {
+            fingerprint: Self::intent_fingerprint(intent, kind),
+            outcome,
+        };
+        if self.store.record_intent_outcome(record).await.is_err() {
+            // Best-effort durability gap, documented per call site: the
+            // answer below already responds from verified reads.
+        }
     }
 
     /// Assigns the consent route after verifying credential presence.
@@ -444,6 +467,16 @@ impl HostHandle {
             ConsentExpectation::ExpectEmpty => None,
             ConsentExpectation::ExpectRevision(id, revision) => Some((id, revision)),
             ConsentExpectation::FaceStale => {
+                // Decided from verified reads: record the stale snapshot so
+                // the id observes one answer forever.
+                self.record_decided(
+                    intent,
+                    Self::INTENT_KIND_ASSIGN,
+                    IntentOutcome::StaleBaseView {
+                        current: consent_mark(current.as_ref()),
+                    },
+                )
+                .await;
                 return vec![outcome_frame(
                     frame,
                     live,
@@ -463,6 +496,12 @@ impl HostHandle {
             )];
         };
         let Some(credential) = refs.iter().find(|known| known.id == credential_id).cloned() else {
+            self.record_decided(
+                intent,
+                Self::INTENT_KIND_ASSIGN,
+                IntentOutcome::NeedsClarification,
+            )
+            .await;
             return vec![outcome_frame(
                 frame,
                 live,
@@ -471,6 +510,12 @@ impl HostHandle {
             )];
         };
         if !self.cred_store.contains(&credential) {
+            self.record_decided(
+                intent,
+                Self::INTENT_KIND_ASSIGN,
+                IntentOutcome::NeedsClarification,
+            )
+            .await;
             return vec![outcome_frame(
                 frame,
                 live,
@@ -530,6 +575,14 @@ impl HostHandle {
             (None, Some(_)) | (Some(_), None) => false,
         };
         if !base_fresh {
+            self.record_decided(
+                intent,
+                Self::INTENT_KIND_ASSIGN,
+                IntentOutcome::StaleBaseView {
+                    current: consent_mark(current.as_ref()),
+                },
+            )
+            .await;
             return vec![outcome_frame(
                 frame,
                 live,
@@ -539,32 +592,38 @@ impl HostHandle {
                 },
             )];
         }
-        if let Some(current) = current.as_ref()
-            && current.provider == provider
-            && current.model == model
-            && current.credential_id == credential_id
+        // Same-route shortcut through one atomic claim (1-d): read current
+        // and record together, so the replay row can never strand apart
+        // from the state it describes.
+        match self
+            .store
+            .shortcut_with_intent(
+                provider.to_string(),
+                model.to_string(),
+                credential_id.to_string(),
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
+            )
+            .await
         {
-            // Read-only success: record the snapshot in its own transaction
-            // (nothing else commits alongside, so this is atomic enough).
-            let snapshot = IntentOutcome::StoredAsRuleView {
-                revision: current.rev.as_u64().to_string(),
-            };
-            let record = IntentOutcomeRecord {
-                fingerprint: Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
-                outcome: snapshot,
-            };
-            if self.store.record_intent_outcome(record).await.is_err() {
-                // The success below already answers; the missing row only
-                // costs a future retry one extra round trip.
+            Ok(ShortcutIntentOutcome::Hit { current }) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::StoredAsRuleView {
+                        revision: ViewMarkWire(current.rev.as_u64().to_string()),
+                    },
+                )];
             }
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::StoredAsRuleView {
-                    revision: ViewMarkWire(current.rev.as_u64().to_string()),
-                },
-            )];
+            Ok(ShortcutIntentOutcome::Miss { .. }) => {}
+            Err(_) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )];
+            }
         }
         let next_rev = match current.as_ref() {
             Some(record) => record.rev.as_u64().saturating_add(1),
@@ -627,29 +686,9 @@ impl HostHandle {
         intent: &ManagementIntent,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let Some(mark) = self.current_mark().await else {
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::HeldByOperation,
-            )];
-        };
-        if intent.base_view.0 != mark {
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::StaleBaseView {
-                    current: ViewMarkWire(mark),
-                },
-            )];
-        }
-        // Durable replay first, same contract as assign and register: exact
-        // retry replays the stored snapshot, reused id with new content
-        // clarifies. Completion derives from state and cannot un-complete,
-        // so only the applied snapshot is ever recorded — anything else
-        // recomputes honestly below.
+        // Durable replay first (1-a): the stored snapshot precedes any
+        // currentness check, so an exact retry replays its prior outcome
+        // even after the base moved on.
         let intent_key = intent.intent_id.0.as_hyphenated().to_string();
         match self.store.lookup_intent_outcome(&intent_key).await {
             Err(_) => {
@@ -680,31 +719,53 @@ impl HostHandle {
             }
             Ok(None) => {}
         }
-        match self.setup_ready().await {
-            Some(true) => {
-                let record = IntentOutcomeRecord {
-                    fingerprint: Self::intent_fingerprint(intent, Self::INTENT_KIND_COMPLETE),
-                    outcome: IntentOutcome::AppliedAsOneTime,
-                };
-                if self.store.record_intent_outcome(record).await.is_err() {
-                    // The applied answer below already responds; the missing
-                    // row only costs a future retry its replay (recompute
-                    // answers applied again, since completion cannot un-happen).
-                }
-                vec![outcome_frame(
+        // Bearer premise for the atomic claim below: locate the credential
+        // without deciding anything (the transaction decides). Unreadable
+        // stores hold, as before.
+        let bearer_present = match self.store.load_current().await {
+            Err(_) => {
+                return vec![outcome_frame(
                     frame,
                     live,
                     intent,
-                    ManagementOutcome::AppliedAsOneTime,
-                )]
+                    ManagementOutcome::HeldByOperation,
+                )];
             }
-            Some(false) => vec![outcome_frame(
+            Ok(None) => false,
+            Ok(Some(consent)) => match self.store.list_refs().await {
+                Err(_) => {
+                    return vec![outcome_frame(
+                        frame,
+                        live,
+                        intent,
+                        ManagementOutcome::HeldByOperation,
+                    )];
+                }
+                Ok(refs) => refs
+                    .iter()
+                    .find(|known| known.id == consent.credential_id)
+                    .is_some_and(|credential| self.cred_store.contains(credential)),
+            },
+        };
+        // One durable determination (1-b): compare, completability, and
+        // snapshot-save share a transaction; the answer below renders the
+        // decided snapshot verbatim.
+        match self
+            .store
+            .complete_with_intent(
+                intent.base_view.0.clone(),
+                bearer_present,
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_COMPLETE),
+            )
+            .await
+        {
+            Ok(decided) => vec![outcome_frame(
                 frame,
                 live,
                 intent,
-                ManagementOutcome::NeedsClarification,
+                Self::replayed_outcome(&decided.outcome),
             )],
-            None => vec![outcome_frame(
+            Err(_) => vec![outcome_frame(
                 frame,
                 live,
                 intent,
