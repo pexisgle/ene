@@ -330,6 +330,10 @@ pub struct DeviceId(
 pub struct DeviceRecord {
     /// Device identity minted at approval; never reused.
     pub id: DeviceId,
+    /// Opaque wire projection of this device, minted fresh at approval and
+    /// unrelated to [`DeviceId`]'s bytes: the only device string that ever
+    /// crosses the wire. Clients echo it; they never derive or resolve it.
+    pub wire: String,
     /// Owner-visible display string naming the device.
     pub descriptor: String,
     /// Wall-clock time with its creation offset recording when pairing completed.
@@ -1537,6 +1541,7 @@ mod tests {
             };
             let device = DeviceRecord {
                 id: DeviceId(RawId::new()),
+                wire: RawId::new().as_uuid().to_string(),
                 descriptor: stored.descriptor,
                 paired_at: WallClockWithTz::now(),
             };

@@ -110,6 +110,14 @@ pub struct HistoryMessage {
     /// replay key; `local_id` stays as correspondence metadata only.
     /// Non-secret correspondence, visible in Debug.
     pub command_id: Option<CommandId>,
+    /// Opaque wire projection of `round`, minted fresh by the caller per
+    /// round and unrelated to the domain bytes: the only round string that
+    /// ever crosses the wire. [`None`] marks pre-opaque rows.
+    pub round_wire: Option<String>,
+    /// Client incarnation that sent the item, as `(counter, random)` when
+    /// the caller carries one. Part of the replay fingerprint together with
+    /// text, language, round wire, and generation.
+    pub incarnation: Option<(u64, u64)>,
     /// Client-local correspondence ID for matching an input to its ack.
     /// Correspondence metadata only, no longer the durable key (that is
     /// `command_id`). Non-secret correspondence, visible in Debug.
@@ -130,6 +138,8 @@ impl core::fmt::Debug for HistoryMessage {
             .field("at", &self.at)
             .field("presence_generation", &self.presence_generation)
             .field("command_id", &self.command_id)
+            .field("round_wire", &self.round_wire)
+            .field("incarnation", &self.incarnation)
             .field("local_id", &self.local_id)
             .finish()
     }
@@ -164,6 +174,14 @@ pub struct AppendHistoryCommand {
     /// id with a fresh message id; `local_id` stays as correspondence
     /// metadata only. Non-secret correspondence, visible in Debug.
     pub command_id: Option<CommandId>,
+    /// Opaque wire projection of `round`, minted fresh by the caller per
+    /// round and unrelated to the domain bytes. The store persists it so
+    /// replay acks and timeline views echo it back instead of rendering the
+    /// domain identity.
+    pub round_wire: Option<String>,
+    /// Client incarnation that sends the item, as `(counter, random)`.
+    /// Part of the replay fingerprint; [`None`] skips that check.
+    pub incarnation: Option<(u64, u64)>,
     /// Client-local correspondence ID for matching an input to its ack, if
     /// the caller carries one. [`None`] stores NULL. Correspondence metadata
     /// only, no longer the durable key (that is `command_id`).
@@ -184,6 +202,8 @@ impl core::fmt::Debug for AppendHistoryCommand {
             .field("expected_generation", &self.expected_generation)
             .field("expected_consent", &self.expected_consent)
             .field("command_id", &self.command_id)
+            .field("round_wire", &self.round_wire)
+            .field("incarnation", &self.incarnation)
             .field("local_id", &self.local_id)
             .finish()
     }
@@ -472,6 +492,8 @@ mod tests {
             expected_generation: PresenceGeneration::first(),
             expected_consent: None,
             command_id: Some(CommandId(RawId::new())),
+            round_wire: Some(String::from("round-wire-1")),
+            incarnation: Some((1, 2)),
             local_id: Some(String::from("local-1")),
         }
     }
@@ -487,6 +509,8 @@ mod tests {
             at: clock(),
             presence_generation: PresenceGeneration::first(),
             command_id: None,
+            round_wire: None,
+            incarnation: None,
             local_id: None,
         }
     }
