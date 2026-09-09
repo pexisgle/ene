@@ -122,6 +122,27 @@ use crate::serve::LiveInput;
 #[cfg(unix)]
 const SEEN_MESSAGE_CAP: usize = 128;
 
+/// What the connection table decides for one inbound frame.
+///
+/// Separates transport redelivery from terminal violations: a duplicate
+/// must drop silently with the connection kept, while an unknown
+/// connection, incarnation mismatch, or device-claim mismatch drops the
+/// frame and closes the connection. Collapsing both into `None` turned
+/// legitimate redelivery into connection loss — a distinct observable
+/// effect the §6.2 silent-drop contract forbids.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LiveDecision {
+    /// Process the frame under these premises.
+    Ready(LiveInput),
+    /// Redelivery of an already-seen message id: drop before any domain
+    /// mapping and keep reading.
+    Duplicate,
+    /// Unknown connection, incarnation mismatch, or device-claim mismatch:
+    /// drop and close.
+    Invalid,
+}
+
 /// Per-connection pairing, incarnation, and authentication record.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,7 +286,7 @@ impl ConnectionTable {
     /// record completed the challenge AND is still the device's current
     /// authed connection: a superseded connection reports unauthed even
     /// though its record keeps the flag.
-    fn live_for(&self, id: &ConnectionWireId, envelope: &WireEnvelope) -> Option<LiveInput> {
+    fn live_for(&self, id: &ConnectionWireId, envelope: &WireEnvelope) -> LiveDecision {
         let mut table = lock_table(&self.inner);
         // Transport duplicate suppression first: a redelivered message id is
         // dropped before it can pin incarnation, pair, or touch any domain
@@ -274,9 +295,11 @@ impl ConnectionTable {
         // The record borrow ends before the currency read below: both go
         // through the table guard, so they cannot overlap.
         let (device, record_authed) = {
-            let record = table.records.get_mut(id)?;
+            let Some(record) = table.records.get_mut(id) else {
+                return LiveDecision::Invalid;
+            };
             if record.seen_messages.contains(&envelope.message_id) {
-                return None;
+                return LiveDecision::Duplicate;
             }
             record.seen_messages.push_back(envelope.message_id);
             while record.seen_messages.len() > SEEN_MESSAGE_CAP {
@@ -285,7 +308,7 @@ impl ConnectionTable {
             let seen = envelope.sender.incarnation_id;
             match record.incarnation {
                 None => record.incarnation = Some(seen),
-                Some(pinned) if pinned != seen => return None,
+                Some(pinned) if pinned != seen => return LiveDecision::Invalid,
                 Some(_) => {}
             }
             (record.paired_device.clone(), record.authed)
@@ -303,9 +326,11 @@ impl ConnectionTable {
             .as_ref()
             .map(|id| id.0.as_hyphenated().to_string());
         let client_ref = match (&device, claimed) {
-            (Some(paired), Some(claim)) if paired != &claim => return None,
+            (Some(paired), Some(claim)) if paired != &claim => {
+                return LiveDecision::Invalid;
+            }
             (Some(paired), _) => paired.clone(),
-            (None, Some(_)) => return None,
+            (None, Some(_)) => return LiveDecision::Invalid,
             (None, None) => {
                 let incarnation = envelope.sender.incarnation_id;
                 format!("incarnation-{}-{}", incarnation.counter, incarnation.random)
@@ -318,7 +343,7 @@ impl ConnectionTable {
             .records
             .get(id)
             .and_then(|record| record.negotiated.clone());
-        Some(LiveInput {
+        LiveDecision::Ready(LiveInput {
             client_ref,
             connection_live: true,
             peer_uid_ok: true,
@@ -554,8 +579,13 @@ async fn serve_connection<T>(
         let Ok((frame, _)) = decode_frame(&bytes) else {
             break;
         };
-        let Some(live) = table.live_for(&connection, &frame.envelope) else {
-            break;
+        let live = match table.live_for(&connection, &frame.envelope) {
+            LiveDecision::Ready(live) => live,
+            // Transport redelivery: silent drop, connection kept.
+            LiveDecision::Duplicate => continue,
+            // Unknown connection, incarnation mismatch, or device-claim
+            // mismatch: terminal.
+            LiveDecision::Invalid => break,
         };
         let responses = handle.handle_frame(frame, live, transport.as_ref()).await;
         for response in &responses {
@@ -626,7 +656,7 @@ pub async fn run(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{ConnectionTable, bind_singleton, socket_path};
+    use super::{ConnectionTable, LiveDecision, bind_singleton, socket_path};
     use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
     use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageType};
 
@@ -662,7 +692,7 @@ mod tests {
         let id = table.note_accept();
         let first = table.live_for(&id, &envelope(incarnation(1, 2)));
         assert!(
-            first.is_some_and(|live| live.connection_known
+            matches!(first, LiveDecision::Ready(ref live) if live.connection_known
                 && live.paired_device.is_none()
                 && !live.authed
                 && live.connection_id == id),
@@ -670,13 +700,14 @@ mod tests {
         );
         let same = table.live_for(&id, &envelope(incarnation(1, 2)));
         assert!(
-            same.is_some_and(|live| live.connection_id == id),
+            matches!(same, LiveDecision::Ready(live) if live.connection_id == id),
             "the pinned incarnation keeps yielding the same table id"
         );
         let other = table.live_for(&id, &envelope(incarnation(1, 3)));
-        assert!(
-            other.is_none(),
-            "an incarnation mismatch yields nothing so the caller drops"
+        assert_eq!(
+            other,
+            LiveDecision::Invalid,
+            "an incarnation mismatch closes so the caller drops"
         );
     }
 
@@ -686,15 +717,19 @@ mod tests {
         let id = table.note_accept();
         let frame = envelope(incarnation(1, 2));
         assert!(
-            table.live_for(&id, &frame).is_some(),
+            matches!(table.live_for(&id, &frame), LiveDecision::Ready(_)),
             "the first delivery passes"
         );
-        assert!(
-            table.live_for(&id, &frame).is_none(),
+        assert_eq!(
+            table.live_for(&id, &frame),
+            LiveDecision::Duplicate,
             "a redelivered message id drops before any mapping"
         );
         assert!(
-            table.live_for(&id, &envelope(incarnation(1, 2))).is_some(),
+            matches!(
+                table.live_for(&id, &envelope(incarnation(1, 2))),
+                LiveDecision::Ready(_)
+            ),
             "fresh message ids still pass"
         );
     }
@@ -707,18 +742,19 @@ mod tests {
         let id = table.note_accept();
         let first = envelope(incarnation(3, 3));
         assert!(
-            table.live_for(&id, &first).is_some(),
+            matches!(table.live_for(&id, &first), LiveDecision::Ready(_)),
             "the first delivery passes"
         );
         for _ in 0..SEEN_MESSAGE_CAP {
             let _ = table.live_for(&id, &envelope(incarnation(3, 3)));
         }
         assert!(
-            table.live_for(&id, &first).is_some(),
+            matches!(table.live_for(&id, &first), LiveDecision::Ready(_)),
             "a rolled-off id processes again instead of growing memory without limit"
         );
-        assert!(
-            table.live_for(&id, &first).is_none(),
+        assert_eq!(
+            table.live_for(&id, &first),
+            LiveDecision::Duplicate,
             "but the replay is still a duplicate once seen again"
         );
     }
@@ -729,14 +765,16 @@ mod tests {
         let id = table.note_accept();
         let before = table.live_for(&id, &envelope(incarnation(7, 7)));
         assert!(
-            before.is_some_and(|live| live.paired_device.is_none()),
+            matches!(before, LiveDecision::Ready(live) if live.paired_device.is_none()),
             "a fresh connection pairs nothing"
         );
         table.note_paired(&id, "device-1");
         let after = table.live_for(&id, &envelope(incarnation(7, 7)));
         assert!(
-            after.is_some_and(
-                |live| live.paired_device == Some(String::from("device-1")) && !live.authed
+            matches!(
+                after,
+                LiveDecision::Ready(live)
+                    if live.paired_device == Some(String::from("device-1")) && !live.authed
             ),
             "a paired-but-never-challenged connection stays unauthed"
         );
@@ -751,11 +789,10 @@ mod tests {
         assert_eq!(again, None, "forgetting is idempotent");
         assert!(!again_live, "a forgotten key holds nothing live");
         let unknown = ConnectionWireId(uuid::Uuid::new_v4());
-        assert!(
-            table
-                .live_for(&unknown, &envelope(incarnation(7, 7)))
-                .is_none(),
-            "an unknown connection yields nothing"
+        assert_eq!(
+            table.live_for(&unknown, &envelope(incarnation(7, 7))),
+            LiveDecision::Invalid,
+            "an unknown connection closes"
         );
     }
 
@@ -766,29 +803,32 @@ mod tests {
         let second = table.note_accept();
         for id in [first, second] {
             let pinned = table.live_for(&id, &envelope(incarnation(9, 9)));
-            assert!(pinned.is_some(), "both connections must pin before pairing");
+            assert!(
+                matches!(pinned, LiveDecision::Ready(_)),
+                "both connections must pin before pairing"
+            );
             table.note_paired(&id, "device-1");
         }
         table.note_authed(&first);
         let current = table.live_for(&first, &envelope(incarnation(9, 9)));
         assert!(
-            current.is_some_and(|live| live.authed),
+            matches!(current, LiveDecision::Ready(live) if live.authed),
             "the freshly authenticated connection reports authed"
         );
         let waiting = table.live_for(&second, &envelope(incarnation(9, 9)));
         assert!(
-            waiting.is_some_and(|live| !live.authed),
+            matches!(waiting, LiveDecision::Ready(live) if !live.authed),
             "the paired-but-never-challenged connection stays unauthed"
         );
         table.note_authed(&second);
         let stale = table.live_for(&first, &envelope(incarnation(9, 9)));
         assert!(
-            stale.is_some_and(|live| !live.authed),
+            matches!(stale, LiveDecision::Ready(live) if !live.authed),
             "a newer authentication supersedes: the old connection goes stale implicitly"
         );
         let now_current = table.live_for(&second, &envelope(incarnation(9, 9)));
         assert!(
-            now_current.is_some_and(|live| live.authed),
+            matches!(now_current, LiveDecision::Ready(live) if live.authed),
             "the newest authentication is the current one"
         );
     }
@@ -800,7 +840,10 @@ mod tests {
         let second = table.note_accept();
         for id in [first, second] {
             let pinned = table.live_for(&id, &envelope(incarnation(4, 4)));
-            assert!(pinned.is_some(), "both connections must pin before pairing");
+            assert!(
+                matches!(pinned, LiveDecision::Ready(_)),
+                "both connections must pin before pairing"
+            );
             table.note_paired(&id, "device-1");
         }
         table.note_authed(&first);
@@ -814,7 +857,7 @@ mod tests {
         assert!(still_live, "the surviving connection keeps the device live");
         let survivor = table.live_for(&second, &envelope(incarnation(4, 4)));
         assert!(
-            survivor.is_some_and(|live| live.authed),
+            matches!(survivor, LiveDecision::Ready(live) if live.authed),
             "closing the superseded connection never clears the newer currency"
         );
     }
@@ -826,7 +869,10 @@ mod tests {
         let second = table.note_accept();
         for id in [first, second] {
             let pinned = table.live_for(&id, &envelope(incarnation(6, 6)));
-            assert!(pinned.is_some(), "both connections must pin before pairing");
+            assert!(
+                matches!(pinned, LiveDecision::Ready(_)),
+                "both connections must pin before pairing"
+            );
             table.note_paired(&id, "device-1");
         }
         table.note_authed(&first);
@@ -839,7 +885,7 @@ mod tests {
         assert!(still_live, "the surviving connection keeps the device live");
         let survivor = table.live_for(&second, &envelope(incarnation(6, 6)));
         assert!(
-            survivor.is_some_and(|live| !live.authed),
+            matches!(survivor, LiveDecision::Ready(live) if !live.authed),
             "the survivor stays unauthed until it completes a fresh challenge"
         );
     }
@@ -849,11 +895,14 @@ mod tests {
         let table = ConnectionTable::new();
         let id = table.note_accept();
         let pinned = table.live_for(&id, &envelope(incarnation(1, 1)));
-        assert!(pinned.is_some(), "the connection must pin first");
+        assert!(
+            matches!(pinned, LiveDecision::Ready(_)),
+            "the connection must pin first"
+        );
         table.note_authed(&id);
         let live = table.live_for(&id, &envelope(incarnation(1, 1)));
         assert!(
-            live.is_some_and(|live| !live.authed),
+            matches!(live, LiveDecision::Ready(live) if !live.authed),
             "an unpaired connection can never become authed"
         );
     }
@@ -865,7 +914,10 @@ mod tests {
         let second = table.note_accept();
         for id in [first, second] {
             let pinned = table.live_for(&id, &envelope(incarnation(7, 7)));
-            assert!(pinned.is_some(), "both connections must pin before pairing");
+            assert!(
+                matches!(pinned, LiveDecision::Ready(_)),
+                "both connections must pin before pairing"
+            );
         }
         table.note_paired(&first, "device-1");
         table.note_paired(&first, "device-1");
@@ -897,7 +949,10 @@ mod tests {
         let table = ConnectionTable::new();
         let id = table.note_accept();
         let pinned = table.live_for(&id, &envelope(incarnation(3, 3)));
-        assert!(pinned.is_some(), "the connection must pin before pairing");
+        assert!(
+            matches!(pinned, LiveDecision::Ready(_)),
+            "the connection must pin before pairing"
+        );
         table.note_paired(&id, "device-1");
         table.note_paired(&id, "device-2");
         let (closed, still_live) = table.note_closed(&id);
@@ -977,6 +1032,136 @@ mod tests {
             "a closed listener leaves a stale path that rebinds: {rebound:?}"
         );
         drop(rebound);
+        crate::test_support::remove_data_dir(&dir);
+    }
+
+    /// Regression: a redelivered frame must drop silently WITHOUT closing
+    /// the connection. The pre-fix `live_for` collapsed duplicates and
+    /// violations into one `None`, and `serve_connection` broke its loop on
+    /// it — so one transport duplicate ended the session.
+    #[tokio::test]
+    async fn redelivery_keeps_the_connection_serving() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use ene_api::v1::handshake::{CapabilityAdvertise, PairingRequest};
+        use ene_api::v1::payload::WirePayload;
+        use ene_api::v1::refs::WireMessageId;
+        use ene_inference::fake::FakeProviderTransport;
+        use ene_plugin_ipc::WireFrame;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        use crate::test_support::memory_handle_with;
+
+        fn framed(
+            payload: WirePayload,
+            incarnation: ClientIncarnationId,
+            message: WireMessageId,
+        ) -> Option<Vec<u8>> {
+            let message_type = payload.message_type().to_string();
+            let mut envelope = new_outgoing_envelope(
+                ProtocolVersion::V1,
+                WireSender {
+                    device_id: None,
+                    incarnation_id: incarnation,
+                    connection_id: None,
+                },
+                WireMessageType(message_type),
+            );
+            envelope.message_id = message;
+            ene_plugin_ipc::encode_frame(&WireFrame { envelope, payload }).ok()
+        }
+
+        async fn read_answer(stream: &mut tokio::net::UnixStream) -> Option<WirePayload> {
+            let timed = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut prefix = [0_u8; 4];
+                stream.read_exact(&mut prefix).await.ok()?;
+                let claimed = u32::from_be_bytes(prefix) as usize;
+                let mut body = vec![0_u8; claimed];
+                stream.read_exact(&mut body).await.ok()?;
+                let mut bytes = prefix.to_vec();
+                bytes.extend_from_slice(&body);
+                let (frame, _) = ene_plugin_ipc::decode_frame(&bytes).ok()?;
+                Some(frame.payload)
+            })
+            .await;
+            timed.ok().flatten()
+        }
+
+        let Some((handle, dir)) = memory_handle_with("dup-serving", |_| {}).await else {
+            return;
+        };
+        let table = Arc::new(ConnectionTable::new());
+        let id = table.note_accept();
+        let pair = tokio::net::UnixStream::pair();
+        assert!(pair.is_ok(), "socket pair must open");
+        let Ok((mut client, server)) = pair else {
+            crate::test_support::remove_data_dir(&dir);
+            return;
+        };
+        let worker = tokio::spawn(super::serve_connection(
+            server,
+            id,
+            Arc::new(handle),
+            Arc::new(FakeProviderTransport::new(String::from("hi"), None)),
+            Arc::clone(&table),
+        ));
+        let incarnation = incarnation(5, 6);
+        let duplicate = WireMessageId(uuid::Uuid::new_v4());
+        let pairing = framed(
+            WirePayload::PairingRequest(PairingRequest {
+                device_descriptor: String::from("dup-device"),
+            }),
+            incarnation,
+            duplicate,
+        );
+        let Some(pairing) = pairing else {
+            worker.abort();
+            crate::test_support::remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            client.write_all(&pairing).await.is_ok(),
+            "first delivery must send"
+        );
+        assert!(
+            matches!(
+                read_answer(&mut client).await,
+                Some(WirePayload::PairingResult(_))
+            ),
+            "first delivery must answer"
+        );
+        assert!(
+            client.write_all(&pairing).await.is_ok(),
+            "redelivery must send"
+        );
+        let capability = framed(
+            WirePayload::CapabilityAdvertise(CapabilityAdvertise {
+                supported_protocol: vec![ProtocolVersion::V1],
+                features: Vec::new(),
+                platform: String::from("test"),
+            }),
+            incarnation,
+            WireMessageId(uuid::Uuid::new_v4()),
+        );
+        let Some(capability) = capability else {
+            worker.abort();
+            crate::test_support::remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            client.write_all(&capability).await.is_ok(),
+            "post-duplicate send must send"
+        );
+        assert!(
+            matches!(
+                read_answer(&mut client).await,
+                Some(WirePayload::DisconnectNotice(_))
+            ),
+            "the connection must still serve after a duplicate (unpaired capability closes with notice)"
+        );
+        drop(client);
+        worker.abort();
         crate::test_support::remove_data_dir(&dir);
     }
 }
