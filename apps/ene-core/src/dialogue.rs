@@ -347,11 +347,16 @@ impl HostHandle {
     /// Runs the submit pipeline for one [`SubmitTextInput`] frame.
     ///
     /// Order: durable idempotent replay, presence attach, intake evaluation,
-    /// owner append, consent and credential load, live authorization,
-    /// inference dispatch, reply append with undelivered registration, usage
-    /// recording, then the response stream. The wire companion ref is
-    /// echo-only: this Host serves a single companion resolved through
-    /// [`ensure_running_companion`](CompanionRepository::ensure_running_companion),
+    /// setup/consent/credential admission (live authorization included),
+    /// owner append, transient round recording, inference dispatch, reply
+    /// append with undelivered registration, usage recording, then the
+    /// response stream. Admission precedes the append so a declined input
+    /// leaves neither history rows nor transient round claims behind; maps
+    /// are recorded only after the append commits, and a racy duplicate
+    /// that lands on [`HistoryAppendOutcome::AlreadyCommittedAs`] answers
+    /// the original accept without re-running inference. The wire companion
+    /// ref is echo-only: this Host serves a single companion resolved
+    /// through [`ensure_running_companion`](CompanionRepository::ensure_running_companion),
     /// because no response in `Stage 2` ever issues a companion ref for the
     /// Client to echo back. The round premise prefers the envelope
     /// `round_view` (the comparison-material carrier) and falls back to the
@@ -533,40 +538,6 @@ impl HostHandle {
                 return vec![revalidate_frame(frame, live, intake_reason(&reason))];
             }
         };
-        let round_wire = RoundWireId(accepted.as_raw().as_uuid().to_string());
-        self.record_round(&round_wire.0, accepted);
-        self.record_open_round(
-            &live.client_ref,
-            &companion_key,
-            OpenRound {
-                companion: companion.as_raw(),
-                client,
-                round: accepted,
-                generation: attribution.generation,
-            },
-        );
-        let generation_number = attribution.generation.as_u64();
-        let owner_cmd = AppendHistoryCommand {
-            companion,
-            round: accepted.as_raw(),
-            role: HistoryRole::Owner,
-            text: submit.body.text.clone(),
-            lang: submit.body.lang.0.clone(),
-            at: WallClockWithTz::now(),
-            expected_generation: attribution.generation,
-            local_id: Some(submit.local_id.0.clone()).filter(|key| !key.is_empty()),
-            command_id: command_id_for(&frame.envelope),
-        };
-        match self.store.append_message(owner_cmd).await {
-            Ok(HistoryAppendOutcome::CommittedAs { .. }) => {}
-            Ok(HistoryAppendOutcome::StaleExpected { current }) => {
-                return vec![stale_frame_with(frame, live, None, current.as_u64())];
-            }
-            Ok(HistoryAppendOutcome::HeldByLifecycle { .. }) => {
-                return vec![revalidate_frame(frame, live, "stopped-companion")];
-            }
-            Err(_) => return vec![held_frame(frame, live)],
-        }
         let Ok(stored_consent) = self.store.load_current().await else {
             return vec![held_frame(frame, live)];
         };
@@ -627,6 +598,46 @@ impl HostHandle {
         let Some(authorization) = authorization else {
             return vec![revalidate_frame(frame, live, "evaluation-consumed")];
         };
+        let round_wire = RoundWireId(accepted.as_raw().as_uuid().to_string());
+        self.record_round(&round_wire.0, accepted);
+        self.record_open_round(
+            &live.client_ref,
+            &companion_key,
+            OpenRound {
+                companion: companion.as_raw(),
+                client,
+                round: accepted,
+                generation: attribution.generation,
+            },
+        );
+        let generation_number = attribution.generation.as_u64();
+        let owner_cmd = AppendHistoryCommand {
+            companion,
+            round: accepted.as_raw(),
+            role: HistoryRole::Owner,
+            text: submit.body.text.clone(),
+            lang: submit.body.lang.0.clone(),
+            at: WallClockWithTz::now(),
+            expected_generation: attribution.generation,
+            local_id: Some(submit.local_id.0.clone()).filter(|key| !key.is_empty()),
+            command_id: command_id_for(&frame.envelope),
+        };
+        match self.store.append_message(owner_cmd).await {
+            Ok(HistoryAppendOutcome::CommittedAs { .. }) => {}
+            Ok(HistoryAppendOutcome::AlreadyCommittedAs { round: prior, .. }) => {
+                let Some(wire) = self.wire_for_round_value(prior) else {
+                    return vec![stale_frame_with(frame, live, None, generation_number)];
+                };
+                return vec![accept_frame(frame, live, &RoundWireId(wire))];
+            }
+            Ok(HistoryAppendOutcome::StaleExpected { current }) => {
+                return vec![stale_frame_with(frame, live, None, current.as_u64())];
+            }
+            Ok(HistoryAppendOutcome::HeldByLifecycle { .. }) => {
+                return vec![revalidate_frame(frame, live, "stopped-companion")];
+            }
+            Err(_) => return vec![held_frame(frame, live)],
+        }
         let ticket = InferenceTicketId(RawId::new());
         let route = ResolvedRoute {
             provider: consent.provider.clone(),
@@ -1126,6 +1137,7 @@ mod tests {
     #[tokio::test]
     async fn submit_without_setup_needs_revalidation() {
         use ene_companion::CompanionRepository as _;
+        use ene_companion::HistoryRepository as _;
         use ene_presence::PresenceRepository as _;
 
         let Some((handle, dir)) = memory_handle_with("dlg-nosetup", |_| {}).await else {
@@ -1187,6 +1199,11 @@ mod tests {
             current.active_client,
             Some(device_client("client-a")),
             "the attach names the submitting device"
+        );
+        let timeline = handle.store.load_timeline(companion, None, 50).await;
+        assert!(
+            matches!(&timeline, Ok(items) if items.is_empty()),
+            "a declined input must leave no history row, got {timeline:?}"
         );
         remove_data_dir(&dir);
     }

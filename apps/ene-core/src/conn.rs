@@ -220,17 +220,20 @@ impl ConnectionTable {
 
     /// Builds the [`LiveInput`] premises for one inbound envelope.
     ///
-    /// Returns [`None`] when the connection is unknown (the table forgot it)
-    /// or when the envelope incarnation mismatches the pinned first
-    /// incarnation: the caller drops the connection without a reply in both
-    /// cases. The `client_ref` stays the envelope-derived routing hint
-    /// (device key when paired, otherwise the incarnation pair); authority
-    /// travels in `paired_device` plus `connection_known` plus `authed`, all
-    /// table-filled, and `connection_id` carries the table key the gate
-    /// requires envelopes to echo on post-capability frames. `authed` holds
-    /// only while the record completed the challenge AND is still the
-    /// device's current authed connection: a superseded connection reports
-    /// unauthed even though its record keeps the flag.
+    /// Returns [`None`] when the connection is unknown (the table forgot
+    /// it), when the envelope incarnation mismatches the pinned first
+    /// incarnation, or when the envelope device claim disagrees with the
+    /// table: the caller drops the connection without a reply in all three
+    /// cases (a mismatched claim is a theft attempt, and answering it would
+    /// be an oracle). The `client_ref` is table-derived (paired device) or
+    /// the pinned incarnation pair — never the envelope claim, which is
+    /// only equality-checked; authority travels in `paired_device` plus
+    /// `connection_known` plus `authed`, all table-filled, and
+    /// `connection_id` carries the table key the gate requires envelopes
+    /// to echo on post-capability frames. `authed` holds only while the
+    /// record completed the challenge AND is still the device's current
+    /// authed connection: a superseded connection reports unauthed even
+    /// though its record keeps the flag.
     fn live_for(&self, id: &ConnectionWireId, envelope: &WireEnvelope) -> Option<LiveInput> {
         let mut table = lock_table(&self.inner);
         // The record borrow ends before the currency read below: both go
@@ -245,11 +248,32 @@ impl ConnectionTable {
             }
             (record.paired_device.clone(), record.authed)
         };
+        // The envelope device claim is verified, never trusted: on a paired
+        // connection it must be absent or equal the table value, otherwise
+        // the frame is dropped (a mismatched claim is a theft attempt, and
+        // answering it would be an oracle). On an unpaired connection any
+        // device claim is a protocol violation with the same treatment: the
+        // pairing/capability/proof frames that legitimately precede pairing
+        // carry none by contract.
+        let claimed = envelope
+            .sender
+            .device_id
+            .as_ref()
+            .map(|id| id.0.as_hyphenated().to_string());
+        let client_ref = match (&device, claimed) {
+            (Some(paired), Some(claim)) if paired != &claim => return None,
+            (Some(paired), _) => paired.clone(),
+            (None, Some(_)) => return None,
+            (None, None) => {
+                let incarnation = envelope.sender.incarnation_id;
+                format!("incarnation-{}-{}", incarnation.counter, incarnation.random)
+            }
+        };
         let current = device
             .as_ref()
             .is_some_and(|paired| table.device_current.get(paired) == Some(id));
         Some(LiveInput {
-            client_ref: client_ref_for(envelope),
+            client_ref,
             connection_live: true,
             peer_uid_ok: true,
             paired_device: device,
@@ -336,21 +360,6 @@ impl ConnectionTable {
 }
 
 /// Derives the opaque client ref for one inbound envelope.
-///
-/// The paired device key names the client when present; otherwise the
-/// incarnation pair does. Both are routing hints only: the Host maps the
-/// paired device to a [`ene_presence::ClientId`] deterministically on first
-/// use and never treats the ref itself as authority.
-#[cfg(unix)]
-fn client_ref_for(envelope: &WireEnvelope) -> String {
-    if let Some(device) = &envelope.sender.device_id {
-        device.0.as_hyphenated().to_string()
-    } else {
-        let incarnation = envelope.sender.incarnation_id;
-        format!("incarnation-{}-{}", incarnation.counter, incarnation.random)
-    }
-}
-
 /// Binds the singleton listener for `socket`.
 ///
 /// Tries the bind first: success means no live peer and no stale path. An
