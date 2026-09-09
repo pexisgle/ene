@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use ene_companion::{
-    AppendHistoryCommand, CompanionId, CompanionLifecycle, CompanionRepository,
+    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
     CompanionTechnicalError, HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole,
     PresentationMark, ReportStatus, ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
     UndeliveredTechnicalError,
@@ -125,6 +125,15 @@ impl Store {
     /// [`HistoryRepository::append_reply_with_undelivered`] funnel through
     /// here so the lifecycle read, the generation compare, the history insert,
     /// and the optional undelivered insert share one `Immediate` transaction.
+    ///
+    /// Durable idempotency rests on the client-minted `(companion,
+    /// command_id)`: a retry reuses the same command id with a fresh message
+    /// id, so an in-transaction pre-check returns the original
+    /// [`HistoryAppendOutcome::CommittedAs`] without re-appending or
+    /// re-registering undelivered. This replaces the retired `local_id`
+    /// pre-check; `local_id` is stored as correspondence metadata only and is
+    /// never consulted here. `NULL` command ids carry no replay key and never
+    /// collide.
     fn append_history(
         &self,
         cmd: &AppendHistoryCommand,
@@ -183,11 +192,12 @@ impl Store {
                 None,
             ));
         }
-        if let Some(local_id) = cmd.local_id.as_deref() {
+        if let Some(command) = cmd.command_id {
+            let command_text = encode_id(command.0);
             let existing: Option<String> = tx
                 .query_row(
-                    SQL_SELECT_HISTORY_ID_BY_LOCAL_ID,
-                    params![companion_text, local_id],
+                    SQL_SELECT_HISTORY_ID_BY_COMMAND,
+                    params![companion_text, command_text],
                     |row| row.get(0),
                 )
                 .optional()
@@ -197,6 +207,7 @@ impl Store {
                 return Ok((HistoryAppendOutcome::CommittedAs { message }, None));
             }
         }
+        let command_text = cmd.command_id.map(|command| encode_id(command.0));
         tx.execute(
             SQL_INSERT_HISTORY,
             params![
@@ -208,6 +219,7 @@ impl Store {
                 cmd.lang,
                 at_text,
                 generation_raw,
+                command_text.as_deref(),
                 cmd.local_id.as_deref(),
             ],
         )
@@ -255,8 +267,12 @@ mod migrate {
     /// Schema version applied by [`run`](run).
     ///
     /// Version 2 adds the nullable `history_message.local_id` column with its
-    /// unique lookup index, plus the device-pairing tables.
-    const CURRENT_VERSION: u64 = 2;
+    /// device-pairing tables (the companion-local unique index it briefly
+    /// carried is dropped again by version 3). Version 3 adds the nullable
+    /// `history_message.command_id` column with the durable
+    /// `(companion_id, command_id)` unique replay index; `local_id` stays as
+    /// correspondence metadata only.
+    const CURRENT_VERSION: u64 = 3;
 
     /// Forward-only schema: tables first, then the supporting indexes.
     const SCHEMA: &str = "
@@ -331,7 +347,9 @@ CREATE INDEX IF NOT EXISTS idx_undelivered_companion_status ON undelivered (comp
     /// Forward-only: existing history rows keep `local_id` NULL, and the new
     /// tables use `IF NOT EXISTS` so a fresh database and an upgraded one
     /// converge on the same shape. `NULL` local ids never collide under the
-    /// unique index because SQLite treats each `NULL` as distinct.
+    /// unique index because SQLite treats each `NULL` as distinct. Version 3
+    /// drops this index again when it promotes `command_id` to the durable
+    /// replay key; the column itself stays as correspondence metadata.
     const MIGRATION_V2: &str = "
 ALTER TABLE history_message ADD COLUMN local_id TEXT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_companion_local ON history_message (companion_id, local_id);
@@ -345,6 +363,19 @@ CREATE TABLE IF NOT EXISTS paired_device (
     paired_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_paired_device_descriptor ON paired_device (descriptor);
+";
+
+    /// Version 3 upgrade, applied once when the stored version is below 3.
+    ///
+    /// Forward-only: existing history rows keep `command_id` NULL, and `NULL`
+    /// command ids never collide under the new unique index because SQLite
+    /// treats each `NULL` as distinct. The retired
+    /// `(companion_id, local_id)` unique index is dropped; the `local_id`
+    /// column stays as stored correspondence metadata, never a key.
+    const MIGRATION_V3: &str = "
+ALTER TABLE history_message ADD COLUMN command_id TEXT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_companion_command ON history_message (companion_id, command_id);
+DROP INDEX IF EXISTS idx_history_message_companion_local;
 ";
 
     /// Creates or upgrades the schema on an open connection.
@@ -375,6 +406,10 @@ CREATE INDEX IF NOT EXISTS idx_paired_device_descriptor ON paired_device (descri
             conn.execute_batch(MIGRATION_V2)
                 .map_err(|error| error.to_string())?;
         }
+        if stored_version < 3 {
+            conn.execute_batch(MIGRATION_V3)
+                .map_err(|error| error.to_string())?;
+        }
         let current = i64::try_from(CURRENT_VERSION)
             .map_err(|_| String::from("schema version out of range"))?;
         if stored.is_none() {
@@ -403,10 +438,11 @@ const SQL_SELECT_ATTRIBUTION: &str =
     "SELECT state, active_client, generation FROM presence_attribution WHERE companion_id = ?1";
 const SQL_UPDATE_ATTRIBUTION: &str = "UPDATE presence_attribution SET state = ?1, active_client = ?2, generation = ?3 WHERE companion_id = ?4";
 const SQL_INSERT_TRANSITION: &str = "INSERT INTO presence_transition_log (companion_id, old_state, new_state, old_gen, new_gen, reason, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
-const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, local_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
-const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, local_id FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
-const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, local_id FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
-const SQL_SELECT_HISTORY_ID_BY_LOCAL_ID: &str = "SELECT message_id FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, command_id, local_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
+const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_ID_BY_COMMAND: &str = "SELECT message_id FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 const SQL_SELECT_UNDELIVERED_STATUS: &str =
@@ -642,7 +678,9 @@ fn decode_pending_pairing(
 }
 
 /// One decoded history row: identity, round, role, body, language,
-// timestamp, generation, and optional client-local correspondence ID.
+/// timestamp, generation, optional command-scoped replay identity, and
+/// optional client-local correspondence ID (`local_id` is stored metadata
+/// only, never a key).
 type HistoryRow = (
     String,
     String,
@@ -652,9 +690,14 @@ type HistoryRow = (
     String,
     i64,
     Option<String>,
+    Option<String>,
 );
 
 /// Reads one history row into its domain message.
+///
+/// `command_text` carries the client-minted replay identity (`None` stores
+/// `NULL`, meaning no replay key); `local_id` carries client-local
+/// correspondence metadata only.
 fn decode_history_message(
     companion: CompanionId,
     message_text: &str,
@@ -664,10 +707,15 @@ fn decode_history_message(
     lang: String,
     at_text: &str,
     generation_raw: i64,
+    command_text: Option<&str>,
     local_id: Option<String>,
 ) -> Result<HistoryMessage, String> {
     let at = WallClockWithTz::parse_rfc3339(at_text)
         .map_err(|_| String::from("malformed timeline timestamp"))?;
+    let mut command_id = None;
+    if let Some(text) = command_text {
+        command_id = Some(CommandId(decode_id(text)?));
+    }
     Ok(HistoryMessage {
         id: decode_id(message_text)?,
         companion,
@@ -677,6 +725,7 @@ fn decode_history_message(
         lang,
         at,
         presence_generation: PresenceGeneration::from_u64(decode_u64(generation_raw)?),
+        command_id,
         local_id,
     })
 }
@@ -1008,10 +1057,9 @@ impl HistoryRepository for Store {
     ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
         let key = encode_id(companion.as_raw());
         let guard = lock_shared(&self.conn);
-        // Pure load: one statement, no transaction. Rows store NULL here
-        // until the contracts scope adds a local id to
-        // `AppendHistoryCommand`, so this matches nothing today; the replay
-        // path in the caller still pre-checks through this method.
+        // Pure load: one statement, no transaction. Correspondence lookup for
+        // matching an input to its ack; durable replay keys on `command_id`
+        // instead (see `lookup_command`).
         let found: Option<HistoryRow> = guard
             .query_row(
                 SQL_SELECT_HISTORY_BY_LOCAL_ID,
@@ -1026,6 +1074,7 @@ impl HistoryRepository for Store {
                         row.get(5)?,
                         row.get(6)?,
                         row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 },
             )
@@ -1040,7 +1089,8 @@ impl HistoryRepository for Store {
                 lang,
                 at_text,
                 generation_raw,
-                local_id,
+                command_text,
+                stored_local_id,
             )) => {
                 let message = decode_history_message(
                     companion,
@@ -1051,7 +1101,73 @@ impl HistoryRepository for Store {
                     lang,
                     &at_text,
                     generation_raw,
-                    local_id,
+                    command_text.as_deref(),
+                    stored_local_id,
+                )
+                .map_err(companion_unavailable)?;
+                Ok(Some(message))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn lookup_command(
+        &self,
+        companion: CompanionId,
+        command: &CommandId,
+    ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
+        let key = encode_id(companion.as_raw());
+        let command_key = encode_id(command.0);
+        let guard = lock_shared(&self.conn);
+        // Pure load: one statement, no transaction. Durable replay lookup on
+        // the `(companion, command_id)` key; `NULL` command ids never match.
+        let found: Option<HistoryRow> = guard
+            .query_row(
+                SQL_SELECT_HISTORY_BY_COMMAND,
+                params![key, command_key],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| companion_unavailable(error.to_string()))?;
+        match found {
+            Some((
+                message_text,
+                round_text,
+                role_text,
+                body,
+                lang,
+                at_text,
+                generation_raw,
+                command_text,
+                stored_local_id,
+            )) => {
+                let message = decode_history_message(
+                    companion,
+                    &message_text,
+                    &round_text,
+                    &role_text,
+                    body,
+                    lang,
+                    &at_text,
+                    generation_raw,
+                    command_text.as_deref(),
+                    stored_local_id,
                 )
                 .map_err(companion_unavailable)?;
                 Ok(Some(message))
@@ -1086,6 +1202,7 @@ impl HistoryRepository for Store {
                     row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })
             .map_err(|error| companion_unavailable(error.to_string()))?;
@@ -1099,28 +1216,28 @@ impl HistoryRepository for Store {
                 lang,
                 at_text,
                 generation_raw,
-                local_id,
+                command_text,
+                stored_local_id,
             ) = row.map_err(|error| companion_unavailable(error.to_string()))?;
-            let at = WallClockWithTz::parse_rfc3339(&at_text)
-                .map_err(|_| companion_unavailable(String::from("malformed timeline timestamp")))?;
+            let message = decode_history_message(
+                companion,
+                &message_text,
+                &round_text,
+                &role_text,
+                body,
+                lang,
+                &at_text,
+                generation_raw,
+                command_text.as_deref(),
+                stored_local_id,
+            )
+            .map_err(companion_unavailable)?;
             if let Some(lower) = since
-                && at.as_datetime() < lower.as_datetime()
+                && message.at.as_datetime() < lower.as_datetime()
             {
                 continue;
             }
-            timeline.push(HistoryMessage {
-                id: decode_id(&message_text).map_err(companion_unavailable)?,
-                companion,
-                round: decode_id(&round_text).map_err(companion_unavailable)?,
-                role: decode_role(&role_text).map_err(companion_unavailable)?,
-                text: body,
-                lang,
-                at,
-                presence_generation: PresenceGeneration::from_u64(
-                    decode_u64(generation_raw).map_err(companion_unavailable)?,
-                ),
-                local_id,
-            });
+            timeline.push(message);
         }
         let cap = match usize::try_from(limit) {
             Ok(value) => value,
@@ -1450,6 +1567,14 @@ impl CredentialRefRepository for Store {
     }
 }
 
+/// Mints a one-time pairing secret for display-once custody.
+///
+/// Secrets are never stored: the caller shows the returned string once on a
+/// trusted surface and holds it only in memory afterwards.
+fn fresh_pairing_secret() -> String {
+    RawId::new().as_uuid().to_string()
+}
+
 impl DevicePairingRepository for Store {
     #[expect(
         clippy::unused_async_trait_impl,
@@ -1514,7 +1639,7 @@ impl DevicePairingRepository for Store {
     async fn approve_pending(
         &self,
         descriptor: &str,
-    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
+    ) -> Result<Option<(DeviceRecord, String)>, CredentialTechnicalError> {
         let device_id = RawId::new();
         let device_text = encode_id(device_id);
         let paired_at = WallClockWithTz::now();
@@ -1524,7 +1649,9 @@ impl DevicePairingRepository for Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| credential_unavailable(error.to_string()))?;
         // Re-approving an already-paired descriptor returns the existing
-        // record unchanged; no fresh identity is minted or stored.
+        // record unchanged with a freshly minted secret (rotation); no
+        // fresh identity is stored. Secrets are never stored: the caller
+        // displays the returned string once on a trusted surface.
         let paired: Option<(String, String, String)> = tx
             .query_row(
                 SQL_SELECT_PAIRED_BY_DESCRIPTOR,
@@ -1536,7 +1663,7 @@ impl DevicePairingRepository for Store {
         if let Some((stored_text, stored_descriptor, stored_paired)) = paired {
             let device = decode_device_record(&stored_text, stored_descriptor, &stored_paired)
                 .map_err(credential_unavailable)?;
-            return Ok(Some(device));
+            return Ok(Some((device, fresh_pairing_secret())));
         }
         let pending: Option<(String, String)> = tx
             .query_row(
@@ -1560,11 +1687,14 @@ impl DevicePairingRepository for Store {
         .map_err(|error| credential_unavailable(error.to_string()))?;
         tx.commit()
             .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(Some(DeviceRecord {
-            id: DeviceId(device_id),
-            descriptor: stored_descriptor,
-            paired_at,
-        }))
+        Ok(Some((
+            DeviceRecord {
+                id: DeviceId(device_id),
+                descriptor: stored_descriptor,
+                paired_at,
+            },
+            fresh_pairing_secret(),
+        )))
     }
 
     #[expect(
@@ -1655,7 +1785,7 @@ impl UsageRepository for Store {
 mod tests {
     use super::Store;
     use ene_companion::{
-        AppendHistoryCommand, CompanionId, CompanionLifecycle, CompanionRepository,
+        AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
         HistoryAppendOutcome, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
         ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
     };
@@ -1693,8 +1823,46 @@ mod tests {
             lang: String::from("en"),
             at: fixture_clock(),
             expected_generation: generation,
+            command_id: None,
             local_id: None,
         }
+    }
+
+    /// Builds a history command carrying an explicit replay key and
+    /// correspondence metadata.
+    fn history_command_with_ids(
+        companion: CompanionId,
+        generation: PresenceGeneration,
+        text: &str,
+        command_id: Option<CommandId>,
+        local_id: Option<&str>,
+    ) -> AppendHistoryCommand {
+        AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: HistoryRole::Owner,
+            text: text.to_owned(),
+            lang: String::from("en"),
+            at: fixture_clock(),
+            expected_generation: generation,
+            command_id,
+            local_id: local_id.map(String::from),
+        }
+    }
+
+    /// Counts durable history rows for one companion.
+    fn history_row_count(store: &Store, companion: CompanionId) -> Option<i64> {
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let counted: Result<i64, _> = guard.query_row(
+            "SELECT COUNT(*) FROM history_message WHERE companion_id = ?1",
+            params![super::encode_id(companion.as_raw())],
+            |row| row.get(0),
+        );
+        assert!(counted.is_ok(), "row count must succeed");
+        counted.ok()
     }
 
     async fn open_memory() -> Option<Store> {
@@ -2252,7 +2420,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lookup_local_id_matches_nothing_until_contracts_carry_it() {
+    async fn local_id_lookup_is_correspondence_metadata_not_replay_key_replacing_local_id_uniqueness()
+     {
         let Some(store) = open_memory().await else {
             return;
         };
@@ -2264,26 +2433,397 @@ mod tests {
             matches!(absent, Ok(None)),
             "unknown local id must find nothing"
         );
-        let appended = store
-            .append_message(history_command(companion, generation, "local body"))
+        // Durable replay keys on `command_id` now; `local_id` is stored
+        // correspondence metadata, so repeating it appends again instead of
+        // replaying the first accept.
+        let first = store
+            .append_message(history_command_with_ids(
+                companion,
+                generation,
+                "first body",
+                None,
+                Some("send-1"),
+            ))
             .await;
         assert!(
-            matches!(appended, Ok(HistoryAppendOutcome::CommittedAs { .. })),
-            "append must commit"
+            matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "first append must commit"
         );
-        // `AppendHistoryCommand` carries no local id yet, so the store
-        // persists NULL and this lookup matches nothing by design; the replay
-        // path in the caller still pre-checks through this method.
-        let unmapped = store.lookup_local_id(companion, "send-1").await;
+        let second = store
+            .append_message(history_command_with_ids(
+                companion,
+                generation,
+                "second body",
+                None,
+                Some("send-1"),
+            ))
+            .await;
         assert!(
-            matches!(unmapped, Ok(None)),
-            "lookup must match nothing while rows store NULL"
+            matches!(second, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "repeating a local id must append, not replay"
         );
+        let Ok(first_outcome) = first else {
+            return;
+        };
+        let Ok(second_outcome) = second else {
+            return;
+        };
+        assert_ne!(
+            first_outcome, second_outcome,
+            "local id repeats must mint distinct messages"
+        );
+        let found = store.lookup_local_id(companion, "send-1").await;
+        assert!(found.is_ok(), "correspondence lookup must succeed");
+        let Ok(Some(item)) = found else {
+            return;
+        };
+        assert_eq!(item.local_id.as_deref(), Some("send-1"));
+        assert_eq!(item.command_id, None);
+        let count = history_row_count(&store, companion);
+        assert_eq!(count, Some(2), "both local id repeats must persist");
+    }
+
+    #[tokio::test]
+    async fn command_replay_returns_original_accept_without_duplicate_row() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let Some((companion, generation)) = running_companion(&store).await else {
+            return;
+        };
+        let command = CommandId(RawId::new());
+        let first = store
+            .append_reply_with_undelivered(
+                history_command_with_ids(
+                    companion,
+                    generation,
+                    "original body",
+                    Some(command),
+                    Some("send-1"),
+                ),
+                true,
+            )
+            .await;
+        assert!(first.is_ok(), "first command append must succeed");
+        let Ok((first_outcome, first_registered)) = first else {
+            return;
+        };
+        let HistoryAppendOutcome::CommittedAs { message: first_id } = first_outcome else {
+            return;
+        };
+        assert!(
+            first_registered.is_some(),
+            "first commit registers undelivered"
+        );
+        // Transport retry reuses the command id with a fresh message id: the
+        // payload differs, but the replay must return the original accept
+        // without a second row or a second undelivered registration.
+        let retry = store
+            .append_reply_with_undelivered(
+                history_command_with_ids(
+                    companion,
+                    generation,
+                    "retry body",
+                    Some(command),
+                    Some("send-1"),
+                ),
+                true,
+            )
+            .await;
+        assert!(retry.is_ok(), "command retry must succeed");
+        let Ok((retry_outcome, retry_registered)) = retry else {
+            return;
+        };
+        assert_eq!(
+            retry_outcome,
+            HistoryAppendOutcome::CommittedAs { message: first_id },
+            "retry must replay the original accept"
+        );
+        assert!(
+            retry_registered.is_none(),
+            "replay must not re-register undelivered"
+        );
+        let count = history_row_count(&store, companion);
+        assert_eq!(count, Some(1), "replay must not append a second row");
+        let pending = UndeliveredRepository::list_pending(&store, companion).await;
+        assert!(pending.is_ok(), "pending list must succeed");
+        let Ok(items) = pending else {
+            return;
+        };
+        assert_eq!(items.len(), 1, "replay must not duplicate undelivered");
+        let looked_up = store.lookup_command(companion, &command).await;
+        assert!(looked_up.is_ok(), "command lookup must succeed");
+        let Ok(Some(item)) = looked_up else {
+            return;
+        };
+        assert_eq!(item.id, first_id);
+        assert_eq!(item.text, "original body");
+    }
+
+    #[tokio::test]
+    async fn different_commands_append_separately() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let Some((companion, generation)) = running_companion(&store).await else {
+            return;
+        };
+        let first = store
+            .append_message(history_command_with_ids(
+                companion,
+                generation,
+                "first body",
+                Some(CommandId(RawId::new())),
+                None,
+            ))
+            .await;
+        assert!(
+            matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "first command must commit"
+        );
+        let second = store
+            .append_message(history_command_with_ids(
+                companion,
+                generation,
+                "second body",
+                Some(CommandId(RawId::new())),
+                None,
+            ))
+            .await;
+        assert!(
+            matches!(second, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "distinct command must commit separately"
+        );
+        let Ok(first_outcome) = first else {
+            return;
+        };
+        let Ok(second_outcome) = second else {
+            return;
+        };
+        assert_ne!(
+            first_outcome, second_outcome,
+            "distinct commands must mint distinct messages"
+        );
+        let count = history_row_count(&store, companion);
+        assert_eq!(count, Some(2), "distinct commands must persist twice");
+    }
+
+    #[tokio::test]
+    async fn null_command_appends_never_collide() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let Some((companion, generation)) = running_companion(&store).await else {
+            return;
+        };
+        let first = store
+            .append_message(history_command(companion, generation, "first body"))
+            .await;
+        assert!(
+            matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "first NULL command must commit"
+        );
+        let second = store
+            .append_message(history_command(companion, generation, "second body"))
+            .await;
+        assert!(
+            matches!(second, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "second NULL command must commit without colliding"
+        );
+        let Ok(first_outcome) = first else {
+            return;
+        };
+        let Ok(second_outcome) = second else {
+            return;
+        };
+        assert_ne!(
+            first_outcome, second_outcome,
+            "NULL commands must mint distinct messages"
+        );
+        let count = history_row_count(&store, companion);
+        assert_eq!(count, Some(2), "NULL commands must persist twice");
+    }
+
+    #[tokio::test]
+    async fn lookup_command_roundtrip_returns_both_ids() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let Some((companion, generation)) = running_companion(&store).await else {
+            return;
+        };
+        let command = CommandId(RawId::new());
+        let appended = store
+            .append_message(history_command_with_ids(
+                companion,
+                generation,
+                "command body",
+                Some(command),
+                Some("send-9"),
+            ))
+            .await;
+        assert!(appended.is_ok(), "command append must succeed");
+        let Ok(HistoryAppendOutcome::CommittedAs { message }) = appended else {
+            return;
+        };
+        let found = store.lookup_command(companion, &command).await;
+        assert!(found.is_ok(), "command lookup must succeed");
+        let Ok(Some(item)) = found else {
+            return;
+        };
+        assert_eq!(item.id, message);
+        assert_eq!(item.command_id, Some(command));
+        assert_eq!(item.local_id.as_deref(), Some("send-9"));
+        assert_eq!(item.text, "command body");
+        let missing = store
+            .lookup_command(companion, &CommandId(RawId::new()))
+            .await;
+        assert!(
+            matches!(missing, Ok(None)),
+            "unknown command must find nothing"
+        );
+        let by_local = store.lookup_local_id(companion, "send-9").await;
+        assert!(by_local.is_ok(), "local lookup must succeed");
+        let Ok(Some(same)) = by_local else {
+            return;
+        };
+        assert_eq!(same.id, message);
+        assert_eq!(same.command_id, Some(command));
         let loaded = store.load_timeline(companion, None, 10).await;
+        assert!(loaded.is_ok(), "timeline must load");
         let Ok(timeline) = loaded else {
             return;
         };
-        assert_eq!(timeline.len(), 1, "the appended item must still read back");
+        assert_eq!(timeline.len(), 1, "one item must read back");
+        assert_eq!(timeline[0].id, message);
+        assert_eq!(timeline[0].command_id, Some(command));
+        assert_eq!(timeline[0].local_id.as_deref(), Some("send-9"));
+    }
+
+    #[tokio::test]
+    async fn migration_v3_keeps_pre_command_rows_readable() {
+        let dir = tempfile::tempdir();
+        assert!(dir.is_ok(), "tempdir must open");
+        let Ok(dir) = dir else {
+            return;
+        };
+        let path = dir.path().join("store.db");
+        let companion = CompanionId::from_raw(RawId::new());
+        let companion_text = super::encode_id(companion.as_raw());
+        let message_id = RawId::new();
+        let message_text = super::encode_id(message_id);
+        let round_id = RawId::new();
+        let round_text = super::encode_id(round_id);
+        {
+            let conn = rusqlite::Connection::open(&path);
+            assert!(conn.is_ok(), "raw v2 file must open");
+            let Ok(conn) = conn else {
+                return;
+            };
+            let shaped = conn.execute_batch(
+                "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL);
+CREATE TABLE undelivered (undelivered_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, source_message TEXT NOT NULL, status TEXT NOT NULL, round_id TEXT NOT NULL, presence_generation INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE presence_attribution (companion_id TEXT PRIMARY KEY, state TEXT NOT NULL, active_client TEXT, generation INTEGER NOT NULL);
+CREATE TABLE presence_transition_log (transition_seq INTEGER PRIMARY KEY AUTOINCREMENT, companion_id TEXT NOT NULL, old_state TEXT NOT NULL, new_state TEXT NOT NULL, old_gen INTEGER NOT NULL, new_gen INTEGER NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
+CREATE TABLE credential_ref (id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL, UNIQUE (provider, label));
+CREATE TABLE usage_fact (ticket TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, source TEXT NOT NULL);
+CREATE TABLE pairing_pending (descriptor TEXT PRIMARY KEY, requested_at TEXT NOT NULL);
+CREATE TABLE paired_device (device_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, paired_at TEXT NOT NULL);
+CREATE INDEX idx_history_message_companion ON history_message (companion_id);
+CREATE INDEX idx_history_message_round ON history_message (round_id);
+CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
+CREATE UNIQUE INDEX idx_history_message_companion_local ON history_message (companion_id, local_id);
+CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
+CREATE TABLE _schema_version (version INTEGER NOT NULL);
+INSERT INTO _schema_version (version) VALUES (2);",
+            );
+            assert!(shaped.is_ok(), "v2 shape must apply");
+            let seeded_companion = conn.execute(
+                "INSERT INTO companion (companion_id, lifecycle, created_at) VALUES (?1, ?2, ?3)",
+                params![
+                    companion_text,
+                    super::encode_lifecycle(CompanionLifecycle::Running),
+                    fixture_clock().to_rfc3339()
+                ],
+            );
+            assert!(seeded_companion.is_ok(), "v2 companion must seed");
+            let seeded_attribution = conn.execute(
+                "INSERT INTO presence_attribution (companion_id, state, active_client, generation) VALUES (?1, ?2, ?3, ?4)",
+                params![companion_text, "no_active", Option::<String>::None, 0_i64],
+            );
+            assert!(seeded_attribution.is_ok(), "v2 attribution must seed");
+            let seeded_history = conn.execute(
+                "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, local_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    message_text,
+                    companion_text,
+                    round_text,
+                    "owner",
+                    "legacy body",
+                    "en",
+                    fixture_clock().to_rfc3339(),
+                    0_i64,
+                    "legacy-1"
+                ],
+            );
+            assert!(seeded_history.is_ok(), "v2 history row must seed");
+        }
+        let opened = Store::open(&path).await;
+        assert!(opened.is_ok(), "open must migrate v2 to v3");
+        let Ok(store) = opened else {
+            return;
+        };
+        let loaded = store.load_timeline(companion, None, 10).await;
+        assert!(loaded.is_ok(), "migrated timeline must load");
+        let Ok(timeline) = loaded else {
+            return;
+        };
+        assert_eq!(timeline.len(), 1, "legacy row must survive migration");
+        assert_eq!(timeline[0].id, message_id);
+        assert_eq!(timeline[0].text, "legacy body");
+        assert_eq!(timeline[0].local_id.as_deref(), Some("legacy-1"));
+        assert_eq!(timeline[0].command_id, None);
+        let by_local = store.lookup_local_id(companion, "legacy-1").await;
+        assert!(by_local.is_ok(), "legacy local lookup must succeed");
+        let Ok(Some(legacy)) = by_local else {
+            return;
+        };
+        assert_eq!(legacy.id, message_id);
+        let missing = store
+            .lookup_command(companion, &CommandId(RawId::new()))
+            .await;
+        assert!(
+            matches!(missing, Ok(None)),
+            "legacy row carries no command key"
+        );
+        let guard = match store.conn.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
+            row.get::<_, i64>(0)
+        });
+        assert!(matches!(version, Ok(3)), "migration must record version 3");
+        let new_index: Result<String, _> = guard.query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
+            (),
+            |row| row.get(0),
+        );
+        assert!(
+            new_index.is_ok(),
+            "command replay index must exist after migration"
+        );
+        let old_index: Result<String, _> = guard.query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_local'",
+            (),
+            |row| row.get(0),
+        );
+        assert!(
+            old_index.is_err(),
+            "retired local id index must be gone after migration"
+        );
     }
 
     #[tokio::test]
@@ -2343,10 +2883,14 @@ mod tests {
         );
         let approved = store.approve_pending("phone").await;
         assert!(approved.is_ok(), "approval must succeed");
-        let Ok(Some(device)) = approved else {
+        let Ok(Some((device, secret))) = approved else {
             return;
         };
         assert_eq!(device.descriptor.as_str(), "phone");
+        assert!(
+            secret.len() == 36 && secret.chars().filter(|c| *c == '-').count() == 4,
+            "approval must mint a UUID-text one-time secret"
+        );
         let pending_after = DevicePairingRepository::list_pending(&store).await;
         let Ok(remaining) = pending_after else {
             return;
@@ -2367,16 +2911,25 @@ mod tests {
             ),
             "re-request after pairing must return the stored record"
         );
-        // Re-approving returns the same record without minting a new id.
+        // Re-approving returns the same record without minting a new id,
+        // but with a freshly minted secret (rotation).
         let reapproved = store.approve_pending("phone").await;
+        assert!(reapproved.is_ok(), "re-approval must succeed");
+        let Ok(Some((same, rotated))) = reapproved else {
+            return;
+        };
         assert!(
-            matches!(reapproved, Ok(Some(ref stored)) if *stored == device),
+            same == device,
             "re-approval must return the existing record"
+        );
+        assert!(
+            rotated.len() == 36 && rotated != secret,
+            "re-approval must rotate to a fresh secret"
         );
     }
 
     #[tokio::test]
-    async fn migration_v2_reopen_keeps_pairing_state() {
+    async fn migration_v3_reopen_keeps_pairing_state() {
         let dir = tempfile::tempdir();
         assert!(dir.is_ok(), "tempdir must open");
         let Ok(dir) = dir else {
@@ -2394,7 +2947,7 @@ mod tests {
             "request must pend"
         );
         let approved = first.approve_pending("phone").await;
-        let Ok(Some(device)) = approved else {
+        let Ok(Some((device, _))) = approved else {
             return;
         };
         drop(first);
@@ -2424,8 +2977,8 @@ mod tests {
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(2)),
-            "reopened database must record schema version 2"
+            matches!(version, Ok(3)),
+            "reopened database must record schema version 3"
         );
     }
 
