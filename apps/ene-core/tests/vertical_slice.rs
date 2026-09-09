@@ -2,11 +2,13 @@
 //!
 //! Real listener socket, real `ene-ctl` client builders and session, real
 //! Host orchestration; only the provider HTTP transport is fake. Covers:
-//! socket placement, pairing approval with the one-time secret, the full
-//! challenge/proof/accepted handshake, setup register/assign/complete, text
-//! round with ordered streaming, presentation confirmation draining
-//! undelivered, history, restart restore with stale old rounds, tampered
-//! secrets, and untrusted-peer denial.
+//! socket placement, pairing approval through an INDEPENDENT approval
+//! context (proving cross-process sharing via the file device-auth store),
+//! the full challenge/proof/accepted handshake, setup register/assign/
+//! complete, text round with ordered streaming, presentation confirmation
+//! draining undelivered, history, restart restore WITHOUT re-approval,
+//! stale old rounds, secret rotation, tampered secrets, and untrusted-peer
+//! denial.
 //!
 //! Unix-only: the production listener is a Unix socket (Windows uses named
 //! pipes in a follow-up).
@@ -61,6 +63,15 @@ fn fake_transport() -> FakeProviderTransport {
     )
 }
 
+async fn open_host(dir: &std::path::Path) -> Option<Arc<HostHandle>> {
+    let opened = HostHandle::open_with_cred_store(dir, CredStore::Memory(memory_store())).await;
+    assert!(opened.is_ok(), "host must open");
+    let Ok(handle) = opened else {
+        return None;
+    };
+    Some(Arc::new(handle))
+}
+
 async fn wait_for_socket(dir: &std::path::Path) -> bool {
     for _ in 0..100 {
         if dir.join("ene.sock").exists() {
@@ -74,14 +85,6 @@ async fn wait_for_socket(dir: &std::path::Path) -> bool {
 async fn ask(client: &mut Client, payload: WirePayload, what: &str) -> Result<WirePayload, String> {
     match tokio::time::timeout(Duration::from_secs(10), client.request(payload)).await {
         Ok(Ok(answer)) => Ok(answer),
-        Ok(Err(error)) => Err(format!("{what} errored: {error:?}")),
-        Err(_) => Err(format!("{what} timed out")),
-    }
-}
-
-async fn recv(client: &mut Client, what: &str) -> Result<WirePayload, String> {
-    match tokio::time::timeout(Duration::from_secs(10), client.next_frame()).await {
-        Ok(Ok(payload)) => Ok(payload),
         Ok(Err(error)) => Err(format!("{what} errored: {error:?}")),
         Err(_) => Err(format!("{what} timed out")),
     }
@@ -117,40 +120,15 @@ async fn view_mark(client: &mut Client) -> Result<String, String> {
     Ok(view.mark.0.clone())
 }
 
-async fn view_sections(client: &mut Client) -> Result<Vec<String>, String> {
-    let answer = ask(
-        client,
-        WirePayload::ManagementViewRequest(cmds::setup_view_request()),
-        "show",
-    )
-    .await;
-    assert!(
-        matches!(&answer, Ok(WirePayload::ManagementView(_))),
-        "show must answer a view: {answer:?}"
-    );
-    let Ok(WirePayload::ManagementView(view)) = answer else {
-        return Err(String::from("show answered nothing usable"));
-    };
-    Ok(view
-        .sections
-        .iter()
-        .map(|section| section.kind.clone())
-        .collect())
-}
-
-/// Runs pairing approval and provisions the device file, returning the
-/// connected client. Fails loudly at whichever step breaks.
-async fn paired_client(dir: &std::path::Path, handle: &HostHandle) -> Result<Client, String> {
-    let pending = Client::connect(dir, DESCRIPTOR, "test").await;
-    assert!(
-        matches!(pending, Err(CliError::ServerOutcome(_))),
-        "first pairing must pend"
-    );
-    let approved = handle
+/// Approves through an INDEPENDENT handle (simulating the separate
+/// `approve-device` process) and provisions the device file from the
+/// one-time secret, like the operator channel would.
+async fn approve_and_provision(dir: &std::path::Path, approver: &HostHandle) -> Result<(), String> {
+    let approval = approver
         .approve_device(DESCRIPTOR)
         .await
         .map_err(|error| format!("approve failed: {error:?}"))?;
-    let Some((record, secret)) = approved else {
+    let Some((record, secret)) = approval else {
         return Err(String::from("approval must pair"));
     };
     store_device(
@@ -158,21 +136,10 @@ async fn paired_client(dir: &std::path::Path, handle: &HostHandle) -> Result<Cli
         &StoredDevice::new(DeviceWireId(record.id.0.as_uuid()), secret),
     )
     .map_err(|error| format!("device file must store: {error:?}"))?;
-    let connected = Client::connect(dir, DESCRIPTOR, "test").await;
-    match connected {
-        Ok(client) => Ok(client),
-        Err(error) => {
-            assert!(
-                format!("{error:?}").is_empty(),
-                "second connect must succeed: {error:?}"
-            );
-            Err(String::from("second connect failed"))
-        }
-    }
+    Ok(())
 }
 
-async fn setup_step(handle: &HostHandle, client: &mut Client) -> Result<(), String> {
-    let _ = handle;
+async fn setup_flow(client: &mut Client) -> Result<(), String> {
     let mark = view_mark(client).await?;
     let register = ask(
         client,
@@ -267,7 +234,7 @@ async fn send_round(
     let mut previous_seq: Option<u64> = None;
     let mut stream_id = None;
     loop {
-        let frame = recv(client, "stream frame").await?;
+        let frame = ask_stream(client).await?;
         match frame {
             WirePayload::TextStreamOpen(open) => {
                 opened = true;
@@ -302,6 +269,60 @@ async fn send_round(
     Ok((round_wire, stream_id, text_out))
 }
 
+async fn ask_stream(client: &mut Client) -> Result<WirePayload, String> {
+    match tokio::time::timeout(Duration::from_secs(10), client.next_frame()).await {
+        Ok(Ok(payload)) => Ok(payload),
+        Ok(Err(error)) => Err(format!("stream frame errored: {error:?}")),
+        Err(_) => Err(String::from("stream frame timed out")),
+    }
+}
+
+async fn history_count(client: &mut Client) -> Result<(usize, bool, bool), String> {
+    let history = ask(
+        client,
+        WirePayload::HistoryRequest(cmds::history_request(50)),
+        "history",
+    )
+    .await;
+    assert!(
+        matches!(&history, Ok(WirePayload::HistoryView(_))),
+        "history must answer, got {history:?}"
+    );
+    let Ok(WirePayload::HistoryView(view)) = history else {
+        return Err(String::from("history answered nothing usable"));
+    };
+    let mut owner_seen = false;
+    let mut companion_seen = false;
+    for item in &view.items {
+        if item.role == ene_api::v1::round::HistoryRole::Owner {
+            owner_seen = true;
+        }
+        if item.role == ene_api::v1::round::HistoryRole::Companion {
+            companion_seen = true;
+        }
+    }
+    Ok((view.items.len(), owner_seen, companion_seen))
+}
+
+async fn pending_empty(dir: &std::path::Path) -> bool {
+    for _ in 0..100 {
+        let Ok(store) = Store::open(&dir.join("app.db")).await else {
+            break;
+        };
+        let Ok(companion) = store.ensure_running_companion().await else {
+            break;
+        };
+        let Ok(pending) = store.list_pending(companion).await else {
+            break;
+        };
+        if pending.is_empty() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 #[tokio::test]
 async fn production_path_setup_to_restart() {
     let temp = tempfile::TempDir::new();
@@ -310,17 +331,13 @@ async fn production_path_setup_to_restart() {
         return;
     };
     let dir = temp.path().to_path_buf();
-    let transport = Arc::new(fake_transport());
-    let opened = HostHandle::open_with_cred_store(&dir, CredStore::Memory(memory_store())).await;
-    assert!(opened.is_ok(), "host must open");
-    let Ok(handle) = opened else {
+    let Some(handle) = open_host(&dir).await else {
         return;
     };
-    let handle = Arc::new(handle);
     let server = tokio::spawn(conn::run(
         dir.clone(),
         Arc::clone(&handle),
-        Arc::clone(&transport),
+        Arc::new(fake_transport()),
     ));
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
     assert!(
@@ -328,9 +345,21 @@ async fn production_path_setup_to_restart() {
         "socket path must not double-append"
     );
 
-    let client = paired_client(&dir, &handle).await;
-    assert!(client.is_ok(), "pairing flow must connect");
-    let Ok(mut client) = client else {
+    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
+    assert!(
+        matches!(pending, Err(CliError::ServerOutcome(_))),
+        "first pairing must pend"
+    );
+    let Some(approver) = open_host(&dir).await else {
+        return;
+    };
+    let provisioned = approve_and_provision(&dir, &approver).await;
+    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
+
+    let connected = Client::connect(&dir, DESCRIPTOR, "test").await;
+    let connected_ok = connected.is_ok();
+    assert!(connected_ok, "second connect must succeed");
+    let Ok(mut client) = connected else {
         return;
     };
 
@@ -345,7 +374,7 @@ async fn production_path_setup_to_restart() {
             "show must carry the Host sections, got {sections:?}"
         );
     }
-    let setup = setup_step(&handle, &mut client).await;
+    let setup = setup_flow(&mut client).await;
     assert!(setup.is_ok(), "setup must complete: {setup:?}");
 
     let sent = send_round(&mut client, "hello companion").await;
@@ -374,119 +403,55 @@ async fn production_path_setup_to_restart() {
         matches!(notified, Ok(Ok(()))),
         "confirm must send, got {notified:?}"
     );
-
-    let db = dir.join("app.db");
-    let mut drained = false;
-    for _ in 0..100 {
-        let Ok(store) = Store::open(&db).await else {
-            break;
-        };
-        let Ok(companion) = store.ensure_running_companion().await else {
-            break;
-        };
-        let Ok(pending) = store.list_pending(companion).await else {
-            break;
-        };
-        if pending.is_empty() {
-            drained = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(drained, "confirmed reply must not linger undelivered");
-
-    let history = ask(
-        &mut client,
-        WirePayload::HistoryRequest(cmds::history_request(50)),
-        "history",
-    )
-    .await;
     assert!(
-        matches!(&history, Ok(WirePayload::HistoryView(_))),
-        "history must answer, got {history:?}"
+        pending_empty(&dir).await,
+        "confirmed reply must not linger undelivered"
     );
-    let Ok(WirePayload::HistoryView(view)) = history else {
+
+    let counted = history_count(&mut client).await;
+    assert!(counted.is_ok(), "history must answer");
+    let Ok((before, owner_seen, companion_seen)) = counted else {
         return;
     };
-    let mut owner_seen = false;
-    let mut companion_seen = false;
-    for item in &view.items {
-        if item.role == ene_api::v1::round::HistoryRole::Owner {
-            owner_seen = true;
-        }
-        if item.role == ene_api::v1::round::HistoryRole::Companion {
-            companion_seen = true;
-        }
-    }
     assert!(owner_seen && companion_seen, "history must hold both sides");
-    let before = view.items.len();
     assert!(before >= 2, "history must hold the round, got {before}");
 
     drop(client);
     server.abort();
     tokio::task::yield_now().await;
     drop(std::fs::remove_file(dir.join("ene.sock")));
-    let memory = memory_store();
-    let reopened = HostHandle::open_with_cred_store(&dir, CredStore::Memory(memory)).await;
-    assert!(reopened.is_ok(), "reopen must succeed");
-    let Ok(handle) = reopened else {
+
+    let Some(handle) = open_host(&dir).await else {
         return;
     };
     let handle = Arc::new(handle);
-    let transport = Arc::new(fake_transport());
     let server = tokio::spawn(conn::run(
         dir.clone(),
         Arc::clone(&handle),
-        Arc::clone(&transport),
+        Arc::new(fake_transport()),
     ));
     assert!(
         wait_for_socket(&dir).await,
         "listener must rebind after restart"
     );
 
-    // Restart drops the transient device-auth store (Group K, E): the Owner
-    // re-approves (rotation) and re-provisions, exactly the real flow.
-    // History and pairing records survive (durable); live secrets do not.
-    let reapproved = handle.approve_device(DESCRIPTOR).await;
-    assert!(reapproved.is_ok(), "re-approval must succeed");
-    let Ok(Some((record, secret))) = reapproved else {
-        return;
-    };
-    let stored = store_device(
-        &dir,
-        &StoredDevice::new(DeviceWireId(record.id.0.as_uuid()), secret),
-    );
-    assert!(stored.is_ok(), "device file must re-provision");
-
     let reconnected = Client::connect(&dir, DESCRIPTOR, "test").await;
-    let mut client = match reconnected {
-        Ok(client) => client,
-        Err(error) => {
-            assert!(
-                format!("{error:?}").is_empty(),
-                "reconnect must succeed: {error:?}"
-            );
-            return;
-        }
-    };
-    let history = ask(
-        &mut client,
-        WirePayload::HistoryRequest(cmds::history_request(50)),
-        "history",
-    )
-    .await;
+    let reconnected_ok = reconnected.is_ok();
     assert!(
-        matches!(&history, Ok(WirePayload::HistoryView(_))),
-        "history must answer after restart, got {history:?}"
+        reconnected_ok,
+        "reconnect must succeed on durable auth material"
     );
-    let Ok(WirePayload::HistoryView(view)) = history else {
+    let Ok(mut client) = reconnected else {
+        return;
+    };
+    let counted = history_count(&mut client).await;
+    assert!(counted.is_ok(), "history must answer after restart");
+    let Ok((after, _, _)) = counted else {
         return;
     };
     assert!(
-        view.items.len() == before,
-        "restart must preserve history ({} -> {})",
-        before,
-        view.items.len()
+        after == before,
+        "restart must preserve history ({before} -> {after})"
     );
 
     let stale = ask(
@@ -511,6 +476,27 @@ async fn production_path_setup_to_restart() {
     server.abort();
 }
 
+async fn view_sections(client: &mut Client) -> Result<Vec<String>, String> {
+    let answer = ask(
+        client,
+        WirePayload::ManagementViewRequest(cmds::setup_view_request()),
+        "show",
+    )
+    .await;
+    assert!(
+        matches!(&answer, Ok(WirePayload::ManagementView(_))),
+        "show must answer a view: {answer:?}"
+    );
+    let Ok(WirePayload::ManagementView(view)) = answer else {
+        return Err(String::from("show answered nothing usable"));
+    };
+    Ok(view
+        .sections
+        .iter()
+        .map(|section| section.kind.clone())
+        .collect())
+}
+
 #[tokio::test]
 async fn tampered_secret_cannot_authenticate() {
     let temp = tempfile::TempDir::new();
@@ -519,17 +505,13 @@ async fn tampered_secret_cannot_authenticate() {
         return;
     };
     let dir = temp.path().to_path_buf();
-    let transport = Arc::new(fake_transport());
-    let opened = HostHandle::open_with_cred_store(&dir, CredStore::Memory(memory_store())).await;
-    assert!(opened.is_ok(), "host must open");
-    let Ok(handle) = opened else {
+    let Some(handle) = open_host(&dir).await else {
         return;
     };
-    let handle = Arc::new(handle);
     let server = tokio::spawn(conn::run(
         dir.clone(),
         Arc::clone(&handle),
-        Arc::clone(&transport),
+        Arc::new(fake_transport()),
     ));
     assert!(wait_for_socket(&dir).await, "listener must bind");
 
@@ -538,9 +520,12 @@ async fn tampered_secret_cannot_authenticate() {
         matches!(pending, Err(CliError::ServerOutcome(_))),
         "first pairing must pend"
     );
-    let approved = handle.approve_device(DESCRIPTOR).await;
-    assert!(approved.is_ok(), "approve must succeed");
-    let Ok(Some((record, _secret))) = approved else {
+    let Some(approver) = open_host(&dir).await else {
+        return;
+    };
+    let approval = approver.approve_device(DESCRIPTOR).await;
+    assert!(approval.is_ok(), "approve must succeed");
+    let Ok(Some((record, _secret))) = approval else {
         return;
     };
     let stored = store_device(
@@ -555,6 +540,51 @@ async fn tampered_secret_cannot_authenticate() {
     assert!(
         matches!(tampered, Err(CliError::ServerOutcome(_))),
         "tampered secret must not authenticate"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn rotation_requires_reprovisioning() {
+    let temp = tempfile::TempDir::new();
+    assert!(temp.is_ok(), "tempdir must create");
+    let Ok(temp) = temp else {
+        return;
+    };
+    let dir = temp.path().to_path_buf();
+    let Some(handle) = open_host(&dir).await else {
+        return;
+    };
+    let server = tokio::spawn(conn::run(
+        dir.clone(),
+        Arc::clone(&handle),
+        Arc::new(fake_transport()),
+    ));
+    assert!(wait_for_socket(&dir).await, "listener must bind");
+
+    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
+    assert!(
+        matches!(pending, Err(CliError::ServerOutcome(_))),
+        "first pairing must pend"
+    );
+    let Some(approver) = open_host(&dir).await else {
+        return;
+    };
+    let provisioned = approve_and_provision(&dir, &approver).await;
+    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
+    let connected = Client::connect(&dir, DESCRIPTOR, "test").await;
+    assert!(connected.is_ok(), "provisioned connect must succeed");
+    drop(connected);
+
+    let reapproved = approver.approve_device(DESCRIPTOR).await;
+    assert!(reapproved.is_ok(), "re-approval must succeed");
+    let Ok(Some(_)) = reapproved else {
+        return;
+    };
+    let stale_file = Client::connect(&dir, DESCRIPTOR, "test").await;
+    assert!(
+        matches!(stale_file, Err(CliError::ServerOutcome(_))),
+        "rotated secret must invalidate the old file"
     );
     server.abort();
 }

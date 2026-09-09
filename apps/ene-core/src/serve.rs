@@ -36,8 +36,9 @@
 //!   way after a restart (`Stage 2` runs one client per device).
 //! - The ingress gate in [`HostHandle::handle_frame`] drops unauthenticated
 //!   domain service: any post-capability frame whose [`LiveInput`] carries no
-//!   paired device, an unknown connection, or an envelope connection id that
-//!   does not equal the table id answers a single terminal
+//!   paired device, no known connection, no completed authentication on the
+//!   current connection, or an envelope connection id that does not equal the
+//!   table id answers a single terminal
 //!   [`DisconnectNotice`] with reason `"unpaired"` and nothing else. There is
 //!   no generic reject DTO in `ene-api`, so silence-plus-close (rather than
 //!   an oracle denial) is the explicit decision. Pairing frames carry no
@@ -52,18 +53,27 @@
 //!   answers [`NegotiatedConnection`]
 //!   plus a fresh [`AuthChallenge`]
 //!   whose nonce is recorded pending for that connection, and a later
-//!   [`AuthProof`] verifies (constant time)
-//!   against the secret stored at approval, consuming the nonce single-use
+//!   [`AuthProof`] verifies (constant time, inside `ene-credential`)
+//!   against the secret persisted at approval, consuming the nonce single-use
 //!   regardless of outcome. Success answers
 //!   [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted) carrying the
 //!   connection id the Client echoes on every later frame as the auth
 //!   binding; any failure answers
-//!   [`Rejected`](ene_api::v1::handshake::AuthResult::Rejected). Nonces and
-//!   secrets live only in [`HostHandle`] memory: a restart drops them
+//!   [`Rejected`](ene_api::v1::handshake::AuthResult::Rejected). Pending
+//!   nonces live only in [`HostHandle`] memory: a restart drops them
 //!   (fail-closed), so Clients re-run capability-plus-proof after a restart.
-//! - Every response envelope echoes the connection: the Host sender carries
-//!   the paired device (or [`None`] pre-pairing), the inbound incarnation,
-//!   and `Some` table connection id.
+//!   Pairing secrets live only in the `device-auth.json` file store (plus the
+//!   transient approve-time display scope): the handle holds no secret map,
+//!   proof verification reads the file through on every authentication, and
+//!   there is deliberately no secret cache.
+//! - The response sender reveals the connection id only on and after
+//!   acceptance: [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted)
+//!   and every later (domain) response carry `Some` table connection id, while
+//!   every pre-accept response (pairing results and denials, negotiated terms,
+//!   challenges, rejections, and unpaired closes) carries [`None`]. A peer
+//!   that never completed the challenge therefore never learns the id the
+//!   gate requires it to echo. The sender always echoes the inbound
+//!   incarnation and names the paired device (or [`None`] pre-pairing).
 //! - [`HostHandle::handle_frame`] is infallible by contract: infrastructure
 //!   failures map to retry-safe outcome frames (hold or revalidate), never to
 //!   fabricated domain facts. The mapping table lives on each pipeline method.
@@ -98,8 +108,8 @@ use ene_api::v1::refs::{ConnectionWireId, WireMessageId, WireMessageType};
 use ene_companion::CompanionRepository;
 use ene_credential::{
     CredentialRef, CredentialStore, CredentialTechnicalError, DeviceId, DevicePairingRepository,
-    DevicePairingStatus, DeviceRecord, EnvCredentialStore, MemoryCredentialStore,
-    verify_pairing_proof,
+    DevicePairingStatus, DeviceRecord, EnvCredentialStore, FileDeviceAuthStore,
+    MemoryCredentialStore,
 };
 use ene_inference::ProviderTransport;
 use ene_inference::provider::{DEFAULT_BASE_URL, OpenAiResponsesTransport};
@@ -221,12 +231,15 @@ impl CredentialStore for CredStore {
 /// reachability premise, `peer_uid_ok` carries the same-user proof for this
 /// connection, `paired_device` carries the device wire string the connection
 /// table paired on this connection (if any), `connection_known` reports
-/// whether the connection table knows this connection at all, and
-/// `connection_id` is the table key itself. The gate in
-/// [`HostHandle::handle_frame`] trusts these conn-filled premises; direct
-/// handle callers (tests) construct them explicitly. All fields are public so
-/// connection adapters and integration tests can construct the value
-/// directly.
+/// whether the connection table knows this connection at all, `authed`
+/// reports whether this connection completed the challenge/proof exchange and
+/// is still the device's current authed connection (a newer authentication by
+/// the same device supersedes this one, flipping `authed` off without
+/// touching the record), and `connection_id` is the table key itself. The
+/// gate in [`HostHandle::handle_frame`] trusts these conn-filled premises;
+/// direct handle callers (tests) construct them explicitly. All fields are
+/// public so connection adapters and integration tests can construct the
+/// value directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveInput {
     /// Opaque client reference naming the caller for this frame.
@@ -239,13 +252,22 @@ pub struct LiveInput {
     pub paired_device: Option<String>,
     /// Whether the connection table knows this connection.
     pub connection_known: bool,
+    /// Whether this connection is authenticated and current for its device.
+    ///
+    /// Filled by the connection table, never by the Client: true only after
+    /// an [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted) answer
+    /// on this connection while no newer authentication by the same device
+    /// has superseded it. The ingress gate requires this premise on every
+    /// post-capability frame except the proof itself.
+    pub authed: bool,
     /// Host-minted connection key for this connection (the table id).
     ///
     /// Filled by the connection table, never by the Client: the ingress gate
     /// requires post-capability envelopes to echo exactly this id, and
     /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted) reveals it
-    /// to the Client for the first time, so echoing it proves the sender
-    /// completed the challenge on this connection.
+    /// to the Client for the first time (pre-accept responses carry [`None`]
+    /// instead), so echoing it proves the sender completed the challenge on
+    /// this connection.
     pub connection_id: ConnectionWireId,
 }
 
@@ -264,12 +286,17 @@ pub(crate) fn device_client(device_wire: &str) -> ClientId {
     )))
 }
 
-/// Keys the pairing-secret map by device: the hyphenated wire form of the id.
+/// Parses a hyphenated device wire string back into its domain identity.
 ///
-/// The same string the `Paired` outcome carries and the connection layer
-/// records, so proof verification resolves the exact entry approval stored.
-pub(crate) fn device_key(id: &DeviceId) -> String {
-    id.0.as_uuid().as_hyphenated().to_string()
+/// Yields [`None`] for anything that is not UUID text. Proof verification
+/// treats an unparsable device exactly like a missing secret (a rejected
+/// proof with the same reason string), so a malformed table entry can never
+/// become an oracle.
+fn parse_device_id(text: &str) -> Option<DeviceId> {
+    text.parse::<Uuid>()
+        .ok()
+        .map(RawId::from_uuid)
+        .map(DeviceId)
 }
 
 /// Keys the pending-nonce map by connection: the hyphenated wire form of the id.
@@ -309,40 +336,44 @@ fn lock_map<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
 /// needs `&mut` across its transport await while only touching the tracker
 /// synchronously up front, and the transport never calls back into the
 /// handle, so no lock ordering exists); the [`Store`] carries its own lock.
-/// Nothing here is durable except through [`Store`]: a restart drops every
-/// map while the database persists, and old wire round refs then surface as
-/// stale (never rebound). Pairing and idempotency are durable instead: the
-/// device tables and the history `local_id` column live in [`Store`].
+/// Nothing here is durable except through [`Store`] and the device-auth file:
+/// a restart drops every map while the database persists, and old wire round
+/// refs then surface as stale (never rebound). Pairing, device-auth secrets,
+/// and idempotency are durable instead: the device tables and the history
+/// `local_id` column live in [`Store`], and pairing secrets live in
+/// `device-auth.json` through the `auth_store` field.
 ///
 /// Map keys: `open_rounds` is keyed by `(client ref, companion key)`; round
 /// refs issued on the wire resolve back through `rounds` (wire string to
 /// domain round); `pending_nonces` is keyed by the hyphenated connection id
-/// string; `pairing_secrets` is keyed by the hyphenated device wire string
-/// (the same form the `Paired` outcome carries).
+/// string.
 pub struct HostHandle {
     pub(crate) store: Store,
     pub(crate) tracker: AsyncMutex<EvaluationTracker>,
     pub(crate) open_rounds: StdMutex<HashMap<(String, String), OpenRound>>,
     pub(crate) rounds: StdMutex<HashMap<String, RoundId>>,
     pub(crate) cred_store: CredStore,
+    /// File-backed pairing-secret store by device.
+    ///
+    /// Opened on `<data_dir>/device-auth.json` by
+    /// [`HostHandle::open_with_cred_store`]. Secrets live here and in the
+    /// transient approve-time display scope only: the handle keeps no secret
+    /// map and no cache, and proof verification reads the file through on
+    /// every authentication. Backup-exclusion: this file holds Group K
+    /// verification material with E classification and must never enter
+    /// backups or exports (see the [`FileDeviceAuthStore`] contract); a
+    /// future backup stage walking the data directory must exclude it by
+    /// name.
+    pub(crate) auth_store: FileDeviceAuthStore,
     /// Single-use auth nonces by connection key.
     ///
-    /// In-memory and transient: a restart drops every pending nonce (and
-    /// every pairing secret below), so post-restart Clients re-run
-    /// capability-plus-proof rather than resuming. Fail-closed: a proof with
-    /// no pending nonce answers
+    /// In-memory and transient: a restart drops every pending nonce, so
+    /// post-restart Clients re-run capability-plus-proof rather than
+    /// resuming. Fail-closed: a proof with no pending nonce answers
     /// [`Rejected`](ene_api::v1::handshake::AuthResult::Rejected), never
     /// acceptance. Each nonce is consumed on first proof regardless of
     /// outcome, so a captured proof cannot replay.
     pub(crate) pending_nonces: StdMutex<HashMap<String, String>>,
-    /// Pairing secrets by device wire string.
-    ///
-    /// Same transience contract as [`HostHandle::pending_nonces`]: populated
-    /// only through [`HostHandle::approve_device`], never persisted, never
-    /// logged, never rendered. A proof for a device with no recorded secret
-    /// answers [`Rejected`](ene_api::v1::handshake::AuthResult::Rejected),
-    /// never acceptance.
-    pub(crate) pairing_secrets: StdMutex<HashMap<String, String>>,
 }
 
 impl HostHandle {
@@ -369,12 +400,16 @@ impl HostHandle {
     /// Same as [`HostHandle::open`] except for the store: integration tests
     /// pass [`CredStore::Memory`] pre-provisioned with test bearers, which
     /// keeps them hermetic (the environment store would read the real process
-    /// environment on every call).
+    /// environment on every call). The file-backed device-auth store opens on
+    /// `<data_dir>/device-auth.json` (created lazily on first approval); the
+    /// data directory itself is ensured first, so the open always has its
+    /// parent.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::Store`] under the same conditions as
-    /// [`HostHandle::open`].
+    /// [`HostHandle::open`], plus when the device-auth file cannot be opened
+    /// (unreadable, malformed, or wrongly permissioned).
     pub async fn open_with_cred_store(
         data_dir: &Path,
         cred_store: CredStore,
@@ -384,14 +419,16 @@ impl HostHandle {
         let store = Store::open(&database)
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
+        let auth_store = FileDeviceAuthStore::open(&data_dir.join("device-auth.json"))
+            .map_err(|error| CoreError::Store(error.to_string()))?;
         Ok(Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
             open_rounds: StdMutex::new(HashMap::new()),
             rounds: StdMutex::new(HashMap::new()),
             cred_store,
+            auth_store,
             pending_nonces: StdMutex::new(HashMap::new()),
-            pairing_secrets: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -401,8 +438,12 @@ impl HostHandle {
     /// [`crate::conn`], while inference arrives as `transport` so tests pass a
     /// fake and production passes the `OpenAI` transport. The returned frames
     /// carry response envelopes (paired device or [`None`] pre-pairing, the
-    /// inbound incarnation echoed, `Some` table connection id) with `reply_to`
-    /// set to the inbound message id: every response echoes the connection.
+    /// inbound incarnation echoed, `reply_to` set to the inbound message id)
+    /// whose sender reveals the table connection id only on and after
+    /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted): domain
+    /// responses and the acceptance itself carry `Some` id, while every
+    /// pre-accept response (pairing results, negotiated terms, challenges,
+    /// rejections, denials, unpaired closes) carries [`None`].
     ///
     /// Ingress rules by frame kind: [`PairingRequest`] frames carry no checks;
     /// [`CapabilityAdvertise`] frames need the paired-device check only (they
@@ -482,8 +523,11 @@ impl HostHandle {
     /// Pairing, capability, and proof frames never reach this gate (see
     /// [`HostHandle::handle_frame`]): pairing is pre-pairing by definition,
     /// capability predates authentication, and the proof is the
-    /// authentication. Every later frame needs all three premises: a device
-    /// paired on this connection, a known connection entry, and an envelope
+    /// authentication. Every later frame needs all four premises: a device
+    /// paired on this connection, a known connection entry, a completed
+    /// authentication that is still current for the device (a newer
+    /// authentication by the same device supersedes this connection, so a
+    /// replayed id on the old connection still trips), and an envelope
     /// connection id equal to the table id. Equality is the auth binding: the
     /// id is minted per accept and revealed only in
     /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted), so echoing
@@ -494,6 +538,7 @@ impl HostHandle {
     fn gate_trips(frame: &WireFrame, live: &LiveInput) -> bool {
         live.paired_device.is_none()
             || !live.connection_known
+            || !live.authed
             || frame.envelope.sender.connection_id != Some(live.connection_id)
     }
 
@@ -547,20 +592,21 @@ impl HostHandle {
     /// decides whether pairing is allowed itself. An unknown descriptor
     /// yields `Ok(None)` (the caller lists [`HostHandle::pending_devices`]);
     /// a blank descriptor can never match because wire ingress denies blank
+    /// descriptors before they reach the store.
     /// Records one Owner pairing approval and mints its one-time secret.
     ///
     /// The returned secret string is for one-time display on this
     /// Host-local trusted surface only: the caller shows it once and
-    /// forgets it. The handle additionally retains a copy in its transient
-    /// pairing-secret map keyed by the hyphenated device wire string (the
-    /// same form the `Paired` outcome carries), so later
-    /// [`AuthProof`] frames verify against
-    /// it. The copy is never stored, logged, or rendered in `Debug`.
+    /// forgets it. The secret is additionally persisted through the
+    /// file-backed `auth_store` under the approved device, so
+    /// later [`AuthProof`] frames verify against the file; the handle keeps
+    /// no in-memory copy and no cache. The persisted copy is never logged
+    /// and never rendered in `Debug`.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::Store`] when the durable pairing tables are
-    /// unavailable.
+    /// unavailable or the device-auth file cannot be written.
     pub async fn approve_device(
         &self,
         descriptor: &str,
@@ -571,7 +617,9 @@ impl HostHandle {
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
         if let Some((record, secret)) = approved.as_ref() {
-            lock_map(&self.pairing_secrets).insert(device_key(&record.id), secret.clone());
+            self.auth_store
+                .save_secret(&record.id, &record.descriptor, secret)
+                .map_err(|error| CoreError::Store(error.to_string()))?;
         }
         Ok(approved)
     }
@@ -664,7 +712,8 @@ impl HostHandle {
     /// descriptors with [`Denied`](PairingResult::Denied): the pairing
     /// outcome has no `NeedsClarification` variant, so refusal is the honest
     /// shape. A store failure likewise denies (operational reason only); the
-    /// Client retries the same request, which is idempotent.
+    /// Client retries the same request, which is idempotent. Every answer
+    /// here predates authentication, so its sender hides the connection id.
     async fn pair(
         &self,
         frame: &WireFrame,
@@ -681,14 +730,14 @@ impl HostHandle {
         match self.store.request_pairing(descriptor).await {
             Ok(DevicePairingStatus::Paired { device }) => {
                 let device_id = DeviceWireId(device.id.0.as_uuid());
-                vec![outgoing_frame(
+                vec![outgoing_frame_pre_auth(
                     frame,
                     live,
                     "PairingResult",
                     WirePayload::PairingResult(PairingResult::Paired { device_id }),
                 )]
             }
-            Ok(DevicePairingStatus::Pending { .. }) => vec![outgoing_frame(
+            Ok(DevicePairingStatus::Pending { .. }) => vec![outgoing_frame_pre_auth(
                 frame,
                 live,
                 "PairingResult",
@@ -708,8 +757,9 @@ impl HostHandle {
     /// [`AuthChallenge`] whose nonce is recorded pending for this connection:
     /// the Client answers with an [`AuthProof`] proving possession of its
     /// pairing secret. Re-advertising replaces the pending nonce, so only the
-    /// latest challenge can be answered. Capability frames never attach
-    /// presence: attach happens only on the submit path, so a
+    /// latest challenge can be answered. Both answers predate authentication,
+    /// so their senders hide the connection id. Capability frames never
+    /// attach presence: attach happens only on the submit path, so a
     /// negotiating-but-never-submitting peer leaves attribution untouched.
     fn advertise(
         &self,
@@ -725,7 +775,7 @@ impl HostHandle {
             let notice = DisconnectNotice {
                 reason: String::from("incompatible protocol major"),
             };
-            return vec![outgoing_frame(
+            return vec![outgoing_frame_pre_auth(
                 frame,
                 live,
                 "DisconnectNotice",
@@ -744,13 +794,13 @@ impl HostHandle {
         let nonce = Uuid::new_v4().as_hyphenated().to_string();
         lock_map(&self.pending_nonces).insert(conn_key(&live.connection_id), nonce.clone());
         vec![
-            outgoing_frame(
+            outgoing_frame_pre_auth(
                 frame,
                 live,
                 "NegotiatedConnection",
                 WirePayload::NegotiatedConnection(negotiated),
             ),
-            outgoing_frame(
+            outgoing_frame_pre_auth(
                 frame,
                 live,
                 "AuthChallenge",
@@ -759,18 +809,23 @@ impl HostHandle {
         ]
     }
 
-    /// Handles one [`AuthProof`]: verify against the pairing secret and answer.
+    /// Handles one [`AuthProof`]: verify against the persisted secret and answer.
     ///
     /// No prior auth is required: this frame IS the authentication. The
     /// pending nonce for this connection is consumed single-use regardless of
-    /// outcome — a missing nonce, a missing sender device, a missing secret,
-    /// or a bad proof all answer
+    /// outcome — a missing nonce, a missing sender device, a missing or
+    /// unreadable secret, or a bad proof all answer
     /// [`Rejected`](ene_api::v1::handshake::AuthResult::Rejected) with an
-    /// operational reason — so a captured proof can never replay. Success
-    /// answers [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted)
+    /// operational reason — so a captured proof can never replay. The secret
+    /// loads from the file-backed `auth_store` on every call:
+    /// there is no cache, so rotations and revocations take effect on the
+    /// next authentication. Success answers
+    /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted)
     /// carrying this connection's table id, which the Client echoes on every
-    /// later frame as the auth binding the gate checks. Proof comparison
-    /// itself runs in constant time inside [`verify_pairing_proof`].
+    /// later frame as the auth binding the gate checks; the acceptance (and
+    /// its piggybacked presence fact) is the first response on this
+    /// connection to reveal the id, while every rejection hides it. Proof
+    /// comparison itself runs in constant time inside `ene-credential`.
     async fn verify_proof(
         &self,
         frame: &WireFrame,
@@ -786,10 +841,13 @@ impl HostHandle {
         let device = live.paired_device.clone();
         let reason = match (nonce, device) {
             (Some(nonce), Some(device)) => {
-                let verified = lock_map(&self.pairing_secrets)
-                    .get(&device)
-                    .cloned()
-                    .is_some_and(|secret| verify_pairing_proof(&secret, &nonce, &proof.proof));
+                let verified = parse_device_id(&device).is_some_and(|id| {
+                    matches!(
+                        self.auth_store
+                            .verify_device_proof(&id, &nonce, &proof.proof),
+                        Ok(true)
+                    )
+                });
                 if verified {
                     None
                 } else {
@@ -822,7 +880,7 @@ impl HostHandle {
                 }
                 out
             }
-            Some(reason) => vec![outgoing_frame(
+            Some(reason) => vec![outgoing_frame_pre_auth(
                 frame,
                 live,
                 "AuthResult",
@@ -861,8 +919,10 @@ fn attribution_to_wire(
 }
 
 /// Builds a pairing denial frame with an operational reason only.
+///
+/// A denial predates authentication, so its sender hides the connection id.
 fn denied_pairing(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFrame {
-    outgoing_frame(
+    outgoing_frame_pre_auth(
         frame,
         live,
         "PairingResult",
@@ -876,9 +936,12 @@ fn denied_pairing(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFram
 ///
 /// The connection closes after this frame is written. The `"unpaired"` reason
 /// names the gate trip only; no generic reject DTO exists in `ene-api`, so a
-/// disconnect (rather than an oracle denial) is the explicit decision.
+/// disconnect (rather than an oracle denial) is the explicit decision. The
+/// gate trips exactly when the sender is not authenticated, so the frame
+/// hides the connection id: a peer that never completed the challenge must
+/// not learn it from the drop.
 pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {
-    outgoing_frame(
+    outgoing_frame_pre_auth(
         frame,
         live,
         "DisconnectNotice",
@@ -890,14 +953,17 @@ pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {
 
 /// Builds the Host sender for one response to `frame` under `live`.
 ///
-/// Host-to-Client addressing echoes the inbound incarnation (so the Client
-/// pairs the response with its connection state) and always carries this
-/// connection's table id: every response echoes the connection. The device
-/// names the paired target when this connection paired one (parsed back from
-/// the hyphenated wire string the table holds; an unparsable entry — never
+/// Host-to-Client addressing always echoes the inbound incarnation (so the
+/// Client pairs the response with its connection state) and names the paired
+/// device target when this connection paired one (parsed back from the
+/// hyphenated wire string the table holds; an unparsable entry — never
 /// written by this Host — maps to [`None`]); pre-pairing responses carry
-/// [`None`].
-fn response_sender(frame: &WireFrame, live: &LiveInput) -> WireSender {
+/// device [`None`]. The connection id travels only when `reveal_connection`
+/// holds: acceptance and later domain responses reveal this connection's
+/// table id, while every pre-accept response hides it ([`None`]), so a peer
+/// that never completed the challenge never learns the id the gate requires
+/// it to echo.
+fn response_sender(frame: &WireFrame, live: &LiveInput, reveal_connection: bool) -> WireSender {
     WireSender {
         device_id: live
             .paired_device
@@ -905,7 +971,7 @@ fn response_sender(frame: &WireFrame, live: &LiveInput) -> WireSender {
             .and_then(|text| Uuid::parse_str(text).ok())
             .map(DeviceWireId),
         incarnation_id: frame.envelope.sender.incarnation_id,
-        connection_id: Some(live.connection_id),
+        connection_id: reveal_connection.then_some(live.connection_id),
     }
 }
 
@@ -921,9 +987,35 @@ pub(crate) fn outgoing_envelope(
     message_type: &str,
     reply_to: Option<WireMessageId>,
 ) -> WireEnvelope {
+    outgoing_envelope_inner(frame, live, message_type, reply_to, true)
+}
+
+/// Builds a pre-accept outgoing envelope for a `Stage 2` message type.
+///
+/// Same as [`outgoing_envelope`] except the sender hides the connection id
+/// ([`None`]): pairing results and denials, negotiated terms, challenges,
+/// rejections, and unpaired closes all predate the acceptance that first
+/// reveals the id, so none of them may carry it.
+pub(crate) fn outgoing_envelope_pre_auth(
+    frame: &WireFrame,
+    live: &LiveInput,
+    message_type: &str,
+    reply_to: Option<WireMessageId>,
+) -> WireEnvelope {
+    outgoing_envelope_inner(frame, live, message_type, reply_to, false)
+}
+
+/// Builds an outgoing envelope with an explicit connection-id reveal rule.
+fn outgoing_envelope_inner(
+    frame: &WireFrame,
+    live: &LiveInput,
+    message_type: &str,
+    reply_to: Option<WireMessageId>,
+    reveal_connection: bool,
+) -> WireEnvelope {
     let mut envelope = new_outgoing_envelope(
         ProtocolVersion::V1,
-        response_sender(frame, live),
+        response_sender(frame, live, reveal_connection),
         WireMessageType(message_type.to_string()),
     );
     envelope.correlation.reply_to = reply_to;
@@ -933,8 +1025,10 @@ pub(crate) fn outgoing_envelope(
 /// Builds one response frame answering `frame` with `payload`.
 ///
 /// The envelope follows the `Stage 2` `message_type` convention documented on
-/// the crate root and links back through `reply_to`, echoing the connection
-/// through [`response_sender`].
+/// the crate root and links back through `reply_to`, revealing the connection
+/// through [`response_sender`]. Use only on and after
+/// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted): the acceptance
+/// itself, the piggybacked presence fact, and every domain response.
 pub(crate) fn outgoing_frame(
     frame: &WireFrame,
     live: &LiveInput,
@@ -943,6 +1037,29 @@ pub(crate) fn outgoing_frame(
 ) -> WireFrame {
     WireFrame {
         envelope: outgoing_envelope(frame, live, message_type, Some(frame.envelope.message_id)),
+        payload,
+    }
+}
+
+/// Builds one pre-accept response frame answering `frame` with `payload`.
+///
+/// Same as [`outgoing_frame`] except the sender hides the connection id:
+/// pairing results and denials, negotiated terms, challenges, rejections,
+/// and unpaired closes must not reveal the id the gate later requires the
+/// Client to echo.
+pub(crate) fn outgoing_frame_pre_auth(
+    frame: &WireFrame,
+    live: &LiveInput,
+    message_type: &str,
+    payload: WirePayload,
+) -> WireFrame {
+    WireFrame {
+        envelope: outgoing_envelope_pre_auth(
+            frame,
+            live,
+            message_type,
+            Some(frame.envelope.message_id),
+        ),
         payload,
     }
 }
@@ -1038,7 +1155,9 @@ mod tests {
     ///
     /// Constructed explicitly (never the shared helper): auth-flow tests bind
     /// several frames to one connection, so the id must stay fixed across
-    /// them.
+    /// them. `authed` holds: these premises stand in for a connection table
+    /// entry after its `Accepted`, so post-accept domain frames pass the
+    /// gate; bypass tests override it explicitly.
     fn paired_input(device_wire: &str) -> LiveInput {
         LiveInput {
             client_ref: device_wire.to_string(),
@@ -1046,6 +1165,7 @@ mod tests {
             peer_uid_ok: true,
             paired_device: Some(device_wire.to_string()),
             connection_known: true,
+            authed: true,
             connection_id: ConnectionWireId(uuid::Uuid::new_v4()),
         }
     }
@@ -1417,6 +1537,12 @@ mod tests {
             )),
             "a fresh descriptor pends, got {pending:?}"
         );
+        for response in &pending {
+            assert_eq!(
+                response.envelope.sender.connection_id, None,
+                "a pre-accept pairing answer hides the connection id"
+            );
+        }
         let approved = handle.approve_device("laptop").await;
         assert!(
             matches!(approved, Ok(Some(_))),
@@ -1441,6 +1567,10 @@ mod tests {
         };
         let device_id = *device_id;
         assert_eq!(
+            answer.envelope.sender.connection_id, None,
+            "even the Paired answer hides the connection id"
+        );
+        assert_eq!(
             device_id.0.as_hyphenated().to_string(),
             device_wire,
             "the issued device key names the approved device"
@@ -1458,6 +1588,12 @@ mod tests {
             2,
             "capability answers terms plus challenge"
         );
+        for response in &challenged {
+            assert_eq!(
+                response.envelope.sender.connection_id, None,
+                "negotiation and challenge hide the connection id"
+            );
+        }
         let Some(challenge_frame) = challenged.get(1) else {
             remove_data_dir(&dir);
             return;
@@ -1518,6 +1654,11 @@ mod tests {
             "acceptance carries the attribution fact, got {:?}",
             fact.payload
         );
+        assert_eq!(
+            fact.envelope.sender.connection_id,
+            Some(live.connection_id),
+            "the piggybacked fact rides the acceptance, so it reveals too"
+        );
         let replayed = handle
             .handle_frame(proof_frame(device_id, &proof), live.clone(), &transport)
             .await;
@@ -1528,6 +1669,12 @@ mod tests {
             )),
             "the consumed nonce never answers twice, got {replayed:?}"
         );
+        for response in &replayed {
+            assert_eq!(
+                response.envelope.sender.connection_id, None,
+                "a rejection hides the connection id even post-accept"
+            );
+        }
         let rechallenged = handle
             .handle_frame(
                 advertise_frame(ProtocolVersion::V1),
@@ -1612,6 +1759,261 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pre_accept_denials_and_closes_hide_the_connection_id() {
+        let Some((handle, dir)) = open_handle("auth-hidden").await else {
+            return;
+        };
+        let transport = fake_transport();
+        let live = live_input("client-a");
+        let denied = handle
+            .handle_frame(pairing_frame("laptop"), live.clone(), &transport)
+            .await;
+        // Fresh descriptor pends (no denial here); the peer-mismatch and
+        // blank denials below are the hiding cases.
+        assert!(
+            denied.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation)
+            )),
+            "a fresh descriptor pends, got {denied:?}"
+        );
+        let mismatched = LiveInput {
+            peer_uid_ok: false,
+            ..live_input("client-a")
+        };
+        let refused = handle
+            .handle_frame(pairing_frame("laptop"), mismatched, &transport)
+            .await;
+        assert!(
+            refused.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::PairingResult(PairingResult::Denied { .. })
+            )),
+            "an unauthorized peer is denied, got {refused:?}"
+        );
+        let mismatch = handle
+            .handle_frame(
+                advertise_frame(ProtocolVersion { major: 9, minor: 0 }),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        assert!(
+            mismatch
+                .first()
+                .is_some_and(|first| matches!(&first.payload, WirePayload::DisconnectNotice(_))),
+            "a major mismatch disconnects, got {mismatch:?}"
+        );
+        let dropped = handle
+            .handle_frame(submit_frame(), unpaired_input(), &transport)
+            .await;
+        assert!(
+            dropped.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::DisconnectNotice(notice) if notice.reason == "unpaired"
+            )),
+            "an unpaired submit closes, got {dropped:?}"
+        );
+        for response in denied
+            .iter()
+            .chain(&refused)
+            .chain(&mismatch)
+            .chain(&dropped)
+        {
+            assert_eq!(
+                response.envelope.sender.connection_id, None,
+                "no pre-accept response may reveal the connection id, got {:?}",
+                response.payload
+            );
+            assert!(
+                response.envelope.correlation.reply_to.is_some(),
+                "hiding never drops the reply link, got {:?}",
+                response.payload
+            );
+        }
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn unauthed_domain_frame_closes_even_without_a_connection_id() {
+        let Some((handle, dir)) = open_handle("gate-bypass").await else {
+            return;
+        };
+        let transport = fake_transport();
+        // A paired device that skipped the proof: the bypass attempt carries
+        // no connection id because pre-accept responses never reveal it.
+        let bypass = LiveInput {
+            paired_device: Some(String::from("laptop")),
+            connection_known: true,
+            authed: false,
+            ..live_input("client-a")
+        };
+        let without_id = submit_frame();
+        assert_eq!(
+            without_id.envelope.sender.connection_id, None,
+            "the bypass frame carries no connection id"
+        );
+        let dropped = handle
+            .handle_frame(without_id, bypass.clone(), &transport)
+            .await;
+        assert!(
+            dropped.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::DisconnectNotice(notice) if notice.reason == "unpaired"
+            )),
+            "an unauthed domain frame closes, got {dropped:?}"
+        );
+        for response in &dropped {
+            assert_eq!(
+                response.envelope.sender.connection_id, None,
+                "the drop itself reveals nothing"
+            );
+        }
+        // Even a fully authed connection must still echo the id: `None` is
+        // never a valid binding.
+        let authed = LiveInput {
+            authed: true,
+            ..bypass
+        };
+        let dropped = handle
+            .handle_frame(submit_frame(), authed, &transport)
+            .await;
+        assert!(
+            dropped.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::DisconnectNotice(notice) if notice.reason == "unpaired"
+            )),
+            "an id-less frame on an authed connection still closes, got {dropped:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn superseded_connection_replay_closes_despite_a_known_id() {
+        let Some((handle, dir)) = open_handle("gate-superseded").await else {
+            return;
+        };
+        let transport = fake_transport();
+        // The connection table reports a superseded connection as unauthed
+        // (see the conn-level supersede test): the envelope echoes the table
+        // id exactly, yet the gate must still drop the frame because the
+        // device authenticated anew elsewhere.
+        let stale = LiveInput {
+            paired_device: Some(String::from("laptop")),
+            connection_known: true,
+            authed: false,
+            ..live_input("client-a")
+        };
+        let replay = stamped(submit_frame(), &stale);
+        assert_eq!(
+            replay.envelope.sender.connection_id,
+            Some(stale.connection_id),
+            "the replay echoes the table id exactly"
+        );
+        let dropped = handle.handle_frame(replay, stale, &transport).await;
+        assert!(
+            dropped.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::DisconnectNotice(notice) if notice.reason == "unpaired"
+            )),
+            "a known-id replay on a superseded connection closes, got {dropped:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
+        use crate::test_support::temp_data_dir;
+        use ene_credential::MemoryCredentialStore;
+
+        use super::CredStore;
+
+        let Some(dir) = temp_data_dir("auth-durable") else {
+            return;
+        };
+        let transport = fake_transport();
+        let opened =
+            HostHandle::open_with_cred_store(&dir, CredStore::Memory(MemoryCredentialStore::new()))
+                .await;
+        assert!(opened.is_ok(), "the first open must succeed");
+        let Ok(first) = opened else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let pending = first
+            .handle_frame(pairing_frame("laptop"), live_input("client-a"), &transport)
+            .await;
+        assert!(
+            pending.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation)
+            )),
+            "a fresh descriptor pends, got {pending:?}"
+        );
+        let approved = first.approve_device("laptop").await;
+        assert!(
+            matches!(approved, Ok(Some(_))),
+            "owner approval must pair, got {approved:?}"
+        );
+        let Ok(Some((record, secret))) = approved else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            dir.join("device-auth.json").exists(),
+            "approval persists the secret to the device-auth file"
+        );
+        drop(first);
+        // A fresh handle holds no secret map at all: if verification reads
+        // only memory, this proof must fail. It must pass from the file.
+        let reopened =
+            HostHandle::open_with_cred_store(&dir, CredStore::Memory(MemoryCredentialStore::new()))
+                .await;
+        assert!(reopened.is_ok(), "the second open must succeed");
+        let Ok(second) = reopened else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let device_wire = record.id.0.as_uuid().as_hyphenated().to_string();
+        let live = paired_input(&device_wire);
+        let challenged = second
+            .handle_frame(
+                advertise_frame(ProtocolVersion::V1),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        let Some(challenge_frame) = challenged.get(1) else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let WirePayload::AuthChallenge(challenge) = &challenge_frame.payload else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let proof = pairing_proof_hex(&secret, &challenge.nonce);
+        let Ok(device_uuid) = uuid::Uuid::parse_str(&device_wire) else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let answered = second
+            .handle_frame(
+                proof_frame(DeviceWireId(device_uuid), &proof),
+                live,
+                &transport,
+            )
+            .await;
+        assert!(
+            answered.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::AuthResult(AuthResult::Accepted { .. })
+            )),
+            "the file-backed secret verifies with no re-approval, got {answered:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
     async fn proof_without_challenge_is_rejected() {
         let Some((handle, dir)) = open_handle("auth-nochallenge").await else {
             return;
@@ -1644,9 +2046,13 @@ mod tests {
             first.payload
         );
         assert_eq!(
-            first.envelope.sender.connection_id,
-            Some(live.connection_id),
-            "even the rejection echoes the connection"
+            first.envelope.sender.connection_id, None,
+            "a pre-accept rejection hides the connection id"
+        );
+        assert_eq!(
+            first.envelope.sender.incarnation_id,
+            sender().incarnation_id,
+            "hiding the connection never drops the incarnation echo"
         );
         remove_data_dir(&dir);
     }
@@ -1718,9 +2124,8 @@ mod tests {
         );
         for response in &responses {
             assert_eq!(
-                response.envelope.sender.connection_id,
-                Some(live.connection_id),
-                "every response echoes the connection"
+                response.envelope.sender.connection_id, None,
+                "pre-accept negotiation hides the connection id"
             );
         }
         let recorded = match handle.pending_nonces.lock() {

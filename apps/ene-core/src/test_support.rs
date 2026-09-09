@@ -68,11 +68,11 @@ pub(crate) async fn memory_handle(tag: &str) -> Option<(HostHandle, PathBuf)> {
 
 /// Builds a live, authorized [`LiveInput`] for a client ref.
 ///
-/// The premises describe a paired, known connection on a freshly minted
-/// table id: `paired_device` carries the client ref as the device wire
-/// string, `connection_known` holds, and `connection_id` is the id domain
-/// frames must echo in the envelope. Tests for the gate itself override
-/// these fields explicitly.
+/// The premises describe a paired, known, authenticated connection on a
+/// freshly minted table id: `paired_device` carries the client ref as the
+/// device wire string, `connection_known` and `authed` hold, and
+/// `connection_id` is the id domain frames must echo in the envelope. Tests
+/// for the gate itself override these fields explicitly.
 pub(crate) fn live_input(client_ref: &str) -> LiveInput {
     LiveInput {
         client_ref: client_ref.to_string(),
@@ -80,6 +80,7 @@ pub(crate) fn live_input(client_ref: &str) -> LiveInput {
         peer_uid_ok: true,
         paired_device: Some(client_ref.to_string()),
         connection_known: true,
+        authed: true,
         connection_id: ConnectionWireId(uuid::Uuid::new_v4()),
     }
 }

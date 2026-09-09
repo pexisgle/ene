@@ -21,14 +21,22 @@
 //! connection without a reply — the frame cannot be attributed to the pinned
 //! owner), and marks the connection paired after [`HostHandle::handle_frame`]
 //! answers [`Paired`](ene_api::v1::handshake::PairingResult::Paired) on it.
-//! Each frame's [`LiveInput`] premises (`paired_device`, `connection_known`,
-//! `connection_id`) come from this table, never from Client self-reports; the
-//! ingress gate in [`HostHandle::handle_frame`] trusts exactly these
-//! conn-filled premises, and the envelope connection id must equal the table
-//! id on every post-capability frame (the id is revealed to the Client only
-//! in `AuthResult::Accepted`, so echoing it is the auth binding). Socket close
-//! forgets the entry and, when the closing connection was the last live one
-//! holding its paired device, reports the paired device string to
+//! A later [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted) answer
+//! on the connection marks it authenticated through
+//! `ConnectionTable::note_authed`, which also records it as the device's
+//! current authed connection: a newer authentication by the same device
+//! supersedes the older one, and the older connection goes stale implicitly
+//! (its record keeps `authed`, but it is no longer current, so the gate
+//! drops its domain frames). Each frame's [`LiveInput`] premises
+//! (`paired_device`, `connection_known`, `authed`, `connection_id`) come from
+//! this table, never from Client self-reports; the ingress gate in
+//! [`HostHandle::handle_frame`] trusts exactly these conn-filled premises,
+//! and the envelope connection id must equal the table id on every
+//! post-capability frame (the id is revealed to the Client only in
+//! `AuthResult::Accepted`, and pre-accept responses carry [`None`], so
+//! echoing it is the auth binding). Socket close forgets the entry and, when
+//! the closing connection was the last live one holding its paired device,
+//! reports the paired device string to
 //! [`HostHandle::note_disconnect`](crate::serve::HostHandle::note_disconnect)
 //! so presence falls back to `NoActive`. Connection close and presence loss
 //! are deliberately separate: one device may hold several live connections,
@@ -91,7 +99,7 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
 #[cfg(unix)]
 use ene_api::v1::envelope::WireEnvelope;
 #[cfg(unix)]
-use ene_api::v1::handshake::PairingResult;
+use ene_api::v1::handshake::{AuthResult, PairingResult};
 #[cfg(unix)]
 use ene_api::v1::payload::WirePayload;
 #[cfg(unix)]
@@ -104,7 +112,7 @@ use tokio::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use crate::serve::LiveInput;
 
-/// Per-connection pairing and incarnation record.
+/// Per-connection pairing, incarnation, and authentication record.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectionRecord {
@@ -112,6 +120,15 @@ struct ConnectionRecord {
     paired_device: Option<String>,
     /// First incarnation seen on this connection, pinned on first frame.
     incarnation: Option<ClientIncarnationId>,
+    /// Whether this connection completed the challenge/proof exchange.
+    ///
+    /// Set by [`ConnectionTable::note_authed`] after an `Accepted` answer;
+    /// never cleared except by forgetting the record. Staleness after a
+    /// superseding authentication is tracked separately in
+    /// [`ConnectionTableInner::device_current`]: the old record keeps this
+    /// flag, but [`ConnectionTable::live_for`] no longer reports the
+    /// connection as authed once it is not current.
+    authed: bool,
 }
 
 /// Per-connection table owned by the listener.
@@ -143,6 +160,16 @@ struct ConnectionTableInner {
     records: HashMap<ConnectionWireId, ConnectionRecord>,
     /// Live-connection count per paired device string.
     device_live: HashMap<String, usize>,
+    /// Current authed connection per paired device wire string.
+    ///
+    /// Set by [`ConnectionTable::note_authed`]: a newer authentication by the
+    /// same device overwrites the entry, so the older connection goes stale
+    /// implicitly — [`ConnectionTable::live_for`] reports `authed` only while
+    /// the entry still names the connection. Closing the current connection
+    /// clears the entry (a newer entry for another connection is never
+    /// cleared by an older close); the remaining live connections stay
+    /// unauthed until they complete a fresh challenge.
+    device_current: HashMap<String, ConnectionWireId>,
 }
 
 /// Locks the connection table, recovering from poisoning.
@@ -185,6 +212,7 @@ impl ConnectionTable {
             ConnectionRecord {
                 paired_device: None,
                 incarnation: None,
+                authed: false,
             },
         );
         id
@@ -197,24 +225,36 @@ impl ConnectionTable {
     /// incarnation: the caller drops the connection without a reply in both
     /// cases. The `client_ref` stays the envelope-derived routing hint
     /// (device key when paired, otherwise the incarnation pair); authority
-    /// travels in `paired_device` plus `connection_known`, both table-filled,
-    /// and `connection_id` carries the table key the gate requires envelopes
-    /// to echo on post-capability frames.
+    /// travels in `paired_device` plus `connection_known` plus `authed`, all
+    /// table-filled, and `connection_id` carries the table key the gate
+    /// requires envelopes to echo on post-capability frames. `authed` holds
+    /// only while the record completed the challenge AND is still the
+    /// device's current authed connection: a superseded connection reports
+    /// unauthed even though its record keeps the flag.
     fn live_for(&self, id: &ConnectionWireId, envelope: &WireEnvelope) -> Option<LiveInput> {
         let mut table = lock_table(&self.inner);
-        let record = table.records.get_mut(id)?;
-        let seen = envelope.sender.incarnation_id;
-        match record.incarnation {
-            None => record.incarnation = Some(seen),
-            Some(pinned) if pinned != seen => return None,
-            Some(_) => {}
-        }
+        // The record borrow ends before the currency read below: both go
+        // through the table guard, so they cannot overlap.
+        let (device, record_authed) = {
+            let record = table.records.get_mut(id)?;
+            let seen = envelope.sender.incarnation_id;
+            match record.incarnation {
+                None => record.incarnation = Some(seen),
+                Some(pinned) if pinned != seen => return None,
+                Some(_) => {}
+            }
+            (record.paired_device.clone(), record.authed)
+        };
+        let current = device
+            .as_ref()
+            .is_some_and(|paired| table.device_current.get(paired) == Some(id));
         Some(LiveInput {
             client_ref: client_ref_for(envelope),
             connection_live: true,
             peer_uid_ok: true,
-            paired_device: record.paired_device.clone(),
+            paired_device: device,
             connection_known: true,
+            authed: record_authed && current,
             connection_id: *id,
         })
     }
@@ -245,6 +285,27 @@ impl ConnectionTable {
             .or_insert(0) += 1;
     }
 
+    /// Marks the connection authenticated after an `Accepted` answer.
+    ///
+    /// Called only after [`HostHandle::handle_frame`] answers `Accepted` on
+    /// this connection, so the table records authentication, never a Client
+    /// claim. The connection becomes the device's current authed connection:
+    /// a newer authentication by the same device overwrites the entry and
+    /// the older connection goes stale implicitly. An unpaired connection
+    /// records nothing: acceptance without a paired device cannot happen,
+    /// and failing closed here keeps it that way.
+    fn note_authed(&self, id: &ConnectionWireId) {
+        let mut table = lock_table(&self.inner);
+        let Some(record) = table.records.get_mut(id) else {
+            return;
+        };
+        let Some(device) = record.paired_device.clone() else {
+            return;
+        };
+        record.authed = true;
+        table.device_current.insert(device, *id);
+    }
+
     /// Forgets a closed connection, returning its paired device, if any, and
     /// whether that device still holds another live connection.
     ///
@@ -253,7 +314,10 @@ impl ConnectionTable {
     /// only when `device_still_live` is false: closing one of several live
     /// connections for a device is a transport fact, not presence loss. A
     /// second close for the same key returns [`None`] with false: forgetting
-    /// is idempotent.
+    /// is idempotent. When the closing connection is the device's current
+    /// authed connection, the currency entry goes with it; an entry naming a
+    /// different (newer) connection is left alone, and the survivors stay
+    /// unauthed until they complete a fresh challenge.
     fn note_closed(&self, id: &ConnectionWireId) -> (Option<String>, bool) {
         let mut table = lock_table(&self.inner);
         let Some(record) = table.records.remove(id) else {
@@ -263,6 +327,9 @@ impl ConnectionTable {
             return (None, false);
         };
         decrement_live(&mut table.device_live, &device);
+        if table.device_current.get(&device) == Some(id) {
+            table.device_current.remove(&device);
+        }
         let still_live = table.device_live.contains_key(&device);
         (Some(device), still_live)
     }
@@ -441,6 +508,14 @@ async fn serve_connection<T>(
             {
                 table.note_paired(&connection, &device_id.0.as_hyphenated().to_string());
             }
+            // The accepted id is the table key the handle echoed back: only
+            // an exact match authenticates this connection.
+            if let WirePayload::AuthResult(AuthResult::Accepted { connection_id }) =
+                &response.payload
+                && *connection_id == connection
+            {
+                table.note_authed(&connection);
+            }
         }
         let mut failed = false;
         let mut terminal = false;
@@ -530,6 +605,7 @@ mod tests {
         assert!(
             first.is_some_and(|live| live.connection_known
                 && live.paired_device.is_none()
+                && !live.authed
                 && live.connection_id == id),
             "the first frame pins and yields table-bound unknown-but-unpaired premises"
         );
@@ -557,8 +633,10 @@ mod tests {
         table.note_paired(&id, "device-1");
         let after = table.live_for(&id, &envelope(incarnation(7, 7)));
         assert!(
-            after.is_some_and(|live| live.paired_device == Some(String::from("device-1"))),
-            "a paired connection carries its device"
+            after.is_some_and(
+                |live| live.paired_device == Some(String::from("device-1")) && !live.authed
+            ),
+            "a paired-but-never-challenged connection stays unauthed"
         );
         let (closed, still_live) = table.note_closed(&id);
         assert_eq!(
@@ -576,6 +654,105 @@ mod tests {
                 .live_for(&unknown, &envelope(incarnation(7, 7)))
                 .is_none(),
             "an unknown connection yields nothing"
+        );
+    }
+
+    #[test]
+    fn auth_marks_current_and_supersedes_the_previous_connection() {
+        let table = ConnectionTable::new();
+        let first = table.note_accept();
+        let second = table.note_accept();
+        for id in [first, second] {
+            let pinned = table.live_for(&id, &envelope(incarnation(9, 9)));
+            assert!(pinned.is_some(), "both connections must pin before pairing");
+            table.note_paired(&id, "device-1");
+        }
+        table.note_authed(&first);
+        let current = table.live_for(&first, &envelope(incarnation(9, 9)));
+        assert!(
+            current.is_some_and(|live| live.authed),
+            "the freshly authenticated connection reports authed"
+        );
+        let waiting = table.live_for(&second, &envelope(incarnation(9, 9)));
+        assert!(
+            waiting.is_some_and(|live| !live.authed),
+            "the paired-but-never-challenged connection stays unauthed"
+        );
+        table.note_authed(&second);
+        let stale = table.live_for(&first, &envelope(incarnation(9, 9)));
+        assert!(
+            stale.is_some_and(|live| !live.authed),
+            "a newer authentication supersedes: the old connection goes stale implicitly"
+        );
+        let now_current = table.live_for(&second, &envelope(incarnation(9, 9)));
+        assert!(
+            now_current.is_some_and(|live| live.authed),
+            "the newest authentication is the current one"
+        );
+    }
+
+    #[test]
+    fn closing_an_older_connection_keeps_the_newer_currency() {
+        let table = ConnectionTable::new();
+        let first = table.note_accept();
+        let second = table.note_accept();
+        for id in [first, second] {
+            let pinned = table.live_for(&id, &envelope(incarnation(4, 4)));
+            assert!(pinned.is_some(), "both connections must pin before pairing");
+            table.note_paired(&id, "device-1");
+        }
+        table.note_authed(&first);
+        table.note_authed(&second);
+        let (closed, still_live) = table.note_closed(&first);
+        assert_eq!(
+            closed,
+            Some(String::from("device-1")),
+            "the older close reports its device"
+        );
+        assert!(still_live, "the surviving connection keeps the device live");
+        let survivor = table.live_for(&second, &envelope(incarnation(4, 4)));
+        assert!(
+            survivor.is_some_and(|live| live.authed),
+            "closing the superseded connection never clears the newer currency"
+        );
+    }
+
+    #[test]
+    fn closing_the_current_connection_clears_currency_without_reviving() {
+        let table = ConnectionTable::new();
+        let first = table.note_accept();
+        let second = table.note_accept();
+        for id in [first, second] {
+            let pinned = table.live_for(&id, &envelope(incarnation(6, 6)));
+            assert!(pinned.is_some(), "both connections must pin before pairing");
+            table.note_paired(&id, "device-1");
+        }
+        table.note_authed(&first);
+        let (closed, still_live) = table.note_closed(&first);
+        assert_eq!(
+            closed,
+            Some(String::from("device-1")),
+            "the current close reports its device"
+        );
+        assert!(still_live, "the surviving connection keeps the device live");
+        let survivor = table.live_for(&second, &envelope(incarnation(6, 6)));
+        assert!(
+            survivor.is_some_and(|live| !live.authed),
+            "the survivor stays unauthed until it completes a fresh challenge"
+        );
+    }
+
+    #[test]
+    fn auth_without_pairing_records_nothing() {
+        let table = ConnectionTable::new();
+        let id = table.note_accept();
+        let pinned = table.live_for(&id, &envelope(incarnation(1, 1)));
+        assert!(pinned.is_some(), "the connection must pin first");
+        table.note_authed(&id);
+        let live = table.live_for(&id, &envelope(incarnation(1, 1)));
+        assert!(
+            live.is_some_and(|live| !live.authed),
+            "an unpaired connection can never become authed"
         );
     }
 

@@ -10,9 +10,13 @@
 //!
 //! The approve-time secret reaches this process through exactly one inlet:
 //! the [`BOOTSTRAP_SECRET_ENV`] (`ENE_PAIRING_SECRET`) process environment
-//! variable, consumed only when the device file holds no secret yet (see
-//! [`select_bootstrap_secret`]), and persisted to the `0600` file at the
-//! first opportunity. The tradeoff is documented, not hidden: process
+//! variable. Resolution is explicit (see [`resolve_device_secret`]): a set,
+//! non-blank environment value rotates — it wins over a differing or absent
+//! file secret and overwrites the `0600` file at the first opportunity
+//! (one-shot rotation for re-provisioning); with no environment value the
+//! stored file secret wins unchanged; with neither side holding a secret the
+//! caller takes the approve-and-provision path. The tradeoff is documented,
+//! not hidden: process
 //! environment is visible to the same user (for example via `/proc`), so a
 //! co-user secret there is weaker than the file. This is accepted as a
 //! one-shot bootstrap because the pairing threat model is same-machine
@@ -24,7 +28,7 @@
 //! Tests never touch the process environment (workspace `unsafe` ban keeps
 //! even `std::env::set_var` out of reach): [`read_bootstrap_secret`] is the
 //! single environment reader and has no unit test; the pure
-//! [`select_bootstrap_secret`] carries the file-wins matrix instead.
+//! [`resolve_device_secret`] carries the rotation matrix instead.
 
 use std::path::{Path, PathBuf};
 
@@ -38,8 +42,9 @@ pub const DEVICE_FILE_NAME: &str = "client-device.json";
 
 /// Process environment variable carrying the one-shot approve-time secret.
 ///
-/// Read only by [`read_bootstrap_secret`], and only honored when the device
-/// file holds no secret (see [`select_bootstrap_secret`]).
+/// Read only by [`read_bootstrap_secret`]. A set, non-blank value rotates:
+/// it wins over a differing or absent file secret and overwrites the file
+/// (see [`resolve_device_secret`]); with no value set the file wins.
 pub const BOOTSTRAP_SECRET_ENV: &str = "ENE_PAIRING_SECRET";
 
 /// Stored client device identity: the Host-issued device key plus the
@@ -49,15 +54,26 @@ pub const BOOTSTRAP_SECRET_ENV: &str = "ENE_PAIRING_SECRET";
 /// The secret is deliberately a plain string in memory (session-lifetime
 /// only, see `SessionState` in [`crate::client`]): it must be usable for
 /// proof derivation on demand, and the file permission (`0600` on Unix) is
-/// the at-rest protection. `Debug` is derived, and the only `Debug`-visible
-/// field besides the key is the secret itself — never log or format this
-/// value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// the at-rest protection. `Debug` is custom and redacts the secret (the
+/// device key stays visible for operator correlation): never log or format
+/// this value beyond its `Debug`, and never render that `Debug` where the
+/// redaction marker itself would mislead.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredDevice {
     /// Device key the Host issued for this device's descriptor.
     pub device_id: DeviceWireId,
     /// Approve-time pairing secret (hex), proof key material.
     pub pairing_secret: String,
+}
+
+impl core::fmt::Debug for StoredDevice {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("StoredDevice")
+            .field("device_id", &self.device_id)
+            .field("pairing_secret", &"[redacted]")
+            .finish()
+    }
 }
 
 impl StoredDevice {
@@ -135,8 +151,32 @@ pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), CliErr
     Ok(())
 }
 
-/// Selects the effective pairing secret: the stored file secret wins, and
-/// the one-shot environment secret applies only when the file holds none.
+/// How [`resolve_device_secret`] derived the effective pairing secret.
+///
+/// The tri-state makes rotation explicit: `Stored` means the file won and
+/// the file needs no secret overwrite (a fresh device key may still be
+/// persisted alongside it); `Rotated` means the environment bootstrap won
+/// and the caller must overwrite the file (one-shot rotation); `Missing`
+/// means neither side holds a secret and the caller takes the
+/// approve-and-provision path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretSource {
+    /// The stored file secret is effective (no environment bootstrap set).
+    Stored,
+    /// The environment bootstrap is effective (it differs from or the file
+    /// lacks a secret); the caller must persist it over the file.
+    Rotated,
+    /// Neither side holds a secret; provisioning guidance applies.
+    Missing,
+}
+
+/// Resolves the effective pairing secret with an explicit rotation source.
+///
+/// A set, non-blank environment value rotates: it wins over a differing or
+/// absent file secret (`Rotated`, and the caller overwrites the file). An
+/// environment value equal to the file secret is not a rotation (`Stored`).
+/// With no environment value the file secret wins (`Stored`). With neither
+/// side holding a secret there is nothing to use (`Missing`).
 ///
 /// Blank inputs count as absent on both sides (a blank key proves nothing,
 /// so preferring it would only mask the side that actually holds a secret).
@@ -144,21 +184,31 @@ pub fn store_device(data_dir: &Path, device: &StoredDevice) -> Result<(), CliErr
 /// [`read_bootstrap_secret`] and passes the value in, which keeps this
 /// decision pure and testable without environment mutation.
 #[must_use]
-pub fn select_bootstrap_secret(
+pub fn resolve_device_secret(
     file_secret: Option<String>,
     env_secret: Option<String>,
-) -> Option<String> {
+) -> (Option<String>, SecretSource) {
     let file = file_secret.filter(|secret| !secret.is_empty());
-    if file.is_some() {
-        return file;
+    let env = env_secret.filter(|secret| !secret.is_empty());
+    match (file, env) {
+        (Some(file_value), Some(env_value)) => {
+            if env_value == file_value {
+                (Some(file_value), SecretSource::Stored)
+            } else {
+                (Some(env_value), SecretSource::Rotated)
+            }
+        }
+        (Some(file_value), None) => (Some(file_value), SecretSource::Stored),
+        (None, Some(env_value)) => (Some(env_value), SecretSource::Rotated),
+        (None, None) => (None, SecretSource::Missing),
     }
-    env_secret.filter(|secret| !secret.is_empty())
 }
 
 /// Reads the one-shot bootstrap secret from the process environment.
 ///
 /// This is the single environment reader in the crate: callers pass its
-/// result into [`select_bootstrap_secret`], which prefers the device file.
+/// result into [`resolve_device_secret`], which rotates over a differing or
+/// absent file secret and otherwise keeps the file.
 /// Blank values count as absent. The value is never logged; see the
 /// module docs for the documented `/proc`-visibility tradeoff.
 #[must_use]
@@ -170,7 +220,7 @@ pub fn read_bootstrap_secret() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    //! Device-file roundtrips in a scratch directory plus the pure selector
+    //! Device-file roundtrips in a scratch directory plus the pure resolver
     //! matrix. No sockets, no environment mutation, no network: the only
     //! environment read in the crate ([`read_bootstrap_secret`]) has no test
     //! by design (see the module docs).
@@ -178,7 +228,8 @@ mod tests {
     use ene_api::v1::refs::DeviceWireId;
 
     use super::{
-        StoredDevice, device_file_path, load_stored_device, select_bootstrap_secret, store_device,
+        SecretSource, StoredDevice, device_file_path, load_stored_device, resolve_device_secret,
+        store_device,
     };
 
     /// Creates a scratch directory unique to this process and test, so
@@ -318,45 +369,86 @@ mod tests {
     }
 
     #[test]
-    fn selector_prefers_the_file_secret() {
+    fn stored_device_debug_redacts_the_secret() {
+        let rendered = format!("{:?}", stored());
         assert!(
-            select_bootstrap_secret(
-                Some(String::from("file-secret")),
-                Some(String::from("env-secret")),
-            ) == Some(String::from("file-secret")),
-            "the file wins once it holds a secret"
+            !rendered.contains("abcdef0123456789"),
+            "stored Debug must not leak the secret: {rendered:?}"
         );
         assert!(
-            select_bootstrap_secret(Some(String::from("file-secret")), None)
-                == Some(String::from("file-secret")),
-            "the file alone is enough"
+            rendered.contains("[redacted]"),
+            "stored Debug must mark the redaction: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("StoredDevice"),
+            "stored Debug must name the type: {rendered:?}"
         );
     }
 
     #[test]
-    fn selector_falls_back_to_the_env_secret() {
+    fn resolver_keeps_the_file_without_env() {
         assert!(
-            select_bootstrap_secret(None, Some(String::from("env-secret")))
-                == Some(String::from("env-secret")),
+            resolve_device_secret(Some(String::from("file-secret")), None)
+                == (Some(String::from("file-secret")), SecretSource::Stored),
+            "the file alone wins unchanged"
+        );
+        assert!(
+            resolve_device_secret(Some(String::from("file-secret")), Some(String::new()))
+                == (Some(String::from("file-secret")), SecretSource::Stored),
+            "a blank env never displaces the file"
+        );
+    }
+
+    #[test]
+    fn resolver_rotates_on_a_differing_env_secret() {
+        assert!(
+            resolve_device_secret(
+                Some(String::from("file-secret")),
+                Some(String::from("env-secret")),
+            ) == (Some(String::from("env-secret")), SecretSource::Rotated),
+            "a differing env value rotates over the file"
+        );
+        assert!(
+            resolve_device_secret(None, Some(String::from("env-secret")))
+                == (Some(String::from("env-secret")), SecretSource::Rotated),
             "the env bootstrap applies when the file lacks a secret"
         );
         assert!(
-            select_bootstrap_secret(Some(String::new()), Some(String::from("env-secret")))
-                == Some(String::from("env-secret")),
-            "a blank file secret counts as lacking"
+            resolve_device_secret(Some(String::new()), Some(String::from("env-secret")))
+                == (Some(String::from("env-secret")), SecretSource::Rotated),
+            "a blank file secret counts as lacking, so env rotates"
         );
+    }
+
+    #[test]
+    fn resolver_treats_equal_secrets_as_stored() {
         assert!(
-            select_bootstrap_secret(None, None).is_none(),
+            resolve_device_secret(
+                Some(String::from("same-secret")),
+                Some(String::from("same-secret")),
+            ) == (Some(String::from("same-secret")), SecretSource::Stored),
+            "an equal env value is not a rotation"
+        );
+    }
+
+    #[test]
+    fn resolver_reports_missing_when_neither_side_holds_a_secret() {
+        assert!(
+            resolve_device_secret(None, None) == (None, SecretSource::Missing),
             "no secret anywhere means the approve-and-provision path"
         );
         assert!(
-            select_bootstrap_secret(None, Some(String::new())).is_none(),
+            resolve_device_secret(None, Some(String::new())) == (None, SecretSource::Missing),
             "a blank env secret counts as absent"
         );
         assert!(
-            select_bootstrap_secret(Some(String::from("file-secret")), Some(String::new()),)
-                == Some(String::from("file-secret")),
-            "a blank env secret never displaces the file"
+            resolve_device_secret(Some(String::new()), None) == (None, SecretSource::Missing),
+            "a blank file secret counts as absent"
+        );
+        assert!(
+            resolve_device_secret(Some(String::new()), Some(String::new()))
+                == (None, SecretSource::Missing),
+            "blank on both sides is still missing"
         );
     }
 }

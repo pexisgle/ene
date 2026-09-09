@@ -6,8 +6,10 @@
 //! advertisement, on every connect: already-paired descriptors re-pair
 //! idempotently to the same device key. The issued device key plus the
 //! approve-time pairing secret persist in the device file (see
-//! [`crate::device`]); the secret enters once through the `ENE_PAIRING_SECRET`
-//! bootstrap variable and is never logged, never rendered in `Debug`, and
+//! [`crate::device`]); the secret enters through the `ENE_PAIRING_SECRET`
+//! bootstrap variable (first provision, or one-shot rotation over a
+//! differing or absent file secret, overwriting the file) and is never
+//! logged, never rendered in `Debug`, and
 //! never sent over the wire — only ownership proofs derived from it leave
 //! the device.
 //!
@@ -39,25 +41,31 @@
 //!
 //! Request/response correlation: every [`Client::request`] stamps a fresh
 //! command ID on its outgoing envelope and matches the answer by transport
-//! pairing. A single read per request is wrong because the Host pipelines
+//! pairing (`reply_to` against our message ID). A single read per request
+//! is wrong because the Host pipelines
 //! unsolicited facts ahead of answers — capability today appends the current
 //! [`PresenceAttribution`](ene_api::v1::payload::WirePayload::PresenceAttribution)
 //! fact right after the negotiated terms, and a leftover fact would be
-//! misread as the next request's answer. So `request` loops: presence facts
-//! are absorbed into the [`SessionState`] and reading continues; the first
-//! non-fact frame is the answer (a `reply_to` match is the correlated case,
-//! anything else is returned fail-safe — never silently dropped). The pure
-//! [`select_answer`] holds that decision over a frame script; the socket loop
-//! is its streaming form. Only the fact variant is absorbed for now: any
-//! future unsolicited fact kind needs a new arm here, and the fallthrough
-//! keeps such frames visible as answers until then.
+//! misread as the next request's answer. So `request` consults the deferred
+//! queue first and then loops: a queued or incoming frame whose `reply_to`
+//! matches is the answer and returns without further I/O; presence facts
+//! are absorbed into the [`SessionState`] and reading continues; any other
+//! non-fact frame is pushed to the deferred queue (cap [`DEFERRED_CAP`],
+//! oldest-drop) and reading continues — mismatches are never returned as
+//! answers and never silently dropped. The pure
+//! [`select_answer`] holds that decision over a deferred queue plus a frame
+//! script; the socket loop is its streaming form. Only the fact variant is
+//! absorbed for now: any future unsolicited fact kind needs a new arm here,
+//! and until then such frames queue as mismatches instead of surfacing as
+//! answers.
 //!
 //! Pairing that is still pending answers
 //! [`PendingOwnerConfirmation`](ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation):
 //! the operator approves the device on the Host-local trusted surface (which
 //! shows the one-time secret once), re-runs the client with
 //! `ENE_PAIRING_SECRET` set for that one run so the secret reaches the `0600`
-//! device file, and later runs read the file. A denied pairing answers the
+//! device file (first provision, or rotation overwriting a differing
+//! secret), and later runs read the file. A denied pairing answers the
 //! same way operationally (exit code 2 with the Host reason plus that
 //! guidance). A stored device the Host no longer knows fails later at the
 //! domain gate (unknown sender: close plus `DisconnectNotice`), never with a
@@ -85,6 +93,7 @@
 //! [`CliError::UnsupportedPlatform`];
 //! the pure builders below stay shared.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -152,8 +161,18 @@ pub fn new_incarnation() -> ClientIncarnationId {
     }
 }
 
+/// Maximum deferred out-of-order answers held per session.
+///
+/// When [`Client::request`] reads a non-fact frame whose `reply_to` does not
+/// match its send, it pushes the whole frame here and keeps reading; the
+/// next request scans here first. Oldest-drop keeps a chatty or hostile Host
+/// from growing the session without bound: beyond the cap the oldest queued
+/// frame is discarded to make room, never the newest.
+pub const DEFERRED_CAP: usize = 32;
+
 /// Observed session: the latest generation value this process has seen,
-/// the authenticated connection key, and the pairing secret.
+/// the authenticated connection key, the pairing secret, and the deferred
+/// out-of-order answer queue.
 ///
 /// Latest value supersedes: an older fact never moves the session backwards
 /// except by replacement (each new fact or stale answer simply overwrites).
@@ -168,7 +187,16 @@ pub fn new_incarnation() -> ClientIncarnationId {
 /// the device file or the one-shot bootstrap at connect time): it is never
 /// logged, and the custom [`core::fmt::Debug`] below renders it as
 /// `[redacted]` so a debug dump cannot leak key material.
-#[derive(Clone, PartialEq, Eq, Default)]
+///
+/// The deferred queue holds whole [`WireFrame`]s (payload plus envelope, so
+/// the `reply_to` link survives for later correlation), never facts (facts
+/// are absorbed into the generation on arrival). It is session-lifetime
+/// only, never persisted, capped at [`DEFERRED_CAP`] with oldest-drop.
+///
+/// `Eq` is deliberately absent: [`WireFrame`] is `PartialEq`-only, and
+/// session equality beyond tests is meaningless (generation plus queue
+/// contents); callers compare dimensions, not whole sessions.
+#[derive(Clone, PartialEq, Default)]
 pub struct SessionState {
     /// Latest observed presence generation, if any fact arrived yet.
     generation: Option<u64>,
@@ -176,6 +204,8 @@ pub struct SessionState {
     connection_id: Option<ConnectionWireId>,
     /// Pairing secret proving this device, if provisioned yet.
     pairing_secret: Option<String>,
+    /// Out-of-order answers seen while waiting for another reply.
+    deferred: VecDeque<WireFrame>,
 }
 
 impl core::fmt::Debug for SessionState {
@@ -188,18 +218,20 @@ impl core::fmt::Debug for SessionState {
                 "pairing_secret",
                 &self.pairing_secret.as_ref().map(|_| "[redacted]"),
             )
+            .field("deferred_len", &self.deferred.len())
             .finish()
     }
 }
 
 impl SessionState {
     /// Starts a bootstrap session: no generation observed, no connection
-    /// authenticated, no secret provisioned yet.
+    /// authenticated, no secret provisioned, and no deferred answers yet.
     pub fn new() -> Self {
         Self {
             generation: None,
             connection_id: None,
             pairing_secret: None,
+            deferred: VecDeque::new(),
         }
     }
 
@@ -243,6 +275,32 @@ impl SessionState {
     pub fn note_stale_generation(&mut self, current: u64) {
         self.generation = Some(current);
     }
+
+    /// Returns how many out-of-order answers are deferred.
+    pub fn deferred_len(&self) -> usize {
+        self.deferred.len()
+    }
+
+    /// Defers one mismatched answer frame, enforcing the [`DEFERRED_CAP`]
+    /// oldest-drop bound: when full the oldest queued frame is discarded to
+    /// make room, never the newest.
+    pub fn push_deferred(&mut self, frame: WireFrame) {
+        if self.deferred.len() >= DEFERRED_CAP {
+            let _ = self.deferred.pop_front();
+        }
+        self.deferred.push_back(frame);
+    }
+
+    /// Removes and returns the first deferred frame whose `reply_to` equals
+    /// `own`, if any. Facts never sit in the queue, so a hit is always an
+    /// answer the caller can return without socket I/O.
+    pub fn take_deferred_reply(&mut self, own: WireMessageId) -> Option<WirePayload> {
+        let position = self
+            .deferred
+            .iter()
+            .position(|frame| frame.envelope.correlation.reply_to == Some(own))?;
+        self.deferred.remove(position).map(|frame| frame.payload)
+    }
 }
 
 /// Reads the generation out of a presence fact. A free function so the frame
@@ -266,40 +324,62 @@ pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
     }
 }
 
-/// Splits an incoming frame script into the facts `request` would absorb and
-/// the frame it would return as the answer.
+/// Splits a deferred queue plus an incoming frame script into the facts
+/// `request` would absorb, the correlated answer, and the updated queue.
 ///
-/// This is the pure form of the [`Client::request`] loop decision: leading
+/// This is the pure form of the [`Client::request`] loop decision. First the
+/// deferred queue is scanned for a frame whose `reply_to` equals our
+/// outgoing message ID: a hit returns immediately with no absorption and
+/// that frame removed, without consuming `frames` (no socket I/O in the
+/// streaming form). Otherwise `frames` are walked in order:
 /// [`PresenceAttribution`](ene_api::v1::payload::WirePayload::PresenceAttribution)
-/// facts are collected (the caller applies each to its session) and the
-/// first non-fact frame is the answer. A frame whose `reply_to` equals our
-/// outgoing message ID is the correlated case; any other non-fact frame is
-/// still returned (fail-safe: the client never silently drops a frame it
-/// cannot classify). No fact means no absorption; no non-fact frame means no
-/// answer ([`None`]) — the streaming caller keeps reading in that case.
+/// facts are collected (the caller applies each to its session); a non-fact
+/// frame whose `reply_to` matches is the answer and ends the walk (later
+/// script frames stay unread, as later socket reads in the streaming form);
+/// any other non-fact frame is pushed to the queue (cap [`DEFERRED_CAP`],
+/// oldest-drop) and the walk continues — mismatches are never returned as
+/// answers and never silently dropped. No match means no answer ([`None`]);
+/// the streaming caller keeps reading in that case.
 ///
 /// Only the presence-fact variant is absorbed: a future unsolicited fact
-/// kind needs a new arm here, and until then such frames fall through to the
-/// answer position where the caller rejects or renders them visibly.
+/// kind needs a new arm here, and until then such frames queue as mismatches
+/// instead of surfacing as answers.
+///
+/// The function is total: every combination of queue and script yields a
+/// (possibly empty) absorption, a (possibly absent) answer, and a bounded
+/// queue, with no I/O and no failure.
 #[must_use]
 pub fn select_answer(
     own_message_id: WireMessageId,
+    deferred: &VecDeque<WireFrame>,
     frames: &[WireFrame],
-) -> (Vec<PresenceAttributionWire>, Option<WirePayload>) {
+) -> (
+    Vec<PresenceAttributionWire>,
+    Option<WirePayload>,
+    VecDeque<WireFrame>,
+) {
+    let mut queue = deferred.clone();
+    if let Some(position) = queue
+        .iter()
+        .position(|frame| frame.envelope.correlation.reply_to == Some(own_message_id))
+    {
+        let hit = queue.remove(position).map(|frame| frame.payload);
+        return (Vec::new(), hit, queue);
+    }
     let mut absorbed = Vec::new();
-    // `reply_to` correlation is observed but never gates: a match against
-    // our send is the correlated answer, and anything else still returns
-    // fail-safe (no silent drops), so both cases below return. The ID stays
-    // in the signature as the correlation dimension for future strictness.
-    let _ = own_message_id;
     for frame in frames {
         if let WirePayload::PresenceAttribution(fact) = &frame.payload {
             absorbed.push(fact.clone());
+        } else if frame.envelope.correlation.reply_to == Some(own_message_id) {
+            return (absorbed, Some(frame.payload.clone()), queue);
         } else {
-            return (absorbed, Some(frame.payload.clone()));
+            if queue.len() >= DEFERRED_CAP {
+                let _ = queue.pop_front();
+            }
+            queue.push_back(frame.clone());
         }
     }
-    (absorbed, None)
+    (absorbed, None, queue)
 }
 
 /// Authentication outcome decision for one inbound payload: either the
@@ -532,7 +612,8 @@ pub fn message_type_for(payload: &WirePayload) -> WireMessageType {
 /// Connected, handshaked Host session (Unix): the stream, the sender
 /// identity for subsequent frames (device filled in by pairing, connection
 /// filled in by authentication once the Host challenges), and the observed
-/// session (presence generation, connection key, pairing secret — see
+/// session (presence generation, connection key, pairing secret, deferred
+/// answers — see
 /// [`SessionState`]).
 #[cfg(unix)]
 pub struct Client {
@@ -540,7 +621,7 @@ pub struct Client {
     stream: tokio::net::UnixStream,
     /// Sender identity for subsequent frames.
     sender: WireSender,
-    /// Observed session: generation, connection key, pairing secret.
+    /// Observed session: generation, connection key, pairing secret, deferred.
     state: SessionState,
 }
 
@@ -551,12 +632,16 @@ impl Client {
     ///
     /// Pairing runs on every connect: already-paired descriptors re-pair
     /// idempotently to the same device key. The effective pairing secret is
-    /// the device file's secret when one is stored, else the one-shot
-    /// `ENE_PAIRING_SECRET` bootstrap (see [`crate::device`]); when pairing
+    /// resolved by [`device::resolve_device_secret`]: a set, non-blank
+    /// `ENE_PAIRING_SECRET` bootstrap rotates (it wins over a differing or
+    /// absent file secret and overwrites the file); with no bootstrap value
+    /// the stored file secret wins; with neither side holding a secret the
+    /// session proceeds secretless. When pairing
     /// succeeds while this process holds a secret, the `{device_id, secret}`
     /// pair is persisted to the `0600` device file before capability runs
     /// (fail-closed: a store failure aborts the connect rather than running
-    /// with an unpersisted secret). A successful pairing with no secret
+    /// with an unpersisted secret — this covers both first provision and
+    /// one-shot rotation). A successful pairing with no secret
     /// anywhere proceeds secretless — authentication simply guides later if
     /// the Host ever challenges.
     ///
@@ -601,7 +686,7 @@ impl Client {
             })?;
         let incarnation = new_incarnation();
         let stored = device::load_stored_device(data_dir);
-        let secret = device::select_bootstrap_secret(
+        let (secret, source) = device::resolve_device_secret(
             stored
                 .as_ref()
                 .and_then(|known| known.secret().map(str::to_string)),
@@ -632,11 +717,21 @@ impl Client {
                 }
             }
         };
-        if let Some(secret_value) = secret.as_deref() {
-            device::store_device(
-                data_dir,
-                &device::StoredDevice::new(device_id, secret_value.to_string()),
-            )?;
+        // Persist whenever a secret is effective: first provision and
+        // one-shot rotation both overwrite the `0600` file (a `Stored` secret
+        // still rewrites alongside the fresh pairing device key; a `Rotated`
+        // secret replaces the file secret). `Missing` holds no secret, so
+        // there is nothing to persist.
+        match source {
+            device::SecretSource::Stored | device::SecretSource::Rotated => {
+                if let Some(secret_value) = secret.as_deref() {
+                    device::store_device(
+                        data_dir,
+                        &device::StoredDevice::new(device_id, secret_value.to_string()),
+                    )?;
+                }
+            }
+            device::SecretSource::Missing => {}
         }
         write_frame(&mut stream, &capability_frame(platform, incarnation, None)).await?;
         match read_frame(&mut stream).await?.payload {
@@ -724,8 +819,8 @@ impl Client {
         }
     }
 
-    /// Sends one payload frame and reads the answering frame, absorbing any
-    /// pipelined presence facts on the way.
+    /// Sends one payload frame and reads the correlated answer, absorbing
+    /// pipelined presence facts and deferring out-of-order frames on the way.
     ///
     /// The outgoing envelope carries a fresh command ID (one per send: the
     /// Host pairs its reply by `reply_to` against our message ID, and the
@@ -738,13 +833,17 @@ impl Client {
     /// answer refreshes the session to its `current_generation` (normal
     /// operation, distinct from the handshake bootstrap).
     ///
-    /// The read side loops (the streaming form of [`select_answer`]): an
+    /// The read side first scans the deferred queue (the pure
+    /// [`select_answer`] hit path): a queued frame whose `reply_to` matches
+    /// returns without socket I/O. Otherwise it loops (the streaming form of
+    /// [`select_answer`]): an
     /// authoritative
     /// [`PresenceAttribution`](ene_api::v1::payload::WirePayload::PresenceAttribution)
     /// fact refreshes the session generation (latest supersedes) and reading
-    /// continues; the first non-fact frame is the answer — the correlated
-    /// case when its `reply_to` echoes our send, returned fail-safe
-    /// otherwise, never silently dropped.
+    /// continues; a non-fact frame whose `reply_to` matches is the answer;
+    /// any other non-fact frame is pushed to the deferred queue (cap
+    /// [`DEFERRED_CAP`], oldest-drop) and reading continues — mismatches are
+    /// never returned as answers and never silently dropped.
     ///
     /// # Errors
     ///
@@ -756,23 +855,26 @@ impl Client {
         let mut frame = frame_for_session(payload, self.sender, self.state.generation());
         let own_message_id = stamp_request(&mut frame);
         write_frame(&mut self.stream, &frame).await?;
+        if let Some(queued) = self.state.take_deferred_reply(own_message_id) {
+            if let Some(current) = stale_generation_of(&queued) {
+                self.state.note_stale_generation(current);
+            }
+            return Ok(queued);
+        }
         loop {
             let incoming = read_frame(&mut self.stream).await?;
-            match incoming.payload {
-                WirePayload::PresenceAttribution(fact) => {
-                    self.state.observe_presence(&fact);
+            // The arms mirror [`select_answer`]: facts absorb, the
+            // `reply_to` match returns, and anything else defers with a cap
+            // and continues reading.
+            if let WirePayload::PresenceAttribution(fact) = &incoming.payload {
+                self.state.observe_presence(fact);
+            } else if incoming.envelope.correlation.reply_to == Some(own_message_id) {
+                if let Some(current) = stale_generation_of(&incoming.payload) {
+                    self.state.note_stale_generation(current);
                 }
-                answer => {
-                    // Correlation is observed but never gates (see
-                    // [`select_answer`], whose arms this loop mirrors): the
-                    // `reply_to` match is the correlated case and anything
-                    // else returns fail-safe, never silently dropped.
-                    let _ = own_message_id;
-                    if let Some(current) = stale_generation_of(&answer) {
-                        self.state.note_stale_generation(current);
-                    }
-                    return Ok(answer);
-                }
+                return Ok(incoming.payload);
+            } else {
+                self.state.push_deferred(incoming);
             }
         }
     }
@@ -925,6 +1027,8 @@ mod tests {
     //! No sockets are opened, the environment is never mutated, and frames
     //! go through the in-memory codec or plain in-memory scripts only.
 
+    use std::collections::VecDeque;
+
     use ene_api::v1::envelope::ProtocolVersion;
     use ene_api::v1::handshake::AuthResult;
     use ene_api::v1::payload::WirePayload;
@@ -932,7 +1036,7 @@ mod tests {
     use ene_api::v1::refs::{CompanionWireRef, ConnectionWireId, RoundWireId, WireMessageId};
     use ene_plugin_ipc::WireFrame;
 
-    use super::{AuthDecision, ClientIncarnationId, SessionState, WireSender};
+    use super::{AuthDecision, ClientIncarnationId, DEFERRED_CAP, SessionState, WireSender};
     use super::{
         auth_rejected_guidance, capability_frame, decide_auth, frame_for, frame_for_session,
         message_type_for, missing_secret_guidance, new_incarnation, pairing_frame, payload_kind,
@@ -1297,7 +1401,7 @@ mod tests {
     fn select_answer_returns_a_lone_correlated_answer() {
         let own = message_id(1);
         let frames = [script_frame(answer_payload(), message_id(2), Some(own))];
-        let (absorbed, answer) = select_answer(own, &frames);
+        let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), &frames);
         assert!(
             absorbed.is_empty(),
             "no fact means no absorption: {absorbed:?}"
@@ -1305,6 +1409,10 @@ mod tests {
         assert!(
             answer == Some(answer_payload()),
             "the correlated frame is the answer, got {answer:?}"
+        );
+        assert!(
+            deferred.is_empty(),
+            "a direct hit queues nothing: {deferred:?}"
         );
     }
 
@@ -1324,7 +1432,7 @@ mod tests {
             ),
             script_frame(answer_payload(), message_id(10), Some(own)),
         ];
-        let (absorbed, answer) = select_answer(own, &frames);
+        let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), &frames);
         assert!(
             absorbed
                 .iter()
@@ -1335,7 +1443,11 @@ mod tests {
         );
         assert!(
             answer == Some(answer_payload()),
-            "the first non-fact frame ends the wait, got {answer:?}"
+            "the correlated non-fact ends the wait, got {answer:?}"
+        );
+        assert!(
+            deferred.is_empty(),
+            "facts and the hit queue nothing: {deferred:?}"
         );
     }
 
@@ -1354,7 +1466,7 @@ mod tests {
                 None,
             ),
         ];
-        let (absorbed, answer) = select_answer(own, &frames);
+        let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), &frames);
         assert!(
             absorbed.len() == 2,
             "facts absorb even without a reply link, got {absorbed:?}"
@@ -1363,26 +1475,156 @@ mod tests {
             answer.is_none(),
             "facts alone are never an answer: {answer:?}"
         );
+        assert!(
+            deferred.is_empty(),
+            "facts alone queue nothing: {deferred:?}"
+        );
     }
 
     #[test]
-    fn select_answer_returns_mismatched_frames_fail_safe() {
+    fn select_answer_defers_mismatches_instead_of_answering() {
         let own = message_id(21);
         let other = message_id(22);
         for frames in [
             [script_frame(answer_payload(), message_id(23), Some(other))].as_slice(),
             [script_frame(answer_payload(), message_id(24), None)].as_slice(),
         ] {
-            let (absorbed, answer) = select_answer(own, frames);
+            let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), frames);
             assert!(
                 absorbed.is_empty(),
                 "a non-fact absorbs nothing: {absorbed:?}"
             );
             assert!(
-                answer == Some(answer_payload()),
-                "an uncorrelated frame still answers (never a silent drop), got {answer:?}"
+                answer.is_none(),
+                "an uncorrelated frame is never the answer, got {answer:?}"
+            );
+            assert!(
+                deferred.len() == 1,
+                "the mismatch is deferred, not dropped: {deferred:?}"
             );
         }
+    }
+
+    #[test]
+    fn select_answer_defers_a_mismatch_then_answers() {
+        let own = message_id(31);
+        let other = message_id(32);
+        let frames = [
+            script_frame(answer_payload(), message_id(33), Some(other)),
+            script_frame(answer_payload(), message_id(34), Some(own)),
+        ];
+        let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), &frames);
+        assert!(
+            absorbed.is_empty(),
+            "no fact means no absorption: {absorbed:?}"
+        );
+        assert!(
+            answer == Some(answer_payload()),
+            "the correlated frame answers after the mismatch, got {answer:?}"
+        );
+        assert!(
+            deferred.len() == 1,
+            "the mismatch stays deferred: {deferred:?}"
+        );
+        assert!(
+            deferred[0].envelope.correlation.reply_to == Some(other),
+            "the deferred frame is the mismatch: {deferred:?}"
+        );
+    }
+
+    /// Builds a history answer carrying `limit`, so out-of-order answers
+    /// stay distinguishable by payload.
+    fn history_answer(limit: u64) -> WirePayload {
+        WirePayload::HistoryRequest(crate::cmds::history_request(limit))
+    }
+
+    #[test]
+    fn select_answer_serves_the_second_request_from_the_queue() {
+        let first = message_id(41);
+        let second = message_id(42);
+        let script = [
+            script_frame(history_answer(2), message_id(43), Some(second)),
+            script_frame(history_answer(1), message_id(44), Some(first)),
+        ];
+        let (absorbed, answer, deferred) = select_answer(first, &VecDeque::new(), &script);
+        assert!(
+            absorbed.is_empty(),
+            "no fact means no absorption: {absorbed:?}"
+        );
+        assert!(
+            answer == Some(history_answer(1)),
+            "the first request takes its own reply: {answer:?}"
+        );
+        assert!(
+            deferred.len() == 1,
+            "the future answer stays queued: {deferred:?}"
+        );
+        let (absorbed_next, queued, deferred_next) = select_answer(second, &deferred, &[]);
+        assert!(
+            absorbed_next.is_empty(),
+            "a queue hit absorbs nothing: {absorbed_next:?}"
+        );
+        assert!(
+            queued == Some(history_answer(2)),
+            "the second request finds its answer already queued: {queued:?}"
+        );
+        assert!(
+            deferred_next.is_empty(),
+            "the hit removes the queued frame: {deferred_next:?}"
+        );
+    }
+
+    #[test]
+    fn select_answer_prefers_the_queue_over_new_frames() {
+        let own = message_id(51);
+        let queued_frame = script_frame(history_answer(9), message_id(52), Some(own));
+        let queued: VecDeque<WireFrame> = [queued_frame].into_iter().collect();
+        let fresh = [script_frame(history_answer(8), message_id(53), Some(own))];
+        let (absorbed, answer, deferred) = select_answer(own, &queued, &fresh);
+        assert!(
+            absorbed.is_empty(),
+            "a queue hit absorbs nothing: {absorbed:?}"
+        );
+        assert!(
+            answer == Some(history_answer(9)),
+            "the queued answer wins without socket I/O: {answer:?}"
+        );
+        assert!(
+            deferred.is_empty(),
+            "the hit drains the queue and ignores fresh frames: {deferred:?}"
+        );
+    }
+
+    #[test]
+    fn select_answer_bounds_the_queue_oldest_drop() {
+        let own = message_id(61);
+        let mut queued: VecDeque<WireFrame> = VecDeque::new();
+        for index in 0..DEFERRED_CAP {
+            let id = u128::try_from(index).map_or(0, |value| value + 100);
+            queued.push_back(script_frame(history_answer(7), message_id(id), None));
+        }
+        assert!(
+            queued.len() == DEFERRED_CAP,
+            "the fixture queue starts full: {queued:?}"
+        );
+        let overflow = [script_frame(
+            history_answer(7),
+            message_id(999),
+            Some(message_id(998)),
+        )];
+        let (_, answer, deferred) = select_answer(own, &queued, &overflow);
+        assert!(
+            answer.is_none(),
+            "a lone mismatch never answers: {answer:?}"
+        );
+        assert!(
+            deferred.len() == DEFERRED_CAP,
+            "the queue stays bounded: {deferred:?}"
+        );
+        assert!(
+            deferred[0].envelope.message_id != queued[0].envelope.message_id,
+            "the oldest frame drops first"
+        );
     }
 
     #[test]
@@ -1533,6 +1775,72 @@ mod tests {
         assert!(
             rendered.contains("[redacted]"),
             "session Debug must mark the redaction: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn session_debug_reports_the_queue_length_without_bodies() {
+        let mut session = SessionState::new();
+        session.push_deferred(script_frame(history_answer(3), message_id(71), None));
+        let rendered = format!("{session:?}");
+        assert!(
+            rendered.contains("deferred_len"),
+            "session Debug must name the queue length: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("HistoryRequest"),
+            "session Debug must not dump queued payloads: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn session_deferred_queue_takes_only_the_matching_reply() {
+        let mut session = SessionState::new();
+        assert!(
+            session.deferred_len() == 0,
+            "a new session defers nothing: {session:?}"
+        );
+        let first = message_id(81);
+        let second = message_id(82);
+        session.push_deferred(script_frame(
+            history_answer(2),
+            message_id(83),
+            Some(second),
+        ));
+        session.push_deferred(script_frame(history_answer(1), message_id(84), Some(first)));
+        assert!(
+            session.deferred_len() == 2,
+            "both mismatches queue: {session:?}"
+        );
+        assert!(
+            session.take_deferred_reply(first) == Some(history_answer(1)),
+            "the take finds the matching reply out of order"
+        );
+        assert!(
+            session.deferred_len() == 1,
+            "the hit removes only its frame: {session:?}"
+        );
+        assert!(
+            session.take_deferred_reply(message_id(85)).is_none(),
+            "an unknown reply finds nothing"
+        );
+        assert!(
+            session.take_deferred_reply(second) == Some(history_answer(2)),
+            "the remaining reply is still queued"
+        );
+        assert!(session.deferred_len() == 0, "the queue drains: {session:?}");
+    }
+
+    #[test]
+    fn session_deferred_queue_drops_oldest_at_the_cap() {
+        let mut session = SessionState::new();
+        for index in 0..DEFERRED_CAP + 2 {
+            let id = u128::try_from(index).map_or(0, |value| value + 200);
+            session.push_deferred(script_frame(history_answer(4), message_id(id), None));
+        }
+        assert!(
+            session.deferred_len() == DEFERRED_CAP,
+            "the queue stays bounded at the cap: {session:?}"
         );
     }
 }
