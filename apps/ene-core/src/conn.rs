@@ -99,7 +99,7 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
 #[cfg(unix)]
 use ene_api::v1::envelope::WireEnvelope;
 #[cfg(unix)]
-use ene_api::v1::handshake::{AuthResult, PairingResult};
+use ene_api::v1::handshake::{AuthResult, NegotiatedConnection, PairingResult};
 #[cfg(unix)]
 use ene_api::v1::payload::WirePayload;
 #[cfg(unix)]
@@ -129,6 +129,10 @@ struct ConnectionRecord {
     /// flag, but [`ConnectionTable::live_for`] no longer reports the
     /// connection as authed once it is not current.
     authed: bool,
+    /// Host-selected terms recorded when this connection answered
+    /// capability. Re-advertising supersedes (latest wins); the ingress
+    /// gate enforces the recorded major on every later frame.
+    negotiated: Option<NegotiatedConnection>,
 }
 
 /// Per-connection table owned by the listener.
@@ -213,9 +217,18 @@ impl ConnectionTable {
                 paired_device: None,
                 incarnation: None,
                 authed: false,
+                negotiated: None,
             },
         );
         id
+    }
+
+    /// Records the Host-selected terms answered on this connection,
+    /// superseding any earlier negotiation.
+    fn note_negotiated(&self, id: &ConnectionWireId, terms: NegotiatedConnection) {
+        if let Some(record) = lock_table(&self.inner).records.get_mut(id) {
+            record.negotiated = Some(terms);
+        }
     }
 
     /// Builds the [`LiveInput`] premises for one inbound envelope.
@@ -272,6 +285,10 @@ impl ConnectionTable {
         let current = device
             .as_ref()
             .is_some_and(|paired| table.device_current.get(paired) == Some(id));
+        let negotiated = table
+            .records
+            .get(id)
+            .and_then(|record| record.negotiated.clone());
         Some(LiveInput {
             client_ref,
             connection_live: true,
@@ -280,6 +297,7 @@ impl ConnectionTable {
             connection_known: true,
             authed: record_authed && current,
             connection_id: *id,
+            negotiated,
         })
     }
 
@@ -524,6 +542,9 @@ async fn serve_connection<T>(
                 && *connection_id == connection
             {
                 table.note_authed(&connection);
+            }
+            if let WirePayload::NegotiatedConnection(negotiated) = &response.payload {
+                table.note_negotiated(&connection, negotiated.clone());
             }
         }
         let mut failed = false;

@@ -105,11 +105,12 @@ use ene_api::v1::handshake::{
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::DeviceWireId;
 use ene_api::v1::refs::{ConnectionWireId, WireMessageId, WireMessageType};
+use ene_api::v1::reject::{RejectKind, RejectNotice};
 use ene_companion::CompanionRepository;
 use ene_credential::{
-    CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialStore,
-    CredentialTechnicalError, DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord,
-    EnvCredentialStore, FileDeviceAuthStore, MemoryCredentialStore,
+    CredentialApprovalRepository, CredentialRef, CredentialStore, CredentialTechnicalError,
+    DevicePairingRepository, DevicePairingStatus, DeviceRecord, EnvCredentialStore,
+    FileDeviceAuthStore, MemoryCredentialStore,
 };
 use ene_inference::ProviderTransport;
 use ene_inference::provider::{DEFAULT_BASE_URL, OpenAiResponsesTransport};
@@ -269,6 +270,13 @@ pub struct LiveInput {
     /// instead), so echoing it proves the sender completed the challenge on
     /// this connection.
     pub connection_id: ConnectionWireId,
+    /// Negotiated terms recorded when this connection answered capability.
+    ///
+    /// Filled by the connection table from the Host-selected terms, never
+    /// by the Client: the ingress gate enforces the negotiated major on
+    /// every later frame, so version mixing within one connection is
+    /// impossible. [`None`] before negotiation.
+    pub negotiated: Option<NegotiatedConnection>,
 }
 
 /// Maps a paired device wire string to its per-process [`ClientId`].
@@ -284,19 +292,6 @@ pub(crate) fn device_client(device_wire: &str) -> ClientId {
         &Uuid::NAMESPACE_URL,
         device_wire.as_bytes(),
     )))
-}
-
-/// Parses a hyphenated device wire string back into its domain identity.
-///
-/// Yields [`None`] for anything that is not UUID text. Proof verification
-/// treats an unparsable device exactly like a missing secret (a rejected
-/// proof with the same reason string), so a malformed table entry can never
-/// become an oracle.
-fn parse_device_id(text: &str) -> Option<DeviceId> {
-    text.parse::<Uuid>()
-        .ok()
-        .map(RawId::from_uuid)
-        .map(DeviceId)
 }
 
 /// Keys the pending-nonce map by connection: the hyphenated wire form of the id.
@@ -466,6 +461,34 @@ impl HostHandle {
         live: LiveInput,
         transport: &impl ProviderTransport,
     ) -> Vec<WireFrame> {
+        if frame.envelope.message_type.0 != frame.payload.message_type() {
+            return vec![reject_frame(
+                &frame,
+                &live,
+                RejectKind::UnsupportedMessage,
+                format!("unknown message type {:?}", frame.envelope.message_type.0),
+            )];
+        }
+        let negotiated_major = live.negotiated.as_ref().map(|terms| terms.version.major);
+        match (negotiated_major, frame.envelope.protocol.major) {
+            (Some(want), got) if got != want => {
+                return vec![reject_frame(
+                    &frame,
+                    &live,
+                    RejectKind::IncompatibleProtocol,
+                    format!("major {got} outside negotiated major {want}"),
+                )];
+            }
+            (None, got) if got != ProtocolVersion::V1.major => {
+                return vec![reject_frame(
+                    &frame,
+                    &live,
+                    RejectKind::IncompatibleProtocol,
+                    format!("major {got} without negotiation"),
+                )];
+            }
+            _ => {}
+        }
         match &frame.payload {
             WirePayload::PairingRequest(request) => self.pair(&frame, request, &live).await,
             WirePayload::CapabilityAdvertise(advertise) => {
@@ -514,6 +537,8 @@ impl HostHandle {
                 }
                 self.answer_view(&frame, request, &live).await
             }
+            // Inbound rejects, stray acks, and future variants answer
+            // nothing: only the Host rejects, and only in response.
             _ => Vec::new(),
         }
     }
@@ -650,22 +675,13 @@ impl HostHandle {
     ///
     /// Returns [`CoreError::Store`] when the durable tables are unavailable.
     pub async fn approve_credential(&self, provider: &str, label: &str) -> Result<bool, CoreError> {
-        let approved = CredentialApprovalRepository::approve_pending(&self.store, provider, label)
+        // One atomic store call: the pending drain and the usable-ref insert
+        // share a transaction, so a crash cannot strand an approval with no
+        // usable marker. The usable ref id follows the `provider:label`
+        // convention both sides already use for assignment.
+        CredentialApprovalRepository::approve_pending(&self.store, provider, label)
             .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
-        if !approved {
-            return Ok(false);
-        }
-        let credential = CredentialRef {
-            id: format!("{provider}:{label}"),
-            provider: provider.to_string(),
-            label: label.to_string(),
-        };
-        self.store
-            .save_ref(credential)
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
-        Ok(true)
+            .map_err(|error| CoreError::Store(error.to_string()))
     }
 
     /// Lists pending credential approvals as `provider:label` strings.
@@ -769,7 +785,14 @@ impl HostHandle {
         }
         match DevicePairingRepository::request_pairing(&self.store, descriptor).await {
             Ok(DevicePairingStatus::Paired { device }) => {
-                let device_id = DeviceWireId(device.id.0.as_uuid());
+                // The issued key is the stored opaque projection, never the
+                // domain identity: the connection layer records this string
+                // verbatim and later frames echo it back for resolution
+                // through `find_device_by_wire`.
+                let Ok(wire) = device.wire.parse() else {
+                    return vec![denied_pairing(frame, live, "pairing store unavailable")];
+                };
+                let device_id = DeviceWireId(wire);
                 vec![outgoing_frame_pre_auth(
                     frame,
                     live,
@@ -877,14 +900,19 @@ impl HostHandle {
         // earlier on this same connection), never from the envelope claim:
         // the proof authenticates the pending pairing the Host recorded, and
         // trusting a Client-supplied device here would let any peer claim
-        // any identity.
+        // any identity. The opaque wire string resolves to its domain record
+        // through the store — never by parsing, since projections are
+        // unrelated to the domain bytes — and the domain id keys the secret.
         let device = live.paired_device.clone();
         let reason = match (nonce, device) {
             (Some(nonce), Some(device)) => {
-                let verified = parse_device_id(&device).is_some_and(|id| {
+                let stored = DevicePairingRepository::find_device_by_wire(&self.store, &device)
+                    .await
+                    .unwrap_or_default();
+                let verified = stored.is_some_and(|record| {
                     matches!(
                         self.auth_store
-                            .verify_device_proof(&id, &nonce, &proof.proof),
+                            .verify_device_proof(&record.id, &nonce, &proof.proof),
                         Ok(true)
                     )
                 });
@@ -932,8 +960,15 @@ impl HostHandle {
     }
 }
 
-/// Maps a durable attribution to its wire fact: refs stay readable,
-/// generation travels as a value copy. Reporting only, never authority.
+/// Maps a durable attribution to its wire fact: refs are one-way opaque
+/// projections (never the canonical domain UUIDs), generation travels as a
+/// value copy. Reporting only, never authority: no Host path parses these
+/// strings back, and Clients must treat them as opaque.
+///
+/// Projections reuse the `device_client` recipe — `UUIDv5` over a
+/// kind-separated label — so they are stable across restarts without any
+/// mapping table, while remaining non-reversible: parsing one yields no
+/// domain identity.
 fn attribution_to_wire(
     attribution: &ene_presence::PresenceAttribution,
 ) -> ene_api::v1::presence::PresenceAttributionWire {
@@ -941,7 +976,18 @@ fn attribution_to_wire(
     use ene_api::v1::refs::{ClientWireRef, CompanionWireRef};
     use ene_presence::PresenceState;
     ene_api::v1::presence::PresenceAttributionWire {
-        companion: CompanionWireRef(attribution.companion.as_uuid().to_string()),
+        companion: CompanionWireRef(
+            Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!(
+                    "ene-presence-companion:{}",
+                    attribution.companion.as_uuid().as_hyphenated()
+                )
+                .as_bytes(),
+            )
+            .as_hyphenated()
+            .to_string(),
+        ),
         state: match attribution.state {
             PresenceState::Present => PresenceStateWire::Present,
             PresenceState::NoActive => PresenceStateWire::NoActive,
@@ -949,10 +995,20 @@ fn attribution_to_wire(
             PresenceState::Stopped => PresenceStateWire::Stopped,
             PresenceState::RecoveryWait => PresenceStateWire::RecoveryWait,
         },
-        active_client: attribution
-            .active_client
-            .as_ref()
-            .map(|client| ClientWireRef(client.as_raw().as_uuid().to_string())),
+        active_client: attribution.active_client.as_ref().map(|client| {
+            ClientWireRef(
+                Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!(
+                        "ene-presence-client:{}",
+                        client.as_raw().as_uuid().as_hyphenated()
+                    )
+                    .as_bytes(),
+                )
+                .as_hyphenated()
+                .to_string(),
+            )
+        }),
         generation: attribution.generation.as_u64(),
         move_reason: None,
     }
@@ -995,8 +1051,8 @@ pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {
 ///
 /// Host-to-Client addressing always echoes the inbound incarnation (so the
 /// Client pairs the response with its connection state) and names the paired
-/// device target when this connection paired one (parsed back from the
-/// hyphenated wire string the table holds; an unparsable entry — never
+/// device target when this connection paired one (the opaque projection the
+/// table holds, passed through verbatim; an unparsable entry — never
 /// written by this Host — maps to [`None`]); pre-pairing responses carry
 /// device [`None`]. The connection id travels only when `reveal_connection`
 /// holds: acceptance and later domain responses reveal this connection's
@@ -1081,6 +1137,25 @@ pub(crate) fn outgoing_frame(
     }
 }
 
+/// Builds one typed wire rejection answering `frame`.
+///
+/// Rejections never reveal the connection id (pre-auth form always): a
+/// malformed or unnegotiated frame must not become a connection oracle.
+/// The connection stays open; only the message is refused.
+pub(crate) fn reject_frame(
+    frame: &WireFrame,
+    live: &LiveInput,
+    kind: RejectKind,
+    detail: String,
+) -> WireFrame {
+    outgoing_frame_pre_auth(
+        frame,
+        live,
+        "Reject",
+        WirePayload::Reject(RejectNotice { kind, detail }),
+    )
+}
+
 /// Builds one pre-accept response frame answering `frame` with `payload`.
 ///
 /// Same as [`outgoing_frame`] except the sender hides the connection id:
@@ -1155,8 +1230,15 @@ fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
     let handle = HostHandle::open(data_dir).await?;
     let credential = handle.startup_credential().await;
-    let transport =
-        OpenAiResponsesTransport::new(DEFAULT_BASE_URL, credential, EnvCredentialStore::new());
+    // Base URL override for self-hosted endpoints and tests: production
+    // keeps [`DEFAULT_BASE_URL`]. The test harness points a real `serve`
+    // binary at a local fake Responses server through this variable (child
+    // process env only; no test ever mutates its own environment).
+    let base_url = std::env::var("ENE_OPENAI_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    let transport = OpenAiResponsesTransport::new(base_url, credential, EnvCredentialStore::new());
     crate::conn::run(
         data_dir.to_path_buf(),
         Arc::new(handle),
@@ -1220,6 +1302,7 @@ mod tests {
             connection_known: true,
             authed: true,
             connection_id: ConnectionWireId(uuid::Uuid::new_v4()),
+            negotiated: None,
         }
     }
 
@@ -1605,7 +1688,7 @@ mod tests {
             remove_data_dir(&dir);
             return;
         };
-        let device_wire = record.id.0.as_uuid().as_hyphenated().to_string();
+        let device_wire = record.wire.clone();
         let paired = handle
             .handle_frame(pairing_frame("laptop"), live_input("client-a"), &transport)
             .await;
@@ -1626,7 +1709,12 @@ mod tests {
         assert_eq!(
             device_id.0.as_hyphenated().to_string(),
             device_wire,
-            "the issued device key names the approved device"
+            "the issued device key is the stored opaque projection"
+        );
+        assert_ne!(
+            device_wire,
+            record.id.0.as_uuid().as_hyphenated().to_string(),
+            "the issued key never renders the domain identity"
         );
         let live = paired_input(&device_wire);
         let challenged = handle
@@ -2027,7 +2115,7 @@ mod tests {
             remove_data_dir(&dir);
             return;
         };
-        let device_wire = record.id.0.as_uuid().as_hyphenated().to_string();
+        let device_wire = record.wire.clone();
         let live = paired_input(&device_wire);
         let challenged = second
             .handle_frame(

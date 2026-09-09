@@ -82,5 +82,6 @@ pub(crate) fn live_input(client_ref: &str) -> LiveInput {
         connection_known: true,
         authed: true,
         connection_id: ConnectionWireId(uuid::Uuid::new_v4()),
+        negotiated: None,
     }
 }
