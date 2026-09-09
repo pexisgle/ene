@@ -32,8 +32,8 @@ use ene_credential::{
 };
 use ene_inference::{InferenceTechnicalError, UsageFact, UsageRepository, UsageSource};
 use ene_permission::{
-    ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
-    PermissionTechnicalError,
+    AssignIntentRecord, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
+    IntentReplayRepository, PermissionTechnicalError,
 };
 use ene_presence::{
     ClientId, LiveReachabilityRef, MoveDecision, PresenceAttribution, PresenceCheckRef,
@@ -352,7 +352,7 @@ mod migrate {
     /// correspondence metadata only. Version 4 adds the `credential_pending`
     /// table for registration approvals; the usable marker stays
     /// `credential_ref`, so no approved table is created.
-    const CURRENT_VERSION: u64 = 5;
+    const CURRENT_VERSION: u64 = 6;
 
     /// Forward-only schema: tables first, then the supporting indexes.
     const SCHEMA: &str = "
@@ -498,6 +498,21 @@ UPDATE paired_device SET wire = device_id WHERE wire IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_device_wire ON paired_device (wire);
 ";
 
+    /// Version 6 upgrade, applied once when the stored version is below 6.
+    ///
+    /// Forward-only: introduces `management_assign_intent` for durable
+    /// assign-intent replay (design §18.2 idempotency keys). Fresh and
+    /// upgraded databases converge via `IF NOT EXISTS`; no pre-existing
+    /// rows can reference the new table, so nothing is backfilled. Intents
+    /// committed before this version simply have no replay row: their
+    /// retries take the normal compare-and-save path.
+    const MIGRATION_V6: &str = "
+CREATE TABLE IF NOT EXISTS management_assign_intent (
+    intent_id TEXT PRIMARY KEY,
+    target TEXT NOT NULL,
+    base TEXT NOT NULL
+);
+";
     /// Creates or upgrades the schema on an open connection.
     ///
     /// Idempotent: rerunning on a migrated database changes nothing. Rejects
@@ -536,6 +551,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_device_wire ON paired_device (wire)
         }
         if stored_version < 5 {
             conn.execute_batch(MIGRATION_V5)
+                .map_err(|error| error.to_string())?;
+        }
+        if stored_version < 6 {
+            conn.execute_batch(MIGRATION_V6)
                 .map_err(|error| error.to_string())?;
         }
         let current = i64::try_from(CURRENT_VERSION)
@@ -584,6 +603,9 @@ const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (id, rev, provider,
 const SQL_UPDATE_CONSENT: &str =
     "UPDATE consent_record SET id = ?1, rev = ?2, provider = ?3, model = ?4, credential_id = ?5";
 const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
+const SQL_UPSERT_ASSIGN_INTENT: &str = "INSERT INTO management_assign_intent (intent_id, target, base) VALUES (?1, ?2, ?3) ON CONFLICT (intent_id) DO UPDATE SET target = excluded.target, base = excluded.base";
+const SQL_SELECT_ASSIGN_INTENT: &str =
+    "SELECT target, base FROM management_assign_intent WHERE intent_id = ?1";
 const SQL_SELECT_CREDENTIAL: &str =
     "SELECT id, provider, label FROM credential_ref WHERE provider = ?1 AND label = ?2";
 const SQL_LIST_CREDENTIALS: &str = "SELECT id, provider, label FROM credential_ref ORDER BY id ASC";
@@ -1721,6 +1743,51 @@ impl ConsentRepository for Store {
         tx.commit()
             .map_err(|error| permission_unavailable(error.to_string()))?;
         Ok(ConsentCommitOutcome::Committed { record })
+    }
+}
+
+impl IntentReplayRepository for Store {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn record_assign_intent(
+        &self,
+        record: AssignIntentRecord,
+    ) -> Result<(), PermissionTechnicalError> {
+        let guard = lock_shared(&self.conn);
+        // Upsert on the intent key: re-establishing the same intent refreshes
+        // its fingerprint instead of duplicating rows. Plain statement, no
+        // transaction needed beyond the single insert.
+        guard
+            .execute(
+                SQL_UPSERT_ASSIGN_INTENT,
+                params![record.intent_id, record.target, record.base],
+            )
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        Ok(())
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn lookup_assign_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<AssignIntentRecord>, PermissionTechnicalError> {
+        let guard = lock_shared(&self.conn);
+        let found: Option<(String, String)> = guard
+            .query_row(SQL_SELECT_ASSIGN_INTENT, params![intent_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        Ok(found.map(|(target, base)| AssignIntentRecord {
+            intent_id: intent_id.to_owned(),
+            target,
+            base,
+        }))
     }
 }
 
@@ -3332,7 +3399,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
         let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
             row.get::<_, i64>(0)
         });
-        assert!(matches!(version, Ok(5)), "migration must record version 5");
+        assert!(matches!(version, Ok(6)), "migration must record version 6");
         let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
             (),
@@ -3629,8 +3696,8 @@ INSERT INTO _schema_version (version) VALUES (4);",
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(5)),
-            "reopened database must record schema version 5"
+            matches!(version, Ok(6)),
+            "reopened database must record schema version 6"
         );
     }
 
@@ -3727,6 +3794,40 @@ INSERT INTO _schema_version (version) VALUES (4);",
         assert!(
             matches!(listed_after, Ok(ref items) if items.is_empty()),
             "usable pair must never linger as pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn assign_intent_records_replays_and_refreshes() {
+        use ene_permission::{AssignIntentRecord, IntentReplayRepository as _};
+
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let missing = store.lookup_assign_intent("no-such-intent").await;
+        assert!(matches!(missing, Ok(None)), "unknown intent must miss");
+        let record = AssignIntentRecord {
+            intent_id: String::from("intent-1"),
+            target: String::from("consent:openai:dialogue-1:openai:main"),
+            base: String::from("consent-none"),
+        };
+        let recorded = store.record_assign_intent(record.clone()).await;
+        assert!(recorded.is_ok(), "assign intent must record");
+        let found = store.lookup_assign_intent("intent-1").await;
+        assert!(
+            matches!(found, Ok(Some(ref stored)) if *stored == record),
+            "recorded intent must read back"
+        );
+        let refreshed = AssignIntentRecord {
+            base: String::from("consent-rev-1"),
+            ..record.clone()
+        };
+        let rerecorded = store.record_assign_intent(refreshed.clone()).await;
+        assert!(rerecorded.is_ok(), "re-record must upsert");
+        let found = store.lookup_assign_intent("intent-1").await;
+        assert!(
+            matches!(found, Ok(Some(ref stored)) if *stored == refreshed),
+            "re-record must refresh the fingerprint, got {found:?}"
         );
     }
 
@@ -3899,8 +4000,8 @@ INSERT INTO _schema_version (version) VALUES (4);",
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(5)),
-            "reopened database must record schema version 5"
+            matches!(version, Ok(6)),
+            "reopened database must record schema version 6"
         );
     }
 
