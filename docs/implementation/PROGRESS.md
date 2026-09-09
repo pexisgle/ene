@@ -19,5 +19,5 @@
 
 ## 未解決 blocker
 
-- #1360 レビュー第2ラウンド応答済み（2026-09-09）。残りはレビュアー判断待ち2点（pre-auth claim 厳格化、intent replay table）のみ
+- #1360 レビュー第3ラウンド（2026-09-09 08:30 の inline 2件）対応済み: `WireMessageId` 重複抑止（connection-local bounded cache）、usage certainty 分離（未送信は無記録・stale adoption は Reported 保持）。CI 待ち + レビュアー判断待ち2点（pre-auth claim 厳格化、intent replay table）は継続
 - マージ順: #1355 → #1356 → #1358 → #1359 → #1360
