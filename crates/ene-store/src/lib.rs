@@ -36,8 +36,8 @@ use ene_inference::{
 };
 use ene_permission::{
     ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
-    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, PermissionTechnicalError,
-    ShortcutIntentOutcome, consent_mark_rev,
+    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution,
+    PermissionTechnicalError, ShortcutIntentOutcome, consent_mark_rev,
 };
 use ene_presence::{
     ClientId, LiveReachabilityRef, MoveDecision, PresenceAttribution, PresenceCheckRef,
@@ -640,7 +640,7 @@ const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (id, rev, provider,
 const SQL_UPDATE_CONSENT: &str =
     "UPDATE consent_record SET id = ?1, rev = ?2, provider = ?3, model = ?4, credential_id = ?5";
 const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
-const SQL_UPSERT_INTENT_OUTCOME: &str = "INSERT INTO management_intent (intent_id, kind, target, base, rationale_origin, rationale_quote, outcome, mark) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT (intent_id) DO UPDATE SET kind = excluded.kind, target = excluded.target, base = excluded.base, rationale_origin = excluded.rationale_origin, rationale_quote = excluded.rationale_quote, outcome = excluded.outcome, mark = excluded.mark";
+const SQL_INSERT_INTENT_OUTCOME: &str = "INSERT INTO management_intent (intent_id, kind, target, base, rationale_origin, rationale_quote, outcome, mark) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 const SQL_SELECT_INTENT_OUTCOME: &str = "SELECT kind, target, base, rationale_origin, rationale_quote, outcome, mark FROM management_intent WHERE intent_id = ?1";
 const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, consent_id, consent_rev, provider, model, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 const SQL_SELECT_CREDENTIAL: &str =
@@ -874,45 +874,50 @@ fn decode_intent_outcome(
     }
 }
 
-/// Inserts one intent replay row outside any caller transaction.
+/// Reads one paired-device row into its domain record.
 ///
-/// Read-only outcomes only (commits use [`insert_intent_row_tx`] inside
-/// their own transaction), so a lone statement is atomic enough.
-fn insert_intent_row(
-    conn: &Connection,
-    fingerprint: &IntentFingerprint,
-    outcome: &IntentOutcome,
-) -> Result<(), String> {
-    let (outcome_text, mark) = encode_intent_outcome(outcome);
-    conn.execute(
-        SQL_UPSERT_INTENT_OUTCOME,
-        params![
-            fingerprint.intent_id,
-            fingerprint.kind,
-            fingerprint.target,
-            fingerprint.base,
-            fingerprint.rationale_origin,
-            fingerprint.rationale_quote.as_deref(),
-            outcome_text,
-            mark,
-        ],
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(())
+/// Compares the content fields only: both rows share the key by
+/// construction, so the key itself carries no information.
+fn fingerprints_match(stored: &IntentFingerprint, incoming: &IntentFingerprint) -> bool {
+    stored.kind == incoming.kind
+        && stored.target == incoming.target
+        && stored.base == incoming.base
+        && stored.rationale_origin == incoming.rationale_origin
+        && stored.rationale_quote == incoming.rationale_quote
 }
 
-/// Inserts one intent replay row inside the caller's transaction.
+/// Maps an existing row to replay-or-conflict against `fingerprint`.
 ///
-/// Upserts on the intent key: re-establishing the same intent refreshes
-/// rather than duplicating rows.
-fn insert_intent_row_tx(
+/// Shared by the claim check and the insert-race fallback so both answer
+/// from the same rule: exact content replays, anything else clarifies.
+fn replay_or_conflict<T>(
+    stored: IntentOutcomeRecord,
+    fingerprint: &IntentFingerprint,
+) -> IntentResolution<T> {
+    if fingerprints_match(&stored.fingerprint, fingerprint) {
+        IntentResolution::Replay(stored)
+    } else {
+        IntentResolution::Conflict(stored)
+    }
+}
+
+/// Inserts the decided snapshot, resolving a lost primary-key race to the
+/// winner instead of overwriting it.
+///
+/// Returns `None` when this call stored the row, or the winning row when a
+/// concurrent writer committed first (cross-process only; same-process
+/// writers serialize on the shared connection, so the pre-check above
+/// always wins there). Callers must NOT commit on `Some`: dropping the
+/// transaction rolls back any decision writes made after the pre-check, so
+/// a loser changes nothing.
+fn insert_decided_row_tx(
     tx: &Transaction<'_>,
     fingerprint: &IntentFingerprint,
     outcome: &IntentOutcome,
-) -> Result<(), String> {
+) -> Result<Option<IntentOutcomeRecord>, String> {
     let (outcome_text, mark) = encode_intent_outcome(outcome);
-    tx.execute(
-        SQL_UPSERT_INTENT_OUTCOME,
+    match tx.execute(
+        SQL_INSERT_INTENT_OUTCOME,
         params![
             fingerprint.intent_id,
             fingerprint.kind,
@@ -923,9 +928,62 @@ fn insert_intent_row_tx(
             outcome_text,
             mark,
         ],
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(())
+    ) {
+        Ok(_) => Ok(None),
+        Err(error)
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
+        {
+            select_intent_row_tx(tx, &fingerprint.intent_id)?.map_or_else(
+                || Err(String::from("intent row vanished after write conflict")),
+                |winner| Ok(Some(winner)),
+            )
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Builds the domain record for one decoded intent-outcome row.
+fn decode_intent_outcome_row(
+    intent_id: &str,
+    row: IntentOutcomeRow,
+) -> Result<IntentOutcomeRecord, String> {
+    let (kind, target, base, rationale_origin, rationale_quote, outcome_text, mark) = row;
+    let outcome = decode_intent_outcome(&outcome_text, mark)?;
+    Ok(IntentOutcomeRecord {
+        fingerprint: IntentFingerprint {
+            intent_id: intent_id.to_owned(),
+            kind,
+            target,
+            base,
+            rationale_origin,
+            rationale_quote,
+        },
+        outcome,
+    })
+}
+
+/// Reads one intent outcome row inside the caller's transaction.
+fn select_intent_row_tx(
+    tx: &Transaction<'_>,
+    intent_id: &str,
+) -> Result<Option<IntentOutcomeRecord>, String> {
+    let found: Option<IntentOutcomeRow> = tx
+        .query_row(SQL_SELECT_INTENT_OUTCOME, params![intent_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .optional()
+        .map_err(|error| error.to_string())?;
+    found
+        .map(|row| decode_intent_outcome_row(intent_id, row))
+        .transpose()
 }
 
 /// Reads one paired-device row into its domain record.
@@ -1910,14 +1968,27 @@ impl IntentOutcomeRepository for Store {
     async fn record_intent_outcome(
         &self,
         record: IntentOutcomeRecord,
-    ) -> Result<(), PermissionTechnicalError> {
-        let guard = lock_shared(&self.conn);
-        // Upsert on the intent key: re-establishing the same intent refreshes
-        // rather than duplicating. Read-only outcomes only (commits use the
-        // combined operations below), so a lone statement is atomic enough.
-        insert_intent_row(&guard, &record.fingerprint, &record.outcome)
-            .map_err(permission_unavailable)?;
-        Ok(())
+    ) -> Result<IntentResolution<()>, PermissionTechnicalError> {
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        // Write-once claim first: an existing row is never rewritten.
+        if let Some(stored) = select_intent_row_tx(&tx, &record.fingerprint.intent_id)
+            .map_err(permission_unavailable)?
+        {
+            return Ok(replay_or_conflict(stored, &record.fingerprint));
+        }
+        match insert_decided_row_tx(&tx, &record.fingerprint, &record.outcome)
+            .map_err(permission_unavailable)?
+        {
+            None => {
+                tx.commit()
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                Ok(IntentResolution::Decided(()))
+            }
+            Some(winner) => Ok(replay_or_conflict(winner, &record.fingerprint)),
+        }
     }
 
     #[expect(
@@ -1944,23 +2015,10 @@ impl IntentOutcomeRepository for Store {
             .optional()
             .map_err(|error| permission_unavailable(error.to_string()))?;
         match found {
-            Some((kind, target, base, rationale_origin, rationale_quote, outcome_text, mark)) => {
-                let outcome =
-                    decode_intent_outcome(&outcome_text, mark).map_err(permission_unavailable)?;
-                Ok(Some(IntentOutcomeRecord {
-                    fingerprint: IntentFingerprint {
-                        intent_id: intent_id.to_owned(),
-                        kind,
-                        target,
-                        base,
-                        rationale_origin,
-                        rationale_quote,
-                    },
-                    outcome,
-                }))
-            }
+            Some(row) => decode_intent_outcome_row(intent_id, row).map(Some),
             None => Ok(None),
         }
+        .map_err(permission_unavailable)
     }
 
     #[expect(
@@ -1972,11 +2030,19 @@ impl IntentOutcomeRepository for Store {
         expected: Option<(String, ConsentRevision)>,
         record: ConsentRecord,
         fingerprint: IntentFingerprint,
-    ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
+    ) -> Result<IntentResolution<ConsentCommitOutcome>, PermissionTechnicalError> {
         let mut guard = lock_shared(&self.conn);
         let tx = guard
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| permission_unavailable(error.to_string()))?;
+        // Write-once claim first: an existing row decides without touching
+        // consent, so a concurrent same-id send can neither fork the answer
+        // nor re-run the compare-and-save.
+        if let Some(stored) =
+            select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+        {
+            return Ok(replay_or_conflict(stored, &fingerprint));
+        }
         let outcome = compare_and_save_row(
             &tx,
             expected.as_ref().map(|(id, rev)| (id.as_str(), rev)),
@@ -1989,20 +2055,25 @@ impl IntentOutcomeRepository for Store {
         // so a retried id always observes the same answer. The commit
         // snapshot carries the committed revision, so replay answers it
         // verbatim.
-        if let ConsentCommitOutcome::Committed { record } = &outcome {
-            let snapshot = IntentOutcome::StoredAsRuleView {
+        let snapshot = match &outcome {
+            ConsentCommitOutcome::Committed { record } => IntentOutcome::StoredAsRuleView {
                 revision: record.rev.as_u64().to_string(),
-            };
-            insert_intent_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
-        } else if let ConsentCommitOutcome::StaleCurrent { current } = &outcome {
-            let snapshot = IntentOutcome::StaleBaseView {
+            },
+            ConsentCommitOutcome::StaleCurrent { current } => IntentOutcome::StaleBaseView {
                 current: consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64())),
-            };
-            insert_intent_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
+            },
+        };
+        match insert_decided_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)? {
+            None => {
+                tx.commit()
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                Ok(IntentResolution::Decided(outcome))
+            }
+            // Lost a cross-process race after deciding: roll back (dropping
+            // `tx` without committing) so the loser changes nothing, and
+            // answer from the winner.
+            Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
         }
-        tx.commit()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        Ok(outcome)
     }
 
     #[expect(
@@ -2014,7 +2085,7 @@ impl IntentOutcomeRepository for Store {
         provider: String,
         label: String,
         fingerprint: IntentFingerprint,
-    ) -> Result<IntentOutcomeRecord, PermissionTechnicalError> {
+    ) -> Result<IntentResolution<IntentOutcomeRecord>, PermissionTechnicalError> {
         if credential_pair_is_blank(&provider, &label) {
             return Err(permission_unavailable(String::from(
                 "blank credential pair",
@@ -2025,6 +2096,13 @@ impl IntentOutcomeRepository for Store {
         let tx = guard
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| permission_unavailable(error.to_string()))?;
+        // Write-once claim first: an existing row decides without touching
+        // credential state.
+        if let Some(stored) =
+            select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+        {
+            return Ok(replay_or_conflict(stored, &fingerprint));
+        }
         // One transaction: the pending insert (or usable recheck) plus the
         // replay row, so the decided snapshot and the state it describes
         // can never strand apart.
@@ -2048,11 +2126,19 @@ impl IntentOutcomeRepository for Store {
             fingerprint,
             outcome,
         };
-        insert_intent_row_tx(&tx, &decided.fingerprint, &decided.outcome)
-            .map_err(permission_unavailable)?;
-        tx.commit()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        Ok(decided)
+        match insert_decided_row_tx(&tx, &decided.fingerprint, &decided.outcome)
+            .map_err(permission_unavailable)?
+        {
+            None => {
+                tx.commit()
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                Ok(IntentResolution::Decided(decided))
+            }
+            // Lost a cross-process race after deciding: roll back (dropping
+            // `tx` without committing) so the loser changes nothing, and
+            // answer from the winner.
+            Some(winner) => Ok(replay_or_conflict(winner, &decided.fingerprint)),
+        }
     }
 
     #[expect(
@@ -2064,11 +2150,19 @@ impl IntentOutcomeRepository for Store {
         expected_base: String,
         bearer_present: bool,
         fingerprint: IntentFingerprint,
-    ) -> Result<IntentOutcomeRecord, PermissionTechnicalError> {
+    ) -> Result<IntentResolution<IntentOutcomeRecord>, PermissionTechnicalError> {
         let mut guard = lock_shared(&self.conn);
         let tx = guard
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| permission_unavailable(error.to_string()))?;
+        // Write-once claim first: an existing row decides without
+        // re-reading consent, so a concurrent same-id send can neither
+        // fork the answer nor re-run the mark comparison.
+        if let Some(stored) =
+            select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+        {
+            return Ok(replay_or_conflict(stored, &fingerprint));
+        }
         // One transaction: compare the base mark, verify completability,
         // and record the decided snapshot together. Every decided outcome
         // is recorded (even stale/clarify), so a retried id always observes
@@ -2106,11 +2200,19 @@ impl IntentOutcomeRepository for Store {
             fingerprint,
             outcome,
         };
-        insert_intent_row_tx(&tx, &decided.fingerprint, &decided.outcome)
-            .map_err(permission_unavailable)?;
-        tx.commit()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        Ok(decided)
+        match insert_decided_row_tx(&tx, &decided.fingerprint, &decided.outcome)
+            .map_err(permission_unavailable)?
+        {
+            None => {
+                tx.commit()
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                Ok(IntentResolution::Decided(decided))
+            }
+            // Lost a cross-process race after deciding: roll back (dropping
+            // `tx` without committing) so the loser changes nothing, and
+            // answer from the winner.
+            Some(winner) => Ok(replay_or_conflict(winner, &decided.fingerprint)),
+        }
     }
 
     #[expect(
@@ -2123,14 +2225,22 @@ impl IntentOutcomeRepository for Store {
         model: String,
         credential_id: String,
         fingerprint: IntentFingerprint,
-    ) -> Result<ShortcutIntentOutcome, PermissionTechnicalError> {
+    ) -> Result<IntentResolution<ShortcutIntentOutcome>, PermissionTechnicalError> {
         let mut guard = lock_shared(&self.conn);
         let tx = guard
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| permission_unavailable(error.to_string()))?;
-        // One transaction: read current and, only when the stored route
-        // already equals the requested one, record the snapshot for the
-        // current revision. No state changes either way.
+        // Write-once claim first: an existing row decides without reading
+        // consent, so a concurrent same-id send can neither fork the answer
+        // nor re-run the route check.
+        if let Some(stored) =
+            select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+        {
+            return Ok(replay_or_conflict(stored, &fingerprint));
+        }
+        // One transaction: read current, and — only when the stored route
+        // already equals the requested one — insert the `Stored` snapshot
+        // for the current revision. No state changes either way.
         let found: Option<(String, i64, String, String, String)> = tx
             .query_row(SQL_SELECT_CONSENT, (), |row| {
                 Ok((
@@ -2156,18 +2266,31 @@ impl IntentOutcomeRepository for Store {
                 && stored.credential_id == credential_id
         });
         if !matches {
-            return Ok(ShortcutIntentOutcome::Miss { current });
+            return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
+                current,
+            }));
         }
         let Some(record) = current else {
-            return Ok(ShortcutIntentOutcome::Miss { current: None });
+            return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
+                current: None,
+            }));
         };
         let snapshot = IntentOutcome::StoredAsRuleView {
             revision: record.rev.as_u64().to_string(),
         };
-        insert_intent_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
-        tx.commit()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        Ok(ShortcutIntentOutcome::Hit { current: record })
+        match insert_decided_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)? {
+            None => {
+                tx.commit()
+                    .map_err(|error| permission_unavailable(error.to_string()))?;
+                Ok(IntentResolution::Decided(ShortcutIntentOutcome::Hit {
+                    current: record,
+                }))
+            }
+            // Lost a cross-process race after deciding: roll back (dropping
+            // `tx` without committing) so the loser changes nothing, and
+            // answer from the winner.
+            Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
+        }
     }
 }
 
@@ -4240,6 +4363,7 @@ mod tests {
     async fn intent_outcome_roundtrips_and_refreshes() {
         use ene_permission::{
             IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _,
+            IntentResolution,
         };
 
         fn record() -> IntentOutcomeRecord {
@@ -4264,28 +4388,56 @@ mod tests {
         let missing = store.lookup_intent_outcome("no-such-intent").await;
         assert!(matches!(missing, Ok(None)), "unknown intent must miss");
         let recorded = store.record_intent_outcome(record()).await;
-        assert!(recorded.is_ok(), "intent outcome must record");
+        assert!(
+            matches!(recorded, Ok(IntentResolution::Decided(()))),
+            "first write must decide, got {recorded:?}"
+        );
         let found = store.lookup_intent_outcome("intent-1").await;
         assert!(
             matches!(found, Ok(Some(ref stored)) if *stored == record()),
             "recorded outcome must read back"
         );
-        let mut refreshed = record();
-        refreshed.outcome = IntentOutcome::HeldByOperation;
-        let rerecorded = store.record_intent_outcome(refreshed.clone()).await;
-        assert!(rerecorded.is_ok(), "re-record must upsert");
+        // Write-once: re-recording the same intent replays instead of
+        // refreshing, even with a different outcome attached.
+        let mut conflicting = record();
+        conflicting.outcome = IntentOutcome::HeldByOperation;
+        let rerecorded = store.record_intent_outcome(conflicting).await;
+        assert!(
+            matches!(
+                rerecorded,
+                Ok(IntentResolution::Replay(ref stored)) if *stored == record()
+            ),
+            "re-record must replay the original, got {rerecorded:?}"
+        );
         let found = store.lookup_intent_outcome("intent-1").await;
         assert!(
-            matches!(found, Ok(Some(ref stored)) if *stored == refreshed),
-            "re-record must refresh, got {found:?}"
+            matches!(found, Ok(Some(ref stored)) if *stored == record()),
+            "the original row must survive, got {found:?}"
+        );
+        // Same id, different content: conflict, original preserved.
+        let mut other = record();
+        other.fingerprint.target = String::from("consent:openai:other:openai:main");
+        other.outcome = IntentOutcome::HeldByOperation;
+        let conflicted = store.record_intent_outcome(other).await;
+        assert!(
+            matches!(
+                conflicted,
+                Ok(IntentResolution::Conflict(ref stored)) if *stored == record()
+            ),
+            "different content must conflict, got {conflicted:?}"
+        );
+        let found = store.lookup_intent_outcome("intent-1").await;
+        assert!(
+            matches!(found, Ok(Some(ref stored)) if *stored == record()),
+            "conflict must not rewrite the row, got {found:?}"
         );
     }
 
     #[tokio::test]
     async fn assign_with_intent_commits_marker_atomically() {
         use ene_permission::{
-            ConsentRecord, ConsentRevision, IntentFingerprint, IntentOutcome, IntentOutcomeRecord,
-            IntentOutcomeRepository as _,
+            ConsentRecord, ConsentRepository as _, ConsentRevision, IntentFingerprint,
+            IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _, IntentResolution,
         };
 
         fn intent() -> IntentOutcomeRecord {
@@ -4321,7 +4473,12 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(committed, Ok(ConsentCommitOutcome::Committed { .. })),
+            matches!(
+                committed,
+                Ok(IntentResolution::Decided(
+                    ConsentCommitOutcome::Committed { .. }
+                ))
+            ),
             "fresh assign must commit, got {committed:?}"
         );
         let found = store.lookup_intent_outcome("assign-1").await;
@@ -4346,7 +4503,12 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(stale, Ok(ConsentCommitOutcome::StaleCurrent { .. })),
+            matches!(
+                stale,
+                Ok(IntentResolution::Decided(
+                    ConsentCommitOutcome::StaleCurrent { .. }
+                ))
+            ),
             "stale assign must not commit, got {stale:?}"
         );
         let stale_row = store.lookup_intent_outcome("assign-2").await;
@@ -4361,12 +4523,146 @@ mod tests {
             ),
             "stale assign must leave its stale snapshot, got {stale_row:?}"
         );
+        // Same id, same fingerprint: replays the stored row without
+        // re-running compare-and-save or touching consent.
+        let replayed = store
+            .assign_with_intent(
+                None,
+                ConsentRecord {
+                    id: String::from("consent-9"),
+                    rev: ConsentRevision::from_u64(9),
+                    provider: String::from("other"),
+                    model: String::from("other"),
+                    credential_id: String::from("other"),
+                },
+                intent().fingerprint,
+            )
+            .await;
+        assert!(
+            matches!(
+                replayed,
+                Ok(IntentResolution::Replay(ref stored)) if *stored == intent()
+            ),
+            "same-id retry must replay, got {replayed:?}"
+        );
+        // Same id, different content: conflicts without side effects — the
+        // original row and the consent record both survive untouched.
+        let conflicted = store
+            .assign_with_intent(
+                None,
+                ConsentRecord {
+                    id: String::from("consent-9"),
+                    rev: ConsentRevision::from_u64(9),
+                    provider: String::from("other"),
+                    model: String::from("other"),
+                    credential_id: String::from("other"),
+                },
+                IntentFingerprint {
+                    target: String::from("consent:openai:changed:openai:main"),
+                    ..intent().fingerprint
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                conflicted,
+                Ok(IntentResolution::Conflict(ref stored)) if *stored == intent()
+            ),
+            "same-id reuse must conflict, got {conflicted:?}"
+        );
+        let preserved = store.lookup_intent_outcome("assign-1").await;
+        assert!(
+            matches!(preserved, Ok(Some(ref stored)) if *stored == intent()),
+            "conflict must not rewrite the row, got {preserved:?}"
+        );
+        let timeline = store.load_current().await;
+        assert!(
+            matches!(
+                timeline,
+                Ok(Some(ref record))
+                    if record.rev == ConsentRevision::from_u64(1)
+                        && record.model == "dialogue-1"
+            ),
+            "conflict must not move consent, got {timeline:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_id_assigns_fork_nothing() {
+        use ene_permission::{
+            ConsentRecord, ConsentRevision, IntentFingerprint, IntentOutcomeRepository as _,
+            IntentResolution,
+        };
+
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        // Two sends of one logical intent racing through the same store:
+        // the shared-connection mutex serializes whole transactions, so
+        // the loser always observes the winner's row. Exactly one decides;
+        // the other replays — the answer never forks and the row is never
+        // rewritten.
+        let attempt = |model: &'static str| {
+            let store = &store;
+            let fingerprint = IntentFingerprint {
+                intent_id: String::from("race-1"),
+                kind: String::from("assign"),
+                target: String::from("consent:openai:dialogue-1:openai:main"),
+                base: String::from("consent-none"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+            };
+            async move {
+                store
+                    .assign_with_intent(
+                        None,
+                        ConsentRecord {
+                            id: String::from("consent-1"),
+                            rev: ConsentRevision::from_u64(1),
+                            provider: String::from("openai"),
+                            model: String::from(model),
+                            credential_id: String::from("openai:main"),
+                        },
+                        fingerprint,
+                    )
+                    .await
+            }
+        };
+        let (first, second) = tokio::join!(attempt("dialogue-1"), attempt("dialogue-1"));
+        let decided_count = [&first, &second]
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    Ok(IntentResolution::Decided(
+                        ConsentCommitOutcome::Committed { .. }
+                    ))
+                )
+            })
+            .count();
+        assert_eq!(
+            decided_count, 1,
+            "exactly one racer must decide, got {first:?} / {second:?}"
+        );
+        for result in [&first, &second] {
+            assert!(
+                matches!(
+                    result,
+                    Ok(
+                        IntentResolution::Decided(ConsentCommitOutcome::Committed { .. })
+                            | IntentResolution::Replay(_)
+                    )
+                ),
+                "the loser must replay, never conflict or fail, got {result:?}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn request_approval_with_intent_decides_atomically() {
         use ene_permission::{
             IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _,
+            IntentResolution,
         };
 
         fn intent(id: &str) -> IntentOutcomeRecord {
@@ -4394,7 +4690,11 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(decided, Ok(ref snapshot) if snapshot.outcome == IntentOutcome::HeldByOperation),
+            matches!(
+                decided,
+                Ok(IntentResolution::Decided(ref snapshot))
+                    if snapshot.outcome == IntentOutcome::HeldByOperation
+            ),
             "first registration must hold, got {decided:?}"
         );
         let found = store.lookup_intent_outcome("reg-1").await;
@@ -4419,7 +4719,7 @@ mod tests {
     async fn complete_with_intent_decides_atomically() {
         use ene_permission::{
             ConsentRecord, ConsentRepository as _, ConsentRevision, IntentFingerprint,
-            IntentOutcome, IntentOutcomeRepository as _,
+            IntentOutcome, IntentOutcomeRepository as _, IntentResolution,
         };
 
         fn fingerprint(id: &str, base: &str) -> IntentFingerprint {
@@ -4447,7 +4747,7 @@ mod tests {
         assert!(
             matches!(
                 empty,
-                Ok(ref decided) if decided.outcome == IntentOutcome::NeedsClarification
+                Ok(IntentResolution::Decided(ref decided)) if decided.outcome == IntentOutcome::NeedsClarification
             ),
             "empty completion must clarify, got {empty:?}"
         );
@@ -4483,7 +4783,7 @@ mod tests {
         assert!(
             matches!(
                 unready,
-                Ok(ref decided) if decided.outcome == IntentOutcome::NeedsClarification
+                Ok(IntentResolution::Decided(ref decided)) if decided.outcome == IntentOutcome::NeedsClarification
             ),
             "bearerless completion must clarify, got {unready:?}"
         );
@@ -4498,7 +4798,7 @@ mod tests {
         assert!(
             matches!(
                 ready,
-                Ok(ref decided) if decided.outcome == IntentOutcome::AppliedAsOneTime
+                Ok(IntentResolution::Decided(ref decided)) if decided.outcome == IntentOutcome::AppliedAsOneTime
             ),
             "ready completion must apply, got {ready:?}"
         );
@@ -4513,7 +4813,7 @@ mod tests {
         assert!(
             matches!(
                 stale,
-                Ok(ref decided) if decided.outcome
+                Ok(IntentResolution::Decided(ref decided)) if decided.outcome
                     == IntentOutcome::StaleBaseView {
                         current: String::from("consent-rev-1"),
                     }
@@ -4533,7 +4833,7 @@ mod tests {
     async fn shortcut_with_intent_hits_atomically() {
         use ene_permission::{
             ConsentRecord, ConsentRepository as _, ConsentRevision, IntentFingerprint,
-            IntentOutcome, IntentOutcomeRepository as _, ShortcutIntentOutcome,
+            IntentOutcome, IntentOutcomeRepository as _, IntentResolution, ShortcutIntentOutcome,
         };
 
         fn fingerprint(id: &str) -> IntentFingerprint {
@@ -4575,7 +4875,10 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(hit, Ok(ShortcutIntentOutcome::Hit { .. })),
+            matches!(
+                hit,
+                Ok(IntentResolution::Decided(ShortcutIntentOutcome::Hit { .. }))
+            ),
             "matching route must hit, got {hit:?}"
         );
         let found = store.lookup_intent_outcome("s-1").await;
@@ -4599,7 +4902,12 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(miss, Ok(ShortcutIntentOutcome::Miss { .. })),
+            matches!(
+                miss,
+                Ok(IntentResolution::Decided(
+                    ShortcutIntentOutcome::Miss { .. }
+                ))
+            ),
             "differing route must miss, got {miss:?}"
         );
         let missing = store.lookup_intent_outcome("s-2").await;
