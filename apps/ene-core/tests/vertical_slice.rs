@@ -499,7 +499,9 @@ async fn view_sections(client: &mut Client) -> Result<Vec<String>, String> {
 }
 
 /// Locates a sibling binary built by the workspace: integration tests run
-/// from `target/debug/deps`, so the binaries live two levels up.
+/// from `target/debug/deps`, so the binaries live two levels up. Requires
+/// a prior `cargo build` (`cargo test` alone does not link binaries); CI
+/// builds the workspace before testing for exactly this reason.
 fn workspace_binary(name: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let debug = exe.parent()?.parent()?;

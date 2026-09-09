@@ -32,6 +32,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Build binaries
+        # The binary-level E2E drives target/debug binaries as subprocesses;
+        # `cargo test` alone does not link them.
+        run: cargo build --locked --workspace
       - name: Run tests
         run: cargo test --locked --workspace
       - name: Build docs
