@@ -30,17 +30,20 @@ use ene_credential::{
     DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord,
     PendingCredentialApproval, PendingPairing,
 };
-use ene_inference::{InferenceTechnicalError, UsageFact, UsageRepository, UsageSource};
+use ene_inference::{
+    AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository, InferenceTechnicalError,
+    UsageFact, UsageRepository, UsageSource,
+};
 use ene_permission::{
-    AssignIntentRecord, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
-    IntentReplayRepository, PermissionTechnicalError,
+    ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentOutcome,
+    IntentOutcomeRecord, IntentOutcomeRepository, PermissionTechnicalError,
 };
 use ene_presence::{
     ClientId, LiveReachabilityRef, MoveDecision, PresenceAttribution, PresenceCheckRef,
     PresenceGeneration, PresenceRepository, PresenceState, PresenceTechnicalError, ThinMoveReason,
 };
 use ene_primitive::{RawId, WallClockWithTz};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 /// Failures opening or migrating the SQLite backing file.
 ///
@@ -352,7 +355,7 @@ mod migrate {
     /// correspondence metadata only. Version 4 adds the `credential_pending`
     /// table for registration approvals; the usable marker stays
     /// `credential_ref`, so no approved table is created.
-    const CURRENT_VERSION: u64 = 6;
+    const CURRENT_VERSION: u64 = 7;
 
     /// Forward-only schema: tables first, then the supporting indexes.
     const SCHEMA: &str = "
@@ -500,17 +503,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_device_wire ON paired_device (wire)
 
     /// Version 6 upgrade, applied once when the stored version is below 6.
     ///
-    /// Forward-only: introduces `management_assign_intent` for durable
-    /// assign-intent replay (design §18.2 idempotency keys). Fresh and
-    /// upgraded databases converge via `IF NOT EXISTS`; no pre-existing
-    /// rows can reference the new table, so nothing is backfilled. Intents
-    /// committed before this version simply have no replay row: their
-    /// retries take the normal compare-and-save path.
+    /// Forward-only: introduces `management_intent` for durable management
+    /// intent replay (design §18.2 idempotency keys). Each row binds one
+    /// intent key to the fingerprint it decided on plus its terminal
+    /// outcome snapshot, so an exact retry replays without re-executing
+    /// while a reused id with new content conflicts instead of rebinding.
+    /// Fresh and upgraded databases converge via `IF NOT EXISTS`; no
+    /// pre-existing rows can reference the new table, so nothing is
+    /// backfilled. Intents decided before this version simply have no
+    /// replay row: their retries take the normal premise-checked path.
     const MIGRATION_V6: &str = "
-CREATE TABLE IF NOT EXISTS management_assign_intent (
+CREATE TABLE IF NOT EXISTS management_intent (
     intent_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
     target TEXT NOT NULL,
-    base TEXT NOT NULL
+    base TEXT NOT NULL,
+    rationale_origin TEXT NOT NULL,
+    rationale_quote TEXT NULL,
+    outcome TEXT NOT NULL,
+    mark TEXT NULL
+);
+";
+
+    /// Version 7 upgrade, applied once when the stored version is below 7.
+    ///
+    /// Forward-only: introduces `inference_attempt` for the provider-I/O
+    /// linearization point. Each row claims one ticket's attempt under one
+    /// consent premise in the same short transaction that verifies it, so a
+    /// consent mutation either precedes the claim (the claim fails stale
+    /// before any byte leaves) or follows it (adoption decides separately).
+    /// Fresh and upgraded databases converge via `IF NOT EXISTS`; ticket
+    /// ids are single-use, so nothing is backfilled and re-claiming one
+    /// ticket answers stale instead of sending twice.
+    const MIGRATION_V7: &str = "
+CREATE TABLE IF NOT EXISTS inference_attempt (
+    ticket TEXT PRIMARY KEY,
+    consent_id TEXT NOT NULL,
+    consent_rev INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    started_at TEXT NOT NULL
 );
 ";
     /// Creates or upgrades the schema on an open connection.
@@ -555,6 +587,10 @@ CREATE TABLE IF NOT EXISTS management_assign_intent (
         }
         if stored_version < 6 {
             conn.execute_batch(MIGRATION_V6)
+                .map_err(|error| error.to_string())?;
+        }
+        if stored_version < 7 {
+            conn.execute_batch(MIGRATION_V7)
                 .map_err(|error| error.to_string())?;
         }
         let current = i64::try_from(CURRENT_VERSION)
@@ -603,9 +639,9 @@ const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (id, rev, provider,
 const SQL_UPDATE_CONSENT: &str =
     "UPDATE consent_record SET id = ?1, rev = ?2, provider = ?3, model = ?4, credential_id = ?5";
 const SQL_UPSERT_CREDENTIAL: &str = "INSERT INTO credential_ref (id, provider, label) VALUES (?1, ?2, ?3) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, label = excluded.label";
-const SQL_UPSERT_ASSIGN_INTENT: &str = "INSERT INTO management_assign_intent (intent_id, target, base) VALUES (?1, ?2, ?3) ON CONFLICT (intent_id) DO UPDATE SET target = excluded.target, base = excluded.base";
-const SQL_SELECT_ASSIGN_INTENT: &str =
-    "SELECT target, base FROM management_assign_intent WHERE intent_id = ?1";
+const SQL_UPSERT_INTENT_OUTCOME: &str = "INSERT INTO management_intent (intent_id, kind, target, base, rationale_origin, rationale_quote, outcome, mark) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT (intent_id) DO UPDATE SET kind = excluded.kind, target = excluded.target, base = excluded.base, rationale_origin = excluded.rationale_origin, rationale_quote = excluded.rationale_quote, outcome = excluded.outcome, mark = excluded.mark";
+const SQL_SELECT_INTENT_OUTCOME: &str = "SELECT kind, target, base, rationale_origin, rationale_quote, outcome, mark FROM management_intent WHERE intent_id = ?1";
+const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, consent_id, consent_rev, provider, model, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 const SQL_SELECT_CREDENTIAL: &str =
     "SELECT id, provider, label FROM credential_ref WHERE provider = ?1 AND label = ?2";
 const SQL_LIST_CREDENTIALS: &str = "SELECT id, provider, label FROM credential_ref ORDER BY id ASC";
@@ -808,6 +844,31 @@ fn decode_consent(
     })
 }
 
+/// Encodes an intent outcome snapshot into its stored `(kind, mark)` pair.
+fn encode_intent_outcome(outcome: &IntentOutcome) -> (&'static str, Option<&str>) {
+    match outcome {
+        IntentOutcome::StoredAsRuleView { revision } => ("stored", Some(revision)),
+        IntentOutcome::AppliedAsOneTime => ("applied", None),
+        IntentOutcome::HeldByOperation => ("held", None),
+    }
+}
+
+/// Reads one stored outcome snapshot back into its domain outcome.
+///
+/// Unknown kinds — or a stored outcome without its mark — are malformed
+/// rows, never guessed: the caller fails closed.
+fn decode_intent_outcome(
+    outcome_text: &str,
+    mark: Option<String>,
+) -> Result<IntentOutcome, String> {
+    match (outcome_text, mark) {
+        ("stored", Some(revision)) => Ok(IntentOutcome::StoredAsRuleView { revision }),
+        ("applied", _) => Ok(IntentOutcome::AppliedAsOneTime),
+        ("held", _) => Ok(IntentOutcome::HeldByOperation),
+        _ => Err(String::from("malformed intent outcome")),
+    }
+}
+
 /// Reads one paired-device row into its domain record.
 ///
 /// `wire` carries the opaque wire projection; pre-opaque rows store `NULL`,
@@ -899,6 +960,18 @@ type CommandFingerprintRow = (
     Option<String>,
     Option<i64>,
     Option<i64>,
+);
+
+/// One decoded intent-outcome row: kind, target, base, rationale origin,
+/// optional rationale quote, outcome kind, and optional outcome mark.
+type IntentOutcomeRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
 );
 
 /// Reads one history row into its domain message.
@@ -1682,87 +1755,121 @@ impl ConsentRepository for Store {
         expected: Option<(String, ConsentRevision)>,
         record: ConsentRecord,
     ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
-        let rev_raw = encode_u64(record.rev.as_u64()).map_err(permission_unavailable)?;
         let mut guard = lock_shared(&self.conn);
         let tx = guard
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| permission_unavailable(error.to_string()))?;
-        let found: Option<(String, i64, String, String, String)> = tx
-            .query_row(SQL_SELECT_CONSENT, (), |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })
-            .optional()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        let current = match found {
-            Some((id, stored_rev, provider, model, credential_id)) => Some(
-                decode_consent(id, stored_rev, provider, model, credential_id)
-                    .map_err(permission_unavailable)?,
-            ),
-            None => None,
-        };
-        let matches = match (&current, &expected) {
-            (None, None) => true,
-            (Some(stored), Some((id, rev))) => stored.id == *id && stored.rev == *rev,
-            _ => false,
-        };
-        if !matches {
-            return Ok(ConsentCommitOutcome::StaleCurrent { current });
-        }
-        if current.is_none() {
-            tx.execute(
-                SQL_INSERT_CONSENT,
-                params![
-                    record.id,
-                    rev_raw,
-                    record.provider,
-                    record.model,
-                    record.credential_id
-                ],
-            )
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        } else {
-            // Single logical row: the expectation matched, so overwrite it.
-            tx.execute(
-                SQL_UPDATE_CONSENT,
-                params![
-                    record.id,
-                    rev_raw,
-                    record.provider,
-                    record.model,
-                    record.credential_id
-                ],
-            )
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        }
+        let outcome = compare_and_save_row(
+            &tx,
+            expected.as_ref().map(|(id, rev)| (id.as_str(), rev)),
+            &record,
+        )
+        .map_err(permission_unavailable)?;
         tx.commit()
             .map_err(|error| permission_unavailable(error.to_string()))?;
-        Ok(ConsentCommitOutcome::Committed { record })
+        Ok(outcome)
     }
 }
 
-impl IntentReplayRepository for Store {
+/// Runs the consent compare-and-save inside the caller's transaction.
+///
+/// Shared by [`ConsentRepository::compare_and_save`] and the intent-atomic
+/// variant so the premise check and the write cannot drift apart between
+/// the two entry points.
+fn compare_and_save_row(
+    tx: &Transaction<'_>,
+    expected: Option<(&str, &ConsentRevision)>,
+    record: &ConsentRecord,
+) -> Result<ConsentCommitOutcome, String> {
+    let rev_raw = encode_u64(record.rev.as_u64())?;
+    let found: Option<(String, i64, String, String, String)> = tx
+        .query_row(SQL_SELECT_CONSENT, (), |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let current = match found {
+        Some((id, stored_rev, provider, model, credential_id)) => Some(decode_consent(
+            id,
+            stored_rev,
+            provider,
+            model,
+            credential_id,
+        )?),
+        None => None,
+    };
+    let matches = match (&current, &expected) {
+        (None, None) => true,
+        (Some(stored), Some((id, rev))) => stored.id == *id && stored.rev == **rev,
+        _ => false,
+    };
+    if !matches {
+        return Ok(ConsentCommitOutcome::StaleCurrent { current });
+    }
+    if current.is_none() {
+        tx.execute(
+            SQL_INSERT_CONSENT,
+            params![
+                record.id,
+                rev_raw,
+                record.provider,
+                record.model,
+                record.credential_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    } else {
+        // Single logical row: the expectation matched, so overwrite it.
+        tx.execute(
+            SQL_UPDATE_CONSENT,
+            params![
+                record.id,
+                rev_raw,
+                record.provider,
+                record.model,
+                record.credential_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(ConsentCommitOutcome::Committed {
+        record: record.clone(),
+    })
+}
+
+impl IntentOutcomeRepository for Store {
     #[expect(
         clippy::unused_async_trait_impl,
         reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
     )]
-    async fn record_assign_intent(
+    async fn record_intent_outcome(
         &self,
-        record: AssignIntentRecord,
+        record: IntentOutcomeRecord,
     ) -> Result<(), PermissionTechnicalError> {
+        let (outcome_text, mark) = encode_intent_outcome(&record.outcome);
         let guard = lock_shared(&self.conn);
         // Upsert on the intent key: re-establishing the same intent refreshes
-        // its fingerprint instead of duplicating rows. Plain statement, no
-        // transaction needed beyond the single insert.
+        // rather than duplicating. Read-only outcomes only (commits use the
+        // combined operations below), so a lone statement is atomic enough.
         guard
             .execute(
-                SQL_UPSERT_ASSIGN_INTENT,
-                params![record.intent_id, record.target, record.base],
+                SQL_UPSERT_INTENT_OUTCOME,
+                params![
+                    record.intent_id,
+                    record.kind,
+                    record.target,
+                    record.base,
+                    record.rationale_origin,
+                    record.rationale_quote.as_deref(),
+                    outcome_text,
+                    mark,
+                ],
             )
             .map_err(|error| permission_unavailable(error.to_string()))?;
         Ok(())
@@ -1772,22 +1879,205 @@ impl IntentReplayRepository for Store {
         clippy::unused_async_trait_impl,
         reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
     )]
-    async fn lookup_assign_intent(
+    async fn lookup_intent_outcome(
         &self,
         intent_id: &str,
-    ) -> Result<Option<AssignIntentRecord>, PermissionTechnicalError> {
+    ) -> Result<Option<IntentOutcomeRecord>, PermissionTechnicalError> {
         let guard = lock_shared(&self.conn);
-        let found: Option<(String, String)> = guard
-            .query_row(SQL_SELECT_ASSIGN_INTENT, params![intent_id], |row| {
-                Ok((row.get(0)?, row.get(1)?))
+        let found: Option<IntentOutcomeRow> = guard
+            .query_row(SQL_SELECT_INTENT_OUTCOME, params![intent_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
             })
             .optional()
             .map_err(|error| permission_unavailable(error.to_string()))?;
-        Ok(found.map(|(target, base)| AssignIntentRecord {
-            intent_id: intent_id.to_owned(),
-            target,
-            base,
-        }))
+        match found {
+            Some((kind, target, base, rationale_origin, rationale_quote, outcome_text, mark)) => {
+                let outcome =
+                    decode_intent_outcome(&outcome_text, mark).map_err(permission_unavailable)?;
+                Ok(Some(IntentOutcomeRecord {
+                    intent_id: intent_id.to_owned(),
+                    kind,
+                    target,
+                    base,
+                    rationale_origin,
+                    rationale_quote,
+                    outcome,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn assign_with_intent(
+        &self,
+        expected: Option<(String, ConsentRevision)>,
+        record: ConsentRecord,
+        intent: IntentOutcomeRecord,
+    ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        let outcome = compare_and_save_row(
+            &tx,
+            expected.as_ref().map(|(id, rev)| (id.as_str(), rev)),
+            &record,
+        )
+        .map_err(permission_unavailable)?;
+        // The replay row shares the commit transaction: a crash can neither
+        // strand a commit without its marker nor a marker without its
+        // commit. Stale outcomes record nothing (they recompute honestly).
+        if let ConsentCommitOutcome::Committed { .. } = outcome {
+            let (outcome_text, mark) = encode_intent_outcome(&intent.outcome);
+            tx.execute(
+                SQL_UPSERT_INTENT_OUTCOME,
+                params![
+                    intent.intent_id,
+                    intent.kind,
+                    intent.target,
+                    intent.base,
+                    intent.rationale_origin,
+                    intent.rationale_quote.as_deref(),
+                    outcome_text,
+                    mark,
+                ],
+            )
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        Ok(outcome)
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn request_approval_with_intent(
+        &self,
+        provider: String,
+        label: String,
+        intent: IntentOutcomeRecord,
+    ) -> Result<IntentOutcomeRecord, PermissionTechnicalError> {
+        if credential_pair_is_blank(&provider, &label) {
+            return Err(permission_unavailable(String::from(
+                "blank credential pair",
+            )));
+        }
+        let requested_text = WallClockWithTz::now().to_rfc3339();
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        // One transaction: the pending insert (or usable recheck) plus the
+        // replay row, so the decided snapshot and the state it describes
+        // can never strand apart.
+        let usable: Option<(String, String, String)> = tx
+            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        let outcome = if usable.is_some() {
+            IntentOutcome::AppliedAsOneTime
+        } else {
+            tx.execute(
+                SQL_INSERT_CREDENTIAL_PENDING_IGNORE,
+                params![provider, label, requested_text],
+            )
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+            IntentOutcome::HeldByOperation
+        };
+        let decided = IntentOutcomeRecord { outcome, ..intent };
+        let (outcome_text, mark) = encode_intent_outcome(&decided.outcome);
+        tx.execute(
+            SQL_UPSERT_INTENT_OUTCOME,
+            params![
+                decided.intent_id,
+                decided.kind,
+                decided.target,
+                decided.base,
+                decided.rationale_origin,
+                decided.rationale_quote.as_deref(),
+                outcome_text,
+                mark,
+            ],
+        )
+        .map_err(|error| permission_unavailable(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        Ok(decided)
+    }
+}
+
+impl InferenceAttemptRepository for Store {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn begin_inference_attempt(
+        &self,
+        attempt: InferenceAttempt,
+    ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+        let rev_raw = encode_u64(attempt.expected_consent.1).map_err(inference_unavailable)?;
+        let ticket_text = encode_id(attempt.ticket.0);
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| inference_unavailable(error.to_string()))?;
+        // The linearization point: read, compare, and claim share one short
+        // transaction that never spans provider I/O. A mutation that
+        // committed first fails the compare (no byte leaves); a mutation
+        // that commits after only affects result adoption, never the fact
+        // that this attempt started under a verified premise.
+        let stored: Option<(String, i64)> = tx
+            .query_row(SQL_SELECT_CONSENT, (), |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()
+            .map_err(|error| inference_unavailable(error.to_string()))?;
+        let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
+            id == &attempt.expected_consent.0
+                && decode_u64(*rev).is_ok_and(|value| value == attempt.expected_consent.1)
+        });
+        if !current_matches {
+            return Ok(AttemptBeginOutcome::Stale);
+        }
+        let started_text = WallClockWithTz::now().to_rfc3339();
+        match tx.execute(
+            SQL_INSERT_ATTEMPT,
+            params![
+                ticket_text,
+                attempt.expected_consent.0,
+                rev_raw,
+                attempt.provider,
+                attempt.model,
+                started_text,
+            ],
+        ) {
+            Ok(_) => {}
+            // A duplicate ticket re-claims an already-started attempt: stale
+            // (never send twice), never a storage error.
+            Err(error)
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
+            {
+                return Ok(AttemptBeginOutcome::Stale);
+            }
+            Err(error) => return Err(inference_unavailable(error.to_string())),
+        }
+        tx.commit()
+            .map_err(|error| inference_unavailable(error.to_string()))?;
+        Ok(AttemptBeginOutcome::Started)
     }
 }
 
@@ -3399,7 +3689,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
         let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
             row.get::<_, i64>(0)
         });
-        assert!(matches!(version, Ok(6)), "migration must record version 6");
+        assert!(matches!(version, Ok(7)), "migration must record version 7");
         let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
             (),
@@ -3696,8 +3986,8 @@ INSERT INTO _schema_version (version) VALUES (4);",
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(6)),
-            "reopened database must record schema version 6"
+            matches!(version, Ok(7)),
+            "reopened database must record schema version 7"
         );
     }
 
@@ -3798,36 +4088,240 @@ INSERT INTO _schema_version (version) VALUES (4);",
     }
 
     #[tokio::test]
-    async fn assign_intent_records_replays_and_refreshes() {
-        use ene_permission::{AssignIntentRecord, IntentReplayRepository as _};
+    async fn intent_outcome_roundtrips_and_refreshes() {
+        use ene_permission::{IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _};
+
+        fn record() -> IntentOutcomeRecord {
+            IntentOutcomeRecord {
+                intent_id: String::from("intent-1"),
+                kind: String::from("assign"),
+                target: String::from("consent:openai:dialogue-1:openai:main"),
+                base: String::from("consent-none"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+                outcome: IntentOutcome::StoredAsRuleView {
+                    revision: String::from("1"),
+                },
+            }
+        }
 
         let Some(store) = open_memory().await else {
             return;
         };
-        let missing = store.lookup_assign_intent("no-such-intent").await;
+        let missing = store.lookup_intent_outcome("no-such-intent").await;
         assert!(matches!(missing, Ok(None)), "unknown intent must miss");
-        let record = AssignIntentRecord {
-            intent_id: String::from("intent-1"),
-            target: String::from("consent:openai:dialogue-1:openai:main"),
-            base: String::from("consent-none"),
-        };
-        let recorded = store.record_assign_intent(record.clone()).await;
-        assert!(recorded.is_ok(), "assign intent must record");
-        let found = store.lookup_assign_intent("intent-1").await;
+        let recorded = store.record_intent_outcome(record()).await;
+        assert!(recorded.is_ok(), "intent outcome must record");
+        let found = store.lookup_intent_outcome("intent-1").await;
         assert!(
-            matches!(found, Ok(Some(ref stored)) if *stored == record),
-            "recorded intent must read back"
+            matches!(found, Ok(Some(ref stored)) if *stored == record()),
+            "recorded outcome must read back"
         );
-        let refreshed = AssignIntentRecord {
-            base: String::from("consent-rev-1"),
-            ..record.clone()
-        };
-        let rerecorded = store.record_assign_intent(refreshed.clone()).await;
+        let mut refreshed = record();
+        refreshed.outcome = IntentOutcome::HeldByOperation;
+        let rerecorded = store.record_intent_outcome(refreshed.clone()).await;
         assert!(rerecorded.is_ok(), "re-record must upsert");
-        let found = store.lookup_assign_intent("intent-1").await;
+        let found = store.lookup_intent_outcome("intent-1").await;
         assert!(
             matches!(found, Ok(Some(ref stored)) if *stored == refreshed),
-            "re-record must refresh the fingerprint, got {found:?}"
+            "re-record must refresh, got {found:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assign_with_intent_commits_marker_atomically() {
+        use ene_permission::{
+            ConsentRecord, ConsentRevision, IntentOutcome, IntentOutcomeRecord,
+            IntentOutcomeRepository as _,
+        };
+
+        fn intent() -> IntentOutcomeRecord {
+            IntentOutcomeRecord {
+                intent_id: String::from("assign-1"),
+                kind: String::from("assign"),
+                target: String::from("consent:openai:dialogue-1:openai:main"),
+                base: String::from("consent-none"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+                outcome: IntentOutcome::StoredAsRuleView {
+                    revision: String::from("1"),
+                },
+            }
+        }
+
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let committed = store
+            .assign_with_intent(
+                None,
+                ConsentRecord {
+                    id: String::from("consent-1"),
+                    rev: ConsentRevision::from_u64(1),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-1"),
+                    credential_id: String::from("openai:main"),
+                },
+                intent(),
+            )
+            .await;
+        assert!(
+            matches!(committed, Ok(ConsentCommitOutcome::Committed { .. })),
+            "fresh assign must commit, got {committed:?}"
+        );
+        let found = store.lookup_intent_outcome("assign-1").await;
+        assert!(
+            matches!(found, Ok(Some(ref stored)) if *stored == intent()),
+            "commit must leave its replay row, got {found:?}"
+        );
+        let stale = store
+            .assign_with_intent(
+                None,
+                ConsentRecord {
+                    id: String::from("consent-1"),
+                    rev: ConsentRevision::from_u64(2),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-2"),
+                    credential_id: String::from("openai:main"),
+                },
+                IntentOutcomeRecord {
+                    intent_id: String::from("assign-2"),
+                    ..intent()
+                },
+            )
+            .await;
+        assert!(
+            matches!(stale, Ok(ConsentCommitOutcome::StaleCurrent { .. })),
+            "stale assign must not commit, got {stale:?}"
+        );
+        let missing = store.lookup_intent_outcome("assign-2").await;
+        assert!(
+            matches!(missing, Ok(None)),
+            "stale assign must leave no replay row"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_approval_with_intent_decides_atomically() {
+        use ene_permission::{IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _};
+
+        fn intent(id: &str) -> IntentOutcomeRecord {
+            IntentOutcomeRecord {
+                intent_id: id.to_owned(),
+                kind: String::from("register"),
+                target: String::from("credential:acme:main"),
+                base: String::from("consent-none"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+                outcome: IntentOutcome::HeldByOperation,
+            }
+        }
+
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let decided = store
+            .request_approval_with_intent(
+                String::from("acme"),
+                String::from("main"),
+                intent("reg-1"),
+            )
+            .await;
+        assert!(
+            matches!(decided, Ok(ref snapshot) if snapshot.outcome == IntentOutcome::HeldByOperation),
+            "first registration must hold, got {decided:?}"
+        );
+        let found = store.lookup_intent_outcome("reg-1").await;
+        assert!(
+            matches!(found, Ok(Some(_))),
+            "the held decision must leave its replay row"
+        );
+        let usable = store
+            .request_approval_with_intent(
+                String::from("acme"),
+                String::from("main"),
+                intent("reg-2"),
+            )
+            .await;
+        assert!(
+            usable.is_ok(),
+            "repeat registration must decide, got {usable:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_claims_started_rejects_moved_and_duplicate() {
+        use ene_inference::{
+            AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _,
+            InferenceTicketId,
+        };
+        use ene_permission::{ConsentRecord, ConsentRepository as _, ConsentRevision};
+
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let saved = store
+            .compare_and_save(
+                None,
+                ConsentRecord {
+                    id: String::from("consent-1"),
+                    rev: ConsentRevision::from_u64(1),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-1"),
+                    credential_id: String::from("openai:main"),
+                },
+            )
+            .await;
+        assert!(
+            matches!(saved, Ok(ConsentCommitOutcome::Committed { .. })),
+            "consent must seed"
+        );
+        let claim = |ticket: InferenceTicketId, rev: u64| InferenceAttempt {
+            ticket,
+            expected_consent: (String::from("consent-1"), rev),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+        };
+        let ticket = InferenceTicketId(RawId::new());
+        let started = store.begin_inference_attempt(claim(ticket, 1)).await;
+        assert!(
+            matches!(started, Ok(AttemptBeginOutcome::Started)),
+            "a fresh premise must claim, got {started:?}"
+        );
+        let duplicate = store.begin_inference_attempt(claim(ticket, 1)).await;
+        assert!(
+            matches!(duplicate, Ok(AttemptBeginOutcome::Stale)),
+            "re-claiming one ticket must never send twice, got {duplicate:?}"
+        );
+        let moved = store
+            .compare_and_save(
+                Some((String::from("consent-1"), ConsentRevision::from_u64(1))),
+                ConsentRecord {
+                    id: String::from("consent-1"),
+                    rev: ConsentRevision::from_u64(2),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-2"),
+                    credential_id: String::from("openai:main"),
+                },
+            )
+            .await;
+        assert!(
+            matches!(moved, Ok(ConsentCommitOutcome::Committed { .. })),
+            "consent must move"
+        );
+        let stale = store
+            .begin_inference_attempt(claim(InferenceTicketId(RawId::new()), 1))
+            .await;
+        assert!(
+            matches!(stale, Ok(AttemptBeginOutcome::Stale)),
+            "a moved premise must fail stale before any byte leaves, got {stale:?}"
+        );
+        let current = store
+            .begin_inference_attempt(claim(InferenceTicketId(RawId::new()), 2))
+            .await;
+        assert!(
+            matches!(current, Ok(AttemptBeginOutcome::Started)),
+            "the current premise must claim, got {current:?}"
         );
     }
 
@@ -4000,8 +4494,8 @@ INSERT INTO _schema_version (version) VALUES (4);",
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(6)),
-            "reopened database must record schema version 6"
+            matches!(version, Ok(7)),
+            "reopened database must record schema version 7"
         );
     }
 
