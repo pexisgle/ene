@@ -324,10 +324,11 @@ pub trait IntentOutcomeRepository: Send + Sync {
     ///
     /// One transaction: the compare-and-save plus the replay-row insert, so
     /// a crash between commit and marker can neither strand an approval
-    /// without its replay row nor replay a row without its commit. Records
-    /// only on [`ConsentCommitOutcome::Committed`]; stale outcomes carry no
-    /// row (they recompute honestly on retry). The snapshot carries the
-    /// committed revision; replay answers it verbatim.
+    /// without its replay row nor replay a row without its commit. Commits
+    /// record the `Stored` snapshot built from the committed revision;
+    /// stale attempts record the `Stale` snapshot with the current mark —
+    /// same id always observes the same answer. Replay answers either
+    /// verbatim.
     async fn assign_with_intent(
         &self,
         expected: Option<(String, ConsentRevision)>,
@@ -351,12 +352,13 @@ pub trait IntentOutcomeRepository: Send + Sync {
 
     /// Claims a setup completion and records its outcome atomically.
     ///
-    /// One transaction: compare the expected base mark against current,
-    /// and — only when they match, a row exists, and the bearer is present
-    /// — insert the `Applied` snapshot. Returns `Ready` (recorded, answer
-    /// applied), `Stale` (base moved, nothing recorded), or `NotReady`
-    /// (empty premise or bearer absent, nothing recorded). The bearer gate
-    /// rides in because completion means consent-plus-bearer; the flag is
+    /// One transaction: compare the expected base mark against current and
+    /// record the decided snapshot together — `Applied` when the base
+    /// matches, a row exists, and the bearer is present; `Clarify` when the
+    /// premise is empty or the bearer is absent; `Stale` (with the current
+    /// mark) when the base moved. Returns the decided record so the caller
+    /// answers from one durable determination. The bearer gate rides in as
+    /// a flag because completion means consent-plus-bearer; it is
     /// Host-observed just before the call, and the transaction re-verifies
     /// everything durable around it.
     async fn complete_with_intent(
@@ -364,7 +366,7 @@ pub trait IntentOutcomeRepository: Send + Sync {
         expected_base: String,
         bearer_present: bool,
         fingerprint: IntentFingerprint,
-    ) -> Result<CompleteIntentOutcome, PermissionTechnicalError>;
+    ) -> Result<IntentOutcomeRecord, PermissionTechnicalError>;
 
     /// Claims a same-route shortcut and records its outcome atomically.
     ///
@@ -442,24 +444,6 @@ pub enum IntentOutcome {
     },
 }
 
-/// Outcome of a setup-completion claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompleteIntentOutcome {
-    /// Base matched and bearer held: snapshot recorded, answer applied.
-    Ready {
-        /// Current mark, for the answer.
-        mark: String,
-    },
-    /// Base moved: answer stale with this mark. Nothing recorded.
-    Stale {
-        /// Current mark the sender should build on next time.
-        mark: String,
-    },
-    /// No completion to record (empty premise or bearer absent): answer
-    /// without recording.
-    NotReady,
-}
-
 /// Outcome of a same-route shortcut claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShortcutIntentOutcome {
@@ -475,6 +459,19 @@ pub enum ShortcutIntentOutcome {
     },
 }
 
+/// Renders the base-view mark for a consent revision: `consent-none` when
+/// absent, `consent-rev-N` otherwise.
+///
+/// Single grammar owner for base-view marks: the store renders replay
+/// snapshots with it and the Host renders live answers with it, so the two
+/// can never disagree on what a mark names.
+#[must_use]
+pub fn consent_mark_rev(rev: Option<u64>) -> String {
+    match rev {
+        Some(number) => format!("consent-rev-{number}"),
+        None => String::from("consent-none"),
+    }
+}
 /// Tracks minted evaluation ids and enforces single use.
 ///
 /// Holds the issued `RawId -> EvalFingerprint` map plus the set of consumed
