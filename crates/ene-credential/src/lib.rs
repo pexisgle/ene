@@ -429,6 +429,16 @@ pub trait DevicePairingRepository: Send + Sync {
         id: &DeviceId,
     ) -> Result<Option<DeviceRecord>, CredentialTechnicalError>;
 
+    /// Loads the paired record for a wire projection, if any.
+    ///
+    /// The only durable wire-to-domain resolution: callers holding an
+    /// opaque wire string (proof verification, sender attribution) resolve
+    /// it here instead of parsing or deriving it.
+    async fn find_device_by_wire(
+        &self,
+        wire: &str,
+    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError>;
+
     /// Lists all currently pending pairing requests.
     async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError>;
 }
@@ -1561,6 +1571,14 @@ mod tests {
             Ok(paired.values().find(|device| device.id == *id).cloned())
         }
 
+        async fn find_device_by_wire(
+            &self,
+            wire: &str,
+        ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
+            let paired = self.paired.lock().await;
+            Ok(paired.values().find(|device| device.wire == wire).cloned())
+        }
+
         async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError> {
             let pending = self.pending.lock().await;
             Ok(pending.values().cloned().collect())
@@ -1687,6 +1705,34 @@ mod tests {
         assert_eq!(second, first);
         assert_uuid_text_shape(&second_secret);
         assert_ne!(first_secret, second_secret);
+    }
+
+    #[tokio::test]
+    async fn find_device_by_wire_resolves_opaque_projection() {
+        use super::DevicePairingRepository as _;
+
+        let repo = FakePairingRepo::new();
+        let requested = repo.request_pairing("phone".to_owned()).await;
+        assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
+        let approved = repo.approve_pending("phone").await;
+        let Ok(Some((device, _))) = approved else {
+            return;
+        };
+        assert_ne!(
+            device.wire,
+            device.id.0.as_uuid().to_string(),
+            "wire projection must not render the domain identity"
+        );
+        let found = repo.find_device_by_wire(&device.wire).await;
+        assert!(
+            matches!(&found, Ok(Some(stored)) if *stored == device),
+            "wire lookup must resolve the record"
+        );
+        let missing = repo.find_device_by_wire("no-such-wire").await;
+        assert!(
+            matches!(missing, Ok(None)),
+            "unknown wire must miss, got {missing:?}"
+        );
     }
 
     #[tokio::test]
