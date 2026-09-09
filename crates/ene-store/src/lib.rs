@@ -40,8 +40,9 @@ use ene_permission::{
     PermissionTechnicalError, ShortcutIntentOutcome, consent_mark_rev,
 };
 use ene_presence::{
-    ClientId, LiveReachabilityRef, MoveDecision, PresenceAttribution, PresenceCheckRef,
-    PresenceGeneration, PresenceRepository, PresenceState, PresenceTechnicalError, ThinMoveReason,
+    ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
+    PresenceCheckRef, PresenceGeneration, PresenceRepository, PresenceState,
+    PresenceTechnicalError, ThinMoveReason,
 };
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -92,9 +93,9 @@ impl Store {
         reason = "requested as async; open runs synchronously with no await"
     )]
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
-        let conn =
+        let mut conn =
             Connection::open(path).map_err(|error| StoreError::OpenFailed(error.to_string()))?;
-        migrate::run(&conn).map_err(StoreError::MigrationFailed)?;
+        migrate::run(&mut conn).map_err(StoreError::MigrationFailed)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -115,9 +116,9 @@ impl Store {
         reason = "requested as async; open runs synchronously with no await"
     )]
     pub async fn open_in_memory() -> Result<Self, StoreError> {
-        let conn = Connection::open_in_memory()
+        let mut conn = Connection::open_in_memory()
             .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
-        migrate::run(&conn).map_err(StoreError::MigrationFailed)?;
+        migrate::run(&mut conn).map_err(StoreError::MigrationFailed)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -338,13 +339,14 @@ impl Store {
 
 /// Forward-only schema setup.
 ///
-/// The `_schema_version` singleton records the applied version. Setup runs
-/// `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` statements and
-/// then bumps the singleton, so reopening a migrated file changes nothing.
-/// No other tables exist here: hint, settings, provider, and consent-history
+/// The `_schema_version` singleton records the applied version. Pending
+/// migrations and the version bump commit together in one transaction, so
+/// a crash mid-migration rolls back and the next open retries from
+/// scratch; the commit is the sole version-advancement boundary. No other
+/// tables exist here: hint, settings, provider, and consent-history
 /// storage are explicitly deferred.
 mod migrate {
-    use rusqlite::{Connection, OptionalExtension};
+    use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
     /// Schema version applied by [`run`](run).
     ///
@@ -548,12 +550,18 @@ CREATE TABLE IF NOT EXISTS inference_attempt (
 ";
     /// Creates or upgrades the schema on an open connection.
     ///
-    /// Idempotent: rerunning on a migrated database changes nothing. Rejects
-    /// a database newer than this binary understands instead of guessing.
-    pub(super) fn run(conn: &Connection) -> Result<(), String> {
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS _schema_version (version INTEGER NOT NULL)")
+    /// Atomic: pending migrations and the version bump commit together in
+    /// one transaction, so a crash mid-migration rolls back to the
+    /// pre-migration state and the next open retries from scratch. The
+    /// commit is the sole version-advancement boundary. Rejects a database
+    /// newer than this binary understands instead of guessing.
+    pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
-        let stored: Option<i64> = conn
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS _schema_version (version INTEGER NOT NULL)")
+            .map_err(|error| error.to_string())?;
+        let stored: Option<i64> = tx
             .query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
                 row.get(0)
             })
@@ -568,47 +576,48 @@ CREATE TABLE IF NOT EXISTS inference_attempt (
         if stored_version > CURRENT_VERSION {
             return Err(String::from("schema version newer than supported"));
         }
-        conn.execute_batch(SCHEMA)
+        tx.execute_batch(SCHEMA)
             .map_err(|error| error.to_string())?;
         if stored_version < 2 {
-            conn.execute_batch(MIGRATION_V2)
+            tx.execute_batch(MIGRATION_V2)
                 .map_err(|error| error.to_string())?;
         }
         if stored_version < 3 {
-            conn.execute_batch(MIGRATION_V3)
+            tx.execute_batch(MIGRATION_V3)
                 .map_err(|error| error.to_string())?;
         }
         if stored_version < 4 {
-            conn.execute_batch(MIGRATION_V4)
+            tx.execute_batch(MIGRATION_V4)
                 .map_err(|error| error.to_string())?;
         }
         if stored_version < 5 {
-            conn.execute_batch(MIGRATION_V5)
+            tx.execute_batch(MIGRATION_V5)
                 .map_err(|error| error.to_string())?;
         }
         if stored_version < 6 {
-            conn.execute_batch(MIGRATION_V6)
+            tx.execute_batch(MIGRATION_V6)
                 .map_err(|error| error.to_string())?;
         }
         if stored_version < 7 {
-            conn.execute_batch(MIGRATION_V7)
+            tx.execute_batch(MIGRATION_V7)
                 .map_err(|error| error.to_string())?;
         }
         let current = i64::try_from(CURRENT_VERSION)
             .map_err(|_| String::from("schema version out of range"))?;
         if stored.is_none() {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO _schema_version (version) VALUES (?1)",
                 rusqlite::params![current],
             )
             .map_err(|error| error.to_string())?;
         } else if stored_version < CURRENT_VERSION {
-            conn.execute(
+            tx.execute(
                 "UPDATE _schema_version SET version = ?1",
                 rusqlite::params![current],
             )
             .map_err(|error| error.to_string())?;
         }
+        tx.commit().map_err(|error| error.to_string())?;
         Ok(())
     }
 }
@@ -1049,20 +1058,57 @@ fn decode_pending_credential(
 /// wire projection and incarnation for the replay fingerprint, and optional
 /// client-local correspondence ID (`local_id` is stored metadata only,
 /// never a key).
-type HistoryRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-    Option<i64>,
-);
+///
+/// Named fields (instead of the retired positional tuple) so column order
+/// lives in exactly one place: [`HistoryRow::from_row`]. All three readers
+/// (`lookup_local_id`, `lookup_command`, `load_timeline`) share the column
+/// order through that constructor.
+struct HistoryRow {
+    /// Stored message identity text.
+    message_text: String,
+    /// Stored round identity text.
+    round_text: String,
+    /// Stored role text.
+    role_text: String,
+    /// Stored body text.
+    body: String,
+    /// Stored language tag.
+    lang: String,
+    /// Stored timestamp rendering.
+    at_text: String,
+    /// Stored presence generation count.
+    generation_raw: i64,
+    /// Stored command-scoped replay identity, if any.
+    command_text: Option<String>,
+    /// Stored client-local correspondence ID, if any.
+    stored_local_id: Option<String>,
+    /// Stored opaque round wire projection, if any.
+    round_wire: Option<String>,
+    /// Stored sending incarnation counter, if any.
+    client_counter: Option<i64>,
+    /// Stored sending incarnation random, if any.
+    client_random: Option<i64>,
+}
+
+impl HistoryRow {
+    /// Reads one row in the shared column order of the history selects.
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            message_text: row.get(0)?,
+            round_text: row.get(1)?,
+            role_text: row.get(2)?,
+            body: row.get(3)?,
+            lang: row.get(4)?,
+            at_text: row.get(5)?,
+            generation_raw: row.get(6)?,
+            command_text: row.get(7)?,
+            stored_local_id: row.get(8)?,
+            round_wire: row.get(9)?,
+            client_counter: row.get(10)?,
+            client_random: row.get(11)?,
+        })
+    }
+}
 
 /// One stored replay fingerprint for a `(companion, command_id)` key:
 /// message and round identity plus the compared content (role, body,
@@ -1101,23 +1147,26 @@ type IntentOutcomeRow = (
 /// client-local correspondence metadata only.
 fn decode_history_message(
     companion: CompanionId,
-    message_text: &str,
-    round_text: &str,
-    role_text: &str,
-    body: String,
-    lang: String,
-    at_text: &str,
-    generation_raw: i64,
-    command_text: Option<&str>,
-    round_wire: Option<String>,
-    client_counter: Option<i64>,
-    client_random: Option<i64>,
-    local_id: Option<String>,
+    row: HistoryRow,
 ) -> Result<HistoryMessage, String> {
-    let at = WallClockWithTz::parse_rfc3339(at_text)
+    let HistoryRow {
+        message_text,
+        round_text,
+        role_text,
+        body,
+        lang,
+        at_text,
+        generation_raw,
+        command_text,
+        stored_local_id,
+        round_wire,
+        client_counter,
+        client_random,
+    } = row;
+    let at = WallClockWithTz::parse_rfc3339(&at_text)
         .map_err(|_| String::from("malformed timeline timestamp"))?;
     let mut command_id = None;
-    if let Some(text) = command_text {
+    if let Some(text) = command_text.as_deref() {
         command_id = Some(CommandId(decode_id(text)?));
     }
     let incarnation = match (client_counter, client_random) {
@@ -1128,10 +1177,10 @@ fn decode_history_message(
         _ => return Err(String::from("malformed history incarnation")),
     };
     Ok(HistoryMessage {
-        id: decode_id(message_text)?,
+        id: decode_id(&message_text)?,
         companion,
-        round: decode_id(round_text)?,
-        role: decode_role(role_text)?,
+        round: decode_id(&round_text)?,
+        role: decode_role(&role_text)?,
         text: body,
         lang,
         at,
@@ -1139,7 +1188,7 @@ fn decode_history_message(
         command_id,
         round_wire,
         incarnation,
-        local_id,
+        local_id: stored_local_id,
     })
 }
 /// Reads one attribution row into its domain fact.
@@ -1283,7 +1332,7 @@ impl PresenceRepository for Store {
         companion: RawId,
         transitioning_generation: PresenceGeneration,
         live: LiveReachabilityRef,
-    ) -> Result<PresenceAttribution, PresenceTechnicalError> {
+    ) -> Result<ConfirmTransitionOutcome, PresenceTechnicalError> {
         let key = encode_id(companion);
         let now_text = WallClockWithTz::now().to_rfc3339();
         let confirm_reason = if live.connection_live {
@@ -1318,7 +1367,14 @@ impl PresenceRepository for Store {
         if current.generation != transitioning_generation
             || current.state != PresenceState::InTransition
         {
-            return Ok(current);
+            return Ok(ConfirmTransitionOutcome::Confirmed(current));
+        }
+        // Authority pin: a live confirm may only crown the client pinned at
+        // begin time (stored as the row's active client). A different
+        // claimant leaves the row untouched and observes stale instead —
+        // the connection table, not a self-report, decides who is current.
+        if live.connection_live && current.active_client != Some(live.client) {
+            return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
         }
         let (target_state, target_text, target_client) = if live.connection_live {
             (
@@ -1354,12 +1410,12 @@ impl PresenceRepository for Store {
         .map_err(|error| presence_unavailable(error.to_string()))?;
         tx.commit()
             .map_err(|error| presence_unavailable(error.to_string()))?;
-        Ok(PresenceAttribution {
+        Ok(ConfirmTransitionOutcome::Confirmed(PresenceAttribution {
             companion,
             state: target_state,
             active_client: target_client,
             generation: transitioning_generation,
-        })
+        }))
     }
 }
 
@@ -1477,56 +1533,14 @@ impl HistoryRepository for Store {
             .query_row(
                 SQL_SELECT_HISTORY_BY_LOCAL_ID,
                 params![key, local_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<String>>(9)?,
-                        row.get::<_, Option<i64>>(10)?,
-                        row.get::<_, Option<i64>>(11)?,
-                    ))
-                },
+                HistoryRow::from_row,
             )
             .optional()
             .map_err(|error| companion_unavailable(error.to_string()))?;
         match found {
-            Some((
-                message_text,
-                round_text,
-                role_text,
-                body,
-                lang,
-                at_text,
-                generation_raw,
-                command_text,
-                stored_local_id,
-                round_wire,
-                client_counter,
-                client_random,
-            )) => {
-                let message = decode_history_message(
-                    companion,
-                    &message_text,
-                    &round_text,
-                    &role_text,
-                    body,
-                    lang,
-                    &at_text,
-                    generation_raw,
-                    command_text.as_deref(),
-                    round_wire,
-                    client_counter,
-                    client_random,
-                    stored_local_id,
-                )
-                .map_err(companion_unavailable)?;
+            Some(row) => {
+                let message =
+                    decode_history_message(companion, row).map_err(companion_unavailable)?;
                 Ok(Some(message))
             }
             None => Ok(None),
@@ -1551,56 +1565,14 @@ impl HistoryRepository for Store {
             .query_row(
                 SQL_SELECT_HISTORY_BY_COMMAND,
                 params![key, command_key],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<String>>(9)?,
-                        row.get::<_, Option<i64>>(10)?,
-                        row.get::<_, Option<i64>>(11)?,
-                    ))
-                },
+                HistoryRow::from_row,
             )
             .optional()
             .map_err(|error| companion_unavailable(error.to_string()))?;
         match found {
-            Some((
-                message_text,
-                round_text,
-                role_text,
-                body,
-                lang,
-                at_text,
-                generation_raw,
-                command_text,
-                stored_local_id,
-                round_wire,
-                client_counter,
-                client_random,
-            )) => {
-                let message = decode_history_message(
-                    companion,
-                    &message_text,
-                    &round_text,
-                    &role_text,
-                    body,
-                    lang,
-                    &at_text,
-                    generation_raw,
-                    command_text.as_deref(),
-                    round_wire,
-                    client_counter,
-                    client_random,
-                    stored_local_id,
-                )
-                .map_err(companion_unavailable)?;
+            Some(row) => {
+                let message =
+                    decode_history_message(companion, row).map_err(companion_unavailable)?;
                 Ok(Some(message))
             }
             None => Ok(None),
@@ -1623,55 +1595,12 @@ impl HistoryRepository for Store {
             .prepare(SQL_SELECT_TIMELINE)
             .map_err(|error| companion_unavailable(error.to_string()))?;
         let rows = query
-            .query_map(params![key], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<i64>>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
-                ))
-            })
+            .query_map(params![key], HistoryRow::from_row)
             .map_err(|error| companion_unavailable(error.to_string()))?;
         let mut timeline = Vec::new();
         for row in rows {
-            let (
-                message_text,
-                round_text,
-                role_text,
-                body,
-                lang,
-                at_text,
-                generation_raw,
-                command_text,
-                stored_local_id,
-                round_wire,
-                client_counter,
-                client_random,
-            ) = row.map_err(|error| companion_unavailable(error.to_string()))?;
-            let message = decode_history_message(
-                companion,
-                &message_text,
-                &round_text,
-                &role_text,
-                body,
-                lang,
-                &at_text,
-                generation_raw,
-                command_text.as_deref(),
-                round_wire,
-                client_counter,
-                client_random,
-                stored_local_id,
-            )
-            .map_err(companion_unavailable)?;
+            let row = row.map_err(|error| companion_unavailable(error.to_string()))?;
+            let message = decode_history_message(companion, row).map_err(companion_unavailable)?;
             if let Some(lower) = since
                 && message.at.as_datetime() < lower.as_datetime()
             {
@@ -2843,8 +2772,8 @@ mod tests {
     use ene_inference::{InferenceTicketId, UsageFact, UsageRepository, UsageSource};
     use ene_permission::{ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision};
     use ene_presence::{
-        ClientId, LiveReachabilityRef, MoveDecision, PresenceCheckRef, PresenceGeneration,
-        PresenceRepository, PresenceState, ThinMoveReason,
+        ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
+        PresenceGeneration, PresenceRepository, PresenceState, ThinMoveReason,
     };
     use ene_primitive::{RawId, WallClockWithTz};
     use rusqlite::params;
@@ -3277,12 +3206,87 @@ mod tests {
             )
             .await;
         assert!(confirmed.is_ok(), "confirm must succeed");
-        let Ok(fact) = confirmed else {
+        let Ok(ConfirmTransitionOutcome::Confirmed(fact)) = confirmed else {
             return;
         };
         assert_eq!(fact.state, PresenceState::Present);
         assert_eq!(fact.active_client, Some(client));
         assert_eq!(fact.generation, next);
+    }
+
+    #[tokio::test]
+    async fn confirm_by_unpinned_client_is_rejected_without_touching_state() {
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let Some((companion, generation)) = running_companion(&store).await else {
+            return;
+        };
+        let raw = companion.as_raw();
+        let pinned = ClientId::generate();
+        let intruder = ClientId::generate();
+        let begin = store
+            .compare_and_begin_transition(
+                raw,
+                PresenceCheckRef {
+                    expected_generation: generation,
+                    expected_state: PresenceState::NoActive,
+                    expected_active: None,
+                },
+                Some(pinned),
+                ThinMoveReason::InitialAttach,
+            )
+            .await;
+        assert!(begin.is_ok(), "matching begin must succeed");
+        let Ok(MoveDecision::TransitioningToNew { generation: next }) = begin else {
+            return;
+        };
+        // A live confirm for a different client must not crown it: the row
+        // stays InTransition toward the pinned target.
+        let rejected = store
+            .confirm_transition(
+                raw,
+                next,
+                LiveReachabilityRef {
+                    client: intruder,
+                    connection_live: true,
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                rejected,
+                Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { .. })
+            ),
+            "unpinned confirm must reject, got {rejected:?}"
+        );
+        let current = store.load_attribution(raw).await;
+        assert!(
+            matches!(&current, Ok(Some(fact)) if fact.state == PresenceState::InTransition
+                && fact.generation == next
+                && fact.active_client == Some(pinned)),
+            "rejected confirm must leave the row untouched, got {current:?}"
+        );
+        // The pinned client still confirms normally afterwards.
+        let confirmed = store
+            .confirm_transition(
+                raw,
+                next,
+                LiveReachabilityRef {
+                    client: pinned,
+                    connection_live: true,
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                confirmed,
+                Ok(ConfirmTransitionOutcome::Confirmed(ref fact))
+                    if fact.state == PresenceState::Present
+                        && fact.active_client == Some(pinned)
+            ),
+            "pinned confirm must succeed, got {confirmed:?}"
+        );
     }
 
     fn consent_record(id: &str, rev: u64) -> ConsentRecord {
@@ -4206,6 +4210,123 @@ mod tests {
         assert_eq!(
             stored.wire, device_text,
             "legacy backfill keeps the identity rendering so provisioned clients resolve"
+        );
+    }
+
+    /// Reads the `_schema_version` singleton through a throwaway
+    /// connection, without running migrations.
+    fn read_schema_version(path: &std::path::Path) -> Option<i64> {
+        let conn = rusqlite::Connection::open(path).ok()?;
+        conn.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
+            row.get(0)
+        })
+        .ok()
+    }
+
+    /// Column names of one table through a throwaway connection.
+    fn table_columns(path: &std::path::Path, table: &str) -> Vec<String> {
+        let Ok(conn) = rusqlite::Connection::open(path) else {
+            return Vec::new();
+        };
+        let Ok(mut query) = conn.prepare("SELECT name FROM pragma_table_info(?1)") else {
+            return Vec::new();
+        };
+        query
+            .query_map([table], |row| row.get(0))
+            .map(|rows| {
+                rows.filter_map(std::result::Result::ok)
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn migration_failure_rolls_back_and_reopen_recovers() {
+        let dir = tempfile::tempdir();
+        assert!(dir.is_ok(), "tempdir must open");
+        let Ok(dir) = dir else {
+            return;
+        };
+        let path = dir.path().join("store.db");
+        {
+            let conn = rusqlite::Connection::open(&path);
+            assert!(conn.is_ok(), "raw v4 file must open");
+            let Ok(conn) = conn else {
+                return;
+            };
+            let shaped = conn.execute_batch(
+                "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL, command_id TEXT NULL);
+CREATE TABLE undelivered (undelivered_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, source_message TEXT NOT NULL, status TEXT NOT NULL, round_id TEXT NOT NULL, presence_generation INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE presence_attribution (companion_id TEXT PRIMARY KEY, state TEXT NOT NULL, active_client TEXT, generation INTEGER NOT NULL);
+CREATE TABLE presence_transition_log (transition_seq INTEGER PRIMARY KEY AUTOINCREMENT, companion_id TEXT NOT NULL, old_state TEXT NOT NULL, new_state TEXT NOT NULL, old_gen INTEGER NOT NULL, new_gen INTEGER NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE consent_record (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, credential_id TEXT NOT NULL);
+CREATE TABLE credential_ref (id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL, UNIQUE (provider, label));
+CREATE TABLE usage_fact (ticket TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, source TEXT NOT NULL);
+CREATE TABLE pairing_pending (descriptor TEXT PRIMARY KEY, requested_at TEXT NOT NULL);
+CREATE TABLE paired_device (device_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL, paired_at TEXT NOT NULL);
+CREATE TABLE credential_pending (provider TEXT NOT NULL, label TEXT NOT NULL, requested_at TEXT NOT NULL, PRIMARY KEY (provider, label));
+CREATE INDEX idx_history_message_companion ON history_message (companion_id);
+CREATE INDEX idx_history_message_round ON history_message (round_id);
+CREATE INDEX idx_undelivered_companion_status ON undelivered (companion_id, status);
+CREATE UNIQUE INDEX idx_history_message_companion_command ON history_message (companion_id, command_id);
+CREATE INDEX idx_paired_device_descriptor ON paired_device (descriptor);
+CREATE TABLE _schema_version (version INTEGER NOT NULL);
+INSERT INTO _schema_version (version) VALUES (4);",
+            );
+            assert!(shaped.is_ok(), "v4 shape must apply");
+            // One paired row so the backfill UPDATE below has a row to trip
+            // the injected fault on: without rows the UPDATE touches nothing
+            // and the fault would never fire.
+            let seeded = conn.execute(
+                "INSERT INTO paired_device (device_id, descriptor, paired_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    super::encode_id(RawId::new()),
+                    "legacy-phone",
+                    fixture_clock().to_rfc3339()
+                ],
+            );
+            assert!(seeded.is_ok(), "v4 paired row must seed");
+            // Fault injection: abort V5's backfill UPDATE *after* its four
+            // ALTERs ran, simulating a crash mid-migration. No production
+            // hook is involved — the trigger is test-only crash simulation.
+            let injected = conn.execute_batch(
+                "CREATE TRIGGER inject_crash BEFORE UPDATE ON paired_device BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+            );
+            assert!(injected.is_ok(), "fault trigger must install");
+        }
+        let failed = Store::open(&path).await;
+        assert!(failed.is_err(), "faulted migration must fail open");
+        assert_eq!(
+            read_schema_version(&path),
+            Some(4),
+            "a failed migration must not advance the version"
+        );
+        assert!(
+            !table_columns(&path, "history_message").contains(&String::from("round_wire")),
+            "a failed migration must roll back its DDL"
+        );
+        // Clearing the fault lets the next open resume from scratch and
+        // converge on the current schema.
+        {
+            let conn = rusqlite::Connection::open(&path);
+            assert!(conn.is_ok(), "file must reopen for cleanup");
+            let Ok(conn) = conn else {
+                return;
+            };
+            let dropped = conn.execute_batch("DROP TRIGGER inject_crash;");
+            assert!(dropped.is_ok(), "fault trigger must drop");
+        }
+        let opened = Store::open(&path).await;
+        assert!(opened.is_ok(), "open must recover after the fault clears");
+        assert_eq!(
+            read_schema_version(&path),
+            Some(7),
+            "recovered open must converge on the current version"
+        );
+        assert!(
+            table_columns(&path, "history_message").contains(&String::from("round_wire")),
+            "recovered open must apply the rolled-back DDL"
         );
     }
 
