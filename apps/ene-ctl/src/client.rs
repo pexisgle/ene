@@ -1113,6 +1113,13 @@ impl Client {
     pub async fn notify(&mut self, _payload: WirePayload) -> Result<(), CliError> {
         Err(CliError::UnsupportedPlatform("unix socket transport"))
     }
+
+    /// Reports the bootstrap companion: no session ever observes presence
+    /// on this platform, so every request carries the fallback and the Host
+    /// revalidates rather than attributing through it.
+    pub fn companion_ref(&self) -> String {
+        String::from(crate::cmds::DEFAULT_COMPANION_REF)
+    }
 }
 
 #[cfg(test)]
