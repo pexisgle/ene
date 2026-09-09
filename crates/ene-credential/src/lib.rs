@@ -18,6 +18,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ene_primitive::{RawId, WallClockWithTz};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -387,14 +390,26 @@ pub trait DevicePairingRepository: Send + Sync {
         descriptor: String,
     ) -> Result<DevicePairingStatus, CredentialTechnicalError>;
 
-    /// Approves the pending request for `descriptor`, pairing the device.
+    /// Approves the pending request for `descriptor`, pairing the device and
+    /// issuing its one-time pairing secret.
     ///
-    /// On a known pending descriptor this mints a fresh identity via
-    /// [`RawId::new`], moves the entry from pending to paired, and returns
-    /// the new record. An unknown descriptor yields `Ok(None)` — not an
-    /// error; the caller maps that outcome to a clarification request.
-    /// Re-approving an already-paired descriptor is idempotent: the existing
-    /// record is returned unchanged and no fresh identity is minted.
+    /// On a known pending descriptor this mints a fresh device identity via
+    /// [`RawId::new`] and a fresh pairing secret (a second [`RawId::new`]
+    /// rendered as UUID text), moves the entry from pending to paired, stores
+    /// the record (id, descriptor, and timestamps only — never the secret),
+    /// and returns the record together with the secret. An unknown descriptor
+    /// yields `Ok(None)` — not an error; the caller maps that outcome to a
+    /// clarification request. Re-approving an already-paired descriptor
+    /// returns the existing record unchanged (no fresh device identity) with
+    /// a freshly minted secret, rotating the previous one.
+    ///
+    /// Secret custody flow: the trait is secret-free in storage. The approve
+    /// caller (Host composition) holds the returned secret in memory,
+    /// short-lived, transfers it once over a trusted inlet (approve-time
+    /// one-time display / protected client file), and provisions it into its
+    /// runtime secret map for later ownership-proof verification. The secret
+    /// is never logged, never rendered in `Debug`, and never travels the
+    /// wire — only the pairing proof derived from it leaves the device.
     ///
     /// Approval records an Owner decision transported from a trusted inlet;
     /// the repository never decides whether pairing is allowed, it records
@@ -402,7 +417,7 @@ pub trait DevicePairingRepository: Send + Sync {
     async fn approve_pending(
         &self,
         descriptor: &str,
-    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError>;
+    ) -> Result<Option<(DeviceRecord, String)>, CredentialTechnicalError>;
 
     /// Loads the paired record for `id`, if any.
     async fn find_device(
@@ -412,6 +427,95 @@ pub trait DevicePairingRepository: Send + Sync {
 
     /// Lists all currently pending pairing requests.
     async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError>;
+}
+
+/// Pairing ownership proof (Group K device-auth): HMAC-SHA256 over a
+/// single-use nonce, keyed by the pairing secret.
+///
+/// The secret travels a trusted inlet only: it is shown once at approve time
+/// for one-time display, or written to a protected client file. It is never
+/// logged, never rendered in `Debug`, and never sent over the wire — only
+/// the proof hex leaves the device. The nonce is single-use by caller
+/// contract: the Host mints a fresh nonce per challenge and rejects reuse,
+/// so a captured proof cannot be replayed.
+///
+/// ```
+/// use ene_credential::{pairing_proof_hex, verify_pairing_proof};
+///
+/// let proof = pairing_proof_hex("pairing-secret", "one-time-nonce");
+/// assert!(verify_pairing_proof("pairing-secret", "one-time-nonce", &proof));
+/// assert!(!verify_pairing_proof("other-secret", "one-time-nonce", &proof));
+/// ```
+#[must_use]
+pub fn pairing_proof_hex(secret: &str, nonce: &str) -> String {
+    encode_hex_lower(&compute_pairing_mac(secret, nonce))
+}
+
+/// Verifies a pairing ownership proof against the secret and nonce.
+///
+/// Hex-decodes `proof` (malformed input yields `false`) and compares the
+/// bytes against the recomputed MAC in constant time via `subtle`, so no
+/// early exit leaks how much of the proof matched. See
+/// [`pairing_proof_hex`] for the secret-inlet and nonce-reuse caller
+/// contracts, which apply here unchanged.
+#[must_use]
+pub fn verify_pairing_proof(secret: &str, nonce: &str, proof: &str) -> bool {
+    let Some(decoded) = decode_hex_lower(proof) else {
+        return false;
+    };
+    let recomputed = compute_pairing_mac(secret, nonce);
+    bool::from(recomputed.as_slice().ct_eq(decoded.as_slice()))
+}
+
+/// Computes the raw HMAC-SHA256 of `nonce` keyed by `secret`.
+///
+/// HMAC accepts keys of any length, so construction cannot fail in practice;
+/// on the impossible error this yields zeros rather than panicking.
+fn compute_pairing_mac(secret: &str, nonce: &str) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    if let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+        mac.update(nonce.as_bytes());
+        let digest = mac.finalize().into_bytes();
+        out.copy_from_slice(&digest);
+    }
+    out
+}
+
+/// Renders bytes as lowercase hex, two characters per byte.
+fn encode_hex_lower(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(DIGITS[usize::from(byte >> 4)] as char);
+        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
+    }
+    out
+}
+
+/// Decodes lowercase hex; yields [`None`] for odd lengths or any byte
+/// outside `0-9`/`a-f` (uppercase included, so only canonical proofs parse).
+fn decode_hex_lower(input: &str) -> Option<Vec<u8>> {
+    let bytes = input.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let mut out = Vec::with_capacity(pairs.len());
+    for pair in pairs {
+        let hi = hex_val(pair[0])?;
+        let lo = hex_val(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+/// Value of one lowercase hex digit, or [`None`] for any other byte.
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -622,9 +726,10 @@ mod tests {
         async fn approve_pending(
             &self,
             descriptor: &str,
-        ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
+        ) -> Result<Option<(DeviceRecord, String)>, CredentialTechnicalError> {
             if let Some(device) = self.paired.lock().await.get(descriptor).cloned() {
-                return Ok(Some(device));
+                let secret = RawId::new().as_uuid().to_string();
+                return Ok(Some((device, secret)));
             }
             let pending = self.pending.lock().await.remove(descriptor);
             let Some(stored) = pending else {
@@ -639,7 +744,8 @@ mod tests {
                 .lock()
                 .await
                 .insert(descriptor.to_owned(), device.clone());
-            Ok(Some(device))
+            let secret = RawId::new().as_uuid().to_string();
+            Ok(Some((device, secret)))
         }
 
         async fn find_device(
@@ -653,6 +759,13 @@ mod tests {
         async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError> {
             let pending = self.pending.lock().await;
             Ok(pending.values().cloned().collect())
+        }
+    }
+
+    fn assert_uuid_text_shape(secret: &str) {
+        assert_eq!(secret.len(), 36);
+        for index in [8_usize, 13, 18, 23] {
+            assert!(matches!(secret.as_bytes().get(index), Some(b'-')));
         }
     }
 
@@ -715,10 +828,11 @@ mod tests {
         assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
         let approved = repo.approve_pending("phone").await;
         assert!(matches!(approved, Ok(Some(_))));
-        let Ok(Some(device)) = approved else {
+        let Ok(Some((device, secret))) = approved else {
             return;
         };
         assert_eq!(device.descriptor.as_str(), "phone");
+        assert_uuid_text_shape(&secret);
         let listed = repo.list_pending().await;
         let Ok(items) = listed else {
             return;
@@ -738,7 +852,7 @@ mod tests {
         let requested = repo.request_pairing("phone".to_owned()).await;
         assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
         let approved = repo.approve_pending("phone").await;
-        let Ok(Some(device)) = approved else {
+        let Ok(Some((device, _))) = approved else {
             return;
         };
         let again = repo.request_pairing("phone".to_owned()).await;
@@ -751,21 +865,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn re_approve_returns_the_existing_record() {
+    async fn re_approve_returns_the_existing_record_with_a_fresh_secret() {
         let repo = FakePairingRepo::new();
         let requested = repo.request_pairing("phone".to_owned()).await;
         assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
         let approved = repo.approve_pending("phone").await;
-        let Ok(Some(first)) = approved else {
+        let Ok(Some((first, first_secret))) = approved else {
             return;
         };
         let reapproved = repo.approve_pending("phone").await;
         assert!(matches!(reapproved, Ok(Some(_))));
-        let Ok(Some(second)) = reapproved else {
+        let Ok(Some((second, second_secret))) = reapproved else {
             return;
         };
         assert_eq!(second.id, first.id);
         assert_eq!(second, first);
+        assert_uuid_text_shape(&second_secret);
+        assert_ne!(first_secret, second_secret);
     }
 
     #[tokio::test]
@@ -783,5 +899,73 @@ mod tests {
         assert_eq!(descriptors.len(), 2);
         assert!(descriptors.contains(&"phone"));
         assert!(descriptors.contains(&"tablet"));
+    }
+
+    #[test]
+    fn pairing_proof_matches_rfc4231_case_1() {
+        let key = "\x0b".repeat(20);
+        let proof = super::pairing_proof_hex(&key, "Hi There");
+        assert_eq!(
+            proof.as_str(),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert!(super::verify_pairing_proof(&key, "Hi There", &proof));
+    }
+
+    #[test]
+    fn pairing_proof_round_trips_and_rejects_mismatch() {
+        let proof = super::pairing_proof_hex("pairing-secret", "single-use-nonce");
+        assert!(super::verify_pairing_proof(
+            "pairing-secret",
+            "single-use-nonce",
+            &proof
+        ));
+        assert!(!super::verify_pairing_proof(
+            "other-secret",
+            "single-use-nonce",
+            &proof
+        ));
+        assert!(!super::verify_pairing_proof(
+            "pairing-secret",
+            "other-nonce",
+            &proof
+        ));
+        assert!(!super::verify_pairing_proof(
+            "pairing-secret",
+            "single-use-nonce",
+            "not-hex!!"
+        ));
+        assert!(!super::verify_pairing_proof(
+            "pairing-secret",
+            "single-use-nonce",
+            ""
+        ));
+        assert!(!super::verify_pairing_proof(
+            "pairing-secret",
+            "single-use-nonce",
+            "B0344C61D8DB38535CA8AFCEAF0BF12B881DC200C9833DA726E9376C2E32CFF7"
+        ));
+    }
+
+    #[test]
+    fn pairing_proof_rejects_tampered_hex() {
+        let proof = super::pairing_proof_hex("pairing-secret", "single-use-nonce");
+        let tampered: String = proof
+            .chars()
+            .enumerate()
+            .map(|(index, digit)| {
+                if index == 0 {
+                    if digit == '0' { '1' } else { '0' }
+                } else {
+                    digit
+                }
+            })
+            .collect();
+        assert_ne!(tampered, proof);
+        assert!(!super::verify_pairing_proof(
+            "pairing-secret",
+            "single-use-nonce",
+            &tampered
+        ));
     }
 }

@@ -39,6 +39,9 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rmp-serde = "1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [workspace.lints.clippy]

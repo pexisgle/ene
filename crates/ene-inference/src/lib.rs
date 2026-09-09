@@ -2,9 +2,11 @@
 //!
 //! This crate binds one authorized use to one provider call. It reuses
 //! [`ene_permission::InferenceUseCandidate`] from `ene-permission` (never
-//! redefined here) and consumes the single-use
-//! [`ene_permission::PermissionEvaluationId`] through
-//! [`ene_permission::EvaluationTracker`].
+//! redefined here). The caller mints the single-use
+//! [`ene_permission::PermissionEvaluationId`] via
+//! [`ene_permission::check_live_authorization`] and burns it through
+//! [`ene_permission::EvaluationTracker::consume`] under its own short lock
+//! before calling [`send`]; this crate keeps no tracker state.
 //!
 //! The [`ResolvedRoute`] is a premise supplied by core: core loads consent
 //! and the credential ref, so there is no `resolve()` here. Likewise
@@ -17,9 +19,7 @@
 //! zero, when the provider reports nothing.
 
 use ene_credential::CredentialRef;
-use ene_permission::{
-    ConsentRevision, EvaluationTracker, InferenceUseCandidate, PermissionEvaluationId,
-};
+use ene_permission::{ConsentRevision, InferenceUseCandidate, PermissionEvaluationId};
 use ene_primitive::RawId;
 use thiserror::Error;
 
@@ -104,6 +104,9 @@ pub enum NotSentReason {
     CredentialUnavailable,
     /// The evaluation id was unknown, already consumed, or bound to a
     /// different fingerprint.
+    ///
+    /// Produced by Host-side pre-checks (the consume step before dispatch),
+    /// never by [`send`].
     EvaluationConsumed,
     /// `input_text` exceeds [`MAX_INPUT_CHARS`].
     OverLimit,
@@ -266,36 +269,35 @@ pub trait UsageRepository: Send + Sync {
 
 /// Dispatches one authorized inference use.
 ///
+/// Caller protocol: the Host first runs
+/// [`ene_permission::check_live_authorization`], then consumes the minted id
+/// through [`ene_permission::EvaluationTracker::consume`] under its own short
+/// lock, and only then calls [`send`]. This function performs no
+/// authorization bookkeeping itself: a call reaching it has already burned
+/// its single-use id, so the same authorization value presented twice sends
+/// twice.
+///
 /// Gates, in order:
 ///
-/// 1. The evaluation id must consume against the candidate fingerprint;
-///    otherwise [`NotSentReason::EvaluationConsumed`] with no arrival.
-/// 2. Route provider/model must exactly equal the candidate's; otherwise
+/// 1. Route provider/model must exactly equal the candidate's; otherwise
 ///    [`NotSentReason::ConsentMismatch`].
-/// 3. `route_consent_match` (core's verdict that the route consent premise
+/// 2. `route_consent_match` (core's verdict that the route consent premise
 ///    matches stored consent) must hold; otherwise [`NotSentReason::ConsentMismatch`].
-/// 4. `input_text` longer than [`MAX_INPUT_CHARS`] yields
+/// 3. `input_text` longer than [`MAX_INPUT_CHARS`] yields
 ///    [`NotSentReason::OverLimit`].
-/// 5. Otherwise the transport runs. Transport errors propagate as
+/// 4. Otherwise the transport runs. Transport errors propagate as
 ///    [`Err`]; a response with no usage maps to [`None`] counts with
 ///    [`UsageSource::Unknown`], never zero.
 ///
 /// [`NotSentReason::AuthRejected`], [`NotSentReason::CredentialUnavailable`],
-/// and [`InferenceUseOutcome::InsufficientCapability`] are Host-side
-/// pre-check outcomes and are never produced here.
+/// [`NotSentReason::EvaluationConsumed`], and
+/// [`InferenceUseOutcome::InsufficientCapability`] are Host-side pre-check
+/// outcomes and are never produced here.
 pub async fn send(
     cmd: RequestInferenceCommand,
     route_consent_match: bool,
-    tracker: &mut EvaluationTracker,
     transport: &impl ProviderTransport,
 ) -> Result<(InferenceUseOutcome, Option<InferenceResultArrival>), InferenceTechnicalError> {
-    let fingerprint = cmd.candidate.fingerprint();
-    if !tracker.consume(&cmd.authorization, &fingerprint) {
-        return Ok((
-            InferenceUseOutcome::NotSent(NotSentReason::EvaluationConsumed),
-            None,
-        ));
-    }
     if cmd.route.provider != cmd.candidate.provider_ref || cmd.route.model != cmd.candidate.model {
         return Ok((
             InferenceUseOutcome::NotSent(NotSentReason::ConsentMismatch),
@@ -432,8 +434,8 @@ mod tests {
     };
     use ene_credential::CredentialRef;
     use ene_permission::{
-        CapabilityKind, ConsentRevision, ConsumerKind, EvaluationTracker, InferenceUseCandidate,
-        PurposeKind,
+        CapabilityKind, ConsentRevision, ConsumerKind, InferenceUseCandidate,
+        PermissionEvaluationId, PurposeKind,
     };
     use ene_primitive::RawId;
 
@@ -460,16 +462,11 @@ mod tests {
         }
     }
 
-    fn authorized_cmd(
-        tracker: &mut EvaluationTracker,
-        input_text: &str,
-    ) -> RequestInferenceCommand {
-        let candidate = candidate();
-        let authorization = tracker.mint(&candidate);
+    fn command(input_text: &str) -> RequestInferenceCommand {
         RequestInferenceCommand {
             ticket: InferenceTicketId(RawId::new()),
-            candidate,
-            authorization,
+            candidate: candidate(),
+            authorization: PermissionEvaluationId(RawId::new()),
             route: route(),
             input_text: input_text.to_owned(),
         }
@@ -477,8 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn success_maps_reported_usage() {
-        let mut tracker = EvaluationTracker::new();
-        let cmd = authorized_cmd(&mut tracker, "hello");
+        let cmd = command("hello");
         let ticket = cmd.ticket;
         let transport = FakeProviderTransport::new(
             "hi there".to_owned(),
@@ -487,7 +483,7 @@ mod tests {
                 output_tokens: 2,
             }),
         );
-        let result = send(cmd, true, &mut tracker, &transport).await;
+        let result = send(cmd, true, &transport).await;
         assert!(result.is_ok());
         let Ok((outcome, arrival)) = result else {
             return;
@@ -506,10 +502,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_usage_maps_to_unknown_not_zero() {
-        let mut tracker = EvaluationTracker::new();
-        let cmd = authorized_cmd(&mut tracker, "hello");
+        let cmd = command("hello");
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, true, &mut tracker, &transport).await;
+        let result = send(cmd, true, &transport).await;
         assert!(result.is_ok());
         let Ok((outcome, arrival)) = result else {
             return;
@@ -525,36 +520,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replayed_evaluation_is_not_sent() {
-        let mut tracker = EvaluationTracker::new();
-        let cmd = authorized_cmd(&mut tracker, "hello");
+    async fn send_keeps_no_tracker_state_for_the_caller_protocol() {
+        let cmd = command("hello");
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let first = send(cmd.clone(), true, &mut tracker, &transport).await;
+        let first = send(cmd.clone(), true, &transport).await;
         assert!(matches!(
             first,
             Ok((InferenceUseOutcome::SentAndCompleted(_), Some(_)))
         ));
-        let second = send(cmd, true, &mut tracker, &transport).await;
-        assert!(second.is_ok());
-        let Ok((outcome, arrival)) = second else {
-            return;
-        };
-        assert_eq!(
-            outcome,
-            InferenceUseOutcome::NotSent(NotSentReason::EvaluationConsumed)
-        );
-        assert_eq!(arrival, None);
+        let second = send(cmd, true, &transport).await;
+        assert!(matches!(
+            second,
+            Ok((InferenceUseOutcome::SentAndCompleted(_), Some(_)))
+        ));
     }
 
     #[tokio::test]
     async fn route_mismatch_is_not_sent() {
-        let mut tracker = EvaluationTracker::new();
-        let candidate = candidate();
-        let authorization = tracker.mint(&candidate);
         let cmd = RequestInferenceCommand {
             ticket: InferenceTicketId(RawId::new()),
-            candidate,
-            authorization,
+            candidate: candidate(),
+            authorization: PermissionEvaluationId(RawId::new()),
             route: ResolvedRoute {
                 model: "other-model".to_owned(),
                 ..route()
@@ -562,7 +548,7 @@ mod tests {
             input_text: "hello".to_owned(),
         };
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, true, &mut tracker, &transport).await;
+        let result = send(cmd, true, &transport).await;
         assert!(result.is_ok());
         let Ok((outcome, arrival)) = result else {
             return;
@@ -576,10 +562,9 @@ mod tests {
 
     #[tokio::test]
     async fn failed_consent_premise_is_not_sent() {
-        let mut tracker = EvaluationTracker::new();
-        let cmd = authorized_cmd(&mut tracker, "hello");
+        let cmd = command("hello");
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, false, &mut tracker, &transport).await;
+        let result = send(cmd, false, &transport).await;
         assert!(result.is_ok());
         let Ok((outcome, arrival)) = result else {
             return;
@@ -593,11 +578,10 @@ mod tests {
 
     #[tokio::test]
     async fn over_limit_input_is_not_sent() {
-        let mut tracker = EvaluationTracker::new();
         let big: String = "x".repeat(super::MAX_INPUT_CHARS + 1);
-        let cmd = authorized_cmd(&mut tracker, &big);
+        let cmd = command(&big);
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, true, &mut tracker, &transport).await;
+        let result = send(cmd, true, &transport).await;
         assert!(result.is_ok());
         let Ok((outcome, arrival)) = result else {
             return;
@@ -611,10 +595,9 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_is_a_technical_error() {
-        let mut tracker = EvaluationTracker::new();
-        let cmd = authorized_cmd(&mut tracker, "hello");
+        let cmd = command("hello");
         let transport = FakeProviderTransport::failing(FakeFailure::Transport("down".to_owned()));
-        let result = send(cmd, true, &mut tracker, &transport).await;
+        let result = send(cmd, true, &transport).await;
         assert!(matches!(
             result,
             Err(super::InferenceTechnicalError::ProviderTransportFailed(_))
@@ -623,10 +606,9 @@ mod tests {
 
     #[tokio::test]
     async fn lost_response_is_a_technical_error() {
-        let mut tracker = EvaluationTracker::new();
-        let cmd = authorized_cmd(&mut tracker, "hello");
+        let cmd = command("hello");
         let transport = FakeProviderTransport::failing(FakeFailure::ResponseLost);
-        let result = send(cmd, true, &mut tracker, &transport).await;
+        let result = send(cmd, true, &transport).await;
         assert!(matches!(
             result,
             Err(super::InferenceTechnicalError::ResponseLost)
@@ -635,8 +617,7 @@ mod tests {
 
     #[test]
     fn debug_redacts_body_text() {
-        let mut tracker = EvaluationTracker::new();
-        let cmd = authorized_cmd(&mut tracker, "harbor-sunset-body-probe");
+        let cmd = command("harbor-sunset-body-probe");
         let rendered = format!("{cmd:?}");
         assert!(!rendered.contains("harbor-sunset-body-probe"));
         let arrival = InferenceResultArrival {

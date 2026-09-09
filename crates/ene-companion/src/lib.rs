@@ -53,6 +53,16 @@ impl CompanionId {
     }
 }
 
+/// Command-scoped idempotency identity for history appends.
+///
+/// Opaque over [`RawId`] with no `From` conversions: the wire `CommandWireId`
+/// maps 1:1 at ingress when the Host parses its UUID text into this domain
+/// newtype. The client mints one per send; a transport retry reuses the same
+/// command id with a fresh message id. Non-secret correspondence, visible in
+/// [`core::fmt::Debug`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CommandId(pub RawId);
+
 /// Companion lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompanionLifecycle {
@@ -95,9 +105,14 @@ pub struct HistoryMessage {
     pub at: WallClockWithTz,
     /// Presence generation the item belongs to.
     pub presence_generation: PresenceGeneration,
-    /// Client-local correspondence ID, for idempotent replay: a retry with
-    /// the same ID returns the original acceptance without re-append.
+    /// Command-scoped idempotency identity, when the caller carries one.
+    /// [`None`] marks pre-command callers or an unknown command. The durable
+    /// replay key; `local_id` stays as correspondence metadata only.
     /// Non-secret correspondence, visible in Debug.
+    pub command_id: Option<CommandId>,
+    /// Client-local correspondence ID for matching an input to its ack.
+    /// Correspondence metadata only, no longer the durable key (that is
+    /// `command_id`). Non-secret correspondence, visible in Debug.
     pub local_id: Option<String>,
 }
 
@@ -114,6 +129,7 @@ impl core::fmt::Debug for HistoryMessage {
             .field("lang", &self.lang)
             .field("at", &self.at)
             .field("presence_generation", &self.presence_generation)
+            .field("command_id", &self.command_id)
             .field("local_id", &self.local_id)
             .finish()
     }
@@ -136,8 +152,14 @@ pub struct AppendHistoryCommand {
     pub at: WallClockWithTz,
     /// Generation value the caller relied on.
     pub expected_generation: PresenceGeneration,
-    /// Client-local correspondence ID for idempotent retry, if the caller
-    /// carries one. [`None`] stores NULL (no replay key).
+    /// Command-scoped idempotency identity, when the caller carries one.
+    /// [`None`] stores NULL (no replay key). A retry reuses the same command
+    /// id with a fresh message id; `local_id` stays as correspondence
+    /// metadata only. Non-secret correspondence, visible in Debug.
+    pub command_id: Option<CommandId>,
+    /// Client-local correspondence ID for matching an input to its ack, if
+    /// the caller carries one. [`None`] stores NULL. Correspondence metadata
+    /// only, no longer the durable key (that is `command_id`).
     pub local_id: Option<String>,
 }
 
@@ -153,6 +175,7 @@ impl core::fmt::Debug for AppendHistoryCommand {
             .field("lang", &self.lang)
             .field("at", &self.at)
             .field("expected_generation", &self.expected_generation)
+            .field("command_id", &self.command_id)
             .field("local_id", &self.local_id)
             .finish()
     }
@@ -331,15 +354,27 @@ pub trait HistoryRepository {
 
     /// Looks up one previously accepted message by caller-supplied local id.
     ///
-    /// The replay path calls this before appending: when a record exists the
-    /// caller returns the original acceptance without re-appending, so
-    /// retries of the same local send stay idempotent. Stream outcomes are
-    /// not replayed through this lookup; a caller that needs missed stream
+    /// Correspondence lookup for matching an input to its ack. Command-scoped
+    /// replay uses [`HistoryRepository::lookup_command`]; stream outcomes are
+    /// not replayed through either lookup — a caller that needs missed stream
     /// items recovers via `HistoryRequest`.
     async fn lookup_local_id(
         &self,
         companion: CompanionId,
         local_id: &str,
+    ) -> Result<Option<HistoryMessage>, CompanionTechnicalError>;
+
+    /// Looks up one previously accepted message by command id.
+    ///
+    /// The replay path calls this before appending: when a record exists the
+    /// caller returns the original acceptance without re-appending, so
+    /// retries of the same command stay idempotent. Stream outcomes are not
+    /// replayed through this lookup; a caller that needs missed stream items
+    /// recovers via `HistoryRequest`.
+    async fn lookup_command(
+        &self,
+        companion: CompanionId,
+        command: &CommandId,
     ) -> Result<Option<HistoryMessage>, CompanionTechnicalError>;
 }
 
@@ -384,7 +419,7 @@ pub trait UndeliveredRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppendHistoryCommand, CompanionId, CompanionLifecycle, CompanionTechnicalError,
+        AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError,
         HistoryAppendOutcome, HistoryMessage, HistoryRole, PresentationMark, ReportStatus,
         ReportStatusTransition, UndeliveredRef, UndeliveredTechnicalError,
     };
@@ -410,6 +445,7 @@ mod tests {
             lang: String::from("en"),
             at: clock(),
             expected_generation: PresenceGeneration::first(),
+            command_id: Some(CommandId(RawId::new())),
             local_id: Some(String::from("local-1")),
         }
     }
@@ -424,6 +460,7 @@ mod tests {
             lang: String::from("en"),
             at: clock(),
             presence_generation: PresenceGeneration::first(),
+            command_id: None,
             local_id: None,
         }
     }
@@ -544,6 +581,25 @@ mod tests {
         assert!(
             rendered.contains("index offline"),
             "reason stays: {rendered}"
+        );
+    }
+
+    #[test]
+    fn command_id_is_visible_non_secret_correspondence() {
+        let id = CommandId(RawId::new());
+        let rendered = format!("{id:?}");
+        assert!(
+            rendered.contains("CommandId"),
+            "command id visible: {rendered}"
+        );
+        let mut item = message();
+        assert_eq!(item.command_id, None);
+        item.command_id = Some(id);
+        assert_eq!(item.command_id, Some(id));
+        let rendered_item = format!("{item:?}");
+        assert!(
+            !rendered_item.contains("private words"),
+            "text redacted: {rendered_item}"
         );
     }
 
