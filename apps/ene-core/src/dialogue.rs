@@ -30,12 +30,14 @@
 //!   with a fresh local id.
 //! - Any failure after acceptance (inference not sent, transport error, reply
 //!   append lost) becomes the accept ack plus a stream closed as
-//!   [`Interrupted`](ene_api::v1::round::StreamClose::Interrupted). Usage is
-//!   still recorded with [`Unknown`](ene_inference::UsageSource::Unknown)
-//!   counts on the inference-failure paths. A usage-record failure after a
-//!   durable reply keeps the `Completed` close: the reply happened, and the
-//!   usage gap is the documented `Stage 2` follow-up (retry queue), not a
-//!   reason to misreport the stream.
+//!   [`Interrupted`](ene_api::v1::round::StreamClose::Interrupted). Usage
+//!   accounting follows certainty, never adoption: never-sent calls record
+//!   no fact, uncertain attempts record
+//!   [`Unknown`](ene_inference::UsageSource::Unknown) counts, and reported
+//!   counts are kept even when the reply cannot be adopted. A usage-record
+//!   failure after a durable reply keeps the `Completed` close: the reply
+//!   happened, and the usage gap is the documented `Stage 2` follow-up
+//!   (retry queue), not a reason to misreport the stream.
 //! - Presentation observations and unresolvable confirmation rounds produce no
 //!   reply: confirmation is an observation, never a report of completion.
 
@@ -56,7 +58,7 @@ use ene_companion::{
 use ene_credential::{CredentialRef, CredentialRefRepository, credential_availability};
 use ene_inference::{
     InferenceTicketId, InferenceUseOutcome, ProviderTransport, RequestInferenceCommand,
-    ResolvedRoute, UsageSource, send,
+    ResolvedRoute, UsageFact, UsageSource, send,
 };
 use ene_permission::{
     CapabilityKind, CheckLiveAuthorizationQuery, ConsentRepository, ConsentRevision, ConsumerKind,
@@ -120,6 +122,49 @@ pub fn chunk_text(text: &str) -> Vec<String> {
 fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<CommandId> {
     let CommandWireId(id) = envelope.correlation.command_id?;
     Some(CommandId(ene_primitive::RawId::from_uuid(id)))
+}
+
+/// How one send attempt resolved, for usage-accounting purposes only.
+///
+/// Result adoption and usage accounting stay separate: the provider may
+/// have spent tokens even when the Host cannot adopt the reply, and a
+/// never-attempted call spends nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendOutcomeClass<'a> {
+    /// The attempt may have run (transport error, including timeouts, or a
+    /// claimed completion with no arrival): certainty is unknown, never zero.
+    AttemptUncertain,
+    /// The call definitely never ran (pre-send refusal): no provider use,
+    /// so no fact is recorded at all.
+    NeverSent,
+    /// The provider completed and reported: the known fact is recorded
+    /// against its ticket whether or not the reply is adopted.
+    Reported(&'a UsageFact),
+}
+
+/// Decides the usage fact for one finished send attempt, if any.
+///
+/// `None` records nothing (definitely no provider use); `Some` records the
+/// fact — known counts when reported, unknown counts when the attempt is
+/// uncertain. Never zero-as-unknown: unknown counts travel as [`None`].
+fn usage_for_disposition(
+    ticket: InferenceTicketId,
+    provider: &str,
+    model: &str,
+    outcome: SendOutcomeClass<'_>,
+) -> Option<UsageFact> {
+    match outcome {
+        SendOutcomeClass::AttemptUncertain => Some(UsageFact {
+            ticket,
+            provider: provider.to_string(),
+            model: model.to_string(),
+            input_tokens: None,
+            output_tokens: None,
+            source: UsageSource::Unknown,
+        }),
+        SendOutcomeClass::NeverSent => None,
+        SendOutcomeClass::Reported(usage) => Some(usage.clone()),
+    }
 }
 
 /// Whether a stored row carries the same intent as an incoming submit:
@@ -312,26 +357,41 @@ impl HostHandle {
         stale_frame_with(frame, live, current_round, generation)
     }
 
-    /// Records an unknown-usage fact for a ticket whose inference never completed.
+    /// Records an unknown-usage fact for a ticket whose provider attempt has
+    /// uncertain outcome.
     ///
-    /// Best-effort post-accept bookkeeping: when the store itself rejects the
-    /// record, the stream close already returned stays authoritative and the
-    /// usage gap becomes the documented `Stage 2` follow-up.
+    /// Only for attempts that may have run (transport errors, including
+    /// timeouts where the call may have executed): a ticket that was
+    /// definitely never sent records NO fact (see [`usage_for_disposition`]),
+    /// and a completed attempt records its reported counts even when the
+    /// reply cannot be adopted. Best-effort post-accept bookkeeping: when
+    /// the store itself rejects the record, the stream close already
+    /// returned stays authoritative and the usage gap becomes the documented
+    /// `Stage 2` follow-up.
     pub(crate) async fn record_unknown_usage(
         &self,
         ticket: InferenceTicketId,
         provider: &str,
         model: &str,
     ) {
-        use ene_inference::UsageFact;
-        use ene_inference::UsageRepository;
-        let fact = UsageFact {
+        self.record_usage_decision(usage_for_disposition(
             ticket,
-            provider: provider.to_string(),
-            model: model.to_string(),
-            input_tokens: None,
-            output_tokens: None,
-            source: UsageSource::Unknown,
+            provider,
+            model,
+            SendOutcomeClass::AttemptUncertain,
+        ))
+        .await;
+    }
+
+    /// Records a decided usage fact, if any.
+    ///
+    /// [`None`] (definitely no provider use) stores nothing; [`Some`]
+    /// stores the fact best-effort, with the already-returned stream close
+    /// staying authoritative on store failure.
+    pub(crate) async fn record_usage_decision(&self, decided: Option<UsageFact>) {
+        use ene_inference::UsageRepository;
+        let Some(fact) = decided else {
+            return;
         };
         if self.store.record_usage(fact).await.is_err() {
             // The stream close is authoritative; usage persistence retries
@@ -339,7 +399,7 @@ impl HostHandle {
         }
     }
 
-    /// Attaches presence for the paired device when none is active.
+    /// Attaches presence for the paired device when none is active..
     ///
     /// Best-effort by design and called only from the submit path: the caller
     /// pins the `NoActive` view it just read (`expected_generation` must equal
@@ -772,8 +832,8 @@ impl HostHandle {
             input_text: submit.body.text.clone(),
         };
         if !self.consent_matches(&consent.id, consent.rev).await {
-            self.record_unknown_usage(ticket, &consent.provider, &consent.model)
-                .await;
+            // Never attempted: no provider use, so no usage fact (cf.
+            // `usage_for_disposition`).
             return interrupted_frames(frame, live, &round_wire, generation_number);
         }
         let send_outcome = send(command, true, transport).await;
@@ -783,8 +843,14 @@ impl HostHandle {
             return interrupted_frames(frame, live, &round_wire, generation_number);
         };
         let InferenceUseOutcome::SentAndCompleted(_) = outcome else {
-            self.record_unknown_usage(ticket, &consent.provider, &consent.model)
-                .await;
+            // Definitely never sent: the decision table records no fact.
+            self.record_usage_decision(usage_for_disposition(
+                ticket,
+                &consent.provider,
+                &consent.model,
+                SendOutcomeClass::NeverSent,
+            ))
+            .await;
             return interrupted_frames(frame, live, &round_wire, generation_number);
         };
         let Some(arrival) = arrival else {
@@ -793,8 +859,16 @@ impl HostHandle {
             return interrupted_frames(frame, live, &round_wire, generation_number);
         };
         if !self.consent_matches(&consent.id, consent.rev).await {
-            self.record_unknown_usage(ticket, &consent.provider, &consent.model)
-                .await;
+            // The provider ran and reported: adoption failed, accounting did
+            // not. The known fact stays against its ticket even though the
+            // reply is not adopted.
+            self.record_usage_decision(usage_for_disposition(
+                ticket,
+                &consent.provider,
+                &consent.model,
+                SendOutcomeClass::Reported(&arrival.usage),
+            ))
+            .await;
             return interrupted_frames(frame, live, &round_wire, generation_number);
         }
         let reply_cmd = AppendHistoryCommand {
@@ -814,23 +888,33 @@ impl HostHandle {
             round_wire: Some(round_wire.0.clone()),
             incarnation: None,
         };
-        match self
-            .store
-            .append_reply_with_undelivered(reply_cmd, true)
-            .await
-        {
-            Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => {}
-            Ok(_) | Err(_) => {
-                return interrupted_frames(frame, live, &round_wire, generation_number);
-            }
+        if !matches!(
+            self.store
+                .append_reply_with_undelivered(reply_cmd, true)
+                .await,
+            Ok((HistoryAppendOutcome::CommittedAs { .. }, _))
+        ) {
+            // The provider ran and reported but the reply could not be
+            // adopted: accounting still records the known fact against
+            // its ticket.
+            self.record_usage_decision(usage_for_disposition(
+                ticket,
+                &consent.provider,
+                &consent.model,
+                SendOutcomeClass::Reported(&arrival.usage),
+            ))
+            .await;
+            return interrupted_frames(frame, live, &round_wire, generation_number);
         }
-        {
-            use ene_inference::UsageRepository;
-            if self.store.record_usage(arrival.usage).await.is_err() {
-                // The reply is durable and will stream; the usage gap is the
-                // documented follow-up, never a reason to misreport completion.
-            }
-        }
+        // Adopted reply: the reported fact records best-effort; a store
+        // failure keeps the `Completed` close (the reply happened).
+        self.record_usage_decision(usage_for_disposition(
+            ticket,
+            &consent.provider,
+            &consent.model,
+            SendOutcomeClass::Reported(&arrival.usage),
+        ))
+        .await;
         let stream = StreamWireId(RawId::new().as_uuid());
         let mut responses = vec![
             accept_frame(frame, live, &round_wire),
@@ -2239,6 +2323,55 @@ mod tests {
             "only the owner row commits on interrupted adoption, got {timeline:?}"
         );
         remove_data_dir(&dir);
+    }
+
+    #[test]
+    fn usage_certainty_never_invents_or_discards_facts() {
+        use super::{SendOutcomeClass, usage_for_disposition};
+        use ene_inference::{InferenceTicketId, UsageFact, UsageSource};
+
+        let ticket = InferenceTicketId(RawId::new());
+        assert_eq!(
+            usage_for_disposition(ticket, "openai", "dialogue-1", SendOutcomeClass::NeverSent),
+            None,
+            "a never-sent call spends nothing, so no fact is recorded"
+        );
+        let uncertain = usage_for_disposition(
+            ticket,
+            "openai",
+            "dialogue-1",
+            SendOutcomeClass::AttemptUncertain,
+        );
+        assert_eq!(
+            uncertain,
+            Some(UsageFact {
+                ticket,
+                provider: String::from("openai"),
+                model: String::from("dialogue-1"),
+                input_tokens: None,
+                output_tokens: None,
+                source: UsageSource::Unknown,
+            }),
+            "an uncertain attempt records unknown counts, never zero"
+        );
+        let reported = UsageFact {
+            ticket,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            input_tokens: Some(7),
+            output_tokens: Some(9),
+            source: UsageSource::Reported,
+        };
+        assert_eq!(
+            usage_for_disposition(
+                ticket,
+                "openai",
+                "dialogue-1",
+                SendOutcomeClass::Reported(&reported)
+            ),
+            Some(reported),
+            "reported counts survive even when the caller cannot adopt the reply"
+        );
     }
 
     #[tokio::test]
