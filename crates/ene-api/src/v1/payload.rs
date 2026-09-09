@@ -74,3 +74,39 @@ pub enum WirePayload {
     /// Typed wire rejection: no side effects, no retry signal.
     Reject(RejectNotice),
 }
+
+impl WirePayload {
+    /// Canonical message-type name for this payload, matching what senders
+    /// put in the envelope for routing. Receivers compare the envelope
+    /// string against this (instead of trusting it) and reject mismatches
+    /// without guessing.
+    #[must_use]
+    pub fn message_type(&self) -> &'static str {
+        match self {
+            Self::PairingRequest(_) => "PairingRequest",
+            Self::PairingResult(_) => "PairingResult",
+            Self::AuthChallenge(_) => "AuthChallenge",
+            Self::AuthProof(_) => "AuthProof",
+            Self::AuthResult(_) => "AuthResult",
+            Self::CapabilityAdvertise(_) => "CapabilityAdvertise",
+            Self::NegotiatedConnection(_) => "NegotiatedConnection",
+            Self::ReconnectHello(_) => "ReconnectHello",
+            Self::RecoveryInvite(_) => "RecoveryInvite",
+            Self::DisconnectNotice(_) => "DisconnectNotice",
+            Self::SubmitTextInput(_) => "SubmitTextInput",
+            Self::RoundIntakeOutcome(_) => "RoundIntakeOutcome",
+            Self::TextStreamOpen(_) => "TextStreamOpen",
+            Self::TextStreamFrame(_) => "TextStreamFrame",
+            Self::TextStreamClose(_) => "TextStreamClose",
+            Self::ConfirmPresentation(_) => "ConfirmPresentation",
+            Self::HistoryRequest(_) => "HistoryRequest",
+            Self::HistoryView(_) => "HistoryView",
+            Self::PresenceAttribution(_) => "PresenceAttribution",
+            Self::ManagementIntent(_) => "ManagementIntent",
+            Self::ManagementOutcome(_) => "ManagementOutcome",
+            Self::ManagementViewRequest(_) => "ManagementViewRequest",
+            Self::ManagementView(_) => "ManagementView",
+            Self::Reject(_) => "Reject",
+        }
+    }
+}

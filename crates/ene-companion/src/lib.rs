@@ -152,6 +152,13 @@ pub struct AppendHistoryCommand {
     pub at: WallClockWithTz,
     /// Generation value the caller relied on.
     pub expected_generation: PresenceGeneration,
+    /// Consent premise the caller relied on, as an opaque `(id, rev)` pair
+    /// that travels together (never a bare revision). [`None`] skips the
+    /// consent check; callers that went through admission always pass
+    /// [`Some`]. The store compares both inside the append transaction, so
+    /// a mid-flight consent move answers [`HistoryAppendOutcome::StaleConsent`]
+    /// instead of attributing content across the move.
+    pub expected_consent: Option<(String, u64)>,
     /// Command-scoped idempotency identity, when the caller carries one.
     /// [`None`] stores NULL (no replay key). A retry reuses the same command
     /// id with a fresh message id; `local_id` stays as correspondence
@@ -209,6 +216,11 @@ pub enum HistoryAppendOutcome {
         /// Current generation the caller should observe next time.
         current: PresenceGeneration,
     },
+    /// The expected consent moved underneath this append. The generation
+    /// premise held, but the consent premise did not, so the content must
+    /// not be attributed to the new consent without a fresh check. Carries
+    /// no payload: the caller reloads and answers `consent-stale`.
+    StaleConsent,
     /// Held by the companion lifecycle.
     HeldByLifecycle {
         /// Lifecycle that held the append.
@@ -457,6 +469,7 @@ mod tests {
             lang: String::from("en"),
             at: clock(),
             expected_generation: PresenceGeneration::first(),
+            expected_consent: None,
             command_id: Some(CommandId(RawId::new())),
             local_id: Some(String::from("local-1")),
         }
