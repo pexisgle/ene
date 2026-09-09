@@ -11,13 +11,13 @@
 
 ## 次に進む領域
 
-- Stage 2 rework（#1360）: production 経路の E2E が green になるまで Stage 2 完了にしない
-  - 実 listener bind・実 CLI builder・generation 受け渡し・presence lifecycle 分離・pairing 承認・ingress gate・mutex 分割・single-instance・confirm 送信・consent CAS・idempotency 確定
-  - 下位 restack: ConsentRepository CAS・device pairing 契約・setup 共有 grammar（#1356）、CAS 実装・local_id 列・device テーブル（#1358）
+- Stage 2 rework（#1360）: production 経路の E2E は green（実 binary E2E `binaries_drive_send_stream_history_and_restart` 追加）。レビュー残件の第2ラウンド対応済み、レビュアー応答待ち
+  - 追加対応: replay fingerprint（round/role/text/lang/round-wire/incarnation）と `CommandConflict` → wire reject、durable replay ack（restart-safe）、opaque device/round/presence 投影、`find_device_by_wire` による proof 解決、negotiated-major 強制、management shortcut の base 前提強制、credential approval 単一 TX、client retry API（`retry`/`retry_frame`）
+  - 下位 restack: opaque wire 契約・`CommandConflict`・`RejectKind::ConflictingCommand`（#1356）、V5 migration・fingerprint 比較・atomic approval（#1358）
 - 上記 stack の bottom-up merge 後に Stage 3（Learning）へ進む
 - shared error crate は作らない（owner-local 維持）
 
 ## 未解決 blocker
 
-- #1360 レビュー指摘の E2E green 化（対応中）
+- #1360 レビュー第2ラウンド応答済み（2026-09-09）。残りはレビュアー判断待ち2点（pre-auth claim 厳格化、intent replay table）のみ
 - マージ順: #1355 → #1356 → #1358 → #1359 → #1360
