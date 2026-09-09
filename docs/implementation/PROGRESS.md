@@ -19,6 +19,6 @@
 
 ## 未解決 blocker
 
-- #1360 レビュー第8ラウンド対応済み: `management_intent` write-once 化（`ON CONFLICT DO UPDATE` 廃止・tx内claim check・raceはwinner再読・`record_decided` durable-before-visible・assign fast-path先頭化）。層別コミット済み、本ラウンド分はCI 待ち
+- #1360 レビュー第8ラウンド対応済み＋残り1分岐（malformed assign target の Clarify 未記録）も修正：`record_decided` 経由に統一し回帰テスト追加。層別コミット済み、CI 待ち
 - 残りは返信済み：TOCTOU・intent・replay スレッドは実装で応答、transport retry P2 受諾、Stage 5 defer 群は継続
 - マージ順: #1355 → #1356 → #1358 → #1359 → #1360
