@@ -57,8 +57,9 @@ use ene_companion::{
 };
 use ene_credential::{CredentialRef, CredentialRefRepository, credential_availability};
 use ene_inference::{
-    InferenceTicketId, InferenceUseOutcome, ProviderTransport, RequestInferenceCommand,
-    ResolvedRoute, UsageFact, UsageSource, send,
+    AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository, InferenceTicketId,
+    InferenceUseOutcome, ProviderTransport, RequestInferenceCommand, ResolvedRoute, UsageFact,
+    UsageSource, send,
 };
 use ene_permission::{
     CapabilityKind, CheckLiveAuthorizationQuery, ConsentRepository, ConsentRevision, ConsumerKind,
@@ -851,6 +852,33 @@ impl HostHandle {
             // `usage_for_disposition`).
             return interrupted_frames(frame, live, &round_wire, generation_number);
         }
+        // Linearization point: claim this ticket's attempt under the
+        // expected consent in one short transaction, then issue provider
+        // I/O outside any lock. A mutation that committed first fails the
+        // claim stale — no byte leaves; a mutation that commits after only
+        // affects result adoption (handled below), never the fact that the
+        // attempt started under a verified premise. This replaces the old
+        // check-then-send gap with a serialized determination.
+        match self
+            .store
+            .begin_inference_attempt(InferenceAttempt {
+                ticket,
+                expected_consent: (consent.id.clone(), consent.rev.as_u64()),
+                provider: consent.provider.clone(),
+                model: consent.model.clone(),
+            })
+            .await
+        {
+            Ok(AttemptBeginOutcome::Started) => {}
+            Ok(AttemptBeginOutcome::Stale) | Err(_) => {
+                // The provider never ran (fail-closed on store failure
+                // too): no usage fact, same as never sent.
+                return interrupted_frames(frame, live, &round_wire, generation_number);
+            }
+        }
+        // The `true` verdict is the claim above: `send` keeps its own gate
+        // as defense in depth, but the durable determination already bound
+        // this ticket to its consent premise.
         let send_outcome = send(command, true, transport).await;
         let Ok((outcome, arrival)) = send_outcome else {
             self.record_unknown_usage(ticket, &consent.provider, &consent.model)
@@ -2367,8 +2395,11 @@ mod tests {
             "the exact retry must replay success at rev 1, got {:?}",
             same.payload
         );
-        // The route moves on under a different intent; retrying X now finds
-        // its route gone and reports staleness honestly (no blind replay).
+        // The route moves on under a different intent; retrying X still
+        // answers its own prior outcome verbatim (§6.2: never re-executed).
+        // The rev-1 mark no longer names current state, so the caller's
+        // NEXT intent built on it reports stale and converges — replay
+        // stays honest by returning history, not by recomputing the present.
         let moved = handle
             .handle_frame(
                 intent_frame(
@@ -2396,11 +2427,11 @@ mod tests {
         assert!(
             matches!(
                 &stale_retry.first().map(|first| &first.payload),
-                Some(WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView {
-                    current
-                })) if current.0 == "consent-rev-2"
+                Some(WirePayload::ManagementOutcome(ManagementOutcome::StoredAsRuleView {
+                    revision
+                })) if revision.0 == "1"
             ),
-            "a replay whose route moved on must report stale, got {stale_retry:?}"
+            "a replay after the route moved still answers its prior outcome, got {stale_retry:?}"
         );
         remove_data_dir(&dir);
     }

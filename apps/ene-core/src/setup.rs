@@ -47,23 +47,23 @@
 //! answers zero sections under the `"unavailable"` mark (documented gap: there
 //! is no error DTO on the view path).
 //!
-//! Rationale provenance only: this inlet never reads the intent `rationale`.
+//! Rationale is fingerprint material only: the inlet never acts on the
+//! intent `rationale`, but its origin and quote ride the replay fingerprint
+//! so a reused id with a new rationale counts as different content.
 //! Assignment parameters come from the parsed consent target; the Host never
-//! sends intents, so no `quote` handling exists Host-side.
+//! sends intents, so no `quote` handling exists Host-side beyond carrying it.
 
 use ene_api::v1::management::{
     ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
-    ManagementViewRequest, SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, ViewSection,
+    ManagementViewRequest, RationaleOrigin, SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, ViewSection,
     parse_consent_target, parse_credential_target,
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
-use ene_credential::{
-    CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialStore,
-};
+use ene_credential::{CredentialRef, CredentialRefRepository, CredentialStore};
 use ene_permission::{
-    AssignIntentRecord, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
-    IntentReplayRepository,
+    ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
+    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
 };
 use ene_plugin_ipc::WireFrame;
 use ene_primitive::RawId;
@@ -261,11 +261,14 @@ impl HostHandle {
     ///
     /// The wire intent only PROPOSES: it records a pending approval and
     /// answers [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation)
-    /// until a Host-local `approve-credential` flips it usable, at which
-    /// point re-requesting answers
-    /// [`AppliedAsOneTime`](ene_api::v1::management::ManagementOutcome::AppliedAsOneTime).
-    /// Credential registration is high-privilege (trusted confirmation
-    /// required), so the wire never creates usable refs directly.
+    /// until a Host-local `approve-credential` flips it usable — observed
+    /// through a NEW intent id, which decides `AppliedAsOneTime` from
+    /// current state. An exact retry (same id, same fingerprint) replays
+    /// its stored snapshot instead: still `Held` even after approval
+    /// landed elsewhere, because a new judgment requires a new key (same
+    /// rule as command keys). Credential registration is high-privilege
+    /// (trusted confirmation required), so the wire never creates usable
+    /// refs directly.
     async fn register_credential(
         &self,
         frame: &WireFrame,
@@ -280,37 +283,107 @@ impl HostHandle {
                 ManagementOutcome::NeedsClarification,
             )];
         };
-        let outcome = match self
+        // Durable replay first, same contract as assign: exact retry replays
+        // the stored snapshot (a held registration stays held until a NEW
+        // intent observes the approval — the snapshot never goes stale by
+        // itself, it just stops being the whole story once the Owner acts).
+        let intent_key = intent.intent_id.0.as_hyphenated().to_string();
+        match self.store.lookup_intent_outcome(&intent_key).await {
+            Err(_) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )];
+            }
+            Ok(Some(stored))
+                if Self::intent_matches(&stored, intent, Self::INTENT_KIND_REGISTER) =>
+            {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    Self::replayed_outcome(&stored.outcome),
+                )];
+            }
+            Ok(Some(_)) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::NeedsClarification,
+                )];
+            }
+            Ok(None) => {}
+        }
+        // One durable determination: propose-or-report plus the replay row
+        // share a transaction, so the snapshot and the state it describes
+        // can never strand apart.
+        let fingerprint = Self::intent_fingerprint(intent, Self::INTENT_KIND_REGISTER);
+        match self
             .store
-            .request_approval(provider.clone(), label.clone())
+            .request_approval_with_intent(provider, label, fingerprint)
             .await
         {
-            Ok(true) | Err(_) => ManagementOutcome::HeldByOperation,
-            Ok(false) => match self.store.is_approved(&provider, &label).await {
-                Ok(true) => ManagementOutcome::AppliedAsOneTime,
-                Ok(false) | Err(_) => ManagementOutcome::HeldByOperation,
-            },
-        };
-        vec![outcome_frame(frame, live, intent, outcome)]
+            Ok(decided) => vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                Self::replayed_outcome(&decided.outcome),
+            )],
+            Err(_) => vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::HeldByOperation,
+            )],
+        }
     }
 
-    /// Records one assign intent's fingerprint after it established its
-    /// route (by commit or by shortcut success).
-    ///
-    /// Best-effort: when the record itself fails, the committed answer
-    /// already returned stays authoritative — a later retry simply takes
-    /// the normal premise-checked path (stale base, then converge) instead
-    /// of the durable replay. The record never gates the answer, only
-    /// future retries.
-    async fn record_assign_intent(&self, intent: &ManagementIntent) {
-        let record = AssignIntentRecord {
+    /// Intent kind discriminators for replay fingerprints. One per recording
+    /// path; a reused id across kinds is different content by construction.
+    const INTENT_KIND_ASSIGN: &str = "assign";
+    const INTENT_KIND_REGISTER: &str = "register";
+    const INTENT_KIND_COMPLETE: &str = "complete";
+
+    /// Builds the replay fingerprint for `intent` under `kind`.
+    fn intent_fingerprint(intent: &ManagementIntent, kind: &str) -> IntentFingerprint {
+        IntentFingerprint {
             intent_id: intent.intent_id.0.as_hyphenated().to_string(),
+            kind: kind.to_string(),
             target: intent.target.0.clone(),
             base: intent.base_view.0.clone(),
-        };
-        if self.store.record_assign_intent(record).await.is_err() {
-            // The commit below/above already answered; the missing replay
-            // row only costs a future retry one extra round trip.
+            rationale_origin: match intent.rationale.origin {
+                RationaleOrigin::Conversation => String::from("conversation"),
+                RationaleOrigin::ManagementSurface => String::from("management-surface"),
+            },
+            rationale_quote: intent.rationale.quote.clone(),
+        }
+    }
+
+    /// Whether a stored row carries the same intent (fingerprint match; the
+    /// recorded outcome is irrelevant to identity).
+    fn intent_matches(stored: &IntentOutcomeRecord, intent: &ManagementIntent, kind: &str) -> bool {
+        stored.fingerprint.kind == kind
+            && stored.fingerprint.target == intent.target.0
+            && stored.fingerprint.base == intent.base_view.0
+            && stored.fingerprint.rationale_origin
+                == match intent.rationale.origin {
+                    RationaleOrigin::Conversation => "conversation",
+                    RationaleOrigin::ManagementSurface => "management-surface",
+                }
+            && stored.fingerprint.rationale_quote == intent.rationale.quote
+    }
+
+    /// Maps a replayed snapshot to its answer, verbatim.
+    fn replayed_outcome(snapshot: &IntentOutcome) -> ManagementOutcome {
+        match snapshot {
+            IntentOutcome::StoredAsRuleView { revision } => ManagementOutcome::StoredAsRuleView {
+                revision: ViewMarkWire(revision.clone()),
+            },
+            IntentOutcome::AppliedAsOneTime => ManagementOutcome::AppliedAsOneTime,
+            IntentOutcome::HeldByOperation => ManagementOutcome::HeldByOperation,
         }
     }
 
@@ -406,14 +479,13 @@ impl HostHandle {
             )];
         }
         // Durable intent replay (§18.2): the same intent id either replays
-        // or conflicts — it is never rebound. A hit with the same
-        // fingerprint whose route still holds succeeds at the CURRENT
-        // revision however stale the base has grown (the lost reply, not a
-        // new decision); a hit with different content clarifies instead of
-        // adopting the new meaning. A miss, or a hit whose route moved on,
-        // falls through to the normal premise-checked path below.
+        // its stored snapshot or conflicts — it is never rebound. A hit
+        // with the same fingerprint answers the prior outcome verbatim
+        // (never re-executed); a hit with different content clarifies
+        // instead of adopting the new meaning. A miss falls through to the
+        // normal premise-checked path below.
         let intent_key = intent.intent_id.0.as_hyphenated().to_string();
-        match self.store.lookup_assign_intent(&intent_key).await {
+        match self.store.lookup_intent_outcome(&intent_key).await {
             Err(_) => {
                 return vec![outcome_frame(
                     frame,
@@ -422,23 +494,13 @@ impl HostHandle {
                     ManagementOutcome::HeldByOperation,
                 )];
             }
-            Ok(Some(record))
-                if record.target == intent.target.0 && record.base == intent.base_view.0 =>
-            {
-                if let Some(current) = current.as_ref()
-                    && current.provider == provider
-                    && current.model == model
-                    && current.credential_id == credential_id
-                {
-                    return vec![outcome_frame(
-                        frame,
-                        live,
-                        intent,
-                        ManagementOutcome::StoredAsRuleView {
-                            revision: ViewMarkWire(current.rev.as_u64().to_string()),
-                        },
-                    )];
-                }
+            Ok(Some(stored)) if Self::intent_matches(&stored, intent, Self::INTENT_KIND_ASSIGN) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    Self::replayed_outcome(&stored.outcome),
+                )];
             }
             Ok(Some(_)) => {
                 return vec![outcome_frame(
@@ -459,9 +521,9 @@ impl HostHandle {
         // reloads and converges), never silent success — otherwise a
         // different intent built on a moved base would succeed without ever
         // observing the move. (The durable replay above is the only
-        // stale-base success: same intent id AND same fingerprint.) Genuine changes still flow into
-        // compare_and_save below, where a moved base answers stale instead
-        // of overwriting.
+        // stale-base success, and only for the same intent id AND the same
+        // fingerprint.) Genuine changes still flow into the atomic assign
+        // below, where a moved base answers stale instead of overwriting.
         let base_fresh = match (&expected, current.as_ref()) {
             (None, None) => true,
             (Some((id, revision)), Some(record)) => record.id == *id && record.rev == *revision,
@@ -482,7 +544,19 @@ impl HostHandle {
             && current.model == model
             && current.credential_id == credential_id
         {
-            self.record_assign_intent(intent).await;
+            // Read-only success: record the snapshot in its own transaction
+            // (nothing else commits alongside, so this is atomic enough).
+            let snapshot = IntentOutcome::StoredAsRuleView {
+                revision: current.rev.as_u64().to_string(),
+            };
+            let record = IntentOutcomeRecord {
+                fingerprint: Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
+                outcome: snapshot,
+            };
+            if self.store.record_intent_outcome(record).await.is_err() {
+                // The success below already answers; the missing row only
+                // costs a future retry one extra round trip.
+            }
             return vec![outcome_frame(
                 frame,
                 live,
@@ -507,18 +581,23 @@ impl HostHandle {
             model: model.to_string(),
             credential_id: credential_id.to_string(),
         };
-        match self.store.compare_and_save(expected, record).await {
-            Ok(ConsentCommitOutcome::Committed { record }) => {
-                self.record_assign_intent(intent).await;
-                vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::StoredAsRuleView {
-                        revision: ViewMarkWire(record.rev.as_u64().to_string()),
-                    },
-                )]
-            }
+        match self
+            .store
+            .assign_with_intent(
+                expected,
+                record,
+                Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
+            )
+            .await
+        {
+            Ok(ConsentCommitOutcome::Committed { record }) => vec![outcome_frame(
+                frame,
+                live,
+                intent,
+                ManagementOutcome::StoredAsRuleView {
+                    revision: ViewMarkWire(record.rev.as_u64().to_string()),
+                },
+            )],
             Ok(ConsentCommitOutcome::StaleCurrent { current }) => vec![outcome_frame(
                 frame,
                 live,
@@ -566,13 +645,59 @@ impl HostHandle {
                 },
             )];
         }
+        // Durable replay first, same contract as assign and register: exact
+        // retry replays the stored snapshot, reused id with new content
+        // clarifies. Completion derives from state and cannot un-complete,
+        // so only the applied snapshot is ever recorded — anything else
+        // recomputes honestly below.
+        let intent_key = intent.intent_id.0.as_hyphenated().to_string();
+        match self.store.lookup_intent_outcome(&intent_key).await {
+            Err(_) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )];
+            }
+            Ok(Some(stored))
+                if Self::intent_matches(&stored, intent, Self::INTENT_KIND_COMPLETE) =>
+            {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    Self::replayed_outcome(&stored.outcome),
+                )];
+            }
+            Ok(Some(_)) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::NeedsClarification,
+                )];
+            }
+            Ok(None) => {}
+        }
         match self.setup_ready().await {
-            Some(true) => vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::AppliedAsOneTime,
-            )],
+            Some(true) => {
+                let record = IntentOutcomeRecord {
+                    fingerprint: Self::intent_fingerprint(intent, Self::INTENT_KIND_COMPLETE),
+                    outcome: IntentOutcome::AppliedAsOneTime,
+                };
+                if self.store.record_intent_outcome(record).await.is_err() {
+                    // The applied answer below already responds; the missing
+                    // row only costs a future retry its replay (recompute
+                    // answers applied again, since completion cannot un-happen).
+                }
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::AppliedAsOneTime,
+                )]
+            }
             Some(false) => vec![outcome_frame(
                 frame,
                 live,
