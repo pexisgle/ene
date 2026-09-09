@@ -283,21 +283,20 @@ fn main() -> Result<(), CliError> {
     }
     if approve_mode {
         let (descriptor, rest) = extract_descriptor(&rest)?;
+        let path = parse_args(&rest)?;
+        let cfg = Config::load(path.as_deref())?;
+        let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
+            return Err(CoreError::Store("no data directory resolved".to_string()).into());
+        };
         let Some(descriptor) = descriptor else {
-            return Err(CliError::Usage(
-                "approve-device requires --descriptor EXACT".to_string(),
-            ));
+            list_pending_devices(&data_dir)?;
+            return Ok(());
         };
         if descriptor.trim().is_empty() {
             return Err(CliError::Usage(
                 "approve-device requires a non-blank --descriptor".to_string(),
             ));
         }
-        let path = parse_args(&rest)?;
-        let cfg = Config::load(path.as_deref())?;
-        let Some(data_dir) = ene_config::resolve_data_dir(&cfg) else {
-            return Err(CoreError::Store("no data directory resolved".to_string()).into());
-        };
         run_approve_device(&data_dir, descriptor.trim())?;
         return Ok(());
     }
@@ -312,6 +311,38 @@ fn main() -> Result<(), CliError> {
     }
     let _data_dir = ene_config::resolve_data_dir(&cfg);
     Ok(())
+}
+
+/// Lists pending pairing descriptors on stdout, one per line.
+///
+/// Opens the Host state and prints what `approve-device --descriptor`
+/// would accept. Empty output (exit 0) means nothing is pending.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Store`] when the runtime cannot be built or the
+/// state cannot be opened.
+fn list_pending_devices(data_dir: &Path) -> Result<(), CoreError> {
+    use std::io::Write as _;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| CoreError::Store("tokio runtime unavailable".to_string()))?;
+    runtime.block_on(async {
+        let handle = HostHandle::open(data_dir).await?;
+        let mut pending = handle.pending_devices().await?;
+        pending.sort();
+        let mut stdout = std::io::stdout().lock();
+        for descriptor in &pending {
+            writeln!(stdout, "{descriptor}").map_err(|error| {
+                CoreError::Store(format!("pending list could not be shown: {error}"))
+            })?;
+        }
+        stdout.flush().map_err(|error| {
+            CoreError::Store(format!("pending list could not be shown: {error}"))
+        })?;
+        Ok(())
+    })
 }
 
 /// Blocks the calling thread on [`serve::serve`] for `data_dir`.

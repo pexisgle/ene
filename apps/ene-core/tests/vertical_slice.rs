@@ -345,10 +345,6 @@ async fn production_path_setup_to_restart() {
         Arc::new(fake_transport()),
     ));
     assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
-    assert!(
-        !dir.join("ene.sock").join("ene.sock").exists(),
-        "socket path must not double-append"
-    );
 
     let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
@@ -500,6 +496,307 @@ async fn view_sections(client: &mut Client) -> Result<Vec<String>, String> {
         .iter()
         .map(|section| section.kind.clone())
         .collect())
+}
+
+/// Locates a sibling binary built by the workspace: integration tests run
+/// from `target/debug/deps`, so the binaries live two levels up.
+fn workspace_binary(name: &str) -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let debug = exe.parent()?.parent()?;
+    let candidate = debug.join(name);
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// A spawned child killed on drop, so failing asserts cannot leak a
+/// listener holding the test socket.
+struct KillOnDrop(Option<std::process::Child>);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            drop(child.kill());
+            drop(child.wait());
+        }
+    }
+}
+
+fn escape_json_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+async fn run_cli(
+    binary: &std::path::Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+    timeout: Duration,
+) -> Option<(i32, String, String)> {
+    let mut command = tokio::process::Command::new(binary);
+    command.args(args);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let child = command.spawn().ok()?;
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    Some((
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+/// Production-path binary test: the real `ene-core serve` listener plus the
+/// real `ene-ctl` command orchestration (arg parsing, builders, session,
+/// rendering, exit codes). Provider inference is out of scope here (no
+/// network or keys in CI): the send path stays with the lib-level E2E, and
+/// this test proves pairing approval, setup, views, and graceful
+/// degradation end to end through both binaries.
+#[tokio::test]
+async fn binaries_drive_pairing_setup_and_views() {
+    let temp = tempfile::TempDir::new();
+    assert!(temp.is_ok(), "tempdir must create");
+    let Ok(temp) = temp else {
+        return;
+    };
+    let dir = temp.path().to_path_buf();
+    let binaries = (workspace_binary("ene-ctl"), workspace_binary("ene-core"));
+    assert!(
+        binaries.0.is_some() && binaries.1.is_some(),
+        "both binaries must be built"
+    );
+    let (Some(ctl), Some(core)) = binaries else {
+        return;
+    };
+    let config_path = dir.join("ene.json");
+    let config = format!(
+        "{{\"language\": \"en\", \"data_dir\": \"{}\"}}",
+        escape_json_string(&dir.to_string_lossy())
+    );
+    assert!(
+        std::fs::write(&config_path, config).is_ok(),
+        "config file must be writable"
+    );
+    let config = config_path.to_string_lossy().into_owned();
+
+    let mut server = std::process::Command::new(&core);
+    // Fake provider key for the SERVER child only (setting a child env is
+    // safe; our own process env is never touched): production reads the
+    // bearer from its environment, so without this the credential gate
+    // would deny assignment. No inference runs in these flows, hence no
+    // network is ever touched — the key only satisfies presence checks.
+    server.env("ENE_OPENAI_API_KEY", "sk-test-only");
+    server.args(["serve", "--config", &config]);
+    server.stdout(std::process::Stdio::null());
+    server.stderr(std::process::Stdio::null());
+    let server = server.spawn();
+    assert!(server.is_ok(), "serve must spawn");
+    let Ok(server) = server else {
+        return;
+    };
+    let _server = KillOnDrop(Some(server));
+    let bound = wait_for_socket(&dir).await;
+    let listing: Vec<String> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        bound,
+        "listener must bind ene.sock in {dir:?}, has {listing:?}"
+    );
+    assert!(
+        !dir.join("ene.sock").join("ene.sock").exists(),
+        "socket path must not double-append"
+    );
+
+    let status = run_cli(
+        &ctl,
+        &["--config", &config, "status"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(status, Some((2, _, _))),
+        "pre-pairing status must pend pairing, got {status:?}"
+    );
+
+    let mut list_pending = std::process::Command::new(&core);
+    list_pending.args(["approve-device", "--config", &config]);
+    list_pending.stdout(std::process::Stdio::piped());
+    list_pending.stderr(std::process::Stdio::null());
+    let listed = list_pending.output();
+    assert!(listed.is_ok(), "approve-device list must spawn");
+    let Ok(listed) = listed else {
+        return;
+    };
+    assert!(listed.status.success(), "listing pendings must exit 0");
+    let pending_out = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let descriptor = pending_out
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty());
+    assert!(
+        descriptor.is_some(),
+        "one pending device must list, got {pending_out:?}"
+    );
+    let Some(descriptor) = descriptor else {
+        return;
+    };
+    let mut approve = std::process::Command::new(&core);
+    approve.args([
+        "approve-device",
+        "--descriptor",
+        descriptor,
+        "--config",
+        &config,
+    ]);
+    approve.stdout(std::process::Stdio::piped());
+    approve.stderr(std::process::Stdio::piped());
+    let approved = approve.output();
+    assert!(approved.is_ok(), "approve must spawn");
+    let Ok(approved) = approved else {
+        return;
+    };
+    assert!(
+        approved.status.success(),
+        "approve-device must exit 0: {}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let shown = String::from_utf8_lossy(&approved.stdout).into_owned();
+    let secret = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("pairing secret (show once): "))
+        .map(str::to_string);
+    assert!(
+        secret.is_some(),
+        "approve must print the one-time secret, got {shown:?}"
+    );
+    let Some(secret) = secret else {
+        return;
+    };
+    assert!(!secret.trim().is_empty(), "secret must be non-blank");
+
+    let status = run_cli(
+        &ctl,
+        &["--config", &config, "status"],
+        &[("ENE_PAIRING_SECRET", secret.as_str())],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(status, Some((0, _, _))),
+        "paired status must exit 0, got {status:?}"
+    );
+
+    let show = run_cli(
+        &ctl,
+        &["--config", &config, "setup", "--show"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(show, Some((0, _, _))),
+        "setup --show must exit 0, got {show:?}"
+    );
+    let Some((_, out, _)) = show else {
+        return;
+    };
+    for section in ["provider:", "model:", "consent:", "credential:"] {
+        assert!(out.contains(section), "show must render {section}");
+    }
+
+    let setup = run_cli(
+        &ctl,
+        &[
+            "--config",
+            &config,
+            "setup",
+            "--provider",
+            "openai",
+            "--model",
+            MODEL,
+        ],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(setup, Some((2, _, _))),
+        "unapproved setup must hold at exit 2, got {setup:?}"
+    );
+
+    let mut approve_cred = std::process::Command::new(&core);
+    approve_cred.args([
+        "approve-credential",
+        "--provider",
+        "openai",
+        "--label",
+        "main",
+        "--config",
+        &config,
+    ]);
+    approve_cred.stdout(std::process::Stdio::null());
+    approve_cred.stderr(std::process::Stdio::piped());
+    let credential_approved = approve_cred.output();
+    assert!(credential_approved.is_ok(), "credential approve must spawn");
+    let Ok(credential_approved) = credential_approved else {
+        return;
+    };
+    assert!(
+        credential_approved.status.success(),
+        "approve-credential must exit 0: {}",
+        String::from_utf8_lossy(&credential_approved.stderr)
+    );
+
+    let setup = run_cli(
+        &ctl,
+        &[
+            "--config",
+            &config,
+            "setup",
+            "--provider",
+            "openai",
+            "--model",
+            MODEL,
+        ],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    let setup_ok = matches!(setup, Some((0, _, _)));
+    assert!(setup_ok, "approved setup must exit 0, got {setup:?}");
+    let Some((_, out, _)) = setup else {
+        return;
+    };
+    assert!(
+        out.contains("setup complete:"),
+        "setup must report completion"
+    );
+
+    let history = run_cli(
+        &ctl,
+        &["--config", &config, "history"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(history, Some((0, _, _))),
+        "empty history must exit 0, got {history:?}"
+    );
 }
 
 #[tokio::test]
