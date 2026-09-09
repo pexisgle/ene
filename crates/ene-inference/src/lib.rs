@@ -267,6 +267,53 @@ pub trait UsageRepository: Send + Sync {
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError>;
 }
 
+/// One claimed inference attempt: the ticket plus the consent premise and
+/// route it may run under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferenceAttempt {
+    /// Ticket the attempt would run under.
+    pub ticket: InferenceTicketId,
+    /// Consent premise the attempt relies on, as an `(id, rev)` pair that
+    /// travels together (never a bare revision).
+    pub expected_consent: (String, u64),
+    /// Provider the attempt would bill.
+    pub provider: String,
+    /// Model the attempt would run.
+    pub model: String,
+}
+
+/// Outcome of claiming an inference attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttemptBeginOutcome {
+    /// The attempt is claimed under the expected consent: the caller may
+    /// issue provider I/O outside any lock. A later consent move cannot
+    /// un-start it; result adoption still decides separately.
+    Started,
+    /// The expected consent no longer holds (or was never recorded): the
+    /// caller must NOT issue provider I/O for this ticket.
+    Stale,
+}
+
+/// Linearization point for starting provider I/O.
+///
+/// Claiming an attempt and mutating consent share one serialization
+/// domain (short `Immediate` transactions, never held across I/O): either
+/// the claim commits first and the attempt runs under a known-good
+/// premise, or the mutation commits first and the claim fails stale
+/// before any byte leaves. Re-claiming one ticket never sends twice: a
+/// duplicate claim answers [`AttemptBeginOutcome::Stale`].
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
+)]
+pub trait InferenceAttemptRepository: Send + Sync {
+    /// Claims `attempt` iff the expected consent still holds.
+    async fn begin_inference_attempt(
+        &self,
+        attempt: InferenceAttempt,
+    ) -> Result<AttemptBeginOutcome, InferenceTechnicalError>;
+}
+
 /// Dispatches one authorized inference use.
 ///
 /// Caller protocol: the Host first runs

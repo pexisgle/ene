@@ -302,35 +302,99 @@ pub trait ConsentRepository: Send + Sync {
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
-pub trait IntentReplayRepository: Send + Sync {
-    /// Records that `record` was established for one assign intent.
+pub trait IntentOutcomeRepository: Send + Sync {
+    /// Records one intent's terminal outcome snapshot.
     ///
-    /// Upserts on `intent_id`: re-recording the same intent refreshes its
-    /// fingerprint rather than duplicating rows.
-    async fn record_assign_intent(
+    /// Upserts on `intent_id`: re-recording refreshes rather than
+    /// duplicating. For read-only outcomes (shortcut successes, completion
+    /// checks, already-usable registers) this own transaction is atomic
+    /// enough — nothing else commits alongside. For state-changing outcomes
+    /// use the combined operations below so the commit and its replay row
+    /// share one transaction.
+    async fn record_intent_outcome(
         &self,
-        record: AssignIntentRecord,
+        record: IntentOutcomeRecord,
     ) -> Result<(), PermissionTechnicalError>;
 
-    /// Loads the assign record for `intent_id`, if any.
-    async fn lookup_assign_intent(
+    /// Loads the outcome snapshot for `intent_id`, if any.
+    async fn lookup_intent_outcome(
         &self,
         intent_id: &str,
-    ) -> Result<Option<AssignIntentRecord>, PermissionTechnicalError>;
+    ) -> Result<Option<IntentOutcomeRecord>, PermissionTechnicalError>;
+
+    /// Assigns the consent route and records the intent outcome atomically.
+    ///
+    /// One transaction: the compare-and-save plus the replay-row insert, so
+    /// a crash between commit and marker can neither strand an approval
+    /// without its replay row nor replay a row without its commit. Records
+    /// only on [`ConsentCommitOutcome::Committed`]; stale outcomes carry no
+    /// row (they recompute honestly on retry). The snapshot carries the
+    /// committed revision; replay answers it verbatim.
+    async fn assign_with_intent(
+        &self,
+        expected: Option<(String, ConsentRevision)>,
+        record: ConsentRecord,
+        intent: IntentOutcomeRecord,
+    ) -> Result<ConsentCommitOutcome, PermissionTechnicalError>;
+
+    /// Registers the credential approval request and records the intent
+    /// outcome atomically.
+    ///
+    /// One transaction: the pending insert (or usable recheck) plus the
+    /// replay-row insert. Returns the decided snapshot — `Held` when the
+    /// pair now pends approval, `Applied` when it is already usable — so
+    /// the caller answers from one durable determination.
+    async fn request_approval_with_intent(
+        &self,
+        provider: String,
+        label: String,
+        intent: IntentOutcomeRecord,
+    ) -> Result<IntentOutcomeRecord, PermissionTechnicalError>;
 }
 
-/// Durable fingerprint of one consent-assign intent: the intent key plus
-/// the content it committed. The base premise rides along so a refreshed
+/// Durable fingerprint plus terminal outcome snapshot of one management
+/// intent: the intent key, the content it decided on, and the outcome that
+/// content produced. An exact retry (same id, same fingerprint) replays the
+/// snapshot verbatim — never re-executed, never rebound; the same id with
+/// different content is a conflict the caller clarifies. The base premise
+/// and the semantically effective rationale ride along, so a refreshed
 /// premise under a reused id counts as different content (new premise, new
 /// id — same rule as command keys).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AssignIntentRecord {
+pub struct IntentOutcomeRecord {
     /// Intent key, as hyphenated UUID text.
     pub intent_id: String,
-    /// Intent target text (`consent:<provider>:<model>:<credential>`).
+    /// Intent kind discriminator (`assign`, `register`, or `complete`).
+    pub kind: String,
+    /// Intent target text.
     pub target: String,
     /// Base-view mark text the intent was built on.
     pub base: String,
+    /// Rationale origin text (`conversation` or `management-surface`).
+    pub rationale_origin: String,
+    /// Rationale quote, if the intent carried one.
+    pub rationale_quote: Option<String>,
+    /// Terminal outcome snapshot.
+    pub outcome: IntentOutcome,
+}
+
+/// Terminal management outcome worth replaying.
+///
+/// Only content-terminal outcomes are recorded: non-terminal answers
+/// (`StaleBaseView`, `NeedsClarification`, `DeniedByBoundary`) recompute
+/// honestly on retry — replaying a stale mark would send the caller to
+/// build on it again instead of converging.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IntentOutcome {
+    /// Stored as a rule at this revision view.
+    StoredAsRuleView {
+        /// Revision view committed by this intent.
+        revision: String,
+    },
+    /// Applied as a one-time approval.
+    AppliedAsOneTime,
+    /// Held for a pending Owner decision.
+    HeldByOperation,
 }
 
 /// Tracks minted evaluation ids and enforces single use.
