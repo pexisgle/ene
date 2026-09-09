@@ -286,18 +286,16 @@ pub trait ConsentRepository: Send + Sync {
     ) -> Result<ConsentCommitOutcome, PermissionTechnicalError>;
 }
 
-/// Durable intent replay for consent assignment.
+/// Durable intent replay for management intents.
 ///
-/// Design §18.2 fixes `intent_id` as the idempotency key for management
-/// intents. The store binds each committed (or shortcut-succeeded) assign
-/// to the intent fingerprint `(target, base)`; a later send with the same
-/// intent id either replays (same fingerprint and the route still holds)
-/// or conflicts (same id, different content — never rebound). Only the
-/// assign path writes and reads these rows: register is propose-only and
-/// naturally convergent (`Held` → `Applied` as approval lands), and
-/// completion re-derives from state, so neither needs replay rows. A lost
-/// reply therefore converges without a fresh intent id, while a reused id
-/// with new meaning is declined instead of silently adopting it.
+/// Design §18.2 fixes `intent_id` as the idempotency key: a transport retry
+/// carries the same id, and a new judgment mints a new one. The store binds
+/// each decided outcome to the intent fingerprint; a later send with the
+/// same intent id either replays the stored snapshot verbatim — never
+/// re-executed — or conflicts (same id, different content, answered without
+/// side effects). Re-evaluation always means a new id: even a stale or
+/// clarifying answer replays under its own id, so the same key can never
+/// observe two different outcomes.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
@@ -350,6 +348,39 @@ pub trait IntentOutcomeRepository: Send + Sync {
         label: String,
         fingerprint: IntentFingerprint,
     ) -> Result<IntentOutcomeRecord, PermissionTechnicalError>;
+
+    /// Claims a setup completion and records its outcome atomically.
+    ///
+    /// One transaction: compare the expected base mark against current,
+    /// and — only when they match, a row exists, and the bearer is present
+    /// — insert the `Applied` snapshot. Returns `Ready` (recorded, answer
+    /// applied), `Stale` (base moved, nothing recorded), or `NotReady`
+    /// (empty premise or bearer absent, nothing recorded). The bearer gate
+    /// rides in because completion means consent-plus-bearer; the flag is
+    /// Host-observed just before the call, and the transaction re-verifies
+    /// everything durable around it.
+    async fn complete_with_intent(
+        &self,
+        expected_base: String,
+        bearer_present: bool,
+        fingerprint: IntentFingerprint,
+    ) -> Result<CompleteIntentOutcome, PermissionTechnicalError>;
+
+    /// Claims a same-route shortcut and records its outcome atomically.
+    ///
+    /// One transaction: read current, and — only when the stored route
+    /// already equals the requested one — insert the `Stored` snapshot for
+    /// the current revision. Returns `Hit` (recorded, answer the current
+    /// revision without bumping) or `Miss` (nothing recorded; the caller
+    /// continues through compare-and-save). State-changing assigns still
+    /// go through [`IntentOutcomeRepository::assign_with_intent`].
+    async fn shortcut_with_intent(
+        &self,
+        provider: String,
+        model: String,
+        credential_id: String,
+        fingerprint: IntentFingerprint,
+    ) -> Result<ShortcutIntentOutcome, PermissionTechnicalError>;
 }
 
 /// Durable fingerprint of one management intent: the intent key plus the
@@ -385,12 +416,12 @@ pub struct IntentOutcomeRecord {
     pub outcome: IntentOutcome,
 }
 
-/// Terminal management outcome worth replaying.
+/// Management outcome snapshot worth replaying.
 ///
-/// Only content-terminal outcomes are recorded: non-terminal answers
-/// (`StaleBaseView`, `NeedsClarification`, `DeniedByBoundary`) recompute
-/// honestly on retry — replaying a stale mark would send the caller to
-/// build on it again instead of converging.
+/// Every decided outcome is recorded — including stale and clarifying
+/// answers. A retried id must observe the same answer it observed before;
+/// only a fresh id earns a fresh evaluation. (Infrastructure failures are
+/// not decisions: an unreadable store holds without recording.)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IntentOutcome {
     /// Stored as a rule at this revision view.
@@ -402,6 +433,46 @@ pub enum IntentOutcome {
     AppliedAsOneTime,
     /// Held for a pending Owner decision.
     HeldByOperation,
+    /// Too ambiguous or contradictory to decide.
+    NeedsClarification,
+    /// The base view had moved underneath the intent.
+    StaleBaseView {
+        /// Current mark the sender should build on next time.
+        current: String,
+    },
+}
+
+/// Outcome of a setup-completion claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompleteIntentOutcome {
+    /// Base matched and bearer held: snapshot recorded, answer applied.
+    Ready {
+        /// Current mark, for the answer.
+        mark: String,
+    },
+    /// Base moved: answer stale with this mark. Nothing recorded.
+    Stale {
+        /// Current mark the sender should build on next time.
+        mark: String,
+    },
+    /// No completion to record (empty premise or bearer absent): answer
+    /// without recording.
+    NotReady,
+}
+
+/// Outcome of a same-route shortcut claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShortcutIntentOutcome {
+    /// Route already holds: snapshot recorded, answer the current record.
+    Hit {
+        /// Current consent record behind the answer.
+        current: ConsentRecord,
+    },
+    /// Route differs: answer through the normal path. Nothing recorded.
+    Miss {
+        /// Current consent record, if any, for the caller to continue with.
+        current: Option<ConsentRecord>,
+    },
 }
 
 /// Tracks minted evaluation ids and enforces single use.
