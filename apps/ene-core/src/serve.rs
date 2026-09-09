@@ -273,7 +273,7 @@ pub struct LiveInput {
     /// Negotiated terms recorded when this connection answered capability.
     ///
     /// Filled by the connection table from the Host-selected terms, never
-    /// by the Client: the ingress gate enforces the negotiated major on
+    /// by the Client: the ingress gate enforces the exact negotiated version on
     /// every later frame, so version mixing within one connection is
     /// impossible. [`None`] before negotiation.
     pub negotiated: Option<NegotiatedConnection>,
@@ -469,22 +469,22 @@ impl HostHandle {
                 format!("unknown message type {:?}", frame.envelope.message_type.0),
             )];
         }
-        let negotiated_major = live.negotiated.as_ref().map(|terms| terms.version.major);
-        match (negotiated_major, frame.envelope.protocol.major) {
+        let negotiated_version = live.negotiated.as_ref().map(|terms| terms.version);
+        match (negotiated_version, frame.envelope.protocol) {
             (Some(want), got) if got != want => {
                 return vec![reject_frame(
                     &frame,
                     &live,
                     RejectKind::IncompatibleProtocol,
-                    format!("major {got} outside negotiated major {want}"),
+                    format!("version {got:?} outside negotiated version {want:?}"),
                 )];
             }
-            (None, got) if got != ProtocolVersion::V1.major => {
+            (None, got) if got != ProtocolVersion::V1 => {
                 return vec![reject_frame(
                     &frame,
                     &live,
                     RejectKind::IncompatibleProtocol,
-                    format!("major {got} without negotiation"),
+                    format!("version {got:?} without negotiation"),
                 )];
             }
             _ => {}
@@ -2196,6 +2196,58 @@ mod tests {
             "hiding the connection never drops the incarnation echo"
         );
         remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn negotiated_version_is_fixed_per_connection() {
+        use ene_api::v1::handshake::NegotiatedConnection;
+
+        let Some((handle, _dir)) = open_handle("version-fixed").await else {
+            return;
+        };
+        let transport = fake_transport();
+        let negotiated = LiveInput {
+            negotiated: Some(NegotiatedConnection {
+                version: ProtocolVersion::V1,
+                accepted_features: Vec::new(),
+            }),
+            ..paired_input("device-1")
+        };
+        let mut mixed = submit_frame();
+        mixed.envelope.protocol = ProtocolVersion {
+            major: 1,
+            minor: 99,
+        };
+        let rejected = handle
+            .handle_frame(mixed, negotiated.clone(), &transport)
+            .await;
+        assert!(
+            rejected.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::Reject(notice)
+                    if notice.kind == ene_api::v1::reject::RejectKind::IncompatibleProtocol
+            )),
+            "a v1.99 frame on a v1.0 connection must reject, got {rejected:?}"
+        );
+        let agreed = handle
+            .handle_frame(submit_frame(), negotiated, &transport)
+            .await;
+        assert!(
+            agreed
+                .first()
+                .is_none_or(|first| !matches!(&first.payload, WirePayload::Reject(_))),
+            "the negotiated version itself must pass the gate, got {agreed:?}"
+        );
+        let mut early = pairing_frame("laptop");
+        early.envelope.protocol = ProtocolVersion { major: 1, minor: 1 };
+        let pre = handle
+            .handle_frame(early, unpaired_input(), &transport)
+            .await;
+        assert!(
+            pre.first()
+                .is_some_and(|first| matches!(&first.payload, WirePayload::Reject(_))),
+            "pre-negotiation frames must speak exactly v1.0, got {pre:?}"
+        );
     }
 
     #[tokio::test]
