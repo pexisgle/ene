@@ -37,6 +37,7 @@ use ene_inference::{
 use ene_permission::{
     ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
     IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, PermissionTechnicalError,
+    ShortcutIntentOutcome, consent_mark_rev,
 };
 use ene_presence::{
     ClientId, LiveReachabilityRef, MoveDecision, PresenceAttribution, PresenceCheckRef,
@@ -850,6 +851,8 @@ fn encode_intent_outcome(outcome: &IntentOutcome) -> (&'static str, Option<&str>
         IntentOutcome::StoredAsRuleView { revision } => ("stored", Some(revision)),
         IntentOutcome::AppliedAsOneTime => ("applied", None),
         IntentOutcome::HeldByOperation => ("held", None),
+        IntentOutcome::NeedsClarification => ("clarify", None),
+        IntentOutcome::StaleBaseView { current } => ("stale", Some(current)),
     }
 }
 
@@ -865,6 +868,8 @@ fn decode_intent_outcome(
         ("stored", Some(revision)) => Ok(IntentOutcome::StoredAsRuleView { revision }),
         ("applied", _) => Ok(IntentOutcome::AppliedAsOneTime),
         ("held", _) => Ok(IntentOutcome::HeldByOperation),
+        ("clarify", _) => Ok(IntentOutcome::NeedsClarification),
+        ("stale", Some(current)) => Ok(IntentOutcome::StaleBaseView { current }),
         _ => Err(String::from("malformed intent outcome")),
     }
 }
@@ -1978,14 +1983,20 @@ impl IntentOutcomeRepository for Store {
             &record,
         )
         .map_err(permission_unavailable)?;
-        // The replay row shares the commit transaction: a crash can neither
-        // strand a commit without its marker nor a marker without its
-        // commit. Stale outcomes record nothing (they recompute honestly).
-        // The snapshot carries the committed revision, so replay answers it
+        // The replay row shares the decision transaction: a crash can
+        // neither strand a commit without its marker nor a marker without
+        // its commit. Stale attempts record their stale snapshot here too,
+        // so a retried id always observes the same answer. The commit
+        // snapshot carries the committed revision, so replay answers it
         // verbatim.
         if let ConsentCommitOutcome::Committed { record } = &outcome {
             let snapshot = IntentOutcome::StoredAsRuleView {
                 revision: record.rev.as_u64().to_string(),
+            };
+            insert_intent_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
+        } else if let ConsentCommitOutcome::StaleCurrent { current } = &outcome {
+            let snapshot = IntentOutcome::StaleBaseView {
+                current: consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64())),
             };
             insert_intent_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
         }
@@ -2042,6 +2053,121 @@ impl IntentOutcomeRepository for Store {
         tx.commit()
             .map_err(|error| permission_unavailable(error.to_string()))?;
         Ok(decided)
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn complete_with_intent(
+        &self,
+        expected_base: String,
+        bearer_present: bool,
+        fingerprint: IntentFingerprint,
+    ) -> Result<IntentOutcomeRecord, PermissionTechnicalError> {
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        // One transaction: compare the base mark, verify completability,
+        // and record the decided snapshot together. Every decided outcome
+        // is recorded (even stale/clarify), so a retried id always observes
+        // the same answer; only store failures hold unrecorded.
+        let found: Option<(String, i64, String, String, String)> = tx
+            .query_row(SQL_SELECT_CONSENT, (), |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .optional()
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        let current = match found {
+            Some((id, stored_rev, provider, model, credential_id)) => Some(
+                decode_consent(id, stored_rev, provider, model, credential_id)
+                    .map_err(permission_unavailable)?,
+            ),
+            None => None,
+        };
+        let mark = consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64()));
+        let outcome = if mark != expected_base {
+            IntentOutcome::StaleBaseView {
+                current: mark.clone(),
+            }
+        } else if current.is_some() && bearer_present {
+            IntentOutcome::AppliedAsOneTime
+        } else {
+            IntentOutcome::NeedsClarification
+        };
+        let decided = IntentOutcomeRecord {
+            fingerprint,
+            outcome,
+        };
+        insert_intent_row_tx(&tx, &decided.fingerprint, &decided.outcome)
+            .map_err(permission_unavailable)?;
+        tx.commit()
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        Ok(decided)
+    }
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
+    )]
+    async fn shortcut_with_intent(
+        &self,
+        provider: String,
+        model: String,
+        credential_id: String,
+        fingerprint: IntentFingerprint,
+    ) -> Result<ShortcutIntentOutcome, PermissionTechnicalError> {
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        // One transaction: read current and, only when the stored route
+        // already equals the requested one, record the snapshot for the
+        // current revision. No state changes either way.
+        let found: Option<(String, i64, String, String, String)> = tx
+            .query_row(SQL_SELECT_CONSENT, (), |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .optional()
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        let current = match found {
+            Some((id, stored_rev, provider, model, credential_id)) => Some(
+                decode_consent(id, stored_rev, provider, model, credential_id)
+                    .map_err(permission_unavailable)?,
+            ),
+            None => None,
+        };
+        let matches = current.as_ref().is_some_and(|stored| {
+            stored.provider == provider
+                && stored.model == model
+                && stored.credential_id == credential_id
+        });
+        if !matches {
+            return Ok(ShortcutIntentOutcome::Miss { current });
+        }
+        let Some(record) = current else {
+            return Ok(ShortcutIntentOutcome::Miss { current: None });
+        };
+        let snapshot = IntentOutcome::StoredAsRuleView {
+            revision: record.rev.as_u64().to_string(),
+        };
+        insert_intent_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)?;
+        tx.commit()
+            .map_err(|error| permission_unavailable(error.to_string()))?;
+        Ok(ShortcutIntentOutcome::Hit { current: record })
     }
 }
 
@@ -4223,10 +4349,17 @@ mod tests {
             matches!(stale, Ok(ConsentCommitOutcome::StaleCurrent { .. })),
             "stale assign must not commit, got {stale:?}"
         );
-        let missing = store.lookup_intent_outcome("assign-2").await;
+        let stale_row = store.lookup_intent_outcome("assign-2").await;
         assert!(
-            matches!(missing, Ok(None)),
-            "stale assign must leave no replay row"
+            matches!(
+                stale_row,
+                Ok(Some(ref stored))
+                    if stored.outcome
+                        == IntentOutcome::StaleBaseView {
+                            current: String::from("consent-rev-1"),
+                        }
+            ),
+            "stale assign must leave its stale snapshot, got {stale_row:?}"
         );
     }
 
@@ -4279,6 +4412,200 @@ mod tests {
         assert!(
             usable.is_ok(),
             "repeat registration must decide, got {usable:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_with_intent_decides_atomically() {
+        use ene_permission::{
+            ConsentRecord, ConsentRepository as _, ConsentRevision, IntentFingerprint,
+            IntentOutcome, IntentOutcomeRepository as _,
+        };
+
+        fn fingerprint(id: &str, base: &str) -> IntentFingerprint {
+            IntentFingerprint {
+                intent_id: id.to_owned(),
+                kind: String::from("complete"),
+                target: String::from("setup:complete"),
+                base: base.to_owned(),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+            }
+        }
+
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        // Empty premise with no consent: clarify, recorded.
+        let empty = store
+            .complete_with_intent(
+                String::from("consent-none"),
+                true,
+                fingerprint("c-0", "consent-none"),
+            )
+            .await;
+        assert!(
+            matches!(
+                empty,
+                Ok(ref decided) if decided.outcome == IntentOutcome::NeedsClarification
+            ),
+            "empty completion must clarify, got {empty:?}"
+        );
+        let found = store.lookup_intent_outcome("c-0").await;
+        assert!(
+            matches!(found, Ok(Some(_))),
+            "the clarify decision must leave its replay row"
+        );
+        let saved = store
+            .compare_and_save(
+                None,
+                ConsentRecord {
+                    id: String::from("consent-1"),
+                    rev: ConsentRevision::from_u64(1),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-1"),
+                    credential_id: String::from("openai:main"),
+                },
+            )
+            .await;
+        assert!(
+            matches!(saved, Ok(ConsentCommitOutcome::Committed { .. })),
+            "consent must seed"
+        );
+        // Fresh base but bearer absent: clarify, recorded.
+        let unready = store
+            .complete_with_intent(
+                String::from("consent-rev-1"),
+                false,
+                fingerprint("c-1", "consent-rev-1"),
+            )
+            .await;
+        assert!(
+            matches!(
+                unready,
+                Ok(ref decided) if decided.outcome == IntentOutcome::NeedsClarification
+            ),
+            "bearerless completion must clarify, got {unready:?}"
+        );
+        // Fresh base and bearer: applied, recorded.
+        let ready = store
+            .complete_with_intent(
+                String::from("consent-rev-1"),
+                true,
+                fingerprint("c-2", "consent-rev-1"),
+            )
+            .await;
+        assert!(
+            matches!(
+                ready,
+                Ok(ref decided) if decided.outcome == IntentOutcome::AppliedAsOneTime
+            ),
+            "ready completion must apply, got {ready:?}"
+        );
+        // Stale base: stale snapshot with the current mark, recorded.
+        let stale = store
+            .complete_with_intent(
+                String::from("consent-none"),
+                true,
+                fingerprint("c-3", "consent-none"),
+            )
+            .await;
+        assert!(
+            matches!(
+                stale,
+                Ok(ref decided) if decided.outcome
+                    == IntentOutcome::StaleBaseView {
+                        current: String::from("consent-rev-1"),
+                    }
+            ),
+            "moved base must report stale with the current mark, got {stale:?}"
+        );
+        let found = store.lookup_intent_outcome("c-3").await;
+        assert!(
+            matches!(found, Ok(Some(ref stored)) if stored.outcome == IntentOutcome::StaleBaseView {
+                current: String::from("consent-rev-1"),
+            }),
+            "the stale decision must leave its replay row"
+        );
+    }
+
+    #[tokio::test]
+    async fn shortcut_with_intent_hits_atomically() {
+        use ene_permission::{
+            ConsentRecord, ConsentRepository as _, ConsentRevision, IntentFingerprint,
+            IntentOutcome, IntentOutcomeRepository as _, ShortcutIntentOutcome,
+        };
+
+        fn fingerprint(id: &str) -> IntentFingerprint {
+            IntentFingerprint {
+                intent_id: id.to_owned(),
+                kind: String::from("assign"),
+                target: String::from("consent:openai:dialogue-1:openai:main"),
+                base: String::from("consent-rev-1"),
+                rationale_origin: String::from("management-surface"),
+                rationale_quote: None,
+            }
+        }
+
+        let Some(store) = open_memory().await else {
+            return;
+        };
+        let saved = store
+            .compare_and_save(
+                None,
+                ConsentRecord {
+                    id: String::from("consent-1"),
+                    rev: ConsentRevision::from_u64(1),
+                    provider: String::from("openai"),
+                    model: String::from("dialogue-1"),
+                    credential_id: String::from("openai:main"),
+                },
+            )
+            .await;
+        assert!(
+            matches!(saved, Ok(ConsentCommitOutcome::Committed { .. })),
+            "consent must seed"
+        );
+        let hit = store
+            .shortcut_with_intent(
+                String::from("openai"),
+                String::from("dialogue-1"),
+                String::from("openai:main"),
+                fingerprint("s-1"),
+            )
+            .await;
+        assert!(
+            matches!(hit, Ok(ShortcutIntentOutcome::Hit { .. })),
+            "matching route must hit, got {hit:?}"
+        );
+        let found = store.lookup_intent_outcome("s-1").await;
+        assert!(
+            matches!(
+                found,
+                Ok(Some(ref stored))
+                    if stored.outcome
+                        == IntentOutcome::StoredAsRuleView {
+                            revision: String::from("1"),
+                        }
+            ),
+            "the hit must leave its snapshot, got {found:?}"
+        );
+        let miss = store
+            .shortcut_with_intent(
+                String::from("openai"),
+                String::from("dialogue-9"),
+                String::from("openai:main"),
+                fingerprint("s-2"),
+            )
+            .await;
+        assert!(
+            matches!(miss, Ok(ShortcutIntentOutcome::Miss { .. })),
+            "differing route must miss, got {miss:?}"
+        );
+        let missing = store.lookup_intent_outcome("s-2").await;
+        assert!(
+            matches!(missing, Ok(None)),
+            "a miss must leave no replay row"
         );
     }
 
