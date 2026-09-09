@@ -187,10 +187,22 @@ impl core::fmt::Debug for AppendHistoryCommand {
 /// returned as `Ok`, never retried automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HistoryAppendOutcome {
-    /// Committed as this message identity.
+    /// Committed as this message identity: the caller owns this row and
+    /// continues with inference, reply, and streaming for it.
     CommittedAs {
         /// Committed message identity.
         message: RawId,
+    },
+    /// Already committed under the same idempotency key by a concurrent
+    /// attempt: the caller must NOT re-run inference or re-append. It
+    /// answers the original acceptance (round below) and stops, so a
+    /// transport retry racing the original can neither duplicate effects
+    /// nor steal the round.
+    AlreadyCommittedAs {
+        /// Original message identity.
+        message: RawId,
+        /// Original round identity for the accept ack.
+        round: RawId,
     },
     /// The `expected_generation` was not current.
     StaleExpected {
