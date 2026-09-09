@@ -451,22 +451,21 @@ impl HostHandle {
 
     /// Runs the submit pipeline for one [`SubmitTextInput`] frame.
     ///
-    /// Order: durable idempotent replay, presence attach, intake evaluation,
-    /// setup/consent/credential admission (live authorization included),
-    /// owner append, transient round recording, inference dispatch, reply
-    /// append with undelivered registration, usage recording, then the
-    /// response stream. Admission precedes the append so a declined input
-    /// leaves neither history rows nor transient round claims behind; maps
-    /// are recorded only after the append commits, and a racy duplicate
-    /// that lands on [`HistoryAppendOutcome::AlreadyCommittedAs`] answers
-    /// the original accept without re-running inference. The wire companion
-    /// ref is echo-only: this Host serves a single companion resolved
-    /// through [`ensure_running_companion`](CompanionRepository::ensure_running_companion),
-    /// because no response in `Stage 2` ever issues a companion ref for the
-    /// Client to echo back. The round premise prefers the envelope
-    /// `round_view` (the comparison-material carrier) and falls back to the
-    /// input `round`; a present-but-unresolvable round is stale, never
-    /// rebound.
+    /// Order: companion mapping, mandatory command key, durable idempotent
+    /// replay, presence attach, intake evaluation, setup/consent/credential
+    /// admission (live authorization included), owner append, transient
+    /// round recording, inference dispatch, reply append with undelivered
+    /// registration, usage recording, then the response stream. Admission
+    /// precedes the append so a declined input leaves neither history rows
+    /// nor transient round claims behind; maps are recorded only after the
+    /// append commits, and a racy duplicate that lands on
+    /// [`HistoryAppendOutcome::AlreadyCommittedAs`] answers the original
+    /// accept without re-running inference. The inbound companion ref
+    /// resolves through [`HostHandle::resolve_companion`]: presence facts
+    /// issue the projection the Client echoes back. The round premise
+    /// prefers the envelope `round_view` (the comparison-material carrier)
+    /// and falls back to the input `round`; a present-but-unresolvable
+    /// round is stale, never rebound.
     ///
     /// Presence attach runs only when the loaded attribution is `NoActive`,
     /// and only on the envelope's observed generation premise: a missing
@@ -533,6 +532,40 @@ impl HostHandle {
                 intake_reason(&RevalidationReason::MissingCommandId),
             )];
         };
+        // Durable replay precedes presence attach: an exact retry answers
+        // from the stored marker without advancing presence generation or
+        // touching any other state, while a conflicting reuse rejects just
+        // as early.
+        match self.store.lookup_command(companion, &command).await {
+            Err(_) => return vec![held_frame(frame, live)],
+            Ok(Some(found)) => {
+                let sender = (
+                    frame.envelope.sender.incarnation_id.counter,
+                    frame.envelope.sender.incarnation_id.random,
+                );
+                if !command_matches(&found, submit, sender) {
+                    return vec![reject_frame(
+                        frame,
+                        live,
+                        RejectKind::ConflictingCommand,
+                        format!(
+                            "command {} reused with different content",
+                            command.0.as_uuid().as_hyphenated()
+                        ),
+                    )];
+                }
+                return self
+                    .replay_accept(
+                        frame,
+                        live,
+                        companion,
+                        &command,
+                        attribution.generation.as_u64(),
+                    )
+                    .await;
+            }
+            Ok(None) => {}
+        }
         // The winner's intake premise below carries the fresh generation from
         // the committed fact. Any other path carries the envelope view
         // untouched: intake reports a missing or mismatched view honestly.
@@ -578,36 +611,6 @@ impl HostHandle {
                     )];
                 }
             }
-        }
-        match self.store.lookup_command(companion, &command).await {
-            Err(_) => return vec![held_frame(frame, live)],
-            Ok(Some(found)) => {
-                let sender = (
-                    frame.envelope.sender.incarnation_id.counter,
-                    frame.envelope.sender.incarnation_id.random,
-                );
-                if !command_matches(&found, submit, sender) {
-                    return vec![reject_frame(
-                        frame,
-                        live,
-                        RejectKind::ConflictingCommand,
-                        format!(
-                            "command {} reused with different content",
-                            command.0.as_uuid().as_hyphenated()
-                        ),
-                    )];
-                }
-                return self
-                    .replay_accept(
-                        frame,
-                        live,
-                        companion,
-                        &command,
-                        attribution.generation.as_u64(),
-                    )
-                    .await;
-            }
-            Ok(None) => {}
         }
         let round_hint = frame
             .envelope
@@ -2031,6 +2034,64 @@ mod tests {
         assert_eq!(
             current.active_client, None,
             "socket close clears the active client"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn replay_after_disconnect_neither_stales_nor_reattaches() {
+        use ene_companion::CompanionRepository as _;
+        use ene_presence::PresenceRepository as _;
+
+        let Some((handle, dir)) = setup_handle("dlg-replay-disc").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        assert!(
+            register_assign_complete(&handle, &live, &transport).await,
+            "setup must complete"
+        );
+        let frame = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
+        let accepted = handle
+            .handle_frame(frame.clone(), live.clone(), &transport)
+            .await;
+        assert!(
+            accepted.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+            )),
+            "the send attaches and accepts, got {accepted:?}"
+        );
+        handle.note_disconnect("client-a").await;
+        // The durable replay check precedes presence attach: the same
+        // command replays its original accept even though the device is
+        // NoActive again, and presence stays untouched (no re-attach, no
+        // generation advance for a send that changes nothing).
+        let replayed = handle.handle_frame(frame, live.clone(), &transport).await;
+        assert!(
+            replayed.first().is_some_and(|first| matches!(
+                &first.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { .. })
+            )),
+            "the post-disconnect retry must replay, not stale, got {replayed:?}"
+        );
+        let companion = handle.store.ensure_running_companion().await;
+        let Ok(companion) = companion else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let attribution = handle.store.load_attribution(companion.as_raw()).await;
+        assert!(
+            matches!(&attribution, Ok(Some(current)) if current.state == ene_presence::PresenceState::NoActive && current.active_client.is_none()),
+            "the replay must not re-attach presence, got {attribution:?}"
         );
         remove_data_dir(&dir);
     }
