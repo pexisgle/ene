@@ -18,6 +18,11 @@ pub enum RejectKind {
     MissingRequiredField,
     /// No common major version; the connection cannot proceed.
     IncompatibleProtocol,
+    /// A reused command key arrived with different content than the stored
+    /// row. The durable key already owns its fingerprint, so the conflicting
+    /// send is refused without side effects; retrying the same bytes fails
+    /// identically, while retrying the original content replays cleanly.
+    ConflictingCommand,
 }
 
 /// One rejected message: kind plus operational detail only (never secrets,
@@ -55,7 +60,17 @@ mod tests {
 
     #[test]
     fn reject_kinds_are_distinct_outcomes() {
-        assert!(RejectKind::UnsupportedMessage != RejectKind::IncompatibleProtocol);
-        assert!(RejectKind::UnsupportedFieldValue != RejectKind::MissingRequiredField);
+        assert_ne!(
+            RejectKind::UnsupportedMessage,
+            RejectKind::IncompatibleProtocol
+        );
+        assert_ne!(
+            RejectKind::UnsupportedFieldValue,
+            RejectKind::MissingRequiredField
+        );
+        assert_ne!(
+            RejectKind::ConflictingCommand,
+            RejectKind::UnsupportedMessage
+        );
     }
 }

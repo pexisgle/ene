@@ -242,6 +242,15 @@ pub enum HistoryAppendOutcome {
     /// not be attributed to the new consent without a fresh check. Carries
     /// no payload: the caller reloads and answers `consent-stale`.
     StaleConsent,
+    /// A reused command key arrived with different content than the stored
+    /// row. The fingerprint (round, role, text, language, round wire, and
+    /// incarnation) did not match, so the send is declined without side
+    /// effects: no new row, no undelivered registration, no inference.
+    /// Carries no payload (the key itself is the caller's correlation): the
+    /// Host answers a typed wire rejection, never an intake outcome, and
+    /// never retries automatically. Resending the original content replays
+    /// as [`HistoryAppendOutcome::AlreadyCommittedAs`] instead.
+    CommandConflict,
     /// Held by the companion lifecycle.
     HeldByLifecycle {
         /// Lifecycle that held the append.
