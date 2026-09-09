@@ -106,7 +106,7 @@ use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::DeviceWireId;
 use ene_api::v1::refs::{ConnectionWireId, WireMessageId, WireMessageType};
 use ene_api::v1::reject::{RejectKind, RejectNotice};
-use ene_companion::CompanionRepository;
+use ene_companion::{CompanionId, CompanionRepository};
 use ene_credential::{
     CredentialApprovalRepository, CredentialRef, CredentialStore, CredentialTechnicalError,
     DevicePairingRepository, DevicePairingStatus, DeviceRecord, EnvCredentialStore,
@@ -369,6 +369,17 @@ pub struct HostHandle {
     /// acceptance. Each nonce is consumed on first proof regardless of
     /// outcome, so a captured proof cannot replay.
     pub(crate) pending_nonces: StdMutex<HashMap<String, String>>,
+    /// Opaque companion projection issued by this handle.
+    ///
+    /// The domain wire-ref mapping for the single Stage 2 companion: every
+    /// outbound presence/companion ref renders this string, and every
+    /// inbound companion ref resolves through
+    /// [`HostHandle::resolve_companion`] — exact match against this value,
+    /// never parsed, never derived. Minted fresh per handle (restarts
+    /// rotate it; Clients relearn it from the next presence fact and
+    /// converge through revalidation), so the projection is a genuine
+    /// Host-owned mapping entry rather than a function of the domain id.
+    pub(crate) companion_wire: String,
 }
 
 impl HostHandle {
@@ -424,7 +435,36 @@ impl HostHandle {
             cred_store,
             auth_store,
             pending_nonces: StdMutex::new(HashMap::new()),
+            companion_wire: RawId::new().as_uuid().to_string(),
         })
+    }
+
+    /// Returns the opaque companion projection this handle issues.
+    ///
+    /// Test scaffolding and the mapping check share one vocabulary through
+    /// this accessor; Clients learn the value from presence facts instead.
+    pub(crate) fn companion_wire(&self) -> &str {
+        &self.companion_wire
+    }
+
+    /// Resolves an inbound companion wire ref to its domain companion.
+    ///
+    /// The domain wire-ref mapping for the single Stage 2 companion: only
+    /// the projection this handle issued resolves, to the running
+    /// companion; any other string is unknown — never guessed, never
+    /// parsed, never derived. Callers answer `unknown-companion`
+    /// revalidation (or an empty view) on `Ok(None)`, so a rotated
+    /// projection (restart) converges through one revalidation round trip.
+    /// Store failures stay errors (the caller holds), distinct from
+    /// unknown refs.
+    pub(crate) async fn resolve_companion(
+        &self,
+        wire: &str,
+    ) -> Result<Option<CompanionId>, ene_companion::CompanionTechnicalError> {
+        if wire != self.companion_wire.as_str() {
+            return Ok(None);
+        }
+        self.store.ensure_running_companion().await.map(Some)
     }
 
     /// Runs the full orchestration pipeline for one inbound frame.
@@ -943,7 +983,7 @@ impl HostHandle {
                         frame,
                         live,
                         "PresenceAttribution",
-                        WirePayload::PresenceAttribution(attribution_to_wire(&attribution)),
+                        WirePayload::PresenceAttribution(attribution_to_wire(self, &attribution)),
                     ));
                 }
                 out
@@ -960,34 +1000,30 @@ impl HostHandle {
     }
 }
 
-/// Maps a durable attribution to its wire fact: refs are one-way opaque
-/// projections (never the canonical domain UUIDs), generation travels as a
-/// value copy. Reporting only, never authority: no Host path parses these
-/// strings back, and Clients must treat them as opaque.
+/// Maps a durable attribution to its wire fact: the companion ref renders
+/// the handle-issued projection (resolvable back through
+/// [`HostHandle::resolve_companion`]), the client ref is a one-way opaque
+/// projection, and generation travels as a value copy. Reporting only,
+/// never authority: no Host path parses these strings into domain ids —
+/// companion refs resolve through the mapping, and Clients must treat both
+/// as opaque.
 ///
-/// Projections reuse the `device_client` recipe — `UUIDv5` over a
-/// kind-separated label — so they are stable across restarts without any
-/// mapping table, while remaining non-reversible: parsing one yields no
-/// domain identity.
+/// The client projection reuses the `device_client` recipe — `UUIDv5` over
+/// a kind-separated label — so it is stable across restarts without any
+/// mapping table, while remaining non-reversible. It stays one-way (rather
+/// than mapped) because nothing ever echoes it back: no inbound DTO carries
+/// a `ClientWireRef`, so a mapping would be write-only. The Client's
+/// operative wire identity remains the device projection plus incarnation,
+/// both resolved table-side.
 fn attribution_to_wire(
+    handle: &HostHandle,
     attribution: &ene_presence::PresenceAttribution,
 ) -> ene_api::v1::presence::PresenceAttributionWire {
     use ene_api::v1::presence::PresenceStateWire;
     use ene_api::v1::refs::{ClientWireRef, CompanionWireRef};
     use ene_presence::PresenceState;
     ene_api::v1::presence::PresenceAttributionWire {
-        companion: CompanionWireRef(
-            Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!(
-                    "ene-presence-companion:{}",
-                    attribution.companion.as_uuid().as_hyphenated()
-                )
-                .as_bytes(),
-            )
-            .as_hyphenated()
-            .to_string(),
-        ),
+        companion: CompanionWireRef(handle.companion_wire().to_string()),
         state: match attribution.state {
             PresenceState::Present => PresenceStateWire::Present,
             PresenceState::NoActive => PresenceStateWire::NoActive,

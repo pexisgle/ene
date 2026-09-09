@@ -503,8 +503,20 @@ impl HostHandle {
             return vec![unpaired_close(frame, live)];
         };
         let client = device_client(&device_wire);
-        let Ok(companion) = self.store.ensure_running_companion().await else {
-            return vec![held_frame(frame, live)];
+        // The inbound companion ref resolves through the handle mapping —
+        // never assumed, never derived. An unknown ref (including a
+        // projection rotated by a restart) revalidates so the Client
+        // relearns the current projection from presence and converges.
+        let companion = match self.resolve_companion(&submit.companion.0).await {
+            Err(_) => return vec![held_frame(frame, live)],
+            Ok(None) => {
+                return vec![revalidate_frame(
+                    frame,
+                    live,
+                    intake_reason(&RevalidationReason::UnknownCompanion),
+                )];
+            }
+            Ok(Some(companion)) => companion,
         };
         let Ok(Some(mut attribution)) = self.store.load_attribution(companion.as_raw()).await
         else {
@@ -997,7 +1009,10 @@ impl HostHandle {
         request: &HistoryRequest,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let Ok(companion) = self.store.ensure_running_companion().await else {
+        // The timeline resolves through the same companion mapping as
+        // submits: an unknown ref (or an unreadable store) answers an empty
+        // view, which is the documented `Stage 2` gap for this path.
+        let Ok(Some(companion)) = self.resolve_companion(&request.companion.0).await else {
             return vec![empty_history(frame, live)];
         };
         let since = request
@@ -1179,6 +1194,7 @@ mod tests {
     }
 
     fn submit_frame(
+        companion: &str,
         generation: Option<u64>,
         round: Option<RoundWireId>,
         local_id: &str,
@@ -1199,7 +1215,7 @@ mod tests {
         let frame = ene_plugin_ipc::WireFrame {
             envelope,
             payload: WirePayload::SubmitTextInput(SubmitTextInput {
-                companion: CompanionWireRef(String::from("companion-echo")),
+                companion: CompanionWireRef(companion.to_string()),
                 round: None,
                 local_id: ClientLocalId(local_id.to_string()),
                 body: TextBodyWire {
@@ -1237,7 +1253,7 @@ mod tests {
         stamped(frame, connection)
     }
 
-    fn history_frame(connection: ConnectionWireId) -> ene_plugin_ipc::WireFrame {
+    fn history_frame(companion: &str, connection: ConnectionWireId) -> ene_plugin_ipc::WireFrame {
         let frame = ene_plugin_ipc::WireFrame {
             envelope: new_outgoing_envelope(
                 ProtocolVersion::V1,
@@ -1245,7 +1261,7 @@ mod tests {
                 WireMessageType(String::from("HistoryRequest")),
             ),
             payload: WirePayload::HistoryRequest(ene_api::v1::round::HistoryRequest {
-                companion: CompanionWireRef(String::from("companion-echo")),
+                companion: CompanionWireRef(companion.to_string()),
                 since: None,
                 limit: 100,
             }),
@@ -1413,7 +1429,14 @@ mod tests {
         let live = live_input("client-a");
         let denied = handle
             .handle_frame(
-                submit_frame(Some(0), None, "local-1", "hello", live.connection_id),
+                submit_frame(
+                    handle.companion_wire(),
+                    Some(0),
+                    None,
+                    "local-1",
+                    "hello",
+                    live.connection_id,
+                ),
                 live.clone(),
                 &transport,
             )
@@ -1486,7 +1509,14 @@ mod tests {
         let live = live_input("client-never-attached");
         let answers = handle
             .handle_frame(
-                submit_frame(None, None, "local-1", "hello", live.connection_id),
+                submit_frame(
+                    handle.companion_wire(),
+                    None,
+                    None,
+                    "local-1",
+                    "hello",
+                    live.connection_id,
+                ),
                 live.clone(),
                 &transport,
             )
@@ -1549,7 +1579,14 @@ mod tests {
         let live = live_input("client-never-attached");
         let answers = handle
             .handle_frame(
-                submit_frame(Some(7), None, "local-1", "hello", live.connection_id),
+                submit_frame(
+                    handle.companion_wire(),
+                    Some(7),
+                    None,
+                    "local-1",
+                    "hello",
+                    live.connection_id,
+                ),
                 live.clone(),
                 &transport,
             )
@@ -1677,7 +1714,14 @@ mod tests {
             )
             .await;
         assert_eq!(shown.len(), 1, "a view request answers once");
-        let frame = submit_frame(Some(0), None, "local-1", "hello", live.connection_id);
+        let frame = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
         let responses = handle
             .handle_frame(frame.clone(), live.clone(), &transport)
             .await;
@@ -1779,7 +1823,11 @@ mod tests {
             "a presentation observation answers nothing"
         );
         let restored = handle
-            .handle_frame(history_frame(live.connection_id), live.clone(), &transport)
+            .handle_frame(
+                history_frame(handle.companion_wire(), live.connection_id),
+                live.clone(),
+                &transport,
+            )
             .await;
         assert_eq!(restored.len(), 1, "history answers once");
         let Some(view) = restored.first() else {
@@ -1808,7 +1856,11 @@ mod tests {
             replay.payload
         );
         let again = handle
-            .handle_frame(history_frame(live.connection_id), live.clone(), &transport)
+            .handle_frame(
+                history_frame(handle.companion_wire(), live.connection_id),
+                live.clone(),
+                &transport,
+            )
             .await;
         let Some(second) = again.first() else {
             remove_data_dir(&dir);
@@ -1833,7 +1885,14 @@ mod tests {
             register_assign_complete(&handle, &live, &transport).await,
             "setup must complete"
         );
-        let frame = submit_frame(Some(0), None, "local-9", "hello", live.connection_id);
+        let frame = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-9",
+            "hello",
+            live.connection_id,
+        );
         let accepted = handle
             .handle_frame(frame.clone(), live.clone(), &transport)
             .await;
@@ -1870,6 +1929,13 @@ mod tests {
         let relive = live_input("client-a");
         let mut resent = frame;
         resent.envelope.sender.connection_id = Some(relive.connection_id);
+        // A restarted handle rotates its companion projection: a real Client
+        // relearns it from the reconnect presence fact before retrying. The
+        // retried command (id, content, incarnation) is unchanged, so the
+        // replay path still answers the original accept.
+        if let WirePayload::SubmitTextInput(ref mut input) = resent.payload {
+            input.companion = CompanionWireRef(reopened.companion_wire().to_string());
+        }
         let replayed = reopened
             .handle_frame(resent, relive.clone(), &transport)
             .await;
@@ -1890,7 +1956,7 @@ mod tests {
         );
         let restored = reopened
             .handle_frame(
-                history_frame(relive.connection_id),
+                history_frame(reopened.companion_wire(), relive.connection_id),
                 relive.clone(),
                 &transport,
             )
@@ -1927,7 +1993,14 @@ mod tests {
         );
         let accepted = handle
             .handle_frame(
-                submit_frame(Some(0), None, "local-1", "hello", live.connection_id),
+                submit_frame(
+                    handle.companion_wire(),
+                    Some(0),
+                    None,
+                    "local-1",
+                    "hello",
+                    live.connection_id,
+                ),
                 live.clone(),
                 &transport,
             )
@@ -1975,7 +2048,14 @@ mod tests {
         );
         let accepted = handle
             .handle_frame(
-                submit_frame(Some(0), None, "local-1", "probe", live.connection_id),
+                submit_frame(
+                    handle.companion_wire(),
+                    Some(0),
+                    None,
+                    "local-1",
+                    "probe",
+                    live.connection_id,
+                ),
                 live.clone(),
                 &transport,
             )
@@ -1990,7 +2070,14 @@ mod tests {
         let failing = FakeProviderTransport::failing(FakeFailure::Transport(String::from("down")));
         let responses = handle
             .handle_frame(
-                submit_frame(Some(1), None, "local-9", "hello", live.connection_id),
+                submit_frame(
+                    handle.companion_wire(),
+                    Some(1),
+                    None,
+                    "local-9",
+                    "hello",
+                    live.connection_id,
+                ),
                 live.clone(),
                 &failing,
             )
@@ -2148,7 +2235,14 @@ mod tests {
             register_assign_complete(&handle, &live, &transport).await,
             "setup must complete"
         );
-        let mut frame = submit_frame(Some(0), None, "local-1", "hello", live.connection_id);
+        let mut frame = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
         frame.envelope.correlation.command_id = None;
         let declined = handle.handle_frame(frame, live.clone(), &transport).await;
         let Some(only) = declined.first() else {
@@ -2191,7 +2285,14 @@ mod tests {
             register_assign_complete(&handle, &live, &transport).await,
             "setup must complete"
         );
-        let frame = submit_frame(Some(0), None, "local-1", "hello", live.connection_id);
+        let frame = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
         let first = handle
             .handle_frame(frame.clone(), live.clone(), &transport)
             .await;
@@ -2281,6 +2382,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_with_unknown_companion_needs_revalidation() {
+        use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+
+        let Some((handle, dir)) = setup_handle("dlg-unknowncomp").await else {
+            return;
+        };
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        assert!(
+            register_assign_complete(&handle, &live, &transport).await,
+            "setup must complete"
+        );
+        let declined = handle
+            .handle_frame(
+                submit_frame(
+                    "not-the-issued-projection",
+                    Some(0),
+                    None,
+                    "local-1",
+                    "hello",
+                    live.connection_id,
+                ),
+                live.clone(),
+                &transport,
+            )
+            .await;
+        let Some(only) = declined.first() else {
+            remove_data_dir(&dir);
+            return;
+        };
+        assert!(
+            matches!(
+                &only.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::NeedsRevalidation {
+                    reason
+                }) if reason.0 == "unknown-companion"
+            ),
+            "an unresolvable companion ref must revalidate, got {:?}",
+            only.payload
+        );
+        let companion = handle.store.ensure_running_companion().await;
+        let Ok(companion) = companion else {
+            remove_data_dir(&dir);
+            return;
+        };
+        let timeline = handle.store.load_timeline(companion, None, 50).await;
+        assert!(
+            matches!(&timeline, Ok(items) if items.is_empty()),
+            "the unknown-companion send must append nothing, got {timeline:?}"
+        );
+        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
     async fn consent_move_mid_flight_interrupts_adoption() {
         use ene_companion::{CompanionRepository as _, HistoryRepository as _};
 
@@ -2297,7 +2452,14 @@ mod tests {
             db: dir.join("app.db"),
             inner: fake,
         };
-        let frame = submit_frame(Some(0), None, "local-1", "hello", live.connection_id);
+        let frame = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
         let responses = handle.handle_frame(frame, live.clone(), &transport).await;
         let Some(last) = responses.last() else {
             remove_data_dir(&dir);
