@@ -2,6 +2,8 @@
 
 状態: **再構成済みBaseline**
 
+本書は、eneの目的、主要概念の意味と違い、製品対象、非目標を定義する。Ownerから観測できる必須挙動、条件、例外は[要件](requirements.md)だけに置き、本書は該当節を参照する。
+
 ## 製品の要約
 
 eneは、一人のOwnerが管理するHost上で継続する、Companion中心のパーソナルAIシステムである。
@@ -12,68 +14,64 @@ eneはCompanionを体験上の中心に置くが、汎用作業Agentとしての
 
 ## 利用者と実行場所
 
-- 一つのene環境は一人のOwnerに属する。複数人の独立した利用者を同じ環境へ収容しない。
-- Hostはene Coreを実行し、eneが管理する永続状態の正本と継続実行を担うOwner管理下のPCである。通常のTask・Task Agentの作業は、Computer Use等のClient依存部分を除き、CompanionのClient間移動から独立してHost上で継続する。
-- Clientは同じHostへ接続し、Companionが存在してOwnerと対話し、そのPCの画面・device・Computer Use等と関わる場所である。表示・会話・操作の入口であり、永続状態の正本ではない。Hostと同じPCにも別PCにも置ける。
-- 推論はHost、OwnerのLAN、またはOwnerが選んだCloud Providerで実行できる。
+- Owner: 一つのene環境を所有し管理する一人の利用者。複数人の独立した利用者を同じ環境へ収容しない。
+- Host: ene Coreを実行し、eneが管理する永続状態の正本と継続実行を担うOwner管理下のPC。
+- Client: 同じHostへ接続し、Companionが存在してOwnerと対話し、そのPCの画面・device・Computer Use等と関わる場所。表示・会話・操作の入口であり、永続状態の正本ではない。Hostと同じPCにも別PCにも置ける。
+- 推論先: Host、OwnerのLAN、またはOwnerが選んだCloud Provider。
+
+所有、継続、接続の契約は[所有と実行](requirements.md#所有と実行)と[Remote Client](requirements.md#remote-client)に定める。
 
 ## 主要概念
 
 ### Companion
 
-Characterを基に作られ、Memory、Relationship、Companion State、設定をExperienceから形成する継続的な個体。同じCharacterから作ったCompanionも別個体である。
+Characterを基に作られ、Memory、Relationship、Companion State、設定をExperienceから形成する継続的な個体。同じCharacterから作ったCompanionも別個体である。Ownerとの会話、判断、Taskの開始・委任・調整、結果の統合の中心であり、まとまった実作業を本体で直接抱える主体ではない。
 
-Running Companionは基本的に同時に一つのClientへ存在し、Body、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useがその存在場所に結び付く。必要に応じてClient間を移動できる。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わず、伝えられなかった事項は次に移動したClientでまとめて報告する。Stopped Companionはデータを保持して再開できるが、どのClientにもHostにもpresenceを持たない。Ownerとの継続的な会話、判断、Taskの開始・委任・調整、steering、結果の受領・統合の中心であり、多数のまとまった実作業を本体で直接抱えることを基本にしない。
+Running Companionは基本的に同時に一つのClientにだけ存在し、Body、会話、Voice、Observationとの関係、自発的interaction、Computer Useはその存在場所に結び付く。active Clientがない間もHost正本で同じ個体として存続する。Stopped Companionはデータを保持して再開できるが、どのClientにもHostにもpresenceを持たない。存在場所、移動、停止、削除の契約は[Remote Client](requirements.md#remote-client)と[停止と削除](requirements.md#停止と削除)に定める。
 
 ### Character
 
-配布可能な静的人格、設定、Body、Voice、表現、推奨Skillの組み合わせ。特定Ownerとの経験や関係は含まない。Character Packageはそのimport/export単位である。
+配布可能な静的人格、設定、Body、Voice、表現、推奨Skillの組み合わせ。特定Ownerとの経験や関係は含まない。Character Packageはそのimport/export単位である（[Character Package](requirements.md#character-package)）。
 
 ### Experience
 
-CompanionがOwnerとの対話、Task、Tool利用、Observation、他のCompanionとの交流その他の活動を通じて経験した出来事とその結果。ExperienceはMemory、Skill、Relationship、Companion State等が形成または更新される根拠になり得る。Experienceであることは、そのRaw dataを恒久保存することを意味しない。
+CompanionがOwnerとの対話、Task、Tool利用、Observation、他のCompanionとの交流その他の活動を通じて経験した出来事とその結果。Memory、Skill、Relationship、Companion State等が形成または更新される根拠になり得るが、Raw dataの恒久保存を意味しない。
 
-Memory、Skill、Relationship、比較的持続するCompanion State等へ利用するときは、必要に応じて複数messageや一連の行動を、topic、出来事、Task、意思決定、共有体験等の意味的なまとまりとして要約したExperience Summaryを根拠にできる。Experience SummaryはRaw Historyの代替でも独立した知識の正本でもなく、長期状態を形成・説明するための圧縮された根拠である。
+Experience Summaryは、複数messageや一連の行動を意味的なまとまりとして要約した、長期状態を形成・説明するための圧縮された根拠である。Raw Historyの代替でも独立した知識の正本でもない（[ExperienceとExperience Summary](requirements.md#experienceとexperience-summary)）。
 
 ### Task
 
-開始、進行、判断待ち、完了、失敗、Cancel等の状態を追跡する作業単位。Ownerの依頼によるものとCompanionが自発的に始めるものを含む。ある程度まとまった作業は基本的にTaskとして扱い、実行は原則Task Agentへ委任する。Taskは実行主体そのものではない。
+開始、進行、判断待ち、完了、失敗、Cancel等の状態を追跡する作業単位。Ownerの依頼によるものとCompanionが自発的に始めるものを含む。Taskは実行主体そのものではない。
 
 ### Task Agent
 
-CompanionからTaskまたはその一部を委任された一時的な実行主体。独立した長期人格やRelationshipを持たず、委任元Companionの権限とTask境界内で作業し、結果を返す。Companion自身の軽微な処理や判断のための情報取得まで、一律にTask Agentへ委任するものではない。
+CompanionからTaskまたはその一部を委任された一時的な実行主体。独立した長期人格やRelationshipを持たず、委任元Companionの権限とTask境界内で作業し、結果を返す。まとまった作業は原則Task Agentへ委任するが、Companion自身の軽微な処理まで一律に委任するものではない（[Task](requirements.md#task)）。
 
 ### ObservationとObserver
 
-ObservationはClientの画面やComputerの操作状況を観測する活動である。ObserverはClientに紐づく特殊な共有主体であり、専用のmodel／Provider assignmentの下でCapture・候補検知を共有し、文脈上関係がありそうなCompanionへeventを伝える役割を指す。CompanionやTask Agentではなく、Companionごとの自発性・Provider overrideとは異なる制御単位である。専用processや内部subsystemを意味しない。
+ObservationはClientの画面やComputerの操作状況を観測する活動である。ObserverはClientに紐づく特殊な共有主体であり、Capture・候補検知を共有し、文脈上関係がありそうなCompanionへeventを伝える役割を指す。CompanionやTask Agentではなく、Companionごとの自発性とは異なる制御単位である。専用processや内部subsystemを意味しない（[Observation](requirements.md#observation)）。
 
 ### Workspace
 
-Taskが作業対象として利用するfolder、file、外部source等との関連付け。WorkspaceはTaskより上位の独立containerやデータ所有主体ではなく、Taskに従属する作業場である。Taskとの関連が削除されても、外部のfileやsource自体は削除しない。
+Taskが作業対象として利用するfolder、file、外部source等との関連付け。Taskより上位の独立containerやデータ所有主体ではなく、Taskに従属する作業場である（[Workspace](requirements.md#workspace)）。
 
 ### MemoryとSkill
 
-Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Memoryは後のExperienceによって内容、重要度、scope、時間的意味等を継続的に更新できる。通常の忘却、訂正、失効、置換、統合では保存済みMemoryやその過去revision・根拠を削除せず、現在の認識や重要度、想起優先度等を更新する。OwnerがPrivacyまたはSecurityのため特定情報そのものをene内部から強制消去するよう明示したtargeted deletionは、この保持原則より優先する。容量管理は通常の忘却とは別であり、過去revision・Experience Summary等の自動cleanupは既定OFF、Ownerの明示的な有効化により設定可能とする。MemoryはOwner、Companion、出来事、状況等についての長期的な理解ではRelationshipより優先される主要な知識状態である。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
+Experienceから形成され得るLearning。Memoryは出来事、事実、意味、好み等を後の理解に用いる現在の認識であり、一般世界知識やRaw Historyの保存領域ではない。Skillは将来の類似Taskで再利用できる手順、専門知識、実行上の注意、補助resource等をまとめたLearningで、Agent Skillsとの相互運用を前提とする。
 
-ene内部のMemoryとSkillはCompanionまたはGlobalのscopeを持ち得る。特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とし、Ownerが明示的に共有を求めた場合、または内容と文脈から複数Companionで共通に利用すべきことが明確な場合だけGlobal scopeにする。単に重要、有用、一般的な好みであることだけを理由にGlobal scopeへ昇格させない。
+Memoryは後のExperienceによって継続的に更新される。通常の忘却は削除ではなく想起の抑制であり、Privacy/Security目的でOwnerが明示したtargeted deletionだけが例外的な消去である。特定CompanionとのExperienceから形成されたLearningはCompanion scopeを既定とし、Global scopeは複数Companionで共通に利用すべきことが明確な場合に限る。保持、訂正、scope、容量管理、targeted deletionの契約は[MemoryとSkill](requirements.md#memoryとskill)、[Scope](requirements.md#scope)、[重要度、忘却、訂正](requirements.md#重要度忘却訂正)、[Privacy/Security目的のtargeted deletionと履歴保持](requirements.md#privacysecurity目的のtargeted-deletionと履歴保持)、[Learningと根拠の容量管理](requirements.md#learningと根拠の容量管理)に定める。
 
 ### Relationship
 
-Relationshipは、あるCompanionとその相手であるOwnerまたは別のCompanionとの共有Experienceから形成される、そのCompanion自身による現在の関係認識である。各RelationshipはCompanion側の個体固有状態であり、相手側の認識と自動的に同一または対称にはしない。
-
-RelationshipはMemoryの補助となるcompactな状態であり、人物情報、出来事、Preference等の詳細を第二のMemoryとして複製しない。必要な事実はMemoryやExperience Summaryを参照し、Relationship自身は距離感、交流傾向、関係の変化等、関係そのものの現在の解釈へ絞る。Memoryと矛盾する事実認識をRelationshipで上書きせず、Permission、Rule、安全境界にも影響しない。
+あるCompanionとその相手（Ownerまたは別のCompanion）との共有Experienceから形成される、そのCompanion自身による現在の関係認識。Companion側の個体固有状態であり、相手側の認識と自動的に同一または対称にはならない。Memoryの補助となるcompactな状態であり、事実の詳細を第二のMemoryとして複製しない（[Relationship](requirements.md#relationship)）。
 
 ### Companion State
 
-Companion Stateは、Experienceから形成される、あるCompanion自身の現在の内的状態と振る舞いの傾向である。感情、関心、Experienceによって形成された人格上の傾向等を含み得る。
-
-Memoryが出来事、事実、意味等についての現在の認識を扱い、Relationshipが相手との関係についての現在解釈を扱うのに対し、Companion Stateは、それらを現在の表現、注意、会話や行動の傾向へどう反映するかを扱う。MemoryやRelationshipの内容を第二の正本として複製しない。
-
-Companion Stateには、最近のExperienceや時間経過によって変化する一時的な状態と、Experienceの蓄積によって形成される比較的持続的な傾向があり得る。具体的な分類、dimension、内部表現、数値scale、更新・減衰方式は設計で定める。
+Experienceから形成される、あるCompanion自身の現在の内的状態と振る舞いの傾向。感情、関心、人格上の傾向等を含み得る。Memoryが出来事・事実についての認識、Relationshipが相手との関係についての解釈を扱うのに対し、Companion Stateはそれらを現在の表現、注意、会話や行動の傾向へどう反映するかを扱う。一時的な状態と比較的持続的な傾向があり得る（[Companion State](requirements.md#companion-state)）。
 
 ### Capability、Action、Rule
 
-CapabilityはFilesystem、Network、Device等を利用する実行能力、ActionはCapabilityを使う具体的作用、Ruleは将来のActionを評価するOwnerの方針である。Rule自体はActionを開始しない。
+CapabilityはFilesystem、Network、Device等を利用する実行能力、ActionはCapabilityを使う具体的作用、Ruleは将来のActionを評価するOwnerの方針である。Rule自体はActionを開始しない（[Permissionと安全境界](requirements.md#permissionと安全境界)）。
 
 ## 製品対象
 
