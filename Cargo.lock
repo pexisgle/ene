@@ -274,6 +274,7 @@ dependencies = [
 name = "ene-companion"
 version = "0.1.0"
 dependencies = [
+ "ene-inference",
  "ene-presence",
  "ene-primitive",
  "thiserror",

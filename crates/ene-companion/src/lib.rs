@@ -24,6 +24,7 @@
 //! and generation pins at the Host boundary. This crate performs no wire
 //! mapping itself.
 
+pub mod dialogue;
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
 
