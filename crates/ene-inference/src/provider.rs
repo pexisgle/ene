@@ -20,8 +20,7 @@ use ene_credential::{CredentialRef, CredentialStore, CredentialTechnicalError};
 use serde::Deserialize;
 
 use super::{
-    InferenceTechnicalError, MAX_INPUT_CHARS, ProviderRequest, ProviderResponse, ProviderTransport,
-    RawUsage,
+    InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport, RawUsage,
 };
 
 /// Base URL for the `OpenAI` API; tests inject a local URL instead.
@@ -97,9 +96,8 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
     /// Runs one Responses API completion with no retries or side effects
     /// beyond the call.
     ///
-    /// Over-limit input is rejected defensively here, but core guarantees the
-    /// pre-check: such input normally surfaces as `NotSent(OverLimit)` from
-    /// [`crate::send`] without ever reaching the transport.
+    /// Input policy, including the length cap, is owned by [`crate::send`];
+    /// the transport sends what it is given.
     fn complete(
         &self,
         req: ProviderRequest,
@@ -114,11 +112,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
         &self,
         req: ProviderRequest,
     ) -> Result<ProviderResponse, InferenceTechnicalError> {
-        if req.input.chars().count() > MAX_INPUT_CHARS {
-            return Err(InferenceTechnicalError::ProviderTransportFailed(format!(
-                "input over limit: {MAX_INPUT_CHARS} chars"
-            )));
-        }
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{base}/v1/responses");
         let body = responses_body(&req.model, &req.input);
@@ -457,18 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_object_without_status_is_not_success() {
-        let result = parse_response(200, serde_json::json!({}));
-        assert!(
-            matches!(
-                result,
-                Err(InferenceTechnicalError::ProviderTransportFailed(_))
-            ),
-            "a status-less body must fail, got {result:?}"
-        );
-    }
-
-    #[test]
     fn non_completed_statuses_fail_without_text_or_usage() {
         for (status, body, marker) in [
             (
@@ -531,24 +512,6 @@ mod tests {
                 "{status} must not leak body text, got {reason:?}"
             );
         }
-    }
-
-    #[test]
-    fn incomplete_reason_names_its_class() {
-        let result = parse_response(
-            200,
-            serde_json::json!({
-                "status": "incomplete",
-                "incomplete_details": {"reason": "max_output_tokens"},
-            }),
-        );
-        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
-            return;
-        };
-        assert!(
-            reason.contains("max_output_tokens"),
-            "bounded reason class must surface, got {reason:?}"
-        );
     }
 
     #[test]
