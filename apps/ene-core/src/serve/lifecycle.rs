@@ -42,12 +42,12 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 
 /// Runs the `Stage 2` Host: opens state, builds transport, serves the socket.
 ///
-/// The inference transport binds the credential resolved at startup
-/// ([`crate::setup`] documents the resolution); per-frame consent checks stay
-/// authoritative, and the environment bearer store is label-insensitive within
-/// the `openai` provider, so a later consent reassignment cannot silently
-/// misbill. Rebinding the transport on consent change is deferred hardening.
-/// Socket-path assembly stays inside [`crate::conn`]: this entry point passes
+/// The inference transport is credential-agnostic: every provider request
+/// carries the credential the admission resolved for that use, so a consent
+/// reassignment bills the new credential on the next request without any
+/// transport rebinding. The environment bearer store serves the `openai`
+/// provider until real OS stores arrive. Socket-path assembly stays inside
+/// [`crate::conn`]: this entry point passes
 /// the data directory, never the socket path.
 ///
 /// # Errors
@@ -57,7 +57,6 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
 /// listener cannot run.
 pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
     let handle = HostHandle::open(data_dir).await?;
-    let credential = handle.startup_credential().await;
     // Base URL override for self-hosted endpoints and tests: production
     // keeps [`DEFAULT_BASE_URL`]. The test harness points a real `serve`
     // binary at a local fake Responses server through this variable (child
@@ -66,7 +65,7 @@ pub async fn serve(data_dir: &Path) -> Result<(), CoreError> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-    let transport = OpenAiResponsesTransport::new(base_url, credential, EnvCredentialStore::new())
+    let transport = OpenAiResponsesTransport::new(base_url, EnvCredentialStore::new())
         .map_err(|error| CoreError::Inference(error.to_string()))?;
     crate::conn::run(
         data_dir.to_path_buf(),

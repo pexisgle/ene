@@ -60,7 +60,7 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
-use ene_credential::{CredentialRef, CredentialRefRepository, CredentialStore};
+use ene_credential::{CredentialRefRepository, CredentialStore};
 use ene_permission::{
     ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
     IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution,
@@ -145,46 +145,7 @@ fn consent_expectation(base_view: &str, current: Option<&ConsentRecord>) -> Cons
     )
 }
 
-/// Default non-secret credential ref used before any consent exists.
-///
-/// The bearer behind it still comes from the held store at call time; this
-/// ref only names the conventional `openai` main credential.
-#[expect(
-    clippy::expect_used,
-    reason = "the conventional openai:main ref satisfies the credential grammar by construction"
-)]
-pub(crate) fn default_credential() -> CredentialRef {
-    CredentialRef::new("openai", "main")
-        .expect("the conventional openai:main ref satisfies the credential grammar")
-}
-
 impl HostHandle {
-    /// Resolves the credential ref the startup transport bills against.
-    ///
-    /// Prefers the consent-bound ref from the registry when present, else a
-    /// synthesized ref from the consent record, else the conventional default.
-    /// Best-effort: store failures fall back to the default because the
-    /// per-frame consent checks stay authoritative regardless.
-    pub(crate) async fn startup_credential(&self) -> CredentialRef {
-        let Ok(current) = self.store.load_current().await else {
-            return default_credential();
-        };
-        let Some(consent) = current else {
-            return default_credential();
-        };
-        match self.store.list_refs().await {
-            Ok(refs) => match refs
-                .iter()
-                .find(|known| known.id() == consent.credential_id)
-            {
-                Some(known) => known.clone(),
-                None => CredentialRef::new(consent.provider.clone(), "main")
-                    .unwrap_or_else(|_| default_credential()),
-            },
-            Err(_) => default_credential(),
-        }
-    }
-
     /// Maps one [`ManagementIntent`] to its `Stage 2` outcome frames.
     ///
     /// Setup pairs route through the register/assign/complete/show paths
