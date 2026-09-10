@@ -5,10 +5,101 @@
 //! judgment copies, and full internal conditions never appear in views.
 //! High-privilege final confirmation additionally never travels this wire:
 //! it stays on the Host-local trusted first-party surface (IPC §18.1).
+//!
+//! Setup target grammar: the single shared contract for Setup management
+//! targets. The Host and the CLI must both use it; neither side re-invents
+//! the mini-language.
+//!
+//! ```text
+//! credential-target = "credential:" provider ":" label
+//! consent-target    = "consent:" provider ":" model ":" credential-id
+//! setup-show        = "setup:show"
+//! setup-complete    = "setup:complete"
+//! ```
+//!
+//! Builders ([`credential_target`], [`consent_target`]) and parsers
+//! ([`parse_credential_target`], [`parse_consent_target`]) are two sides of
+//! this one contract: builders format, parsers recover the parts with the
+//! exact rules documented on each function. The Host parse is authoritative:
+//! builders are plain constructors that never bypass validation, and every
+//! part must be non-empty at parse time. The consent `credential-id` keeps
+//! its remainder verbatim and may itself contain `':'`; the credential
+//! `label` likewise keeps any further `':'` verbatim. The two Setup command
+//! targets are fixed strings ([`SETUP_SHOW_TARGET`],
+//! [`SETUP_COMPLETE_TARGET`]).
 
 use serde::{Deserialize, Serialize};
 
 use super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
+
+/// Fixed Setup command target requesting the current Setup view.
+pub const SETUP_SHOW_TARGET: &str = "setup:show";
+
+/// Fixed Setup command target marking Setup complete.
+pub const SETUP_COMPLETE_TARGET: &str = "setup:complete";
+
+/// Builds a credential Setup target: `credential:{provider}:{label}`.
+///
+/// This is a plain constructor spelling the shared grammar once; it does
+/// not validate. Non-empty `provider` and `label` are required by the
+/// grammar and enforced at Host parse, which stays authoritative.
+#[must_use]
+pub fn credential_target(provider: &str, label: &str) -> ManagementTargetWire {
+    ManagementTargetWire(format!("credential:{provider}:{label}"))
+}
+
+/// Builds a consent Setup target:
+/// `consent:{provider}:{model}:{credential-id}`.
+///
+/// This is a plain constructor spelling the shared grammar once; it does
+/// not validate. Non-empty `provider`, `model`, and `credential-id` are
+/// required by the grammar and enforced at Host parse, which stays
+/// authoritative. The `credential-id` keeps its remainder verbatim and may
+/// itself contain `':'`.
+#[must_use]
+pub fn consent_target(provider: &str, model: &str, credential_id: &str) -> ManagementTargetWire {
+    ManagementTargetWire(format!("consent:{provider}:{model}:{credential_id}"))
+}
+
+/// Parses a credential Setup target into `(provider, label)`.
+///
+/// Exact rule: strip the `credential:` prefix, split the remainder once on
+/// `':'`, and require both parts to be non-empty, else [`None`]. A wrong
+/// prefix, a missing separator, or any empty part rejects. The label keeps
+/// any further `':'` verbatim, mirroring the consent remainder rule.
+#[must_use]
+pub fn parse_credential_target(target: &ManagementTargetWire) -> Option<(String, String)> {
+    let rest = target.0.strip_prefix("credential:")?;
+    let (provider, label) = rest.split_once(':')?;
+    if provider.is_empty() || label.is_empty() {
+        return None;
+    }
+    Some((provider.to_owned(), label.to_owned()))
+}
+
+/// Parses a consent Setup target into `(provider, model, credential-id)`.
+///
+/// Exact rule: strip the `consent:` prefix, split the remainder with
+/// `splitn(3, ':')`, and require all three parts to be non-empty, else
+/// [`None`]. A wrong prefix, fewer than three parts, or any empty part
+/// rejects. The `credential-id` keeps its remainder verbatim, so it may
+/// itself contain `':'`.
+#[must_use]
+pub fn parse_consent_target(target: &ManagementTargetWire) -> Option<(String, String, String)> {
+    let rest = target.0.strip_prefix("consent:")?;
+    let mut parts = rest.splitn(3, ':');
+    let provider = parts.next()?;
+    let model = parts.next()?;
+    let credential_id = parts.next()?;
+    if provider.is_empty() || model.is_empty() || credential_id.is_empty() {
+        return None;
+    }
+    Some((
+        provider.to_owned(),
+        model.to_owned(),
+        credential_id.to_owned(),
+    ))
+}
 
 /// Management intent kinds (IPC §18.2). Stage 1 exercises the Setup range;
 /// the remaining kinds arrive with their owners, which alone may accept
@@ -165,7 +256,11 @@ pub struct ManagementView {
 #[cfg(test)]
 mod tests {
     use super::super::refs::{BaseViewMark, CommandWireId, ManagementTargetWire, ViewMarkWire};
-    use super::{IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin};
+    use super::{
+        IntentRationaleWire, ManagementIntent, ManagementIntentKind, RationaleOrigin,
+        SETUP_COMPLETE_TARGET, SETUP_SHOW_TARGET, consent_target, credential_target,
+        parse_consent_target, parse_credential_target,
+    };
     use super::{ManagementOutcome, ViewSection};
     use uuid::Uuid;
 
@@ -227,5 +322,115 @@ mod tests {
             rendered.contains("Setup status"),
             "labels stay visible: {rendered}"
         );
+    }
+
+    #[test]
+    fn credential_builder_spells_the_shared_grammar() {
+        let target = credential_target("openai", "personal");
+        assert_eq!(target.0.as_str(), "credential:openai:personal");
+    }
+
+    #[test]
+    fn consent_builder_spells_the_shared_grammar() {
+        let target = consent_target("openai", "gpt-x", "cred-1");
+        assert_eq!(target.0.as_str(), "consent:openai:gpt-x:cred-1");
+    }
+
+    #[test]
+    fn credential_builder_parser_roundtrip() {
+        let target = credential_target("openai", "personal");
+        assert_eq!(
+            parse_credential_target(&target),
+            Some((String::from("openai"), String::from("personal")))
+        );
+    }
+
+    #[test]
+    fn consent_builder_parser_roundtrip() {
+        let target = consent_target("openai", "gpt-x", "cred-1");
+        assert_eq!(
+            parse_consent_target(&target),
+            Some((
+                String::from("openai"),
+                String::from("gpt-x"),
+                String::from("cred-1")
+            ))
+        );
+    }
+
+    #[test]
+    fn credential_parser_rejects_blanks_and_wrong_shapes() {
+        for raw in [
+            "credential::personal",
+            "credential:openai:",
+            "credential::",
+            "credential:openai",
+            "credential:",
+            "consent:openai:gpt-x:cred-1",
+            "setup:show",
+            "",
+        ] {
+            let target = ManagementTargetWire(String::from(raw));
+            assert!(
+                parse_credential_target(&target).is_none(),
+                "credential parse rejects {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn consent_parser_rejects_blanks_and_wrong_shapes() {
+        for raw in [
+            "consent::gpt-x:cred-1",
+            "consent:openai::cred-1",
+            "consent:openai:gpt-x:",
+            "consent:openai:gpt-x",
+            "consent:openai",
+            "consent:",
+            "credential:openai:personal",
+            "setup:complete",
+            "",
+        ] {
+            let target = ManagementTargetWire(String::from(raw));
+            assert!(
+                parse_consent_target(&target).is_none(),
+                "consent parse rejects {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn consent_parser_preserves_colons_in_credential_id() {
+        let target = consent_target("openai", "gpt-x", "cred:with:colons");
+        assert_eq!(target.0.as_str(), "consent:openai:gpt-x:cred:with:colons");
+        assert_eq!(
+            parse_consent_target(&target),
+            Some((
+                String::from("openai"),
+                String::from("gpt-x"),
+                String::from("cred:with:colons")
+            ))
+        );
+    }
+
+    #[test]
+    fn setup_command_targets_are_fixed_strings() {
+        assert_eq!(SETUP_SHOW_TARGET, "setup:show");
+        assert_eq!(SETUP_COMPLETE_TARGET, "setup:complete");
+    }
+
+    #[test]
+    fn setup_command_targets_parse_as_neither_shape() {
+        for raw in [SETUP_SHOW_TARGET, SETUP_COMPLETE_TARGET] {
+            let target = ManagementTargetWire(String::from(raw));
+            assert!(
+                parse_credential_target(&target).is_none(),
+                "setup target is not a credential target: {raw:?}"
+            );
+            assert!(
+                parse_consent_target(&target).is_none(),
+                "setup target is not a consent target: {raw:?}"
+            );
+        }
     }
 }

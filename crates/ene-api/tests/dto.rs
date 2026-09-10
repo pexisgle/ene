@@ -75,6 +75,7 @@ fn round_trip_roundtrip() {
     roundtrip(&SubmitTextInput {
         companion: CompanionWireRef(String::from("companion-1")),
         round: None,
+        fresh: false,
         local_id: ClientLocalId(String::from("local-1")),
         body: TextBodyWire {
             text: String::from("hello"),
