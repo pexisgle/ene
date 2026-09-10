@@ -298,8 +298,23 @@ dependencies = [
 name = "ene-core"
 version = "0.1.0"
 dependencies = [
+ "ene-api",
+ "ene-companion",
  "ene-config",
+ "ene-credential",
+ "ene-ctl",
+ "ene-inference",
+ "ene-permission",
+ "ene-plugin-ipc",
+ "ene-presence",
+ "ene-presentation",
+ "ene-primitive",
+ "ene-store",
+ "serde_json",
+ "tempfile",
  "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -322,8 +337,15 @@ dependencies = [
 name = "ene-ctl"
 version = "0.1.0"
 dependencies = [
+ "ene-api",
  "ene-config",
+ "ene-credential",
+ "ene-plugin-ipc",
+ "serde",
+ "serde_json",
  "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

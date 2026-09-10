@@ -12,7 +12,7 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::CredentialTechnicalError;
-use crate::pairing::{DeviceId, decode_hex_lower, encode_hex_lower};
+use crate::pairing::{DeviceId, decode_hex_lower, encode_hex_lower, verify_pairing_proof};
 use crate::secret::SecretValue;
 
 /// File-backed custody for device-auth verification material.
@@ -209,6 +209,39 @@ impl FileDeviceAuthStore {
             });
         };
         Ok(Some(SecretValue::new(bytes)))
+    }
+
+    /// Verifies one pairing ownership proof against the persisted secret.
+    ///
+    /// Loads through [`load_secret`](FileDeviceAuthStore::load_secret) on
+    /// every call: there is no cache, so verification always observes the
+    /// latest persisted rotation or revocation. Authentication stays
+    /// per-connection-once, so the extra file read costs correctness nothing
+    /// it cannot afford. The secret bytes never leave this crate: they are
+    /// borrowed into the constant-time comparison inside
+    /// [`verify_pairing_proof`] and zeroized on drop with the [`SecretValue`].
+    /// An unknown device yields `Ok(false)`; a stored secret that is not
+    /// valid UTF-8 (never minted by the approve path, which stores UUID text)
+    /// likewise yields `Ok(false)`. Both are fail-closed without
+    /// distinguishing the reason to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// file cannot be read or fails validation.
+    pub fn verify_device_proof(
+        &self,
+        device: &DeviceId,
+        nonce: &str,
+        proof_hex: &str,
+    ) -> Result<bool, CredentialTechnicalError> {
+        let Some(secret) = self.load_secret(device)? else {
+            return Ok(false);
+        };
+        let Ok(text) = core::str::from_utf8(secret.bytes()) else {
+            return Ok(false);
+        };
+        Ok(verify_pairing_proof(text, nonce, proof_hex))
     }
 
     /// Revokes `device` by deleting its entry from the protected file.
