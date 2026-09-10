@@ -2,10 +2,6 @@
 
 本書は、CompanionがClientへ存在し、呼び出され、移動し、切断され、再接続し、Host再起動後にpresenceを復旧する過程で、**presenceとClient依存活動の帰属が曖昧にならず、二重存在・古いClientでの作用・誤った再実行を起こさないためのlogical contract**を詳細化する。後続のstate representation／concurrency／persistence／IPC／interface設計が安全に依存できる水準まで定め、具体的なmechanismは固定しない。
 
-製品挙動のsource of truthは[要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
-
-本書の「presence」「帰属」「区切り」「round」「試行」「作用」「確定度」「未伝達」「復旧」は論理的な関係であり、共通object、永続record、protocol、state machine、enumを指定しない。番号付きの段階は必要な前後関係を示し、すべてを直列実行する指定ではない。
-
 ## 1. 詳細化する問題と範囲選定
 
 Client移動を「active Client fieldの瞬間的な代入」へ落とすと、次の帰属が失われる。後続設計が誤りやすい点と、本書で定める契約は次のとおりである。
@@ -25,7 +21,7 @@ Client移動を「active Client fieldの瞬間的な代入」へ落とすと、�
 
 ## 2. 上位architectureとの位置関係
 
-[Subsystem Decomposition](../architecture/subsystems.md)の12責務、[State Ownership](../architecture/state-ownership.md)（SO）第4〜8節、[Dependency Rules](../architecture/dependency-rules.md)（DR）第3〜7節、[System Context](../architecture/system-context.md)の内外境界、[Runtime Topology](../architecture/runtime-topology.md)の配置・寿命・trust／failure boundaryを変更しない。新しいsemantic owner、万能Presence Manager、統一presence state machine、共通Client session layerを追加しない。
+上位architectureとの優先順位は[設計文書 README](../README.md#正本と優先順位)に従う。本書内のSOは[State Ownership](../architecture/state-ownership.md)、DRは[Dependency Rules](../architecture/dependency-rules.md)の節番号を指し、CC／RF／RT番号は対応するarchitecture文書（[artifact 一覧](../README.md#artifact-一覧)）の契約IDである。新しいsemantic owner、万能Presence Manager、統一presence state machine、共通Client session layerを追加しない。
 
 | 本書内の役割 | 既存の責任とauthoritativeな判断 | 本書が持ってはならない正本 |
 |---|---|---|

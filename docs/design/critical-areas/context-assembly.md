@@ -1,8 +1,6 @@
 # Context Assembly — 受渡し・利用・結果受入の詳細設計
 
-本書は、用途の異なる責務間で情報を選び、変換し、推論へ渡し、その結果を利用するときの契約を詳細化する。Context Assemblyは新しいSubsystemでも情報の正本でもない。以下の「要求」「利用単位」「対応」は論理的な関係であり、共通object、永続record、protocolを指定しない。
-
-製品挙動のsource of truthは[要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+本書は、用途の異なる責務間で情報を選び、変換し、推論へ渡し、その結果を利用するときの契約を詳細化する。Context Assemblyは新しいSubsystemでも情報の正本でもない。
 
 ## 1. 最初に詳細化する領域の選定
 
@@ -23,7 +21,7 @@ Contextは情報を集めるだけの処理に見えるが、受け手、目的�
 
 主な詳細化対象は[Cross-cutting Design](../architecture/cross-cutting.md)のCC-02・03である。CC-01のOwner意図、CC-04の活動条件、CC-05の消去参加、CC-06の推論利用、CC-07の事実の確定度が、contextを通っても失われない条件を接続する。
 
-責務・正本・依存は[Subsystem Decomposition](../architecture/subsystems.md)、[State Ownership](../architecture/state-ownership.md)（SO）第4〜8節、[Dependency Rules](../architecture/dependency-rules.md)（DR）第3〜7節を維持する。[System Context](../architecture/system-context.md)のHost／外部境界、[Runtime Topology](../architecture/runtime-topology.md)のClient・Provider・MCP・Plugin・MCP Appsのtrust／failure boundaryも変更しない。
+上位architectureとの優先順位は[設計文書 README](../README.md#正本と優先順位)に従う。本書内のSOは[State Ownership](../architecture/state-ownership.md)、DRは[Dependency Rules](../architecture/dependency-rules.md)の節番号を指し、CC／RF番号は対応するarchitecture文書（[artifact 一覧](../README.md#artifact-一覧)）の契約IDである。
 
 | 本書内の役割 | 既存の責任とauthoritativeな判断 | Contextが持ってはならない正本 |
 |---|---|---|

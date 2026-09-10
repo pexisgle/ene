@@ -3,32 +3,14 @@
 本書は Step 12 Subsystem Detailed Design として、**Character構成・配布（以下、Character）**単独を詳細化する。Step 12で未詳細化の最後のSubsystemである。
 
 本書内の CH 番号は本書内の内部責務の参照用、CD 番号は本書内のSubsystem間semantic contractの参照用であり、製品要件IDではない。
-「要求」「対応」「区間」「保留」「受入」「完了」は論理的な関係であり、共通object、永続record、protocol、state machine、enumを指定しない。
 
 ## 0. 位置付けと不変条件
 
-製品挙動の source of truth は [要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。[Context Assembly](../critical-areas/context-assembly.md)、[Action Execution](../critical-areas/action-execution.md)、[Targeted Deletion](../critical-areas/targeted-deletion.md)、[Client Presence Transition](../critical-areas/client-presence-transition.md)（以下、Presence Transition）、[Backup / Restore](../critical-areas/backup-restore.md)（以下、Backup-Restore）の一般契約は、隣接する確定済み contract として利用し、再定義も所有権の移動もしない。本書内の SO は [State Ownership](../architecture/state-ownership.md)、DR は [Dependency Rules](../architecture/dependency-rules.md) の節番号を指し、CC / RF / SC 番号は対応する architecture 文書（[artifact 一覧](../README.md#artifact-一覧)）の契約 ID である。
 
-責務・非責務は [Subsystem Decomposition](../architecture/subsystems.md)第3・5・6節、意味owner・lifecycleは [State Ownership](../architecture/state-ownership.md)（以下SO）第4〜8節、依存の許可・禁止・制約は [Dependency Rules](../architecture/dependency-rules.md)（以下DR）第3〜7節、内外境界は [System Context](../architecture/system-context.md)、配置・寿命・trust / failure boundary は [Runtime Topology](../architecture/runtime-topology.md)を維持する。[Cross-cutting Design](../architecture/cross-cutting.md)の CC-01〜07 を前提とし、再定義しない。
+他の Step 12 文書の意味 owner と受渡しも確定済み contract として利用する。[個体継続・対話調整 / 作業遂行・実行管理 / 経験に基づく認識・学習](companion-task-learning.md)（以下、個体・作業・学習）の H-1〜H-10、[権限・利用制約 / 認証秘密の保護 / Action実行・拡張受入 / 推論利用](permission-credential-execution-inference.md)（以下、権限・実行クラスタ）の K-1〜K-12、[Client接続・存在調停 / Owner入出力・体験提示 / 共有観測・関連付け](client-presence-io-observation.md)（以下、接続・提示・観測）の X-1〜X-10、[内部データ保全・消去](data-preservation-erasure.md)（以下、保全・消去）の DP-1〜DP-8 を参照する。
 
-Step 11 の5詳細設計は特定Subsystemの新しいownerではない。本書は次を隣接する確定済みcontractとして利用し、再定義も所有権の移動もしない。
-
-- [Context Assembly](../critical-areas/context-assembly.md)：由来・用途・現在性・用途別結果受入・処理中無効化の一般契約
-- [Action Execution](../critical-areas/action-execution.md)：判断対象と実対象の対応・委任不変・確定度・不明保持・遅延帰属の一般契約
-- [Targeted Deletion](../critical-areas/targeted-deletion.md)：消去区間・再保存防止・未完了保全・完了条件の一般契約
-- [Client Presence Transition](../critical-areas/client-presence-transition.md)（以下、Presence Transition）：authoritative帰属・切替区間・活動別区切り・到着物帰属・Host継続の一般契約
-- [Backup / Restore](../critical-areas/backup-restore.md)（以下、Backup-Restore）：復元範囲・正本切替・再有効化・stale・旧backup交差の一般契約
-
-既存Step 12 artifactは確定済みcontractとして扱い、再定義も所有権の移動もしない。
-
-- [個体継続・対話調整 / 作業遂行・実行管理 / 経験に基づく認識・学習](companion-task-learning.md)（以下、個体・作業・学習）：同一性・適用関係・History・Summary・Memory・Skill・Relationship・Companion Stateの意味ownerと受渡し H-1〜H-10
-- [権限・利用制約 / 認証秘密の保護 / Action実行・拡張受入 / 推論利用](permission-credential-execution-inference.md)（以下、権限・実行クラスタ）：制御確定・秘密・作用・割当の意味ownerと受渡し K-1〜K-12
-- [Client接続・存在調停 / Owner入出力・体験提示 / 共有観測・関連付け](client-presence-io-observation.md)（以下、接続・提示・観測）：帰属・round・対象・routingの意味ownerと受渡し X-1〜X-10
-- [内部データ保全・消去](data-preservation-erasure.md)（以下、保全・消去）：全域操作の調整と受渡し DP-1〜DP-8
-
-新しい semantic owner、第二の正本、万能Character Manager / Package Service / Distribution Coordinator、統一character state machine、共通package layerを追加しない。Subsystem と crate / process / service を一対一に対応させない。Host側とClient側に同名Subsystemを複製しない。
-
-本書の active Client不在時の活動継続・移動・復旧は Running Companion の契約である。Stopped 個体はどのClientにもHostにも presence を持たず、保存dataや再配置hintは現在帰属ではない。Clientに依存しない活動も個体停止の禁止を迂回しない。
+新しい semantic owner、第二の正本、万能Character Manager / Package Service / Distribution Coordinator、統一character state machine、共通package layerを追加しない。
 
 `subsystems.md` で確定したCharacterの非責務を維持する。個体の成長や現在状態の更新、Bodyの描画、音声推論、Skillの経験による改善、外部原本の所有、3D・Voice・高度なSkill制作環境は担わない。推奨Skillの同梱は実行の許可ではない。
 

@@ -1,8 +1,6 @@
 # Concurrency / Race Control / Stale-result Acceptance の具体設計 — Step 13 Concrete Design
 
-本書は Step 13 の Concurrency artifact である。Step 11（Context Assembly, Action Execution, Targeted Deletion, Client Presence Transition, Backup / Restore）および Step 12（Subsystem Decomposition, 各 subsystem artifact, State Ownership (SO), Dependency Rules (DR), Cross-cutting Design (CC), Runtime Topology, Runtime Flows, System Context）と Step 13 `correspondence-identity.md`（CI）・`persistence-recovery.md`（PR）を固定前提とする。semantic ownership, subsystem boundary, Security / Privacy / Permission semantics, CI の identity / revision / generation / correlation / boundary token の意味、PR の owner 別 durable state・D1/D2/D3/R/T/E 分類・atomicity / ordering・recovery semantics・compare 対象・durable-before-visible 等の境界を変更しない。変更が必要に見えた場合は設計で吸収せず Issue として報告する（第21節）。
-
-製品挙動の source of truth は[要件 Baseline](../../requirements/README.md), [製品定義](../../requirements/product.md), [要件](../../requirements/requirements.md) とする。[受け入れ条件](../../requirements/acceptance.md) も検証範囲へ含め、[参考資料](../../requirements/references.md) は非規範として扱う。既存実装から製品挙動を補わない。
+本書は Step 13 の Concurrency artifact である。[対応関係・識別](correspondence-identity.md)（CI）の identity / revision / generation / correlation / boundary token の意味と、[Persistence / Recovery](persistence-recovery.md)（PR）の owner 別 durable state・D1/D2/D3/R/T/E 分類・atomicity / ordering・recovery semantics・compare 対象・durable-before-visible を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。本書内の DR は [Dependency Rules](../architecture/dependency-rules.md) を指す。
 
 実装コードはまだ変更しない。本書は mechanism 選択まで固定し、具体 SQL・crate 分割・IPC 形状・retry/timeout 値は固定しない。
 
