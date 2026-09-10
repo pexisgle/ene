@@ -20,6 +20,6 @@
 ## 未解決 blocker
 
 - #1360 レビュー第8ラウンド対応済み＋残り1分岐（malformed assign target の Clarify 未記録）も修正：`record_decided` 経由に統一し回帰テスト追加。層別コミット済み、CI success 確認済み
-- #1360 レビュー第9ラウンド（contracts/store/behaviors 再確認）対応済み：`RoundIntent` 分離、`confirm_transition` target pin、migration atomicity、provider `store:false`＋status matrix、`DispatchResult` 一本化、tracker 単一map化、device-auth serde 移行。層別コミット済み、CI 待ち
+- #1360 レビュー第10ラウンド（レビュー 5158798688＋コメント 5613441143）対応済み：request fingerprint/accepted result 分離（store で round/wire を conflict 判定から除外、in-tx 一本化）、round 1:1 projection（既知 round は wire 再利用）、client テスト Result 化（silent pass 撲滅）、roundtrip/decide_frame 一本化、payload_kind→message_type 委譲、旧 rustdoc 一掃。層別コミット済み、CI 待ち
 - 残りは返信済み：TOCTOU・intent・replay スレッドは実装で応答、transport retry P2 受諾、Stage 5 defer 群は継続
 - マージ順: #1355 → #1356 → #1358 → #1359 → #1360

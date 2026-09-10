@@ -39,9 +39,13 @@
 //!   paired device, no known connection, no completed authentication on the
 //!   current connection, or an envelope connection id that does not equal the
 //!   table id answers a single terminal
-//!   [`DisconnectNotice`] with reason `"unpaired"` and nothing else. There is
-//!   no generic reject DTO in `ene-api`, so silence-plus-close (rather than
-//!   an oracle denial) is the explicit decision. Pairing frames carry no
+//!   [`DisconnectNotice`] with reason `"unpaired"` and nothing else. A
+//!   generic reject DTO does exist in `ene-api`
+//!   ([`Reject`](ene_api::v1::payload::WirePayload::Reject), used for
+//!   post-auth declines such as conflicting commands and envelope
+//!   violations), but the pre-auth gate deliberately does not use it:
+//!   silence-plus-close (rather than an oracle denial) reveals nothing to
+//!   an unauthenticated peer. Pairing frames carry no
 //!   checks; capability frames need the paired-device check only (they predate
 //!   authentication); [`AuthProof`] frames
 //!   need none (they ARE the authentication). Inbound
@@ -597,9 +601,10 @@ impl HostHandle {
     /// id is minted per accept and revealed only in
     /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted), so echoing
     /// it proves the sender completed the challenge on this connection.
-    /// There is no generic reject DTO in `ene-api`, so tripping drops
-    /// unauthenticated domain service with a terminal disconnect rather than
-    /// an oracle denial.
+    /// Trips on unauthenticated domain service; the answer is a terminal
+    /// disconnect, not a [`Reject`](ene_api::v1::payload::WirePayload::Reject)
+    /// (which exists for post-auth declines): an unauthenticated peer learns
+    /// nothing beyond the drop, never an oracle denial.
     fn gate_trips(frame: &WireFrame, live: &LiveInput) -> bool {
         live.paired_device.is_none()
             || !live.connection_known
@@ -1067,8 +1072,9 @@ fn denied_pairing(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFram
 /// Builds the terminal gate frame dropping unauthenticated domain service.
 ///
 /// The connection closes after this frame is written. The `"unpaired"` reason
-/// names the gate trip only; no generic reject DTO exists in `ene-api`, so a
-/// disconnect (rather than an oracle denial) is the explicit decision. The
+/// names the gate trip only; a disconnect (rather than a `Reject` denial,
+/// which exists for post-auth declines) is the explicit decision, so an
+/// unauthenticated peer gets no oracle. The
 /// gate trips exactly when the sender is not authenticated, so the frame
 /// hides the connection id: a peer that never completed the challenge must
 /// not learn it from the drop.

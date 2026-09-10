@@ -20,24 +20,21 @@
 //! Then [`CapabilityAdvertise`]
 //! must answer
 //! [`NegotiatedConnection`](ene_api::v1::handshake::NegotiatedConnection)
-//! with a matching major version. The capability frame carries no device ID:
-//! the Host attributes it through the connection table (which recorded the
-//! paired device when this same connection paired moments earlier), so no
-//! device claim is needed before authentication.
+//! with a matching major version. The capability frame names the paired
+//! device ID (paired-sender contract); the Host attributes it through the
+//! connection table (which recorded the paired device when this same
+//! connection paired moments earlier) and never trusts the claim —
+//! a mismatched claim drops the frame.
 //!
 //! Authentication ([`AuthChallenge`] /
 //! [`AuthProof`] /
-//! [`AuthResult`]) is implemented on this
-//! side ([`proof_frame`], [`decide_auth`], [`Client::authenticate`]) but the
-//! current Host never emits a challenge (its auth trio answers nothing yet),
-//! so `connect` performs no auth exchange: it reads exactly the pairing
-//! answer and the negotiated terms and returns, leaving any pipelined
-//! presence fact buffered for the caller. A speculative proof today would
-//! block forever waiting for an `AuthResult` that never comes. When the Host
-//! starts challenging, `connect` gains a challenge read at that point; the
-//! proof builder, the result decision, and the connection-ID storage need no
-//! change. The accepted connection key is stored into the sender for all
-//! later frames plus into the [`SessionState`] mirror.
+//! [`AuthResult`]) runs inside `connect`: after the negotiated terms arrive,
+//! the Host sends a challenge, this side answers with [`proof_frame`] (the
+//! proof names the paired device, never the connection), and
+//! [`decide_auth`] plus [`Client::authenticate`] store the accepted
+//! connection key into the sender for all later frames plus into the
+//! [`SessionState`] mirror. The trailing presence fact is consumed as the
+//! session's first attribution before returning.
 //!
 //! Request/response correlation: every [`Client::request`] stamps a fresh
 //! command ID on its outgoing envelope and matches the answer by transport
@@ -312,12 +309,11 @@ impl SessionState {
 
     /// Removes and returns the first deferred frame whose `reply_to` equals
     /// `own`, if any. Facts never sit in the queue, so a hit is always an
-    /// answer the caller can return without socket I/O.
+    /// answer the caller can return without socket I/O. Shares the scan
+    /// with [`select_answer`] through the same position function, so both
+    /// find the same frame.
     pub fn take_deferred_reply(&mut self, own: WireMessageId) -> Option<WirePayload> {
-        let position = self
-            .deferred
-            .iter()
-            .position(|frame| frame.envelope.correlation.reply_to == Some(own))?;
+        let position = find_deferred_reply(&self.deferred, own)?;
         self.deferred.remove(position).map(|frame| frame.payload)
     }
 }
@@ -343,6 +339,46 @@ pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
     }
 }
 
+/// Ruling for one incoming frame against our outgoing message ID.
+///
+/// The single decision behind both the pure [`select_answer`] script form
+/// and [`Client::request`]'s socket loop: the loop classifies every read
+/// frame here and only applies session effects, so the pure tests below
+/// verify the production ruling directly instead of a mirror. Queue-cap
+/// handling stays with each caller (session push vs. script queue).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameDecision {
+    /// An authoritative presence fact to absorb into the session.
+    AbsorbPresence(PresenceAttributionWire),
+    /// The correlated answer to return to the caller.
+    Answer(WirePayload),
+    /// Anything else: defer under the caller's oldest-drop cap.
+    Defer,
+}
+
+/// Classifies one incoming frame: presence facts absorb, a `reply_to`
+/// match answers, anything else defers. Total and pure: no I/O, no session
+/// access, so both the script form and the socket loop rule identically.
+#[must_use]
+pub fn decide_frame(own_message_id: WireMessageId, frame: &WireFrame) -> FrameDecision {
+    if let WirePayload::PresenceAttribution(fact) = &frame.payload {
+        FrameDecision::AbsorbPresence(fact.clone())
+    } else if frame.envelope.correlation.reply_to == Some(own_message_id) {
+        FrameDecision::Answer(frame.payload.clone())
+    } else {
+        FrameDecision::Defer
+    }
+}
+
+/// Position of the first deferred frame whose `reply_to` equals `own`, if
+/// any. Shared by the session pop ([`SessionState::take_deferred_reply`])
+/// and the script scan ([`select_answer`]) so both find the same frame.
+fn find_deferred_reply(deferred: &VecDeque<WireFrame>, own: WireMessageId) -> Option<usize> {
+    deferred
+        .iter()
+        .position(|frame| frame.envelope.correlation.reply_to == Some(own))
+}
+
 /// Splits a deferred queue plus an incoming frame script into the facts
 /// `request` would absorb, the correlated answer, and the updated queue.
 ///
@@ -350,19 +386,18 @@ pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
 /// deferred queue is scanned for a frame whose `reply_to` equals our
 /// outgoing message ID: a hit returns immediately with no absorption and
 /// that frame removed, without consuming `frames` (no socket I/O in the
-/// streaming form). Otherwise `frames` are walked in order:
-/// [`PresenceAttribution`](ene_api::v1::payload::WirePayload::PresenceAttribution)
-/// facts are collected (the caller applies each to its session); a non-fact
-/// frame whose `reply_to` matches is the answer and ends the walk (later
-/// script frames stay unread, as later socket reads in the streaming form);
-/// any other non-fact frame is pushed to the queue (cap [`DEFERRED_CAP`],
-/// oldest-drop) and the walk continues — mismatches are never returned as
-/// answers and never silently dropped. No match means no answer ([`None`]);
-/// the streaming caller keeps reading in that case.
+/// streaming form). Otherwise `frames` are walked in order, each classified
+/// by [`decide_frame`]: absorbed facts accumulate (the caller applies each
+/// to its session); the first answer ends the walk (later script frames stay
+/// unread, as later socket reads in the streaming form); deferred frames
+/// push to the queue (cap [`DEFERRED_CAP`], oldest-drop) and the walk
+/// continues — mismatches are never returned as answers and never silently
+/// dropped. No match means no answer ([`None`]); the streaming caller keeps
+/// reading in that case.
 ///
 /// Only the presence-fact variant is absorbed: a future unsolicited fact
-/// kind needs a new arm here, and until then such frames queue as mismatches
-/// instead of surfacing as answers.
+/// kind needs a new arm in [`decide_frame`], and until then such frames
+/// queue as mismatches instead of surfacing as answers.
 ///
 /// The function is total: every combination of queue and script yields a
 /// (possibly empty) absorption, a (possibly absent) answer, and a bounded
@@ -378,24 +413,21 @@ pub fn select_answer(
     VecDeque<WireFrame>,
 ) {
     let mut queue = deferred.clone();
-    if let Some(position) = queue
-        .iter()
-        .position(|frame| frame.envelope.correlation.reply_to == Some(own_message_id))
-    {
+    if let Some(position) = find_deferred_reply(&queue, own_message_id) {
         let hit = queue.remove(position).map(|frame| frame.payload);
         return (Vec::new(), hit, queue);
     }
     let mut absorbed = Vec::new();
     for frame in frames {
-        if let WirePayload::PresenceAttribution(fact) = &frame.payload {
-            absorbed.push(fact.clone());
-        } else if frame.envelope.correlation.reply_to == Some(own_message_id) {
-            return (absorbed, Some(frame.payload.clone()), queue);
-        } else {
-            if queue.len() >= DEFERRED_CAP {
-                let _ = queue.pop_front();
+        match decide_frame(own_message_id, frame) {
+            FrameDecision::AbsorbPresence(fact) => absorbed.push(fact),
+            FrameDecision::Answer(payload) => return (absorbed, Some(payload), queue),
+            FrameDecision::Defer => {
+                if queue.len() >= DEFERRED_CAP {
+                    let _ = queue.pop_front();
+                }
+                queue.push_back(frame.clone());
             }
-            queue.push_back(frame.clone());
         }
     }
     (absorbed, None, queue)
@@ -452,21 +484,12 @@ pub fn decide_auth(payload: &WirePayload) -> AuthDecision {
     }
 }
 
-/// Builds the ownership proof frame for a challenge nonce: the proof is the
-/// pairing-secret HMAC over the single-use nonce (hex), and the sender
-/// carries no device or connection key.
-///
-/// No device claim is a deliberate attribution rule, not an omission: the
-/// Host attributes the proof to the pending pairing this connection recorded
-/// when it paired moments earlier (its connection table tracks the paired
-/// device per connection; the envelope's device field is a Client claim the
-/// Host must not trust for authentication). The incarnation still travels so
-/// the connection's pinned owner stays attributable.
 /// Builds the proof frame: the wire sender names the paired device under
 /// proof (the Host attributes through its connection table and never trusts
-/// the claim, but the paired sender contract carries it), echoes the
+/// the claim, but the paired-sender contract carries it), echoes the
 /// caller incarnation, and hides the connection id (still undisclosed
-/// pre-accept).
+/// pre-accept). The proof itself is the pairing-secret HMAC over the
+/// single-use challenge nonce.
 pub fn proof_frame(
     proof: &str,
     incarnation: ClientIncarnationId,
@@ -621,33 +644,12 @@ fn stamp_request(frame: &mut WireFrame) -> WireMessageId {
 }
 
 /// Static kind name of a payload, used in rejection messages (no bodies).
+///
+/// Delegates to the canonical [`WirePayload::message_type`] vocabulary in
+/// `ene-api`: the wire names live in exactly one place, so adding a variant
+/// can never leave a second exhaustive list behind.
 pub fn payload_kind(payload: &WirePayload) -> &'static str {
-    match payload {
-        WirePayload::PairingRequest(_) => "PairingRequest",
-        WirePayload::PairingResult(_) => "PairingResult",
-        WirePayload::AuthChallenge(_) => "AuthChallenge",
-        WirePayload::AuthProof(_) => "AuthProof",
-        WirePayload::AuthResult(_) => "AuthResult",
-        WirePayload::CapabilityAdvertise(_) => "CapabilityAdvertise",
-        WirePayload::NegotiatedConnection(_) => "NegotiatedConnection",
-        WirePayload::ReconnectHello(_) => "ReconnectHello",
-        WirePayload::RecoveryInvite(_) => "RecoveryInvite",
-        WirePayload::DisconnectNotice(_) => "DisconnectNotice",
-        WirePayload::SubmitTextInput(_) => "SubmitTextInput",
-        WirePayload::RoundIntakeOutcome(_) => "RoundIntakeOutcome",
-        WirePayload::TextStreamOpen(_) => "TextStreamOpen",
-        WirePayload::TextStreamFrame(_) => "TextStreamFrame",
-        WirePayload::TextStreamClose(_) => "TextStreamClose",
-        WirePayload::ConfirmPresentation(_) => "ConfirmPresentation",
-        WirePayload::HistoryRequest(_) => "HistoryRequest",
-        WirePayload::HistoryView(_) => "HistoryView",
-        WirePayload::PresenceAttribution(_) => "PresenceAttribution",
-        WirePayload::ManagementIntent(_) => "ManagementIntent",
-        WirePayload::ManagementOutcome(_) => "ManagementOutcome",
-        WirePayload::ManagementViewRequest(_) => "ManagementViewRequest",
-        WirePayload::ManagementView(_) => "ManagementView",
-        WirePayload::Reject(_) => "Reject",
-    }
+    payload.message_type()
 }
 
 /// Envelope discriminator for a payload: the variant name, matching the
@@ -690,8 +692,10 @@ impl Client {
     /// (fail-closed: a store failure aborts the connect rather than running
     /// with an unpersisted secret — this covers both first provision and
     /// one-shot rotation). A successful pairing with no secret
-    /// anywhere proceeds secretless — authentication simply guides later if
-    /// the Host ever challenges.
+    /// anywhere proceeds secretless into capability, then fails closed at
+    /// the mandatory post-negotiation challenge with provisioning guidance
+    /// (approve and provision, then re-run): an unauthenticated session
+    /// never reaches domain service.
     ///
     /// Capability advertises with the paired device ID (the paired-sender
     /// contract names it on capability and proof frames alike); the Host
@@ -965,18 +969,18 @@ impl Client {
         }
         loop {
             let incoming = read_frame(&mut self.stream).await?;
-            // The arms mirror [`select_answer`]: facts absorb, the
-            // `reply_to` match returns, and anything else defers with a cap
-            // and continues reading.
-            if let WirePayload::PresenceAttribution(fact) = &incoming.payload {
-                self.state.observe_presence(fact);
-            } else if incoming.envelope.correlation.reply_to == Some(own_message_id) {
-                if let Some(current) = stale_generation_of(&incoming.payload) {
-                    self.state.note_stale_generation(current);
+            // The ruling lives in `decide_frame` — the same function the
+            // pure `select_answer` script form classifies with — so this
+            // loop only moves socket bytes and session effects.
+            match decide_frame(own_message_id, &incoming) {
+                FrameDecision::AbsorbPresence(fact) => self.state.observe_presence(&fact),
+                FrameDecision::Answer(payload) => {
+                    if let Some(current) = stale_generation_of(&payload) {
+                        self.state.note_stale_generation(current);
+                    }
+                    return Ok(payload);
                 }
-                return Ok(incoming.payload);
-            } else {
-                self.state.push_deferred(incoming);
+                FrameDecision::Defer => self.state.push_deferred(incoming),
             }
         }
     }
@@ -1162,15 +1166,12 @@ mod tests {
         }
     }
 
-    /// Yields `Ok` values without `unwrap`/`expect` (both denied): the
-    /// `assert!` fails the test first, so the `else` branch is only a
-    /// type-level fallback, never a silent pass.
-    fn require_ok<T: core::fmt::Debug, E: core::fmt::Debug>(
-        result: Result<T, E>,
-        what: &str,
-    ) -> Option<T> {
-        assert!(result.is_ok(), "{what} unexpectedly failed: {result:?}");
-        result.ok()
+    /// Unwraps `Ok` values for tests without `unwrap`/`expect` (both
+    /// denied): failures propagate through `?` and fail the test with the
+    /// cause attached, so no `let ... else { return; }` fallback can
+    /// silently pass.
+    fn require_ok<T, E: core::fmt::Debug>(result: Result<T, E>, what: &str) -> Result<T, String> {
+        result.map_err(|error| format!("{what} unexpectedly failed: {error:?}"))
     }
 
     #[test]
@@ -1192,10 +1193,10 @@ mod tests {
     }
 
     #[test]
-    fn pairing_frame_is_pre_pairing_v1() {
+    fn pairing_frame_is_pre_pairing_v1() -> Result<(), String> {
         let frame = pairing_frame("Owner laptop", incarnation());
         let WirePayload::PairingRequest(request) = &frame.payload else {
-            return;
+            return Err(String::from("pairing builder must emit PairingRequest"));
         };
         assert!(
             request.device_descriptor == "Owner laptop",
@@ -1213,14 +1214,17 @@ mod tests {
             frame.envelope.message_type.0 == "PairingRequest",
             "pairing names its payload shape"
         );
+        Ok(())
     }
 
     #[test]
-    fn capability_frame_claims_no_features_and_threads_device() {
+    fn capability_frame_claims_no_features_and_threads_device() -> Result<(), String> {
         let sender_device = ene_api::v1::refs::DeviceWireId(uuid::Uuid::new_v4());
         let frame = capability_frame("linux-x86_64", incarnation(), Some(sender_device));
         let WirePayload::CapabilityAdvertise(advertise) = &frame.payload else {
-            return;
+            return Err(String::from(
+                "capability builder must emit CapabilityAdvertise",
+            ));
         };
         assert!(
             advertise.supported_protocol == vec![ProtocolVersion::V1],
@@ -1242,6 +1246,7 @@ mod tests {
             frame.envelope.message_type.0 == "CapabilityAdvertise",
             "capability names its payload shape"
         );
+        Ok(())
     }
 
     #[test]
@@ -1270,39 +1275,31 @@ mod tests {
     }
 
     #[test]
-    fn pairing_frame_survives_the_wire_codec() {
+    fn pairing_frame_survives_the_wire_codec() -> Result<(), String> {
         let frame = pairing_frame("Owner laptop", incarnation());
-        let Some(encoded) =
-            require_ok(ene_plugin_ipc::encode_frame(&frame), "encode pairing frame")
-        else {
-            return;
-        };
-        let Some((decoded, consumed)) = require_ok(
+        let encoded = require_ok(ene_plugin_ipc::encode_frame(&frame), "encode pairing frame")?;
+        let (decoded, consumed) = require_ok(
             ene_plugin_ipc::decode_frame(&encoded),
             "decode pairing frame",
-        ) else {
-            return;
-        };
+        )?;
         assert!(consumed == encoded.len(), "decode must consume the frame");
         assert!(decoded == frame, "codec must preserve the pairing frame");
+        Ok(())
     }
 
     #[test]
-    fn capability_frame_survives_the_wire_codec() {
+    fn capability_frame_survives_the_wire_codec() -> Result<(), String> {
         let frame = capability_frame("linux-x86_64", incarnation(), None);
-        let Some(encoded) = require_ok(
+        let encoded = require_ok(
             ene_plugin_ipc::encode_frame(&frame),
             "encode capability frame",
-        ) else {
-            return;
-        };
-        let Some((decoded, _consumed)) = require_ok(
+        )?;
+        let (decoded, _consumed) = require_ok(
             ene_plugin_ipc::decode_frame(&encoded),
             "decode capability frame",
-        ) else {
-            return;
-        };
+        )?;
         assert!(decoded == frame, "codec must preserve the capability frame");
+        Ok(())
     }
 
     /// Builds a presence fact carrying `generation`.
@@ -1481,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    fn request_stamps_a_fresh_command_id_per_send() {
+    fn request_stamps_a_fresh_command_id_per_send() -> Result<(), String> {
         let sender = WireSender {
             device_id: None,
             incarnation_id: incarnation(),
@@ -1503,7 +1500,7 @@ mod tests {
             first.envelope.correlation.command_id,
             second.envelope.correlation.command_id,
         ) else {
-            return;
+            return Err(String::from("stamped requests must carry command ids"));
         };
         assert!(
             first_command != second_command,
@@ -1513,6 +1510,7 @@ mod tests {
             first.envelope.correlation.request_id.is_some(),
             "every send carries a request ID for pairing"
         );
+        Ok(())
     }
 
     #[test]
@@ -1581,6 +1579,32 @@ mod tests {
             first.envelope.observed.presence_generation_view,
             second.envelope.observed.presence_generation_view,
             "retries preserve the observed premise"
+        );
+    }
+
+    #[test]
+    fn decide_frame_rules_one_frame_for_both_callers() {
+        use super::{FrameDecision, decide_frame};
+
+        let own = message_id(1);
+        let fact = script_frame(
+            WirePayload::PresenceAttribution(presence_fact(3)),
+            message_id(2),
+            Some(own),
+        );
+        assert!(
+            matches!(decide_frame(own, &fact), FrameDecision::AbsorbPresence(_)),
+            "facts absorb"
+        );
+        let answer = script_frame(answer_payload(), message_id(3), Some(own));
+        assert!(
+            decide_frame(own, &answer) == FrameDecision::Answer(answer_payload()),
+            "a reply_to match answers"
+        );
+        let stranger = script_frame(answer_payload(), message_id(4), Some(message_id(9)));
+        assert!(
+            decide_frame(own, &stranger) == FrameDecision::Defer,
+            "anything else defers"
         );
     }
 
@@ -1830,12 +1854,12 @@ mod tests {
     }
 
     #[test]
-    fn decide_auth_rejection_guides_reprovisioning() {
+    fn decide_auth_rejection_guides_reprovisioning() -> Result<(), String> {
         let decision = decide_auth(&WirePayload::AuthResult(AuthResult::Rejected {
             reason: String::from("unknown proof"),
         }));
         let AuthDecision::Guidance { message } = decision else {
-            return;
+            return Err(String::from("rejection must guide reprovisioning"));
         };
         assert!(
             message.contains("unknown proof"),
@@ -1845,27 +1869,29 @@ mod tests {
             message.contains(crate::device::BOOTSTRAP_SECRET_ENV),
             "guidance names the provisioning step: {message:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn decide_auth_names_unexpected_kinds() {
+    fn decide_auth_names_unexpected_kinds() -> Result<(), String> {
         let decision = decide_auth(&answer_payload());
         let AuthDecision::Unexpected { message } = decision else {
-            return;
+            return Err(String::from("foreign kinds must be unexpected"));
         };
         assert!(
             message.contains("HistoryRequest") && message.contains("AuthResult"),
             "the refusal must name both kinds: {message:?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn proof_frame_names_the_paired_device() {
+    fn proof_frame_names_the_paired_device() -> Result<(), String> {
         use ene_api::v1::refs::DeviceWireId;
         let device = DeviceWireId(uuid::Uuid::new_v4());
         let frame = proof_frame("proof-hex-abc", incarnation(), device);
         let WirePayload::AuthProof(proof) = &frame.payload else {
-            return;
+            return Err(String::from("proof builder must emit AuthProof"));
         };
         assert!(
             proof.proof == "proof-hex-abc",
@@ -1883,25 +1909,20 @@ mod tests {
             !rendered.contains("proof-hex-abc"),
             "frame Debug must not leak the proof: {rendered:?}"
         );
-        let Some(encoded) = require_ok(ene_plugin_ipc::encode_frame(&frame), "encode proof frame")
-        else {
-            return;
-        };
-        let Some((decoded, _consumed)) =
-            require_ok(ene_plugin_ipc::decode_frame(&encoded), "decode proof frame")
-        else {
-            return;
-        };
+        let encoded = require_ok(ene_plugin_ipc::encode_frame(&frame), "encode proof frame")?;
+        let (decoded, _consumed) =
+            require_ok(ene_plugin_ipc::decode_frame(&encoded), "decode proof frame")?;
         assert!(decoded == frame, "codec must preserve the proof frame");
+        Ok(())
     }
 
     #[test]
-    fn proof_derives_from_the_secret_and_the_single_use_nonce() {
+    fn proof_derives_from_the_secret_and_the_single_use_nonce() -> Result<(), String> {
         use ene_api::v1::refs::DeviceWireId;
         let proof = ene_credential::pairing_proof_hex("pairing-secret", "nonce-1");
         let frame = proof_frame(&proof, incarnation(), DeviceWireId(uuid::Uuid::new_v4()));
         let WirePayload::AuthProof(carried) = &frame.payload else {
-            return;
+            return Err(String::from("proof builder must emit AuthProof"));
         };
         assert!(
             ene_credential::verify_pairing_proof("pairing-secret", "nonce-1", &carried.proof),
@@ -1911,6 +1932,7 @@ mod tests {
             !ene_credential::verify_pairing_proof("pairing-secret", "nonce-2", &carried.proof),
             "the proof must not verify against another nonce (single-use)"
         );
+        Ok(())
     }
 
     #[test]
