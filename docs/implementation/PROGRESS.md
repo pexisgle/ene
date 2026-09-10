@@ -2,12 +2,13 @@
 
 ## 現在の milestone
 
-- Stage 2 Setup とテキスト会話の最初の縦断 slice — merge 準備完了（production blocker 0）
+- Stage 3 Experience Summary / Memory
 
 ## 完了した milestone
 
 - Stage 0 repository / build foundation
 - Stage 1 最小 foundation と共有 contract
+- Stage 2 Setup とテキスト会話の最初の縦断 slice
 
 ## 未解決 blocker
 
@@ -15,4 +16,4 @@
 
 ## 次の Stage
 
-- Stage 3 Experience Summary / Memory。共有 contract が安定していれば Stage 4 Task / Action を並列で開始可能（[実装ガイド](README.md) の並列化条件に従う）。
+- Stage 4 Task / Action。Stage 3 の共有 contract が安定していれば並列で開始可能（[実装ガイド](README.md) の並列化条件に従う）。
