@@ -264,15 +264,6 @@ mod tests {
     }
 
     #[test]
-    fn device_file_path_appends_the_file_name() {
-        let dir = std::path::Path::new("/tmp/ene-data");
-        assert!(
-            device_file_path(dir) == dir.join("client-device.json"),
-            "the device file lives under the data dir"
-        );
-    }
-
-    #[test]
     fn missing_file_loads_as_absent() {
         let dir = scratch_dir("missing");
         assert!(

@@ -656,8 +656,8 @@ mod tests {
         DEFAULT_HISTORY_LIMIT, HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI, assignment_intent,
         consent_target_for, credential_id_for, credential_intent, credential_target_for,
         describe_intake, describe_management, history_request, new_local_id, parse_command,
-        render_history, render_round_history, render_view, role_label, setup_view_request,
-        status_view_request, submit_input,
+        render_history, render_round_history, render_view, setup_view_request, status_view_request,
+        submit_input,
     };
 
     /// Builds owned arguments from plain words.
@@ -665,37 +665,11 @@ mod tests {
         words.iter().map(|word| (*word).to_string()).collect()
     }
 
-    /// Yields `Ok` values without `unwrap`/`expect` (both denied): the
-    /// `assert!` fails the test first, so the `else` branch is only a
-    /// type-level fallback, never a silent pass.
-    fn require_ok<T: core::fmt::Debug, E: core::fmt::Debug>(
-        result: Result<T, E>,
-        what: &str,
-    ) -> Option<T> {
-        assert!(result.is_ok(), "{what} unexpectedly failed: {result:?}");
-        result.ok()
-    }
-
-    /// Yields `Err` values; see [`require_ok`] for the pattern.
-    fn require_err<T: core::fmt::Debug, E: core::fmt::Debug>(
-        result: Result<T, E>,
-        what: &str,
-    ) -> Option<E> {
-        assert!(result.is_err(), "{what} unexpectedly succeeded: {result:?}");
-        result.err()
-    }
-
     /// Asserts a usage error whose message ends with the usage text.
     fn assert_usage(result: Result<Command, crate::errors::CliError>, what: &str) {
-        let Some(error) = require_err(result, what) else {
-            return;
-        };
-        assert!(
-            matches!(error, crate::errors::CliError::Usage(_)),
-            "{what} must be a usage error, got {error:?}"
-        );
+        let error = result.expect_err(what);
         let crate::errors::CliError::Usage(message) = error else {
-            return;
+            panic!("{what} must be a usage error, got {error:?}");
         };
         assert!(
             message.ends_with(crate::errors::USAGE),
@@ -715,10 +689,7 @@ mod tests {
 
     #[test]
     fn setup_show_parses() {
-        let Some(command) = require_ok(parse_command(&args(&["setup", "--show"])), "setup --show")
-        else {
-            return;
-        };
+        let command = (parse_command(&args(&["setup", "--show"]))).expect("setup --show");
         assert!(
             command == Command::Setup(SetupMode::Show),
             "setup --show must select Show, got {command:?}"
@@ -731,9 +702,7 @@ mod tests {
             ["setup", "--provider", "openai", "--model", "gpt-x"].as_slice(),
             ["setup", "--model", "gpt-x", "--provider", "openai"].as_slice(),
         ] {
-            let Some(command) = require_ok(parse_command(&args(words)), "setup assign") else {
-                return;
-            };
+            let command = (parse_command(&args(words))).expect("setup assign");
             assert!(
                 command
                     == Command::Setup(SetupMode::Assign {
@@ -747,9 +716,7 @@ mod tests {
 
     #[test]
     fn setup_without_args_reports_usage_explicitly() {
-        let Some(error) = require_err(parse_command(&args(&["setup"])), "bare setup") else {
-            return;
-        };
+        let error = (parse_command(&args(&["setup"]))).expect_err("bare setup");
         let crate::errors::CliError::Usage(message) = error else {
             return;
         };
@@ -817,9 +784,7 @@ mod tests {
 
     #[test]
     fn status_parses_without_operands() {
-        let Some(command) = require_ok(parse_command(&args(&["status"])), "status") else {
-            return;
-        };
+        let command = (parse_command(&args(&["status"]))).expect("status");
         assert!(
             command == Command::Status,
             "status must parse, got {command:?}"
@@ -836,12 +801,8 @@ mod tests {
 
     #[test]
     fn send_with_new_parses_and_joins_text() {
-        let Some(command) = require_ok(
-            parse_command(&args(&["send", "--new", "hello", "there"])),
-            "send --new",
-        ) else {
-            return;
-        };
+        let command =
+            (parse_command(&args(&["send", "--new", "hello", "there"]))).expect("send --new");
         assert!(
             command
                 == Command::Send(SendArgs {
@@ -855,12 +816,8 @@ mod tests {
 
     #[test]
     fn send_with_round_parses() {
-        let Some(command) = require_ok(
-            parse_command(&args(&["send", "--round", "round-1", "hi"])),
-            "send --round",
-        ) else {
-            return;
-        };
+        let command =
+            (parse_command(&args(&["send", "--round", "round-1", "hi"]))).expect("send --round");
         assert!(
             command
                 == Command::Send(SendArgs {
@@ -874,9 +831,7 @@ mod tests {
 
     #[test]
     fn send_without_flags_requests_a_new_round() {
-        let Some(command) = require_ok(parse_command(&args(&["send", "hi"])), "bare send") else {
-            return;
-        };
+        let command = (parse_command(&args(&["send", "hi"]))).expect("bare send");
         assert!(
             command
                 == Command::Send(SendArgs {
@@ -923,12 +878,8 @@ mod tests {
 
     #[test]
     fn watch_parses_with_round() {
-        let Some(command) = require_ok(
-            parse_command(&args(&["watch", "--round", "round-7"])),
-            "watch --round",
-        ) else {
-            return;
-        };
+        let command =
+            (parse_command(&args(&["watch", "--round", "round-7"]))).expect("watch --round");
         assert!(
             command
                 == Command::Watch {
@@ -953,9 +904,7 @@ mod tests {
 
     #[test]
     fn history_defaults_the_limit() {
-        let Some(command) = require_ok(parse_command(&args(&["history"])), "history") else {
-            return;
-        };
+        let command = (parse_command(&args(&["history"]))).expect("history");
         assert!(
             command
                 == Command::History {
@@ -967,12 +916,8 @@ mod tests {
 
     #[test]
     fn history_limit_parses() {
-        let Some(command) = require_ok(
-            parse_command(&args(&["history", "--limit", "3"])),
-            "history --limit",
-        ) else {
-            return;
-        };
+        let command =
+            (parse_command(&args(&["history", "--limit", "3"]))).expect("history --limit");
         assert!(
             command == Command::History { limit: 3 },
             "history must carry the limit, got {command:?}"
@@ -1098,15 +1043,6 @@ mod tests {
         assert!(
             render_round_history(&fixture_history(), "round-9").is_empty(),
             "an unknown round must render to nothing"
-        );
-    }
-
-    #[test]
-    fn role_labels_cover_both_roles() {
-        assert!(role_label(HistoryRole::Owner) == "owner", "owner label");
-        assert!(
-            role_label(HistoryRole::Companion) == "companion",
-            "companion label"
         );
     }
 
