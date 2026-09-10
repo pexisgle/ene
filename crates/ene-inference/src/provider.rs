@@ -616,11 +616,7 @@ mod tests {
     #[test]
     fn debug_rendering_carries_no_bearer_material() {
         let concrete = MemoryCredentialStore::new();
-        let credential = CredentialRef {
-            id: "openai:main".to_owned(),
-            provider: "openai".to_owned(),
-            label: "main".to_owned(),
-        };
+        let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
         concrete.insert(credential.clone(), "sk-probe-bearer-material");
         let Ok(transport) =
             OpenAiResponsesTransport::new("http://127.0.0.1:9", credential, concrete)

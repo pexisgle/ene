@@ -1754,19 +1754,11 @@ mod env_credential_store_tests {
     use std::cell::Cell;
 
     fn openai_cred() -> CredentialRef {
-        CredentialRef {
-            id: "openai:main".to_owned(),
-            provider: "openai".to_owned(),
-            label: "main".to_owned(),
-        }
+        CredentialRef::new("openai", "main").expect("valid test fixture")
     }
 
     fn other_cred() -> CredentialRef {
-        CredentialRef {
-            id: "acme:main".to_owned(),
-            provider: "acme".to_owned(),
-            label: "main".to_owned(),
-        }
+        CredentialRef::new("acme", "main").expect("valid test fixture")
     }
 
     #[test]
