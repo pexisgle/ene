@@ -11,18 +11,23 @@
 //! which also covers every non-setup kind — companion shutdown, deletion,
 //! tasks, schedules, rules, devices, backups — as "not in `Stage 2` scope"):
 //!
-//! - `(ConfigureCredentialIntent, "credential:{provider}:{label}")` registers a
-//!   credential ref through [`ene_credential::register`] (never overwriting)
-//!   and answers [`AppliedAsOneTime`](ene_api::v1::management::ManagementOutcome::AppliedAsOneTime).
+//! - `(ConfigureCredentialIntent, "credential:{provider}:{label}")` records a
+//!   pending credential approval through the credential owner and answers
+//!   [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation);
+//!   once the Owner approves the pair on the Host-local trusted inlet, a fresh
+//!   intent observing the now-usable pair answers
+//!   [`AppliedAsOneTime`](ene_api::v1::management::ManagementOutcome::AppliedAsOneTime).
 //!   The bearer itself travels the Host-local protected path only: with the
 //!   environment store that means the process environment, which the view
 //!   below notes as env-sourced.
 //! - `(ManageRuleConsentCap, "consent:{provider}:{model}:{credential-id}")`
-//!   assigns the route after verifying the credential is present (registry
-//!   knows it and the store holds its bearer), then commits consent through
-//!   compare-and-save at revision previous-plus-one and answers
+//!   assigns the route after verifying the credential is present (the
+//!   registry knows that id under the same provider and the store holds its
+//!   bearer), then commits consent through the consent owner at
+//!   previous-plus-one and answers
 //!   [`StoredAsRuleView`](ene_api::v1::management::ManagementOutcome::StoredAsRuleView)
-//!   carrying the new revision mark.
+//!   carrying the new revision mark. Revision exhaustion clarifies; it never
+//!   reuses the maximum revision with new content.
 //! - `(ManageRuleConsentCap, "setup:complete")` verifies consent plus
 //!   credential presence and answers `AppliedAsOneTime`. Setup completion is
 //!   derived thereafter (consent stored and credential present), never written
@@ -94,8 +99,6 @@ fn view_frame(frame: &WireFrame, live: &LiveInput, view: ManagementView) -> Wire
     outgoing_frame(frame, live, WirePayload::ManagementView(view))
 }
 
-/// Renders the consent display mark for an optional stored record.
-///
 impl HostHandle {
     /// Maps one [`ManagementIntent`] to its `Stage 2` outcome frames.
     ///
@@ -330,7 +333,12 @@ impl HostHandle {
             },
             IntentOutcome::AppliedAsOneTime => ManagementOutcome::AppliedAsOneTime,
             IntentOutcome::HeldByOperation => ManagementOutcome::HeldByOperation,
-            IntentOutcome::NeedsClarification => ManagementOutcome::NeedsClarification,
+            // The wire has no exhaustion outcome: a consent identity that
+            // cannot advance its revision needs Owner intervention, the same
+            // answer class as any other undecidable premise.
+            IntentOutcome::NeedsClarification | IntentOutcome::RevisionExhausted => {
+                ManagementOutcome::NeedsClarification
+            }
             IntentOutcome::StaleBaseView { current } => ManagementOutcome::StaleBaseView {
                 current: ViewMarkWire(current.clone()),
             },
@@ -454,19 +462,25 @@ impl HostHandle {
         }
         // Credential availability is a credential-owned premise: the Host
         // only crosses owners, it never combines their judgments.
-        let credential_present =
-            match available_credential(credential_id, &self.store, &self.cred_store).await {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(_) => {
-                    return vec![outcome_frame(
-                        frame,
-                        live,
-                        intent,
-                        ManagementOutcome::HeldByOperation,
-                    )];
-                }
-            };
+        let credential_present = match available_credential(
+            provider,
+            credential_id,
+            &self.store,
+            &self.cred_store,
+        )
+        .await
+        {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => {
+                return vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )];
+            }
+        };
         // The consent owner decides the route: mark parsing, stale faces,
         // same-route shortcut, revision bump, and the atomic commit.
         let premises = AssignConsentIntent {
@@ -561,8 +575,13 @@ impl HostHandle {
             }
             Ok(None) => false,
             Ok(Some(consent)) => {
-                match available_credential(&consent.credential_id, &self.store, &self.cred_store)
-                    .await
+                match available_credential(
+                    &consent.provider,
+                    &consent.credential_id,
+                    &self.store,
+                    &self.cred_store,
+                )
+                .await
                 {
                     Ok(found) => found.is_some(),
                     Err(_) => {
@@ -638,8 +657,13 @@ impl HostHandle {
         };
         let credential_present = match &current {
             Some(record) => {
-                match available_credential(&record.credential_id, &self.store, &self.cred_store)
-                    .await
+                match available_credential(
+                    &record.provider,
+                    &record.credential_id,
+                    &self.store,
+                    &self.cred_store,
+                )
+                .await
                 {
                     Ok(found) => found.is_some(),
                     Err(_) => return unavailable_view(),
