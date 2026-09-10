@@ -56,22 +56,19 @@ use ene_api::v1::round::{
     HistoryView, PresentationStatus, RoundIntakeOutcomeWire, StreamClose, SubmitTextInput,
     TextStreamClose, TextStreamFrameWire, TextStreamOpen,
 };
+use ene_companion::dialogue::{
+    AcceptedDialogueInput, DialogueBegin, DialogueOutcome, ReplayClassification, begin_turn,
+    classify_replay, finish_turn,
+};
 use ene_companion::{
-    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
-    HistoryAppendOutcome, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
-    RequestFingerprint, RoundIntentMark, UndeliveredRepository,
+    CommandId, CompanionLifecycle, CompanionRepository, HistoryRepository, HistoryRole,
+    PresentationMark, ReportStatus, RequestFingerprint, RoundIntentMark, UndeliveredRepository,
 };
-use ene_credential::{CredentialRef, CredentialRefRepository, credential_availability};
 use ene_inference::{
-    AttemptBeginOutcome, DispatchResult, InferenceAttempt, InferenceAttemptRepository,
-    InferenceTicketId, ProviderTransport, RequestInferenceCommand, ResolvedRoute, UsageFact,
-    UsageSource, send,
+    Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor,
+    InferenceTechnicalError, NotSentReason, PreparedAdmission, ProviderTransport,
 };
-use ene_permission::{
-    CapabilityKind, CheckLiveAuthorizationQuery, ConsentRepository, ConsentRevision, ConsumerKind,
-    DenyCode, InferenceUseCandidate, LiveAuthorizationDecision, PurposeKind,
-    check_live_authorization,
-};
+use ene_permission::EvaluationTracker;
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceAttribution,
@@ -83,11 +80,11 @@ use ene_presentation::{
 };
 use ene_primitive::{RawId, WallClockWithTz};
 use ene_store::Store;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::serve::{
-    HostHandle, LiveInput, device_client, outgoing_frame, reject_frame, unpaired_close,
+    CredStore, HostHandle, LiveInput, device_client, outgoing_frame, reject_frame, unpaired_close,
 };
-use crate::setup::default_credential;
 
 /// Maximum stream chunk size in Unicode scalar values.
 ///
@@ -132,49 +129,6 @@ fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<Comm
     Some(CommandId(ene_primitive::RawId::from_uuid(id)))
 }
 
-/// How one send attempt resolved, for usage-accounting purposes only.
-///
-/// Result adoption and usage accounting stay separate: the provider may
-/// have spent tokens even when the Host cannot adopt the reply, and a
-/// never-attempted call spends nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SendOutcomeClass<'a> {
-    /// The attempt may have run (transport error, including timeouts):
-    /// certainty is unknown, never zero.
-    AttemptUncertain,
-    /// The call definitely never ran (pre-send refusal): no provider use,
-    /// so no fact is recorded at all.
-    NeverSent,
-    /// The provider completed and reported: the known fact is recorded
-    /// against its ticket whether or not the reply is adopted.
-    Reported(&'a UsageFact),
-}
-
-/// Decides the usage fact for one finished send attempt, if any.
-///
-/// `None` records nothing (definitely no provider use); `Some` records the
-/// fact — known counts when reported, unknown counts when the attempt is
-/// uncertain. Never zero-as-unknown: unknown counts travel as [`None`].
-fn usage_for_disposition(
-    ticket: InferenceTicketId,
-    provider: &str,
-    model: &str,
-    outcome: SendOutcomeClass<'_>,
-) -> Option<UsageFact> {
-    match outcome {
-        SendOutcomeClass::AttemptUncertain => Some(UsageFact {
-            ticket,
-            provider: provider.to_string(),
-            model: model.to_string(),
-            input_tokens: None,
-            output_tokens: None,
-            source: UsageSource::Unknown,
-        }),
-        SendOutcomeClass::NeverSent => None,
-        SendOutcomeClass::Reported(usage) => Some(usage.clone()),
-    }
-}
-
 /// Canonical client round premise of one [`SubmitTextInput`] send.
 ///
 /// One rule covers every carrier. The payload names the premise (IPC §21
@@ -208,14 +162,6 @@ fn canonical_round_premise(
             Some(RoundPremise::Existing(round.0.clone()))
         }
         _ => None,
-    }
-}
-
-fn deny_reason(code: DenyCode) -> &'static str {
-    match code {
-        DenyCode::SetupIncomplete => "setup-incomplete",
-        DenyCode::ConsentStale | DenyCode::Superseded => "consent-stale",
-        DenyCode::NotInAllowlist => "not-in-allowlist",
     }
 }
 
@@ -329,6 +275,64 @@ fn revalidate_frame(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFr
     )
 }
 
+/// Renders the typed wire detail for one command-key conflict.
+fn command_conflict_detail(command: &CommandId) -> String {
+    format!(
+        "command {} reused with a different request",
+        command.0.as_uuid().as_hyphenated()
+    )
+}
+
+/// Maps an admission decline to the `Stage 2` revalidation vocabulary.
+///
+/// Admission never produces the route-mismatch or over-limit reasons; they
+/// map defensively rather than claiming a setup failure.
+fn admission_reason(reason: NotSentReason) -> &'static str {
+    match reason {
+        NotSentReason::SetupIncomplete
+        | NotSentReason::CredentialUnavailable
+        | NotSentReason::AuthRejected => "setup-incomplete",
+        NotSentReason::ConsentStale | NotSentReason::ConsentMismatch => "consent-stale",
+        NotSentReason::NotInAllowlist => "not-in-allowlist",
+        NotSentReason::EvaluationConsumed => "evaluation-consumed",
+        NotSentReason::OverLimit => "unknown-reason",
+    }
+}
+
+/// Builds the completed response sequence for an adopted reply.
+fn completed_frames(
+    frame: &WireFrame,
+    live: &LiveInput,
+    round: &RoundWireId,
+    generation: u64,
+    text: &str,
+) -> Vec<WireFrame> {
+    let stream = StreamWireId(RawId::new().as_uuid());
+    let mut responses = vec![
+        accept_frame(frame, live, round),
+        open_frame(frame, live, &stream, round, generation),
+    ];
+    for (position, delta) in chunk_text(text).iter().enumerate() {
+        responses.push(outgoing_frame(
+            frame,
+            live,
+            WirePayload::TextStreamFrame(TextStreamFrameWire {
+                stream,
+                seq: position as u64,
+                delta: delta.clone(),
+                is_final: false,
+            }),
+        ));
+    }
+    if let Some(last) = responses.last_mut()
+        && let WirePayload::TextStreamFrame(closing) = &mut last.payload
+    {
+        closing.is_final = true;
+    }
+    responses.push(close_frame(frame, live, &stream, StreamClose::Completed));
+    responses
+}
+
 /// Outcome of one presence attach compare-and-commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AttachOutcome {
@@ -368,48 +372,6 @@ impl HostHandle {
         stale_frame_with(frame, live, current_round, generation)
     }
 
-    /// Records an unknown-usage fact for a ticket whose provider attempt has
-    /// uncertain outcome.
-    ///
-    /// Only for attempts that may have run (transport errors, including
-    /// timeouts where the call may have executed): a ticket that was
-    /// definitely never sent records NO fact (see [`usage_for_disposition`]),
-    /// and a completed attempt records its reported counts even when the
-    /// reply cannot be adopted. Best-effort post-accept bookkeeping: when
-    /// the store itself rejects the record, the stream close already
-    /// returned stays authoritative and the usage gap becomes the documented
-    /// `Stage 2` follow-up.
-    pub(crate) async fn record_unknown_usage(
-        &self,
-        ticket: InferenceTicketId,
-        provider: &str,
-        model: &str,
-    ) {
-        self.record_usage_decision(usage_for_disposition(
-            ticket,
-            provider,
-            model,
-            SendOutcomeClass::AttemptUncertain,
-        ))
-        .await;
-    }
-
-    /// Records a decided usage fact, if any.
-    ///
-    /// [`None`] (definitely no provider use) stores nothing; [`Some`]
-    /// stores the fact best-effort, with the already-returned stream close
-    /// staying authoritative on store failure.
-    pub(crate) async fn record_usage_decision(&self, decided: Option<UsageFact>) {
-        use ene_inference::UsageRepository;
-        let Some(fact) = decided else {
-            return;
-        };
-        if self.store.record_usage(fact).await.is_err() {
-            // The stream close is authoritative; usage persistence retries
-            // belong to later milestone work, not to this frame.
-        }
-    }
-
     /// Attaches presence for the paired device when none is active..
     ///
     /// Best-effort by design and called only from the submit path: the caller
@@ -446,18 +408,6 @@ impl HostHandle {
             connection_live,
         )
         .await
-    }
-
-    /// Reloads the consent record and checks it still names the authorized
-    /// route. Both the pre-send and the adoption gate funnel through here:
-    /// short compare-before-commit reads around the long provider await, so
-    /// a mid-flight consent move cannot silently ride on a stale check.
-    /// Store failures fail closed (`false`).
-    async fn consent_matches(&self, id: &str, rev: ConsentRevision) -> bool {
-        let Ok(Some(current)) = self.store.load_current().await else {
-            return false;
-        };
-        current.id == id && current.rev == rev
     }
 
     /// Runs the submit pipeline for one [`SubmitTextInput`] frame.
@@ -589,38 +539,28 @@ impl HostHandle {
         // Durable replay precedes presence attach: an exact retry answers
         // from the stored marker without advancing presence generation or
         // touching any other state, while a conflicting reuse rejects just
-        // as early. One comparison, one judge: the same
-        // [`RequestFingerprint`] value the store reconstructs
-        // in-transaction; a stored row without one proves nothing and is
-        // declined the same way (fail-closed).
-        match self.store.lookup_command(companion, &command).await {
-            Err(_) => return vec![held_frame(frame, live)],
-            Ok(Some(found)) => {
-                let replays = found
-                    .request_fingerprint()
-                    .is_some_and(|stored| stored == incoming_fingerprint);
-                if !replays {
-                    return vec![reject_frame(
-                        frame,
-                        live,
-                        RejectKind::ConflictingCommand,
-                        format!(
-                            "command {} reused with a different request",
-                            command.0.as_uuid().as_hyphenated()
-                        ),
-                    )];
-                }
-                return self
-                    .replay_accept(
-                        frame,
-                        live,
-                        companion,
-                        &command,
-                        attribution.generation.as_u64(),
-                    )
-                    .await;
+        // as early. The companion owns the fingerprint judge; core only
+        // maps its verdict to frames.
+        match classify_replay(&self.store, companion, &command, incoming_fingerprint).await {
+            ReplayClassification::Replay { round, round_wire } => {
+                return self.replay_frames(
+                    frame,
+                    live,
+                    round,
+                    round_wire,
+                    attribution.generation.as_u64(),
+                );
             }
-            Ok(None) => {}
+            ReplayClassification::Conflict => {
+                return vec![reject_frame(
+                    frame,
+                    live,
+                    RejectKind::ConflictingCommand,
+                    command_conflict_detail(&command),
+                )];
+            }
+            ReplayClassification::Held => return vec![held_frame(frame, live)],
+            ReplayClassification::None => {}
         }
         // The winner's intake premise below carries the fresh generation from
         // the committed fact. Any other path carries the envelope view
@@ -742,288 +682,74 @@ impl HostHandle {
                 return vec![revalidate_frame(frame, live, intake_reason(&reason))];
             }
         };
-        let Ok(stored_consent) = self.store.load_current().await else {
-            return vec![held_frame(frame, live)];
-        };
-        let Some(consent) = stored_consent else {
-            return vec![revalidate_frame(frame, live, "setup-incomplete")];
-        };
-        let Ok(known_refs) = self.store.list_refs().await else {
-            return vec![held_frame(frame, live)];
-        };
-        let credential = match known_refs
-            .iter()
-            .find(|known| known.id() == consent.credential_id)
-            .cloned()
-        {
-            Some(known) => known,
-            None => CredentialRef::new(consent.provider.clone(), "main")
-                .unwrap_or_else(|_| default_credential()),
-        };
-        let repo_known = known_refs
-            .iter()
-            .any(|known| known.id() == consent.credential_id);
-        let setup_complete =
-            credential_availability(&credential, repo_known, &self.cred_store).present;
-        let candidate = InferenceUseCandidate {
-            consumer: ConsumerKind::CompanionDialogue,
-            capability: CapabilityKind::Dialogue,
-            provider_ref: consent.provider.clone(),
-            model: consent.model.clone(),
-            purpose: PurposeKind::DialogueResponse,
-        };
-        let query = CheckLiveAuthorizationQuery {
-            candidate: candidate.clone(),
-            expected_consent: Some((consent.id.clone(), consent.rev)),
-            setup_complete,
-        };
-        let authorization = {
-            let mut tracker = self.tracker.lock().await;
-            let decision = check_live_authorization(&query, Some(&consent), &mut tracker);
-            match decision {
-                LiveAuthorizationDecision::AllowForThisUse(authorization) => {
-                    if tracker.consume(&authorization, &candidate.fingerprint()) {
-                        Some(authorization)
-                    } else {
-                        None
-                    }
-                }
-                LiveAuthorizationDecision::Deny(reason) => {
-                    return vec![revalidate_frame(frame, live, deny_reason(reason.code))];
-                }
-                LiveAuthorizationDecision::NeedsRevalidation(_) => {
-                    return vec![revalidate_frame(frame, live, "consent-stale")];
-                }
-            }
-        };
-        let Some(authorization) = authorization else {
-            return vec![revalidate_frame(frame, live, "evaluation-consumed")];
-        };
-        // One projection per round: the atomic get-or-create below reuses
-        // an already-mapped round's wire, so every message in the round —
-        // and every replay — names the same projection; only an unmapped
-        // (freshly minted) round mints. The mint may land before the
-        // durable append below decides, but the projection is never
-        // published on a failed append (no ack or stream carries it), and
-        // an unpublished, unguessable mapping entry is not authority:
-        // acceptance still comes only from intake plus the durable commit.
-        // The map itself stays per-process, dropped by a restart.
+        // The companion owns the accepted-turn order: admission precedes the
+        // durable append, the Host records the open round only after that
+        // append commits, and dispatch plus reply integration follow.
         let round_wire = self.round_wire_or_mint(&accepted);
-        let sender_incarnation = (
-            frame.envelope.sender.incarnation_id.counter,
-            frame.envelope.sender.incarnation_id.random,
-        );
         let generation_number = attribution.generation.as_u64();
-        let owner_cmd = AppendHistoryCommand {
+        let executor = HostInference {
+            store: &self.store,
+            cred_store: &self.cred_store,
+            tracker: &self.tracker,
+            transport,
+        };
+        let input = AcceptedDialogueInput {
             companion,
             round: accepted.as_raw(),
-            role: HistoryRole::Owner,
+            generation: attribution.generation,
             text: submit.body.text.clone(),
             lang: submit.body.lang.0.clone(),
-            at: WallClockWithTz::now(),
-            expected_generation: attribution.generation,
-            expected_consent: Some((consent.id.clone(), consent.rev.as_u64())),
             local_id: Some(submit.local_id.0.clone()).filter(|key| !key.is_empty()),
-            command_id: Some(command),
-            round_wire: Some(round_wire.0.clone()),
-            round_intent: Some(round_intent),
-            incarnation: Some(sender_incarnation),
+            command,
+            round_wire: round_wire.0.clone(),
+            round_intent,
+            incarnation: Some((
+                frame.envelope.sender.incarnation_id.counter,
+                frame.envelope.sender.incarnation_id.random,
+            )),
         };
-        match self.store.append_message(owner_cmd).await {
-            Ok(HistoryAppendOutcome::CommittedAs { .. }) => {}
-            Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. }) => {
-                // Lost the race with a concurrent same-command submit after
-                // the lookup above: resolve durably so the ack survives
-                // restarts like any other replay.
-                return self
-                    .replay_accept(frame, live, companion, &command, generation_number)
-                    .await;
+        match begin_turn(input, &self.store, &executor).await {
+            DialogueBegin::Ready(turn) => {
+                self.record_open_round(
+                    &live.client_ref,
+                    &companion_key,
+                    OpenRound {
+                        companion: companion.as_raw(),
+                        client,
+                        round: accepted,
+                        generation: attribution.generation,
+                    },
+                );
+                match finish_turn(turn, &self.store, &executor).await {
+                    DialogueOutcome::Completed { text } => {
+                        completed_frames(frame, live, &round_wire, generation_number, &text)
+                    }
+                    DialogueOutcome::Interrupted => {
+                        interrupted_frames(frame, live, &round_wire, generation_number)
+                    }
+                }
             }
-            Ok(HistoryAppendOutcome::StaleExpected { current }) => {
-                return vec![stale_frame_with(frame, live, None, current.as_u64())];
+            DialogueBegin::Replayed { round, round_wire } => {
+                self.replay_frames(frame, live, round, round_wire, generation_number)
             }
-            Ok(HistoryAppendOutcome::StaleConsent) => {
-                return vec![revalidate_frame(frame, live, "consent-stale")];
+            DialogueBegin::StaleExpected { current } => {
+                vec![stale_frame_with(frame, live, None, current.as_u64())]
             }
-            Ok(HistoryAppendOutcome::CommandConflict) => {
-                // The key already owns a different request than the stored
-                // fingerprint covers — the store decided this
-                // in-transaction from the same [`RequestFingerprint`] the
-                // early replay compares. Same-send retries never reach
-                // here: they replay as `AlreadyCommittedAs` from the stored
-                // accept, even across round drift. Declined without side
-                // effects, never rebound, never an intake outcome, never a
-                // retry signal.
-                return vec![reject_frame(
-                    frame,
-                    live,
-                    RejectKind::ConflictingCommand,
-                    format!(
-                        "command {} reused with a different request",
-                        command.0.as_uuid().as_hyphenated()
-                    ),
-                )];
-            }
-            Ok(HistoryAppendOutcome::HeldByLifecycle { .. }) => {
-                return vec![revalidate_frame(frame, live, "stopped-companion")];
-            }
-            Err(_) => return vec![held_frame(frame, live)],
-        }
-        self.record_open_round(
-            &live.client_ref,
-            &companion_key,
-            OpenRound {
-                companion: companion.as_raw(),
-                client,
-                round: accepted,
-                generation: attribution.generation,
-            },
-        );
-        let ticket = InferenceTicketId(RawId::new());
-        let route = ResolvedRoute {
-            provider: consent.provider.clone(),
-            model: consent.model.clone(),
-            credential: credential.clone(),
-            consent: (consent.id.clone(), consent.rev),
-        };
-        let command = RequestInferenceCommand {
-            ticket,
-            candidate,
-            authorization,
-            route,
-            input_text: submit.body.text.clone(),
-        };
-        if !self.consent_matches(&consent.id, consent.rev).await {
-            // Never attempted: no provider use, so no usage fact (cf.
-            // `usage_for_disposition`).
-            return interrupted_frames(frame, live, &round_wire, generation_number);
-        }
-        // Linearization point: claim this ticket's attempt under the
-        // expected consent in one short transaction, then issue provider
-        // I/O outside any lock. A mutation that committed first fails the
-        // claim stale — no byte leaves; a mutation that commits after only
-        // affects result adoption (handled below), never the fact that the
-        // attempt started under a verified premise.
-        match self
-            .store
-            .begin_inference_attempt(InferenceAttempt {
-                ticket,
-                expected_consent: (consent.id.clone(), consent.rev.as_u64()),
-                provider: consent.provider.clone(),
-                model: consent.model.clone(),
-            })
-            .await
-        {
-            Ok(AttemptBeginOutcome::Started) => {}
-            Ok(AttemptBeginOutcome::Stale) | Err(_) => {
-                // The provider never ran (fail-closed on store failure
-                // too): no usage fact, same as never sent.
-                return interrupted_frames(frame, live, &round_wire, generation_number);
-            }
-        }
-        // The `true` verdict is the claim above: `send` keeps its own gate
-        // as defense in depth, but the durable determination already bound
-        // this ticket to its consent premise.
-        let send_outcome = send(command, true, transport).await;
-        let Ok(dispatch) = send_outcome else {
-            self.record_unknown_usage(ticket, &consent.provider, &consent.model)
-                .await;
-            return interrupted_frames(frame, live, &round_wire, generation_number);
-        };
-        let DispatchResult::Completed(arrival) = dispatch else {
-            // Definitely never sent: the decision table records no fact.
-            self.record_usage_decision(usage_for_disposition(
-                ticket,
-                &consent.provider,
-                &consent.model,
-                SendOutcomeClass::NeverSent,
-            ))
-            .await;
-            return interrupted_frames(frame, live, &round_wire, generation_number);
-        };
-        if !self.consent_matches(&consent.id, consent.rev).await {
-            // The provider ran and reported: adoption failed, accounting did
-            // not. The known fact stays against its ticket even though the
-            // reply is not adopted.
-            self.record_usage_decision(usage_for_disposition(
-                ticket,
-                &consent.provider,
-                &consent.model,
-                SendOutcomeClass::Reported(&arrival.usage),
-            ))
-            .await;
-            return interrupted_frames(frame, live, &round_wire, generation_number);
-        }
-        let reply_cmd = AppendHistoryCommand {
-            companion,
-            round: accepted.as_raw(),
-            role: HistoryRole::Companion,
-            text: arrival.output_text.clone(),
-            lang: submit.body.lang.0.clone(),
-            at: WallClockWithTz::now(),
-            expected_generation: attribution.generation,
-            expected_consent: Some((consent.id.clone(), consent.rev.as_u64())),
-            local_id: None,
-            command_id: None,
-            // Same round, same projection: the reply belongs to the accepted
-            // round. No command key and no round intent: the reply is
-            // Host-produced, never a client command, so it carries no
-            // replay key at all.
-            round_wire: Some(round_wire.0.clone()),
-            round_intent: None,
-            incarnation: None,
-        };
-        if !matches!(
-            self.store
-                .append_reply_with_undelivered(reply_cmd, true)
-                .await,
-            Ok((HistoryAppendOutcome::CommittedAs { .. }, _))
-        ) {
-            // The provider ran and reported but the reply could not be
-            // adopted: accounting still records the known fact against
-            // its ticket.
-            self.record_usage_decision(usage_for_disposition(
-                ticket,
-                &consent.provider,
-                &consent.model,
-                SendOutcomeClass::Reported(&arrival.usage),
-            ))
-            .await;
-            return interrupted_frames(frame, live, &round_wire, generation_number);
-        }
-        // Adopted reply: the reported fact records best-effort; a store
-        // failure keeps the `Completed` close (the reply happened).
-        self.record_usage_decision(usage_for_disposition(
-            ticket,
-            &consent.provider,
-            &consent.model,
-            SendOutcomeClass::Reported(&arrival.usage),
-        ))
-        .await;
-        let stream = StreamWireId(RawId::new().as_uuid());
-        let mut responses = vec![
-            accept_frame(frame, live, &round_wire),
-            open_frame(frame, live, &stream, &round_wire, generation_number),
-        ];
-        for (position, delta) in chunk_text(&arrival.output_text).iter().enumerate() {
-            responses.push(outgoing_frame(
+            DialogueBegin::StaleConsent => vec![revalidate_frame(frame, live, "consent-stale")],
+            DialogueBegin::Conflict => vec![reject_frame(
                 frame,
                 live,
-                WirePayload::TextStreamFrame(TextStreamFrameWire {
-                    stream,
-                    seq: position as u64,
-                    delta: delta.clone(),
-                    is_final: false,
-                }),
-            ));
+                RejectKind::ConflictingCommand,
+                command_conflict_detail(&command),
+            )],
+            DialogueBegin::Held => vec![held_frame(frame, live)],
+            DialogueBegin::HeldByLifecycle(_) => {
+                vec![revalidate_frame(frame, live, "stopped-companion")]
+            }
+            DialogueBegin::Declined(reason) => {
+                vec![revalidate_frame(frame, live, admission_reason(reason))]
+            }
         }
-        if let Some(last) = responses.last_mut()
-            && let WirePayload::TextStreamFrame(closing) = &mut last.payload
-        {
-            closing.is_final = true;
-        }
-        responses.push(close_frame(frame, live, &stream, StreamClose::Completed));
-        responses
     }
 
     /// Applies one presentation observation with no reply.
@@ -1133,38 +859,27 @@ impl HostHandle {
         self.wire_for_round(&RoundId::from_raw(round))
     }
 
-    /// Answers the original accept ack for a replayed command from durable
-    /// state: the stored round wire travels verbatim, so a retry after a
-    /// restart replays instead of going stale on the dropped transient map.
+    /// Answers a durable replay with its stored accept, or stale when no
+    /// projection survives.
+    ///
+    /// The stored round wire travels verbatim, so a retry after a restart
+    /// replays instead of going stale on the dropped transient map.
     /// Pre-opaque rows (no stored wire) fall back to the transient map; only
     /// when both miss does the intake answer stale with the current
     /// generation, and the Client recovers missed items through history.
-    async fn replay_accept(
+    fn replay_frames(
         &self,
         frame: &WireFrame,
         live: &LiveInput,
-        companion: CompanionId,
-        command: &CommandId,
+        round: RawId,
+        stored_wire: Option<String>,
         generation: u64,
     ) -> Vec<WireFrame> {
-        let stored = self
-            .store
-            .lookup_command(companion, command)
-            .await
-            .ok()
-            .flatten();
-        let wire = stored
-            .as_ref()
-            .and_then(|row| row.round_wire.clone())
-            .or_else(|| {
-                stored
-                    .as_ref()
-                    .and_then(|row| self.wire_for_round_value(row.round))
-            });
-        let Some(wire) = wire else {
-            return vec![stale_frame_with(frame, live, None, generation)];
-        };
-        vec![accept_frame(frame, live, &RoundWireId(wire))]
+        let wire = stored_wire.or_else(|| self.wire_for_round_value(round));
+        match wire {
+            Some(wire) => vec![accept_frame(frame, live, &RoundWireId(wire))],
+            None => vec![stale_frame_with(frame, live, None, generation)],
+        }
     }
 }
 
@@ -1207,6 +922,49 @@ async fn attach_from(
         Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { .. }) | Err(_) => {
             AttachOutcome::Raced
         }
+    }
+}
+
+/// Host adapter implementing the owner's inference boundary.
+///
+/// Pure wiring: every admission, attempt, provider, adoption, and usage
+/// decision lives in `ene-inference`; this adapter only hands it the
+/// concrete repositories and takes the short tracker lock for the
+/// single-use authorization.
+struct HostInference<'a, T> {
+    store: &'a Store,
+    cred_store: &'a CredStore,
+    tracker: &'a AsyncMutex<EvaluationTracker>,
+    transport: &'a T,
+}
+
+impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_, T> {
+    async fn admit_dialogue(&self) -> Result<Admission, InferenceTechnicalError> {
+        match ene_inference::prepare_dialogue_admission(self.store, self.store, self.cred_store)
+            .await?
+        {
+            PreparedAdmission::Declined(reason) => Ok(Admission::Declined(reason)),
+            PreparedAdmission::Ready(request) => {
+                let mut tracker = self.tracker.lock().await;
+                Ok(request.authorize(&mut tracker))
+            }
+        }
+    }
+
+    async fn dispatch(
+        &self,
+        authorized: AuthorizedInference,
+        input_text: String,
+    ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
+        ene_inference::dispatch_authorized(
+            authorized,
+            input_text,
+            self.store,
+            self.store,
+            self.store,
+            self.transport,
+        )
+        .await
     }
 }
 

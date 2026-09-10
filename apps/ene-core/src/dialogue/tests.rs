@@ -2218,55 +2218,6 @@ async fn consent_move_mid_flight_interrupts_adoption() {
     );
 }
 
-#[test]
-fn usage_certainty_never_invents_or_discards_facts() {
-    use super::{SendOutcomeClass, usage_for_disposition};
-    use ene_inference::{InferenceTicketId, UsageFact, UsageSource};
-
-    let ticket = InferenceTicketId(RawId::new());
-    assert_eq!(
-        usage_for_disposition(ticket, "openai", "dialogue-1", SendOutcomeClass::NeverSent),
-        None,
-        "a never-sent call spends nothing, so no fact is recorded"
-    );
-    let uncertain = usage_for_disposition(
-        ticket,
-        "openai",
-        "dialogue-1",
-        SendOutcomeClass::AttemptUncertain,
-    );
-    assert_eq!(
-        uncertain,
-        Some(UsageFact {
-            ticket,
-            provider: String::from("openai"),
-            model: String::from("dialogue-1"),
-            input_tokens: None,
-            output_tokens: None,
-            source: UsageSource::Unknown,
-        }),
-        "an uncertain attempt records unknown counts, never zero"
-    );
-    let reported = UsageFact {
-        ticket,
-        provider: String::from("openai"),
-        model: String::from("dialogue-1"),
-        input_tokens: Some(7),
-        output_tokens: Some(9),
-        source: UsageSource::Reported,
-    };
-    assert_eq!(
-        usage_for_disposition(
-            ticket,
-            "openai",
-            "dialogue-1",
-            SendOutcomeClass::Reported(&reported)
-        ),
-        Some(reported),
-        "reported counts survive even when the caller cannot adopt the reply"
-    );
-}
-
 #[tokio::test]
 async fn register_holds_until_host_local_approval() {
     let Some((handle, _dir)) = memory_handle_with("dlg-credgate", |_| {}).await else {
