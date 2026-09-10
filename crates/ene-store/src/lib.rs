@@ -22,8 +22,8 @@ use std::sync::MutexGuard;
 use ene_companion::{
     AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
     CompanionTechnicalError, HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole,
-    PresentationMark, ReportStatus, ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
-    UndeliveredTechnicalError,
+    PresentationMark, ReportStatus, ReportStatusTransition, RoundIntentMark, UndeliveredRef,
+    UndeliveredRepository, UndeliveredTechnicalError,
 };
 use ene_credential::{
     CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialTechnicalError,
@@ -134,14 +134,21 @@ impl Store {
     ///
     /// Durable idempotency rests on the client-minted `(companion,
     /// command_id)`: a retry reuses the same command id with a fresh message
-    /// id, so an in-transaction pre-check compares the stored *request
-    /// fingerprint* (role, body, language, sending incarnation) and returns
-    /// the original [`HistoryAppendOutcome::AlreadyCommittedAs`] without
-    /// re-appending or re-registering undelivered. Round identity and its
-    /// wire projection are the *accepted result*, not the request: the Host
-    /// mints them per intake decision and a retry can re-intake into a
-    /// newer round, so they never decide conflict — the replay answers the
-    /// stored accept verbatim. This replaces the retired `local_id`
+    /// id, so an in-transaction pre-check compares the stored
+    /// [`RequestFingerprint`] against the incoming request's — the same
+    /// fingerprint type every caller builds — and returns the original
+    /// [`HistoryAppendOutcome::AlreadyCommittedAs`] without re-appending or
+    /// re-registering undelivered. The fingerprint covers role, body,
+    /// language, sending incarnation, and the canonical client round
+    /// intent; round identity and its wire projection are the *accepted
+    /// result*, not the request: the Host mints them per intake decision
+    /// and a retry can re-intake into a newer round, so they never decide
+    /// conflict — the replay answers the stored accept verbatim. A row
+    /// whose fingerprint cannot be reconstructed (a pre-mark row) proves
+    /// nothing: it is declined like any conflicting reuse, never guessed.
+    /// The generation premise stays out of the fingerprint: it is enforced
+    /// separately above, so a retry under a newer generation view still
+    /// replays instead of conflicting. This replaces the retired `local_id`
     /// pre-check; `local_id` is stored as correspondence metadata only and
     /// is never consulted here. `NULL` command ids carry no replay key and
     /// never collide. A reused key with a different request answers
@@ -219,67 +226,42 @@ impl Store {
         }
         if let Some(command) = cmd.command_id {
             let command_text = encode_id(command.0);
-            let existing: Option<CommandFingerprintRow> = tx
+            let existing: Option<HistoryRow> = tx
                 .query_row(
-                    SQL_SELECT_HISTORY_ID_BY_COMMAND,
+                    SQL_SELECT_HISTORY_BY_COMMAND,
                     params![companion_text, command_text],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                            row.get(6)?,
-                        ))
-                    },
+                    HistoryRow::from_row,
                 )
                 .optional()
                 .map_err(|error| companion_unavailable(error.to_string()))?;
-            if let Some((
-                existing,
-                existing_round,
-                existing_role,
-                existing_body,
-                existing_lang,
-                existing_counter,
-                existing_random,
-            )) = existing
-            {
-                let message = decode_id(&existing).map_err(companion_unavailable)?;
-                let round = decode_id(&existing_round).map_err(companion_unavailable)?;
-                // The durable key owns its request fingerprint: role, body,
-                // language, and sending incarnation. An exact retry replays
-                // the original acceptance even when the Host re-intaked it
-                // into a newer round (round and its projection are the
-                // accepted result and travel verbatim from the stored row),
-                // while the same key with a different request is declined
-                // without side effects. The generation premise stays out of
-                // the fingerprint: it is enforced separately above, so a
-                // retry under a newer generation view still replays instead
-                // of conflicting.
-                let stored_incarnation = match (existing_counter, existing_random) {
-                    (Some(counter_raw), Some(random_raw)) => Some((
-                        decode_u64(counter_raw).map_err(companion_unavailable)?,
-                        decode_u64(random_raw).map_err(companion_unavailable)?,
-                    )),
-                    (None, None) => None,
-                    _ => {
-                        return Err(companion_unavailable(String::from(
-                            "malformed history incarnation",
-                        )));
-                    }
+            if let Some(row) = existing {
+                let stored =
+                    decode_history_message(cmd.companion, row).map_err(companion_unavailable)?;
+                // The durable key owns its request fingerprint, and the
+                // same [`RequestFingerprint`] type every caller builds is
+                // the only judge: an exact retry replays the original
+                // acceptance even when the Host re-intaked it into a newer
+                // round (round and its projection are the accepted result
+                // and travel verbatim from the stored row), while the same
+                // key with a different request — a different round intent
+                // included — is declined without side effects. A row
+                // without a reconstructable fingerprint proves nothing and
+                // declines the same way (fail-closed); so does a keyed
+                // incoming command without a round intent.
+                let Some(stored_fingerprint) = stored.request_fingerprint() else {
+                    return Ok((HistoryAppendOutcome::CommandConflict, None));
                 };
-                if existing_role != role_text
-                    || existing_body != cmd.text
-                    || existing_lang != cmd.lang
-                    || cmd.incarnation != stored_incarnation
-                {
+                let Some(incoming_fingerprint) = cmd.request_fingerprint() else {
+                    return Ok((HistoryAppendOutcome::CommandConflict, None));
+                };
+                if stored_fingerprint != incoming_fingerprint {
                     return Ok((HistoryAppendOutcome::CommandConflict, None));
                 }
                 return Ok((
-                    HistoryAppendOutcome::AlreadyCommittedAs { message, round },
+                    HistoryAppendOutcome::AlreadyCommittedAs {
+                        message: stored.id,
+                        round: stored.round,
+                    },
                     None,
                 ));
             }
@@ -290,6 +272,13 @@ impl Store {
                 Some(encode_u64(counter).map_err(companion_unavailable)?),
                 Some(encode_u64(random).map_err(companion_unavailable)?),
             ),
+            None => (None, None),
+        };
+        let (intent_kind, intent_ref) = match cmd.round_intent.as_ref() {
+            Some(intent) => {
+                let (kind, reference) = encode_round_intent(intent);
+                (Some(kind), reference.map(str::to_owned))
+            }
             None => (None, None),
         };
         tx.execute(
@@ -306,6 +295,8 @@ impl Store {
                 command_text.as_deref(),
                 cmd.local_id.as_deref(),
                 cmd.round_wire.as_deref(),
+                intent_kind,
+                intent_ref,
                 client_counter,
                 client_random,
             ],
@@ -361,8 +352,10 @@ mod migrate {
     /// `(companion_id, command_id)` unique replay index; `local_id` stays as
     /// correspondence metadata only. Version 4 adds the `credential_pending`
     /// table for registration approvals; the usable marker stays
-    /// `credential_ref`, so no approved table is created.
-    const CURRENT_VERSION: u64 = 7;
+    /// `credential_ref`, so no approved table is created. Version 8 adds the
+    /// nullable `history_message.round_intent` / `round_intent_ref` columns
+    /// that persist the client round intent of the request fingerprint.
+    const CURRENT_VERSION: u64 = 8;
 
     /// Forward-only schema: tables first, then the supporting indexes.
     const SCHEMA: &str = "
@@ -552,6 +545,21 @@ CREATE TABLE IF NOT EXISTS inference_attempt (
     started_at TEXT NOT NULL
 );
 ";
+
+    /// Version 8 upgrade, applied once when the stored version is below 8.
+    ///
+    /// Forward-only: adds the persisted client round intent of the history
+    /// request fingerprint (`round_intent` kind, `round_intent_ref`
+    /// payload). The intent is request semantics — Auto, force-new, or a
+    /// join of the round reference the Client sent — so a restart can still
+    /// decide replay from durable state. Pre-existing rows keep both
+    /// columns `NULL`: their intent was never stored, so their sameness
+    /// cannot be proven and every replay attempt against them fails closed
+    /// instead of being guessed.
+    const MIGRATION_V8: &str = "
+ALTER TABLE history_message ADD COLUMN round_intent TEXT NULL;
+ALTER TABLE history_message ADD COLUMN round_intent_ref TEXT NULL;
+";
     /// Creates or upgrades the schema on an open connection.
     ///
     /// Atomic: pending migrations and the version bump commit together in
@@ -606,6 +614,10 @@ CREATE TABLE IF NOT EXISTS inference_attempt (
             tx.execute_batch(MIGRATION_V7)
                 .map_err(|error| error.to_string())?;
         }
+        if stored_version < 8 {
+            tx.execute_batch(MIGRATION_V8)
+                .map_err(|error| error.to_string())?;
+        }
         let current = i64::try_from(CURRENT_VERSION)
             .map_err(|_| String::from("schema version out of range"))?;
         if stored.is_none() {
@@ -635,11 +647,10 @@ const SQL_SELECT_ATTRIBUTION: &str =
     "SELECT state, active_client, generation FROM presence_attribution WHERE companion_id = ?1";
 const SQL_UPDATE_ATTRIBUTION: &str = "UPDATE presence_attribution SET state = ?1, active_client = ?2, generation = ?3 WHERE companion_id = ?4";
 const SQL_INSERT_TRANSITION: &str = "INSERT INTO presence_transition_log (companion_id, old_state, new_state, old_gen, new_gen, reason, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
-const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
-const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
-const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
-const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
-const SQL_SELECT_HISTORY_ID_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
+const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
+const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 const SQL_SELECT_UNDELIVERED_STATUS: &str =
@@ -759,6 +770,37 @@ fn decode_role(text: &str) -> Result<HistoryRole, String> {
         "owner" => Ok(HistoryRole::Owner),
         "companion" => Ok(HistoryRole::Companion),
         _ => Err(String::from("unknown history role")),
+    }
+}
+
+/// Encodes a client round intent into its stored `(kind, reference)` pair.
+///
+/// Only an [`RoundIntentMark::Existing`] carries a reference, and it is the
+/// Client-supplied round reference verbatim.
+fn encode_round_intent(intent: &RoundIntentMark) -> (&'static str, Option<&str>) {
+    match intent {
+        RoundIntentMark::Auto => ("auto", None),
+        RoundIntentMark::New => ("new", None),
+        RoundIntentMark::Existing(reference) => ("existing", Some(reference)),
+    }
+}
+
+/// Reads a stored round intent back into its domain mark.
+///
+/// `None` intent means the row predates the mark (or carries no command
+/// key): the caller fail-closes on replay instead of guessing. A reference
+/// without its `existing` kind — or the kind without one — is a malformed
+/// row, never a defaulted value.
+fn decode_round_intent(
+    kind: Option<&str>,
+    reference: Option<String>,
+) -> Result<Option<RoundIntentMark>, String> {
+    match (kind, reference) {
+        (None, None) => Ok(None),
+        (Some("auto"), None) => Ok(Some(RoundIntentMark::Auto)),
+        (Some("new"), None) => Ok(Some(RoundIntentMark::New)),
+        (Some("existing"), Some(reference)) => Ok(Some(RoundIntentMark::Existing(reference))),
+        _ => Err(String::from("malformed history round intent")),
     }
 }
 
@@ -1059,9 +1101,9 @@ fn decode_pending_credential(
 
 /// One decoded history row: identity, round, role, body, language,
 /// timestamp, generation, optional command-scoped replay identity, optional
-/// wire projection and incarnation for the replay fingerprint, and optional
-/// client-local correspondence ID (`local_id` is stored metadata only,
-/// never a key).
+/// wire projection and round intent for the replay fingerprint, and
+/// optional client-local correspondence ID (`local_id` is stored metadata
+/// only, never a key).
 ///
 /// Named fields (instead of the retired positional tuple) so column order
 /// lives in exactly one place: [`HistoryRow::from_row`]. All three readers
@@ -1088,6 +1130,10 @@ struct HistoryRow {
     stored_local_id: Option<String>,
     /// Stored opaque round wire projection, if any.
     round_wire: Option<String>,
+    /// Stored round intent kind, if any (`NULL` on pre-mark rows).
+    round_intent_kind: Option<String>,
+    /// Stored round intent reference, if any.
+    round_intent_ref: Option<String>,
     /// Stored sending incarnation counter, if any.
     client_counter: Option<i64>,
     /// Stored sending incarnation random, if any.
@@ -1108,27 +1154,13 @@ impl HistoryRow {
             command_text: row.get(7)?,
             stored_local_id: row.get(8)?,
             round_wire: row.get(9)?,
-            client_counter: row.get(10)?,
-            client_random: row.get(11)?,
+            round_intent_kind: row.get(10)?,
+            round_intent_ref: row.get(11)?,
+            client_counter: row.get(12)?,
+            client_random: row.get(13)?,
         })
     }
 }
-
-/// One stored replay fingerprint for a `(companion, command_id)` key:
-/// message and round identity plus the compared request content (role,
-/// body, language, incarnation columns). Round identity and its wire
-/// projection are the accepted result and are compared nowhere here; the
-/// generation premise stays out too, enforced separately before the replay
-/// check.
-type CommandFingerprintRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<i64>,
-    Option<i64>,
-);
 
 /// One decoded intent-outcome row: kind, target, base, rationale origin,
 /// optional rationale quote, outcome kind, and optional outcome mark.
@@ -1146,10 +1178,11 @@ type IntentOutcomeRow = (
 ///
 /// `command_text` carries the client-minted replay identity (`None` stores
 /// `NULL`, meaning no replay key); `round_wire` carries the opaque wire
-/// projection (`None` on pre-opaque rows); the client counter/random pair
-/// carries the sending incarnation only when both are present and decode
-/// (`None` otherwise, including pre-opaque rows); `local_id` carries
-/// client-local correspondence metadata only.
+/// projection (`None` on pre-opaque rows); the round intent columns decode
+/// through [`decode_round_intent`] (never guessed); the client counter/
+/// random pair carries the sending incarnation only when both are present
+/// and decode (`None` otherwise, including pre-opaque rows); `local_id`
+/// carries client-local correspondence metadata only.
 fn decode_history_message(
     companion: CompanionId,
     row: HistoryRow,
@@ -1165,6 +1198,8 @@ fn decode_history_message(
         command_text,
         stored_local_id,
         round_wire,
+        round_intent_kind,
+        round_intent_ref,
         client_counter,
         client_random,
     } = row;
@@ -1181,6 +1216,7 @@ fn decode_history_message(
         (None, None) => None,
         _ => return Err(String::from("malformed history incarnation")),
     };
+    let round_intent = decode_round_intent(round_intent_kind.as_deref(), round_intent_ref)?;
     Ok(HistoryMessage {
         id: decode_id(&message_text)?,
         companion,
@@ -1192,6 +1228,7 @@ fn decode_history_message(
         presence_generation: PresenceGeneration::from_u64(decode_u64(generation_raw)?),
         command_id,
         round_wire,
+        round_intent,
         incarnation,
         local_id: stored_local_id,
     })
@@ -2768,7 +2805,7 @@ mod tests {
     use ene_companion::{
         AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
         HistoryAppendOutcome, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
-        ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
+        ReportStatusTransition, RoundIntentMark, UndeliveredRef, UndeliveredRepository,
     };
     use ene_credential::{
         CredentialApprovalRepository, CredentialRef, CredentialRefRepository, DeviceId,
@@ -2807,13 +2844,15 @@ mod tests {
             expected_consent: None,
             command_id: None,
             round_wire: Some(RawId::new().as_uuid().to_string()),
+            round_intent: None,
             incarnation: Some((1, 2)),
             local_id: None,
         }
     }
 
     /// Builds a history command carrying an explicit replay key and
-    /// correspondence metadata.
+    /// correspondence metadata. A keyed command always names its canonical
+    /// round intent, so its replay stays decidable from durable state.
     fn history_command_with_ids(
         companion: CompanionId,
         generation: PresenceGeneration,
@@ -2832,6 +2871,7 @@ mod tests {
             expected_consent: None,
             command_id,
             round_wire: Some(RawId::new().as_uuid().to_string()),
+            round_intent: command_id.map(|_| RoundIntentMark::Auto),
             incarnation: Some((1, 2)),
             local_id: local_id.map(String::from),
         }
@@ -3653,13 +3693,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_reuse_with_different_content_is_declined() {
-        let Some(store) = open_memory().await else {
-            return;
-        };
-        let Some((companion, generation)) = running_companion(&store).await else {
-            return;
-        };
+    async fn command_reuse_with_different_request_is_declined() -> Result<(), String> {
+        let store = open_memory().await.ok_or_else(|| String::from("open"))?;
+        let (companion, generation) = running_companion(&store)
+            .await
+            .ok_or_else(|| String::from("companion"))?;
         let command = CommandId(RawId::new());
         let base = history_command_with_ids(
             companion,
@@ -3673,6 +3711,8 @@ mod tests {
             matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
             "first command append must commit"
         );
+        // Every request-semantics field decides: body, language, sending
+        // incarnation, and the canonical client round intent.
         for (label, mut conflicting) in [
             ("body", {
                 let mut cmd = base.clone();
@@ -3689,6 +3729,16 @@ mod tests {
                 cmd.incarnation = Some((9, 9));
                 cmd
             }),
+            ("round intent: auto to force-new", {
+                let mut cmd = base.clone();
+                cmd.round_intent = Some(RoundIntentMark::New);
+                cmd
+            }),
+            ("round intent: auto to explicit join", {
+                let mut cmd = base.clone();
+                cmd.round_intent = Some(RoundIntentMark::Existing(String::from("round-wire-9")));
+                cmd
+            }),
         ] {
             let attempt = store.append_message(conflicting.clone()).await;
             assert!(
@@ -3698,13 +3748,14 @@ mod tests {
             conflicting.text = String::from("original body");
             conflicting.lang = String::from("en");
             conflicting.incarnation = base.incarnation;
+            conflicting.round_intent = base.round_intent.clone();
             let replayed = store.append_message(conflicting).await;
             assert!(
                 matches!(
                     replayed,
                     Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. })
                 ),
-                "{label} restored content must replay the original accept"
+                "{label} restored request must replay the original accept"
             );
         }
         // Round identity and its wire projection are the accepted result,
@@ -3723,6 +3774,68 @@ mod tests {
         );
         let count = history_row_count(&store, companion);
         assert_eq!(count, Some(1), "conflicts must never append rows");
+        Ok(())
+    }
+
+    /// A keyed command without a stored round intent proves nothing: the
+    /// replay attempt fails closed (declined, never guessed) whether the
+    /// stored row or the incoming command is the one missing the intent.
+    #[tokio::test]
+    async fn unprovable_round_intent_fails_closed() -> Result<(), String> {
+        let store = open_memory().await.ok_or_else(|| String::from("open"))?;
+        let (companion, generation) = running_companion(&store)
+            .await
+            .ok_or_else(|| String::from("companion"))?;
+        let command = CommandId(RawId::new());
+        let keyed = history_command_with_ids(
+            companion,
+            generation,
+            "original body",
+            Some(command),
+            Some("send-1"),
+        );
+        let first = store.append_message(keyed.clone()).await;
+        assert!(
+            matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "keyed append must commit, got {first:?}"
+        );
+        // Same key, same request fields, but the caller dropped the intent:
+        // sameness cannot be proven, so the key is declined.
+        let mut no_intent = keyed.clone();
+        no_intent.round_intent = None;
+        let attempt = store.append_message(no_intent).await;
+        assert!(
+            matches!(attempt, Ok(HistoryAppendOutcome::CommandConflict)),
+            "a keyed command without a round intent must not exact-replay, got {attempt:?}"
+        );
+        // The mirrored case: a keyed row stored without an intent (a
+        // pre-mark row) declines every later replay attempt too.
+        let legacy = CommandId(RawId::new());
+        let mut unmarked = history_command_with_ids(
+            companion,
+            generation,
+            "legacy body",
+            Some(legacy),
+            Some("send-2"),
+        );
+        unmarked.round_intent = None;
+        let stored = store.append_message(unmarked.clone()).await;
+        assert!(
+            matches!(stored, Ok(HistoryAppendOutcome::CommittedAs { .. })),
+            "the unmarked row still stores, got {stored:?}"
+        );
+        let mut retry = keyed;
+        retry.command_id = Some(legacy);
+        retry.text = String::from("legacy body");
+        retry.lang = String::from("en");
+        retry.incarnation = unmarked.incarnation;
+        retry.round_intent = Some(RoundIntentMark::Auto);
+        let attempt = store.append_message(retry).await;
+        assert!(
+            matches!(attempt, Ok(HistoryAppendOutcome::CommandConflict)),
+            "a stored row without an intent must not exact-replay, got {attempt:?}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -3978,7 +4091,7 @@ mod tests {
         let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
             row.get::<_, i64>(0)
         });
-        assert!(matches!(version, Ok(7)), "migration must record version 7");
+        assert!(matches!(version, Ok(8)), "migration must record version 8");
         let new_index: Result<String, _> = guard.query_row(
                 "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
                 (),
@@ -4319,6 +4432,10 @@ INSERT INTO _schema_version (version) VALUES (4);",
             !table_columns(&path, "history_message").contains(&String::from("round_wire")),
             "a failed migration must roll back its DDL"
         );
+        assert!(
+            !table_columns(&path, "history_message").contains(&String::from("round_intent")),
+            "a failed migration must roll back its DDL"
+        );
         // Clearing the fault lets the next open resume from scratch and
         // converge on the current schema.
         {
@@ -4334,11 +4451,15 @@ INSERT INTO _schema_version (version) VALUES (4);",
         assert!(opened.is_ok(), "open must recover after the fault clears");
         assert_eq!(
             read_schema_version(&path),
-            Some(7),
+            Some(8),
             "recovered open must converge on the current version"
         );
         assert!(
             table_columns(&path, "history_message").contains(&String::from("round_wire")),
+            "recovered open must apply the rolled-back DDL"
+        );
+        assert!(
+            table_columns(&path, "history_message").contains(&String::from("round_intent")),
             "recovered open must apply the rolled-back DDL"
         );
     }
@@ -4392,8 +4513,8 @@ INSERT INTO _schema_version (version) VALUES (4);",
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(7)),
-            "reopened database must record schema version 7"
+            matches!(version, Ok(8)),
+            "reopened database must record schema version 8"
         );
     }
 
@@ -5296,8 +5417,8 @@ INSERT INTO _schema_version (version) VALUES (4);",
             row.get::<_, i64>(0)
         });
         assert!(
-            matches!(version, Ok(7)),
-            "reopened database must record schema version 7"
+            matches!(version, Ok(8)),
+            "reopened database must record schema version 8"
         );
     }
 
