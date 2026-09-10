@@ -1,4 +1,2 @@
-max_width = 100
-reorder_imports = true
-use_field_init_shorthand = true
-use_try_shorthand = true
+# Use rustfmt defaults for this repository. This file exists so rustfmt
+# does not inherit a parent-directory or user config.
