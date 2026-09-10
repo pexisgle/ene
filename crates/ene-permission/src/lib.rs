@@ -80,6 +80,8 @@ impl ConsentRevision {
 pub enum ConsumerKind {
     /// The companion dialogue loop acting for the owner.
     CompanionDialogue,
+    /// The learning formation pass acting for one companion.
+    CompanionLearning,
 }
 
 /// The capability the consumer wants to exercise.
@@ -87,6 +89,8 @@ pub enum ConsumerKind {
 pub enum CapabilityKind {
     /// General dialogue generation.
     Dialogue,
+    /// Experience Summary and Memory formation judgement.
+    Learning,
 }
 
 /// The purpose binding one inference use.
@@ -96,6 +100,8 @@ pub enum PurposeKind {
     DialogueResponse,
     /// A setup-time probe checking the route works.
     SetupProbe,
+    /// Form one Experience Summary and its Memory changes.
+    MemoryFormation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,7 +492,8 @@ impl EvaluationTracker {
 /// 1. `setup_complete == false` denies with [`DenyCode::SetupIncomplete`].
 /// 2. A `(consumer, capability, purpose)` triple outside the closed world
 ///    denies with [`DenyCode::NotInAllowlist`]. The current world is
-///    `(CompanionDialogue, Dialogue, DialogueResponse | SetupProbe)`.
+///    `(CompanionDialogue, Dialogue, DialogueResponse | SetupProbe)` and
+///    `(CompanionLearning, Learning, MemoryFormation)`.
 /// 3. Consent comparison: when stored consent exists and differs from
 ///    `expected_consent`, the caller's view is stale and the decision is
 ///    [`LiveAuthorizationDecision::NeedsRevalidation`] carrying the stored
@@ -517,6 +524,10 @@ pub fn check_live_authorization(
             ConsumerKind::CompanionDialogue,
             CapabilityKind::Dialogue,
             PurposeKind::DialogueResponse | PurposeKind::SetupProbe
+        ) | (
+            ConsumerKind::CompanionLearning,
+            CapabilityKind::Learning,
+            PurposeKind::MemoryFormation
         )
     );
     if !in_allowlist {
@@ -739,6 +750,78 @@ mod tests {
             decision,
             LiveAuthorizationDecision::AllowForThisUse(_)
         ));
+    }
+
+    fn learning_candidate() -> InferenceUseCandidate {
+        InferenceUseCandidate {
+            consumer: ConsumerKind::CompanionLearning,
+            capability: CapabilityKind::Learning,
+            provider_ref: "acme".to_owned(),
+            model: "dialogue-1".to_owned(),
+            purpose: PurposeKind::MemoryFormation,
+        }
+    }
+
+    #[test]
+    fn learning_formation_is_within_the_closed_world() {
+        let stored = record();
+        let query = CheckLiveAuthorizationQuery {
+            candidate: learning_candidate(),
+            expected_consent: Some((stored.id.clone(), stored.rev)),
+            setup_complete: true,
+        };
+        let mut tracker = EvaluationTracker::new();
+        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
+        let LiveAuthorizationDecision::AllowForThisUse(id) = decision else {
+            panic!("learning formation must be allowed, got {decision:?}");
+        };
+        assert!(
+            tracker.consume(&id, &learning_candidate().fingerprint()),
+            "the learning evaluation is bound to the learning fingerprint"
+        );
+        assert!(
+            !tracker.consume(&id, &candidate().fingerprint()),
+            "a dialogue fingerprint must not consume a learning evaluation"
+        );
+    }
+
+    #[test]
+    fn dialogue_and_learning_consumers_are_not_interchangeable() {
+        let stored = record();
+        for mixed in [
+            InferenceUseCandidate {
+                consumer: ConsumerKind::CompanionDialogue,
+                ..learning_candidate()
+            },
+            InferenceUseCandidate {
+                capability: CapabilityKind::Dialogue,
+                ..learning_candidate()
+            },
+            InferenceUseCandidate {
+                purpose: PurposeKind::DialogueResponse,
+                ..learning_candidate()
+            },
+            InferenceUseCandidate {
+                consumer: ConsumerKind::CompanionLearning,
+                ..candidate()
+            },
+        ] {
+            let query = CheckLiveAuthorizationQuery {
+                candidate: mixed.clone(),
+                expected_consent: Some((stored.id.clone(), stored.rev)),
+                setup_complete: true,
+            };
+            let mut tracker = EvaluationTracker::new();
+            let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
+            assert!(
+                matches!(
+                    decision,
+                    LiveAuthorizationDecision::Deny(ref reason)
+                        if reason.code == DenyCode::NotInAllowlist
+                ),
+                "mixed consumer/capability/purpose must stay outside the closed world: {mixed:?}"
+            );
+        }
     }
 
     #[test]

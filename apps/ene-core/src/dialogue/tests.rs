@@ -2248,3 +2248,31 @@ async fn setup_edge_cases_clarify_or_hold() {
         "an incomplete premise cannot complete setup"
     );
 }
+
+/// The learning consumer is admitted through its own candidate triple, so a
+/// formation pass never presents itself as dialogue; both admissions can
+/// coexist under the one current provider assignment.
+#[tokio::test]
+async fn learning_admission_is_distinct_from_dialogue_admission() {
+    use super::HostInference;
+    use ene_inference::{Admission, InferenceExecutor as _};
+
+    let live = live_input("dlg-learning-admit");
+    let transport = ok_transport();
+    let setup = round_test_handle("dlg-learning-admit", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    let executor = HostInference {
+        store: &handle.store,
+        cred_store: &handle.cred_store,
+        tracker: &handle.tracker,
+        transport: &transport,
+    };
+    assert!(
+        matches!(executor.admit_learning().await, Ok(Admission::Admitted(_))),
+        "learning formation is admitted under the shared assignment"
+    );
+    assert!(
+        matches!(executor.admit_dialogue().await, Ok(Admission::Admitted(_))),
+        "dialogue admission still works independently"
+    );
+}
