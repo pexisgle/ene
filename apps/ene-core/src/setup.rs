@@ -1,7 +1,10 @@
-//! `Stage 2` setup management inlet: register, assign, complete, show.
+//! Host management inlet: setup intents, the setup view, and the read-only
+//! Memory view.
 //!
 //! The Client expresses setup intent and reads filtered views; every
-//! acceptance happens Host-side here.
+//! acceptance happens Host-side here. Memory has no write path: corrections
+//! and changes arrive as Experience through Learning, never by editing a
+//! canonical row.
 //!
 //! Setup targets are matched on `(intent kind, target string)`; anything else
 //! — every non-setup kind included — answers
@@ -62,16 +65,19 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
+use ene_companion::CompanionRepository;
 use ene_credential::{
     CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,
     available_credential,
 };
+use ene_learning::{ChangeKind, LearningRepository, Memory, MemoryRevisionRecord, TemporalMeaning};
 use ene_permission::{
     AssignConsentIntent, AssignConsentResolution, CapabilityKind, ConsentRecord, ConsentRepository,
     IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
     IntentResolution, assign_consent, consent_view_mark,
 };
 use ene_plugin_ipc::WireFrame;
+use ene_primitive::RawId;
 
 use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing_frame};
 
@@ -628,9 +634,9 @@ impl HostHandle {
         }
     }
 
-    /// An empty section list selects every `Stage 2` section (`provider`,
-    /// `model`, `consent`, `credential`); otherwise only requested known
-    /// sections render and unknown names are skipped.
+    /// An empty section list selects every known section (`provider`,
+    /// `model`, `consent`, `credential`, `memory`); otherwise only requested
+    /// known sections render and unknown names are skipped.
     pub(crate) async fn answer_view(
         &self,
         frame: &WireFrame,
@@ -691,7 +697,7 @@ impl HostHandle {
             dialogue.as_ref().map(|record| record.rev.as_u64()),
             learning.as_ref().map(|record| record.rev.as_u64()),
         );
-        let candidates = [
+        let mut candidates = vec![
             ("provider", "Provider", provider_text),
             ("model", "Model", model_text),
             ("consent", "Consent", consent_text),
@@ -702,6 +708,9 @@ impl HostHandle {
             ),
             ("learning", "Learning", learning_text),
         ];
+        if wanted.is_empty() || wanted.iter().any(|name| name == "memory") {
+            candidates.push(("memory", "Memory", self.render_memory_view().await));
+        }
         let sections = candidates
             .into_iter()
             .filter(|(kind, _, _)| wanted.is_empty() || wanted.iter().any(|name| name == kind))
@@ -735,6 +744,51 @@ impl HostHandle {
             Err(_) => None,
         }
     }
+
+    /// Read-only projection of current Memory and its change history.
+    ///
+    /// Shows content, scope, temporal meaning, importance, recall state, the
+    /// evidence Summary behind each revision, and every revision. There is no
+    /// write path here: corrections and changes arrive as Experience through
+    /// Learning, never by editing a Memory row.
+    async fn render_memory_view(&self) -> String {
+        let Ok(companion) = self.store.ensure_running_companion().await else {
+            return String::from("unavailable");
+        };
+        let Ok(memories) = self
+            .store
+            .list_current_memories(companion.as_raw(), MEMORY_VIEW_LIMIT)
+            .await
+        else {
+            return String::from("unavailable");
+        };
+        if memories.is_empty() {
+            return String::from("(none)");
+        }
+        let mut body = String::new();
+        for memory in &memories {
+            body.push_str(&render_memory(memory));
+            match self.store.list_memory_revisions(memory.id).await {
+                Ok(revisions) => {
+                    for revision in &revisions {
+                        body.push_str(&render_revision(revision));
+                        if let Some(summary_id) = revision.summary
+                            && let Ok(Some(summary)) = self.store.load_summary(summary_id).await
+                        {
+                            body.push_str(&format!(
+                                "  grounds summary {}: {}\n",
+                                short_id(summary.id.as_raw()),
+                                summary.content
+                            ));
+                        }
+                    }
+                }
+                Err(_) => body.push_str("  revisions: unavailable\n"),
+            }
+            body.push('\n');
+        }
+        body.trim_end().to_owned()
+    }
 }
 
 fn presence_text(present: bool, source: &str) -> String {
@@ -742,6 +796,64 @@ fn presence_text(present: bool, source: &str) -> String {
         format!("present ({source})")
     } else {
         String::from("absent")
+    }
+}
+
+/// Current memories rendered by one management view.
+const MEMORY_VIEW_LIMIT: u64 = 20;
+
+fn short_id(id: RawId) -> String {
+    id.as_uuid()
+        .as_hyphenated()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect()
+}
+
+fn render_memory(memory: &Memory) -> String {
+    format!(
+        "memory {} scope=companion importance={} temporal={} recall={} revision={} updated={}\ncontent: {}\n",
+        short_id(memory.id.as_raw()),
+        memory.importance.as_u8(),
+        temporal_label(memory.temporal),
+        if memory.recall_suppressed {
+            "suppressed"
+        } else {
+            "active"
+        },
+        memory.revision.as_u64(),
+        memory.updated_at.to_rfc3339(),
+        memory.content,
+    )
+}
+
+fn render_revision(revision: &MemoryRevisionRecord) -> String {
+    format!(
+        "  rev{} {} at={} content: {}\n",
+        revision.revision.as_u64(),
+        change_label(revision.change),
+        revision.at.to_rfc3339(),
+        revision.content,
+    )
+}
+
+fn temporal_label(temporal: TemporalMeaning) -> &'static str {
+    match temporal {
+        TemporalMeaning::Enduring => "enduring",
+        TemporalMeaning::Event => "event",
+    }
+}
+
+fn change_label(change: ChangeKind) -> &'static str {
+    match change {
+        ChangeKind::Initial => "initial",
+        ChangeKind::Reinforced => "reinforced",
+        ChangeKind::Refined => "refined",
+        ChangeKind::Integrated => "integrated",
+        ChangeKind::CorrectedInitiallyWrong => "corrected-initially-wrong",
+        ChangeKind::ChangedSince => "changed-since",
+        ChangeKind::Forgotten => "forgotten",
     }
 }
 

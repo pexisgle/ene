@@ -143,6 +143,10 @@ async fn run_command(
             let view = request_history(&mut session, limit).await?;
             emit(&cmds::render_history(&view))
         }
+        cmds::Command::Memory => {
+            let view = request_view(&mut session, cmds::memory_view_request()).await?;
+            emit(&cmds::render_view(&view))
+        }
     }
 }
 

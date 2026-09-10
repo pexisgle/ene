@@ -3323,3 +3323,79 @@ async fn repeated_identical_owner_input_is_excluded_by_message_identity() {
         "the current input appears once as context (the earlier send) and once as the current turn: {second}"
     );
 }
+
+#[tokio::test]
+async fn memory_view_renders_current_recognition_grounds_and_revisions() {
+    let live = live_input("client-memory-view");
+    let create = LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes jasmine tea.", "memories": [{"action": "create", "content": "The owner likes jasmine tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    );
+    let setup = round_test_handle("dlg-memory-view", &live, &create).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, &create).await);
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-view-1",
+        "remember that I like jasmine tea",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(first, live.clone(), &create).await;
+    assert_stream_completed(&responses);
+    handle.run_pending_learning(&create).await;
+
+    let update = LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner now prefers coffee.", "memories": [{"action": "update", "target": 1, "change": "changed_since", "content": "The owner prefers coffee now."}]}"#,
+        ),
+    );
+    let second = submit_frame(
+        handle.companion_wire(),
+        Some(1),
+        None,
+        "local-view-2",
+        "I switched to coffee",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(second, live.clone(), &update).await;
+    assert_stream_completed(&responses);
+    handle.run_pending_learning(&update).await;
+
+    let requested = handle
+        .handle_frame(
+            view_request_frame(live.connection_id),
+            live.clone(),
+            &update,
+        )
+        .await;
+    let Some(first) = requested.first() else {
+        panic!("the view must answer");
+    };
+    let WirePayload::ManagementView(view) = &first.payload else {
+        panic!("a view request answers a view, got {:?}", first.payload);
+    };
+    let Some(memory) = view
+        .sections
+        .iter()
+        .find(|section| section.kind == "memory")
+    else {
+        panic!("the view must carry a memory section");
+    };
+    assert!(memory.body.contains("The owner likes jasmine tea."));
+    assert!(memory.body.contains("importance=4"));
+    assert!(memory.body.contains("temporal=enduring"));
+    assert!(memory.body.contains("recall=active"));
+    assert!(memory.body.contains("grounds summary"));
+    assert!(memory.body.contains("rev1 initial"), "{}", memory.body);
+    assert!(
+        memory.body.contains("rev2 changed-since"),
+        "{}",
+        memory.body
+    );
+    assert!(memory.body.contains("The owner prefers coffee now."));
+}
