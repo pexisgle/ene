@@ -277,4 +277,4 @@ Cross-cutting契約に対して維持する性質は次のとおりである。
 - 一時的な対応の保持期間・保存要否、永続化を必要とする未完了状態との接続、消去参加先の探索・検証・全域完了手順。通常のRaw非保存と必要な保全を維持する。
 - Rust crate／module、struct／enum／trait、concrete function／API、IPC protocol、DB schema・SQL table、serialization、event bus／actor／queue、process／thread、locking／transaction、retry／timeout値、library／framework。本書はこれらを選ばない。
 
-Observer出力の配送境界とProvider sessionの再利用条件は、CC-02・03・05から導く詳細化であり、新scopeや外部消去保証ではない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
+Observer出力の配送境界とProvider sessionの再利用条件は、CC-02・03・05から導く詳細化であり、新scopeや外部消去保証ではない。

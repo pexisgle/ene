@@ -304,4 +304,4 @@ Context Assemblyとの照合では、由来Client・round・観測候補との�
 
 crate／module、Rust trait／type、concrete API・error型、middleware・interceptor・hook、event bus／queue／actor、IPC format、DB schema、transaction／lock、具体的Credential保護・sandbox・Plugin隔離、特定library・SDK・OS API、session token・lease・heartbeat・epoch・sequence numberの具体形式、timeout／reconnect interval値、具体retry algorithm、UI animation・audio buffering・capture intervalも固定しない。上表の対応関係から統一Context layer、Policy Engine、Manager、Service、Coordinatorの追加を導かない。既存の12責務、semantic owner、Host／Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-切替調停・検知・区切りの具体mechanism、再接続・復旧の待機方式、戻り先選択、到達性確認方式等が未決定であることはIssueにしない。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
+切替調停・検知・区切りの具体mechanism、再接続・復旧の待機方式、戻り先選択、到達性確認方式等は下位設計の自由度として残る。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。

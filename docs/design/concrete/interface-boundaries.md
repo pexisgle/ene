@@ -1045,7 +1045,7 @@ struct ResetCommand {
 
 第一者の入出力・提示は、作業への Cancel・Schedule 管理・記録確認、個体調整への個体停止・削除、権限・制約への承認拒否・Rule・同意・cap・device 管理、認証秘密への明示的な認証設定、保全・消去への消去・backup・restore・Reset を直接要求できる。ここで「直接」は本体 LLM の承認や長時間 Task の完了を介在させない意味であり、具体 API の指定ではない。各 owner の受理・確認・結果に従い、UI に任意 state の書換権を与えない。受付と完了、保存済み data への影響、既知作用と不明を区別して提示する（H-10 / X-10 / K-1 / D-A〜D-E の管理入口の共通性質）。
 
-高権限操作の最終確認は Host PC 上の trusted first-party management surface に限定する（RA-01 Owner decision、具体的な対象・確認境界は IPC §18）。pairing / device trust・revocation、Credential 変更、Restore・復元後一括有効化、Full Reset 等の要求を Remote Client が送れても、remote の確認申告だけでは成立させない。担当 owner は Host が確認した入口の由来と当該操作・対象・現在前提に結び付く確認事実を必要とし、下記 command の存在を確認済みと読まない。同居 transport や pairing だけでは trusted first-party 性を与えず、Tool / Computer Use 等の代理入力による最終確認も受け入れない。管理面全体に会話の active 制約は課さない。
+高権限操作の最終確認は Host PC 上の trusted first-party management surface に限定する（[要件「信頼境界」](../../requirements/requirements.md#信頼境界)、具体的な対象・確認境界は IPC §18）。pairing / device trust・revocation、Credential 変更、Restore・復元後一括有効化、Full Reset 等の要求を Remote Client が送れても、remote の確認申告だけでは成立させない。担当 owner は Host が確認した入口の由来と当該操作・対象・現在前提に結び付く確認事実を必要とし、下記 command の存在を確認済みと読まない。同居 transport や pairing だけでは trusted first-party 性を与えず、Tool / Computer Use 等の代理入力による最終確認も受け入れない。管理面全体に会話の active 制約は課さない。
 
 ```rust
 struct ManagementOperationCommand {
@@ -1540,11 +1540,3 @@ crate 構成は [Crate / Module 分解](crate-module-decomposition.md) が定め
 - 探索・無効化・検証の実装、backup の整合時点・形式、restore 切替・復旧、保存・暗号化方式、`SealedSearchToken` の実装。
 - audit format、診断・telemetry stack、提示確認、要約粒度、具体保持期間、UI layout。
 - 上表の対応関係から統一 Context layer、Policy Engine、Manager、Service、Coordinator の追加を導かない。既存の12責務、semantic owner、Host／Client 配置と trust boundary の下で実現方法を選ぶ。
-
-## 19. Escalation — Requirement / Architecture Issue の有無
-
-Step 11 / Step 12 contract の変更、correspondence / persistence / concurrency 原則の変更、semantic owner の変更、subsystem boundary の変更、Requirement / Security / Privacy semantics の変更を必要とする事項は検出しなかった。interface 形状・Rust abstraction 選択は Issue ではないため、ここに Issue を報告しない。
-
-- 本書は CI・PR・CCT の意味を変更していない。identity / revision / generation / correlation / boundary token の分離、durable 分類、serialization domain、compare-before-commit の境界を維持した。
-- H-1〜H-10、K-1〜K-12、X-1〜X-10、CH/CD、DP/PE の semantic contract を再定義・移動していない。各 interface の owner は SO・DR の確定事項の再掲であり、新しい semantic owner・第二の正本・万能 Manager / Coordinator / Policy Engine・統一 state machine・共通 Context layer を追加していない。
-- 将来 Issue になり得る観測事項（いずれも現時点では Issue にしない）：Client 一時 data の到達不能時の完了根拠の具体方式、観測停止時の取得済み候補の扱い、旧 live 結果を区別する具体手段の選択。これらはいずれも既決の制約を満たす後続設計上の自由度として残る（CC §10 と同様）。

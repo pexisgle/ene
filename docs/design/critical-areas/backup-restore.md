@@ -257,8 +257,4 @@ Context Assemblyとの照合では、由来・用途・現在性・用途別結�
 
 archive / file format、encryption implementation、DB schema、serialization、transaction mechanism、filesystem layout、Rust type / trait、crate / module、IPC、locking、exact progress representation、retry / timeout、specific libraryも固定しない。上表の対応関係から統一Context layer、Policy Engine、Manager、Service、Coordinatorの追加を導かない。既存の12責務、semantic owner、Host / Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-対象探索・検証・到達性確認・backupとの交差等の具体mechanismが未決定であることはIssueにしない。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
-
-### Requirement / Architecture Issue
-
-本書の範囲では、Requirement Ambiguity / Gap、上位architecture変更、semantic owner / subsystem boundary変更、Privacy / Security / Permission semanticsの変更を必要とする事項は見つかっていない。古いBackupに含まれる削除済み情報の復活は、既決の「自動再形成の禁止」と「明示restore」の区別で成立し、新しいPrivacy semanticsを追加していない。具体mechanismの未決定はIssueにしない。
+対象探索・検証・到達性確認・backupとの交差等の具体mechanismは下位設計の自由度として残る。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。

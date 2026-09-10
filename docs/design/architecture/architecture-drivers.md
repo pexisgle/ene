@@ -50,7 +50,7 @@ Host正本、Clientへの必要最小限の一時data、LANまたはOwner管理V
 
 Running Companionのactive Clientは同時に一つまでとする。Stopではactive帰属を解除し、どのClientにもHostにもpresenceを残さない。Body・通常interaction・Computer Use対象・自発活動はなく、Observer対象人数にも数えない。最後のClient等は再配置hintとして保持でき、Resumeで適切なClientへ再配置できるが、配置algorithmは固定しない。Running個体のdisconnect時のHost PC側Clientへの移動とは区別する。
 
-一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientに結び付く。Companionは通常は現在のClientに留まり、別Clientから会話・操作するにはそのClientへの呼出し・移動を経る。移動時には入出力roundを安全に区切り、両Clientに状態を示し、同じ個体を同時に二か所へ存在させない。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動前のClientへのpresence復旧は自発移動と区別し、RA-06・AD-09の自動復旧契約に従う。通常のHost上のTask、Task Agent、Scheduleはその移動とは独立して継続でき、作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。
+一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientに結び付く。Companionは通常は現在のClientに留まり、別Clientから会話・操作するにはそのClientへの呼出し・移動を経る。移動時には入出力roundを安全に区切り、両Clientに状態を示し、同じ個体を同時に二か所へ存在させない。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動前のClientへのpresence復旧は自発移動と区別し、[要件「Remote Client」](../../requirements/requirements.md#remote-client)とAD-09の自動復旧契約に従う。通常のHost上のTask、Task Agent、Scheduleはその移動とは独立して継続でき、作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。
 
 **Requirements basis**
 
@@ -371,33 +371,3 @@ Restoreは開始前からHostに存在する現在のCredential storeを維持�
 | 負荷による縮退（AD-13）とTask継続・停止（AD-01・09・10） | 処理品質や速度の調整を、Task記録の破棄や説明のない停止へ置き換えない。費用・資源上限による安全な停止・判断要求は維持し、保存済みdataへの影響と既知の外部作用を示す。 |
 | 保持・由来（AD-05・07・14）と資源上限（AD-13） | 通常Learningの保持を、容量都合の黙った削除で解決しない。上限到達時の停止・判断要求と、Ownerが管理するHistory・log保持、および明示opt-inによるLearning・根拠のretentionを別の契約として扱う。 |
 | 削除（AD-07）と復元（AD-15） | 削除前の内部根拠からの自動再形成は禁止されるが、Ownerが説明を受けて旧backupをrestoreすると情報が戻り得る。外部copyまでの消去保証や復元後の自動実行許可とはしない。 |
-
-## 3. Requirement Issues
-
-A-01〜A-04／G-01・G-02はOwner判断により解消し、未解決Issueとして残さない。各決定は[要件](../../requirements/requirements.md)と[製品定義](../../requirements/product.md)へ反映し、本書のDriverへ組み込んだ。以下は解消結果の記録であり、新たな製品要件の追加ではない。
-
-### 解決済み決定
-
-#### A-01 — Companion削除時のCompanion scope Skillの扱い（解決）
-
-ene内部のCompanion scope SkillはCompanion削除時に過去revisionを含めて削除する。削除を契機とするGlobal scopeへの自動昇格は行わない。Global化すべきLearningは削除に先立つ通常のLearning lifecycleでScopeの条件に従ってGlobal化されているものとする。Global scopeのSkillを含むLearning、グループ発言、共同Task記録、Workspace等の外部Skill・file・sourceは残す。AD-04・07・08・15の前提とする。
-
-#### A-02 — 自発作業、Task、Task Agent（解決）
-
-Taskは追跡される作業単位、Task AgentはTaskまたはその一部を委任される一時的な実行主体として区別する。ある程度まとまった作業は基本的にTaskとして扱い、実行は原則としてTask Agentへ委任する。Companion本体はOwnerとの会話、判断、Taskの開始・委任・調整、steering、結果の受領・統合の中心となり、多数のまとまった実作業を直接抱えることを基本にしない。労力が非常に小さい処理、会話中の短い情報取得、自身の判断のための軽い調査、Observation eventを理解するための小規模な情報収集、独立した作業とするほどではない補助処理等まで一律にTask Agent化しない。Ownerの依頼か自発的な開始かだけで原則を変えず、自発的なまとまった作業もTask／Task Agentへ載せる。自発的な発話や軽微な内部調査まで一律にTask化しない。具体的なTask化の閾値・分類algorithmは要件で固定せず、AD-03・08・09・12の前提とする。
-
-#### A-03 — Observationと自発性の適用単位（解決）
-
-ObserverのCapture・候補検知はClient単位で共有し、Companionごとの自発性はCompanion単位とする。ObserverはCompanionが1体以上存在するClientだけを対象とし、複数対象Clientは同時にCaptureせず順番に実行タイミングをずらす。Clientごとに指定された観測頻度を満たしつつ可能な範囲で負荷を分散し、不必要に同時実行しない。具体的な間隔値・scheduling algorithmは固定しない。eventはObserverで文脈との関係を判断し、関係がありそうなCompanionだけへ伝え、複数該当なら複数へ伝える。全Companionへの無条件配信やCompanionごとの候補検知の重複は行わない。ObserverはClientごとのPause／OFFと全体のPause／OFFを持ち、自発性（雑談・自発会話、通知、内部調査、Companion間交流等）のCompanionごとのOFFを含む頻度・上限とはscopeをまとめない。共有処理を理由に利用範囲・送信同意を広げない。AD-01・02・10・12の前提とする。
-
-#### A-04 — Client間のCompanion移動とText会話（解決）
-
-Textの入力・応答もactive Clientに属する。Companionは通常は現在のClientに留まり、別Clientから会話するにはそのClientからの呼出し・移動を経る。元Clientに残したまま別ClientからTextだけを送って応答させることを基本モデルにしない。移動はOwnerのその場の明示的な呼出しだけに限定せず、事前指示や文脈上の必要性による自発的な移動を可能にする。通常のHost上のTask・Task Agent・Scheduleの作業中であることだけでは移動を妨げず、呼出し先ClientへHost上の通常作業を移送しない。移動時の安全な入出力roundの区切りは維持する。AD-02・03の前提とする。
-
-#### G-01 — Computer Useの操作対象（解決）
-
-CompanionがComputer Useできる対象は、そのCompanionが現在存在するactive Clientだけとする。TaskやTask Agentから任意のpairing済みClientを独立に操作対象として選ばない。別Clientを操作するには先にそのClientへ移動し、存在場所と操作対象を分離しない。Host PCを対象にする場合もHost上のClientへの存在を必要とする。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。通常のClient切断時は基本的にHost PC上のClientへCompanionを移動するが、未確定ActionのHostでの自動再実行とは区別し、成功不明時の非再実行・重複時のOwner判断・best-effort停止の契約を維持する。AD-01・02・06・08・09・11・12の前提とする。
-
-#### G-02 — active Clientがない場合の継続・復帰（解決）
-
-Running Companionにactive Clientがない場合でも、Schedule起動および継続中の許可済みHost上のTask・Task Agent・Schedule・保存は継続できる。判断基準はClientが必要かどうかとし、Clientが必要なこと以外のTask等は可能、Clientに依存することは不可能とする。Body、Realtime／Text会話、Voice、Computer Useはactive Clientがない間は行わず、対象Clientがない間の新規観測は発生しない。Companion間交流、通知の生成、Clientを必要としない内部調査等のHost内で完結する活動は継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動前のClientへのpresence復旧は自発移動と区別し、RA-06・AD-09の自動復旧契約に従う。Host側Client環境の自動起動は行わない。AD-01・02・09・12の前提とする。

@@ -364,7 +364,7 @@ Client availability・connection状態・presence・movement / restoration・sta
 
 crate / module、Rust trait / type、concrete API・error型、middleware・interceptor・hook、event bus / queue / actor、IPC format・network protocol、DB schema、transaction / lock、具体的Credential保護・sandbox・Plugin隔離、特定library・SDK・OS API、frontend framework、audio / video library、concrete deletion query・index implementation・storage engine、exact retry / timeout・progress表現・capture interval・routing algorithm / Prompt・UI componentも固定しない。上表の対応関係から統一Context layer・Policy Engine・Presence Manager・Context Manager・Observer State owner・I/O正本の追加を導かない。既存の12責務、semantic owner、Host / Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-具体mechanism未決定はIssueにしない。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行・配信の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
+必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行・配信の新保証はいずれも自由度に含めない。
 
 ## 10. 横断検証
 
@@ -410,7 +410,3 @@ Cross-cutting契約との照合結果は次のとおりである。
 Context Assemblyとの照合では、由来Client・round・観測候補との対応、変換後の制限継承、現在性・用途別受入、処理中無効化の契約を帰属切替・round・routingへ接続し、移動前のCaptureの付け替え・Stopped個体の覚醒・古いsessionによる制約迂回を許していない。Action Executionとの照合では、判断対象と実対象の対応、委任不変、試行と作用の区別、確定度・不明保持、遅延帰属、報告での確定度保持を帰属切替・Client依存作用へ接続し、移動・再接続・再起動による自動再実行を許していない。Targeted Deletionとの照合では、消去条件の適用、区間内再到着の取込み、旧由来と新規提供の区別、cache・session・Client copyの再利用禁止、未完了保全の契約をClient一時data・観測派生物へ接続し、古いClient copyからの復活を新しいExperienceとして救済していない。Presence Transitionとの照合では、authoritative帰属・切替区間の新規開始禁止・活動別区切り・到着物の帰属・Host継続・再起動復旧と再実行の分離の契約を三者の責任へ落とし、二重presence・旧一時のcanonical化・未終了作用の自動継続を許していない。Backup / Restoreとの照合では、復元範囲・正本切替・再有効化・stale・旧live混入禁止の契約を復旧先・hint・接続・帰属・設定・観測運用へ接続し、復元された帰属のcanonical化・二重presence・旧作用の自動継続・復元内容の存在＝実行可能化を許していない。
 
 他のSubsystem設計（個体調整 / 作業 / 認識・学習、権限・制約 / 認証秘密 / 実行・拡張 / 推論）との照合では、利用側Subsystemと本書の接続・提示・観測Subsystemの間に新しいsemantic ownerや第二の正本を生まない。Task達成は作業、作用確定度は実行・拡張、報告必要内容は個体調整、提示の実際は入出力・提示、帰属は接続・存在、対象・時機・routingは共有観測、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、割当解決・利用量原記録は推論に残り、本書のX-1〜X-10はその受渡しの対応付けである。未伝達の正本の個体調整残置、Computer Useの現在presence限定、Observerの専用assignment、scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持の各契約は両文書で同一である。
-
-### Requirement / Architecture Issue
-
-本書の範囲では、Requirement Ambiguity / Gap、上位architecture変更、subsystem boundary変更、semantic owner変更、Privacy / Security / Permission semanticsの変更を必要とする事項は見つかっていない。具体mechanismの未決定はIssueにしない。

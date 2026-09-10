@@ -289,4 +289,4 @@ Cross-cutting契約との照合結果は次のとおりである。
 
 crate／module、Rust trait／type、concrete API・error型、middleware・interceptor・hook、event bus／queue／actor、IPC format、DB schema、transaction／lock、具体的Credential保護・sandbox・Plugin隔離、特定library・SDK・OS APIも固定しない。上表の対応関係から統一Context layer、Policy Engine、Manager、Service、Coordinatorの追加を導かない。既存の12責務、semantic owner、Host／Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-transport再送と論理試行の切分け、実対象解決の配置、試行識別の表現等は、既決の制約を満たす後続設計上の自由度として残る。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
+transport再送と論理試行の切分け、実対象解決の配置、試行識別の表現等は、既決の制約を満たす下位設計の自由度として残る。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。

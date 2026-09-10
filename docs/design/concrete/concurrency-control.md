@@ -573,13 +573,3 @@ fn reserve_usage(
 | 到達性・時刻・ UI | 経過時間の解釈、missed 非補完、確認不能の不受理を守る | 到達性確認方式・減衰・時刻計算・Capture 時機・提示確認・要約粒度・UI layout |
 
 archive / file format、encryption implementation、serialization、Rust type / trait、crate / module、IPC、locking、retry / timeout、specific library も固定しない。上表の対応関係から統一 Context layer、Policy Engine、Manager、Service、Coordinator の追加を導かない。既存の責務、semantic owner、Host / Client 配置と trust boundary の下で実現方法を選ぶ。
-
-## 20. Requirement / Architecture Issue の有無
-
-- **Requirement 変更。** なし。
-- **Step 11 / Step 12 semantic contract の変更。** なし。
-- **CI 原則変更。** なし。
-- **PR 原則変更。** なし。
-- **semantic owner / subsystem boundary 変更。** なし。
-- **Security / Privacy / Permission semantics 変更。** なし。
-- concurrency mechanism の選択自体は Issue ではない。第19節の Freedom の範囲で後続設計が行う。

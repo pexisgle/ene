@@ -261,9 +261,9 @@ Targeted deletionは指定範囲の通常revision・根拠・History保持に優
 
 一般的なlogging、caching、configuration、security等を項目として追加することはしていない。それぞれがeneで守るべき情報・制御・保持・説明の契約へ参加する範囲を示した。Characterの部品選択手順、Task分割、具体的なObservation候補処理等、特定Flowやdomain内で決まる詳細は独立concernへ昇格させていない。
 
-## 10. Design Freedomと新たなIssue
+## 10. Design Freedom
 
-### 後続設計で選ぶ実現方法
+### 下位設計で選ぶ実現方法
 
 | 設計対象 | 固定済みのarchitecture property | 残すDesign Freedom |
 |---|---|---|
@@ -277,12 +277,10 @@ Targeted deletionは指定範囲の通常revision・根拠・History保持に優
 
 crate／module、Rust trait／type、concrete API、middleware・interceptor・hook、event bus／queue／actor、IPC format、DB schema、transaction／lock、具体的Credential保護・sandbox・Plugin隔離も固定しない。上表の対応関係から統一Context layer、Policy Engine、Manager、Service、Coordinatorの追加を導かない。既存の12責務、semantic owner、Host／Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-### 新たなarchitecture contradiction
+### 既存契約で成立する組合せと残す自由度
 
-遅延結果の記録と活動禁止、個体削除後の記録保持と固有Learning消去、復元後の保留と通常再起動後の継続は、用途・目的・lifecycleを分ける既存契約で成立する。これらを単一の成功・停止・共有状態へ潰す実現方法は本書の契約違反となるが、既存architecture自体の矛盾としては扱わない。
+遅延結果の記録と活動禁止、個体削除後の記録保持と固有Learning消去、復元後の保留と通常再起動後の継続は、用途・目的・lifecycleを分ける既存契約で成立する。これらを単一の成功・停止・共有状態へ潰す実現方法は本書の契約違反である。
 
-### 新たなRequirement Ambiguity／Gap
-
-観測停止時の取得済み候補をどこまで処理するか、切断Clientの消去完了根拠、旧live結果を区別する具体手段等は、既決の制約を満たす後続設計上の自由度として残る。必要な確認を省く、現在同意を広げる、未完了を成功とする自由度はない。意味的一致の完全検出、外部作用のrollback、exactly-once実行・配信等の未保証事項を新しい保証へ変えていない。
+観測停止時の取得済み候補をどこまで処理するか、切断Clientの消去完了根拠、旧live結果を区別する具体手段等は、既決の制約を満たす下位設計の自由度として残る。必要な確認を省く、現在同意を広げる、未完了を成功とする自由度はない。意味的一致の完全検出、外部作用のrollback、exactly-once実行・配信等の未保証事項を新しい保証へ変えない。
 
 下位設計は、各mechanismがCC-01〜07の参加責任・失敗時条件を満たすことを示す。

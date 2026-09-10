@@ -42,7 +42,7 @@
 - crate placement（第25節）。`ene-api` に logic を置かず、mapping module を別配置にする。
 - walkthrough による検証（第26節）。transport success を domain success へ読み替えない。
 
-### 1.2 本書が決めないもの（Design Freedom。第29節）
+### 1.2 本書が決めないもの（Design Freedom。第28節）
 
 - 具体暗号 library・key format・鍵導出・証明書運用の詳細（property は第9節で固定）。
 - heartbeat / keepalive / timeout / retry 回数・値、scheduling・capture 時機 algorithm、費用算定式。
@@ -350,7 +350,7 @@ wire semantic と transport を分離し、以下を共通化の範囲とする�
 | LAN / remote device | 別 PC の Client（同一 LAN・Owner 管理 VPN） | WebSocket（binary message）＋TLS。ene 運営 relay・account・Cloud を接続要件にしない。単一 connection で論理 stream を多重する（`stream_id` で mux） |
 | future transport | 将来の追加 | adapter 追加で対応する。wire semantic・DTO・version・auth property を変えない |
 
-QUIC 等の採用は現時点でしない。理由：現在の topology（単一 Owner-managed Host、少数 Client、ticket 制御の低頻度 capture、WebSocket で足りる stream 多重）では必要性がなく、over-engineering になるためである。将来 transport は adapter として追加できる（第29節）。
+QUIC 等の採用は現時点でしない。理由：現在の topology（単一 Owner-managed Host、少数 Client、ticket 制御の低頻度 capture、WebSocket で足りる stream 多重）では必要性がなく、over-engineering になるためである。将来 transport は adapter として追加できる（第28節）。
 
 「Host PC 上の Client」の判定材料は、Host transport adapter が接続経路と OS peer 認証から確定する `transport_class = SameMachine | Remote` とする。Client の platform・device descriptor・loopback アドレスの自己申告では確定しない。PR Group G の最終観測に記録し、現在の利用時には live connection の同じ分類と認証を再確認する。presence fallback はこの材料を使うが、管理面の trusted first-party 性はさらに §18 の確認境界を必要とする。
 
@@ -590,7 +590,7 @@ enum DeletionTargetWire {
 
 Owner 管理面が Client に存在しても、Client から送られる control 変更は **Owner intent / candidate request** であり、Host-side control owner が最終的に成立させる既存 contract（IB 第9節・K-A）を維持する。管理画面から Permission・Provider・Rule 等を変更できる場合でも、Client が control state 正本を所有する protocol にしない。
 
-### 18.1 高権限操作の確認境界（RA-01 Owner decision）
+### 18.1 高権限操作の確認境界
 
 device pairing 承認など trust root を変更する高権限操作の最終確認は、**Host PC 上の trusted first-party management surface** で行う。Remote Client から要求を送ることは許すが、Remote Client だけでは成立させない。これは既存の Host 側確認 contract の具体化である。
 
@@ -991,17 +991,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 - schema registry service・custom binary protocol。MessagePack＋versioned DTO＋field 規約で足りる。
 - QUIC 等の新 transport の先行導入。必要になれば adapter として追加する。
 
-## 28. Escalation — Requirement / Architecture Issue の有無
-
-- **Requirement 変更。** なし。
-- **Step 11 / Step 12 semantic contract の変更。** なし。
-- **CI / PR / CCT / IB / CM contract の変更。** なし。
-- **semantic owner 変更。** なし。
-- **Host / Client boundary 変更。** なし。
-- **Security / Privacy semantics 変更。** なし。
-- wire / serialization / transport の選択（MessagePack canonical＋JSON-compatible model、local socket＋WebSocket/TLS、adapter boundary）は Issue ではない。
-
-## 29. 意図的に残した Design Freedom
+## 28. 意図的に残した Design Freedom
 
 - 具体暗号 library・key format・鍵導出・証明書運用、pairing material の具体形式・保存方式、nonce・proof の具体方式。
 - heartbeat / keepalive / timeout / retry 回数・値、`message_id` cache 期間、`command_id` marker の保存形式・詳細 outcome の compact 方法・sender epoch 終了後の cleanup 時機、command fingerprint の canonical encoding / hash 方式。**retry を受理し得る current sender epoch より先に no-reexecute marker を失うこと、または同じ ID の別 semantic command を一致扱いすることは Freedom に含まれない。**
