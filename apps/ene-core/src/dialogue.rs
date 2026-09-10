@@ -234,7 +234,6 @@ fn accept_frame(frame: &WireFrame, live: &LiveInput, round: &RoundWireId) -> Wir
     outgoing_frame(
         frame,
         live,
-        "RoundIntakeOutcome",
         WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
             round: round.clone(),
         }),
@@ -252,7 +251,6 @@ fn open_frame(
     outgoing_frame(
         frame,
         live,
-        "TextStreamOpen",
         WirePayload::TextStreamOpen(TextStreamOpen {
             stream: *stream,
             round: round.clone(),
@@ -271,7 +269,6 @@ fn close_frame(
     outgoing_frame(
         frame,
         live,
-        "TextStreamClose",
         WirePayload::TextStreamClose(TextStreamClose {
             stream: *stream,
             status,
@@ -304,7 +301,6 @@ fn stale_frame_with(
     outgoing_frame(
         frame,
         live,
-        "RoundIntakeOutcome",
         WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound {
             current_round,
             current_generation,
@@ -317,7 +313,6 @@ fn held_frame(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     outgoing_frame(
         frame,
         live,
-        "RoundIntakeOutcome",
         WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::HeldForTransition),
     )
 }
@@ -327,7 +322,6 @@ fn revalidate_frame(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFr
     outgoing_frame(
         frame,
         live,
-        "RoundIntakeOutcome",
         WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::NeedsRevalidation {
             reason: RevalidationReasonWire(reason.to_string()),
         }),
@@ -910,8 +904,7 @@ impl HostHandle {
         // I/O outside any lock. A mutation that committed first fails the
         // claim stale — no byte leaves; a mutation that commits after only
         // affects result adoption (handled below), never the fact that the
-        // attempt started under a verified premise. This replaces the old
-        // check-then-send gap with a serialized determination.
+        // attempt started under a verified premise.
         match self
             .store
             .begin_inference_attempt(InferenceAttempt {
@@ -1017,7 +1010,6 @@ impl HostHandle {
             responses.push(outgoing_frame(
                 frame,
                 live,
-                "TextStreamFrame",
                 WirePayload::TextStreamFrame(TextStreamFrameWire {
                     stream,
                     seq: position as u64,
@@ -1129,7 +1121,6 @@ impl HostHandle {
         vec![outgoing_frame(
             frame,
             live,
-            "HistoryView",
             WirePayload::HistoryView(HistoryView { items: view_items }),
         )]
     }
@@ -1225,7 +1216,6 @@ fn empty_history(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     outgoing_frame(
         frame,
         live,
-        "HistoryView",
         WirePayload::HistoryView(HistoryView { items: Vec::new() }),
     )
 }
@@ -1234,7 +1224,7 @@ fn empty_history(frame: &WireFrame, live: &LiveInput) -> WireFrame {
 mod tests {
     use super::{AttachOutcome, CHUNK_CHARS, chunk_text};
     use crate::serve::{CredStore, HostHandle, LiveInput, device_client};
-    use crate::test_support::{live_input, memory_handle_with, remove_data_dir};
+    use crate::test_support::{live_input, memory_handle_with};
     use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
     use ene_api::v1::management::{
         IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome,
@@ -1416,12 +1406,11 @@ mod tests {
         tag: &str,
         live: &LiveInput,
         transport: &FakeProviderTransport,
-    ) -> Result<(HostHandle, std::path::PathBuf), String> {
+    ) -> Result<(HostHandle, tempfile::TempDir), String> {
         let Some((handle, dir)) = setup_handle(tag).await else {
             return Err(String::from("handle open failed"));
         };
         if !register_assign_complete(&handle, live, transport).await {
-            remove_data_dir(&dir);
             return Err(String::from("setup must complete"));
         }
         Ok((handle, dir))
@@ -1490,7 +1479,7 @@ mod tests {
         };
         Ok(current.generation.as_u64())
     }
-    async fn setup_handle(tag: &str) -> Option<(HostHandle, std::path::PathBuf)> {
+    async fn setup_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
         memory_handle_with(tag, |store| {
             store.insert(
                 CredentialRef {
@@ -1605,7 +1594,7 @@ mod tests {
         use ene_companion::HistoryRepository as _;
         use ene_presence::PresenceRepository as _;
 
-        let Some((handle, dir)) = memory_handle_with("dlg-nosetup", |_| {}).await else {
+        let Some((handle, _dir)) = memory_handle_with("dlg-nosetup", |_| {}).await else {
             return;
         };
         let transport = ok_transport();
@@ -1626,7 +1615,6 @@ mod tests {
             .await;
         assert_eq!(denied.len(), 1, "denial answers once");
         let Some(only) = denied.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1645,7 +1633,6 @@ mod tests {
             "the companion must resolve, got {companion:?}"
         );
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let attribution = handle.store.load_attribution(companion.as_raw()).await;
@@ -1654,7 +1641,6 @@ mod tests {
             "attribution must load, got {attribution:?}"
         );
         let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
             return;
         };
         assert_eq!(
@@ -1677,7 +1663,6 @@ mod tests {
             matches!(&timeline, Ok(items) if items.is_empty()),
             "a declined input must leave no history row, got {timeline:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
@@ -1685,7 +1670,7 @@ mod tests {
         use ene_companion::CompanionRepository as _;
         use ene_presence::PresenceRepository as _;
 
-        let Some((handle, dir)) = setup_handle("dlg-noview").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-noview").await else {
             return;
         };
         let transport = ok_transport();
@@ -1706,7 +1691,6 @@ mod tests {
             .await;
         assert_eq!(answers.len(), 1, "a viewless submit answers once");
         let Some(only) = answers.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1725,7 +1709,6 @@ mod tests {
             "the companion must resolve, got {companion:?}"
         );
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let attribution = handle.store.load_attribution(companion.as_raw()).await;
@@ -1734,7 +1717,6 @@ mod tests {
             "attribution must load, got {attribution:?}"
         );
         let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
             return;
         };
         assert_eq!(
@@ -1747,7 +1729,6 @@ mod tests {
             0,
             "a viewless submit moves no generation"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
@@ -1755,7 +1736,7 @@ mod tests {
         use ene_companion::CompanionRepository as _;
         use ene_presence::PresenceRepository as _;
 
-        let Some((handle, dir)) = setup_handle("dlg-staleview").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-staleview").await else {
             return;
         };
         let transport = ok_transport();
@@ -1776,7 +1757,6 @@ mod tests {
             .await;
         assert_eq!(answers.len(), 1, "a stale-view submit answers once");
         let Some(only) = answers.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1796,12 +1776,10 @@ mod tests {
             "the companion must resolve, got {companion:?}"
         );
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let attribution = handle.store.load_attribution(companion.as_raw()).await;
         let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
             return;
         };
         assert_eq!(
@@ -1814,7 +1792,6 @@ mod tests {
             0,
             "a stale-view submit moves no generation"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
@@ -1822,7 +1799,7 @@ mod tests {
         use ene_companion::CompanionRepository as _;
         use ene_presence::PresenceRepository as _;
 
-        let Some((handle, dir)) = setup_handle("dlg-race").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-race").await else {
             return;
         };
         let companion = handle.store.ensure_running_companion().await;
@@ -1831,7 +1808,6 @@ mod tests {
             "the companion must resolve, got {companion:?}"
         );
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let initial = handle.store.load_attribution(companion.as_raw()).await;
@@ -1840,7 +1816,6 @@ mod tests {
             "attribution must load, got {initial:?}"
         );
         let Ok(Some(seen)) = initial else {
-            remove_data_dir(&dir);
             return;
         };
         assert_eq!(
@@ -1872,7 +1847,6 @@ mod tests {
             matches!(second, AttachOutcome::Raced),
             "the second compare with the same observed premise loses, got {second:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
@@ -1880,7 +1854,7 @@ mod tests {
         use ene_companion::CompanionRepository as _;
         use ene_presence::PresenceRepository as _;
 
-        let Some((handle, dir)) = setup_handle("dlg-full").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-full").await else {
             return;
         };
         let transport = ok_transport();
@@ -1921,18 +1895,15 @@ mod tests {
             );
         }
         let Some(accepted) = responses.first() else {
-            remove_data_dir(&dir);
             return;
         };
         let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) =
             &accepted.payload
         else {
-            remove_data_dir(&dir);
             return;
         };
         let round = round.clone();
         let Some(opened) = responses.get(1) else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1944,7 +1915,6 @@ mod tests {
             opened.payload
         );
         let Some(stream_frame) = responses.get(2) else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1955,7 +1925,6 @@ mod tests {
             "the single frame is final at seq zero"
         );
         let Some(closed) = responses.get(3) else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1971,12 +1940,10 @@ mod tests {
             "the companion must resolve, got {companion:?}"
         );
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let attribution = handle.store.load_attribution(companion.as_raw()).await;
         let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
             return;
         };
         assert_eq!(
@@ -2014,18 +1981,15 @@ mod tests {
             .await;
         assert_eq!(restored.len(), 1, "history answers once");
         let Some(view) = restored.first() else {
-            remove_data_dir(&dir);
             return;
         };
         let WirePayload::HistoryView(view) = &view.payload else {
-            remove_data_dir(&dir);
             return;
         };
         assert_eq!(view.items.len(), 2, "owner input plus reply restore");
         let replayed = handle.handle_frame(frame, live.clone(), &transport).await;
         assert_eq!(replayed.len(), 1, "a command replay answers once");
         let Some(replay) = replayed.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2046,15 +2010,12 @@ mod tests {
             )
             .await;
         let Some(second) = again.first() else {
-            remove_data_dir(&dir);
             return;
         };
         let WirePayload::HistoryView(second) = &second.payload else {
-            remove_data_dir(&dir);
             return;
         };
         assert_eq!(second.items.len(), 2, "the replay appends nothing durable");
-        remove_data_dir(&dir);
     }
 
     /// A `fresh` send mints a new round even when an open round would
@@ -2063,7 +2024,7 @@ mod tests {
     async fn fresh_send_mints_despite_matching_open_round() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        let (handle, dir) = round_test_handle("dlg-fresh", &live, &transport).await?;
+        let (handle, _dir) = round_test_handle("dlg-fresh", &live, &transport).await?;
         let first = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2086,7 +2047,6 @@ mod tests {
             live.connection_id,
         );
         let WirePayload::SubmitTextInput(ref mut input) = second.payload else {
-            remove_data_dir(&dir);
             return Err(String::from("the send frame must carry its input"));
         };
         input.fresh = true;
@@ -2096,7 +2056,6 @@ mod tests {
             second_round, first_round,
             "a fresh send must mint instead of joining, got {second_round:?}"
         );
-        remove_data_dir(&dir);
         Ok(())
     }
 
@@ -2106,7 +2065,7 @@ mod tests {
     async fn same_round_reuses_one_wire_projection() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        let (handle, dir) = round_test_handle("dlg-one-wire", &live, &transport).await?;
+        let (handle, _dir) = round_test_handle("dlg-one-wire", &live, &transport).await?;
         let first = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2134,7 +2093,6 @@ mod tests {
             second_round, first_round,
             "a joined round must reuse its one projection, got {second_round:?}"
         );
-        remove_data_dir(&dir);
         Ok(())
     }
 
@@ -2148,7 +2106,7 @@ mod tests {
     async fn retry_after_round_advance_replays_the_stored_accept() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        let (handle, dir) = round_test_handle("dlg-retry-drift", &live, &transport).await?;
+        let (handle, _dir) = round_test_handle("dlg-retry-drift", &live, &transport).await?;
         let first = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2204,7 +2162,6 @@ mod tests {
             before,
             "the retry appends nothing durable"
         );
-        remove_data_dir(&dir);
         Ok(())
     }
 
@@ -2215,7 +2172,7 @@ mod tests {
     async fn retry_with_changed_round_intent_conflicts() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        let (handle, dir) = round_test_handle("dlg-retry-intent", &live, &transport).await?;
+        let (handle, _dir) = round_test_handle("dlg-retry-intent", &live, &transport).await?;
         let first = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2249,7 +2206,6 @@ mod tests {
             2,
             "the conflicting retry appends nothing durable"
         );
-        remove_data_dir(&dir);
         Ok(())
     }
 
@@ -2260,7 +2216,7 @@ mod tests {
     async fn retry_with_forced_fresh_conflicts() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        let (handle, dir) = round_test_handle("dlg-retry-fresh", &live, &transport).await?;
+        let (handle, _dir) = round_test_handle("dlg-retry-fresh", &live, &transport).await?;
         let first = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2297,7 +2253,6 @@ mod tests {
             2,
             "conflict and replay append nothing durable"
         );
-        remove_data_dir(&dir);
         Ok(())
     }
 
@@ -2311,7 +2266,7 @@ mod tests {
     async fn forced_fresh_with_a_round_premise_is_declined() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        let (handle, dir) = round_test_handle("dlg-fresh-premise", &live, &transport).await?;
+        let (handle, _dir) = round_test_handle("dlg-fresh-premise", &live, &transport).await?;
         let first = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2348,7 +2303,6 @@ mod tests {
             .await;
         assert_eq!(answers.len(), 1, "a contradictory frame answers once");
         let Some(only) = answers.first() else {
-            remove_data_dir(&dir);
             return Err(String::from("the submit must answer"));
         };
         assert!(
@@ -2363,7 +2317,6 @@ mod tests {
         let viewed = build_forced(None, Some(first_round.clone()));
         let answers = handle.handle_frame(viewed, live.clone(), &transport).await;
         let Some(only) = answers.first() else {
-            remove_data_dir(&dir);
             return Err(String::from("the submit must answer"));
         };
         assert!(
@@ -2383,7 +2336,6 @@ mod tests {
             .handle_frame(mismatched, live.clone(), &transport)
             .await;
         let Some(only) = answers.first() else {
-            remove_data_dir(&dir);
             return Err(String::from("the submit must answer"));
         };
         assert!(
@@ -2407,7 +2359,6 @@ mod tests {
             4,
             "the declined shapes append nothing durable (two rounds, owner plus reply)"
         );
-        remove_data_dir(&dir);
         Ok(())
     }
 
@@ -2417,7 +2368,7 @@ mod tests {
     async fn concurrent_joins_of_one_round_share_one_wire() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        let (handle, dir) = round_test_handle("dlg-concurrent", &live, &transport).await?;
+        let (handle, _dir) = round_test_handle("dlg-concurrent", &live, &transport).await?;
         let original = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2459,7 +2410,6 @@ mod tests {
             "concurrent joins of one round must share its one wire"
         );
         assert_eq!(left_wire, open_wire, "the open round keeps its projection");
-        remove_data_dir(&dir);
         Ok(())
     }
 
@@ -2467,7 +2417,7 @@ mod tests {
     /// round all receive the same wire, never two mints.
     #[tokio::test]
     async fn concurrent_projection_requests_mint_one_wire() -> Result<(), String> {
-        let Some((handle, dir)) = setup_handle("dlg-mint-race").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-mint-race").await else {
             return Err(String::from("handle open must succeed"));
         };
         let round = RoundId::from_raw(RawId::new());
@@ -2490,7 +2440,6 @@ mod tests {
             1,
             "one round must mint exactly one wire, got {distinct:?}"
         );
-        remove_data_dir(&dir);
         Ok(())
     }
 
@@ -2505,7 +2454,6 @@ mod tests {
         let transport = ok_transport();
         let live = live_input("client-a");
         if !register_assign_complete(&handle, &live, &transport).await {
-            remove_data_dir(&dir);
             return Err(String::from("setup must complete"));
         }
         let frame = submit_frame(
@@ -2530,7 +2478,7 @@ mod tests {
             },
             "test-bearer",
         );
-        let reopened = HostHandle::open_with_cred_store(&dir, CredStore::Memory(fresh))
+        let reopened = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(fresh))
             .await
             .map_err(|error| format!("the store must reopen: {error:?}"))?;
         let relive = live_input("client-a");
@@ -2564,11 +2512,9 @@ mod tests {
             )
             .await;
         let Some(view_frame) = restored.first() else {
-            remove_data_dir(&dir);
             return Err(String::from("history must answer"));
         };
         let WirePayload::HistoryView(view) = &view_frame.payload else {
-            remove_data_dir(&dir);
             return Err(String::from("history must answer with a view"));
         };
         assert_eq!(
@@ -2576,7 +2522,6 @@ mod tests {
             2,
             "the restart replay appends nothing durable"
         );
-        remove_data_dir(&dir);
         Ok(())
     }
 
@@ -2585,7 +2530,7 @@ mod tests {
         use ene_companion::CompanionRepository as _;
         use ene_presence::PresenceRepository as _;
 
-        let Some((handle, dir)) = setup_handle("dlg-disc").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-disc").await else {
             return;
         };
         let transport = ok_transport();
@@ -2618,12 +2563,10 @@ mod tests {
         handle.note_disconnect("client-a").await;
         let companion = handle.store.ensure_running_companion().await;
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let attribution = handle.store.load_attribution(companion.as_raw()).await;
         let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
             return;
         };
         assert_eq!(
@@ -2635,7 +2578,6 @@ mod tests {
             current.active_client, None,
             "socket close clears the active client"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
@@ -2643,7 +2585,7 @@ mod tests {
         use ene_companion::CompanionRepository as _;
         use ene_presence::PresenceRepository as _;
 
-        let Some((handle, dir)) = setup_handle("dlg-replay-disc").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-replay-disc").await else {
             return;
         };
         let transport = ok_transport();
@@ -2685,7 +2627,6 @@ mod tests {
         );
         let companion = handle.store.ensure_running_companion().await;
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let attribution = handle.store.load_attribution(companion.as_raw()).await;
@@ -2693,12 +2634,11 @@ mod tests {
             matches!(&attribution, Ok(Some(current)) if current.state == ene_presence::PresenceState::NoActive && current.active_client.is_none()),
             "the replay must not re-attach presence, got {attribution:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn provider_failure_interrupts_after_accept() {
-        let Some((handle, dir)) = setup_handle("dlg-fail").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-fail").await else {
             return;
         };
         let transport = ok_transport();
@@ -2745,7 +2685,6 @@ mod tests {
             .await;
         assert_eq!(responses.len(), 3, "accept plus an interrupted stream");
         let Some(closed) = responses.get(2) else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2755,12 +2694,11 @@ mod tests {
             ),
             "a send failure interrupts the stream"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn consent_replay_is_idempotent_and_moves_report_staleness() {
-        let Some((handle, dir)) = setup_handle("dlg-cas").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-cas").await else {
             return;
         };
         let transport = ok_transport();
@@ -2795,7 +2733,6 @@ mod tests {
             )
             .await;
         let Some(stored) = assigned.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2818,7 +2755,6 @@ mod tests {
             )
             .await;
         let Some(same) = replayed.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2843,7 +2779,6 @@ mod tests {
             )
             .await;
         let Some(same) = converged.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2869,7 +2804,6 @@ mod tests {
             )
             .await;
         let Some(stale) = moved.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2880,12 +2814,11 @@ mod tests {
             ),
             "a changed assign on a stale base reports the rebuilt current mark"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn assign_intent_replay_returns_the_stored_success() {
-        let Some((handle, dir)) = setup_handle("dlg-intentreplay").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-intentreplay").await else {
             return;
         };
         let transport = ok_transport();
@@ -2936,7 +2869,6 @@ mod tests {
             .handle_frame(assign_x("consent-none"), live.clone(), &transport)
             .await;
         let Some(same) = replayed.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2987,14 +2919,13 @@ mod tests {
             ),
             "a replay after the route moved still answers its prior outcome, got {stale_retry:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn assign_intent_conflict_clarifies_without_side_effects() {
         use ene_permission::ConsentRepository as _;
 
-        let Some((handle, dir)) = setup_handle("dlg-intentconflict").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-intentconflict").await else {
             return;
         };
         let transport = ok_transport();
@@ -3042,7 +2973,6 @@ mod tests {
             )
             .await;
         let Some(only) = conflicted.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3058,14 +2988,13 @@ mod tests {
             matches!(&current, Ok(Some(record)) if record.model == "dialogue-1"),
             "the conflict must not move consent, got {current:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn malformed_target_reuse_conflicts_without_side_effects() {
         use ene_permission::ConsentRepository as _;
 
-        let Some((handle, dir)) = setup_handle("dlg-malformed-reuse").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-malformed-reuse").await else {
             return;
         };
         let transport = ok_transport();
@@ -3115,7 +3044,6 @@ mod tests {
             )
             .await;
         let Some(only) = reused.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3131,12 +3059,11 @@ mod tests {
             matches!(&current, Ok(Some(record)) if record.model == "dialogue-1"),
             "the conflict must not move consent, got {current:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn complete_replay_returns_the_stored_snapshot() {
-        let Some((handle, dir)) = setup_handle("dlg-completeray").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-completeray").await else {
             return;
         };
         let transport = ok_transport();
@@ -3177,12 +3104,11 @@ mod tests {
             ),
             "the exact retry must replay applied, got {replayed:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn complete_stale_replay_returns_its_own_mark() {
-        let Some((handle, dir)) = setup_handle("dlg-completestale").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-completestale").await else {
             return;
         };
         let transport = ok_transport();
@@ -3244,12 +3170,11 @@ mod tests {
             ),
             "the stale retry must replay its own mark, got {replayed:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn assign_stale_replay_returns_its_own_mark() {
-        let Some((handle, dir)) = setup_handle("dlg-assignstale").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-assignstale").await else {
             return;
         };
         let transport = ok_transport();
@@ -3277,14 +3202,13 @@ mod tests {
                 "attempt {attempt} must report the empty mark, got {answered:?}"
             );
         }
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn submit_without_command_id_is_declined_without_side_effects() {
         use ene_companion::{CompanionRepository as _, HistoryRepository as _};
 
-        let Some((handle, dir)) = setup_handle("dlg-nocmd").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-nocmd").await else {
             return;
         };
         let transport = ok_transport();
@@ -3304,7 +3228,6 @@ mod tests {
         frame.envelope.correlation.command_id = None;
         let declined = handle.handle_frame(frame, live.clone(), &transport).await;
         let Some(only) = declined.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3319,7 +3242,6 @@ mod tests {
         );
         let companion = handle.store.ensure_running_companion().await;
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let timeline = handle.store.load_timeline(companion, None, 50).await;
@@ -3327,14 +3249,13 @@ mod tests {
             matches!(&timeline, Ok(items) if items.is_empty()),
             "a declined keyless input must leave no history row, got {timeline:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn submit_with_reused_command_and_new_text_is_declined() {
         use ene_companion::{CompanionRepository as _, HistoryRepository as _};
 
-        let Some((handle, dir)) = setup_handle("dlg-mismatch").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-mismatch").await else {
             return;
         };
         let transport = ok_transport();
@@ -3367,7 +3288,6 @@ mod tests {
         }
         let declined = handle.handle_frame(forged, live.clone(), &transport).await;
         let Some(only) = declined.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3380,7 +3300,6 @@ mod tests {
         );
         let companion = handle.store.ensure_running_companion().await;
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let timeline = handle.store.load_timeline(companion, None, 50).await;
@@ -3388,7 +3307,6 @@ mod tests {
             matches!(&timeline, Ok(items) if items.len() == 2),
             "the declined forgery must append nothing (owner plus reply only), got {timeline:?}"
         );
-        remove_data_dir(&dir);
     }
 
     /// Transport that revokes consent mid-flight: it bumps the stored
@@ -3443,7 +3361,7 @@ mod tests {
     async fn submit_with_unknown_companion_needs_revalidation() {
         use ene_companion::{CompanionRepository as _, HistoryRepository as _};
 
-        let Some((handle, dir)) = setup_handle("dlg-unknowncomp").await else {
+        let Some((handle, _dir)) = setup_handle("dlg-unknowncomp").await else {
             return;
         };
         let transport = ok_transport();
@@ -3467,7 +3385,6 @@ mod tests {
             )
             .await;
         let Some(only) = declined.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3482,7 +3399,6 @@ mod tests {
         );
         let companion = handle.store.ensure_running_companion().await;
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let timeline = handle.store.load_timeline(companion, None, 50).await;
@@ -3490,7 +3406,6 @@ mod tests {
             matches!(&timeline, Ok(items) if items.is_empty()),
             "the unknown-companion send must append nothing, got {timeline:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
@@ -3507,7 +3422,7 @@ mod tests {
             "setup must complete"
         );
         let transport = RevokingTransport {
-            db: dir.join("app.db"),
+            db: dir.path().join("app.db"),
             inner: fake,
         };
         let frame = submit_frame(
@@ -3520,7 +3435,6 @@ mod tests {
         );
         let responses = handle.handle_frame(frame, live.clone(), &transport).await;
         let Some(last) = responses.last() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3534,7 +3448,6 @@ mod tests {
         );
         let companion = handle.store.ensure_running_companion().await;
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let timeline = handle.store.load_timeline(companion, None, 50).await;
@@ -3542,7 +3455,6 @@ mod tests {
             matches!(&timeline, Ok(items) if items.len() == 1),
             "only the owner row commits on interrupted adoption, got {timeline:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[test]
@@ -3596,7 +3508,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_holds_until_host_local_approval() {
-        let Some((handle, dir)) = memory_handle_with("dlg-credgate", |_| {}).await else {
+        let Some((handle, _dir)) = memory_handle_with("dlg-credgate", |_| {}).await else {
             return;
         };
         let transport = ok_transport();
@@ -3614,7 +3526,6 @@ mod tests {
             )
             .await;
         let Some(first) = pending.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3642,7 +3553,6 @@ mod tests {
             )
             .await;
         let Some(second) = usable.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3653,12 +3563,11 @@ mod tests {
             "re-request after approval applies, got {:?}",
             second.payload
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn setup_edge_cases_clarify_or_hold() {
-        let Some((handle, dir)) = memory_handle_with("dlg-edge", |_| {}).await else {
+        let Some((handle, _dir)) = memory_handle_with("dlg-edge", |_| {}).await else {
             return;
         };
         let transport = ok_transport();
@@ -3676,7 +3585,6 @@ mod tests {
             )
             .await;
         let Some(first) = malformed.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3699,7 +3607,6 @@ mod tests {
             )
             .await;
         let Some(second) = stale_base.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3722,7 +3629,6 @@ mod tests {
             )
             .await;
         let Some(third) = foreign.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3745,7 +3651,6 @@ mod tests {
             )
             .await;
         let Some(fourth) = incomplete.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -3755,6 +3660,5 @@ mod tests {
             ),
             "an incomplete premise cannot complete setup"
         );
-        remove_data_dir(&dir);
     }
 }

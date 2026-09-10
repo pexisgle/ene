@@ -32,6 +32,16 @@
 //! only; the `MessagePack` body already carries the same variant name through its
 //! externally-tagged encoding, so the two can never disagree silently.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
+    )
+)]
+
 pub mod conn;
 pub mod dialogue;
 pub mod serve;

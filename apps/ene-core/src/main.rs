@@ -16,6 +16,16 @@
 //! [`HostHandle::approve_device`](ene_core::serve::HostHandle::approve_device):
 //! the Host-local trusted inlet for pending device requests.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
+    )
+)]
+
 use std::path::{Path, PathBuf};
 
 use ene_config::Config;

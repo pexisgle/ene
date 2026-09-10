@@ -189,9 +189,9 @@ struct ConnectionTable {
 /// Connection records plus the per-device live-connection count.
 ///
 /// `device_live` counts connections currently holding each paired device
-/// string: [`ConnectionTable::note_paired`] increments on first pairing per
-/// connection (re-pairing the same device on the same connection is not a new
-/// live connection), and [`ConnectionTable::note_closed`] decrements.
+/// string: [`ConnectionTable::note_paired`] increments once when a
+/// connection first records its device (the device is immutable per
+/// connection thereafter), and [`ConnectionTable::note_closed`] decrements.
 /// Presence falls back only when the count for a device reaches zero, which
 /// keeps connection close (transport fact) separate from presence loss
 /// (domain fact).
@@ -359,22 +359,22 @@ impl ConnectionTable {
     ///
     /// Called only after [`HostHandle::handle_frame`] answers `Paired` on
     /// this connection, so the table records issuance, never a Client claim.
-    /// The per-device live count increments only when this connection newly
-    /// holds the device: re-pairing the same device on the same connection
-    /// (for example a second `Paired` answer on one connection) is idempotent
-    /// and never double-counts, while moving the connection to a different
-    /// device releases the old count first.
+    /// The paired device is immutable once set: the first `Paired` answer on
+    /// a connection is the only one recorded, so a connection can never move
+    /// its live count (or any other per-device bookkeeping) to another
+    /// device, and closing it can never strand an earlier device's liveness.
+    /// Host ingress denies a second pairing request on the same connection;
+    /// this set-once check keeps the invariant even if such a response is
+    /// ever emitted.
     fn note_paired(&self, id: &ConnectionWireId, device_wire: &str) {
         let mut table = lock_table(&self.inner);
         let Some(record) = table.records.get_mut(id) else {
             return;
         };
-        if record.paired_device.as_deref() == Some(device_wire) {
+        if record.paired_device.is_some() {
             return;
         }
-        if let Some(old) = record.paired_device.replace(device_wire.to_string()) {
-            decrement_live(&mut table.device_live, &old);
-        }
+        record.paired_device = Some(device_wire.to_string());
         *table
             .device_live
             .entry(device_wire.to_string())
@@ -431,7 +431,6 @@ impl ConnectionTable {
     }
 }
 
-/// Derives the opaque client ref for one inbound envelope.
 /// Binds the singleton listener for `socket`.
 ///
 /// Tries the bind first: success means no live peer and no stale path. An
@@ -945,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn re_pairing_a_connection_moves_its_live_count() {
+    fn re_pairing_a_connection_keeps_the_first_device() {
         let table = ConnectionTable::new();
         let id = table.note_accept();
         let pinned = table.live_for(&id, &envelope(incarnation(3, 3)));
@@ -958,21 +957,19 @@ mod tests {
         let (closed, still_live) = table.note_closed(&id);
         assert_eq!(
             closed,
-            Some(String::from("device-2")),
-            "close reports the current device"
+            Some(String::from("device-1")),
+            "the first paired device is immutable"
         );
         assert!(
             !still_live,
-            "the moved connection leaves no liveness behind"
+            "the connection never counted as live for the second device"
         );
     }
 
     #[tokio::test]
     async fn stale_regular_file_blocks_bind_until_removed() {
-        let Some(dir) = crate::test_support::temp_data_dir("conn-bind") else {
-            return;
-        };
-        let socket = socket_path(&dir);
+        let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+        let socket = socket_path(dir.path());
         assert!(
             std::fs::write(&socket, b"stale").is_ok(),
             "the stale probe file must be writable"
@@ -991,18 +988,14 @@ mod tests {
         );
         let rebound = tokio::net::UnixListener::bind(&socket);
         assert!(rebound.is_ok(), "the cleared path must bind: {rebound:?}");
-        crate::test_support::remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn live_listener_blocks_a_second_bind() {
-        let Some(dir) = crate::test_support::temp_data_dir("conn-live") else {
-            return;
-        };
-        let socket = socket_path(&dir);
+        let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+        let socket = socket_path(dir.path());
         let first = bind_singleton(&socket).await;
         let Ok(live) = first else {
-            crate::test_support::remove_data_dir(&dir);
             return;
         };
         let second = bind_singleton(&socket).await;
@@ -1011,18 +1004,14 @@ mod tests {
             "a live listener must block a second bind: {second:?}"
         );
         drop(live);
-        crate::test_support::remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn stale_socket_file_rebinds_after_close() {
-        let Some(dir) = crate::test_support::temp_data_dir("conn-stale") else {
-            return;
-        };
-        let socket = socket_path(&dir);
+        let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+        let socket = socket_path(dir.path());
         let first = bind_singleton(&socket).await;
         let Ok(live) = first else {
-            crate::test_support::remove_data_dir(&dir);
             return;
         };
         drop(live);
@@ -1032,13 +1021,11 @@ mod tests {
             "a closed listener leaves a stale path that rebinds: {rebound:?}"
         );
         drop(rebound);
-        crate::test_support::remove_data_dir(&dir);
     }
 
-    /// Regression: a redelivered frame must drop silently WITHOUT closing
-    /// the connection. The pre-fix `live_for` collapsed duplicates and
-    /// violations into one `None`, and `serve_connection` broke its loop on
-    /// it — so one transport duplicate ended the session.
+    /// A redelivered frame must drop silently WITHOUT closing the
+    /// connection: transport at-least-once must never become domain twice,
+    /// and a duplicate is not a terminal violation.
     #[tokio::test]
     async fn redelivery_keeps_the_connection_serving() {
         use std::sync::Arc;
@@ -1088,7 +1075,7 @@ mod tests {
             timed.ok().flatten()
         }
 
-        let Some((handle, dir)) = memory_handle_with("dup-serving", |_| {}).await else {
+        let Some((handle, _dir)) = memory_handle_with("dup-serving", |_| {}).await else {
             return;
         };
         let table = Arc::new(ConnectionTable::new());
@@ -1096,7 +1083,6 @@ mod tests {
         let pair = tokio::net::UnixStream::pair();
         assert!(pair.is_ok(), "socket pair must open");
         let Ok((mut client, server)) = pair else {
-            crate::test_support::remove_data_dir(&dir);
             return;
         };
         let worker = tokio::spawn(super::serve_connection(
@@ -1117,7 +1103,6 @@ mod tests {
         );
         let Some(pairing) = pairing else {
             worker.abort();
-            crate::test_support::remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1146,7 +1131,6 @@ mod tests {
         );
         let Some(capability) = capability else {
             worker.abort();
-            crate::test_support::remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1162,6 +1146,5 @@ mod tests {
         );
         drop(client);
         worker.abort();
-        crate::test_support::remove_data_dir(&dir);
     }
 }

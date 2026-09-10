@@ -81,27 +81,15 @@ fn outcome_frame(
     intent: &ManagementIntent,
     outcome: ManagementOutcome,
 ) -> WireFrame {
-    let mut envelope = outgoing_envelope(
-        frame,
-        live,
-        "ManagementOutcome",
-        Some(frame.envelope.message_id),
-    );
+    let payload = WirePayload::ManagementOutcome(outcome);
+    let mut envelope = outgoing_envelope(frame, live, &payload, Some(frame.envelope.message_id));
     envelope.correlation.command_id = Some(intent.intent_id);
-    WireFrame {
-        envelope,
-        payload: WirePayload::ManagementOutcome(outcome),
-    }
+    WireFrame { envelope, payload }
 }
 
 /// Builds a management view reply.
 fn view_frame(frame: &WireFrame, live: &LiveInput, view: ManagementView) -> WireFrame {
-    outgoing_frame(
-        frame,
-        live,
-        "ManagementView",
-        WirePayload::ManagementView(view),
-    )
+    outgoing_frame(frame, live, WirePayload::ManagementView(view))
 }
 
 /// Renders the consent display mark for an optional stored record.

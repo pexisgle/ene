@@ -14,6 +14,12 @@
 //! pipes in a follow-up).
 
 #![cfg(unix)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "integration tests may unwrap values whose failure would be a test bug"
+)]
 
 use std::sync::Arc;
 use std::time::Duration;

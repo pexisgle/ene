@@ -493,7 +493,9 @@ impl HostHandle {
     /// pre-accept response (pairing results, negotiated terms, challenges,
     /// rejections, denials, unpaired closes) carries [`None`].
     ///
-    /// Ingress rules by frame kind: [`PairingRequest`] frames carry no checks;
+    /// Ingress rules by frame kind: [`PairingRequest`] frames are refused
+    /// once the connection already holds a paired device (one connection,
+    /// one device); unpaired connections need no other check.
     /// [`CapabilityAdvertise`] frames need the paired-device check only (they
     /// predate authentication); [`AuthProof`]
     /// frames need none (they ARE the authentication); inbound
@@ -853,6 +855,13 @@ impl HostHandle {
         if !live.peer_uid_ok {
             return vec![denied_pairing(frame, live, "peer user mismatch")];
         }
+        // One connection pairs with one device for its lifetime: a second
+        // request must not be able to move the connection (and its liveness
+        // and auth binding) to another device. The connection table also
+        // enforces set-once, so both layers refuse the move.
+        if live.paired_device.is_some() {
+            return vec![denied_pairing(frame, live, "connection already paired")];
+        }
         let descriptor = request.device_descriptor.trim().to_string();
         if descriptor.is_empty() {
             return vec![denied_pairing(frame, live, "blank device descriptor")];
@@ -870,14 +879,12 @@ impl HostHandle {
                 vec![outgoing_frame_pre_auth(
                     frame,
                     live,
-                    "PairingResult",
                     WirePayload::PairingResult(PairingResult::Paired { device_id }),
                 )]
             }
             Ok(DevicePairingStatus::Pending { .. }) => vec![outgoing_frame_pre_auth(
                 frame,
                 live,
-                "PairingResult",
                 WirePayload::PairingResult(PairingResult::PendingOwnerConfirmation),
             )],
             Err(_) => vec![denied_pairing(frame, live, "pairing store unavailable")],
@@ -915,7 +922,6 @@ impl HostHandle {
             return vec![outgoing_frame_pre_auth(
                 frame,
                 live,
-                "DisconnectNotice",
                 WirePayload::DisconnectNotice(notice),
             )];
         }
@@ -931,16 +937,10 @@ impl HostHandle {
         let nonce = Uuid::new_v4().as_hyphenated().to_string();
         lock_map(&self.pending_nonces).insert(conn_key(&live.connection_id), nonce.clone());
         vec![
+            outgoing_frame_pre_auth(frame, live, WirePayload::NegotiatedConnection(negotiated)),
             outgoing_frame_pre_auth(
                 frame,
                 live,
-                "NegotiatedConnection",
-                WirePayload::NegotiatedConnection(negotiated),
-            ),
-            outgoing_frame_pre_auth(
-                frame,
-                live,
-                "AuthChallenge",
                 WirePayload::AuthChallenge(AuthChallenge { nonce }),
             ),
         ]
@@ -1004,7 +1004,6 @@ impl HostHandle {
                 let mut out = vec![outgoing_frame(
                     frame,
                     live,
-                    "AuthResult",
                     WirePayload::AuthResult(AuthResult::Accepted {
                         connection_id: live.connection_id,
                     }),
@@ -1016,7 +1015,6 @@ impl HostHandle {
                     out.push(outgoing_frame(
                         frame,
                         live,
-                        "PresenceAttribution",
                         WirePayload::PresenceAttribution(attribution_to_wire(self, &attribution)),
                     ));
                 }
@@ -1025,7 +1023,6 @@ impl HostHandle {
             Some(reason) => vec![outgoing_frame_pre_auth(
                 frame,
                 live,
-                "AuthResult",
                 WirePayload::AuthResult(AuthResult::Rejected {
                     reason: reason.to_string(),
                 }),
@@ -1091,7 +1088,6 @@ fn denied_pairing(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFram
     outgoing_frame_pre_auth(
         frame,
         live,
-        "PairingResult",
         WirePayload::PairingResult(PairingResult::Denied {
             reason: reason.to_string(),
         }),
@@ -1111,7 +1107,6 @@ pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     outgoing_frame_pre_auth(
         frame,
         live,
-        "DisconnectNotice",
         WirePayload::DisconnectNotice(DisconnectNotice {
             reason: String::from("unpaired"),
         }),
@@ -1142,22 +1137,24 @@ fn response_sender(frame: &WireFrame, live: &LiveInput, reveal_connection: bool)
     }
 }
 
-/// Builds an outgoing envelope for a `Stage 2` message type.
+/// Builds an outgoing envelope for a `Stage 2` message.
 ///
-/// `reply_to` links the response to its request for transport pairing; domain
-/// correspondence travels in the payloads, never here. The sender follows
-/// [`response_sender`]: the paired device (or [`None`] pre-pairing), the
-/// inbound incarnation echoed, and this connection's table id.
+/// The `message_type` is derived from `payload`, never passed separately, so
+/// the envelope and body cannot disagree. `reply_to` links the response to its
+/// request for transport pairing; domain correspondence travels in the
+/// payloads, never here. The sender follows [`response_sender`]: the paired
+/// device (or [`None`] pre-pairing), the inbound incarnation echoed, and this
+/// connection's table id.
 pub(crate) fn outgoing_envelope(
     frame: &WireFrame,
     live: &LiveInput,
-    message_type: &str,
+    payload: &WirePayload,
     reply_to: Option<WireMessageId>,
 ) -> WireEnvelope {
-    outgoing_envelope_inner(frame, live, message_type, reply_to, true)
+    outgoing_envelope_inner(frame, live, payload.message_type(), reply_to, true)
 }
 
-/// Builds a pre-accept outgoing envelope for a `Stage 2` message type.
+/// Builds a pre-accept outgoing envelope for a `Stage 2` message.
 ///
 /// Same as [`outgoing_envelope`] except the sender hides the connection id
 /// ([`None`]): pairing results and denials, negotiated terms, challenges,
@@ -1166,10 +1163,10 @@ pub(crate) fn outgoing_envelope(
 pub(crate) fn outgoing_envelope_pre_auth(
     frame: &WireFrame,
     live: &LiveInput,
-    message_type: &str,
+    payload: &WirePayload,
     reply_to: Option<WireMessageId>,
 ) -> WireEnvelope {
-    outgoing_envelope_inner(frame, live, message_type, reply_to, false)
+    outgoing_envelope_inner(frame, live, payload.message_type(), reply_to, false)
 }
 
 /// Builds an outgoing envelope with an explicit connection-id reveal rule.
@@ -1192,20 +1189,18 @@ fn outgoing_envelope_inner(
 /// Builds one response frame answering `frame` with `payload`.
 ///
 /// The envelope follows the `Stage 2` `message_type` convention documented on
-/// the crate root and links back through `reply_to`, revealing the connection
-/// through [`response_sender`]. Use only on and after
+/// the crate root, derived from `payload` so the two cannot disagree, and
+/// links back through `reply_to`, revealing the connection through
+/// [`response_sender`]. Use only on and after
 /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted): the acceptance
 /// itself, the piggybacked presence fact, and every domain response.
 pub(crate) fn outgoing_frame(
     frame: &WireFrame,
     live: &LiveInput,
-    message_type: &str,
     payload: WirePayload,
 ) -> WireFrame {
-    WireFrame {
-        envelope: outgoing_envelope(frame, live, message_type, Some(frame.envelope.message_id)),
-        payload,
-    }
+    let envelope = outgoing_envelope(frame, live, &payload, Some(frame.envelope.message_id));
+    WireFrame { envelope, payload }
 }
 
 /// Builds one typed wire rejection answering `frame`.
@@ -1222,7 +1217,6 @@ pub(crate) fn reject_frame(
     outgoing_frame_pre_auth(
         frame,
         live,
-        "Reject",
         WirePayload::Reject(RejectNotice { kind, detail }),
     )
 }
@@ -1236,18 +1230,11 @@ pub(crate) fn reject_frame(
 pub(crate) fn outgoing_frame_pre_auth(
     frame: &WireFrame,
     live: &LiveInput,
-    message_type: &str,
     payload: WirePayload,
 ) -> WireFrame {
-    WireFrame {
-        envelope: outgoing_envelope_pre_auth(
-            frame,
-            live,
-            message_type,
-            Some(frame.envelope.message_id),
-        ),
-        payload,
-    }
+    let envelope =
+        outgoing_envelope_pre_auth(frame, live, &payload, Some(frame.envelope.message_id));
+    WireFrame { envelope, payload }
 }
 
 /// Ensures the Host data directory exists.
@@ -1324,7 +1311,7 @@ use ene_plugin_ipc::WireFrame;
 #[cfg(test)]
 mod tests {
     use super::{HostHandle, LiveInput, conn_key, device_client};
-    use crate::test_support::{live_input, memory_handle, remove_data_dir};
+    use crate::test_support::{live_input, memory_handle};
     use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
     use ene_api::v1::handshake::{
         AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, PairingRequest, PairingResult,
@@ -1453,7 +1440,7 @@ mod tests {
         FakeProviderTransport::new(String::new(), None)
     }
 
-    async fn open_handle(tag: &str) -> Option<(HostHandle, std::path::PathBuf)> {
+    async fn open_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
         memory_handle(tag).await
     }
 
@@ -1478,7 +1465,7 @@ mod tests {
 
     #[tokio::test]
     async fn pairing_denies_an_unauthorized_peer() {
-        let Some((handle, dir)) = open_handle("pair-deny").await else {
+        let Some((handle, _dir)) = open_handle("pair-deny").await else {
             return;
         };
         let denied_input = LiveInput {
@@ -1491,7 +1478,6 @@ mod tests {
             .await;
         assert_eq!(responses.len(), 1, "denial answers exactly one frame");
         let Some(first) = responses.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1501,22 +1487,17 @@ mod tests {
             ),
             "an unauthorized peer is denied"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn pairing_denies_a_blank_descriptor() {
-        let Some((handle, dir)) = open_handle("pair-blank").await else {
+        let Some((handle, _dir)) = open_handle("pair-blank").await else {
             return;
         };
         let transport = fake_transport();
         for descriptor in ["", "   "] {
             let responses = handle
-                .handle_frame(
-                    pairing_frame(descriptor),
-                    live_input("client-a"),
-                    &transport,
-                )
+                .handle_frame(pairing_frame(descriptor), unpaired_input(), &transport)
                 .await;
             assert_eq!(responses.len(), 1, "blank denial answers once");
             let Some(first) = responses.first() else {
@@ -1532,28 +1513,25 @@ mod tests {
         }
         let pending = handle.pending_devices().await;
         let Ok(descriptors) = pending else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
             descriptors.is_empty(),
             "blank descriptors leave no pending entry"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn pairing_pends_then_pairs_after_owner_approval() {
-        let Some((handle, dir)) = open_handle("pair-flow").await else {
+        let Some((handle, _dir)) = open_handle("pair-flow").await else {
             return;
         };
         let transport = fake_transport();
         let pending = handle
-            .handle_frame(pairing_frame("laptop"), live_input("client-a"), &transport)
+            .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
             .await;
         assert_eq!(pending.len(), 1, "the request answers once");
         let Some(first) = pending.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1565,7 +1543,6 @@ mod tests {
         );
         let listed = handle.pending_devices().await;
         let Ok(descriptors) = listed else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1574,21 +1551,18 @@ mod tests {
         );
         let unknown = handle.approve_device("unknown box").await;
         let Ok(None) = unknown else {
-            remove_data_dir(&dir);
             return;
         };
         let approved = handle.approve_device("laptop").await;
         let Ok(Some(_)) = approved else {
-            remove_data_dir(&dir);
             return;
         };
         let paired_frame = pairing_frame("laptop");
         let expected_reply = paired_frame.envelope.message_id;
         let paired = handle
-            .handle_frame(paired_frame, live_input("client-a"), &transport)
+            .handle_frame(paired_frame, unpaired_input(), &transport)
             .await;
         let Some(answer) = paired.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1603,12 +1577,45 @@ mod tests {
             Some(expected_reply),
             "the reply links back to the request"
         );
-        remove_data_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_already_paired_connection_cannot_pair_again() {
+        let Some((handle, _dir)) = open_handle("pair-immutable").await else {
+            return;
+        };
+        let transport = fake_transport();
+        let responses = handle
+            .handle_frame(
+                pairing_frame("other box"),
+                paired_input("device-1"),
+                &transport,
+            )
+            .await;
+        assert_eq!(responses.len(), 1, "the refusal answers exactly one frame");
+        let Some(first) = responses.first() else {
+            return;
+        };
+        assert!(
+            matches!(
+                &first.payload,
+                WirePayload::PairingResult(PairingResult::Denied { .. })
+            ),
+            "a paired connection never re-pairs"
+        );
+        let pending = handle.pending_devices().await;
+        let Ok(descriptors) = pending else {
+            return;
+        };
+        assert!(
+            descriptors.is_empty(),
+            "the refused descriptor leaves no pending entry"
+        );
     }
 
     #[tokio::test]
     async fn unpaired_domain_frames_close_with_an_unpaired_notice() {
-        let Some((handle, dir)) = open_handle("gate-drop").await else {
+        let Some((handle, _dir)) = open_handle("gate-drop").await else {
             return;
         };
         let transport = fake_transport();
@@ -1617,7 +1624,6 @@ mod tests {
             .await;
         assert_eq!(responses.len(), 1, "the gate answers once");
         let Some(first) = responses.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1631,7 +1637,6 @@ mod tests {
             .handle_frame(history_frame(), unpaired_input(), &transport)
             .await;
         let Some(view) = history.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1641,12 +1646,11 @@ mod tests {
             ),
             "an unpaired history request closes with the unpaired notice"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn unknown_connection_closes_even_with_a_device() {
-        let Some((handle, dir)) = open_handle("gate-unknown").await else {
+        let Some((handle, _dir)) = open_handle("gate-unknown").await else {
             return;
         };
         let transport = fake_transport();
@@ -1657,7 +1661,6 @@ mod tests {
         };
         let responses = handle.handle_frame(submit_frame(), input, &transport).await;
         let Some(first) = responses.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1667,12 +1670,11 @@ mod tests {
             ),
             "an unknown connection closes even when it names a device"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn unsolicited_challenge_and_result_answer_nothing() {
-        let Some((handle, dir)) = open_handle("auth-deferred").await else {
+        let Some((handle, _dir)) = open_handle("auth-deferred").await else {
             return;
         };
         let transport = fake_transport();
@@ -1705,7 +1707,6 @@ mod tests {
                 "unsolicited challenge/result frames answer nothing, even unpaired"
             );
         }
-        remove_data_dir(&dir);
     }
 
     fn proof_frame(device_id: DeviceWireId, proof: &str) -> super::WireFrame {
@@ -1732,12 +1733,12 @@ mod tests {
 
     #[tokio::test]
     async fn challenge_proof_accepts_and_binds_the_connection() {
-        let Some((handle, dir)) = open_handle("auth-flow").await else {
+        let Some((handle, _dir)) = open_handle("auth-flow").await else {
             return;
         };
         let transport = fake_transport();
         let pending = handle
-            .handle_frame(pairing_frame("laptop"), live_input("client-a"), &transport)
+            .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
             .await;
         assert!(
             pending.first().is_some_and(|first| matches!(
@@ -1758,20 +1759,17 @@ mod tests {
             "owner approval must pair, got {approved:?}"
         );
         let Ok(Some((record, secret))) = approved else {
-            remove_data_dir(&dir);
             return;
         };
         let device_wire = record.wire.clone();
         let paired = handle
-            .handle_frame(pairing_frame("laptop"), live_input("client-a"), &transport)
+            .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
             .await;
         let Some(answer) = paired.first() else {
-            remove_data_dir(&dir);
             return;
         };
         let WirePayload::PairingResult(PairingResult::Paired { device_id }) = &answer.payload
         else {
-            remove_data_dir(&dir);
             return;
         };
         let device_id = *device_id;
@@ -1809,11 +1807,9 @@ mod tests {
             );
         }
         let Some(challenge_frame) = challenged.get(1) else {
-            remove_data_dir(&dir);
             return;
         };
         let WirePayload::AuthChallenge(challenge) = &challenge_frame.payload else {
-            remove_data_dir(&dir);
             return;
         };
         let nonce = challenge.nonce.clone();
@@ -1824,7 +1820,6 @@ mod tests {
         let answered = handle.handle_frame(attempt, live.clone(), &transport).await;
         assert_eq!(answered.len(), 2, "a proof answers result plus fact");
         let Some(accepted) = answered.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1860,7 +1855,6 @@ mod tests {
             "the result echoes the connection"
         );
         let Some(fact) = answered.get(1) else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1897,11 +1891,9 @@ mod tests {
             )
             .await;
         let Some(fresh) = rechallenged.get(1) else {
-            remove_data_dir(&dir);
             return;
         };
         let WirePayload::AuthChallenge(fresh_challenge) = &fresh.payload else {
-            remove_data_dir(&dir);
             return;
         };
         assert_ne!(
@@ -1927,7 +1919,6 @@ mod tests {
             )
             .await;
         let Some(fresh) = rechallenged.get(1) else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -1969,18 +1960,17 @@ mod tests {
             )),
             "a foreign connection id closes with the unpaired notice, got {dropped:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn pre_accept_denials_and_closes_hide_the_connection_id() {
-        let Some((handle, dir)) = open_handle("auth-hidden").await else {
+        let Some((handle, _dir)) = open_handle("auth-hidden").await else {
             return;
         };
         let transport = fake_transport();
         let live = live_input("client-a");
         let denied = handle
-            .handle_frame(pairing_frame("laptop"), live.clone(), &transport)
+            .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
             .await;
         // Fresh descriptor pends (no denial here); the peer-mismatch and
         // blank denials below are the hiding cases.
@@ -1993,7 +1983,7 @@ mod tests {
         );
         let mismatched = LiveInput {
             peer_uid_ok: false,
-            ..live_input("client-a")
+            ..unpaired_input()
         };
         let refused = handle
             .handle_frame(pairing_frame("laptop"), mismatched, &transport)
@@ -2045,12 +2035,11 @@ mod tests {
                 response.payload
             );
         }
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn unauthed_domain_frame_closes_even_without_a_connection_id() {
-        let Some((handle, dir)) = open_handle("gate-bypass").await else {
+        let Some((handle, _dir)) = open_handle("gate-bypass").await else {
             return;
         };
         let transport = fake_transport();
@@ -2099,12 +2088,11 @@ mod tests {
             )),
             "an id-less frame on an authed connection still closes, got {dropped:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn superseded_connection_replay_closes_despite_a_known_id() {
-        let Some((handle, dir)) = open_handle("gate-superseded").await else {
+        let Some((handle, _dir)) = open_handle("gate-superseded").await else {
             return;
         };
         let transport = fake_transport();
@@ -2132,30 +2120,27 @@ mod tests {
             )),
             "a known-id replay on a superseded connection closes, got {dropped:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
-        use crate::test_support::temp_data_dir;
         use ene_credential::MemoryCredentialStore;
 
         use super::CredStore;
 
-        let Some(dir) = temp_data_dir("auth-durable") else {
-            return;
-        };
+        let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
         let transport = fake_transport();
-        let opened =
-            HostHandle::open_with_cred_store(&dir, CredStore::Memory(MemoryCredentialStore::new()))
-                .await;
+        let opened = HostHandle::open_with_cred_store(
+            dir.path(),
+            CredStore::Memory(MemoryCredentialStore::new()),
+        )
+        .await;
         assert!(opened.is_ok(), "the first open must succeed");
         let Ok(first) = opened else {
-            remove_data_dir(&dir);
             return;
         };
         let pending = first
-            .handle_frame(pairing_frame("laptop"), live_input("client-a"), &transport)
+            .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
             .await;
         assert!(
             pending.first().is_some_and(|first| matches!(
@@ -2170,22 +2155,22 @@ mod tests {
             "owner approval must pair, got {approved:?}"
         );
         let Ok(Some((record, secret))) = approved else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
-            dir.join("device-auth.json").exists(),
+            dir.path().join("device-auth.json").exists(),
             "approval persists the secret to the device-auth file"
         );
         drop(first);
         // A fresh handle holds no secret map at all: if verification reads
         // only memory, this proof must fail. It must pass from the file.
-        let reopened =
-            HostHandle::open_with_cred_store(&dir, CredStore::Memory(MemoryCredentialStore::new()))
-                .await;
+        let reopened = HostHandle::open_with_cred_store(
+            dir.path(),
+            CredStore::Memory(MemoryCredentialStore::new()),
+        )
+        .await;
         assert!(reopened.is_ok(), "the second open must succeed");
         let Ok(second) = reopened else {
-            remove_data_dir(&dir);
             return;
         };
         let device_wire = record.wire.clone();
@@ -2198,16 +2183,13 @@ mod tests {
             )
             .await;
         let Some(challenge_frame) = challenged.get(1) else {
-            remove_data_dir(&dir);
             return;
         };
         let WirePayload::AuthChallenge(challenge) = &challenge_frame.payload else {
-            remove_data_dir(&dir);
             return;
         };
         let proof = pairing_proof_hex(&secret, &challenge.nonce);
         let Ok(device_uuid) = uuid::Uuid::parse_str(&device_wire) else {
-            remove_data_dir(&dir);
             return;
         };
         let answered = second
@@ -2224,12 +2206,11 @@ mod tests {
             )),
             "the file-backed secret verifies with no re-approval, got {answered:?}"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn proof_without_challenge_is_rejected() {
-        let Some((handle, dir)) = open_handle("auth-nochallenge").await else {
+        let Some((handle, _dir)) = open_handle("auth-nochallenge").await else {
             return;
         };
         let transport = fake_transport();
@@ -2247,7 +2228,6 @@ mod tests {
         let responses = handle.handle_frame(proof, live.clone(), &transport).await;
         assert_eq!(responses.len(), 1, "a proof answers exactly one frame");
         let Some(first) = responses.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2268,7 +2248,6 @@ mod tests {
             sender().incarnation_id,
             "hiding the connection never drops the incarnation echo"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
@@ -2325,7 +2304,7 @@ mod tests {
 
     #[tokio::test]
     async fn capability_mismatch_ends_with_a_disconnect_notice() {
-        let Some((handle, dir)) = open_handle("caps-mismatch").await else {
+        let Some((handle, _dir)) = open_handle("caps-mismatch").await else {
             return;
         };
         let frame = advertise_frame(ProtocolVersion { major: 9, minor: 0 });
@@ -2335,21 +2314,19 @@ mod tests {
             .await;
         assert_eq!(responses.len(), 1, "mismatch answers exactly one frame");
         let Some(first) = responses.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
             matches!(&first.payload, WirePayload::DisconnectNotice(_)),
             "a major mismatch disconnects"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn capability_match_negotiates_and_challenges_without_attaching() {
         use ene_companion::CompanionRepository as _;
 
-        let Some((handle, dir)) = open_handle("caps-ok").await else {
+        let Some((handle, _dir)) = open_handle("caps-ok").await else {
             return;
         };
         let live = live_input("client-a");
@@ -2363,7 +2340,6 @@ mod tests {
             "negotiation answers terms plus the auth challenge"
         );
         let Some(first) = responses.first() else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2377,11 +2353,9 @@ mod tests {
             "the reply links back to the request"
         );
         let Some(second) = responses.get(1) else {
-            remove_data_dir(&dir);
             return;
         };
         let WirePayload::AuthChallenge(challenge) = &second.payload else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
@@ -2405,37 +2379,32 @@ mod tests {
         );
         let companion = handle.store.ensure_running_companion().await;
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let attribution = handle.store.load_attribution(companion.as_raw()).await;
         let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
             return;
         };
         assert!(
             current.active_client.is_none(),
             "capability negotiation never attaches presence"
         );
-        remove_data_dir(&dir);
     }
 
     #[tokio::test]
     async fn disconnect_without_presence_is_a_no_op() {
         use ene_companion::CompanionRepository as _;
 
-        let Some((handle, dir)) = open_handle("disc-noop").await else {
+        let Some((handle, _dir)) = open_handle("disc-noop").await else {
             return;
         };
         handle.note_disconnect("never-attached").await;
         let companion = handle.store.ensure_running_companion().await;
         let Ok(companion) = companion else {
-            remove_data_dir(&dir);
             return;
         };
         let attribution = handle.store.load_attribution(companion.as_raw()).await;
         let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
             return;
         };
         assert_eq!(
@@ -2443,6 +2412,5 @@ mod tests {
             ene_presence::PresenceState::NoActive,
             "a disconnect with nothing attached changes nothing"
         );
-        remove_data_dir(&dir);
     }
 }
