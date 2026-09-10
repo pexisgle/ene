@@ -27,10 +27,17 @@
     )
 )]
 
+mod intent;
+
 use std::collections::HashMap;
 
 use ene_primitive::RawId;
 use thiserror::Error;
+
+pub use intent::{
+    AssignConsentIntent, AssignConsentResolution, BaseViewExpectation, assign_consent,
+    base_view_expectation,
+};
 
 /// Single-use authorization token for one inference use.
 ///
@@ -615,9 +622,9 @@ pub fn check_live_authorization(
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRevision, ConsumerKind,
-        DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision, PurposeKind,
-        check_live_authorization,
+        BaseViewExpectation, CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord,
+        ConsentRevision, ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate,
+        LiveAuthorizationDecision, PurposeKind, base_view_expectation, check_live_authorization,
     };
 
     fn candidate() -> InferenceUseCandidate {
@@ -801,5 +808,40 @@ mod tests {
             decision,
             LiveAuthorizationDecision::AllowForThisUse(_)
         ));
+    }
+
+    #[test]
+    fn base_view_expectation_covers_marks_and_stale_faces() {
+        let stored = record();
+        assert_eq!(
+            base_view_expectation("consent-none", None),
+            BaseViewExpectation::ExpectEmpty
+        );
+        assert_eq!(
+            base_view_expectation("consent-rev-3", Some(&stored)),
+            BaseViewExpectation::ExpectRevision(
+                String::from("consent-1"),
+                ConsentRevision::from_u64(3)
+            )
+        );
+        assert_eq!(
+            base_view_expectation("consent-rev-9", Some(&stored)),
+            BaseViewExpectation::ExpectRevision(
+                String::from("consent-1"),
+                ConsentRevision::from_u64(9)
+            )
+        );
+        assert_eq!(
+            base_view_expectation("consent-rev-2", None),
+            BaseViewExpectation::FaceStale
+        );
+        assert_eq!(
+            base_view_expectation("consent-rev-x", Some(&stored)),
+            BaseViewExpectation::FaceStale
+        );
+        assert_eq!(
+            base_view_expectation("garbage", Some(&stored)),
+            BaseViewExpectation::FaceStale
+        );
     }
 }
