@@ -18,10 +18,11 @@ pub enum RejectKind {
     MissingRequiredField,
     /// No common major version; the connection cannot proceed.
     IncompatibleProtocol,
-    /// A reused command key arrived with different content than the stored
-    /// row. The durable key already owns its fingerprint, so the conflicting
-    /// send is refused without side effects; retrying the same bytes fails
-    /// identically, while retrying the original content replays cleanly.
+    /// A reused command key arrived with a different request than the
+    /// stored row. The durable key already owns its request fingerprint, so
+    /// the conflicting send is refused without side effects; retrying the
+    /// same bytes fails identically, while retrying the original request
+    /// replays cleanly.
     ConflictingCommand,
 }
 
