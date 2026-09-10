@@ -990,3 +990,225 @@ mod tests {
         assert!(!rendered_arrival.contains("harbor-sunset-output-probe"));
     }
 }
+
+#[cfg(test)]
+mod dispatch_tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::fake::{FakeFailure, FakeProviderTransport};
+    use super::{
+        AttemptBeginOutcome, AuthorizedInference, InferenceAttempt, InferenceAttemptRepository,
+        InferenceDispatchOutcome, InferenceTechnicalError, InferenceTicketId, MAX_INPUT_CHARS,
+        NotSentReason, PermissionEvaluationId, RawUsage, UsageFact, UsageRepository, UsageSource,
+        dispatch_authorized,
+    };
+    use ene_credential::CredentialRef;
+    use ene_permission::{
+        CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
+        ConsumerKind, InferenceUseCandidate, PermissionTechnicalError, PurposeKind,
+    };
+    use ene_primitive::RawId;
+
+    fn record(revision: u64) -> ConsentRecord {
+        ConsentRecord {
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(revision),
+            provider: String::from("acme"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("acme:main"),
+        }
+    }
+
+    struct FixedConsent(Option<ConsentRecord>);
+
+    impl ConsentRepository for FixedConsent {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
+            Ok(self.0.clone())
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn compare_and_save(
+            &self,
+            _expected: Option<(String, ConsentRevision)>,
+            _record: ConsentRecord,
+        ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
+            Err(PermissionTechnicalError::StorageUnavailable {
+                reason: String::from("read-only test consent"),
+            })
+        }
+    }
+
+    /// Returns the first record once, then the second: models a consent move
+    /// landing during the provider await.
+    struct SwitchingConsent {
+        first: ConsentRecord,
+        second: ConsentRecord,
+        reads: AtomicUsize,
+    }
+
+    impl ConsentRepository for SwitchingConsent {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
+            let read = self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(if read == 0 {
+                self.first.clone()
+            } else {
+                self.second.clone()
+            }))
+        }
+
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn compare_and_save(
+            &self,
+            _expected: Option<(String, ConsentRevision)>,
+            _record: ConsentRecord,
+        ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
+            Err(PermissionTechnicalError::StorageUnavailable {
+                reason: String::from("read-only test consent"),
+            })
+        }
+    }
+
+    struct StartedAttempts;
+
+    impl InferenceAttemptRepository for StartedAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            Ok(AttemptBeginOutcome::Started)
+        }
+    }
+
+    struct CapturedUsage(Mutex<Vec<UsageFact>>);
+
+    impl UsageRepository for CapturedUsage {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError> {
+            self.0.lock().expect("usage capture lock").push(fact);
+            Ok(())
+        }
+    }
+
+    fn authorized() -> AuthorizedInference {
+        let consent = record(1);
+        AuthorizedInference {
+            ticket: InferenceTicketId(RawId::new()),
+            consent: (consent.id, consent.rev),
+            provider: consent.provider,
+            model: consent.model,
+            credential: CredentialRef::new("acme", "main").expect("valid test fixture"),
+            candidate: InferenceUseCandidate {
+                consumer: ConsumerKind::CompanionDialogue,
+                capability: CapabilityKind::Dialogue,
+                provider_ref: String::from("acme"),
+                model: String::from("dialogue-1"),
+                purpose: PurposeKind::DialogueResponse,
+            },
+            authorization: PermissionEvaluationId(RawId::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_failure_records_unknown_counts() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::failing(FakeFailure::Transport("down".to_owned()));
+        let result = dispatch_authorized(
+            authorized(),
+            String::from("hello"),
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await;
+        assert!(result.is_err(), "transport failure propagates");
+        let facts = usage.0.lock().expect("usage capture lock");
+        assert_eq!(facts.len(), 1, "an uncertain attempt records one fact");
+        assert_eq!(facts[0].source, UsageSource::Unknown);
+        assert_eq!(facts[0].input_tokens, None);
+        assert_eq!(facts[0].output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn never_sent_records_no_fact() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = FixedConsent(Some(record(1)));
+        let transport = FakeProviderTransport::new(String::from("hi"), None);
+        let result = dispatch_authorized(
+            authorized(),
+            "x".repeat(MAX_INPUT_CHARS + 1),
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await;
+        assert_eq!(
+            result.expect("dispatch answers an outcome"),
+            InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit)
+        );
+        assert!(
+            usage.0.lock().expect("usage capture lock").is_empty(),
+            "a definitely-never-sent call spends nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_records_reported_counts_even_when_adoption_moves() {
+        let usage = CapturedUsage(Mutex::new(Vec::new()));
+        let consent = SwitchingConsent {
+            first: record(1),
+            second: record(2),
+            reads: AtomicUsize::new(0),
+        };
+        let transport = FakeProviderTransport::new(
+            String::from("hi there"),
+            Some(RawUsage {
+                input_tokens: 4,
+                output_tokens: 2,
+            }),
+        );
+        let outcome = dispatch_authorized(
+            authorized(),
+            String::from("hello"),
+            &consent,
+            &StartedAttempts,
+            &usage,
+            &transport,
+        )
+        .await
+        .expect("dispatch answers an outcome");
+        let InferenceDispatchOutcome::Completed { adopted, .. } = outcome else {
+            panic!("a provider success completes");
+        };
+        assert!(!adopted, "the moved consent refuses adoption");
+        let facts = usage.0.lock().expect("usage capture lock");
+        assert_eq!(facts.len(), 1, "the reported fact is kept");
+        assert_eq!(facts[0].source, UsageSource::Reported);
+        assert_eq!(facts[0].input_tokens, Some(4));
+        assert_eq!(facts[0].output_tokens, Some(2));
+    }
+}
