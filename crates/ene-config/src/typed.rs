@@ -104,12 +104,11 @@ impl Config {
     ///
     /// A missing file contributes no values; a present but unreadable or
     /// malformed file is reported as [`ConfigError::Figment`]. Environment
-    /// selection and application are pure ([`select_env`], [`apply_env`]) so
-    /// precedence is unit-testable without mutating the process environment;
-    /// only this entry point reads the real one, and non-UTF-8 entries are
-    /// ignored rather than read at all. The merged result is checked with
-    /// [`Config::validate`] before it is returned, so an empty
-    /// `ENE_LANGUAGE` fails the load.
+    /// selection and application are pure so precedence is unit-testable
+    /// without mutating the process environment; only this entry point reads
+    /// the real one, and non-UTF-8 entries are ignored rather than read at
+    /// all. The merged result is checked with [`Config::validate`] before it
+    /// is returned, so an empty `ENE_LANGUAGE` fails the load.
     ///
     /// # Errors
     ///
