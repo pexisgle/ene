@@ -1,0 +1,17 @@
+[package]
+name = "ene-companion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ene-primitive = { path = "../ene-primitive" }
+ene-presence = { path = "../ene-presence" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
