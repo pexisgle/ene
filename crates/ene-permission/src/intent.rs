@@ -162,8 +162,18 @@ pub async fn assign_consent(
         }
     }
     let next_rev = match current.as_ref() {
-        Some(record) => record.rev.as_u64().saturating_add(1),
-        None => 1,
+        Some(record) => match record.rev.checked_next() {
+            Some(next) => next,
+            None => {
+                return record_decided(
+                    intents,
+                    intent.fingerprint,
+                    IntentOutcome::RevisionExhausted,
+                )
+                .await;
+            }
+        },
+        None => ConsentRevision::from_u64(1),
     };
     let id = match current {
         Some(record) => record.id,
@@ -171,7 +181,7 @@ pub async fn assign_consent(
     };
     let record = ConsentRecord {
         id,
-        rev: ConsentRevision::from_u64(next_rev),
+        rev: next_rev,
         provider: intent.provider,
         model: intent.model,
         credential_id: intent.credential_id,

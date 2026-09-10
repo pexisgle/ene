@@ -284,8 +284,9 @@ pub struct InferenceAttempt {
     /// Ticket the attempt would run under.
     pub ticket: InferenceTicketId,
     /// Consent premise the attempt relies on, as an `(id, rev)` pair that
-    /// travels together (never a bare revision).
-    pub expected_consent: (String, u64),
+    /// travels together (never a bare revision), so exhaustion stays visible
+    /// at the boundary.
+    pub expected_consent: (String, ConsentRevision),
     /// Provider the attempt would bill.
     pub provider: String,
     /// Model the attempt would run.

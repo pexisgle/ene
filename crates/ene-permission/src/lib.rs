@@ -31,7 +31,7 @@ mod intent;
 
 use std::collections::HashMap;
 
-use ene_primitive::RawId;
+use ene_primitive::{RawId, RevisionInner};
 use thiserror::Error;
 
 pub use intent::{
@@ -61,23 +61,34 @@ pub struct RuleId(pub RawId);
 
 /// Monotonic order of one consent identity's revisions.
 ///
-/// Follows the [`ene_primitive::revision::RevisionInner`] discipline: the
-/// inner count travels only inside its `(consent id, revision)` pair, and no
-/// bare `u64` revision crosses a public boundary in this crate.
+/// Follows the [`RevisionInner`] discipline: the inner count travels only
+/// inside its `(consent id, revision)` pair, no bare `u64` revision crosses a
+/// public boundary in this crate, and [`Self::checked_next`] reports
+/// exhaustion instead of aliasing `u64::MAX`, so a new revision can never
+/// silently share the previous one's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ConsentRevision(u64);
+pub struct ConsentRevision(RevisionInner);
 
 impl ConsentRevision {
     /// Reconstitutes a stored revision alongside its consent id.
     #[must_use]
     pub fn from_u64(value: u64) -> Self {
-        Self(value)
+        Self(RevisionInner::from_u64(value))
     }
 
     /// Returns the stored value for persistence or boundary tokens.
     #[must_use]
     pub fn as_u64(&self) -> u64 {
-        self.0
+        self.0.as_u64()
+    }
+
+    /// Successor revision, or [`None`] when no distinct value remains.
+    ///
+    /// Callers must treat [`None`] as revision exhaustion and refuse the
+    /// commit rather than writing [`u64::MAX`] again with new content.
+    #[must_use]
+    pub fn checked_next(&self) -> Option<Self> {
+        self.0.checked_next().map(Self)
     }
 }
 
@@ -462,6 +473,9 @@ pub enum IntentOutcome {
     HeldByOperation,
     /// Too ambiguous or contradictory to decide.
     NeedsClarification,
+    /// The consent identity ran out of distinct revisions: committing again
+    /// would reuse `u64::MAX` with new content, so nothing was written.
+    RevisionExhausted,
     /// The base view had moved underneath the intent.
     StaleBaseView {
         /// Current mark the sender should build on next time.
@@ -843,5 +857,14 @@ mod tests {
             base_view_expectation("garbage", Some(&stored)),
             BaseViewExpectation::FaceStale
         );
+    }
+
+    #[test]
+    fn revision_exhaustion_is_reported_not_aliased() {
+        assert_eq!(
+            ConsentRevision::from_u64(0).checked_next(),
+            Some(ConsentRevision::from_u64(1))
+        );
+        assert_eq!(ConsentRevision::from_u64(u64::MAX).checked_next(), None);
     }
 }
