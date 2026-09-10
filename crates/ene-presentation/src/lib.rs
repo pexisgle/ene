@@ -28,16 +28,6 @@
 //! [`RoundIntent::Auto`] request with a matching [`OpenRound`] for the same
 //! companion, client, and generation, the open round is returned.
 
-#![cfg_attr(
-    test,
-    allow(
-        clippy::expect_used,
-        clippy::unwrap_used,
-        clippy::panic,
-        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
-    )
-)]
-
 use ene_presence::{
     ClientId, LiveReachabilityRef, PresenceAttribution, PresenceGeneration, PresenceState,
 };

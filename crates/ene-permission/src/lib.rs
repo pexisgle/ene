@@ -17,16 +17,6 @@
 //! for this stage. Future stages may widen it, but only by extending the
 //! explicit match in [`check_live_authorization`], never by default-allow.
 
-#![cfg_attr(
-    test,
-    allow(
-        clippy::expect_used,
-        clippy::unwrap_used,
-        clippy::panic,
-        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
-    )
-)]
-
 mod intent;
 
 use std::collections::HashMap;

@@ -14,16 +14,6 @@
 //! send it after the closure returns, because the borrowed bearer never
 //! escapes the closure's lifetime.
 
-#![cfg_attr(
-    test,
-    allow(
-        clippy::expect_used,
-        clippy::unwrap_used,
-        clippy::panic,
-        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
-    )
-)]
-
 mod registration;
 
 use std::collections::HashMap;
@@ -1428,10 +1418,7 @@ mod tests {
         let saved = store.save_secret(&device, "phone", "pairing-secret-value");
         assert!(saved.is_ok(), "save must succeed");
         let loaded = store.load_secret(&device);
-        assert!(loaded.is_ok(), "load must succeed");
-        let Ok(Some(secret)) = loaded else {
-            return;
-        };
+        let secret = loaded.unwrap().unwrap();
         assert_eq!(secret.bytes(), "pairing-secret-value".as_bytes());
     }
 
@@ -1525,10 +1512,7 @@ mod tests {
                 .is_ok()
         );
         let raw = std::fs::read(&path);
-        assert!(raw.is_ok(), "rendered file must be readable");
-        let Ok(raw) = raw else {
-            return;
-        };
+        let raw = raw.unwrap();
         assert!(
             raw.starts_with(b"{\"devices\":{"),
             "rendering keeps the single-section shape"
@@ -1555,14 +1539,9 @@ mod tests {
         let written = std::fs::write(&path, fixture);
         assert!(written.is_ok(), "fixture setup must succeed");
         let store = open_device_auth_store(&path);
-        let Some(device) = super::parse_device_key("123e4567-e89b-12d3-a456-426614174000") else {
-            return;
-        };
+        let device = super::parse_device_key("123e4567-e89b-12d3-a456-426614174000").unwrap();
         let loaded = store.load_secret(&device);
-        assert!(loaded.is_ok(), "old shape must keep parsing");
-        let Ok(Some(secret)) = loaded else {
-            return;
-        };
+        let secret = loaded.unwrap().unwrap();
         assert_eq!(secret.bytes(), &[0x00]);
     }
 
@@ -1578,10 +1557,7 @@ mod tests {
         assert!(lax.is_ok(), "fixture setup must succeed");
         let store = open_device_auth_store(&path);
         let meta = std::fs::metadata(&path);
-        assert!(meta.is_ok(), "metadata must be readable");
-        let Ok(meta) = meta else {
-            return;
-        };
+        let meta = meta.unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         let loaded = store.load_secret(&DeviceId(RawId::new()));
         assert!(matches!(loaded, Ok(None)));
@@ -1597,10 +1573,7 @@ mod tests {
         let saved = store.save_secret(&DeviceId(RawId::new()), "phone", "pairing-secret");
         assert!(saved.is_ok(), "save must succeed");
         let meta = std::fs::metadata(&path);
-        assert!(meta.is_ok(), "metadata must be readable");
-        let Ok(meta) = meta else {
-            return;
-        };
+        let meta = meta.unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
@@ -1621,10 +1594,7 @@ mod tests {
         let missing = store.load_secret(&first);
         assert!(matches!(missing, Ok(None)));
         let kept = store.load_secret(&second);
-        assert!(kept.is_ok(), "other device must survive the delete");
-        let Ok(Some(secret)) = kept else {
-            return;
-        };
+        let secret = kept.unwrap().unwrap();
         assert_eq!(secret.bytes(), "second-secret".as_bytes());
         assert!(store.delete_for(&first).is_ok());
         assert!(store.delete_for(&DeviceId(RawId::new())).is_ok());
@@ -1643,10 +1613,7 @@ mod tests {
         assert!(store.save_secret(&device, "phone", "first-secret").is_ok());
         assert!(store.save_secret(&device, "phone", "second-secret").is_ok());
         let loaded = store.load_secret(&device);
-        assert!(loaded.is_ok(), "load must succeed");
-        let Ok(Some(secret)) = loaded else {
-            return;
-        };
+        let secret = loaded.unwrap().unwrap();
         assert_eq!(secret.bytes(), "second-secret".as_bytes());
     }
 
@@ -1665,10 +1632,7 @@ mod tests {
         drop(first);
         let second = open_device_auth_store(&path);
         let loaded = second.load_secret(&device);
-        assert!(loaded.is_ok(), "load must succeed");
-        let Ok(Some(secret)) = loaded else {
-            return;
-        };
+        let secret = loaded.unwrap().unwrap();
         assert_eq!(secret.bytes(), "pairing-secret-value".as_bytes());
     }
 
