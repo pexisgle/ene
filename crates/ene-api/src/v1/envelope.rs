@@ -86,12 +86,14 @@ pub struct WireSender {
 pub struct ObservedMarks {
     /// Presence generation value the Client saw, if any.
     pub presence_generation_view: Option<u64>,
-    /// Round the Client believes it belongs to. [`None`] for a new-round
-    /// request; the Host never rebinds an old round from this field. Once a
-    /// sender populates it on a submit, it must equal the payload
+    /// Round the Client believes it belongs to. It must be [`None`]
+    /// whenever the input does not join a round — a bare round-less
+    /// request or a force-new one — and once a sender populates it on a
+    /// submit it must equal the payload
     /// [`round`](crate::v1::round::SubmitTextInput::round) premise: the two
     /// fields carry one premise, and a disagreement is rejected, never
-    /// adopted one side over the other.
+    /// adopted one side over the other. The Host never rebinds an old
+    /// round from this field.
     pub round_view: Option<RoundWireId>,
     /// Ticket premise the Client relied on, if any.
     pub ticket_view: Option<TicketWireId>,

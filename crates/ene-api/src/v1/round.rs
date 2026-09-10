@@ -16,13 +16,19 @@ use super::refs::{ClientLocalId, CompanionWireRef, RoundWireId, StreamWireId, Te
 pub struct SubmitTextInput {
     /// Opaque Companion reference. Echoed, never interpreted.
     pub companion: CompanionWireRef,
-    /// Target round, or [`None`] to join-or-mint. Old rounds are
-    /// never rebound from this field. Ignored when [`fresh`](Self::fresh)
-    /// is set: an explicit new-round intent beats a round hint.
+    /// Target round, or [`None`] to join-or-mint. Old rounds are never
+    /// rebound from this field. With [`fresh`](Self::fresh) set this field
+    /// must be [`None`]: a force-new request is the design's round-less
+    /// new-round request (IPC §13.1), so a round premise here makes the
+    /// frame self-contradictory and the Host declines it stale instead of
+    /// interpreting either value.
     pub round: Option<RoundWireId>,
     /// Force a fresh round: the Host mints instead of joining any open
     /// round. Defaults to `false` when absent, preserving the join-or-mint
-    /// meaning of a bare `round: None`.
+    /// meaning of a bare `round: None`. A force-new request carries no
+    /// round premise: [`round`](Self::round) and the envelope `round_view`
+    /// must both be absent, and a contradictory frame is declined stale,
+    /// never silently reinterpreted.
     #[serde(default)]
     pub fresh: bool,
     /// Client-local correspondence ID for matching acks to sends.
