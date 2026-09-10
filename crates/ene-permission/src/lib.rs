@@ -346,23 +346,6 @@ pub trait IntentOutcomeRepository: Send + Sync {
         fingerprint: IntentFingerprint,
     ) -> Result<IntentResolution<ConsentCommitOutcome>, PermissionTechnicalError>;
 
-    /// Registers the credential approval request and records the intent
-    /// outcome atomically.
-    ///
-    /// One transaction: check the intent key first, then the pending insert
-    /// (or usable recheck) plus the replay-row insert. An existing row is
-    /// never rewritten. Returns the resolution — `Decided` carrying the
-    /// snapshot that was just stored (`Held` when the pair now pends
-    /// approval, `Applied` when it is already usable), `Replay` carrying
-    /// the prior snapshot, or `Conflict` — so the caller answers from one
-    /// durable determination.
-    async fn request_approval_with_intent(
-        &self,
-        provider: String,
-        label: String,
-        fingerprint: IntentFingerprint,
-    ) -> Result<IntentResolution<IntentOutcomeRecord>, PermissionTechnicalError>;
-
     /// Claims a setup completion and records its outcome atomically.
     ///
     /// One transaction: check the intent key first, then compare the
