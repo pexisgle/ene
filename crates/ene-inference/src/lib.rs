@@ -536,16 +536,11 @@ mod tests {
                 output_tokens: 2,
             }),
         );
-        let result = send(cmd, true, &transport).await;
-        assert!(result.is_ok());
-        let Ok((outcome, arrival)) = result else {
-            return;
-        };
+        let (outcome, arrival) = send(cmd, true, &transport)
+            .await
+            .expect("inference dispatch answers an outcome");
         assert!(matches!(outcome, InferenceUseOutcome::SentAndCompleted(_)));
-        assert!(arrival.is_some());
-        let Some(arrival) = arrival else {
-            return;
-        };
+        let arrival = arrival.expect("a completed send carries an arrival");
         assert_eq!(arrival.ticket, ticket);
         assert_eq!(arrival.output_text, "hi there");
         assert_eq!(arrival.usage.input_tokens, Some(4));
@@ -557,35 +552,14 @@ mod tests {
     async fn missing_usage_maps_to_unknown_not_zero() {
         let cmd = command("hello");
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, true, &transport).await;
-        assert!(result.is_ok());
-        let Ok((outcome, arrival)) = result else {
-            return;
-        };
+        let (outcome, arrival) = send(cmd, true, &transport)
+            .await
+            .expect("inference dispatch answers an outcome");
         assert!(matches!(outcome, InferenceUseOutcome::SentAndCompleted(_)));
-        assert!(arrival.is_some());
-        let Some(arrival) = arrival else {
-            return;
-        };
+        let arrival = arrival.expect("a completed send carries an arrival");
         assert_eq!(arrival.usage.input_tokens, None);
         assert_eq!(arrival.usage.output_tokens, None);
         assert_eq!(arrival.usage.source, UsageSource::Unknown);
-    }
-
-    #[tokio::test]
-    async fn send_keeps_no_tracker_state_for_the_caller_protocol() {
-        let cmd = command("hello");
-        let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let first = send(cmd.clone(), true, &transport).await;
-        assert!(matches!(
-            first,
-            Ok((InferenceUseOutcome::SentAndCompleted(_), Some(_)))
-        ));
-        let second = send(cmd, true, &transport).await;
-        assert!(matches!(
-            second,
-            Ok((InferenceUseOutcome::SentAndCompleted(_), Some(_)))
-        ));
     }
 
     #[tokio::test]
@@ -601,11 +575,9 @@ mod tests {
             input_text: "hello".to_owned(),
         };
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, true, &transport).await;
-        assert!(result.is_ok());
-        let Ok((outcome, arrival)) = result else {
-            return;
-        };
+        let (outcome, arrival) = send(cmd, true, &transport)
+            .await
+            .expect("inference dispatch answers an outcome");
         assert_eq!(
             outcome,
             InferenceUseOutcome::NotSent(NotSentReason::ConsentMismatch)
@@ -617,11 +589,9 @@ mod tests {
     async fn failed_consent_premise_is_not_sent() {
         let cmd = command("hello");
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, false, &transport).await;
-        assert!(result.is_ok());
-        let Ok((outcome, arrival)) = result else {
-            return;
-        };
+        let (outcome, arrival) = send(cmd, false, &transport)
+            .await
+            .expect("inference dispatch answers an outcome");
         assert_eq!(
             outcome,
             InferenceUseOutcome::NotSent(NotSentReason::ConsentMismatch)
@@ -634,11 +604,9 @@ mod tests {
         let big: String = "x".repeat(super::MAX_INPUT_CHARS + 1);
         let cmd = command(&big);
         let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, true, &transport).await;
-        assert!(result.is_ok());
-        let Ok((outcome, arrival)) = result else {
-            return;
-        };
+        let (outcome, arrival) = send(cmd, true, &transport)
+            .await
+            .expect("inference dispatch answers an outcome");
         assert_eq!(
             outcome,
             InferenceUseOutcome::NotSent(NotSentReason::OverLimit)

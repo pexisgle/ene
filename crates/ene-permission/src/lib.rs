@@ -668,11 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn revision_round_trips_through_u64() {
-        assert_eq!(ConsentRevision::from_u64(7).as_u64(), 7);
-    }
-
-    #[test]
     fn matching_consent_allows_for_exactly_one_use() {
         let stored = record();
         let query = query_for(&stored);

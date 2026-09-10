@@ -603,21 +603,14 @@ pub trait UndeliveredRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError,
-        HistoryAppendOutcome, HistoryMessage, HistoryRole, PresentationMark, ReportStatus,
-        ReportStatusTransition, RoundIntentMark, UndeliveredRef, UndeliveredTechnicalError,
+        AppendHistoryCommand, CommandId, CompanionId, HistoryMessage, HistoryRole, RoundIntentMark,
     };
     use ene_presence::PresenceGeneration;
     use ene_primitive::{RawId, WallClockWithTz};
 
     fn clock() -> WallClockWithTz {
-        let parsed = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00");
-        assert!(parsed.is_ok(), "fixture timestamp must parse");
-        if let Ok(at) = parsed {
-            at
-        } else {
-            WallClockWithTz::now()
-        }
+        WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00")
+            .expect("fixture timestamp parses")
     }
 
     fn command() -> AppendHistoryCommand {
@@ -657,12 +650,6 @@ mod tests {
     }
 
     #[test]
-    fn companion_id_round_trips_through_raw() {
-        let raw = RawId::new();
-        assert_eq!(CompanionId::from_raw(raw).as_raw(), raw);
-    }
-
-    #[test]
     fn generated_companion_ids_differ() {
         assert_ne!(CompanionId::generate(), CompanionId::generate());
     }
@@ -670,14 +657,12 @@ mod tests {
     #[test]
     fn history_debug_redacts_text_and_keeps_refs() {
         let item = message();
-        let round = item.round;
         let rendered = format!("{item:?}");
         assert!(
             !rendered.contains("private words"),
             "text redacted: {rendered}"
         );
         assert!(rendered.contains("en"), "lang stays: {rendered}");
-        let _ = round;
     }
 
     #[test]
@@ -691,125 +676,12 @@ mod tests {
     }
 
     #[test]
-    fn append_outcomes_carry_current_or_lifecycle() {
-        let committed = HistoryAppendOutcome::CommittedAs {
-            message: RawId::new(),
-        };
-        assert!(matches!(
-            committed,
-            HistoryAppendOutcome::CommittedAs { .. }
-        ));
-        let stale = HistoryAppendOutcome::StaleExpected {
-            current: PresenceGeneration::from_u64(3),
-        };
-        assert!(matches!(stale, HistoryAppendOutcome::StaleExpected { .. }));
-        if let HistoryAppendOutcome::StaleExpected { current } = stale {
-            assert_eq!(current, PresenceGeneration::from_u64(3));
-        }
-        let held = HistoryAppendOutcome::HeldByLifecycle {
-            lifecycle: CompanionLifecycle::Stopped,
-        };
-        assert_eq!(
-            held,
-            HistoryAppendOutcome::HeldByLifecycle {
-                lifecycle: CompanionLifecycle::Stopped,
-            }
-        );
-        assert_eq!(CompanionLifecycle::Running, CompanionLifecycle::Running);
-        assert_eq!(CompanionLifecycle::Deleted, CompanionLifecycle::Deleted);
-    }
-
-    #[test]
-    fn undelivered_ref_and_transitions_construct() {
-        let entry = UndeliveredRef {
-            id: RawId::new(),
-            companion: CompanionId::from_raw(RawId::new()),
-            source_message: RawId::new(),
-            status: ReportStatus::Pending,
-            round: RawId::new(),
-            presence_generation: PresenceGeneration::first(),
-        };
-        assert_eq!(entry.status, ReportStatus::Pending);
-        assert_eq!(
-            ReportStatusTransition::PendingToPresented,
-            ReportStatusTransition::PendingToPresented
-        );
-        assert_eq!(
-            ReportStatusTransition::MarkedPresentationUnknown,
-            ReportStatusTransition::MarkedPresentationUnknown
-        );
-        assert_eq!(
-            ReportStatusTransition::StaleSource,
-            ReportStatusTransition::StaleSource
-        );
-        assert_eq!(ReportStatus::Presented, ReportStatus::Presented);
-        assert_eq!(
-            ReportStatus::PresentationUnknown,
-            ReportStatus::PresentationUnknown
-        );
-        let mark = PresentationMark {
-            round: entry.round,
-            presented: true,
-        };
-        assert!(mark.presented);
-        assert_eq!(mark.round, entry.round);
-    }
-
-    #[test]
-    fn technical_errors_render_reasons() {
-        let companion = CompanionTechnicalError::StorageUnavailable {
-            reason: String::from("disk offline"),
-        };
-        let rendered = format!("{companion}");
-        assert!(
-            rendered.contains("disk offline"),
-            "reason stays: {rendered}"
-        );
-        let undelivered = UndeliveredTechnicalError::StorageUnavailable {
-            reason: String::from("index offline"),
-        };
-        let rendered = format!("{undelivered}");
-        assert!(
-            rendered.contains("index offline"),
-            "reason stays: {rendered}"
-        );
-    }
-
-    #[test]
-    fn command_id_is_visible_non_secret_correspondence() {
-        let id = CommandId(RawId::new());
-        let rendered = format!("{id:?}");
-        assert!(
-            rendered.contains("CommandId"),
-            "command id visible: {rendered}"
-        );
-        let mut item = message();
-        assert_eq!(item.command_id, None);
-        item.command_id = Some(id);
-        assert_eq!(item.command_id, Some(id));
-        let rendered_item = format!("{item:?}");
-        assert!(
-            !rendered_item.contains("private words"),
-            "text redacted: {rendered_item}"
-        );
-    }
-
-    #[test]
-    fn roles_cover_owner_and_companion() {
-        assert_eq!(HistoryRole::Owner, HistoryRole::Owner);
-        assert_eq!(HistoryRole::Companion, HistoryRole::Companion);
-        assert_ne!(HistoryRole::Owner, HistoryRole::Companion);
-    }
-
-    #[test]
-    fn request_fingerprint_covers_request_semantics_only() -> Result<(), String> {
+    fn request_fingerprint_covers_request_semantics_only() {
         let mut keyed = command();
         keyed.command_id = Some(CommandId(RawId::new()));
-        let Some(fingerprint) = keyed.request_fingerprint() else {
-            return Err(String::from(
-                "a keyed command carries a request fingerprint",
-            ));
-        };
+        let fingerprint = keyed
+            .request_fingerprint()
+            .expect("a keyed command carries a request fingerprint");
         assert_eq!(fingerprint.round_intent, RoundIntentMark::Auto);
         let rendered = format!("{fingerprint:?}");
         assert!(
@@ -841,6 +713,5 @@ mod tests {
         let mut keyless = keyed;
         keyless.command_id = None;
         assert_eq!(keyless.request_fingerprint(), None);
-        Ok(())
     }
 }

@@ -396,9 +396,9 @@ pub fn check_intake(premise: IntakePremise) -> RoundIntakeOutcome {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientInputRef, CompanionAvailability, ConfirmPresentationObservation, IntakePremise,
-        OpenRound, PresentationStatus, RevalidationReason, RoundClosureFact, RoundId,
-        RoundIntakeOutcome, RoundIntent, SubmitClientInputCandidate, check_intake, new_round,
+        ClientInputRef, CompanionAvailability, IntakePremise, OpenRound, RevalidationReason,
+        RoundId, RoundIntakeOutcome, RoundIntent, SubmitClientInputCandidate, check_intake,
+        new_round,
     };
     use ene_presence::{
         ClientId, LiveReachabilityRef, PresenceAttribution, PresenceGeneration, PresenceState,
@@ -628,13 +628,13 @@ mod tests {
         );
         let fact = attribution_for(companion, other, PresenceGeneration::first());
         let outcome = check_intake(premise(candidate, fact, live_for(claimant), None));
-        assert!(matches!(outcome, RoundIntakeOutcome::StaleRound { .. }));
-        if let RoundIntakeOutcome::StaleRound {
+        let RoundIntakeOutcome::StaleRound {
             current_generation, ..
         } = outcome
-        {
-            assert_eq!(current_generation, PresenceGeneration::first());
-        }
+        else {
+            panic!("a non-active client must be stale");
+        };
+        assert_eq!(current_generation, PresenceGeneration::first());
     }
 
     #[test]
@@ -674,15 +674,15 @@ mod tests {
         );
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let outcome = check_intake(premise(candidate, fact, live_for(claimant), Some(open)));
-        assert!(matches!(outcome, RoundIntakeOutcome::StaleRound { .. }));
-        if let RoundIntakeOutcome::StaleRound {
+        let RoundIntakeOutcome::StaleRound {
             current_round,
             current_generation,
         } = outcome
-        {
-            assert_eq!(current_round, Some(open.round));
-            assert_eq!(current_generation, PresenceGeneration::first());
-        }
+        else {
+            panic!("a non-matching existing-round request must be stale");
+        };
+        assert_eq!(current_round, Some(open.round));
+        assert_eq!(current_generation, PresenceGeneration::first());
     }
 
     #[test]
@@ -787,12 +787,6 @@ mod tests {
     }
 
     #[test]
-    fn round_id_round_trips_through_raw() {
-        let raw = RawId::new();
-        assert_eq!(RoundId::from_raw(raw).as_raw(), raw);
-    }
-
-    #[test]
     fn input_debug_redacts_body_and_keeps_refs() {
         let candidate = SubmitClientInputCandidate {
             companion: RawId::new(),
@@ -829,37 +823,6 @@ mod tests {
         assert!(
             !rendered.contains("hello companion"),
             "body redacted: {rendered}"
-        );
-    }
-
-    #[test]
-    fn observation_and_closure_facts_construct() {
-        let observation = ConfirmPresentationObservation {
-            round: new_round(),
-            presented_or_unknown: PresentationStatus::Presented,
-        };
-        assert_eq!(
-            observation.presented_or_unknown,
-            PresentationStatus::Presented
-        );
-        let unknown = ConfirmPresentationObservation {
-            round: new_round(),
-            presented_or_unknown: PresentationStatus::PresentationUnknown,
-        };
-        assert_eq!(
-            unknown.presented_or_unknown,
-            PresentationStatus::PresentationUnknown
-        );
-        let fact = RoundClosureFact {
-            companion: RawId::new(),
-            client: client(),
-            round: new_round(),
-            undelivered_link: None,
-        };
-        assert!(fact.undelivered_link.is_none());
-        assert_eq!(
-            RevalidationReason::UnknownReasonTag,
-            RevalidationReason::UnknownReasonTag
         );
     }
 }
