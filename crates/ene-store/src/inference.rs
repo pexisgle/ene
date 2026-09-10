@@ -25,7 +25,8 @@ impl InferenceAttemptRepository for Store {
     ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
-            let rev_raw = encode_u64(attempt.expected_consent.1).map_err(inference_unavailable)?;
+            let rev_raw =
+                encode_u64(attempt.expected_consent.1.as_u64()).map_err(inference_unavailable)?;
             let ticket_text = encode_id(attempt.ticket.0);
             let mut guard = lock_shared(&conn);
             let tx = guard
@@ -42,7 +43,8 @@ impl InferenceAttemptRepository for Store {
                 .map_err(|error| inference_unavailable(error.to_string()))?;
             let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
                 id == &attempt.expected_consent.0
-                    && decode_u64(*rev).is_ok_and(|value| value == attempt.expected_consent.1)
+                    && decode_u64(*rev)
+                        .is_ok_and(|value| value == attempt.expected_consent.1.as_u64())
             });
             if !current_matches {
                 return Ok(AttemptBeginOutcome::Stale);

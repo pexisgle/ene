@@ -2328,7 +2328,7 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
     );
     let claim = |ticket: InferenceTicketId, rev: u64| InferenceAttempt {
         ticket,
-        expected_consent: (String::from("consent-1"), rev),
+        expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(rev)),
         provider: String::from("openai"),
         model: String::from("dialogue-1"),
     };

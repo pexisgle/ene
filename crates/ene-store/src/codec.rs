@@ -249,6 +249,7 @@ pub(crate) fn encode_intent_outcome(outcome: &IntentOutcome) -> (&'static str, O
         IntentOutcome::AppliedAsOneTime => ("applied", None),
         IntentOutcome::HeldByOperation => ("held", None),
         IntentOutcome::NeedsClarification => ("clarify", None),
+        IntentOutcome::RevisionExhausted => ("exhausted", None),
         IntentOutcome::StaleBaseView { current } => ("stale", Some(current)),
     }
 }
@@ -266,6 +267,7 @@ pub(crate) fn decode_intent_outcome(
         ("applied", _) => Ok(IntentOutcome::AppliedAsOneTime),
         ("held", _) => Ok(IntentOutcome::HeldByOperation),
         ("clarify", _) => Ok(IntentOutcome::NeedsClarification),
+        ("exhausted", _) => Ok(IntentOutcome::RevisionExhausted),
         ("stale", Some(current)) => Ok(IntentOutcome::StaleBaseView { current }),
         _ => Err(String::from("malformed intent outcome")),
     }
