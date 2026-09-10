@@ -60,14 +60,16 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
-use ene_credential::{CredentialRefRepository, CredentialStore};
+use ene_credential::{
+    CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,
+    available_credential,
+};
 use ene_permission::{
-    ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
-    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution,
-    ShortcutIntentOutcome,
+    AssignConsentIntent, AssignConsentResolution, ConsentRepository, IntentFingerprint,
+    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution, assign_consent,
+    consent_mark_rev,
 };
 use ene_plugin_ipc::WireFrame;
-use ene_primitive::RawId;
 
 use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing_frame};
 
@@ -94,57 +96,6 @@ fn view_frame(frame: &WireFrame, live: &LiveInput, view: ManagementView) -> Wire
 
 /// Renders the consent display mark for an optional stored record.
 ///
-/// `"consent-rev-{n}"` over the stored revision, or `"consent-none"` when
-/// nothing is stored. The same mark travels in views and in
-/// [`StaleBaseView`](ene_api::v1::management::ManagementOutcome::StaleBaseView)
-/// outcomes, so staleness checks compare against one vocabulary.
-fn consent_mark(current: Option<&ConsentRecord>) -> String {
-    match current {
-        Some(record) => format!("consent-rev-{}", record.rev.as_u64()),
-        None => String::from("consent-none"),
-    }
-}
-
-/// Parsed consent `base_view` mark: a compare-and-save expectation.
-///
-/// Three cases, never collapsed: expecting empty, expecting a stored id at a
-/// parsed revision, or stale on its face. Callers answer `StaleBaseView` with
-/// the rebuilt current mark on [`ConsentExpectation::FaceStale`] instead of
-/// writing.
-enum ConsentExpectation {
-    /// The mark (`"consent-none"`) expects no stored row.
-    ExpectEmpty,
-    /// The mark (`"consent-rev-N"`) expects the loaded current consent id at
-    /// the parsed revision.
-    ExpectRevision(String, ConsentRevision),
-    /// The mark is stale on its face: unparseable, or a revision claim with
-    /// no stored row.
-    FaceStale,
-}
-
-/// Parses the intent `base_view` mark into a compare-and-save expectation.
-///
-/// `"consent-none"` expects no stored row; `"consent-rev-N"` expects the
-/// loaded current consent id at revision `N`.
-fn consent_expectation(base_view: &str, current: Option<&ConsentRecord>) -> ConsentExpectation {
-    if base_view == "consent-none" {
-        return ConsentExpectation::ExpectEmpty;
-    }
-    let Some(revision_text) = base_view.strip_prefix("consent-rev-") else {
-        return ConsentExpectation::FaceStale;
-    };
-    let Ok(revision_number) = revision_text.parse::<u64>() else {
-        return ConsentExpectation::FaceStale;
-    };
-    let Some(stored) = current else {
-        return ConsentExpectation::FaceStale;
-    };
-    ConsentExpectation::ExpectRevision(
-        stored.id.clone(),
-        ConsentRevision::from_u64(revision_number),
-    )
-}
-
 impl HostHandle {
     /// Maps one [`ManagementIntent`] to its `Stage 2` outcome frames.
     ///
@@ -270,29 +221,63 @@ impl HostHandle {
             }
             Ok(None) => {}
         }
-        // One durable determination: propose-or-report plus the replay row
-        // share a transaction, so the snapshot and the state it describes
-        // can never strand apart. A raced insert answers from the winner.
+        // One durable determination owned by `ene-credential`: the pending
+        // insert (or usable recheck) and the replay row share a transaction,
+        // so the snapshot and the state it describes can never strand
+        // apart. A raced insert is resolved from the journal below.
         let fingerprint = Self::intent_fingerprint(intent, Self::INTENT_KIND_REGISTER);
+        let registration = RegistrationFingerprint {
+            intent_id: fingerprint.intent_id.clone(),
+            kind: fingerprint.kind.clone(),
+            target: fingerprint.target.clone(),
+            base: fingerprint.base.clone(),
+            rationale_origin: fingerprint.rationale_origin.clone(),
+            rationale_quote: fingerprint.rationale_quote.clone(),
+        };
         match self
             .store
-            .request_approval_with_intent(provider, label, fingerprint)
+            .request_registration_with_intent(provider, label, registration)
             .await
         {
-            Ok(IntentResolution::Decided(decided) | IntentResolution::Replay(decided)) => {
+            Ok(RegistrationApply::Decided(RegistrationState::AppliedAsOneTime)) => {
                 vec![outcome_frame(
                     frame,
                     live,
                     intent,
-                    Self::replayed_outcome(&decided.outcome),
+                    ManagementOutcome::AppliedAsOneTime,
                 )]
             }
-            Ok(IntentResolution::Conflict(_)) => vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::NeedsClarification,
-            )],
+            Ok(RegistrationApply::Decided(RegistrationState::HeldByOperation)) => {
+                vec![outcome_frame(
+                    frame,
+                    live,
+                    intent,
+                    ManagementOutcome::HeldByOperation,
+                )]
+            }
+            Ok(RegistrationApply::AlreadyDecided) => {
+                // Lost a cross-process race: answer from the journal winner.
+                match self.store.lookup_intent_outcome(&intent_key).await {
+                    Ok(Some(stored)) if stored.fingerprint == fingerprint => vec![outcome_frame(
+                        frame,
+                        live,
+                        intent,
+                        Self::replayed_outcome(&stored.outcome),
+                    )],
+                    Ok(Some(_)) => vec![outcome_frame(
+                        frame,
+                        live,
+                        intent,
+                        ManagementOutcome::NeedsClarification,
+                    )],
+                    Ok(None) | Err(_) => vec![outcome_frame(
+                        frame,
+                        live,
+                        intent,
+                        ManagementOutcome::HeldByOperation,
+                    )],
+                }
+            }
             Err(_) => vec![outcome_frame(
                 frame,
                 live,
@@ -434,12 +419,11 @@ impl HostHandle {
         live: &LiveInput,
     ) -> Vec<WireFrame> {
         // Durable intent replay first (§18.2): the stored snapshot precedes
-        // every check below — including current and credential reads — so a
-        // past-success exact retry reaches its prior outcome even after
-        // credential state moved on. A hit with the same fingerprint answers
-        // the prior outcome verbatim (never re-executed); a hit with
-        // different content clarifies instead of adopting the new meaning. A
-        // miss falls through to the normal premise-checked path below.
+        // every premise read, so a past-success exact retry reaches its prior
+        // outcome even after credential state moved on. A hit with the same
+        // fingerprint answers the prior outcome verbatim (never re-executed);
+        // a hit with different content clarifies instead of adopting the new
+        // meaning. A miss falls through to the owner-side assignment.
         let intent_key = intent.intent_id.0.as_hyphenated().to_string();
         match self.store.lookup_intent_outcome(&intent_key).await {
             Err(_) => {
@@ -468,206 +452,42 @@ impl HostHandle {
             }
             Ok(None) => {}
         }
-        let Ok(current) = self.store.load_current().await else {
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::HeldByOperation,
-            )];
-        };
-        let expected = match consent_expectation(&intent.base_view.0, current.as_ref()) {
-            ConsentExpectation::ExpectEmpty => None,
-            ConsentExpectation::ExpectRevision(id, revision) => Some((id, revision)),
-            ConsentExpectation::FaceStale => {
-                // Decided from verified reads; the row makes the id observe
-                // one answer forever (or holds when the store is down).
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    self.record_decided(
+        // Credential availability is a credential-owned premise: the Host
+        // only crosses owners, it never combines their judgments.
+        let credential_present =
+            match available_credential(credential_id, &self.store, &self.cred_store).await {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(_) => {
+                    return vec![outcome_frame(
+                        frame,
+                        live,
                         intent,
-                        Self::INTENT_KIND_ASSIGN,
-                        IntentOutcome::StaleBaseView {
-                            current: consent_mark(current.as_ref()),
-                        },
-                    )
-                    .await,
-                )];
-            }
-        };
-        let Ok(refs) = self.store.list_refs().await else {
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                ManagementOutcome::HeldByOperation,
-            )];
-        };
-        let Some(credential) = refs
-            .iter()
-            .find(|known| known.id() == credential_id)
-            .cloned()
-        else {
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_ASSIGN,
-                    IntentOutcome::NeedsClarification,
-                )
-                .await,
-            )];
-        };
-        if !self.cred_store.contains(&credential) {
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_ASSIGN,
-                    IntentOutcome::NeedsClarification,
-                )
-                .await,
-            )];
-        }
-        // Idempotent retry: when the stored route already equals the
-        // requested one, answer the current revision without bumping. A
-        // transport retry reuses the intent id with identical content, so
-        // bumping again would fork revisions for one Owner decision. The
-        // base premise is enforced BEFORE the shortcut: a stale base with a
-        // coincidentally equal route must answer stale (so the caller
-        // reloads and converges), never silent success — otherwise a
-        // different intent built on a moved base would succeed without ever
-        // observing the move. (The durable replay above is the only
-        // stale-base success, and only for the same intent id AND the same
-        // fingerprint.) Genuine changes still flow into the atomic assign
-        // below, where a moved base answers stale instead of overwriting.
-        let base_fresh = match (&expected, current.as_ref()) {
-            (None, None) => true,
-            (Some((id, revision)), Some(record)) => record.id == *id && record.rev == *revision,
-            (None, Some(_)) | (Some(_), None) => false,
-        };
-        if !base_fresh {
-            return vec![outcome_frame(
-                frame,
-                live,
-                intent,
-                self.record_decided(
-                    intent,
-                    Self::INTENT_KIND_ASSIGN,
-                    IntentOutcome::StaleBaseView {
-                        current: consent_mark(current.as_ref()),
-                    },
-                )
-                .await,
-            )];
-        }
-        // Same-route shortcut through one atomic claim (1-d): read current
-        // and record together, so the replay row can never strand apart
-        // from the state it describes. A raced claim answers from the
-        // winner instead of forking.
-        match self
-            .store
-            .shortcut_with_intent(
-                provider.to_string(),
-                model.to_string(),
-                credential_id.to_string(),
-                Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
-            )
-            .await
-        {
-            Ok(IntentResolution::Decided(ShortcutIntentOutcome::Hit { current })) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::StoredAsRuleView {
-                        revision: ViewMarkWire(current.rev.as_u64().to_string()),
-                    },
-                )];
-            }
-            Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss { .. })) => {}
-            Ok(IntentResolution::Replay(stored)) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    Self::replayed_outcome(&stored.outcome),
-                )];
-            }
-            Ok(IntentResolution::Conflict(_)) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::NeedsClarification,
-                )];
-            }
-            Err(_) => {
-                return vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::HeldByOperation,
-                )];
-            }
-        }
-        let next_rev = match current.as_ref() {
-            Some(record) => record.rev.as_u64().saturating_add(1),
-            None => 1,
-        };
-        let id = match current {
-            Some(record) => record.id,
-            None => RawId::new().as_uuid().to_string(),
-        };
-        let record = ConsentRecord {
-            id,
-            rev: ConsentRevision::from_u64(next_rev),
+                        ManagementOutcome::HeldByOperation,
+                    )];
+                }
+            };
+        // The consent owner decides the route: mark parsing, stale faces,
+        // same-route shortcut, revision bump, and the atomic commit.
+        let premises = AssignConsentIntent {
             provider: provider.to_string(),
             model: model.to_string(),
             credential_id: credential_id.to_string(),
+            base_view: intent.base_view.0.clone(),
+            credential_present,
+            fingerprint: Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
         };
-        match self
-            .store
-            .assign_with_intent(
-                expected,
-                record,
-                Self::intent_fingerprint(intent, Self::INTENT_KIND_ASSIGN),
-            )
-            .await
-        {
-            Ok(IntentResolution::Decided(ConsentCommitOutcome::Committed { record })) => {
-                vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::StoredAsRuleView {
-                        revision: ViewMarkWire(record.rev.as_u64().to_string()),
-                    },
-                )]
-            }
-            Ok(IntentResolution::Decided(ConsentCommitOutcome::StaleCurrent { current })) => {
-                vec![outcome_frame(
-                    frame,
-                    live,
-                    intent,
-                    ManagementOutcome::StaleBaseView {
-                        current: ViewMarkWire(consent_mark(current.as_ref())),
-                    },
-                )]
-            }
-            Ok(IntentResolution::Replay(stored)) => vec![outcome_frame(
+        match assign_consent(&self.store, &self.store, premises).await {
+            Ok(
+                AssignConsentResolution::Decided(outcome)
+                | AssignConsentResolution::Replay(IntentOutcomeRecord { outcome, .. }),
+            ) => vec![outcome_frame(
                 frame,
                 live,
                 intent,
-                Self::replayed_outcome(&stored.outcome),
+                Self::replayed_outcome(&outcome),
             )],
-            Ok(IntentResolution::Conflict(_)) => vec![outcome_frame(
+            Ok(AssignConsentResolution::Conflict(_)) => vec![outcome_frame(
                 frame,
                 live,
                 intent,
@@ -727,9 +547,9 @@ impl HostHandle {
             }
             Ok(None) => {}
         }
-        // Bearer premise for the atomic claim below: locate the credential
-        // without deciding anything (the transaction decides). Unreadable
-        // stores hold, as before.
+        // Bearer premise for the atomic claim below: the credential owner
+        // resolves registered-and-backed availability; the transaction
+        // decides completion. Unreadable stores hold, as before.
         let bearer_present = match self.store.load_current().await {
             Err(_) => {
                 return vec![outcome_frame(
@@ -740,20 +560,21 @@ impl HostHandle {
                 )];
             }
             Ok(None) => false,
-            Ok(Some(consent)) => match self.store.list_refs().await {
-                Err(_) => {
-                    return vec![outcome_frame(
-                        frame,
-                        live,
-                        intent,
-                        ManagementOutcome::HeldByOperation,
-                    )];
+            Ok(Some(consent)) => {
+                match available_credential(&consent.credential_id, &self.store, &self.cred_store)
+                    .await
+                {
+                    Ok(found) => found.is_some(),
+                    Err(_) => {
+                        return vec![outcome_frame(
+                            frame,
+                            live,
+                            intent,
+                            ManagementOutcome::HeldByOperation,
+                        )];
+                    }
                 }
-                Ok(refs) => refs
-                    .iter()
-                    .find(|known| known.id() == consent.credential_id)
-                    .is_some_and(|credential| self.cred_store.contains(credential)),
-            },
+            }
         };
         // One durable determination (1-b): compare, completability, and
         // snapshot-save share a transaction; the answer below renders the
@@ -815,8 +636,16 @@ impl HostHandle {
         let Ok(current) = self.store.load_current().await else {
             return unavailable_view();
         };
-        let Ok(refs) = self.store.list_refs().await else {
-            return unavailable_view();
+        let credential_present = match &current {
+            Some(record) => {
+                match available_credential(&record.credential_id, &self.store, &self.cred_store)
+                    .await
+                {
+                    Ok(found) => found.is_some(),
+                    Err(_) => return unavailable_view(),
+                }
+            }
+            None => false,
         };
         let (provider_text, model_text, consent_text) = match &current {
             Some(record) => (
@@ -830,19 +659,15 @@ impl HostHandle {
                 String::from("none"),
             ),
         };
-        let mark_text = consent_mark(current.as_ref());
+        let mark_text = consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64()));
         let source = match &self.cred_store {
             CredStore::Env(_) => "env-sourced",
             CredStore::Memory(_) => "memory",
         };
-        let credential_text = match &current {
-            Some(record) => match refs.iter().find(|known| known.id() == record.credential_id) {
-                Some(known) if self.cred_store.contains(known) => {
-                    format!("present ({source})")
-                }
-                _ => String::from("absent"),
-            },
-            None => String::from("absent"),
+        let credential_text = if credential_present {
+            format!("present ({source})")
+        } else {
+            String::from("absent")
         };
         let candidates = [
             ("provider", "Provider", provider_text),
