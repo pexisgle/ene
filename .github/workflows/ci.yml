@@ -27,6 +27,7 @@ jobs:
         run: |
           rustup toolchain install
           rustup show
+      - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
@@ -46,5 +47,6 @@ jobs:
         run: |
           rustup toolchain install
           rustup show
+      - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --locked --workspace
