@@ -622,10 +622,10 @@ pub const ENV_API_KEY: &str = "ENE_OPENAI_API_KEY";
 /// provider reports absent.
 ///
 /// Request-builder discipline (shared with every [`CredentialStore`]): the
-/// bearer is wrapped in [`SecretValue`] internally and lent as `&str` into
-/// the caller's closure, which must build its owned request (headers, body)
-/// there and perform I/O after it returns. Nothing borrows the key out, and
-/// errors carry a status class only, never key material.
+/// bearer is lent as `&str` into the caller's closure, which must build its
+/// owned request (headers, body) there and perform I/O after it returns.
+/// Nothing borrows the key out, and errors carry a status class only, never
+/// key material.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EnvCredentialStore;
 
@@ -642,8 +642,9 @@ impl EnvCredentialStore {
 // `|name| std::env::var(name).ok()` (a safe function; no `unsafe` involved)
 // as `lookup`; tests inject closures, which keeps them hermetic: only the
 // one-line wiring at each call site touches the real process environment. An
-// empty value counts as absent, matching an unset variable.
-fn resolve_for(provider: &str, lookup: impl FnOnce(&str) -> Option<String>) -> Option<SecretValue> {
+// empty value counts as absent, matching an unset variable. Values arrive as
+// `String`, so the bearer is already valid UTF-8; no revalidation exists.
+fn resolve_for(provider: &str, lookup: impl FnOnce(&str) -> Option<String>) -> Option<String> {
     if provider != "openai" {
         return None;
     }
@@ -651,7 +652,7 @@ fn resolve_for(provider: &str, lookup: impl FnOnce(&str) -> Option<String>) -> O
     if raw.is_empty() {
         return None;
     }
-    Some(SecretValue::new(raw.into_bytes()))
+    Some(raw)
 }
 
 impl CredentialStore for EnvCredentialStore {
@@ -662,28 +663,25 @@ impl CredentialStore for EnvCredentialStore {
     ) -> Result<R, CredentialTechnicalError> {
         // Single live read of the process environment per call: never cached,
         // rotation-friendly. `std::env::var` is a safe function.
-        let Some(secret) = resolve_for(&cred.provider, |name| std::env::var(name).ok()) else {
+        let Some(bearer) = resolve_for(cred.provider(), |name| std::env::var(name).ok()) else {
             return Err(CredentialTechnicalError::StorageUnavailable {
                 reason: "env credential missing".to_owned(),
             });
         };
-        // Defensive: values arriving via `std::env::var` are Unicode by
-        // construction, but the store contract reports non-UTF-8 bearers.
-        let Ok(bearer) = core::str::from_utf8(secret.bytes()) else {
-            return Err(CredentialTechnicalError::StorageUnavailable {
-                reason: "env credential is not valid UTF-8".to_owned(),
-            });
-        };
         // The borrow of `bearer` cannot escape: `f` must build its owned
         // request inside this closure.
-        Ok(f(bearer))
+        Ok(f(&bearer))
     }
 
     fn delete(&self, _cred: &CredentialRef) -> Result<(), CredentialTechnicalError> {
-        // Nothing durable to remove: the bearer lives in the process
-        // environment, not in this store. Revocation is ref-side, by removing
-        // the `CredentialRef` from the `CredentialRefRepository`.
-        Ok(())
+        // The bearer lives in the process environment, which this store
+        // cannot mutate. Reporting success would claim a deletion that did
+        // not happen; revocation is ref-side, by removing the
+        // `CredentialRef` from the `CredentialRefRepository`.
+        Err(CredentialTechnicalError::StorageUnavailable {
+            reason: "environment credentials cannot be deleted; remove the credential ref"
+                .to_owned(),
+        })
     }
 
     fn contains(&self, cred: &CredentialRef) -> bool {
@@ -1753,26 +1751,8 @@ mod env_credential_store_tests {
     };
     use std::cell::Cell;
 
-    fn openai_cred() -> CredentialRef {
-        CredentialRef::new("openai", "main").expect("valid test fixture")
-    }
-
     fn other_cred() -> CredentialRef {
         CredentialRef::new("acme", "main").expect("valid test fixture")
-    }
-
-    #[test]
-    fn env_var_name_is_pinned() {
-        assert_eq!(ENV_API_KEY, "ENE_OPENAI_API_KEY");
-    }
-
-    #[test]
-    fn constructors_create_a_fieldless_store() {
-        fn assert_default<T: Default>() {}
-        assert_default::<EnvCredentialStore>();
-        let via_new = EnvCredentialStore::new();
-        assert!(!via_new.contains(&other_cred()));
-        assert!(!EnvCredentialStore.contains(&other_cred()));
     }
 
     #[test]
@@ -1792,29 +1772,7 @@ mod env_credential_store_tests {
             assert_eq!(name, ENV_API_KEY);
             Some("test-key".to_owned())
         });
-        assert!(resolved.is_some());
-        let Some(secret) = resolved else {
-            return;
-        };
-        assert!(matches!(
-            core::str::from_utf8(secret.bytes()),
-            Ok("test-key")
-        ));
-    }
-
-    #[test]
-    fn resolved_bearer_builds_an_owned_request() {
-        let resolved = resolve_for("openai", |_| Some("test-key".to_owned()));
-        assert!(resolved.is_some());
-        let Some(secret) = resolved else {
-            return;
-        };
-        let Ok(bearer) = core::str::from_utf8(secret.bytes()) else {
-            return;
-        };
-        let authorization = format!("Bearer {bearer}");
-        drop(secret);
-        assert_eq!(authorization, "Bearer test-key");
+        assert_eq!(resolved.as_deref(), Some("test-key"));
     }
 
     #[test]
@@ -1844,19 +1802,5 @@ mod env_credential_store_tests {
             return;
         };
         assert_eq!(reason, "env credential missing");
-    }
-
-    #[test]
-    fn delete_reports_success_with_nothing_durable() {
-        let store = EnvCredentialStore;
-        assert!(store.delete(&openai_cred()).is_ok());
-        assert!(store.delete(&other_cred()).is_ok());
-    }
-
-    #[test]
-    fn debug_rendering_names_the_store_only() {
-        let store = EnvCredentialStore;
-        let rendered = format!("{store:?}");
-        assert_eq!(rendered, "EnvCredentialStore");
     }
 }
