@@ -561,10 +561,6 @@ impl HostHandle {
             // mints challenges and issues results), so both answer nothing —
             // the same empty vector as the catch-all below, spelled out so
             // the auth direction stays explicit.
-            #[expect(
-                clippy::match_same_arms,
-                reason = "the empty answer is intentional for both arms; the explicit arm documents that inbound challenges/results are never solicited"
-            )]
             WirePayload::AuthChallenge(_) | WirePayload::AuthResult(_) => Vec::new(),
             WirePayload::SubmitTextInput(submit) => {
                 if Self::gate_trips(&frame, &live) {
