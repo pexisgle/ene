@@ -104,22 +104,14 @@ mod tests {
     #[test]
     fn no_args_yields_no_override() {
         let args: Vec<String> = Vec::new();
-        let parsed = parse_args(&args);
-        assert!(parsed.is_ok(), "no args must succeed");
-        let Some(path) = parsed.ok() else {
-            return;
-        };
+        let path = parse_args(&args).expect("no args must succeed");
         assert!(path.is_none(), "no args must yield no override");
     }
 
     #[test]
     fn config_flag_captures_its_value() {
         let args = [String::from("--config"), String::from("/tmp/ene.json")];
-        let parsed = parse_args(&args);
-        assert!(parsed.is_ok(), "--config with a value must succeed");
-        let Some(path) = parsed.ok() else {
-            return;
-        };
+        let path = parse_args(&args).expect("--config with a value must succeed");
         assert!(
             path == Some(PathBuf::from("/tmp/ene.json")),
             "the --config value must become the override"
@@ -129,11 +121,7 @@ mod tests {
     #[test]
     fn missing_config_value_is_a_usage_error() {
         let args = [String::from("--config")];
-        let parsed = parse_args(&args);
-        assert!(parsed.is_err(), "a missing --config value must fail");
-        let Some(error) = parsed.err() else {
-            return;
-        };
+        let error = parse_args(&args).expect_err("a missing --config value must fail");
         let rendered = format!("{error}");
         assert!(
             rendered.contains("usage: ene-core [--config PATH]"),
@@ -144,11 +132,7 @@ mod tests {
     #[test]
     fn unknown_argument_is_a_usage_error() {
         let args = [String::from("--verbose")];
-        let parsed = parse_args(&args);
-        assert!(parsed.is_err(), "an unknown argument must fail");
-        let Some(error) = parsed.err() else {
-            return;
-        };
+        let error = parse_args(&args).expect_err("an unknown argument must fail");
         let rendered = format!("{error}");
         assert!(
             rendered.contains("usage: ene-core [--config PATH]"),
@@ -164,11 +148,7 @@ mod tests {
             String::from("--config"),
             String::from("/tmp/second.json"),
         ];
-        let parsed = parse_args(&args);
-        assert!(parsed.is_ok(), "a repeated --config must succeed");
-        let Some(path) = parsed.ok() else {
-            return;
-        };
+        let path = parse_args(&args).expect("a repeated --config must succeed");
         assert!(
             path == Some(PathBuf::from("/tmp/second.json")),
             "a repeated --config must keep the last value"

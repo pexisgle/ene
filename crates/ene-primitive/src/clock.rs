@@ -120,11 +120,9 @@ mod tests {
 
     #[test]
     fn preserves_offset_through_parse_and_render() {
-        let parsed = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00");
-        assert!(parsed.is_ok());
-        if let Ok(clock) = parsed {
-            assert_eq!(clock.to_rfc3339(), "2026-09-08T12:00:00+09:00");
-        }
+        let clock = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00")
+            .expect("offset timestamp must parse");
+        assert_eq!(clock.to_rfc3339(), "2026-09-08T12:00:00+09:00");
     }
 
     #[test]
@@ -134,13 +132,10 @@ mod tests {
 
     #[test]
     fn same_instant_with_different_offsets_compares_equal() {
-        let tokyo = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00");
-        let utc = WallClockWithTz::parse_rfc3339("2026-09-08T03:00:00+00:00");
-        assert!(tokyo.is_ok(), "offset timestamp must parse");
-        assert!(utc.is_ok(), "UTC timestamp must parse");
-        let (Some(tokyo), Some(utc)) = (tokyo.ok(), utc.ok()) else {
-            return;
-        };
+        let tokyo = WallClockWithTz::parse_rfc3339("2026-09-08T12:00:00+09:00")
+            .expect("offset timestamp must parse");
+        let utc = WallClockWithTz::parse_rfc3339("2026-09-08T03:00:00+00:00")
+            .expect("UTC timestamp must parse");
         assert_eq!(
             tokyo, utc,
             "equality follows the instant, not the stored offset"
@@ -149,11 +144,9 @@ mod tests {
 
     #[test]
     fn wraps_and_returns_the_same_instant() {
-        let parsed = WallClockWithTz::parse_rfc3339("2026-01-02T03:04:05Z");
-        assert!(parsed.is_ok());
-        if let Ok(clock) = parsed {
-            let rebuilt = WallClockWithTz::from_datetime(clock.as_datetime());
-            assert_eq!(rebuilt, clock);
-        }
+        let clock = WallClockWithTz::parse_rfc3339("2026-01-02T03:04:05Z")
+            .expect("UTC timestamp must parse");
+        let rebuilt = WallClockWithTz::from_datetime(clock.as_datetime());
+        assert_eq!(rebuilt, clock);
     }
 }

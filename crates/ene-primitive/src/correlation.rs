@@ -90,13 +90,11 @@ mod tests {
     fn keeps_direction_and_purpose() {
         let from = RawId::new();
         let to = RawId::new();
-        let pair = DirectedPair::try_new(from, to, String::from("retry supersedes attempt"));
-        assert!(pair.is_ok());
-        if let Ok(link) = pair {
-            assert_eq!(link.from_raw, from);
-            assert_eq!(link.to_raw, to);
-            assert_eq!(link.purpose, "retry supersedes attempt");
-        }
+        let link = DirectedPair::try_new(from, to, String::from("retry supersedes attempt"))
+            .expect("non-empty purpose must construct");
+        assert_eq!(link.from_raw, from);
+        assert_eq!(link.to_raw, to);
+        assert_eq!(link.purpose, "retry supersedes attempt");
     }
 
     #[test]
