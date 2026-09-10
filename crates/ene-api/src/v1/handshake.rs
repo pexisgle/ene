@@ -14,7 +14,7 @@ use super::refs::DeviceWireId;
 /// rule on [`super::envelope::WireSender`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PairingRequest {
-    /// Human-readable device description, display only. Never authority.
+    /// Display only. Never authority.
     pub device_descriptor: String,
 }
 
@@ -22,13 +22,9 @@ pub struct PairingRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PairingResult {
     /// Owner confirmed; the device key is now issued.
-    Paired {
-        /// Newly issued device key for this device.
-        device_id: DeviceWireId,
-    },
+    Paired { device_id: DeviceWireId },
     /// Waiting on the Host-local trusted-surface confirmation.
     PendingOwnerConfirmation,
-    /// Refused, with an operational reason.
     Denied {
         /// Operational reason. Never a secret or a body copy.
         reason: String,
@@ -38,16 +34,14 @@ pub enum PairingResult {
 /// Host-minted single-use challenge opening one authentication.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AuthChallenge {
-    /// Opaque nonce. Single-use; old proofs are never reused.
+    /// Single-use; old proofs are never reused.
     pub nonce: String,
 }
 
-/// Client ownership proof. The proof demonstrates possession; it never
-/// carries a plaintext secret, and it must only travel auth-dedicated
-/// frames, never general payloads, logs, or Debug output.
+/// Client ownership proof: demonstrates possession, never carries a
+/// plaintext secret.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AuthProof {
-    /// Opaque ownership proof. Redacted from [`core::fmt::Debug`].
     pub proof: String,
 }
 
@@ -65,7 +59,6 @@ impl core::fmt::Debug for AuthProof {
 pub enum AuthResult {
     /// Authenticated; this connection key governs later messages.
     Accepted {
-        /// Newly issued connection key for this connection.
         connection_id: super::refs::ConnectionWireId,
     },
     /// Rejected against the current device-auth store.
@@ -80,26 +73,19 @@ pub enum AuthResult {
 /// permission; the Host checks availability separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ClientFeatureKind {
-    /// 2D body rendering.
     Body2D,
-    /// Full-duplex voice.
     VoiceDuplex,
-    /// Screen capture sourcing.
     ScreenCapture,
-    /// Computer-use actuation.
     ComputerUse,
-    /// System notifications.
     Notification,
-    /// Tray integration.
     TrayIntegration,
 }
 
-/// One advertised capability: kind plus availability. Per-feature detail
-/// (codecs, limits) and structured platform/limits descriptors are Stage 2
-/// negotiation scope; Stage 1 carries the display platform string only.
+/// Per-feature detail (codecs, limits) and structured platform/limits
+/// descriptors are Stage 2 negotiation scope; Stage 1 carries the display
+/// platform string only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClientFeature {
-    /// Advertised capability kind.
     pub kind: ClientFeatureKind,
     /// Whether the Client claims it right now. Claim is not proof.
     pub available: bool,
@@ -108,9 +94,7 @@ pub struct ClientFeature {
 /// Connection-time capability advertisement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAdvertise {
-    /// Protocol versions this Client speaks.
     pub supported_protocol: Vec<ProtocolVersion>,
-    /// Advertised capabilities.
     pub features: Vec<ClientFeature>,
     /// OS/device description, display only. Never permission evidence.
     pub platform: String,
@@ -120,9 +104,8 @@ pub struct CapabilityAdvertise {
 /// accepted features never mix with restore or presence generations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NegotiatedConnection {
-    /// Version the Host selected for this connection.
     pub version: ProtocolVersion,
-    /// Advertised kinds the Host received. Receipt, not permission.
+    /// Receipt, not permission.
     pub accepted_features: Vec<ClientFeatureKind>,
 }
 
@@ -143,7 +126,6 @@ pub struct RecoveryInvite {
 /// purge of attribution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DisconnectNotice {
-    /// Operational reason for the disconnect observation.
     pub reason: String,
 }
 

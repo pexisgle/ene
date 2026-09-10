@@ -16,26 +16,19 @@ use crate::secret::CredentialStore;
 /// disagree, and two distinct `(provider, label)` pairs can never share an id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CredentialRef {
-    /// Provider name; matched exactly.
     provider: String,
-    /// Owner-chosen label distinguishing credentials of one provider.
     label: String,
 }
 
-/// Why a [`CredentialRef`] could not be constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CredentialRefError {
-    /// Provider was blank or contained the `:` separator.
     #[error("credential provider must be non-blank and contain no ':'")]
     InvalidProvider,
-    /// Label was empty.
     #[error("credential label must be non-empty")]
     InvalidLabel,
 }
 
 impl CredentialRef {
-    /// Builds a ref from its parts, enforcing the credential grammar.
-    ///
     /// # Errors
     ///
     /// Returns [`CredentialRefError::InvalidProvider`] for a blank provider or
@@ -62,16 +55,13 @@ impl CredentialRef {
         &self.provider
     }
 
-    /// Owner-chosen label distinguishing credentials of one provider.
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
 
-    /// Stable composite id of `provider:label`, not a secret.
-    ///
-    /// Derived, never stored separately: the id always reflects the validated
-    /// parts above.
+    /// Stable composite id of `provider:label`, not a secret; derived, never
+    /// stored separately.
     #[must_use]
     pub fn id(&self) -> String {
         format!("{}:{}", self.provider, self.label)
@@ -85,26 +75,19 @@ impl CredentialRef {
 /// through this command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterCredentialCommand {
-    /// Provider the credential belongs to; must be non-blank.
     pub provider: String,
-    /// Owner-chosen label for the credential.
     pub label: String,
 }
 
-/// Outcome of a registry `register` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegisterOutcome {
-    /// A new ref was persisted.
     Registered(CredentialRef),
-    /// The provider name was blank or contained `:`.
     InvalidProvider,
-    /// The label was empty.
     InvalidLabel,
     /// A ref already exists; the stored ref was left untouched (no overwrite).
     AlreadyExists(CredentialRef),
 }
 
-/// Availability of one credential across registry and store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialAvailability {
     /// True only when the ref is known to the registry and the store holds
@@ -114,7 +97,6 @@ pub struct CredentialAvailability {
     pub credential: Option<CredentialRef>,
 }
 
-/// Host-facing notification about a credential state change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialNotify {
     /// The bearer no longer works; the owner must reauthenticate.
@@ -123,23 +105,19 @@ pub enum CredentialNotify {
     Revoked(CredentialRef),
 }
 
-/// Persistence boundary for non-secret credential refs.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait CredentialRefRepository: Send + Sync {
-    /// Persists a credential ref.
     async fn save_ref(&self, cred: CredentialRef) -> Result<(), CredentialTechnicalError>;
 
-    /// Loads the ref for one `(provider, label)` pair, if any.
     async fn load_ref(
         &self,
         provider: &str,
         label: &str,
     ) -> Result<Option<CredentialRef>, CredentialTechnicalError>;
 
-    /// Lists all known refs.
     async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError>;
 }
 
@@ -169,11 +147,9 @@ pub async fn register(
     Ok(RegisterOutcome::Registered(cred))
 }
 
-/// Combines registry knowledge with store presence into one availability fact.
-///
-/// `repo_known` reports whether the registry holds the ref; store presence is
-/// read via [`CredentialStore::contains`]. The credential is available only
-/// when both agree.
+/// Combines registry knowledge with store presence into one availability
+/// fact: [`CredentialStore::contains`] supplies store presence, and the
+/// credential is available only when both agree.
 pub fn credential_availability(
     cred: &CredentialRef,
     repo_known: bool,

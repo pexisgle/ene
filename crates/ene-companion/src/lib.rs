@@ -28,26 +28,21 @@ pub mod dialogue;
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
 
-/// Companion identity.
-///
 /// Wraps a [`RawId`]; never converted to any other domain newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CompanionId(RawId);
 
 impl CompanionId {
-    /// Wraps an existing raw identity, for example one read back from storage.
     #[must_use]
     pub fn from_raw(raw: RawId) -> Self {
         Self(raw)
     }
 
-    /// Returns the wrapped raw identity for storage or transport encoding.
     #[must_use]
     pub fn as_raw(self) -> RawId {
         self.0
     }
 
-    /// Generates a fresh random identity.
     #[must_use]
     pub fn generate() -> Self {
         Self(RawId::new())
@@ -95,12 +90,9 @@ pub enum CompanionLifecycle {
     Deleted,
 }
 
-/// Who produced a history item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HistoryRole {
-    /// The Owner.
     Owner,
-    /// The Companion.
     Companion,
 }
 
@@ -110,26 +102,18 @@ pub enum HistoryRole {
 /// [`core::fmt::Debug`]; refs stay visible.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HistoryMessage {
-    /// Message identity.
     pub id: RawId,
-    /// Companion this item belongs to.
     pub companion: CompanionId,
-    /// Round this item belongs to.
     pub round: RawId,
-    /// Who produced it.
     pub role: HistoryRole,
-    /// Item text. Redacted from [`core::fmt::Debug`].
     pub text: String,
-    /// Opaque language tag.
     pub lang: String,
     /// Wall-clock time with its creation offset, display only.
     pub at: WallClockWithTz,
-    /// Presence generation the item belongs to.
     pub presence_generation: PresenceGeneration,
     /// Command-scoped idempotency identity, when the caller carries one.
     /// [`None`] marks pre-command callers or an unknown command. The durable
     /// replay key; `local_id` stays as correspondence metadata only.
-    /// Non-secret correspondence, visible in Debug.
     pub command_id: Option<CommandId>,
     /// Opaque wire projection of `round`, minted fresh by the caller per
     /// round and unrelated to the domain bytes: the only round string that
@@ -147,12 +131,11 @@ pub struct HistoryMessage {
     pub incarnation: Option<(u64, u64)>,
     /// Client-local correspondence ID for matching an input to its ack.
     /// Correspondence metadata only, no longer the durable key (that is
-    /// `command_id`). Non-secret correspondence, visible in Debug.
+    /// `command_id`).
     pub local_id: Option<String>,
 }
 
 impl core::fmt::Debug for HistoryMessage {
-    /// Renders refs while redacting `text`.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("HistoryMessage")
@@ -173,22 +156,16 @@ impl core::fmt::Debug for HistoryMessage {
     }
 }
 
-/// Command to append one history item under a generation expectation.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AppendHistoryCommand {
-    /// Companion to append to.
     pub companion: CompanionId,
-    /// Round the item belongs to.
     pub round: RawId,
-    /// Who produced it.
     pub role: HistoryRole,
     /// Item text. Redacted from [`core::fmt::Debug`].
     pub text: String,
-    /// Opaque language tag.
     pub lang: String,
     /// Wall-clock time with its creation offset, display only.
     pub at: WallClockWithTz,
-    /// Generation value the caller relied on.
     pub expected_generation: PresenceGeneration,
     /// Consent premise the caller relied on, as an opaque `(id, rev)` pair
     /// that travels together (never a bare revision). [`None`] skips the
@@ -200,7 +177,7 @@ pub struct AppendHistoryCommand {
     /// Command-scoped idempotency identity, when the caller carries one.
     /// [`None`] stores NULL (no replay key). A retry reuses the same command
     /// id with a fresh message id; `local_id` stays as correspondence
-    /// metadata only. Non-secret correspondence, visible in Debug.
+    /// metadata only.
     pub command_id: Option<CommandId>,
     /// Opaque wire projection of `round`, minted fresh by the caller per
     /// round and unrelated to the domain bytes. The store persists it so
@@ -224,7 +201,6 @@ pub struct AppendHistoryCommand {
 }
 
 impl core::fmt::Debug for AppendHistoryCommand {
-    /// Renders refs while redacting `text`.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("AppendHistoryCommand")
@@ -292,21 +268,13 @@ impl HistoryMessage {
 pub enum HistoryAppendOutcome {
     /// Committed as this message identity: the caller owns this row and
     /// continues with inference, reply, and streaming for it.
-    CommittedAs {
-        /// Committed message identity.
-        message: RawId,
-    },
+    CommittedAs { message: RawId },
     /// Already committed under the same idempotency key by a concurrent
     /// attempt: the caller must NOT re-run inference or re-append. It
     /// answers the original acceptance (round below) and stops, so a
     /// transport retry racing the original can neither duplicate effects
     /// nor steal the round.
-    AlreadyCommittedAs {
-        /// Original message identity.
-        message: RawId,
-        /// Original round identity for the accept ack.
-        round: RawId,
-    },
+    AlreadyCommittedAs { message: RawId, round: RawId },
     /// The `expected_generation` was not current.
     StaleExpected {
         /// Current generation the caller should observe next time.
@@ -332,10 +300,7 @@ pub enum HistoryAppendOutcome {
     /// [`HistoryAppendOutcome::AlreadyCommittedAs`] instead.
     CommandConflict,
     /// Held by the companion lifecycle.
-    HeldByLifecycle {
-        /// Lifecycle that held the append.
-        lifecycle: CompanionLifecycle,
-    },
+    HeldByLifecycle { lifecycle: CompanionLifecycle },
 }
 
 /// The immutable request semantics of one command-scoped history append:
@@ -353,20 +318,15 @@ pub enum HistoryAppendOutcome {
 /// Body text is redacted from [`core::fmt::Debug`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct RequestFingerprint {
-    /// Who produced the item.
     pub role: HistoryRole,
-    /// Body text. Redacted from [`core::fmt::Debug`].
     pub text: String,
-    /// Opaque language tag.
     pub lang: String,
     /// Sending incarnation. [`None`] must match [`None`].
     pub incarnation: Option<(u64, u64)>,
-    /// Canonical client round intent of the request.
     pub round_intent: RoundIntentMark,
 }
 
 impl core::fmt::Debug for RequestFingerprint {
-    /// Renders refs while redacting `text`.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("RequestFingerprint")
@@ -382,39 +342,27 @@ impl core::fmt::Debug for RequestFingerprint {
 /// Undelivered tracking fact: a durably stored item not yet confirmed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UndeliveredRef {
-    /// Undelivered entry identity.
     pub id: RawId,
-    /// Companion the entry belongs to.
     pub companion: CompanionId,
     /// Durable source message this entry reports on.
     pub source_message: RawId,
-    /// Current report status.
     pub status: ReportStatus,
-    /// Round the entry belongs to.
     pub round: RawId,
-    /// Presence generation the entry belongs to.
     pub presence_generation: PresenceGeneration,
 }
 
-/// Report status vocabulary for undelivered items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReportStatus {
-    /// Waiting for a presentation observation.
     Pending,
-    /// Confirmed as presented.
     Presented,
     /// Presentation unknown. Sticky: never upgraded by resend.
     PresentationUnknown,
 }
 
-/// Outcome of a compare-and-mark-reported attempt.
-///
 /// An `Ok`-side domain outcome, never an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReportStatusTransition {
-    /// Moved from pending to presented.
     PendingToPresented,
-    /// Marked as presentation-unknown.
     MarkedPresentationUnknown,
     /// The `expected` status was not current.
     StaleSource,
@@ -426,9 +374,7 @@ pub enum ReportStatusTransition {
 /// sending alone never marks an entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PresentationMark {
-    /// Round the observation covers.
     pub round: RawId,
-    /// Whether the round was presented.
     pub presented: bool,
 }
 
@@ -437,7 +383,6 @@ pub struct PresentationMark {
 /// Stale / held outcomes are [`HistoryAppendOutcome`], never this error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompanionTechnicalError {
-    /// Durable storage was unavailable.
     #[error("companion storage unavailable: {reason}")]
     StorageUnavailable {
         /// Operational reason. Never a secret or a body copy.
@@ -450,7 +395,6 @@ pub enum CompanionTechnicalError {
 /// Stale marks are [`ReportStatusTransition::StaleSource`], never this error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UndeliveredTechnicalError {
-    /// Durable storage was unavailable.
     #[error("undelivered storage unavailable: {reason}")]
     StorageUnavailable {
         /// Operational reason. Never a secret or a body copy.
@@ -458,7 +402,6 @@ pub enum UndeliveredTechnicalError {
     },
 }
 
-/// Companion lifecycle contract.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
@@ -584,7 +527,6 @@ pub trait UndeliveredRepository {
         mark: PresentationMark,
     ) -> Result<ReportStatusTransition, UndeliveredTechnicalError>;
 
-    /// Lists pending entries for one companion.
     async fn list_pending(
         &self,
         companion: CompanionId,
@@ -700,7 +642,6 @@ mod tests {
             joined.request_fingerprint(),
             "a changed round intent must change the fingerprint"
         );
-        // Keyless appends carry no fingerprint at all.
         let mut keyless = keyed;
         keyless.command_id = None;
         assert_eq!(keyless.request_fingerprint(), None);

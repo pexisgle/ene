@@ -14,11 +14,8 @@ use crate::CredentialTechnicalError;
 /// recorded, for display and audit only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PendingCredentialApproval {
-    /// Provider the requested credential belongs to.
     pub provider: String,
-    /// Owner-chosen label distinguishing credentials of one provider.
     pub label: String,
-    /// Wall-clock time with its creation offset recording when requested.
     pub requested_at: WallClockWithTz,
 }
 
@@ -35,8 +32,8 @@ pub struct PendingCredentialApproval {
 /// crate provides the approval fact; it never combines it with availability
 /// itself.
 ///
-/// Revocation is explicitly deferred: Stage 2 thin scope provides no
-/// remove/revoke method, so approvals only accumulate.
+/// Revocation is explicitly deferred: there is no remove/revoke method, so
+/// approvals only accumulate.
 ///
 /// Blank-input contract: Host ingress validates that provider and label are
 /// non-blank before calling. Implementations perform no validation
@@ -51,13 +48,10 @@ pub struct PendingCredentialApproval {
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait CredentialApprovalRepository: Send + Sync {
-    /// Records a credential registration approval request.
-    ///
     /// Returns `Ok(true)` only when a new pending entry was recorded.
     /// Returns `Ok(false)` without touching stored entries when a pending
     /// entry already exists for `(provider, label)`, when the pair is already
-    /// approved, or when either input is blank (empty or whitespace-only;
-    /// Host ingress validates non-blank before calling, so this is a
+    /// approved, or when either input is blank (empty or whitespace-only; a
     /// defensive backstop, never validation feedback).
     async fn request_approval(
         &self,
@@ -65,8 +59,6 @@ pub trait CredentialApprovalRepository: Send + Sync {
         label: String,
     ) -> Result<bool, CredentialTechnicalError>;
 
-    /// Approves the pending request for `(provider, label)`, marking it usable.
-    ///
     /// On a known pending pair this moves the entry from pending to usable
     /// and returns `Ok(true)`. Re-approving an already-usable pair returns
     /// `Ok(true)` idempotently with no state change. An unknown pair yields
@@ -79,17 +71,14 @@ pub trait CredentialApprovalRepository: Send + Sync {
     /// minted record or one-time secret to hand back: the approval fact
     /// itself is the whole result.
     ///
-    /// Approval records an Owner decision transported from a trusted inlet;
-    /// the repository never decides whether approval is allowed, it records
-    /// the decision it was given.
+    /// The repository never decides whether approval is allowed; it records
+    /// the Owner decision it was given.
     async fn approve_pending(
         &self,
         provider: &str,
         label: &str,
     ) -> Result<bool, CredentialTechnicalError>;
 
-    /// Reports whether `(provider, label)` is approved (usable).
-    ///
     /// Returns `Ok(true)` only after approval; pending-only, unknown, and
     /// blank pairs all yield `Ok(false)`.
     async fn is_approved(
@@ -98,7 +87,6 @@ pub trait CredentialApprovalRepository: Send + Sync {
         label: &str,
     ) -> Result<bool, CredentialTechnicalError>;
 
-    /// Lists all currently pending credential approval requests.
     async fn list_pending(
         &self,
     ) -> Result<Vec<PendingCredentialApproval>, CredentialTechnicalError>;

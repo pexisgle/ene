@@ -18,17 +18,14 @@ use crate::registry::CredentialRef;
 /// zeroized on drop via [`ZeroizeOnDrop`].
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretValue {
-    /// Raw bearer bytes; never logged, never rendered.
     pub(crate) bytes: Vec<u8>,
 }
 
 impl SecretValue {
-    /// Wraps raw bearer bytes for an in-crate store.
     pub(crate) fn new(bytes: Vec<u8>) -> Self {
         Self { bytes }
     }
 
-    /// Borrows the bearer bytes for an in-crate store.
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -53,11 +50,8 @@ pub trait CredentialStore: Send + Sync {
         f: impl FnOnce(&str) -> R,
     ) -> Result<R, CredentialTechnicalError>;
 
-    /// Deletes the bearer for `cred`.
     fn delete(&self, cred: &CredentialRef) -> Result<(), CredentialTechnicalError>;
 
-    /// Reports whether the store holds a bearer for `cred`.
-    ///
     /// Existence is non-secret metadata.
     fn contains(&self, cred: &CredentialRef) -> bool;
 }
@@ -71,13 +65,10 @@ pub trait CredentialStore: Send + Sync {
 /// [`core::fmt::Debug`] lists only the public refs and the entry count, never
 /// secret material.
 pub struct MemoryCredentialStore {
-    /// Entries keyed by the validated ref itself; values hold the confined
-    /// secret.
     entries: Mutex<HashMap<CredentialRef, SecretValue>>,
 }
 
 impl core::fmt::Debug for MemoryCredentialStore {
-    /// Renders the entry count and public refs; secrets are never rendered.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let entries = match self.entries.lock() {
             Ok(guard) => guard,
@@ -92,14 +83,12 @@ impl core::fmt::Debug for MemoryCredentialStore {
 }
 
 impl Default for MemoryCredentialStore {
-    /// Creates an empty store holding no bearers.
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl MemoryCredentialStore {
-    /// Creates an empty store holding no bearers.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -107,8 +96,6 @@ impl MemoryCredentialStore {
         }
     }
 
-    /// Inserts or replaces the bearer for `cred`.
-    ///
     /// Test/dev provisioning path standing in for the Host-local protected
     /// path; production backends must not accept secrets this casually.
     pub fn insert(&self, cred: CredentialRef, secret: &str) {
@@ -163,8 +150,6 @@ impl CredentialStore for MemoryCredentialStore {
     }
 }
 
-/// Name of the process environment variable carrying the `OpenAI` bearer.
-///
 /// The only environment input [`EnvCredentialStore`] ever reads, and only
 /// inside [`CredentialStore::with_bearer`] and [`CredentialStore::contains`],
 /// at call time.
@@ -178,30 +163,20 @@ pub const ENV_API_KEY: &str = "ENE_OPENAI_API_KEY";
 /// takes effect on the next call without a restart. Only the `"openai"`
 /// provider is served (closed world until real OS stores arrive); every other
 /// provider reports absent.
-///
-/// Request-builder discipline (shared with every [`CredentialStore`]): the
-/// bearer is lent as `&str` into the caller's closure, which must build its
-/// owned request (headers, body) there and perform I/O after it returns.
-/// Nothing borrows the key out, and errors carry a status class only, never
-/// key material.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EnvCredentialStore;
 
 impl EnvCredentialStore {
-    /// Creates the store. Performs no I/O; the environment is read per call.
     #[must_use]
     pub fn new() -> Self {
         Self
     }
 }
 
-// Pure-over-closure lookup shared by `contains` and `with_bearer`, so both
-// agree on provider gating and emptiness. Production passes
-// `|name| std::env::var(name).ok()` (a safe function; no `unsafe` involved)
-// as `lookup`; tests inject closures, which keeps them hermetic: only the
-// one-line wiring at each call site touches the real process environment. An
-// empty value counts as absent, matching an unset variable. Values arrive as
-// `String`, so the bearer is already valid UTF-8; no revalidation exists.
+// Shared by `contains` and `with_bearer`, so both agree on provider gating
+// and emptiness. Tests inject closures, which keeps them hermetic. An empty
+// value counts as absent, matching an unset variable; values arrive as
+// `String`, so the bearer is already valid UTF-8.
 pub(crate) fn resolve_for(
     provider: &str,
     lookup: impl FnOnce(&str) -> Option<String>,
@@ -222,23 +197,18 @@ impl CredentialStore for EnvCredentialStore {
         cred: &CredentialRef,
         f: impl FnOnce(&str) -> R,
     ) -> Result<R, CredentialTechnicalError> {
-        // Single live read of the process environment per call: never cached,
-        // rotation-friendly. `std::env::var` is a safe function.
         let Some(bearer) = resolve_for(cred.provider(), |name| std::env::var(name).ok()) else {
             return Err(CredentialTechnicalError::StorageUnavailable {
                 reason: "env credential missing".to_owned(),
             });
         };
-        // The borrow of `bearer` cannot escape: `f` must build its owned
-        // request inside this closure.
         Ok(f(&bearer))
     }
 
     fn delete(&self, _cred: &CredentialRef) -> Result<(), CredentialTechnicalError> {
-        // The bearer lives in the process environment, which this store
-        // cannot mutate. Reporting success would claim a deletion that did
-        // not happen; revocation is ref-side, by removing the
-        // `CredentialRef` from the `CredentialRefRepository`.
+        // The environment cannot be mutated by this store: reporting success
+        // would claim a deletion that did not happen. Revocation is ref-side,
+        // by removing the `CredentialRef` from the `CredentialRefRepository`.
         Err(CredentialTechnicalError::StorageUnavailable {
             reason: "environment credentials cannot be deleted; remove the credential ref"
                 .to_owned(),
@@ -246,8 +216,6 @@ impl CredentialStore for EnvCredentialStore {
     }
 
     fn contains(&self, cred: &CredentialRef) -> bool {
-        // Same predicate as `with_bearer`'s gate, so availability and access
-        // never disagree. Existence is non-secret metadata.
         resolve_for(cred.provider(), |name| std::env::var(name).ok()).is_some()
     }
 }

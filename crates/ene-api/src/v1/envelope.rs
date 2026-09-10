@@ -15,33 +15,22 @@ use super::refs::{
 };
 use super::refs::{CommandWireId, RequestWireId, StreamWireId};
 
-/// Wire protocol version. Major marks the semantic-compatibility boundary;
-/// minor covers backwards-compatible additions (IPC §7.2).
+/// Major marks the semantic-compatibility boundary; minor covers
+/// backwards-compatible additions (IPC §7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProtocolVersion {
-    /// Semantic compatibility boundary. Different majors do not interoperate.
+    /// Different majors do not interoperate.
     pub major: u16,
-    /// Backwards-compatible range within a major.
     pub minor: u16,
 }
 
 impl ProtocolVersion {
-    /// The first protocol version spoken on this wire.
     pub const V1: Self = Self { major: 1, minor: 0 };
 
-    /// Whether `self` and `other` share a major version.
-    ///
-    /// This is a narrow predicate, not a compatibility verdict: sharing a
-    /// major only admits the pair to negotiation. The negotiated version is
-    /// fixed per connection (older minor's understood range, never silent
-    /// upgrade) in Stage 2.
-    ///
-    /// ```
-    /// use ene_api::v1::envelope::ProtocolVersion;
-    ///
-    /// assert!(ProtocolVersion::V1.shares_major_with(&ProtocolVersion { major: 1, minor: 4 }));
-    /// assert!(!ProtocolVersion::V1.shares_major_with(&ProtocolVersion { major: 2, minor: 0 }));
-    /// ```
+    /// A narrow predicate, not a compatibility verdict: sharing a major only
+    /// admits the pair to negotiation. The negotiated version is fixed per
+    /// connection (older minor's understood range, never silent upgrade) in
+    /// Stage 2.
     #[must_use]
     pub fn shares_major_with(&self, other: &Self) -> bool {
         self.major == other.major
@@ -53,15 +42,11 @@ impl ProtocolVersion {
 /// a stream frame carries no request ID, a fact carries none at all.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WireCorrelation {
-    /// Request/response pair key, minted by the request sender.
     pub request_id: Option<RequestWireId>,
-    /// Command/ack saga key and domain idempotency key.
     pub command_id: Option<CommandWireId>,
-    /// Stream this message belongs to, Host-issued by default.
     pub stream_id: Option<StreamWireId>,
     /// Message this message answers, for transport pairing.
     pub reply_to: Option<WireMessageId>,
-    /// Diagnostic/tracing span. Never authority, never ordering evidence.
     pub causation_span: Option<SpanWireId>,
 }
 
@@ -84,7 +69,6 @@ pub struct WireSender {
 /// the Host, never a claim of currentness (IPC §5).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObservedMarks {
-    /// Presence generation value the Client saw, if any.
     pub presence_generation_view: Option<u64>,
     /// Round the Client believes it belongs to. It must be [`None`]
     /// whenever the input does not join a round — a bare round-less
@@ -95,32 +79,21 @@ pub struct ObservedMarks {
     /// adopted one side over the other. The Host never rebinds an old
     /// round from this field.
     pub round_view: Option<RoundWireId>,
-    /// Ticket premise the Client relied on, if any.
     pub ticket_view: Option<TicketWireId>,
 }
 
-/// The envelope routes; it never authorizes. There is no payload field:
-/// payload framing is the transport's job and arrives in Stage 2.
 /// `message_type` names the payload shape for routing; an unknown value is
 /// rejected, never guessed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireEnvelope {
-    /// Protocol version spoken by this message.
     pub protocol: ProtocolVersion,
-    /// Fresh per send. Transport duplicate suppression only.
     pub message_id: WireMessageId,
-    /// Request/response, command/ack, and stream correspondence.
     pub correlation: WireCorrelation,
-    /// Device, incarnation, and connection the message arrived under.
     pub sender: WireSender,
-    /// Generation and round views the sender relied on.
     pub observed: ObservedMarks,
-    /// Payload discriminator for routing.
     pub message_type: WireMessageType,
 }
 
-/// Mints a fresh envelope skeleton for one send. The caller fills in
-/// addressing; the transport assigns framing in Stage 2.
 #[must_use]
 pub fn new_outgoing_envelope(
     protocol: ProtocolVersion,

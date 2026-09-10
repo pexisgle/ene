@@ -17,10 +17,8 @@ use uuid::Uuid;
 /// The connection closes after this frame is written. The `"unpaired"` reason
 /// names the gate trip only; a disconnect (rather than a `Reject` denial,
 /// which exists for post-auth declines) is the explicit decision, so an
-/// unauthenticated peer gets no oracle. The
-/// gate trips exactly when the sender is not authenticated, so the frame
-/// hides the connection id: a peer that never completed the challenge must
-/// not learn it from the drop.
+/// unauthenticated peer gets no oracle. The frame hides the connection id: a
+/// peer that never completed the challenge must not learn it from the drop.
 pub(crate) fn unpaired_close(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     outgoing_frame_pre_auth(
         frame,
@@ -57,12 +55,9 @@ fn response_sender(frame: &WireFrame, live: &LiveInput, reveal_connection: bool)
 
 /// Builds an outgoing envelope for a `Stage 2` message.
 ///
-/// The `message_type` is derived from `payload`, never passed separately, so
-/// the envelope and body cannot disagree. `reply_to` links the response to its
-/// request for transport pairing; domain correspondence travels in the
-/// payloads, never here. The sender follows [`response_sender`]: the paired
-/// device (or [`None`] pre-pairing), the inbound incarnation echoed, and this
-/// connection's table id.
+/// `reply_to` links the response to its request for transport pairing; domain
+/// correspondence travels in the payloads, never here. The sender follows
+/// [`response_sender`].
 pub(crate) fn outgoing_envelope(
     frame: &WireFrame,
     live: &LiveInput,
@@ -72,12 +67,6 @@ pub(crate) fn outgoing_envelope(
     outgoing_envelope_inner(frame, live, payload.message_type(), reply_to, true)
 }
 
-/// Builds a pre-accept outgoing envelope for a `Stage 2` message.
-///
-/// Same as [`outgoing_envelope`] except the sender hides the connection id
-/// ([`None`]): pairing results and denials, negotiated terms, challenges,
-/// pre-auth rejections, and unpaired closes all predate the acceptance that
-/// first reveals the id, so none of them may carry it.
 pub(crate) fn outgoing_envelope_pre_auth(
     frame: &WireFrame,
     live: &LiveInput,
@@ -87,7 +76,6 @@ pub(crate) fn outgoing_envelope_pre_auth(
     outgoing_envelope_inner(frame, live, payload.message_type(), reply_to, false)
 }
 
-/// Builds an outgoing envelope with an explicit connection-id reveal rule.
 fn outgoing_envelope_inner(
     frame: &WireFrame,
     live: &LiveInput,
@@ -106,12 +94,10 @@ fn outgoing_envelope_inner(
 
 /// Builds one response frame answering `frame` with `payload`.
 ///
-/// The envelope follows the `Stage 2` `message_type` convention documented on
-/// the crate root, derived from `payload` so the two cannot disagree, and
-/// links back through `reply_to`, revealing the connection through
-/// [`response_sender`]. Use only on and after
+/// Use only on and after
 /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted): the acceptance
-/// itself, the piggybacked presence fact, and every domain response.
+/// itself, the piggybacked presence fact, and every domain response reveal
+/// the connection id.
 pub(crate) fn outgoing_frame(
     frame: &WireFrame,
     live: &LiveInput,
@@ -139,12 +125,6 @@ pub(crate) fn reject_frame(
     }
 }
 
-/// Builds one pre-accept response frame answering `frame` with `payload`.
-///
-/// Same as [`outgoing_frame`] except the sender hides the connection id:
-/// pairing results and denials, negotiated terms, challenges, pre-auth
-/// rejections, and unpaired closes must not reveal the id the gate later
-/// requires the Client to echo.
 pub(crate) fn outgoing_frame_pre_auth(
     frame: &WireFrame,
     live: &LiveInput,

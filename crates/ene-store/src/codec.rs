@@ -36,11 +36,9 @@ pub(crate) const SQL_SELECT_INTENT_OUTCOME: &str = "SELECT kind, target, base, r
 
 pub(crate) const SQL_INSERT_INTENT_OUTCOME: &str = "INSERT INTO management_intent (intent_id, kind, target, base, rationale_origin, rationale_quote, outcome, mark) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
-/// Locks the shared connection, recovering from poisoning.
-///
 /// Poisoning only follows a panic inside a critical section; sections here
 /// perform no panicking work while holding the guard, so recovery preserves
-/// the committed state. Recovery (rather than erroring) also keeps lock
+/// the committed state. Recovering (rather than erroring) also keeps lock
 /// handling out of every repository's error vocabulary.
 pub(crate) fn lock_shared(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
     match conn.lock() {
@@ -49,15 +47,12 @@ pub(crate) fn lock_shared(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection
     }
 }
 
-/// Encodes an identity as lowercase hyphenated text for `TEXT` columns.
 pub(crate) fn encode_id(id: RawId) -> String {
     id.as_uuid().as_hyphenated().to_string()
 }
 
-/// Decodes identity text written by [`encode_id`].
-///
 /// The `uuid` crate is not a direct dependency, so parsing goes through
-/// [`str::parse`]: the target type is inferred from [`RawId::from_uuid`].
+/// [`str::parse`], with the target type inferred from [`RawId::from_uuid`].
 pub(crate) fn decode_id(text: &str) -> Result<RawId, String> {
     let parsed = text
         .parse()
@@ -65,17 +60,15 @@ pub(crate) fn decode_id(text: &str) -> Result<RawId, String> {
     Ok(RawId::from_uuid(parsed))
 }
 
-/// Encodes a `u64` count for an `INTEGER` column.
 pub(crate) fn encode_u64(value: u64) -> Result<i64, String> {
     i64::try_from(value).map_err(|_| String::from("count out of range"))
 }
 
-/// Decodes an `INTEGER` column back to a `u64` count.
 pub(crate) fn decode_u64(raw: i64) -> Result<u64, String> {
     u64::try_from(raw).map_err(|_| String::from("count out of range"))
 }
 
-/// Encodes an optional `u64` count, preserving unknown as `NULL` (never zero).
+/// Unknown counts stay `NULL`, never zero.
 pub(crate) fn encode_optional_count(value: Option<u64>) -> Result<Option<i64>, String> {
     match value {
         Some(number) => Ok(Some(encode_u64(number)?)),
@@ -115,10 +108,7 @@ pub(crate) fn decode_role(text: &str) -> Result<HistoryRole, String> {
     }
 }
 
-/// Encodes a client round intent into its stored `(kind, reference)` pair.
-///
-/// Only an [`RoundIntentMark::Existing`] carries a reference, and it is the
-/// Client-supplied round reference verbatim.
+/// Only [`RoundIntentMark::Existing`] carries a reference, stored verbatim.
 pub(crate) fn encode_round_intent(intent: &RoundIntentMark) -> (&'static str, Option<&str>) {
     match intent {
         RoundIntentMark::Auto => ("auto", None),
@@ -127,12 +117,9 @@ pub(crate) fn encode_round_intent(intent: &RoundIntentMark) -> (&'static str, Op
     }
 }
 
-/// Reads a stored round intent back into its domain mark.
-///
 /// `None` intent means the row predates the mark (or carries no command
-/// key): the caller fail-closes on replay instead of guessing. A reference
-/// without its `existing` kind — or the kind without one — is a malformed
-/// row, never a defaulted value.
+/// key): the caller fail-closes on replay instead of guessing. A kind and
+/// reference that disagree are a malformed row, never defaulted.
 pub(crate) fn decode_round_intent(
     kind: Option<&str>,
     reference: Option<String>,
@@ -224,7 +211,6 @@ pub(crate) fn inference_unavailable(reason: String) -> InferenceTechnicalError {
     InferenceTechnicalError::StorageUnavailable { reason }
 }
 
-/// Reads one consent row into its domain record.
 pub(crate) fn decode_consent(
     id: String,
     rev_raw: i64,
@@ -242,7 +228,6 @@ pub(crate) fn decode_consent(
     })
 }
 
-/// Encodes an intent outcome snapshot into its stored `(kind, mark)` pair.
 pub(crate) fn encode_intent_outcome(outcome: &IntentOutcome) -> (&'static str, Option<&str>) {
     match outcome {
         IntentOutcome::StoredAsRuleView { revision } => ("stored", Some(revision)),
@@ -254,10 +239,8 @@ pub(crate) fn encode_intent_outcome(outcome: &IntentOutcome) -> (&'static str, O
     }
 }
 
-/// Reads one stored outcome snapshot back into its domain outcome.
-///
-/// Unknown kinds — or a stored outcome without its mark — are malformed
-/// rows, never guessed: the caller fails closed.
+/// Unknown kinds and missing marks are malformed rows, never guessed: the
+/// caller fails closed.
 pub(crate) fn decode_intent_outcome(
     outcome_text: &str,
     mark: Option<String>,
@@ -273,10 +256,8 @@ pub(crate) fn decode_intent_outcome(
     }
 }
 
-/// Whether two intent fingerprints describe the same request content.
-///
-/// Compares the content fields only: both rows share the key by
-/// construction, so the key itself carries no information.
+/// Compares content fields only: both rows share the key by construction, so
+/// the key itself carries no information.
 pub(crate) fn fingerprints_match(stored: &IntentFingerprint, incoming: &IntentFingerprint) -> bool {
     stored.kind == incoming.kind
         && stored.target == incoming.target
@@ -285,8 +266,6 @@ pub(crate) fn fingerprints_match(stored: &IntentFingerprint, incoming: &IntentFi
         && stored.rationale_quote == incoming.rationale_quote
 }
 
-/// Maps an existing row to replay-or-conflict against `fingerprint`.
-///
 /// Shared by the claim check and the insert-race fallback so both answer
 /// from the same rule: exact content replays, anything else clarifies.
 pub(crate) fn replay_or_conflict<T>(
@@ -300,15 +279,11 @@ pub(crate) fn replay_or_conflict<T>(
     }
 }
 
-/// Inserts the decided snapshot, resolving a lost primary-key race to the
-/// winner instead of overwriting it.
-///
 /// Returns `None` when this call stored the row, or the winning row when a
 /// concurrent writer committed first (cross-process only; same-process
-/// writers serialize on the shared connection, so the pre-check above
-/// always wins there). Callers must NOT commit on `Some`: dropping the
-/// transaction rolls back any decision writes made after the pre-check, so
-/// a loser changes nothing.
+/// writers serialize on the shared connection). Callers must NOT commit on
+/// `Some`: dropping the transaction rolls back any decision writes made
+/// after the pre-check, so a loser changes nothing.
 pub(crate) fn insert_decided_row_tx(
     tx: &Transaction<'_>,
     fingerprint: &IntentFingerprint,
@@ -341,7 +316,6 @@ pub(crate) fn insert_decided_row_tx(
     }
 }
 
-/// Builds the domain record for one decoded intent-outcome row.
 pub(crate) fn decode_intent_outcome_row(
     intent_id: &str,
     row: IntentOutcomeRow,
@@ -361,7 +335,6 @@ pub(crate) fn decode_intent_outcome_row(
     })
 }
 
-/// Reads one intent outcome row inside the caller's transaction.
 pub(crate) fn select_intent_row_tx(
     tx: &Transaction<'_>,
     intent_id: &str,
@@ -385,12 +358,10 @@ pub(crate) fn select_intent_row_tx(
         .transpose()
 }
 
-/// Reads one paired-device row into its domain record.
-///
-/// `wire` carries the opaque wire projection; pre-opaque rows store `NULL`,
-/// which decodes to the legacy continuity projection (the device identity
-/// rendering) so already-provisioned clients keep resolving after migration.
-/// New approvals always store a fresh opaque projection instead.
+/// Pre-opaque rows store `NULL` for `wire` and decode to the legacy
+/// continuity projection (the device identity rendering) so
+/// already-provisioned clients keep resolving; new approvals always store a
+/// fresh opaque projection.
 pub(crate) fn decode_device_record(
     device_text: &str,
     descriptor: String,
@@ -407,7 +378,6 @@ pub(crate) fn decode_device_record(
     })
 }
 
-/// Reads one pending-pairing row into its domain fact.
 pub(crate) fn decode_pending_pairing(
     descriptor: String,
     requested_text: &str,
@@ -420,15 +390,12 @@ pub(crate) fn decode_pending_pairing(
     })
 }
 
-/// Reports whether a credential `(provider, label)` pair is blank.
-///
-/// Empty or whitespace-only input is treated as absent: callers check this
-/// before touching the store, so blank pairs never become stored rows.
+/// Empty or whitespace-only input is absent: callers check this before
+/// touching the store, so blank pairs never become stored rows.
 pub(crate) fn credential_pair_is_blank(provider: &str, label: &str) -> bool {
     provider.trim().is_empty() || label.trim().is_empty()
 }
 
-/// Reads one pending-credential row into its domain fact.
 pub(crate) fn decode_pending_credential(
     provider: String,
     label: String,
@@ -443,15 +410,9 @@ pub(crate) fn decode_pending_credential(
     })
 }
 
-/// Reads one history row into its domain message.
-///
-/// `command_text` carries the client-minted replay identity (`None` stores
-/// `NULL`, meaning no replay key); `round_wire` carries the opaque wire
-/// projection (`None` on pre-opaque rows); the round intent columns decode
-/// through [`decode_round_intent`] (never guessed); the client counter/
-/// random pair carries the sending incarnation only when both are present
-/// and decode (`None` otherwise, including pre-opaque rows); `local_id`
-/// carries client-local correspondence metadata only.
+/// `None` command text means no replay key; `None` wire projection marks a
+/// pre-opaque row; the incarnation appears only when both counter and random
+/// are present and decode; `local_id` is correspondence metadata only.
 pub(crate) fn decode_history_message(
     companion: CompanionId,
     row: HistoryRow,
@@ -503,7 +464,6 @@ pub(crate) fn decode_history_message(
     })
 }
 
-/// Reads one attribution row into its domain fact.
 pub(crate) fn decode_attribution(
     companion: RawId,
     state_text: &str,
@@ -524,49 +484,28 @@ pub(crate) fn decode_attribution(
     })
 }
 
-/// One decoded history row: identity, round, role, body, language,
-/// timestamp, generation, optional command-scoped replay identity, optional
-/// wire projection and round intent for the replay fingerprint, and
-/// optional client-local correspondence ID (`local_id` is stored metadata
-/// only, never a key).
-///
 /// Named fields keep column order in exactly one place:
 /// [`HistoryRow::from_row`]. All three readers
 /// (`lookup_local_id`, `lookup_command`, `load_timeline`) share the column
 /// order through that constructor.
 pub(crate) struct HistoryRow {
-    /// Stored message identity text.
     message_text: String,
-    /// Stored round identity text.
     round_text: String,
-    /// Stored role text.
     role_text: String,
-    /// Stored body text.
     body: String,
-    /// Stored language tag.
     lang: String,
-    /// Stored timestamp rendering.
     at_text: String,
-    /// Stored presence generation count.
     generation_raw: i64,
-    /// Stored command-scoped replay identity, if any.
     command_text: Option<String>,
-    /// Stored client-local correspondence ID, if any.
     stored_local_id: Option<String>,
-    /// Stored opaque round wire projection, if any.
     round_wire: Option<String>,
-    /// Stored round intent kind, if any (`NULL` on pre-mark rows).
     round_intent_kind: Option<String>,
-    /// Stored round intent reference, if any.
     round_intent_ref: Option<String>,
-    /// Stored sending incarnation counter, if any.
     client_counter: Option<i64>,
-    /// Stored sending incarnation random, if any.
     client_random: Option<i64>,
 }
 
 impl HistoryRow {
-    /// Reads one row in the shared column order of the history selects.
     pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             message_text: row.get(0)?,
@@ -587,8 +526,6 @@ impl HistoryRow {
     }
 }
 
-/// One decoded intent-outcome row: kind, target, base, rationale origin,
-/// optional rationale quote, outcome kind, and optional outcome mark.
 pub(crate) type IntentOutcomeRow = (
     String,
     String,

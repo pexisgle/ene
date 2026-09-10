@@ -40,7 +40,6 @@ use thiserror::Error;
 /// Maximum accepted input length in Unicode scalar values.
 pub const MAX_INPUT_CHARS: usize = 8_000;
 
-/// Opaque identity of one inference ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InferenceTicketId(pub RawId);
 
@@ -60,10 +59,8 @@ pub struct ResolvedRoute {
     pub consent: (String, ConsentRevision),
 }
 
-/// Command dispatching one authorized inference use.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RequestInferenceCommand {
-    /// Ticket identifying this use end to end.
     pub ticket: InferenceTicketId,
     /// The authorized candidate; its fingerprint must match the evaluation id.
     pub candidate: InferenceUseCandidate,
@@ -76,7 +73,6 @@ pub struct RequestInferenceCommand {
 }
 
 impl core::fmt::Debug for RequestInferenceCommand {
-    /// Renders every field except `input_text`, which is body text.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("RequestInferenceCommand")
             .field("ticket", &self.ticket)
@@ -136,14 +132,11 @@ pub enum NotSentReason {
 /// [`DispatchResult::Completed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InferenceResultRef {
-    /// Ticket the result answers.
     pub ticket: InferenceTicketId,
 }
 
-/// Arrival of one inference result with its usage fact.
 #[derive(Clone, PartialEq, Eq)]
 pub struct InferenceResultArrival {
-    /// Ticket the result answers.
     pub ticket: InferenceTicketId,
     /// Provider output text; [`core::fmt::Debug`] redacts this.
     pub output_text: String,
@@ -152,7 +145,6 @@ pub struct InferenceResultArrival {
 }
 
 impl core::fmt::Debug for InferenceResultArrival {
-    /// Renders ticket and usage; `output_text` is body text and redacted.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("InferenceResultArrival")
             .field("ticket", &self.ticket)
@@ -162,49 +154,37 @@ impl core::fmt::Debug for InferenceResultArrival {
     }
 }
 
-/// Provenance of a usage fact's token counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UsageSource {
-    /// Counts came from the provider response.
     Reported,
-    /// Counts were estimated Host-side.
     Estimated,
     /// No counts are known; token fields must be [`None`], never zero.
     Unknown,
 }
 
-/// Token accounting for one ticket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageFact {
-    /// Ticket the accounting belongs to.
     pub ticket: InferenceTicketId,
-    /// Provider that served the call.
     pub provider: String,
-    /// Model that served the call.
     pub model: String,
     /// Input tokens, or [`None`] when unknown (never zero-as-unknown).
     pub input_tokens: Option<u64>,
     /// Output tokens, or [`None`] when unknown (never zero-as-unknown).
     pub output_tokens: Option<u64>,
-    /// Provenance of the counts.
     pub source: UsageSource,
 }
 
 /// Certainty of an inference attempt, for Host-side bookkeeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InferenceCertainty {
-    /// The provider call completed.
     Completed,
-    /// The provider call failed.
     ProviderFailed,
     /// The call may have run but the response was lost.
     ResponseLost,
 }
 
-/// Technical failures of inference dispatch.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum InferenceTechnicalError {
-    /// The provider transport failed.
     #[error("provider transport failed: {0}")]
     ProviderTransportFailed(String),
     /// The timeout-bound HTTP client could not be built. Reported instead
@@ -215,7 +195,6 @@ pub enum InferenceTechnicalError {
     /// The provider may have run the call but the response was lost.
     #[error("provider response lost")]
     ResponseLost,
-    /// Inference persistence was unreachable or rejected the operation.
     #[error("inference storage unavailable: {reason}")]
     StorageUnavailable {
         /// Backend-supplied cause, without body text or secrets.
@@ -223,10 +202,8 @@ pub enum InferenceTechnicalError {
     },
 }
 
-/// Provider-bound request for one completion.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProviderRequest {
-    /// Model to complete with.
     pub model: String,
     /// Authorized credential the provider call bills. The transport resolves
     /// its bearer per request, so a consent reassignment applies immediately.
@@ -236,8 +213,6 @@ pub struct ProviderRequest {
 }
 
 impl core::fmt::Debug for ProviderRequest {
-    /// Renders the model and the non-secret credential ref; `input` is body
-    /// text and redacted.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ProviderRequest")
             .field("model", &self.model)
@@ -247,7 +222,6 @@ impl core::fmt::Debug for ProviderRequest {
     }
 }
 
-/// Provider-bound response for one completion.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProviderResponse {
     /// Output text; [`core::fmt::Debug`] redacts this.
@@ -257,7 +231,6 @@ pub struct ProviderResponse {
 }
 
 impl core::fmt::Debug for ProviderResponse {
-    /// Renders usage presence; `text` is body text and redacted.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ProviderResponse")
             .field("text", &"<redacted>")
@@ -266,12 +239,9 @@ impl core::fmt::Debug for ProviderResponse {
     }
 }
 
-/// Raw token counts reported by a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RawUsage {
-    /// Reported input tokens.
     pub input_tokens: u64,
-    /// Reported output tokens.
     pub output_tokens: u64,
 }
 
@@ -288,13 +258,11 @@ pub trait ProviderTransport: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, InferenceTechnicalError>> + Send + '_>>;
 }
 
-/// Persistence boundary for usage facts.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait UsageRepository: Send + Sync {
-    /// Records one usage fact.
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError>;
 }
 
@@ -302,19 +270,15 @@ pub trait UsageRepository: Send + Sync {
 /// route it may run under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceAttempt {
-    /// Ticket the attempt would run under.
     pub ticket: InferenceTicketId,
     /// Consent premise the attempt relies on, as an `(id, rev)` pair that
     /// travels together (never a bare revision), so exhaustion stays visible
     /// at the boundary.
     pub expected_consent: (String, ConsentRevision),
-    /// Provider the attempt would bill.
     pub provider: String,
-    /// Model the attempt would run.
     pub model: String,
 }
 
-/// Outcome of claiming an inference attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttemptBeginOutcome {
     /// The attempt is claimed under the expected consent: the caller may
@@ -409,8 +373,6 @@ pub async fn send(
     Ok(DispatchResult::Completed(arrival))
 }
 
-/// One admission decision: an authorized use or a refusal.
-///
 /// Admission resolves consent and credential premises, then runs the
 /// single-use live authorization. A decline happens before any history
 /// append or provider call, so it leaves no side effects.
@@ -552,13 +514,12 @@ pub struct AuthorizedInference {
 }
 
 impl AuthorizedInference {
-    /// Ticket this use runs under.
     #[must_use]
     pub fn ticket(&self) -> InferenceTicketId {
         self.ticket
     }
 
-    /// Consent premise the use was authorized under, as `(id, rev)`.
+    /// Consent premise as `(id, rev)`.
     #[must_use]
     pub fn consent_premise(&self) -> (&str, u64) {
         (&self.consent.0, self.consent.1.as_u64())
@@ -576,7 +537,6 @@ pub enum InferenceDispatchOutcome {
     /// The provider call completed; carries the arrival and whether
     /// adoption consent still held after the await.
     Completed {
-        /// Full result of the call.
         arrival: InferenceResultArrival,
         /// Whether the post-await consent check still admitted the reply.
         adopted: bool,
@@ -731,7 +691,6 @@ async fn record_usage_decision(usage: &impl UsageRepository, fact: UsageFact) {
     }
 }
 
-/// Maps one permission deny code to its inference refusal reason.
 fn not_sent_for_deny(code: DenyCode) -> NotSentReason {
     match code {
         DenyCode::SetupIncomplete => NotSentReason::SetupIncomplete,
@@ -743,8 +702,7 @@ fn not_sent_for_deny(code: DenyCode) -> NotSentReason {
 /// In-memory provider transport for tests and core integration tests.
 ///
 /// Performs zero I/O: it replays configured text and usage, or a configured
-/// failure. Provider adapters and retry policies are a behaviors-stage
-/// concern, not here.
+/// failure. Real provider adapters and retry policies live elsewhere.
 pub mod fake {
     use std::future::Future;
     use std::pin::Pin;
@@ -752,28 +710,20 @@ pub mod fake {
     use super::RawUsage;
     use super::{InferenceTechnicalError, ProviderRequest, ProviderResponse, ProviderTransport};
 
-    /// Failure mode of a [`FakeProviderTransport`].
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum FakeFailure {
-        /// Fail like a broken transport with the given reason.
         Transport(String),
-        /// Fail like a lost response.
         ResponseLost,
     }
 
-    /// Zero-I/O transport replaying fixed text, usage, or failure.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FakeProviderTransport {
-        /// Text returned on success.
         pub text: String,
-        /// Usage returned on success, or [`None`] for unknown usage.
         pub usage: Option<RawUsage>,
-        /// Failure to return instead of succeeding.
         pub fail: Option<FakeFailure>,
     }
 
     impl FakeProviderTransport {
-        /// Replays a successful completion with the given text and usage.
         #[must_use]
         pub fn new(text: String, usage: Option<RawUsage>) -> Self {
             Self {
@@ -783,7 +733,6 @@ pub mod fake {
             }
         }
 
-        /// Always fails with the given mode.
         #[must_use]
         pub fn failing(fail: FakeFailure) -> Self {
             Self {
@@ -795,7 +744,6 @@ pub mod fake {
     }
 
     impl ProviderTransport for FakeProviderTransport {
-        /// Replays the configured response or failure without I/O.
         fn complete(
             &self,
             _req: ProviderRequest,

@@ -20,8 +20,6 @@ const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (id, rev, provider,
 const SQL_UPDATE_CONSENT: &str =
     "UPDATE consent_record SET id = ?1, rev = ?2, provider = ?3, model = ?4, credential_id = ?5";
 
-/// Runs the consent compare-and-save inside the caller's transaction.
-///
 /// Shared by [`ConsentRepository::compare_and_save`] and the intent-atomic
 /// variant so the premise check and the write cannot drift apart between
 /// the two entry points.
@@ -74,7 +72,7 @@ fn compare_and_save_row(
         )
         .map_err(|error| error.to_string())?;
     } else {
-        // Single logical row: the expectation matched, so overwrite it.
+        // Single logical row: overwrite it.
         tx.execute(
             SQL_UPDATE_CONSENT,
             params![
@@ -237,9 +235,7 @@ impl IntentOutcomeRepository for Store {
             // The replay row shares the decision transaction: a crash can
             // neither strand a commit without its marker nor a marker without
             // its commit. Stale attempts record their stale snapshot here too,
-            // so a retried id always observes the same answer. The commit
-            // snapshot carries the committed revision, so replay answers it
-            // verbatim.
+            // so a retried id always observes the same answer.
             let snapshot = match &outcome {
                 ConsentCommitOutcome::Committed { record } => IntentOutcome::StoredAsRuleView {
                     revision: record.rev.as_u64().to_string(),
@@ -256,9 +252,6 @@ impl IntentOutcomeRepository for Store {
                         .map_err(|error| permission_unavailable(error.to_string()))?;
                     Ok(IntentResolution::Decided(outcome))
                 }
-                // Lost a cross-process race after deciding: roll back (dropping
-                // `tx` without committing) so the loser changes nothing, and
-                // answer from the winner.
                 Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
             }
         })
@@ -330,9 +323,6 @@ impl IntentOutcomeRepository for Store {
                         .map_err(|error| permission_unavailable(error.to_string()))?;
                     Ok(IntentResolution::Decided(decided))
                 }
-                // Lost a cross-process race after deciding: roll back (dropping
-                // `tx` without committing) so the loser changes nothing, and
-                // answer from the winner.
                 Some(winner) => Ok(replay_or_conflict(winner, &decided.fingerprint)),
             }
         })
@@ -360,9 +350,8 @@ impl IntentOutcomeRepository for Store {
             {
                 return Ok(replay_or_conflict(stored, &fingerprint));
             }
-            // One transaction: read current, and — only when the stored route
-            // already equals the requested one — insert the `Stored` snapshot
-            // for the current revision. No state changes either way.
+            // No consent state changes either way: the only write, on a hit,
+            // records the replay row.
             let found: Option<(String, i64, String, String, String)> = tx
                 .query_row(SQL_SELECT_CONSENT, (), |row| {
                     Ok((
@@ -410,9 +399,6 @@ impl IntentOutcomeRepository for Store {
                         current: record,
                     }))
                 }
-                // Lost a cross-process race after deciding: roll back (dropping
-                // `tx` without committing) so the loser changes nothing, and
-                // answer from the winner.
                 Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
             }
         })

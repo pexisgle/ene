@@ -41,23 +41,17 @@ use ene_primitive::RawId;
 pub struct RoundId(RawId);
 
 impl RoundId {
-    /// Wraps an existing raw identity, for example one read back from storage.
     #[must_use]
     pub fn from_raw(raw: RawId) -> Self {
         Self(raw)
     }
 
-    /// Returns the wrapped raw identity for storage or transport encoding.
     #[must_use]
     pub fn as_raw(self) -> RawId {
         self.0
     }
 }
 
-/// Mints a fresh Host-issued [`RoundId`].
-///
-/// Minting alone accepts nothing; acceptance is decided by [`check_intake`]
-/// and recorded by the caller.
 #[must_use]
 pub fn new_round() -> RoundId {
     RoundId(RawId::new())
@@ -71,12 +65,10 @@ pub fn new_round() -> RoundId {
 pub struct ClientInputRef {
     /// Body text. Redacted from [`core::fmt::Debug`].
     pub text: String,
-    /// Opaque language tag.
     pub lang: String,
 }
 
 impl core::fmt::Debug for ClientInputRef {
-    /// Renders `lang` while redacting `text`.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("ClientInputRef")
@@ -92,25 +84,17 @@ impl core::fmt::Debug for ClientInputRef {
 /// happen Host-side in [`check_intake`].
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SubmitClientInputCandidate {
-    /// Companion the candidate targets.
     pub companion: RawId,
-    /// Claiming [`ClientId`].
     pub client: ClientId,
-    /// Generation value the Client saw, if any. [`None`] means the
-    /// generation token was missing.
+    /// [`None`] means the generation token was missing.
     pub claimed_generation: Option<PresenceGeneration>,
-    /// Which round the input wants: join-or-mint, always-mint, or one
-    /// specific open round. A single meaning per value — never an
-    /// `Option` doing double duty.
+    /// A single meaning per value — never an `Option` doing double duty.
     pub round: RoundIntent,
-    /// Input body reference.
     pub input_ref: ClientInputRef,
-    /// Client-local correspondence ID for matching acks to sends.
     pub local_id: String,
 }
 
 impl core::fmt::Debug for SubmitClientInputCandidate {
-    /// Renders refs and the redacted input while redacting body text.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("SubmitClientInputCandidate")
@@ -153,36 +137,27 @@ pub enum CompanionAvailability {
     Running,
 }
 
-/// Currently open round premise for round binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OpenRound {
-    /// Companion the open round belongs to.
     pub companion: RawId,
-    /// [`ClientId`] the open round belongs to.
     pub client: ClientId,
-    /// Open [`RoundId`].
     pub round: RoundId,
-    /// Generation the open round belongs to.
     pub generation: PresenceGeneration,
 }
 
 /// Full intake premise evaluated by [`check_intake`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct IntakePremise {
-    /// Input candidate under evaluation.
     pub candidate: SubmitClientInputCandidate,
     /// Current authoritative [`PresenceAttribution`].
     pub attribution: PresenceAttribution,
-    /// Companion availability premise.
     pub companion: CompanionAvailability,
     /// Out-of-band liveness premise.
     pub live: LiveReachabilityRef,
-    /// Currently open round, if one is open.
     pub open_round: Option<OpenRound>,
 }
 
 impl core::fmt::Debug for IntakePremise {
-    /// Renders the premise with body text redacted via the candidate.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("IntakePremise")
@@ -201,11 +176,8 @@ impl core::fmt::Debug for IntakePremise {
 /// [`check_intake`] itself never emits that variant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RevalidationReason {
-    /// The generation view token was missing.
     MissingGenerationView,
-    /// The companion is unknown.
     UnknownCompanion,
-    /// The companion is stopped.
     StoppedCompanion,
     /// The command carried no idempotency key. Replay safety needs one, so
     /// keyless commands are declined rather than accepted unkeyed.
@@ -224,21 +196,15 @@ pub enum RevalidationReason {
 pub enum RoundIntakeOutcome {
     /// Accepted into this Host-issued round.
     AcceptedForRound {
-        /// Round the input joined.
         round: RoundId,
     },
-    /// The premise round is not current.
     StaleRound {
-        /// Current round, if one is open.
         current_round: Option<RoundId>,
         /// Current generation value the sender should observe next time.
         current_generation: PresenceGeneration,
     },
-    /// A presence transition holds intake for now.
     HeldForTransition,
-    /// The premise needs refreshing before intake.
     NeedsRevalidation {
-        /// Reason the premise needs refreshing.
         reason: RevalidationReason,
     },
 }
@@ -251,7 +217,6 @@ pub enum RoundIntakeOutcome {
 /// resend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PresentationStatus {
-    /// Presented.
     Presented,
     /// Presentation unknown. Sticky: never upgraded by resend.
     PresentationUnknown,
@@ -262,20 +227,15 @@ pub enum PresentationStatus {
 /// Sending never equals reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConfirmPresentationObservation {
-    /// Round the confirmation covers.
     pub round: RoundId,
-    /// Observed presentation status.
     pub presented_or_unknown: PresentationStatus,
 }
 
 /// Round closure fact handed to the store layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RoundClosureFact {
-    /// Companion the closed round belongs to.
     pub companion: RawId,
-    /// [`ClientId`] the closed round belongs to.
     pub client: ClientId,
-    /// Closed [`RoundId`].
     pub round: RoundId,
     /// Undelivered link, when close left an unpresented item.
     pub undelivered_link: Option<RawId>,

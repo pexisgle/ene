@@ -53,8 +53,6 @@ const SQL_DELETE_CREDENTIAL_PENDING: &str =
 const SQL_LIST_CREDENTIAL_PENDING: &str =
     "SELECT provider, label, requested_at FROM credential_pending ORDER BY rowid ASC";
 
-/// Mints a one-time pairing secret for display-once custody.
-///
 /// Secrets are never stored: the caller shows the returned string once on a
 /// trusted surface and holds it only in memory afterwards.
 fn fresh_pairing_secret() -> String {
@@ -208,8 +206,7 @@ impl DevicePairingRepository for Store {
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             // Re-approving an already-paired descriptor returns the existing
             // record unchanged with a freshly minted secret (rotation); no
-            // fresh identity is stored. Secrets are never stored: the caller
-            // displays the returned string once on a trusted surface.
+            // fresh identity is stored.
             let paired: Option<(String, String, String, Option<String>)> = tx
                 .query_row(
                     SQL_SELECT_PAIRED_BY_DESCRIPTOR,
@@ -352,8 +349,6 @@ impl CredentialApprovalRepository for Store {
     ) -> Result<bool, CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
-            // Blank pairs are treated as absent before touching the store, so
-            // they never become stored rows.
             if credential_pair_is_blank(&provider, &label) {
                 return Ok(false);
             }
@@ -399,7 +394,6 @@ impl CredentialApprovalRepository for Store {
         let provider = provider.to_owned();
         let label = label.to_owned();
         run_blocking(move || {
-            // Blank pairs are treated as absent before touching the store.
             if credential_pair_is_blank(&provider, &label) {
                 return Ok(false);
             }
@@ -411,9 +405,9 @@ impl CredentialApprovalRepository for Store {
             // both pending and usable never strands its pending row. The delete
             // and the usable-ref upsert share this transaction: a crash between
             // them could otherwise strand an approval with no usable marker (or
-            // vice versa), forcing the Owner to re-request and re-approve. The
-            // ref id follows the same `provider:label` convention the Host uses
-            // when it builds refs for assignment, so both paths name one row.
+            // vice versa). The ref id follows the same `provider:label`
+            // convention the Host uses when it builds refs for assignment, so
+            // both paths name one row.
             let pending: Option<(String, String, String)> = tx
                 .query_row(
                     SQL_SELECT_CREDENTIAL_PENDING,
@@ -455,13 +449,12 @@ impl CredentialApprovalRepository for Store {
         let provider = provider.to_owned();
         let label = label.to_owned();
         run_blocking(move || {
-            // Blank pairs are treated as absent before touching the store.
             if credential_pair_is_blank(&provider, &label) {
                 return Ok(false);
             }
             let guard = lock_shared(&conn);
-            // Pure load: one statement, no transaction. The `credential_ref`
-            // row is the usable marker; pending-only pairs report `false`.
+            // The `credential_ref` row is the usable marker; pending-only
+            // pairs report `false`.
             let found: Option<(String, String, String)> = guard
                 .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -575,9 +568,8 @@ impl CredentialIntentRepository for Store {
                         .map_err(|error| credential_unavailable(error.to_string()))?;
                     Ok(RegistrationApply::Decided(state))
                 }
-                // Lost a cross-process race after deciding: roll back
-                // (dropping `tx` without committing) so the loser changes
-                // nothing, and let the caller answer from the journal.
+                // Loser of a cross-process race: roll back (never commit) and
+                // let the caller answer from the journal.
                 Some(_winner) => Ok(RegistrationApply::AlreadyDecided),
             }
         })

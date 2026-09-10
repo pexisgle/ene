@@ -13,7 +13,6 @@ use crate::{
     PermissionTechnicalError, ShortcutIntentOutcome, consent_mark_rev,
 };
 
-/// Parsed consent base-view mark: a compare-and-save expectation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BaseViewExpectation {
     /// The mark (`"consent-none"`) expects no stored row.
@@ -25,10 +24,6 @@ pub enum BaseViewExpectation {
     FaceStale,
 }
 
-/// Parses a consent base-view mark into a compare-and-save expectation.
-///
-/// `"consent-none"` expects no stored row; `"consent-rev-N"` expects the
-/// loaded current record at revision `N`.
 #[must_use]
 pub fn base_view_expectation(
     base_view: &str,
@@ -52,21 +47,15 @@ pub fn base_view_expectation(
     )
 }
 
-/// Owner-side premises of one consent-assign intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignConsentIntent {
-    /// Provider the route binds.
     pub provider: String,
-    /// Model the route binds.
     pub model: String,
-    /// Credential id the route requires.
     pub credential_id: String,
-    /// Base-view mark the intent was built on.
     pub base_view: String,
     /// Whether the credential id resolves to a registered, bearer-backed
     /// ref (computed by the Host, which alone can cross owners).
     pub credential_present: bool,
-    /// Durable intent fingerprint.
     pub fingerprint: IntentFingerprint,
 }
 
@@ -77,11 +66,8 @@ pub struct AssignConsentIntent {
 /// state, never from a locally decided outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignConsentResolution {
-    /// This call decided and recorded the outcome.
     Decided(IntentOutcome),
-    /// Exact fingerprint replay; nothing changed.
     Replay(IntentOutcomeRecord),
-    /// Same id, different fingerprint; nothing changed.
     Conflict(IntentOutcomeRecord),
 }
 
@@ -205,12 +191,10 @@ pub async fn assign_consent(
     }
 }
 
-/// Renders the current consent mark for a possibly absent record.
 fn current_mark(current: Option<&ConsentRecord>) -> String {
     consent_mark_rev(current.map(|record| record.rev.as_u64()))
 }
 
-/// Records one locally decided outcome and maps the write-once resolution.
 async fn record_decided(
     intents: &impl IntentOutcomeRepository,
     fingerprint: IntentFingerprint,

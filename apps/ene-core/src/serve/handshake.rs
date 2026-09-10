@@ -29,16 +29,13 @@ impl HostHandle {
     /// [`request_pairing`](DevicePairingRepository::request_pairing): an
     /// already-paired descriptor re-issues its device key as
     /// [`Paired`](PairingResult::Paired) (the connection layer then marks the
-    /// connection paired), while a fresh descriptor is recorded pending and
-    /// answers
+    /// connection paired), while a fresh descriptor answers
     /// [`PendingOwnerConfirmation`](PairingResult::PendingOwnerConfirmation)
-    /// until the Host-local `approve-device` inlet records the Owner
-    /// decision. Ingress trims surrounding whitespace and denies blank
-    /// descriptors with [`Denied`](PairingResult::Denied): the pairing
-    /// outcome has no `NeedsClarification` variant, so refusal is the honest
-    /// shape. A store failure likewise denies (operational reason only); the
-    /// Client retries the same request, which is idempotent. Every answer
-    /// here predates authentication, so its sender hides the connection id.
+    /// until the Host-local `approve-device` inlet records the Owner decision.
+    /// Blank descriptors are denied with [`Denied`](PairingResult::Denied):
+    /// the pairing outcome has no `NeedsClarification` variant, so refusal is
+    /// the honest shape. A store failure likewise denies (operational reason
+    /// only); the Client retries the same request, which is idempotent.
     pub(super) async fn pair(
         &self,
         frame: &WireFrame,
@@ -94,9 +91,8 @@ impl HostHandle {
     /// [`AuthChallenge`] whose nonce is recorded pending for this connection:
     /// the Client answers with an [`AuthProof`] proving possession of its
     /// pairing secret. Re-advertising replaces the pending nonce, so only the
-    /// latest challenge can be answered. Both answers predate authentication,
-    /// so their senders hide the connection id. Capability frames never
-    /// attach presence: attach happens only on the submit path, so a
+    /// latest challenge can be answered. Capability frames never attach
+    /// presence: attach happens only on the submit path, so a
     /// negotiating-but-never-submitting peer leaves attribution untouched.
     pub(super) fn advertise(
         &self,
@@ -146,16 +142,11 @@ impl HostHandle {
     /// outcome — a missing nonce, a missing sender device, a missing or
     /// unreadable secret, or a bad proof all answer
     /// [`Rejected`](ene_api::v1::handshake::AuthResult::Rejected) with an
-    /// operational reason — so a captured proof can never replay. The secret
-    /// loads from the file-backed `auth_store` on every call:
-    /// there is no cache, so rotations and revocations take effect on the
-    /// next authentication. Success answers
-    /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted)
+    /// operational reason — so a captured proof can never replay. Success
+    /// answers [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted)
     /// carrying this connection's table id, which the Client echoes on every
-    /// later frame as the auth binding the gate checks; the acceptance (and
-    /// its piggybacked presence fact) is the first response on this
-    /// connection to reveal the id, while every rejection hides it. Proof
-    /// comparison itself runs in constant time inside `ene-credential`.
+    /// later frame as the auth binding the gate checks. Proof comparison
+    /// itself runs in constant time inside `ene-credential`.
     pub(super) async fn verify_proof(
         &self,
         frame: &WireFrame,
@@ -238,7 +229,7 @@ impl HostHandle {
 /// than mapped) because nothing ever echoes it back: no inbound DTO carries
 /// a `ClientWireRef`, so a mapping would be write-only. The Client's
 /// operative wire identity remains the device projection plus incarnation,
-/// both resolved table-side.
+/// resolved table-side.
 fn attribution_to_wire(
     handle: &HostHandle,
     attribution: &ene_presence::PresenceAttribution,
@@ -274,9 +265,6 @@ fn attribution_to_wire(
     }
 }
 
-/// Builds a pairing denial frame with an operational reason only.
-///
-/// A denial predates authentication, so its sender hides the connection id.
 fn denied_pairing(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFrame {
     outgoing_frame_pre_auth(
         frame,

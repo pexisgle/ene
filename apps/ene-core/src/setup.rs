@@ -1,15 +1,12 @@
 //! `Stage 2` setup management inlet: register, assign, complete, show.
 //!
 //! The Client expresses setup intent and reads filtered views; every
-//! acceptance happens Host-side here. `HostHandle::apply_intent` maps one
-//! [`ManagementIntent`] to a domain act, and `HostHandle::answer_view` (plus
-//! the `setup:show` intent target) renders the filtered [`ManagementView`].
+//! acceptance happens Host-side here.
 //!
-//! `Stage 2` setup-target mini-language (matched on
-//! `(intent kind, target string)`; anything else answers
-//! [`NeedsClarification`](ene_api::v1::management::ManagementOutcome::NeedsClarification),
-//! which also covers every non-setup kind — companion shutdown, deletion,
-//! tasks, schedules, rules, devices, backups — as "not in `Stage 2` scope"):
+//! Setup targets are matched on `(intent kind, target string)`; anything else
+//! — every non-setup kind included — answers
+//! [`NeedsClarification`](ene_api::v1::management::ManagementOutcome::NeedsClarification)
+//! as "not in `Stage 2` scope":
 //!
 //! - `(ConfigureCredentialIntent, "credential:{provider}:{label}")` records a
 //!   pending credential approval through the credential owner and answers
@@ -78,8 +75,6 @@ use ene_plugin_ipc::WireFrame;
 
 use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing_frame};
 
-/// Builds a management outcome reply, echoing the intent id.
-///
 /// The outcome is the ack of the intent saga, so the envelope carries the
 /// intent id as `command_id` alongside the `reply_to` link.
 fn outcome_frame(
@@ -94,17 +89,13 @@ fn outcome_frame(
     WireFrame { envelope, payload }
 }
 
-/// Builds a management view reply.
 fn view_frame(frame: &WireFrame, live: &LiveInput, view: ManagementView) -> WireFrame {
     outgoing_frame(frame, live, WirePayload::ManagementView(view))
 }
 
 impl HostHandle {
-    /// Maps one [`ManagementIntent`] to its `Stage 2` outcome frames.
-    ///
-    /// Setup pairs route through the register/assign/complete/show paths
-    /// below; every other kind answers `NeedsClarification` (deferred scope,
-    /// never a silent accept). Store failures behind a write answer
+    /// Every other kind answers `NeedsClarification` (deferred scope, never a
+    /// silent accept). Store failures behind a write answer
     /// [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation):
     /// nothing was decided, so a later retry is safe.
     pub(crate) async fn apply_intent(
@@ -120,8 +111,8 @@ impl HostHandle {
             ManagementIntentKind::ManageRuleConsentCap => {
                 self.apply_consent_or_setup(frame, intent, live).await
             }
-            // Deferred scope answers clarify — recorded like any other
-            // decided outcome, so a retried id observes one answer.
+            // Deferred scope answers clarify, recorded like any other decided
+            // outcome so a retried id observes one answer.
             _ => {
                 return vec![outcome_frame(
                     frame,
@@ -138,8 +129,6 @@ impl HostHandle {
         }
     }
 
-    /// Renders a wire intent kind into its replay-fingerprint discriminator.
-    ///
     /// Explicit match, never derived: the stored text must stay stable
     /// across refactors that do not change the wire.
     fn intent_kind_name(kind: ManagementIntentKind) -> &'static str {
@@ -158,19 +147,11 @@ impl HostHandle {
         }
     }
 
-    /// Registers the credential ref named by a `credential:` target.
-    /// Registers a credential ref request through the approval gate.
-    ///
-    /// The wire intent only PROPOSES: it records a pending approval and
-    /// answers [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation)
-    /// until a Host-local `approve-credential` flips it usable — observed
-    /// through a NEW intent id, which decides `AppliedAsOneTime` from
-    /// current state. An exact retry (same id, same fingerprint) replays
-    /// its stored snapshot instead: still `Held` even after approval
-    /// landed elsewhere, because a new judgment requires a new key (same
-    /// rule as command keys). Credential registration is high-privilege
-    /// (trusted confirmation required), so the wire never creates usable
-    /// refs directly.
+    /// The wire intent only PROPOSES: a held snapshot stays held until a NEW
+    /// intent id observes the approval, because a new judgment requires a new
+    /// key (same rule as command keys). Credential registration is
+    /// high-privilege (trusted confirmation required), so the wire never
+    /// creates usable refs directly.
     async fn register_credential(
         &self,
         frame: &WireFrame,
@@ -190,10 +171,7 @@ impl HostHandle {
                 .await,
             )];
         };
-        // Durable replay first, same contract as assign: exact retry replays
-        // the stored snapshot (a held registration stays held until a NEW
-        // intent observes the approval — the snapshot never goes stale by
-        // itself, it just stops being the whole story once the Owner acts).
+        // Durable replay first: an exact retry replays its stored snapshot.
         let intent_key = intent.intent_id.0.as_hyphenated().to_string();
         match self.store.lookup_intent_outcome(&intent_key).await {
             Err(_) => {
@@ -226,8 +204,8 @@ impl HostHandle {
         }
         // One durable determination owned by `ene-credential`: the pending
         // insert (or usable recheck) and the replay row share a transaction,
-        // so the snapshot and the state it describes can never strand
-        // apart. A raced insert is resolved from the journal below.
+        // so snapshot and state can never strand apart. A raced insert is
+        // resolved from the journal below.
         let fingerprint = Self::intent_fingerprint(intent, Self::INTENT_KIND_REGISTER);
         let registration = RegistrationFingerprint {
             intent_id: fingerprint.intent_id.clone(),
@@ -290,13 +268,12 @@ impl HostHandle {
         }
     }
 
-    /// Intent kind discriminators for replay fingerprints. One per recording
-    /// path; a reused id across kinds is different content by construction.
+    /// Replay-fingerprint discriminators, one per recording path; a reused id
+    /// across kinds is different content by construction.
     const INTENT_KIND_ASSIGN: &str = "assign";
     const INTENT_KIND_REGISTER: &str = "register";
     const INTENT_KIND_COMPLETE: &str = "complete";
 
-    /// Builds the replay fingerprint for `intent` under `kind`.
     fn intent_fingerprint(intent: &ManagementIntent, kind: &str) -> IntentFingerprint {
         IntentFingerprint {
             intent_id: intent.intent_id.0.as_hyphenated().to_string(),
@@ -311,8 +288,7 @@ impl HostHandle {
         }
     }
 
-    /// Whether a stored row carries the same intent (fingerprint match; the
-    /// recorded outcome is irrelevant to identity).
+    /// Identity is the fingerprint only; the recorded outcome is irrelevant.
     fn intent_matches(stored: &IntentOutcomeRecord, intent: &ManagementIntent, kind: &str) -> bool {
         stored.fingerprint.kind == kind
             && stored.fingerprint.target == intent.target.0
@@ -325,7 +301,6 @@ impl HostHandle {
             && stored.fingerprint.rationale_quote == intent.rationale.quote
     }
 
-    /// Maps a replayed snapshot to its answer, verbatim.
     fn replayed_outcome(snapshot: &IntentOutcome) -> ManagementOutcome {
         match snapshot {
             IntentOutcome::StoredAsRuleView { revision } => ManagementOutcome::StoredAsRuleView {
@@ -345,7 +320,6 @@ impl HostHandle {
         }
     }
 
-    /// Routes a consent-scope intent to assign, complete, or show.
     async fn apply_consent_or_setup(
         &self,
         frame: &WireFrame,
@@ -381,8 +355,6 @@ impl HostHandle {
             .await
     }
 
-    /// Stores a decided snapshot write-once and returns the wire answer.
-    ///
     /// Durable-before-visible: a store failure answers
     /// [`HeldByOperation`](ene_api::v1::management::ManagementOutcome::HeldByOperation)
     /// rather than the decided outcome, so an id never observes an answer
@@ -408,16 +380,9 @@ impl HostHandle {
         }
     }
 
-    /// Assigns the consent route after verifying credential presence.
-    ///
-    /// Parses the intent `base_view` into a compare-and-save expectation
-    /// against the loaded current record, then requires the credential to be
-    /// both registered and bearer-present. The saved record keeps the stored
-    /// id when one exists and advances its revision; an exhausted revision
-    /// clarifies instead of reusing the maximum. A lost
-    /// compare race (or a view that moved between read and write) answers
-    /// `StaleBaseView` with the rebuilt current mark instead of overwriting:
-    /// the caller re-reads and retries.
+    /// The saved record keeps the stored id when one exists and advances its
+    /// revision. A lost compare race answers `StaleBaseView` with the rebuilt
+    /// current mark instead of overwriting: the caller re-reads and retries.
     async fn assign_consent(
         &self,
         frame: &WireFrame,
@@ -430,9 +395,9 @@ impl HostHandle {
         // Durable intent replay first (§18.2): the stored snapshot precedes
         // every premise read, so a past-success exact retry reaches its prior
         // outcome even after credential state moved on. A hit with the same
-        // fingerprint answers the prior outcome verbatim (never re-executed);
-        // a hit with different content clarifies instead of adopting the new
-        // meaning. A miss falls through to the owner-side assignment.
+        // fingerprint answers verbatim (never re-executed); a hit with
+        // different content clarifies instead of adopting the new meaning.
+        // A miss falls through to the owner-side assignment.
         let intent_key = intent.intent_id.0.as_hyphenated().to_string();
         match self.store.lookup_intent_outcome(&intent_key).await {
             Err(_) => {
@@ -517,21 +482,14 @@ impl HostHandle {
         }
     }
 
-    /// Completes setup after verifying the full premise, writing no flag.
-    ///
-    /// `AppliedAsOneTime` means consent is stored and its bearer is present
-    /// right now; completion stays derived from those two facts afterwards.
-    /// A stale `base_view` answers `StaleBaseView`, an unreadable store holds,
-    /// and an incomplete premise clarifies.
     async fn complete_setup(
         &self,
         frame: &WireFrame,
         intent: &ManagementIntent,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        // Durable replay first (1-a): the stored snapshot precedes any
-        // currentness check, so an exact retry replays its prior outcome
-        // even after the base moved on.
+        // Durable replay first: the stored snapshot precedes any currentness
+        // check, so an exact retry replays its prior outcome.
         let intent_key = intent.intent_id.0.as_hyphenated().to_string();
         match self.store.lookup_intent_outcome(&intent_key).await {
             Err(_) => {
@@ -564,7 +522,7 @@ impl HostHandle {
         }
         // Bearer premise for the atomic claim below: the credential owner
         // resolves registered-and-backed availability; the transaction
-        // decides completion. Unreadable stores hold, as before.
+        // decides completion. Unreadable stores hold.
         let bearer_present = match self.store.load_current().await {
             Err(_) => {
                 return vec![outcome_frame(
@@ -596,7 +554,7 @@ impl HostHandle {
                 }
             }
         };
-        // One durable determination (1-b): compare, completability, and
+        // One durable determination: compare, completability, and
         // snapshot-save share a transaction; the answer below renders the
         // decided snapshot verbatim. A raced claim answers from the winner.
         match self
@@ -631,8 +589,6 @@ impl HostHandle {
         }
     }
 
-    /// Answers one [`ManagementViewRequest`] with the filtered view.
-    ///
     /// An empty section list selects every `Stage 2` section (`provider`,
     /// `model`, `consent`, `credential`); otherwise only requested known
     /// sections render and unknown names are skipped.
@@ -646,8 +602,6 @@ impl HostHandle {
         vec![view_frame(frame, live, view)]
     }
 
-    /// Builds the filtered setup view for the wanted sections.
-    ///
     /// Bodies carry display facts only — provider, model, consent revision,
     /// credential presence plus the bearer-source note — never secrets. The
     /// mark mirrors the consent revision so consent writes can check
@@ -716,7 +670,6 @@ impl HostHandle {
     }
 }
 
-/// Builds the view answering a store failure: no sections, pinned mark.
 fn unavailable_view() -> ManagementView {
     ManagementView {
         mark: ViewMarkWire(String::from("unavailable")),

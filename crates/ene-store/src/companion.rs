@@ -57,27 +57,17 @@ const SQL_SELECT_PENDING: &str = "SELECT undelivered_id, companion_id, source_me
 /// here so the lifecycle read, the generation compare, the history insert,
 /// and the optional undelivered insert share one `Immediate` transaction.
 ///
-/// Durable idempotency rests on the client-minted `(companion,
-/// command_id)`: a retry reuses the same command id with a fresh message
-/// id, so an in-transaction pre-check compares the stored
-/// [`RequestFingerprint`] against the incoming request's — the same
-/// fingerprint type every caller builds — and returns the original
+/// Durable replay rests on the client-minted `(companion, command_id)` key:
+/// an exact request fingerprint answers
 /// [`HistoryAppendOutcome::AlreadyCommittedAs`] without re-appending or
-/// re-registering undelivered. The fingerprint covers role, body,
-/// language, sending incarnation, and the canonical client round
-/// intent; round identity and its wire projection are the *accepted
-/// result*, not the request: the Host mints them per intake decision
-/// and a retry can re-intake into a newer round, so they never decide
-/// conflict — the replay answers the stored accept verbatim. A row
-/// whose fingerprint cannot be reconstructed (a pre-mark row) proves
-/// nothing: it is declined like any conflicting reuse, never guessed.
-/// The generation premise stays out of the fingerprint: it is enforced
-/// separately above, so a retry under a newer generation view still
-/// replays instead of conflicting. `local_id` is stored as
-/// correspondence metadata only and is never consulted here. `NULL` command ids carry no replay key and
-/// never collide. A reused key with a different request answers
-/// [`HistoryAppendOutcome::CommandConflict`] instead: declined without
-/// side effects, never rebound.
+/// re-registering undelivered; a reused key with a different or
+/// unreconstructable fingerprint answers
+/// [`HistoryAppendOutcome::CommandConflict`] with no side effects. Round
+/// identity and wire projection are the accepted result, not request
+/// content, so they never decide conflict. The generation premise stays out
+/// of the fingerprint (enforced separately above), so a retry under a newer
+/// generation view still replays; `NULL` command ids carry no replay key
+/// and never collide.
 fn append_history(
     conn: &Mutex<Connection>,
     cmd: &AppendHistoryCommand,
@@ -161,17 +151,6 @@ fn append_history(
         if let Some(row) = existing {
             let stored =
                 decode_history_message(cmd.companion, row).map_err(companion_unavailable)?;
-            // The durable key owns its request fingerprint, and the
-            // same [`RequestFingerprint`] type every caller builds is
-            // the only judge: an exact retry replays the original
-            // acceptance even when the Host re-intaked it into a newer
-            // round (round and its projection are the accepted result
-            // and travel verbatim from the stored row), while the same
-            // key with a different request — a different round intent
-            // included — is declined without side effects. A row
-            // without a reconstructable fingerprint proves nothing and
-            // declines the same way (fail-closed); so does a keyed
-            // incoming command without a round intent.
             let Some(stored_fingerprint) = stored.request_fingerprint() else {
                 return Ok((HistoryAppendOutcome::CommandConflict, None));
             };
@@ -358,9 +337,8 @@ impl HistoryRepository for Store {
         run_blocking(move || {
             let key = encode_id(companion.as_raw());
             let guard = lock_shared(&conn);
-            // Pure load: one statement, no transaction. Correspondence lookup for
-            // matching an input to its ack; durable replay keys on `command_id`
-            // instead (see `lookup_command`).
+            // Correspondence lookup for matching an input to its ack; durable
+            // replay keys on `command_id` instead (see `lookup_command`).
             let found: Option<HistoryRow> = guard
                 .query_row(
                     SQL_SELECT_HISTORY_BY_LOCAL_ID,
@@ -392,8 +370,8 @@ impl HistoryRepository for Store {
             let key = encode_id(companion.as_raw());
             let command_key = encode_id(command.0);
             let guard = lock_shared(&conn);
-            // Pure load: one statement, no transaction. Durable replay lookup on
-            // the `(companion, command_id)` key; `NULL` command ids never match.
+            // Durable replay lookup on the `(companion, command_id)` key; `NULL`
+            // command ids never match.
             let found: Option<HistoryRow> = guard
                 .query_row(
                     SQL_SELECT_HISTORY_BY_COMMAND,

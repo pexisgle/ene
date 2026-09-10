@@ -21,17 +21,13 @@ pub struct RegistrationFingerprint {
     pub intent_id: String,
     /// Intent kind discriminator (`"register"`).
     pub kind: String,
-    /// Intent target text.
     pub target: String,
     /// Base-view mark text the intent was built on.
     pub base: String,
-    /// Rationale origin text.
     pub rationale_origin: String,
-    /// Rationale quote, if the intent carried one.
     pub rationale_quote: Option<String>,
 }
 
-/// Decided registration state recorded by one atomic request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegistrationState {
     /// The pair is already usable as a one-time approval.
@@ -48,9 +44,7 @@ pub enum RegistrationState {
 /// journal instead of guessing it here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegistrationApply {
-    /// This call decided and recorded the state.
     Decided(RegistrationState),
-    /// An intent row already existed; nothing changed here.
     AlreadyDecided,
 }
 

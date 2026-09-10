@@ -1,9 +1,5 @@
-//! Builder shapes, socket path, in-memory codec roundtrips, the pure
-//! request-correlation decision, auth builders and decisions, guidance
-//! text, and session secrecy.
-//!
-//! No sockets are opened, the environment is never mutated, and frames
-//! go through the in-memory codec or plain in-memory scripts only.
+//! In-memory only: no sockets are opened and the environment is never
+//! mutated; frames go through the in-memory codec or plain in-memory scripts.
 
 use std::collections::VecDeque;
 
@@ -26,7 +22,7 @@ use super::session::{
 };
 use super::{platform_display, socket_path};
 
-/// Fixed incarnation so built frames are deterministic.
+/// Deterministic stand-in for a process incarnation.
 fn incarnation() -> ClientIncarnationId {
     ClientIncarnationId {
         counter: 0,
@@ -134,7 +130,6 @@ fn message_type_names_the_variant() {
     );
 }
 
-/// Builds a presence fact carrying `generation`.
 fn presence_fact(generation: u64) -> PresenceAttributionWire {
     PresenceAttributionWire {
         companion: CompanionWireRef(String::from("default")),
@@ -145,7 +140,6 @@ fn presence_fact(generation: u64) -> PresenceAttributionWire {
     }
 }
 
-/// Builds a stale-round answer carrying `current_generation`.
 fn stale_answer(current_generation: u64) -> WirePayload {
     WirePayload::RoundIntakeOutcome(ene_api::v1::round::RoundIntakeOutcomeWire::StaleRound {
         current_round: None,
@@ -263,7 +257,6 @@ fn incarnation_names_this_process_and_advances() {
     );
 }
 
-/// Builds a script frame with a controlled message ID and reply link.
 fn script_frame(
     payload: WirePayload,
     message_id: WireMessageId,
@@ -282,12 +275,11 @@ fn script_frame(
     frame
 }
 
-/// Builds a deterministic message ID from one integer.
 fn message_id(value: u128) -> WireMessageId {
     WireMessageId(uuid::Uuid::from_u128(value))
 }
 
-/// Builds an answer payload (the kind never matters to selection).
+/// The payload kind never matters to selection.
 fn answer_payload() -> WirePayload {
     WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 1))
 }
@@ -558,8 +550,7 @@ fn select_answer_defers_a_mismatch_then_answers() {
     );
 }
 
-/// Builds a history answer carrying `limit`, so out-of-order answers
-/// stay distinguishable by payload.
+/// Carries `limit` so out-of-order answers stay distinguishable by payload.
 fn history_answer(limit: u64) -> WirePayload {
     WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", limit))
 }

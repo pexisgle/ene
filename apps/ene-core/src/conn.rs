@@ -7,47 +7,33 @@
 //! [`DisconnectNotice`](ene_api::v1::handshake::DisconnectNotice) in the
 //! responses is terminal: it is written, then the connection closes.
 //!
-//! Single instance: [`run`] binds through `bind_singleton`, which tries the
-//! bind first and only treats `AddrInUse` as a possible live peer. A
-//! short-timeout connect probe then decides: connectable means a live Host
-//! already serves this data directory (error, no unlink), while refused (or
-//! any other connect failure) means a stale path, which is unlinked before
-//! rebinding. A connect timeout fails safe toward live: the path is left
-//! alone and the bind reports in use.
+//! Single instance: [`run`] binds through `bind_singleton`, which treats
+//! `AddrInUse` as a possible live peer and probes before deciding to unlink a
+//! stale path; a probe timeout fails safe toward live.
 //!
 //! Per-connection state lives in `ConnectionTable`, owned by this module:
 //! [`run`] mints one [`ConnectionWireId`] per accepted connection, pins the
-//! first incarnation it sees on that connection (a mismatch later drops the
-//! connection without a reply — the frame cannot be attributed to the pinned
-//! owner), and marks the connection paired after [`HostHandle::handle_frame`]
-//! answers [`Paired`](ene_api::v1::handshake::PairingResult::Paired) on it.
-//! A later [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted) answer
-//! on the connection marks it authenticated through
-//! `ConnectionTable::note_authed`, which also records it as the device's
-//! current authed connection: a newer authentication by the same device
-//! supersedes the older one, and the older connection goes stale implicitly
-//! (its record keeps `authed`, but it is no longer current, so the gate
-//! drops its domain frames). Each frame's [`LiveInput`] premises
-//! (`paired_device`, `connection_known`, `authed`, `connection_id`) come from
-//! this table, never from Client self-reports; the ingress gate in
-//! [`HostHandle::handle_frame`] trusts exactly these conn-filled premises,
-//! and the envelope connection id must equal the table id on every
-//! post-capability frame (the id is revealed to the Client only in
-//! `AuthResult::Accepted`, and pre-accept responses carry [`None`], so
-//! echoing it is the auth binding). Socket close forgets the entry and, when
-//! the closing connection was the last live one holding its paired device,
-//! reports the paired device string to
+//! first incarnation it sees (a mismatch later drops the connection without a
+//! reply, since the frame cannot be attributed to the pinned owner), and
+//! records pairing/authentication only from [`HostHandle::handle_frame`]
+//! answers. A newer authentication by the same device supersedes the older
+//! connection, which goes stale implicitly. Each frame's [`LiveInput`]
+//! premises come from this table, never from Client self-reports; the ingress
+//! gate in [`HostHandle::handle_frame`] trusts exactly these conn-filled
+//! premises, and the envelope connection id must equal the table id on every
+//! post-capability frame (the id is revealed only in `AuthResult::Accepted`,
+//! so echoing it is the auth binding). Socket close forgets the entry and
+//! reports the paired device to
 //! [`HostHandle::note_disconnect`](crate::serve::HostHandle::note_disconnect)
-//! so presence falls back to `NoActive`. Connection close and presence loss
-//! are deliberately separate: one device may hold several live connections,
-//! and closing one of them must not clear presence while the others stay
-//! live — only the last close for a device observes a disconnect.
+//! only when it was the device's last live connection: connection close and
+//! presence loss are deliberately separate, because one device may hold
+//! several live connections.
 //!
 //! Same-user proof without new dependencies: after binding, the listener reads
 //! the socket file owner through [`MetadataExt::uid`](std::os::unix::fs::MetadataExt)
-//! (the file is created by this process inside the `0700` data directory, so
-//! its owner is the Host user) and compares it against each peer credential
-//! uid from [`tokio::net::UnixStream::peer_cred`]. A mismatch, or an unreadable peer
+//! (created by this process inside the `0700` data directory, so its owner is
+//! the Host user) and compares it against each peer credential uid from
+//! [`tokio::net::UnixStream::peer_cred`]. A mismatch, or an unreadable peer
 //! credential, closes the connection before any frame is read: an unprovable
 //! peer is a trust violation, not a protocol peer, so it receives no bytes
 //! (not even a denial, which would be an oracle). [`LiveInput::peer_uid_ok`]
@@ -76,7 +62,6 @@ use ene_inference::ProviderTransport;
 
 use crate::serve::{CoreError, HostHandle};
 
-/// Socket filename inside the data directory.
 const SOCKET_NAME: &str = "ene.sock";
 
 /// Connect-probe timeout for the singleton check.
@@ -112,109 +97,80 @@ use tokio::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use crate::serve::LiveInput;
 
-/// Bound on the per-connection transport duplicate-suppression cache.
-///
-/// Enough to cover any realistic redelivery window on a local socket;
-/// beyond it the oldest ids roll off and a very late duplicate would
-/// re-process (message ids are sender-minted UUIDs, so a repeat after
-/// roll-off means a true transport duplicate, never a fresh send — fresh
-/// sends, including transport retries, always mint new ids).
+/// Bound on the per-connection transport duplicate-suppression cache, enough
+/// for any realistic redelivery window on a local socket. Beyond it the
+/// oldest ids roll off and a very late duplicate re-processes: message ids
+/// are sender-minted UUIDs, so a repeat after roll-off is a true transport
+/// duplicate, never a fresh send (fresh sends, including transport retries,
+/// always mint new ids).
 #[cfg(unix)]
 const SEEN_MESSAGE_CAP: usize = 128;
 
-/// What the connection table decides for one inbound frame.
-///
 /// Separates transport redelivery from terminal violations: a duplicate
-/// must drop silently with the connection kept, while an unknown
-/// connection, incarnation mismatch, or device-claim mismatch drops the
-/// frame and closes the connection. Collapsing both into `None` turned
-/// legitimate redelivery into connection loss — a distinct observable
-/// effect the §6.2 silent-drop contract forbids.
+/// drops silently with the connection kept, while an unknown connection,
+/// incarnation mismatch, or device-claim mismatch drops the frame and closes
+/// the connection. Collapsing both into `None` would turn legitimate
+/// redelivery into connection loss, a distinct observable effect the §6.2
+/// silent-drop contract forbids.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LiveDecision {
-    /// Process the frame under these premises.
     Ready(LiveInput),
-    /// Redelivery of an already-seen message id: drop before any domain
-    /// mapping and keep reading.
     Duplicate,
-    /// Unknown connection, incarnation mismatch, or device-claim mismatch:
-    /// drop and close.
     Invalid,
 }
 
-/// Per-connection pairing, incarnation, and authentication record.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectionRecord {
-    /// Device wire string paired on this connection, if any.
     paired_device: Option<String>,
-    /// First incarnation seen on this connection, pinned on first frame.
     incarnation: Option<ClientIncarnationId>,
-    /// Whether this connection completed the challenge/proof exchange.
-    ///
-    /// Set by [`ConnectionTable::note_authed`] after an `Accepted` answer;
-    /// never cleared except by forgetting the record. Staleness after a
-    /// superseding authentication is tracked separately in
-    /// [`ConnectionTableInner::device_current`]: the old record keeps this
-    /// flag, but [`ConnectionTable::live_for`] no longer reports the
-    /// connection as authed once it is not current.
+    /// Set by [`ConnectionTable::note_authed`] and never cleared; currency
+    /// after a superseding authentication lives in
+    /// [`ConnectionTableInner::device_current`].
     authed: bool,
-    /// Host-selected terms recorded when this connection answered
-    /// capability. Re-advertising supersedes (latest wins); the ingress
-    /// gate enforces the recorded major on every later frame.
+    /// Host-selected terms from the capability answer; re-advertising
+    /// supersedes (latest wins) and the ingress gate enforces the recorded
+    /// major on later frames.
     negotiated: Option<NegotiatedConnection>,
-    /// Recently seen transport message ids, oldest-first, for duplicate
-    /// suppression (IPC §6.1–6.2): a redelivered frame is dropped before
-    /// any domain mapping, so transport at-least-once never becomes
-    /// domain twice. Bounded by [`SEEN_MESSAGE_CAP`]; never a domain
-    /// identity, never consulted for correlation (that is `command_id` /
-    /// `request_id` / `reply_to`).
+    /// Recently seen transport message ids, oldest-first, bounded by
+    /// [`SEEN_MESSAGE_CAP`]. Transport duplicate suppression only (IPC
+    /// §6.1–6.2): never a domain identity, never consulted for correlation
+    /// (that is `command_id` / `request_id` / `reply_to`).
     seen_messages: std::collections::VecDeque<WireMessageId>,
 }
 
-/// Per-connection table owned by the listener.
-///
 /// Every method takes a short section over the inner maps and never awaits
 /// while holding it. Poisoning recovers the committed table: sections run
 /// plain map operations that never panic while holding the guard.
 #[cfg(unix)]
 #[derive(Debug, Default)]
 struct ConnectionTable {
-    /// Live connections by their Host-minted key, plus the per-device live
-    /// count, under one section so pairing and close stay atomic.
+    /// The per-device live count shares this section so pairing and close
+    /// stay atomic.
     inner: StdMutex<ConnectionTableInner>,
 }
 
-/// Connection records plus the per-device live-connection count.
-///
 /// `device_live` counts connections currently holding each paired device
-/// string: [`ConnectionTable::note_paired`] increments once when a
-/// connection first records its device (the device is immutable per
-/// connection thereafter), and [`ConnectionTable::note_closed`] decrements.
-/// Presence falls back only when the count for a device reaches zero, which
-/// keeps connection close (transport fact) separate from presence loss
-/// (domain fact).
+/// string: [`ConnectionTable::note_paired`] increments once when a connection
+/// first records its device (immutable per connection thereafter), and
+/// [`ConnectionTable::note_closed`] decrements. Presence falls back only at
+/// zero, keeping connection close (transport fact) separate from presence
+/// loss (domain fact).
 #[cfg(unix)]
 #[derive(Debug, Default)]
 struct ConnectionTableInner {
-    /// Live connections by their Host-minted key.
     records: HashMap<ConnectionWireId, ConnectionRecord>,
-    /// Live-connection count per paired device string.
     device_live: HashMap<String, usize>,
-    /// Current authed connection per paired device wire string.
-    ///
     /// Set by [`ConnectionTable::note_authed`]: a newer authentication by the
     /// same device overwrites the entry, so the older connection goes stale
     /// implicitly — [`ConnectionTable::live_for`] reports `authed` only while
     /// the entry still names the connection. Closing the current connection
-    /// clears the entry (a newer entry for another connection is never
-    /// cleared by an older close); the remaining live connections stay
-    /// unauthed until they complete a fresh challenge.
+    /// clears the entry (a newer entry is never cleared by an older close);
+    /// survivors stay unauthed until they complete a fresh challenge.
     device_current: HashMap<String, ConnectionWireId>,
 }
 
-/// Locks the connection table, recovering from poisoning.
 #[cfg(unix)]
 fn lock_table(table: &StdMutex<ConnectionTableInner>) -> MutexGuard<'_, ConnectionTableInner> {
     match table.lock() {
@@ -223,8 +179,6 @@ fn lock_table(table: &StdMutex<ConnectionTableInner>) -> MutexGuard<'_, Connecti
     }
 }
 
-/// Decrements the live count for `device`, dropping the entry at zero.
-///
 /// Zero-count entries are removed (rather than kept at zero) so that
 /// "still live" reads as map membership with no separate bookkeeping.
 #[cfg(unix)]
@@ -239,14 +193,12 @@ fn decrement_live(counts: &mut HashMap<String, usize>, device: &str) {
 
 #[cfg(unix)]
 impl ConnectionTable {
-    /// Creates an empty table.
     fn new() -> Self {
         Self {
             inner: StdMutex::new(ConnectionTableInner::default()),
         }
     }
 
-    /// Records an accepted connection under a freshly minted key.
     fn note_accept(&self) -> ConnectionWireId {
         let id = ConnectionWireId(uuid::Uuid::new_v4());
         lock_table(&self.inner).records.insert(
@@ -262,8 +214,6 @@ impl ConnectionTable {
         id
     }
 
-    /// Records the Host-selected terms answered on this connection,
-    /// superseding any earlier negotiation.
     fn note_negotiated(&self, id: &ConnectionWireId, terms: NegotiatedConnection) {
         if let Some(record) = lock_table(&self.inner).records.get_mut(id) {
             record.negotiated = Some(terms);
@@ -293,8 +243,6 @@ impl ConnectionTable {
         // dropped before it can pin incarnation, pair, or touch any domain
         // mapping. Fresh sends — including transport retries, which always
         // mint new ids — pass through and are recorded bounded-oldest-first.
-        // The record borrow ends before the currency read below: both go
-        // through the table guard, so they cannot overlap.
         let (device, record_authed) = {
             let Some(record) = table.records.get_mut(id) else {
                 return LiveDecision::Invalid;
@@ -350,13 +298,11 @@ impl ConnectionTable {
     ///
     /// Called only after [`HostHandle::handle_frame`] answers `Paired` on
     /// this connection, so the table records issuance, never a Client claim.
-    /// The paired device is immutable once set: the first `Paired` answer on
-    /// a connection is the only one recorded, so a connection can never move
-    /// its live count (or any other per-device bookkeeping) to another
-    /// device, and closing it can never strand an earlier device's liveness.
-    /// Host ingress denies a second pairing request on the same connection;
-    /// this set-once check keeps the invariant even if such a response is
-    /// ever emitted.
+    /// The paired device is immutable once set: a connection can never move
+    /// its live count to another device, and closing it can never strand an
+    /// earlier device's liveness. Host ingress denies a second pairing
+    /// request; this set-once check keeps the invariant even if such a
+    /// response is emitted.
     fn note_paired(&self, id: &ConnectionWireId, device_wire: &str) {
         let mut table = lock_table(&self.inner);
         let Some(record) = table.records.get_mut(id) else {
@@ -376,11 +322,8 @@ impl ConnectionTable {
     ///
     /// Called only after [`HostHandle::handle_frame`] answers `Accepted` on
     /// this connection, so the table records authentication, never a Client
-    /// claim. The connection becomes the device's current authed connection:
-    /// a newer authentication by the same device overwrites the entry and
-    /// the older connection goes stale implicitly. An unpaired connection
-    /// records nothing: acceptance without a paired device cannot happen,
-    /// and failing closed here keeps it that way.
+    /// claim. An unpaired connection records nothing: acceptance without a
+    /// paired device cannot happen, and failing closed here keeps it that way.
     fn note_authed(&self, id: &ConnectionWireId) {
         let mut table = lock_table(&self.inner);
         let Some(record) = table.records.get_mut(id) else {
@@ -396,15 +339,12 @@ impl ConnectionTable {
     /// Forgets a closed connection, returning its paired device, if any, and
     /// whether that device still holds another live connection.
     ///
-    /// The caller reports a returned device string to
+    /// The caller reports the device to
     /// [`HostHandle::note_disconnect`](crate::serve::HostHandle::note_disconnect)
     /// only when `device_still_live` is false: closing one of several live
-    /// connections for a device is a transport fact, not presence loss. A
-    /// second close for the same key returns [`None`] with false: forgetting
-    /// is idempotent. When the closing connection is the device's current
-    /// authed connection, the currency entry goes with it; an entry naming a
-    /// different (newer) connection is left alone, and the survivors stay
-    /// unauthed until they complete a fresh challenge.
+    /// connections is a transport fact, not presence loss. Forgetting is
+    /// idempotent, and closing the current authed connection clears its
+    /// currency entry; an entry naming a newer connection is left alone.
     fn note_closed(&self, id: &ConnectionWireId) -> (Option<String>, bool) {
         let mut table = lock_table(&self.inner);
         let Some(record) = table.records.remove(id) else {
@@ -422,13 +362,8 @@ impl ConnectionTable {
     }
 }
 
-/// Binds the singleton listener for `socket`.
-///
-/// Tries the bind first: success means no live peer and no stale path. An
-/// `AddrInUse` bind runs the connect probe — connectable means a live Host
-/// already serves this path (error, no unlink), while a refused probe means a
-/// stale path, which is unlinked before rebinding. Any other bind failure
-/// reports directly.
+/// Binds the singleton listener for `socket`, treating `AddrInUse` as a
+/// possible live peer and probing via [`probe_and_rebind`].
 ///
 /// # Errors
 ///
@@ -457,8 +392,6 @@ async fn probe_and_rebind(socket: &Path) -> Result<UnixListener, CoreError> {
         UnixStream::connect(socket),
     )
     .await;
-    // Only a refused (or otherwise failed) connect means stale. A timeout
-    // fails safe toward live: the path is left alone.
     let live = !matches!(probe, Ok(Err(_)));
     if live {
         return Err(CoreError::Bind(String::from(
@@ -479,13 +412,10 @@ async fn probe_and_rebind(socket: &Path) -> Result<UnixListener, CoreError> {
 ///
 /// Binds [`socket_path`] through the singleton check, proves each peer
 /// against the socket owner, and spawns one frame-loop task per authorized
-/// connection. The socket path is assembled here from `data_dir`: callers
-/// pass the data directory, never the socket path. The transport is the
-/// production `OpenAI` transport; the fake-friendly seam is
-/// [`HostHandle::handle_frame`], which this loop drives. There is no shutdown
-/// signal in `Stage 2`: the future resolves only on bind failure; otherwise it
-/// runs until killed. The handle is shared by reference (`Arc` with `&self`
-/// methods): no handle-wide lock spans provider I/O.
+/// connection, driving the fake-friendly [`HostHandle::handle_frame`] seam.
+/// There is no shutdown signal in `Stage 2`: the future resolves only on bind
+/// failure; otherwise it runs until killed. The handle is shared by reference
+/// (`Arc` with `&self` methods), so no handle-wide lock spans provider I/O.
 ///
 /// # Errors
 ///
@@ -529,8 +459,6 @@ where
     }
 }
 
-/// Runs one connection frame loop: read, handle, write, close on terminal.
-///
 /// An incarnation mismatch, a corrupt or oversize frame, or a terminal
 /// [`DisconnectNotice`](ene_api::v1::handshake::DisconnectNotice) in the
 /// responses ends the connection; close always forgets the table entry and
@@ -571,10 +499,7 @@ async fn serve_connection<T>(
         };
         let live = match table.live_for(&connection, &frame.envelope) {
             LiveDecision::Ready(live) => live,
-            // Transport redelivery: silent drop, connection kept.
             LiveDecision::Duplicate => continue,
-            // Unknown connection, incarnation mismatch, or device-claim
-            // mismatch: terminal.
             LiveDecision::Invalid => break,
         };
         let responses = handle.handle_frame(frame, live, transport.as_ref()).await;
@@ -624,9 +549,6 @@ async fn serve_connection<T>(
 }
 
 /// Windows stub: no listener yet.
-///
-/// The follow-up is a named-pipe listener behind the same
-/// [`HostHandle::handle_frame`] seam.
 ///
 /// # Errors
 ///

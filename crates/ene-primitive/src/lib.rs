@@ -1,15 +1,10 @@
-//! Shared opaque primitives (identity shape, monotonic order, wall clock).
+//! Shared opaque primitives: identity shape, monotonic order, wall clock, and
+//! directed correspondence.
 //!
 //! This crate is not a semantic owner: it holds no domain types, no wire
-//! DTOs, and no storage or OS dependencies.
-//!
-//! The five modules below share only shapes: opaque identity ([`RawId`]),
-//! monotonic content order ([`RevisionInner`]), lifecycle interval order
-//! ([`GenerationInner`]), wall-clock time with its creation offset
-//! ([`WallClockWithTz`]), and directed correspondence ([`DirectedPair`]).
-//! Downstream crates wrap these in domain newtypes (`CompanionId`,
-//! `TaskRevision`, `PresenceGeneration`, ...) and never convert between those
-//! newtypes.
+//! DTOs, and no storage or OS dependencies. Downstream crates wrap these
+//! shapes in domain newtypes (`CompanionId`, `TaskRevision`,
+//! `PresenceGeneration`, ...) and never convert between those newtypes.
 
 pub mod clock;
 pub mod correlation;

@@ -14,7 +14,6 @@ use super::refs::{ClientLocalId, CompanionWireRef, RoundWireId, StreamWireId, Te
 /// checks happen Host-side (IB X-B).
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SubmitTextInput {
-    /// Opaque Companion reference. Echoed, never interpreted.
     pub companion: CompanionWireRef,
     /// Target round, or [`None`] to join-or-mint. Old rounds are never
     /// rebound from this field. With [`fresh`](Self::fresh) set this field
@@ -31,9 +30,7 @@ pub struct SubmitTextInput {
     /// never silently reinterpreted.
     #[serde(default)]
     pub fresh: bool,
-    /// Client-local correspondence ID for matching acks to sends.
     pub local_id: ClientLocalId,
-    /// Message body. Redacted from [`core::fmt::Debug`].
     pub body: TextBodyWire,
 }
 
@@ -54,9 +51,8 @@ impl core::fmt::Debug for SubmitTextInput {
 /// the Host canonicalizes accepted text into History.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TextBodyWire {
-    /// Body text. Redacted from [`core::fmt::Debug`].
+    /// Redacted from [`core::fmt::Debug`].
     pub text: String,
-    /// Opaque language tag.
     pub lang: TextLangWire,
 }
 
@@ -75,51 +71,39 @@ impl core::fmt::Debug for TextBodyWire {
 /// [`None`] request is never auto-resent to work around a rejection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RoundIntakeOutcomeWire {
-    /// Accepted into this Host-issued round.
     AcceptedForRound {
-        /// Round the input joined.
         round: RoundWireId,
     },
     /// The premise round is not current.
     StaleRound {
-        /// Current round, if one is open.
         current_round: Option<RoundWireId>,
-        /// Current generation value the sender should observe next time.
+        /// Current generation the sender should observe next time.
         current_generation: u64,
     },
     /// A presence transition holds intake for now.
     HeldForTransition,
-    /// The premise needs refreshing before intake.
     NeedsRevalidation {
         /// Opaque reason, matched against a known set at Host ingress.
         reason: RevalidationReasonWire,
     },
 }
 
-/// Response stream opening: stream key, round, and generation together.
 /// Opening is neither presentation nor achievement.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TextStreamOpen {
-    /// Stream this opening starts, Host-issued by default.
     pub stream: StreamWireId,
-    /// Round the stream answers.
     pub round: RoundWireId,
-    /// Generation the stream belongs to.
     pub generation: u64,
 }
 
-/// One stream frame: per-stream order by `seq`, partial text, final flag.
-/// A frame without `is_final` never completes anything; gaps are never
-/// guessed over.
+/// Per-stream order by `seq`. A frame without `is_final` never completes
+/// anything; gaps are never guessed over.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TextStreamFrameWire {
-    /// Owning stream.
     pub stream: StreamWireId,
-    /// In-stream order.
     pub seq: u64,
-    /// Partial text. Redacted from [`core::fmt::Debug`].
+    /// Redacted from [`core::fmt::Debug`].
     pub delta: String,
-    /// Whether this frame closes the stream.
     pub is_final: bool,
 }
 
@@ -135,26 +119,20 @@ impl core::fmt::Debug for TextStreamFrameWire {
     }
 }
 
-/// How a stream ended, kept distinct: completion, interruption,
-/// cancellation, and staleness are different facts.
+/// Completion, interruption, cancellation, and staleness are different
+/// facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StreamClose {
-    /// Stream completed normally.
     Completed,
-    /// Stream interrupted before completion.
     Interrupted,
-    /// Stream cancelled.
     Cancelled,
-    /// Stream went stale (old stream, never rebound).
+    /// Old streams are never rebound.
     Stale,
 }
 
-/// Stream close record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TextStreamClose {
-    /// Stream that ended.
     pub stream: StreamWireId,
-    /// How it ended.
     pub status: StreamClose,
 }
 
@@ -162,11 +140,8 @@ pub struct TextStreamClose {
 /// Sending never equals reported.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConfirmPresentationWire {
-    /// Round the confirmation covers.
     pub round: RoundWireId,
-    /// Stream the confirmation covers, if stream-scoped.
     pub stream: Option<StreamWireId>,
-    /// Presentation status.
     pub status: PresentationStatus,
     /// Display reason. Operational metadata only: never a secret or a body
     /// copy, and redacted from [`core::fmt::Debug`] in depth.
@@ -185,23 +160,17 @@ impl core::fmt::Debug for ConfirmPresentationWire {
     }
 }
 
-/// Presentation status vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PresentationStatus {
-    /// Presented.
     Presented,
-    /// Presentation unknown. Sticky: never upgraded by resend.
+    /// Sticky: never upgraded by resend.
     Unknown,
-    /// Presentation failed.
     Failed,
 }
 
-/// Who produced a history item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HistoryRole {
-    /// The Owner.
     Owner,
-    /// The Companion.
     Companion,
 }
 
@@ -210,11 +179,9 @@ pub enum HistoryRole {
 /// design): filtered facts only, never undelivered reporting.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HistoryItem {
-    /// Round this item belongs to.
     pub round: RoundWireId,
-    /// Who produced it.
     pub role: HistoryRole,
-    /// Item text. Redacted from [`core::fmt::Debug`].
+    /// Redacted from [`core::fmt::Debug`].
     pub text: String,
     /// Wall-clock rendering (RFC 3339 with offset), display only.
     pub at: String,
@@ -232,21 +199,17 @@ impl core::fmt::Debug for HistoryItem {
     }
 }
 
-/// Timeline restore request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HistoryRequest {
-    /// Opaque Companion reference.
     pub companion: CompanionWireRef,
     /// Items at or after this wall-clock rendering, if bounded.
     pub since: Option<String>,
-    /// Maximum items to return.
     pub limit: u64,
 }
 
-/// Timeline restore answer: filtered display facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryView {
-    /// Restored items, oldest first.
+    /// Oldest first.
     pub items: Vec<HistoryItem>,
 }
 

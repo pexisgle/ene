@@ -1,20 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
-/// Schema version applied by [`run`](run).
-///
-/// Version 2 adds the nullable `history_message.local_id` column with its
-/// device-pairing tables (the companion-local unique index it briefly
-/// carried is dropped again by version 3). Version 3 adds the nullable
-/// `history_message.command_id` column with the durable
-/// `(companion_id, command_id)` unique replay index; `local_id` stays as
-/// correspondence metadata only. Version 4 adds the `credential_pending`
-/// table for registration approvals; the usable marker stays
-/// `credential_ref`, so no approved table is created. Version 8 adds the
-/// nullable `history_message.round_intent` / `round_intent_ref` columns
-/// that persist the client round intent of the request fingerprint.
 const CURRENT_VERSION: u64 = 8;
 
-/// Forward-only schema: tables first, then the supporting indexes.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
 companion_id TEXT PRIMARY KEY,
@@ -82,14 +69,8 @@ CREATE INDEX IF NOT EXISTS idx_history_message_round ON history_message (round_i
 CREATE INDEX IF NOT EXISTS idx_undelivered_companion_status ON undelivered (companion_id, status);
 ";
 
-/// Version 2 upgrade, applied once when the stored version is below 2.
-///
-/// Forward-only: existing history rows keep `local_id` NULL, and the new
-/// tables use `IF NOT EXISTS` so a fresh database and an upgraded one
-/// converge on the same shape. `NULL` local ids never collide under the
-/// unique index because SQLite treats each `NULL` as distinct. Version 3
-/// drops this index again when it promotes `command_id` to the durable
-/// replay key; the column itself stays as correspondence metadata.
+/// Existing history rows keep `local_id` NULL; fresh and upgraded databases
+/// converge via `IF NOT EXISTS`.
 const MIGRATION_V2: &str = "
 ALTER TABLE history_message ADD COLUMN local_id TEXT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_companion_local ON history_message (companion_id, local_id);
@@ -105,27 +86,20 @@ paired_at TEXT NOT NULL
 CREATE INDEX IF NOT EXISTS idx_paired_device_descriptor ON paired_device (descriptor);
 ";
 
-/// Version 3 upgrade, applied once when the stored version is below 3.
-///
-/// Forward-only: existing history rows keep `command_id` NULL, and `NULL`
-/// command ids never collide under the new unique index because SQLite
-/// treats each `NULL` as distinct. The retired
-/// `(companion_id, local_id)` unique index is dropped; the `local_id`
-/// column stays as stored correspondence metadata, never a key.
+/// Existing history rows keep `command_id` NULL, and `NULL` command ids never
+/// collide under the new unique index because SQLite treats each `NULL` as
+/// distinct. The retired `(companion_id, local_id)` unique index is dropped;
+/// the `local_id` column stays as stored correspondence metadata, never a key.
 const MIGRATION_V3: &str = "
 ALTER TABLE history_message ADD COLUMN command_id TEXT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_companion_command ON history_message (companion_id, command_id);
 DROP INDEX IF EXISTS idx_history_message_companion_local;
 ";
 
-/// Version 4 upgrade, applied once when the stored version is below 4.
-///
-/// Forward-only: introduces `credential_pending` for registration
-/// approvals. Fresh and upgraded databases converge via `IF NOT EXISTS`;
-/// no pre-existing rows can reference the new table, so nothing is
-/// backfilled. The usable marker stays `credential_ref` (the register
-/// flow creates the ref only at approval time), so no approved table is
-/// created here.
+/// Introduces `credential_pending` for registration approvals; pre-existing
+/// rows cannot reference the new table, so nothing is backfilled. The usable
+/// marker stays `credential_ref` (the register flow creates the ref only at
+/// approval time), so no approved table exists.
 const MIGRATION_V4: &str = "
 CREATE TABLE IF NOT EXISTS credential_pending (
 provider TEXT NOT NULL,
@@ -135,20 +109,13 @@ PRIMARY KEY (provider, label)
 );
 ";
 
-/// Version 5 upgrade, applied once when the stored version is below 5.
-///
-/// Forward-only: adds the opaque wire projections and the replay
-/// fingerprint. `history_message.round_wire` carries the only round
-/// string that ever crosses the wire (minted fresh per round,
-/// unrelated to the domain bytes); `client_counter`/`client_random`
-/// carry the sending incarnation for fingerprint comparison; all three
-/// stay `NULL` on pre-existing rows, which read back as absent. Same
-/// for `paired_device.wire` (opaque device projection with a uniqueness
-/// guard for new rows), except pre-existing paired rows are backfilled
-/// to the legacy continuity projection (their device identity rendering)
-/// so already-provisioned clients keep resolving after migration; new
-/// approvals mint a fresh opaque projection instead. Fresh and upgraded
-/// databases converge via `IF NOT EXISTS`; nothing else is backfilled.
+/// Adds the opaque wire projections and the replay fingerprint. `round_wire`
+/// is the only round string that ever crosses the wire (minted fresh per
+/// round, unrelated to the domain bytes); `client_counter`/`client_random`
+/// carry the sending incarnation for fingerprint comparison. Pre-opaque rows
+/// keep all three `NULL` and read back as absent. Pre-existing paired devices
+/// are backfilled to their identity rendering so already-provisioned clients
+/// keep resolving; new approvals mint a fresh opaque projection instead.
 const MIGRATION_V5: &str = "
 ALTER TABLE history_message ADD COLUMN round_wire TEXT NULL;
 ALTER TABLE history_message ADD COLUMN client_counter INTEGER NULL;
@@ -158,17 +125,12 @@ UPDATE paired_device SET wire = device_id WHERE wire IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_device_wire ON paired_device (wire);
 ";
 
-/// Version 6 upgrade, applied once when the stored version is below 6.
-///
-/// Forward-only: introduces `management_intent` for durable management
-/// intent replay (design §18.2 idempotency keys). Each row binds one
-/// intent key to the fingerprint it decided on plus its terminal
-/// outcome snapshot, so an exact retry replays without re-executing
-/// while a reused id with new content conflicts instead of rebinding.
-/// Fresh and upgraded databases converge via `IF NOT EXISTS`; no
-/// pre-existing rows can reference the new table, so nothing is
-/// backfilled. Intents decided before this version simply have no
-/// replay row: their retries take the normal premise-checked path.
+/// Introduces `management_intent` for durable management intent replay
+/// (design §18.2 idempotency keys): each row binds one intent key to the
+/// fingerprint it decided on plus its terminal outcome snapshot, so an exact
+/// retry replays without re-executing while a reused id with new content
+/// conflicts instead of rebinding. Intents decided before this version have
+/// no replay row; their retries take the normal premise-checked path.
 const MIGRATION_V6: &str = "
 CREATE TABLE IF NOT EXISTS management_intent (
 intent_id TEXT PRIMARY KEY,
@@ -182,16 +144,12 @@ mark TEXT NULL
 );
 ";
 
-/// Version 7 upgrade, applied once when the stored version is below 7.
-///
-/// Forward-only: introduces `inference_attempt` for the provider-I/O
-/// linearization point. Each row claims one ticket's attempt under one
-/// consent premise in the same short transaction that verifies it, so a
-/// consent mutation either precedes the claim (the claim fails stale
-/// before any byte leaves) or follows it (adoption decides separately).
-/// Fresh and upgraded databases converge via `IF NOT EXISTS`; ticket
-/// ids are single-use, so nothing is backfilled and re-claiming one
-/// ticket answers stale instead of sending twice.
+/// Introduces `inference_attempt` for the provider-I/O linearization point:
+/// one ticket's attempt is claimed under one consent premise in the same
+/// short transaction that verifies it, so a consent mutation either precedes
+/// the claim (the claim fails stale before any byte leaves) or follows it
+/// (adoption decides separately). Ticket ids are single-use, so re-claiming
+/// one answers stale instead of sending twice.
 const MIGRATION_V7: &str = "
 CREATE TABLE IF NOT EXISTS inference_attempt (
 ticket TEXT PRIMARY KEY,
@@ -203,27 +161,22 @@ started_at TEXT NOT NULL
 );
 ";
 
-/// Version 8 upgrade, applied once when the stored version is below 8.
-///
-/// Forward-only: adds the persisted client round intent of the history
-/// request fingerprint (`round_intent` kind, `round_intent_ref`
-/// payload). The intent is request semantics — Auto, force-new, or a
-/// join of the round reference the Client sent — so a restart can still
-/// decide replay from durable state. Pre-existing rows keep both
-/// columns `NULL`: their intent was never stored, so their sameness
-/// cannot be proven and every replay attempt against them fails closed
-/// instead of being guessed.
+/// Persists the client round intent of the history request fingerprint
+/// (`round_intent` kind, `round_intent_ref` payload). The intent is request
+/// semantics — Auto, force-new, or a join of the Client-supplied round
+/// reference — so a restart can still decide replay from durable state.
+/// Pre-existing rows keep both columns `NULL`: their intent was never stored,
+/// so their sameness cannot be proven and replay attempts against them fail
+/// closed instead of being guessed.
 const MIGRATION_V8: &str = "
 ALTER TABLE history_message ADD COLUMN round_intent TEXT NULL;
 ALTER TABLE history_message ADD COLUMN round_intent_ref TEXT NULL;
 ";
-/// Creates or upgrades the schema on an open connection.
-///
-/// Atomic: pending migrations and the version bump commit together in
-/// one transaction, so a crash mid-migration rolls back to the
-/// pre-migration state and the next open retries from scratch. The
-/// commit is the sole version-advancement boundary. Rejects a database
-/// newer than this binary understands instead of guessing.
+/// Atomic: pending migrations and the version bump commit together in one
+/// transaction, so a crash mid-migration rolls back to the pre-migration
+/// state and the next open retries from scratch. The commit is the sole
+/// version-advancement boundary. Forward-only: a database newer than this
+/// binary understands is rejected instead of guessing.
 pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)

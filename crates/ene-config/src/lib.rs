@@ -1,17 +1,7 @@
 //! Typed process configuration: values, OS paths, and JSON schema.
 //!
-//! Holds no domain state, no secrets, and no runtime judgments.
-//!
-//! The crate owns three pieces and nothing else:
-//!
-//! * [`Config`] ([`typed`]): the minimal `Stage 1` configuration value with
-//!   layered loading and validation.
-//! * OS data directory resolution ([`paths`]): explicit override handling on
-//!   top of the OS default, without side effects.
-//! * JSON Schema generation ([`schema`]): the machine-readable shape of
-//!   [`Config`] for tooling, without file output.
-//!
-//! This crate has no dependencies on other `ene` crates.
+//! Holds no domain state, no secrets, and no runtime judgments; owns only the
+//! three modules below and depends on no other `ene` crate.
 
 pub mod paths;
 pub mod schema;
