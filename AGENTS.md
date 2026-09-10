@@ -34,8 +34,7 @@ No `default-members`: bare `cargo test` / `cargo clippy` cover the workspace.
 - Diagnostics use structured `tracing`.
 - Prefer the narrowest visibility; `pub(crate)` by default unless an API must
   be public.
-- Keep shared dependencies in root `[workspace.dependencies]` when more than
-  one package shares version policy.
+- Keep external dependency version policy in root `[workspace.dependencies]`.
 - Workspace clippy policy is authoritative. Do not weaken lints to make
   unrelated code pass.
 - Every `unsafe` block requires a preceding `// SAFETY:` comment that states
