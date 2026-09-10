@@ -2,25 +2,44 @@
 
 ## 現在の milestone
 
-- Stage 2 Setup とテキスト会話の最初の縦断 slice（レビュー指摘対応中）
+- Stage 2 Setup とテキスト会話の最初の縦断 slice — merge 準備完了（production blocker 0）
 
 ## 完了した milestone
 
 - Stage 0 repository / build foundation
 - Stage 1 最小 foundation と共有 contract
 
-## 次に進む領域
+## Stage 2 で成立したもの
 
-- Stage 2 rework（#1360）: production 経路の E2E は green（実 binary E2E `binaries_drive_send_stream_history_and_restart` 追加）。レビュー残件の第2ラウンド対応済み、レビュアー応答待ち
-  - 追加対応: replay fingerprint（round/role/text/lang/round-wire/incarnation）と `CommandConflict` → wire reject、durable replay ack（restart-safe）、opaque device/round/presence 投影、`find_device_by_wire` による proof 解決、negotiated-major 強制、management shortcut の base 前提強制、credential approval 単一 TX、client retry API（`retry`/`retry_frame`）
-  - 下位 restack: opaque wire 契約・`CommandConflict`・`RejectKind::ConflictingCommand`（#1356）、V5 migration・fingerprint 比較・atomic approval（#1358）
-- 上記 stack の bottom-up merge 後に Stage 3（Learning）へ進む
-- shared error crate は作らない（owner-local 維持）
+- Production 経路: `ene-core serve`（Unix socket listener、same-UID peer check、pairing → capability negotiation → challenge/proof 認証、Host-local device / credential approval）と実 `ene-ctl`（setup / send / watch / history）が実 binary E2E で接続。
+- 会話縦断: Host 発行 round → Owner text intake → OpenAI Responses inference → stream / presentation confirm → durable history。
+- 再起動復元: 保存済み timeline の復元と、Host 再起動後の継続送信（実 binary E2E `binaries_drive_send_stream_history_and_restart`）。
+- Command replay: `RequestFingerprint` = role + body + language + sending incarnation + canonical client round intent が唯一の replay 比較。accepted result（domain round / Host 発行 wire projection）は replay 判定に使わない。same id + different content は `ConflictingCommand`、restart 後も exact retry は stored accept を verbatim replay。
+- Round: `RoundIntentMark::{Auto, New, Existing}` が canonical client intent。force-new は round premise を持たず（premise があれば自己矛盾として `StaleRound`）、round projection は同一 round への並行 submit でも atomic get-or-create で単一 wire。
+- ManagementIntent: `intent_id` keyed durable replay を write-once で保持（plain INSERT、in-transaction claim check、race loser は winner を再読）。malformed consent target も `record_decided()` を通り、store failure 時は decided outcome を返さず `HeldByOperation`（durable-before-visible）。
+- Inference attempt start の linearization、consent / currentness の compare-before-commit、transport duplicate suppression。
+- Validation: workspace unit / store / vertical slice と production binary E2E。Linux / Windows CI green。
 
 ## 未解決 blocker
 
-- #1360 レビュー第10ラウンド（レビュー 5158798688＋コメント 5613441143）対応済み・CI success 確認済み: request fingerprint/accepted result 分離、round 1:1 projection、client テスト Result 化、roundtrip/decide_frame 一本化、payload_kind→message_type 委譲
-- #1360 レビュー第11ラウンド対応: replay の semantic identity を一箇所へ収束。canonical client round intent（Auto / force-new / explicit join）を request fingerprint に追加し、restart 対比は schema V8（`round_intent` 列）で durable 化、pre-mark row は fail-closed（`CommandConflict`）。Host 側の先行判定は store と同一の `RequestFingerprint` 比較に一本化（`command_matches` 削除、dead `RevalidationReason::CommandMismatch` 削除）。round projection は同一 round への並行 submit でも単一 wire を返す atomic get-or-create。`retry_after_round_advance_replays_the_stored_accept` を exact retry（request fields 不変）に修正し、fresh/round-intent 変更 conflict・同 round 並行 join・restart verbatim replay の回帰テスト追加、round regression tests の silent pass を Result 化で解消。層別コミット済み（contracts / store / wiring）、CI success 確認済み
-- #1360 レビュー第12ラウンド対応: force-new の carrier rule を一つに統一。`fresh=true` は設計の round-less 新規 round 要求（§13.1: `round=None`, `round_view=None`）で premise を持たないため、payload `round` / envelope `round_view` のいずれかに premise があれば自己矛盾として `StaleRound` で decline（黙って flag 扱いにしない）。DTO rustdoc（#1356）を「ignored」から carrier rule へ更新し、`fresh + round` / `fresh + round_view` / `fresh + mismatched` / legal premise-free force-new の回帰テスト追加。層別コミット済み、CI success 確認済み
-- 残りは返信済み：TOCTOU・intent・replay スレッドは実装で応答、transport retry P2 受諾、Stage 5 defer 群は継続
-- マージ順: #1355 → #1356 → #1358 → #1359 → #1360
+- なし（Stage 2 production blocker: 0）
+
+## Deferred（later-stage tracking）
+
+- Stage 5 Client lifecycle / presence / recovery（[実装ガイド](README.md) の Stage 5 で扱う。#1360 review threads）:
+  - current authenticated connection 消失後の presence fallback edge。
+  - superseded connection が同一 socket 上で handshake phase へ戻れる問題。
+- P2 / later hardening（#1360 review threads）:
+  - Client lost-reply retry API: 最初の `request()` が生成した command id を caller が保持できない。
+  - `ClientIncarnationId` の process-boot semantics。
+  - paired connection の missing `device_id` strictness と post-auth `Reject` sender。
+  - display descriptor と multi-device pairing identity の分離。
+  - future / unknown `WirePayload` variant の codec compatibility。
+
+## merge 順
+
+- #1355 → #1356 → #1358 → #1359 → #1360（bottom-up）
+
+## 次の Stage
+
+- Stage 3 Experience Summary / Memory。共有 contract が安定していれば Stage 4 Task / Action を並列で開始可能（[実装ガイド](README.md) の並列化条件に従う）。
