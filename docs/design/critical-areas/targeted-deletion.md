@@ -15,7 +15,7 @@ Targeted deletionを「各storeからdeleteする手順」へ落とすと、次�
 | 一つのstoreやcoordinatorの成功、LLMの納得で全域完了にする。 | 局所完了と全域完了の分離、pending／unreachable／failed verificationの扱い、全域完了の成立条件。 |
 | 作用記録・Audit・完了説明へ対象本文を残す。 | 保持すべき事実と保持してはいけない対象本文の区別。 |
 
-今回の範囲は、消去要求の同一性、対象の追跡・識別、既存ownerの参加範囲、実行中活動との競合、再保存防止、再起動等を跨ぐ保持、全域完了、事実と本文の区別までとする。Contextの情報選択・Provider適応の一般契約は[Context Assembly](context-assembly.md)を、認可判断と実作用・確定度・不明の一般契約は[Action Execution](action-execution.md)を利用し、再定義しない。Client帰属の調停手順、backup／restoreの切替手順、Permission評価全体、Learning形成algorithmは、それぞれの既存契約を利用する隣接領域である。
+本書の範囲は、消去要求の同一性、対象の追跡・識別、既存ownerの参加範囲、実行中活動との競合、再保存防止、再起動等を跨ぐ保持、全域完了、事実と本文の区別までとする。Contextの情報選択・Provider適応の一般契約は[Context Assembly](context-assembly.md)を、認可判断と実作用・確定度・不明の一般契約は[Action Execution](action-execution.md)を利用し、再定義しない。Client帰属の調停手順、backup／restoreの切替手順、Permission評価全体、Learning形成algorithmは、それぞれの既存契約を利用する隣接領域である。
 
 Targeted deletionは、通常の忘却、訂正、失効、置換、統合、History／logの通常削除・retention、Companion deletion、設定Reset／全データResetとは異なる目的の操作である。同じ削除mechanismを使えても目的は変わらない。本書の契約はこの目的差を変えない。
 
@@ -303,9 +303,9 @@ Targeted deletion、保持期間の短縮、手動削除は、対象をene内部
 
 Companion削除は個体固有の現在状態・学習状態等の削除であり、過去に存在し会話・活動した記録を消す操作ではない。Targeted deletionが重なる対象本文は、Companion削除後の残存記録からも除去する。個体削除では必要なhistorical recordを残せるが、targeted deletionが重なる対象本文は残せない。
 
-## 10. Runtime FlowsとCross-cutting Designへ戻した検証
+## 10. Runtime FlowsとCross-cutting Designに対する横断検証
 
-[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](../architecture/cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)へ、正常系と意味のある競合・障害を戻して照合した。
+[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](../architecture/cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)に対する、正常系と意味のある競合・障害のwalkthroughは次のとおりである。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -341,11 +341,11 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task待ちにしない。機械的消去をLLM待ちにしない。 |
 | CC-07 | transport・Tool・Task・報告・監査の確定度を分け、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。 |
 
-State Ownership、Dependency Rulesとの照合では、semantic owner、Host／Client配置、trust／failure boundary、lifecycle、permission／consent semanticsを変更する必要は見つかっていない。新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Deletion Managerを導入していない。通常History保持、Companion削除、targeted deletion、backup／restoreはSO・DRの異なるlifecycleを維持する。
+本書はsemantic owner、Host／Client配置、trust／failure boundary、lifecycle、permission／consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Deletion Managerを導入しない。通常History保持、Companion削除、targeted deletion、backup／restoreはSO・DRの異なるlifecycleを維持する。
 
-## 11. 後続設計への引渡しと残す自由度
+## 11. 本書が固定する契約と残す Design Freedom
 
-後続のstate representation／persistence／concurrency／interface設計は、次を固定された契約として利用できる。
+下位設計は、次を本書が固定した契約として利用できる。
 
 - 消去要求は目的・対象記述・消去区間・完了境界の対応であり、保存場所の指定ではない。機械的条件は必須・LLM非依存、意味的条件は補助・完全性なし、既知依存の追跡は免除されない。
 - 各ownerは自分の保持・利用範囲について参加し、coordinatorは成立を調整する。対象を復元できる内部state・過去根拠・派生物・一時data・処理中利用は列挙の有無にかかわらず参加する。ene管理下の内部copyは除外せず、外部copyは成功条件に含めない。
@@ -355,7 +355,7 @@ State Ownership、Dependency Rulesとの照合では、semantic owner、Host／C
 - 全域完了は、内部全域の除去または復元不能化、機械的残存検証、区間内再到着の取込み、再保存・再形成防止、未完了集約の全体である。未確認・検証失敗を完了にしない。
 - 保持すべき事実と保持してはいけない対象本文を区別し、完了記録・Auditを復元源にしない。
 
-今回絞り込んだ禁止選択肢は、canonical削除だけでの完了、遅延結果の新Experience扱い、Client copyでのHost上書き・自動replay、古い根拠からの自動再形成、cache hitでの制約省略、Provider sessionの無条件再利用、確認不能の成功扱い、LLMの納得での完了、外部copy消去の内部完了条件化、内部copyの外部扱い除外、作用記録を理由とする本文保持、不明の成功・失敗・未実行への変換と自動replay、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
+本書が採れない選択肢として除外するのは、canonical削除だけでの完了、遅延結果の新Experience扱い、Client copyでのHost上書き・自動replay、古い根拠からの自動再形成、cache hitでの制約省略、Provider sessionの無条件再利用、確認不能の成功扱い、LLMの納得での完了、外部copy消去の内部完了条件化、内部copyの外部扱い除外、作用記録を理由とする本文保持、不明の成功・失敗・未実行への変換と自動replay、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
 
 以下は意図的に残すDesign Freedomである。
 

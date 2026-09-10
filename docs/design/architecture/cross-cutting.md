@@ -285,8 +285,4 @@ crate／module、Rust trait／type、concrete API、middleware・interceptor・h
 
 観測停止時の取得済み候補をどこまで処理するか、切断Clientの消去完了根拠、旧live結果を区別する具体手段等は、既決の制約を満たす後続設計上の自由度として残る。必要な確認を省く、現在同意を広げる、未完了を成功とする自由度はない。意味的一致の完全検出、外部作用のrollback、exactly-once実行・配信等の未保証事項を新しい保証へ変えていない。
 
-Architecture Review #1の解決済み事項は維持した。Stopped個体のpresenceなし、Observer専用assignment、個体削除後のhistorical record保持、Host自動起動設定の入出力・提示による所有を変更していない。公開地域・対象年齢等の留保、ReleaseごとのSupport Matrix・性能budgetも既存文書に残す。
-
-### 引渡し
-
-Architecture Review #2は、Owner decisions RA-01〜06を要件へ反映し、F-01〜03を独立に再評価して既存architectureへ統合したことでclosedとして扱える。判断と対応は[Architecture Drivers第3節](architecture-drivers.md#3-requirement-issues)に記録し、独立レビュー記録自体は変更しない。後続の詳細設計では各mechanismがCC-01〜07の参加責任・失敗時条件を満たすことを示す必要がある。
+下位設計は、各mechanismがCC-01〜07の参加責任・失敗時条件を満たすことを示す。

@@ -279,9 +279,9 @@ Credential値は通常contentに含めない。登録済みCredential値は、�
 
 対象記述・package内容の伝達・保持にprivate本文・秘密の複製を増やさない。由来を保存するという理由で削除本文やCredentialを別保管しない。制限情報や識別用の値も対象情報を復元できるなら保護・消去対象であり、完了記録・Audit・説明へ対象本文を戻さない。
 
-## 9. 後続設計への引渡しと残す自由度
+## 9. 本書が固定する契約と残す Design Freedom
 
-後続の crate / module / interface / state / persistence / concurrency設計は、次を固定された契約として利用できる。
+下位設計は、次を本書が固定した契約として利用できる。
 
 - Character静的・適用関係・経験状態の意味owner分離（第2〜3節）と、各責務のauthoritative判断・非所有は、そのままinterface・stateの分割根拠にできる。一つのCharacter objectへの経験統合、一つのCompanion objectへの静的・経験の統合、一つのLearning storeへの静的・経験の統合はいずれも採れない。
 - 受渡しCD-1〜CD-7は、呼出し方向・同期順序・payload中継経路を固定せずとも、要求開始・判断確定・受渡内容・前提保持・結果受入の対応としてinterface・state representationで表現できなければならない。
@@ -294,7 +294,7 @@ Credential値は通常contentに含めない。登録済みCredential値は、�
 - 旧backupの明示restoreによる復活は別操作として事前説明・Audit・保留・現在再評価を経る。自動再消去・自動再利用のいずれもしない。
 - Character削除は既存Companionの経験・記録を削除せず、必要な由来resource喪失はdanglingとして未解決にする。黙った置換・replay・復活のinterfaceは不可である。
 
-今回絞り込んだ禁止選択肢は、一つの編集可能contextへの静的・経験・制御の集約、Characterによる個体state・Learning意味の直接更新、認識・学習による静的定義の書換え、revision存在の適用済み化・適用の自動実行・黙った上書き・巻戻し・Global化、package由来Skillの自動Global化・削除時の自動昇格、単独importのscope選択の省略、import・validation成功の権限・秘密・同意・実行authority化、package内記述のOwner指示化・制御変更化、validationの実行許可化、exportへのprivate混入、Character削除の経験・記録へのcascade、必要な由来resource喪失の黙った置換・replay、古い判定・cached許可・解決済み経路での新規開始、不明の未実行・失敗・成功への変換と自動replay、遅延結果の新目的への自動採用、古い根拠からの自動再形成・cache hitでの制約省略・Provider sessionの無条件再利用、確認不能の成功扱い、部分正本・混合・権限先行復活・未完了の成功表示、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
+本書が採れない選択肢として除外するのは、一つの編集可能contextへの静的・経験・制御の集約、Characterによる個体state・Learning意味の直接更新、認識・学習による静的定義の書換え、revision存在の適用済み化・適用の自動実行・黙った上書き・巻戻し・Global化、package由来Skillの自動Global化・削除時の自動昇格、単独importのscope選択の省略、import・validation成功の権限・秘密・同意・実行authority化、package内記述のOwner指示化・制御変更化、validationの実行許可化、exportへのprivate混入、Character削除の経験・記録へのcascade、必要な由来resource喪失の黙った置換・replay、古い判定・cached許可・解決済み経路での新規開始、不明の未実行・失敗・成功への変換と自動replay、遅延結果の新目的への自動採用、古い根拠からの自動再形成・cache hitでの制約省略・Provider sessionの無条件再利用、確認不能の成功扱い、部分正本・混合・権限先行復活・未完了の成功表示、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
 
 以下は意図的に残すDesign Freedomである。
 
@@ -314,7 +314,7 @@ crate / module、Rust struct / enum / trait、concrete API・error型、middlewa
 
 ## 10. 横断検証
 
-requirements・Subsystem Decomposition・State Ownership・Dependency Rules・Runtime Flows・Cross-cutting・Step 11・既存Step 12 artifactへ戻して横断検証した。固定scenario一覧の充足ではなく、正常系と本Subsystemにとって意味のある failure / stale / revision / import / deletionを選んで walkthroughした。
+requirements・上位architecture・critical-area契約・他のSubsystem設計に対する横断検証は次のとおりである。固定scenario一覧の充足ではなく、正常系と本Subsystemにとって意味のある failure / stale / revision / import / deletionを選んでwalkthroughする。
 
 | 領域・交差 | walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -347,9 +347,9 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task・適用完了待ちにしない。機械的検証をLLM待ちにしない。 |
 | CC-07 | 受付・受理・作用・記録保存・Task達成・報告を別の事実とし、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。適用供給済みを適用済み・提示済みにしない。 |
 
-State Ownership・Dependency Rulesとの照合では、semantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更する必要は見つかっていない。新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Character Manager・統一character state machine・共通package layerを導入していない。通常History保持、Companion削除、targeted deletion、backup / restore・ResetはSO・DRの異なるlifecycleを維持する。
+本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Character Manager・統一character state machine・共通package layerを導入しない。通常History保持、Companion削除、targeted deletion、backup / restore・ResetはSO・DRの異なるlifecycleを維持する。
 
-既存Step 12 artifact（個体・作業・学習、権限・実行クラスタ、接続・提示・観測、保全・消去）との照合では、静的・適用・経験・制御・秘密・作用・帰属・保全の間に新しいsemantic ownerや第二の正本を生んでいない。静的内容・revisionはCharacter、適用関係は個体調整、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、作用確定度は実行・拡張、帰属は接続・存在、round・提示は入出力・提示、対象・時機・routingは共有観測、全域成立は保全・消去に残り、本書のCD-1〜CD-7はその受渡しの対応付けである。scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持、旧backup交差の各契約は各文書で同一である。
+他のSubsystem設計（個体・作業・学習、権限・実行クラスタ、接続・提示・観測、保全・消去）との照合では、静的・適用・経験・制御・秘密・作用・帰属・保全の間に新しいsemantic ownerや第二の正本を生まない。静的内容・revisionはCharacter、適用関係は個体調整、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、作用確定度は実行・拡張、帰属は接続・存在、round・提示は入出力・提示、対象・時機・routingは共有観測、全域成立は保全・消去に残り、本書のCD-1〜CD-7はその受渡しの対応付けである。scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持、旧backup交差の各契約は各文書で同一である。
 
 重点確認5項目の結果は次のとおりである。
 

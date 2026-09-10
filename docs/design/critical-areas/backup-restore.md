@@ -19,7 +19,7 @@ Restoreを「backupの内容をDBへ上書きする」へ落とすと、次の�
 | 実行authorityだけ先に復活させ、完了していないRestoreを成功表示する。 | 復元成立と再有効化の分離、成功表示の条件（第7、9節）。 |
 | Host再起動で部分置換を新正本にし、保留を黙って解除する。 | 再起動を跨ぐ保全と未完了の維持（第9節）。 |
 
-今回の範囲は、復元対象と現在維持の対応、staleの扱い、live活動との隔離、backup作成の整合、受理から一括有効化までの成立条件、削除との交差、失敗・再起動のlogical propertyまでとする。Contextの情報選択・Provider適応の一般契約は[Context Assembly](context-assembly.md)を、認可判断と実作用・確定度・不明の一般契約は[Action Execution](action-execution.md)を、全域消去の参加・完了の一般契約は[Targeted Deletion](targeted-deletion.md)を、帰属切替・区切りの一般契約は[Client Presence Transition](client-presence-transition.md)を利用し、再定義しない。Backup scheduleの時機・保持数管理はTask Scheduleへ統合しない。
+本書の範囲は、復元対象と現在維持の対応、staleの扱い、live活動との隔離、backup作成の整合、受理から一括有効化までの成立条件、削除との交差、失敗・再起動のlogical propertyまでとする。Contextの情報選択・Provider適応の一般契約は[Context Assembly](context-assembly.md)を、認可判断と実作用・確定度・不明の一般契約は[Action Execution](action-execution.md)を、全域消去の参加・完了の一般契約は[Targeted Deletion](targeted-deletion.md)を、帰属切替・区切りの一般契約は[Client Presence Transition](client-presence-transition.md)を利用し、再定義しない。Backup scheduleの時機・保持数管理はTask Scheduleへ統合しない。
 
 Targeted deletionと通常retention / Companion deletion / Resetは異なるlifecycleとして維持する。外部Workspace、Provider保有state等はBackupされた内部stateと同一の時間へ巻き戻るとは限らない。
 
@@ -192,7 +192,7 @@ Backup作成に担当CompanionやTask Agentの稼働を必要とせず、管理�
 
 ## 10. 横断検証
 
-requirements、上位architecture、および既存Step 11詳細設計へ戻して横断検証した。チェックリストの機械的な充足ではなく、正常系と重要なfailure / stale / delayed / restartを選んでwalkthroughした。
+requirements、上位architecture、および他のcritical-area契約に対する横断検証は次のとおりである。チェックリストの機械的な充足ではなく、正常系と重要なfailure / stale / delayed / restartを選んでwalkthroughする。
 
 | 領域・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -226,13 +226,13 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task待ちにしない。機械的検証をLLM待ちにしない。 |
 | CC-07 | transport・Tool・Task・報告・監査の確定度を分け、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。 |
 
-State Ownership、Dependency Rulesとの照合では、semantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更する必要は見つかっていない。新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Restore Managerを導入していない。通常History保持、Companion削除、targeted deletion、backup / restore、ResetはSO・DRの異なるlifecycleを維持する。
+本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Restore Managerを導入しない。通常History保持、Companion削除、targeted deletion、backup / restore、ResetはSO・DRの異なるlifecycleを維持する。
 
 Context Assemblyとの照合では、由来・用途・現在性・用途別結果受入・処理中無効化の契約を復元へ接続し、旧live結果の混入・古いsessionによる制約迂回を許していない。Action Executionとの照合では、判断対象と実対象の対応・委任不変・試行と作用の区別・確定度・不明保持・遅延帰属・報告での確定度保持を復元へ接続し、移動・再接続・再起動・restoreによる自動再実行を許していない。Targeted Deletionとの照合では、消去条件の適用・区間内再到着の取込み・旧由来と新規提供・明示restoreの区別・cache・session・Client copyの再利用禁止・未完了保全の契約を復元へ接続し、古いBackupからの復活を新しいExperience・別操作として扱い、自動再形成の例外にしていない。Client Presence Transitionとの照合では、authoritative帰属・切替区間の新規開始禁止・活動別区切り・到着物の帰属・Host継続・再起動復旧と再実行の分離の契約を復元へ接続し、復元された帰属のcanonical化・二重presence・旧作用の自動継続を許していない。
 
-## 11. 後続設計への引渡しと残す自由度
+## 11. 本書が固定する契約と残す Design Freedom
 
-後続のstate / persistence / concurrency / interface設計は、次を固定された契約として利用できる。
+下位設計は、次を本書が固定した契約として利用できる。
 
 - 復元対象は現在のCredential store secretを除く対象内部dataの全置換であり、旧liveとのmergeではない。backup copyは正本ではなく、置換成立後に初めて復元内容がHost正本になる。
 - 現在のCredential store・外部現実・現在の到達性・未完了の保留は維持され、復元参照の存在から巻き戻したとは扱わない。
@@ -242,7 +242,7 @@ Context Assemblyとの照合では、由来・用途・現在性・用途別結�
 - 明示restoreによる復活は自動再形成の例外ではなく別操作であり、事前説明・Audit・保留・現在再評価を経る。未完了消去の保留は置換で解除しない。
 - 単一正本・非混合・権限先行復活の禁止・成功表示の条件・再起動時の保全を守る。
 
-今回絞り込んだ禁止選択肢は、復元内容の無条件上書き・merge、Credentialの巻戻し・復元、復元参照・同意からの自動利用、外部現実の巻戻し・danglingの黙った解消、不明の書換えと自動replay、presence復旧によるTask・Actionの再開権限化、旧live結果・Client copyの混入・Host上書き・自動queue、古い根拠からの自動再形成・cache hitでの制約省略・Provider sessionの無条件再利用、確認不能の成功扱い、部分正本・混合・権限先行復活・未完了の成功表示、再起動による保留解除・部分置換の正本化、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
+本書が採れない選択肢として除外するのは、復元内容の無条件上書き・merge、Credentialの巻戻し・復元、復元参照・同意からの自動利用、外部現実の巻戻し・danglingの黙った解消、不明の書換えと自動replay、presence復旧によるTask・Actionの再開権限化、旧live結果・Client copyの混入・Host上書き・自動queue、古い根拠からの自動再形成・cache hitでの制約省略・Provider sessionの無条件再利用、確認不能の成功扱い、部分正本・混合・権限先行復活・未完了の成功表示、再起動による保留解除・部分置換の正本化、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
 
 以下は意図的に残すDesign Freedomである。
 

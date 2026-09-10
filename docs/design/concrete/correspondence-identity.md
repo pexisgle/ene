@@ -4,7 +4,7 @@
 
 ## 1. 対象と非対象
 
-### 1.1 今回具体化するもの
+### 1.1 本書が具体化するもの
 
 - 実装上保持・照合しなければならない対応関係の体系化（第3節）。
 - 共通化してよい識別・相関 concept と domain 固有に分離すべきものの境界（第4・5節）。
@@ -15,13 +15,13 @@
 - serialization boundary の方針（第4・8節）。
 - concurrency 上の照合単位＝「何と何を比較すれば現在として受け入れられるか」（第6節）。mechanism（lock / MVCC / channel / transaction protocol）は選ばない。
 
-### 1.2 今回決めないもの
+### 1.2 本書が決めないもの
 
 - プロジェクト全体の crate 構成、module 分割、process / thread 配置。
 - DB 製品の選定、完全な `CREATE TABLE`、index 設計、migration 方式。
 - IPC 方式、wire format の byte 仕様、network protocol、heartbeat / lease の有無・値。
 - queue / retry / timeout の値、scheduling algorithm、embedding / retrieval scoring、prompt 組立 algorithm。
-- 各 Subsystem の完全な API 一覧。ただし「後続 interface 設計で落としてはならない情報」は第8節で固定する。
+- 各 Subsystem の完全な API 一覧。ただし「interface が落としてはならない情報」は第8節で固定する。
 - 暗号方式、archive 形式、署名方式、marketplace / relay / account の有無（いずれも非目標のまま）。
 
 ### 1.3 用語
@@ -563,9 +563,9 @@ Host 正本として restart 後も必要なもの。いずれも意味の owner
 - Reset の列挙・強確認・trust 失効（PE-4）。設定 Reset と全 data Reset を混同しない。
 - Audit 追記順・保持、Debug の明示対象・内容・短期失効・停止・削除（PE-6）。Audit・Debug を secret 置場・削除迂回・stale 正本・確定度強化の根拠にしない。
 
-## 8. Interface への含意（後続設計で落としてはならない情報）
+## 8. Interface が落としてはならない情報
 
-全 Subsystem の API 一覧は作らない。受け渡す際に semantic information を落とさないための必須情報を固定する。
+各 interface の具体形は [Interface Boundaries](interface-boundaries.md) が定める。本節は受け渡す際に semantic information を落とさないための必須情報を固定する。
 
 ### 8.1 受け渡し一般の必須情報
 
@@ -642,20 +642,7 @@ Host 正本として restart 後も必要なもの。いずれも意味の owner
 - 通常忘却・History 整理・容量 retention（既定 OFF・明示 opt-in）・Companion 削除・targeted deletion・Reset（設定既定化 vs 全削除分離）を混同しないこと（CC-05）。
 - 報告・Audit・復旧が確定度を強めないこと（CC-07）。Audit 順序を発生順・許可正本にしないこと。Raw・CoT を通常保存しないこと。
 
-## 10. 固定前提として使える範囲と残した Design Freedom
-
-### 10.1 次の persistence / concurrency / interface 設計の固定前提として使えるもの
-
-- 第2節の原則（ownership 非奪取、非共通化、型方針）。
-- 第4節の共通性質（opaque identity、owner ごと revision、lifecycle ごと generation、有向 correlation、boundary token、serialization 方針）。global version counter なし。
-- 第5節の domain 別型分離と field 意味。型名の同義改名は許すが分離・意味は維持する。
-- 第6節の照合述語（何と何を比較するか）。mechanism は未定。
-- 第7節の persistent property（何を restart 後に残すか）。table 分割・製品・migration は未定。
-- 第8節の interface 必須情報（何を落としてはならないか）。API 形状は未定。
-
-これらは次の persistence / concurrency / interface 設計で前提にしてよい。変える場合は Issue として扱う。
-
-### 10.2 意図的に残した Design Freedom
+## 10. 意図的に残した Design Freedom
 
 - crate・module・process・service・thread の分割と配置。
 - DB 製品・schema・index・repository 分割・writer・transaction・lock・MVCC の選択。
@@ -665,33 +652,11 @@ Host 正本として restart 後も必要なもの。いずれも意味の owner
 - Task 化閾値・分類 algorithm、Summary・revision 粒度、embedding・scoring・cache key、prompt 形成 algorithm、削除・追跡・検証・保持期間の手段、backup・暗号・復元・Credential・sandbox の手段、UI・renderer・round・確認・資源・Provider catalog の手段（いずれも SO・Step 12 の Freedom のまま）。
 - 未伝達メモの保持方式、Task 記録所有・参照の内部表現、次回表示の導出方式、呼出し・自発移動の検知 algorithm、Observer routing 文脈の生成方式・model・形式・頻度（assignment・同意・費用の契約は維持する）。
 
-## 11. 横断レビュー（自己レビュー）
-
-本書完成後に、requirements・Step 11・Step 12・review artifact へ戻して自己レビューした。観点と結果は次のとおりである。
-
-- **Ownership 非奪取。** ID・correlation・provenance・context・tracking・attempt・session・deletion record のいずれも authority 化していない。第2節の表と第5節の注意書きで明示した。SO §2 の12原則・§4 の owner 分担・§6 の coordination 限定と衝突しない。
-- **非共通化。** Universal 系・万能 ID・共通 state machine・共通 store・global counter を導入していない。第4節は性質の共通化に留め、型・counter・lifecycle を分離した。第5節は domain 別 newtype である。
-- **Stale / delayed / restart。** 第6・7・9節で stale result・retry・Cancel・restart・Client move・削除中再到着・restore 前後・delegation の walkthrough を確認した。必要な対応（attempt・revision 前提・generation・区間・世代）を失わない。
-- **Persistence。** 不明 outcome・遅延帰属・再保存防止・旧 live 分離・Client stale・未伝達・Task 継続の persistent property を第7節に置いた。全文 context・Raw・推論の永続化を要求していない（CA §8.1 の再構築可能性と整合）。
-- **Interface。** 全 API 一覧を作らず必須情報に留めた（第8節）。本文埋込文字列・モデル出力・cache hit・到着順を根拠にしない禁止を再掲した。
-- **修正。** レビューで見つけた表現上の不足（generation と revision の混用防止、boundary token 欠落時の扱い、digest の位置付け）は本書へ反映済みである。Step 11・Step 12・requirements の変更は不要であった。
-
-## 12. Requirement / Architecture Issue の有無
+## 11. Requirement / Architecture Issue の有無
 
 - **Requirement 変更。** なし。
 - **Step 11 / Step 12 semantic contract の変更。** なし。
 - **semantic owner 変更。** なし。
 - **subsystem boundary 変更。** なし。
 - **Security / Privacy / Permission semantics 変更。** なし。
-- 具体実装方式の選択（ID 生成器、digest 有無、table 分割、mechanism 選択等）は Issue ではない。第10.2節の Freedom の範囲で後続設計が行う。
-
-## 13. Step 13 で次に具体化すべき領域
-
-本書は Step 13 の最初の artifact であり、対応関係の表現・照合を固定した。次に具体化すべき領域の候補は次のとおりである。順序は後続の依存の重さで決める。
-
-1. **persistence schema・保存単位。** 第7節の persistent property を、保存単位・repository 分割・migration・upgrade の具体設計へ落とす。保全・消去の調整と各 owner の保存を混同しない範囲で行う。
-2. **concurrency mechanism。** 第6節の述語を、lock / MVCC / channel / queue / transaction protocol の選択へ落とす。待機 polling 禁止・循環承認待ち禁止・管理経路独立（DR-08）を維持する。
-3. **interface boundary。** 第8節の必須情報を、各 Subsystem 間の request・response・notification の field へ落とす。本文埋込・モデル出力の authority 化をしない範囲で行う。
-4. **IPC・Host↔Client 形式。** round・提示・未伝達・Client 主張・一時 copy の扱いを、Client 最小一時・非永続・削除参加の契約の範囲で具体化する。
-
-いずれも本書の固定前提（第10.1節）の上で行い、本書の原則を変えずに進める。
+- 具体実装方式の選択（ID 生成器、digest 有無、table 分割、mechanism 選択等）は Issue ではない。第10節の Freedom の範囲で後続設計が行う。

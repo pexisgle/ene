@@ -4,17 +4,17 @@
 
 ## 1. 対象と非対象
 
-### 1.1 今回具体化するもの
+### 1.1 本書が具体化するもの
 
 - 何を永続化しなければならないか / 一時でよいか / 再構築可能派生か / 外部・credential-store かの分類。
 - 保存単位（logical table / collection）の体系化と owner / durability / deletion / reconstruction の明示。
 - どの property 同士が整合して保存・復旧されなければならないか（atomicity / ordering / durable-before-visible）。
 - Host restart / crash 後にどの durable を読めばどの runtime を再構成できるか、自動再開してよいものとしてはいけないもの。
 - Targeted Deletion / Backup / Restore と persistence schema の関係。
-- 次の concurrency 設計が成立するために persistence が持つべき revision / generation / expected value / operation / attempt / durable boundary。
+- concurrency 制御が成立するために persistence が持つべき revision / generation / expected value / operation / attempt / durable boundary。
 - 上記から導かれる technology mapping（SQLite / sqlite-vec / filesystem / credential store）。
 
-### 1.2 今回決めないもの
+### 1.2 本書が決めないもの
 
 - DB 製品固有の完全な `CREATE TABLE`（index, migration, vacuum, 暗号実装を含む）、製品固有 SQL 方言。
 - crate / module 分割、process / thread 配置、IPC / wire format。
@@ -490,9 +490,9 @@ Backup 作成に担当 Companion や Task Agent の稼働を必要とせず、�
 - `restore_operation`（受理・説明・隔離・照合・置換・保留・一括有効化対応・状態）と `restore_generation_state` を D3/D1 として Host で保全する。保留中・確認途中・置換途中に再起動しても、復元済み assignment/consent だけで自動利用を開始しない。部分置換を新正本にしない。到達不能・確認不能を成功に読み替えない。
 - 失敗時は復元前正常を維持し、不完全な復元や旧 live と競合する正本を成功と表示しない。
 
-## 10. Concurrency handoff — persistence が持つべき property と atomic compare
+## 10. Concurrency のために persistence が持つべき property と atomic compare
 
-concurrency mechanism そのものは設計しない。成立のために persistence 側が持つ必要のある property と「どの比較を atomic に行える必要があるか」まで明確にする。
+concurrency mechanism そのものは [Concurrency Control](concurrency-control.md) が定める。本節は成立のために persistence 側が持つ必要のある property と「どの比較を atomic に行える必要があるか」を固定する。
 
 ### 10.1 必須 property
 
@@ -554,18 +554,7 @@ DB を分ける / 同一にする判断は上表の必要性に限る。Host dur
 | Schedule 到来と active なし（追加） | Schedule 設定・発生対応・各回 Task の区別を保ち、停止中の回は missed とし自動補完しない。将来回は新 Task として現在条件で開始する。active なしでも Host 完結作業は継続し、Client 依存確認は判断待ちにする | §4 Group D, §6 |
 | Observer routing と scope 変更（追加） | routing 限定文脈は R/T の派生表現とし、新正本・新 scope・包括共有にしない。scope 変更・同意失効・消去を生成済み要約・処理中結果にも適用する。混合文しかなく分離を確認できなければ個体へ渡さない | §5 |
 
-## 13. 後続設計への引渡しと残す Design Freedom
-
-後続の concurrency / interface 設計は、次を固定された契約として利用できる。
-
-- durable / derived / transient / external の分類（§3）と owner 別 table group（§4）は固定前提として使える。storage 共有は ownership 統合ではない。
-- 主な保存単位・PK・REV/GEN・CORR・ownership・durability・deletion・reconstruction（§4）は固定前提として使える。domain ID 統合・revision/generation 混同・万能 table 化は採れない。
-- 重要な atomicity / ordering / durable-before-visible（§7）と atomic compare（§10）は固定前提として使える。global transaction・distributed transaction は採らない。
-- restart / crash recovery 方針（§6）は固定前提として使える。自動再開してよいもの（presence 復旧・Host 完結継続・将来回判定・保留維持）と自動実行してはいけないもの（Task 再開・Agent 再起動・Unknown 再実行・missed 補完・復元後自動処理・停止個体復旧・Client 依存新規開始・古い根拠からの再形成・古い判定による新規利用）の区別を維持すること。
-- Targeted Deletion（§8）/ Backup / Restore（§9）の persistence 対応は固定前提として使える。削除対象・既知依存の追跡不能化、過剰な意味 graph 保存、完了記録・Audit への本文再保存、secret の backup 混入、外部実体の収集、復元参照からの自動利用、旧 live 混入、部分正本・混合・権限先行復活は採らない。
-- derived の扱い（§5）と technology mapping（§11）は固定前提として使える。derived の第二正本化、Provider session・cache への正本依存、Client の正本化は採らない。
-
-以下は意図的に残す Design Freedom である。
+## 13. 意図的に残した Design Freedom
 
 | 設計対象 | 固定済みの architecture property | 残す Design Freedom |
 |---|---|---|
@@ -577,12 +566,6 @@ DB を分ける / 同一にする判断は上表の必要性に限る。Host dur
 | 時間・費用 | 経過時間の解釈、missed 非補完、並列・処理中・不明の上限反映を守る | 減衰・時刻計算・Capture 時機・費用予約・集計期間・推定・資源配分の機構 |
 
 archive / file format、encryption implementation、DB schema の製品固有 SQL、serialization、transaction mechanism、Rust type / trait、crate / module、IPC、locking、exact progress representation、retry / timeout、specific library も固定しない。上表の対応関係から統一 Context layer、Policy Engine、Manager、Service、Coordinator の追加を導かない。既存の12責務、semantic owner、Host / Client 配置と trust boundary の下で実現方法を選ぶ。
-
-### Step 13 で次に具体化すべき領域
-
-- concurrency 設計：本書 §10 の atomic compare をどの mechanism（楽観 / 悲観・配置・伝達）で成立させるか。特に Task revision・presence generation・cap・消去条件・復元 generation の競合制御と、確認不能時の hold・deny・不足・再評価への戻し方。
-- interface 設計：各 Subsystem 間の受渡しで boundary token（expected revision/generation・operation/attempt identity・durable boundary）をどの field として受け渡すか。本書 §4 の CORR / REV / GEN を API 上で欠落させないこと。
-- 残りの Step 13 具体設計がある場合は、本書 §4・§7・§10 の property を欠落させないこと。
 
 ## 14. Requirement / Architecture Issue
 

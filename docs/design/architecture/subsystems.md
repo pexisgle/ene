@@ -532,56 +532,27 @@ AD-01・04・05・07〜09・14・15。要件「履歴、保持、Privacy」「�
 
 「分散」は責任を曖昧にする意味ではない。判断の根拠を提供する側、制約を扱う側、実際の作用・送信・保存を行う側を対応付けて抜け道を閉じる。
 
-| 責務 | この工程での扱い | 次工程に残す点 |
-|---|---|---|
-| Permission・同意・scope・失効 | 独立した権限・制約と、実行・送信・参照・保存箇所での適用の協調。自然言語解釈は目的を持つ判断責務に残す。Learningの内容・由来・scope形成の意味責任は認識・学習に残し、決定後の迂回不能な適用は権限・制約と各利用箇所の協調に置く。deviceの制御状態（権限・制約）、帰属への反映（接続・存在）、実行時の適用結果（実行・拡張）を混同しない。 | 制御変更の由来、現在の有効条件、変更中・失効中の利用との整合性、すべての経路が制約へ接続する依存。state representationと厳密な依存方向・APIは本書では定めない。 |
-| Credentialと秘密の非露出 | 認証秘密を独立させる。推論、実行、提示、記録、Debug captureも値を通常dataへ出さない。登録外の秘密は検出時の不要な保存・送信抑制と失効・更新案内を分担し、完全検出を保証しない。 | 認証用途への受渡しと通常result経路の依存分離。秘密を含まない参照・診断情報の所属。 |
-| Targeted deletion | 保全・消去が全域の対象・影響・完了を協調し、全参加先が局所消去、処理中利用・遅延結果の無効化、検証へ参加する。局所Subsystemだけでは完結しない。 | 根拠・派生物の追跡、再保存防止、接続中Clientを含む完了根拠と再起動後の未完了操作。 |
-| 保存・backup・restore・Reset | 保全・消去の協調責任と各状態の意味を分ける。Credential除外、外部file非所有、復元後保留、設定Resetの保護範囲を維持する。 | 状態の整合範囲と、保存された設定／現在の実行可能性の区別。具体transactionはここで固定しない。 |
-| Audit・診断・Error説明 | 独立Subsystemにしない。Action・Permission・割当・Credential参照・設定・削除等の事実は担当責務が供給し、保全・消去が順序を確認できる記録と保持を支え、入出力・提示が説明する。 | 必要な参照関係と診断経路。会話・file本文・秘密・削除済みprivate内容を別保管庫へ残さない。自動送信せず、手動共有は内容・送信先をOwnerが確認する。 |
-| 費用・資源・負荷による縮退 | 上限は権限・制約、利用量と費用の報告・推定・不明は推論等の利用元、縮退は各機能が引き受ける。専用の資源配分Subsystemは追加しない。 | 並列利用でも全体／Provider別capを守る整合性、会話・Owner操作・安全判断を背景作業や描画から保護する依存。容量不足でLearningを黙って削除しない。 |
-| 時刻・待機・活動の抑制 | 現在日時・timezoneを必要な活動が利用する。Schedule、backup、観測、自発性はそれぞれの制御scopeに置き、待機だけのLLM pollingを使わない。 | 時刻を参照する関係と、停止・到来・再開の整合性。共通timerや待機機構の採否は詳細設計。 |
-| Fullscreen・個体停止・Client不在 | Fullscreen時はそのClientのBodyを入出力・提示、ambient Observationを共有観測、自発発話を個体調整と入出力・提示が休止する。個体停止はそれより広い活動停止、active Client不在はClient依存部分の利用不能として各責務が扱う。 | これらの状態の参照と変化の反映。Host側の通常作業をfullscreenだけで停止させず、Host停止時はClientが独立実行・代替正本を担わない。 |
-| Context・由来・最小data | 個体調整・作業等が用途を、認識・学習等が情報の意味・根拠を、権限・制約が利用範囲を、推論が能力差との対応を扱う。独立Context／検索／cache Subsystemを追加しない。 | 情報選択方針の責任関係、各参照でのscope適用、派生dataの非正本性。組立て・検索・scoring algorithmは未定。 |
-| 通常保存しないdata | Raw Observation・Raw Voice・詳細Tool payload・内部推論・chain-of-thoughtの非保存を各生成・受入責務へ適用する。保全・消去が保全することは、すべてを保存対象へ追加する意味ではない。 | 通常data経路と明示Debug captureの区別、Client・拡張を含む一時dataの所属。秘密保護と消去は診断経路でも維持する。 |
-| 部分障害・Cancel・成功不明 | 各責務が実際に確認できた結果を供給する。作業はTaskとして、個体調整はOwner向け結果として統合し、入出力・提示は受付・完了・不明を区別する。 | 停止や復旧がLLM・Body・拡張の成功へ依存しない関係、結果の鮮度・参照。不明をexactly-once保証やrollback成功へ置き換えない。 |
-| 拡張・外部contentのtrust | 実行・拡張がcodeの受入・制限を、利用機能が機能上の意味とfailureを扱い、権限・制約が制御変更を保護する。形式別の専用Subsystemは追加しない。 | 外部code・UIからControl planeや内部dataへ届く依存の制限と、ene管理下の一時data保護。Plugin ABI・隔離機構は未定。 |
-| Locale・accessibility・Setup | 入出力・提示が導線・代替経路・翻訳を扱い、各domainが判断材料・結果の意味を供給する。全設定を所有するSettings／Setup Subsystemは追加しない。 | 表示言語で許可・費用・Privacy・失敗の意味が変わらない参照関係。Setupから新規開始／restoreへ分岐しても各契約は共通。 |
-
-## 7. State Ownership Questions
-
-以下は責務境界を成立させるための問いであり、特定のwriterや保存単位の回答ではない。Host正本、Client非正本、外部所有物の非所有は既決事項として扱う。F-07〜F-13のState Ownership Riskはpre-state-ownership-review.mdに残す。本節の問いは状態所有設計で扱う。ここではownershipの答えを決めない。
-
-| 問い | 関係する境界と、明確化が必要な理由 |
+| 責務 | 責任の配置 |
 |---|---|
-| 個体の継続と構成をどう対応付けるか | 個体調整・Character・認識・学習の間で、個体識別、選択済み部品、静的revision、経験による状態をどう区別し、停止・再開・明示更新で何が継続するか。Package更新が経験を上書きしない所属・参照が必要。 |
-| 作業の担当、実行主体、各回の状態をどう分けるか | 個体調整・作業の間で、Task、委任・一時Task Agent、Scheduleと各回、共同Task、引継ぎ、Workspace関連付けをどう関連付けるか。担当削除で残る記録と消えるScheduleを表せる必要がある。 |
-| 進捗と作用の確定度を何に結び付けるか | 作業・実行・拡張・接続・存在の間で、依頼、実行済み・不明な作用、停止要求、未保存作業、Owner判断をどう対応付けるか。移動・失効・再起動を越えて不明を未実行へ戻さないために必要。 |
-| 接続、device許可、active帰属、入出力roundをどう整合させるか | 接続・存在・権限・制約・入出力・提示・共有観測・実行・拡張の間で、何が接続状態で何が個体の帰属か、切替・切断中に何を有効と扱えるか。Client一時dataとHostの状態を混同しない必要がある。 |
-| 未伝達事項と会話・作業記録をどう関連付けるか | 個体調整・作業・入出力・提示の間で、Client不在で伝えられなかった事項、元の結果、次Clientでの要約報告の状況をどう扱うか。表示用copyや接続状態を伝達・Task完了の正本にしないために必要。 |
-| 意味状態・根拠・原履歴・派生dataをどう区別するか | 認識・学習、会話・作業の記録、保全・消去の間で、現在認識、revision、Summary、source範囲、検索派生物の所属と参照を明確にする。通常History削除、事実訂正、過去の有効性、根拠説明を両立する必要がある。 |
-| 共有根拠と個体固有状態の所属をどう表すか | 認識・学習・個体調整・保全・消去の間で、Global Learning、Companion scope、共有Summary、非対称なRelationship、その相手の削除、内部Skill revisionと外部Skillをどう区別するか。削除時の自動Global化や私的状態の共有を防ぐ必要がある。 |
-| 一時的状態と継続的傾向をどう復帰させるか | 認識・学習・個体調整・保全・消去の間で、時間経過と保持した根拠を何へ関連付けるか。再起動・restoreによる不自然な初期化と一時状態の永久固定の両方を防ぐ必要がある。 |
-| 解釈、許可設定、現在の有効性をどう対応付けるか | 権限・制約と各利用元の間で、Ownerの依頼、Rule解釈・Undo、同意、決定scope、保存禁止、委任、device失効、並列利用量をどう扱うか。保存された条件と実行時に有効な条件、費用報告値・推定・不明の区別が必要。 |
-| Credentialの参照と秘密値をどう分離するか | 認証秘密・推論・実行・拡張・保全・消去の間で、用途、参照元、認証状態、更新・失効とbackup除外をどう関連付けるか。通常dataやClientへの永続複製を作らず再認証を説明する必要がある。 |
-| 全域消去の対象と完了根拠をどう保つか | 全参加Subsystemで、根拠・revision・cache・保持済みsource・Client一時data・処理中利用・遅延結果の関係をどう把握するか。部分削除、機械的残存検証、再保存防止、未完了状態を成立させる整合範囲が必要。具体transaction・競合機構は別途設計する。 |
-| Backup・restore・Resetの整合範囲と実行保留をどう表すか | 保全・消去と全参加先で、復旧可能な正常状態、復元対象、除外、復元されたRule等と再有効化、Auditの参照をどう対応付けるか。通常再起動、旧backupの明示restore、設定Reset、全データResetを一つの初期化にできない。 |
+| Permission・同意・scope・失効 | 独立した権限・制約と、実行・送信・参照・保存箇所での適用の協調。自然言語解釈は目的を持つ判断責務に残す。Learningの内容・由来・scope形成の意味責任は認識・学習に残し、決定後の迂回不能な適用は権限・制約と各利用箇所の協調に置く。deviceの制御状態（権限・制約）、帰属への反映（接続・存在）、実行時の適用結果（実行・拡張）を混同しない。 |
+| Credentialと秘密の非露出 | 認証秘密を独立させる。推論、実行、提示、記録、Debug captureも値を通常dataへ出さない。登録外の秘密は検出時の不要な保存・送信抑制と失効・更新案内を分担し、完全検出を保証しない。 |
+| Targeted deletion | 保全・消去が全域の対象・影響・完了を協調し、全参加先が局所消去、処理中利用・遅延結果の無効化、検証へ参加する。局所Subsystemだけでは完結しない。 |
+| 保存・backup・restore・Reset | 保全・消去の協調責任と各状態の意味を分ける。Credential除外、外部file非所有、復元後保留、設定Resetの保護範囲を維持する。 |
+| Audit・診断・Error説明 | 独立Subsystemにしない。Action・Permission・割当・Credential参照・設定・削除等の事実は担当責務が供給し、保全・消去が順序を確認できる記録と保持を支え、入出力・提示が説明する。 |
+| 費用・資源・負荷による縮退 | 上限は権限・制約、利用量と費用の報告・推定・不明は推論等の利用元、縮退は各機能が引き受ける。専用の資源配分Subsystemは追加しない。 |
+| 時刻・待機・活動の抑制 | 現在日時・timezoneを必要な活動が利用する。Schedule、backup、観測、自発性はそれぞれの制御scopeに置き、待機だけのLLM pollingを使わない。 |
+| Fullscreen・個体停止・Client不在 | Fullscreen時はそのClientのBodyを入出力・提示、ambient Observationを共有観測、自発発話を個体調整と入出力・提示が休止する。個体停止はそれより広い活動停止、active Client不在はClient依存部分の利用不能として各責務が扱う。 |
+| Context・由来・最小data | 個体調整・作業等が用途を、認識・学習等が情報の意味・根拠を、権限・制約が利用範囲を、推論が能力差との対応を扱う。独立Context／検索／cache Subsystemを追加しない。 |
+| 通常保存しないdata | Raw Observation・Raw Voice・詳細Tool payload・内部推論・chain-of-thoughtの非保存を各生成・受入責務へ適用する。保全・消去が保全することは、すべてを保存対象へ追加する意味ではない。 |
+| 部分障害・Cancel・成功不明 | 各責務が実際に確認できた結果を供給する。作業はTaskとして、個体調整はOwner向け結果として統合し、入出力・提示は受付・完了・不明を区別する。 |
+| 拡張・外部contentのtrust | 実行・拡張がcodeの受入・制限を、利用機能が機能上の意味とfailureを扱い、権限・制約が制御変更を保護する。形式別の専用Subsystemは追加しない。 |
+| Locale・accessibility・Setup | 入出力・提示が導線・代替経路・翻訳を扱い、各domainが判断材料・結果の意味を供給する。全設定を所有するSettings／Setup Subsystemは追加しない。 |
 
-## 8. Dependency Questions
+## 7. 状態所有と依存規則への接続
 
-ここでは厳密な依存方向、許可API、参照interfaceを完成させない。次の問いへの回答で、既決のtrust boundaryと本書のcollaborationを両立させる。F-07〜F-13の扱いは状態所有設計へ残し、ここでは依存の答えを先取りしない。
+本書は責務の境界を固定し、各状態の意味・正本・変更責任・所属・lifecycleの回答は[State Ownership](state-ownership.md)、責務間の許可される依存方向と禁止経路の回答は[Dependency Rules](dependency-rules.md)に置く。Host正本、Client非正本、外部所有物の非所有は両者の前提であり、本書はwriter・保存単位・API・依存方向を先取りしない。
 
-- **意味判断から制御変更へ何を渡せるか。** 個体調整・作業・学習・観測の解釈と、Ownerに由来する管理操作をどう区別するか。Learningの内容・由来・scope形成の意味責任は認識・学習に残すことを前提に、保存されたLearningや外部Promptから、Rule・同意・Credential・capへ直接到達できない関係が必要になる。具体的な依存方向・API・制約表現はここでは完成させない。
-- **各利用経路はどう現在の制約へ結び付くか。** Task Agent、軽微な本体処理、Schedule、共有観測、Provider fallback、MCP Apps、Client側の経路でも、scope・Deny・費用・device失効を迂回しない参照と適用をどう成立させるか。一つの中央呼出し列の採用を答えとして先取りしない。
-- **何を基準にClient依存を限定するか。** 作業は接続・存在のどの情報を必要とし、どの情報を必要としないか。Computer Useはactive Clientと安全な区切りへ結び付け、通常のHost作業はClient表示の成功に依存させない関係が必要になる。
-- **停止・管理・復旧はどの成功から独立するか。** Body・Voice・推論・Task Agent・MCP Appsの終了待ちをせず、OwnerのCancel、承認拒否、停止、保存済みdata確認へ到達する関係をどう構成するか。Companion削除後のTask管理経路も含む。
-- **認証経路と通常data経路をどう分離するか。** 接続に必要な秘密利用を可能にしながら、LLM生成argument、result、UI、Learning、Audit、Debug captureへ秘密値が届く依存をどう防ぐか。
-- **情報の選択とProvider適応をどう協調させるか。** 個体・作業の用途、学習の意味・根拠、権限による利用範囲、推論先の能力差を、特定Providerに偏らない情報選択へどう結び付けるか。検索派生物・Prompt cacheを正本や権限の根拠にしない関係が必要になる。
-- **全域操作へ各責務をどう参加させるか。** 保全・消去が全domainの内部実装へ無制限に依存せず、各参加先の対象・影響・処理中利用・検証結果を集める関係をどう設けるか。復旧や消去のための循環的な完了待ちを避け、遅延結果やClient一時dataを取りこぼさない必要がある。
-- **拡張の参加をどこで止めるか。** 機能側がProvider protocol・renderer・Observation adapter等を利用する関係と、実行・拡張による受入・制限をどう両立させるか。外部code・MCP Appsを第一者の管理・保存の任意変更へ接続せず、Local MCPの例外をPluginへ流用しない関係が必要になる。
-- **外部所有物と内部copyをどう区別して利用するか。** Workspace、Agent Skills、Character Package、backup、診断共有の各出力を、異なる許可・保持・削除範囲としてどう参照させるか。内部Reset・削除が外部fileやOwner保存backupの削除へ伝播する依存を防ぐ必要がある。
-
-## 9. Design Freedom
+## 8. Design Freedom
 
 本書は責務の境界を固定し、その実現方式は固定しない。
 
@@ -596,7 +567,7 @@ AD-01・04・05・07〜09・14・15。要件「履歴、保持、Privacy」「�
 
 この自由度は、Cloud正本、Remote専用Core、Companionごとの専用service、恒久Workspace container、成果物専用library、汎用Plugin改変、ene運営relay・account・Marketplace等の追加を許すものではない。
 
-## 10. Traceability and Completeness
+## 9. Traceability and Completeness
 
 ADは[Architecture Drivers](architecture-drivers.md)、SCは[System Context](system-context.md#boundary-invariants)、RTは[Runtime Topology](runtime-topology.md#runtime-relationships)の判断を指す。表の対応は主要な責任を示し、単独のSubsystemだけでDriver全体が完結することは意味しない。
 

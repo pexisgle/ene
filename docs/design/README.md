@@ -7,7 +7,7 @@
 1. 製品挙動の正本は [`docs/requirements/`](../requirements/README.md) である。設計は要件にない製品挙動を追加・変更せず、要求と設計の境界は requirements 側の「要件と設計の境界」に従う。
 2. 設計は `architecture/` → `critical-areas/` → `subsystems/` → `concrete/` の順に上位から下位へ具体化する。下位文書は上位文書の責務境界、semantic owner、identity / revision / generation の意味、保存分類、依存規則、Security / Privacy / Permission の意味を黙って変更しない。同じ層の中では、各文書が冒頭で前提として挙げる文書が先行する。
 3. 文書間の矛盾は、下位側や実装で意味を決めず Issue として扱う。
-4. 規範となるのは現行文書へ統合された判断だけである。`reviews/` のレビュー原文、過去の作業指示、既存実装、Git 履歴、[参考資料](../requirements/references.md) は非規範であり、設計根拠にしない。
+4. 規範となるのは現行文書へ統合された判断だけである。過去の独立レビュー記録、過去の作業指示、既存実装、Git 履歴、[参考資料](../requirements/references.md) は非規範であり、設計根拠にしない。独立レビュー記録の原文は Git 履歴（commit `b5c7990` 以前の `docs/design/reviews/`）で辿れる。
 
 ## directory の役割
 
@@ -15,7 +15,6 @@
 - [`critical-areas/`](critical-areas/): Step 11 Critical Area Detailed Design。後続設計が依存する 5 領域の logical contract。
 - [`subsystems/`](subsystems/): Step 12 Subsystem Detailed Design。Subsystem cluster 別の詳細設計。
 - [`concrete/`](concrete/): Step 13 Concrete Design。識別・保存・concurrency・interface・crate 分解・IPC の具体設計。
-- [`reviews/`](reviews/): 独立レビュー記録。判断履歴・検証記録であり、現行 Architecture の代替正本ではない。
 
 `critical-areas/` と `subsystems/` の文中の「要求」「対応」「区間」「保留」「受入」等は論理的な関係を表し、共通 object、永続 record、protocol、state machine、enum を指定しない。番号付きの段階は必要な前後関係を示し、直列実行の指定ではない。
 
@@ -49,32 +48,20 @@
 
 ### subsystems/
 
-`subsystems/` 内では `subsystem-` prefix を外している（整理時に rename。旧名→新名の対応は下表のとおり）。
-
-- [個体継続・対話調整 / 作業遂行・実行管理 / 経験に基づく認識・学習](subsystems/companion-task-learning.md)（旧 `subsystem-companion-task-learning.md`）
-- [権限・利用制約 / 認証秘密の保護 / Action実行・拡張受入 / 推論利用](subsystems/permission-credential-execution-inference.md)（旧 `subsystem-permission-credential-execution-inference.md`）
-- [Client接続・存在調停 / Owner入出力・体験提示 / 共有観測・関連付け](subsystems/client-presence-io-observation.md)（旧 `subsystem-client-presence-io-observation.md`）
-- [内部データ保全・消去](subsystems/data-preservation-erasure.md)（旧 `subsystem-data-preservation-erasure.md`）
-- [Character構成・配布](subsystems/character-distribution.md)（旧 `subsystem-character-distribution.md`）
+- [個体継続・対話調整 / 作業遂行・実行管理 / 経験に基づく認識・学習](subsystems/companion-task-learning.md)
+- [権限・利用制約 / 認証秘密の保護 / Action実行・拡張受入 / 推論利用](subsystems/permission-credential-execution-inference.md)
+- [Client接続・存在調停 / Owner入出力・体験提示 / 共有観測・関連付け](subsystems/client-presence-io-observation.md)
+- [内部データ保全・消去](subsystems/data-preservation-erasure.md)
+- [Character構成・配布](subsystems/character-distribution.md)
 
 ### concrete/
 
-- [対応関係・識別](concrete/correspondence-identity.md)（CI）: Step 13 の最初の具体設計。identity / revision / generation / correlation / boundary token。
+- [対応関係・識別](concrete/correspondence-identity.md)（CI）: identity / revision / generation / correlation / boundary token。
 - [Persistence / 保存単位 / Recovery](concrete/persistence-recovery.md)（PR）
 - [Concurrency / Race Control / Stale-result Acceptance](concrete/concurrency-control.md)（CCT）
 - [Subsystem Interface Boundary / Command・Query・Result Contract](concrete/interface-boundaries.md)（IB）
 - [Crate / Module 分解と依存方向](concrete/crate-module-decomposition.md)（CM）
 - [Host↔Client IPC / wire protocol](concrete/host-client-ipc.md)
-
-### reviews/
-
-- [Architecture Drivers Review](reviews/architecture-drivers-review.md)
-- [Architecture Review #1](reviews/architecture-review-1.md)
-- [Architecture Review #2](reviews/architecture-review-2.md)
-- [Architecture Review #3](reviews/architecture-review-3.md)
-- [Step 4 前独立レビュー](reviews/pre-state-ownership-review.md)
-
-レビュー本文は歴史的記録として維持する。レビュー中の旧 `docs/design/<file>.md` 表記は当時の path の引用であり、現行配置への読み替えは本 README の対応表で行う。ナビゲーションとして機能する Markdown link target のみ現行配置へ更新している。
 
 ## 現在の設計進捗
 

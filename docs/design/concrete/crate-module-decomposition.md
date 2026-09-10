@@ -2,19 +2,19 @@
 
 本書は Step 13 の Crate / Module 分解 artifact である。[対応関係・識別](correspondence-identity.md)（CI）、[Persistence / Recovery](persistence-recovery.md)（PR）、[Concurrency Control](concurrency-control.md)（CCT）、[Interface Boundaries](interface-boundaries.md)（IB）が定めた identity の型分離、storage の役割分離、concurrency と interface の契約を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。本書内の SO / DR は [State Ownership](../architecture/state-ownership.md) / [Dependency Rules](../architecture/dependency-rules.md) を指す。
 
-実装コードは変更しない。本書の Rust pseudo-type / module 名は提案であり、コンパイル対象ではない。型名・crate 名の同義改名は許すが、ownership 分離・依存方向・public boundary の意味は維持すること。
+本書の Rust pseudo-type / module 名は提案であり、コンパイル対象ではない。型名・crate 名の同義改名は許すが、ownership 分離・依存方向・public boundary の意味は維持すること。
 
 ## 1. 対象と非対象・判断材料
 
-### 1.1 今回具体化するもの
+### 1.1 本書が具体化するもの
 
 - workspace crate 一覧、各 crate の責務、主要 module、public / private boundary。
 - crate 間 dependency（allowed / prohibited / adapter inversion / test dependency）。
 - Host / Client / shared 配置、repository / adapter 配置、remote-facing type 配置。
-- 新規実装が最終的に満たす workspace tree と依存制約。**実装の時系列は [`docs/implementation/README.md`](../../implementation/README.md) を正本**とし、本書は第4節の crate 一覧を先に空実装する順序を要求しない。旧 Repository との対応は、目標境界の由来を説明する**非規範の参考対応**としてのみ示し、旧 crate / module の copy・move・re-export shim・互換維持を実装要件にしない。
-- 第12節の validation walkthrough による crate 依存だけでの実現可能性確認。
+- 新規実装が最終的に満たす workspace tree と依存制約。**実装の時系列は [`docs/implementation/README.md`](../../implementation/README.md) を正本**とし、本書は第3節の crate 一覧を先に空実装する順序を要求しない。
+- 第11節の validation walkthrough による crate 依存だけでの実現可能性確認。
 
-### 1.2 今回決めないもの
+### 1.2 本書が決めないもの
 
 - 完全な `CREATE TABLE`、index、migration code、IPC wire byte 仕様、version negotiation、retry / timeout 値、scheduling / scoring algorithm、prompt 組立。
 - 各 crate の完全な関数一覧、内部 helper の列挙。
@@ -37,48 +37,21 @@ crate を分けるか module に留めるかの材料として次を用いた。
 
 ## 2. 設計原則（固定 premise の crate 落とし込み）
 
-1. **crate ≠ Subsystem ≠ semantic owner。** 複数 Subsystem が一つの crate に載っても ownership を統合しない。一つの Subsystem が複数 crate へ分かれても owner を分裂させない。各 crate の責務表（第4節）に owner を明示し、table group ごとに owner を注記する（PR §4 と同様）。
+1. **crate ≠ Subsystem ≠ semantic owner。** 複数 Subsystem が一つの crate に載っても ownership を統合しない。一つの Subsystem が複数 crate へ分かれても owner を分裂させない。各 crate の責務表（第3節）に owner を明示し、table group ごとに owner を注記する（PR §4 と同様）。
 2. **型分離を潰さない。** `CompanionId` / `TaskId` / `TaskRevision` / `PresenceGeneration` / `RestoreGeneration` / `DeletionOperationId` / `DeletionSweepGeneration` 等は各 owner crate が定義する。内部表現が同じでも相互 `From` / 比較を設けない。`Revision(u64)` / `Generation(u64)` の共通内部形は `ene-primitive` の opaque 実装だけを共有し、semantic newtype を集めない。
-3. **循環回避のための shared crate へ domain 型を集めない。** すべての domain ID を `ene-primitive` や `ene-api` へ移す設計は禁止する。cross-domain 参照は第5節の `RawId` + 用途別 premise による inversion で解決し、crate 依存を一方向に保つ。
-4. **storage crate を semantic owner にしない。** `ene-store` は row mapping / SQL / migration / fs 配置 / orphan cleanup だけを持ち、revision bump 可否・採否・達成・許可・確定度の意味判断を持たない。repository trait は各 domain crate が定義し、`ene-store` が実装する方向に依存させる（第7節）。
+3. **循環回避のための shared crate へ domain 型を集めない。** すべての domain ID を `ene-primitive` や `ene-api` へ移す設計は禁止する。cross-domain 参照は第4節の `RawId` + 用途別 premise による inversion で解決し、crate 依存を一方向に保つ。
+4. **storage crate を semantic owner にしない。** `ene-store` は row mapping / SQL / migration / fs 配置 / orphan cleanup だけを持ち、revision bump 可否・採否・達成・許可・確定度の意味判断を持たない。repository trait は各 domain crate が定義し、`ene-store` が実装する方向に依存させる（第6節）。
 5. **serialization domain を統合しない。** SD-Task / SD-Attempt / SD-Presence / SD-Cap / SD-CharApply / SD-Undelivered / SD-Deletion / SD-Restore / SD-RuleConsent / SD-CompanionLife（CCT §4）を一つの Runtime lock / global coordinator / universal actor へまとめない。`ene-store` の短 transaction は各 SD の不可分性を隠蔽するだけで、意味変更権を統合しない。
 6. **caller ≠ authority を crate 依存で守る。** 呼べたことを確定にしない。`Ok` 側 domain outcome と `Err` 側 technical error を潰さない（IB §11）。`SecretValue` 型を public に返さない。`rusqlite::Transaction` を business layer へ露出させない。
-7. **中央 orchestrator を作らない。** `ene-host-service` 的な万能 crate、`common` / `shared` / `utils` / `core` / `services` / `managers` / `models` 的な dumping ground、crate per entity / per table / per use case、内部 domain 用 plugin framework、service locator、全面 dynamic dispatch を導入しない。orchestration は caller 側の用途別 module（対話は Companion、作業は Task、全域 fan-out は Host composition + Preservation trait）に分散させる（第6節）。
+7. **中央 orchestrator を作らない。** `ene-host-service` 的な万能 crate、`common` / `shared` / `utils` / `core` / `services` / `managers` / `models` 的な dumping ground、crate per entity / per table / per use case、内部 domain 用 plugin framework、service locator、全面 dynamic dispatch を導入しない。orchestration は caller 側の用途別 module（対話は Companion、作業は Task、全域 fan-out は Host composition + Preservation trait）に分散させる（第5節）。
 8. **巨大 `ene-core` を composition root へ痩せさせる。** 旧 `apps/ene-core` の構造を維持すること自体を要件にしない。意味判断は各 owner crate、永続化は `ene-store`、外部 hosting は `ene-plugin-host`、wire DTO は `ene-api` へ置き、`ene-core` は wiring / lifecycle / storage init / route 配線だけに留める。
 9. **旧実装は実装契約ではない。** `.old/` や旧 crate / module の名前・配置・actor / store / shutdown pattern は、設計判断の参考にはできるが、新規実装で保持・移植・re-export・互換 shim 化する理由にはしない。目標責務を直接実装し、旧構造との互換性のために依存方向・ownership・public boundary を歪めない。
 
-## 3. 旧 Repository との参考対応（非規範）
+## 3. 目標 workspace 構成
 
-以下は、旧 Repository に存在した責務が目標設計のどこに相当するかを説明する**参考表**である。旧 code を copy / move / split して実装する指示ではなく、旧 crate 名を残すこと、re-export shim を置くこと、旧 API / 挙動との互換性を保つことも要求しない。新規実装の source of truth は Requirements / Design と第4節以降の目標構成である。
+### 3.1 Workspace tree 例
 
-| 旧 crate / app | 主な中身（参考） | 目標設計での対応 | 境界上の注意 |
-|---|---|---|---|
-| `ene-config` | config・schema・path 解決 | narrow な typed config / path 解決に相当 | domain state・secret・runtime 判断を持たせない |
-| `ene-card` | Character card container（V3, PNG/CHARX import）・diff | `ene-character` の静的構成・revision・import/export の参考 | 適用関係（Companion）と分離する |
-| `ene-companion` | soul / affect / memory(+scope) / inner / proactive / package / presence / store | 旧責務は `ene-companion` / `ene-learning` / `ene-character` / `ene-presence` / repository 境界へ分かれる | 旧 crate の split・module move 自体は要求しない |
-| `ene-work` | delegation / jobs / schedules / skills / MCP / vision / learning / observe / task / store | `ene-task` / `ene-learning` / `ene-action` / `ene-observer` / `ene-store` の責務理解の参考 | 作業・学習・実行・観測を再び一つに集めない |
-| `ene-kernel` | dialogue lane / context assembly / visibility / observability | 対話 orchestration は `ene-companion::dialogue`、用途別 context は各 owner、Audit は `ene-preservation` | **互換 shim・lane 移植を要求しない。** Context Assembly を中央 pipeline に戻さない |
-| `ene-access-control` | approval / audit / vault | `ene-permission` / `ene-credential` / `ene-preservation` の境界の参考 | Permission・Credential・Audit を再統合しない |
-| `ene-session` | event log / usage ledger / history projection + rusqlite | owner 別 repository + `ene-store` / derived の参考 | **re-export shim・旧 session store 維持を要求しない。** History・usage・projection を一つの正本にしない |
-| `ene-tool-registry` | tool registry / builtins / pipeline / deny-by-default | `ene-action` の adapter / extension 境界の参考 | 旧 registry crate の保持を要求せず、目標 adapter 境界を直接実装する |
-| `ene-body` | performance queue / emotion mapping / duplex voice | `ene-presentation` + Client adapter、内的意味は `ene-learning` の参考 | 旧 queue / voice pattern の移植を要求しない |
-| `ene-api` | HTTP/WS API types・OpenAPI・typed client | narrow な wire DTO crate の参考 | Host domain 依存・secret・durable row を露出させない |
-| `ene-plugin-ipc` | length-prefixed MessagePack frames | transport 表現の adapter 候補 | domain 意味を持たせない |
-| `ene-plugin-host` | process supervision / host-context / broker grants | 外部 code hosting adapter の参考 | 推論解決・Action 認可の意味を持たせない |
-| `ene-provider-assets` | catalog / manifest / download helpers | catalog / manifest helper の参考 | 割当同意・送信可否の意味を持たせない |
-| `ene-sandbox` | Landlock + seccomp + Job Object | OS 隔離 adapter の参考 | domain 意味を持たせない |
-| `ene-vrm` | VRM 1.0 renderer (wgpu) | Client renderer adapter の参考 | 適用関係・経験状態・権限を持たせない |
-| `ene-stage-ui` / `ene-tray-linux` | Slint bindings / ksni tray | Client UI / tray adapter の参考 | domain 意味を持たせない |
-| `ene-stage-poc` | PoC stage | 目標 product Client には含めない | 旧 PoC の互換維持を要求しない |
-| `apps/ene-core` | Host process（session store・lane・lock・HTTP/WS） | `apps/ene-core` composition root の責務検討材料 | 旧全依存・旧 runtime pattern を維持しない |
-| `apps/ene-desktop` | frozen desktop client | 目標新規実装の product Client ではない | 新規設計の互換対象にしない |
-| `apps/ene-stage` / `apps/ene-ctl` | product stage client / CLI client | Client composition の参考 | `ene-api` DTO 経由で Host authority と分離する |
-
-## 4. 目標 workspace 構成
-
-### 4.1 Workspace tree 例
-
-以下は**最終目標の構成例**であり、旧 crate の互換 shim を含めない。**これは stage completion checklist や全 crate 先行作成の指示ではない。** 実際の実装では実装ガイドの vertical slice を優先し、その slice で必要になった boundary から第4・10節の責務と依存方向を満たす形で追加する。
+以下は**最終目標の構成例**である。**これは stage completion checklist や全 crate 先行作成の指示ではない。** 実際の実装では実装ガイドの vertical slice を優先し、その slice で必要になった boundary から第3・9節の責務と依存方向を満たす形で追加する。
 
 ```text
 Cargo.toml  # members = ["crates/*", "apps/*", "plugins/tool/*", "plugins/provider/*"]
@@ -115,7 +88,7 @@ plugins/tool/*, plugins/provider/*  # 外部拡張（ene-plugin-host 経由で�
 
 上記粒度は navigation・compile boundary・ownership 追跡・循環防止・test 容易性を優先したものであり、crate 数の最小化・最大分離自体を目標にしない。`ene-presentation` / `ene-observer` を `ene-presence` へ畳まないのは、帰属（Companion 単位排他）・round 実際（入出力）・観測対象（Client 単位共有）の制御単位・lifecycle が異なり、一つの state・boolean・actor へ潰すと X-1〜X-10 の契約が失われるためである。`ene-permission` / `ene-credential` を分けるのは、説明・context に載せてよい情報と秘密値の保護・失効・backup 除外の契約が異なり（DR-05）、同一 crate では非露出を強制できないためである。`ene-inference` / `ene-action` を分けるのは、推論失敗と外部作用不明の再試行・確定度・replay 契約が異なり（CCT §6・§8）、統合すると不明の自動再実行が生まれるためである。
 
-### 4.2 Crate 責務・主要 module・public boundary
+### 3.2 Crate 責務・主要 module・public boundary
 
 凡例：`pub` = workspace 公開、`priv` = crate 内限定。`Transaction` / `SecretValue` / 生 SQL はいずれも `pub` にしない。
 
@@ -137,20 +110,20 @@ plugins/tool/*, plugins/provider/*  # 外部拡張（ene-plugin-host 経由で�
 | `ene-preservation` | 保全・消去（保持・Backup/Restore/Reset・Audit/Debug・全域調整。PE-1〜PE-7、D-A〜D-E、DP-0〜DP-8） | `retention`（保持・opt-in cleanup。既定 OFF）、`backup`（対象時点・参照・除外・未完了対応）、`restore`（staging・switch・保留・一括有効化）、`deletion`（範囲確定・`ErasureConditionRef`・残存検証・全域完了）、`reset`（Settings/FullData 区別）、`audit`（追記順・保持。本文別保管庫にしない）、`debug`（明示・短期・停止・削除）、`coordination`（`ErasureParticipant` trait・完了集約。任意編集権を持たない） | pub: `DeletionOperationId`・`DeletionSweepGeneration`・`BackupPointId`・`RestoreGeneration`・`DemandLocalErasureCommand`・`ParticipantCompletionFact`・`PreservationRepository` trait。priv: 探索・検証実装・archive 形式。禁止: 各 domain の意味変更、秘密値取得、外部所有物管理 |
 | `ene-store` | 機構のみ（PR Group A〜K の D1/D2/D3 + R/T の保持。semantic owner ではない） | `sqlite`（`app.db` owner 別 group。`Immediate` 短 transaction のみ。await なし）、`derived`（`derived.db` + sqlite-vec。feature 隔離。再構築可能）、`fs`（`internal_copies/` + `*.ene-backup` staging。temp→fsync→publication guard→rename→pointer commit→guard release→orphan cleanup）、`migrate`（schema version・migration。前方のみ。downgrade 保証しない） | pub: 各 group の row 型への mapping 関数・`new`/`open`・cleanup のみ。`Transaction` を pub にしない。各 domain の `*Repository` trait 実装（`ene-store` が各 domain に依存する方向）。cleanup は live 参照も active publication もないことを削除直前に同じ同期境界で再確認する。禁止: 採否・達成・許可・確定度の判断、revision bump 可否の決定、秘密値の保持、derived からの正本復活 |
 | `ene-api` | Host↔Client wire-neutral DTO（remote-capable のみ。IB §15） | `round`（`SubmitClientInputCandidate` wire 形・`RoundClosureFact`・`ConfirmPresentationObservation`）、`presence`（`RequestMoveCommand` wire 形・`PresenceAttributionFact` wire 形）、`undelivered`（`UndeliveredSummaryFact` wire 形）、`character_asset`（表示資材参照のみ）、`management`（`ManagementOperationCommand` wire 形）、`erasure_client`（Client 一時参加分） | pub: serde DTO のみ。`ene-companion`/`ene-task` 等への依存禁止。Host 内部 newtype・secret・durable row を露出させない。内部正本の主 key として再利用できる形で渡さない |
-| `ene-plugin-ipc`/`ene-plugin-host`/`ene-provider-assets`/`ene-sandbox` | transport / hosting / catalog / 隔離（外部境界） | 必要な最小 adapter 実装（第8節） | pub: transport・hosting・catalog・隔離 API のみ。domain 意味を持たせない |
+| `ene-plugin-ipc`/`ene-plugin-host`/`ene-provider-assets`/`ene-sandbox` | transport / hosting / catalog / 隔離（外部境界） | 必要な最小 adapter 実装（第7節） | pub: transport・hosting・catalog・隔離 API のみ。domain 意味を持たせない |
 | `ene-vrm`/`ene-stage-ui`/`ene-tray-linux` | Client adapter（renderer / UI bindings / tray） | Client 必要範囲 | pub: adapter API のみ。domain 正本・権限を持たせない |
 
 `pub(crate)` を既定とし、`pub` は上表の型・command・outcome・trait に限定する。`allow_attributes` の workspace 規約に従い、例外は narrow な `#[expect]` のみとする。`unsafe` は必要な OS / native adapter の狭い境界に閉じ込め、各 `unsafe` ブロックに `// SAFETY:` を付す（AGENTS.md）。
 
-## 5. Core domain types の配置（巨大 common を作らない）
+## 4. Core domain types の配置（巨大 common を作らない）
 
-### 5.1 `ene-primitive` に入るもの・入らないもの
+### 4.1 `ene-primitive` に入るもの・入らないもの
 
 入るもの（本当に小さい primitive のみ）：`RawId`（128bit opaque。衝突回避・再利用禁止・推測不能の性質のみ）、`RevisionInner` / `GenerationInner`（`u64` 単調 helper。単独で持ち歩かない）、`WallClockWithTz`（wall-clock + 作成時 tz。revision 代替にしない）、有向 pair の形（`{from_raw, to_raw, purpose}` の shape のみ。本文複製しない）。
 
 入らないもの：`CompanionId`・`TaskId`・`ActionAttemptId`・`ClientId`・`RoundId`・`LearningId`・`CharacterId`・`RuleId`・`CredentialRef`・`DeletionOperationId`・`BackupPointId` 等の domain newtype、`TaskRevision`・`PresenceGeneration`・`RestoreGeneration`・`DeletionSweepGeneration` 等の lifecycle 別 revision / generation、`UndeliveredRef`・`DelegationRef`・`RoutingContextRef`・`SummaryGroundsRef` 等の correlation struct、wire DTO、DB row、OS 依存。理由：primitive を巨大化させると ownership 追跡・compile boundary・Host/Client 分離が崩れるためである。
 
-### 5.2 Domain 固有型の owner 別配置
+### 4.2 Domain 固有型の owner 別配置
 
 | 型 | owner crate | 備考（分離の理由） |
 |---|---|---|
@@ -165,30 +138,30 @@ plugins/tool/*, plugins/provider/*  # 外部拡張（ene-plugin-host 経由で�
 | `ObservationCandidateId`・`RoutingContextRef`（派生） | `ene-observer` | 新正本・新 scope・包括共有にしない。元 owner の制約と専用 assignment 同意を変換後も適用する |
 | `DeletionOperationId`・`DeletionSweepGeneration`・`DeletionOperationRef`・`ErasureConditionRef`・`BackupPointId`・`RestoreGeneration`・`RestoreRef`・`HoldConditionRef` | `ene-preservation` | `DeletionOperationRef` の完了は全域確定であり、各 domain の意味変更は各 owner が行う。検索 token は操作期間のみ保持し、除去・復元不能化を確認してから全域完了を確定する |
 
-### 5.3 循環回避のための inversion（重要）
+### 4.3 循環回避のための inversion（重要）
 
 Samsara を避けるため、cross-domain 参照は次の inversion で解決する。複数 domain 型を一つの shared crate へ移すだけの設計は採らない。
 
 - 各 owner crate は他 owner crate の domain newtype に依存しない。必要な相手情報は `RawId` + `u64`（revision / generation 値）+ 用途・scope・provenance の premise struct（自 crate 定義）として受け取る。例：`ene-action::AttemptCommitPremise { expected_task: Option<TaskPremise { task: RawId, revision: u64 }>, ... }` は `ene-task::TaskRef` に依存しない。
 - `RawId` ↔ domain newtype の mapping は orchestration 層（caller 側の `dialogue` / `orchestrate` module + Host composition `apps/ene-core`）だけが行う。`From<CompanionId> for AssigneeRef` 等の domain 間 `From` を設けない。field 名と型で区別し、接頭辞判別を照合 logic に使わない（CI §4.1）。
 - 逆向きの参照依存（例：Permission が Task 委任範囲・推論消費事実を読む、Learning が History・Task 事実を読む、Preservation が各 holder の source 関係を読む）は、owner が caller 内部を知る依存ではなく、caller が premise として供給する形で満たす。DR-12 の双方向は意味上の必要性であり、crate 依存の双方向にしない。
-- `ErasureParticipant` 等の横断 trait は `ene-preservation` が定義し、各 participant crate が実装する方向（participant → preservation）に依存させる。`ene-preservation` は participant 具体 crate に依存しない。fan-out 呼出しは Host composition が行う（第6・7節）。
+- `ErasureParticipant` 等の横断 trait は `ene-preservation` が定義し、各 participant crate が実装する方向（participant → preservation）に依存させる。`ene-preservation` は participant 具体 crate に依存しない。fan-out 呼出しは Host composition が行う（第5・6節）。
 
-## 6. Domain logic vs orchestration
+## 5. Domain logic vs orchestration
 
 DDD を機械適用しない。依存方向と変更理由で分ける。
 
 - pure domain logic（不変条件・採否・確定度・scope 意味・世代対応）は各 owner crate の `logic` / `policy` module に置く。`trait` 化しない。例：Task steering の目的区別、Learning の保存価値・訂正種別、Presence の二重 active 禁止、Permission の再評価要否、Action の実対象解決。
 - state transition / acceptance（SD 単位の compare・forward・CAS）は各 owner crate の `transition` / `commit` module に置き、`*Repository` trait 経由で durable 化する。DB transaction を business が保持しない（IB §13）。
 - orchestration（複数 owner の premise 収集・順序付け・遅延帰属・未伝達接続）は caller 側に分散させる。対話 orchestration は `ene-companion::dialogue`、作業 orchestration は `ene-task::orchestrate`、観測 routing は `ene-observer::routing`（Host 供給の context を受ける形）、全域 fan-out は Host composition + `ene-preservation::coordination` が行う。万能 mediator を新設しない。
-- repository access（trait 定義）は各 domain crate、implementation は `ene-store`（第7節）。business から `rusqlite::Transaction` を漏らさない。
-- external adapter（transport・OS・device・MCP）は `ene-plugin-host` / `ene-action::adapters` / Client app module に置き、domain が adapter 具体に依存しない方向（adapter → domain trait 実装）に反転させる（第8節）。旧 adapter crate の存在を新規実装の前提にしない。
+- repository access（trait 定義）は各 domain crate、implementation は `ene-store`（第6節）。business から `rusqlite::Transaction` を漏らさない。
+- external adapter（transport・OS・device・MCP）は `ene-plugin-host` / `ene-action::adapters` / Client app module に置き、domain が adapter 具体に依存しない方向（adapter → domain trait 実装）に反転させる（第7節）。旧 adapter crate の存在を新規実装の前提にしない。
 
 中央 orchestrator にならないことの担保：`ene-companion` は対話用途の Task/Learning/Inference/Action/Presence 呼びに限定し（`dialogue` module に隔離。軽微応答・軽微本体のみ直接。削除・Backup/Restore・予約・adapter 選択を知らない）、`ene-task` は作業用途の Action/Inference/Learning 呼びに限定し、帰属切替・観測 routing・表示を知らない。`ene-preservation` は完了集約・hold・token 最終消去・全域完了確定に限定し、対話・作業の意味を知らない。`apps/ene-core` は wiring・lifecycle・storage init・route 配線に限定し、採否・達成・許可・確定度を決めない。各 crate の禁止事項は第4.2節の表に従う。
 
-## 7. Persistence 配置
+## 6. Persistence 配置
 
-### 7.1 Repository trait / implementation / schema / migration
+### 6.1 Repository trait / implementation / schema / migration
 
 | 関心 | 配置 | 依存方向 |
 |---|---|---|
@@ -202,7 +175,7 @@ DDD を機械適用しない。依存方向と変更理由で分ける。
 
 business/domain layer から `rusqlite::Transaction`・生 SQL・`sqlite-vec`・fsync・rename を漏らさない。repository method が内部で短 transaction を行い、compare と durable 更新を不可分にする。transaction 内で await・外部 I/O を行わない。filesystem publication guard は DB transaction の代替ではなく、publish と cleanup の競合だけを狭く同期する。
 
-### 7.2 Table group と crate の対応（抜粋）
+### 6.2 Table group と crate の対応（抜粋）
 
 PR §4 の Group A〜K に対応する。storage 上で近くても owner は統合しない。
 
@@ -220,7 +193,7 @@ PR §4 の Group A〜K に対応する。storage 上で近くても owner は統
 | J 保全・消去（操作・backup・audit・debug） | `ene-preservation` | `sqlite::preservation` + `fs`（backup file） |
 | K Credential 参照（非秘密） | `ene-credential` | `sqlite::credential_ref`（秘密なし）。秘密本体は OS store |
 
-## 8. Provider / MCP / Plugin / OS 境界
+## 7. Provider / MCP / Plugin / OS 境界
 
 SDK 選定より依存方向を固定する。trait を置く crate と実装 crate を分け、adapter ごとに過剰な crate を増やさない。
 
@@ -237,7 +210,7 @@ SDK 選定より依存方向を固定する。trait を置く crate と実装 cr
 
 `ene-sandbox` はいずれの domain 意味も持たず、適用可否の意味（Permission の sandbox 例外）と適用結果（Action の作用）は各 owner に残る。`ene-plugin-ipc` は transport 表現だけを持ち、意味を持たない。
 
-## 9. Host / Client / shared 配置
+## 8. Host / Client / shared 配置
 
 Client が Host domain crate へ直接依存して canonical mutation API を利用できる構造にしない。共有できる型まで複製しない。
 
@@ -256,9 +229,9 @@ Client が Host domain crate へ直接依存して canonical mutation API を利
 
 初期実装では Client capture（screenshot・audio・VAD・barge-in・通知）・device adapter を app 内 module で開始し、境界が安定したら crate 分離可能とする。その場合も logical boundary（`CaptureAdapter`・`AudioAdapter`・`RenderAdapter` の trait 位置と `ene-observer` / `ene-presentation` との premise 受け渡し）は本書の表に従う。
 
-## 10. 依存方向・グラフ
+## 9. 依存方向・グラフ
 
-### 10.1 Allowed dependency 表（crate 依存。`A → B` は A が B に依存する）
+### 9.1 Allowed dependency 表（crate 依存。`A → B` は A が B に依存する）
 
 | 依存元 | 依存先（allowed） | 理由（caller → owner / 機構共有） |
 |---|---|---|
@@ -282,7 +255,7 @@ Client が Host domain crate へ直接依存して canonical mutation API を利
 
 prohibited reverse の要点：owner → caller（例：`ene-task` → `ene-companion`、`ene-learning` → `ene-companion`/`ene-task`、`ene-permission` → `ene-task`/`ene-action`、`ene-preservation` → participant 具体、`ene-store` → の逆である owner → store、`ene-api` → domain、`ene-credential` → `ene-permission` 具体とその逆）を禁止する。双方向に見える意味依存は第5.3節の premise 供給・Host 媒介・trait 反転で一方向に保つ。
 
-### 10.2 Dependency graph（crate 依存。矢印は依存方向）
+### 9.2 Dependency graph（crate 依存。矢印は依存方向）
 
 ```mermaid
 flowchart TB
@@ -389,23 +362,11 @@ flowchart TB
 
 `ene-store` の fan-in は機構共有であり ownership 統合ではない。`apps/ene-core` の fan-in は wiring であり意味判断ではない。`ene-companion`・`ene-task` の fan-in は用途別 orchestration であり、全域の万能化ではない。graph に cycle はない。
 
-## 11. IPC readiness（次工程への boundary）
+## 10. IPC boundary
 
-具体的 wire protocol / serialization schema / version negotiation は次工程へ残す。今回固定するのは boundary の両側と wire-neutral type の置き場所である。
+Host↔Client を越える interface の選別、wire DTO の module 配置、Host-local に留めるものは [Host↔Client IPC](host-client-ipc.md) 第2節・第25節が定める。本書はその前提として、wire-neutral type を `ene-api` だけに置き（第3・8節）、Client が Host domain crate・`ene-store`・secret に依存しない依存方向（第9節）を固定する。
 
-| boundary 両側 | 位置 | wire-neutral type の置き場所 |
-|---|---|---|
-| Client input → Host Companion（X-B `SubmitClientInputCandidate`・`RoundIntakeOutcome`） | Client（`apps/ene-stage`・`ene-ctl`） ↔ Host（`ene-presentation` 受付 + `ene-presence` 照合 + `ene-companion` 受理。`apps/ene-core` が媒介） | `ene-api::round`。Client 主張（`claimed_generation`）を authority にしない。旧 round 付け替え・Client copy 上書き・自動 queue をしない |
-| Host output → Client presentation（X-B `RoundClosureFact`・`ConfirmPresentationObservation`・X-H `UndeliveredSummaryFact`） | Host（`ene-companion` 要約報告材料 + `ene-presentation` 提示事実） ↔ Client（表示・提示確認） | `ene-api::round` + `ene-api::undelivered`。送信≠報告完了。提示不明を保持する。exactly-once・既読保証を追加しない |
-| presence 移動・復帰（X-A `RequestMoveCommand`・`PresenceAttributionFact`） | Client（呼出し意図） ↔ Host（`ene-presence` 成立。`ene-companion` 必要性 + `ene-presentation`/`ene-action` 区切りを `apps/ene-core` が対応付け） | `ene-api::presence`。hint・復旧先だけで成立させない。二重 presence を禁止する |
-| 観測 eligibility 表示（X-D `NotifyPresenceChangeFact` の Client 向け表示分） | Host（`ene-observer`・`ene-presence`） → Client（表示） | `ene-api::observer_display`。Raw・候補・routing 用 data・私的 context を送らない |
-| Targeted Deletion の Client 一時参加（D-B の Client 宛て分） | Host（`ene-preservation` 調整） ↔ Client（一時 data 保持者） | `ene-api::erasure_client`。切断・応答なしを成功にしない。未確認範囲を保全・消去へ伝える。再接続時に旧 copy を戻さない |
-| Character 表示資材（C-A の資材利用） | Host（`ene-character` 供給） → Client（表示利用） | `ene-api::character_asset`。適用関係・経験状態を送らない。内部主 key として再利用できる形で渡さない |
-| 管理面の表示・操作（IB 第9節 `ManagementOperationCommand` の Client 側入口） | Client（入口） ↔ Host（各 owner の受理・確認・結果） | `ene-api::management` は intent・filtered view。高権限操作の最終確認は Host PC 上の trusted first-party management surface に限定する（IPC §18）。`ene-presentation::management` と Host 管理入口が確認を担当 owner へ供給し、`apps/ene-core` は配線・中継する。UI に任意書換権を与えず、本体 LLM・長時間 Task を介在させない |
-
-Host-local に留め、越境させないもの：H-B〜H-E の形成・訂正・scope 意味判断、K-A〜K-C の制御確定・秘密利用、K-D〜K-G の割当解決・送信条件・予約確定、K-H の認可・作用確定、D-A・D-C・D-D の範囲確定・完了確定・switch、第13節の repository compare-and-commit 群。durable compare を Host 単一 SQLite transaction で不可分にするため、DB transaction を Client・Provider・MCP へ露出させない。秘密値を通常経路に載せない。ID・revision・generation・correlation を明示 field として serialize し、本文中文字列を照合に使わない（CI §4.6）。時刻は wall-clock + 作成時 tz を保持し、Schedule tz を黙置換しない。
-
-## 12. Validation（crate 依存だけでの確認）
+## 11. Validation（crate 依存だけでの確認）
 
 特定 crate が何でも知る中央 orchestrator になっていないことも含めて確認する。各 walkthrough は crate hop のみを追う（意味の再定義はしない）。
 
@@ -421,22 +382,17 @@ Host-local に留め、越境させないもの：H-B〜H-E の形成・訂正�
 - external adapter replacement：`ene-inference` の `ProviderTransport`・`ene-action` の `McpAdapter`/`OsActionAdapter`・`ene-observer` の `CaptureAdapter`・`ene-credential` の `CredentialStore` を差し替える。`ene-plugin-host`・`plugins/*`・Client adapter を交換し、domain crate・`ene-store`・`ene-api` を変更しない。未対応 protocol の Plugin 補完・Local MCP 例外・Client 直結でも同意・費用・秘密・消去契約を維持する。adapter が domain の authority にならない。
 - filesystem publish → periodic cleanup：`ene-store::fs` が file durable 後に publication guard を確立し rename、DB pointer commit 後に guard を解除する。周期 cleanup は live 参照・active publication を同じ同期境界で再確認するため、rename 後・pointer commit 前の file を削除しない。process crash で guard が失われ、durable pointer もない file は recovery / orphan cleanup 対象にできる。
 
-## 13. 実装順序との関係 — vertical slice が正本
+## 12. 実装順序との関係 — vertical slice が正本
 
 本書は crate / module の**目標責務・public boundary・dependency direction**を固定するが、crate を作る時系列は定めない。実装順の source of truth は [`docs/implementation/README.md`](../../implementation/README.md) であり、ユーザーから観測できる vertical slice に必要になった boundary だけを追加する。
 
-- **全 crate を先に scaffold しない。** 第4節の一覧、全 repository trait、全 adapter を architecture compliance のためだけに先行実装しない。未使用 crate・将来用 abstraction・空 owner shell を増やさない。
-- **必要になった boundary で目標設計を直接満たす。** slice が新しい owner / repository / adapter を必要とした時点で、第4・10節の責務・禁止事項・依存方向を満たす最小実装を追加する。旧 crate の shim / re-export / compatibility layer を経由して段階移行することは要求しない。
-- **共有 contract は先に小さく固定できる。** 複数 stack が同じ public contract に依存する場合は実装ガイド §3.3 に従い、その contract だけを小さい prerequisite PR として固定してから並列化する。これは全 owner の skeleton 先行作成を意味しない。
+- **全 crate を先に scaffold しない。** 第3節の一覧、全 repository trait、全 adapter を architecture compliance のためだけに先行実装しない。未使用 crate・将来用 abstraction・空 owner shell を増やさない。
+- **必要になった boundary で目標設計を直接満たす。** slice が新しい owner / repository / adapter を必要とした時点で、第3・9節の責務・禁止事項・依存方向を満たす最小実装を追加する。
+- **共有 contract は先に小さく固定できる。** 複数 stack が同じ public contract に依存する場合は実装ガイドの PR 分割の原則に従い、その contract だけを小さい prerequisite PR として固定してから並列化する。これは全 owner の skeleton 先行作成を意味しない。
 - **Persistence は必要になった時点で安全契約も同時に入れる。** internal copy / backup file と DB pointer を扱う slice で `ene-store::fs` を初めて追加するなら、CCT §13 の publication guard・cleanup の最終再確認をその slice の acceptance に含める。単に「Store を先に完成させる」段階は設けない。
 - **Targeted Deletion も Stage 6 より前に scaffold しない。** 実装対象になった時点で PR / CCT の `finalizing` と検索 token の wipe / 復元不能化-before-completion を満たす。Stage 1 / Stage 2 に deletion owner・table・coordination の空実装を先行追加する必要はない。
-- **現在の Stage 1 は整合している。** `ene-primitive` / `ene-config` / 最小 `ene-api` / Host・CLI entrypoint のみを先に成立させ、まだ `ene-store`・Deletion・Task 等を作っていない構成は本書と矛盾しない。第4節の tree は target topology であり stage completion checklist ではない。
 
-各 PR は、その時点で存在する package と vertical slice に対して focused な `cargo check -p <pkg>` / `cargo test -p <pkg>` を回し、必要な範囲で workspace validation を行う。具体 command・workspace members は実装の進行に合わせて更新してよく、将来の package 一覧を先に満たすことを合格条件にしない。
-
-旧 Repository との対応表（第3節）は、必要な責務を見落とさないための参考に限る。旧 crate 名の残置、旧 module の物理 move、段階的 re-export、互換 wrapper、旧 shutdown / actor / store pattern の再現は実装順序にも各 Stage の完了条件にも含まれない。
-
-## 14. 意図的に残した Design Freedom
+## 13. 意図的に残した Design Freedom
 
 - 各 crate の concrete method 名・module 粒度・同期 / 非同期の粒度（IB は `async fn` を提案するが、actor / channel / 直接呼出し等の mechanism は固定しない）。
 - `RawId` ↔ domain newtype の mapping 方式（Host composition の最小 helper に留める。具体 code は固定しない）。
@@ -450,31 +406,11 @@ Host-local に留め、越境させないもの：H-B〜H-E の形成・訂正�
 - legacy code を参考にするかどうか、参考にする場合の具体箇所。ただし旧 compatibility / shim / copy / move を architecture requirement に格上げすることは Freedom に含まれない。
 - 上記の対応関係から統一 Context layer、Policy Engine、Manager、Service、Coordinator の追加を導かない。既存の12責務、semantic owner、Host／Client 配置と trust boundary の下で実現方法を選ぶ。
 
-## 15. Escalation — Requirement / Architecture Issue の有無
+## 14. Escalation — Requirement / Architecture Issue の有無
 
 Step 11 / Step 12 semantic contract 変更、correspondence / persistence / concurrency / interface contract 変更、semantic owner 変更、subsystem boundary 変更、Requirement / Security / Privacy semantics 変更を必要とする事項は検出しなかった。crate / module 配置の選択は Issue ではないため、ここに Issue を報告しない。
 
 - CI・PR・CCT・IB の意味を変更していない。identity / revision / generation / correlation / boundary token の分離、durable 分類、serialization domain、compare-before-commit、caller ≠ authority、typed expected、domain outcome / technical error 分離、secret 非返却、Host-local / remote-capable の区別を維持した。
 - H-1〜H-10、K-1〜K-12、X-1〜X-10、CH/CD、DP/PE の semantic contract を再定義・移動していない。各 crate の owner 注記は SO・DR の再掲であり、新しい semantic owner・第二の正本・万能 Manager / Coordinator / Policy Engine・統一 state machine・共通 Context layer を追加していない。
-- 新規実装方針との整合のため、旧 Repository の retain / rename / move / split / shim 指示は規範から外し、第3節を非規範の参考対応にした。さらに第13節では実装時系列を実装ガイドの vertical-slice 方針へ明示的に委譲し、第4節の target crate 一覧を build-order / Stage checklist と誤読できないようにした。これは architecture 変更ではなく、Requirements / Design と実装ガイドの責務分担の明確化である。
 - CCT §13 と整合させ、`ene-store::fs` の publish 中 file を周期 orphan cleanup から保護する publication guard / 最終再確認を明記した。具体 lock / registry 実装は Freedom のままである。
 - 将来 Issue になり得る観測事項（いずれも現時点では Issue にしない）：Client 一時 data の到達不能時の完了根拠の具体方式、観測停止時の取得済み候補の扱い、旧 live 結果を区別する具体手段の選択。これらはいずれも既決の制約を満たす後続設計上の自由度として残る（CC §10・IB §19 と同様）。
-
-## 16. 次工程への申送り
-
-### 16.1 Host ↔ Client IPC 設計の固定前提として使えること
-
-- remote-capable interface は第11節の7群（round 受付・提示・区切り、移動・復帰、未伝達報告、eligibility 表示、Client 一時参加、表示資材、管理面）に限定する。Host-local（形成・訂正・scope 意味、制御確定・秘密利用、割当解決・予約確定、認可・作用確定、範囲確定・完了確定・switch、repository compare 群）を越境させない。
-- wire-neutral type は `ene-api` に置く。Host 内部 newtype・secret・durable row を露出させない。内部正本の主 key として再利用できる形で渡さない。ID・revision・generation・correlation を明示 field として serialize し、本文中文字列を照合に使わない。時刻は wall-clock + 作成時 tz とする。
-- Client は `ene-api` 経由で Host authority と通信し、Host domain・`ene-store`・secret に依存しない。Host は DTO ↔ domain premise の mapping を composition / adapter 層で行い、domain crate に wire 依存を持ち込まない。
-- boundary token の欠落は「制約なし」ではなく不受理の理由にする。`StaleRound`・`StalePremise`・`HeldForTransition`・`NeedsRevalidation` 等は `Ok` 側 domain outcome で返し、`Err` 側 retry 対象にしない。
-- 第3節の旧 Repository 対応は非規範であり、後続実装は旧 shim / re-export / compatibility を設計前提にしてはならない。
-- **crate を追加する時系列は実装ガイドが正本**であり、第4節の workspace tree は最終 target の責務・依存制約である。後続 Stage は必要な vertical slice から crate / module を追加し、全 target crate の先行 scaffold をしない。
-
-### 16.2 Step 13 で次に具体化すべき領域（本書の対象外として残したもの）
-
-- Host ↔ Client IPC の wire schema・version negotiation（第11節の DTO を材料にする）。
-- 具体 DB schema・index・migration code（PR §4 と IB §13 の repository premise を材料にする）。
-- concurrency mechanism の確定（CCT の SD・AU と第10節の compare を材料にする）。
-- Provider protocol adapter・MCP・Plugin の受入境界の concrete API（第8節の extension 種別を材料にする）。
-- Client capture・audio・device adapter の crate 分離時期と platform 隔離の確定（第9節の app 内 module 開始を材料にする）。

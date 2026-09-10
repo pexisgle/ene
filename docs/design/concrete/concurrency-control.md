@@ -2,11 +2,11 @@
 
 本書は Step 13 の Concurrency artifact である。[対応関係・識別](correspondence-identity.md)（CI）の identity / revision / generation / correlation / boundary token の意味と、[Persistence / Recovery](persistence-recovery.md)（PR）の owner 別 durable state・D1/D2/D3/R/T/E 分類・atomicity / ordering・recovery semantics・compare 対象・durable-before-visible を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。本書内の DR は [Dependency Rules](../architecture/dependency-rules.md) を指す。
 
-実装コードはまだ変更しない。本書は mechanism 選択まで固定し、具体 SQL・crate 分割・IPC 形状・retry/timeout 値は固定しない。
+本書は mechanism 選択まで固定し、具体 SQL・crate 分割・IPC 形状・retry/timeout 値は固定しない。
 
 ## 1. 対象と非対象
 
-### 1.1 今回具体化するもの
+### 1.1 本書が具体化するもの
 
 - 何が同時に起こり得るか、何と何が競合するか、競合時にどちらを受け入れてよいか（第3節）。
 - どの比較を不可分に行う必要があるか、どこで serialization が必要でどこで不要か（第4・5節）。
@@ -14,11 +14,11 @@
 - domain invariant に適した mechanism の選択（第6節）。一つの mechanism の全体強制はしない。
 - Task / Action / Permission-cost / Presence / Deletion / Restore / Filesystem+DB / Cancellation の競合制御（第7–12節）。
 - lock の ownership・granularity・ordering・await 中の保持可否（第15節）。
-- 次の interface 設計で必要になる concurrency property の引渡し（第16節）。
+- interface が運ぶべき concurrency property（第16節）。
 - Rust 実装方針の具体化範囲（第17節）。特定 library の導入は必要性が明確な場合だけ固定する。
 - race walkthrough（第18節）。
 
-### 1.2 今回決めないもの
+### 1.2 本書が決めないもの
 
 - DB 製品固有の完全な `CREATE TABLE`、index、migration、vacuum。
 - crate / module 分割、process / thread 配置、IPC / wire format の byte 仕様。
@@ -440,9 +440,9 @@ publication guard の具体実装は固定しない。process 内の lock / in-p
 - broadcast は観測・表示のための配信に限り、authority・commit 順序・排他に使わない。`Lagged` は skip し、欠落を成功・現在と読まない。
 - 上記により、複数 owner を跨ぐ処理でも global lock ではなく compare / commit 境界で成立させる。循環承認待ち・管理経路の循環依存を作らない（DR-08）。
 
-## 16. Interface handoff（次の interface 設計で要求すべき concurrency property）
+## 16. Interface が運ぶべき concurrency property
 
-具体 API 全部を今回設計しない。落としてはならない情報を固定する。暗黙の「最新を使う」指定を設けず、token 欠落は不受理の理由にする。
+具体 API は [Interface Boundaries](interface-boundaries.md) が定める。本節は interface が落としてはならない concurrency property を固定する。暗黙の「最新を使う」指定を設けず、token 欠落は不受理の理由にする。
 
 | 境界 | 要求すべき concurrency property |
 |---|---|
@@ -561,35 +561,7 @@ fn reserve_usage(
 | revocation during use（追加） | 新規予約を deny し、実行中を best-effort で停止する。既確定消費を事後取消にせず、別経路迂回をしない | §9, §14 |
 | Character 更新 vs 適用競合（追加） | 新 revision insert と適用を分離し、適用は `expected_character_revision + OwnerSelectionRef` の CAS で確定する。未確認部品を更新済みにしない | §4, §5 |
 
-## 19. 横断レビュー（自己レビュー）
-
-本書完成後に requirements・Step 11・Step 12・CI・PR へ戻して自己レビューした。観点と結果は次のとおりである。
-
-- **固定 premise 維持。** identity / revision / generation / directed correlation / boundary token の意味と分離、owner 別 durable・D1/D2/D3/R/T/E・atomicity / ordering・recovery・compare 対象・durable-before-visible の境界を維持した。arrival order・wall-clock / TTL・global revision counter・unknown 推定・retry 新 Attempt・遅延帰属・replay 禁止・判断記録 / 解決経路 / Client 主張の非 authority 化のいずれも崩していない。
-- **単一 mechanism 強制の回避。** 楽観 CAS・owner-local serialization・短い DB transaction・予約・mailbox・cancel signal・filesystem publication guard を必要な domain にだけ選択し、「全部 actor / mutex / DB transaction / global coordinator」を設けていない。global version・universal ordering・consensus・lease を導入していない。
-- **serialization の過不足。** 同一 Task・同一 Companion 帰属・同一 attempt 確定度・同一 cap・同一 operation 完了集約・switch 瞬間のみ逐次化し、異なる Task・Companion・attempt・cap・operation 間と長時間処理を並列に残した。filesystem publish と cleanup の race は path publication の狭い境界だけ同期する。全 domain の長大 lock・全 read 停止を避けた。
-- **stale / delayed の隔離。** 全競合で「元への記録」と「現在への採用」を分け、旧目的・旧承認・旧 provenance の自動採用・自動再実行・自動復活をしないことを walkthrough で確認した。
-- **外部作用の不可逆性。** 開始前 compare と開始後 tracking を分離し、DB rollback で外部作用を取り消せる想定を置いていない。Unknown 粘着・新 evidence 更新・新 Attempt retry を維持した。
-- **修正。** レビューで見つけた不足（acceptance result と lifecycle `Status` の混同防止、完了後遅延物の provenance linkage による抑止、Targeted Deletion の検索 token 最終消去を全域完了前の必須条件化、filesystem publish 中 file と周期 cleanup の排他、transaction 内 read 順序、mailbox 内での他 domain 待ち禁止、旧実装 pattern を実装要件にしないこと）を本書へ反映した。Step 11・Step 12・CI・requirements の変更は不要であった。
-
-## 20. 後続設計への引渡しと残す Design Freedom
-
-### 20.1 固定前提として使えるもの
-
-後続の interface / IPC / 実装設計は次を固定契約として利用できる。
-
-- concurrency sources・競合対・受入方針（第3節）。
-- serialization domain 表（第4節）。同一 Task・同一 Companion 帰属・同一 attempt・同一 cap・同一 operation・switch 瞬間の逐次化範囲と、並列してよい範囲。
-- compare-before-commit の一般形と原子比較表（第5節）。DB transaction 長時間保持の禁止、token 欠落の不受理を含む。
-- domain 別 mechanism 選択（第6節）。単一 mechanism 強制・global 系・consensus 系の不採用を含む。
-- Task / Action / Permission-cost / Presence / Deletion / Restore の競合制御（第7–12節）。
-- filesystem＋DB の順序、publication guard と cleanup の同期、failure 残存条件（第13節）。
-- cancellation の五層分離（第14節）。
-- lock ownership・granularity・ordering・await 中の保持禁止（第15節）。
-- interface handoff の concurrency property と acceptance result の区別（第16節）。
-- Rust 方針の具体化範囲（第17節）。primitive カテゴリ・actor 目安・transaction closure / CAS method の形。旧実装 pattern の互換維持は含まない。
-
-### 20.2 意図的に残した Design Freedom
+## 19. 意図的に残した Design Freedom
 
 | 設計対象 | 固定済みの architecture property | 残す Design Freedom |
 |---|---|---|
@@ -602,13 +574,7 @@ fn reserve_usage(
 
 archive / file format、encryption implementation、serialization、Rust type / trait、crate / module、IPC、locking、retry / timeout、specific library も固定しない。上表の対応関係から統一 Context layer、Policy Engine、Manager、Service、Coordinator の追加を導かない。既存の責務、semantic owner、Host / Client 配置と trust boundary の下で実現方法を選ぶ。
 
-### Step 13 で次に具体化すべき領域
-
-1. **interface boundary。** 第16節の concurrency property を各 Subsystem 間の request・response・notification の field へ落とす。本文埋込・モデル出力の authority 化をしない範囲で行う。
-2. **IPC・Host↔Client 形式。** round・提示・未伝達・Client 主張・一時 copy の扱いを、Client 最小一時・非永続・削除参加の契約の範囲で具体化する。
-3. **残りの Step 13 具体設計がある場合は、本書 §4・§5・§13・§16 の property を欠落させないこと。**
-
-## 21. Requirement / Architecture Issue の有無
+## 20. Requirement / Architecture Issue の有無
 
 - **Requirement 変更。** なし。
 - **Step 11 / Step 12 semantic contract の変更。** なし。
@@ -616,4 +582,4 @@ archive / file format、encryption implementation、serialization、Rust type / 
 - **PR 原則変更。** なし。
 - **semantic owner / subsystem boundary 変更。** なし。
 - **Security / Privacy / Permission semantics 変更。** なし。
-- concurrency mechanism の選択自体は Issue ではない。第20.2節の Freedom の範囲で後続設計が行う。
+- concurrency mechanism の選択自体は Issue ではない。第19節の Freedom の範囲で後続設計が行う。
