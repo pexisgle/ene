@@ -526,31 +526,13 @@ Runtime TopologyのH／C／P／M／X／Uを維持する。ここでは配置を�
 
 Device失効・全データResetではHost側の信頼を失効させ、旧Client材料だけで再接続の信頼を復活させない。接続・存在は認証秘密と協調して不要な端末材料の消去・更新を扱うが、到達不能Clientの物理的な消去を確認済みとは表示しない。再pairingは現在のHost側確認に基づき、旧材料や表示上のpairing済み状態だけで成立させない。Restoreも復元されたdevice参照・許可と現在の接続・認証の成立を照合し、secretをbackupから戻さない。これは4.21のProvider／MCP等に用いる現在のCredential store維持を変更せず、新しいClient永続cache一般を認めるものでもない。
 
-Client切断時に失われてよいのは未確定の編集・入力、描画・再生buffer、再取得できる表示copy等である。Hostが受理したTask指示、会話記録、報告すべき結果、作用不明、制御変更・全域操作の進捗はClientだけに置かない。Clientの未送信操作を接続回復後の自動Action queueとして扱わず、Host不在時に代替正本や独立したOffline実行を作らない。
+Client切断時に失ってよい一時表現と、Clientだけに置いてはならない受理済み内容の区別は5.3に従う。Clientの未送信操作を接続回復後の自動Action queueとして扱わず、Host不在時に代替正本や独立したOffline実行を作らない。
 
 Credential値の利用は上表の通常representation・contentの経路とは分離する。推論・作用の認証に必要な経路だけで利用し、Clientの通常表示、model context、Tool argument・result、Auditやbackupへ流さない。これを満たす物理経路はRT-05・07の自由度に残し、全音声・画面のHost中継や保存を新たに要求しない。
 
 同じHost PCの外部Provider・MCP・fileも外部であり、Remoteの第一者Clientもene内部の一時data保護に責任を持つ。物理的な所在、process、sandboxへの収容は、semantic ownershipを移す理由ではない。
 
-## 9. Questions for Dependency Rules
-
-次の問いは、ここで決めたowner・参照・強制・coordinationを実効的な依存の許可／禁止／制約へ落とすためのものである。本書では呼出し方向や経路を完成させない。
-
-| 問い | 依存設計が守る必要のあるownership境界 |
-|---|---|
-| 各stateの意味変更を、どの依頼・結果・参照に限定するか。 | 個体調整からの訂正と認識・学習の更新、Character部品適用と経験状態、Taskの達成判断と個別Action結果を区別する。利用側による同じ意味の独立更新を防ぐ。 |
-| Owner由来の管理意図とLLM生成contentを、どの境界で区別するか。 | 通常の学習・scope意味判断は可能にしつつ、Rule・Permission・同意・cap・Credentialの直接変更へ到達させない。自然言語Ruleの保存・UndoもOwnerの意図との対応を失わない。 |
-| 決定したscopeと禁止・失効を、全参照・利用先へどう接続するか。 | 現在Learningだけでなく過去revision・Summary・source・検索・共有観測・Task Agent・Provider送信を含む。権限・制約がLearningの意味ownerになる構造は避ける。 |
-| 保存条件と実行時の有効条件をどう参照し、古いcopyの利用を防ぐか。 | Permission、Provider割当、device許可、並列費用・資源消費、個体停止、restore保留を各利用箇所で守る。Taskや推論側に独立した許可・使用実績の正本を増やさない。 |
-| 作用結果・進捗・会話・未伝達・Auditをどう対応付けるか。 | 実行・拡張の確定度をTaskやUIが独立に上書きせず、報告済みとTask完了を混同しない。記録が残ることから実行再開権限を導かない。 |
-| Client依存性と管理・停止経路をどう限定するか。 | Computer Use等は現在のactive帰属と区切りを必要とする。通常Host作業、Companion削除後のTask管理、Cancel・拒否・復旧はBody・Voice・LLM・MCP Appsの成功へ従属させない。 |
-| 認証用の秘密利用と、通常dataの依存をどう分けるか。 | Provider／MCP等の必要な認証を可能にしつつ、model生成argument・result・History・Learning・UI・Audit・Debug・backupへ値を流さない。参照の復元と再認証を区別する。 |
-| 各ownerを全域操作へどう参加させ、完了根拠を返させるか。 | 保全・消去への任意domain編集権限や全内部構造への無制限依存を要求せず、対象・根拠・派生物・処理中利用・遅延結果・Clientを取りこぼさない。循環した完了待ちを避ける。 |
-| 正本の参照と、検索・表示・Provider適応をどう分離するか。 | 派生物を再生成・廃棄できても意味・由来が残り、同じ情報選択方針を維持する。cache hit／missで権限・永続化対象を変えない。Context Assembly自体は別途設計する。 |
-| 外部code・外部所有物への依存をどこで制限するか。 | Plugin・MCP Appsへ内部状態の任意変更を許さず、内部copyの保護責任は残す。Workspace・Skill・Package・backupの内部操作から外部実体への暗黙削除を発生させない。 |
-| 復旧操作の成立と活動の再有効化をどう分けるか。 | 保全・消去のrestore完了、各ownerの参照・時間的整合、権限・制約の保留解除、作業等の再開条件を対応付ける。復元した旧Rule・同意が単独で実行開始へ到達しない。 |
-
-## 10. Design Freedom
+## 9. Design Freedom
 
 ここで未決定に残すのは、上記契約を実現する方法である。未決定であることを、新たなstate categoryや責務を追加する理由にしない。
 
@@ -566,13 +548,11 @@ Credential値の利用は上表の通常representation・contentの経路とは�
 
 公開地域・対象年齢等の公開計画時留保は引き続き製品定義に従う。過去形式の互換性、Cloud正本、恒久Workspace、成果物library、汎用Plugin改変、ene運営のrelay・account等は将来拡張を理由に再導入しない。
 
-## 11. Traceability and Completeness
+## 10. Traceability and Completeness
 
-### 11.1 根拠と対応
+### 10.1 根拠と対応
 
-[製品定義](../../requirements/product.md)を概念・非目標、[要件](../../requirements/requirements.md)を必須挙動の唯一の正本とする。[受け入れ条件](../../requirements/acceptance.md)は検証上の範囲であり、後続milestoneの確定済み要件も対象に含める。[参考資料](../../requirements/references.md)は非規範であり、参考製品・外部仕様・既存実装をownershipの根拠にしていない。
-
-下表の要件欄は要件文書の見出しを示す。ADはArchitecture Drivers、SCはSystem Context、RTはRuntime Topologyの参照であり、Subsystemは本書で通常変更責任と参加責任を具体化した境界である。
+下表の要件欄は[要件](../../requirements/requirements.md)の見出しを示す。ADはArchitecture Drivers、SCはSystem Context、RTはRuntime Topologyの参照であり、Subsystemは本書で通常変更責任と参加責任を具体化した境界である。
 
 | 本書の判断 | 要件の対応 | AD / SC / RTと主なSubsystem |
 |---|---|---|
@@ -591,7 +571,7 @@ Credential値の利用は上表の通常representation・contentの経路とは�
 | Audit・Debug・保持方針・全域消去（4.23・4.24、6.3〜6.5） | 履歴、保持、Privacy、停止と削除 | AD-07・14、SC-07・10、RT-08・10。保全・消去が協調し全ownerが参加。 |
 | 正常保存・backup・全置換・保留・Reset（4.24、6.5、7） | 保護、Backup、復旧、Setupと日常利用 | AD-15、SC-06〜09、RT-08・09。保全・消去、認証秘密、権限・制約、認識・学習、活動owner。 |
 
-### 11.2 Subsystem境界の論点と回答箇所
+### 10.2 Subsystem境界の論点と回答箇所
 
 | Subsystem境界の論点 | 本書の回答箇所と主要判断 |
 |---|---|

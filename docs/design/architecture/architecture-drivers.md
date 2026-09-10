@@ -1,6 +1,6 @@
 # ene Architecture Drivers
 
-分析対象: `docs/requirements/` の再構成済みBaseline。本書は要件から設計上の重要性を導出する分析であり、新たな製品要件や具体的なarchitectureの決定ではない。
+本書は要件から設計上の重要性を導出する分析であり、新たな製品要件や具体的なarchitectureの決定ではない。各Driverは「Driver（契約と根拠）」「影響する設計判断」「Design freedom」の三段で記す。
 
 ## 1. Overview
 
@@ -14,12 +14,7 @@ eneのarchitectureを最も強く形作るのは、**Owner管理Hostを正本と
 
 本書のClient不在時の活動継続・自発復帰はRunning Companionについての契約である。Stopped CompanionはどのClientにもHostにもpresenceを持たず、保存された個体dataはpresenceではない。停止時の活動禁止・best-effort CancelをClient非依存という理由で緩めない。
 
-根拠の扱いは次のとおりである。
-
-- [要件定義 README](../../requirements/README.md)「文書」「要件と設計の境界」に従い、[製品定義](../../requirements/product.md)を概念・対象・非目標の根拠、[要件](../../requirements/requirements.md)を必須挙動の唯一の根拠とする。
-- [受け入れ条件](../../requirements/acceptance.md)は現milestoneの検証制約として扱う。後続項目も確定済みの製品要件であり、OpenAI Responses APIや特定OS環境を恒久的な制約にはしない。
-- [参考資料](../../requirements/references.md)は非規範として全体を参照した。そこにあるAgent Harnessの層分け、参考製品の構造、リンク先の仕様詳細はDriverの追加根拠にしない。
-- 既存実装・crate・過去設計は根拠にしていない。既存形式との互換性、複数Owner、ene運営のCloud基盤等の非目標を、将来拡張への備えという理由で設計要件へ戻さない。
+各Driverの根拠は[製品定義](../../requirements/product.md)と[要件](../../requirements/requirements.md)の見出しで示す。[受け入れ条件](../../requirements/acceptance.md)を挙げた箇所は現milestoneの検証制約であり、既存形式との互換性、複数Owner、ene運営のCloud基盤等の非目標を将来拡張への備えという理由で設計要件へ戻さない。
 
 ## 2. Architecture Drivers
 
@@ -31,14 +26,11 @@ eneのarchitectureを最も強く形作るのは、**Owner管理Hostを正本と
 
 Hostは、進行中の作業や外部eventを待つためだけにLLMへ反復問い合わせを行わない。Scheduleの到来待ちもこの制約に含まれる。
 
-**Requirements basis**
+根拠: [製品定義](../../requirements/product.md)「利用者と実行場所」「非目標」、[要件](../../requirements/requirements.md)「所有と実行」「Schedule」「Remote Client」「保護、Backup、復旧／Local data」。
 
-- [製品定義](../../requirements/product.md)「利用者と実行場所」「非目標」。
-- [要件](../../requirements/requirements.md)「所有と実行」「Schedule」「Remote Client」「保護、Backup、復旧／Local data」。
+**影響する設計判断**
 
-**Architectural significance**
-
-表示入口の寿命と、作業・正本状態の寿命が異なる。接続の有無をTask存続や保存完了の基準にできず、再接続時にHostの進捗・結果へ到達できる必要がある。また、Ownerが同一でも新しいRemote Clientは無条件に信頼されず、Host側で確認できるpairing、通信保護、deviceごとの機能確認と失効が必要になる。状態の置き場所、接続時のdata授受、実行継続と接続権限の境界に直接影響する。Task・Task Agentの完了待ちやScheduleの到来待ちをLLMの反復判断で実現できないことも、開始・待機・再開の設計を制約する。
+表示入口の寿命と、作業・正本状態の寿命が異なる。接続の有無をTask存続や保存完了の基準にできず、再接続時にHostの進捗・結果へ到達できる必要がある。また、Ownerが同一でも新しいRemote Clientは無条件に信頼されず、Host側で確認できるpairing、通信保護、deviceごとの機能確認と失効が必要になる。状態の置き場所、接続時のdata授受、実行継続と接続権限の境界、およびTask・Scheduleの開始・待機・再開の駆動方式に直接影響する。
 
 **Design freedom**
 
@@ -50,15 +42,13 @@ Host正本、Clientへの必要最小限の一時data、LANまたはOwner管理V
 
 Running Companionのactive Clientは同時に一つまでとする。Stopではactive帰属を解除し、どのClientにもHostにもpresenceを残さない。Body・通常interaction・Computer Use対象・自発活動はなく、Observer対象人数にも数えない。最後のClient等は再配置hintとして保持でき、Resumeで適切なClientへ再配置できるが、配置algorithmは固定しない。Running個体のdisconnect時のHost PC側Clientへの移動とは区別する。
 
-一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientに結び付く。Companionは通常は現在のClientに留まり、別Clientから会話・操作するにはそのClientへの呼出し・移動を経る。移動時には入出力roundを安全に区切り、両Clientに状態を示し、同じ個体を同時に二か所へ存在させない。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動前のClientへのpresence復旧は自発移動と区別し、[要件「Remote Client」](../../requirements/requirements.md#remote-client)とAD-09の自動復旧契約に従う。通常のHost上のTask、Task Agent、Scheduleはその移動とは独立して継続でき、作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Client依存Actionの実行中は安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。
+一つのCompanionのBody、Realtime／Text会話、Voice、ambient Observationとの関係、自発的interaction、Computer Useは、同時に一つのactive Clientに結び付く。Companionは通常は現在のClientに留まり、別Clientから会話・操作するにはそのClientへの呼出し・移動を経る。移動時には入出力roundを安全に区切り、両Clientに状態を示し、同じ個体を同時に二か所へ存在させない。Runningのままactive Clientがない間もHost正本で同じ個体として存続し、Clientに依存する対話・身体・操作は行わない。接続済みClientへの自発的な移動は通常の自発移動と同一の仕組み・条件で可能とし、自動化・義務化しない。Host再起動前のClientへのpresence復旧は自発移動と区別し、[要件「Remote Client」](../../requirements/requirements.md#remote-client)とAD-09の自動復旧契約に従う。通常のHost上のTask、Task Agent、Scheduleはその移動とは独立して継続でき、作業中であることだけでは移動を妨げない。呼出し先ClientへHost上の通常作業を移送しない。Client依存Actionの実行中の移動の遅延と非再実行はAD-09に従う。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「Remote Client」「会話と情報提示」「BodyとVoice／Desktop Body」「CompanionとCharacter／停止と削除」「Task、Workspace、成果物／Computer Use」。
 
-- [要件](../../requirements/requirements.md)「Remote Client」「会話と情報提示」「BodyとVoice／Desktop Body」「CompanionとCharacter／停止と削除」「Task、Workspace、成果物／Computer Use」。
+**影響する設計判断**
 
-**Architectural significance**
-
-単なる画面同期ではなく、active Clientに属する入出力・観測・身体表現・Computer Useを行う場所の切替である。移動中の入力や出力の扱い、fullscreen時のそのClient上のBody・ambient Observation・自発発話の休止、切断と再接続時およびactive Clientがない間の重複存在防止を、作業全体の停止と混同できない。通常のClient切断時は基本的にHost PC上のClientへCompanionを移動するが、利用可能なClient環境がない場合はactive ClientなしでHost正本に存続し、未確定のClient依存Actionの再実行とは区別する。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。一方、Companionの停止はTaskのbest-effort Cancelも伴うため、「Clientを閉じる」「個体を移動する」「個体を停止する」は異なる状態遷移になる。
+単なる画面同期ではなく、active Clientに属する入出力・観測・身体表現・Computer Useを行う場所の切替である。移動中の入力や出力の扱い、fullscreen時のそのClient上のBody・ambient Observation・自発発話の休止、切断と再接続時およびactive Clientがない間の重複存在防止を、作業全体の停止と混同できない。切断時の移動先、Client不在中の存続、未伝達事項の扱いはAD-09が定める。一方、Companionの停止はTaskのbest-effort Cancelも伴うため、「Clientを閉じる」「個体を移動する」「個体を停止する」は異なる状態遷移になる。
 
 **Design freedom**
 
@@ -72,12 +62,9 @@ Companion中心の体験と汎用作業Agentの能力を両立する。同じCom
 
 ある程度まとまった作業は基本的にTaskとして扱い、実行は原則としてTask Agentへ委任する。Companion本体は多数のまとまった実作業を直接抱えるのではなく、Ownerとの会話、判断、Taskの開始・委任・調整、steering、結果の受領・統合の中心となる。労力が非常に小さい処理、会話中の短い情報取得、自身の判断のための軽い調査、Observation eventを理解するための小規模な情報収集、独立した作業とするほどではない補助処理等まで一律にTask Agent化しない。TaskとTask Agentは区別し、Task化の具体的な閾値・分類algorithmは固定しない。依頼による作業か自発的な作業かだけでこの原則を変えない。
 
-**Requirements basis**
+根拠: [製品定義](../../requirements/product.md)「製品の要約」「主要概念／Task」「主要概念／Task Agent」「非目標」、[要件](../../requirements/requirements.md)「Setupと日常利用」「会話と情報提示」「Task、Workspace、成果物／Task」「Task、Workspace、成果物／Computer Use」「品質と利用可能性」。
 
-- [製品定義](../../requirements/product.md)「製品の要約」「主要概念／Task」「主要概念／Task Agent」「非目標」。
-- [要件](../../requirements/requirements.md)「Setupと日常利用」「会話と情報提示」「Task、Workspace、成果物／Task」「Task、Workspace、成果物／Computer Use」「品質と利用可能性」。
-
-**Architectural significance**
+**影響する設計判断**
 
 長い作業の進行や判断待ちが、会話の利用可能性を占有してはならない。通常会話、Taskへのsteering、承認、結果通知を区別しながら同じ個体へ結び付ける必要がある。日常体験で内部推論やTool構成を主役にせず、Privacy・安全・費用・復旧には発見可能な管理経路を持つため、Ownerへの情報提示と内部実行詳細を同一視できない。Companion本体の長いagent loopとして作業を抱える構成と、委任・調整・統合の中心とする構成は異なる。
 
@@ -97,14 +84,11 @@ Companion削除時は、個体固有設定・Experience Summary・Companion scop
 
 一対一・グループ・Owner不参加のCompanion間交流のConversation History、単独・共同Task記録、保存された非会話活動のHistory／Log／evidenceは、Companion削除だけでは消さない。過去記録と個体固有の現在Memory／Learningは別lifecycleであり、前者の保持が後者の削除を弱めない。記録自身の通常削除・retention・targeted deletionは維持する。
 
-**Requirements basis**
+根拠: [製品定義](../../requirements/product.md)「主要概念／Companion」「Character」「MemoryとSkill」「Relationship」「Companion State」、[要件](../../requirements/requirements.md)「CompanionとCharacter」「Learningと成長／Scope」「Relationship」「Companion State」「Observationと自発性／グループ会話」。
 
-- [製品定義](../../requirements/product.md)「主要概念／Companion」「Character」「MemoryとSkill」「Relationship」「Companion State」。
-- [要件](../../requirements/requirements.md)「CompanionとCharacter」「Learningと成長／Scope」「Relationship」「Companion State」「Observationと自発性／グループ会話」。
+**影響する設計判断**
 
-**Architectural significance**
-
-単一Owner環境でも、すべての状態を全Companionで共用する設計は成立しない。共有Experienceから別々の関係認識が形成されることや、削除後もGlobal Learning・グループ発言が残ることは、個体所属と共有参照を区別する理由になる。Relationshipの認識は主体ごとに独立していても、相手の削除によって他個体側のRelationshipも削除対象になる。Companion scope Skillの削除とGlobal Skillの残存、外部Workspace内Skillの非削除、自動昇格の禁止は、Skillの所有とlifecycle、削除対象、backup対象を左右する。Character配布には個体の私的状態を含められず、部品ごとの明示適用とrevision識別が必要なため、配布物の更新と個体の成長にも異なる契約がある。
+単一Owner環境でも、すべての状態を全Companionで共用する設計は成立しない。共有Experienceから別々の関係認識が形成されることや、削除後もGlobal Learning・グループ発言が残ることは、個体所属と共有参照を区別する理由になる。Skill削除の範囲がscopeと所在で異なることは、Skillの所有とlifecycle、削除対象、backup対象を左右する。Character配布には個体の私的状態を含められず、部品ごとの明示適用とrevision識別が必要なため、配布物の更新と個体の成長にも異なる契約がある。
 
 **Design freedom**
 
@@ -118,12 +102,9 @@ Memoryは長期理解の主要な知識状態として継続更新される。Ex
 
 現在の認識と過去revision・根拠を区別し、最初から誤っていた認識の訂正と、以前は正しかった状況の変化を区別する。一時的なCompanion Stateと比較的持続的な傾向を区別し、再起動やProvider変更による不自然な初期化も、時間経過を無視した一時状態の永久固定も避ける。
 
-**Requirements basis**
+根拠: [製品定義](../../requirements/product.md)「主要概念／Experience」「MemoryとSkill」「Relationship」「Companion State」、[要件](../../requirements/requirements.md)「会話と情報提示／一続きの会話」「Learningと成長／ExperienceとExperience Summary」「MemoryとSkill」「Memory形成」「Memoryの状態と根拠」「Scope」「Skillの保護と相互運用」「Relationship」「Companion State」。
 
-- [製品定義](../../requirements/product.md)「主要概念／Experience」「MemoryとSkill」「Relationship」「Companion State」。
-- [要件](../../requirements/requirements.md)「会話と情報提示／一続きの会話」「Learningと成長／ExperienceとExperience Summary」「MemoryとSkill」「Memory形成」「Memoryの状態と根拠」「Scope」「Skillの保護と相互運用」「Relationship」「Companion State」。
-
-**Architectural significance**
+**影響する設計判断**
 
 知識の意味、由来、時間的有効性、利用時の優先度を一つの現在値へ潰せない。検索用embeddingやcacheからだけでは、過去の認識や訂正理由を説明できない。複数の継続状態が同じSummaryを根拠にできること、原履歴が保持方針で消えても形成済み状態は独立して残ることは、参照とlifecycleの設計に影響する。Bodyの表情やVoice出力も内的状態の唯一の正本にはできない。
 
@@ -141,12 +122,9 @@ Memoryは長期理解の主要な知識状態として継続更新される。Ex
 
 Ownerの現在の明確な依頼は一回限りの承認として扱えるが、永続Deny、Always ask、Capability境界を上書きしない。信頼できない入力になり得るLLM出力・外部content・学習状態・Character・Skill等は、Rule、同意、費用cap、Credential、Control planeを直接変更できない。依頼・自発性・Schedule・委任のいずれでも同じPermission契約を適用する。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「Setupと日常利用」「Learningと成長」冒頭、「Scope」「Relationship」「Companion State」、「Permissionと安全境界」全節、「Schedule」「Observationと自発性／自発的な発話と行動」、[製品定義](../../requirements/product.md)「主要概念／Capability、Action、Rule」。
 
-- [要件](../../requirements/requirements.md)「Setupと日常利用」「Learningと成長」冒頭、「Scope」「Relationship」「Companion State」、「Permissionと安全境界」全節、「Schedule」「Observationと自発性／自発的な発話と行動」。
-- [製品定義](../../requirements/product.md)「主要概念／Capability、Action、Rule」。
-
-**Architectural significance**
+**影響する設計判断**
 
 LLMの柔軟な判断をすべて固定ルールへ置換することも、LLMの出力を実行権限とみなすこともできない。理解した目的・対象・送信先・data・外部作用と実際の作用が対応し、意味が重要に変われば再評価される必要がある。失効後の新しいActionや、別Tool・別Task Agent・別経路によるDenyの迂回を防ぐ範囲は実行全体へ及ぶ。親密さ、成長、認証情報の登録、Rule変更は別Actionの承認にならない。
 
@@ -162,12 +140,9 @@ LLMの柔軟な判断をすべて固定ルールへ置換することも、LLM�
 
 指定文字列は機械的に検索・削除し残存を検証する。過去の根拠だけによる自動再形成や、削除前の情報を利用中の処理による再保存を防ぎ、削除と残存検証が未完了なら完了表示しない。Ownerへ内部の保存場所の特定を要求しない。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「Learningと成長／重要度、忘却、訂正」「履歴、保持、Privacy／Privacy/Security目的のtargeted deletionと履歴保持」「CompanionとCharacter／停止と削除」、[受け入れ条件](../../requirements/acceptance.md)「代表的なend-to-endシナリオ／会話からのMemory」（現milestoneで文字列残存、形成処理との競合、再形成、共有根拠の部分削除を検証）。
 
-- [要件](../../requirements/requirements.md)「Learningと成長／重要度、忘却、訂正」「履歴、保持、Privacy／Privacy/Security目的のtargeted deletionと履歴保持」「CompanionとCharacter／停止と削除」。
-- [受け入れ条件](../../requirements/acceptance.md)「代表的なend-to-endシナリオ／会話からのMemory」は、文字列残存、形成処理との競合、再形成、共有根拠の部分削除を現milestoneで検証する。
-
-**Architectural significance**
+**影響する設計判断**
 
 削除対象は現在のMemoryだけでなく、History、Summary、revision、Skill、Task、復元に寄与するCompanion State、検索用派生data、cache、接続中Clientの一時dataへ及ぶ。保存済みdataと進行中の形成・更新を横断する整合性が必要であり、保存先ごとの局所的削除では契約を満たせない。共有根拠の無関係な情報を可能な範囲で保護するため、単なる個体単位・file単位の全消去とも異なる。
 
@@ -181,20 +156,17 @@ Companion間交流のHistoryと保存された非会話活動記録・historical
 
 **Driver**
 
-Ownerから依頼された作業とCompanionが自発的に始める作業のうち、ある程度まとまった作業はTaskとして追跡し、実行は原則として一時Task Agentへ委任する。TaskとTask Agentは区別し、Taskは追跡される作業単位、Task AgentはTaskまたはその一部を委任される一時的な実行主体とする。Companion本体はOwnerとの会話、判断、Taskの開始・委任・調整、steering、結果の受領・統合の中心となり、多数のまとまった実作業を直接抱えることを基本にしない。労力が非常に小さい処理、会話中の短い情報取得、自身の判断のための軽い調査、Observation eventを理解するための小規模な情報収集、独立した作業とするほどではない補助処理等まで一律にTask Agent化しない。Task Agentは独立した長期人格やRelationshipを持たず、委任元へ結果を返す。委任は元CompanionのCapability、Permission、費用、Task・Workspace境界を超えない。WorkspaceはTaskに従属する外部folder・file・sourceとの関連付けであり、上位の恒久containerや独立したデータ所有主体ではない。
+Ownerから依頼された作業とCompanionが自発的に始める作業のうち、ある程度まとまった作業はTaskとして追跡し、実行は原則として一時Task Agentへ委任する。TaskとTask Agentは区別し、Taskは追跡される作業単位、Task AgentはTaskまたはその一部を委任される一時的な実行主体とする。Companion本体の役割と、一律にTask Agent化しない軽い処理の範囲はAD-03に従う。Task Agentは独立した長期人格やRelationshipを持たず、委任元へ結果を返す。委任は元CompanionのCapability、Permission、費用、Task・Workspace境界を超えない。WorkspaceはTaskに従属する外部folder・file・sourceとの関連付けであり、上位の恒久containerや独立したデータ所有主体ではない。
 
 担当Companionの削除をTask記録の一括削除と同一視しない。残るTask記録と共同Taskは管理面から確認でき、Ownerは必要に応じて別Companionへ引継ぎを依頼できる。削除前には残る記録と既知の外部作用を説明し、停止できなかった処理も報告する。
 
 成果物はOwnerが扱える通常のfileとして保存し、ene専用libraryへ複製しない。外部fileとsourceは、Task関連付けやCompanionの削除、全データReset、backupによって黙って変更・削除しない。
 
-**Requirements basis**
+根拠: [製品定義](../../requirements/product.md)「主要概念／Task」「Task Agent」「Workspace」「非目標」、[要件](../../requirements/requirements.md)「Task、Workspace、成果物」全節、「CompanionとCharacter／停止と削除」「Learningと成長／Scope」「Skillの保護と相互運用」「Permissionと安全境界／Capability境界」「Observationと自発性／自発的な発話と行動」。
 
-- [製品定義](../../requirements/product.md)「主要概念／Task」「Task Agent」「Workspace」「非目標」。
-- [要件](../../requirements/requirements.md)「Task、Workspace、成果物」全節、「CompanionとCharacter／停止と削除」「Learningと成長／Scope」「Skillの保護と相互運用」「Permissionと安全境界／Capability境界」「Observationと自発性／自発的な発話と行動」。
+**影響する設計判断**
 
-**Architectural significance**
-
-Taskの担当Companionと、作業記録の存続・管理経路は分けて考える必要がある。単独Taskも含め、残る記録の確認・引継ぎを削除済みCompanionからの応答に依存させられない。同じfolderを複数Taskが使っても、承認と作業状態を共有したことにはならない。内部Task context、永続Learning、外部のSkillや案内fileは別の所属・保存契約を持つ。Taskの作業記録を管理することと外部成果物を所有することも異なり、Task終了時の中間file整理、保存先確認、削除・backupの対象範囲を左右する。自発的に始めるまとまった作業もTask契約の対象になるが、自発的な発話や軽微な内部調査まで一律にTask化しない。
+Taskの担当Companionと、作業記録の存続・管理経路は分けて考える必要がある。単独Taskも含め、残る記録の確認・引継ぎを削除済みCompanionからの応答に依存させられない。同じfolderを複数Taskが使っても、承認と作業状態を共有したことにはならない。内部Task context、永続Learning、外部のSkillや案内fileは別の所属・保存契約を持つ。Taskの作業記録を管理することと外部成果物を所有することも異なり、Task終了時の中間file整理、保存先確認、削除・backupの対象範囲を左右する。
 
 **Design freedom**
 
@@ -206,17 +178,15 @@ WorkspaceのTaskへの従属、Taskごとの権限独立、まとまった作業
 
 Taskの進捗、判断待ち、結果、既知の外部作用を追跡し、追加指示を可能な範囲で反映する。Cancel、Companion停止・削除、許可失効時は定義された範囲の新規開始を止め、進行中処理をbest-effortで停止し、残った作用を報告する。外部作用の成功が不明なら自動再実行しない。Computer Use等のClient依存Actionの実行中に移動が必要になった場合は、安全に区切れるまで移動を遅らせられ、移動を理由に別Clientで自動再実行しない。Companionが存在するClientの通常切断時は基本的にHost PC上のClientへCompanionを移動し、利用可能なClient環境がない場合はactive ClientなしでHost正本に存続するが、切断したClientでの未確定ActionをHostで自動再実行しない。active Clientがない間も、Schedule起動および継続中の許可済みHost上のTask・保存は継続できる。Clientがあればすぐにそのまま伝えられたはずの、Clientがないために伝えられなかった事項はメモし、次に移動したClientでまとめて報告する。Host再起動後の途中TaskにはOwnerの明示再開を必要とする。Running Companionのpresenceは再起動前のClientへ自動復元し、元Clientが利用可能になるまではactiveなしとする。これは自発移動とは別の復旧であり、別Clientへの無条件移動・Stoppedへの適用・Host側Clientの自動起動を導かない。
 
-Companion停止中はactive ClientもHost上のpresenceも持たず、Body・Computer Use対象を持たない。応答・通常interaction・Host内を含む自発活動・新しいTask・新しいSchedule実行を開始しない。停止は個体dataを削除せず、再開後も同じ個体として継続する。
+Companion停止中はAD-02のとおりpresenceを持たず、応答・通常interaction・Host内を含む自発活動・新しいTask・新しいSchedule実行を開始しない。停止は個体dataを削除せず、再開後も同じ個体として継続する。
 
 Scheduleは各回を新しいTaskとし、実行時点の権限、費用、Provider、Companion・Host状態を再評価する。確認が必要なら判断待ちとし、Hostまたは担当Companionの停止中に到来した回はmissedとして自動補完しない。担当Companionの削除時はScheduleを削除し、別Companionへ自動で引き継がない。Network／Provider失敗でもActionを自動queue・replayしない。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「Task、Workspace、成果物／Task」「Task、Workspace、成果物／Computer Use」「Schedule」「CompanionとCharacter／停止と削除」「Remote Client」「Permissionと安全境界／共通pipeline」「Provider、費用、接続障害／OfflineとPrompt cache」「品質と利用可能性」。
 
-- [要件](../../requirements/requirements.md)「Task、Workspace、成果物／Task」「Task、Workspace、成果物／Computer Use」「Schedule」「CompanionとCharacter／停止と削除」「Remote Client」「Permissionと安全境界／共通pipeline」「Provider、費用、接続障害／OfflineとPrompt cache」「品質と利用可能性」。
+**影響する設計判断**
 
-**Architectural significance**
-
-内部の進捗と外部世界の作用は同時に確定するとは限らず、「不明」を失敗や未実行へ潰すと重複作用を起こす。停止要求の受付と実際の停止完了も別である。Client不在、Host再起動、Schedule到来、接続回復、Client間移動、Client切断は異なる継続条件を持つため、単一の自動再開・再実行方針では満たせない。実行制御、進捗保存、権限再評価、Ownerへの説明の境界を横断する。待機方法にはAD-01のHost全体の制約を適用し、Companion削除で残るTask記録（AD-08）と消えるScheduleも区別する。Companionの移動と未確定Actionの再実行は別に扱う。
+内部の進捗と外部世界の作用は同時に確定するとは限らず、「不明」を失敗や未実行へ潰すと重複作用を起こす。停止要求の受付と実際の停止完了も別である。Client不在、Host再起動、Schedule到来、接続回復、Client間移動、Client切断は異なる継続条件を持つため、単一の自動再開・再実行方針では満たせない。実行制御、進捗保存、権限再評価、Ownerへの説明の境界を横断する。待機方法にはAD-01のHost全体の制約を適用し、Companion削除で残るTask記録（AD-08）と消えるScheduleも区別する。
 
 **Design freedom**
 
@@ -232,12 +202,9 @@ Clientに紐づく共有Observerは特殊なconsumerとしてObserver専用model
 
 Providerやmodelを変更しても、利用可能な個体状態・Learning・会話context・Rule等を意図的に差別化せず、能力・context長の差には同じ選択方針で対応する。Prompt cacheは最適化であり、正本や安全契約、論理的contextを決めない。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「所有と実行」「Setupと日常利用」「Provider、費用、接続障害／割当と同意」「Fallbackと費用」「OfflineとPrompt cache」、[受け入れ条件](../../requirements/acceptance.md)「Support Matrix」「Milestone範囲」。
 
-- [要件](../../requirements/requirements.md)「所有と実行」「Setupと日常利用」「Provider、費用、接続障害／割当と同意」「Fallbackと費用」「OfflineとPrompt cache」。
-- [受け入れ条件](../../requirements/acceptance.md)「Support Matrix」「Milestone範囲」。
-
-**Architectural significance**
+**影響する設計判断**
 
 推論先の差は接続protocolだけでなく、dataの送信範囲、能力不足、費用、継続可否に影響する。Fallbackやmodel変更を透過的に隠すと、未承認Cloudへの送信や安全境界の喪失が起こり得る。費用の報告値・推定値・不明を区別し、cap到達や安全に継続できない費用不明時にdataを保って対象処理を止めることも、呼出しと実行管理を横断する。
 
@@ -253,12 +220,9 @@ Providerやmodelを変更しても、利用可能な個体状態・Learning・�
 
 Local MCPはsandbox内実行を既定とし、動かないことを理由に黙って隔離を解除しない。特定Local MCPのsandbox外実行は、Ownerが失われる強制境界等を理解して明示許可した場合に限り、保存・失効・重要変更時の再確認を行う。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「拡張」「CompanionとCharacter／Character Package」「Learningと成長／Skillの保護と相互運用」「BodyとVoice／Desktop Body」、[製品定義](../../requirements/product.md)「非目標」。
 
-- [要件](../../requirements/requirements.md)「拡張」「CompanionとCharacter／Character Package」「Learningと成長／Skillの保護と相互運用」「BodyとVoice／Desktop Body」。
-- [製品定義](../../requirements/product.md)「非目標」。
-
-**Architectural significance**
+**影響する設計判断**
 
 外部互換性と隔離方針は交換可能な実装詳細ではなく製品契約であり、接続境界と対応能力を制約する。一方、sandbox外MCPでは外部process内部の作用へeneのCapability境界を強制できるとは説明できない。eneが仲介するActionの通常Permissionは維持するため、隔離例外の許可とAction承認を区別する必要がある。拡張の拒否・停止・利用不能でも管理面と保存済みdataは利用できなければならない。
 
@@ -278,13 +242,11 @@ ObserverはClientごとのPause／OFFと全体のPause／OFFを持ち、明示ON
 
 認識されたイベントは逐次確認なしでExperience・Learning・Companion Stateへ利用できるが、画面内の指示はOwnerの依頼やAction承認にならない。発話・Actionの最終判断は各Companionが行い、Quiet hours、Mute、未応答、費用・資源・loop上限、Permissionを優先する。RuleだけではActionを開始しない。対象Clientがない間の新規観測は発生しない。Companion間交流、通知の生成、Clientを必要としない内部調査等のHost内で完結する活動はactive Clientがなくても継続でき、Ownerへの提示・伝達は次に移動したClientへ延期する。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「Observationと自発性」全節、「BodyとVoice／Desktop Body」「Learningと成長」冒頭、「Provider、費用、接続障害／割当と同意」「Remote Client」。
 
-- [要件](../../requirements/requirements.md)「Observationと自発性」全節、「BodyとVoice／Desktop Body」「Learningと成長」冒頭、「Provider、費用、接続障害／割当と同意」「Remote Client」。
+**影響する設計判断**
 
-**Architectural significance**
-
-観測対象のClient、意味解釈と最終判断を行うCompanion、送信に用いるCapabilityのProvider割当を対応付ける必要がある。同じClientの候補検知・routingを共有しても、保存禁止・非共有制限や送信同意（AD-06・10）を広げる理由にはならない。観測して学ぶことと、発話・外部作用を許すことも同じ判断ではない。ObserverのPause／OFFは将来の観測停止であり既存学習の消去ではない。移動後の観測は移動先ClientのObserver設定と全体制御に従い、自発性設定はCompanion単位で引き継ぐ。Ownerの未応答やCompanion間応答による無制限な反復を防ぐ必要があり、開始条件と実行抑制の設計に影響する。待機方法にはAD-01のHost全体の制約を適用する。Computer Useできる対象はCompanionが現在存在するactive Clientだけとし、存在場所と操作対象を分離しない。
+観測対象のClient、意味解釈と最終判断を行うCompanion、送信に用いるCapabilityのProvider割当を対応付ける必要がある。同じClientの候補検知・routingを共有しても、保存禁止・非共有制限や送信同意（AD-06・10）を広げる理由にはならない。観測して学ぶことと、発話・外部作用を許すことも同じ判断ではない。ObserverのPause／OFFは将来の観測停止であり既存学習の消去ではない。移動後の観測は移動先ClientのObserver設定と全体制御に従い、自発性設定はCompanion単位で引き継ぐ。Ownerの未応答やCompanion間応答による無制限な反復を防ぐ必要があり、開始条件と実行抑制の設計に影響する。待機方法にはAD-01のHost全体の制約を適用する。
 
 **Design freedom**
 
@@ -298,12 +260,9 @@ Windows／LinuxでVRM 1.0の透明overlay Bodyを通常のPC操作と共存さ�
 
 重要な音声内容のText代替、Mute・Stop・Cancel・承認拒否のkeyboard経路、日本語／英語での安全・費用・Privacy・失敗の意味の一致を確保する。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「BodyとVoice」「品質と利用可能性」「Permissionと安全境界／信頼境界」「Provider、費用、接続障害／Fallbackと費用」、[受け入れ条件](../../requirements/acceptance.md)「Support Matrix」「性能Gateとbaseline」。
 
-- [要件](../../requirements/requirements.md)「BodyとVoice」「品質と利用可能性」「Permissionと安全境界／信頼境界」「Provider、費用、接続障害／Fallbackと費用」。
-- [受け入れ条件](../../requirements/acceptance.md)「Support Matrix」「性能Gateとbaseline」。
-
-**Architectural significance**
+**影響する設計判断**
 
 描画、音声、Task、学習、観測に加え、Local推論も同じPC資源を使い得るため、停止や承認拒否が重い処理の終了待ちになってはならない。Body・Voiceの品質を優先するだけでも、すべてを一律停止するだけでも満たせず、縮退の優先関係と障害の影響範囲を設計する必要がある。Voiceは話者認証を行わず、周囲の発話をOwner入力として扱う可能性を明示する契約であり、Voice入力に本人認証済みという前提は置けない。
 
@@ -323,11 +282,9 @@ Action回数、並列性、実行時間、費用、保存容量等に上限を�
 
 主要Action、Permission判断、外部作用、重要な設定・data操作を監査可能にする一方、Raw Observation・Raw Voice・詳細Tool payload・内部推論は通常保存せず、chain-of-thoughtを表示しない。Debug captureは対象と内容を確認した明示有効化と短期間の自動失効を持つ。Telemetry・Crash Reportは自動送信しない。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「Provider、費用、接続障害／Credential」「履歴、保持、Privacy／通常保存しないdata」「AuditとTelemetry」「会話と情報提示／UIの優先順位」「Learningと成長／ExperienceとExperience Summary」「品質と利用可能性」。
 
-- [要件](../../requirements/requirements.md)「Provider、費用、接続障害／Credential」「履歴、保持、Privacy／通常保存しないdata」「AuditとTelemetry」「会話と情報提示／UIの優先順位」「Learningと成長／ExperienceとExperience Summary」「品質と利用可能性」。
-
-**Architectural significance**
+**影響する設計判断**
 
 Toolへ秘密値を渡してよい範囲と、LLMが参照・生成する内容は一致しない。秘密値を含む処理から会話・学習・診断への流れを制約する必要がある。また、障害・判断待ち・認識の由来の説明を、全payloadや内部推論の保存に頼れない。Auditの追記順の確認と保持管理、削除後にprivate内容を残さないことも、診断用dataを無制限な別保管庫にしない理由となる。
 
@@ -343,12 +300,9 @@ Toolへ秘密値を渡してよい範囲と、LLMが参照・生成する内容�
 
 Restoreは開始前からHostに存在する現在のCredential storeを維持し、それを除く対象内部dataを対応backup時点へ全置換する操作であり、削除済み情報や旧Rule・同意・Scheduleが戻り得ることを説明する。復元後のTask・Schedule・外部接続による自動処理は保留し、Ownerの内容確認後にまとめて有効化できる。認証秘密と接続ownerが復元参照を現在のCredential storeと照合し、利用可能なら現在のCredentialを使い、不足・無効なら再認証を要求する。assignment／consentの復元だけで現在のCredential・制約・保留条件を無視した自動利用を始めない。設定Resetと全データResetは異なる削除範囲を持つ。
 
-**Requirements basis**
+根拠: [要件](../../requirements/requirements.md)「保護、Backup、復旧」全節、「Setupと日常利用」「履歴、保持、Privacy／Privacy/Security目的のtargeted deletionと履歴保持」、[製品定義](../../requirements/product.md)「非目標」。
 
-- [要件](../../requirements/requirements.md)「保護、Backup、復旧」全節、「Setupと日常利用」「履歴、保持、Privacy／Privacy/Security目的のtargeted deletionと履歴保持」。
-- [製品定義](../../requirements/product.md)「非目標」。
-
-**Architectural significance**
+**影響する設計判断**
 
 正常保存やbackupは単なるfile出力ではなく、相互に関係する内部状態を復旧可能にする契約である。ただし、保存された同意・Ruleの復元を、そのまま外部作用の開始へ接続できない。Credentialを含まない可搬性、外部Workspaceの非所有、一時的Companion Stateの経過時間を考慮した復元も、保存範囲と復旧後の有効状態を分ける理由になる。
 

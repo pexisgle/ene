@@ -6,16 +6,7 @@
 
 Runtime Flowは、triggerを受けてから、判断・状態変更・作用・結果統合を経て、完了、判断待ち、中断、失敗、後の継続へ至る**責任の連なり**を表す。具体的なfunction call、IPC、event schema、queue、process、transaction、実装state machineは表さない。番号付きの段階は必要な前後関係を示し、すべてを直列実行する指定ではない。以下のRF番号は文書内参照であり、新しい要件IDではない。
 
-製品挙動の正本は[製品定義](../../requirements/product.md)と[要件](../../requirements/requirements.md)である。[受け入れ条件](../../requirements/acceptance.md)の後続milestoneも対象から外さず、[参考資料](../../requirements/references.md)は非規範として扱った。既存実装や外部製品の仕組みから不足を補っていない。
-
-設計上の前提は次の全6文書を維持する。
-
-- [Architecture Drivers](architecture-drivers.md): AD-01〜15と優先関係。
-- [System Context](system-context.md): SC-01〜10、内部責任と外部所有物の境界。
-- [Runtime Topology](runtime-topology.md): RT-01〜10、Host／Client／Provider／MCP／Plugin／MCP Appsの寿命と境界。
-- [Subsystem Decomposition](subsystems.md): 12責務と非責務。本書でも同じ略称を使う。
-- [State Ownership](state-ownership.md): 以下「SO」。意味owner、参照、通常変更と横断操作の成立条件。
-- [Dependency Rules](dependency-rules.md): 以下「DR文書」。DR-01〜12、許可・禁止依存と全域操作の参加契約。
+本書は[Subsystem Decomposition](subsystems.md)の略称を使い、[State Ownership](state-ownership.md)をSO、[Dependency Rules](dependency-rules.md)の文書をDR文書（規則はDR-xx）と表記する。
 
 各Flowの「確認」は、既存契約の下で責任と成立条件を辿れたというarchitecture上の判断であり、実装・性能・分散障害耐性をテストしたとの宣言ではない。必要条件が満たされない分岐も、担当ownerが不明・未完了・判断待ちを引き受ければ経路として閉じる。成功へ強制的に収束させることは目的ではない。
 
