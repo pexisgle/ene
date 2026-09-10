@@ -177,17 +177,19 @@ fn usage_for_disposition(
 
 /// Canonical client round premise of one [`SubmitTextInput`] send.
 ///
-/// The payload names the premise (IPC §21 maps the intake candidate's round
-/// from `SubmitTextInput.round`); the envelope `round_view` is the mirror
-/// the Client relied on (IPC §5: comparison material, not a claim) and must
-/// agree with the payload premise once it is populated. A disagreement
-/// means the frame carries two different round premises: neither side is
-/// adopted — the caller answers stale with current values, and the Client
-/// re-syncs.
+/// One rule covers every carrier. The payload names the premise (IPC §21
+/// maps the intake candidate's round from `SubmitTextInput.round`); the
+/// envelope `round_view` is the mirror the Client relied on (IPC §5:
+/// comparison material, not a claim) and must agree with the payload
+/// premise once it is populated. A disagreement means the frame carries
+/// two different round premises: neither side is adopted — the caller
+/// answers stale with current values, and the Client re-syncs.
 ///
-/// `fresh` does not change the premise: an explicit new-round force ignores
-/// every round hint per the payload contract, so there is nothing to agree
-/// on, and the caller builds [`RoundIntentMark::New`] from the flag alone.
+/// A force-new request is the design's round-less new-round request
+/// (IPC §13.1: `round = None`, `round_view = None`), so it names no
+/// premise at all. A force-new frame carrying a premise in either carrier
+/// is self-contradictory and is rejected here, never silently
+/// reinterpreted as the flag or joined on the hint.
 enum RoundPremise {
     /// A round-less request: join-or-mint.
     Auto,
@@ -201,8 +203,10 @@ fn canonical_round_premise(
 ) -> Option<RoundPremise> {
     match (&submit.round, round_view) {
         (None, None) => Some(RoundPremise::Auto),
-        (Some(round), None) => Some(RoundPremise::Existing(round.0.clone())),
-        (Some(round), Some(view)) if view == round => Some(RoundPremise::Existing(round.0.clone())),
+        (Some(round), None) if !submit.fresh => Some(RoundPremise::Existing(round.0.clone())),
+        (Some(round), Some(view)) if !submit.fresh && view == round => {
+            Some(RoundPremise::Existing(round.0.clone()))
+        }
         _ => None,
     }
 }
@@ -477,10 +481,12 @@ impl HostHandle {
     /// accept without re-running inference. The inbound companion ref
     /// resolves through [`HostHandle::resolve_companion`]: presence facts
     /// issue the projection the Client echoes back. The canonical round
-    /// premise comes from the input `round`, and a populated envelope
-    /// `round_view` must agree with it — a disagreement answers stale with
-    /// current values instead of adopting either side; a present-but-
-    /// unresolvable round is stale, never rebound.
+    /// premise comes from the input `round`, a populated envelope
+    /// `round_view` must agree with it, and a force-new request carries no
+    /// premise at all — a contradictory frame (disagreement, or a premise
+    /// under `fresh`) answers stale with current values instead of
+    /// adopting either side; a present-but-unresolvable round is stale,
+    /// never rebound.
     ///
     /// Presence attach runs only when the loaded attribution is `NoActive`,
     /// and only on the envelope's observed generation premise: a missing
@@ -565,8 +571,9 @@ impl HostHandle {
         };
         // The request fingerprint is the immutable client semantics: role,
         // body, language, sending incarnation, and the canonical round
-        // intent. `fresh` forces a new round and ignores every hint per the
-        // payload contract; otherwise the premise decides.
+        // intent. `fresh` requests the design's round-less new-round shape,
+        // so a force-new frame carries no premise (the gate above declined
+        // one); otherwise the premise decides.
         let round_intent = if submit.fresh {
             RoundIntentMark::New
         } else {
@@ -683,10 +690,10 @@ impl HostHandle {
             },
         };
         // One meaning per value, matching the fingerprint's round intent:
-        // an explicit new-round force beats any premise (the CLI already
-        // rejects combining them, so both set means a hand-built frame);
-        // otherwise a resolved premise joins that round and no premise
-        // joins-or-mints.
+        // a force-new request mints and never joins (the CLI rejects
+        // combining `--new` with `--round`, and the premise gate above
+        // already declined a premise-carrying force-new frame); a resolved
+        // premise joins that round, and no premise joins-or-mints.
         let intent = if submit.fresh {
             RoundIntent::New
         } else {
@@ -2290,6 +2297,116 @@ mod tests {
             timeline_count(&handle).await?,
             2,
             "conflict and replay append nothing durable"
+        );
+        remove_data_dir(&dir);
+        Ok(())
+    }
+
+    /// A force-new request carries no round premise (IPC §13.1:
+    /// `round = None`, `round_view = None`). A premise in either carrier
+    /// makes the frame self-contradictory: declined stale with current
+    /// values, never silently reinterpreted as the flag or joined on the
+    /// hint. Covers the three shapes: `fresh` + payload round, `fresh` +
+    /// round view, and `fresh` + mismatched round/round view.
+    #[tokio::test]
+    async fn forced_fresh_with_a_round_premise_is_declined() -> Result<(), String> {
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        let (handle, dir) = round_test_handle("dlg-fresh-premise", &live, &transport).await?;
+        let first = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
+        let first_round =
+            accepted_round(&handle.handle_frame(first, live.clone(), &transport).await)?;
+        let generation = current_generation(&handle).await?;
+        let build_forced = |round: Option<RoundWireId>, view: Option<RoundWireId>| {
+            let mut frame = submit_frame(
+                handle.companion_wire(),
+                Some(generation),
+                None,
+                "local-2",
+                "again",
+                live.connection_id,
+            );
+            // The helper stamps both carriers from one value; the premise
+            // rule under test distinguishes them, so set each explicitly.
+            if let WirePayload::SubmitTextInput(ref mut input) = frame.payload {
+                input.round = round;
+                input.fresh = true;
+            }
+            frame.envelope.observed.round_view = view;
+            frame
+        };
+        // `fresh` + payload round (equal premise), no round view.
+        let with_round = build_forced(Some(first_round.clone()), None);
+        let answers = handle
+            .handle_frame(with_round, live.clone(), &transport)
+            .await;
+        assert_eq!(answers.len(), 1, "a contradictory frame answers once");
+        let Some(only) = answers.first() else {
+            remove_data_dir(&dir);
+            return Err(String::from("the submit must answer"));
+        };
+        assert!(
+            matches!(
+                &only.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound { .. })
+            ),
+            "a force-new frame carrying a payload round must decline stale, got {:?}",
+            only.payload
+        );
+        // `fresh` + round view (no payload round).
+        let viewed = build_forced(None, Some(first_round.clone()));
+        let answers = handle.handle_frame(viewed, live.clone(), &transport).await;
+        let Some(only) = answers.first() else {
+            remove_data_dir(&dir);
+            return Err(String::from("the submit must answer"));
+        };
+        assert!(
+            matches!(
+                &only.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound { .. })
+            ),
+            "a force-new frame carrying a round view must decline stale, got {:?}",
+            only.payload
+        );
+        // `fresh` + mismatched round and round view.
+        let mismatched = build_forced(
+            Some(first_round.clone()),
+            Some(RoundWireId(String::from("other-round"))),
+        );
+        let answers = handle
+            .handle_frame(mismatched, live.clone(), &transport)
+            .await;
+        let Some(only) = answers.first() else {
+            remove_data_dir(&dir);
+            return Err(String::from("the submit must answer"));
+        };
+        assert!(
+            matches!(
+                &only.payload,
+                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::StaleRound { .. })
+            ),
+            "a force-new frame with mismatched premises must decline stale, got {:?}",
+            only.payload
+        );
+        // The premise-free force-new shape is the legal one: it mints.
+        let forced = build_forced(None, None);
+        let forced_round =
+            accepted_round(&handle.handle_frame(forced, live.clone(), &transport).await)?;
+        assert_ne!(
+            forced_round, first_round,
+            "the premise-free force-new request mints a new round"
+        );
+        assert_eq!(
+            timeline_count(&handle).await?,
+            4,
+            "the declined shapes append nothing durable (two rounds, owner plus reply)"
         );
         remove_data_dir(&dir);
         Ok(())
