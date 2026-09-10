@@ -9,6 +9,7 @@ publish.workspace = true
 ene-primitive = { path = "../ene-primitive" }
 ene-presence = { path = "../ene-presence" }
 ene-inference = { path = "../ene-inference" }
+ene-learning = { path = "../ene-learning" }
 thiserror.workspace = true
 
 [dev-dependencies]

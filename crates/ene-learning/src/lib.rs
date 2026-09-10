@@ -18,12 +18,21 @@
 //! absent: a companion-derived memory cannot be widened by accident, and the
 //! scope field keeps the distinction explicit for the later stage.
 
+mod formation;
 mod identity;
 mod memory;
 mod repository;
 mod scope;
 mod summary;
 
+#[cfg(test)]
+mod test_support;
+
+pub use formation::{
+    ChangeRejection, ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationChange,
+    FormationDecision, LearningInference, LearningInferenceError, MAX_FORMATION_TURNS,
+    MAX_FORMED_MEMORIES, SecretScrubber, form_experience,
+};
 pub use identity::{ExperienceSourceKind, MemoryId, MemoryRevision, SourceRangeRef, SummaryId};
 pub use memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, TemporalMeaning};
 pub use repository::{

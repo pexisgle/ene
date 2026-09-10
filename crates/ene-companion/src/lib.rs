@@ -470,6 +470,18 @@ pub trait HistoryRepository {
         limit: u64,
     ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError>;
 
+    /// Loads the newest items for one companion, oldest first within the
+    /// returned window, capped at `limit`.
+    ///
+    /// This is the bounded recent-context query: callers that need the
+    /// conversation near the present (dialogue context, Experience source)
+    /// must not read the whole timeline to find it.
+    async fn load_recent_timeline(
+        &self,
+        companion: CompanionId,
+        limit: u64,
+    ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError>;
+
     /// Looks up one previously accepted message by caller-supplied local id.
     ///
     /// Correspondence lookup for matching an input to its ack. Command-scoped

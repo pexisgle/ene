@@ -17,12 +17,18 @@
 use ene_inference::{
     Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor, NotSentReason,
 };
+use ene_learning::{
+    ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn, FormationDecision,
+    LearningInference, LearningInferenceError, LearningRepository, LearningTechnicalError,
+    SecretScrubber, SourceRangeRef,
+};
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
+use thiserror::Error;
 
 use crate::{
-    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, HistoryAppendOutcome,
-    HistoryRepository, HistoryRole, RequestFingerprint, RoundIntentMark,
+    AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError,
+    HistoryAppendOutcome, HistoryRepository, HistoryRole, RequestFingerprint, RoundIntentMark,
 };
 
 /// One presentation-accepted client input, ready for the companion turn.
@@ -284,5 +290,96 @@ pub async fn finish_turn(
             | InferenceDispatchOutcome::NotSent(_),
         )
         | Err(_) => DialogueOutcome::Interrupted,
+    }
+}
+
+/// Recent History messages read into one Experience source.
+pub const EXPERIENCE_SOURCE_MESSAGES: u64 = 12;
+
+/// Why one Experience proposal could not be completed.
+///
+/// A model answer that cannot be interpreted is the domain outcome
+/// [`FormationDecision::DeferredForContext`], not an error.
+#[derive(Debug, Error)]
+pub enum ExperienceProposalError {
+    #[error("history unavailable for experience formation: {0}")]
+    History(#[from] CompanionTechnicalError),
+    #[error("learning formation failed: {0}")]
+    Formation(#[from] LearningTechnicalError),
+}
+
+/// Proposes one Experience from the companion's recent History and lets
+/// Learning judge it.
+///
+/// The caller runs this after a reply is durable; the result never changes
+/// whether that reply completed. The transcript is transient source material
+/// for this formation only, and the Summary records only a source-range
+/// reference back to the retained History.
+pub async fn propose_experience(
+    companion: CompanionId,
+    history: &impl HistoryRepository,
+    learning: &impl LearningRepository,
+    inference: &impl InferenceExecutor,
+    scrubber: &impl SecretScrubber,
+) -> Result<FormationDecision, ExperienceProposalError> {
+    let items = history
+        .load_recent_timeline(companion, EXPERIENCE_SOURCE_MESSAGES)
+        .await?;
+    let (Some(first), Some(last)) = (items.first(), items.last()) else {
+        return Ok(FormationDecision::DeclinedAsNoEndValue);
+    };
+    let transcript = items
+        .iter()
+        .map(|item| ExperienceTurn {
+            role: match item.role {
+                HistoryRole::Owner => ExperienceRole::Owner,
+                HistoryRole::Companion => ExperienceRole::Companion,
+            },
+            text: item.text.clone(),
+        })
+        .collect();
+    let candidate = ExperienceCandidate {
+        companion: companion.as_raw(),
+        source: SourceRangeRef {
+            kind: ExperienceSourceKind::Dialogue,
+            start: first.id,
+            end: last.id,
+        },
+        transcript,
+        at: WallClockWithTz::now(),
+    };
+    let adapter = LearningInferenceAdapter { inference };
+    Ok(ene_learning::form_experience(learning, &adapter, scrubber, candidate).await?)
+}
+
+/// Maps the inference owner boundary onto the opaque Learning inference port.
+///
+/// The learning consumer and purpose are admitted by `ene-inference`; this
+/// adapter never presents the call as dialogue.
+struct LearningInferenceAdapter<'a, I> {
+    inference: &'a I,
+}
+
+impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInferenceAdapter<'_, I> {
+    async fn infer(&self, prompt: String) -> Result<String, LearningInferenceError> {
+        match self.inference.admit_learning().await {
+            Ok(Admission::Admitted(authorized)) => {
+                match self.inference.dispatch(*authorized, prompt).await {
+                    Ok(InferenceDispatchOutcome::Completed {
+                        arrival,
+                        adopted: true,
+                    }) => Ok(arrival.output_text),
+                    Ok(
+                        InferenceDispatchOutcome::Completed { adopted: false, .. }
+                        | InferenceDispatchOutcome::NotSent(_),
+                    )
+                    | Err(_) => Err(LearningInferenceError::Declined),
+                }
+            }
+            Ok(Admission::Declined(_)) => Err(LearningInferenceError::Declined),
+            Err(error) => Err(LearningInferenceError::Unavailable {
+                reason: error.to_string(),
+            }),
+        }
     }
 }

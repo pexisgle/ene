@@ -2992,3 +2992,24 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         "the rebuilt consent table is capability-scoped"
     );
 }
+
+#[tokio::test]
+async fn recent_timeline_keeps_the_newest_window_in_order() {
+    let store = open_memory().await.unwrap();
+    let Some((companion, generation)) = running_companion(&store).await else {
+        panic!("the running companion must resolve");
+    };
+    for text in ["one", "two", "three"] {
+        let appended = store
+            .append_message(history_command(companion, generation, text))
+            .await;
+        assert!(matches!(
+            appended,
+            Ok(HistoryAppendOutcome::CommittedAs { .. })
+        ));
+    }
+    let recent = store.load_recent_timeline(companion, 2).await.unwrap();
+    assert_eq!(recent.len(), 2, "the window is capped");
+    assert_eq!(recent[0].text, "two", "oldest first within the window");
+    assert_eq!(recent[1].text, "three");
+}

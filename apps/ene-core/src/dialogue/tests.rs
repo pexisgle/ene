@@ -17,6 +17,7 @@ use ene_api::v1::round::{
     SubmitTextInput, TextBodyWire,
 };
 use ene_credential::{CredentialRef, MemoryCredentialStore};
+use ene_inference::ProviderTransport;
 use ene_inference::fake::{FakeFailure, FakeProviderTransport};
 use ene_presentation::RoundId;
 use ene_primitive::RawId;
@@ -175,10 +176,10 @@ fn ok_transport() -> FakeProviderTransport {
 
 /// Result-based handle setup for the round regression tests: a failed
 /// open or a failed setup is a test failure, never a silent pass.
-async fn round_test_handle(
+async fn round_test_handle<T: ProviderTransport>(
     tag: &str,
     live: &LiveInput,
-    transport: &FakeProviderTransport,
+    transport: &T,
 ) -> Result<(HostHandle, tempfile::TempDir), String> {
     let Some((handle, dir)) = setup_handle(tag).await else {
         return Err(String::from("handle open failed"));
@@ -276,10 +277,10 @@ async fn setup_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
     .await
 }
 
-async fn register_assign_complete(
+async fn register_assign_complete<T: ProviderTransport>(
     handle: &HostHandle,
     live: &LiveInput,
-    transport: &FakeProviderTransport,
+    transport: &T,
 ) -> bool {
     let registered = handle
         .handle_frame(
@@ -2308,5 +2309,168 @@ async fn learning_admission_requires_its_own_capability_assignment() {
     assert!(
         matches!(executor.admit_dialogue().await, Ok(Admission::Admitted(_))),
         "the dialogue assignment is untouched"
+    );
+}
+
+/// A transport that answers the learning formation prompt with a configured
+/// JSON answer and every dialogue call with fixed reply text.
+struct LearningAwareTransport {
+    reply: String,
+    formation: Option<String>,
+}
+
+impl LearningAwareTransport {
+    fn new(reply: &str, formation: Option<&str>) -> Self {
+        Self {
+            reply: reply.to_owned(),
+            formation: formation.map(str::to_owned),
+        }
+    }
+}
+
+impl ProviderTransport for LearningAwareTransport {
+    fn complete(
+        &self,
+        req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        let text = if req.input.contains("learning formation pass") {
+            self.formation.clone().unwrap_or_default()
+        } else {
+            self.reply.clone()
+        };
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+}
+
+fn assert_stream_completed(responses: &[ene_plugin_ipc::WireFrame]) {
+    let Some(last) = responses.last() else {
+        panic!("the turn must answer");
+    };
+    assert!(
+        matches!(
+            &last.payload,
+            WirePayload::TextStreamClose(close) if close.status == StreamClose::Completed
+        ),
+        "the dialogue must still complete, got {:?}",
+        last.payload
+    );
+}
+
+#[tokio::test]
+async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::LearningRepository as _;
+
+    let transport = LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes jasmine tea.", "memories": [{"content": "The owner likes jasmine tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    );
+    let live = live_input("client-formation");
+    let setup = round_test_handle("dlg-formation", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-formation",
+        "please remember that I like jasmine tea",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+    assert_stream_completed(&responses);
+
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1, "one compressed memory is formed");
+    assert_eq!(memories[0].content, "The owner likes jasmine tea.");
+    assert_eq!(memories[0].importance.as_u8(), 4);
+    let revisions = handle
+        .store
+        .list_memory_revisions(memories[0].id)
+        .await
+        .unwrap();
+    assert_eq!(revisions.len(), 1, "the initial revision is recorded");
+    let summary = handle
+        .store
+        .load_summary(revisions[0].summary.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(summary.content.contains("jasmine tea"), "grounds are kept");
+}
+
+#[tokio::test]
+async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::LearningRepository as _;
+
+    // The fixture handle provisions `openai:main` with "test-bearer".
+    let transport = LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner shared test-bearer.", "memories": [{"content": "The owner's key is test-bearer.", "importance": 5}]}"#,
+        ),
+    );
+    let live = live_input("client-secret");
+    let setup = round_test_handle("dlg-secret", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-secret",
+        "remember my key test-bearer",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+    assert_stream_completed(&responses);
+
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1);
+    assert!(
+        !memories[0].content.contains("test-bearer"),
+        "a registered credential never reaches Memory: {}",
+        memories[0].content
+    );
+    assert!(
+        memories[0].content.contains("[credential]"),
+        "the credential position is visibly redacted"
+    );
+    let revisions = handle
+        .store
+        .list_memory_revisions(memories[0].id)
+        .await
+        .unwrap();
+    let summary = handle
+        .store
+        .load_summary(revisions[0].summary.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !summary.content.contains("test-bearer"),
+        "a registered credential never reaches Summary: {}",
+        summary.content
     );
 }

@@ -64,9 +64,11 @@ use ene_companion::dialogue::{
     classify_replay, finish_turn,
 };
 use ene_companion::{
-    CommandId, CompanionLifecycle, CompanionRepository, HistoryRepository, HistoryRole,
-    PresentationMark, ReportStatus, RequestFingerprint, RoundIntentMark, UndeliveredRepository,
+    CommandId, CompanionId, CompanionLifecycle, CompanionRepository, HistoryRepository,
+    HistoryRole, PresentationMark, ReportStatus, RequestFingerprint, RoundIntentMark,
+    UndeliveredRepository,
 };
+use ene_credential::{CredentialRefRepository, CredentialStore};
 use ene_inference::{
     Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor,
     InferenceTechnicalError, NotSentReason, PreparedAdmission, ProviderTransport,
@@ -672,6 +674,7 @@ impl HostHandle {
                 );
                 match finish_turn(turn, &self.store, &executor).await {
                     DialogueOutcome::Completed { text } => {
+                        self.propose_learning_experience(companion, &executor).await;
                         completed_frames(frame, live, &round_wire, generation_number, &text)
                     }
                     DialogueOutcome::Interrupted => {
@@ -818,6 +821,62 @@ impl HostHandle {
             Some(wire) => vec![accept_frame(frame, live, &RoundWireId(wire))],
             None => vec![stale_frame_with(frame, live, None, generation)],
         }
+    }
+
+    /// Runs the Learning formation pass after a completed reply.
+    ///
+    /// Best-effort by design: the stream outcome was already decided by the
+    /// durable reply append, so a formation decline or failure never rewrites
+    /// it. The pass reads recent History, judges it under the learning
+    /// consumer, and commits Summary evidence plus new Memories.
+    async fn propose_learning_experience<T: ProviderTransport>(
+        &self,
+        companion: CompanionId,
+        executor: &HostInference<'_, T>,
+    ) {
+        let scrubber = CredentialScrubber {
+            refs: &self.store,
+            store: &self.cred_store,
+        };
+        let outcome = ene_companion::dialogue::propose_experience(
+            companion,
+            &self.store,
+            &self.store,
+            executor,
+            &scrubber,
+        )
+        .await;
+        // The formation result is intentionally not surfaced on the dialogue
+        // path; a future management surface can read the durable outcome.
+        drop(outcome);
+    }
+}
+
+/// Redacts registered credential values from text on its way to Learning.
+///
+/// Uses the existing credential boundary: the bearer is borrowed inside
+/// `with_bearer` and only the redacted copy escapes. A missing bearer leaves
+/// the text unchanged and cannot fabricate redaction.
+struct CredentialScrubber<'a> {
+    refs: &'a Store,
+    store: &'a CredStore,
+}
+
+impl ene_learning::SecretScrubber for CredentialScrubber<'_> {
+    async fn scrub(&self, text: &str) -> String {
+        let Ok(refs) = self.refs.list_refs().await else {
+            return text.to_owned();
+        };
+        let mut scrubbed = text.to_owned();
+        for credential in refs {
+            let replaced = self.store.with_bearer(&credential, |bearer| {
+                scrubbed.replace(bearer, "[credential]")
+            });
+            if let Ok(next) = replaced {
+                scrubbed = next;
+            }
+        }
+        scrubbed
     }
 }
 

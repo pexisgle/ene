@@ -14,10 +14,12 @@ use crate::memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, Tempor
 use crate::scope::LearningScope;
 use crate::summary::SummaryRecord;
 
-/// Infrastructure failure for Learning persistence.
+/// Infrastructure failure for Learning persistence and formation.
 ///
-/// Stale / missing / scope outcomes are [`MemoryChangeOutcome`], never this
-/// error.
+/// Stale / missing / scope outcomes are [`MemoryChangeOutcome`], and an
+/// uninterpretable model answer is
+/// [`FormationDecision::DeferredForContext`](crate::FormationDecision), never
+/// this error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LearningTechnicalError {
     #[error("learning storage unavailable: {reason}")]
@@ -36,6 +38,11 @@ pub enum LearningTechnicalError {
     SummaryIdentityConflict {
         /// The reused identity; carries no content.
         summary: SummaryId,
+    },
+    #[error("learning inference unavailable: {reason}")]
+    InferenceUnavailable {
+        /// Provider-class cause. Never prompt or output text.
+        reason: String,
     },
 }
 
