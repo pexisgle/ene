@@ -25,6 +25,16 @@
 //! server-side domain outcomes (stale rounds, held transitions, stale base
 //! views, pending confirmations, and similar Ok-side declines).
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
+    )
+)]
+
 use ene_ctl::errors::{CliError, USAGE};
 use ene_ctl::{client, cmds};
 
