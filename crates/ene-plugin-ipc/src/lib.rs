@@ -15,6 +15,16 @@
 //! Host. Unknown-field tolerance therefore comes free from the `ene-api`
 //! DTOs, not from any logic here.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
+    )
+)]
+
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::payload::WirePayload;
 use serde::{Deserialize, Serialize};
@@ -99,10 +109,9 @@ pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, CodecError> {
     if body.len() > MAX_FRAME_BYTES {
         return Err(CodecError::FrameTooLarge { len: body.len() });
     }
-    // Infallible after the cap check (`MAX_FRAME_BYTES` fits in `u32`), kept
-    // fallible-shaped so no cast-or-unwrap primitive can silently truncate.
-    let len_prefix =
-        u32::try_from(body.len()).map_err(|_| CodecError::FrameTooLarge { len: body.len() })?;
+    // The cap check above keeps this conversion exact: `MAX_FRAME_BYTES`
+    // (256 KiB) fits in `u32`.
+    let len_prefix = body.len() as u32;
     let mut out = Vec::with_capacity(LEN_PREFIX_LEN + body.len());
     out.extend_from_slice(&len_prefix.to_be_bytes());
     out.extend_from_slice(&body);
@@ -187,36 +196,11 @@ mod tests {
         WireFrame { envelope, payload }
     }
 
-    /// Yields `Ok` values in tests without `unwrap`/`expect` (both denied by
-    /// the workspace lints): `let Some(v) = require_ok(r, "ctx") else {
-    /// return };`. The `assert!` fails the test first, so the `else` branch
-    /// is only a type-level fallback, never a silent pass.
-    fn require_ok<T: core::fmt::Debug, E: core::fmt::Debug>(
-        result: Result<T, E>,
-        what: &str,
-    ) -> Option<T> {
-        assert!(result.is_ok(), "{what} unexpectedly failed: {result:?}");
-        result.ok()
-    }
-
-    /// Yields `Err` values in tests; see [`require_ok`] for the pattern.
-    fn require_err<T: core::fmt::Debug, E: core::fmt::Debug>(
-        result: Result<T, E>,
-        what: &str,
-    ) -> Option<E> {
-        assert!(result.is_err(), "{what} unexpectedly succeeded: {result:?}");
-        result.err()
-    }
-
     #[test]
     fn roundtrip_preserves_envelope_and_payload() {
         let frame = sample_frame();
-        let Some(encoded) = require_ok(encode_frame(&frame), "encode frame") else {
-            return;
-        };
-        let Some((decoded, consumed)) = require_ok(decode_frame(&encoded), "decode frame") else {
-            return;
-        };
+        let encoded = encode_frame(&frame).expect("encode frame");
+        let (decoded, consumed) = decode_frame(&encoded).expect("decode frame");
         assert_eq!(consumed, encoded.len());
         assert_eq!(decoded, frame);
     }
@@ -224,13 +208,9 @@ mod tests {
     #[test]
     fn prefix_is_big_endian_body_length() {
         let frame = sample_frame();
-        let Some(body) = require_ok(rmp_serde::to_vec(&frame), "encode body") else {
-            return;
-        };
-        let Some(encoded) = require_ok(encode_frame(&frame), "encode frame") else {
-            return;
-        };
-        let body_len = body.len() as u32;
+        let body = rmp_serde::to_vec(&frame).expect("encode body");
+        let encoded = encode_frame(&frame).expect("encode frame");
+        let body_len = u32::try_from(body.len()).expect("sample body fits in u32");
         let mut expected = body_len.to_be_bytes().to_vec();
         expected.extend_from_slice(&body);
         assert_eq!(encoded, expected);
@@ -239,15 +219,10 @@ mod tests {
 
     #[test]
     fn short_prefix_is_truncated_needing_four() {
-        let Some(encoded) = require_ok(encode_frame(&sample_frame()), "encode frame") else {
-            return;
-        };
+        let encoded = encode_frame(&sample_frame()).expect("encode frame");
         assert!(encoded.len() > 4, "sample must carry a body");
         for have in 0..4 {
-            let Some(error) = require_err(decode_frame(&encoded[..have]), "decode short prefix")
-            else {
-                return;
-            };
+            let error = decode_frame(&encoded[..have]).expect_err("decode short prefix");
             assert_eq!(
                 error,
                 CodecError::Truncated { have, need: 4 },
@@ -258,14 +233,10 @@ mod tests {
 
     #[test]
     fn short_body_is_truncated_needing_frame_total() {
-        let Some(encoded) = require_ok(encode_frame(&sample_frame()), "encode frame") else {
-            return;
-        };
+        let encoded = encode_frame(&sample_frame()).expect("encode frame");
         assert!(encoded.len() > 4, "sample must carry a body");
         let cut = encoded.len() - 1;
-        let Some(error) = require_err(decode_frame(&encoded[..cut]), "decode short body") else {
-            return;
-        };
+        let error = decode_frame(&encoded[..cut]).expect_err("decode short body");
         assert_eq!(
             error,
             CodecError::Truncated {
@@ -282,9 +253,7 @@ mod tests {
         // before any body-sized allocation or read.
         let mut bytes = 1_073_741_824_u32.to_be_bytes().to_vec();
         bytes.extend_from_slice(&[0_u8; 10]);
-        let Some(error) = require_err(decode_frame(&bytes), "decode oversize prefix") else {
-            return;
-        };
+        let error = decode_frame(&bytes).expect_err("decode oversize prefix");
         assert_eq!(
             error,
             CodecError::FrameTooLarge { len: 1_073_741_824 },
@@ -300,15 +269,9 @@ mod tests {
         body.extend_from_slice(b"secret-body-marker-xyz");
         let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
         bytes.extend_from_slice(&body);
-        let Some(error) = require_err(decode_frame(&bytes), "decode corrupt body") else {
-            return;
-        };
-        assert!(
-            matches!(error, CodecError::DecodeFailed { .. }),
-            "corrupt body must fail decode, got {error:?}"
-        );
+        let error = decode_frame(&bytes).expect_err("decode corrupt body");
         let CodecError::DecodeFailed { reason } = error else {
-            return;
+            panic!("corrupt body must fail decode, got {error:?}");
         };
         assert!(
             !reason.contains("secret-body-marker-xyz"),
@@ -325,25 +288,15 @@ mod tests {
     fn concatenated_frames_decode_sequentially() {
         let first = sample_frame();
         let second = sample_frame();
-        let Some(first_encoded) = require_ok(encode_frame(&first), "encode first") else {
-            return;
-        };
-        let Some(second_encoded) = require_ok(encode_frame(&second), "encode second") else {
-            return;
-        };
+        let first_encoded = encode_frame(&first).expect("encode first");
+        let second_encoded = encode_frame(&second).expect("encode second");
         let mut both = first_encoded.clone();
         both.extend_from_slice(&second_encoded);
-        let Some((decoded_first, consumed_first)) = require_ok(decode_frame(&both), "decode first")
-        else {
-            return;
-        };
+        let (decoded_first, consumed_first) = decode_frame(&both).expect("decode first");
         assert_eq!(consumed_first, first_encoded.len());
         assert_eq!(decoded_first, first);
-        let Some((decoded_second, consumed_second)) =
-            require_ok(decode_frame(&both[consumed_first..]), "decode second")
-        else {
-            return;
-        };
+        let (decoded_second, consumed_second) =
+            decode_frame(&both[consumed_first..]).expect("decode second");
         assert_eq!(consumed_first + consumed_second, both.len());
         assert_eq!(decoded_second, second);
     }
@@ -351,23 +304,13 @@ mod tests {
     #[test]
     fn oversize_body_rejected_on_encode() {
         let mut frame = sample_frame();
-        assert!(
-            matches!(frame.payload, WirePayload::SubmitTextInput(_)),
-            "sample payload must be text input"
-        );
         let WirePayload::SubmitTextInput(input) = &mut frame.payload else {
-            return;
+            panic!("sample payload must be text input");
         };
         input.body.text = "x".repeat(MAX_FRAME_BYTES);
-        let Some(error) = require_err(encode_frame(&frame), "encode oversize body") else {
-            return;
-        };
-        assert!(
-            matches!(error, CodecError::FrameTooLarge { .. }),
-            "oversize body must report length, got {error:?}"
-        );
+        let error = encode_frame(&frame).expect_err("encode oversize body");
         let CodecError::FrameTooLarge { len } = error else {
-            return;
+            panic!("oversize body must report length, got {error:?}");
         };
         assert!(
             len > MAX_FRAME_BYTES,
