@@ -149,12 +149,13 @@ fn consent_expectation(base_view: &str, current: Option<&ConsentRecord>) -> Cons
 ///
 /// The bearer behind it still comes from the held store at call time; this
 /// ref only names the conventional `openai` main credential.
-fn default_credential() -> CredentialRef {
-    CredentialRef {
-        id: String::from("openai:main"),
-        provider: String::from("openai"),
-        label: String::from("main"),
-    }
+#[expect(
+    clippy::expect_used,
+    reason = "the conventional openai:main ref satisfies the credential grammar by construction"
+)]
+pub(crate) fn default_credential() -> CredentialRef {
+    CredentialRef::new("openai", "main")
+        .expect("the conventional openai:main ref satisfies the credential grammar")
 }
 
 impl HostHandle {
@@ -172,13 +173,13 @@ impl HostHandle {
             return default_credential();
         };
         match self.store.list_refs().await {
-            Ok(refs) => match refs.iter().find(|known| known.id == consent.credential_id) {
+            Ok(refs) => match refs
+                .iter()
+                .find(|known| known.id() == consent.credential_id)
+            {
                 Some(known) => known.clone(),
-                None => CredentialRef {
-                    id: consent.credential_id.clone(),
-                    provider: consent.provider.clone(),
-                    label: String::from("main"),
-                },
+                None => CredentialRef::new(consent.provider.clone(), "main")
+                    .unwrap_or_else(|_| default_credential()),
             },
             Err(_) => default_credential(),
         }
@@ -543,7 +544,11 @@ impl HostHandle {
                 ManagementOutcome::HeldByOperation,
             )];
         };
-        let Some(credential) = refs.iter().find(|known| known.id == credential_id).cloned() else {
+        let Some(credential) = refs
+            .iter()
+            .find(|known| known.id() == credential_id)
+            .cloned()
+        else {
             return vec![outcome_frame(
                 frame,
                 live,
@@ -785,7 +790,7 @@ impl HostHandle {
                 }
                 Ok(refs) => refs
                     .iter()
-                    .find(|known| known.id == consent.credential_id)
+                    .find(|known| known.id() == consent.credential_id)
                     .is_some_and(|credential| self.cred_store.contains(credential)),
             },
         };
@@ -870,7 +875,7 @@ impl HostHandle {
             CredStore::Memory(_) => "memory",
         };
         let credential_text = match &current {
-            Some(record) => match refs.iter().find(|known| known.id == record.credential_id) {
+            Some(record) => match refs.iter().find(|known| known.id() == record.credential_id) {
                 Some(known) if self.cred_store.contains(known) => {
                     format!("present ({source})")
                 }

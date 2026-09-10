@@ -49,11 +49,7 @@ const FAKE_TEXT: &str = "hello back over the real socket";
 fn memory_store() -> MemoryCredentialStore {
     let store = MemoryCredentialStore::new();
     store.insert(
-        CredentialRef {
-            id: String::from("openai:main"),
-            provider: String::from("openai"),
-            label: String::from("main"),
-        },
+        CredentialRef::new("openai", "main").expect("valid test fixture"),
         "sk-test-only",
     );
     store

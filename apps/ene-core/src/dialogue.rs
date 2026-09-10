@@ -87,6 +87,7 @@ use ene_store::Store;
 use crate::serve::{
     HostHandle, LiveInput, device_client, outgoing_frame, reject_frame, unpaired_close,
 };
+use crate::setup::default_credential;
 
 /// Maximum stream chunk size in Unicode scalar values.
 ///
@@ -714,9 +715,10 @@ impl HostHandle {
                 local_id: submit.local_id.0.clone(),
             },
             attribution,
-            companion: CompanionAvailability {
-                known: true,
-                running: lifecycle == Some(CompanionLifecycle::Running),
+            companion: match lifecycle {
+                Some(CompanionLifecycle::Running) => CompanionAvailability::Running,
+                Some(_) => CompanionAvailability::Stopped,
+                None => CompanionAvailability::Unknown,
             },
             live: LiveReachabilityRef {
                 client,
@@ -751,19 +753,16 @@ impl HostHandle {
         };
         let credential = match known_refs
             .iter()
-            .find(|known| known.id == consent.credential_id)
+            .find(|known| known.id() == consent.credential_id)
             .cloned()
         {
             Some(known) => known,
-            None => CredentialRef {
-                id: consent.credential_id.clone(),
-                provider: consent.provider.clone(),
-                label: String::from("main"),
-            },
+            None => CredentialRef::new(consent.provider.clone(), "main")
+                .unwrap_or_else(|_| default_credential()),
         };
         let repo_known = known_refs
             .iter()
-            .any(|known| known.id == consent.credential_id);
+            .any(|known| known.id() == consent.credential_id);
         let setup_complete =
             credential_availability(&credential, repo_known, &self.cred_store).present;
         let candidate = InferenceUseCandidate {

@@ -255,11 +255,7 @@ async fn current_generation(handle: &HostHandle) -> Result<u64, String> {
 async fn setup_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
     memory_handle_with(tag, |store| {
         store.insert(
-            CredentialRef {
-                id: String::from("openai:main"),
-                provider: String::from("openai"),
-                label: String::from("main"),
-            },
+            CredentialRef::new("openai", "main").expect("valid test fixture"),
             "test-bearer",
         );
     })
@@ -1240,11 +1236,7 @@ async fn replay_after_restart_replays_from_durable_wire() -> Result<(), String> 
     drop(handle);
     let fresh = MemoryCredentialStore::new();
     fresh.insert(
-        CredentialRef {
-            id: String::from("openai:main"),
-            provider: String::from("openai"),
-            label: String::from("main"),
-        },
+        CredentialRef::new("openai", "main").expect("valid test fixture"),
         "test-bearer",
     );
     let reopened = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(fresh))
