@@ -1,8 +1,6 @@
 # Host↔Client IPC / wire protocol の具体設計 — Step 13 Concrete Design
 
-本書は Step 13 の Host↔Client IPC / wire protocol artifact である。Step 11（Context Assembly, Action Execution, Targeted Deletion, Client Presence Transition, Backup / Restore）および Step 12（Subsystem Decomposition, 各 subsystem 詳細設計, State Ownership (SO), Dependency Rules (DR), Cross-cutting Design (CC), Runtime Topology, Runtime Flows, System Context）と Step 13 の[対応関係・識別](correspondence-identity.md)（CI）、[Persistence / Recovery](persistence-recovery.md)（PR）、[Concurrency Control](concurrency-control.md)（CCT）、[Interface Boundaries](interface-boundaries.md)（IB）、[Crate / Module 分解](crate-module-decomposition.md)（CM）を**固定前提**とする。semantic ownership、identity / revision / generation / directed correlation / boundary token の意味、durable / derived / transient / external 分類、atomicity / ordering boundary、recovery semantics、serialization domain、compare-before-commit、caller ≠ authority、typed expected、domain outcome / technical error 分離、secret 非返却、Host-local / remote-capable の区別、crate 依存方向のいずれも変更しない。変更が必要に見えた場合は設計で吸収せず Issue として報告する（第29節）。
-
-製品挙動の source of truth は[要件 Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+本書は Step 13 の Host↔Client IPC / wire protocol artifact である。[対応関係・識別](correspondence-identity.md)（CI）、[Persistence / Recovery](persistence-recovery.md)（PR）、[Concurrency Control](concurrency-control.md)（CCT）、[Interface Boundaries](interface-boundaries.md)（IB）、[Crate / Module 分解](crate-module-decomposition.md)（CM）が定めた identity・保存分類・concurrency・interface contract・crate 依存方向を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。
 
 実装コードは変更しない。本書の Rust pseudo-type はコンパイル対象ではない。型名・field 名・message 名の同義改名は許すが、型の分離と field の意味は維持すること。
 

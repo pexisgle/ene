@@ -2,10 +2,6 @@
 
 本書は、BackupからEneの内部状態を復旧するときに、**何が復元され、何が現在環境から維持され、何が自動的には再有効化されず、どの時点で復元された内部stateを新しい正本として扱えるか**のlogical contractを詳細化する。後続のstate / persistence / concurrency / interface設計が安全に依存できる水準まで定め、具体的なmechanismは固定しない。
 
-製品挙動のsource of truthは[要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
-
-本書の「要求」「対応」「置換成立」「保留」「一括有効化」「旧live」「復元正本」は論理的な関係であり、共通object、永続record、protocol、state machine、enumを指定しない。番号付きの段階は必要な前後関係を示し、すべてを直列実行する指定ではない。
-
 ## 1. 詳細化する問題と範囲選定
 
 Restoreを「backupの内容をDBへ上書きする」へ落とすと、次の成立が失われる。後続設計が誤りやすい点と、本書で定める契約は次のとおりである。
@@ -29,7 +25,7 @@ Targeted deletionと通常retention / Companion deletion / Resetは異なるlife
 
 ## 2. 上位architectureとの位置関係
 
-[Subsystem Decomposition](../architecture/subsystems.md)の12責務、[State Ownership](../architecture/state-ownership.md)（SO）第4〜8節、[Dependency Rules](../architecture/dependency-rules.md)（DR）第3〜7節、[System Context](../architecture/system-context.md)の内外境界、[Runtime Topology](../architecture/runtime-topology.md)の配置・寿命・trust / failure boundaryを変更しない。新しいsemantic owner、中央Persistence owner、万能Restore Manager、統一restore state machineを追加しない。
+上位architectureとの優先順位は[設計文書 README](../README.md#正本と優先順位)に従う。本書内のSOは[State Ownership](../architecture/state-ownership.md)、DRは[Dependency Rules](../architecture/dependency-rules.md)の節番号を指し、CC / RF / RT / SC番号は対応するarchitecture文書（[artifact 一覧](../README.md#artifact-一覧)）の契約IDである。新しいsemantic owner、中央Persistence owner、万能Restore Manager、統一restore state machineを追加しない。
 
 | 本書内の役割 | 既存の責任とauthoritativeな判断 | 本書が持ってはならない正本 |
 |---|---|---|

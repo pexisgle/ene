@@ -1,8 +1,6 @@
 # Persistence / 保存単位 / Recovery の具体設計 — Step 13 Concrete Design
 
-本書は Step 13 の Persistence / 保存単位 / Recovery artifact である。Step 11（Context Assembly, Action Execution, Targeted Deletion, Client Presence Transition, Backup / Restore）および Step 12（Subsystem Decomposition, 各 subsystem artifact, State Ownership (SO), Dependency Rules (DR), Cross-cutting Design (CC), Runtime Topology, Runtime Flows, System Context）と Step 13 `correspondence-identity.md` を固定前提とする。semantic ownership, subsystem boundary, Security / Privacy / Permission semantics, `correspondence-identity.md` の identity / revision / generation / correlation / boundary token の意味を変更しない。変更が必要に見えた場合は設計で吸収せず Issue として報告する（第14節）。
-
-製品挙動の source of truth は [要件 Baseline](../../requirements/README.md), [製品定義](../../requirements/product.md), [要件](../../requirements/requirements.md) とする。[受け入れ条件](../../requirements/acceptance.md) も検証範囲へ含め、[参考資料](../../requirements/references.md) は非規範として扱う。既存実装から製品挙動を補わない。
+本書は Step 13 の Persistence / 保存単位 / Recovery artifact である。[対応関係・識別](correspondence-identity.md)（CI）の identity / revision / generation / correlation / boundary token の意味を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。本書内の SO は [State Ownership](../architecture/state-ownership.md) を指す。
 
 ## 1. 対象と非対象
 

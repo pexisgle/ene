@@ -1,10 +1,6 @@
 # 対応関係・識別の具体設計 — Step 13 Concrete Design (Correspondence & Identity)
 
-本書は Step 13 の最初の具体設計 artifact である。Ene 全体で必要になる「対応関係（correspondence）」を、具体実装で安全に表現・照合できる形まで具体化する。
-
-製品挙動の source of truth は [要件 Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md) とする。[受け入れ条件](../../requirements/acceptance.md) も検証範囲へ含め、[参考資料](../../requirements/references.md) は非規範として扱う。既存実装から製品挙動を補わない。
-
-Step 11（Critical Area Detailed Design: [Context Assembly](../critical-areas/context-assembly.md)、[Action Execution](../critical-areas/action-execution.md)、[Targeted Deletion](../critical-areas/targeted-deletion.md)、[Client Presence Transition](../critical-areas/client-presence-transition.md)、[Backup / Restore](../critical-areas/backup-restore.md)）および Step 12（Subsystem Detailed Design: [Subsystem Decomposition](../architecture/subsystems.md)、各 subsystem artifact、[State Ownership](../architecture/state-ownership.md)（SO）、[Dependency Rules](../architecture/dependency-rules.md)（DR）、[Cross-cutting Design](../architecture/cross-cutting.md)（CC）、[Runtime Topology](../architecture/runtime-topology.md)、[Runtime Flows](../architecture/runtime-flows.md)、[System Context](../architecture/system-context.md)、各 review）を**固定前提**とする。本書はそれらの semantic ownership、subsystem boundary、Security / Privacy / Permission semantics を変更しない。変更が必要に見えた場合は設計で吸収せず Issue として報告する（第12節）。
+本書は Step 13 の最初の具体設計 artifact である。Ene 全体で必要になる「対応関係（correspondence）」を、具体実装で安全に表現・照合できる形まで具体化する。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。本書内の SO / DR / CC は [State Ownership](../architecture/state-ownership.md) / [Dependency Rules](../architecture/dependency-rules.md) / [Cross-cutting Design](../architecture/cross-cutting.md) を指す。
 
 ## 1. 対象と非対象
 

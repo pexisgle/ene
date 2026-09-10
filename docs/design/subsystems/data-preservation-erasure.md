@@ -3,27 +3,14 @@
 本書は Step 12 Subsystem Detailed Design として、**内部データ保全・消去（以下、保全・消去）**単独を詳細化する。
 
 本書内の PE 番号は本書内の内部責務の参照用、DP 番号は本書内のSubsystem間semantic contractの参照用であり、製品要件IDではない。
-「要求」「対応」「区間」「保留」「受入」「完了」は論理的な関係であり、共通object、永続record、protocol、state machine、enumを指定しない。
 
 ## 0. 位置付けと不変条件
 
-製品挙動の source of truth は [要件Baseline](../../requirements/README.md)、[製品定義](../../requirements/product.md)、[要件](../../requirements/requirements.md)とする。[受け入れ条件](../../requirements/acceptance.md)も検証範囲へ含め、[参考資料](../../requirements/references.md)は非規範として扱う。既存実装から製品挙動を補わない。
+上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。[Context Assembly](../critical-areas/context-assembly.md)、[Action Execution](../critical-areas/action-execution.md)、[Targeted Deletion](../critical-areas/targeted-deletion.md)、[Client Presence Transition](../critical-areas/client-presence-transition.md)（以下、Presence Transition）、[Backup / Restore](../critical-areas/backup-restore.md)（以下、Backup-Restore）の一般契約は、隣接する確定済み contract として利用し、再定義も所有権の移動もしない。本書内の SO は [State Ownership](../architecture/state-ownership.md)、DR は [Dependency Rules](../architecture/dependency-rules.md) の節番号を指し、CC / RF 番号は対応する architecture 文書（[artifact 一覧](../README.md#artifact-一覧)）の契約 ID である。
 
-責務・非責務は [Subsystem Decomposition](../architecture/subsystems.md)第3・5・6節、意味owner・lifecycleは [State Ownership](../architecture/state-ownership.md)（以下SO）第4〜8節、依存の許可・禁止・制約は [Dependency Rules](../architecture/dependency-rules.md)（以下DR）第3〜7節、内外境界は [System Context](../architecture/system-context.md)、配置・寿命・trust / failure boundary は [Runtime Topology](../architecture/runtime-topology.md)を維持する。[Cross-cutting Design](../architecture/cross-cutting.md)の CC-01〜07 を前提とし、再定義しない。
+新しい semantic owner、第二の正本、万能Deletion Manager / Restore Manager / Persistence Owner / Policy Engine、統一state machine、共通Context layer、共通Client session layerを追加しない。
 
-Step 11 の5詳細設計は特定Subsystemの新しいownerではない。本書は次を隣接する確定済みcontractとして利用し、再定義も所有権の移動もしない。
-
-- [Context Assembly](../critical-areas/context-assembly.md)：由来・用途・現在性・用途別結果受入・処理中無効化の一般契約
-- [Action Execution](../critical-areas/action-execution.md)：判断対象と実対象の対応・委任不変・確定度・不明保持・遅延帰属の一般契約
-- [Targeted Deletion](../critical-areas/targeted-deletion.md)：消去区間・再保存防止・未完了保全・完了条件の一般契約
-- [Client Presence Transition](../critical-areas/client-presence-transition.md)（以下、Presence Transition）：authoritative帰属・切替区間・活動別区切り・到着物帰属・Host継続の一般契約
-- [Backup / Restore](../critical-areas/backup-restore.md)（以下、Backup-Restore）：復元範囲・正本切替・再有効化・stale・旧backup交差の一般契約
-
-新しい semantic owner、第二の正本、万能Deletion Manager / Restore Manager / Persistence Owner / Policy Engine、統一state machine、共通Context layer、共通Client session layerを追加しない。Subsystem と crate / process / service を一対一に対応させない。Host側とClient側に同名Subsystemを複製しない。
-
-本書の active Client不在時の活動継続・移動・復旧は Running Companion の契約である。Stopped 個体はどのClientにもHostにも presence を持たず、保存dataや再配置hintは現在帰属ではない。Clientに依存しない活動も個体停止の禁止を迂回しない。
-
-`targeted-deletion.md` と `backup-restore.md` が定めた全域操作そのもののlogical contractを再設計しない。本書は**保全・消去がそのcontractを成立させるために何を担い、各semantic ownerへ何を要求し、何を受け取って全体成立を判断するのか**へ落とす。Context Assembly / Action Execution / Presence Transitionで定義されたprovenance、delayed result、unknown outcome、Client一時data等も既存contractとして利用する。
+Targeted Deletion と Backup-Restore が定めた全域操作そのもののlogical contractを再設計しない。本書は**保全・消去がそのcontractを成立させるために何を担い、各semantic ownerへ何を要求し、何を受け取って全体成立を判断するのか**へ落とす。Context Assembly / Action Execution / Presence Transitionで定義されたprovenance、delayed result、unknown outcome、Client一時data等も既存contractとして利用する。
 
 ## 1. 選定理由
 

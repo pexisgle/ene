@@ -2,11 +2,12 @@
 
 この directory は、ene の設計の正本置き場である。Step 11 / Step 12 / Step 13 までの確定設計を、抽象度と役割に応じて配置する。巨大な summary ではなく、各 artifact への入口として使う。
 
-## requirements と design の関係
+## 正本と優先順位
 
-- 製品要求の source of truth は [`docs/requirements/`](../requirements/README.md) であり、本 directory が製品挙動を追加・変更することはない。
-- design は、要求を実現するための内部設計詳細（責務境界、正本、依存規則、concurrency、保存単位、interface、crate 分割、IPC 等）を定める。要求と設計の境界は requirements 側の「要件と設計の境界」に従う。
-- 既存実装、Git 履歴、参考資料は設計根拠にしない。参考資料は非規範として扱う。
+1. 製品挙動の正本は [`docs/requirements/`](../requirements/README.md) である。設計は要件にない製品挙動を追加・変更せず、要求と設計の境界は requirements 側の「要件と設計の境界」に従う。
+2. 設計は `architecture/` → `critical-areas/` → `subsystems/` → `concrete/` の順に上位から下位へ具体化する。下位文書は上位文書の責務境界、semantic owner、identity / revision / generation の意味、保存分類、依存規則、Security / Privacy / Permission の意味を黙って変更しない。同じ層の中では、各文書が冒頭で前提として挙げる文書が先行する。
+3. 文書間の矛盾は、下位側や実装で意味を決めず Issue として扱う。
+4. 規範となるのは現行文書へ統合された判断だけである。`reviews/` のレビュー原文、過去の作業指示、既存実装、Git 履歴、[参考資料](../requirements/references.md) は非規範であり、設計根拠にしない。
 
 ## directory の役割
 
@@ -16,13 +17,14 @@
 - [`concrete/`](concrete/): Step 13 Concrete Design。識別・保存・concurrency・interface・crate 分解・IPC の具体設計。
 - [`reviews/`](reviews/): 独立レビュー記録。判断履歴・検証記録であり、現行 Architecture の代替正本ではない。
 
+`critical-areas/` と `subsystems/` の文中の「要求」「対応」「区間」「保留」「受入」等は論理的な関係を表し、共通 object、永続 record、protocol、state machine、enum を指定しない。番号付きの段階は必要な前後関係を示し、直列実行の指定ではない。
+
 ## 推奨 reading order
 
 1. 上位から読む: Architecture Drivers → System Context → Runtime Topology → Subsystem Decomposition → State Ownership → Dependency Rules → Runtime Flows → Cross-cutting。
 2. 次に Step 11（`critical-areas/`）を Context Assembly → Action Execution → Targeted Deletion → Client Presence Transition → Backup / Restore の順に読む。
 3. 次に Step 12（`subsystems/`）を読む。5 artifact は相互に参照し合う。
 4. 次に Step 13（`concrete/`）を Correspondence & Identity → Persistence / Recovery → Concurrency → Interface Boundaries → Crate / Module 分解 → Host↔Client IPC の順に読む。
-5. `reviews/` は必要に応じて参照する。現行判断の正本としては使わない。
 
 ## artifact 一覧
 
@@ -81,11 +83,3 @@
 - Subsystem Detailed Design (Step 12): COMPLETE
 - Concrete Design (Step 13): COMPLETE
 - Next: Walking Skeleton
-
-## precedence / conflict rule
-
-1. `docs/requirements/` が製品要求の source of truth。上位・下位を問わず、設計は要求にない製品挙動を追加しない。
-2. `architecture/` の artifact は、その要求を実現する上位設計（上位 contract）である。
-3. `critical-areas/` / `subsystems/` / `concrete/` は上位 contract を具体化するものであり、黙って上位 contract を変更しない。Step 13 の各 artifact が宣言する固定前提（fixed premise）を守る。
-4. 下位 artifact と上位 artifact に矛盾が見つかった場合、下位側で意味を上書きせず Issue として扱う。各 artifact の Issue 節に報告し、設計で吸収しない。
-5. `reviews/` は判断履歴・検証記録であり、統合済みの現行 Architecture の代替 source of truth ではない。レビューの提案を再採用するのではなく、現行 architecture へ統合された判断に従う。
