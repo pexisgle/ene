@@ -35,14 +35,14 @@ crate を分けるか module に留めるかの材料として次を用いた。
 - independent replacement / adapter boundary（Provider protocol / MCP / Plugin / OS store の差替え）。
 - Host / Client 共有可能性（Client が Host domain crate へ直接依存せずに済むか）。
 
-## 2. 設計原則（固定 premise の crate 落とし込み）
+## 2. 設計原則（crate 固有の判断）
 
 1. **crate ≠ Subsystem ≠ semantic owner。** 複数 Subsystem が一つの crate に載っても ownership を統合しない。一つの Subsystem が複数 crate へ分かれても owner を分裂させない。各 crate の責務表（第3節）に owner を明示し、table group ごとに owner を注記する（PR §4 と同様）。
-2. **型分離を潰さない。** `CompanionId` / `TaskId` / `TaskRevision` / `PresenceGeneration` / `RestoreGeneration` / `DeletionOperationId` / `DeletionSweepGeneration` 等は各 owner crate が定義する。内部表現が同じでも相互 `From` / 比較を設けない。`Revision(u64)` / `Generation(u64)` の共通内部形は `ene-primitive` の opaque 実装だけを共有し、semantic newtype を集めない。
+2. **semantic newtype は owner crate に残す。** 内部表現が同じでも相互 `From` / 比較を設けない。`ene-primitive` は opaque な RawId / RevisionInner / GenerationInner だけを共有し、semantic newtype を集めない。
 3. **循環回避のための shared crate へ domain 型を集めない。** すべての domain ID を `ene-primitive` や `ene-api` へ移す設計は禁止する。cross-domain 参照は第4節の `RawId` + 用途別 premise による inversion で解決し、crate 依存を一方向に保つ。
-4. **storage crate を semantic owner にしない。** `ene-store` は row mapping / SQL / migration / fs 配置 / orphan cleanup だけを持ち、revision bump 可否・採否・達成・許可・確定度の意味判断を持たない。repository trait は各 domain crate が定義し、`ene-store` が実装する方向に依存させる（第6節）。
-5. **serialization domain を統合しない。** SD-Task / SD-Attempt / SD-Presence / SD-Cap / SD-CharApply / SD-Undelivered / SD-Deletion / SD-Restore / SD-RuleConsent / SD-CompanionLife（CCT §4）を一つの Runtime lock / global coordinator / universal actor へまとめない。`ene-store` の短 transaction は各 SD の不可分性を隠蔽するだけで、意味変更権を統合しない。
-6. **caller ≠ authority を crate 依存で守る。** 呼べたことを確定にしない。`Ok` 側 domain outcome と `Err` 側 technical error を潰さない（IB §11）。`SecretValue` 型を public に返さない。`rusqlite::Transaction` を business layer へ露出させない。
+4. **`ene-store` を semantic owner にしない。** row mapping / SQL / migration / fs 配置 / orphan cleanup だけを持ち、revision bump 可否・採否・達成・許可・確定度の意味判断を持たない。repository trait は各 domain crate が定義し、`ene-store` が実装する方向に依存させる（第6節）。
+5. **serialization domain を一つの Runtime lock / global coordinator / universal actor へまとめない。** `ene-store` の短 transaction は各 SD の不可分性を隠蔽するだけで、意味変更権を統合しない。
+6. **crate の public API で確定を偽装しない。** `SecretValue` 型を public に返さない。`rusqlite::Transaction` を business layer へ露出させない。
 7. **中央 orchestrator を作らない。** `ene-host-service` 的な万能 crate、`common` / `shared` / `utils` / `core` / `services` / `managers` / `models` 的な dumping ground、crate per entity / per table / per use case、内部 domain 用 plugin framework、service locator、全面 dynamic dispatch を導入しない。orchestration は caller 側の用途別 module（対話は Companion、作業は Task、全域 fan-out は Host composition + Preservation trait）に分散させる（第5節）。
 8. **巨大 `ene-core` を composition root へ痩せさせる。** 旧 `apps/ene-core` の構造を維持すること自体を要件にしない。意味判断は各 owner crate、永続化は `ene-store`、外部 hosting は `ene-plugin-host`、wire DTO は `ene-api` へ置き、`ene-core` は wiring / lifecycle / storage init / route 配線だけに留める。
 9. **旧実装は実装契約ではない。** `.old/` や旧 crate / module の名前・配置・actor / store / shutdown pattern は、設計判断の参考にはできるが、新規実装で保持・移植・re-export・互換 shim 化する理由にはしない。目標責務を直接実装し、旧構造との互換性のために依存方向・ownership・public boundary を歪めない。

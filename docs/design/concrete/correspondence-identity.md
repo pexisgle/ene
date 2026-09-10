@@ -39,16 +39,14 @@
 
 本書の state 表現は、既存 owner の意味を**保持・照合するための実装上の表現**であり、意味そのものを移さない。以下をすべて維持する。
 
-| 禁止 | 本書での守り方 |
-|---|---|
-| ID や correlation record 自体を semantic ownerにしない | ID は区別子、correlation は対応の記録に留める。内容の採否・達成・有効性の判断は各 owner が行う（第6節の述語は「受理可否の条件」であって判断の代替ではない）。 |
-| provenance record を新 canonical knowledge にしない | 由来は参照・説明のための対応であり、現在知識の正本にしない。現在値は Memory / Task / Rule 等の owner が持つ。 |
-| central context object を全 Subsystem の正本にしない | Context は用途限定の派生表現のまま。共通の `Context` object・store・lifecycle を新設しない。 |
-| generic workflow state machine へ全 lifecycle を潰さない | Task / 試行 / 帰属 / 消去区間 / 復元は別 lifecycle のまま。共通 `Status` enum・遷移表を設けない。 |
-| tracking record を Permission authority にしない | 判断記録・委任時の copy・cache された判定は生きた許可の正本にしない。現在の許可は権限・制約が domain 事実と照合して確定する。 |
-| Action attempt record を Task success の authority にしない | 試行の把握された作用は実行・拡張、Task 目的の達成は作業。試行 record の存在・成功応答を受領したことと Task 達成を同一視しない。 |
-| Client session identifier を presence authority にしない | presence の authority は Host 管理の個体別帰属記録のみ。Client 側の session / token / 接続主張は照合材料である。 |
-| deletion tracking record を domain state の owner にしない | 消去の進捗・hold・再保存防止条件は調整のための記録であり、domain state の意味変更権ではない。意味変更は各 owner が行う。 |
+- ID は区別子、correlation は対応の記録に留める。内容の採否・達成・有効性の判断は各 owner が行う（第6節の述語は「受理可否の条件」であって判断の代替ではない）。
+- 由来は参照・説明のための対応であり、現在知識の正本にしない。現在値は Memory / Task / Rule 等の owner が持つ。
+- Context は用途限定の派生表現のまま。共通の `Context` object・store・lifecycle を新設しない。
+- Task / 試行 / 帰属 / 消去区間 / 復元は別 lifecycle のまま。共通 `Status` enum・遷移表を設けない。
+- 判断記録・委任時の copy・cache された判定は生きた許可の正本にしない。現在の許可は権限・制約が domain 事実と照合して確定する。
+- 試行の把握された作用は実行・拡張、Task 目的の達成は作業。試行 record の存在・成功応答を受領したことと Task 達成を同一視しない。
+- presence の authority は Host 管理の個体別帰属記録のみ。Client 側の session / token / 接続主張は照合材料である。
+- 消去の進捗・hold・再保存防止条件は調整のための記録であり、domain state の意味変更権ではない。意味変更は各 owner が行う。
 
 ### 2.2 過度の共通化をしない
 
@@ -67,68 +65,50 @@
 2. **newtype を既定とする。** 生の `String` / `u64` / `Uuid` を domain 境界を越えて渡さない。field 名で意味を区別するだけでなく型で区別する。
 3. **revision / generation は生の数値として単独で持ち歩かない。** 必ず `(identity, revision)` または `(lifecycle, generation)` の組で扱う。revision だけ見て新旧・有効性を決めない。
 4. **correlation は有向の pair として明示する。** 暗黙の時系列順・到着順・ID の大小を対応の根拠にしない。
-5. **`unsafe` を本設計の表現のために要求しない。** 将来の実装で `unsafe` が必要になれば AGENTS.md に従い `// SAFETY:` を付すが、本書の型自体は safe Rust で表現できる範囲に留める。
-6. **error 型は本書で固定しない。** 将来 library 化する際は `thiserror` を用い、bare `String` / `Box<dyn Error>` を public error にしない（repo 規約の再掲であり新規約束ではない）。
 
 ## 3. 必要な対応関係の体系化
 
-既存 artifact から、実装上保持しなければならない対応を8領域に整理する。各行の owner は SO / Step 12 の確定事項の再掲であり、本書で変更しない。
+既存 artifact から、実装上保持しなければならない対応を8領域に整理する。判定本体は各 owner に残し、本書は組だけを固定する。
 
 ### 3.1 Context の由来・用途・consumer との対応
 
-- 要求の同一性は `(consumer, 用途, 担当 Companion, Task・委任関係, 目的・steering 前提, 元入力・出来事・管理操作, Client 依存なら取得 Client・round・候補, 活動継続関係, 期待する利用先)` の組で成立する。Companion ID や Task ID 単独では同一性にならない（CA §3.1）。
-- 情報単位ごとに `(owner, 対象・source 関係, 位置付け・由来, revision・取得時点・有効期間, 所属・scope・共有関係, 用途・保存・共有・送信の制限, 参照の解決状態・欠落)` を保持または正本から解決できる必要がある（CA §3.2）。
-- 説明文と強制情報を分ける。本文中の文字列だけで強制側が変わる構成は不可（CA §3.3）。
-- 変換・圧縮は依存と制限を引き継ぐ。分離を確認できない混合出力は全入力に依存し得るものとして扱う（CA §4.3）。
+- 要求の同一性は `(consumer, 用途, 担当 Companion, Task・委任関係, 目的・steering 前提, 元入力・出来事・管理操作, Client 依存なら取得 Client・round・候補, 活動継続関係, 期待する利用先)` の組で成立する。Companion ID や Task ID 単独では同一性にならない。
+- 情報単位ごとに `(owner, 対象・source 関係, 位置付け・由来, revision・取得時点・有効期間, 所属・scope・共有関係, 用途・保存・共有・送信の制限, 参照の解決状態・欠落)` を保持または正本から解決できる必要がある。
 
 ### 3.2 Owner 意図 / Permission 判断 / 実対象との対応
 
-- 認可判断の材料は、適用範囲で `(実行主体＋委任 chain、Task＋Workspace 範囲、目的、実対象＋操作種別＋送信先・作用想定、利用 data＋目的、費用・risk、依拠した Owner 意図・Rule)` である（AE §3.1）。
-- LLM / Task Agent / Tool / MCP / shell / Computer Use / Plugin 等の生成 content は Permission を新設・拡大・自己承認できない（AE §3.2）。
-- 判断記録と生きた許可は別の意味である。保存された Allow・委任時 copy・事前判定・復元 Rule・文脈内許可文・cache 判定を、取消・scope 変更・停止・帰属切替・cap・steering・消去・復元保留の再照合なしに現在許可として再利用しない（AE §3.3、SO §4.19）。
+- 認可判断の材料は、適用範囲で `(実行主体＋委任 chain、Task＋Workspace 範囲、目的、実対象＋操作種別＋送信先・作用想定、利用 data＋目的、費用・risk、依拠した Owner 意図・Rule)` である。
 
 ### 3.3 Task / delegation / Task Agent との対応
 
-- Task は `(目的, 担当, 採用した追加指示, 進捗, 待機, 完了・失敗・Cancel, 結果, 未完了・次の判断)` を追う。Task context は `(採用した目的・指示・材料・途中理解, 由来・取得時点・目的・有効性)` である（SO §4.10）。
-- 委任は `(誰から・どの範囲を・どの一時 Agent へ, 進捗・待機・停止・受領)` の対応である。Agent は永続 state の owner にならず、委任元の Capability・Permission・費用・Task・Workspace 境界を越えない（SO §4.11、AE §4.1）。
-- 追加指示の発話 record（History）と Task への反映内容と未反映・待機は区別する。steering 前後で目的が変われば旧目的の結果を新目的の達成に自動採用しない（AE §7.2）。
+- Task は `(目的, 担当, 採用した追加指示, 進捗, 待機, 完了・失敗・Cancel, 結果, 未完了・次の判断)` を追う。Task context は `(採用した目的・指示・材料・途中理解, 由来・取得時点・目的・有効性)` である。
+- 委任は `(誰から・どの範囲を・どの一時 Agent へ, 進捗・待機・停止・受領)` の対応である。
+- 追加指示の発話 record（History）と Task への反映内容と未反映・待機は区別する。
 
 ### 3.4 Action の判断 / 試行 / 実作用 / outcome との対応
 
-- 受付・開始・把握された作用・確定度・停止要求・停止結果を分ける。内部記録の保存成功≠外部作用の成功、外部作用の成功≠内部保存の成功（AE §6.1）。
-- 確定度は少なくとも `確認済み成功 / 確認済み失敗 / 不明` を区別する。Cancel 受付済み≠停止済み、通信成功≠作用成功、UI 表示≠許可・完了（AE §6.2）。
-- 重複し得る再送・retry は論理的な試行として不明・重複管理の対象にする。「同じ試行の継続」として除外する方式は採らない（AE §6.2）。
-- 遅延到着は元の Action / Task へ記録し、現在の Task の達成・次の Action・提示とは別の受入として扱う（AE §7.3）。
+- `(受付, 開始, 把握された作用, 確定度, 停止要求, 停止結果)` を分ける。内部記録の保存成功≠外部作用の成功、外部作用の成功≠内部保存の成功。
+- 確定度は少なくとも `確認済み成功 / 確認済み失敗 / 不明` を区別する。Cancel 受付済み≠停止済み、通信成功≠作用成功、UI 表示≠許可・完了。
+- 重複し得る再送・retry は論理的な試行として不明・重複管理の対象にする。「同じ試行の継続」として除外する方式は採らない。
+- 遅延到着は元の Action / Task へ記録し、現在の Task の達成・次の Action・提示とは別の受入として扱う。
 
 ### 3.5 Companion / Client / presence / round との対応
 
-- authoritative presence は Host 管理の個体別帰属記録のみである。Client 表示・過去 active・hint・入力中 copy・再接続旧 state・復旧先・Provider 残存は根拠にならない（CPT、CCT、CNSO §4.15）。
-- `presence（どこ） / Host 継続（存続） / 接続（到達） / 許可（可否）` を分離する。pairing 済み・接続済み・active・Action 許可済みは四つの異なる意味である（SO §4.15）。
-- 切替区間は `旧 presence / 移行中 / 新 presence / active なし / 停止中 / 復旧待ち` を区別し、boolean や単一 active field へ潰さない。移行中は新旧いずれでも Client 依存の新規開始をしない（CPT、CNSO CN-4）。
-- round は `(Companion, Client, round, 候補・試行)` の対応であり、移動・切断・再起動で旧 round の入力・未提示出力を新 round へ付け替えない（CPT、CNSO IO-1/IO-6）。
+- 切替区間は `旧 presence / 移行中 / 新 presence / active なし / 停止中 / 復旧待ち` を区別し、boolean や単一 active field へ潰さない。
+- round は `(Companion, Client, round, 候補・試行)` の対応であり、移動・切断・再起動で旧 round の入力・未提示出力を新 round へ付け替えない。
 
 ### 3.6 Targeted Deletion の対象 / 由来 / 依存 / 区間との対応
 
-- 対象記述は二層である。機械的に必須の層（LLM 非依存の文字列検索・削除・残存検証）と、意味的な補助の層（言換え特定、完全性を保証しない）を分ける（DP、PE-1）。
-- 全 holder（情報 owner だけでなく処理中 context・派生物・cache・Client / 拡張一時 copy・返却可能結果の保持者を含む）が `(source 関係, 処理中利用, 局所扱い・検証, 再保存防止, 未確認・未完了)` を保全・消去へ説明する（CA §8.2、PE-1）。
-- 区間内に再到着・再生成した対象情報も同じ消去対象である。既知 source の追跡だけでは足りず、各受入箇所が飛行中の消去条件を適用する（CA §8.2、PE-1）。
-- source を消した後に依存関係も消失し遅延結果を識別できなくなる実装は不可。本文を保持せず対応を維持できる必要がある（CA §8.2）。
-- 局所完了≠全域完了。未確認・到達不能を成功と読まず、局所返却だけで hold を解除しない（PE-1、PE-7）。
+- 全 holder（情報 owner だけでなく処理中 context・派生物・cache・Client / 拡張一時 copy・返却可能結果の保持者を含む）が `(source 関係, 処理中利用, 局所扱い・検証, 再保存防止, 未確認・未完了)` を保全・消去へ説明する。
+- source を消した後に依存関係も消失し遅延結果を識別できなくなる実装は不可。本文を保持せず対応を維持できる必要がある。
 
 ### 3.7 Backup / Restore での復元 state と現在環境との対応
 
-- Restore は merge ではなく、開始前 Credential secret を除く対象内部 data の対応 backup 時点への全置換である。成立前は復元前正常が正本、成立後は復元内容が正本であり、第三の混合状態を作らない（BR）。
-- 復元された assignment / consent だけで自動利用を開始しない。現 Credential・現制約・復元後保留条件を満たす必要がある（BR、SO §4.12 原則12）。
-- 旧 live 活動の結果を復元後の正本へ混入しない。由来別に用途受入する（BR §5）。
-- stale な Permission / Provider / Client / 作用結果 / 外部参照を現在化しない。作用不明は不明のまま維持し、replay しない（BR §4）。
-- Audit は backup 時点置換＋成立後の Restore 事実追記であり、順序の発生順化・許可正本化・再生・自動実行入力化をしない（BR、PE-6）。
+- Restore 対応は `(復元操作, backup 時点, RestoreGeneration, 復元後保留)` である。成立前は復元前正常が正本、成立後は復元内容が正本であり、第三の混合状態の identity を作らない。
 
 ### 3.8 delayed / stale result の元活動への帰属対応
 
-- 結果は、少なくとも実際に入力した範囲に依存し得るものとして扱う。逐語の不在だけで消去・非共有・保存禁止の対応を外さない（CA §7.3）。
-- 受入 owner は用途別である。会話・送信→個体調整、Task 判断→作業、Learning / Summary→認識・学習、Permission / Rule 解釈→権限・制約、次 Action 候補→起案者＋実行・拡張＋権限・制約、作用・利用量事実→元の owner（CA §7.3）。
-- Cancel・失効・steering・移動・削除・復元後の到着物は、元の Action / Task へ記録し、旧承認の解除・旧結果の新目的採用・後続の自動開始をしない（AE §7.3、CA §7.3）。
-- 参照時に正しかったことと今の利用に適することを分ける。固定 TTL だけでは scope 失効・Stop・消去を処理できない（CA §7.2）。
+- 受入 owner は用途別である。会話・送信→個体調整、Task 判断→作業、Learning / Summary→認識・学習、Permission / Rule 解釈→権限・制約、次 Action 候補→起案者＋実行・拡張＋権限・制約、作用・利用量事実→元の owner。
 
 ## 4. 共通に持つ識別・correlation concept
 
@@ -588,15 +568,6 @@ Host 正本として restart 後も必要なもの。いずれも意味の owner
 | Learning・Summary・根拠 | `SummaryGroundsRef`、訂正と状況変化の別、過去の時間的有効性、scope・制約。旧 Summary を訂正後 Memory の代わりにしない。 |
 | 消去・保持・backup・復元 | `DeletionOperationRef`・`ErasureConditionRef`（目的・範囲・影響・除外・要確認、参加者・未完了・検証・hold）、backup 時点・参照・除外・保護・結果、Restore 世代・保留・一括有効化対応、Audit 順序・保持、Debug 対象・内容・期限。完了根拠に本文・秘密を残さない。 |
 | 利用量・費用 | 用途・送信先の対応、報告・推定・不明・処理中の別、cap・資源の現在条件。未報告・処理中・不明のゼロ化をしない。 |
-
-### 8.3 禁止の再掲（interface 設計への制約）
-
-- 本文中の文字列・モデル出力・引用・画面表示・案内・prompt 要約を承認・同意・scope・許可の evidence にしない。
-- Voice に話者認証済みの意味を足さない。
-- Provider session・round・表示 state・timeline・進捗要約・Agent 自己申告・notification memo・UI 表示を History・Task・進捗・作用の正本にしない。
-- Client を domain state の唯一保持者にしない。Client に History・Summary・Learning・Relationship・Companion State・登録 Credential の永続 cache を持たせない。
-- 未確認・到達不能・未検証を成功・承認・新 Experience・現在値にしない。
-- 旧設定 copy・外部 code・Provider 残存・古派生・cache・session を同意・現在性の根拠にしない。
 
 ## 9. 検証
 
