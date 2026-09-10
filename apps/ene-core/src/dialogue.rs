@@ -1239,6 +1239,7 @@ mod tests {
     };
     use ene_credential::{CredentialRef, MemoryCredentialStore};
     use ene_inference::fake::{FakeFailure, FakeProviderTransport};
+    use ene_presentation::RoundId;
     use ene_primitive::RawId;
 
     fn sender() -> WireSender {
@@ -2335,6 +2336,37 @@ mod tests {
             "concurrent joins of one round must share its one wire"
         );
         assert_eq!(left_wire, open_wire, "the open round keeps its projection");
+        remove_data_dir(&dir);
+        Ok(())
+    }
+
+    /// The get-or-create itself is atomic: truly parallel requests for one
+    /// round all receive the same wire, never two mints.
+    #[tokio::test]
+    async fn concurrent_projection_requests_mint_one_wire() -> Result<(), String> {
+        let Some((handle, dir)) = setup_handle("dlg-mint-race").await else {
+            return Err(String::from("handle open must succeed"));
+        };
+        let round = RoundId::from_raw(RawId::new());
+        let wires: Vec<RoundWireId> = std::thread::scope(|scope| {
+            let joins: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| handle.round_wire_or_mint(&round)))
+                .collect();
+            joins
+                .into_iter()
+                .map(|join| join.join().map_err(|_| String::from("mint task panicked")))
+                .collect::<Vec<Result<RoundWireId, String>>>()
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, String>>()?;
+        let mut distinct: Vec<String> = wires.iter().map(|wire| wire.0.clone()).collect();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "one round must mint exactly one wire, got {distinct:?}"
+        );
         remove_data_dir(&dir);
         Ok(())
     }
