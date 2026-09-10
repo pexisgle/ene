@@ -115,9 +115,9 @@ pub trait LearningRepository: Send + Sync {
         memory: MemoryId,
     ) -> Result<Option<Memory>, LearningTechnicalError>;
 
-    /// Lists current memories for one Companion, newest first, capped at
-    /// `limit`. Suppressed memories are included: suppression is a recall
-    /// decision, not a visibility restriction.
+    /// Lists current memories for one Companion, most recently formed first,
+    /// capped at `limit`. Suppressed memories are included: suppression is a
+    /// recall decision, not a visibility restriction.
     async fn list_current_memories(
         &self,
         companion: RawId,
