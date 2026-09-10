@@ -36,7 +36,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// Holds the base URL, the built [`reqwest::Client`], and the bearer store.
 /// No field ever holds key material or a fixed credential: the bearer is
-/// resolved per request from the [`CredentialRef`] the authorized dispatch
+/// resolved per request from the [`ene_credential::CredentialRef`] the authorized dispatch
 /// carries, and borrowed transiently inside [`CredentialStore::with_bearer`].
 ///
 /// The store is a generic `S: CredentialStore` rather than a trait object
