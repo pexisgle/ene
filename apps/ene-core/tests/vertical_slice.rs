@@ -18,7 +18,7 @@
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::panic,
-    reason = "integration tests may unwrap values whose failure would be a test bug"
+    reason = "integration-test helpers outside #[test] functions need the fixture allowances clippy.toml grants only to test functions"
 )]
 
 use std::sync::Arc;
@@ -346,14 +346,9 @@ async fn pending_empty(dir: &std::path::Path) -> bool {
 #[tokio::test]
 async fn production_path_setup_to_restart() {
     let temp = tempfile::TempDir::new();
-    assert!(temp.is_ok(), "tempdir must create");
-    let Ok(temp) = temp else {
-        return;
-    };
+    let temp = temp.unwrap();
     let dir = temp.path().to_path_buf();
-    let Some(handle) = open_host(&dir).await else {
-        return;
-    };
+    let handle = open_host(&dir).await.unwrap();
     let server = tokio::spawn(conn::run(
         dir.clone(),
         Arc::clone(&handle),
@@ -366,24 +361,17 @@ async fn production_path_setup_to_restart() {
         matches!(pending, Err(CliError::ServerOutcome(_))),
         "first pairing must pend"
     );
-    let Some(approver) = open_host(&dir).await else {
-        return;
-    };
+    let approver = open_host(&dir).await.unwrap();
     let provisioned = approve_and_provision(&dir, &approver).await;
     assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
 
     let connected = Client::connect(&dir, DESCRIPTOR, "test").await;
     let connected_ok = connected.is_ok();
     assert!(connected_ok, "second connect must succeed");
-    let Ok(mut client) = connected else {
-        return;
-    };
+    let mut client = connected.unwrap();
 
     let sections = view_sections(&mut client).await;
-    assert!(sections.is_ok(), "show must answer");
-    let Ok(sections) = sections else {
-        return;
-    };
+    let sections = sections.unwrap();
     for expected in ["provider", "model", "consent", "credential"] {
         assert!(
             sections.iter().any(|kind| kind == expected),
@@ -394,10 +382,7 @@ async fn production_path_setup_to_restart() {
     assert!(setup.is_ok(), "setup must complete: {setup:?}");
 
     let sent = send_round(&mut client, "hello companion").await;
-    assert!(sent.is_ok(), "round must stream: {sent:?}");
-    let Ok((round_wire, stream_id, text_out)) = sent else {
-        return;
-    };
+    let (round_wire, stream_id, text_out) = sent.unwrap();
     assert!(
         text_out == FAKE_TEXT,
         "stream must carry provider text, got {text_out:?}"
@@ -425,10 +410,7 @@ async fn production_path_setup_to_restart() {
     );
 
     let counted = history_count(&mut client).await;
-    assert!(counted.is_ok(), "history must answer");
-    let Ok((before, owner_seen, companion_seen)) = counted else {
-        return;
-    };
+    let (before, owner_seen, companion_seen) = counted.unwrap();
     assert!(owner_seen && companion_seen, "history must hold both sides");
     assert!(before >= 2, "history must hold the round, got {before}");
 
@@ -437,9 +419,7 @@ async fn production_path_setup_to_restart() {
     tokio::task::yield_now().await;
     drop(std::fs::remove_file(dir.join("ene.sock")));
 
-    let Some(handle) = open_host(&dir).await else {
-        return;
-    };
+    let handle = open_host(&dir).await.unwrap();
     let handle = Arc::new(handle);
     let server = tokio::spawn(conn::run(
         dir.clone(),
@@ -457,14 +437,9 @@ async fn production_path_setup_to_restart() {
         reconnected_ok,
         "reconnect must succeed on durable auth material"
     );
-    let Ok(mut client) = reconnected else {
-        return;
-    };
+    let mut client = reconnected.unwrap();
     let counted = history_count(&mut client).await;
-    assert!(counted.is_ok(), "history must answer after restart");
-    let Ok((after, _, _)) = counted else {
-        return;
-    };
+    let (after, _, _) = counted.unwrap();
     assert!(
         after == before,
         "restart must preserve history ({before} -> {after})"
@@ -582,10 +557,7 @@ async fn run_cli(
 #[tokio::test]
 async fn binaries_drive_pairing_setup_and_views() {
     let temp = tempfile::TempDir::new();
-    assert!(temp.is_ok(), "tempdir must create");
-    let Ok(temp) = temp else {
-        return;
-    };
+    let temp = temp.unwrap();
     let dir = temp.path().to_path_buf();
     let binaries = (workspace_binary("ene-ctl"), workspace_binary("ene-core"));
     assert!(
@@ -617,10 +589,7 @@ async fn binaries_drive_pairing_setup_and_views() {
     server.stdout(std::process::Stdio::null());
     server.stderr(std::process::Stdio::null());
     let server = server.spawn();
-    assert!(server.is_ok(), "serve must spawn");
-    let Ok(server) = server else {
-        return;
-    };
+    let server = server.unwrap();
     let _server = KillOnDrop(Some(server));
     let bound = wait_for_socket(&dir).await;
     let listing: Vec<String> = std::fs::read_dir(&dir)
@@ -657,10 +626,7 @@ async fn binaries_drive_pairing_setup_and_views() {
     list_pending.stdout(std::process::Stdio::piped());
     list_pending.stderr(std::process::Stdio::null());
     let listed = list_pending.output();
-    assert!(listed.is_ok(), "approve-device list must spawn");
-    let Ok(listed) = listed else {
-        return;
-    };
+    let listed = listed.unwrap();
     assert!(listed.status.success(), "listing pendings must exit 0");
     let pending_out = String::from_utf8_lossy(&listed.stdout).into_owned();
     let descriptor = pending_out
@@ -671,9 +637,7 @@ async fn binaries_drive_pairing_setup_and_views() {
         descriptor.is_some(),
         "one pending device must list, got {pending_out:?}"
     );
-    let Some(descriptor) = descriptor else {
-        return;
-    };
+    let descriptor = descriptor.unwrap();
     let mut approve = std::process::Command::new(&core);
     approve.args([
         "approve-device",
@@ -685,10 +649,7 @@ async fn binaries_drive_pairing_setup_and_views() {
     approve.stdout(std::process::Stdio::piped());
     approve.stderr(std::process::Stdio::piped());
     let approved = approve.output();
-    assert!(approved.is_ok(), "approve must spawn");
-    let Ok(approved) = approved else {
-        return;
-    };
+    let approved = approved.unwrap();
     assert!(
         approved.status.success(),
         "approve-device must exit 0: {}",
@@ -703,9 +664,7 @@ async fn binaries_drive_pairing_setup_and_views() {
         secret.is_some(),
         "approve must print the one-time secret, got {shown:?}"
     );
-    let Some(secret) = secret else {
-        return;
-    };
+    let secret = secret.unwrap();
     assert!(!secret.trim().is_empty(), "secret must be non-blank");
 
     let status = run_cli(
@@ -731,9 +690,7 @@ async fn binaries_drive_pairing_setup_and_views() {
         matches!(show, Some((0, _, _))),
         "setup --show must exit 0, got {show:?}"
     );
-    let Some((_, out, _)) = show else {
-        return;
-    };
+    let (_, out, _) = show.unwrap();
     for section in ["provider:", "model:", "consent:", "credential:"] {
         assert!(out.contains(section), "show must render {section}");
     }
@@ -771,10 +728,7 @@ async fn binaries_drive_pairing_setup_and_views() {
     approve_cred.stdout(std::process::Stdio::null());
     approve_cred.stderr(std::process::Stdio::piped());
     let credential_approved = approve_cred.output();
-    assert!(credential_approved.is_ok(), "credential approve must spawn");
-    let Ok(credential_approved) = credential_approved else {
-        return;
-    };
+    let credential_approved = credential_approved.unwrap();
     assert!(
         credential_approved.status.success(),
         "approve-credential must exit 0: {}",
@@ -798,9 +752,7 @@ async fn binaries_drive_pairing_setup_and_views() {
     .await;
     let setup_ok = matches!(setup, Some((0, _, _)));
     assert!(setup_ok, "approved setup must exit 0, got {setup:?}");
-    let Some((_, out, _)) = setup else {
-        return;
-    };
+    let (_, out, _) = setup.unwrap();
     assert!(
         out.contains("setup complete:"),
         "setup must report completion"
@@ -822,14 +774,9 @@ async fn binaries_drive_pairing_setup_and_views() {
 #[tokio::test]
 async fn tampered_secret_cannot_authenticate() {
     let temp = tempfile::TempDir::new();
-    assert!(temp.is_ok(), "tempdir must create");
-    let Ok(temp) = temp else {
-        return;
-    };
+    let temp = temp.unwrap();
     let dir = temp.path().to_path_buf();
-    let Some(handle) = open_host(&dir).await else {
-        return;
-    };
+    let handle = open_host(&dir).await.unwrap();
     let server = tokio::spawn(conn::run(
         dir.clone(),
         Arc::clone(&handle),
@@ -842,17 +789,10 @@ async fn tampered_secret_cannot_authenticate() {
         matches!(pending, Err(CliError::ServerOutcome(_))),
         "first pairing must pend"
     );
-    let Some(approver) = open_host(&dir).await else {
-        return;
-    };
+    let approver = open_host(&dir).await.unwrap();
     let approval = approver.approve_device(DESCRIPTOR).await;
-    assert!(approval.is_ok(), "approve must succeed");
-    let Ok(Some((record, _secret))) = approval else {
-        return;
-    };
-    let Ok(wire) = record.wire.parse().map(DeviceWireId) else {
-        return;
-    };
+    let (record, _secret) = approval.unwrap().unwrap();
+    let wire = record.wire.parse().map(DeviceWireId).unwrap();
     let stored = store_device(
         &dir,
         &StoredDevice::new(wire, String::from("wrong-secret-not-from-approve")),
@@ -869,14 +809,9 @@ async fn tampered_secret_cannot_authenticate() {
 #[tokio::test]
 async fn rotation_requires_reprovisioning() {
     let temp = tempfile::TempDir::new();
-    assert!(temp.is_ok(), "tempdir must create");
-    let Ok(temp) = temp else {
-        return;
-    };
+    let temp = temp.unwrap();
     let dir = temp.path().to_path_buf();
-    let Some(handle) = open_host(&dir).await else {
-        return;
-    };
+    let handle = open_host(&dir).await.unwrap();
     let server = tokio::spawn(conn::run(
         dir.clone(),
         Arc::clone(&handle),
@@ -889,9 +824,7 @@ async fn rotation_requires_reprovisioning() {
         matches!(pending, Err(CliError::ServerOutcome(_))),
         "first pairing must pend"
     );
-    let Some(approver) = open_host(&dir).await else {
-        return;
-    };
+    let approver = open_host(&dir).await.unwrap();
     let provisioned = approve_and_provision(&dir, &approver).await;
     assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
     let connected = Client::connect(&dir, DESCRIPTOR, "test").await;
@@ -899,10 +832,10 @@ async fn rotation_requires_reprovisioning() {
     drop(connected);
 
     let reapproved = approver.approve_device(DESCRIPTOR).await;
-    assert!(reapproved.is_ok(), "re-approval must succeed");
-    let Ok(Some(_)) = reapproved else {
-        return;
-    };
+    assert!(
+        reapproved.unwrap().is_some(),
+        "re-approval returns the existing record and a fresh secret"
+    );
     let stale_file = Client::connect(&dir, DESCRIPTOR, "test").await;
     assert!(
         matches!(stale_file, Err(CliError::ServerOutcome(_))),
@@ -935,9 +868,7 @@ async fn spawn_fake_responses(
     let flag = std::sync::Arc::clone(&saw_no_store);
     let handle = tokio::spawn(async move {
         loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
+            let (mut stream, _) = listener.accept().await.unwrap();
             let flag = std::sync::Arc::clone(&flag);
             tokio::spawn(async move {
                 let mut head = Vec::new();
@@ -946,9 +877,7 @@ async fn spawn_fake_responses(
                     if head.len() > 16_384 {
                         return;
                     }
-                    let Ok(read) = stream.read(&mut byte).await else {
-                        return;
-                    };
+                    let read = stream.read(&mut byte).await.unwrap();
                     if read == 0 {
                         return;
                     }
@@ -1112,10 +1041,7 @@ async fn pair_via_binaries(
 #[tokio::test]
 async fn binaries_drive_send_stream_history_and_restart() {
     let temp = tempfile::TempDir::new();
-    assert!(temp.is_ok(), "tempdir must create");
-    let Ok(temp) = temp else {
-        return;
-    };
+    let temp = temp.unwrap();
     let dir = temp.path().to_path_buf();
     let binaries = (workspace_binary("ene-ctl"), workspace_binary("ene-core"));
     assert!(
@@ -1125,12 +1051,8 @@ async fn binaries_drive_send_stream_history_and_restart() {
     let (Some(ctl), Some(core)) = binaries else {
         return;
     };
-    let Some(config) = write_test_config(&dir) else {
-        return;
-    };
-    let Some((fake_addr, fake, saw_no_store)) = spawn_fake_responses(PROD_FAKE_TEXT).await else {
-        return;
-    };
+    let config = write_test_config(&dir).unwrap();
+    let (fake_addr, fake, saw_no_store) = spawn_fake_responses(PROD_FAKE_TEXT).await.unwrap();
     let base_url = format!("http://{fake_addr}");
     let server_env = [
         ("ENE_OPENAI_API_KEY", "sk-test-only"),

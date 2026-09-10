@@ -373,7 +373,7 @@ impl HostHandle {
         stale_frame_with(frame, live, current_round, generation)
     }
 
-    /// Attaches presence for the paired device when none is active..
+    /// Attaches presence for the paired device when none is active.
     ///
     /// Best-effort by design and called only from the submit path: the caller
     /// pins the `NoActive` view it just read (`expected_generation` must equal

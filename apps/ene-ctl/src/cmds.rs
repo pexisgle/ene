@@ -1190,9 +1190,7 @@ mod tests {
             input.companion.0 == "companion-1",
             "input echoes the learned companion: {input:?}"
         );
-        let Some(round) = input.round.as_ref() else {
-            return;
-        };
+        let round = input.round.as_ref().unwrap();
         assert!(
             round.0 == "round-1",
             "input keeps the premise round: {input:?}"

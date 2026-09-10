@@ -25,16 +25,6 @@
 //! server-side domain outcomes (stale rounds, held transitions, stale base
 //! views, pending confirmations, and similar Ok-side declines).
 
-#![cfg_attr(
-    test,
-    allow(
-        clippy::expect_used,
-        clippy::unwrap_used,
-        clippy::panic,
-        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
-    )
-)]
-
 use ene_ctl::errors::{CliError, USAGE};
 use ene_ctl::{client, cmds};
 
@@ -522,12 +512,8 @@ mod tests {
 
     /// Asserts a [`parse_cli`] usage error ending with the usage text.
     fn assert_cli_usage(result: Result<super::Cli, CliError>, what: &str) {
-        assert!(
-            matches!(result, Err(CliError::Usage(_))),
-            "{what} must be a usage error"
-        );
         let Err(CliError::Usage(message)) = result else {
-            return;
+            panic!("{what} must be a usage error");
         };
         assert!(
             message.ends_with(USAGE),
@@ -540,9 +526,7 @@ mod tests {
     fn config_before_command_selects_both() {
         let parsed = parse_cli(&args(&["--config", "/tmp/ene.json", "status"]));
         assert!(parsed.is_ok(), "--config plus status must succeed");
-        let Some(cli) = parsed.ok() else {
-            return;
-        };
+        let cli = parsed.ok().unwrap();
         assert!(
             cli.config == Some(PathBuf::from("/tmp/ene.json")),
             "--config must select the given file"
@@ -584,9 +568,7 @@ mod tests {
     fn full_command_lines_parse() {
         let parsed = parse_cli(&args(&["send", "hello"]));
         assert!(parsed.is_ok(), "send hello must succeed");
-        let Some(cli) = parsed.ok() else {
-            return;
-        };
+        let cli = parsed.ok().unwrap();
         assert!(cli.config.is_none(), "no --config must select no file");
     }
 

@@ -413,7 +413,8 @@ impl HostHandle {
     /// Parses the intent `base_view` into a compare-and-save expectation
     /// against the loaded current record, then requires the credential to be
     /// both registered and bearer-present. The saved record keeps the stored
-    /// id when one exists and bumps its revision by one, saturating. A lost
+    /// id when one exists and advances its revision; an exhausted revision
+    /// clarifies instead of reusing the maximum. A lost
     /// compare race (or a view that moved between read and write) answers
     /// `StaleBaseView` with the rebuilt current mark instead of overwriting:
     /// the caller re-reads and retries.

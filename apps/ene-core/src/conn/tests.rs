@@ -338,9 +338,7 @@ async fn live_listener_blocks_a_second_bind() {
     let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
     let socket = socket_path(dir.path());
     let first = bind_singleton(&socket).await;
-    let Ok(live) = first else {
-        return;
-    };
+    let live = first.unwrap();
     let second = bind_singleton(&socket).await;
     assert!(
         second.is_err(),
@@ -354,9 +352,7 @@ async fn stale_socket_file_rebinds_after_close() {
     let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
     let socket = socket_path(dir.path());
     let first = bind_singleton(&socket).await;
-    let Ok(live) = first else {
-        return;
-    };
+    let live = first.unwrap();
     drop(live);
     let rebound = bind_singleton(&socket).await;
     assert!(
@@ -418,16 +414,11 @@ async fn redelivery_keeps_the_connection_serving() {
         timed.ok().flatten()
     }
 
-    let Some((handle, _dir)) = memory_handle_with("dup-serving", |_| {}).await else {
-        return;
-    };
+    let (handle, _dir) = memory_handle_with("dup-serving", |_| {}).await.unwrap();
     let table = Arc::new(ConnectionTable::new());
     let id = table.note_accept();
     let pair = tokio::net::UnixStream::pair();
-    assert!(pair.is_ok(), "socket pair must open");
-    let Ok((mut client, server)) = pair else {
-        return;
-    };
+    let (mut client, server) = pair.unwrap();
     let worker = tokio::spawn(super::serve_connection(
         server,
         id,

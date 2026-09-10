@@ -333,13 +333,9 @@ fn chunk_boundaries_hold_at_200_chars() {
     let over: String = "a".repeat(CHUNK_CHARS + 1);
     let chunks = chunk_text(&over);
     assert_eq!(chunks.len(), 2, "one char over fills two chunks");
-    let Some(first) = chunks.first() else {
-        return;
-    };
+    let first = chunks.first().unwrap();
     assert_eq!(first.chars().count(), CHUNK_CHARS);
-    let Some(second) = chunks.get(1) else {
-        return;
-    };
+    let second = chunks.get(1).unwrap();
     assert_eq!(second, "a");
 }
 
@@ -363,9 +359,7 @@ async fn submit_without_setup_needs_revalidation() {
     use ene_companion::HistoryRepository as _;
     use ene_presence::PresenceRepository as _;
 
-    let Some((handle, _dir)) = memory_handle_with("dlg-nosetup", |_| {}).await else {
-        return;
-    };
+    let (handle, _dir) = memory_handle_with("dlg-nosetup", |_| {}).await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     let denied = handle
@@ -383,9 +377,7 @@ async fn submit_without_setup_needs_revalidation() {
         )
         .await;
     assert_eq!(denied.len(), 1, "denial answers once");
-    let Some(only) = denied.first() else {
-        return;
-    };
+    let only = denied.first().unwrap();
     assert!(
         matches!(
             &only.payload,
@@ -401,17 +393,13 @@ async fn submit_without_setup_needs_revalidation() {
         companion.is_ok(),
         "the companion must resolve, got {companion:?}"
     );
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
     assert!(
         matches!(attribution, Ok(Some(_))),
         "attribution must load, got {attribution:?}"
     );
-    let Ok(Some(current)) = attribution else {
-        return;
-    };
+    let current = attribution.unwrap().unwrap();
     assert_eq!(
         current.state,
         ene_presence::PresenceState::Present,
@@ -439,9 +427,7 @@ async fn attach_without_generation_view_needs_revalidation() {
     use ene_companion::CompanionRepository as _;
     use ene_presence::PresenceRepository as _;
 
-    let Some((handle, _dir)) = setup_handle("dlg-noview").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-noview").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-never-attached");
     let answers = handle
@@ -459,9 +445,7 @@ async fn attach_without_generation_view_needs_revalidation() {
         )
         .await;
     assert_eq!(answers.len(), 1, "a viewless submit answers once");
-    let Some(only) = answers.first() else {
-        return;
-    };
+    let only = answers.first().unwrap();
     assert!(
         matches!(
             &only.payload,
@@ -477,17 +461,13 @@ async fn attach_without_generation_view_needs_revalidation() {
         companion.is_ok(),
         "the companion must resolve, got {companion:?}"
     );
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
     assert!(
         matches!(attribution, Ok(Some(_))),
         "attribution must load, got {attribution:?}"
     );
-    let Ok(Some(current)) = attribution else {
-        return;
-    };
+    let current = attribution.unwrap().unwrap();
     assert_eq!(
         current.state,
         ene_presence::PresenceState::NoActive,
@@ -505,9 +485,7 @@ async fn attach_with_stale_view_reports_current_values() {
     use ene_companion::CompanionRepository as _;
     use ene_presence::PresenceRepository as _;
 
-    let Some((handle, _dir)) = setup_handle("dlg-staleview").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-staleview").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-never-attached");
     let answers = handle
@@ -525,9 +503,7 @@ async fn attach_with_stale_view_reports_current_values() {
         )
         .await;
     assert_eq!(answers.len(), 1, "a stale-view submit answers once");
-    let Some(only) = answers.first() else {
-        return;
-    };
+    let only = answers.first().unwrap();
     assert!(
         matches!(
             &only.payload,
@@ -544,13 +520,9 @@ async fn attach_with_stale_view_reports_current_values() {
         companion.is_ok(),
         "the companion must resolve, got {companion:?}"
     );
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
-    let Ok(Some(current)) = attribution else {
-        return;
-    };
+    let current = attribution.unwrap().unwrap();
     assert_eq!(
         current.state,
         ene_presence::PresenceState::NoActive,
@@ -568,25 +540,19 @@ async fn attach_compare_loser_reports_raced() {
     use ene_companion::CompanionRepository as _;
     use ene_presence::PresenceRepository as _;
 
-    let Some((handle, _dir)) = setup_handle("dlg-race").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-race").await.unwrap();
     let companion = handle.store.ensure_running_companion().await;
     assert!(
         companion.is_ok(),
         "the companion must resolve, got {companion:?}"
     );
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let initial = handle.store.load_attribution(companion.as_raw()).await;
     assert!(
         matches!(initial, Ok(Some(_))),
         "attribution must load, got {initial:?}"
     );
-    let Ok(Some(seen)) = initial else {
-        return;
-    };
+    let seen = initial.unwrap().unwrap();
     assert_eq!(
         seen.state,
         ene_presence::PresenceState::NoActive,
@@ -623,9 +589,7 @@ async fn full_dialogue_round_streams_and_restores() {
     use ene_companion::CompanionRepository as _;
     use ene_presence::PresenceRepository as _;
 
-    let Some((handle, _dir)) = setup_handle("dlg-full").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-full").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -663,18 +627,14 @@ async fn full_dialogue_round_streams_and_restores() {
             "every response echoes the connection"
         );
     }
-    let Some(accepted) = responses.first() else {
-        return;
-    };
+    let accepted = responses.first().unwrap();
     let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) =
         &accepted.payload
     else {
         return;
     };
     let round = round.clone();
-    let Some(opened) = responses.get(1) else {
-        return;
-    };
+    let opened = responses.get(1).unwrap();
     assert!(
         matches!(
             &opened.payload,
@@ -683,9 +643,7 @@ async fn full_dialogue_round_streams_and_restores() {
         "the stream opens at the freshly attached generation, got {:?}",
         opened.payload
     );
-    let Some(stream_frame) = responses.get(2) else {
-        return;
-    };
+    let stream_frame = responses.get(2).unwrap();
     assert!(
         matches!(
             &stream_frame.payload,
@@ -693,9 +651,7 @@ async fn full_dialogue_round_streams_and_restores() {
         ),
         "the single frame is final at seq zero"
     );
-    let Some(closed) = responses.get(3) else {
-        return;
-    };
+    let closed = responses.get(3).unwrap();
     assert!(
         matches!(
             &closed.payload,
@@ -708,13 +664,9 @@ async fn full_dialogue_round_streams_and_restores() {
         companion.is_ok(),
         "the companion must resolve, got {companion:?}"
     );
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
-    let Ok(Some(current)) = attribution else {
-        return;
-    };
+    let current = attribution.unwrap().unwrap();
     assert_eq!(
         current.state,
         ene_presence::PresenceState::Present,
@@ -749,18 +701,14 @@ async fn full_dialogue_round_streams_and_restores() {
         )
         .await;
     assert_eq!(restored.len(), 1, "history answers once");
-    let Some(view) = restored.first() else {
-        return;
-    };
+    let view = restored.first().unwrap();
     let WirePayload::HistoryView(view) = &view.payload else {
         return;
     };
     assert_eq!(view.items.len(), 2, "owner input plus reply restore");
     let replayed = handle.handle_frame(frame, live.clone(), &transport).await;
     assert_eq!(replayed.len(), 1, "a command replay answers once");
-    let Some(replay) = replayed.first() else {
-        return;
-    };
+    let replay = replayed.first().unwrap();
     assert!(
         matches!(
             &replay.payload,
@@ -778,9 +726,7 @@ async fn full_dialogue_round_streams_and_restores() {
             &transport,
         )
         .await;
-    let Some(second) = again.first() else {
-        return;
-    };
+    let second = again.first().unwrap();
     let WirePayload::HistoryView(second) = &second.payload else {
         return;
     };
@@ -1291,9 +1237,7 @@ async fn disconnect_clears_an_attached_device() {
     use ene_companion::CompanionRepository as _;
     use ene_presence::PresenceRepository as _;
 
-    let Some((handle, _dir)) = setup_handle("dlg-disc").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-disc").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -1323,13 +1267,9 @@ async fn disconnect_clears_an_attached_device() {
     );
     handle.note_disconnect("client-a").await;
     let companion = handle.store.ensure_running_companion().await;
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
-    let Ok(Some(current)) = attribution else {
-        return;
-    };
+    let current = attribution.unwrap().unwrap();
     assert_eq!(
         current.state,
         ene_presence::PresenceState::NoActive,
@@ -1346,9 +1286,7 @@ async fn replay_after_disconnect_neither_stales_nor_reattaches() {
     use ene_companion::CompanionRepository as _;
     use ene_presence::PresenceRepository as _;
 
-    let Some((handle, _dir)) = setup_handle("dlg-replay-disc").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-replay-disc").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -1387,9 +1325,7 @@ async fn replay_after_disconnect_neither_stales_nor_reattaches() {
         "the post-disconnect retry must replay, not stale, got {replayed:?}"
     );
     let companion = handle.store.ensure_running_companion().await;
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
     assert!(
         matches!(&attribution, Ok(Some(current)) if current.state == ene_presence::PresenceState::NoActive && current.active_client.is_none()),
@@ -1399,9 +1335,7 @@ async fn replay_after_disconnect_neither_stales_nor_reattaches() {
 
 #[tokio::test]
 async fn provider_failure_interrupts_after_accept() {
-    let Some((handle, _dir)) = setup_handle("dlg-fail").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-fail").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -1445,9 +1379,7 @@ async fn provider_failure_interrupts_after_accept() {
         )
         .await;
     assert_eq!(responses.len(), 3, "accept plus an interrupted stream");
-    let Some(closed) = responses.get(2) else {
-        return;
-    };
+    let closed = responses.get(2).unwrap();
     assert!(
         matches!(
             &closed.payload,
@@ -1459,9 +1391,7 @@ async fn provider_failure_interrupts_after_accept() {
 
 #[tokio::test]
 async fn consent_replay_is_idempotent_and_moves_report_staleness() {
-    let Some((handle, _dir)) = setup_handle("dlg-cas").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-cas").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     let registered = handle
@@ -1493,9 +1423,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
             &transport,
         )
         .await;
-    let Some(stored) = assigned.first() else {
-        return;
-    };
+    let stored = assigned.first().unwrap();
     assert!(
         matches!(
             &stored.payload,
@@ -1515,9 +1443,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
             &transport,
         )
         .await;
-    let Some(same) = replayed.first() else {
-        return;
-    };
+    let same = replayed.first().unwrap();
     assert!(
         matches!(
             &same.payload,
@@ -1539,9 +1465,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
             &transport,
         )
         .await;
-    let Some(same) = converged.first() else {
-        return;
-    };
+    let same = converged.first().unwrap();
     assert!(
         matches!(
             &same.payload,
@@ -1564,9 +1488,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
             &transport,
         )
         .await;
-    let Some(stale) = moved.first() else {
-        return;
-    };
+    let stale = moved.first().unwrap();
     assert!(
         matches!(
             &stale.payload,
@@ -1579,9 +1501,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
 
 #[tokio::test]
 async fn assign_intent_replay_returns_the_stored_success() {
-    let Some((handle, _dir)) = setup_handle("dlg-intentreplay").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-intentreplay").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     let registered = handle
@@ -1629,9 +1549,7 @@ async fn assign_intent_replay_returns_the_stored_success() {
     let replayed = handle
         .handle_frame(assign_x("consent-none"), live.clone(), &transport)
         .await;
-    let Some(same) = replayed.first() else {
-        return;
-    };
+    let same = replayed.first().unwrap();
     assert!(
         matches!(
             &same.payload,
@@ -1686,9 +1604,7 @@ async fn assign_intent_replay_returns_the_stored_success() {
 async fn assign_intent_conflict_clarifies_without_side_effects() {
     use ene_permission::ConsentRepository as _;
 
-    let Some((handle, _dir)) = setup_handle("dlg-intentconflict").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-intentconflict").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -1733,9 +1649,7 @@ async fn assign_intent_conflict_clarifies_without_side_effects() {
             &transport,
         )
         .await;
-    let Some(only) = conflicted.first() else {
-        return;
-    };
+    let only = conflicted.first().unwrap();
     assert!(
         matches!(
             &only.payload,
@@ -1755,9 +1669,7 @@ async fn assign_intent_conflict_clarifies_without_side_effects() {
 async fn malformed_target_reuse_conflicts_without_side_effects() {
     use ene_permission::ConsentRepository as _;
 
-    let Some((handle, _dir)) = setup_handle("dlg-malformed-reuse").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-malformed-reuse").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -1804,9 +1716,7 @@ async fn malformed_target_reuse_conflicts_without_side_effects() {
             &transport,
         )
         .await;
-    let Some(only) = reused.first() else {
-        return;
-    };
+    let only = reused.first().unwrap();
     assert!(
         matches!(
             &only.payload,
@@ -1824,9 +1734,7 @@ async fn malformed_target_reuse_conflicts_without_side_effects() {
 
 #[tokio::test]
 async fn complete_replay_returns_the_stored_snapshot() {
-    let Some((handle, _dir)) = setup_handle("dlg-completeray").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-completeray").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -1869,9 +1777,7 @@ async fn complete_replay_returns_the_stored_snapshot() {
 
 #[tokio::test]
 async fn complete_stale_replay_returns_its_own_mark() {
-    let Some((handle, _dir)) = setup_handle("dlg-completestale").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-completestale").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -1935,9 +1841,7 @@ async fn complete_stale_replay_returns_its_own_mark() {
 
 #[tokio::test]
 async fn assign_stale_replay_returns_its_own_mark() {
-    let Some((handle, _dir)) = setup_handle("dlg-assignstale").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-assignstale").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     let intent_id = CommandWireId(RawId::new().as_uuid());
@@ -1969,9 +1873,7 @@ async fn assign_stale_replay_returns_its_own_mark() {
 async fn submit_without_command_id_is_declined_without_side_effects() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
 
-    let Some((handle, _dir)) = setup_handle("dlg-nocmd").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-nocmd").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -1988,9 +1890,7 @@ async fn submit_without_command_id_is_declined_without_side_effects() {
     );
     frame.envelope.correlation.command_id = None;
     let declined = handle.handle_frame(frame, live.clone(), &transport).await;
-    let Some(only) = declined.first() else {
-        return;
-    };
+    let only = declined.first().unwrap();
     assert!(
         matches!(
             &only.payload,
@@ -2002,9 +1902,7 @@ async fn submit_without_command_id_is_declined_without_side_effects() {
         only.payload
     );
     let companion = handle.store.ensure_running_companion().await;
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let timeline = handle.store.load_timeline(companion, None, 50).await;
     assert!(
         matches!(&timeline, Ok(items) if items.is_empty()),
@@ -2016,9 +1914,7 @@ async fn submit_without_command_id_is_declined_without_side_effects() {
 async fn submit_with_reused_command_and_new_text_is_declined() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
 
-    let Some((handle, _dir)) = setup_handle("dlg-mismatch").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-mismatch").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -2048,9 +1944,7 @@ async fn submit_with_reused_command_and_new_text_is_declined() {
         input.body.text = String::from("different words, same command");
     }
     let declined = handle.handle_frame(forged, live.clone(), &transport).await;
-    let Some(only) = declined.first() else {
-        return;
-    };
+    let only = declined.first().unwrap();
     assert!(
         matches!(
             &only.payload,
@@ -2060,9 +1954,7 @@ async fn submit_with_reused_command_and_new_text_is_declined() {
         only.payload
     );
     let companion = handle.store.ensure_running_companion().await;
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let timeline = handle.store.load_timeline(companion, None, 50).await;
     assert!(
         matches!(&timeline, Ok(items) if items.len() == 2),
@@ -2122,9 +2014,7 @@ impl ene_inference::ProviderTransport for RevokingTransport {
 async fn submit_with_unknown_companion_needs_revalidation() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
 
-    let Some((handle, _dir)) = setup_handle("dlg-unknowncomp").await else {
-        return;
-    };
+    let (handle, _dir) = setup_handle("dlg-unknowncomp").await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     assert!(
@@ -2145,9 +2035,7 @@ async fn submit_with_unknown_companion_needs_revalidation() {
             &transport,
         )
         .await;
-    let Some(only) = declined.first() else {
-        return;
-    };
+    let only = declined.first().unwrap();
     assert!(
         matches!(
             &only.payload,
@@ -2159,9 +2047,7 @@ async fn submit_with_unknown_companion_needs_revalidation() {
         only.payload
     );
     let companion = handle.store.ensure_running_companion().await;
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let timeline = handle.store.load_timeline(companion, None, 50).await;
     assert!(
         matches!(&timeline, Ok(items) if items.is_empty()),
@@ -2173,9 +2059,7 @@ async fn submit_with_unknown_companion_needs_revalidation() {
 async fn consent_move_mid_flight_interrupts_adoption() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
 
-    let Some((handle, dir)) = setup_handle("dlg-midflight").await else {
-        return;
-    };
+    let (handle, dir) = setup_handle("dlg-midflight").await.unwrap();
     let live = live_input("client-a");
     let fake = ok_transport();
     assert!(
@@ -2195,9 +2079,7 @@ async fn consent_move_mid_flight_interrupts_adoption() {
         live.connection_id,
     );
     let responses = handle.handle_frame(frame, live.clone(), &transport).await;
-    let Some(last) = responses.last() else {
-        return;
-    };
+    let last = responses.last().unwrap();
     assert!(
         matches!(
             &last.payload,
@@ -2208,9 +2090,7 @@ async fn consent_move_mid_flight_interrupts_adoption() {
         last.payload
     );
     let companion = handle.store.ensure_running_companion().await;
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let timeline = handle.store.load_timeline(companion, None, 50).await;
     assert!(
         matches!(&timeline, Ok(items) if items.len() == 1),
@@ -2220,9 +2100,7 @@ async fn consent_move_mid_flight_interrupts_adoption() {
 
 #[tokio::test]
 async fn register_holds_until_host_local_approval() {
-    let Some((handle, _dir)) = memory_handle_with("dlg-credgate", |_| {}).await else {
-        return;
-    };
+    let (handle, _dir) = memory_handle_with("dlg-credgate", |_| {}).await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     let pending = handle
@@ -2237,9 +2115,7 @@ async fn register_holds_until_host_local_approval() {
             &transport,
         )
         .await;
-    let Some(first) = pending.first() else {
-        return;
-    };
+    let first = pending.first().unwrap();
     assert!(
         matches!(
             &first.payload,
@@ -2264,9 +2140,7 @@ async fn register_holds_until_host_local_approval() {
             &transport,
         )
         .await;
-    let Some(second) = usable.first() else {
-        return;
-    };
+    let second = usable.first().unwrap();
     assert!(
         matches!(
             &second.payload,
@@ -2279,9 +2153,7 @@ async fn register_holds_until_host_local_approval() {
 
 #[tokio::test]
 async fn setup_edge_cases_clarify_or_hold() {
-    let Some((handle, _dir)) = memory_handle_with("dlg-edge", |_| {}).await else {
-        return;
-    };
+    let (handle, _dir) = memory_handle_with("dlg-edge", |_| {}).await.unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     let malformed = handle
@@ -2296,9 +2168,7 @@ async fn setup_edge_cases_clarify_or_hold() {
             &transport,
         )
         .await;
-    let Some(first) = malformed.first() else {
-        return;
-    };
+    let first = malformed.first().unwrap();
     assert!(
         matches!(
             &first.payload,
@@ -2318,9 +2188,7 @@ async fn setup_edge_cases_clarify_or_hold() {
             &transport,
         )
         .await;
-    let Some(second) = stale_base.first() else {
-        return;
-    };
+    let second = stale_base.first().unwrap();
     assert!(
         matches!(
             &second.payload,
@@ -2340,9 +2208,7 @@ async fn setup_edge_cases_clarify_or_hold() {
             &transport,
         )
         .await;
-    let Some(third) = foreign.first() else {
-        return;
-    };
+    let third = foreign.first().unwrap();
     assert!(
         matches!(
             &third.payload,
@@ -2362,9 +2228,7 @@ async fn setup_edge_cases_clarify_or_hold() {
             &transport,
         )
         .await;
-    let Some(fourth) = incomplete.first() else {
-        return;
-    };
+    let fourth = incomplete.first().unwrap();
     assert!(
         matches!(
             &fourth.payload,

@@ -153,9 +153,7 @@ fn device_mapping_is_not_issuance() {
 
 #[tokio::test]
 async fn pairing_denies_an_unauthorized_peer() {
-    let Some((handle, _dir)) = open_handle("pair-deny").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("pair-deny").await.unwrap();
     let denied_input = LiveInput {
         peer_uid_ok: false,
         ..live_input("client-a")
@@ -165,9 +163,7 @@ async fn pairing_denies_an_unauthorized_peer() {
         .handle_frame(pairing_frame("laptop"), denied_input, &transport)
         .await;
     assert_eq!(responses.len(), 1, "denial answers exactly one frame");
-    let Some(first) = responses.first() else {
-        return;
-    };
+    let first = responses.first().unwrap();
     assert!(
         matches!(
             &first.payload,
@@ -179,9 +175,7 @@ async fn pairing_denies_an_unauthorized_peer() {
 
 #[tokio::test]
 async fn pairing_denies_a_blank_descriptor() {
-    let Some((handle, _dir)) = open_handle("pair-blank").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("pair-blank").await.unwrap();
     let transport = fake_transport();
     for descriptor in ["", "   "] {
         let responses = handle
@@ -200,9 +194,7 @@ async fn pairing_denies_a_blank_descriptor() {
         );
     }
     let pending = handle.pending_devices().await;
-    let Ok(descriptors) = pending else {
-        return;
-    };
+    let descriptors = pending.unwrap();
     assert!(
         descriptors.is_empty(),
         "blank descriptors leave no pending entry"
@@ -211,17 +203,13 @@ async fn pairing_denies_a_blank_descriptor() {
 
 #[tokio::test]
 async fn pairing_pends_then_pairs_after_owner_approval() {
-    let Some((handle, _dir)) = open_handle("pair-flow").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("pair-flow").await.unwrap();
     let transport = fake_transport();
     let pending = handle
         .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
         .await;
     assert_eq!(pending.len(), 1, "the request answers once");
-    let Some(first) = pending.first() else {
-        return;
-    };
+    let first = pending.first().unwrap();
     assert!(
         matches!(
             &first.payload,
@@ -230,29 +218,21 @@ async fn pairing_pends_then_pairs_after_owner_approval() {
         "a fresh descriptor pends, never auto-approves"
     );
     let listed = handle.pending_devices().await;
-    let Ok(descriptors) = listed else {
-        return;
-    };
+    let descriptors = listed.unwrap();
     assert!(
         descriptors.iter().any(|name| name == "laptop"),
         "the pending descriptor lists for the Owner"
     );
-    let unknown = handle.approve_device("unknown box").await;
-    let Ok(None) = unknown else {
-        return;
-    };
-    let approved = handle.approve_device("laptop").await;
-    let Ok(Some(_)) = approved else {
-        return;
-    };
+    let unknown = handle.approve_device("unknown box").await.unwrap();
+    assert!(unknown.is_none(), "an unknown descriptor approves nothing");
+    let approved = handle.approve_device("laptop").await.unwrap();
+    assert!(approved.is_some(), "owner approval must pair");
     let paired_frame = pairing_frame("laptop");
     let expected_reply = paired_frame.envelope.message_id;
     let paired = handle
         .handle_frame(paired_frame, unpaired_input(), &transport)
         .await;
-    let Some(answer) = paired.first() else {
-        return;
-    };
+    let answer = paired.first().unwrap();
     assert!(
         matches!(
             &answer.payload,
@@ -269,9 +249,7 @@ async fn pairing_pends_then_pairs_after_owner_approval() {
 
 #[tokio::test]
 async fn an_already_paired_connection_cannot_pair_again() {
-    let Some((handle, _dir)) = open_handle("pair-immutable").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("pair-immutable").await.unwrap();
     let transport = fake_transport();
     let responses = handle
         .handle_frame(
@@ -281,9 +259,7 @@ async fn an_already_paired_connection_cannot_pair_again() {
         )
         .await;
     assert_eq!(responses.len(), 1, "the refusal answers exactly one frame");
-    let Some(first) = responses.first() else {
-        return;
-    };
+    let first = responses.first().unwrap();
     assert!(
         matches!(
             &first.payload,
@@ -292,9 +268,7 @@ async fn an_already_paired_connection_cannot_pair_again() {
         "a paired connection never re-pairs"
     );
     let pending = handle.pending_devices().await;
-    let Ok(descriptors) = pending else {
-        return;
-    };
+    let descriptors = pending.unwrap();
     assert!(
         descriptors.is_empty(),
         "the refused descriptor leaves no pending entry"
@@ -303,17 +277,13 @@ async fn an_already_paired_connection_cannot_pair_again() {
 
 #[tokio::test]
 async fn unpaired_domain_frames_close_with_an_unpaired_notice() {
-    let Some((handle, _dir)) = open_handle("gate-drop").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("gate-drop").await.unwrap();
     let transport = fake_transport();
     let responses = handle
         .handle_frame(submit_frame(), unpaired_input(), &transport)
         .await;
     assert_eq!(responses.len(), 1, "the gate answers once");
-    let Some(first) = responses.first() else {
-        return;
-    };
+    let first = responses.first().unwrap();
     assert!(
         matches!(
             &first.payload,
@@ -324,9 +294,7 @@ async fn unpaired_domain_frames_close_with_an_unpaired_notice() {
     let history = handle
         .handle_frame(history_frame(), unpaired_input(), &transport)
         .await;
-    let Some(view) = history.first() else {
-        return;
-    };
+    let view = history.first().unwrap();
     assert!(
         matches!(
             &view.payload,
@@ -338,9 +306,7 @@ async fn unpaired_domain_frames_close_with_an_unpaired_notice() {
 
 #[tokio::test]
 async fn unknown_connection_closes_even_with_a_device() {
-    let Some((handle, _dir)) = open_handle("gate-unknown").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("gate-unknown").await.unwrap();
     let transport = fake_transport();
     let input = LiveInput {
         paired_device: Some(String::from("laptop")),
@@ -348,9 +314,7 @@ async fn unknown_connection_closes_even_with_a_device() {
         ..live_input("client-a")
     };
     let responses = handle.handle_frame(submit_frame(), input, &transport).await;
-    let Some(first) = responses.first() else {
-        return;
-    };
+    let first = responses.first().unwrap();
     assert!(
         matches!(
             &first.payload,
@@ -362,9 +326,7 @@ async fn unknown_connection_closes_even_with_a_device() {
 
 #[tokio::test]
 async fn unsolicited_challenge_and_result_answer_nothing() {
-    let Some((handle, _dir)) = open_handle("auth-deferred").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("auth-deferred").await.unwrap();
     let transport = fake_transport();
     let challenge = super::WireFrame {
         envelope: new_outgoing_envelope(
@@ -421,9 +383,7 @@ fn proof_frame(device_id: DeviceWireId, proof: &str) -> super::WireFrame {
 
 #[tokio::test]
 async fn challenge_proof_accepts_and_binds_the_connection() {
-    let Some((handle, _dir)) = open_handle("auth-flow").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("auth-flow").await.unwrap();
     let transport = fake_transport();
     let pending = handle
         .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
@@ -446,16 +406,12 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
         matches!(approved, Ok(Some(_))),
         "owner approval must pair, got {approved:?}"
     );
-    let Ok(Some((record, secret))) = approved else {
-        return;
-    };
+    let (record, secret) = approved.unwrap().unwrap();
     let device_wire = record.wire.clone();
     let paired = handle
         .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
         .await;
-    let Some(answer) = paired.first() else {
-        return;
-    };
+    let answer = paired.first().unwrap();
     let WirePayload::PairingResult(PairingResult::Paired { device_id }) = &answer.payload else {
         return;
     };
@@ -493,9 +449,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
             "negotiation and challenge hide the connection id"
         );
     }
-    let Some(challenge_frame) = challenged.get(1) else {
-        return;
-    };
+    let challenge_frame = challenged.get(1).unwrap();
     let WirePayload::AuthChallenge(challenge) = &challenge_frame.payload else {
         return;
     };
@@ -506,9 +460,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
     let expected_reply = attempt.envelope.message_id;
     let answered = handle.handle_frame(attempt, live.clone(), &transport).await;
     assert_eq!(answered.len(), 2, "a proof answers result plus fact");
-    let Some(accepted) = answered.first() else {
-        return;
-    };
+    let accepted = answered.first().unwrap();
     assert!(
         matches!(
             &accepted.payload,
@@ -541,9 +493,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
         Some(live.connection_id),
         "the result echoes the connection"
     );
-    let Some(fact) = answered.get(1) else {
-        return;
-    };
+    let fact = answered.get(1).unwrap();
     assert!(
         matches!(&fact.payload, WirePayload::PresenceAttribution(_)),
         "acceptance carries the attribution fact, got {:?}",
@@ -577,9 +527,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
             &transport,
         )
         .await;
-    let Some(fresh) = rechallenged.get(1) else {
-        return;
-    };
+    let fresh = rechallenged.get(1).unwrap();
     let WirePayload::AuthChallenge(fresh_challenge) = &fresh.payload else {
         return;
     };
@@ -605,9 +553,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
             &transport,
         )
         .await;
-    let Some(fresh) = rechallenged.get(1) else {
-        return;
-    };
+    let fresh = rechallenged.get(1).unwrap();
     assert!(
         matches!(&fresh.payload, WirePayload::AuthChallenge(_)),
         "re-advertising challenges again, got {:?}",
@@ -651,9 +597,7 @@ async fn challenge_proof_accepts_and_binds_the_connection() {
 
 #[tokio::test]
 async fn pre_accept_denials_and_closes_hide_the_connection_id() {
-    let Some((handle, _dir)) = open_handle("auth-hidden").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("auth-hidden").await.unwrap();
     let transport = fake_transport();
     let live = live_input("client-a");
     let denied = handle
@@ -726,9 +670,7 @@ async fn pre_accept_denials_and_closes_hide_the_connection_id() {
 
 #[tokio::test]
 async fn unauthed_domain_frame_closes_even_without_a_connection_id() {
-    let Some((handle, _dir)) = open_handle("gate-bypass").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("gate-bypass").await.unwrap();
     let transport = fake_transport();
     // A paired device that skipped the proof: the bypass attempt carries
     // no connection id because pre-accept responses never reveal it.
@@ -779,9 +721,7 @@ async fn unauthed_domain_frame_closes_even_without_a_connection_id() {
 
 #[tokio::test]
 async fn superseded_connection_replay_closes_despite_a_known_id() {
-    let Some((handle, _dir)) = open_handle("gate-superseded").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("gate-superseded").await.unwrap();
     let transport = fake_transport();
     // The connection table reports a superseded connection as unauthed
     // (see the conn-level supersede test): the envelope echoes the table
@@ -822,10 +762,7 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
         CredStore::Memory(MemoryCredentialStore::new()),
     )
     .await;
-    assert!(opened.is_ok(), "the first open must succeed");
-    let Ok(first) = opened else {
-        return;
-    };
+    let first = opened.unwrap();
     let pending = first
         .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
         .await;
@@ -841,9 +778,7 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
         matches!(approved, Ok(Some(_))),
         "owner approval must pair, got {approved:?}"
     );
-    let Ok(Some((record, secret))) = approved else {
-        return;
-    };
+    let (record, secret) = approved.unwrap().unwrap();
     assert!(
         dir.path().join("device-auth.json").exists(),
         "approval persists the secret to the device-auth file"
@@ -856,10 +791,7 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
         CredStore::Memory(MemoryCredentialStore::new()),
     )
     .await;
-    assert!(reopened.is_ok(), "the second open must succeed");
-    let Ok(second) = reopened else {
-        return;
-    };
+    let second = reopened.unwrap();
     let device_wire = record.wire.clone();
     let live = paired_input(&device_wire);
     let challenged = second
@@ -869,16 +801,12 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
             &transport,
         )
         .await;
-    let Some(challenge_frame) = challenged.get(1) else {
-        return;
-    };
+    let challenge_frame = challenged.get(1).unwrap();
     let WirePayload::AuthChallenge(challenge) = &challenge_frame.payload else {
         return;
     };
     let proof = pairing_proof_hex(&secret, &challenge.nonce);
-    let Ok(device_uuid) = uuid::Uuid::parse_str(&device_wire) else {
-        return;
-    };
+    let device_uuid = uuid::Uuid::parse_str(&device_wire).unwrap();
     let answered = second
         .handle_frame(
             proof_frame(DeviceWireId(device_uuid), &proof),
@@ -897,9 +825,7 @@ async fn approved_secret_verifies_from_a_fresh_handle_on_the_same_dir() {
 
 #[tokio::test]
 async fn proof_without_challenge_is_rejected() {
-    let Some((handle, _dir)) = open_handle("auth-nochallenge").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("auth-nochallenge").await.unwrap();
     let transport = fake_transport();
     let proof = super::WireFrame {
         envelope: new_outgoing_envelope(
@@ -914,9 +840,7 @@ async fn proof_without_challenge_is_rejected() {
     let live = live_input("client-a");
     let responses = handle.handle_frame(proof, live.clone(), &transport).await;
     assert_eq!(responses.len(), 1, "a proof answers exactly one frame");
-    let Some(first) = responses.first() else {
-        return;
-    };
+    let first = responses.first().unwrap();
     assert!(
         matches!(
             &first.payload,
@@ -941,9 +865,7 @@ async fn proof_without_challenge_is_rejected() {
 async fn negotiated_version_is_fixed_per_connection() {
     use ene_api::v1::handshake::NegotiatedConnection;
 
-    let Some((handle, _dir)) = open_handle("version-fixed").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("version-fixed").await.unwrap();
     let transport = fake_transport();
     let negotiated = LiveInput {
         negotiated: Some(NegotiatedConnection {
@@ -991,18 +913,14 @@ async fn negotiated_version_is_fixed_per_connection() {
 
 #[tokio::test]
 async fn capability_mismatch_ends_with_a_disconnect_notice() {
-    let Some((handle, _dir)) = open_handle("caps-mismatch").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("caps-mismatch").await.unwrap();
     let frame = advertise_frame(ProtocolVersion { major: 9, minor: 0 });
     let transport = fake_transport();
     let responses = handle
         .handle_frame(frame, live_input("client-a"), &transport)
         .await;
     assert_eq!(responses.len(), 1, "mismatch answers exactly one frame");
-    let Some(first) = responses.first() else {
-        return;
-    };
+    let first = responses.first().unwrap();
     assert!(
         matches!(&first.payload, WirePayload::DisconnectNotice(_)),
         "a major mismatch disconnects"
@@ -1013,9 +931,7 @@ async fn capability_mismatch_ends_with_a_disconnect_notice() {
 async fn capability_match_negotiates_and_challenges_without_attaching() {
     use ene_companion::CompanionRepository as _;
 
-    let Some((handle, _dir)) = open_handle("caps-ok").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("caps-ok").await.unwrap();
     let live = live_input("client-a");
     let frame = advertise_frame(ProtocolVersion::V1);
     let expected_reply = frame.envelope.message_id;
@@ -1026,9 +942,7 @@ async fn capability_match_negotiates_and_challenges_without_attaching() {
         2,
         "negotiation answers terms plus the auth challenge"
     );
-    let Some(first) = responses.first() else {
-        return;
-    };
+    let first = responses.first().unwrap();
     assert!(
         matches!(&first.payload, WirePayload::NegotiatedConnection(_)),
         "a major match negotiates, got {:?}",
@@ -1039,9 +953,7 @@ async fn capability_match_negotiates_and_challenges_without_attaching() {
         Some(expected_reply),
         "the reply links back to the request"
     );
-    let Some(second) = responses.get(1) else {
-        return;
-    };
+    let second = responses.get(1).unwrap();
     let WirePayload::AuthChallenge(challenge) = &second.payload else {
         return;
     };
@@ -1065,13 +977,9 @@ async fn capability_match_negotiates_and_challenges_without_attaching() {
         "the challenge nonce is pending for this connection"
     );
     let companion = handle.store.ensure_running_companion().await;
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
-    let Ok(Some(current)) = attribution else {
-        return;
-    };
+    let current = attribution.unwrap().unwrap();
     assert!(
         current.active_client.is_none(),
         "capability negotiation never attaches presence"
@@ -1082,18 +990,12 @@ async fn capability_match_negotiates_and_challenges_without_attaching() {
 async fn disconnect_without_presence_is_a_no_op() {
     use ene_companion::CompanionRepository as _;
 
-    let Some((handle, _dir)) = open_handle("disc-noop").await else {
-        return;
-    };
+    let (handle, _dir) = open_handle("disc-noop").await.unwrap();
     handle.note_disconnect("never-attached").await;
     let companion = handle.store.ensure_running_companion().await;
-    let Ok(companion) = companion else {
-        return;
-    };
+    let companion = companion.unwrap();
     let attribution = handle.store.load_attribution(companion.as_raw()).await;
-    let Ok(Some(current)) = attribution else {
-        return;
-    };
+    let current = attribution.unwrap().unwrap();
     assert_eq!(
         current.state,
         ene_presence::PresenceState::NoActive,

@@ -16,16 +16,6 @@
 //! [`HostHandle::approve_device`](ene_core::serve::HostHandle::approve_device):
 //! the Host-local trusted inlet for pending device requests.
 
-#![cfg_attr(
-    test,
-    allow(
-        clippy::expect_used,
-        clippy::unwrap_used,
-        clippy::panic,
-        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
-    )
-)]
-
 use std::path::{Path, PathBuf};
 
 use ene_config::Config;
@@ -636,9 +626,7 @@ mod tests {
         let args = [String::from("--config"), String::from("/tmp/ene.json")];
         let split = extract_serve(&args);
         assert!(split.is_ok(), "args without serve must split");
-        let Some((serve, rest)) = split.ok() else {
-            return;
-        };
+        let (serve, rest) = split.ok().unwrap();
         assert!(!serve, "no serve token means no subcommand");
         assert_eq!(rest, args, "the rest must pass through untouched");
     }
@@ -660,9 +648,7 @@ mod tests {
         ] {
             let split = extract_serve(&args);
             assert!(split.is_ok(), "a single serve must split: {args:?}");
-            let Some((serve, rest)) = split.ok() else {
-                return;
-            };
+            let (serve, rest) = split.ok().unwrap();
             assert!(serve, "the serve token must select the subcommand");
             assert!(
                 !rest.iter().any(|arg| arg == "serve"),
@@ -676,9 +662,7 @@ mod tests {
         let args = [String::from("serve"), String::from("serve")];
         let split = extract_serve(&args);
         assert!(split.is_err(), "a repeated serve must fail");
-        let Some(error) = split.err() else {
-            return;
-        };
+        let error = split.err().unwrap();
         let rendered = format!("{error}");
         assert!(
             rendered.contains("usage: ene-core [--config PATH]"),
@@ -706,9 +690,7 @@ mod tests {
                 split.is_ok(),
                 "a single approve-device must split: {args:?}"
             );
-            let Some((approve, rest)) = split.ok() else {
-                return;
-            };
+            let (approve, rest) = split.ok().unwrap();
             assert!(approve, "the token must select the subcommand");
             assert!(
                 !rest.iter().any(|arg| arg == "approve-device"),
@@ -728,22 +710,13 @@ mod tests {
             String::from("main"),
         ];
         let split = extract_approve_credential(&args);
-        assert!(split.is_ok(), "a single approve-credential must split");
-        let Ok((approve, rest)) = split else {
-            return;
-        };
+        let (approve, rest) = split.unwrap();
         assert!(approve, "the token must select the subcommand");
         let named = extract_named(&rest, "--provider");
-        assert!(named.is_ok(), "provider flag must parse");
-        let Ok((provider, rest)) = named else {
-            return;
-        };
+        let (provider, rest) = named.unwrap();
         assert_eq!(provider, Some(String::from("openai")));
         let named = extract_named(&rest, "--label");
-        assert!(named.is_ok(), "label flag must parse");
-        let Ok((label, rest)) = named else {
-            return;
-        };
+        let (label, rest) = named.unwrap();
         assert_eq!(label, Some(String::from("main")));
         assert!(rest.is_empty(), "nothing must remain: {rest:?}");
         let missing = extract_named(&[String::from("--provider")], "--provider");
@@ -758,9 +731,7 @@ mod tests {
         ];
         let split = extract_approve_device(&args);
         assert!(split.is_err(), "a repeated approve-device must fail");
-        let Some(error) = split.err() else {
-            return;
-        };
+        let error = split.err().unwrap();
         let rendered = format!("{error}");
         assert!(
             rendered.contains("usage: ene-core [--config PATH]"),
@@ -778,9 +749,7 @@ mod tests {
         ];
         let parsed = extract_descriptor(&args);
         assert!(parsed.is_ok(), "--descriptor with a value must split");
-        let Some((descriptor, rest)) = parsed.ok() else {
-            return;
-        };
+        let (descriptor, rest) = parsed.ok().unwrap();
         assert_eq!(
             descriptor,
             Some(String::from("--odd-value")),
@@ -803,9 +772,7 @@ mod tests {
         ];
         let parsed = extract_descriptor(&args);
         assert!(parsed.is_ok(), "a repeated --descriptor must split");
-        let Some((descriptor, _)) = parsed.ok() else {
-            return;
-        };
+        let (descriptor, _) = parsed.ok().unwrap();
         assert_eq!(
             descriptor,
             Some(String::from("second")),
@@ -818,9 +785,7 @@ mod tests {
         let args = [String::from("--descriptor")];
         let parsed = extract_descriptor(&args);
         assert!(parsed.is_err(), "a missing --descriptor value must fail");
-        let Some(error) = parsed.err() else {
-            return;
-        };
+        let error = parsed.err().unwrap();
         let rendered = format!("{error}");
         assert!(
             rendered.contains("usage: ene-core [--config PATH]"),
@@ -833,9 +798,7 @@ mod tests {
         let args = [String::from("--config"), String::from("/tmp/e.json")];
         let parsed = extract_descriptor(&args);
         assert!(parsed.is_ok(), "args without --descriptor must split");
-        let Some((descriptor, rest)) = parsed.ok() else {
-            return;
-        };
+        let (descriptor, rest) = parsed.ok().unwrap();
         assert!(descriptor.is_none(), "no flag means no descriptor");
         assert_eq!(rest, args, "the rest must pass through untouched");
     }
@@ -853,8 +816,8 @@ mod tests {
             ),
             "a --config value is data, never a subcommand, got {parsed:?}"
         );
-        let Ok(CliCommand::ShowConfig { config }) = parsed else {
-            return;
+        let CliCommand::ShowConfig { config } = parsed.unwrap() else {
+            panic!("unexpected variant");
         };
         assert_eq!(
             config,
@@ -876,8 +839,8 @@ mod tests {
             ),
             "a --descriptor value is data, got {parsed:?}"
         );
-        let Ok(CliCommand::ApproveDevice { descriptor, .. }) = parsed else {
-            return;
+        let CliCommand::ApproveDevice { descriptor, .. } = parsed.unwrap() else {
+            panic!("unexpected variant");
         };
         assert_eq!(
             descriptor.as_deref(),
