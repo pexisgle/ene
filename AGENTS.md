@@ -8,9 +8,9 @@ behavior from it without a test, never treat it as requirements or design.
 
 - Desired behavior: `docs/requirements/` (product definition, requirements,
   acceptance). Design adds no product behavior.
-- Internal design: `docs/design/` (architecture → critical-areas → subsystems
-  → concrete). Obey each Step 13 artifact's fixed premises; file conflicts as
-  Issues instead of overriding.
+- Internal design: `docs/design/`. Follow the layer precedence stated in
+  `docs/design/README.md`; file conflicts between layers as Issues instead of
+  resolving them in code.
 - Implementation order and gates: `docs/implementation/README.md`.
 - Current implementation/API: source code, Cargo manifests, tests, rustdoc.
 
@@ -39,6 +39,13 @@ No `default-members`: bare `cargo test` / `cargo clippy` cover the workspace.
   `pedantic`/`cargo` wholesale.
 - Every `unsafe` block requires a preceding `// SAFETY:` comment that states
   the invariant making it sound.
+- Never route a production path through a throwaway fake or bypass an
+  authority boundary "for now"; unimplemented behavior is an explicit
+  unsupported/unavailable outcome, not a fake success.
+- Keep domain outcomes (stale, deny, hold, unknown) distinct from technical
+  errors and from success.
+- Never re-execute an external effect automatically while its outcome is
+  unknown.
 
 ## Comments
 
