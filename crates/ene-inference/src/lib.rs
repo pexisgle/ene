@@ -227,15 +227,20 @@ pub enum InferenceTechnicalError {
 pub struct ProviderRequest {
     /// Model to complete with.
     pub model: String,
+    /// Authorized credential the provider call bills. The transport resolves
+    /// its bearer per request, so a consent reassignment applies immediately.
+    pub credential: CredentialRef,
     /// Input text; [`core::fmt::Debug`] redacts this.
     pub input: String,
 }
 
 impl core::fmt::Debug for ProviderRequest {
-    /// Renders the model; `input` is body text and redacted.
+    /// Renders the model and the non-secret credential ref; `input` is body
+    /// text and redacted.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ProviderRequest")
             .field("model", &self.model)
+            .field("credential", &self.credential)
             .field("input", &"<redacted>")
             .finish()
     }
@@ -344,10 +349,10 @@ pub trait InferenceAttemptRepository: Send + Sync {
 ///
 /// Transport-facing gate under the [`InferenceExecutor`] boundary:
 /// [`dispatch_authorized`] is the normal caller and reaches this function
-/// only after admission consumed the single-use id and the attempt claim
-/// committed. This function performs no authorization bookkeeping itself: a
-/// call reaching it has already burned its id, so the same authorization
-/// value presented twice sends twice.
+/// only after admission consumed the single-use id, the attempt claim
+/// committed, and the input cap passed. This function performs no
+/// authorization bookkeeping itself: a call reaching it has already burned
+/// its id, so the same authorization value presented twice sends twice.
 ///
 /// Gates, in order:
 ///
@@ -356,9 +361,7 @@ pub trait InferenceAttemptRepository: Send + Sync {
 /// 2. `route_consent_match` (the attempt claim's verdict that the route
 ///    consent premise matched stored consent) must hold; otherwise
 ///    [`NotSentReason::ConsentMismatch`].
-/// 3. `input_text` longer than [`MAX_INPUT_CHARS`] yields
-///    [`NotSentReason::OverLimit`].
-/// 4. Otherwise the transport runs. Transport errors propagate as
+/// 3. Otherwise the transport runs. Transport errors propagate as
 ///    [`Err`]; a response with no usage maps to [`None`] counts with
 ///    [`UsageSource::Unknown`], never zero.
 pub async fn send(
@@ -372,12 +375,10 @@ pub async fn send(
     if !route_consent_match {
         return Ok(DispatchResult::NotSent(NotSentReason::ConsentMismatch));
     }
-    if cmd.input_text.chars().count() > MAX_INPUT_CHARS {
-        return Ok(DispatchResult::NotSent(NotSentReason::OverLimit));
-    }
     let response = transport
         .complete(ProviderRequest {
             model: cmd.route.model.clone(),
+            credential: cmd.route.credential.clone(),
             input: cmd.input_text.clone(),
         })
         .await?;
@@ -606,14 +607,18 @@ pub trait InferenceExecutor: Send + Sync {
     ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
 }
 
-/// Dispatches one authorized use: attempt claim, provider call, adoption
-/// re-check, and usage recording.
+/// Dispatches one authorized use: input validation, attempt claim, provider
+/// call, adoption re-check, and usage recording.
 ///
+/// The input cap is checked here, before the durable attempt claim: an
+/// over-limit request is a never-sent refusal and must not leave an attempt
+/// row behind. From the successful claim onward, every path either records
+/// usage (uncertain or reported) or reports stale before any provider I/O.
 /// A technical provider failure records an unknown-usage fact before
-/// propagating: the attempt may have run. A never-sent outcome records no
-/// fact. A completed call records its reported counts whether or not the
-/// reply is adopted; an adoption read failure still records the reported
-/// counts before propagating the storage error.
+/// propagating: the attempt may have run. A completed call records its
+/// reported counts whether or not the reply is adopted; an adoption read
+/// failure still records the reported counts before propagating the storage
+/// error.
 pub async fn dispatch_authorized(
     authorized: AuthorizedInference,
     input_text: String,
@@ -622,6 +627,9 @@ pub async fn dispatch_authorized(
     usage: &impl UsageRepository,
     transport: &impl ProviderTransport,
 ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
+    if input_text.chars().count() > MAX_INPUT_CHARS {
+        return Ok(InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit));
+    }
     let ticket = authorized.ticket;
     let (consent_id, consent_rev) = (authorized.consent.0.clone(), authorized.consent.1);
     let (provider, model) = (authorized.provider.clone(), authorized.model.clone());
@@ -929,17 +937,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn over_limit_input_is_not_sent() {
-        let big: String = "x".repeat(super::MAX_INPUT_CHARS + 1);
-        let cmd = command(&big);
-        let transport = FakeProviderTransport::new("hi there".to_owned(), None);
-        let result = send(cmd, true, &transport)
-            .await
-            .expect("inference dispatch answers an outcome");
-        assert_eq!(result, DispatchResult::NotSent(NotSentReason::OverLimit));
-    }
-
-    #[tokio::test]
     async fn transport_failure_is_a_technical_error() {
         let cmd = command("hello");
         let transport = FakeProviderTransport::failing(FakeFailure::Transport("down".to_owned()));
@@ -1052,6 +1049,22 @@ mod dispatch_tests {
         }
     }
 
+    struct RecordingAttempts(Mutex<usize>);
+
+    impl InferenceAttemptRepository for RecordingAttempts {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "in-test fake; async matches the repository contract"
+        )]
+        async fn begin_inference_attempt(
+            &self,
+            _attempt: InferenceAttempt,
+        ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
+            *self.0.lock().expect("attempt count lock") += 1;
+            Ok(AttemptBeginOutcome::Started)
+        }
+    }
+
     struct CapturedUsage(Mutex<Vec<UsageFact>>);
 
     impl UsageRepository for CapturedUsage {
@@ -1111,11 +1124,12 @@ mod dispatch_tests {
         let usage = CapturedUsage(Mutex::new(Vec::new()));
         let consent = FixedConsent(Some(record(1)));
         let transport = FakeProviderTransport::new(String::from("hi"), None);
+        let attempts = RecordingAttempts(Mutex::new(0));
         let result = dispatch_authorized(
             authorized(),
             "x".repeat(MAX_INPUT_CHARS + 1),
             &consent,
-            &StartedAttempts,
+            &attempts,
             &usage,
             &transport,
         )
@@ -1123,6 +1137,11 @@ mod dispatch_tests {
         assert_eq!(
             result.expect("dispatch answers an outcome"),
             InferenceDispatchOutcome::NotSent(NotSentReason::OverLimit)
+        );
+        assert_eq!(
+            *attempts.0.lock().expect("attempt count lock"),
+            0,
+            "an over-limit input never claims a durable attempt"
         );
         assert!(
             usage.0.lock().expect("usage capture lock").is_empty(),

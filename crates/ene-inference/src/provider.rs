@@ -16,7 +16,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use ene_credential::{CredentialRef, CredentialStore, CredentialTechnicalError};
+use ene_credential::{CredentialStore, CredentialTechnicalError};
 use serde::Deserialize;
 
 use super::{
@@ -34,10 +34,10 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// HTTPS transport for the `OpenAI` Responses API (`POST /v1/responses`).
 ///
-/// Holds the base URL, the built [`reqwest::Client`], the non-secret
-/// [`CredentialRef`], and the bearer store. No field ever holds key material:
-/// the bearer is borrowed transiently inside [`CredentialStore::with_bearer`]
-/// on each call.
+/// Holds the base URL, the built [`reqwest::Client`], and the bearer store.
+/// No field ever holds key material or a fixed credential: the bearer is
+/// resolved per request from the [`CredentialRef`] the authorized dispatch
+/// carries, and borrowed transiently inside [`CredentialStore::with_bearer`].
 ///
 /// The store is a generic `S: CredentialStore` rather than a trait object
 /// because [`CredentialStore::with_bearer`] is generic over its closure return
@@ -45,39 +45,35 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct OpenAiResponsesTransport<S> {
     base_url: String,
     http: reqwest::Client,
-    credential: CredentialRef,
     store: S,
 }
 
 impl<S> core::fmt::Debug for OpenAiResponsesTransport<S> {
-    /// Renders the base URL and credential ref; the HTTP client and the store
-    /// render opaque so no bearer material can leak through logging.
+    /// Renders the base URL; the HTTP client and the store render opaque so
+    /// no bearer material can leak through logging.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("OpenAiResponsesTransport")
             .field("base_url", &self.base_url)
             .field("http", &"<http-client>")
-            .field("credential", &self.credential)
             .field("store", &"<credential-store>")
             .finish()
     }
 }
 
 impl<S: CredentialStore> OpenAiResponsesTransport<S> {
-    /// Creates a transport against `base_url` billed to `credential`.
+    /// Creates a transport against `base_url` over `store`.
     ///
     /// The client enforces [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`]. No
-    /// I/O happens here; pass [`DEFAULT_BASE_URL`] for production.
+    /// I/O happens here; pass [`DEFAULT_BASE_URL`] for production. Each call
+    /// bills the credential its [`ProviderRequest`] carries, so a consent
+    /// reassignment takes effect on the next request without rebinding.
     ///
     /// # Errors
     ///
     /// Returns [`InferenceTechnicalError::HttpClientBuildFailed`] when the
     /// timeout-bound client cannot be built — the timeout invariant is
     /// reported, never silently dropped for an unbounded default.
-    pub fn new(
-        base_url: impl Into<String>,
-        credential: CredentialRef,
-        store: S,
-    ) -> Result<Self, InferenceTechnicalError> {
+    pub fn new(base_url: impl Into<String>, store: S) -> Result<Self, InferenceTechnicalError> {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
@@ -86,7 +82,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
         Ok(Self {
             base_url: base_url.into(),
             http,
-            credential,
             store,
         })
     }
@@ -96,8 +91,9 @@ impl<S: CredentialStore> ProviderTransport for OpenAiResponsesTransport<S> {
     /// Runs one Responses API completion with no retries or side effects
     /// beyond the call.
     ///
-    /// Input policy, including the length cap, is owned by [`crate::send`];
-    /// the transport sends what it is given.
+    /// Input policy, including the length cap, is owned by the dispatch
+    /// boundary ([`crate::dispatch_authorized`]); the transport bills the
+    /// request's authorized credential and sends what it is given.
     fn complete(
         &self,
         req: ProviderRequest,
@@ -117,7 +113,7 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
         let body = responses_body(&req.model, &req.input);
         let build = self
             .store
-            .with_bearer(&self.credential, |key| {
+            .with_bearer(&req.credential, |key| {
                 self.http
                     .post(url.as_str())
                     .bearer_auth(key)
@@ -618,9 +614,7 @@ mod tests {
         let concrete = MemoryCredentialStore::new();
         let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
         concrete.insert(credential.clone(), "sk-probe-bearer-material");
-        let Ok(transport) =
-            OpenAiResponsesTransport::new("http://127.0.0.1:9", credential, concrete)
-        else {
+        let Ok(transport) = OpenAiResponsesTransport::new("http://127.0.0.1:9", concrete) else {
             return;
         };
         let rendered = format!("{transport:?}");
