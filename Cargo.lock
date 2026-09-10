@@ -302,6 +302,7 @@ dependencies = [
  "ene-companion",
  "ene-config",
  "ene-credential",
+ "ene-ctl",
  "ene-inference",
  "ene-permission",
  "ene-plugin-ipc",
@@ -338,7 +339,10 @@ version = "0.1.0"
 dependencies = [
  "ene-api",
  "ene-config",
+ "ene-credential",
  "ene-plugin-ipc",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "uuid",
