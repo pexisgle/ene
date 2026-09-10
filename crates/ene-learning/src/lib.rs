@@ -33,7 +33,7 @@ pub use ene_credential::{CredentialSetRevision, ScrubbedText, SecretScrubError, 
 pub use formation::{
     ChangeRejection, ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
     FormationChange, FormationDecision, LearningInference, LearningInferenceError,
-    MAX_FORMATION_TURNS, MAX_FORMED_MEMORIES, form_experience,
+    MAX_FORMATION_CHANGES, MAX_FORMATION_TURNS, form_experience,
 };
 pub use identity::{ExperienceSourceKind, MemoryId, MemoryRevision, SourceRangeRef, SummaryId};
 pub use memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, TemporalMeaning};

@@ -9,9 +9,12 @@
 //! material can neither reach the model context nor be stored as a Summary or
 //! Memory.
 //!
-//! Stage 3 forms new companion-scoped memories only; updating existing ones
-//! arrives with the revision pass. Existing memories are still shown to the
-//! model so it can decline to duplicate what is already known.
+//! Stage 3 forms and updates companion-scoped memories. Existing memories
+//! are shown to the model with positional references so repeated information
+//! can reinforce, refine, or integrate an existing recognition instead of
+//! creating a duplicate, and so a correction can name the Memory it changes.
+//! Every update carries the revision it was judged from and commits through
+//! compare-before-commit: a stale target is reported, never overwritten.
 
 use ene_primitive::{RawId, WallClockWithTz};
 use serde::Deserialize;
@@ -28,8 +31,8 @@ use crate::repository::{
 use crate::scope::LearningScope;
 use crate::summary::SummaryRecord;
 
-/// Cap on Memories formed from one experience.
-pub const MAX_FORMED_MEMORIES: usize = 5;
+/// Cap on Memory changes formed from one experience.
+pub const MAX_FORMATION_CHANGES: usize = 5;
 
 /// Cap on the turns read into one formation prompt.
 pub const MAX_FORMATION_TURNS: usize = 24;
@@ -38,7 +41,7 @@ const EXISTING_MEMORY_LIMIT: u64 = 20;
 
 const PROMPT_PREAMBLE: &str = "\
 You are ene's learning formation pass for one companion.
-Decide what, if anything, from the new experience below deserves to be kept as long-term Memory.
+Decide what, if anything, from the new experience below should be kept or changed as long-term Memory.
 Rules:
 - Answer with one JSON object and nothing else.
 - Write a short summary of what happened and what it means for later understanding.
@@ -46,12 +49,17 @@ Rules:
 - Do not keep small talk, transient states, or raw conversation.
 - Weigh an explicit request to remember (for example \"remember this\" or \"覚えておいて\") highly.
 - Never keep credential values or secrets, even when asked to remember them.
-- Do not duplicate an existing memory: omit information that is already known.
+- When the experience confirms or changes an existing memory, update that memory by its number instead of creating a duplicate.
+- A correction is \"corrected_initially_wrong\" when the earlier memory was never true, and \"changed_since\" when it was true until the situation changed.
 - Memory scope is always this companion; never claim shared or global scope.";
 
 const PROMPT_SCHEMA: &str = "\
 Answer exactly as:
-{\"summary\": \"compressed evidence\", \"memories\": [{\"content\": \"...\", \"importance\": 3, \"temporal\": \"enduring\"}]}
+{\"summary\": \"compressed evidence\", \"memories\": [{\"action\": \"create\", \"content\": \"...\", \"importance\": 3, \"temporal\": \"enduring\"}]}
+Actions:
+- create: a new memory. Content is required.
+- update: change an existing memory by \"target\" number, with \"change\" one of reinforced, refined, integrated, corrected_initially_wrong, changed_since. Content is the new full content when it should change.
+- forget: suppress recall of an existing memory by \"target\" number without deleting it.
 Use an empty \"memories\" list when nothing is worth keeping. Importance is 1-5. Temporal is \"enduring\" for facts and preferences, \"event\" for something that happened.";
 
 /// Which side of the conversation produced one Experience turn.
@@ -147,6 +155,9 @@ pub enum FormationDecision {
         summary: SummaryId,
         changes: Vec<FormationChange>,
     },
+    /// Every proposed change lost its compare-before-commit, so no Summary
+    /// evidence was stored and no newer recognition was touched.
+    RejectedAsStale { changes: Vec<FormationChange> },
     /// The model judged the experience not worth keeping; nothing was stored.
     DeclinedAsNoEndValue,
     /// The answer could not be interpreted or inference declined; nothing was
@@ -243,51 +254,103 @@ pub async fn form_experience(
     // registration between two pieces would otherwise let an earlier piece
     // carry the newly registered value into storage.
     let mut prepared = Vec::new();
-    for proposed in answer.memories.into_iter().take(MAX_FORMED_MEMORIES) {
-        let Some(content) = proposed.content.as_deref() else {
+    let mut changes = Vec::new();
+    let mut applied = false;
+    for proposed in answer.memories.into_iter().take(MAX_FORMATION_CHANGES) {
+        let resolved = match proposed.action.as_deref().unwrap_or("create") {
+            "create" => {
+                let Some(content) = proposed.content else {
+                    continue;
+                };
+                Some((
+                    MemoryTarget::New {
+                        id: MemoryId::generate(),
+                    },
+                    ChangeKind::Initial,
+                    content,
+                    Importance::clamped(
+                        proposed
+                            .importance
+                            .unwrap_or_else(|| Importance::default().as_u8()),
+                    ),
+                    parse_temporal(proposed.temporal.as_deref()),
+                ))
+            }
+            "update" | "forget" => {
+                let Some(index) = proposed.target else {
+                    continue;
+                };
+                let Some(known) = index
+                    .checked_sub(1)
+                    .and_then(|position| existing.get(position))
+                else {
+                    continue;
+                };
+                let change = if proposed.action.as_deref() == Some("forget") {
+                    ChangeKind::Forgotten
+                } else {
+                    parse_change(proposed.change.as_deref())
+                };
+                let content = proposed.content.unwrap_or_else(|| known.content.clone());
+                let importance = Importance::clamped(
+                    proposed
+                        .importance
+                        .unwrap_or_else(|| known.importance.as_u8()),
+                );
+                let temporal = proposed
+                    .temporal
+                    .as_deref()
+                    .map_or(known.temporal, |value| parse_temporal(Some(value)));
+                Some((
+                    MemoryTarget::Existing {
+                        id: known.id,
+                        expected_revision: known.revision,
+                    },
+                    change,
+                    content,
+                    importance,
+                    temporal,
+                ))
+            }
+            _ => continue,
+        };
+        let Some((target, change, content, importance, temporal)) = resolved else {
             continue;
         };
         let content = scrubber
-            .scrub(content)
+            .scrub(&content)
             .await
             .map_err(secret_boundary_failure)?;
         if content.text.trim().is_empty() {
             continue;
         }
-        prepared.push((proposed, content));
+        prepared.push((target, change, content, importance, temporal));
     }
     let secret_premise = ScrubbedText::oldest_premise(
-        std::iter::once(&summary_text).chain(prepared.iter().map(|(_, content)| content)),
+        std::iter::once(&summary_text).chain(prepared.iter().map(|(_, _, content, _, _)| content)),
     );
 
-    let mut changes = Vec::new();
-    for (proposed, content) in prepared {
+    for (target, change, content, importance, temporal) in prepared {
         let content = content.text.trim().to_owned();
-        let memory = MemoryId::generate();
-        let importance = Importance::clamped(
-            proposed
-                .importance
-                .unwrap_or_else(|| Importance::default().as_u8()),
-        );
-        let temporal = parse_temporal(proposed.temporal.as_deref());
         let outcome = repository
             .commit_memory_change(MemoryChangeCommit {
                 summary: Some(summary.clone()),
                 secret_premise,
                 change: MemoryChange {
-                    target: MemoryTarget::New { id: memory },
+                    target,
                     scope,
                     content,
                     importance,
                     temporal,
-                    change: ChangeKind::Initial,
-                    recall_suppressed: false,
+                    change,
+                    recall_suppressed: change.suppresses_recall(),
                     at: candidate.at,
                 },
             })
             .await?;
         changes.push(match outcome {
             MemoryChangeOutcome::Committed { memory, revision } => {
+                applied = true;
                 FormationChange::Applied { memory, revision }
             }
             MemoryChangeOutcome::StaleTarget { memory, .. } => FormationChange::Rejected {
@@ -321,13 +384,13 @@ pub async fn form_experience(
             }
         });
     }
-    if changes.is_empty() {
-        return Ok(FormationDecision::DeclinedAsNoEndValue);
+    if applied {
+        return Ok(FormationDecision::Formed {
+            summary: summary_id,
+            changes,
+        });
     }
-    Ok(FormationDecision::Formed {
-        summary: summary_id,
-        changes,
-    })
+    Ok(FormationDecision::RejectedAsStale { changes })
 }
 
 async fn build_prompt(
@@ -341,13 +404,17 @@ async fn build_prompt(
     if existing.is_empty() {
         prompt.push_str("(none)\n");
     } else {
-        for memory in existing {
+        for (position, memory) in existing.iter().enumerate() {
             let content = scrubber
                 .scrub(&memory.content)
                 .await
                 .map_err(secret_boundary_failure)?;
             premises.push(content.credential_set);
-            prompt.push_str("- ");
+            prompt.push_str(&format!(
+                "{}. [importance {}] ",
+                position + 1,
+                memory.importance.as_u8()
+            ));
             prompt.push_str(&content.text);
             prompt.push('\n');
         }
@@ -403,11 +470,17 @@ struct ModelAnswer {
 #[derive(Deserialize)]
 struct ModelMemory {
     #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    target: Option<usize>,
+    #[serde(default)]
     content: Option<String>,
     #[serde(default)]
     importance: Option<u8>,
     #[serde(default)]
     temporal: Option<String>,
+    #[serde(default)]
+    change: Option<String>,
 }
 
 /// Tolerant answer decoding: exactly one JSON object, optionally wrapped in
@@ -426,6 +499,16 @@ fn parse_temporal(value: Option<&str>) -> TemporalMeaning {
     match value {
         Some("event") => TemporalMeaning::Event,
         _ => TemporalMeaning::Enduring,
+    }
+}
+
+fn parse_change(value: Option<&str>) -> ChangeKind {
+    match value {
+        Some("reinforced") => ChangeKind::Reinforced,
+        Some("integrated") => ChangeKind::Integrated,
+        Some("corrected_initially_wrong") => ChangeKind::CorrectedInitiallyWrong,
+        Some("changed_since") => ChangeKind::ChangedSince,
+        _ => ChangeKind::Refined,
     }
 }
 
@@ -739,5 +822,255 @@ mod tests {
             "an existing Memory must not carry a registered value into the prompt: {prompt}"
         );
         assert!(prompt.contains("[credential]"));
+    }
+}
+
+#[cfg(test)]
+mod consolidation_tests {
+    use ene_primitive::{RawId, WallClockWithTz};
+
+    use crate::formation::{
+        ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
+        FormationChange, FormationDecision, form_experience,
+    };
+    use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
+    use crate::memory::ChangeKind;
+    use crate::repository::LearningRepository;
+    use crate::scope::LearningScope;
+    use crate::test_support::{
+        FakeLearningRepository, RacingInference, ReplacingScrubber, ScriptedInference, seed_memory,
+    };
+
+    fn candidate(companion: RawId) -> ExperienceCandidate {
+        ExperienceCandidate {
+            companion,
+            source: SourceRangeRef {
+                kind: ExperienceSourceKind::Dialogue,
+                start: RawId::new(),
+                end: RawId::new(),
+            },
+            transcript: vec![ExperienceTurn {
+                role: ExperienceRole::Owner,
+                text: String::from("a follow-up exchange"),
+            }],
+            at: WallClockWithTz::now(),
+            correspondence: ExperienceCorrespondence::default(),
+        }
+    }
+
+    fn scrubber() -> ReplacingScrubber {
+        ReplacingScrubber::new("sk-secret", "[credential]")
+    }
+
+    async fn apply_update(
+        answer: &str,
+    ) -> (
+        FakeLearningRepository,
+        crate::identity::MemoryId,
+        FormationDecision,
+    ) {
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        let (memory, _) = seed_memory(&repository, companion, "owner likes tea").await;
+        let inference = ScriptedInference::new(vec![Ok(answer.to_owned())]);
+        let decision = form_experience(&repository, &inference, &scrubber(), candidate(companion))
+            .await
+            .unwrap();
+        (repository, memory, decision)
+    }
+
+    #[tokio::test]
+    async fn repeated_information_reinforces_instead_of_duplicating() {
+        let (repository, memory, decision) = apply_update(
+            r#"{"summary": "The owner mentioned tea again.", "memories": [{"action": "update", "target": 1, "change": "reinforced", "content": "owner likes tea"}]}"#,
+        )
+        .await;
+        assert!(
+            matches!(decision, FormationDecision::Formed { .. }),
+            "the reinforcement must apply, got {decision:?}"
+        );
+        assert_eq!(
+            repository.current().len(),
+            1,
+            "no duplicate memory is created"
+        );
+        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].content, "owner likes tea");
+        assert_eq!(revisions[1].change, ChangeKind::Reinforced);
+        assert_eq!(
+            repository
+                .load_current_memory(memory)
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            MemoryRevision::from_u64(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn refinement_updates_content_and_keeps_the_earlier_revision() {
+        let (repository, memory, decision) = apply_update(
+            r#"{"summary": "The owner was more specific.", "memories": [{"action": "update", "target": 1, "change": "refined", "content": "owner prefers jasmine tea in the morning"}]}"#,
+        )
+        .await;
+        assert!(matches!(decision, FormationDecision::Formed { .. }));
+        let current = repository
+            .load_current_memory(memory)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.content, "owner prefers jasmine tea in the morning");
+        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(
+            revisions[0].content, "owner likes tea",
+            "the earlier recognition is not rewritten"
+        );
+        assert_eq!(revisions[1].change, ChangeKind::Refined);
+    }
+
+    #[tokio::test]
+    async fn initial_wrong_and_changed_since_stay_distinct() {
+        let (repository, memory, decision) = apply_update(
+            r#"{"summary": "The owner corrected me.", "memories": [{"action": "update", "target": 1, "change": "corrected_initially_wrong", "content": "owner never liked tea"}]}"#,
+        )
+        .await;
+        assert!(matches!(decision, FormationDecision::Formed { .. }));
+        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        assert_eq!(revisions[1].change, ChangeKind::CorrectedInitiallyWrong);
+
+        let (repository, memory, decision) = apply_update(
+            r#"{"summary": "The situation changed.", "memories": [{"action": "update", "target": 1, "change": "changed_since", "content": "owner switched to coffee"}]}"#,
+        )
+        .await;
+        assert!(matches!(decision, FormationDecision::Formed { .. }));
+        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        assert_eq!(revisions[1].change, ChangeKind::ChangedSince);
+        assert_ne!(
+            ChangeKind::CorrectedInitiallyWrong,
+            ChangeKind::ChangedSince
+        );
+    }
+
+    #[tokio::test]
+    async fn forgetting_suppresses_recall_without_deleting_content_or_revisions() {
+        let (repository, memory, decision) = apply_update(
+            r#"{"summary": "The owner asked me to let the topic rest.", "memories": [{"action": "forget", "target": 1}]}"#,
+        )
+        .await;
+        assert!(matches!(decision, FormationDecision::Formed { .. }));
+        let current = repository
+            .load_current_memory(memory)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(current.recall_suppressed, "recall is suppressed");
+        assert_eq!(
+            current.content, "owner likes tea",
+            "normal forgetting never deletes content"
+        );
+        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].content, "owner likes tea");
+        assert_eq!(revisions[1].change, ChangeKind::Forgotten);
+        assert!(
+            revisions[1].recall_suppressed,
+            "the suppression is part of the revision history"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_without_importance_keeps_the_existing_one() {
+        let (repository, memory, decision) = apply_update(
+            r#"{"summary": "A small refinement.", "memories": [{"action": "update", "target": 1, "change": "refined", "content": "owner really likes tea"}]}"#,
+        )
+        .await;
+        assert!(matches!(decision, FormationDecision::Formed { .. }));
+        let current = repository
+            .load_current_memory(memory)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current.importance.as_u8(),
+            crate::Importance::default().as_u8(),
+            "an omitted importance does not reset the stored one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_target_is_rejected_not_overwritten() {
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        let (memory, revision) = seed_memory(&repository, companion, "owner likes tea").await;
+        let inference = RacingInference::new(
+            &repository,
+            companion,
+            memory,
+            revision,
+            r#"{"summary": "The owner mentioned tea.", "memories": [{"action": "update", "target": 1, "change": "refined", "content": "owner likes jasmine tea"}]}"#,
+        );
+        let decision = form_experience(&repository, &inference, &scrubber(), candidate(companion))
+            .await
+            .unwrap();
+        let FormationDecision::RejectedAsStale { changes } = decision else {
+            panic!("a moved target must reject the stale formation, got {decision:?}");
+        };
+        assert!(matches!(
+            changes.as_slice(),
+            [FormationChange::Rejected { .. }]
+        ));
+        let current = repository
+            .load_current_memory(memory)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current.content, "advanced by another formation",
+            "the newer recognition is untouched"
+        );
+        assert_eq!(
+            repository
+                .list_memory_revisions(memory)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "the stale change leaves no revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forget_request_without_target_is_ignored() {
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        let _ = seed_memory(&repository, companion, "owner likes tea").await;
+        let inference = ScriptedInference::new(vec![Ok(String::from(
+            r#"{"summary": "The owner asked to forget something unnamed.", "memories": [{"action": "forget"}]}"#,
+        ))]);
+        let decision = form_experience(&repository, &inference, &scrubber(), candidate(companion))
+            .await
+            .unwrap();
+        assert_eq!(decision, FormationDecision::DeclinedAsNoEndValue);
+        assert_eq!(
+            repository.current().len(),
+            1,
+            "an unnamed target changes nothing"
+        );
+        assert!(
+            !repository
+                .load_current_memory(repository.current()[0].id)
+                .await
+                .unwrap()
+                .unwrap()
+                .recall_suppressed,
+            "an unnamed forget request suppresses nothing"
+        );
+        assert_eq!(
+            repository.current()[0].scope,
+            LearningScope::companion(companion)
+        );
     }
 }
