@@ -23,8 +23,14 @@ pub mod provider;
 use std::future::Future;
 use std::pin::Pin;
 
-use ene_credential::CredentialRef;
-use ene_permission::{ConsentRevision, InferenceUseCandidate, PermissionEvaluationId};
+use ene_credential::{
+    CredentialRef, CredentialRefRepository, CredentialStore, credential_availability,
+};
+use ene_permission::{
+    CapabilityKind, CheckLiveAuthorizationQuery, ConsentRecord, ConsentRepository, ConsentRevision,
+    ConsumerKind, DenyCode, EvaluationTracker, InferenceUseCandidate, LiveAuthorizationDecision,
+    PermissionEvaluationId, PurposeKind, check_live_authorization,
+};
 use ene_primitive::RawId;
 use thiserror::Error;
 
@@ -115,6 +121,18 @@ pub enum NotSentReason {
     /// Produced by Host-side pre-checks (the consume step before dispatch),
     /// never by [`send`].
     EvaluationConsumed,
+    /// No complete setup premise: no consent is recorded, or the consent
+    /// references an unavailable credential.
+    ///
+    /// Produced by admission, never by [`send`].
+    SetupIncomplete,
+    /// The stored consent moved away from the premise the use was admitted
+    /// under, before the attempt claim or before adoption.
+    ConsentStale,
+    /// The live-authorization allowlist refused the use.
+    ///
+    /// Produced by admission, never by [`send`].
+    NotInAllowlist,
     /// `input_text` exceeds [`MAX_INPUT_CHARS`].
     OverLimit,
 }
@@ -400,6 +418,325 @@ pub async fn send(
         usage,
     };
     Ok(DispatchResult::Completed(arrival))
+}
+
+/// One admission decision: an authorized use or a refusal.
+///
+/// Admission resolves consent and credential premises, then runs the
+/// single-use live authorization. A decline happens before any history
+/// append or provider call, so it leaves no side effects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// Authorized; carries the already-consumed single-use authorization.
+    Admitted(Box<AuthorizedInference>),
+    /// Declined without side effects; carries the failing gate.
+    Declined(NotSentReason),
+}
+
+/// Admission premises with the single-use decision still pending.
+///
+/// The caller runs [`AdmissionRequest::authorize`] under its own short
+/// tracker lock, so no lock is held across the premise loads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionRequest {
+    candidate: InferenceUseCandidate,
+    consent: ConsentRecord,
+    setup_complete: bool,
+    credential: CredentialRef,
+}
+
+impl AdmissionRequest {
+    /// Runs the live authorization and consumes its id on success.
+    #[must_use]
+    pub fn authorize(self, tracker: &mut EvaluationTracker) -> Admission {
+        let query = CheckLiveAuthorizationQuery {
+            candidate: self.candidate.clone(),
+            expected_consent: Some((self.consent.id.clone(), self.consent.rev)),
+            setup_complete: self.setup_complete,
+        };
+        match check_live_authorization(&query, Some(&self.consent), tracker) {
+            LiveAuthorizationDecision::AllowForThisUse(authorization) => {
+                if tracker.consume(&authorization, &self.candidate.fingerprint()) {
+                    Admission::Admitted(Box::new(AuthorizedInference {
+                        ticket: InferenceTicketId(RawId::new()),
+                        consent: (self.consent.id, self.consent.rev),
+                        provider: self.consent.provider,
+                        model: self.consent.model,
+                        credential: self.credential,
+                        candidate: self.candidate,
+                        authorization,
+                    }))
+                } else {
+                    Admission::Declined(NotSentReason::EvaluationConsumed)
+                }
+            }
+            LiveAuthorizationDecision::Deny(reason) => {
+                Admission::Declined(not_sent_for_deny(reason.code))
+            }
+            LiveAuthorizationDecision::NeedsRevalidation(_) => {
+                Admission::Declined(NotSentReason::ConsentStale)
+            }
+        }
+    }
+}
+
+/// Premises prepared for one dialogue-purpose admission decision.
+///
+/// Repository failures stay in the surrounding `Err`; an absent or
+/// incomplete setup answers [`PreparedAdmission::Declined`] without a
+/// tracker decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedAdmission {
+    /// Ready for the single-use decision under the caller's short lock.
+    Ready(Box<AdmissionRequest>),
+    /// Declined without touching the tracker.
+    Declined(NotSentReason),
+}
+
+/// Resolves the consent and credential premises for one dialogue admission.
+///
+/// The returned request still needs [`AdmissionRequest::authorize`]; this
+/// function performs no authorization and holds no lock.
+pub async fn prepare_dialogue_admission(
+    consent: &impl ConsentRepository,
+    credential_refs: &impl CredentialRefRepository,
+    credential_store: &impl CredentialStore,
+) -> Result<PreparedAdmission, InferenceTechnicalError> {
+    let record =
+        consent
+            .load_current()
+            .await
+            .map_err(|_| InferenceTechnicalError::StorageUnavailable {
+                reason: String::from("load consent"),
+            })?;
+    let Some(record) = record else {
+        return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
+    };
+    let known_refs = credential_refs.list_refs().await.map_err(|_| {
+        InferenceTechnicalError::StorageUnavailable {
+            reason: String::from("list credential refs"),
+        }
+    })?;
+    let credential = match known_refs
+        .iter()
+        .find(|known| known.id() == record.credential_id)
+        .cloned()
+    {
+        Some(known) => known,
+        None => match CredentialRef::new(record.provider.clone(), "main") {
+            Ok(synthesized) => synthesized,
+            Err(_) => {
+                return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
+            }
+        },
+    };
+    let repo_known = known_refs
+        .iter()
+        .any(|known| known.id() == record.credential_id);
+    let setup_complete = credential_availability(&credential, repo_known, credential_store).present;
+    let candidate = InferenceUseCandidate {
+        consumer: ConsumerKind::CompanionDialogue,
+        capability: CapabilityKind::Dialogue,
+        provider_ref: record.provider.clone(),
+        model: record.model.clone(),
+        purpose: PurposeKind::DialogueResponse,
+    };
+    Ok(PreparedAdmission::Ready(Box::new(AdmissionRequest {
+        candidate,
+        consent: record,
+        setup_complete,
+        credential,
+    })))
+}
+
+/// The resolved, authorized premise of one not-yet-attempted inference use.
+///
+/// Opaque outside this crate behind accessors: a caller sequences the
+/// durable append between admission and dispatch without learning
+/// credential material or permission internals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizedInference {
+    ticket: InferenceTicketId,
+    consent: (String, ConsentRevision),
+    provider: String,
+    model: String,
+    credential: CredentialRef,
+    candidate: InferenceUseCandidate,
+    authorization: PermissionEvaluationId,
+}
+
+impl AuthorizedInference {
+    /// Ticket this use runs under.
+    #[must_use]
+    pub fn ticket(&self) -> InferenceTicketId {
+        self.ticket
+    }
+
+    /// Consent premise the use was authorized under, as `(id, rev)`.
+    #[must_use]
+    pub fn consent_premise(&self) -> (&str, u64) {
+        (&self.consent.0, self.consent.1.as_u64())
+    }
+}
+
+/// Outcome of one dispatched (attempted) inference use.
+///
+/// Usage accounting is already decided and recorded when this returns: a
+/// never-attempted use records no fact, an uncertain attempt records
+/// [`UsageSource::Unknown`], and a completed call records its reported
+/// counts even when `adopted` is false.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InferenceDispatchOutcome {
+    /// The provider call completed; carries the arrival and whether
+    /// adoption consent still held after the await.
+    Completed {
+        /// Full result of the call.
+        arrival: InferenceResultArrival,
+        /// Whether the post-await consent check still admitted the reply.
+        adopted: bool,
+    },
+    /// Definitely never sent; no usage fact was recorded.
+    NotSent(NotSentReason),
+}
+
+/// The owner boundary for one dialogue inference call.
+///
+/// `ene-inference` owns permission, credential, attempt, provider, and
+/// usage ordering behind this boundary; the caller (companion dialogue)
+/// only sequences its own durable append between admission and dispatch.
+/// Implementations are wired by the Host composition root.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 2 contract uses native async fn; Send bounds settle with the Host adapter"
+)]
+pub trait InferenceExecutor: Send + Sync {
+    /// Resolves and authorizes one dialogue-purpose use without sending.
+    async fn admit_dialogue(&self) -> Result<Admission, InferenceTechnicalError>;
+
+    /// Claims the attempt, calls the provider, records usage, and reports
+    /// whether adoption consent survived the await.
+    async fn dispatch(
+        &self,
+        authorized: AuthorizedInference,
+        input_text: String,
+    ) -> Result<InferenceDispatchOutcome, InferenceTechnicalError>;
+}
+
+/// Dispatches one authorized use: consent re-check, attempt claim, provider
+/// call, adoption re-check, and usage recording.
+///
+/// A technical provider failure records an unknown-usage fact before
+/// propagating: the attempt may have run. A never-sent outcome records no
+/// fact. A completed call records its reported counts whether or not the
+/// reply is adopted.
+pub async fn dispatch_authorized(
+    authorized: AuthorizedInference,
+    input_text: String,
+    consent: &impl ConsentRepository,
+    attempts: &impl InferenceAttemptRepository,
+    usage: &impl UsageRepository,
+    transport: &impl ProviderTransport,
+) -> Result<InferenceDispatchOutcome, InferenceTechnicalError> {
+    let ticket = authorized.ticket;
+    let (consent_id, consent_rev) = (authorized.consent.0.clone(), authorized.consent.1);
+    let (provider, model) = (authorized.provider.clone(), authorized.model.clone());
+    if !consent_matches(consent, &consent_id, consent_rev).await {
+        // Never attempted: no provider use, so no usage fact.
+        return Ok(InferenceDispatchOutcome::NotSent(
+            NotSentReason::ConsentStale,
+        ));
+    }
+    let command = RequestInferenceCommand {
+        ticket,
+        candidate: authorized.candidate,
+        authorization: authorized.authorization,
+        route: ResolvedRoute {
+            provider: provider.clone(),
+            model: model.clone(),
+            credential: authorized.credential,
+            consent: (consent_id.clone(), consent_rev),
+        },
+        input_text,
+    };
+    match attempts
+        .begin_inference_attempt(InferenceAttempt {
+            ticket,
+            expected_consent: (consent_id.clone(), consent_rev.as_u64()),
+            provider: provider.clone(),
+            model: model.clone(),
+        })
+        .await
+    {
+        Ok(AttemptBeginOutcome::Started) => {}
+        // Fail closed on a stale claim or a store failure: the provider
+        // never ran, so no byte leaves and no usage fact is recorded.
+        Ok(AttemptBeginOutcome::Stale) | Err(_) => {
+            return Ok(InferenceDispatchOutcome::NotSent(
+                NotSentReason::ConsentStale,
+            ));
+        }
+    }
+    // The attempt claim is the determination `send` relies on; the route
+    // and candidate were built from the same consent premise.
+    match send(command, true, transport).await {
+        Err(error) => {
+            record_usage_decision(usage, Some(unknown_usage(ticket, &provider, &model))).await;
+            Err(error)
+        }
+        Ok(DispatchResult::NotSent(reason)) => Ok(InferenceDispatchOutcome::NotSent(reason)),
+        Ok(DispatchResult::Completed(arrival)) => {
+            let adopted = consent_matches(consent, &consent_id, consent_rev).await;
+            record_usage_decision(usage, Some(arrival.usage.clone())).await;
+            Ok(InferenceDispatchOutcome::Completed { arrival, adopted })
+        }
+    }
+}
+
+/// Loads the current consent and checks it still names exactly `id` at `rev`.
+async fn consent_matches(
+    consent: &impl ConsentRepository,
+    id: &str,
+    revision: ConsentRevision,
+) -> bool {
+    let Ok(Some(current)) = consent.load_current().await else {
+        return false;
+    };
+    current.id == id && current.rev == revision
+}
+
+/// Unknown-counts fact for an attempt that may have run.
+fn unknown_usage(ticket: InferenceTicketId, provider: &str, model: &str) -> UsageFact {
+    UsageFact {
+        ticket,
+        provider: provider.to_string(),
+        model: model.to_string(),
+        input_tokens: None,
+        output_tokens: None,
+        source: UsageSource::Unknown,
+    }
+}
+
+/// Records one decided usage fact best-effort.
+///
+/// The caller's stream outcome is authoritative; a usage persistence
+/// failure is the documented later-stage retry gap, never a reason to
+/// rewrite what already happened.
+async fn record_usage_decision(usage: &impl UsageRepository, fact: Option<UsageFact>) {
+    let Some(fact) = fact else {
+        return;
+    };
+    if usage.record_usage(fact).await.is_err() {
+        // Best-effort: the stream close stays authoritative.
+    }
+}
+
+/// Maps one permission deny code to its inference refusal reason.
+fn not_sent_for_deny(code: DenyCode) -> NotSentReason {
+    match code {
+        DenyCode::SetupIncomplete => NotSentReason::SetupIncomplete,
+        DenyCode::ConsentStale | DenyCode::Superseded => NotSentReason::ConsentStale,
+        DenyCode::NotInAllowlist => NotSentReason::NotInAllowlist,
+    }
 }
 
 /// In-memory provider transport for tests and core integration tests.
