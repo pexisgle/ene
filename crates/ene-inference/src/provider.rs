@@ -384,10 +384,7 @@ mod tests {
             "usage": {"input_tokens": 12, "output_tokens": 5},
         });
         let result = parse_response(200, body);
-        assert!(result.is_ok());
-        let Ok(response) = result else {
-            return;
-        };
+        let response = result.unwrap();
         assert_eq!(response.text, "Hello, world! Again.");
         assert_eq!(
             response.usage,
@@ -410,10 +407,7 @@ mod tests {
             ],
         });
         let result = parse_response(200, body);
-        assert!(result.is_ok());
-        let Ok(response) = result else {
-            return;
-        };
+        let response = result.unwrap();
         assert_eq!(response.text, "hi");
         assert_eq!(response.usage, None);
     }
@@ -439,8 +433,8 @@ mod tests {
             ),
             "a status-less body must fail, got {result:?}"
         );
-        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
-            return;
+        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
+            panic!("unexpected variant");
         };
         assert!(reason.contains("missing status"), "got {reason:?}");
     }
@@ -496,8 +490,9 @@ mod tests {
                 ),
                 "{status} must fail, got {result:?}"
             );
-            let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
-                return;
+            let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err()
+            else {
+                panic!("unexpected variant");
             };
             assert!(
                 reason.contains(marker),
@@ -517,8 +512,8 @@ mod tests {
             result,
             Err(InferenceTechnicalError::ProviderTransportFailed(_))
         ));
-        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
-            return;
+        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
+            panic!("unexpected variant");
         };
         assert!(reason.contains("decode"));
     }
@@ -531,10 +526,7 @@ mod tests {
             "usage": {"input_tokens": 7},
         });
         let result = parse_response(200, body);
-        assert!(result.is_ok());
-        let Ok(response) = result else {
-            return;
-        };
+        let response = result.unwrap();
         assert_eq!(response.usage, None);
     }
 
@@ -545,8 +537,8 @@ mod tests {
             result,
             Err(InferenceTechnicalError::ProviderTransportFailed(_))
         ));
-        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
-            return;
+        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
+            panic!("unexpected variant");
         };
         assert!(reason.contains("unauthorized"));
     }
@@ -558,8 +550,8 @@ mod tests {
             result,
             Err(InferenceTechnicalError::ProviderTransportFailed(_))
         ));
-        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
-            return;
+        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
+            panic!("unexpected variant");
         };
         assert!(reason.contains("provider unavailable"));
         assert!(reason.contains("429"));
@@ -572,8 +564,8 @@ mod tests {
             result,
             Err(InferenceTechnicalError::ProviderTransportFailed(_))
         ));
-        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
-            return;
+        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
+            panic!("unexpected variant");
         };
         assert!(reason.contains("provider unavailable"));
         assert!(reason.contains("503"));
@@ -586,8 +578,8 @@ mod tests {
             result,
             Err(InferenceTechnicalError::ProviderTransportFailed(_))
         ));
-        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
-            return;
+        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
+            panic!("unexpected variant");
         };
         assert!(reason.contains("provider request failed"));
         assert!(reason.contains("400"));
@@ -603,8 +595,8 @@ mod tests {
             result,
             Err(InferenceTechnicalError::ProviderTransportFailed(_))
         ));
-        let Err(InferenceTechnicalError::ProviderTransportFailed(reason)) = result else {
-            return;
+        let InferenceTechnicalError::ProviderTransportFailed(reason) = result.unwrap_err() else {
+            panic!("unexpected variant");
         };
         assert!(reason.contains("decode"));
     }
@@ -614,9 +606,7 @@ mod tests {
         let concrete = MemoryCredentialStore::new();
         let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
         concrete.insert(credential.clone(), "sk-probe-bearer-material");
-        let Ok(transport) = OpenAiResponsesTransport::new("http://127.0.0.1:9", concrete) else {
-            return;
-        };
+        let transport = OpenAiResponsesTransport::new("http://127.0.0.1:9", concrete).unwrap();
         let rendered = format!("{transport:?}");
         assert!(!rendered.contains("sk-probe-bearer-material"));
         assert!(!rendered.contains("Bearer"));

@@ -252,10 +252,7 @@ fn device_auth_roundtrip_preserves_secret_bytes() {
     let saved = store.save_secret(&device, "phone", "pairing-secret-value");
     assert!(saved.is_ok(), "save must succeed");
     let loaded = store.load_secret(&device);
-    assert!(loaded.is_ok(), "load must succeed");
-    let Ok(Some(secret)) = loaded else {
-        return;
-    };
+    let secret = loaded.unwrap().unwrap();
     assert_eq!(secret.bytes(), "pairing-secret-value".as_bytes());
 }
 
@@ -346,10 +343,7 @@ fn device_auth_file_renders_canonical_json() {
             .is_ok()
     );
     let raw = std::fs::read(&path);
-    assert!(raw.is_ok(), "rendered file must be readable");
-    let Ok(raw) = raw else {
-        return;
-    };
+    let raw = raw.unwrap();
     assert!(
         raw.starts_with(b"{\"devices\":{"),
         "rendering keeps the single-section shape"
@@ -376,15 +370,10 @@ fn device_auth_reads_pre_serde_documents() {
     let written = std::fs::write(&path, fixture);
     assert!(written.is_ok(), "fixture setup must succeed");
     let store = open_device_auth_store(&path);
-    let Some(device) = crate::auth_file::parse_device_key("123e4567-e89b-12d3-a456-426614174000")
-    else {
-        return;
-    };
+    let device =
+        crate::auth_file::parse_device_key("123e4567-e89b-12d3-a456-426614174000").unwrap();
     let loaded = store.load_secret(&device);
-    assert!(loaded.is_ok(), "old shape must keep parsing");
-    let Ok(Some(secret)) = loaded else {
-        return;
-    };
+    let secret = loaded.unwrap().unwrap();
     assert_eq!(secret.bytes(), &[0x00]);
 }
 
@@ -400,10 +389,7 @@ fn device_auth_open_tightens_lax_permissions() {
     assert!(lax.is_ok(), "fixture setup must succeed");
     let store = open_device_auth_store(&path);
     let meta = std::fs::metadata(&path);
-    assert!(meta.is_ok(), "metadata must be readable");
-    let Ok(meta) = meta else {
-        return;
-    };
+    let meta = meta.unwrap();
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     let loaded = store.load_secret(&DeviceId(RawId::new()));
     assert!(matches!(loaded, Ok(None)));
@@ -419,10 +405,7 @@ fn device_auth_saved_file_is_owner_only() {
     let saved = store.save_secret(&DeviceId(RawId::new()), "phone", "pairing-secret");
     assert!(saved.is_ok(), "save must succeed");
     let meta = std::fs::metadata(&path);
-    assert!(meta.is_ok(), "metadata must be readable");
-    let Ok(meta) = meta else {
-        return;
-    };
+    let meta = meta.unwrap();
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
 }
 
@@ -443,10 +426,7 @@ fn device_auth_delete_removes_only_the_target() {
     let missing = store.load_secret(&first);
     assert!(matches!(missing, Ok(None)));
     let kept = store.load_secret(&second);
-    assert!(kept.is_ok(), "other device must survive the delete");
-    let Ok(Some(secret)) = kept else {
-        return;
-    };
+    let secret = kept.unwrap().unwrap();
     assert_eq!(secret.bytes(), "second-secret".as_bytes());
     assert!(store.delete_for(&first).is_ok());
     assert!(store.delete_for(&DeviceId(RawId::new())).is_ok());
@@ -465,10 +445,7 @@ fn device_auth_second_save_rotates_the_secret() {
     assert!(store.save_secret(&device, "phone", "first-secret").is_ok());
     assert!(store.save_secret(&device, "phone", "second-secret").is_ok());
     let loaded = store.load_secret(&device);
-    assert!(loaded.is_ok(), "load must succeed");
-    let Ok(Some(secret)) = loaded else {
-        return;
-    };
+    let secret = loaded.unwrap().unwrap();
     assert_eq!(secret.bytes(), "second-secret".as_bytes());
 }
 
@@ -487,10 +464,7 @@ fn device_auth_persists_across_store_instances() {
     drop(first);
     let second = open_device_auth_store(&path);
     let loaded = second.load_secret(&device);
-    assert!(loaded.is_ok(), "load must succeed");
-    let Ok(Some(secret)) = loaded else {
-        return;
-    };
+    let secret = loaded.unwrap().unwrap();
     assert_eq!(secret.bytes(), "pairing-secret-value".as_bytes());
 }
 
@@ -567,10 +541,7 @@ mod env_credential_store_tests {
     fn store_with_bearer_rejects_other_providers() {
         let store = EnvCredentialStore;
         let outcome = store.with_bearer(&other_cred(), str::len);
-        assert!(outcome.is_err());
-        let Err(CredentialTechnicalError::StorageUnavailable { reason }) = outcome else {
-            return;
-        };
+        let CredentialTechnicalError::StorageUnavailable { reason } = outcome.unwrap_err();
         assert_eq!(reason, "env credential missing");
     }
 }

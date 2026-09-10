@@ -15,16 +15,6 @@
 //! Host. Unknown-field tolerance therefore comes free from the `ene-api`
 //! DTOs, not from any logic here.
 
-#![cfg_attr(
-    test,
-    allow(
-        clippy::expect_used,
-        clippy::unwrap_used,
-        clippy::panic,
-        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
-    )
-)]
-
 use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::payload::WirePayload;
 use serde::{Deserialize, Serialize};
