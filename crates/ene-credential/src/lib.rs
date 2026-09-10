@@ -1000,10 +1000,9 @@ fn remove_best_effort(tmp: &Path) {
 // Renders the whole document in one canonical shape: entries ordered by
 // device key (`BTreeMap` iteration), no whitespace, trailing newline.
 // Struct field order fixes the entry key order, so the rendering the doc
-// comment on [`FileDeviceAuthStore`] shows is exact. Rendering goes through
-// `serde_json` — one JSON implementation for both directions instead of a
-// hand-rolled renderer. The `Result` is propagated rather than unwrapped:
-// a custody file must never silently fall back to a default document.
+// comment on [`FileDeviceAuthStore`] shows is exact. `serde_json` is the one
+// JSON implementation for both directions; a render failure is reported,
+// never defaulted.
 fn render_device_auth_file(
     entries: &BTreeMap<String, StoredDeviceAuth>,
 ) -> Result<String, CredentialTechnicalError> {
@@ -1406,27 +1405,19 @@ mod tests {
         ));
     }
 
-    fn fresh_tempdir() -> Option<tempfile::TempDir> {
-        let temp = tempfile::tempdir();
-        assert!(temp.is_ok(), "tempdir must be available");
-        temp.ok()
+    fn fresh_tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("tempdir must be available")
     }
 
-    fn open_device_auth_store(path: &std::path::Path) -> Option<FileDeviceAuthStore> {
-        let opened = FileDeviceAuthStore::open(path);
-        assert!(opened.is_ok(), "device-auth store must open");
-        opened.ok()
+    fn open_device_auth_store(path: &std::path::Path) -> FileDeviceAuthStore {
+        FileDeviceAuthStore::open(path).expect("device-auth store must open")
     }
 
     #[test]
     fn device_auth_roundtrip_preserves_secret_bytes() {
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
-        let Some(store) = open_device_auth_store(&path) else {
-            return;
-        };
+        let store = open_device_auth_store(&path);
         let device = DeviceId(RawId::new());
         let saved = store.save_secret(&device, "phone", "pairing-secret-value");
         assert!(saved.is_ok(), "save must succeed");
@@ -1440,13 +1431,9 @@ mod tests {
 
     #[test]
     fn device_auth_missing_file_loads_none_and_missing_parent_fails_open() {
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
-        let Some(store) = open_device_auth_store(&path) else {
-            return;
-        };
+        let store = open_device_auth_store(&path);
         let loaded = store.load_secret(&DeviceId(RawId::new()));
         assert!(matches!(loaded, Ok(None)));
         let nested = temp.path().join("no-such-dir").join("device-auth.json");
@@ -1500,16 +1487,12 @@ mod tests {
             keyed.clone() + "}]",
             duplicate_key,
         ];
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
         for fixture in fixtures {
             let written = std::fs::write(&path, &fixture);
             assert!(written.is_ok(), "fixture setup must succeed");
-            let Some(store) = open_device_auth_store(&path) else {
-                return;
-            };
+            let store = open_device_auth_store(&path);
             let device = DeviceId(RawId::new());
             assert!(
                 store.load_secret(&device).is_err(),
@@ -1524,13 +1507,9 @@ mod tests {
 
     #[test]
     fn device_auth_file_renders_canonical_json() {
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
-        let Some(store) = open_device_auth_store(&path) else {
-            return;
-        };
+        let store = open_device_auth_store(&path);
         let first = DeviceId(RawId::new());
         let second = DeviceId(RawId::new());
         assert!(store.save_secret(&first, "phone", "first-secret").is_ok());
@@ -1560,20 +1539,16 @@ mod tests {
 
     #[test]
     fn device_auth_reads_pre_serde_documents() {
-        // Shape emitted by the retired hand-rolled renderer: field order and
-        // escape sequences must keep parsing after the serde migration.
+        // Same document shape as earlier releases (field order and escape
+        // sequences): existing custody files must keep parsing.
         let fixture = "{\"devices\":{\"123e4567-e89b-12d3-a456-426614174000\":\
             {\"secret_hex\":\"00\",\"descriptor\":\"a\\\"b\\\\nc✓\",\
             \"paired_at\":\"2026-09-08T12:00:00+09:00\"}}}\n";
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
         let written = std::fs::write(&path, fixture);
         assert!(written.is_ok(), "fixture setup must succeed");
-        let Some(store) = open_device_auth_store(&path) else {
-            return;
-        };
+        let store = open_device_auth_store(&path);
         let Some(device) = super::parse_device_key("123e4567-e89b-12d3-a456-426614174000") else {
             return;
         };
@@ -1589,17 +1564,13 @@ mod tests {
     #[test]
     fn device_auth_open_tightens_lax_permissions() {
         use std::os::unix::fs::PermissionsExt;
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
         let written = std::fs::write(&path, "{\"devices\":{}}");
         assert!(written.is_ok(), "fixture setup must succeed");
         let lax = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
         assert!(lax.is_ok(), "fixture setup must succeed");
-        let Some(store) = open_device_auth_store(&path) else {
-            return;
-        };
+        let store = open_device_auth_store(&path);
         let meta = std::fs::metadata(&path);
         assert!(meta.is_ok(), "metadata must be readable");
         let Ok(meta) = meta else {
@@ -1614,13 +1585,9 @@ mod tests {
     #[test]
     fn device_auth_saved_file_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
-        let Some(store) = open_device_auth_store(&path) else {
-            return;
-        };
+        let store = open_device_auth_store(&path);
         let saved = store.save_secret(&DeviceId(RawId::new()), "phone", "pairing-secret");
         assert!(saved.is_ok(), "save must succeed");
         let meta = std::fs::metadata(&path);
@@ -1633,13 +1600,9 @@ mod tests {
 
     #[test]
     fn device_auth_delete_removes_only_the_target() {
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
-        let Some(store) = open_device_auth_store(&path) else {
-            return;
-        };
+        let store = open_device_auth_store(&path);
         let first = DeviceId(RawId::new());
         let second = DeviceId(RawId::new());
         assert!(store.save_secret(&first, "phone", "first-secret").is_ok());
@@ -1660,22 +1623,16 @@ mod tests {
         assert!(store.delete_for(&first).is_ok());
         assert!(store.delete_for(&DeviceId(RawId::new())).is_ok());
         let absent = temp.path().join("absent.json");
-        let Some(absent_store) = open_device_auth_store(&absent) else {
-            return;
-        };
+        let absent_store = open_device_auth_store(&absent);
         assert!(absent_store.delete_for(&first).is_ok());
         assert!(!absent.exists(), "delete must not create the file");
     }
 
     #[test]
     fn device_auth_second_save_rotates_the_secret() {
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
-        let Some(store) = open_device_auth_store(&path) else {
-            return;
-        };
+        let store = open_device_auth_store(&path);
         let device = DeviceId(RawId::new());
         assert!(store.save_secret(&device, "phone", "first-secret").is_ok());
         assert!(store.save_secret(&device, "phone", "second-secret").is_ok());
@@ -1689,24 +1646,18 @@ mod tests {
 
     #[test]
     fn device_auth_persists_across_store_instances() {
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
         let device = DeviceId(RawId::new());
         let descriptor = "phone \"pro\"\nline2\t✓";
-        let Some(first) = open_device_auth_store(&path) else {
-            return;
-        };
+        let first = open_device_auth_store(&path);
         assert!(
             first
                 .save_secret(&device, descriptor, "pairing-secret-value")
                 .is_ok()
         );
         drop(first);
-        let Some(second) = open_device_auth_store(&path) else {
-            return;
-        };
+        let second = open_device_auth_store(&path);
         let loaded = second.load_secret(&device);
         assert!(loaded.is_ok(), "load must succeed");
         let Ok(Some(secret)) = loaded else {
@@ -1717,13 +1668,9 @@ mod tests {
 
     #[test]
     fn device_auth_debug_carries_no_secret_or_descriptor() {
-        let Some(temp) = fresh_tempdir() else {
-            return;
-        };
+        let temp = fresh_tempdir();
         let path = temp.path().join("device-auth.json");
-        let Some(store) = open_device_auth_store(&path) else {
-            return;
-        };
+        let store = open_device_auth_store(&path);
         let marker = "marker-secret-9d3f41";
         let descriptor = "marker-descriptor-6be2";
         assert!(

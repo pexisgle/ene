@@ -136,10 +136,8 @@ impl core::fmt::Debug for SubmitClientInputCandidate {
 
 /// Which round an intake candidate wants to join.
 ///
-/// One value, one meaning: unlike the retired `Option<RoundId>` (where
-/// `None` meant both "join the open round" and "mint a fresh one"), each
-/// variant names exactly one intention, so replay fingerprints and round
-/// projections built downstream rest on a single meaning source.
+/// Each variant names exactly one intention, so replay fingerprints and
+/// round projections built downstream rest on a single meaning source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoundIntent {
     /// Join the matching open round; mint a fresh one when none matches.
