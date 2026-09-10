@@ -10,9 +10,7 @@
 
 他の Step 12 文書の意味 owner と受渡しも確定済み contract として利用する。[個体継続・対話調整 / 作業遂行・実行管理 / 経験に基づく認識・学習](companion-task-learning.md)（以下、個体・作業・学習）の H-1〜H-10、[権限・利用制約 / 認証秘密の保護 / Action実行・拡張受入 / 推論利用](permission-credential-execution-inference.md)（以下、権限・実行クラスタ）の K-1〜K-12、[Client接続・存在調停 / Owner入出力・体験提示 / 共有観測・関連付け](client-presence-io-observation.md)（以下、接続・提示・観測）の X-1〜X-10、[内部データ保全・消去](data-preservation-erasure.md)（以下、保全・消去）の DP-1〜DP-8 を参照する。
 
-新しい semantic owner、第二の正本、万能Character Manager / Package Service / Distribution Coordinator、統一character state machine、共通package layerを追加しない。
-
-`subsystems.md` で確定したCharacterの非責務を維持する。個体の成長や現在状態の更新、Bodyの描画、音声推論、Skillの経験による改善、外部原本の所有、3D・Voice・高度なSkill制作環境は担わない。推奨Skillの同梱は実行の許可ではない。
+Characterの非責務は[Subsystem Decomposition](../architecture/subsystems.md)のとおりであり、本書は新しいsemantic ownerや第二の正本（万能Character Manager / Package Service / Distribution Coordinator、統一character state machine、共通package layer）を追加しない。
 
 ## 1. 選定理由
 
@@ -60,16 +58,7 @@ Characterのrevisionは配布可能な静的構成についての正本であり
 
 ### 3.2 Characterが所有しない state（既存ownerに残る）
 
-本節の列挙はSO第4節の再掲ではなく、Characterが取得しないことの確認である。**本節のすべてを除いても、各domain stateのsemantic ownerを一意に説明できる。**
-
-- Companionの同一性・活動状態・適用済み構成：個体調整（SO 4.2）。生成・停止・再開・削除はOwnerの操作に基づき、LLM応答の成否に従属させない。部品内容の正本はCharacter、適用関係の正本は個体調整である。
-- 会話の参加・継続、Historyと非会話活動記録・evidenceの意味、進行中の意味判断、未伝達事項と報告状況：個体調整（SO 4.3・4.4）。入出力roundの実際は入出力・提示に残る。
-- Summary・根拠関係・source参照、Memory現在認識・重要度・scope・過去revision、内部Skill・学習revision・実行結果、Relationship、Companion Stateの一時状態と持続的傾向：認識・学習（SO 4.5〜4.9）。scope意味は認識・学習、決定後の強制は権限・制約と各利用箇所に残る。
-- Task目的・担当・進捗・結果とTask context、委任と一時Agentの実行対応、Workspace関連付け・保存先・内部copy・中間fileの意味、Schedule設定・到来した回・各回のTask：作業（SO 4.10・4.11・4.13・4.14）。外部実体はOwnerまたは外部systemの所有物である。
-- 接続の事実・active帰属、観測設定・観測候補、自発性の設定・抑制、一般設定・Body・Voiceの出力と一時状態：接続・存在・共有観測・個体調整・入出力・提示の各owner（SO 4.15〜4.17）。
-- Provider接続情報・能力情報と割当の解決、Rule・Permission・同意・禁止・上限と現在の有効性、利用量・費用・資源の記録、Credential値・用途・参照元・認証状態：推論・権限・制約・認証秘密の各owner（SO 4.18〜4.21）。
-- MCP・Pluginの接続 / 受入設定と外部実行状態、Audit・診断・Debug capture、保持方針・全域操作の状況・backup設定とcopy：実行・拡張・保全・消去の各owner（SO 4.22〜4.24）。
-- 外部Workspace実体・案内file・Skill・成果物、外部Package・Skill原本、Provider / MCP側固有状態：Ownerまたは外部systemの所有物である。eneは許されたActionで利用する。
+3.1以外のdomain stateはSO第4節の各ownerに残り、Characterは取得しない。特にCompanionの同一性・活動状態・適用済み構成は個体調整（SO 4.2）、経験由来のSummary・Memory・Skill・Relationship・Companion Stateは認識・学習（SO 4.5〜4.9）であり、部品内容の正本はCharacter、適用関係の正本は個体調整である。
 
 個体の理解・振る舞いには実際のExperienceから形成した継続状態をCharacter初期設定より優先する（SO 4.2）。個体調整が会話で訂正を受け取ることは、学習状態の直接上書きを意味しない。ExperienceによるCompanion Stateの形成はCharacter Packageの静的設定そのものを書き換えない。
 
@@ -228,37 +217,27 @@ Cancel・切断から外部作用の取消・不存在を推測せず、不明�
 
 ## 7. Step 11 contractへの参加
 
+各契約の一般条件は第0節に挙げたcritical-area文書が持ち、本節では再掲しない。本節はCharacterが供給・参加する固有内容だけを記す。
+
 ### 7.1 Context Assemblyへの参加
 
-- Character：静的内容・revision・差分提示・provenanceの提供範囲と意味を持つ。用途確立に必要な対応（対象Character・revision・部品・適用先Companion・Owner選択・継続関係・期待利用先）を供給する。引用を含むOwner入力の全体を無条件にOwner命令とせず、package内記述をOwner管理意図にしない。
-- 共通：参照・変換・実送信・結果の保存・提示・作用は別の利用境界である。事前の取得成功・推論成功・validation成功から後段の権限を作らない。本文中の文字列だけで強制側の状態を変えない。分離を確認できない派生物は混合元の制限を免れない。Provider適応では論理的選択方針を維持し、必須の意味が表現できなければ不足を返す。cache・session・Client経路の再利用でも範囲・用途・現在性を確認し、hitを理由に制約確認を省かない。Permission解釈・消去探索の補助推論も例外にせず、審査対象Actionの許可・実行を先行条件にしない。
-- 処理中context・検索派生物・cache・Client / 拡張の一時copy・戻り得る結果を含めて消去へ参加できるよう、sourceを消した後に依存関係も消失し遅延結果を識別できなくなる実装を不可とする。必要な関係は本文を保持せず維持できるようにする。
+- 静的内容・revision・差分提示・provenanceの提供範囲と意味を持つ。用途確立に必要な対応（対象Character・revision・部品・適用先Companion・Owner選択・継続関係・期待利用先）を供給する。引用を含むOwner入力の全体を無条件にOwner命令とせず、package内記述をOwner管理意図にしない。validation成功から後段の権限を作らない。
 
 ### 7.2 Action Executionへの参加
 
-- Character：import / export・適用供給のための許された外部file作用を、権限・制約に従って実行・拡張へ要求する。通常の内部保存をすべて外部Actionに再分類しない。出力対象の意味・選択はCharacter、外部作用は実行・拡張に残る。
-- 共通：認可判断は判断対象と実利用の対応であり、記録と生きた許可は別である。開始前に現在条件と実対象解決を成立させ、重要な変更では再評価する。無関係な変更での再承認は要求しない。委任・経路変更は元のTask / Owner意図 / Permission / Workspace / Client境界を広げない。生成content・Tool UI入力・sandbox例外・package内記述から権限を作らない。Cancel・steering・失効後の遅延到着は元Action・Taskへ帰属させ、古い承認での解除・旧結果の新目的への自動採用・後続の自動開始をしない。作用不明は粘着的に保持し、自動再実行・自動replayしない。retry・再開は新しい試行として現在条件で扱い、不明試行の再実行は重複riskを示したOwner判断を必要とする。試行と作用・判断・実対象・段階・確定度・保留の対応を保持・区別できなければ成功・未実行と推定しない。報告・監査・復旧で確定度を強めない。消去対象本文を作用記録で残さない。
+- import / export・適用供給のための許された外部file作用を、権限・制約に従って実行・拡張へ要求する。通常の内部保存をすべて外部Actionに再分類しない。出力対象の意味・選択はCharacter、外部作用は実行・拡張に残る。package内記述から権限を作らない。
 
 ### 7.3 Targeted Deletionへの参加
 
-各 semantic ownerは自分の保持・利用範囲について参加し、保全・消去は成立を調整する。通常ownerは正当な全域消去への参加を拒めず、保全・消去も任意の通常変更権を取得しない。対象を復元できる内部state・過去根拠・派生物・一時data・処理中利用を持つ責務は、列挙の有無にかかわらず参加する。
-
-- Character：静的revision・imported package copy / provenance・差分提示・export確認表示の該当情報を参加させる。通常は経験由来の対象情報を保持しないが、対象情報を復元できる内容を持つ場合は同じ参加原則に従う。列挙漏れを不参加の理由にしない。原本保護・revision提示は対象範囲の消去を免除しない。
-- 共通：消去要求の同一性（Privacy / Security目的と通常忘却等の区別・対象記述・消去区間・完了後の新規提供との境界・参加対応付け）を保つ。機械的条件は必須・LLM非依存、意味的条件は補助・完全性なし、既知依存の追跡は免除されない。新規利用は対象範囲で禁じ、進行中はbest-effortで扱い、遅延結果は用途別受入で消去条件へ照合する。消去区間の再到着・再生成は同じ対象とし、旧由来の遅延結果と完了後の新規提供は由来・対応で区別する。cache・session・Client copyの再利用・復帰で対象を戻さない。未完了・保留・再保存防止はHostで保全し、再起動・再接続・restoreを跨ぐ。確認不能を成功にせず、局所完了を全域完了にしない。保持すべき事実と保持してはいけない対象本文を区別し、完了記録・Auditを復元源にしない。
-- 消去のための推論にもその推論自身の割当同意・認証用途・費用制限を適用し、審査対象Actionの許可・実行を先行条件にしない。推論不可なら意味判断の不足を返し、第一者の停止・拒否・管理・機械的検証を塞がない。
-
-指定文字列の機械的検索・削除・残存検証をLLMへ依存させない。意味的同一情報の特定にはLLMを利用できるが完全検出を保証しない。
+- 静的revision・imported package copy / provenance・差分提示・export確認表示の該当情報を参加させる。通常は経験由来の対象情報を保持しないが、対象情報を復元できる内容を持つ場合は同じ参加原則に従う。列挙漏れを不参加の理由にしない。原本保護・revision提示は対象範囲の消去を免除しない。
 
 ### 7.4 Client Presence Transitionへの参加
 
-- Character：適用供給・表示資材の対応付けに、対象Character・revision・部品・適用先Companion・round・試行との関係を供給する。Host authoritative帰属とClient側一時表現・入力・結果が主張する帰属との対応を維持し、Client copyでHostを上書きせず、未送信操作を自動queueにしない。
-- 共通：現在のpresenceはHostが管理する個体ごとの帰属記録だけがauthoritativeである。Client表示・過去記録・hint・一時copy・復旧先記録・Provider残存は根拠にならない。presence・Host継続・接続・許可は別の意味である。切替区間は旧・新のいずれも新規開始の根拠にしない。二重presence・旧一時のcanonical化・未終了作用の自動継続をしない。移動・切断中の到着物は元帰属・元round・元試行へ対応付け、用途別に受け入れる。Host再起動後のpresence復旧とround / Computer Use / Task / Actionの再実行・再開は別の条件である。前者は元Clientへの自動復旧（利用不能ならactiveなし）、後者は自動replay禁止・明示再開である。Computer Useは現在presence限定・安全な区切りまでの遅延・disconnect後不明・別Client / Hostでの自動再実行禁止を維持する。存在は許可を意味しない。
+- 適用供給・表示資材の対応付けに、対象Character・revision・部品・適用先Companion・round・試行との関係を供給する。Host authoritative帰属とClient側一時表現・入力・結果が主張する帰属との対応を維持し、Client copyでHostを上書きせず、未送信操作を自動queueにしない。
 
 ### 7.5 Backup / Restoreへの参加
 
-- Character：静的構成・revision・imported package copy / provenance・差分提示の対応を復旧可能な参照対応で提供する。外部Package原本を辿って収集しない。適用関係の対応は個体調整が提供し、Characterは内容側の対応を供給する。派生物・一時dataは独立復元対象にしない。
-- 共通：復元対象は現在のCredential store secretを除く対象内部dataの全置換であり、旧liveとのmergeではない。backup copyは正本ではなく、置換成立後に初めて復元内容がHost正本になる。現在のCredential store・外部現実・現在の到達性・未完了の保留は維持され、復元参照の存在から巻き戻したとは扱わない。復元されたassignment / consent / Rule等だけで現在利用・自動処理を開始しない。復元成立・一括有効化・現在条件を別に満たす。一件ずつの再承認は要求しないが、Deny・cap・認証不足・不明を無視しない。staleなPermission・Provider・Client・作用結果・外部参照を現在事実にしない。dangling参照は未解決とし、不明は不明のまま保持し、自動replayしない。旧live要求・結果・Client copyを復元正本へ混ぜない。用別受入で由来を区別する。単一正本・非混合・権限先行復活の禁止・成功表示の条件・再起動時の保全を守る。
-- 旧backupの明示restoreによる復活は自動再形成の例外ではなく別操作である。Restore前には削除済み情報や旧Rule・同意・Scheduleが戻り得ることを説明する。戻った情報は新しい正本として扱い、自動的に再消去・自動利用のいずれもしない。完了記録・Audit・Owner説明自体へ対象private本文を再保存しない。未完了の消去とbackup / restoreが重なる場合は、制約を無視した正常・即実行可能なcopyを作らず、未完了・保留・再保存防止をHostで保全する。
+- 静的構成・revision・imported package copy / provenance・差分提示の対応を復旧可能な参照対応で提供する。外部Package原本を辿って収集しない。適用関係の対応は個体調整が提供し、Characterは内容側の対応を供給する。派生物・一時dataは独立復元対象にしない。
 
 ## 8. boundaryを越える際に保持すべき意味
 
@@ -327,29 +306,23 @@ requirements・上位architecture・critical-area契約・他のSubsystem設計�
 | package内記述の制御非昇格 | package内のPermission変更らしい記述・Credential要求・system control変更・外部実行指示が、Permission・Credential・Rule・同意・cap・Control planeを直接変更しない。validation成功を許可にしない。意味判断と決定論的強制の境界を保つ。 | CD-4・CD-7、第7.1・7.2節。DR-02、CC-01、SC-03を維持。 |
 | Character削除と既存Companion | 共有Character削除が既存Companionの経験・記録を削除せず、最後の適用snapshotと経験で同じ個体として継続する。必要な由来resource喪失はdanglingとして未解決にし、黙った置換・replayをしない。新規作成を不可にする。 | CD-7、第5節。SO 4.1・4.2・6.3、SC-06を維持。 |
 | Companion削除とCharacter残存 | 個体削除が固有Summary・Companion scope・Skill過去revision・Companion State・主体 / 相手Relationship・担当Scheduleを対象とし、History・活動記録・Task記録・Global・共有Summary・外部file・Character静的を巻き込まない。 | CD-7、第5節。RF-06、SO 6.3、CC-05を維持。 |
-| Targeted Deletionとの交差 | 静的revisionが対象情報を復元できる場合は参加し、通常の編集・revision・適用を消去にしない。完了後のOwner新規提供・外部copy消去保証と分ける。 | 第7.3節。RF-07、SO 6.4、CC-05を維持。 |
-| 通常History整理・retentionとの交差 | 通常削除・明示cleanupを形成済み・Summaryへcascadeさせず、既定OFF・明示opt-inを守る。Character静的と経験のlifecycleを混同しない。 | CD-7、第5・7.5節。SO 4.24・6.5、CC-05を維持。 |
-| Backup / Restoreとの交差 | 内部Character・適用対応を復旧可能な対応で含め、外部原本を収集せず、secret・外部実体を除外する。全置換・現在維持・単一正本・非混合・権限先行復活の禁止・復元後保留・一括有効化を守る。staleを現在事実にしない。旧liveを混ぜない。 | 第7.5節。RF-08、SO 6.5・7、CC-01・03〜05を維持。 |
+| Targeted Deletionとの交差 | 静的revisionが対象情報を復元できる場合は参加し、通常の編集・revision・適用を消去にしない。完了後のOwner新規提供・外部copy消去保証と分ける。 | 第7.3節、Targeted Deletion 6.2・8.3。RF-07、SO 6.4、CC-05を維持。 |
+| 通常History整理・retentionとの交差 | 通常削除・明示cleanupを形成済み・Summaryへcascadeさせず、既定OFF・明示opt-inを守る。Character静的と経験のlifecycleを混同しない。 | CD-7、第5節。SO 4.24・6.5、CC-05を維持。 |
+| Backup / Restoreとの交差 | 内部Character・適用対応を復旧可能な対応で含め、外部原本を収集せず、secret・外部実体を除外する。全置換・現在維持・単一正本・非混合・権限先行復活の禁止・復元後保留・一括有効化を守る。staleを現在事実にしない。旧liveを混ぜない。 | 第7.5節、Backup-Restore 3〜5・7。RF-08、SO 6.5・7、CC-01・03〜05を維持。 |
 | Resetとの交差 | 設定Resetの保護対象と全データResetの外部除外を守る。旧処理・一時copyから戻さない。 | CD-7、第5節。SO 6.5・7を維持。 |
-| 移動・切断・再起動との交差 | 適用供給・表示資材の対応を帰属・round・試行へ対応付け、Client copyでHostを上書きせず、未送信操作を自動queueにしない。presence復旧とTask再開・Action再実行を分離する。 | 第6・7.4節。RF-04・05、CC-03・04を維持。 |
-| 補助推論・費用不明との競合 | 適用・validation・消去探索の推論が不通・費用不足でも、機械的検証・停止・拒否・管理を塞がない。不足を管理面へ返す。 | 第6・7.1節。Context 5.2、CC-06を維持。 |
-| 監査・報告 | 確定度を強めず、本文・秘密の別保管庫を作らない。監査記録を再生・自動実行の入力にしない。 | 第7.2節。CC-07を維持。 |
+| 移動・切断・再起動との交差 | 適用供給・表示資材の対応を帰属・round・試行へ対応付け、Client copyでHostを上書きせず、未送信操作を自動queueにしない。presence復旧とTask再開・Action再実行を分離する。 | 第6・7.4節、Presence Transition 8.3。RF-04・05、CC-03・04を維持。 |
+| 補助推論・費用不明との競合 | 適用・validation・消去探索の推論が不通・費用不足でも、機械的検証・停止・拒否・管理を塞がない。不足を管理面へ返す。 | Context 5.2、Targeted Deletion 5.4、CC-06を維持。 |
 
-Cross-cutting契約との照合結果は次のとおりである。
+CC-01〜CC-07に対して維持する一般的な性質は各critical-area文書の横断検証と同一である。本書が加えるのは次の点である。
 
-| 契約 | 詳細化によって維持する性質 |
-|---|---|
-| CC-01 | package内記述・生成content・復元記録から権限を新設しない。適用・import・exportの由来と帰属成立・Action許可を区別する。既存依頼で足りる場合の再確認を増やさない。復元Rule・同意をtriggerにしない。 |
-| CC-02 | 参照・変換・共有・送信・保存・派生物・Client経路へ適用関係・scope・消去条件を適用する。旧適用・旧revisionのcontext・cache・sessionを新適用で無条件に再利用しない。Credentialは別経路で非露出を維持する。通常Learningのscope形成責任は認識・学習に残す。 |
-| CC-03 | 過去の適用の正しさと現在の用途への有効性を分離する。遅延結果の用途別受入により単一valid判定へownerを集めない。旧由来と完了後の新規提供・明示restoreを区別する。 |
-| CC-04 | Client依存だけを現在帰属に結び付け、Stop・Cancel・再起動・restore保留を区別する。解除一つで他の禁止・保留を消さない。自動replay・自動復帰の拡大をしない。 |
-| CC-05 | 保持・利用先が派生物・遅延結果まで消去・復元へ参加する。原記録削除・round終了・局所完了を全域完了にしない。外部copy消去を内部完了に含めない。目的別lifecycleを保つ。Character静的と経験のlifecycleを混同しない。 |
-| CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task・適用完了待ちにしない。機械的検証をLLM待ちにしない。 |
-| CC-07 | 受付・受理・作用・記録保存・Task達成・報告を別の事実とし、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。適用供給済みを適用済み・提示済みにしない。 |
+- CC-01：package内記述・validation成功から権限を新設せず、適用・import・exportの由来と帰属成立・Action許可を区別する。
+- CC-02：旧適用・旧revisionのcontext・cache・sessionを新適用で無条件に再利用しない。
+- CC-03：過去の適用の正しさと現在の用途への有効性を分離する。
+- CC-05：Character静的と経験のlifecycleを混同しない。
+- CC-06：制御・保全経路を適用完了待ちにしない。
+- CC-07：適用供給済みを適用済み・提示済みにしない。
 
-本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Character Manager・統一character state machine・共通package layerを導入しない。通常History保持、Companion削除、targeted deletion、backup / restore・ResetはSO・DRの異なるlifecycleを維持する。
-
-他のSubsystem設計（個体・作業・学習、権限・実行クラスタ、接続・提示・観測、保全・消去）との照合では、静的・適用・経験・制御・秘密・作用・帰属・保全の間に新しいsemantic ownerや第二の正本を生まない。静的内容・revisionはCharacter、適用関係は個体調整、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、作用確定度は実行・拡張、帰属は接続・存在、round・提示は入出力・提示、対象・時機・routingは共有観測、全域成立は保全・消去に残り、本書のCD-1〜CD-7はその受渡しの対応付けである。scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持、旧backup交差の各契約は各文書で同一である。
+他のSubsystem設計との照合では、各意味ownerはSO第4節のまま残り、本書のCD-1〜CD-7はその受渡しの対応付けである。scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持、旧backup交差の各契約は各文書で同一である。
 
 重点確認5項目の結果は次のとおりである。
 

@@ -329,19 +329,12 @@ Companion削除は個体固有の現在状態・学習状態等の削除であ�
 | 全Flow 補助推論の失敗・費用不明 | 消去の意味探索・検証の推論が不通・費用不足。機械的消去・検証を推論待ちにせず、不足を管理面へ返す。停止・拒否・機械的検証は継続可能。 | 5.4。Context 5.2、CC-06を維持。 |
 | 全Flow Audit・報告 | 消去の完了説明・Auditが対象本文を含まない。確定度を強めない。監査記録を再生・自動実行の入力にしない。 | 9。Action 9、CC-07を維持。 |
 
-Cross-cutting契約との照合結果は次のとおりである。
+CC-01〜CC-07の一般条件は[Cross-cutting Design](../architecture/cross-cutting.md)が持つ。本書が加えるのは次の点である。
 
-| 契約 | 詳細化によって維持する性質 |
-|---|---|
-| CC-01 | 消去の目的・対象と通常の意味変更・承認を区別する。生成contentから消去解除・権限新設をしない。既存依頼で足りる場合の再確認を増やさない。 |
-| CC-02 | 参照・変換・共有・送信・保存・派生物・Client経路へ消去条件を適用する。Credentialは別経路で非露出を維持する。通常Learningのscope形成責任は維持する。 |
-| CC-03 | 削除前の根拠と完了後の新規提供、過去の正しさと現在有効性を分離する。遅延結果の用途別受入により単一valid判定へownerを集めない。 |
-| CC-04 | Client依存だけを現在帰属に結び付け、Stop・Cancel・再起動・restore保留を区別する。解除一つで他の禁止・保留を消さない。自動replayしない。 |
-| CC-05 | 保持・利用先が派生物・遅延結果まで消去へ参加する。原記録削除・context終了・局所完了を全域完了にしない。外部copy消去を内部完了に含めない。 |
-| CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task待ちにしない。機械的消去をLLM待ちにしない。 |
-| CC-07 | transport・Tool・Task・報告・監査の確定度を分け、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。 |
-
-本書はsemantic owner、Host／Client配置、trust／failure boundary、lifecycle、permission／consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Deletion Managerを導入しない。通常History保持、Companion削除、targeted deletion、backup／restoreはSO・DRの異なるlifecycleを維持する。
+- CC-01：消去の目的・対象と通常の意味変更・承認を区別する。生成contentから消去解除をしない。
+- CC-03：削除前の根拠と完了後の新規提供を分離する。
+- CC-05：原記録削除・context終了・局所完了を全域完了にせず、外部copy消去を内部完了に含めない。
+- CC-06：機械的消去をLLM待ちにしない。
 
 ## 11. 本書が固定する契約と残す Design Freedom
 
