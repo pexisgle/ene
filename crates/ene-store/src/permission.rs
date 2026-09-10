@@ -5,13 +5,11 @@ use ene_permission::{
     IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution,
     PermissionTechnicalError, ShortcutIntentOutcome, consent_mark_rev,
 };
-use ene_primitive::WallClockWithTz;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{
-    IntentOutcomeRow, SQL_INSERT_CREDENTIAL_PENDING_IGNORE, SQL_SELECT_CONSENT,
-    SQL_SELECT_CREDENTIAL, SQL_SELECT_INTENT_OUTCOME, credential_pair_is_blank, decode_consent,
+    IntentOutcomeRow, SQL_SELECT_CONSENT, SQL_SELECT_INTENT_OUTCOME, decode_consent,
     decode_intent_outcome_row, encode_u64, insert_decided_row_tx, lock_shared,
     permission_unavailable, replay_or_conflict, select_intent_row_tx,
 };
@@ -262,71 +260,6 @@ impl IntentOutcomeRepository for Store {
                 // `tx` without committing) so the loser changes nothing, and
                 // answer from the winner.
                 Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
-            }
-        })
-        .await
-    }
-
-    async fn request_approval_with_intent(
-        &self,
-        provider: String,
-        label: String,
-        fingerprint: IntentFingerprint,
-    ) -> Result<IntentResolution<IntentOutcomeRecord>, PermissionTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            if credential_pair_is_blank(&provider, &label) {
-                return Err(permission_unavailable(String::from(
-                    "blank credential pair",
-                )));
-            }
-            let requested_text = WallClockWithTz::now().to_rfc3339();
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| permission_unavailable(error.to_string()))?;
-            // Write-once claim first: an existing row decides without touching
-            // credential state.
-            if let Some(stored) =
-                select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
-            {
-                return Ok(replay_or_conflict(stored, &fingerprint));
-            }
-            // One transaction: the pending insert (or usable recheck) plus the
-            // replay row, so the decided snapshot and the state it describes
-            // can never strand apart.
-            let usable: Option<(String, String, String)> = tx
-                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| permission_unavailable(error.to_string()))?;
-            let outcome = if usable.is_some() {
-                IntentOutcome::AppliedAsOneTime
-            } else {
-                tx.execute(
-                    SQL_INSERT_CREDENTIAL_PENDING_IGNORE,
-                    params![provider, label, requested_text],
-                )
-                .map_err(|error| permission_unavailable(error.to_string()))?;
-                IntentOutcome::HeldByOperation
-            };
-            let decided = IntentOutcomeRecord {
-                fingerprint,
-                outcome,
-            };
-            match insert_decided_row_tx(&tx, &decided.fingerprint, &decided.outcome)
-                .map_err(permission_unavailable)?
-            {
-                None => {
-                    tx.commit()
-                        .map_err(|error| permission_unavailable(error.to_string()))?;
-                    Ok(IntentResolution::Decided(decided))
-                }
-                // Lost a cross-process race after deciding: roll back (dropping
-                // `tx` without committing) so the loser changes nothing, and
-                // answer from the winner.
-                Some(winner) => Ok(replay_or_conflict(winner, &decided.fingerprint)),
             }
         })
         .await

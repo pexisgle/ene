@@ -2099,63 +2099,6 @@ async fn concurrent_same_id_assigns_fork_nothing() {
 }
 
 #[tokio::test]
-async fn request_approval_with_intent_decides_atomically() {
-    use ene_permission::{
-        IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository as _,
-        IntentResolution,
-    };
-
-    fn intent(id: &str) -> IntentOutcomeRecord {
-        IntentOutcomeRecord {
-            fingerprint: IntentFingerprint {
-                intent_id: id.to_owned(),
-                kind: String::from("register"),
-                target: String::from("credential:acme:main"),
-                base: String::from("consent-none"),
-                rationale_origin: String::from("management-surface"),
-                rationale_quote: None,
-            },
-            outcome: IntentOutcome::HeldByOperation,
-        }
-    }
-
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let decided = store
-        .request_approval_with_intent(
-            String::from("acme"),
-            String::from("main"),
-            intent("reg-1").fingerprint,
-        )
-        .await;
-    assert!(
-        matches!(
-            decided,
-            Ok(IntentResolution::Decided(ref snapshot))
-                if snapshot.outcome == IntentOutcome::HeldByOperation
-        ),
-        "first registration must hold, got {decided:?}"
-    );
-    let found = store.lookup_intent_outcome("reg-1").await;
-    assert!(
-        matches!(found, Ok(Some(_))),
-        "the held decision must leave its replay row"
-    );
-    let usable = store
-        .request_approval_with_intent(
-            String::from("acme"),
-            String::from("main"),
-            intent("reg-2").fingerprint,
-        )
-        .await;
-    assert!(
-        usable.is_ok(),
-        "repeat registration must decide, got {usable:?}"
-    );
-}
-
-#[tokio::test]
 async fn complete_with_intent_decides_atomically() {
     use ene_permission::{
         ConsentRecord, ConsentRepository as _, ConsentRevision, IntentFingerprint, IntentOutcome,
