@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/ene-primitive", "crates/ene-config", "crates/ene-api", "apps/ene-core", "apps/ene-ctl"]
+members = [
+    "crates/ene-primitive",
+    "crates/ene-config",
+    "crates/ene-api",
+    "apps/ene-core",
+    "apps/ene-ctl",
+]
 # Retired implementation. Never add members under .old/.
 exclude = [".old"]
 resolver = "2"
@@ -8,11 +14,9 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/pexisgle/ene"
 publish = false
 
-# Shared version policy for M1 foundation crates. Add entries only when a
-# second package needs the same dependency (AGENTS.md).
+# External dependency version policy for workspace crates.
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["clock", "serde"] }
 directories = "6"
