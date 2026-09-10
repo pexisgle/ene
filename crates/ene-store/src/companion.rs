@@ -73,9 +73,8 @@ const SQL_SELECT_PENDING: &str = "SELECT undelivered_id, companion_id, source_me
 /// nothing: it is declined like any conflicting reuse, never guessed.
 /// The generation premise stays out of the fingerprint: it is enforced
 /// separately above, so a retry under a newer generation view still
-/// replays instead of conflicting. This replaces the retired `local_id`
-/// pre-check; `local_id` is stored as correspondence metadata only and
-/// is never consulted here. `NULL` command ids carry no replay key and
+/// replays instead of conflicting. `local_id` is stored as
+/// correspondence metadata only and is never consulted here. `NULL` command ids carry no replay key and
 /// never collide. A reused key with a different request answers
 /// [`HistoryAppendOutcome::CommandConflict`] instead: declined without
 /// side effects, never rebound.

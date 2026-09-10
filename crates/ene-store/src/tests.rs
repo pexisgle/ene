@@ -1,8 +1,3 @@
-#![allow(
-    clippy::expect_used,
-    reason = "test fixtures construct validated credential refs"
-)]
-
 use crate::Store;
 use ene_companion::{
     AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
@@ -126,21 +121,12 @@ fn lock_for_test(store: &Store) -> rusqlite::Result<i64> {
 #[tokio::test]
 async fn reopen_is_idempotent_and_seeds_running_companion() {
     let dir = tempfile::tempdir();
-    assert!(dir.is_ok(), "tempdir must open");
-    let Ok(dir) = dir else {
-        return;
-    };
+    let dir = dir.unwrap();
     let path = dir.path().join("store.db");
     let opened = Store::open(&path).await;
-    assert!(opened.is_ok(), "file open must succeed");
-    let Ok(first) = opened else {
-        return;
-    };
+    let first = opened.unwrap();
     let ensured = first.ensure_running_companion().await;
-    assert!(ensured.is_ok(), "ensure must succeed");
-    let Ok(companion) = ensured else {
-        return;
-    };
+    let companion = ensured.unwrap();
     let lifecycle = first.load_lifecycle(companion).await;
     assert!(
         matches!(lifecycle, Ok(Some(CompanionLifecycle::Running))),
@@ -148,15 +134,9 @@ async fn reopen_is_idempotent_and_seeds_running_companion() {
     );
     drop(first);
     let reopened = Store::open(&path).await;
-    assert!(reopened.is_ok(), "reopen must succeed");
-    let Ok(second) = reopened else {
-        return;
-    };
+    let second = reopened.unwrap();
     let ensured_again = second.ensure_running_companion().await;
-    assert!(ensured_again.is_ok(), "re-ensure must succeed");
-    let Ok(same) = ensured_again else {
-        return;
-    };
+    let same = ensured_again.unwrap();
     assert_eq!(same, companion, "seed must be idempotent");
     let ping = lock_for_test(&second);
     assert!(ping.is_ok(), "reopened handle must serve queries");
@@ -164,28 +144,18 @@ async fn reopen_is_idempotent_and_seeds_running_companion() {
 
 #[tokio::test]
 async fn append_message_commits_and_timeline_reads_back() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let appended = store
         .append_message(history_command(companion, generation, "hello history"))
         .await;
-    assert!(appended.is_ok(), "append must succeed");
-    let Ok(outcome) = appended else {
-        return;
-    };
+    let outcome = appended.unwrap();
     assert!(
         matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
         "happy path must commit"
     );
     let loaded = store.load_timeline(companion, None, 10).await;
-    assert!(loaded.is_ok(), "timeline must load");
-    let Ok(timeline) = loaded else {
-        return;
-    };
+    let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "one item must read back");
     assert_eq!(timeline[0].text, "hello history");
     assert_eq!(timeline[0].lang, "en");
@@ -193,27 +163,17 @@ async fn append_message_commits_and_timeline_reads_back() {
     let bounded = store
         .load_timeline(companion, Some(fixture_clock()), 10)
         .await;
-    assert!(bounded.is_ok(), "since filter must succeed");
-    let Ok(kept) = bounded else {
-        return;
-    };
+    let kept = bounded.unwrap();
     assert_eq!(kept.len(), 1, "item at the bound must be kept");
     let capped = store.load_timeline(companion, None, 0).await;
-    assert!(capped.is_ok(), "zero limit must succeed");
-    let Ok(none) = capped else {
-        return;
-    };
+    let none = capped.unwrap();
     assert!(none.is_empty(), "zero limit must return nothing");
 }
 
 #[tokio::test]
 async fn append_with_stale_generation_is_rejected() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let stale_number = generation.as_u64() + 1;
     let appended = store
         .append_message(history_command(
@@ -222,10 +182,7 @@ async fn append_with_stale_generation_is_rejected() {
             "stale body",
         ))
         .await;
-    assert!(appended.is_ok(), "stale append must be an outcome");
-    let Ok(outcome) = appended else {
-        return;
-    };
+    let outcome = appended.unwrap();
     assert_eq!(
         outcome,
         HistoryAppendOutcome::StaleExpected {
@@ -234,9 +191,7 @@ async fn append_with_stale_generation_is_rejected() {
         "stale expectation must carry the current generation"
     );
     let loaded = store.load_timeline(companion, None, 10).await;
-    let Ok(timeline) = loaded else {
-        return;
-    };
+    let timeline = loaded.unwrap();
     assert!(timeline.is_empty(), "stale append must store nothing");
 }
 
@@ -244,19 +199,12 @@ async fn append_with_stale_generation_is_rejected() {
 async fn append_with_moved_consent_is_rejected() {
     use ene_companion::HistoryRepository as _;
 
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let mut cmd = history_command(companion, generation, "consent body");
     cmd.expected_consent = Some((String::from("consent-1"), 999));
     let appended = store.append_message(cmd).await;
-    assert!(appended.is_ok(), "consent mismatch must be an outcome");
-    let Ok(outcome) = appended else {
-        return;
-    };
+    let outcome = appended.unwrap();
     assert_eq!(
         outcome,
         HistoryAppendOutcome::StaleConsent,
@@ -271,12 +219,8 @@ async fn append_with_moved_consent_is_rejected() {
 
 #[tokio::test]
 async fn append_while_stopped_is_held_by_lifecycle() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     {
         let guard = match store.conn.lock() {
             Ok(locked) => locked,
@@ -294,10 +238,7 @@ async fn append_while_stopped_is_held_by_lifecycle() {
     let appended = store
         .append_message(history_command(companion, generation, "held body"))
         .await;
-    assert!(appended.is_ok(), "held append must be an outcome");
-    let Ok(outcome) = appended else {
-        return;
-    };
+    let outcome = appended.unwrap();
     assert_eq!(
         outcome,
         HistoryAppendOutcome::HeldByLifecycle {
@@ -309,32 +250,20 @@ async fn append_while_stopped_is_held_by_lifecycle() {
 
 #[tokio::test]
 async fn undelivered_register_mark_and_stale_mark() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let appended = store
         .append_reply_with_undelivered(history_command(companion, generation, "reply body"), true)
         .await;
-    assert!(appended.is_ok(), "reply append must succeed");
-    let Ok((outcome, registered)) = appended else {
-        return;
-    };
+    let (outcome, registered) = appended.unwrap();
     assert!(
         matches!(outcome, HistoryAppendOutcome::CommittedAs { .. }),
         "reply must commit"
     );
-    let Some(entry) = registered else {
-        return;
-    };
+    let entry = registered.unwrap();
     assert_eq!(entry.status, ReportStatus::Pending);
     let pending = UndeliveredRepository::list_pending(&store, companion).await;
-    assert!(pending.is_ok(), "pending list must succeed");
-    let Ok(items) = pending else {
-        return;
-    };
+    let items = pending.unwrap();
     assert_eq!(items.len(), 1, "one entry must be pending");
     let marked = store
         .compare_and_mark_reported(
@@ -352,9 +281,7 @@ async fn undelivered_register_mark_and_stale_mark() {
         "pending to presented must compare-and-mark"
     );
     let pending_after = UndeliveredRepository::list_pending(&store, companion).await;
-    let Ok(drained) = pending_after else {
-        return;
-    };
+    let drained = pending_after.unwrap();
     assert!(drained.is_empty(), "presented entry must leave pending");
     let stale = store
         .compare_and_mark_reported(
@@ -388,12 +315,8 @@ async fn undelivered_register_mark_and_stale_mark() {
 
 #[tokio::test]
 async fn presence_begin_mismatch_is_rejected_as_stale() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let raw = companion.as_raw();
     let check = PresenceCheckRef {
         expected_generation: PresenceGeneration::from_u64(generation.as_u64() + 1),
@@ -408,10 +331,7 @@ async fn presence_begin_mismatch_is_rejected_as_stale() {
             ThinMoveReason::InitialAttach,
         )
         .await;
-    assert!(rejected.is_ok(), "stale begin must be an outcome");
-    let Ok(decision) = rejected else {
-        return;
-    };
+    let decision = rejected.unwrap();
     assert!(
         matches!(decision, MoveDecision::RejectedAsStalePresence { .. }),
         "generation mismatch must reject as stale"
@@ -435,9 +355,8 @@ async fn presence_begin_mismatch_is_rejected_as_stale() {
             ThinMoveReason::InitialAttach,
         )
         .await;
-    assert!(begin.is_ok(), "matching begin must succeed");
-    let Ok(MoveDecision::TransitioningToNew { generation: next }) = begin else {
-        return;
+    let MoveDecision::TransitioningToNew { generation: next } = begin.unwrap() else {
+        panic!("unexpected variant");
     };
     let confirmed = store
         .confirm_transition(
@@ -449,9 +368,8 @@ async fn presence_begin_mismatch_is_rejected_as_stale() {
             },
         )
         .await;
-    assert!(confirmed.is_ok(), "confirm must succeed");
-    let Ok(ConfirmTransitionOutcome::Confirmed(fact)) = confirmed else {
-        return;
+    let ConfirmTransitionOutcome::Confirmed(fact) = confirmed.unwrap() else {
+        panic!("unexpected variant");
     };
     assert_eq!(fact.state, PresenceState::Present);
     assert_eq!(fact.active_client, Some(client));
@@ -460,12 +378,8 @@ async fn presence_begin_mismatch_is_rejected_as_stale() {
 
 #[tokio::test]
 async fn confirm_by_unpinned_client_is_rejected_without_touching_state() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let raw = companion.as_raw();
     let pinned = ClientId::generate();
     let intruder = ClientId::generate();
@@ -481,9 +395,8 @@ async fn confirm_by_unpinned_client_is_rejected_without_touching_state() {
             ThinMoveReason::InitialAttach,
         )
         .await;
-    assert!(begin.is_ok(), "matching begin must succeed");
-    let Ok(MoveDecision::TransitioningToNew { generation: next }) = begin else {
-        return;
+    let MoveDecision::TransitioningToNew { generation: next } = begin.unwrap() else {
+        panic!("unexpected variant");
     };
     // A live confirm for a different client must not crown it: the row
     // stays InTransition toward the pinned target.
@@ -545,9 +458,7 @@ fn consent_record(id: &str, rev: u64) -> ConsentRecord {
 
 #[tokio::test]
 async fn consent_compare_and_save_commit_and_stale_matrix() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let empty = store.load_current().await;
     assert!(matches!(empty, Ok(None)), "fresh store holds no consent");
     // No row plus no expectation: insert and commit.
@@ -626,9 +537,7 @@ async fn consent_compare_and_save_commit_and_stale_matrix() {
 
 #[tokio::test]
 async fn consent_compare_and_save_expected_but_empty_is_stale() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let record = consent_record("consent-1", 1);
     let outcome = store
         .compare_and_save(
@@ -649,28 +558,20 @@ async fn consent_compare_and_save_expected_but_empty_is_stale() {
 
 #[tokio::test]
 async fn credential_save_load_and_list() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let missing = store.load_ref("acme", "main").await;
     assert!(matches!(missing, Ok(None)), "fresh store holds no refs");
     let cred = CredentialRef::new("acme", "main").expect("valid test fixture");
     let saved = store.save_ref(cred.clone()).await;
     assert!(saved.is_ok(), "ref save must succeed");
     let loaded = store.load_ref("acme", "main").await;
-    assert!(loaded.is_ok(), "ref load must succeed");
-    let Ok(Some(found)) = loaded else {
-        return;
-    };
+    let found = loaded.unwrap().unwrap();
     assert_eq!(found, cred, "ref must round-trip");
     let second = CredentialRef::new("acme", "backup").expect("valid test fixture");
     let saved_second = store.save_ref(second.clone()).await;
     assert!(saved_second.is_ok(), "second ref save must succeed");
     let listed = store.list_refs().await;
-    assert!(listed.is_ok(), "ref list must succeed");
-    let Ok(refs) = listed else {
-        return;
-    };
+    let refs = listed.unwrap();
     assert_eq!(refs.len(), 2, "both refs must list");
     assert!(refs.contains(&cred), "first ref must list");
     assert!(refs.contains(&second), "second ref must list");
@@ -678,9 +579,7 @@ async fn credential_save_load_and_list() {
 
 #[tokio::test]
 async fn usage_insert_preserves_null_tokens() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let ticket = RawId::new();
     let fact = UsageFact {
         ticket: InferenceTicketId(ticket),
@@ -708,10 +607,7 @@ async fn usage_insert_preserves_null_tokens() {
                 ))
             },
         );
-        assert!(checked.is_ok(), "usage row must read back");
-        let Ok((input, output, source)) = checked else {
-            return;
-        };
+        let (input, output, source) = checked.unwrap();
         assert_eq!(input, None, "unknown input stays NULL, never zero");
         assert_eq!(output, None, "unknown output stays NULL, never zero");
         assert_eq!(source.as_str(), "unknown");
@@ -743,12 +639,8 @@ async fn usage_insert_preserves_null_tokens() {
 
 #[tokio::test]
 async fn local_id_lookup_is_correspondence_metadata_not_replay_key_replacing_local_id_uniqueness() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let absent = store.lookup_local_id(companion, "send-1").await;
     assert!(
         matches!(absent, Ok(None)),
@@ -783,21 +675,14 @@ async fn local_id_lookup_is_correspondence_metadata_not_replay_key_replacing_loc
         matches!(second, Ok(HistoryAppendOutcome::CommittedAs { .. })),
         "repeating a local id must append, not replay"
     );
-    let Ok(first_outcome) = first else {
-        return;
-    };
-    let Ok(second_outcome) = second else {
-        return;
-    };
+    let first_outcome = first.unwrap();
+    let second_outcome = second.unwrap();
     assert_ne!(
         first_outcome, second_outcome,
         "local id repeats must mint distinct messages"
     );
     let found = store.lookup_local_id(companion, "send-1").await;
-    assert!(found.is_ok(), "correspondence lookup must succeed");
-    let Ok(Some(item)) = found else {
-        return;
-    };
+    let item = found.unwrap().unwrap();
     assert_eq!(item.local_id.as_deref(), Some("send-1"));
     assert_eq!(item.command_id, None);
     let count = history_row_count(&store, companion);
@@ -806,12 +691,8 @@ async fn local_id_lookup_is_correspondence_metadata_not_replay_key_replacing_loc
 
 #[tokio::test]
 async fn command_replay_returns_original_accept_without_duplicate_row() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let command = CommandId(RawId::new());
     let base = history_command_with_ids(
         companion,
@@ -823,10 +704,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
     let first = store
         .append_reply_with_undelivered(base.clone(), true)
         .await;
-    assert!(first.is_ok(), "first command append must succeed");
-    let Ok((first_outcome, first_registered)) = first else {
-        return;
-    };
+    let (first_outcome, first_registered) = first.unwrap();
     let HistoryAppendOutcome::CommittedAs { message: first_id } = first_outcome else {
         return;
     };
@@ -840,10 +718,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
     let retry = store
         .append_reply_with_undelivered(base.clone(), true)
         .await;
-    assert!(retry.is_ok(), "command retry must succeed");
-    let Ok((retry_outcome, retry_registered)) = retry else {
-        return;
-    };
+    let (retry_outcome, retry_registered) = retry.unwrap();
     let HistoryAppendOutcome::AlreadyCommittedAs { message, round } = retry_outcome else {
         assert!(
             format!("{retry_outcome:?}").is_empty(),
@@ -856,10 +731,7 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
         "retry must replay the original message identity"
     );
     let looked_up = store.lookup_command(companion, &command).await;
-    assert!(looked_up.is_ok(), "replayed command must stay lookable");
-    let Ok(Some(original)) = looked_up else {
-        return;
-    };
+    let original = looked_up.unwrap().unwrap();
     assert_eq!(original.round, round, "replay must name the original round");
     assert!(
         retry_registered.is_none(),
@@ -868,16 +740,10 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
     let count = history_row_count(&store, companion);
     assert_eq!(count, Some(1), "replay must not append a second row");
     let pending = UndeliveredRepository::list_pending(&store, companion).await;
-    assert!(pending.is_ok(), "pending list must succeed");
-    let Ok(items) = pending else {
-        return;
-    };
+    let items = pending.unwrap();
     assert_eq!(items.len(), 1, "replay must not duplicate undelivered");
     let looked_up = store.lookup_command(companion, &command).await;
-    assert!(looked_up.is_ok(), "command lookup must succeed");
-    let Ok(Some(item)) = looked_up else {
-        return;
-    };
+    let item = looked_up.unwrap().unwrap();
     assert_eq!(item.id, first_id);
     assert_eq!(item.text, "original body");
 }
@@ -1030,12 +896,8 @@ async fn unprovable_round_intent_fails_closed() -> Result<(), String> {
 
 #[tokio::test]
 async fn different_commands_append_separately() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let first = store
         .append_message(history_command_with_ids(
             companion,
@@ -1062,12 +924,8 @@ async fn different_commands_append_separately() {
         matches!(second, Ok(HistoryAppendOutcome::CommittedAs { .. })),
         "distinct command must commit separately"
     );
-    let Ok(first_outcome) = first else {
-        return;
-    };
-    let Ok(second_outcome) = second else {
-        return;
-    };
+    let first_outcome = first.unwrap();
+    let second_outcome = second.unwrap();
     assert_ne!(
         first_outcome, second_outcome,
         "distinct commands must mint distinct messages"
@@ -1078,12 +936,8 @@ async fn different_commands_append_separately() {
 
 #[tokio::test]
 async fn null_command_appends_never_collide() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let first = store
         .append_message(history_command(companion, generation, "first body"))
         .await;
@@ -1098,12 +952,8 @@ async fn null_command_appends_never_collide() {
         matches!(second, Ok(HistoryAppendOutcome::CommittedAs { .. })),
         "second NULL command must commit without colliding"
     );
-    let Ok(first_outcome) = first else {
-        return;
-    };
-    let Ok(second_outcome) = second else {
-        return;
-    };
+    let first_outcome = first.unwrap();
+    let second_outcome = second.unwrap();
     assert_ne!(
         first_outcome, second_outcome,
         "NULL commands must mint distinct messages"
@@ -1114,12 +964,8 @@ async fn null_command_appends_never_collide() {
 
 #[tokio::test]
 async fn lookup_command_roundtrip_returns_both_ids() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let command = CommandId(RawId::new());
     let appended = store
         .append_message(history_command_with_ids(
@@ -1130,15 +976,11 @@ async fn lookup_command_roundtrip_returns_both_ids() {
             Some("send-9"),
         ))
         .await;
-    assert!(appended.is_ok(), "command append must succeed");
-    let Ok(HistoryAppendOutcome::CommittedAs { message }) = appended else {
-        return;
+    let HistoryAppendOutcome::CommittedAs { message } = appended.unwrap() else {
+        panic!("unexpected variant");
     };
     let found = store.lookup_command(companion, &command).await;
-    assert!(found.is_ok(), "command lookup must succeed");
-    let Ok(Some(item)) = found else {
-        return;
-    };
+    let item = found.unwrap().unwrap();
     assert_eq!(item.id, message);
     assert_eq!(item.command_id, Some(command));
     assert_eq!(item.local_id.as_deref(), Some("send-9"));
@@ -1151,17 +993,11 @@ async fn lookup_command_roundtrip_returns_both_ids() {
         "unknown command must find nothing"
     );
     let by_local = store.lookup_local_id(companion, "send-9").await;
-    assert!(by_local.is_ok(), "local lookup must succeed");
-    let Ok(Some(same)) = by_local else {
-        return;
-    };
+    let same = by_local.unwrap().unwrap();
     assert_eq!(same.id, message);
     assert_eq!(same.command_id, Some(command));
     let loaded = store.load_timeline(companion, None, 10).await;
-    assert!(loaded.is_ok(), "timeline must load");
-    let Ok(timeline) = loaded else {
-        return;
-    };
+    let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "one item must read back");
     assert_eq!(timeline[0].id, message);
     assert_eq!(timeline[0].command_id, Some(command));
@@ -1171,10 +1007,7 @@ async fn lookup_command_roundtrip_returns_both_ids() {
 #[tokio::test]
 async fn migration_v3_keeps_pre_command_rows_readable() {
     let dir = tempfile::tempdir();
-    assert!(dir.is_ok(), "tempdir must open");
-    let Ok(dir) = dir else {
-        return;
-    };
+    let dir = dir.unwrap();
     let path = dir.path().join("store.db");
     let companion = CompanionId::from_raw(RawId::new());
     let companion_text = crate::codec::encode_id(companion.as_raw());
@@ -1184,10 +1017,7 @@ async fn migration_v3_keeps_pre_command_rows_readable() {
     let round_text = crate::codec::encode_id(round_id);
     {
         let conn = rusqlite::Connection::open(&path);
-        assert!(conn.is_ok(), "raw v2 file must open");
-        let Ok(conn) = conn else {
-            return;
-        };
+        let conn = conn.unwrap();
         let shaped = conn.execute_batch(
                 "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL);
@@ -1239,15 +1069,9 @@ INSERT INTO _schema_version (version) VALUES (2);",
         assert!(seeded_history.is_ok(), "v2 history row must seed");
     }
     let opened = Store::open(&path).await;
-    assert!(opened.is_ok(), "open must migrate v2 to v5");
-    let Ok(store) = opened else {
-        return;
-    };
+    let store = opened.unwrap();
     let loaded = store.load_timeline(companion, None, 10).await;
-    assert!(loaded.is_ok(), "migrated timeline must load");
-    let Ok(timeline) = loaded else {
-        return;
-    };
+    let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "legacy row must survive migration");
     assert_eq!(timeline[0].id, message_id);
     assert_eq!(timeline[0].text, "legacy body");
@@ -1262,10 +1086,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
         "pre-opaque rows carry no incarnation"
     );
     let by_local = store.lookup_local_id(companion, "legacy-1").await;
-    assert!(by_local.is_ok(), "legacy local lookup must succeed");
-    let Ok(Some(legacy)) = by_local else {
-        return;
-    };
+    let legacy = by_local.unwrap().unwrap();
     assert_eq!(legacy.id, message_id);
     let missing = store
         .lookup_command(companion, &CommandId(RawId::new()))
@@ -1304,9 +1125,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
 
 #[tokio::test]
 async fn device_request_approve_find_and_list() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let missing = store.find_device(&DeviceId(RawId::new())).await;
     assert!(matches!(missing, Ok(None)), "fresh store pairs nothing");
     let listed_empty = DevicePairingRepository::list_pending(&store).await;
@@ -1319,11 +1138,11 @@ async fn device_request_approve_find_and_list() {
         matches!(first, Ok(DevicePairingStatus::Pending { .. })),
         "first request must pend"
     );
-    let Ok(DevicePairingStatus::Pending {
+    let DevicePairingStatus::Pending {
         pending: first_pending,
-    }) = first
+    } = first.unwrap()
     else {
-        return;
+        panic!("unexpected variant");
     };
     assert_eq!(first_pending.descriptor.as_str(), "phone");
     // A second request returns the stored entry without refreshing it.
@@ -1332,11 +1151,11 @@ async fn device_request_approve_find_and_list() {
         matches!(second, Ok(DevicePairingStatus::Pending { .. })),
         "repeat request must stay pending"
     );
-    let Ok(DevicePairingStatus::Pending {
+    let DevicePairingStatus::Pending {
         pending: second_pending,
-    }) = second
+    } = second.unwrap()
     else {
-        return;
+        panic!("unexpected variant");
     };
     assert_eq!(
         second_pending.requested_at, first_pending.requested_at,
@@ -1348,9 +1167,7 @@ async fn device_request_approve_find_and_list() {
         "second descriptor must pend"
     );
     let listed = DevicePairingRepository::list_pending(&store).await;
-    let Ok(items) = listed else {
-        return;
-    };
+    let items = listed.unwrap();
     assert_eq!(items.len(), 2, "both descriptors must list as pending");
     let unknown = DevicePairingRepository::approve_pending(&store, "unknown").await;
     assert!(
@@ -1358,19 +1175,14 @@ async fn device_request_approve_find_and_list() {
         "approving an unknown descriptor must yield none"
     );
     let approved = DevicePairingRepository::approve_pending(&store, "phone").await;
-    assert!(approved.is_ok(), "approval must succeed");
-    let Ok(Some((device, secret))) = approved else {
-        return;
-    };
+    let (device, secret) = approved.unwrap().unwrap();
     assert_eq!(device.descriptor.as_str(), "phone");
     assert!(
         secret.len() == 36 && secret.chars().filter(|c| *c == '-').count() == 4,
         "approval must mint a UUID-text one-time secret"
     );
     let pending_after = DevicePairingRepository::list_pending(&store).await;
-    let Ok(remaining) = pending_after else {
-        return;
-    };
+    let remaining = pending_after.unwrap();
     assert_eq!(remaining.len(), 1, "approval must drain one entry");
     assert_eq!(remaining[0].descriptor.as_str(), "tablet");
     let found = store.find_device(&device.id).await;
@@ -1390,10 +1202,7 @@ async fn device_request_approve_find_and_list() {
     // Re-approving returns the same record without minting a new id,
     // but with a freshly minted secret (rotation).
     let reapproved = DevicePairingRepository::approve_pending(&store, "phone").await;
-    assert!(reapproved.is_ok(), "re-approval must succeed");
-    let Ok(Some((same, rotated))) = reapproved else {
-        return;
-    };
+    let (same, rotated) = reapproved.unwrap().unwrap();
     assert!(
         same == device,
         "re-approval must return the existing record"
@@ -1406,15 +1215,11 @@ async fn device_request_approve_find_and_list() {
 
 #[tokio::test]
 async fn device_wire_is_opaque_and_resolvable() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let requested = store.request_pairing(String::from("phone")).await;
     assert!(matches!(requested, Ok(DevicePairingStatus::Pending { .. })));
     let approved = DevicePairingRepository::approve_pending(&store, "phone").await;
-    let Ok(Some((device, _))) = approved else {
-        return;
-    };
+    let (device, _) = approved.unwrap().unwrap();
     assert_ne!(
         device.wire,
         crate::codec::encode_id(device.id.0),
@@ -1431,23 +1236,17 @@ async fn device_wire_is_opaque_and_resolvable() {
 
 #[tokio::test]
 async fn history_wire_projection_and_incarnation_roundtrip() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
-    let Some((companion, generation)) = running_companion(&store).await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
+    let (companion, generation) = running_companion(&store).await.unwrap();
     let mut cmd = history_command(companion, generation, "opaque body");
     cmd.round_wire = Some(String::from("round-wire-9"));
     cmd.incarnation = Some((7, 11));
     let appended = store.append_message(cmd).await;
-    let Ok(HistoryAppendOutcome::CommittedAs { message }) = appended else {
-        return;
+    let HistoryAppendOutcome::CommittedAs { message } = appended.unwrap() else {
+        panic!("unexpected variant");
     };
     let loaded = store.load_timeline(companion, None, 10).await;
-    let Ok(timeline) = loaded else {
-        return;
-    };
+    let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 1, "one item must read back");
     assert_eq!(timeline[0].id, message);
     assert_eq!(
@@ -1470,19 +1269,13 @@ async fn history_wire_projection_and_incarnation_roundtrip() {
 #[tokio::test]
 async fn migration_v4_backfills_legacy_device_wire() {
     let dir = tempfile::tempdir();
-    assert!(dir.is_ok(), "tempdir must open");
-    let Ok(dir) = dir else {
-        return;
-    };
+    let dir = dir.unwrap();
     let path = dir.path().join("store.db");
     let device_id = RawId::new();
     let device_text = crate::codec::encode_id(device_id);
     {
         let conn = rusqlite::Connection::open(&path);
-        assert!(conn.is_ok(), "raw v4 file must open");
-        let Ok(conn) = conn else {
-            return;
-        };
+        let conn = conn.unwrap();
         let shaped = conn.execute_batch(
                 "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL, command_id TEXT NULL);
@@ -1511,18 +1304,13 @@ INSERT INTO _schema_version (version) VALUES (4);",
         assert!(seeded.is_ok(), "v4 paired row must seed");
     }
     let opened = Store::open(&path).await;
-    assert!(opened.is_ok(), "open must migrate v4 to v5");
-    let Ok(store) = opened else {
-        return;
-    };
+    let store = opened.unwrap();
     let found = store.find_device_by_wire(&device_text).await;
     assert!(
         matches!(found, Ok(Some(ref stored)) if stored.id == DeviceId(device_id)),
         "legacy device must stay resolvable through the continuity projection"
     );
-    let Ok(Some(stored)) = found else {
-        return;
-    };
+    let stored = found.unwrap().unwrap();
     assert_eq!(
         stored.wire, device_text,
         "legacy backfill keeps the identity rendering so provisioned clients resolve"
@@ -1559,17 +1347,11 @@ fn table_columns(path: &std::path::Path, table: &str) -> Vec<String> {
 #[tokio::test]
 async fn migration_failure_rolls_back_and_reopen_recovers() {
     let dir = tempfile::tempdir();
-    assert!(dir.is_ok(), "tempdir must open");
-    let Ok(dir) = dir else {
-        return;
-    };
+    let dir = dir.unwrap();
     let path = dir.path().join("store.db");
     {
         let conn = rusqlite::Connection::open(&path);
-        assert!(conn.is_ok(), "raw v4 file must open");
-        let Ok(conn) = conn else {
-            return;
-        };
+        let conn = conn.unwrap();
         let shaped = conn.execute_batch(
             "CREATE TABLE companion (companion_id TEXT PRIMARY KEY, lifecycle TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE history_message (message_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, round_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, lang TEXT NOT NULL, at TEXT NOT NULL, presence_generation INTEGER NOT NULL, local_id TEXT NULL, command_id TEXT NULL);
@@ -1630,10 +1412,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
     // converge on the current schema.
     {
         let conn = rusqlite::Connection::open(&path);
-        assert!(conn.is_ok(), "file must reopen for cleanup");
-        let Ok(conn) = conn else {
-            return;
-        };
+        let conn = conn.unwrap();
         let dropped = conn.execute_batch("DROP TRIGGER inject_crash;");
         assert!(dropped.is_ok(), "fault trigger must drop");
     }
@@ -1657,31 +1436,20 @@ INSERT INTO _schema_version (version) VALUES (4);",
 #[tokio::test]
 async fn migration_v3_reopen_keeps_pairing_state() {
     let dir = tempfile::tempdir();
-    assert!(dir.is_ok(), "tempdir must open");
-    let Ok(dir) = dir else {
-        return;
-    };
+    let dir = dir.unwrap();
     let path = dir.path().join("store.db");
     let opened = Store::open(&path).await;
-    assert!(opened.is_ok(), "file open must succeed");
-    let Ok(first) = opened else {
-        return;
-    };
+    let first = opened.unwrap();
     let requested = first.request_pairing(String::from("phone")).await;
     assert!(
         matches!(requested, Ok(DevicePairingStatus::Pending { .. })),
         "request must pend"
     );
     let approved = DevicePairingRepository::approve_pending(&first, "phone").await;
-    let Ok(Some((device, _))) = approved else {
-        return;
-    };
+    let (device, _) = approved.unwrap().unwrap();
     drop(first);
     let reopened = Store::open(&path).await;
-    assert!(reopened.is_ok(), "reopen after pairing must succeed");
-    let Ok(second) = reopened else {
-        return;
-    };
+    let second = reopened.unwrap();
     let found = second.find_device(&device.id).await;
     assert!(
         matches!(found, Ok(Some(ref stored)) if *stored == device),
@@ -1710,9 +1478,7 @@ async fn migration_v3_reopen_keeps_pairing_state() {
 
 #[tokio::test]
 async fn credential_approval_request_approve_usable_cycle() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let unknown_approve =
         CredentialApprovalRepository::approve_pending(&store, "acme", "nope").await;
     assert!(
@@ -1744,10 +1510,7 @@ async fn credential_approval_request_approve_usable_cycle() {
         "repeat request must not record again"
     );
     let listed = CredentialApprovalRepository::list_pending(&store).await;
-    assert!(listed.is_ok(), "pending list must succeed");
-    let Ok(items) = listed else {
-        return;
-    };
+    let items = listed.unwrap();
     assert_eq!(items.len(), 1, "one approval must pend");
     assert_eq!(items[0].provider.as_str(), "acme");
     assert_eq!(items[0].label.as_str(), "main");
@@ -1822,9 +1585,7 @@ async fn intent_outcome_roundtrips_and_refreshes() {
         }
     }
 
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let missing = store.lookup_intent_outcome("no-such-intent").await;
     assert!(matches!(missing, Ok(None)), "unknown intent must miss");
     let recorded = store.record_intent_outcome(record()).await;
@@ -1896,9 +1657,7 @@ async fn assign_with_intent_commits_marker_atomically() {
         }
     }
 
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let committed = store
         .assign_with_intent(
             None,
@@ -2034,9 +1793,7 @@ async fn concurrent_same_id_assigns_fork_nothing() {
         IntentResolution,
     };
 
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     // Two sends of one logical intent racing through the same store:
     // the shared-connection mutex serializes whole transactions, so
     // the loser always observes the winner's row. Exactly one decides;
@@ -2116,9 +1873,7 @@ async fn complete_with_intent_decides_atomically() {
         }
     }
 
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     // Empty premise with no consent: clarify, recorded.
     let empty = store
         .complete_with_intent(
@@ -2230,9 +1985,7 @@ async fn shortcut_with_intent_hits_atomically() {
         }
     }
 
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let saved = store
         .compare_and_save(
             None,
@@ -2307,9 +2060,7 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
     };
     use ene_permission::{ConsentRecord, ConsentRepository as _, ConsentRevision};
 
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let saved = store
         .compare_and_save(
             None,
@@ -2377,9 +2128,7 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
 
 #[tokio::test]
 async fn credential_approval_blank_inputs_are_absent() {
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let blank_provider = store
         .request_approval(String::new(), String::from("main"))
         .await;
@@ -2461,16 +2210,10 @@ async fn credential_approval_blank_inputs_are_absent() {
 #[tokio::test]
 async fn migration_v4_reopen_keeps_credential_approval_rows() {
     let dir = tempfile::tempdir();
-    assert!(dir.is_ok(), "tempdir must open");
-    let Ok(dir) = dir else {
-        return;
-    };
+    let dir = dir.unwrap();
     let path = dir.path().join("store.db");
     let opened = Store::open(&path).await;
-    assert!(opened.is_ok(), "file open must succeed");
-    let Ok(first) = opened else {
-        return;
-    };
+    let first = opened.unwrap();
     let pending_requested = first
         .request_approval(String::from("acme"), String::from("pending"))
         .await;
@@ -2497,15 +2240,9 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     assert!(usable_saved.is_ok(), "usable ref save must succeed");
     drop(first);
     let reopened = Store::open(&path).await;
-    assert!(reopened.is_ok(), "reopen must succeed");
-    let Ok(second) = reopened else {
-        return;
-    };
+    let second = reopened.unwrap();
     let listed = CredentialApprovalRepository::list_pending(&second).await;
-    assert!(listed.is_ok(), "pending list must survive reopen");
-    let Ok(items) = listed else {
-        return;
-    };
+    let items = listed.unwrap();
     assert_eq!(items.len(), 1, "pending row must survive reopen");
     assert_eq!(items[0].provider.as_str(), "acme");
     assert_eq!(items[0].label.as_str(), "pending");
@@ -2547,25 +2284,14 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
 #[tokio::test]
 async fn restart_keeps_timeline_intact() {
     let dir = tempfile::tempdir();
-    assert!(dir.is_ok(), "tempdir must open");
-    let Ok(dir) = dir else {
-        return;
-    };
+    let dir = dir.unwrap();
     let path = dir.path().join("store.db");
     let opened = Store::open(&path).await;
-    assert!(opened.is_ok(), "file open must succeed");
-    let Ok(first) = opened else {
-        return;
-    };
+    let first = opened.unwrap();
     let ensured = first.ensure_running_companion().await;
-    assert!(ensured.is_ok(), "ensure must succeed");
-    let Ok(companion) = ensured else {
-        return;
-    };
+    let companion = ensured.unwrap();
     let attributed = first.load_attribution(companion.as_raw()).await;
-    let Ok(Some(current)) = attributed else {
-        return;
-    };
+    let current = attributed.unwrap().unwrap();
     let first_append = first
         .append_message(history_command(companion, current.generation, "first"))
         .await;
@@ -2582,20 +2308,12 @@ async fn restart_keeps_timeline_intact() {
     assert!(second_append.is_ok(), "second append must succeed");
     drop(first);
     let reopened = Store::open(&path).await;
-    assert!(reopened.is_ok(), "reopen must succeed");
-    let Ok(second) = reopened else {
-        return;
-    };
+    let second = reopened.unwrap();
     let ensured_again = second.ensure_running_companion().await;
-    let Ok(same) = ensured_again else {
-        return;
-    };
+    let same = ensured_again.unwrap();
     assert_eq!(same, companion, "companion must survive restart");
     let loaded = second.load_timeline(companion, None, 10).await;
-    assert!(loaded.is_ok(), "timeline must load after restart");
-    let Ok(timeline) = loaded else {
-        return;
-    };
+    let timeline = loaded.unwrap();
     assert_eq!(timeline.len(), 2, "both items must survive restart");
     assert_eq!(timeline[0].text, "first");
     assert_eq!(timeline[1].text, "second");
@@ -2619,9 +2337,7 @@ async fn registration_intent_decides_held_then_already_decided() {
         }
     }
 
-    let Some(store) = open_memory().await else {
-        return;
-    };
+    let store = open_memory().await.unwrap();
     let first = store
         .request_registration_with_intent(
             String::from("acme"),

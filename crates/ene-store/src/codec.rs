@@ -273,7 +273,7 @@ pub(crate) fn decode_intent_outcome(
     }
 }
 
-/// Reads one paired-device row into its domain record.
+/// Whether two intent fingerprints describe the same request content.
 ///
 /// Compares the content fields only: both rows share the key by
 /// construction, so the key itself carries no information.
@@ -530,8 +530,8 @@ pub(crate) fn decode_attribution(
 /// optional client-local correspondence ID (`local_id` is stored metadata
 /// only, never a key).
 ///
-/// Named fields (instead of the retired positional tuple) so column order
-/// lives in exactly one place: [`HistoryRow::from_row`]. All three readers
+/// Named fields keep column order in exactly one place:
+/// [`HistoryRow::from_row`]. All three readers
 /// (`lookup_local_id`, `lookup_command`, `load_timeline`) share the column
 /// order through that constructor.
 pub(crate) struct HistoryRow {
