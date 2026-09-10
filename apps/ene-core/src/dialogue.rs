@@ -22,9 +22,16 @@
 //! - Store failures before acceptance become
 //!   [`HeldForTransition`](ene_api::v1::round::RoundIntakeOutcomeWire::HeldForTransition):
 //!   no work started, so a later retry is safe.
-//! - A stale or held owner append becomes the matching outcome frame; the
-//!   minted round is left recorded but belongs to the old generation, so later
-//!   intakes surface it as stale rather than rebinding it.
+//! - A reused command key with a different
+//!   [`RequestFingerprint`](ene_companion::RequestFingerprint) becomes the
+//!   typed [`Reject`](ene_api::v1::payload::WirePayload::Reject)
+//!   (`ConflictingCommand`), judged by one fingerprint comparison shared
+//!   with the store's in-transaction pre-check: declined without side
+//!   effects, never an intake outcome, never a retry signal.
+//! - A stale or held owner append becomes the matching outcome frame. Its
+//!   projection entry stays mapped but unpublished: no open-round record was
+//!   made and no ack carried it, so later intakes surface the round as stale
+//!   rather than rebinding anything onto it.
 //! - Permission denial becomes `NeedsRevalidation` with the setup/consent
 //!   reason above: the Client recovers by running the setup flow, then retries
 //!   with a fresh local id.
