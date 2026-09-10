@@ -1,18 +1,21 @@
 //! One-to-one text round trip: intake, reply, stream, ack, timeline.
 //!
-//! `HostHandle::submit_text` runs the full accepted-input pipeline: durable
-//! idempotent replay, presence attach, intake evaluation, owner append, live
-//! authorization, inference dispatch, reply append with undelivered
-//! registration, usage recording, and the response stream.
-//! `HostHandle::confirm_presentation` applies presentation observations, and
-//! `HostHandle::answer_history` restores the filtered timeline.
+//! `HostHandle::submit_text` mediates one accepted input: durable idempotent
+//! replay, presence attach, presentation intake, then the companion-owned
+//! turn (`ene_companion::dialogue`), whose inference boundary
+//! (`ene_inference::InferenceExecutor`) owns admission, the attempt claim,
+//! the provider call, adoption, and usage accounting. The Host maps the
+//! resulting domain outcome to frames and records the open round between the
+//! owner append and dispatch. `HostHandle::confirm_presentation` applies
+//! presentation observations, and `HostHandle::answer_history` restores the
+//! filtered timeline.
 //!
 //! `Stage 2` wire reason vocabulary for
 //! [`NeedsRevalidation`](ene_api::v1::round::RoundIntakeOutcomeWire::NeedsRevalidation)
 //! outcomes: `"missing-generation-view"`, `"unknown-companion"`,
 //! `"stopped-companion"` (all straight from
 //! [`ene_presentation::RevalidationReason`]), plus `"setup-incomplete"` and
-//! `"consent-stale"` for the authorization gates and `"not-in-allowlist"` as a
+//! `"consent-stale"` for the admission gates and `"not-in-allowlist"` as a
 //! defensive closed-world denial. `"unknown-reason"` is defensive only:
 //! [`ene_presentation::check_intake`] never emits its source variant.
 //!
@@ -24,26 +27,26 @@
 //!   no work started, so a later retry is safe.
 //! - A reused command key with a different [`RequestFingerprint`] becomes the
 //!   typed [`Reject`](ene_api::v1::payload::WirePayload::Reject)
-//!   (`ConflictingCommand`), judged by one fingerprint comparison shared
-//!   with the store's in-transaction pre-check: declined without side
+//!   (`ConflictingCommand`), judged by the companion's fingerprint comparison
+//!   shared with the store's in-transaction pre-check: declined without side
 //!   effects, never an intake outcome, never a retry signal.
 //! - A stale or held owner append becomes the matching outcome frame. Its
 //!   projection entry stays mapped but unpublished: no open-round record was
 //!   made and no ack carried it, so later intakes surface the round as stale
 //!   rather than rebinding anything onto it.
-//! - Permission denial becomes `NeedsRevalidation` with the setup/consent
+//! - An admission decline becomes `NeedsRevalidation` with the setup/consent
 //!   reason above: the Client recovers by running the setup flow, then retries
 //!   with a fresh local id.
 //! - Any failure after acceptance (inference not sent, transport error, reply
 //!   append lost) becomes the accept ack plus a stream closed as
 //!   [`Interrupted`](ene_api::v1::round::StreamClose::Interrupted). Usage
-//!   accounting follows certainty, never adoption: never-sent calls record
-//!   no fact, uncertain attempts record
-//!   [`Unknown`](ene_inference::UsageSource::Unknown) counts, and reported
-//!   counts are kept even when the reply cannot be adopted. A usage-record
-//!   failure after a durable reply keeps the `Completed` close: the reply
-//!   happened, and the usage gap is the documented `Stage 2` follow-up
-//!   (retry queue), not a reason to misreport the stream.
+//!   accounting follows certainty, never adoption (owned by
+//!   `ene-inference`): never-sent calls record no fact, uncertain attempts
+//!   record [`Unknown`](ene_inference::UsageSource::Unknown) counts, and
+//!   reported counts are kept even when the reply cannot be adopted. A
+//!   usage-record failure after a durable reply keeps the `Completed` close:
+//!   the reply happened, and the usage gap is the documented `Stage 2`
+//!   follow-up (retry queue), not a reason to misreport the stream.
 //! - Presentation observations and unresolvable confirmation rounds produce no
 //!   reply: confirmation is an observation, never a report of completion.
 
@@ -289,9 +292,7 @@ fn command_conflict_detail(command: &CommandId) -> String {
 /// map defensively rather than claiming a setup failure.
 fn admission_reason(reason: NotSentReason) -> &'static str {
     match reason {
-        NotSentReason::SetupIncomplete
-        | NotSentReason::CredentialUnavailable
-        | NotSentReason::AuthRejected => "setup-incomplete",
+        NotSentReason::SetupIncomplete => "setup-incomplete",
         NotSentReason::ConsentStale | NotSentReason::ConsentMismatch => "consent-stale",
         NotSentReason::NotInAllowlist => "not-in-allowlist",
         NotSentReason::EvaluationConsumed => "evaluation-consumed",
@@ -410,17 +411,15 @@ impl HostHandle {
         .await
     }
 
-    /// Runs the submit pipeline for one [`SubmitTextInput`] frame.
+    /// Mediates one [`SubmitTextInput`] frame into the companion turn.
     ///
     /// Order: companion mapping, mandatory command key, durable idempotent
-    /// replay, presence attach, intake evaluation, setup/consent/credential
-    /// admission (live authorization included), owner append, transient
-    /// round recording, inference dispatch, reply append with undelivered
-    /// registration, usage recording, then the response stream. Admission
-    /// precedes the append so a declined input leaves neither history rows
-    /// nor transient round claims behind; the round projection is minted
-    /// atomically with its map entry (one domain round, one wire), and a
-    /// racy duplicate that lands on
+    /// replay, presence attach, presentation intake, then the companion-owned
+    /// turn (`ene_companion::dialogue::begin_turn`/`finish_turn`) with its
+    /// inference boundary. Admission precedes the append so a declined input
+    /// leaves neither history rows nor transient round claims behind; the
+    /// round projection is minted atomically with its map entry (one domain
+    /// round, one wire), and a racy duplicate that lands on
     /// [`HistoryAppendOutcome::AlreadyCommittedAs`] answers the original
     /// accept without re-running inference. The inbound companion ref
     /// resolves through [`HostHandle::resolve_companion`]: presence facts

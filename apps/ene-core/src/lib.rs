@@ -14,9 +14,9 @@
 //! - [`serve`] holds [`serve::CoreError`], [`serve::CredStore`], [`serve::LiveInput`],
 //!   [`serve::HostHandle`], the frame dispatch, the pairing/capability handshake, and
 //!   the [`serve::serve`] entry point.
-//! - [`dialogue`] holds the one-to-one text round trip: intake, history appends,
-//!   authorization, inference dispatch, streaming frames, presentation observations,
-//!   and timeline restore.
+//! - [`dialogue`] holds the one-to-one text round trip: durable replay, presence
+//!   attach, presentation intake, wire mapping of the companion turn outcome, streaming
+//!   frames, presentation observations, and timeline restore.
 //! - [`setup`] holds the `Stage 2` setup management inlet: credential registration,
 //!   consent assignment, setup completion, and filtered views.
 //! - [`conn`] holds the Unix socket listener. The wire close convention is shared:
