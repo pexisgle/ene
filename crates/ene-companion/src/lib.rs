@@ -63,6 +63,26 @@ impl CompanionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(pub RawId);
 
+/// Canonical client round intent of one command-scoped send (IPC §13.1).
+///
+/// This is request semantics the Client minted, not anything the Host
+/// decided: [`Self::Auto`] names the join-or-mint request,
+/// [`Self::New`] names the explicit new-round request, and
+/// [`Self::Existing`] names a join of one specific round by the round
+/// reference exactly as the Client supplied it. The `Existing` payload
+/// stays the wire text the Client sent — never the Host-resolved domain
+/// round and never the Host-minted round projection, which are part of
+/// the accepted result and never decide replay.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RoundIntentMark {
+    /// Join the matching open round; mint a fresh one when none matches.
+    Auto,
+    /// Always mint a fresh round, even when an open round would match.
+    New,
+    /// Join the round this Client-supplied reference names.
+    Existing(String),
+}
+
 /// Companion lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompanionLifecycle {
@@ -114,9 +134,15 @@ pub struct HistoryMessage {
     /// round and unrelated to the domain bytes: the only round string that
     /// ever crosses the wire. [`None`] marks pre-opaque rows.
     pub round_wire: Option<String>,
+    /// Canonical client round intent of the command that stored this row,
+    /// as [`RoundIntentMark`]. [`None`] marks rows without a command key
+    /// (replies) and rows stored before intents were persisted — neither
+    /// can prove sameness for replay.
+    pub round_intent: Option<RoundIntentMark>,
     /// Client incarnation that sent the item, as `(counter, random)` when
-    /// the caller carries one. Part of the replay fingerprint together with
-    /// text, language, round wire, and generation.
+    /// the caller carried one. Part of the request fingerprint together
+    /// with text and language. [`None`] must match [`None`]: an epoch-less
+    /// key only replays epoch-less.
     pub incarnation: Option<(u64, u64)>,
     /// Client-local correspondence ID for matching an input to its ack.
     /// Correspondence metadata only, no longer the durable key (that is
@@ -139,6 +165,7 @@ impl core::fmt::Debug for HistoryMessage {
             .field("presence_generation", &self.presence_generation)
             .field("command_id", &self.command_id)
             .field("round_wire", &self.round_wire)
+            .field("round_intent", &self.round_intent)
             .field("incarnation", &self.incarnation)
             .field("local_id", &self.local_id)
             .finish()
@@ -179,8 +206,15 @@ pub struct AppendHistoryCommand {
     /// replay acks and timeline views echo it back instead of rendering the
     /// domain identity.
     pub round_wire: Option<String>,
+    /// Canonical client round intent of this request, as
+    /// [`RoundIntentMark`]. Required whenever `command_id` is [`Some`]: the
+    /// intent is request semantics, so a keyed append without one stores an
+    /// unprovable row that every later retry declines. [`None`] is for
+    /// keyless appends (replies).
+    pub round_intent: Option<RoundIntentMark>,
     /// Client incarnation that sends the item, as `(counter, random)`.
-    /// Part of the replay fingerprint; [`None`] skips that check.
+    /// Part of the request fingerprint; [`None`] must match [`None`], so an
+    /// epoch-less key only replays epoch-less.
     pub incarnation: Option<(u64, u64)>,
     /// Client-local correspondence ID for matching an input to its ack, if
     /// the caller carries one. [`None`] stores NULL. Correspondence metadata
@@ -203,9 +237,49 @@ impl core::fmt::Debug for AppendHistoryCommand {
             .field("expected_consent", &self.expected_consent)
             .field("command_id", &self.command_id)
             .field("round_wire", &self.round_wire)
+            .field("round_intent", &self.round_intent)
             .field("incarnation", &self.incarnation)
             .field("local_id", &self.local_id)
             .finish()
+    }
+}
+
+impl AppendHistoryCommand {
+    /// Builds the [`RequestFingerprint`] this append would store.
+    ///
+    /// [`None`] when the command carries no replay key (`command_id` is
+    /// [`None`]): there is nothing to compare. A keyed command without a
+    /// round intent has no fingerprint either — the store treats that
+    /// against a stored row as unprovable sameness and declines it.
+    #[must_use]
+    pub fn request_fingerprint(&self) -> Option<RequestFingerprint> {
+        self.command_id.as_ref()?;
+        Some(RequestFingerprint {
+            role: self.role,
+            text: self.text.clone(),
+            lang: self.lang.clone(),
+            incarnation: self.incarnation,
+            round_intent: self.round_intent.clone()?,
+        })
+    }
+}
+
+impl HistoryMessage {
+    /// Reads the stored [`RequestFingerprint`] of this row, when provable.
+    ///
+    /// [`None`] marks rows without a command key (replies) and rows stored
+    /// without a round intent (pre-mark rows): their sameness cannot be
+    /// proven, so replay callers fail closed instead of exact-replaying.
+    #[must_use]
+    pub fn request_fingerprint(&self) -> Option<RequestFingerprint> {
+        self.command_id.as_ref()?;
+        Some(RequestFingerprint {
+            role: self.role,
+            text: self.text.clone(),
+            lang: self.lang.clone(),
+            incarnation: self.incarnation,
+            round_intent: self.round_intent.clone()?,
+        })
     }
 }
 
@@ -242,20 +316,66 @@ pub enum HistoryAppendOutcome {
     /// not be attributed to the new consent without a fresh check. Carries
     /// no payload: the caller reloads and answers `consent-stale`.
     StaleConsent,
-    /// A reused command key arrived with different content than the stored
-    /// row. The fingerprint (round, role, text, language, round wire, and
-    /// incarnation) did not match, so the send is declined without side
-    /// effects: no new row, no undelivered registration, no inference.
-    /// Carries no payload (the key itself is the caller's correlation): the
-    /// Host answers a typed wire rejection, never an intake outcome, and
-    /// never retries automatically. Resending the original content replays
-    /// as [`HistoryAppendOutcome::AlreadyCommittedAs`] instead.
+    /// A reused command key arrived with a different request than the
+    /// stored row: the stored [`RequestFingerprint`] (role, body, language,
+    /// sending incarnation, and canonical round intent) did not match — or
+    /// could not be reconstructed, which fails closed the same way. The
+    /// accepted result (round identity and its wire projection) never
+    /// decides this: a retry whose Host re-intaked it into a newer round
+    /// replays the stored accept verbatim instead of conflicting. Declined
+    /// without side effects: no new row, no undelivered registration, no
+    /// inference. Carries no payload (the key itself is the caller's
+    /// correlation): the Host answers a typed wire rejection, never an
+    /// intake outcome, and never retries automatically. Resending the
+    /// original request replays as
+    /// [`HistoryAppendOutcome::AlreadyCommittedAs`] instead.
     CommandConflict,
     /// Held by the companion lifecycle.
     HeldByLifecycle {
         /// Lifecycle that held the append.
         lifecycle: CompanionLifecycle,
     },
+}
+
+/// The immutable request semantics of one command-scoped history append:
+/// role, body text, language, sending incarnation, and the canonical
+/// client round intent.
+///
+/// This is the whole comparison for command replay, in one type used by
+/// every caller — the store compares it in-transaction and the Host's
+/// early replay path compares the very same value, so there is exactly one
+/// fingerprint definition and one equality. What stays out matters as
+/// much: the accepted result (domain round, Host-minted round projection),
+/// every transport or correspondence ID (`message_id`, `local_id`), and
+/// the generation premise (enforced separately) never decide replay.
+///
+/// Body text is redacted from [`core::fmt::Debug`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct RequestFingerprint {
+    /// Who produced the item.
+    pub role: HistoryRole,
+    /// Body text. Redacted from [`core::fmt::Debug`].
+    pub text: String,
+    /// Opaque language tag.
+    pub lang: String,
+    /// Sending incarnation. [`None`] must match [`None`].
+    pub incarnation: Option<(u64, u64)>,
+    /// Canonical client round intent of the request.
+    pub round_intent: RoundIntentMark,
+}
+
+impl core::fmt::Debug for RequestFingerprint {
+    /// Renders refs while redacting `text`.
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RequestFingerprint")
+            .field("role", &self.role)
+            .field("text", &"[redacted]")
+            .field("lang", &self.lang)
+            .field("incarnation", &self.incarnation)
+            .field("round_intent", &self.round_intent)
+            .finish()
+    }
 }
 
 /// Undelivered tracking fact: a durably stored item not yet confirmed.
@@ -475,7 +595,7 @@ mod tests {
     use super::{
         AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionTechnicalError,
         HistoryAppendOutcome, HistoryMessage, HistoryRole, PresentationMark, ReportStatus,
-        ReportStatusTransition, UndeliveredRef, UndeliveredTechnicalError,
+        ReportStatusTransition, RoundIntentMark, UndeliveredRef, UndeliveredTechnicalError,
     };
     use ene_presence::PresenceGeneration;
     use ene_primitive::{RawId, WallClockWithTz};
@@ -502,6 +622,7 @@ mod tests {
             expected_consent: None,
             command_id: Some(CommandId(RawId::new())),
             round_wire: Some(String::from("round-wire-1")),
+            round_intent: Some(RoundIntentMark::Auto),
             incarnation: Some((1, 2)),
             local_id: Some(String::from("local-1")),
         }
@@ -519,6 +640,7 @@ mod tests {
             presence_generation: PresenceGeneration::first(),
             command_id: None,
             round_wire: None,
+            round_intent: None,
             incarnation: None,
             local_id: None,
         }
@@ -667,5 +789,48 @@ mod tests {
         assert_eq!(HistoryRole::Owner, HistoryRole::Owner);
         assert_eq!(HistoryRole::Companion, HistoryRole::Companion);
         assert_ne!(HistoryRole::Owner, HistoryRole::Companion);
+    }
+
+    #[test]
+    fn request_fingerprint_covers_request_semantics_only() -> Result<(), String> {
+        let mut keyed = command();
+        keyed.command_id = Some(CommandId(RawId::new()));
+        let Some(fingerprint) = keyed.request_fingerprint() else {
+            return Err(String::from(
+                "a keyed command carries a request fingerprint",
+            ));
+        };
+        assert_eq!(fingerprint.round_intent, RoundIntentMark::Auto);
+        let rendered = format!("{fingerprint:?}");
+        assert!(
+            !rendered.contains("private words"),
+            "body redacted: {rendered}"
+        );
+        // Same key, same request semantics: equal.
+        let mut same = keyed.clone();
+        same.round = RawId::new();
+        same.round_wire = Some(String::from("rotated"));
+        same.local_id = Some(String::from("other-local"));
+        same.at = clock();
+        same.expected_generation = PresenceGeneration::from_u64(9);
+        assert_eq!(
+            keyed.request_fingerprint(),
+            same.request_fingerprint(),
+            "accepted-result and transport-only drift never decide replay"
+        );
+        // Round intent is request semantics: a flip must not fingerprint
+        // equal, so a retry cannot adopt the changed intent.
+        let mut joined = keyed.clone();
+        joined.round_intent = Some(RoundIntentMark::Existing(String::from("round-wire-1")));
+        assert_ne!(
+            keyed.request_fingerprint(),
+            joined.request_fingerprint(),
+            "a changed round intent must change the fingerprint"
+        );
+        // Keyless appends carry no fingerprint at all.
+        let mut keyless = keyed;
+        keyless.command_id = None;
+        assert_eq!(keyless.request_fingerprint(), None);
+        Ok(())
     }
 }
