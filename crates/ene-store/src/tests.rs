@@ -2600,3 +2600,69 @@ async fn restart_keeps_timeline_intact() {
     assert_eq!(timeline[0].text, "first");
     assert_eq!(timeline[1].text, "second");
 }
+
+#[tokio::test]
+async fn registration_intent_decides_held_then_already_decided() {
+    use ene_credential::{
+        CredentialIntentRepository as _, RegistrationApply, RegistrationFingerprint,
+        RegistrationState,
+    };
+
+    fn fingerprint(id: &str) -> RegistrationFingerprint {
+        RegistrationFingerprint {
+            intent_id: id.to_owned(),
+            kind: String::from("register"),
+            target: String::from("credential:acme:main"),
+            base: String::from("consent-none"),
+            rationale_origin: String::from("management-surface"),
+            rationale_quote: None,
+        }
+    }
+
+    let Some(store) = open_memory().await else {
+        return;
+    };
+    let first = store
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("main"),
+            fingerprint("reg-1"),
+        )
+        .await;
+    assert_eq!(
+        first,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::HeldByOperation
+        )),
+        "a fresh registration pends Owner approval"
+    );
+    let repeat = store
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("main"),
+            fingerprint("reg-1"),
+        )
+        .await;
+    assert_eq!(
+        repeat,
+        Ok(RegistrationApply::AlreadyDecided),
+        "the same intent never decides twice"
+    );
+    let approved =
+        ene_credential::CredentialApprovalRepository::approve_pending(&store, "acme", "main").await;
+    assert!(matches!(approved, Ok(true)), "approval must apply");
+    let usable = store
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("main"),
+            fingerprint("reg-2"),
+        )
+        .await;
+    assert_eq!(
+        usable,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::AppliedAsOneTime
+        )),
+        "an approved pair registers as usable"
+    );
+}

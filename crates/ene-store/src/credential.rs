@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use ene_credential::{
-    CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialTechnicalError,
-    DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord,
-    PendingCredentialApproval, PendingPairing,
+    CredentialApprovalRepository, CredentialIntentRepository, CredentialRef,
+    CredentialRefRepository, CredentialTechnicalError, DeviceId, DevicePairingRepository,
+    DevicePairingStatus, DeviceRecord, PendingCredentialApproval, PendingPairing,
+    RegistrationApply, RegistrationFingerprint, RegistrationState,
 };
+use ene_permission::{IntentFingerprint, IntentOutcome};
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
@@ -12,7 +14,7 @@ use crate::Store;
 use crate::codec::{
     SQL_INSERT_CREDENTIAL_PENDING_IGNORE, SQL_SELECT_CREDENTIAL, credential_pair_is_blank,
     credential_unavailable, decode_device_record, decode_pending_credential,
-    decode_pending_pairing, encode_id, lock_shared,
+    decode_pending_pairing, encode_id, insert_decided_row_tx, lock_shared, select_intent_row_tx,
 };
 use crate::run_blocking;
 
@@ -499,6 +501,85 @@ impl CredentialApprovalRepository for Store {
                 );
             }
             Ok(pending)
+        })
+        .await
+    }
+}
+
+impl CredentialIntentRepository for Store {
+    async fn request_registration_with_intent(
+        &self,
+        provider: String,
+        label: String,
+        fingerprint: RegistrationFingerprint,
+    ) -> Result<RegistrationApply, CredentialTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            if credential_pair_is_blank(&provider, &label) {
+                return Err(credential_unavailable(String::from(
+                    "blank credential pair",
+                )));
+            }
+            // Journal columns stay shared with the consent intents; the
+            // registration decision is credential-owned and maps onto them.
+            let journal = IntentFingerprint {
+                intent_id: fingerprint.intent_id,
+                kind: fingerprint.kind,
+                target: fingerprint.target,
+                base: fingerprint.base,
+                rationale_origin: fingerprint.rationale_origin,
+                rationale_quote: fingerprint.rationale_quote,
+            };
+            let requested_text = WallClockWithTz::now().to_rfc3339();
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            // Write-once claim first: an existing row decides without
+            // touching credential state; the caller answers from the
+            // journal.
+            if select_intent_row_tx(&tx, &journal.intent_id)
+                .map_err(credential_unavailable)?
+                .is_some()
+            {
+                return Ok(RegistrationApply::AlreadyDecided);
+            }
+            // One transaction: the pending insert (or usable recheck) plus
+            // the replay row, so the decided state and the row that
+            // describes it can never strand apart.
+            let usable: Option<(String, String, String)> = tx
+                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let (state, outcome) = if usable.is_some() {
+                (
+                    RegistrationState::AppliedAsOneTime,
+                    IntentOutcome::AppliedAsOneTime,
+                )
+            } else {
+                tx.execute(
+                    SQL_INSERT_CREDENTIAL_PENDING_IGNORE,
+                    params![provider, label, requested_text],
+                )
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+                (
+                    RegistrationState::HeldByOperation,
+                    IntentOutcome::HeldByOperation,
+                )
+            };
+            match insert_decided_row_tx(&tx, &journal, &outcome).map_err(credential_unavailable)? {
+                None => {
+                    tx.commit()
+                        .map_err(|error| credential_unavailable(error.to_string()))?;
+                    Ok(RegistrationApply::Decided(state))
+                }
+                // Lost a cross-process race after deciding: roll back
+                // (dropping `tx` without committing) so the loser changes
+                // nothing, and let the caller answer from the journal.
+                Some(_winner) => Ok(RegistrationApply::AlreadyDecided),
+            }
         })
         .await
     }
