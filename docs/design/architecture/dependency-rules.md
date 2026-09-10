@@ -450,9 +450,7 @@ flowchart LR
 
 ### 11.1 根拠と全体対応
 
-[製品定義](../../requirements/product.md)を概念と非目標、[要件](../../requirements/requirements.md)を必須挙動の唯一の正本として扱う。[受け入れ条件](../../requirements/acceptance.md)は検証範囲であり、後続milestoneの確定済み契約も含めた。[参考資料](../../requirements/references.md)は非規範として読み、参考製品の構造・外部リンクの仕様・既存実装・Git履歴から依存規則を追加していない。
-
-下表のSOは[State Ownership](state-ownership.md)の節番号。Subsystemの責務・非責務・collaborationは[Subsystem Decomposition](subsystems.md)第3〜6節を維持する。AD・SC・RTは既存文書の識別子を参照する。
+下表の要件欄は[要件](../../requirements/requirements.md)の見出し、SOは[State Ownership](state-ownership.md)の節番号。Subsystemの責務・非責務・collaborationは[Subsystem Decomposition](subsystems.md)第3〜6節を維持する。AD・SC・RTは既存文書の識別子を参照する。
 
 | Drivers / 境界 | 対応する要件の見出し | SubsystemとSOの対応 | 本書の規則・確認箇所 |
 |---|---|---|---|
@@ -470,9 +468,9 @@ flowchart LR
 | AD-14、SC-03・04・10、RT-07・08・10 | Credential、通常保存しないdata、AuditとTelemetry | 認証秘密・保全・消去と全data経路。SO 4.21・4.23、5・8 | DR-05・09〜11、3.3・3.4、5.5、6、7.2。認証用途限定・秘密非露出・最小記録。 |
 | AD-15、SC-06〜09、RT-08・09 | Local data、Backupとrestore、Update、Reset | 保全・消去・全owner・権限・制約・認証秘密。SO 4.24、6.5・7 | DR-03・09・10、5.6、7.1・7.3。正常状態保護、全置換、除外、実行保留と有効化。 |
 
-### 11.2 State Ownershipから渡された問いへの回答
+### 11.2 State Ownershipの所有境界と回答箇所
 
-| SO第9節の問い | Dependency Rulesでの回答 |
+| 所有境界の論点 | Dependency Rulesでの回答 |
 |---|---|
 | 意味変更の要求・結果・参照の限定 | 1、3.1、4.1。変更要求は各semantic ownerへ、原記録・Task達成・個別作用の確定責任を区別。 |
 | Owner管理意図とLLM content | DR-02、4.1、5.2。由来と対象を保ち、Ruleの表示・保存・Undoは権限・制約、秘密設定は認証秘密。 |

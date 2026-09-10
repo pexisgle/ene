@@ -8,14 +8,7 @@ eneでは、ある責務で正しく受理した入力・結果が、別の責�
 
 本書は、こうした受渡しで失ってはいけない意味をFlowに依存しない契約へまとめる。Subsystem設計の責務一覧、State Ownershipの状態一覧、Runtime Flowの手順を複製するものではない。各Flowの順序・固有分岐はその文書に残し、本書では経路・時点・利用目的が変わる交差を扱う。
 
-入力とする文書の立場は次のとおりである。
-
-- [製品定義](../../requirements/product.md)は概念・対象・非目標、[要件](../../requirements/requirements.md)は製品挙動のsource of truthとする。[受け入れ条件](../../requirements/acceptance.md)は検証範囲であり、後続milestoneの確定済み要件も分析対象に含める。[参考資料](../../requirements/references.md)は非規範として扱う。
-- [Architecture Drivers](architecture-drivers.md)のAD-01〜15、[System Context](system-context.md)のSC-01〜10、[Runtime Topology](runtime-topology.md)のRT-01〜10とtrust・failure boundaryを維持する。
-- [Subsystem Decomposition](subsystems.md)の12責務・略称、[State Ownership](state-ownership.md)（以下SO）のsemantic ownerとlifecycle、[Dependency Rules](dependency-rules.md)（以下DR文書）の依存規則を維持する。
-- [Major Runtime Flows](runtime-flows.md)のRF-01〜08と第3節を、時間軸で検証された既存設計として使う。実装や過去設計から未確認の製品挙動を補わない。
-
-CC番号は本書内の参照用であり、要件ID、component、統一data型を意味しない。
+以下、[State Ownership](state-ownership.md)をSO、[Dependency Rules](dependency-rules.md)の文書をDR文書（規則はDR-xx）、[Major Runtime Flows](runtime-flows.md)の各FlowをRF-xxと表記する。CC番号は本書内の参照用であり、要件ID、component、統一data型を意味しない。
 
 | 契約 | 独立した横断設計が必要な理由 | 主な交差 |
 |---|---|---|
@@ -144,7 +137,7 @@ Scheduleは作成時に選んだtimezoneと時刻条件を保持し、表示loca
 
 移動では現在の入出力roundとClient依存作用の安全な区切りを対応付け、新旧Clientで二重存在させない。排他性を確認できないClientは対象活動を続けない。外部作用の物理的停止・取消まで確認したとはみなさない。通常Host Taskの完了を移動の前提にせず、Agent・Workspace・Host正本を移送しない。移動後の観測は移動先Clientと全体のObserver制御、自発性は元のCompanionの設定を参照する。
 
-Running個体の通常のClient切断時は基本的に利用可能なHost PC側Clientへ移動し、なければactiveなしとする。Host側Client環境を自動起動しない。Stopped個体にこの復帰を適用しない。Host再起動後の元Clientへの自動presence復旧は、この通常切断時の移動とは別に扱う。通常の管理面全体へ会話と同じactive制約を課さず、個体削除後も残るTask記録・判断・停止結果へ到達できるようにする。
+通常切断時の移動先、Host側Client環境の非自動起動、Host再起動後の自動presence復旧との区別はRT-02に従い、Stopped個体には適用しない。通常の管理面全体へ会話と同じactive制約を課さず、個体削除後も残るTask記録・判断・停止結果へ到達できるようにする。
 
 ### 再接続・再開は外部作用のreplayを許さない
 
