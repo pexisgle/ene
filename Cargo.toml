@@ -29,41 +29,17 @@ thiserror = "2.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [workspace.lints.clippy]
-# `restriction` is an opt-in menu, not a group to deny wholesale; its lints are
-# adopted one by one below.
-all      = { level = "deny", priority = -1 }
-pedantic = { level = "deny", priority = -1 }
-cargo    = { level = "deny", priority = -1 }
+# Standard Clippy (`all` at warn) is the gate via
+# `cargo clippy --workspace --all-targets -- -D warnings`.
+# `restriction` is opt-in; only lints with a concrete safety or
+# correctness problem are denied here. Do not enable `pedantic` or
+# `cargo` wholesale, and do not add workspace-wide allows to paper
+# over them. Tests may `unwrap`/`expect`/`panic` via clippy.toml.
 undocumented_unsafe_blocks = "deny"
-
-cargo_common_metadata = "allow"
-cast_possible_truncation = "allow"
-cast_possible_wrap = "allow"
-cast_precision_loss = "allow"
-cast_sign_loss = "allow"
-items_after_statements = "allow"
-large_futures = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-module_name_repetitions = "allow"
-multiple_crate_versions = "allow"
-must_use_candidate = "allow"
-struct_excessive_bools = "allow"
-too_many_lines = "allow"
-
-# Exceptions are `#[expect(lint, reason = "...")]`, scoped as narrowly as
-# possible — never a workspace-wide allow. In tests, `unwrap`/`expect()` on
-# Test values still needs such a narrow `#[expect]`; this keeps
-# `unwrap_used`/`expect_used` green without weakening the policy.
-allow_attributes = "deny"
-allow_attributes_without_reason = "deny"
-dbg_macro = "deny"
+unwrap_used = "deny"
 expect_used = "deny"
+panic = "deny"
 let_underscore_must_use = "deny"
 mem_forget = "deny"
-panic = "deny"
-print_stderr = "deny"
-print_stdout = "deny"
 todo = "deny"
 unimplemented = "deny"
-unwrap_used = "deny"

@@ -41,9 +41,8 @@ enum CliError {
 /// override earlier ones, matching the usual override convention. The value
 /// following `--config` is consumed verbatim, even when it starts with `--`.
 /// A missing value after `--config` and any unknown argument (including
-/// `--help` and `--version`, which are deferred: there is no `stdout`
-/// mechanism under the workspace `print_stdout` deny) are [`CliError::Usage`]
-/// failures whose display contains the usage line.
+/// `--help` and `--version`, which Stage 1 does not implement yet) are
+/// [`CliError::Usage`] failures whose display contains the usage line.
 ///
 /// The function is pure: it inspects only `args` and never touches the
 /// process environment, the filesystem, or `stdout`.
@@ -76,16 +75,14 @@ fn parse_args(args: &[String]) -> Result<Option<PathBuf>, CliError> {
 /// `_data_dir` with an underscore prefix on purpose: resolution is a pure
 /// computation that performs no I/O, creates no directories, and prints
 /// nothing, and `Stage 1` allows no effect that would give it meaning (no
-/// `mkdir`, no database open, no print under the `print_stdout` deny). The
-/// binding proves the resolution call compiles and runs while deferring every
-/// effect to `Stage 2`.
+/// `mkdir`, no database open, no print). The binding proves the resolution
+/// call compiles and runs while deferring every effect to `Stage 2`.
 ///
 /// There is deliberately no serve loop, no listener, no database, no
 /// provider, no presence, and no management surface yet (`Stage 2` and
 /// later). This is a synchronous `fn main`: there are no I/O boundaries yet,
-/// so no `Tokio` runtime. `--help` and `--version` are deferred for the same
-/// reason as printing: no `stdout` mechanism exists under the workspace
-/// `print_stdout` deny, so they currently report [`CliError::Usage`].
+/// so no `Tokio` runtime. `--help` and `--version` are not implemented in
+/// Stage 1, so they currently report [`CliError::Usage`].
 ///
 /// # Errors
 ///
