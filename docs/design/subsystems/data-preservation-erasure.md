@@ -8,9 +8,7 @@
 
 上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。[Context Assembly](../critical-areas/context-assembly.md)、[Action Execution](../critical-areas/action-execution.md)、[Targeted Deletion](../critical-areas/targeted-deletion.md)、[Client Presence Transition](../critical-areas/client-presence-transition.md)（以下、Presence Transition）、[Backup / Restore](../critical-areas/backup-restore.md)（以下、Backup-Restore）の一般契約は、隣接する確定済み contract として利用し、再定義も所有権の移動もしない。本書内の SO は [State Ownership](../architecture/state-ownership.md)、DR は [Dependency Rules](../architecture/dependency-rules.md) の節番号を指し、CC / RF 番号は対応する architecture 文書（[artifact 一覧](../README.md#artifact-一覧)）の契約 ID である。
 
-新しい semantic owner、第二の正本、万能Deletion Manager / Restore Manager / Persistence Owner / Policy Engine、統一state machine、共通Context layer、共通Client session layerを追加しない。
-
-Targeted Deletion と Backup-Restore が定めた全域操作そのもののlogical contractを再設計しない。本書は**保全・消去がそのcontractを成立させるために何を担い、各semantic ownerへ何を要求し、何を受け取って全体成立を判断するのか**へ落とす。Context Assembly / Action Execution / Presence Transitionで定義されたprovenance、delayed result、unknown outcome、Client一時data等も既存contractとして利用する。
+本書は新しいsemantic ownerや第二の正本（万能Deletion Manager / Restore Manager / Persistence Owner / Policy Engine、統一state machine、共通Context layer、共通Client session layer）を追加せず、Targeted Deletion と Backup-Restore の全域操作そのものを再設計しない。保全・消去がそのcontractを成立させるために何を担い、各semantic ownerへ何を要求し、何を受け取って全体成立を判断するのかへ落とす。
 
 ## 1. 選定理由
 
@@ -84,31 +82,7 @@ Backupの保護はOwnerが選択し、暗号化を利用できる。非暗号化
 
 ### 3.2 保全・消去が所有しない state（既存ownerに残る）
 
-本節の列挙はSO第4節の再掲ではなく、保全・消去が取得しないことの確認である。**本節のすべてを除いても、各domain stateのsemantic ownerを一意に説明できる。** 保全・消去を除去しても次の対応は失われない。
-
-- Characterの静的構成・revision：Character。適用関係は個体調整。
-- Companionの同一性・活動状態・適用済み構成：個体調整。
-- 会話の参加・継続、Historyと非会話活動記録・evidenceの意味、進行中の意味判断：個体調整。入出力roundの実際は入出力・提示。
-- 未伝達事項と報告状況：個体調整。
-- Summary・根拠関係・source参照：認識・学習。
-- Memoryの現在認識・重要度・scope・過去revision：認識・学習。scope意味は認識・学習、決定後の強制は権限・制約と各利用箇所。
-- 内部Skill・import原本との対応・学習revision・実行結果：認識・学習。
-- Relationship：認識・学習（主体別の現在解釈）。
-- Companion Stateの一時状態と持続的傾向：認識・学習。
-- Taskの目的・担当・進捗・結果とTask context：作業。
-- 委任と一時Task Agentの実行状態：作業。
-- Actionの実行状況・作用の確定度・停止結果：実行・拡張。
-- Workspace関連付け・保存先・内部copy・中間fileの意味：関連付け・Task context・中間fileの用途は作業、外部実体はOwnerまたは外部system、取得結果の由来・確定度は実行・拡張。
-- Schedule設定・到来した回・各回のTask：作業。
-- 接続の事実・active帰属：接続・存在。pairing・device許可の意味は権限・制約。
-- 観測設定・観測候補・自発性の設定：観測運用は共有観測、自発性は個体調整、強制上限は権限・制約、Mute・入出力状況は入出力・提示。
-- 一般設定・Body・Voiceの出力と一時状態・Host自動起動の選択：入出力・提示（OS作用は実行・拡張、全域参加調整は保全・消去）。
-- Provider接続情報・能力情報と割当の解決：登録・能力観測・解決は推論、割当同意は権限・制約。
-- Rule・Permission・同意・禁止・上限と現在の有効性：権限・制約。
-- 利用量・費用・資源の記録：原記録は各利用owner（Provider分は推論）、上限に対する可否は権限・制約。
-- Credential値・用途・参照元・認証状態：認証秘密。参照元接続は各接続owner。
-- MCP・Pluginの接続 / 受入設定と外部実行状態：実行・拡張（sandbox外許可の正本は権限・制約、秘密値は認証秘密）。
-- Client固有の接続材料：端末に属する別分類。利用・更新・再pairingは接続・存在、秘密保護は認証秘密、Host側信頼・許可・失効は権限・制約。具体形式・保存方式は固定しない。
+保全・消去以外のdomain stateはSO第4節の各ownerに残り、保全・消去は取得しない。保全・消去を除去しても各domain stateのsemantic ownerは一意に説明できる（第10節末尾）。Client固有の接続材料は端末に属する別分類であり、利用・更新・再pairingは接続・存在、秘密保護は認証秘密、Host側信頼・許可・失効は権限・制約が担う。
 
 通常時のdata accessやmutationの必須中央経路を保全・消去にしない。通常の参照・形成・委任・送信・保存・提示・作用は各ownerと各利用箇所の契約で成立し、保全・消去を経由しない。保全・消去が関与するのは、全域操作の調整・保持方針の適用調整・Audit / Debug保全・操作状況の保全に限る。通常のLearning形成・Task遂行・会話・観測・推論利用を保全・消去の応答待ちにしない。管理経路の成立にもLLM・長時間Task・Body・Voice・拡張の成功を挟まない（DR 7.4）。
 
@@ -310,53 +284,34 @@ Cancel・切断から外部作用の取消・不存在を推測せず、不明�
 
 ## 7. Step 11 contractへの参加
 
+各契約の一般条件は第0節に挙げたcritical-area文書が持ち、本節では再掲しない。本節は保全・消去が供給・参加する固有内容だけを記す。
+
 ### 7.1 Context Assemblyへの参加
 
 - 保全・消去はContextを保持・変換・送信・受入する各責務が自分の参加範囲を説明できることを要求する。情報ownerだけを参加先にせず、処理中context、検索・圧縮派生物、ene管理下のcache、Client・拡張の一時copy、戻り得る結果を含める。
-- 各保持・利用先は、対象sourceや対象情報との関係、処理中の利用、局所処理・検証、再保存防止、確認不能・未完了を対応付ける。sourceを消した後に依存関係も消失し、遅延結果を識別できなくなる実装を不可とする。必要な関係は本文を保持せず維持できるようにし、関係自体に対象情報が残る場合も消去へ参加させる。
-- 消去開始から完了までに再到着・生成した対象情報も対象に含める。既知sourceへの依存追跡だけではこの条件を満たさないため、各受入・保存先は進行中の対象情報についての消去条件も適用する。指定文字列は機械的な検索・除去・残存検証へ参加し、意味的な同一情報の完全検出までは保証しない。
-- 局所除去後も旧context・遅延結果・再接続Clientから対象情報を戻さない。必要な作用事実は対象本文を再保存しない範囲で扱い、Auditや完了説明を復元源にしない。分離不能な重要影響は影響説明へ返す。確認不能なClientや外部処理を成功へ読み替えず、局所完了を全域完了にしない。
-- 再起動で未完了消去と必要な保留を失わない。完了後も削除前の根拠だけによる再形成・遅延再保存を防ぐ。一方、完了後にOwnerが改めて提供した情報は新しいExperienceになり得るため、同じ文字列への永久禁止を新設しない。旧backupの明示restoreによる復活は別操作である（DP-4）。
+- 各保持・利用先は、対象sourceや対象情報との関係、処理中の利用、局所処理・検証、再保存防止、確認不能・未完了を対応付ける。関係自体に対象情報が残る場合も消去へ参加させる。
 - 外部Workspace・Owner保存backup・Provider保有copyの削除を内部context消去の成功条件へ加えず、ene管理下の内部copyは除外しない。
-- Restoreでは旧live要求・結果と復元正本を区別する。復元後の自動処理保留、Ownerの確認後の一括有効化、現在条件を維持する。旧live作用の必要説明も、復元されたTaskやLearningへ無条件に混ぜない。
 
 ### 7.2 Action Executionへの参加
 
-- 保全・消去は作用事実の説明と消去参加の両立を各受入先へ要求する。必要な事実の記録と対象情報の除去を両立させ、対象本文を作用記録という理由で残さない。各受入先は消去へ参加し、古い結果から対象情報を戻さない。外部へ送信・export・backup済みcopyや外部Workspaceの消去、Credentialの外部失効は作用記録の完了範囲外として説明する。
-- 消去を理由に必要なAction outcomeの確定度を成功・失敗・未実行へ変換しない。実行・拡張が把握した確認済み成功・確認済み失敗・不明の別と、その根拠・観測者を維持する。Task記録は実行・拡張の確定度を参照・集約し、同じ確定度を作業側で独立更新しない。
-- Ownerへの最終報告・管理面の表示・要約が、未完了・不明を成功へ変えないことを維持する。確定度・費用の報告 / 推定 / 不明を保ち、推定・不明を確定値へ昇格させない。
-- Restoreでは試行と作用を別の関係として扱う。retry・再実行は同じ試行の継続ではなく新しい試行とする。作用不明の試行の再実行は重複riskを示したOwner判断を必要とする。確認済み失敗と不明を同じretry経路へ潰さない。Client再接続・移動・Host再起動・restore後の旧試行の結果が遅れて届いても、現在のTask・復元正本へ無条件に混入させない。
-- 記録保存の失敗も、最後の正常記録だけから未実行を推定する理由にしない。
+- 保全・消去は作用事実の説明と消去参加の両立を各受入先へ要求する。必要な事実の記録と対象情報の除去を両立させ、対象本文を作用記録という理由で残さない。外部へ送信・export・backup済みcopyや外部Workspaceの消去、Credentialの外部失効は作用記録の完了範囲外として説明する。
+- 消去を理由に必要なAction outcomeの確定度を成功・失敗・未実行へ変換しない。Task記録は実行・拡張の確定度を参照・集約し、同じ確定度を作業側で独立更新しない。
 
 ### 7.3 Targeted Deletionへの参加
 
-本節は `targeted-deletion.md` の再定義ではなく、各参加責務への落とし込みの確認である。
-
 - 保全・消去（PE-1・PE-7）がOwnerの明示的なPrivacy / Security目的と対象情報を、保存場所を要求せずに全域の消去対象へ対応付ける。意味的な対象特定には個体調整・認識・学習等が参加し、各state ownerは保持済み内容・過去revision・Summary / evidence・source・内部copy・派生物と処理中利用を示す。権限・制約と各実行箇所は再保存を防ぐ制約へ参加する。
 - 完了条件は `targeted-deletion.md` 第8.2節の全体である。保全・消去が各参加先の局所完了・検証・未完了を対応付け、内部全域の成立を確定する。局所完了の集合以上の条件を必要とする。
-- 切断したClientを放置して永続copyが残ることを許さない。Clientはもともと長期private dataを永続cacheせず、切断・再接続でも古い一時dataをHostへ戻して再形成しない責任を持つ。消去中の接続変化や確認不能は保全・消去へ通知し、必要な確認を飛ばして成功にしない。到達性・消去確認の具体方式は後続に残す。
-- Targeted Deletionによる通常の根拠保持・Historyと形成済み状態の独立性に反する変更は、この操作の目的・対象範囲に限って認める。容量retentionはDP-6の明示opt-inに従う別操作とする。保全・消去がMemoryの重要度や関係解釈を普段から編集する権限は生じない。削除完了後にOwnerが改めて情報を提供した場合は新しいExperienceとして扱える。外部送信・export・backup済みcopyや外部Workspaceの消去を完了範囲に含めない。
+- 切断したClientを放置して永続copyが残ることを許さない。消去中の接続変化や確認不能は保全・消去へ通知し、必要な確認を飛ばして成功にしない。到達性・消去確認の具体方式は後続に残す。
+- Targeted Deletionによる通常の根拠保持・Historyと形成済み状態の独立性に反する変更は、この操作の目的・対象範囲に限って認める。容量retentionはDP-6の明示opt-inに従う別操作とする。保全・消去がMemoryの重要度や関係解釈を普段から編集する権限は生じない。
 
 ### 7.4 Client Presence Transitionへの参加
 
 - 保全・消去は接続中Clientの一時dataを扱う参加先の把握を支援する。接続・存在が消去中のClient接続変化・確認不能を参加先へ結び付け、入出力・提示等が表示・一時操作dataの消去状況を報告する。到達不能を消去成功に読み替えない。
-- 切断したClientも古い一時dataを再接続時にHostへ戻して再形成しない。Clientに永続private cacheを置かない原則を維持する。
-- 移動・切断中の到着物は元帰属・元round・元試行へ対応付け、用途別に受け入れる。到着先の現在活動へ付け替えず、Client copyでHostを上書きしない。未送信操作を自動queueにしない。
-- Host再起動後のpresence復旧とround / Computer Use / Task / Actionの再実行・再開は別の条件であることを維持する。復旧先記録そのもののpresence成立化・別Clientへの無条件自動移動への拡大をしない。
-- Restoreでは復旧先・hint・接続・帰属の対応を復旧可能な参照対応で提供する前提で、保存された接続・帰属を現在の到達性とみなさない。復元されたdevice参照・許可は現在の接続・認証成立・排他性を確認できて初めて帰属・利用に接続する。
 
 ### 7.5 Backup / Restoreへの参加
 
-本節は `backup-restore.md` の再定義ではなく、各参加責務への落とし込みの確認である。
-
 - 保全・消去（PE-2・PE-3・PE-7）が対象時点・内部範囲・除外・作成結果・操作状況・保留を調整する。各semantic ownerが自分の保持・利用範囲の対応・参照・利用可能性を確認する。
-- 復元対象は現在のCredential store secretを除く対象内部dataの全置換であり、旧liveとのmergeではない。backup copyは正本ではなく、置換成立後に初めて復元内容がHost正本になる。
-- 現在のCredential store・外部現実・現在の到達性・未完了の保留は維持され、復元参照の存在から巻き戻したとは扱わない。
-- 復元されたassignment / consent / Rule等だけで現在利用・自動処理を開始しない。復元成立・一括有効化・現在条件を別に満たす。一件ずつの再承認は要求しないが、Deny・cap・認証不足・不明を無視しない。
-- staleなPermission・Provider・Client・作用結果・外部参照を現在事実にしない。dangling参照は未解決とし、不明は不明のまま保持し、自動replayしない。
-- 旧live要求・結果・Client copyを復元正本へ混ぜない。用別受入で由来を区別する。
 - 旧backupの明示restoreによる復活は自動再形成の例外ではなく別操作であり、事前説明・Audit・保留・現在再評価を経る（DP-4）。未完了消去の保留は置換で解除しない。
-- 単一正本・非混合・権限先行復活の禁止・成功表示の条件・再起動時の保全を守る。
 
 ## 8. boundaryを越える際に保持すべき意味
 
@@ -415,44 +370,19 @@ crate / module、struct / enum / trait、DB schema、backup format、serializati
 
 requirements・上位architecture・critical-area契約・他のSubsystem設計に対する横断検証は次のとおりである。固定scenario一覧の充足ではなく、正常系と本Subsystemにとって意味のある failure / stale / restart / deletionを選んでwalkthroughする。
 
+[Targeted Deletion](../critical-areas/targeted-deletion.md)第10節と[Backup / Restore](../critical-areas/backup-restore.md)第10節のwalkthroughは、保全・消去の参加調整（DP-1〜DP-4）でも同一の結果を要する。本節はそれらに加えて、保全・消去が意味ownerとなる交差だけを記す。
+
 | 領域・交差 | walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
-| 会話→学習正常・想起・訂正と消去の競合 | Memory形成処理が対象情報を利用中に消去要求が確定。形成先の認識・学習が消去条件へ照合し、削除前の情報から対象を再保存しない。完了前に完了表示しない。 | DP-1、7.1。RF-01、CC-03・05、SO 6.4を維持。 |
-| 共有根拠の部分削除 | 対象を含むSummaryが無関係Memoryの根拠でもある。可能な範囲で対象だけ除去し、分離不能なら影響を説明して確認する。 | DP-1。RF-01、CC-05、SO 4.5を維持。 |
-| 委任Taskの遅延結果と消去・復元 | Task Agent結果・Tool結果が局所除去・置換成立後に到着。元のAction・Taskへ必要な作用事実だけ対応付け、対象本文を再保存せず、復元正本へ混ぜない。確定度を書き換えない。 | DP-1、DP-3、7.2。RF-02、Action 7.3・9、CC-03・07を維持。 |
-| Cancel・steeringと消去の重なり | Cancel・steering後の遅延結果と消去条件が重なる。元Action・Taskへの事実帰属と消去条件を両立させ、古い承認でCancel・消去を解除しない。 | DP-1、7.2。Action 7、CC-03・04を維持。 |
-| 作用不明と消去・復元 | 成功不明の外部作用の説明が必要。重複riskをOwner判断へ戻し、自動再実行しない。不明を未実行・成功へ変換せず、対象本文を作用記録で残さない。 | DP-1、DP-3、7.2。Action 8、CC-07を維持。 |
-| 共有検知→個体理解の遅延と消去 | routing用限定文脈・候補が消去区間に重なる。共有観測・個体調整が消去条件へ照合し、生成済み要約・処理中結果にも適用する。 | DP-1、7.1。Context 6、CC-02・03を維持。 |
-| 移動・切断と消去・復元 | 消去・復元中にClientが切断・再接続。確認不能を成功にせず、古い表示copy・入力をHostへ戻さない。新ClientへのCapture付け替え・旧Actionのreplayをしない。 | DP-1、DP-3、7.4。RF-04、CC-04・05を維持。 |
-| activeなし期間の未伝達と消去 | 未伝達メモ・要約に消去対象が含まれる。個体調整が報告前に消去状況へ照合し、対象を復元させない。 | DP-1。SO 4.4、CC-05・07を維持。 |
-| 再起動と未完了消去・復旧 | Host再起動が消去・復元途中に発生。保全・消去が未完了範囲と保留をHostに保持し、再起動後に検証・置換を継続する。再起動を完了・解除の根拠にしない。途中Taskは明示再開待ちのまま。 | 第6・6.1節、DP-1、DP-3。RF-05、CC-04・05を維持。 |
-| Schedule・自発活動と消去・復元 | 消去区間・復元保留にSchedule到来・自発Task開始が重なる。現在の消去条件・保留を再評価し、対象を必要とする新規利用・自動処理を開始しない。 | DP-1、DP-3。第6節、CC-01・04を維持。 |
-| 個体削除と消去の重なり | 個体削除の残存記録と消去対象が重なる。個体固有Learningは削除し、残るHistory・Task記録の中の対象本文は消去条件で除去する。Summaryをhistorical logへ分類し直して残さない。 | DP-1、第5節。RF-06、SO 6.3・6.4、CC-05を維持。 |
-| 削除後の遅延作用 | 個体削除後に対象を含む作用結果が到着。残るTask記録へ必要な事実だけ残し、削除済み個体のLearningを再作成しない。 | DP-1。Action 7.3、CC-03・05を維持。 |
-| 消去中の再到着・再生成 | 消去開始から完了までに対象情報が再入力・内部生成される。同じ消去対象として処理し、新しいExperienceとして除外しない。完了後のOwner再提供は新しいExperienceとして区別する。 | DP-1、7.1。RF-07、CC-03・05を維持。 |
 | backup作成と未完了消去 | 未完了消去・復旧とbackup作成が重なる。制約を無視した正常copyを作らず、待機または未完了を含める。 | DP-2、第6節。RF-08、CC-05を維持。 |
-| restoreと旧live結果・旧backup | 切替前に開始した推論・Tool結果が切替後に到着。復元正本へ混ぜず、旧作用説明と区別する。旧backupの明示restoreは事前説明・Audit・保留・現在再評価を経る別操作とし、自動再形成の例外・自動再消去・自動利用のいずれにもしない。未完了消去の保留は置換で解除しない。 | DP-3、DP-4。RF-08、CC-01・03〜05、SO 6.5・7を維持。 |
-| stale Permission / Provider / Client | 復元記録だけで新規利用・送信・帰属を成立させない。現在条件へ照合し、確認不能を許可・現在へ変換しない。 | DP-3。Context 7、Action 5、CC-01・03を維持。 |
+| restoreと未完了消去の保留 | 旧backupの明示restoreは事前説明・Audit・保留・現在再評価を経る別操作とする。未完了消去の保留は置換で解除しない。 | DP-3、DP-4。RF-08、SO 6.5・7を維持。 |
 | 通常History整理・retentionと消去の区別 | 通常削除・明示cleanupは形成済みLearning・Summaryへcascadeせず、対象をtargeted deletionへ読み替えない。既定OFFを守る。 | DP-6。RF-01・07、CC-05、SO 6.5を維持。 |
 | 設定Reset / 全データReset | 一般設定の既定化と内部全体削除を分け、保護対象・外部除外を守る。旧処理・一時copyから戻さない。 | DP-5。第5節、RF-08、SO 6.5・7を維持。 |
 | Audit・Debugと秘密・本文 | 確定度を強めず、本文・秘密の別保管庫を作らない。監査記録を再生・自動実行の入力にしない。Debugは短期失効を守る。 | DP-7。Action 9、CC-02・07を維持。 |
-| 補助推論・費用不明との競合 | 消去探索・復元照合の推論が不通・費用不足でも、機械的検証・停止・拒否・管理を塞がない。不足を管理面へ返す。 | DP-1〜DP-3、第6節。Context 5.2、CC-06を維持。 |
 
-Cross-cutting契約との照合結果は次のとおりである。
+CC-01〜CC-07に対して維持する一般的な性質は各critical-area文書の横断検証と同一である。本書が加えるのは、消去条件の適用をcontext内更新で解除しないこと（CC-01）、目的別lifecycleを保つこと（CC-05）、本文の別保管庫を作らないこと（CC-07）である。
 
-| 契約 | 詳細化によって維持する性質 |
-|---|---|
-| CC-01 | 生成content・復元記録から権限を新設しない。既存依頼で足りる場合の再確認を増やさない。復元Rule・同意をtriggerにしない。消去条件の適用をcontext内更新で解除しない。 |
-| CC-02 | 参照・変換・共有・送信・保存・派生物・Client経路へ利用範囲・消去条件を適用する。Credentialは別経路で非露出を維持する。通常Learningのscope形成責任は維持する。 |
-| CC-03 | 削除前の根拠と完了後の新規提供・明示restore、過去の正しさと現在有効性を分離する。遅延結果の用途別受入により単一valid判定へownerを集めない。 |
-| CC-04 | Client依存だけを現在帰属に結び付け、Stop・Cancel・再起動・restore保留を区別する。解除一つで他の禁止・保留を消さない。自動replayしない。 |
-| CC-05 | 保持・利用先が派生物・遅延結果まで消去・復元へ参加する。原記録削除・context終了・局所完了を全域完了にしない。外部copy消去を内部完了に含めない。目的別lifecycleを保つ。 |
-| CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task待ちにしない。機械的検証をLLM待ちにしない。 |
-| CC-07 | transport・Tool・Task・報告・監査の確定度を分け、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。本文の別保管庫を作らない。 |
-
-本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Managerを導入しない。通常History保持、Companion削除、targeted deletion、backup / restore、ResetはSO・DRの異なるlifecycleを維持する。
-
-他のSubsystem設計（個体調整 / 作業 / 認識・学習、権限・制約 / 認証秘密 / 実行・拡張 / 推論、接続・存在 / 入出力・提示 / 共有観測）との照合では、利用側Subsystemと本書の保全・消去の間に新しいsemantic ownerや第二の正本を生まない。Task達成は作業、作用確定度は実行・拡張、報告は個体調整、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、割当解決・利用量原記録は推論、帰属は接続・存在、round・提示は入出力・提示、対象・時機・routingは共有観測に残り、本書のDP-1〜DP-8はその受渡しの対応付けである。scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持、旧backup交差の各契約は各文書で同一である。
+他のSubsystem設計との照合では、各意味ownerはSO第4節のまま残り、本書のDP-1〜DP-8はその受渡しの対応付けである。scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持、旧backup交差の各契約は各文書で同一である。
 
 ### 保全・消去を除いてもownerを一意に説明できることの確認
 

@@ -257,21 +257,15 @@ Computer Useでは特に次の既存contractを維持する。具体的なComput
 | RF-08交差：restore後の旧live結果 | 切替前に開始した推論・Tool結果がrestore後に到着。旧live状態を復元正本へ混ぜず、Task・Learning・許可を復活させない。 | 8.3。Context 8.1、Action 7.3、CC-03・05を維持。 |
 | 全Flow：補助推論・費用不明との競合 | 帰属判断・移動可否の推論が不通・費用不足。未承認Action・無条件移動を先に実行せず、不足を管理面へ返す。停止・拒否・機械的検証は継続可能。 | 3〜5。Context 5.2、CC-06を維持。 |
 
-Cross-cutting契約との照合結果は次のとおりである。
+CC-01〜CC-07の一般条件は[Cross-cutting Design](../architecture/cross-cutting.md)が持つ。本書が加えるのは次の点である。
 
-| 契約 | 詳細化によって維持する性質 |
-|---|---|
-| CC-01 | 移動要求・呼出し・自発移動の由来と、帰属成立・Action許可を区別する。生成content・画面内指示・観測ON・presenceから権限を新設しない。既存依頼で足りる場合の再確認を増やさない。 |
-| CC-02 | 参照・変換・共有・送信・保存・派生物・Client経路へ帰属・scope・消去条件を適用する。旧帰属のcontext・cache・sessionを新帰属で再利用しない。Credentialは別経路で非露出を維持する。 |
-| CC-03 | 過去の帰属の正しさと現在の用途への有効性を分離する。遅延結果の用途別受入により単一valid判定へownerを集めない。旧由来と完了後の新規提供を区別する。 |
-| CC-04 | Client依存だけを現在帰属に結び付け、Stop・Cancel・再起動・restore保留を区別する。解除一つで他の禁止・保留を消さない。自動replay・自動復帰の拡張をしない。 |
-| CC-05 | 保持・利用先が派生物・遅延結果まで消去へ参加する。Client一時dataの古いcopyからの再保存・再形成を防ぐ。原記録削除・round終了・局所完了を全域完了にしない。 |
-| CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task・移動完了待ちにしない。機械的な帰属確認・消去検証をLLM待ちにしない。 |
-| CC-07 | 受付・受理・作用・記録保存・Task達成・報告を別の事実とし、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。生成済みを提示済みにしない。 |
-
-本書はsemantic owner、Host／Client配置、trust／failure boundary、lifecycle、permission／consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Presence Manager・統一presence state machineを導入しない。通常History保持、Companion削除、targeted deletion、backup／restoreはSO・DRの異なるlifecycleを維持する。
-
-Context Assemblyとの照合では、由来Client・round・観測候補との対応、変換後の制限継承、現在性・用途別受入、処理中無効化の契約を帰属切替へ接続し、移動前のCaptureの付け替え・Stopped個体の覚醒・古いsessionによる制約迂回を許していない。Action Executionとの照合では、判断対象と実対象の対応、委任不変、試行と作用の区別、確定度・不明保持、遅延帰属、報告での確定度保持を帰属切替へ接続し、移動・再接続・再起動による自動再実行を許していない。Targeted Deletionとの照合では、消去条件の適用、区間内再到着の取込み、旧由来と新規提供の区別、cache・session・Client copyの再利用禁止、未完了保全の契約を帰属切替へ接続し、古いClient copyからの復活を新しいExperienceとして救済していない。
+- CC-01：移動要求・呼出し・自発移動の由来と、帰属成立・Action許可を区別する。画面内指示・観測ON・presenceから権限を新設しない。
+- CC-02：旧帰属のcontext・cache・sessionを新帰属で再利用しない。
+- CC-03：過去の帰属の正しさと現在の用途への有効性を分離する。
+- CC-04：自動replay・自動復帰の拡張をしない。
+- CC-05：Client一時dataの古いcopyからの再保存・再形成を防ぐ。round終了を全域完了にしない。
+- CC-06：制御・保全経路を移動完了待ちにせず、機械的な帰属確認をLLM待ちにしない。
+- CC-07：生成済みを提示済みにしない。
 
 ## 12. 本書が固定する契約と残す Design Freedom
 

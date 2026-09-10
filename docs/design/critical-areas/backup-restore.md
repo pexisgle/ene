@@ -214,21 +214,11 @@ requirements、上位architecture、および他のcritical-area契約に対す�
 | 補助推論・費用不明との競合 | 復元内容の照合・消去探索の推論が不通・費用不足でも、機械的検証・停止・拒否・管理を塞がない。不足を管理面へ返す。 | 3、7。Context 5.2、CC-06を維持。 |
 | Audit・報告 | 確定度を強めず、本文の別保管庫を作らない。監査記録を再生・自動実行の入力にしない。 | 3、9。Action 9、CC-07を維持。 |
 
-Cross-cutting契約との照合結果は次のとおりである。
+CC-01〜CC-07の一般条件は[Cross-cutting Design](../architecture/cross-cutting.md)が持つ。本書が加えるのは次の点である。
 
-| 契約 | 詳細化によって維持する性質 |
-|---|---|
-| CC-01 | 生成content・復元記録から権限を新設しない。既存依頼で足りる場合の再確認を増やさない。復元Rule・同意をtriggerにしない。 |
-| CC-02 | 参照・変換・共有・送信・保存・派生物・Client経路へ利用範囲・消去条件を適用する。Credentialは別経路で非露出を維持する。通常Learningのscope形成責任は維持する。 |
-| CC-03 | 削除前の根拠と完了後の新規提供・明示restore、過去の正しさと現在有効性を分離する。遅延結果の用途別受入により単一valid判定へownerを集めない。 |
-| CC-04 | Client依存だけを現在帰属に結び付け、Stop・Cancel・再起動・restore保留を区別する。解除一つで他の禁止・保留を消さない。自動replayしない。 |
-| CC-05 | 保持・利用先が派生物・遅延結果まで消去・復元へ参加する。原記録削除・context終了・局所完了を全域完了にしない。外部copy消去を内部完了に含めない。 |
-| CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task待ちにしない。機械的検証をLLM待ちにしない。 |
-| CC-07 | transport・Tool・Task・報告・監査の確定度を分け、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。 |
-
-本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Restore Managerを導入しない。通常History保持、Companion削除、targeted deletion、backup / restore、ResetはSO・DRの異なるlifecycleを維持する。
-
-Context Assemblyとの照合では、由来・用途・現在性・用途別結果受入・処理中無効化の契約を復元へ接続し、旧live結果の混入・古いsessionによる制約迂回を許していない。Action Executionとの照合では、判断対象と実対象の対応・委任不変・試行と作用の区別・確定度・不明保持・遅延帰属・報告での確定度保持を復元へ接続し、移動・再接続・再起動・restoreによる自動再実行を許していない。Targeted Deletionとの照合では、消去条件の適用・区間内再到着の取込み・旧由来と新規提供・明示restoreの区別・cache・session・Client copyの再利用禁止・未完了保全の契約を復元へ接続し、古いBackupからの復活を新しいExperience・別操作として扱い、自動再形成の例外にしていない。Client Presence Transitionとの照合では、authoritative帰属・切替区間の新規開始禁止・活動別区切り・到着物の帰属・Host継続・再起動復旧と再実行の分離の契約を復元へ接続し、復元された帰属のcanonical化・二重presence・旧作用の自動継続を許していない。
+- CC-01：復元記録から権限を新設せず、復元Rule・同意をtriggerにしない。
+- CC-03：削除前の根拠と完了後の新規提供・明示restoreを分離する。
+- CC-05：外部copy消去を内部完了に含めない。
 
 ## 11. 本書が固定する契約と残す Design Freedom
 
