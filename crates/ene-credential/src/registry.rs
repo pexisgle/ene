@@ -186,18 +186,20 @@ pub fn credential_availability(
     }
 }
 
-/// Resolves a credential id to a registered, bearer-backed ref.
+/// Resolves a credential id to a registered, bearer-backed ref for `provider`.
 ///
 /// The Host uses this premise for setup gating and views: `Ok(None)` means
-/// the pair is absent or unprovisioned (setup incomplete), while `Err` is an
-/// infrastructure failure. The two are never collapsed.
+/// the pair is absent, unprovisioned, or names a credential of a different
+/// provider (the route could not bill it), while `Err` is an infrastructure
+/// failure. The two are never collapsed.
 pub async fn available_credential(
+    provider: &str,
     credential_id: &str,
     refs: &impl CredentialRefRepository,
     store: &impl CredentialStore,
 ) -> Result<Option<CredentialRef>, CredentialTechnicalError> {
     let known = refs.list_refs().await?;
-    Ok(known
-        .into_iter()
-        .find(|cred| cred.id() == credential_id && store.contains(cred)))
+    Ok(known.into_iter().find(|cred| {
+        cred.provider() == provider && cred.id() == credential_id && store.contains(cred)
+    }))
 }

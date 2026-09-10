@@ -13,8 +13,9 @@
 //! assembles permission or credential premises by hand.
 //!
 //! [`send`] remains the transport-facing gate under that boundary: it
-//! checks route/candidate agreement and the input cap, then calls the
-//! transport. Direct callers must already hold an admitted use; the
+//! checks route/candidate agreement, then calls the transport. The input
+//! cap is checked earlier by [`dispatch_authorized`], before the durable
+//! attempt claim. Direct callers must already hold an admitted use; the
 //! boundary entry points are the normal path.
 //!
 //! Body text is redacted from [`core::fmt::Debug`]: [`RequestInferenceCommand`]
@@ -512,7 +513,7 @@ pub async fn prepare_dialogue_admission(
     })?;
     let Some(credential) = known_refs
         .iter()
-        .find(|known| known.id() == record.credential_id)
+        .find(|known| known.provider() == record.provider && known.id() == record.credential_id)
         .cloned()
     else {
         return Ok(PreparedAdmission::Declined(NotSentReason::SetupIncomplete));
@@ -651,7 +652,7 @@ pub async fn dispatch_authorized(
     match attempts
         .begin_inference_attempt(InferenceAttempt {
             ticket,
-            expected_consent: (consent_id.clone(), consent_rev.as_u64()),
+            expected_consent: (consent_id.clone(), consent_rev),
             provider: provider.clone(),
             model: model.clone(),
         })
