@@ -2,17 +2,7 @@
 
 本書は Step 13 の Host↔Client IPC / wire protocol artifact である。[対応関係・識別](correspondence-identity.md)（CI）、[Persistence / Recovery](persistence-recovery.md)（PR）、[Concurrency Control](concurrency-control.md)（CCT）、[Interface Boundaries](interface-boundaries.md)（IB）、[Crate / Module 分解](crate-module-decomposition.md)（CM）が定めた identity・保存分類・concurrency・interface contract・crate 依存方向を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。
 
-本書の Rust pseudo-type はコンパイル対象ではない。型名・field 名・message 名の同義改名は許すが、型の分離と field の意味は維持すること。
-
-## 0. 固定 premise（再掲。変更しない）
-
-1. **Host が canonical authority。** canonical state と control authority は Host が持つ。Client は canonical persistent state holder ではない。
-2. **Client-originated message は authority ではない。** Permission / presence / Task / Action 等の確定にはならない。Host の現在条件との照合を経て初めて受入可否が決まる。
-3. **Host-local は IPC へ公開しない。** Host-local な Permission 確定、Credential 利用、Provider assignment、cost reservation、Action 認可・outcome 確定、repository compare、Restore switch 等は wire へ出さない。Client へ送るのは必要表示と、照合のための最小 correlation だけである。
-4. **Client は Host authority crate へ直接依存しない。** Client が依存してよいのは `ene-api`（wire DTO）と `ene-primitive`（opaque 性質）のみである（CM 第8節）。
-5. **`ene-api` は wire DTO のみ。** business logic・authority 判定を置かない。必要なら極小の opaque primitive のみ共有し、Host domain object そのものを公開しない。
-6. **Currentness を失わない。** CI / CCT の identity・revision・generation・typed correspondence・expected current relation・stale / delayed handling を wire 境界でも維持する。ただし Host 内部の boundary token 全体を Client へ渡さない。Client が保持・返送する最小限の opaque / typed correlation だけを選ぶ（第6節）。
-7. **後方互換は制約ではない。** AGENTS.md および要件（非目標）により、既存 config / IPC / Plugin protocol / 保存形式 / CLI との互換性維持は要求しない。clean な設計を優先する。
+本書の Rust pseudo-type はコンパイル対象ではない。型名・field 名・message 名の同義改名は許すが、型の分離と field の意味は維持すること。Host / Client の crate 配置と `ene-api` 境界は [Crate / Module 分解](crate-module-decomposition.md)第8節、identity・currentness は CI / CCT に従い、本書はそれらを wire へ落とす。
 
 ## 1. 対象と非対象
 

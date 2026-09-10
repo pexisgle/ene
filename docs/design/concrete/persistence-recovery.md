@@ -115,7 +115,7 @@ DB 製品固有 SQL は確定しない。以下は logical table / collection �
 | `character_revision` | `(character_id, character_revision)` | 静的部品・推奨 Skill 指定・import provenance 対応（CORR→`character_import`）、差分提示内容。REV=`character_revision` | D1+D2（現在一覧 + 履歴） | Character 削除で除去。targeted deletion で対象情報を復元できる内容を持つ場合のみ参加 | 現在 revision 一覧から供給。存在≠適用と区別する |
 | `character_import` | `import_id` | CORR→対象 Character・revision、外部原本参照（E、所有ではない）、受入時点・validation 結果（実行許可ではない） | D2 | Character 削除で除去。targeted deletion は参加原則に従う | 受入対応の履歴として読む |
 
-適用関係は Group B（個体調整）に置く。内容の正本は Character、適用関係の正本は個体調整であり二重編集しない。
+適用関係は Group B（個体調整）に置く。
 
 #### Group B — Companion / History / 未伝達 / round 対応（owner: 個体調整。round の実際は入出力・提示）
 
@@ -186,7 +186,7 @@ retry・再送・fallback・再委任は新しい `attempt_id` とする。重�
 | `usage_fact_provider`（owner: 推論） | `usage_id` | consumer（Companion/Observer 専用/Task 等）・報告/推定/不明/処理中の別・量・CORR→attempt/task/assignment・報告時点 | D2+D3 | Companion 削除で費用 log を削除・使用量をリセットしない。targeted deletion で該当情報を参加させる（消去を消費リセットにしない） | cap 評価の入力として読む。未報告・処理中・不明をゼロにしない |
 | `usage_fact_task`（owner: 作業） / `usage_fact_action`（owner: 実行・拡張） / `usage_fact_storage`（owner: 保全・消去） | `usage_id` | 同上（委任稼働・Action 実行・保存量等の各事実） | D2+D3 | 同上 | 同上 |
 
-「現在の利用可否」は保存された行ではなく、保存条件＋活動状態＋委任＋帰属＋利用量＋失効＋保留等を照合した評価時に導出する。判定 cache・保存 Allow・復元 Rule を現在許可にしない。
+「現在の利用可否」は保存された行ではなく、保存条件＋活動状態＋委任＋帰属＋利用量＋失効＋保留等を照合した評価時に導出する。
 
 #### Group G — 接続・帰属（owner: 接続・存在。pairing・device 許可の意味は権限・制約、秘密は認証秘密）
 
@@ -247,7 +247,7 @@ retry・再送・fallback・再委任は新しい `attempt_id` とする。重�
 | 秘密値本体 | `credential_id`（credential-store 側 key） | 値・用途限定利用 | E（OS credential store 等） | 失効・更新は別操作。内部露出 copy の消去と外部失効を混同しない | 認証用途に限定して利用する。model context・Tool argument・通常 result・UI・Learning・History・Task 結果・log・Audit・Debug・backup へ流さない |
 | Host device-auth record | pairing identity（store 側 key） | device 対応・Host 側所有証明検証材料（公開鍵等の非秘密材料も含む）・現在 trust 範囲（許可機能の上限）・有効/失効状態 | E（credential-store の device-auth 用途。Provider/MCP Credential と用途分離） | device 失効で検証材料を無効化・削除。機能失効は現在 trust 範囲にも適用。全データ Reset で trust・材料を削除、設定 Reset では維持 | backup 除外・Restore 非置換。E 側の有効材料なしには auth を拒否。DB の許可と現在 trust 範囲の両方を満たす機能だけ利用できる |
 
-Client 固有の接続材料の秘密部分も同様に E とし、DB 側は非秘密の用途参照だけを持つ。形式・保存方式は固定しない（SO §8）。
+Client 固有の接続材料の秘密部分も同様に E とし、DB 側は非秘密の用途参照だけを持つ。
 
 device-auth の保護・検証材料保持は `ene-credential`、trust / 許可変更・失効の意味判断は `ene-permission`、現在接続・帰属への適用は `ene-presence` に残す。E 側 trust は権限・制約が決めた現在範囲の保持であり、認証秘密の独立許可判断ではない。既存の premise 供給・Host 媒介で接続し、owner 間の具体 crate 依存を追加しない。変更の完了は E 側 durable 更新と DB 側記録の対応が揃ってから返し、部分失敗では対象の利用を保留して再評価する。失効完了を DB flag だけで返さない。再 pairing は新 identity と Host PC 上の trusted first-party management surface の最終確認（IPC §18）を必要とし、旧 DB 行・旧材料を再有効化しない。
 
