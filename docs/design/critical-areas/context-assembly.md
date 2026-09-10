@@ -2,20 +2,9 @@
 
 本書は、用途の異なる責務間で情報を選び、変換し、推論へ渡し、その結果を利用するときの契約を詳細化する。Context Assemblyは新しいSubsystemでも情報の正本でもない。
 
-## 1. 最初に詳細化する領域の選定
+## 1. 本書の位置付け
 
-比較の基準は、事故の重大さだけでなく、後続設計への依存の広さ、今詳細化しないと誤って固定しやすい境界、既決事項から契約を導ける範囲である。
-
-| 候補 | 後続設計で誤りやすい点 | 今回の判断 |
-|---|---|---|
-| Context Assemblyの受渡し・利用・結果受入 | 会話、Task、学習、Observer、Permission判断で、本文へ平坦化した情報から由来・用途・制限・時点を復元できなくなる。後段の認可や消去も入力との対応を失う。 | **最優先。** 情報選択algorithmに先立つ共通契約を定めれば、複数の後続設計が安全に独立できる。 |
-| Actionの認可判断から実作用までの対応 | 判断後の対象変更、委任、失効、Cancel、作用不明を経路変更で迂回しやすい。 | 次の詳細設計対象。今回定める由来・現在性・生成結果の非権威性を入力に、作用固有の契約を独立して詰める。 |
-| Targeted deletionの全域成立 | 原記録だけの消去、処理中の再到着、Client確認不能、再起動後の再形成を取りこぼしやすい。 | 優先度は高いが、今回はcontextと派生結果の参加契約まで。全参加先の完了・復旧協調は独立した設計が必要。 |
-| Client帰属切替と活動の区切り | presence、入出力round、Computer Use、Stop、再起動の復帰を一つの状態へまとめやすい。 | 今回はClientに依存するcontextの由来・受入条件を詳細化する。排他帰属と安全な区切りの全設計は分離する。 |
-
-Contextは情報を集めるだけの処理に見えるが、受け手、目的、時点が変わる境界である。ここで「内部にあるから信頼できる」「取得済みだから送信可能」「推論成功だから採用可能」と扱うと、各Subsystemを後から正しく設計しても境界がつながらない。
-
-[Architecture Review #1](../reviews/architecture-review-1.md)のObserver assignment分離とLater-design Notes、[Architecture Review #2](../reviews/architecture-review-2.md)の限定routing context・制約伝播・鮮度に関する指摘も選定材料にした。ただしレビュー原本の提案を再採用するのではなく、[Architecture Drivers](../architecture/architecture-drivers.md)第3節と現在のarchitectureへ統合された判断に従う。特に、新scopeの追加や各CompanionのProviderによるrouting要約生成の必須化は行わない。
+Contextは情報を集めるだけの処理に見えるが、受け手、目的、時点が変わる境界である。ここで「内部にあるから信頼できる」「取得済みだから送信可能」「推論成功だから採用可能」と扱うと、各Subsystemを後から正しく設計しても境界がつながらない。本書は情報選択algorithmに先立つ共通契約を定め、Action Execution・Targeted Deletion・Client Presence Transitionの各契約がこの対応関係を入力として独立に成立できるようにする。
 
 ## 2. 上位architectureとの位置関係
 
@@ -34,7 +23,7 @@ Contextは情報を集めるだけの処理に見えるが、受け手、目的�
 
 認証秘密は認証用途だけに秘密を供給し、通常contextへ値を渡さない。外部file・MCP Resource等の取得は実行・拡張の既存境界を通す。Context Assemblyを検索の名で任意I/Oや内部正本の直接編集ができる入口にしない。
 
-今回の範囲は、用途の確立から情報参照、変換、推論利用、用途別の結果受入、処理中dataの無効化までとする。Permission評価全体、Learning形成algorithm、Observerの検知algorithm、Action実行、全域消去完了、復元手順は、それぞれの既存契約を利用する隣接領域である。
+本書の範囲は、用途の確立から情報参照、変換、推論利用、用途別の結果受入、処理中dataの無効化までとする。Permission評価全体、Learning形成algorithm、Observerの検知algorithm、Action実行、全域消去完了、復元手順は、それぞれの既存契約を利用する隣接領域である。
 
 ## 3. 受渡しで保持する論理的な対応
 
@@ -127,7 +116,7 @@ Permission解釈・消去対象の意味探索も例外ではない。その補�
 
 ## 6. Observerの限定routing contextへの適用
 
-Observerは今回の契約が必要になる最小の複合事例として詳細化する。観測全体や個体の自発性を一緒に設計するものではない。
+Observerは本書の契約が必要になる最小の複合事例として詳細化する。観測全体や個体の自発性を一緒に設計するものではない。
 
 ### 6.1 原ownerからの提供
 
@@ -232,9 +221,9 @@ Contextを保持・変換・送信・受入する各責務は、保全・消去�
 
 この節は全域完了判定の完全設計ではない。通常History保持、Companion削除、targeted deletion、backup／restoreはSO・DRの異なるlifecycleを維持する。外部Workspace・Owner保存backup・Provider保有copyの削除を内部context消去の成功条件へ加えず、ene管理下の内部copyは除外しない。
 
-## 9. Runtime FlowsとCross-cutting Designへ戻した検証
+## 9. Runtime FlowsとCross-cutting Designに対する横断検証
 
-[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08へ、正常系と意味のある競合を戻して照合した。
+[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08に対する、正常系と意味のある競合のwalkthroughは次のとおりである。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -253,7 +242,7 @@ Contextを保持・変換・送信・受入する各責務は、保全・消去�
 | RF-08 Restore | 復元後に旧live結果が到着。復元正本へ混ぜず、旧作用の説明と分離。Credentialは現在storeと照合し、自動処理保留を維持。 | 8.1。復元済み参照・同意から実行を復活させない。 |
 | 全Flow: 補助推論の失敗 | Permission判断や消去探索のProviderが不通。未承認Actionを先に実行せず、不足を管理面へ返す。停止・拒否・機械的検証は継続可能。 | 5.2、7.1。failure時も境界を迂回しない。 |
 
-Cross-cutting契約との照合結果は次のとおりである。
+Cross-cutting契約に対して維持する性質は次のとおりである。
 
 | 契約 | 詳細化によって維持する性質 |
 |---|---|
@@ -265,9 +254,9 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-06 | 変換・再送・fallbackも利用として対応付け、処理中・不明を含む消費を切断しない。安全管理を推論成功待ちにしない。 |
 | CC-07 | 省略・利用不可・不明を成功や事実不在へ変換しない。生成、採用、作用、記録、提示の確定度を分ける。 |
 
-以上の範囲で、semantic owner、Host／Client、trust boundary、lifecycle、permission／consent semanticsを変更する必要は見つかっていない。新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回を導入していない。
+本書はsemantic owner、Host／Client、trust boundary、lifecycle、permission／consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回を導入しない。
 
-## 10. 後続設計への引渡しと残す自由度
+## 10. 本書が固定する契約と残す Design Freedom
 
 後続のSubsystem／implementation designは、次を固定された契約として利用できる。
 
@@ -279,13 +268,13 @@ Cross-cutting契約との照合結果は次のとおりである。
 - 現在性は関係する前提と用途で判断し、遅延結果の記録・semantic更新・次の実行・提示を個別のownerへ戻す。
 - Contextの保持・利用先は、消去中の再到着も含む内部消去、再保存防止、未完了の保全へ参加する。
 
-今回絞り込んだDesign Freedomは、由来を本文だけにする方式、包括的なcontext有効フラグだけで全利用を許す方式、変換後の制限を自己申告だけで外す方式、Observer混合出力の無条件配送、古いsessionによる現在制約の迂回である。いずれも上位契約を成立させないため採れない選択肢として明示した。
+本書が採れない選択肢として除外するのは、由来を本文だけにする方式、包括的なcontext有効フラグだけで全利用を許す方式、変換後の制限を自己申告だけで外す方式、Observer混合出力の無条件配送、古いsessionによる現在制約の迂回である。いずれも上位契約を成立させないため採れない。
 
 以下は意図的に残す。
 
 - 検索・scoring・選択・要約・Learning形成algorithm、Prompt構造、情報の粒度、routing contextの生成model／Provider・更新頻度、省略の優先順位。第4〜6節の性質を満たす範囲で選ぶ。
 - 参照・依存の表現、鮮度の確認・変更検知・失効通知、利用時競合の整合方法、cache再利用方式、session切替方式。確認不能を許可へ変換しないことだけを条件とする。
 - 一時的な対応の保持期間・保存要否、永続化を必要とする未完了状態との接続、消去参加先の探索・検証・全域完了手順。通常のRaw非保存と必要な保全を維持する。
-- Rust crate／module、struct／enum／trait、concrete function／API、IPC protocol、DB schema・SQL table、serialization、event bus／actor／queue、process／thread、locking／transaction、retry／timeout値、library／framework。これらを選ぶ工程には進んでいない。
+- Rust crate／module、struct／enum／trait、concrete function／API、IPC protocol、DB schema・SQL table、serialization、event bus／actor／queue、process／thread、locking／transaction、retry／timeout値、library／framework。本書はこれらを選ばない。
 
 Observer出力の配送境界とProvider sessionの再利用条件は、CC-02・03・05から導く詳細化であり、新scopeや外部消去保証ではない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。

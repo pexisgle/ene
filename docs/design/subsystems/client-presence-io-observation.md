@@ -332,9 +332,9 @@ Credential値は通常contentに含めない。登録済みCredential値は、�
 
 Client availability・connection状態・presence・movement / restoration・stale識別・開始可否を単一stateとして扱わない。Client自身をpresence authorityにしない。具体的なheartbeat・lease・epoch・session token・network protocol等は固定しない。
 
-## 9. 後続設計への引渡しと残す自由度
+## 9. 本書が固定する契約と残す Design Freedom
 
-後続の crate / module / interface / state / persistence / concurrency設計は、次を固定された契約として利用できる。
+下位設計は、次を本書が固定した契約として利用できる。
 
 - 現在のpresenceはHostが管理する個体ごとの帰属記録だけがauthoritativeである。Client表示・過去記録・hint・一時copy・復旧先記録・Provider残存は根拠にならない。presence・Host継続・接続・許可は別の意味である。
 - 切替区間は旧・新のいずれも新規開始の根拠にしない。旧は安全な区切りまでの完了だけ、新は成立後の新しいround・試行だけを許す。二重presence・旧一時のcanonical化・未終了作用の自動継続をしない。
@@ -348,7 +348,7 @@ Client availability・connection状態・presence・movement / restoration・sta
 - presentation成功をTask成功・Action成功へ変換しない。受付・受理・作用・記録保存・Task達成・報告は別の事実とする。
 - 保持・利用先は消去中の再到着も含む内部消去・再保存防止・未完了の保全へ参加する。復元範囲と現在有効性・再有効化は別に確認する。復元内容の存在＝実行可能というinterfaceは不可である。
 
-今回絞り込んだ禁止選択肢は、新旧二重presence、Client表示・hint・一時copy・復旧先記録のcanonical化、旧round・旧Capture・旧作用の新活動への付け替え、Client copyでのHost上書き・自動Action queue、Host作業の移送・一律停止、Task Agentによる操作Client選択、再接続・復旧によるpresence・Permission・実行の自動成立、別Clientへの無条件自動移動・Stoppedへの復旧・Host側Client環境の自動起動、presence復旧によるTask・Actionの再開権限化、不明の未実行・成功への変換と自動replay、要約・復旧での確定度強化、Observer混合出力の無条件配送・古いsessionによる制約迂回、消去対象の旧Client copyからの復活、Client availability・connection・presence・開始可否の単一state化、Clientのpresence authority化、I/O正本化・表示copyの正本化、Observer派生の新canonical・scope・owner化である。いずれも上位契約を成立させないため採れない。
+本書が採れない選択肢として除外するのは、新旧二重presence、Client表示・hint・一時copy・復旧先記録のcanonical化、旧round・旧Capture・旧作用の新活動への付け替え、Client copyでのHost上書き・自動Action queue、Host作業の移送・一律停止、Task Agentによる操作Client選択、再接続・復旧によるpresence・Permission・実行の自動成立、別Clientへの無条件自動移動・Stoppedへの復旧・Host側Client環境の自動起動、presence復旧によるTask・Actionの再開権限化、不明の未実行・成功への変換と自動replay、要約・復旧での確定度強化、Observer混合出力の無条件配送・古いsessionによる制約迂回、消去対象の旧Client copyからの復活、Client availability・connection・presence・開始可否の単一state化、Clientのpresence authority化、I/O正本化・表示copyの正本化、Observer派生の新canonical・scope・owner化である。いずれも上位契約を成立させないため採れない。
 
 以下は意図的に残すDesign Freedomである。
 
@@ -368,7 +368,7 @@ crate / module、Rust trait / type、concrete API・error型、middleware・inte
 
 ## 10. 横断検証
 
-requirements・Subsystem Decomposition・State Ownership・Dependency Rules・Runtime Flows・Cross-cutting・Step 11・既存Step 12 artifactへ戻して横断検証した。固定scenario一覧の充足ではなく、正常系と本クラスタにとって意味のある failure / stale / movement / restart / deletionを選んで walkthroughした。
+requirements・上位architecture・critical-area契約・他のSubsystem設計に対する横断検証は次のとおりである。固定scenario一覧の充足ではなく、正常系と本クラスタにとって意味のある failure / stale / movement / restart / deletionを選んでwalkthroughする。
 
 | 領域・交差 | walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -405,11 +405,11 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task・移動完了待ちにしない。機械的な帰属確認・消去検証をLLM待ちにしない。 |
 | CC-07 | 受付・受理・作用・記録保存・Task達成・報告を別の事実とし、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。生成済みを提示済みにしない。 |
 
-State Ownership、Dependency Rulesとの照合では、semantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更する必要は見つかっていない。新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Presence Manager・統一presence state machine・Context Manager・Observer State owner・I/O正本を導入していない。通常History保持、Companion削除、targeted deletion、backup / restoreはSO・DRの異なるlifecycleを維持する。
+本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Presence Manager・統一presence state machine・Context Manager・Observer State owner・I/O正本を導入しない。通常History保持、Companion削除、targeted deletion、backup / restoreはSO・DRの異なるlifecycleを維持する。
 
 Context Assemblyとの照合では、由来Client・round・観測候補との対応、変換後の制限継承、現在性・用途別受入、処理中無効化の契約を帰属切替・round・routingへ接続し、移動前のCaptureの付け替え・Stopped個体の覚醒・古いsessionによる制約迂回を許していない。Action Executionとの照合では、判断対象と実対象の対応、委任不変、試行と作用の区別、確定度・不明保持、遅延帰属、報告での確定度保持を帰属切替・Client依存作用へ接続し、移動・再接続・再起動による自動再実行を許していない。Targeted Deletionとの照合では、消去条件の適用、区間内再到着の取込み、旧由来と新規提供の区別、cache・session・Client copyの再利用禁止、未完了保全の契約をClient一時data・観測派生物へ接続し、古いClient copyからの復活を新しいExperienceとして救済していない。Presence Transitionとの照合では、authoritative帰属・切替区間の新規開始禁止・活動別区切り・到着物の帰属・Host継続・再起動復旧と再実行の分離の契約を三者の責任へ落とし、二重presence・旧一時のcanonical化・未終了作用の自動継続を許していない。Backup / Restoreとの照合では、復元範囲・正本切替・再有効化・stale・旧live混入禁止の契約を復旧先・hint・接続・帰属・設定・観測運用へ接続し、復元された帰属のcanonical化・二重presence・旧作用の自動継続・復元内容の存在＝実行可能化を許していない。
 
-既存Step 12 artifact（個体調整 / 作業 / 認識・学習、権限・制約 / 認証秘密 / 実行・拡張 / 推論）との照合では、利用側Subsystemと今回の接続・提示・観測Subsystemの間に新しいsemantic ownerや第二の正本を生んでいない。Task達成は作業、作用確定度は実行・拡張、報告必要内容は個体調整、提示の実際は入出力・提示、帰属は接続・存在、対象・時機・routingは共有観測、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、割当解決・利用量原記録は推論に残り、本書のX-1〜X-10はその受渡しの対応付けである。未伝達の正本の個体調整残置、Computer Useの現在presence限定、Observerの専用assignment、scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持の各契約は両文書で同一である。
+他のSubsystem設計（個体調整 / 作業 / 認識・学習、権限・制約 / 認証秘密 / 実行・拡張 / 推論）との照合では、利用側Subsystemと本書の接続・提示・観測Subsystemの間に新しいsemantic ownerや第二の正本を生まない。Task達成は作業、作用確定度は実行・拡張、報告必要内容は個体調整、提示の実際は入出力・提示、帰属は接続・存在、対象・時機・routingは共有観測、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、割当解決・利用量原記録は推論に残り、本書のX-1〜X-10はその受渡しの対応付けである。未伝達の正本の個体調整残置、Computer Useの現在presence限定、Observerの専用assignment、scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持の各契約は両文書で同一である。
 
 ### Requirement / Architecture Issue
 

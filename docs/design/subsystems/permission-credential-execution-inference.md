@@ -341,9 +341,9 @@ Cancel・切断から外部作用の取消・不存在を推測せず、不明�
 
 Credential値は通常contentに含めない。登録済み Credential値は、その依頼があっても Summary・Memoryへ保存しない。用途・参照元・失効・再認証の説明は非秘密情報で行う。登録外の秘密は検知時の不要な保存・送信抑制を維持し、完全検出の保証は追加しない。
 
-## 9. 後続設計への引渡しと残す自由度
+## 9. 本書が固定する契約と残す Design Freedom
 
-後続の crate / module / interface / state / persistence / concurrency設計は、次を固定された契約として利用できる。
+下位設計は、次を本書が固定した契約として利用できる。
 
 - Owner意図の解釈と制御変更の確定は別であり、生成content・保存済みcontentから権限を新設しない。判断記録と生きた許可は別であり、開始前に現在条件と実対象解決を成立させ、重要な変更では再評価する。無関係な変更での再承認は要求しない。
 - Learningのscope意味は認識・学習に残り、決定後の迂回不能な適用は権限・制約と各利用箇所の協調に属する。秘密値と非秘密参照は別であり、認証用途に限定して秘密を利用し、通常経路へ流さない。
@@ -357,7 +357,7 @@ Credential値は通常contentに含めない。登録済み Credential値は、�
 - 保持・利用先は消去中の再到着も含む内部消去・再保存防止・未完了の保全へ参加する。復元範囲と現在有効性・再有効化は別に確認する。復元内容の存在＝実行可能という interfaceは不可である。
 - 報告・監査・復旧で確定度を強めない。消去対象本文を作用記録・Auditで残さない。秘密値をAudit・Debug・backupへ流さない。
 
-今回絞り込んだ禁止選択肢は、一つの編集可能contextへの全設定・Learningの集約、委任元条件の Agentへの丸ごと copy、Denyの同等Action迂回、内部管理への Tool回り込み、古い判定・cached許可・解決済み経路での新規開始、不明の未実行・失敗・成功への変換と自動replay、遅延結果の新目的への自動採用・旧承認での Cancel / 失効 / 移動の解除、推論結果からの権限制御変更、秘密値の通常経路への混入・参照記述での利用可能化、未承認Cloudへのfallback・override解除での送信拡張、独立予算・Provider overrideの作成、sandboxの黙った解除・例外のPluginへの流用・Tool UI入力の承認化、外部process内部への強制保証、Client copyでの Host上書き・自動Action queue、古い根拠からの自動再形成・cache hitでの制約省略・Provider sessionの無条件再利用、確認不能の成功扱い、部分正本・混合・権限先行復活・未完了の成功表示、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
+本書が採れない選択肢として除外するのは、一つの編集可能contextへの全設定・Learningの集約、委任元条件の Agentへの丸ごと copy、Denyの同等Action迂回、内部管理への Tool回り込み、古い判定・cached許可・解決済み経路での新規開始、不明の未実行・失敗・成功への変換と自動replay、遅延結果の新目的への自動採用・旧承認での Cancel / 失効 / 移動の解除、推論結果からの権限制御変更、秘密値の通常経路への混入・参照記述での利用可能化、未承認Cloudへのfallback・override解除での送信拡張、独立予算・Provider overrideの作成、sandboxの黙った解除・例外のPluginへの流用・Tool UI入力の承認化、外部process内部への強制保証、Client copyでの Host上書き・自動Action queue、古い根拠からの自動再形成・cache hitでの制約省略・Provider sessionの無条件再利用、確認不能の成功扱い、部分正本・混合・権限先行復活・未完了の成功表示、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
 
 以下は意図的に残す Design Freedomである。
 
@@ -376,7 +376,7 @@ crate / module、Rust trait / type、concrete API・error型、middleware・inte
 
 ## 10. 横断検証
 
-requirements・Subsystem Decomposition・State Ownership・Dependency Rules・Runtime Flows・Cross-cutting・Step 11・既存Step 12 artifactへ戻して横断検証した。固定scenario一覧の充足ではなく、正常系と本クラスタにとって意味のある failure / stale / cancellation / restart / deletionを選んで walkthroughした。
+requirements・上位architecture・critical-area契約・他のSubsystem設計に対する横断検証は次のとおりである。固定scenario一覧の充足ではなく、正常系と本クラスタにとって意味のある failure / stale / cancellation / restart / deletionを選んでwalkthroughする。
 
 | 領域・交差 | walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -409,9 +409,9 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task待ちにしない。機械的検証をLLM待ちにしない。 |
 | CC-07 | 受付・受理・作用・記録保存・Task達成・報告を別の事実とし、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。生成済みを提示済みにしない。 |
 
-State Ownership・Dependency Rulesとの照合では、semantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更する必要は見つかっていない。新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Manager / Pipeline / Serviceを導入していない。通常History保持・Companion削除・targeted deletion・backup / restore・Resetは SO・DRの異なる lifecycleを維持する。
+本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Manager / Pipeline / Serviceを導入しない。通常History保持・Companion削除・targeted deletion・backup / restore・Resetは SO・DRの異なる lifecycleを維持する。
 
-既存Step 12 artifact（個体調整 / 作業 / 認識・学習）との照合では、利用側Subsystemと今回の実行・強制側Subsystemの間に新しいsemantic ownerや第二の正本を生んでいない。Task達成は作業、作用確定度は実行・拡張、報告は個体調整、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、割当解決・利用量原記録は推論に残り、本書のK-1〜K-12はその受渡しの対応付けである。Task Agentの非所有、Observerの専用assignment、scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持の各契約は両文書で同一である。
+他のSubsystem設計（個体調整 / 作業 / 認識・学習）との照合では、利用側Subsystemと本書の実行・強制側Subsystemの間に新しいsemantic ownerや第二の正本を生まない。Task達成は作業、作用確定度は実行・拡張、報告は個体調整、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、割当解決・利用量原記録は推論に残り、本書のK-1〜K-12はその受渡しの対応付けである。Task Agentの非所有、Observerの専用assignment、scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持の各契約は両文書で同一である。
 
 ### Requirement / Architecture Issue
 

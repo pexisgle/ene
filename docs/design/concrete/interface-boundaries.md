@@ -2,11 +2,11 @@
 
 本書は Step 13 の Interface Boundary artifact である。[対応関係・識別](correspondence-identity.md)（CI）、[Persistence / Recovery](persistence-recovery.md)（PR）、[Concurrency Control](concurrency-control.md)（CCT）が定めた identity・保存分類・atomicity / recovery・concurrency の契約を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。本書内の SO / DR / CC は [State Ownership](../architecture/state-ownership.md) / [Dependency Rules](../architecture/dependency-rules.md) / [Cross-cutting Design](../architecture/cross-cutting.md) を指す。
 
-実装コードはまだ変更しない。本書の Rust pseudo-type / pseudo-trait はコンパイル対象ではない。型名・field 名の同義改名は許すが、型の分離と field の意味は維持すること。crate 分割そのものは決めないが、次工程が依存方向を材料に分解できる状態を目指す。IPC wire schema は完成させない。
+本書の Rust pseudo-type / pseudo-trait はコンパイル対象ではない。型名・field 名の同義改名は許すが、型の分離と field の意味は維持すること。crate 分割は [Crate / Module 分解](crate-module-decomposition.md)、IPC wire schema は [Host↔Client IPC](host-client-ipc.md) が定める。
 
 ## 1. 対象と非対象
 
-### 1.1 今回具体化するもの
+### 1.1 本書が具体化するもの
 
 - どの semantic boundary を明示的な interface として表現すべきかの導出（第3節）。
 - 各主要 interface の request / command 開始責務、authoritative 判断 owner、必要な identity / revision / generation、provenance / purpose / scope、expected current condition、Permission / consent / cap 参照、cancellation / hold 関係、result certainty、stale / rejected / needs-revalidation 等の結果、persistence / commit との関係（第4–9節）。
@@ -20,7 +20,7 @@
 - crate / module decomposition への材料：依存方向（第16節）。
 - walkthrough による検証（第17節）。
 
-### 1.2 今回決めないもの
+### 1.2 本書が決めないもの
 
 - プロジェクト全体の crate 構成、module 分割、process / thread 配置。
 - DB 製品の選定、完全な `CREATE TABLE`、index、migration。
@@ -1375,7 +1375,7 @@ trait UndeliveredRepository {
 
 ## 14. Rust-oriented design — trait / struct / enum の具体化範囲
 
-今回は具体的な Rust interface 方針へ進んで構い、必要に応じて trait / service / repository interface / command / query struct / domain-specific result enum / newtype / borrowed / owned / async method を pseudo-code で示した（第4–9・13節）。ただし「trait を使えるところは全部 trait」にしない。
+本書は具体的な Rust interface 方針まで固定し、trait / service / repository interface / command / query struct / domain-specific result enum / newtype / borrowed / owned / async method を pseudo-code で示す（第4–9・13節）。ただし「trait を使えるところは全部 trait」にしない。
 
 | 抽象化するもの（trait 化） | 理由 | 抽象化しないもの |
 |---|---|---|
@@ -1393,7 +1393,7 @@ trait UndeliveredRepository {
 
 ## 15. IPC readiness — process / network boundary を越える可能性がある interface
 
-今回 IPC wire schema を完成させる必要はない。process-local interface と remote-capable interface を区別する必要があるなら、その理由を記述する。
+IPC wire schema は [Host↔Client IPC](host-client-ipc.md) が定める。本節は process-local interface と remote-capable interface の区別とその理由を固定する。
 
 | 区分 | interface | 越境するもの・理由 |
 |---|---|---|
@@ -1414,7 +1414,7 @@ trait UndeliveredRepository {
 
 ## 16. Crate / module decomposition への材料 — 依存方向
 
-今回 crate 構成そのものを主目的にしない。次工程が interface の依存方向を材料に分解できるよう、semantic dependency と interface 呼び出し方向を記録する。
+crate 構成は [Crate / Module 分解](crate-module-decomposition.md) が定める。本節は semantic dependency と interface 呼び出し方向を固定する。
 
 ### 16.1 依存方向表（caller → owner の interface 依存）
 
@@ -1442,9 +1442,9 @@ trait UndeliveredRepository {
 - 必要な双方向依存は限定して残す（DR-12）。例えば権限・制約は作業の委任範囲・推論の消費事実を読み、作業・推論は現在制限に従う。事実報告のために次の Action 許可を必要とせず、制約判断のために審査対象 Action を先に実行しない。循環した承認・成功待ちを前提にしない。graph を一方向に見せるための汎用 abstraction は不要。
 - 新しい汎用 mediator、Context、Settings、Persistence 等の Subsystem は追加しない（DR §1）。
 
-### 16.2 分解への固定前提として使えること
+### 16.2 分解への制約
 
-- 上表の caller → owner 方向は、次工程の module / crate 依存方向の第一材料になる。owner が caller の内部を知る逆依存を作らない（例：作業が個体調整の会話内部を所有しない、認識・学習が Task 記録を所有しない、権限・制約が学習内容全体を取得しない、保全・消去が任意 domain 編集権を持たない）。
+- 上表の caller → owner 方向が module / crate 依存方向の第一材料である。owner が caller の内部を知る逆依存を作らない（例：作業が個体調整の会話内部を所有しない、認識・学習が Task 記録を所有しない、権限・制約が学習内容全体を取得しない、保全・消去が任意 domain 編集権を持たない）。
 - 同一 owner 内の責務（例：I-1〜I-7、W-1〜W-7、L-1〜L-8、C-1〜C-8、E-1〜E-6、CN-1〜CN-7、IO-1〜IO-8、OB-1〜OB-7、PE-1〜PE-7）は別の state・lifecycle であり、一つの state・trait・table・actor へ潰さないことが分解の制約になる。
 - 同じ storage technology の共有（PR §4 の単一 SQLite file 等）は ownership 統合の理由にならない。transaction 共有は mechanism であり ownership ではない。
 
@@ -1548,8 +1548,3 @@ Step 11 / Step 12 contract の変更、correspondence / persistence / concurrenc
 - 本書は CI・PR・CCT の意味を変更していない。identity / revision / generation / correlation / boundary token の分離、durable 分類、serialization domain、compare-before-commit の境界を維持した。
 - H-1〜H-10、K-1〜K-12、X-1〜X-10、CH/CD、DP/PE の semantic contract を再定義・移動していない。各 interface の owner は SO・DR の確定事項の再掲であり、新しい semantic owner・第二の正本・万能 Manager / Coordinator / Policy Engine・統一 state machine・共通 Context layer を追加していない。
 - 将来 Issue になり得る観測事項（いずれも現時点では Issue にしない）：Client 一時 data の到達不能時の完了根拠の具体方式、観測停止時の取得済み候補の扱い、旧 live 結果を区別する具体手段の選択。これらはいずれも既決の制約を満たす後続設計上の自由度として残る（CC §10 と同様）。
-
-## 20. 次工程への申送り
-
-- 本書の第16節の依存方向表を材料に crate / module decomposition を決められる状態にある。caller → owner 方向を crate 依存方向の第一材料とし、owner が caller の内部を知る逆依存を作らないこと。同一 owner 内の責務を一つの state・trait・table・actor へ潰さないことを制約とすること。storage technology の共有を ownership 統合の理由にしないこと。
-- Step 13 で次に具体化すべき領域（本書の対象外として残したもの）：Host↔Client IPC の wire schema（第15節の remote-capable interface の field を材料にする）、具体 DB schema・index・migration（PR §4 と第13節の repository premise を材料にする）、concurrency mechanism の確定（CCT の SD・AU と第13節の compare を材料にする）、Provider protocol adapter・MCP・Plugin の受入境界の concrete API（K-I の extension 種別を材料にする）。

@@ -17,7 +17,7 @@ Client移動を「active Client fieldの瞬間的な代入」へ落とすと、�
 | 切断・再起動で不明だった外部作用を、回復・移動・再開で再実行可能へ変える。 | 不明の粘着的保持と自動再実行の禁止。 |
 | Observerの対象判定を移動・Stop・切断と連動させず、旧Clientで観測・routingを続ける。 | 存在人数・routing対象の現在帰属への連動。 |
 
-今回の範囲は、authoritative presenceの判断、切替区間の新旧の扱い、活動種別の区切り、到着物の帰属、Host継続、disconnect／reconnect／restart、Observer eligibility、Computer Useの固有条件までとする。Contextの情報選択・Provider適応の一般契約は[Context Assembly](context-assembly.md)を、認可判断と実作用・確定度・不明の一般契約は[Action Execution](action-execution.md)を、全域消去の参加・完了の一般契約は[Targeted Deletion](targeted-deletion.md)を利用し、再定義しない。Observer routing contextやProvider assignmentそのもの、具体的なComputer Use protocol、UI animation・audio buffering・capture intervalは対象外である。
+本書の範囲は、authoritative presenceの判断、切替区間の新旧の扱い、活動種別の区切り、到着物の帰属、Host継続、disconnect／reconnect／restart、Observer eligibility、Computer Useの固有条件までとする。Contextの情報選択・Provider適応の一般契約は[Context Assembly](context-assembly.md)を、認可判断と実作用・確定度・不明の一般契約は[Action Execution](action-execution.md)を、全域消去の参加・完了の一般契約は[Targeted Deletion](targeted-deletion.md)を利用し、再定義しない。Observer routing contextやProvider assignmentそのもの、具体的なComputer Use protocol、UI animation・audio buffering・capture intervalは対象外である。
 
 ## 2. 上位architectureとの位置関係
 
@@ -234,9 +234,9 @@ Computer Useでは特に次の既存contractを維持する。具体的なComput
 
 試行と作用の区別、判断・目的・実対象・段階・確定度・停止保留との対応の保持・区別はAction Execution第8節の契約を利用する。具体的なidempotency key・transaction・retry実装・queue／actor・DB schema・lock方式は固定しない。重複し得る再送を「同じ試行の継続」として不明・重複管理から除外する方式は採れない。retryは新しい試行として現在の認可・目的・実対象・条件で扱い、不明試行の再実行は重複riskを説明したOwner判断を必要とする。
 
-## 11. Runtime FlowsとCross-cutting Designおよび既存3詳細設計へ戻した検証
+## 11. Runtime Flows・Cross-cutting Design・他のcritical-area契約に対する横断検証
 
-[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](../architecture/cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)、[Targeted Deletion](targeted-deletion.md)へ、正常系と意味のある競合・障害を戻して照合した。
+[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](../architecture/cross-cutting.md)CC-01〜07、[Context Assembly](context-assembly.md)、[Action Execution](action-execution.md)、[Targeted Deletion](targeted-deletion.md)に対する、正常系と意味のある競合・障害のwalkthroughは次のとおりである。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -269,13 +269,13 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task・移動完了待ちにしない。機械的な帰属確認・消去検証をLLM待ちにしない。 |
 | CC-07 | 受付・受理・作用・記録保存・Task達成・報告を別の事実とし、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。生成済みを提示済みにしない。 |
 
-State Ownership、Dependency Rulesとの照合では、semantic owner、Host／Client配置、trust／failure boundary、lifecycle、permission／consent semanticsを変更する必要は見つかっていない。新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Presence Manager・統一presence state machineを導入していない。通常History保持、Companion削除、targeted deletion、backup／restoreはSO・DRの異なるlifecycleを維持する。
+本書はsemantic owner、Host／Client配置、trust／failure boundary、lifecycle、permission／consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Presence Manager・統一presence state machineを導入しない。通常History保持、Companion削除、targeted deletion、backup／restoreはSO・DRの異なるlifecycleを維持する。
 
 Context Assemblyとの照合では、由来Client・round・観測候補との対応、変換後の制限継承、現在性・用途別受入、処理中無効化の契約を帰属切替へ接続し、移動前のCaptureの付け替え・Stopped個体の覚醒・古いsessionによる制約迂回を許していない。Action Executionとの照合では、判断対象と実対象の対応、委任不変、試行と作用の区別、確定度・不明保持、遅延帰属、報告での確定度保持を帰属切替へ接続し、移動・再接続・再起動による自動再実行を許していない。Targeted Deletionとの照合では、消去条件の適用、区間内再到着の取込み、旧由来と新規提供の区別、cache・session・Client copyの再利用禁止、未完了保全の契約を帰属切替へ接続し、古いClient copyからの復活を新しいExperienceとして救済していない。
 
-## 12. 後続設計への引渡しと残す自由度
+## 12. 本書が固定する契約と残す Design Freedom
 
-後続のstate representation／concurrency／persistence／IPC／interface設計は、次を固定された契約として利用できる。
+下位設計は、次を本書が固定した契約として利用できる。
 
 - 現在のpresenceはHostが管理する個体ごとの帰属記録だけがauthoritativeである。Client表示・過去記録・hint・一時copy・復旧先記録・Provider残存は根拠にならない。presence・Host継続・接続・許可は別の意味である。
 - 切替区間は旧・新のいずれも新規開始の根拠にしない。旧は安全な区切りまでの完了だけ、新は成立後の新しいround・試行だけを許す。二重presence・旧一時のcanonical化・未終了作用の自動継続をしない。
@@ -288,7 +288,7 @@ Context Assemblyとの照合では、由来Client・round・観測候補との�
 - Computer Useは現在presence限定・安全な区切りまでの遅延・disconnect後不明・別Client／Hostでの自動再実行禁止を維持する。存在は許可を意味しない。
 - 試行と作用・判断・実対象・段階・確定度・保留の対応を保持・区別できなければ、成功・未実行と推定しない。不明は粘着的に保持し、重複riskを示したOwner判断なしに再実行しない。
 
-今回絞り込んだ禁止選択肢は、新旧二重presence、Client表示・hint・一時copy・復旧先記録のcanonical化、旧round・旧Capture・旧作用の新活動への付け替え、Client copyでのHost上書き・自動Action queue、Host作業の移送・一律停止、Task Agentによる操作Client選択、再接続・復旧によるpresence・Permission・実行の自動成立、別Clientへの無条件自動移動・Stoppedへの復旧・Host側Client環境の自動起動、presence復旧によるTask・Actionの再開権限化、不明の未実行・成功への変換と自動replay、要約・復旧での確定度強化、Observer混合出力の無条件配送・古いsessionによる制約迂回、消去対象の旧Client copyからの復活である。いずれも上位契約を成立させないため採れない。
+本書が採れない選択肢として除外するのは、新旧二重presence、Client表示・hint・一時copy・復旧先記録のcanonical化、旧round・旧Capture・旧作用の新活動への付け替え、Client copyでのHost上書き・自動Action queue、Host作業の移送・一律停止、Task Agentによる操作Client選択、再接続・復旧によるpresence・Permission・実行の自動成立、別Clientへの無条件自動移動・Stoppedへの復旧・Host側Client環境の自動起動、presence復旧によるTask・Actionの再開権限化、不明の未実行・成功への変換と自動replay、要約・復旧での確定度強化、Observer混合出力の無条件配送・古いsessionによる制約迂回、消去対象の旧Client copyからの復活である。いずれも上位契約を成立させないため採れない。
 
 以下は意図的に残すDesign Freedomである。
 

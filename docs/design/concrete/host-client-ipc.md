@@ -2,21 +2,21 @@
 
 本書は Step 13 の Host↔Client IPC / wire protocol artifact である。[対応関係・識別](correspondence-identity.md)（CI）、[Persistence / Recovery](persistence-recovery.md)（PR）、[Concurrency Control](concurrency-control.md)（CCT）、[Interface Boundaries](interface-boundaries.md)（IB）、[Crate / Module 分解](crate-module-decomposition.md)（CM）が定めた identity・保存分類・concurrency・interface contract・crate 依存方向を前提とし、変更しない。上位設計との優先順位と矛盾時の扱いは [設計文書 README](../README.md#正本と優先順位) に従う。
 
-実装コードは変更しない。本書の Rust pseudo-type はコンパイル対象ではない。型名・field 名・message 名の同義改名は許すが、型の分離と field の意味は維持すること。
+本書の Rust pseudo-type はコンパイル対象ではない。型名・field 名・message 名の同義改名は許すが、型の分離と field の意味は維持すること。
 
 ## 0. 固定 premise（再掲。変更しない）
 
 1. **Host が canonical authority。** canonical state と control authority は Host が持つ。Client は canonical persistent state holder ではない。
 2. **Client-originated message は authority ではない。** Permission / presence / Task / Action 等の確定にはならない。Host の現在条件との照合を経て初めて受入可否が決まる。
 3. **Host-local は IPC へ公開しない。** Host-local な Permission 確定、Credential 利用、Provider assignment、cost reservation、Action 認可・outcome 確定、repository compare、Restore switch 等は wire へ出さない。Client へ送るのは必要表示と、照合のための最小 correlation だけである。
-4. **Client は Host authority crate へ直接依存しない。** Client が依存してよいのは `ene-api`（wire DTO）と `ene-primitive`（opaque 性質）のみである（CM 第9節）。
+4. **Client は Host authority crate へ直接依存しない。** Client が依存してよいのは `ene-api`（wire DTO）と `ene-primitive`（opaque 性質）のみである（CM 第8節）。
 5. **`ene-api` は wire DTO のみ。** business logic・authority 判定を置かない。必要なら極小の opaque primitive のみ共有し、Host domain object そのものを公開しない。
 6. **Currentness を失わない。** CI / CCT の identity・revision・generation・typed correspondence・expected current relation・stale / delayed handling を wire 境界でも維持する。ただし Host 内部の boundary token 全体を Client へ渡さない。Client が保持・返送する最小限の opaque / typed correlation だけを選ぶ（第6節）。
 7. **後方互換は制約ではない。** AGENTS.md および要件（非目標）により、既存 config / IPC / Plugin protocol / 保存形式 / CLI との互換性維持は要求しない。clean な設計を優先する。
 
 ## 1. 対象と非対象
 
-### 1.1 今回具体化するもの
+### 1.1 本書が具体化するもの
 
 - Host↔Client 間を越える必要がある semantic interface の選別（第2節）。
 - protocol layer 構成（wire semantic と transport の分離、envelope と payload の分離）（第3・5節）。
@@ -42,7 +42,7 @@
 - crate placement（第25節）。`ene-api` に logic を置かず、mapping module を別配置にする。
 - walkthrough による検証（第26節）。transport success を domain success へ読み替えない。
 
-### 1.2 今回決めないもの（Design Freedom へ送る。第30節）
+### 1.2 本書が決めないもの（Design Freedom。第29節）
 
 - 具体暗号 library・key format・鍵導出・証明書運用の詳細（property は第9節で固定）。
 - heartbeat / keepalive / timeout / retry 回数・値、scheduling・capture 時機 algorithm、費用算定式。
@@ -52,7 +52,7 @@
 
 ## 2. Remote-capable 選別 — 何を wire へ出すか
 
-IB 第15節・CM 第11節の remote-capable 7 群を起点に、「network / process boundary を越えなければ成立しないか」で再判定した。固定リストの機械的 protocol 化はしない。
+IB 第15節の remote-capable interface を起点に、「network / process boundary を越えなければ成立しないか」で判定する。固定リストの機械的 protocol 化はしない。
 
 ### 2.1 越境させるもの（wire 化する）
 
@@ -71,14 +71,14 @@ IB 第15節・CM 第11節の remote-capable 7 群を起点に、「network / pro
 
 ### 2.2 越境させないもの（Host-local に留める）
 
-- H-B〜H-E の形成・訂正・scope 意味判断、K-A〜K-C の制御確定・秘密利用、K-D〜K-G の割当解決・送信条件・予約確定、K-H の認可・作用確定、D-A・D-C・D-D の範囲確定・完了確定・switch、第13節の repository compare-and-commit 群。理由は IB 第15節・CM 第11節のとおり。durable compare を Host 単一 SQLite transaction で不可分にするため、DB transaction を Client へ露出させない。秘密値を通常経路に載せない。
+- H-B〜H-E の形成・訂正・scope 意味判断、K-A〜K-C の制御確定・秘密利用、K-D〜K-G の割当解決・送信条件・予約確定、K-H の認可・作用確定、D-A・D-C・D-D の範囲確定・完了確定・switch、第13節の repository compare-and-commit 群。理由は IB 第15節のとおり。durable compare を Host 単一 SQLite transaction で不可分にするため、DB transaction を Client へ露出させない。秘密値を通常経路に載せない。
 - Observer 専用 Provider assignment・routing semantic そのもの。Client へ authority として公開しない。Client が見るのは ticket と自身の capture 受入結果だけである。
 - repository compare、cost reservation、Restore switch。wire へ出さない。
 - 高権限操作の最終確認（§18）。remote の intent・確認済み申告を Host-local の確認として取り込まない。
 
 ### 2.3 選別の帰結
 
-- Client が受け取る ID はすべて**用途限定参照（non-secret reference）**である。内部正本の主 key として再利用できる形で渡さない（CI §4.6、CM §4.2）。
+- Client が受け取る ID はすべて**用途限定参照（non-secret reference）**である。内部正本の主 key として再利用できる形で渡さない（CI §4.6、CM §3.2）。
 - Client が保持・返送する correlation は第6節の最小 set に限定する。Host 内部の boundary token 全体（Task revision 前提・委任 scope・Permission evaluation・消去条件・復元条件の全文）は渡さない。Client が返すのは「どの wire 参照について」「Host が見たどの世代表示を前提にしたか」だけであり、Host が current と再照合する。
 
 ## 3. Protocol layer 構成
@@ -350,7 +350,7 @@ wire semantic と transport を分離し、以下を共通化の範囲とする�
 | LAN / remote device | 別 PC の Client（同一 LAN・Owner 管理 VPN） | WebSocket（binary message）＋TLS。ene 運営 relay・account・Cloud を接続要件にしない。単一 connection で論理 stream を多重する（`stream_id` で mux） |
 | future transport | 将来の追加 | adapter 追加で対応する。wire semantic・DTO・version・auth property を変えない |
 
-QUIC 等の採用は現時点でしない。理由：現在の topology（単一 Owner-managed Host、少数 Client、ticket 制御の低頻度 capture、WebSocket で足りる stream 多重）では必要性がなく、over-engineering になるためである。将来 transport は adapter として追加できる（第30節）。
+QUIC 等の採用は現時点でしない。理由：現在の topology（単一 Owner-managed Host、少数 Client、ticket 制御の低頻度 capture、WebSocket で足りる stream 多重）では必要性がなく、over-engineering になるためである。将来 transport は adapter として追加できる（第29節）。
 
 「Host PC 上の Client」の判定材料は、Host transport adapter が接続経路と OS peer 認証から確定する `transport_class = SameMachine | Remote` とする。Client の platform・device descriptor・loopback アドレスの自己申告では確定しない。PR Group G の最終観測に記録し、現在の利用時には live connection の同じ分類と認証を再確認する。presence fallback はこの材料を使うが、管理面の trusted first-party 性はさらに §18 の確認境界を必要とする。
 
@@ -884,10 +884,10 @@ CM を前提とし、crate 追加・依存方向の変更をしない。mapping 
 | Host adapter（`apps/ene-core` の `ipc_map` module＋各 domain の premise 受付） | DTO validation、wire ref → domain premise mapping、domain fact → DTO 投影、connection・incarnation・version・capability の保持（durable は各 owner の record）、current sender epoch の command idempotency marker 参照 | 持つ：`validate()`・mapping 関数・subscription 管理・stream mux・sender stale check・command fingerprint check。持たない：採否・達成・許可・確定度の判断（各 owner）。domain crate に wire 依存を持ち込まない |
 | Client adapter（`apps/ene-stage`・`apps/ene-ctl` 内の `ipc` module＋device adapter） | DTO → 表示・device 操作、device fact → DTO、transient cache 管理、削除参加時の local wipe、Host→Client command の idempotency marker | 持つ：presentation・capture・audio・tray adapter。持たない：Host domain crate への依存・canonical mutation・正本保持。依存は `ene-api`・`ene-primitive`・Client adapter のみ |
 
-mapping の方向（CM §5.3・§10 の inversion に従う）：
+mapping の方向（CM §4.3・§9 の inversion に従う）：
 
 - Host mapping は wire ref → domain premise の解決だけを行い、domain newtype 間の `From` を設けない。cross-domain 参照は `RawId`＋用途別 premise による inversion で解決し、crate 依存を一方向に保つ。
-- `ene-api` に `ene-primitive` への依存を持ち込まない（CM §10.1 の条件を維持）。opaque 性質の共有が必要な場合は byte・integer の表現に留め、semantic newtype を集めない。
+- `ene-api` に `ene-primitive` への依存を持ち込まない（CM §9.1 の条件を維持）。opaque 性質の共有が必要な場合は byte・integer の表現に留め、semantic newtype を集めない。
 - `rusqlite::Transaction`・生 SQL・`SecretValue` を mapping・DTO へ露出させない。repository compare は Host domain 側の短 transaction で行う（IB §13）。
 - idempotency marker の保存先・fingerprint 表現は実装自由度だが、Host→Client / Client→Host のどちらも第6.2節の「retry を受理する期間より先に再実行防止情報を失わない」契約を満たす。Client を canonical domain state holder にする意味ではなく、受領済み command の side-effect suppression に必要な protocol state である。
 - 現在の Stage 1 `ene-api::v1` が `CommandReplayRejectWire` をまだ持たないことは Stage 2 の transport / reject DTO 実装範囲であり、既存 `RoundIntakeOutcomeWire` / `ManagementOutcome` へ generic variant を後付けする理由にしない。
@@ -991,24 +991,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 - schema registry service・custom binary protocol。MessagePack＋versioned DTO＋field 規約で足りる。
 - QUIC 等の新 transport の先行導入。必要になれば adapter として追加する。
 
-## 28. 横断レビュー（自己レビュー）
-
-本書完成後に requirements・Step 11・Step 12・CI・PR・CCT・IB・CM へ戻して自己レビューした。観点と結果は次のとおりである。
-
-- **Authority 維持。** Host canonical・Client 非正本・client message 非 authority・Host-local 非公開・Client の Host crate 非依存を維持した。envelope・ID・ack・subscription・view のいずれも authority 化していない。UI ack を presence 成立にせず、受信・送信・表示を効果・完了・許可・報告完了にしていない。
-- **Currentness 維持。** identity・revision・generation・typed correspondence・expected current・stale / delayed handling を wire へ落とした。Host 内部 boundary token の全文渡しをせず、Client が保持・返送する最小 correlation（wire ref・generation 写し・round / ticket view・command / stream ID）に限定した。三者（connection・incarnation・generation）を一つの session id へ潰していない。`MessageId` を domain identity に再利用せず、transport 抑止と domain idempotency を分離した。
-- **Pairing bootstrap と authenticated retry の分離。** pre-pairing `device_id=None` / pre-auth `connection_id=None` の正当な sender 形を維持し、これらを authenticated command sender epoch と混同していない。認証後の domain command だけ sender-epoch-scoped idempotency へ入る。
-- **Retry / idempotency。** retry を受理し得る current authenticated sender epoch と semantic marker の保持期間を結び、marker eviction 後の旧 command を新規 command として実行できる穴を作っていない。transport `message_id` cache は短期でよいが、`command_id` marker は current sender epoch の間維持する。`round=None` の再送は同じ round / outcome を返す。同じ ID の別 fingerprint は `CommandReplayRejectWire::CommandIdConflict` として domain mapping 前に拒否し、既存 domain outcome enum を generic conflict variant で汚さない。
-- **Remote-capable 選別。** IB・CM の7群起点で wire 化の要否を再判定し、Host-local（形成・制御確定・秘密利用・割当・予約・認可・作用確定・範囲確定・完了確定・switch・repository compare）を越境させていない。Observer assignment・routing semantic を公開していない。
-- **Pattern 分離。** request/response・command+ack・fact・subscription・stream・progress+completion を区別し、generic Event へ統合していない。envelope と payload を分離し、envelope を owner にしていない。
-- **Presence / I/O / Observation / Action。** 二重 active 禁止・移行中新規開始禁止・旧 round 付け替え禁止・生成≠提示・旧 stream 非継続・ticket 制・class wipe（本文非再送）・command 到着≠成功・自動 retry 禁止・cancel 四分離をいずれも満たす。
-- **Targeted Deletion。** Client 局所完了を全域完了にせず、Host 残存検証・区間内再到着取込みに加えて検索 token の除去 / 復元不能化を全域完了の前提に揃えた。不可分でない間は `finalizing` を未完了として維持する。
-- **Versioning / capability / auth / transport。** claim≠Permission、秘密の通常 payload 非載せ・pairing・revoke・re-auth、version matrix・unknown 拒否・guess 禁止、wire/transport 分離・adapter boundary、per-domain backpressure・global ordering 不要求を満たす。
-- **Security / error。** 非露出・untrusted validation・DTO≠boundary、transport/domain error 分離・typed reject・共通巨大 enum 化の禁止を満たす。
-- **Crate。** `ene-api` の DTO 限定・mapping の別配置・依存方向の維持を満たす。新規 crate・依存追加をしていない。
-- **修正。** レビューで見つけた不足（retry admissibility と `command_id` marker retention の関係、`round=None` の marker eviction 後再実行防止、同一 ID 別内容の typed wire conflict、Targeted Deletion の token 最終消去順序）を本書へ反映し、後から追加された pairing bootstrap sender contract とも統合した。requirements / semantic owner / architecture boundary の変更は不要である。
-
-## 29. Escalation — Requirement / Architecture Issue の有無
+## 28. Escalation — Requirement / Architecture Issue の有無
 
 - **Requirement 変更。** なし。
 - **Step 11 / Step 12 semantic contract の変更。** なし。
@@ -1018,7 +1001,7 @@ transport success を domain success へ読み替えないことを、各 walkth
 - **Security / Privacy semantics 変更。** なし。
 - wire / serialization / transport の選択（MessagePack canonical＋JSON-compatible model、local socket＋WebSocket/TLS、adapter boundary）は Issue ではない。
 
-## 30. 意図的に残した Design Freedom
+## 29. 意図的に残した Design Freedom
 
 - 具体暗号 library・key format・鍵導出・証明書運用、pairing material の具体形式・保存方式、nonce・proof の具体方式。
 - heartbeat / keepalive / timeout / retry 回数・値、`message_id` cache 期間、`command_id` marker の保存形式・詳細 outcome の compact 方法・sender epoch 終了後の cleanup 時機、command fingerprint の canonical encoding / hash 方式。**retry を受理し得る current sender epoch より先に no-reexecute marker を失うこと、または同じ ID の別 semantic command を一致扱いすることは Freedom に含まれない。**
@@ -1027,22 +1010,3 @@ transport success を domain success へ読み替えないことを、各 walkth
 - capture 時機・stagger algorithm、費用予約量算定式・集計期間、BodyState hint の粒度・更新頻度。
 - view の具体項目・表示文言・UI layout・audit format・提示確認の具体 UI。
 - 上記の対応関係から統一 Context layer、Policy Engine、Manager、Service、Coordinator、schema registry、consensus、global ordering の追加を導かない。既存の責務、semantic owner、Host／Client 配置と trust boundary の下で実現方法を選ぶ。
-
-## 31. 次工程への申送り
-
-### 31.1 固定前提として使えるもの
-
-- 第2節の remote-capable 選別（W-1〜W-10 と Host-local の区別）。
-- 第3〜5節の layer・pattern・envelope、および pairing 前 / auth 前 sender の例外。
-- 第6節の identity 分離、authenticated sender epoch、retry admissibility / idempotency retention / fingerprint、第11節の incarnation / stale 拒否。
-- 第7節の serialization・version matrix・field 規約、第8節の capability、第9節の pairing / auth / revoke、第10節の transport・adapter boundary。
-- 第12〜19節の domain 別 wire semantics。
-- 第20・21節の inventory・DTO（`CommandReplayRejectWire` を含む）、第22節の stream semantics、第24節の rejection model。
-- 第25節の crate placement（`ene-api::v1`・Host `ipc_map`・Client `ipc`）。
-
-### 31.2 Step 13 でまだ具体化すべき領域（本書の対象外として残したもの）
-
-- 具体 DB schema・index・migration code（PR §4 と IB §13 の repository premise を材料にする）。
-- concurrency mechanism の確定（CCT の SD・AU と compare を材料にする）。
-- Provider protocol adapter・MCP・Plugin の受入境界の concrete API（IB K-I の extension 種別を材料にする）。
-- Client capture・audio・device adapter の crate 分離時期と platform 隔離の確定（CM 第9節の app 内 module 開始を材料にする）。

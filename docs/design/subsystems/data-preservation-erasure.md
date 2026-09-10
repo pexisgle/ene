@@ -379,9 +379,9 @@ Credential値は通常contentに含めない。登録済みCredential値は、�
 
 対象記述の伝達・保持にprivate本文の複製を増やさない。由来を保存するという理由で削除本文やCredentialを別保管しない。制限情報や識別用の値も対象情報を復元できるなら保護・消去対象であり、完了記録・Audit・説明へ対象本文を戻さない。
 
-## 9. 後続設計への引渡しと残す自由度
+## 9. 本書が固定する契約と残す Design Freedom
 
-後続のstate / persistence / concurrency / interface設計は、次を固定された契約として利用できる。
+下位設計は、次を本書が固定した契約として利用できる。
 
 - 保全・消去はEne全dataのcanonical owner・中央Persistence ownerではなく、各ownerの意味責任を維持し、通常意味変更権をcoordinatorへ移さない。通常時のdata access / mutationの必須中央経路ではない。
 - Targeted Deletionの参加調整・再保存防止・未完了保全・全域完了はDP-1の契約に従う。canonical削除だけ・source追跡だけ・LLM納得だけ・到達不能の放置・再起動による解除での完了は不可である。
@@ -393,7 +393,7 @@ Credential値は通常contentに含めない。登録済みCredential値は、�
 - Audit / Debugの順序・保持・短期失効・本文非保持・確定度非強化はDP-7の契約に従う。本文の別保管庫化・staleの正本化・確定度強化は不可である。
 - 局所完了と全域完了・pending / unreachable / failed verificationの区別、再起動・再接続・restore跨ぎのHost保全、事実と本文の分離はDP-8・第6.1節の契約に従う。未完了・不明の成功扱いは不可である。
 
-今回絞り込んだ禁止選択肢は、全domainの通常writer化・単一transaction化・内部全構造への無制限access、通常意味の中央集約、通常accessの中央経路化、一つの編集可能contextへの全設定・Learningの集約、Targeted Deletionと通常忘却・訂正・History整理・Companion削除・retention・Resetの目的混同、Companion削除前の自動Global化・Summaryのhistorical logへの分類し直し、容量不足での黙った削除・通常History整理のLearningへのcascade、古いBackupの自動改変・再消去・自動再適用、復元参照・同意からの自動利用・外部巻戻し・staleの現在事実化・旧live混入・Client copyでのHost上書き・自動queue、確認不能の成功扱い、部分正本・混合・権限先行復活・未完了の成功表示、要約・復旧での確定度強化、Audit・完了記録への本文再保存・秘密の別保管庫化である。いずれも上位契約を成立させないため採れない。
+本書が採れない選択肢として除外するのは、全domainの通常writer化・単一transaction化・内部全構造への無制限access、通常意味の中央集約、通常accessの中央経路化、一つの編集可能contextへの全設定・Learningの集約、Targeted Deletionと通常忘却・訂正・History整理・Companion削除・retention・Resetの目的混同、Companion削除前の自動Global化・Summaryのhistorical logへの分類し直し、容量不足での黙った削除・通常History整理のLearningへのcascade、古いBackupの自動改変・再消去・自動再適用、復元参照・同意からの自動利用・外部巻戻し・staleの現在事実化・旧live混入・Client copyでのHost上書き・自動queue、確認不能の成功扱い、部分正本・混合・権限先行復活・未完了の成功表示、要約・復旧での確定度強化、Audit・完了記録への本文再保存・秘密の別保管庫化である。いずれも上位契約を成立させないため採れない。
 
 以下は意図的に残すDesign Freedomである。
 
@@ -419,7 +419,7 @@ crate / module、struct / enum / trait、DB schema、backup format、serializati
 
 ## 10. 横断検証
 
-requirements・Subsystem Decomposition・State Ownership・Dependency Rules・Runtime Flows・Cross-cutting・Step 11・既存Step 12 artifactへ戻して横断検証した。固定scenario一覧の充足ではなく、正常系と本Subsystemにとって意味のある failure / stale / restart / deletionを選んで walkthroughした。
+requirements・上位architecture・critical-area契約・他のSubsystem設計に対する横断検証は次のとおりである。固定scenario一覧の充足ではなく、正常系と本Subsystemにとって意味のある failure / stale / restart / deletionを選んでwalkthroughする。
 
 | 領域・交差 | walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -456,9 +456,9 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task待ちにしない。機械的検証をLLM待ちにしない。 |
 | CC-07 | transport・Tool・Task・報告・監査の確定度を分け、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。本文の別保管庫を作らない。 |
 
-State Ownership、Dependency Rulesとの照合では、semantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更する必要は見つかっていない。新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Managerを導入していない。通常History保持、Companion削除、targeted deletion、backup / restore、ResetはSO・DRの異なるlifecycleを維持する。
+本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Managerを導入しない。通常History保持、Companion削除、targeted deletion、backup / restore、ResetはSO・DRの異なるlifecycleを維持する。
 
-既存Step 12 artifact（個体調整 / 作業 / 認識・学習、権限・制約 / 認証秘密 / 実行・拡張 / 推論、接続・存在 / 入出力・提示 / 共有観測）との照合では、利用側Subsystemと今回の保全・消去の間に新しいsemantic ownerや第二の正本を生んでいない。Task達成は作業、作用確定度は実行・拡張、報告は個体調整、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、割当解決・利用量原記録は推論、帰属は接続・存在、round・提示は入出力・提示、対象・時機・routingは共有観測に残り、本書のDP-1〜DP-8はその受渡しの対応付けである。scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持、旧backup交差の各契約は各文書で同一である。
+他のSubsystem設計（個体調整 / 作業 / 認識・学習、権限・制約 / 認証秘密 / 実行・拡張 / 推論、接続・存在 / 入出力・提示 / 共有観測）との照合では、利用側Subsystemと本書の保全・消去の間に新しいsemantic ownerや第二の正本を生まない。Task達成は作業、作用確定度は実行・拡張、報告は個体調整、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、割当解決・利用量原記録は推論、帰属は接続・存在、round・提示は入出力・提示、対象・時機・routingは共有観測に残り、本書のDP-1〜DP-8はその受渡しの対応付けである。scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持、旧backup交差の各契約は各文書で同一である。
 
 ### 保全・消去を除いてもownerを一意に説明できることの確認
 

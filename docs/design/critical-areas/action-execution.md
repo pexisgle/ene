@@ -15,7 +15,7 @@
 | 結果不明を未実行・失敗・成功へ変換し、retry・replayで解消する。 | 不明の保持、試行と作用の区別、自動再実行の禁止、重複防止に必要な保持・区別。 |
 | 報告・要約・復旧の過程で確定度を強める。 | 記録・報告・監査での確定度保持。 |
 
-今回の範囲は、認可判断の対象確定から、委任、開始前の現在条件成立、実作用と確定度の把握、競合時の帰属、作用不明の保持、Task・報告への対応付けまでとする。Contextの情報選択・Provider適応の一般契約は[Context Assembly](context-assembly.md)を利用する。Targeted deletionの全域完了、Client帰属の調停手順、backup／restoreの切替手順は、それぞれの既存契約を利用する隣接領域である。
+本書の範囲は、認可判断の対象確定から、委任、開始前の現在条件成立、実作用と確定度の把握、競合時の帰属、作用不明の保持、Task・報告への対応付けまでとする。Contextの情報選択・Provider適応の一般契約は[Context Assembly](context-assembly.md)を利用する。Targeted deletionの全域完了、Client帰属の調停手順、backup／restoreの切替手順は、それぞれの既存契約を利用する隣接領域である。
 
 ## 2. 上位architectureとの位置関係
 
@@ -229,9 +229,9 @@ Ownerへの最終報告・管理面の表示・Body・Voiceの演出・自然な
 
 作用の説明とtargeted deletionが重なる場合は、必要な事実の記録と対象情報の除去を両立させ、対象本文を作用記録という理由で残さない。各受入先は消去へ参加し、古い結果から対象情報を戻さない。外部へ送信・export・backup済みcopyや外部Workspaceの消去、Credentialの外部失効は作用記録の完了範囲外として説明する。
 
-## 10. Runtime FlowsとCross-cutting Designへ戻した検証
+## 10. Runtime FlowsとCross-cutting Designに対する横断検証
 
-[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](../architecture/cross-cutting.md)CC-01〜07へ、正常系と意味のある競合を戻して照合した。
+[Major Runtime Flows](../architecture/runtime-flows.md)第3節とRF-01〜08、[Cross-cutting Design](../architecture/cross-cutting.md)CC-01〜07に対する、正常系と意味のある競合のwalkthroughは次のとおりである。
 
 | Flow・交差 | Walkthroughと必要な結果 | 本書の成立箇所 |
 |---|---|---|
@@ -260,11 +260,11 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-06 | 並列消費・処理中・不明を同じ上限へ反映し、制御・保全経路を推論・長時間Task待ちにしない。 |
 | CC-07 | transport・Tool・Task・報告の確定度を分け、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。 |
 
-以上の範囲で、semantic owner、Host／Client配置、trust／failure boundary、lifecycle、permission／consent semanticsを変更する必要は見つかっていない。新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Action Managerを導入していない。
+本書はsemantic owner、Host／Client配置、trust／failure boundary、lifecycle、permission／consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・万能Action Managerを導入しない。
 
-## 11. 後続設計への引渡しと残す自由度
+## 11. 本書が固定する契約と残す Design Freedom
 
-後続のconcurrency／state representation／persistence／interface設計は、次を固定された契約として利用できる。
+下位設計は、次を本書が固定した契約として利用できる。
 
 - 認可判断は判断対象と実利用の対応であり、記録と生きた許可は別である。開始前に現在条件と実対象解決を成立させ、重要な変更では再評価する。無関係な変更での再承認は要求しない。
 - 委任・経路変更は元のTask／Owner意図／Permission／Workspace／Client境界を広げない。生成content・Tool UI入力・sandbox例外から権限を作らない。
@@ -274,7 +274,7 @@ Cross-cutting契約との照合結果は次のとおりである。
 - 試行と作用、判断・目的・実対象・段階・確定度・停止保留との対応を保持・区別できなければ、成功・未実行と推定しない。
 - 報告・監査・復旧で確定度を強めない。消去対象本文を作用記録で残さない。
 
-今回絞り込んだ禁止選択肢は、名前一致だけの対象対応、委任先への権限copy、Denyの同等Action迂回、内部管理へのTool回り込み、古い判定・cached許可での新規開始、不明の未実行・失敗・成功への変換と自動replay、遅延結果の新目的への自動採用、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
+本書が採れない選択肢として除外するのは、名前一致だけの対象対応、委任先への権限copy、Denyの同等Action迂回、内部管理へのTool回り込み、古い判定・cached許可での新規開始、不明の未実行・失敗・成功への変換と自動replay、遅延結果の新目的への自動採用、要約・復旧での確定度強化である。いずれも上位契約を成立させないため採れない。
 
 以下は意図的に残すDesign Freedomである。
 
