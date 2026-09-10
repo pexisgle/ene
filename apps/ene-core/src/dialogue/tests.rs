@@ -214,6 +214,25 @@ fn reject_kind(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RejectKind, St
     }
 }
 
+/// Extracts a wire rejection kind, asserting it carries `connection`
+/// (IPC §5).
+fn reject_on(
+    responses: &[ene_plugin_ipc::WireFrame],
+    connection: ConnectionWireId,
+) -> Result<RejectKind, String> {
+    let kind = reject_kind(responses)?;
+    let Some(first) = responses.first() else {
+        return Err(String::from("the submit must answer"));
+    };
+    if first.envelope.sender.connection_id != Some(connection) {
+        return Err(format!(
+            "the post-auth reject must carry the current connection, got {:?}",
+            first.envelope.sender.connection_id
+        ));
+    }
+    Ok(kind)
+}
+
 /// Counts durable history rows through the repository contract.
 async fn timeline_count(handle: &HostHandle) -> Result<usize, String> {
     use ene_companion::CompanionRepository as _;
@@ -909,7 +928,7 @@ async fn retry_with_changed_round_intent_conflicts() -> Result<(), String> {
     }
     let declined = handle.handle_frame(joined, live.clone(), &transport).await;
     assert_eq!(
-        reject_kind(&declined)?,
+        reject_on(&declined, live.connection_id)?,
         RejectKind::ConflictingCommand,
         "a changed round intent must conflict, got {declined:?}"
     );
@@ -948,7 +967,7 @@ async fn retry_with_forced_fresh_conflicts() -> Result<(), String> {
     }
     let declined = handle.handle_frame(forced, live.clone(), &transport).await;
     assert_eq!(
-        reject_kind(&declined)?,
+        reject_on(&declined, live.connection_id)?,
         RejectKind::ConflictingCommand,
         "a fresh flip on the same key must conflict"
     );
@@ -1952,6 +1971,11 @@ async fn submit_with_reused_command_and_new_text_is_declined() {
         ),
         "a reused key with new content must decline, got {:?}",
         only.payload
+    );
+    assert_eq!(
+        only.envelope.sender.connection_id,
+        Some(live.connection_id),
+        "the post-auth conflict reject carries the current connection"
     );
     let companion = handle.store.ensure_running_companion().await;
     let companion = companion.unwrap();

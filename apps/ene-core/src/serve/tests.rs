@@ -116,10 +116,12 @@ fn history_frame() -> super::WireFrame {
     }
 }
 
+/// Premises for a connection that never paired (and so cannot be authed).
 fn unpaired_input() -> LiveInput {
     LiveInput {
         paired_device: None,
         connection_known: false,
+        authed: false,
         ..live_input("client-a")
     }
 }
@@ -890,6 +892,13 @@ async fn negotiated_version_is_fixed_per_connection() {
         )),
         "a v1.99 frame on a v1.0 connection must reject, got {rejected:?}"
     );
+    assert_eq!(
+        rejected
+            .first()
+            .map(|first| first.envelope.sender.connection_id),
+        Some(Some(negotiated.connection_id)),
+        "a post-auth protocol reject carries the current connection"
+    );
     let agreed = handle
         .handle_frame(submit_frame(), negotiated, &transport)
         .await;
@@ -908,6 +917,52 @@ async fn negotiated_version_is_fixed_per_connection() {
         pre.first()
             .is_some_and(|first| matches!(&first.payload, WirePayload::Reject(_))),
         "pre-negotiation frames must speak exactly v1.0, got {pre:?}"
+    );
+    assert_eq!(
+        pre.first().map(|first| first.envelope.sender.connection_id),
+        Some(None),
+        "a pre-auth protocol reject still hides the connection"
+    );
+}
+
+/// The typed reject sender follows the auth boundary (IPC §5).
+#[tokio::test]
+async fn reject_sender_follows_the_auth_boundary() {
+    let (handle, _dir) = open_handle("reject-sender").await.unwrap();
+    let transport = fake_transport();
+    let mut mismatch = submit_frame();
+    mismatch.envelope.message_type = WireMessageType(String::from("HistoryRequest"));
+
+    let live = paired_input("device-1");
+    let post = handle
+        .handle_frame(mismatch.clone(), live.clone(), &transport)
+        .await;
+    let first = post.first().unwrap();
+    assert!(
+        matches!(
+            &first.payload,
+            WirePayload::Reject(notice)
+                if notice.kind == ene_api::v1::reject::RejectKind::UnsupportedMessage
+        ),
+        "a discriminator mismatch must reject, got {post:?}"
+    );
+    assert_eq!(
+        first.envelope.sender.connection_id,
+        Some(live.connection_id),
+        "a post-auth message reject carries the current connection"
+    );
+
+    let pre = handle
+        .handle_frame(mismatch, unpaired_input(), &transport)
+        .await;
+    let first = pre.first().unwrap();
+    assert!(
+        matches!(&first.payload, WirePayload::Reject(_)),
+        "the same mismatch must reject pre-auth, got {pre:?}"
+    );
+    assert_eq!(
+        first.envelope.sender.connection_id, None,
+        "a pre-auth message reject still hides the connection"
     );
 }
 

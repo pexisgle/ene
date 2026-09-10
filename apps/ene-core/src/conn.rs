@@ -272,12 +272,13 @@ impl ConnectionTable {
 
     /// Builds the [`LiveInput`] premises for one inbound envelope.
     ///
-    /// Returns [`None`] when the connection is unknown (the table forgot
-    /// it), when the envelope incarnation mismatches the pinned first
-    /// incarnation, or when the envelope device claim disagrees with the
-    /// table: the caller drops the connection without a reply in all three
-    /// cases (a mismatched claim is a theft attempt, and answering it would
-    /// be an oracle). The `client_ref` is table-derived (paired device) or
+    /// Returns [`LiveDecision::Invalid`] when the connection is unknown (the
+    /// table forgot it), when the envelope incarnation mismatches the pinned
+    /// first incarnation, or when the envelope device claim is missing or
+    /// disagrees with the table: the caller drops the connection without a
+    /// reply in all three cases (a missing or mismatched claim is a
+    /// protocol violation or theft attempt, and answering it would be an
+    /// oracle). The `client_ref` is table-derived (paired device) or
     /// the pinned incarnation pair — never the envelope claim, which is
     /// only equality-checked; authority travels in `paired_device` plus
     /// `connection_known` plus `authed`, all table-filled, and
@@ -313,28 +314,18 @@ impl ConnectionTable {
             }
             (record.paired_device.clone(), record.authed)
         };
-        // The envelope device claim is verified, never trusted: on a paired
-        // connection it must be absent or equal the table value, otherwise
-        // the frame is dropped (a mismatched claim is a theft attempt, and
-        // answering it would be an oracle). On an unpaired connection any
-        // device claim is a protocol violation with the same treatment: the
-        // pairing/capability/proof frames that legitimately precede pairing
-        // carry none by contract.
         let claimed = envelope
             .sender
             .device_id
             .as_ref()
             .map(|id| id.0.as_hyphenated().to_string());
         let client_ref = match (&device, claimed) {
-            (Some(paired), Some(claim)) if paired != &claim => {
-                return LiveDecision::Invalid;
-            }
-            (Some(paired), _) => paired.clone(),
-            (None, Some(_)) => return LiveDecision::Invalid,
+            (Some(paired), Some(claim)) if paired == &claim => paired.clone(),
             (None, None) => {
                 let incarnation = envelope.sender.incarnation_id;
                 format!("incarnation-{}-{}", incarnation.counter, incarnation.random)
             }
+            _ => return LiveDecision::Invalid,
         };
         let current = device
             .as_ref()

@@ -76,8 +76,8 @@ pub(crate) fn outgoing_envelope(
 ///
 /// Same as [`outgoing_envelope`] except the sender hides the connection id
 /// ([`None`]): pairing results and denials, negotiated terms, challenges,
-/// rejections, and unpaired closes all predate the acceptance that first
-/// reveals the id, so none of them may carry it.
+/// pre-auth rejections, and unpaired closes all predate the acceptance that
+/// first reveals the id, so none of them may carry it.
 pub(crate) fn outgoing_envelope_pre_auth(
     frame: &WireFrame,
     live: &LiveInput,
@@ -123,28 +123,28 @@ pub(crate) fn outgoing_frame(
 
 /// Builds one typed wire rejection answering `frame`.
 ///
-/// Rejections never reveal the connection id (pre-auth form always): a
-/// malformed or unnegotiated frame must not become a connection oracle.
-/// The connection stays open; only the message is refused.
+/// Per IPC §5, a rejection on an authenticated connection (`live.authed`)
+/// carries this connection's table id; a pre-auth rejection hides it.
 pub(crate) fn reject_frame(
     frame: &WireFrame,
     live: &LiveInput,
     kind: RejectKind,
     detail: String,
 ) -> WireFrame {
-    outgoing_frame_pre_auth(
-        frame,
-        live,
-        WirePayload::Reject(RejectNotice { kind, detail }),
-    )
+    let payload = WirePayload::Reject(RejectNotice { kind, detail });
+    if live.authed {
+        outgoing_frame(frame, live, payload)
+    } else {
+        outgoing_frame_pre_auth(frame, live, payload)
+    }
 }
 
 /// Builds one pre-accept response frame answering `frame` with `payload`.
 ///
 /// Same as [`outgoing_frame`] except the sender hides the connection id:
-/// pairing results and denials, negotiated terms, challenges, rejections,
-/// and unpaired closes must not reveal the id the gate later requires the
-/// Client to echo.
+/// pairing results and denials, negotiated terms, challenges, pre-auth
+/// rejections, and unpaired closes must not reveal the id the gate later
+/// requires the Client to echo.
 pub(crate) fn outgoing_frame_pre_auth(
     frame: &WireFrame,
     live: &LiveInput,

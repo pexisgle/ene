@@ -1,6 +1,6 @@
 use super::{ConnectionTable, LiveDecision, bind_singleton, socket_path};
 use ene_api::v1::envelope::{ProtocolVersion, WireSender, new_outgoing_envelope};
-use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, WireMessageType};
+use ene_api::v1::refs::{ClientIncarnationId, ConnectionWireId, DeviceWireId, WireMessageType};
 
 #[test]
 fn socket_path_appends_the_socket_name() {
@@ -17,6 +17,27 @@ fn envelope(incarnation: ClientIncarnationId) -> ene_api::v1::envelope::WireEnve
         ProtocolVersion::V1,
         WireSender {
             device_id: None,
+            incarnation_id: incarnation,
+            connection_id: None,
+        },
+        WireMessageType(String::from("CapabilityAdvertise")),
+    )
+}
+
+/// Stable test device wire: hyphenated UUID text, matching claim rendering.
+fn device_one() -> DeviceWireId {
+    DeviceWireId(uuid::Uuid::from_u128(1))
+}
+
+/// Builds a post-pairing envelope whose sender claims `device`.
+fn paired_envelope(
+    incarnation: ClientIncarnationId,
+    device: DeviceWireId,
+) -> ene_api::v1::envelope::WireEnvelope {
+    new_outgoing_envelope(
+        ProtocolVersion::V1,
+        WireSender {
+            device_id: Some(device),
             incarnation_id: incarnation,
             connection_id: None,
         },
@@ -110,20 +131,22 @@ fn connection_table_marks_paired_and_forgets_on_close() {
         matches!(before, LiveDecision::Ready(live) if live.paired_device.is_none()),
         "a fresh connection pairs nothing"
     );
-    table.note_paired(&id, "device-1");
-    let after = table.live_for(&id, &envelope(incarnation(7, 7)));
+    let device = device_one();
+    let device_wire = device.0.as_hyphenated().to_string();
+    table.note_paired(&id, &device_wire);
+    let after = table.live_for(&id, &paired_envelope(incarnation(7, 7), device));
     assert!(
         matches!(
             after,
             LiveDecision::Ready(live)
-                if live.paired_device == Some(String::from("device-1")) && !live.authed
+                if live.paired_device == Some(device_wire.clone()) && !live.authed
         ),
         "a paired-but-never-challenged connection stays unauthed"
     );
     let (closed, still_live) = table.note_closed(&id);
     assert_eq!(
         closed,
-        Some(String::from("device-1")),
+        Some(device_wire),
         "close reports the paired device for disconnect"
     );
     assert!(!still_live, "the last close for a device ends its liveness");
@@ -143,32 +166,34 @@ fn auth_marks_current_and_supersedes_the_previous_connection() {
     let table = ConnectionTable::new();
     let first = table.note_accept();
     let second = table.note_accept();
+    let device = device_one();
+    let device_wire = device.0.as_hyphenated().to_string();
     for id in [first, second] {
         let pinned = table.live_for(&id, &envelope(incarnation(9, 9)));
         assert!(
             matches!(pinned, LiveDecision::Ready(_)),
             "both connections must pin before pairing"
         );
-        table.note_paired(&id, "device-1");
+        table.note_paired(&id, &device_wire);
     }
     table.note_authed(&first);
-    let current = table.live_for(&first, &envelope(incarnation(9, 9)));
+    let current = table.live_for(&first, &paired_envelope(incarnation(9, 9), device));
     assert!(
         matches!(current, LiveDecision::Ready(live) if live.authed),
         "the freshly authenticated connection reports authed"
     );
-    let waiting = table.live_for(&second, &envelope(incarnation(9, 9)));
+    let waiting = table.live_for(&second, &paired_envelope(incarnation(9, 9), device));
     assert!(
         matches!(waiting, LiveDecision::Ready(live) if !live.authed),
         "the paired-but-never-challenged connection stays unauthed"
     );
     table.note_authed(&second);
-    let stale = table.live_for(&first, &envelope(incarnation(9, 9)));
+    let stale = table.live_for(&first, &paired_envelope(incarnation(9, 9), device));
     assert!(
         matches!(stale, LiveDecision::Ready(live) if !live.authed),
         "a newer authentication supersedes: the old connection goes stale implicitly"
     );
-    let now_current = table.live_for(&second, &envelope(incarnation(9, 9)));
+    let now_current = table.live_for(&second, &paired_envelope(incarnation(9, 9), device));
     assert!(
         matches!(now_current, LiveDecision::Ready(live) if live.authed),
         "the newest authentication is the current one"
@@ -180,24 +205,26 @@ fn closing_an_older_connection_keeps_the_newer_currency() {
     let table = ConnectionTable::new();
     let first = table.note_accept();
     let second = table.note_accept();
+    let device = device_one();
+    let device_wire = device.0.as_hyphenated().to_string();
     for id in [first, second] {
         let pinned = table.live_for(&id, &envelope(incarnation(4, 4)));
         assert!(
             matches!(pinned, LiveDecision::Ready(_)),
             "both connections must pin before pairing"
         );
-        table.note_paired(&id, "device-1");
+        table.note_paired(&id, &device_wire);
     }
     table.note_authed(&first);
     table.note_authed(&second);
     let (closed, still_live) = table.note_closed(&first);
     assert_eq!(
         closed,
-        Some(String::from("device-1")),
+        Some(device_wire.clone()),
         "the older close reports its device"
     );
     assert!(still_live, "the surviving connection keeps the device live");
-    let survivor = table.live_for(&second, &envelope(incarnation(4, 4)));
+    let survivor = table.live_for(&second, &paired_envelope(incarnation(4, 4), device));
     assert!(
         matches!(survivor, LiveDecision::Ready(live) if live.authed),
         "closing the superseded connection never clears the newer currency"
@@ -209,23 +236,25 @@ fn closing_the_current_connection_clears_currency_without_reviving() {
     let table = ConnectionTable::new();
     let first = table.note_accept();
     let second = table.note_accept();
+    let device = device_one();
+    let device_wire = device.0.as_hyphenated().to_string();
     for id in [first, second] {
         let pinned = table.live_for(&id, &envelope(incarnation(6, 6)));
         assert!(
             matches!(pinned, LiveDecision::Ready(_)),
             "both connections must pin before pairing"
         );
-        table.note_paired(&id, "device-1");
+        table.note_paired(&id, &device_wire);
     }
     table.note_authed(&first);
     let (closed, still_live) = table.note_closed(&first);
     assert_eq!(
         closed,
-        Some(String::from("device-1")),
+        Some(device_wire),
         "the current close reports its device"
     );
     assert!(still_live, "the surviving connection keeps the device live");
-    let survivor = table.live_for(&second, &envelope(incarnation(6, 6)));
+    let survivor = table.live_for(&second, &paired_envelope(incarnation(6, 6), device));
     assert!(
         matches!(survivor, LiveDecision::Ready(live) if !live.authed),
         "the survivor stays unauthed until it completes a fresh challenge"
@@ -480,4 +509,73 @@ async fn redelivery_keeps_the_connection_serving() {
     );
     drop(client);
     worker.abort();
+}
+
+/// IPC §5 / §9.2: a paired connection drops a claim-less frame without a
+/// reply.
+#[tokio::test]
+async fn paired_connection_drops_a_frame_without_a_device_claim() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ene_api::v1::handshake::CapabilityAdvertise;
+    use ene_api::v1::payload::WirePayload;
+    use ene_inference::fake::FakeProviderTransport;
+    use ene_plugin_ipc::WireFrame;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use crate::test_support::memory_handle_with;
+
+    let (handle, _dir) = memory_handle_with("claim-drop", |_| {}).await.unwrap();
+    let table = Arc::new(ConnectionTable::new());
+    let id = table.note_accept();
+    let device = device_one();
+    let device_wire = device.0.as_hyphenated().to_string();
+    assert!(
+        matches!(
+            table.live_for(&id, &envelope(incarnation(5, 6))),
+            LiveDecision::Ready(_)
+        ),
+        "the pre-pairing frame pins the connection"
+    );
+    table.note_paired(&id, &device_wire);
+
+    let pair = tokio::net::UnixStream::pair();
+    let (mut client, server) = pair.unwrap();
+    let worker = tokio::spawn(super::serve_connection(
+        server,
+        id,
+        Arc::new(handle),
+        Arc::new(FakeProviderTransport::new(String::new(), None)),
+        Arc::clone(&table),
+    ));
+    let frame = WireFrame {
+        envelope: new_outgoing_envelope(
+            ProtocolVersion::V1,
+            WireSender {
+                device_id: None,
+                incarnation_id: incarnation(5, 6),
+                connection_id: None,
+            },
+            WireMessageType(String::from("CapabilityAdvertise")),
+        ),
+        payload: WirePayload::CapabilityAdvertise(CapabilityAdvertise {
+            supported_protocol: vec![ProtocolVersion::V1],
+            features: Vec::new(),
+            platform: String::from("test"),
+        }),
+    };
+    let encoded = ene_plugin_ipc::encode_frame(&frame).expect("test frame must encode");
+    assert!(
+        client.write_all(&encoded).await.is_ok(),
+        "the claim-less frame must send"
+    );
+    // Terminal: EOF, never a response frame.
+    let mut byte = [0_u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(5), client.read(&mut byte)).await;
+    assert!(
+        matches!(closed, Ok(Ok(0))),
+        "a paired connection must close without answering a claim-less frame, got {closed:?}"
+    );
+    assert!(worker.await.is_ok(), "the connection task must finish");
 }
