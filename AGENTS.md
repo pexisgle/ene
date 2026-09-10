@@ -35,10 +35,8 @@ No `default-members`: bare `cargo test` / `cargo clippy` cover the workspace.
 - Prefer the narrowest visibility; `pub(crate)` by default unless an API must
   be public.
 - Keep external dependency version policy in root `[workspace.dependencies]`.
-- Clippy gate is `cargo clippy --workspace --all-targets -- -D warnings`
-  (standard `all`). Extra restriction lints live in
-  `[workspace.lints.clippy]`; do not enable `pedantic`/`cargo` wholesale,
-  and do not add workspace-wide allows to paper over them.
+- Extra restriction lints live in `[workspace.lints.clippy]`; do not enable
+  `pedantic`/`cargo` wholesale.
 - Every `unsafe` block requires a preceding `// SAFETY:` comment that states
   the invariant making it sound.
 

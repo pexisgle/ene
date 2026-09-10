@@ -206,10 +206,7 @@ mod tests {
             .collect()
     }
 
-    /// Writes `contents` to a fresh temporary file.
-    ///
-    /// The returned handle must stay in scope while the path is read:
-    /// [`tempfile::NamedTempFile`] deletes the file on drop.
+    /// Writes `contents` to a temp file. Keep the handle; drop deletes it.
     fn write_config_file(contents: &str) -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().expect("temp config file must be created");
         file.write_all(contents.as_bytes())

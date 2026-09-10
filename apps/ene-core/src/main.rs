@@ -41,8 +41,8 @@ enum CliError {
 /// override earlier ones, matching the usual override convention. The value
 /// following `--config` is consumed verbatim, even when it starts with `--`.
 /// A missing value after `--config` and any unknown argument (including
-/// `--help` and `--version`, which Stage 1 does not implement yet) are
-/// [`CliError::Usage`] failures whose display contains the usage line.
+/// `--help` and `--version`) are [`CliError::Usage`] failures whose display
+/// contains the usage line.
 ///
 /// The function is pure: it inspects only `args` and never touches the
 /// process environment, the filesystem, or `stdout`.
@@ -81,8 +81,7 @@ fn parse_args(args: &[String]) -> Result<Option<PathBuf>, CliError> {
 /// There is deliberately no serve loop, no listener, no database, no
 /// provider, no presence, and no management surface yet (`Stage 2` and
 /// later). This is a synchronous `fn main`: there are no I/O boundaries yet,
-/// so no `Tokio` runtime. `--help` and `--version` are not implemented in
-/// Stage 1, so they currently report [`CliError::Usage`].
+/// so no `Tokio` runtime.
 ///
 /// # Errors
 ///

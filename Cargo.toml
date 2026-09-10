@@ -29,12 +29,6 @@ thiserror = "2.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [workspace.lints.clippy]
-# Standard Clippy (`all` at warn) is the gate via
-# `cargo clippy --workspace --all-targets -- -D warnings`.
-# `restriction` is opt-in; only lints with a concrete safety or
-# correctness problem are denied here. Do not enable `pedantic` or
-# `cargo` wholesale, and do not add workspace-wide allows to paper
-# over them. Tests may `unwrap`/`expect`/`panic` via clippy.toml.
 undocumented_unsafe_blocks = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
