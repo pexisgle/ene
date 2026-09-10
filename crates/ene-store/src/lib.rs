@@ -134,13 +134,17 @@ impl Store {
     ///
     /// Durable idempotency rests on the client-minted `(companion,
     /// command_id)`: a retry reuses the same command id with a fresh message
-    /// id, so an in-transaction pre-check compares the stored fingerprint
-    /// (round, role, body, language, round wire, incarnation) and returns
+    /// id, so an in-transaction pre-check compares the stored *request
+    /// fingerprint* (role, body, language, sending incarnation) and returns
     /// the original [`HistoryAppendOutcome::AlreadyCommittedAs`] without
-    /// re-appending or re-registering undelivered. This replaces the retired
-    /// `local_id` pre-check; `local_id` is stored as correspondence metadata
-    /// only and is never consulted here. `NULL` command ids carry no replay
-    /// key and never collide. A reused key with different content answers
+    /// re-appending or re-registering undelivered. Round identity and its
+    /// wire projection are the *accepted result*, not the request: the Host
+    /// mints them per intake decision and a retry can re-intake into a
+    /// newer round, so they never decide conflict — the replay answers the
+    /// stored accept verbatim. This replaces the retired `local_id`
+    /// pre-check; `local_id` is stored as correspondence metadata only and
+    /// is never consulted here. `NULL` command ids carry no replay key and
+    /// never collide. A reused key with a different request answers
     /// [`HistoryAppendOutcome::CommandConflict`] instead: declined without
     /// side effects, never rebound.
     fn append_history(
@@ -228,7 +232,6 @@ impl Store {
                             row.get(4)?,
                             row.get(5)?,
                             row.get(6)?,
-                            row.get(7)?,
                         ))
                     },
                 )
@@ -240,19 +243,22 @@ impl Store {
                 existing_role,
                 existing_body,
                 existing_lang,
-                existing_wire,
                 existing_counter,
                 existing_random,
             )) = existing
             {
                 let message = decode_id(&existing).map_err(companion_unavailable)?;
                 let round = decode_id(&existing_round).map_err(companion_unavailable)?;
-                // The durable key owns its fingerprint: an exact retry
-                // replays the original acceptance, while the same key with
-                // different content is declined without side effects. The
-                // generation premise stays out of the fingerprint: it is
-                // enforced separately above, so a retry under a newer
-                // generation view still replays instead of conflicting.
+                // The durable key owns its request fingerprint: role, body,
+                // language, and sending incarnation. An exact retry replays
+                // the original acceptance even when the Host re-intaked it
+                // into a newer round (round and its projection are the
+                // accepted result and travel verbatim from the stored row),
+                // while the same key with a different request is declined
+                // without side effects. The generation premise stays out of
+                // the fingerprint: it is enforced separately above, so a
+                // retry under a newer generation view still replays instead
+                // of conflicting.
                 let stored_incarnation = match (existing_counter, existing_random) {
                     (Some(counter_raw), Some(random_raw)) => Some((
                         decode_u64(counter_raw).map_err(companion_unavailable)?,
@@ -268,8 +274,6 @@ impl Store {
                 if existing_role != role_text
                     || existing_body != cmd.text
                     || existing_lang != cmd.lang
-                    || encode_id(cmd.round) != existing_round
-                    || cmd.round_wire != existing_wire
                     || cmd.incarnation != stored_incarnation
                 {
                     return Ok((HistoryAppendOutcome::CommandConflict, None));
@@ -635,7 +639,7 @@ const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, compa
 const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
 const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_SELECT_HISTORY_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
-const SQL_SELECT_HISTORY_ID_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, round_wire, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
+const SQL_SELECT_HISTORY_ID_BY_COMMAND: &str = "SELECT message_id, round_id, role, body, lang, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND command_id = ?2 ORDER BY rowid ASC LIMIT 1";
 const SQL_FIND_HISTORY: &str = "SELECT 1 FROM history_message WHERE message_id = ?1";
 const SQL_INSERT_UNDELIVERED: &str = "INSERT INTO undelivered (undelivered_id, companion_id, source_message, status, round_id, presence_generation, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 const SQL_SELECT_UNDELIVERED_STATUS: &str =
@@ -1111,16 +1115,17 @@ impl HistoryRow {
 }
 
 /// One stored replay fingerprint for a `(companion, command_id)` key:
-/// message and round identity plus the compared content (role, body,
-/// language, round wire, incarnation columns). The generation premise stays
-/// out: it is enforced separately before the replay check.
+/// message and round identity plus the compared request content (role,
+/// body, language, incarnation columns). Round identity and its wire
+/// projection are the accepted result and are compared nowhere here; the
+/// generation premise stays out too, enforced separately before the replay
+/// check.
 type CommandFingerprintRow = (
     String,
     String,
     String,
     String,
     String,
-    Option<String>,
     Option<i64>,
     Option<i64>,
 );
@@ -3679,11 +3684,6 @@ mod tests {
                 cmd.lang = String::from("fr");
                 cmd
             }),
-            ("wire", {
-                let mut cmd = base.clone();
-                cmd.round_wire = Some(String::from("other-wire"));
-                cmd
-            }),
             ("incarnation", {
                 let mut cmd = base.clone();
                 cmd.incarnation = Some((9, 9));
@@ -3697,7 +3697,6 @@ mod tests {
             );
             conflicting.text = String::from("original body");
             conflicting.lang = String::from("en");
-            conflicting.round_wire = base.round_wire.clone();
             conflicting.incarnation = base.incarnation;
             let replayed = store.append_message(conflicting).await;
             assert!(
@@ -3708,6 +3707,20 @@ mod tests {
                 "{label} restored content must replay the original accept"
             );
         }
+        // Round identity and its wire projection are the accepted result,
+        // not the request: the same send re-intaked into a newer round
+        // replays the stored accept instead of conflicting.
+        let mut drifted = base.clone();
+        drifted.round = RawId::new();
+        drifted.round_wire = Some(String::from("rotated-wire"));
+        let replayed = store.append_message(drifted).await;
+        assert!(
+            matches!(
+                replayed,
+                Ok(HistoryAppendOutcome::AlreadyCommittedAs { .. })
+            ),
+            "round/wire drift on the same request must replay, got {replayed:?}"
+        );
         let count = history_row_count(&store, companion);
         assert_eq!(count, Some(1), "conflicts must never append rows");
     }
