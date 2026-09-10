@@ -72,12 +72,14 @@
 //!   there is deliberately no secret cache.
 //! - The response sender reveals the connection id only on and after
 //!   acceptance: [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted)
-//!   and every later (domain) response carry `Some` table connection id, while
-//!   every pre-accept response (pairing results and denials, negotiated terms,
-//!   challenges, rejections, and unpaired closes) carries [`None`]. A peer
-//!   that never completed the challenge therefore never learns the id the
-//!   gate requires it to echo. The sender always echoes the inbound
-//!   incarnation and names the paired device (or [`None`] pre-pairing).
+//!   and every later (domain) response, including post-auth typed
+//!   [`Reject`](ene_api::v1::payload::WirePayload::Reject)s, carry `Some`
+//!   table connection id, while every pre-accept response (pairing results
+//!   and denials, negotiated terms, challenges, pre-auth rejections, and
+//!   unpaired closes) carries [`None`]. A peer that never completed the
+//!   challenge therefore never learns the id the gate requires it to echo.
+//!   The sender always echoes the inbound incarnation and names the paired
+//!   device (or [`None`] pre-pairing).
 //! - [`HostHandle::handle_frame`] is infallible by contract: infrastructure
 //!   failures map to retry-safe outcome frames (hold or revalidate), never to
 //!   fabricated domain facts. The mapping table lives on each pipeline method.
@@ -493,9 +495,11 @@ impl HostHandle {
     /// inbound incarnation echoed, `reply_to` set to the inbound message id)
     /// whose sender reveals the table connection id only on and after
     /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted): domain
-    /// responses and the acceptance itself carry `Some` id, while every
-    /// pre-accept response (pairing results, negotiated terms, challenges,
-    /// rejections, denials, unpaired closes) carries [`None`].
+    /// responses, the acceptance itself, and post-auth typed
+    /// [`Reject`](ene_api::v1::payload::WirePayload::Reject)s carry `Some`
+    /// id, while every pre-accept response (pairing results, negotiated
+    /// terms, challenges, pre-auth rejections, denials, unpaired closes)
+    /// carries [`None`].
     ///
     /// Ingress rules by frame kind: [`ene_api::v1::handshake::PairingRequest`] frames are refused
     /// once the connection already holds a paired device (one connection,
