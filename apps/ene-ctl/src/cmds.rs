@@ -1,47 +1,23 @@
 //! `ene-ctl` subcommands: argument parsing, wire-payload builders, rendering.
 //!
-//! This module is pure: it parses `argv` words, builds `ene-api` DTOs, and
-//! renders Host-filtered views to display strings. It performs no I/O, opens
-//! no sockets, and reads no environment. Transport lives in
+//! Pure: parses `argv` words, builds `ene-api` DTOs, renders views to display
+//! strings; no I/O, sockets, or environment. Transport lives in
 //! [`crate::client`]; exit-code mapping lives at the crate root.
 //!
 //! Wire-mapping decisions (all within the existing DTO shapes):
 //!
-//! * Companion reference: every request echoes the projection the session
-//!   learned from presence ([`DEFAULT_COMPANION_REF`] (`"default"`) until
-//!   the first fact). The Host resolves inbound refs through its own
-//!   mapping — exact match against the issued projection, never derived —
-//!   so a rotated or guessed ref revalidates instead of attributing.
-//! * `setup --provider openai --model MODEL` performs two intents in the
-//!   shared setup-target grammar
-//!   ([`credential_target`] and
-//!   [`consent_target`], never a
-//!   CLI-local mini-language). The credential step uses
-//!   [`ManagementIntentKind::ConfigureCredentialIntent`]
-//!   with [`credential_target_for`] (`"credential:<provider>:main"`; the key
-//!   itself comes from the Host process environment over the Host-local path,
-//!   never this wire). Provider/model assignment uses
-//!   [`ManagementIntentKind::ManageRuleConsentCap`] with
-//!   [`consent_target_for`] (`"consent:<provider>:<model>:<credential-id>"`,
-//!   where the credential id is the `"<provider>:main"` ref the register step
-//!   created). Both rationales are provenance-only
-//!   ([`RationaleOrigin::ManagementSurface`], `quote` [`None`]): assignment
-//!   parameters travel in the consent target, never in the quote.
+//! * Setup intents use the shared setup-target grammar ([`credential_target`]
+//!   and [`consent_target`], never a CLI-local mini-language). The credential
+//!   key comes from the Host process environment over the Host-local path,
+//!   never this wire; assignment parameters travel in the consent target,
+//!   never in the rationale quote, and both rationales are provenance-only.
 //! * Both setup intents carry the display-revision mark of a freshly fetched
-//!   setup view as their `base_view`; staleness is therefore checked against
-//!   something the CLI actually saw, never defaulted to unconstrained.
-//! * `setup --show` and `status` both request [`HOST_SETUP_SECTIONS`] — the
-//!   four Host sections (`provider`, `model`, `consent`, `credential`).
-//! * `watch --round ROUND` prints that round's items from a
-//!   [`HistoryRequest`] (same fetch as
-//!   `history`, filtered by round). True stream-following needs a live `send`
-//!   in the same process because streams cannot resume; that follow mode is
-//!   deferred, and this limitation is documented on [`Command::Watch`].
-//!   Viewing restored facts is not presenting a stream, so `watch` never
-//!   sends [`ConfirmPresentation`](ene_api::v1::round::ConfirmPresentationWire).
-//!
-//! [`ManagementIntentKind::ConfigureCredentialIntent`]: ene_api::v1::management::ManagementIntentKind::ConfigureCredentialIntent
-//! [`ManagementIntentKind::ManageRuleConsentCap`]: ene_api::v1::management::ManagementIntentKind::ManageRuleConsentCap
+//!   setup view as `base_view`, so staleness is checked against something the
+//!   CLI actually saw, never defaulted to unconstrained.
+//! * `watch --round ROUND` prints that round's items from a [`HistoryRequest`]
+//!   (same fetch as `history`, filtered by round); true stream-following needs
+//!   a live `send` in the same process because streams cannot resume, so that
+//!   follow mode is deferred (see [`Command::Watch`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -65,91 +41,65 @@ use crate::errors::{CliError, USAGE};
 /// the current projection from presence and echoes it back.
 pub const DEFAULT_COMPANION_REF: &str = "default";
 
-/// Default item cap for `history` when `--limit` is absent.
 pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
 
-/// Label of the conventional main credential the setup flow registers.
-///
 /// The Host registers refs as `"<provider>:<label>"` and falls back to the
 /// `"<provider>:main"` ref before any consent exists, so the setup flow
 /// always uses this label: the consent step can then name the credential id
 /// it just created (see [`credential_id_for`]).
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
-/// Management-view sections the setup and status flows request.
-///
-/// This mirrors the Host section set: `HostHandle::build_view` in
-/// `apps/ene-core/src/setup.rs` renders exactly `provider`, `model`,
-/// `consent`, and `credential` (an empty request selects the same four).
-/// The contract test below asserts these names against that documented Host
-/// set, so a Host rename fails the test instead of silently fetching nothing.
+/// Mirrors the Host section set: `HostHandle::build_view` in
+/// `apps/ene-core/src/setup.rs` renders exactly these four (an empty request
+/// selects the same four). The contract test below asserts these names
+/// against that documented Host set, so a Host rename fails the test instead
+/// of silently fetching nothing.
 pub const HOST_SETUP_SECTIONS: &[&str] = &["provider", "model", "consent", "credential"];
 
 /// Only provider the setup flow knows how to assign yet.
 pub const SETUP_PROVIDER_OPENAI: &str = "openai";
 
-/// Counter backing [`new_local_id`]: process-local, monotonically increasing.
 static LOCAL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Parsed subcommand with its operands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Setup flow: show the filtered setup view, or register-then-assign.
     Setup(SetupMode),
-    /// Render the `provider`/`model`/`consent`/`credential` view sections.
     Status,
-    /// Submit text and stream the answering round.
     Send(SendArgs),
-    /// Print one round's items from history.
-    ///
-    /// Honest limitation: this is a round-scoped history print, not a live
-    /// stream follow. Streams cannot resume across processes, so following a
-    /// stream needs a live `send` in the same process; that follow mode is
-    /// deferred. Viewing restored facts is not presenting a stream, so
-    /// `watch` never sends a presentation confirmation.
+    /// A round-scoped history print, not a live stream follow: streams cannot
+    /// resume across processes, so following a stream needs a live `send` in
+    /// the same process (deferred). Viewing restored facts is not presenting a
+    /// stream, so `watch` never sends a presentation confirmation.
     Watch {
-        /// Round whose items to print.
         round: String,
     },
-    /// Print recent timeline items, newest request bounded by `limit`.
     History {
-        /// Maximum items to request.
         limit: u64,
     },
 }
 
-/// `setup` mode: filtered-view display, or credential-plus-assignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupMode {
-    /// Fetch and render the `setup` view section.
     Show,
-    /// Register the credential (Host-sourced key), then assign provider/model.
     Assign {
-        /// Provider name; only `"openai"` is accepted.
         provider: String,
-        /// Model name, passed through to the assignment record verbatim.
+        /// Passed through to the assignment record verbatim.
         model: String,
     },
 }
 
-/// `send` operands: optional premise round, new-round force flag, plus
-/// message text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendArgs {
-    /// Target round wire ref, or [`None`] to join-or-mint. Never combined
-    /// with [`fresh`](Self::fresh): the parser rejects `--new --round`.
+    /// Target round wire ref, or [`None`] to join-or-mint; never combined
+    /// with [`fresh`](Self::fresh) (the parser rejects `--new --round`).
     pub round: Option<String>,
-    /// Force a fresh round (`--new`); the Host mints instead of joining
-    /// any open round.
+    /// Force a fresh round: the Host mints instead of joining any open round.
     pub fresh: bool,
-    /// Message text: remaining words joined with single spaces.
     pub text: String,
 }
 
-/// Parses the words after the global flags: subcommand name plus operands.
-///
 /// An empty slice, an unknown name, or malformed operands are all
-/// [`CliError::Usage`] whose message ends with the usage text.
+/// [`CliError::Usage`] whose message ends with [`USAGE`].
 pub fn parse_command(words: &[String]) -> Result<Command, CliError> {
     let Some((name, rest)) = words.split_first() else {
         return Err(CliError::Usage(format!("missing command\n{USAGE}")));
@@ -166,8 +116,6 @@ pub fn parse_command(words: &[String]) -> Result<Command, CliError> {
     }
 }
 
-/// Parses `setup` operands: bare words are rejected, `--show` stands alone,
-/// and `--provider`/`--model` must appear together.
 fn parse_setup(args: &[String]) -> Result<SetupMode, CliError> {
     let mut show = false;
     let mut provider: Option<String> = None;
@@ -238,7 +186,6 @@ fn parse_setup(args: &[String]) -> Result<SetupMode, CliError> {
     }
 }
 
-/// Parses `status`: takes no operands.
 fn parse_status(args: &[String]) -> Result<Command, CliError> {
     if let Some(extra) = args.first() {
         return Err(CliError::Usage(format!(
@@ -248,9 +195,8 @@ fn parse_status(args: &[String]) -> Result<Command, CliError> {
     Ok(Command::Status)
 }
 
-/// Parses `send [--new | --round ROUND] TEXT...`: flags first in any order,
-/// then one or more text words. A word starting with `--` is never treated
-/// as text; such input is a usage error.
+/// A word starting with `--` is never treated as text; such input is a usage
+/// error.
 fn parse_send(args: &[String]) -> Result<SendArgs, CliError> {
     let mut fresh = false;
     let mut round: Option<String> = None;
@@ -300,7 +246,6 @@ fn parse_send(args: &[String]) -> Result<SendArgs, CliError> {
     })
 }
 
-/// Parses `watch --round ROUND`: the round flag is required, nothing else.
 fn parse_watch(args: &[String]) -> Result<Command, CliError> {
     let mut round: Option<String> = None;
     let mut index = 0;
@@ -331,7 +276,6 @@ fn parse_watch(args: &[String]) -> Result<Command, CliError> {
     Ok(Command::Watch { round })
 }
 
-/// Parses `history [--limit N]`: the limit must be a non-negative integer.
 fn parse_history(args: &[String]) -> Result<Command, CliError> {
     let mut limit = DEFAULT_HISTORY_LIMIT;
     let mut index = 0;
@@ -362,7 +306,6 @@ fn parse_history(args: &[String]) -> Result<Command, CliError> {
     Ok(Command::History { limit })
 }
 
-/// Builds the `setup --show` view request: the four Host sections.
 pub fn setup_view_request() -> ManagementViewRequest {
     ManagementViewRequest {
         sections: HOST_SETUP_SECTIONS
@@ -372,9 +315,8 @@ pub fn setup_view_request() -> ManagementViewRequest {
     }
 }
 
-/// Builds the `status` view request: the same four Host sections as
-/// [`setup_view_request`]. There are no `setup`- or `usage`-named sections
-/// Host-side, so neither name is requested.
+/// There are no `setup`- or `usage`-named sections Host-side, so neither name
+/// is requested.
 pub fn status_view_request() -> ManagementViewRequest {
     ManagementViewRequest {
         sections: HOST_SETUP_SECTIONS
@@ -384,7 +326,6 @@ pub fn status_view_request() -> ManagementViewRequest {
     }
 }
 
-/// Builds a timeline request against the bootstrap companion reference.
 pub fn history_request(companion: &str, limit: u64) -> HistoryRequest {
     HistoryRequest {
         companion: CompanionWireRef(companion.to_string()),
@@ -393,10 +334,8 @@ pub fn history_request(companion: &str, limit: u64) -> HistoryRequest {
     }
 }
 
-/// Builds a text-input candidate: the caller-learned companion projection
-/// (echoed from presence; [`DEFAULT_COMPANION_REF`] until the first fact),
-/// optional premise round, new-round force flag, a fresh [`new_local_id`],
-/// and the given body.
+/// `companion` is the caller-learned projection echoed from presence
+/// ([`DEFAULT_COMPANION_REF`] until the first fact).
 pub fn submit_input(
     companion: &str,
     round: Option<String>,
@@ -416,49 +355,39 @@ pub fn submit_input(
     }
 }
 
-/// Mints a process-unique client-local correspondence ID.
+/// Mints a client-local correspondence ID: `ctl-<pid>-<counter>`.
 ///
-/// The `uuid` crate is unavailable to this binary, so uniqueness is
-/// process-id plus a process-local monotonic counter
-/// (`ctl-<pid>-<counter>`). That is unique per connection for this
-/// process, which is all `local_id` needs: it matches acks to sends
-/// within one Client and is never Host-canonical.
+/// The `uuid` crate is unavailable to this binary, so uniqueness rests on the
+/// process id plus a process-local monotonic counter: unique per connection
+/// for this process, which is all `local_id` needs (it matches acks to sends
+/// within one Client and is never Host-canonical).
 pub fn new_local_id() -> ClientLocalId {
     let counter = LOCAL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     ClientLocalId(format!("ctl-{}-{counter}", std::process::id()))
 }
 
-/// Credential-registration target for a provider in the shared setup
-/// grammar: `"credential:<provider>:main"` (see [`SETUP_CREDENTIAL_LABEL`]).
-///
-/// This spells [`credential_target`]
-/// once for the setup flow; the grammar itself (validation, remainder rules)
-/// stays shared, never re-invented here.
+/// `"credential:<provider>:main"` via the shared [`credential_target`]
+/// grammar (validation and remainder rules are never re-invented here); see
+/// [`SETUP_CREDENTIAL_LABEL`].
 pub fn credential_target_for(provider: &str) -> ManagementTargetWire {
     credential_target(provider, SETUP_CREDENTIAL_LABEL)
 }
 
-/// Credential id the register step creates for a provider:
 /// `"<provider>:main"`, matching the Host registry naming
 /// (`"<provider>:<label>"`) and its pre-consent default ref.
 pub fn credential_id_for(provider: &str) -> String {
     format!("{provider}:{SETUP_CREDENTIAL_LABEL}")
 }
 
-/// Consent-assignment target for a provider/model pair in the shared setup
-/// grammar: `"consent:<provider>:<model>:<credential-id>"` (see
-/// [`consent_target`]).
-///
-/// This spells [`consent_target`]
-/// once for the setup flow; the grammar itself stays shared.
+/// `"consent:<provider>:<model>:<credential-id>"` via the shared
+/// [`consent_target`] grammar (never re-invented here).
 pub fn consent_target_for(provider: &str, model: &str) -> ManagementTargetWire {
     consent_target(provider, model, &credential_id_for(provider))
 }
 
-/// Builds the credential-registration intent: the Host sources the key from
-/// its own environment over the Host-local path, so this payload carries no
-/// secret, only the intent with a provenance-only rationale (origin, no
-/// quote).
+/// The Host sources the key from its own environment over the Host-local
+/// path, so this payload carries no secret; the rationale is provenance-only
+/// (origin, no quote).
 pub fn credential_intent(
     intent_id: CommandWireId,
     base: &BaseViewMark,
@@ -476,10 +405,8 @@ pub fn credential_intent(
     }
 }
 
-/// Builds the provider/model assignment intent per the module-docs mapping:
-/// [`ManagementIntentKind::ManageRuleConsentCap`] with
-/// [`consent_target_for`] and a provenance-only rationale (origin, no
-/// quote). Assignment parameters travel in the target, never in the quote.
+/// Provenance-only rationale (origin, no quote): assignment parameters travel
+/// in the consent target, never in the quote.
 pub fn assignment_intent(
     intent_id: CommandWireId,
     base: &BaseViewMark,
@@ -498,13 +425,11 @@ pub fn assignment_intent(
     }
 }
 
-/// Renders a filtered management view as one `kind: title – body` line per
-/// section, in Host order.
+/// Renders one `kind: title – body` line per section, in Host order.
 ///
-/// The renderer prints exactly what the Host-filtered view contains and
-/// nothing else: no revision marks, no envelope IDs, no `Debug` dumps. Body
-/// text shown here is Host-filtered display fact by contract; secrecy of
-/// what reaches the CLI is a Host property, and this function adds no
+/// Prints exactly what the Host-filtered view contains and nothing else: no
+/// revision marks, no envelope IDs, no `Debug` dumps. Body text is
+/// Host-filtered display fact; secrecy is a Host property, and this adds no
 /// secret-bearing surface of its own.
 pub fn render_view(view: &ManagementView) -> String {
     view.sections
@@ -514,7 +439,6 @@ pub fn render_view(view: &ManagementView) -> String {
         .join("\n")
 }
 
-/// Owner/Companion label used by the history renderers.
 pub fn role_label(role: HistoryRole) -> &'static str {
     match role {
         HistoryRole::Owner => "owner",
@@ -522,7 +446,7 @@ pub fn role_label(role: HistoryRole) -> &'static str {
     }
 }
 
-/// Renders timeline items as one `[role] text` line each, oldest first.
+/// One `[role] text` line per item, oldest first.
 pub fn render_history(view: &HistoryView) -> String {
     view.items
         .iter()
@@ -531,8 +455,6 @@ pub fn render_history(view: &HistoryView) -> String {
         .join("\n")
 }
 
-/// Renders only the items belonging to `round`, same line shape as
-/// [`render_history`].
 pub fn render_round_history(view: &HistoryView, round: &str) -> String {
     view.items
         .iter()
@@ -542,24 +464,14 @@ pub fn render_round_history(view: &HistoryView, round: &str) -> String {
         .join("\n")
 }
 
-/// Intake-routing decision for a [`RoundIntakeOutcomeWire`]: either the
-/// accepted round, or a decline message carrying refs and generations only,
-/// never body text.
+/// Intake-routing decision for a [`RoundIntakeOutcomeWire`]; decline messages
+/// carry refs and generations only, never body text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntakeAction {
-    /// Accepted into this Host-issued round.
-    Accepted {
-        /// Round the input joined.
-        round: String,
-    },
-    /// Declined with a display message (exit-code 2 at the crate root).
-    Declined {
-        /// Operational message: refs/generations only, no bodies.
-        message: String,
-    },
+    Accepted { round: String },
+    Declined { message: String },
 }
 
-/// Maps an intake outcome to [`IntakeAction`].
 pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> IntakeAction {
     match outcome {
         RoundIntakeOutcomeWire::AcceptedForRound { round } => IntakeAction::Accepted {
@@ -589,30 +501,15 @@ pub fn describe_intake(outcome: &RoundIntakeOutcomeWire) -> IntakeAction {
     }
 }
 
-/// Management-routing decision for a [`ManagementOutcome`]: either an
-/// applied line, or a decline split by retryability. Stale/held outcomes
-/// are retryable (exit-code 2); clarification/denial are terminal (the
-/// crate root maps them to [`CliError::ServerRejected`], exit-code 1).
+/// Management-routing decision for a [`ManagementOutcome`]; `detail`/`message`
+/// lines carry operational facts only, never bodies or secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagementAction {
-    /// Applied with a display line (refs/marks only, no secrets).
-    Applied {
-        /// Operational line describing what was recorded.
-        detail: String,
-    },
-    /// Retryable decline: refetch the view and retry later.
-    Retryable {
-        /// Operational message: marks only, no bodies or secrets.
-        message: String,
-    },
-    /// Terminal decline: retrying the same intent will not help.
-    Terminal {
-        /// Operational message: no bodies or secrets.
-        message: String,
-    },
+    Applied { detail: String },
+    Retryable { message: String },
+    Terminal { message: String },
 }
 
-/// Maps a management outcome to [`ManagementAction`].
 pub fn describe_management(outcome: &ManagementOutcome) -> ManagementAction {
     match outcome {
         ManagementOutcome::AppliedAsOneTime => ManagementAction::Applied {
@@ -638,12 +535,6 @@ pub fn describe_management(outcome: &ManagementOutcome) -> ManagementAction {
 
 #[cfg(test)]
 mod tests {
-    //! Parsing matrix, renderer fixtures, builder shapes, and ID uniqueness.
-    //!
-    //! No sockets, no environment mutation, no network: parsing is pure over
-    //! the input slice, rendering is pure over fixtures, and frame tests go
-    //! through the in-memory codec only.
-
     use std::collections::HashSet;
 
     use ene_api::v1::management::{ManagementOutcome, ManagementView, ViewSection};
@@ -660,12 +551,10 @@ mod tests {
         submit_input,
     };
 
-    /// Builds owned arguments from plain words.
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_string()).collect()
     }
 
-    /// Asserts a usage error whose message ends with the usage text.
     fn assert_usage(result: Result<Command, crate::errors::CliError>, what: &str) {
         let error = result.expect_err(what);
         let crate::errors::CliError::Usage(message) = error else {
@@ -948,8 +837,7 @@ mod tests {
         );
     }
 
-    /// Builds a two-section fixture view; the mark is planted with a marker
-    /// the renderer must never echo.
+    /// Fixture view whose mark is a marker the renderer must never echo.
     fn fixture_view() -> ManagementView {
         ManagementView {
             mark: ViewMarkWire(String::from("MARKER-MUST-NOT-APPEAR-7f3a")),
@@ -1003,8 +891,6 @@ mod tests {
         );
     }
 
-    /// Builds a two-round fixture; item text carries display facts the
-    /// renderer must preserve verbatim.
     fn fixture_history() -> HistoryView {
         HistoryView {
             items: vec![
@@ -1151,10 +1037,6 @@ mod tests {
 
     #[test]
     fn request_builders_use_the_bootstrap_companion() {
-        // Documented Host section set: `HostHandle::build_view` in
-        // `apps/ene-core/src/setup.rs` renders exactly these four (an empty
-        // request selects the same four). This contract test pins the wire
-        // names, so a Host rename fails here instead of fetching nothing.
         let documented = ["provider", "model", "consent", "credential"];
         assert!(
             HOST_SETUP_SECTIONS == documented,

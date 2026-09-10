@@ -6,107 +6,52 @@
 //! [`WireFrame`] without touching any socket. [`serve`] wires a handle to the
 //! [`crate::conn`] listener with the production inference transport.
 //!
-//! Trust premises, all documented where they are used:
+//! Trust premises:
 //!
 //! - The data directory is created by [`HostHandle::open_with_cred_store`] with
 //!   mode `0700` on Unix (`Stage 2` owns directory creation). The same-machine
 //!   trust premise rests on that directory plus the per-connection same-user
 //!   check in [`crate::conn`], never on a Client self-report.
 //! - Pairing is Owner-confirmed through the durable
-//!   [`DevicePairingRepository`]:
-//!   [`ene_api::v1::handshake::PairingRequest`] records a pending request, the Host-local
-//!   `approve-device` inlet records the Owner decision, and a later request
-//!   for the approved descriptor issues the device key. There is no
+//!   [`DevicePairingRepository`]: a request records a pending entry, the
+//!   Host-local `approve-device` inlet records the Owner decision, and a later
+//!   request for the approved descriptor issues the device key. There is no
 //!   same-descriptor auto-approve: an unapproved descriptor always answers
 //!   [`PendingOwnerConfirmation`](ene_api::v1::handshake::PairingResult::PendingOwnerConfirmation).
 //! - Presence attach happens only on the
-//!   [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) path: when the
-//!   loaded attribution is `NoActive`, intake runs an explicit
-//!   compare-and-commit plus confirm for
-//!   [`InitialAttach`](ene_presence::ThinMoveReason::InitialAttach).
-//!   Capability and management frames never attach. Socket close runs the
-//!   symmetric compare-and-commit for
+//!   [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) path: capability
+//!   and management frames never attach. Socket close runs the symmetric
+//!   compare-and-commit for
 //!   [`DisconnectObserved`](ene_presence::ThinMoveReason::DisconnectObserved)
 //!   through [`HostHandle::note_disconnect`], which [`crate::conn`] calls with
 //!   the paired device string.
-//! - The presence `active_client` names a device through a deterministic
-//!   mapping, not issuance: `device_client` derives the per-process
-//!   [`ClientId`] from the device wire string with `UUID v5`, so one device
-//!   maps to one client within a process and the same device maps the same
-//!   way after a restart (`Stage 2` runs one client per device).
-//! - The ingress gate in [`HostHandle::handle_frame`] drops unauthenticated
-//!   domain service: any post-capability frame whose [`LiveInput`] carries no
-//!   paired device, no known connection, no completed authentication on the
-//!   current connection, or an envelope connection id that does not equal the
-//!   table id answers a single terminal
-//!   [`ene_api::v1::handshake::DisconnectNotice`] with reason `"unpaired"` and nothing else. A
-//!   generic reject DTO does exist in `ene-api`
-//!   ([`Reject`](ene_api::v1::payload::WirePayload::Reject), used for
-//!   post-auth declines such as conflicting commands and envelope
-//!   violations), but the pre-auth gate deliberately does not use it:
-//!   silence-plus-close (rather than an oracle denial) reveals nothing to
-//!   an unauthenticated peer. Pairing frames carry no
-//!   checks; capability frames need the paired-device check only (they predate
-//!   authentication); [`ene_api::v1::handshake::AuthProof`] frames
-//!   need none (they ARE the authentication). Inbound
-//!   [`ene_api::v1::handshake::AuthChallenge`] and
-//!   [`ene_api::v1::handshake::AuthResult`] frames are never
-//!   solicited and answer nothing: the Host mints challenges and issues
-//!   results.
-//! - Authentication is challenge/proof over the pairing secret: capability
-//!   answers [`NegotiatedConnection`]
-//!   plus a fresh [`ene_api::v1::handshake::AuthChallenge`]
-//!   whose nonce is recorded pending for that connection, and a later
-//!   [`ene_api::v1::handshake::AuthProof`] verifies (constant time, inside `ene-credential`)
-//!   against the secret persisted at approval, consuming the nonce single-use
-//!   regardless of outcome. Success answers
-//!   [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted) carrying the
-//!   connection id the Client echoes on every later frame as the auth
-//!   binding; any failure answers
-//!   [`Rejected`](ene_api::v1::handshake::AuthResult::Rejected). Pending
-//!   nonces live only in [`HostHandle`] memory: a restart drops them
-//!   (fail-closed), so Clients re-run capability-plus-proof after a restart.
-//!   Pairing secrets live only in the `device-auth.json` file store (plus the
-//!   transient approve-time display scope): the handle holds no secret map,
-//!   proof verification reads the file through on every authentication, and
-//!   there is deliberately no secret cache.
+//! - Presence `active_client` names a device through `device_client`, a
+//!   deterministic `UUID v5` mapping rather than issuance.
+//! - Authentication is challenge/proof over the pairing secret. Pending nonces
+//!   live in memory only, so a restart fails closed; pairing secrets live only
+//!   in `device-auth.json` (plus the transient approve-time display scope),
+//!   with no secret cache.
 //! - The response sender reveals the connection id only on and after
-//!   acceptance: [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted)
-//!   and every later (domain) response, including post-auth typed
-//!   [`Reject`](ene_api::v1::payload::WirePayload::Reject)s, carry `Some`
-//!   table connection id, while every pre-accept response (pairing results
-//!   and denials, negotiated terms, challenges, pre-auth rejections, and
-//!   unpaired closes) carries [`None`]. A peer that never completed the
-//!   challenge therefore never learns the id the gate requires it to echo.
-//!   The sender always echoes the inbound incarnation and names the paired
-//!   device (or [`None`] pre-pairing).
+//!   [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted): every
+//!   pre-accept response carries [`None`], so a peer that never completed the
+//!   challenge never learns the id the ingress gate requires it to echo.
 //! - [`HostHandle::handle_frame`] is infallible by contract: infrastructure
 //!   failures map to retry-safe outcome frames (hold or revalidate), never to
-//!   fabricated domain facts. The mapping table lives on each pipeline method.
-//! - Decoded-but-unhandled inbound variants (reconnect, stream frames from
-//!   the Client, facts the Host itself emits) are ignored with an empty
-//!   response: they are known [`WirePayload`] variants outside `Stage 2`
-//!   scope, and a [`ene_api::v1::handshake::DisconnectNotice`] would carry the wrong semantics for
-//!   them. Silence is the explicit `Stage 2` decision for these.
+//!   fabricated domain facts.
+//! - Decoded-but-unhandled inbound variants (reconnect, Client stream frames,
+//!   facts the Host itself emits) are ignored with an empty response: they are
+//!   known [`WirePayload`] variants outside `Stage 2` scope, and a
+//!   [`ene_api::v1::handshake::DisconnectNotice`] would carry the wrong
+//!   semantics for them. Silence is the explicit `Stage 2` decision.
 //! - The envelope discriminator must name the decoded payload:
-//!   [`HostHandle::handle_frame`] compares `envelope.message_type` against
-//!   [`WirePayload::message_type`] and answers a typed
+//!   [`HostHandle::handle_frame`] answers a typed
 //!   [`Reject`](ene_api::v1::payload::WirePayload::Reject) with
-//!   `UnsupportedMessage` when they differ, changing nothing else and
-//!   keeping the connection. A future/unknown payload variant itself cannot
-//!   reach that reject: [`WirePayload`] is a closed enum decoded as part of
-//!   the whole frame, so the codec fails first and [`crate::conn`] closes
-//!   the connection. Reaching the typed reject for undecodable variants
-//!   needs a wire-format/framing change and is later compatibility
-//!   hardening, not a `Stage 2` contract.
-//! - A [`ene_api::v1::handshake::DisconnectNotice`] in a
-//!   response vector is terminal: [`crate::conn`] writes it and then closes the
-//!   connection. Both the major-version mismatch and the unpaired-gate paths
-//!   emit one.
-//! - [`HostHandle`] methods take `&self`: per-map `std` mutexes, a leaf
-//!   tracker mutex, and the store's own lock provide short interior critical
-//!   sections, and every guard is dropped before the next await. No
-//!   handle-wide async lock spans provider I/O.
+//!   `UnsupportedMessage` when they differ. A future/unknown payload variant
+//!   cannot reach that reject: [`WirePayload`] is a closed enum decoded as part
+//!   of the whole frame, so the codec fails first and [`crate::conn`] closes
+//!   the connection.
+//! - [`HostHandle`] methods take `&self`: every lock guard is dropped before
+//!   the next await, and no handle-wide async lock spans provider I/O.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -152,34 +97,22 @@ pub use lifecycle::serve;
 /// staleness are domain outcomes on the wire, never this error.
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    /// Layered configuration loading or validation failed.
     #[error(transparent)]
     Config(#[from] ene_config::typed::ConfigError),
-    /// The data directory or the durable store was unavailable.
     #[error("store unavailable: {0}")]
     Store(String),
-    /// The listener socket could not be prepared or bound.
     #[error("bind failed: {0}")]
     Bind(String),
-    /// A transport frame could not be encoded or decoded.
     #[error("codec failed: {0}")]
     Codec(String),
-    /// The handshake could not be completed.
     #[error("handshake failed: {0}")]
     Handshake(String),
-    /// Inference dispatch could not be completed.
     #[error("inference failed: {0}")]
     Inference(String),
-    /// Host-local device approval failed: unknown descriptor or store failure.
-    ///
     /// Unknown descriptors list the pending descriptors so the Owner can
     /// retry with the exact value; the message carries display strings only.
     #[error("device approval failed: {0}")]
     Approve(String),
-    /// The platform has no listener implementation yet.
-    ///
-    /// Carries a static Hardening note, never runtime data. The Windows
-    /// follow-up is a named-pipe listener; see [`crate::conn`].
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(&'static str),
 }
@@ -188,26 +121,17 @@ pub enum CoreError {
 ///
 /// [`CredentialStore::with_bearer`] is generic over its closure return type,
 /// so the trait is not dyn-compatible and the handle holds this closed enum
-/// instead of a trait object. [`CredStore::Env`] is the production store (the
-/// bearer lives in the process environment and is never cached); [`CredStore::Memory`]
-/// is the test and local-development store. The `Clone` and bearer semantics
-/// of each variant are unchanged by this dispatch.
+/// instead of a trait object. [`CredStore::Env`] is the production store for
+/// the `openai` provider (the bearer lives in the process environment and is
+/// never cached); [`CredStore::Memory`] is the test and local-development
+/// store.
 #[derive(Debug)]
 pub enum CredStore {
-    /// Environment-backed bearer store for the `openai` provider.
     Env(EnvCredentialStore),
-    /// In-memory bearer store for tests and local development.
     Memory(MemoryCredentialStore),
 }
 
 impl CredentialStore for CredStore {
-    /// Runs `f` with the bearer for `cred` from the held store.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the held
-    /// store reports the credential unknown, unreadable, or invalid. The error
-    /// never carries secret material.
     fn with_bearer<R>(
         &self,
         cred: &CredentialRef,
@@ -219,12 +143,6 @@ impl CredentialStore for CredStore {
         }
     }
 
-    /// Deletes the bearer for `cred` from the held store.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the held
-    /// store rejects the operation.
     fn delete(&self, cred: &CredentialRef) -> Result<(), CredentialTechnicalError> {
         match self {
             Self::Env(inner) => inner.delete(cred),
@@ -232,9 +150,6 @@ impl CredentialStore for CredStore {
         }
     }
 
-    /// Reports whether the held store has a bearer for `cred`.
-    ///
-    /// Existence is non-secret metadata.
     fn contains(&self, cred: &CredentialRef) -> bool {
         match self {
             Self::Env(inner) => inner.contains(cred),
@@ -254,47 +169,25 @@ impl CredentialStore for CredStore {
 /// whether the connection table knows this connection at all, `authed`
 /// reports whether this connection completed the challenge/proof exchange and
 /// is still the device's current authed connection (a newer authentication by
-/// the same device supersedes this one, flipping `authed` off without
-/// touching the record), and `connection_id` is the table key itself. The
-/// gate in [`HostHandle::handle_frame`] trusts these conn-filled premises;
-/// direct handle callers (tests) construct them explicitly. All fields are
-/// public so connection adapters and integration tests can construct the
-/// value directly.
+/// the same device supersedes it), and `connection_id` is the table key
+/// itself. The gate in [`HostHandle::handle_frame`] trusts these conn-filled
+/// premises; direct handle callers (tests) construct them explicitly. All
+/// fields are public so connection adapters and integration tests can
+/// construct the value directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveInput {
-    /// Opaque client reference naming the caller for this frame.
     pub client_ref: String,
-    /// Whether the underlying connection is currently live.
     pub connection_live: bool,
-    /// Whether the peer passed the same-user check.
     pub peer_uid_ok: bool,
-    /// Device wire string paired on this connection, if any.
     pub paired_device: Option<String>,
-    /// Whether the connection table knows this connection.
     pub connection_known: bool,
-    /// Whether this connection is authenticated and current for its device.
-    ///
-    /// Filled by the connection table, never by the Client: true only after
-    /// an [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted) answer
-    /// on this connection while no newer authentication by the same device
-    /// has superseded it. The ingress gate requires this premise on every
-    /// post-capability frame except the proof itself.
     pub authed: bool,
-    /// Host-minted connection key for this connection (the table id).
-    ///
-    /// Filled by the connection table, never by the Client: the ingress gate
-    /// requires post-capability envelopes to echo exactly this id, and
-    /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted) reveals it
-    /// to the Client for the first time (pre-accept responses carry [`None`]
-    /// instead), so echoing it proves the sender completed the challenge on
-    /// this connection.
     pub connection_id: ConnectionWireId,
     /// Negotiated terms recorded when this connection answered capability.
     ///
-    /// Filled by the connection table from the Host-selected terms, never
-    /// by the Client: the ingress gate enforces the exact negotiated version on
-    /// every later frame, so version mixing within one connection is
-    /// impossible. [`None`] before negotiation.
+    /// Filled by the connection table from the Host-selected terms, never by
+    /// the Client: later frames must match this version, so version mixing
+    /// within one connection is impossible. [`None`] before negotiation.
     pub negotiated: Option<NegotiatedConnection>,
 }
 
@@ -335,15 +228,6 @@ fn lock_map<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
 
 /// `Stage 2` Host handle: durable store, evaluation tracker, and Host maps.
 ///
-/// All fields are crate-private except where the Host-local trusted inlets
-/// need them: external callers (including integration tests) drive the Host
-/// through [`HostHandle::open`] (or
-/// [`HostHandle::open_with_cred_store`]) plus [`HostHandle::handle_frame`],
-/// [`HostHandle::approve_device`], [`HostHandle::pending_devices`], and
-/// [`HostHandle::note_disconnect`], while the pipeline methods in
-/// [`crate::dialogue`] and [`crate::setup`] reach the fields as inherent
-/// `impl HostHandle` blocks in this crate.
-///
 /// Interior mutability: `open_rounds` and `rounds` sit behind short `std`
 /// mutex sections (clone out before every await, never hold a guard across
 /// an await); `tracker` is a leaf async mutex (the inference `send` boundary
@@ -352,9 +236,8 @@ fn lock_map<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
 /// handle, so no lock ordering exists); the [`Store`] carries its own lock.
 /// Nothing here is durable except through [`Store`] and the device-auth file:
 /// a restart drops every map while the database persists, and old wire round
-/// refs then surface as stale (never rebound). Pairing, device-auth secrets,
-/// and idempotency are durable instead: the device tables and the history
-/// `local_id` column live in [`Store`], and pairing secrets live in
+/// refs then surface as stale (never rebound). The device tables and the
+/// history `local_id` column are durable in [`Store`], and pairing secrets in
 /// `device-auth.json` through the `auth_store` field.
 ///
 /// Map keys: `open_rounds` is keyed by `(client ref, companion key)`; round
@@ -367,17 +250,13 @@ pub struct HostHandle {
     pub(crate) open_rounds: StdMutex<HashMap<(String, String), OpenRound>>,
     pub(crate) rounds: StdMutex<HashMap<String, RoundId>>,
     pub(crate) cred_store: CredStore,
-    /// File-backed pairing-secret store by device.
+    /// File-backed pairing-secret store by device, opened on
+    /// `<data_dir>/device-auth.json`.
     ///
-    /// Opened on `<data_dir>/device-auth.json` by
-    /// [`HostHandle::open_with_cred_store`]. Secrets live here and in the
-    /// transient approve-time display scope only: the handle keeps no secret
-    /// map and no cache, and proof verification reads the file through on
-    /// every authentication. Backup-exclusion: this file holds Group K
-    /// verification material with E classification and must never enter
-    /// backups or exports (see the [`FileDeviceAuthStore`] contract); a
-    /// future backup stage walking the data directory must exclude it by
-    /// name.
+    /// Secrets live here and in the transient approve-time display scope only:
+    /// the handle keeps no secret map and no cache. See the
+    /// [`FileDeviceAuthStore`] contract for custody, file protection, and the
+    /// backup-exclusion rule.
     pub(crate) auth_store: FileDeviceAuthStore,
     /// Single-use auth nonces by connection key.
     ///
@@ -405,16 +284,14 @@ impl HostHandle {
     /// Opens (or creates) the Host state under `data_dir` with the production
     /// credential store.
     ///
-    /// Ensures `data_dir` exists (`0700` on Unix; plain creation elsewhere)
-    /// and opens `app.db` inside it through [`Store::open`]. `Stage 2` owns
-    /// directory creation: resolution stays pure in `ene-config` while the
-    /// side effect lives here.
+    /// Ensures `data_dir` exists (`0700` on Unix) and opens `app.db` inside it
+    /// through [`Store::open`]. `Stage 2` owns directory creation: resolution
+    /// stays pure in `ene-config` while the side effect lives here.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::Store`] when the directory cannot be ensured or
-    /// the database cannot be opened or migrated. Messages carry the backend
-    /// cause only, never paths, secrets, or body text.
+    /// the database cannot be opened or migrated.
     pub async fn open(data_dir: &Path) -> Result<Self, CoreError> {
         Self::open_with_cred_store(data_dir, CredStore::Env(EnvCredentialStore::new())).await
     }
@@ -422,19 +299,17 @@ impl HostHandle {
     /// Opens (or creates) the Host state under `data_dir` with an explicit
     /// credential store.
     ///
-    /// Same as [`HostHandle::open`] except for the store: integration tests
-    /// pass [`CredStore::Memory`] pre-provisioned with test bearers, which
-    /// keeps them hermetic (the environment store would read the real process
-    /// environment on every call). The file-backed device-auth store opens on
-    /// `<data_dir>/device-auth.json` (created lazily on first approval); the
-    /// data directory itself is ensured first, so the open always has its
-    /// parent.
+    /// Integration tests pass [`CredStore::Memory`] pre-provisioned with test
+    /// bearers to stay hermetic (the environment store would read the real
+    /// process environment on every call). The device-auth file opens on
+    /// `<data_dir>/device-auth.json` (created lazily on first approval) after
+    /// the data directory is ensured, so the open always has its parent.
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Store`] under the same conditions as
-    /// [`HostHandle::open`], plus when the device-auth file cannot be opened
-    /// (unreadable, malformed, or wrongly permissioned).
+    /// [`CoreError::Store`] as in [`HostHandle::open`], plus when the
+    /// device-auth file cannot be opened (unreadable, malformed, or wrongly
+    /// permissioned).
     pub async fn open_with_cred_store(
         data_dir: &Path,
         cred_store: CredStore,
@@ -458,24 +333,17 @@ impl HostHandle {
         })
     }
 
-    /// Returns the opaque companion projection this handle issues.
-    ///
-    /// Test scaffolding and the mapping check share one vocabulary through
-    /// this accessor; Clients learn the value from presence facts instead.
     pub(crate) fn companion_wire(&self) -> &str {
         &self.companion_wire
     }
 
     /// Resolves an inbound companion wire ref to its domain companion.
     ///
-    /// The domain wire-ref mapping for the single Stage 2 companion: only
-    /// the projection this handle issued resolves, to the running
-    /// companion; any other string is unknown — never guessed, never
-    /// parsed, never derived. Callers answer `unknown-companion`
-    /// revalidation (or an empty view) on `Ok(None)`, so a rotated
-    /// projection (restart) converges through one revalidation round trip.
-    /// Store failures stay errors (the caller holds), distinct from
-    /// unknown refs.
+    /// Only the projection this handle issued resolves; any other string is
+    /// unknown (`Ok(None)`), never guessed or derived, and callers answer
+    /// `unknown-companion` revalidation (or an empty view), so a rotated
+    /// projection (restart) converges through one round trip. Store failures
+    /// stay errors (the caller holds), distinct from unknown refs.
     pub(crate) async fn resolve_companion(
         &self,
         wire: &str,
@@ -490,34 +358,10 @@ impl HostHandle {
     ///
     /// Transport-free by design: framing, sockets, and peer checks live in
     /// [`crate::conn`], while inference arrives as `transport` so tests pass a
-    /// fake and production passes the `OpenAI` transport. The returned frames
-    /// carry response envelopes (paired device or [`None`] pre-pairing, the
-    /// inbound incarnation echoed, `reply_to` set to the inbound message id)
-    /// whose sender reveals the table connection id only on and after
-    /// [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted): domain
-    /// responses, the acceptance itself, and post-auth typed
-    /// [`Reject`](ene_api::v1::payload::WirePayload::Reject)s carry `Some`
-    /// id, while every pre-accept response (pairing results, negotiated
-    /// terms, challenges, pre-auth rejections, denials, unpaired closes)
-    /// carries [`None`].
-    ///
-    /// Ingress rules by frame kind: [`ene_api::v1::handshake::PairingRequest`] frames are refused
-    /// once the connection already holds a paired device (one connection,
-    /// one device); unpaired connections need no other check.
-    /// [`ene_api::v1::handshake::CapabilityAdvertise`] frames need the paired-device check only (they
-    /// predate authentication); [`ene_api::v1::handshake::AuthProof`]
-    /// frames need none (they ARE the authentication); inbound
-    /// [`ene_api::v1::handshake::AuthChallenge`] and
-    /// [`ene_api::v1::handshake::AuthResult`] frames are never
-    /// solicited and answer nothing. Dispatch then runs:
-    /// [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput),
-    /// [`ConfirmPresentation`](ene_api::v1::round::ConfirmPresentationWire), and
-    /// [`HistoryRequest`](ene_api::v1::round::HistoryRequest) in
-    /// [`crate::dialogue`];
-    /// [`ManagementIntent`](ene_api::v1::management::ManagementIntent)
-    /// and [`ManagementViewRequest`](ene_api::v1::management::ManagementViewRequest)
-    /// in [`crate::setup`]. Every other unhandled variant likewise returns an
-    /// empty vector (observation or deferred scope; see the module gap note).
+    /// fake and production passes the `OpenAI` transport. The envelope
+    /// `message_type`, the negotiated version, and the ingress gate
+    /// (`gate_trips`) are checked in that order before dispatch; unhandled
+    /// variants answer an empty vector.
     pub async fn handle_frame(
         &self,
         frame: WireFrame,
@@ -627,14 +471,10 @@ impl HostHandle {
             || frame.envelope.sender.connection_id != Some(live.connection_id)
     }
 
-    /// Resolves an issued wire round string back to its domain round.
     pub(crate) fn round_for(&self, wire: &str) -> Option<RoundId> {
         lock_map(&self.rounds).get(wire).copied()
     }
 
-    /// Returns the open round for a client/companion pair, if any.
-    ///
-    /// Cloned out under one short section; the caller never holds the guard.
     pub(crate) fn open_round_for(
         &self,
         client_ref: &str,
@@ -645,13 +485,12 @@ impl HostHandle {
             .copied()
     }
 
-    /// Records the open round for a client/companion pair.
     pub(crate) fn record_open_round(&self, client_ref: &str, companion_key: &str, open: OpenRound) {
         lock_map(&self.open_rounds)
             .insert((client_ref.to_string(), companion_key.to_string()), open);
     }
 
-    /// Resolves a domain round back to its issued wire string, if still mapped.
+    /// Resolves a domain round back to its issued wire string.
     ///
     /// The map is per-process: after a restart no wire string is mapped and
     /// the caller treats the round as stale (recovery runs through
@@ -701,12 +540,9 @@ impl HostHandle {
     /// descriptors before they reach the store.
     ///
     /// The returned secret string is for one-time display on this
-    /// Host-local trusted surface only: the caller shows it once and
-    /// forgets it. The secret is additionally persisted through the
-    /// file-backed `auth_store` under the approved device, so
-    /// later [`ene_api::v1::handshake::AuthProof`] frames verify against the file; the handle keeps
-    /// no in-memory copy and no cache. The persisted copy is never logged
-    /// and never rendered in `Debug`.
+    /// Host-local trusted surface only: the caller shows it once and forgets
+    /// it. It is persisted through `auth_store` for later
+    /// [`ene_api::v1::handshake::AuthProof`] verification.
     ///
     /// # Errors
     ///
@@ -727,8 +563,6 @@ impl HostHandle {
         Ok(approved)
     }
 
-    /// Lists the descriptors of all currently pending pairing requests.
-    ///
     /// Host-local trusted inlet surfacing the Owner-visible pending set so an
     /// unknown `approve-device` descriptor can be retried with the exact
     /// value. Descriptors are display strings only, never secrets.
@@ -764,11 +598,6 @@ impl HostHandle {
             .map_err(|error| CoreError::Store(error.to_string()))
     }
 
-    /// Lists pending credential approvals as `provider:label` strings.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CoreError::Store`] when the durable tables are unavailable.
     pub async fn pending_credentials(&self) -> Result<Vec<String>, CoreError> {
         let pending = CredentialApprovalRepository::list_pending(&self.store)
             .await

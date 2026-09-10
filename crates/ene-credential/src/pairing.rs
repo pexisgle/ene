@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 
 use crate::CredentialTechnicalError;
 
-/// Opaque device identity for device pairing (Group K, Stage 2 thin scope).
+/// Opaque device identity for device pairing.
 ///
 /// Wraps a [`RawId`] with no `From` implementations to or from any other
 /// type: a `DeviceId` names one logical device in this crate's pairing
@@ -17,10 +17,7 @@ use crate::CredentialTechnicalError;
 /// `ene-api` envelopes: mapping between wire and domain identities happens in
 /// Host composition at the call boundary, never in this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DeviceId(
-    /// Wrapped opaque identity; meaningful only as a device name in this crate.
-    pub RawId,
-);
+pub struct DeviceId(pub RawId);
 
 /// One paired device: its minted identity, display string, and pairing time.
 ///
@@ -29,15 +26,13 @@ pub struct DeviceId(
 /// `paired_at` records when pairing completed, for display and audit only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeviceRecord {
-    /// Device identity minted at approval; never reused.
+    /// Minted at approval; never reused.
     pub id: DeviceId,
     /// Opaque wire projection of this device, minted fresh at approval and
     /// unrelated to [`DeviceId`]'s bytes: the only device string that ever
     /// crosses the wire. Clients echo it; they never derive or resolve it.
     pub wire: String,
-    /// Owner-visible display string naming the device.
     pub descriptor: String,
-    /// Wall-clock time with its creation offset recording when pairing completed.
     pub paired_at: WallClockWithTz,
 }
 
@@ -47,13 +42,10 @@ pub struct DeviceRecord {
 /// carries no secret material, so derived [`core::fmt::Debug`] is safe.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PendingPairing {
-    /// Owner-visible display string naming the requesting device.
     pub descriptor: String,
-    /// Wall-clock time with its creation offset recording when requested.
     pub requested_at: WallClockWithTz,
 }
 
-/// Outcome of a pairing request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DevicePairingStatus {
     /// The descriptor is already paired; carries the existing record.
@@ -70,8 +62,8 @@ pub enum DevicePairingStatus {
 
 /// Persistence boundary for device pairing requests and approvals.
 ///
-/// Revocation is explicitly deferred: Stage 2 thin scope provides no
-/// remove/revoke method, so paired records only accumulate.
+/// Revocation is explicitly deferred: there is no remove/revoke method, so
+/// paired records only accumulate.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
@@ -124,14 +116,11 @@ pub trait DevicePairingRepository: Send + Sync {
         descriptor: &str,
     ) -> Result<Option<(DeviceRecord, String)>, CredentialTechnicalError>;
 
-    /// Loads the paired record for `id`, if any.
     async fn find_device(
         &self,
         id: &DeviceId,
     ) -> Result<Option<DeviceRecord>, CredentialTechnicalError>;
 
-    /// Loads the paired record for a wire projection, if any.
-    ///
     /// The only durable wire-to-domain resolution: callers holding an
     /// opaque wire string (proof verification, sender attribution) resolve
     /// it here instead of parsing or deriving it.
@@ -140,12 +129,11 @@ pub trait DevicePairingRepository: Send + Sync {
         wire: &str,
     ) -> Result<Option<DeviceRecord>, CredentialTechnicalError>;
 
-    /// Lists all currently pending pairing requests.
     async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError>;
 }
 
-/// Pairing ownership proof (Group K device-auth): HMAC-SHA256 over a
-/// single-use nonce, keyed by the pairing secret.
+/// Pairing ownership proof: HMAC-SHA256 over a single-use nonce, keyed by
+/// the pairing secret.
 ///
 /// The secret travels a trusted inlet only: it is shown once at approve time
 /// for one-time display, or written to a protected client file. It is never
@@ -153,14 +141,6 @@ pub trait DevicePairingRepository: Send + Sync {
 /// the proof hex leaves the device. The nonce is single-use by caller
 /// contract: the Host mints a fresh nonce per challenge and rejects reuse,
 /// so a captured proof cannot be replayed.
-///
-/// ```
-/// use ene_credential::{pairing_proof_hex, verify_pairing_proof};
-///
-/// let proof = pairing_proof_hex("pairing-secret", "one-time-nonce");
-/// assert!(verify_pairing_proof("pairing-secret", "one-time-nonce", &proof));
-/// assert!(!verify_pairing_proof("other-secret", "one-time-nonce", &proof));
-/// ```
 #[must_use]
 pub fn pairing_proof_hex(secret: &str, nonce: &str) -> String {
     encode_hex_lower(&compute_pairing_mac(secret, nonce))
@@ -184,9 +164,8 @@ pub fn verify_pairing_proof(secret: &str, nonce: &str, proof: &str) -> bool {
 
 /// Computes the raw HMAC-SHA256 of `nonce` keyed by `secret`.
 ///
-/// HMAC accepts keys of any length, so construction cannot fail; a
-/// failure would break the primitive itself, and returning a fixed MAC
-/// (for example zeros) would map that breakage onto a valid-looking proof.
+/// HMAC accepts keys of any length, so construction cannot fail; returning a
+/// fixed MAC would map a primitive breakage onto a valid-looking proof.
 #[expect(
     clippy::expect_used,
     reason = "HMAC-SHA256 accepts keys of any length; construction failure is an unreachable primitive invariant"
@@ -201,7 +180,6 @@ fn compute_pairing_mac(secret: &str, nonce: &str) -> [u8; 32] {
     out
 }
 
-/// Renders bytes as lowercase hex, two characters per byte.
 pub(crate) fn encode_hex_lower(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -229,7 +207,6 @@ pub(crate) fn decode_hex_lower(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Value of one lowercase hex digit, or [`None`] for any other byte.
 fn hex_val(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),

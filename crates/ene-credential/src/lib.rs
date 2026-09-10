@@ -2,17 +2,15 @@
 //! request-builder store pattern.
 //!
 //! [`CredentialRef`] is the only credential value that may leave this crate
-//! freely: it names a credential without carrying any secret material. Key
-//! material lives solely in [`SecretValue`], which has no [`core::fmt::Debug`]
-//! implementation and is zeroized on drop.
+//! freely: it names a credential without carrying any secret material; key
+//! material lives solely in [`SecretValue`].
 //!
 //! Secrets enter only through the Host-local protected path (a future
 //! behaviors-stage store): [`RegisterCredentialCommand`] deliberately carries
 //! no secret field, so registration can never smuggle key material through
 //! the registry. [`CredentialStore::with_bearer`] exposes the bearer only
 //! inside a caller closure; the caller must build an owned request there and
-//! send it after the closure returns, because the borrowed bearer never
-//! escapes the closure's lifetime.
+//! send it after the closure returns.
 
 mod approval;
 mod auth_file;
@@ -44,10 +42,8 @@ pub use secret::{
     CredentialStore, ENV_API_KEY, EnvCredentialStore, MemoryCredentialStore, SecretValue,
 };
 
-/// Technical failures of credential storage.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CredentialTechnicalError {
-    /// The credential store was unreachable or rejected the operation.
     #[error("credential storage unavailable: {reason}")]
     StorageUnavailable {
         /// Backend-supplied cause, without secret material.

@@ -7,7 +7,6 @@ use super::{CoreError, HostHandle};
 use ene_credential::EnvCredentialStore;
 use ene_inference::provider::{DEFAULT_BASE_URL, OpenAiResponsesTransport};
 
-/// Ensures the Host data directory exists.
 #[cfg(unix)]
 pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
@@ -17,9 +16,9 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
         .create(data_dir)
         .map_err(|error| CoreError::Store(format!("create data directory: {error}")))?;
     // Creation mode applies only to created directories: a pre-existing dir
-    // keeps whatever mode it had, which may predate this Host. The
-    // same-machine socket trust premise needs owner-only, so tighten rather
-    // than serve exposed; a tighten failure fails startup (fail-closed).
+    // keeps whatever mode it had. The same-machine socket trust premise needs
+    // owner-only, so tighten rather than serve exposed; a tighten failure
+    // fails startup (fail-closed).
     let mode = std::fs::metadata(data_dir)
         .map_err(|error| CoreError::Store(format!("stat data directory: {error}")))?
         .permissions()
@@ -32,7 +31,6 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Ensures the Host data directory exists.
 #[cfg(not(unix))]
 pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     std::fs::create_dir_all(data_dir)
@@ -40,7 +38,7 @@ pub(super) fn ensure_data_dir(data_dir: &Path) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Runs the `Stage 2` Host: opens state, builds transport, serves the socket.
+/// Runs the `Stage 2` Host.
 ///
 /// The inference transport is credential-agnostic: every provider request
 /// carries the credential the admission resolved for that use, so a consent

@@ -7,14 +7,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Why one message was rejected at the wire boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RejectKind {
     /// Unknown message type within the negotiated range.
     UnsupportedMessage,
     /// Unknown enum variant in a closed wire enum.
     UnsupportedFieldValue,
-    /// A required field is absent.
     MissingRequiredField,
     /// No common major version; the connection cannot proceed.
     IncompatibleProtocol,
@@ -30,7 +28,6 @@ pub enum RejectKind {
 /// bodies, or frame bytes).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RejectNotice {
-    /// Rejection kind.
     pub kind: RejectKind,
     /// Operational detail (offending type name, version pair, ...).
     pub detail: String,

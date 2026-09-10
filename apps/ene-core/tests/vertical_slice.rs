@@ -1,14 +1,11 @@
 //! Production-path end to end for Stage 2.
 //!
 //! Real listener socket, real `ene-ctl` client builders and session, real
-//! Host orchestration; only the provider HTTP transport is fake. Covers:
-//! socket placement, pairing approval through an INDEPENDENT approval
-//! context (proving cross-process sharing via the file device-auth store),
-//! the full challenge/proof/accepted handshake, setup register/assign/
-//! complete, text round with ordered streaming, presentation confirmation
-//! draining undelivered, history, restart restore WITHOUT re-approval,
-//! stale old rounds, secret rotation, tampered secrets, and untrusted-peer
-//! denial.
+//! Host orchestration; only the provider HTTP transport is fake. Covers
+//! cross-process pairing approval (an INDEPENDENT approval context sharing
+//! the file device-auth store), the full challenge/proof handshake, setup,
+//! rounds with ordered streaming, restart without re-approval, rotation,
+//! tampering, and untrusted-peer denial.
 //!
 //! Unix-only: the production listener is a Unix socket (Windows uses named
 //! pipes in a follow-up).
@@ -491,10 +488,9 @@ async fn view_sections(client: &mut Client) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Locates a sibling binary built by the workspace: integration tests run
-/// from `target/debug/deps`, so the binaries live two levels up. Requires
-/// a prior `cargo build` (`cargo test` alone does not link binaries); CI
-/// builds the workspace before testing for exactly this reason.
+/// Integration tests run from `target/debug/deps`, so workspace binaries live
+/// two levels up. Requires a prior `cargo build` (`cargo test` alone does not
+/// link binaries).
 fn workspace_binary(name: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let debug = exe.parent()?.parent()?;
@@ -551,9 +547,7 @@ async fn run_cli(
 /// Production-path binary test: the real `ene-core serve` listener plus the
 /// real `ene-ctl` command orchestration (arg parsing, builders, session,
 /// rendering, exit codes). Provider inference is out of scope here (no
-/// network or keys in CI): the send path stays with the lib-level E2E, and
-/// this test proves pairing approval, setup, views, and graceful
-/// degradation end to end through both binaries.
+/// network or keys in CI), so the send path stays with the lib-level E2E.
 #[tokio::test]
 async fn binaries_drive_pairing_setup_and_views() {
     let temp = tempfile::TempDir::new();
@@ -579,11 +573,10 @@ async fn binaries_drive_pairing_setup_and_views() {
     let config = config_path.to_string_lossy().into_owned();
 
     let mut server = std::process::Command::new(&core);
-    // Fake provider key for the SERVER child only (setting a child env is
-    // safe; our own process env is never touched): production reads the
-    // bearer from its environment, so without this the credential gate
-    // would deny assignment. No inference runs in these flows, hence no
-    // network is ever touched — the key only satisfies presence checks.
+    // Fake provider key for the SERVER child only (never our own process
+    // env): production reads the bearer from its environment, so without it
+    // the credential gate would deny assignment. No inference runs here, so
+    // no network is touched; the key only satisfies presence checks.
     server.env("ENE_OPENAI_API_KEY", "sk-test-only");
     server.args(["serve", "--config", &config]);
     server.stdout(std::process::Stdio::null());
@@ -844,15 +837,13 @@ async fn rotation_requires_reprovisioning() {
     server.abort();
 }
 
-/// Fixed provider text for the binary send path, distinct from the
-/// lib-level fake so a crossed wire would show.
+/// Distinct from the lib-level fake so a crossed wire would show.
 const PROD_FAKE_TEXT: &str = "production reply over the real binaries";
 
-/// Minimal fake Responses API over plain HTTP/1.1: reads one request's
-/// headers plus body, then answers a fixed non-streaming completion. No new
-/// dependencies: the production transport posts non-streaming JSON to
-/// `{base}/v1/responses`, so a hand-rolled `Content-Length` responder is
-/// enough to prove the real binary path end to end without network or keys.
+/// Minimal fake Responses API over plain HTTP/1.1, answering a fixed
+/// non-streaming completion. Hand-rolled to avoid new dependencies: the
+/// production transport posts non-streaming JSON to `{base}/v1/responses`, so
+/// a `Content-Length` responder suffices, with no external network.
 async fn spawn_fake_responses(
     text: &'static str,
 ) -> Option<(
@@ -931,7 +922,6 @@ async fn spawn_fake_responses(
     Some((addr, handle, saw_no_store))
 }
 
-/// Writes the CLI config pointing at `dir` and reports its path.
 fn write_test_config(dir: &std::path::Path) -> Option<String> {
     let config_path = dir.join("ene.json");
     let config = format!(
@@ -944,8 +934,7 @@ fn write_test_config(dir: &std::path::Path) -> Option<String> {
     Some(config_path.to_string_lossy().into_owned())
 }
 
-/// Spawns the real `serve` binary as a child with `extra_env` (child env
-/// only; our own process env is never touched).
+/// `extra_env` goes to the child only; our own process env is never touched.
 fn spawn_serve_binary(
     core: &std::path::Path,
     config: &str,
@@ -961,9 +950,6 @@ fn spawn_serve_binary(
     server.spawn().ok().map(|child| KillOnDrop(Some(child)))
 }
 
-/// Runs the binary pairing ceremony: pending status, Host-local approval,
-/// then a paired status using the one-time secret. Reports the secret for
-/// callers that provision further children through it.
 async fn pair_via_binaries(
     ctl: &std::path::Path,
     core: &std::path::Path,
@@ -1034,10 +1020,6 @@ async fn pair_via_binaries(
     Some(secret)
 }
 
-/// Full production path through both binaries: pairing, setup, a real
-/// `ene-ctl send` against a local fake Responses server (proving inference,
-/// streaming, presentation, and history through the real `serve` binary),
-/// then a restart proving the history survives and the path still serves.
 #[tokio::test]
 async fn binaries_drive_send_stream_history_and_restart() {
     let temp = tempfile::TempDir::new();

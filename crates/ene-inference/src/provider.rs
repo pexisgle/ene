@@ -7,10 +7,9 @@
 //! escapes the closure. Error strings carry status classes only, never URLs,
 //! keys, or bodies. There is no retry, no streaming, and no model fallback.
 //!
-//! [`ProviderTransport::complete`] itself performs HTTPS I/O and is therefore
-//! covered by integration tests through [`crate::fake::FakeProviderTransport`],
-//! never by unit tests here; the pure `parse_response()` mapping below carries
-//! the unit tests.
+//! [`ProviderTransport::complete`] performs HTTPS I/O, so integration tests
+//! cover it through [`crate::fake::FakeProviderTransport`]; the pure
+//! `parse_response()` mapping below carries the unit tests.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -26,15 +25,12 @@ use super::{
 /// Base URL for the `OpenAI` API; tests inject a local URL instead.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
-/// Time allowed to establish the provider connection.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Time allowed for a whole provider call, connect through body.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// HTTPS transport for the `OpenAI` Responses API (`POST /v1/responses`).
 ///
-/// Holds the base URL, the built [`reqwest::Client`], and the bearer store.
 /// No field ever holds key material or a fixed credential: the bearer is
 /// resolved per request from the [`ene_credential::CredentialRef`] the authorized dispatch
 /// carries, and borrowed transiently inside [`CredentialStore::with_bearer`].
@@ -61,8 +57,6 @@ impl<S> core::fmt::Debug for OpenAiResponsesTransport<S> {
 }
 
 impl<S: CredentialStore> OpenAiResponsesTransport<S> {
-    /// Creates a transport against `base_url` over `store`.
-    ///
     /// The client enforces [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`]. No
     /// I/O happens here; pass [`DEFAULT_BASE_URL`] for production. Each call
     /// bills the credential its [`ProviderRequest`] carries, so a consent
@@ -155,9 +149,6 @@ impl<S: CredentialStore> OpenAiResponsesTransport<S> {
     }
 }
 
-/// Builds the Responses API request body: model, input, non-streaming —
-/// and an explicit `"store": false`.
-///
 /// History lives durably on the local side, which never needs server-side
 /// response state; leaving `store` unset would default it to `true` and
 /// retain conversation text provider-side for no reason. This is a
@@ -172,11 +163,9 @@ fn responses_body(model: &str, input: &str) -> serde_json::Value {
     })
 }
 
-/// Maps a request I/O failure to a technical error without secrets.
-///
-/// An elapsed timeout (connect or whole-request) means the call may have run,
-/// so it maps to [`InferenceTechnicalError::ResponseLost`]; any other I/O
-/// failure maps to a status-class transport failure.
+/// An elapsed timeout (connect or whole-request) may mean the call ran, so it
+/// maps to [`InferenceTechnicalError::ResponseLost`]; any other I/O failure
+/// maps to a status-class transport failure that carries no secrets.
 fn io_error(err: &reqwest::Error, context: &'static str) -> InferenceTechnicalError {
     if err.is_timeout() {
         InferenceTechnicalError::ResponseLost
@@ -191,56 +180,39 @@ fn io_error(err: &reqwest::Error, context: &'static str) -> InferenceTechnicalEr
 /// never a silent success (see [`parse_response`]).
 #[derive(Deserialize)]
 struct ResponsesBody {
-    /// Completion status (`completed`, `failed`, `incomplete`, ...); absent
-    /// when the provider reports none.
     status: Option<String>,
-    /// Message items; absent when the provider reports none.
     #[serde(default)]
     output: Vec<OutputItem>,
-    /// Token counts; absent when the provider reports none.
     #[serde(default)]
     usage: Option<UsageObj>,
-    /// Failure detail for non-completed responses; only `reason`-class
-    /// strings are ever surfaced, never message bodies.
     #[serde(default)]
     incomplete_details: Option<IncompleteDetails>,
 }
 
-/// Reason class for a non-completed response. Only the bounded `reason`
-/// vocabulary is decoded; message bodies never leave the response.
 #[derive(Deserialize)]
 struct IncompleteDetails {
-    /// Bounded reason such as `"max_output_tokens"`.
     #[serde(default)]
     reason: Option<String>,
 }
 
-/// One `output` item; only its `content` parts matter here.
 #[derive(Deserialize)]
 struct OutputItem {
-    /// Content parts; absent for items (such as reasoning) without any.
     #[serde(default)]
     content: Vec<ContentPart>,
 }
 
-/// One `output.content` part; only `output_text` parts carry `text`.
 #[derive(Deserialize)]
 struct ContentPart {
-    /// Part discriminator, such as `"output_text"`.
     #[serde(rename = "type", default)]
     kind: Option<String>,
-    /// Text carried by `output_text` parts.
     #[serde(default)]
     text: Option<String>,
 }
 
-/// Tolerantly decoded `usage` object.
 #[derive(Deserialize)]
 struct UsageObj {
-    /// Reported input tokens.
     #[serde(default)]
     input_tokens: Option<u64>,
-    /// Reported output tokens.
     #[serde(default)]
     output_tokens: Option<u64>,
 }

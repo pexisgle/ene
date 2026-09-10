@@ -12,18 +12,15 @@ use ene_primitive::raw_id::RawId;
 use ene_primitive::revision::RevisionInner;
 use std::collections::HashSet;
 
-/// Test-only value: the subset of the `serde` data model the primitives use.
 #[derive(Debug, Clone, PartialEq)]
 enum MiniValue {
     /// Human-readable strings: UUID text, RFC 3339 timestamps, purposes.
     Str(String),
     /// Counter values for revisions and generations.
     U64(u64),
-    /// Struct bodies keyed by field name.
     Map(Vec<(String, MiniValue)>),
 }
 
-/// Test-only failure for the [`MiniValue`] format.
 #[derive(Debug)]
 struct MiniError(String);
 
@@ -47,10 +44,8 @@ impl serde::de::Error for MiniError {
     }
 }
 
-/// Test-only serializer producing [`MiniValue`].
 struct MiniSerializer;
 
-/// Test-only struct accumulator producing [`MiniValue::Map`].
 struct MiniStructSerializer {
     fields: Vec<(String, MiniValue)>,
 }
@@ -307,10 +302,8 @@ impl serde::ser::SerializeStruct for MiniStructSerializer {
     }
 }
 
-/// Test-only deserializer reading [`MiniValue`].
 struct MiniDeserializer(MiniValue);
 
-/// Test-only map reader for struct bodies.
 struct MiniMapAccess {
     fields: std::vec::IntoIter<(String, MiniValue)>,
     pending: Option<MiniValue>,
@@ -453,7 +446,6 @@ impl<'de> serde::de::MapAccess<'de> for MiniMapAccess {
     }
 }
 
-/// Encodes `value` into [`MiniValue`] and decodes it back.
 fn roundtrip<T>(value: &T) -> Result<T, MiniError>
 where
     T: serde::Serialize + serde::de::DeserializeOwned,

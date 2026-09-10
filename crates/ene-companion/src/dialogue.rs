@@ -28,30 +28,21 @@ use crate::{
 /// One presentation-accepted client input, ready for the companion turn.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AcceptedDialogueInput {
-    /// Companion the input was accepted for.
     pub companion: CompanionId,
     /// Host-issued round the input joined or minted.
     pub round: RawId,
-    /// Presence generation the acceptance pinned.
     pub generation: PresenceGeneration,
     /// Owner body text; redacted from [`core::fmt::Debug`].
     pub text: String,
-    /// Opaque language tag.
     pub lang: String,
-    /// Client-local correspondence id, when non-empty.
     pub local_id: Option<String>,
-    /// Command-scoped idempotency key.
     pub command: CommandId,
-    /// Opaque wire projection of `round`.
     pub round_wire: String,
-    /// Canonical client round intent of the command.
     pub round_intent: RoundIntentMark,
-    /// Sending incarnation, as `(counter, random)`.
     pub incarnation: Option<(u64, u64)>,
 }
 
 impl core::fmt::Debug for AcceptedDialogueInput {
-    /// Renders refs and redacts the body text.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("AcceptedDialogueInput")
@@ -89,12 +80,9 @@ pub enum DialogueBegin {
     Ready(Box<DialogueTurn>),
     /// The command already committed: answers the stored accept.
     Replayed {
-        /// Original domain round.
         round: RawId,
-        /// Original opaque wire projection, when the stored row carries one.
         round_wire: Option<String>,
     },
-    /// The expected generation was not current at append time.
     StaleExpected {
         /// Current generation the caller should observe next time.
         current: PresenceGeneration,
@@ -105,7 +93,6 @@ pub enum DialogueBegin {
     Conflict,
     /// A store failure held the append.
     Held,
-    /// The companion lifecycle held the append.
     HeldByLifecycle(CompanionLifecycle),
     /// Admission declined without side effects.
     Declined(NotSentReason),
@@ -124,7 +111,6 @@ pub enum DialogueOutcome {
 }
 
 impl core::fmt::Debug for DialogueOutcome {
-    /// Renders the variant and redacts reply text.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Completed { .. } => formatter
@@ -141,9 +127,7 @@ impl core::fmt::Debug for DialogueOutcome {
 pub enum ReplayClassification {
     /// The stored row proves an exact retry: answer its original accept.
     Replay {
-        /// Original domain round.
         round: RawId,
-        /// Original opaque wire projection, when the stored row carries one.
         round_wire: Option<String>,
     },
     /// The stored row proves a different request under the same key.

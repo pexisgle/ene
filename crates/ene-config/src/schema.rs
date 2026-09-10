@@ -6,21 +6,13 @@ use schemars::Schema;
 
 use crate::typed::Config;
 
-/// Generates the JSON Schema describing [`Config`].
-///
-/// The schema carries no secret-typed properties and no runtime-judgment
-/// properties such as autostart selection.
-///
-/// Note: the design doc names `schemars::schema::RootSchema` here, but the
-/// pinned `schemars` 1.x exposes the root schema as [`Schema`]; this return
-/// type is that same root schema under its current name.
+/// The design doc names `schemars::schema::RootSchema` here, but the pinned
+/// `schemars` 1.x exposes the root schema as [`Schema`]; this return type is
+/// that same root schema under its current name.
 pub fn config_schema() -> Schema {
     schemars::schema_for!(Config)
 }
 
-/// Returns [`config_schema`] as a [`serde_json::Value`] for embedding or
-/// inspection.
-///
 /// Serialization failure is reported, never hidden: a schema that cannot be
 /// represented is an error, not a null schema.
 ///

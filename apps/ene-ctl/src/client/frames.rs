@@ -13,24 +13,15 @@ use ene_plugin_ipc::WireFrame;
 
 use crate::device;
 
-/// Per-process incarnation sequence backing [`new_incarnation`]: `std` only,
-/// process pid plus a process-local monotonic counter plus start-time
-/// nanoseconds (see the function docs).
 static INCARNATION_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Start-time nanoseconds memo for [`new_incarnation`], captured once.
 static INCARNATION_START: OnceLock<u64> = OnceLock::new();
 
-/// Mints this process's incarnation: `counter` is the process pid (unique per
-/// boot per device for distinct processes), `random` folds a process-local
-/// monotonic sequence into the process start-time nanoseconds.
-///
-/// Uniqueness needs are modest — disambiguating restarts of one device —
-/// and a collision only risks a duplicate-suppression alias, never a
-/// privilege change, so clock-plus-counter randomness from `std` only
-/// (no OS RNG dependency) documented here is enough. This never collapses
-/// with connection identity or presence generation: the three stay separate
-/// envelope dimensions.
+/// Uniqueness needs are modest (disambiguating restarts of one device) and a
+/// collision only risks a duplicate-suppression alias, never a privilege
+/// change: pid plus process-local counter plus start-time nanoseconds from
+/// `std` only, no OS RNG dependency. Distinct envelope dimension from
+/// connection identity and presence generation.
 pub fn new_incarnation() -> ClientIncarnationId {
     let start = *INCARNATION_START.get_or_init(|| {
         std::time::SystemTime::now()
@@ -44,12 +35,9 @@ pub fn new_incarnation() -> ClientIncarnationId {
     }
 }
 
-/// Builds the proof frame: the wire sender names the paired device under
-/// proof (the Host attributes through its connection table and never trusts
-/// the claim, but the paired-sender contract carries it), echoes the
-/// caller incarnation, and hides the connection id (still undisclosed
-/// pre-accept). The proof itself is the pairing-secret HMAC over the
-/// single-use challenge nonce.
+/// The proof is the pairing-secret HMAC over the single-use challenge nonce;
+/// the sender names the paired device and hides the connection id (still
+/// undisclosed pre-accept).
 pub fn proof_frame(
     proof: &str,
     incarnation: ClientIncarnationId,
@@ -67,9 +55,6 @@ pub fn proof_frame(
     )
 }
 
-/// Guidance for a still-pending pairing: approve on the Host-local trusted
-/// surface, then re-run once with the shown secret in the environment so it
-/// reaches the `0600` device file.
 #[must_use]
 pub fn pending_guidance() -> String {
     format!(
@@ -80,8 +65,6 @@ pub fn pending_guidance() -> String {
     )
 }
 
-/// Guidance for a challenge that arrived with no secret to prove with: the
-/// operator must approve and provision before authentication can run.
 #[must_use]
 pub fn missing_secret_guidance() -> String {
     format!(
@@ -92,8 +75,8 @@ pub fn missing_secret_guidance() -> String {
     )
 }
 
-/// Guidance for a rejected proof: the Host reason plus the re-provisioning
-/// step. The reason is operational by DTO contract, so echoing it is safe.
+/// Echoing the Host reason is safe: it is operational by DTO contract, never
+/// a secret or body copy.
 #[must_use]
 pub fn auth_rejected_guidance(reason: &str) -> String {
     format!(
@@ -104,11 +87,9 @@ pub fn auth_rejected_guidance(reason: &str) -> String {
     )
 }
 
-/// Builds a retry frame: the caller's command id travels unchanged while
-/// message and request ids go fresh for this attempt only. Same incarnation
-/// only (see [`super::Client::retry`]): the sender, generation view, and payload
-/// are reused untouched. Pure: the transport pairing in [`super::Client::retry`]
-/// moves it unchanged.
+/// Reuses the caller's command id while message and request ids go fresh for
+/// this attempt. Same-incarnation retries only (see [`super::Client::retry`]):
+/// sender, generation view, and payload travel untouched.
 pub fn retry_frame(
     payload: WirePayload,
     sender: WireSender,
@@ -120,10 +101,10 @@ pub fn retry_frame(
     frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
     frame
 }
-/// `observed.presence_generation_view` with the session value on
-/// [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) sends only. Other
-/// payloads keep the [`None`] default: the generation view is intake
-/// comparison material, not a general envelope claim.
+/// Stamps `observed.presence_generation_view` on
+/// [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput) sends only: the
+/// generation view is intake comparison material, not a general envelope
+/// claim.
 pub fn frame_for_session(
     payload: WirePayload,
     sender: WireSender,
@@ -136,8 +117,8 @@ pub fn frame_for_session(
     frame
 }
 
-/// Builds the pairing frame: display descriptor, pre-pairing sender (no
-/// device ID yet — the Host issues it after Owner confirmation).
+/// Pre-pairing sender: the Host issues the device ID after Owner
+/// confirmation.
 pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> WireFrame {
     frame_for(
         WirePayload::PairingRequest(PairingRequest {
@@ -151,16 +132,10 @@ pub fn pairing_frame(descriptor: &str, incarnation: ClientIncarnationId) -> Wire
     )
 }
 
-/// Builds the capability frame: speaks [`ProtocolVersion::V1`], claims no
-/// optional features (text is the baseline, not a capability), and carries
-/// the display platform string.
-///
-/// `connect` passes the paired device: the paired-sender contract names it
-/// on capability and proof frames alike. The Host still attributes through
-/// its connection table (paired moments earlier on this same connection)
-/// and never trusts the claim — a mismatched claim drops the frame — so the
-/// value here satisfies the wire contract without becoming authority.
-/// Pre-pairing callers (and tests) pass [`None`].
+/// Speaks [`ProtocolVersion::V1`], claims no optional features (text is the
+/// baseline, not a capability), and carries the display platform string.
+/// `connect` passes the paired device the paired-sender contract requires;
+/// pre-pairing callers (and tests) pass [`None`].
 pub fn capability_frame(
     platform: &str,
     incarnation: ClientIncarnationId,
@@ -180,41 +155,32 @@ pub fn capability_frame(
     )
 }
 
-/// Wraps `payload` in a [`ProtocolVersion::V1`] envelope for `sender`.
 pub fn frame_for(payload: WirePayload, sender: WireSender) -> WireFrame {
     let message_type = message_type_for(&payload);
     let envelope = new_outgoing_envelope(ProtocolVersion::V1, sender, message_type);
     WireFrame { envelope, payload }
 }
 
-/// Stamps a fresh command ID on one outgoing request envelope and reports
-/// the message ID the Host echoes in `reply_to`.
-///
-/// One fresh [`CommandWireId`] per send (never reused across retries at this
-/// layer): the Host pairs its reply by `reply_to` against the returned
-/// message ID, and the command ID keeps every request uniformly pairable as
-/// command-side correlation grows. Handshake frames skip this (they rely on
-/// message-ID pairing only); fire-and-forget observations skip it too (no
-/// reply is ever paired to them). Transport retry of one logical send
-/// reuses the ID through [`super::Client::retry`] instead.
+/// One fresh [`CommandWireId`] per send; the returned message ID is what the
+/// Host echoes in `reply_to`. Handshake and fire-and-forget frames skip this
+/// and pair by message ID only; transport retry of one logical send reuses
+/// the command ID through [`super::Client::retry`].
 pub(super) fn stamp_request(frame: &mut WireFrame) -> WireMessageId {
     frame.envelope.correlation.command_id = Some(CommandWireId(uuid::Uuid::new_v4()));
     frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
     frame.envelope.message_id
 }
 
-/// Static kind name of a payload, used in rejection messages (no bodies).
-///
-/// Delegates to the canonical [`WirePayload::message_type`] vocabulary in
-/// `ene-api`: the wire names live in exactly one place, so adding a variant
-/// can never leave a second exhaustive list behind.
+/// Rejection-message kind name (never a body), delegated to the canonical
+/// [`WirePayload::message_type`] vocabulary in `ene-api` so wire names live
+/// in exactly one place and adding a variant cannot leave a second
+/// exhaustive list behind.
 pub fn payload_kind(payload: &WirePayload) -> &'static str {
     payload.message_type()
 }
 
-/// Envelope discriminator for a payload: the variant name, matching the
-/// convention the wire tests use (for example `"SubmitTextInput"`).
-/// Routing hint only; the Host rejects unknown names, never guesses.
+/// Envelope discriminator (the variant name, for example `"SubmitTextInput"`);
+/// routing hint only — the Host rejects unknown names, never guesses.
 pub fn message_type_for(payload: &WirePayload) -> WireMessageType {
     WireMessageType(String::from(payload_kind(payload)))
 }

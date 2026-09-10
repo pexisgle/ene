@@ -1,6 +1,3 @@
-//! Wire contract checks: shapes survive JSON, unknown fields are tolerated,
-//! redactions hold, and identifiers stay separated by type.
-
 use ene_api::v1::envelope::WireSender;
 use ene_api::v1::envelope::{ProtocolVersion, WireEnvelope, new_outgoing_envelope};
 use ene_api::v1::handshake::{CapabilityAdvertise, PairingRequest};
@@ -37,7 +34,6 @@ fn envelope() -> WireEnvelope {
     )
 }
 
-/// Encodes to JSON and decodes back, asserting the value survives.
 fn roundtrip<T>(value: &T)
 where
     T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + core::fmt::Debug,

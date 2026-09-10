@@ -9,24 +9,15 @@ use directories::ProjectDirs;
 
 use crate::typed::Config;
 
-/// Returns the OS default data directory for this application, or [`None`]
-/// when the OS cannot provide one.
-///
-/// The underlying qualifier/organization/application triple is `"dev"` /
-/// `"ene"` / `"ene"`. That choice is `Stage 1`-provisional and user-visible: it
-/// determines concrete paths such as `~/.local/share/ene` on Linux, so any
-/// future change must migrate existing directories instead of silently
-/// switching paths.
+/// Backed by the `"dev"` / `"ene"` / `"ene"` qualifier/organization/application
+/// triple. That choice is `Stage 1`-provisional and user-visible: it determines
+/// concrete paths such as `~/.local/share/ene` on Linux, so any future change
+/// must migrate existing directories instead of silently switching paths.
 pub fn default_data_dir() -> Option<PathBuf> {
     ProjectDirs::from("dev", "ene", "ene").map(|dirs| dirs.data_dir().to_path_buf())
 }
 
-/// Resolves the effective data directory for `cfg`: the explicit
-/// [`Config::data_dir`](crate::typed::Config::data_dir) override when set,
-/// otherwise [`default_data_dir`].
-///
-/// Performs no I/O and creates no directories; callers decide when (and
-/// whether) the resolved directory must exist.
+/// Callers decide when (and whether) the resolved directory must exist.
 pub fn resolve_data_dir(cfg: &Config) -> Option<PathBuf> {
     cfg.data_dir.clone().or_else(default_data_dir)
 }

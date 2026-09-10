@@ -1,11 +1,11 @@
-//! Length-prefixed `MessagePack` transport frames (IPC §10.1).
+//! Length-prefixed `MessagePack` transport frames (IPC §10.1), shared by the
+//! Host listener and the Client dialer.
 //!
-//! This crate is the retained transport-frames crate shared by the Host
-//! listener and the Client dialer. It is a pure byte codec: it frames one
-//! domain message ([`WireFrame`]) as a 4-byte big-endian exclusive length
-//! prefix followed by the canonical `MessagePack` body (IPC §7), and parses
-//! such bytes back. It performs no I/O, owns no sockets, and runs no async
-//! tasks; socket read/write loops live in the applications that embed it.
+//! This is a pure byte codec: it frames one domain message ([`WireFrame`]) as
+//! a 4-byte big-endian exclusive length prefix followed by the canonical
+//! `MessagePack` body (IPC §7), and parses such bytes back. It performs no
+//! I/O, owns no sockets, and runs no async tasks; socket read/write loops
+//! live in the applications that embed it.
 //!
 //! One frame carries exactly one domain message. Text streaming chunking
 //! happens at the DTO level ([`ene_api::v1::round::TextStreamFrameWire`]),
@@ -19,31 +19,22 @@ use ene_api::v1::envelope::WireEnvelope;
 use ene_api::v1::payload::WirePayload;
 use serde::{Deserialize, Serialize};
 
-/// Length of the big-endian frame-length prefix in bytes.
 const LEN_PREFIX_LEN: usize = 4;
 
-/// Maximum `MessagePack` body length in bytes, exclusive of the prefix.
-///
-/// Bodies longer than this are rejected on encode and on decode. The bound
-/// keeps a single hostile or corrupt length prefix from driving unbounded
-/// allocation while comfortably fitting text round-trip traffic.
+/// Maximum `MessagePack` body length in bytes, exclusive of the prefix. The
+/// bound keeps a single hostile or corrupt length prefix from driving
+/// unbounded allocation while comfortably fitting text round-trip traffic.
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 
-/// One domain message on the wire: routing envelope plus typed payload.
-///
 /// Serialization order is the field order (`envelope`, then `payload`) under
 /// the crate-wide `MessagePack` configuration used by [`encode_frame`] and
 /// [`decode_frame`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WireFrame {
-    /// Routing envelope. Routes only; never authorizes.
     pub envelope: WireEnvelope,
-    /// Typed body named by the envelope's `message_type`.
     pub payload: WirePayload,
 }
 
-/// Transport framing failure.
-///
 /// Display strings carry lengths and decoder reasons only. They never echo
 /// frame bytes: a corrupt body may contain conversation text, so neither
 /// the reason nor any other field may include raw payload material.
@@ -52,35 +43,21 @@ pub enum CodecError {
     /// A body length exceeded [`MAX_FRAME_BYTES`]: on encode, the encoded
     /// body; on decode, the length the prefix claims.
     #[error("frame body of {len} bytes exceeds the 256 KiB cap")]
-    FrameTooLarge {
-        /// Offending body length in bytes.
-        len: usize,
-    },
+    FrameTooLarge { len: usize },
     /// Fewer bytes than a complete frame arrived. `need` is the total byte
     /// count required: 4 bytes when the prefix itself is short,
     /// prefix plus claimed body length otherwise.
     #[error("truncated frame: have {have} bytes, need {need}")]
-    Truncated {
-        /// Bytes available in the input slice.
-        have: usize,
-        /// Total bytes required for the frame.
-        need: usize,
-    },
+    Truncated { have: usize, need: usize },
     /// The length prefix was well-formed but the body bytes did not decode
-    /// as a [`WireFrame`]. The reason is the decoder's short diagnostic,
-    /// which never echoes input bytes.
+    /// as a [`WireFrame`].
     #[error("frame body failed to decode: {reason}")]
-    DecodeFailed {
-        /// Short decoder diagnostic, free of raw payload bytes.
-        reason: String,
-    },
+    DecodeFailed { reason: String },
 }
 
-/// Encodes one frame as a 4-byte big-endian body length plus body.
-///
-/// The length is exclusive: it counts the `MessagePack` body only, not the
-/// prefix (IPC §10.1). Bodies longer than [`MAX_FRAME_BYTES`] are rejected
-/// with [`CodecError::FrameTooLarge`].
+/// The length prefix is exclusive: it counts the `MessagePack` body only,
+/// not the prefix (IPC §10.1). Bodies longer than [`MAX_FRAME_BYTES`] are
+/// rejected with [`CodecError::FrameTooLarge`].
 ///
 /// The cap is enforced encode-then-check: the body is serialized first and
 /// its length compared before the output buffer is built. This allocates up
@@ -108,17 +85,13 @@ pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, CodecError> {
     Ok(out)
 }
 
-/// Decodes the first frame in `bytes`, returning it with its consumed length.
-///
 /// Consumed length is prefix plus claimed body length, so trailing bytes are
 /// the next frame: callers advance past the consumed count and call again.
-/// Inputs shorter than the prefix fail with [`CodecError::Truncated`]
-/// needing 4 bytes; a prefix claiming more than [`MAX_FRAME_BYTES`] fails
-/// with [`CodecError::FrameTooLarge`] before any body-sized work (no large
-/// allocation, no large read); a short body fails with
-/// [`CodecError::Truncated`] needing the frame total; an undecodable body
-/// fails with [`CodecError::DecodeFailed`] whose reason carries no raw
-/// payload bytes.
+/// Inputs shorter than the prefix or the claimed body fail with
+/// [`CodecError::Truncated`]; a claimed length over [`MAX_FRAME_BYTES`]
+/// fails with [`CodecError::FrameTooLarge`] before any body-sized work (no
+/// large allocation, no large read); an undecodable body fails with
+/// [`CodecError::DecodeFailed`], whose reason carries no raw payload bytes.
 pub fn decode_frame(bytes: &[u8]) -> Result<(WireFrame, usize), CodecError> {
     if bytes.len() < LEN_PREFIX_LEN {
         return Err(CodecError::Truncated {
@@ -158,7 +131,6 @@ mod tests {
     };
     use ene_api::v1::round::{SubmitTextInput, TextBodyWire};
 
-    /// Minimal envelope plus a text DTO payload for codec tests.
     fn sample_frame() -> WireFrame {
         let sender = WireSender {
             device_id: None,

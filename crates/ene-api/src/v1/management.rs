@@ -1,8 +1,7 @@
 //! Setup management inlet: intent in, filtered view out (IPC §18).
 //!
 //! The Client expresses intent and reads filtered views; every acceptance,
-//! confirmation, and high-privilege final check happens Host-side. Secrets,
-//! judgment copies, and full internal conditions never appear in views.
+//! confirmation, and high-privilege final check happens Host-side.
 //! High-privilege final confirmation additionally never travels this wire:
 //! it stays on the Host-local trusted first-party surface (IPC §18.1).
 //!
@@ -19,12 +18,10 @@
 //!
 //! Builders ([`credential_target`], [`consent_target`]) and parsers
 //! ([`parse_credential_target`], [`parse_consent_target`]) are two sides of
-//! this one contract: builders format, parsers recover the parts with the
-//! exact rules documented on each function. The Host parse is authoritative:
-//! builders are plain constructors that never bypass validation, and every
-//! part must be non-empty at parse time. The consent `credential-id` keeps
-//! its remainder verbatim and may itself contain `':'`; the credential
-//! `label` likewise keeps any further `':'` verbatim. The two Setup command
+//! this one contract. The Host parse is authoritative: builders are plain
+//! constructors that never bypass validation, and every part must be
+//! non-empty at parse time. The consent `credential-id` and the credential
+//! `label` keep further `':'` characters verbatim. The two Setup command
 //! targets are fixed strings ([`SETUP_SHOW_TARGET`],
 //! [`SETUP_COMPLETE_TARGET`]).
 
@@ -38,35 +35,24 @@ pub const SETUP_SHOW_TARGET: &str = "setup:show";
 /// Fixed Setup command target marking Setup complete.
 pub const SETUP_COMPLETE_TARGET: &str = "setup:complete";
 
-/// Builds a credential Setup target: `credential:{provider}:{label}`.
-///
-/// This is a plain constructor spelling the shared grammar once; it does
-/// not validate. Non-empty `provider` and `label` are required by the
-/// grammar and enforced at Host parse, which stays authoritative.
+/// Plain constructor: it does not validate. Non-empty `provider` and
+/// `label` are enforced at Host parse, which stays authoritative.
 #[must_use]
 pub fn credential_target(provider: &str, label: &str) -> ManagementTargetWire {
     ManagementTargetWire(format!("credential:{provider}:{label}"))
 }
 
-/// Builds a consent Setup target:
-/// `consent:{provider}:{model}:{credential-id}`.
-///
-/// This is a plain constructor spelling the shared grammar once; it does
-/// not validate. Non-empty `provider`, `model`, and `credential-id` are
-/// required by the grammar and enforced at Host parse, which stays
-/// authoritative. The `credential-id` keeps its remainder verbatim and may
-/// itself contain `':'`.
+/// Plain constructor: it does not validate. Non-empty `provider`, `model`,
+/// and `credential-id` are enforced at Host parse, which stays
+/// authoritative.
 #[must_use]
 pub fn consent_target(provider: &str, model: &str, credential_id: &str) -> ManagementTargetWire {
     ManagementTargetWire(format!("consent:{provider}:{model}:{credential_id}"))
 }
 
-/// Parses a credential Setup target into `(provider, label)`.
-///
 /// Exact rule: strip the `credential:` prefix, split the remainder once on
-/// `':'`, and require both parts to be non-empty, else [`None`]. A wrong
-/// prefix, a missing separator, or any empty part rejects. The label keeps
-/// any further `':'` verbatim, mirroring the consent remainder rule.
+/// `':'`, and require both parts non-empty, else [`None`]. The label keeps
+/// any further `':'` verbatim.
 #[must_use]
 pub fn parse_credential_target(target: &ManagementTargetWire) -> Option<(String, String)> {
     let rest = target.0.strip_prefix("credential:")?;
@@ -77,13 +63,10 @@ pub fn parse_credential_target(target: &ManagementTargetWire) -> Option<(String,
     Some((provider.to_owned(), label.to_owned()))
 }
 
-/// Parses a consent Setup target into `(provider, model, credential-id)`.
-///
 /// Exact rule: strip the `consent:` prefix, split the remainder with
-/// `splitn(3, ':')`, and require all three parts to be non-empty, else
-/// [`None`]. A wrong prefix, fewer than three parts, or any empty part
-/// rejects. The `credential-id` keeps its remainder verbatim, so it may
-/// itself contain `':'`.
+/// `splitn(3, ':')`, and require all three parts non-empty, else [`None`].
+/// The `credential-id` keeps its remainder verbatim, so it may itself
+/// contain `':'`.
 #[must_use]
 pub fn parse_consent_target(target: &ManagementTargetWire) -> Option<(String, String, String)> {
     let rest = target.0.strip_prefix("consent:")?;
@@ -107,24 +90,17 @@ pub fn parse_consent_target(target: &ManagementTargetWire) -> Option<(String, St
 /// by operation, target, and impact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManagementIntentKind {
-    /// Companion shutdown.
     StopCompanion,
-    /// Companion deletion.
     DeleteCompanion,
-    /// Task cancellation.
     CancelTask,
-    /// Schedule management.
     ManageSchedule,
     /// Deny or refuse rule/consent handling.
     DenyOrRefuse,
-    /// Rule, consent, and cap management.
     ManageRuleConsentCap,
-    /// Device management.
     ManageDevice,
     /// Credential configuration intent (values travel the protected
     /// Host-local path only, never this payload).
     ConfigureCredentialIntent,
-    /// Deletion, backup, restore, and reset requests.
     RequestDeletionBackupRestoreReset,
 }
 
@@ -133,16 +109,12 @@ pub enum ManagementIntentKind {
 /// the Client never self-declares the result.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManagementIntent {
-    /// Idempotency key: the envelope command ID family.
     pub intent_id: CommandWireId,
-    /// What is being proposed.
     pub kind: ManagementIntentKind,
-    /// Target reference: wire refs only, never control state.
     pub target: ManagementTargetWire,
-    /// Display-revision mark the intent was built on. Required: staleness
-    /// is checked, never defaulted to unconstrained.
+    /// Display-revision mark the intent was built on. Staleness is checked,
+    /// never defaulted to unconstrained.
     pub base_view: BaseViewMark,
-    /// Owner intent record. Redacted from [`core::fmt::Debug`].
     pub rationale: IntentRationaleWire,
 }
 
@@ -164,9 +136,7 @@ impl core::fmt::Debug for ManagementIntent {
 /// redacted from [`core::fmt::Debug`].
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IntentRationaleWire {
-    /// Whether the intent originates from conversation or surface operation.
     pub origin: RationaleOrigin,
-    /// Quoted correspondence. Redacted from [`core::fmt::Debug`].
     pub quote: Option<String>,
 }
 
@@ -180,12 +150,9 @@ impl core::fmt::Debug for IntentRationaleWire {
     }
 }
 
-/// Intent provenance vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RationaleOrigin {
-    /// The intent came from conversation.
     Conversation,
-    /// The intent came from management-surface operation.
     ManagementSurface,
 }
 
@@ -196,10 +163,7 @@ pub enum ManagementOutcome {
     /// Applied as a one-time approval. Never a standing rule.
     AppliedAsOneTime,
     /// Stored as a rule or similar, with its revision view.
-    StoredAsRuleView {
-        /// Revision view of what was stored.
-        revision: ViewMarkWire,
-    },
+    StoredAsRuleView { revision: ViewMarkWire },
     /// Too ambiguous, contradictory, excessive, or grave to decide.
     NeedsClarification,
     /// Silent control-boundary overwrite or trusted-surface violation.
@@ -213,22 +177,17 @@ pub enum ManagementOutcome {
     HeldByOperation,
 }
 
-/// Filtered view request: which sections the Client wants to display.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManagementViewRequest {
-    /// Requested section kinds.
     pub sections: Vec<String>,
 }
 
-/// One filtered view section: short labels stay visible, bodies redact.
+/// Short labels stay visible; bodies redact.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ViewSection {
-    /// Section kind discriminator, display routing only.
     pub kind: String,
-    /// Short section title. Labels stay visible in Debug.
     pub title: String,
-    /// Section body. Display facts that may quote managed content:
-    /// redacted from [`core::fmt::Debug`].
+    /// May quote managed content; redacted from [`core::fmt::Debug`].
     pub body: String,
 }
 
@@ -243,13 +202,10 @@ impl core::fmt::Debug for ViewSection {
     }
 }
 
-/// Filtered management view: revision mark plus sections. Secrets,
-/// judgment copies, and full internal conditions are never included.
+/// Secrets, judgment copies, and full internal conditions are never included.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagementView {
-    /// Opaque display-revision mark.
     pub mark: ViewMarkWire,
-    /// Filtered sections.
     pub sections: Vec<ViewSection>,
 }
 

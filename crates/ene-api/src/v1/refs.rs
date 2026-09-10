@@ -13,8 +13,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Macro-free helper: Uuid-backed wire IDs share derives and documentation
-/// shape. Each expansion below is still its own type with no conversions.
 macro_rules! uuid_wire_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
@@ -23,8 +21,6 @@ macro_rules! uuid_wire_id {
     };
 }
 
-/// Macro-free helper: String-backed wire references share derives and
-/// documentation shape. Each expansion is still its own opaque type.
 macro_rules! string_wire_ref {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
@@ -91,7 +87,7 @@ string_wire_ref!(
 );
 string_wire_ref!(
     ClientLocalId,
-    "Client-local correspondence ID (e.g. matching an input to its ack). Monotonic within the Client; never Host-canonical. Named after IPC §6.1/§13.1; §21 pseudo-code spells it `ClientLocalId` for the same role."
+    "Client-local correspondence ID (e.g. matching an input to its ack). Monotonic within the Client; never Host-canonical."
 );
 string_wire_ref!(
     TextLangWire,

@@ -35,19 +35,16 @@ use ene_primitive::{GenerationInner, RawId};
 pub struct ClientId(RawId);
 
 impl ClientId {
-    /// Wraps an existing raw identity, for example one read back from storage.
     #[must_use]
     pub fn from_raw(raw: RawId) -> Self {
         Self(raw)
     }
 
-    /// Returns the wrapped raw identity for storage or transport encoding.
     #[must_use]
     pub fn as_raw(self) -> RawId {
         self.0
     }
 
-    /// Generates a fresh random identity.
     #[must_use]
     pub fn generate() -> Self {
         Self(RawId::new())
@@ -63,7 +60,6 @@ impl ClientId {
 pub struct PresenceGeneration(GenerationInner);
 
 impl PresenceGeneration {
-    /// Smallest value in a sequence.
     #[must_use]
     pub fn first() -> Self {
         Self(GenerationInner::first())
@@ -76,25 +72,21 @@ impl PresenceGeneration {
         self.0.checked_next().map(Self)
     }
 
-    /// Reconstitutes a stored value alongside its companion lifecycle.
     #[must_use]
     pub fn from_u64(value: u64) -> Self {
         Self(GenerationInner::from_u64(value))
     }
 
-    /// Returns the stored value for persistence or boundary tokens.
     #[must_use]
     pub fn as_u64(self) -> u64 {
         self.0.as_u64()
     }
 
-    /// Wraps an existing inner value.
     #[must_use]
     pub fn from_inner(inner: GenerationInner) -> Self {
         Self(inner)
     }
 
-    /// Returns the wrapped inner value.
     #[must_use]
     pub fn as_inner(self) -> GenerationInner {
         self.0
@@ -125,13 +117,9 @@ pub enum PresenceState {
 /// missing fact is never read as current.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PresenceAttribution {
-    /// Companion this attribution belongs to.
     pub companion: RawId,
-    /// Current state.
     pub state: PresenceState,
-    /// Active [`ClientId`], when present.
     pub active_client: Option<ClientId>,
-    /// Presence generation value the fact belongs to.
     pub generation: PresenceGeneration,
 }
 
@@ -140,11 +128,8 @@ pub struct PresenceAttribution {
 /// Carried by callers as comparison material; never authority on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PresenceCheckRef {
-    /// Generation value the caller observed.
     pub expected_generation: PresenceGeneration,
-    /// State value the caller observed.
     pub expected_state: PresenceState,
-    /// Active [`ClientId`] value the caller observed.
     pub expected_active: Option<ClientId>,
 }
 
@@ -154,13 +139,9 @@ pub struct PresenceCheckRef {
 /// happen Host-side against [`PresenceAttribution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientPresenceClaim {
-    /// Companion the claim targets.
     pub companion: RawId,
-    /// Claiming [`ClientId`].
     pub client: ClientId,
-    /// Generation value the claim relies on.
     pub claimed_generation: PresenceGeneration,
-    /// Round the claim believes it belongs to, if any.
     pub round: Option<RawId>,
 }
 
@@ -170,9 +151,7 @@ pub struct ClientPresenceClaim {
 /// premise. Liveness never runs inside the compare-and-commit section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LiveReachabilityRef {
-    /// [`ClientId`] the premise covers.
     pub client: ClientId,
-    /// Whether the connection is currently live.
     pub connection_live: bool,
 }
 
@@ -182,7 +161,6 @@ pub struct LiveReachabilityRef {
 /// [`LiveReachabilityRef`] so the ref stays a minimal liveness premise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportClass {
-    /// Client runs on the same machine as the Host.
     SameMachine,
 }
 
@@ -191,11 +169,8 @@ pub enum TransportClass {
 /// Host-side vocabulary only; a subset of the wire move reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThinMoveReason {
-    /// Initial attach of a companion to a client.
     InitialAttach,
-    /// A disconnect was observed and fallback is considered.
     DisconnectObserved,
-    /// Restart recovery path.
     RestartRecovery,
 }
 
@@ -206,10 +181,7 @@ pub enum ThinMoveReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveDecision {
     /// Transition began toward a new generation.
-    TransitioningToNew {
-        /// Generation the transition moved into.
-        generation: PresenceGeneration,
-    },
+    TransitioningToNew { generation: PresenceGeneration },
     /// The `expected` view was not current; carries the current fact.
     RejectedAsStalePresence {
         /// Current [`PresenceAttribution`] the caller should observe next time.
@@ -229,13 +201,11 @@ pub enum MoveDecision {
 /// Stale / held / denied outcomes are [`MoveDecision`], never this error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PresenceTechnicalError {
-    /// Durable storage was unavailable.
     #[error("presence storage unavailable: {reason}")]
     StorageUnavailable {
         /// Operational reason. Never a secret or a body copy.
         reason: String,
     },
-    /// The reachability-check infrastructure failed.
     #[error("presence reachability check failed: {reason}")]
     ReachabilityCheckFailed {
         /// Operational reason. Never a secret or a body copy.

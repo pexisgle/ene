@@ -47,9 +47,8 @@ fn history_command(
     }
 }
 
-/// Builds a history command carrying an explicit replay key and
-/// correspondence metadata. A keyed command always names its canonical
-/// round intent, so its replay stays decidable from durable state.
+/// A keyed command always names its canonical round intent, so its replay
+/// stays decidable from durable state.
 fn history_command_with_ids(
     companion: CompanionId,
     generation: PresenceGeneration,
@@ -74,7 +73,6 @@ fn history_command_with_ids(
     }
 }
 
-/// Counts durable history rows for one companion.
 fn history_row_count(store: &Store, companion: CompanionId) -> Option<i64> {
     let guard = match store.conn.lock() {
         Ok(locked) => locked,
@@ -398,8 +396,6 @@ async fn confirm_by_unpinned_client_is_rejected_without_touching_state() {
     let MoveDecision::TransitioningToNew { generation: next } = begin.unwrap() else {
         panic!("unexpected variant");
     };
-    // A live confirm for a different client must not crown it: the row
-    // stays InTransition toward the pinned target.
     let rejected = store
         .confirm_transition(
             raw,
@@ -424,7 +420,6 @@ async fn confirm_by_unpinned_client_is_rejected_without_touching_state() {
             && fact.active_client == Some(pinned)),
         "rejected confirm must leave the row untouched, got {current:?}"
     );
-    // The pinned client still confirms normally afterwards.
     let confirmed = store
         .confirm_transition(
             raw,
@@ -461,7 +456,6 @@ async fn consent_compare_and_save_commit_and_stale_matrix() {
     let store = open_memory().await.unwrap();
     let empty = store.load_current().await;
     assert!(matches!(empty, Ok(None)), "fresh store holds no consent");
-    // No row plus no expectation: insert and commit.
     let first = consent_record("consent-1", 3);
     let committed = store.compare_and_save(None, first.clone()).await;
     assert!(
@@ -473,7 +467,6 @@ async fn consent_compare_and_save_commit_and_stale_matrix() {
     );
     let loaded = store.load_current().await;
     assert!(matches!(loaded, Ok(Some(ref current)) if *current == first));
-    // A row plus no expectation: stale, never overwritten.
     let intruder = consent_record("consent-9", 1);
     let unexpected = store.compare_and_save(None, intruder).await;
     assert!(
@@ -483,7 +476,6 @@ async fn consent_compare_and_save_commit_and_stale_matrix() {
         ),
         "existing row with no expectation must be stale"
     );
-    // Matching id and revision: overwrite and commit.
     let next = consent_record("consent-1", 4);
     let recommitted = store
         .compare_and_save(
@@ -498,7 +490,6 @@ async fn consent_compare_and_save_commit_and_stale_matrix() {
         ),
         "matching expectation must commit the replacement"
     );
-    // Same id, older revision: stale, stored row untouched.
     let replay = consent_record("consent-1", 5);
     let stale_rev = store
         .compare_and_save(
@@ -513,7 +504,6 @@ async fn consent_compare_and_save_commit_and_stale_matrix() {
         ),
         "revision mismatch must be stale"
     );
-    // Different id, same revision: stale, stored row untouched.
     let fork = consent_record("consent-2", 4);
     let stale_id = store
         .compare_and_save(
@@ -646,9 +636,6 @@ async fn local_id_lookup_is_correspondence_metadata_not_replay_key_replacing_loc
         matches!(absent, Ok(None)),
         "unknown local id must find nothing"
     );
-    // Durable replay keys on `command_id` now; `local_id` is stored
-    // correspondence metadata, so repeating it appends again instead of
-    // replaying the first accept.
     let first = store
         .append_message(history_command_with_ids(
             companion,
@@ -712,9 +699,6 @@ async fn command_replay_returns_original_accept_without_duplicate_row() {
         first_registered.is_some(),
         "first commit registers undelivered"
     );
-    // Transport retry reuses the command id with a fresh message id but
-    // identical content: the replay must return the original accept
-    // without a second row or a second undelivered registration.
     let retry = store
         .append_reply_with_undelivered(base.clone(), true)
         .await;
@@ -767,8 +751,8 @@ async fn command_reuse_with_different_request_is_declined() -> Result<(), String
         matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
         "first command append must commit"
     );
-    // Every request-semantics field decides: body, language, sending
-    // incarnation, and the canonical client round intent.
+    // Every request-semantics field decides: body, language, incarnation,
+    // and the canonical client round intent.
     for (label, mut conflicting) in [
         ("body", {
             let mut cmd = base.clone();
@@ -814,9 +798,9 @@ async fn command_reuse_with_different_request_is_declined() -> Result<(), String
             "{label} restored request must replay the original accept"
         );
     }
-    // Round identity and its wire projection are the accepted result,
-    // not the request: the same send re-intaked into a newer round
-    // replays the stored accept instead of conflicting.
+    // Round identity and its wire projection are the accepted result, not
+    // the request: a newer round on the same send replays instead of
+    // conflicting.
     let mut drifted = base.clone();
     drifted.round = RawId::new();
     drifted.round_wire = Some(String::from("rotated-wire"));
@@ -833,9 +817,9 @@ async fn command_reuse_with_different_request_is_declined() -> Result<(), String
     Ok(())
 }
 
-/// A keyed command without a stored round intent proves nothing: the
-/// replay attempt fails closed (declined, never guessed) whether the
-/// stored row or the incoming command is the one missing the intent.
+/// A keyed command without a stored round intent proves nothing: replay
+/// fails closed (declined, never guessed) whether the stored row or the
+/// incoming command is the one missing the intent.
 #[tokio::test]
 async fn unprovable_round_intent_fails_closed() -> Result<(), String> {
     let store = open_memory().await.ok_or_else(|| String::from("open"))?;
@@ -855,8 +839,6 @@ async fn unprovable_round_intent_fails_closed() -> Result<(), String> {
         matches!(first, Ok(HistoryAppendOutcome::CommittedAs { .. })),
         "keyed append must commit, got {first:?}"
     );
-    // Same key, same request fields, but the caller dropped the intent:
-    // sameness cannot be proven, so the key is declined.
     let mut no_intent = keyed.clone();
     no_intent.round_intent = None;
     let attempt = store.append_message(no_intent).await;
@@ -864,8 +846,6 @@ async fn unprovable_round_intent_fails_closed() -> Result<(), String> {
         matches!(attempt, Ok(HistoryAppendOutcome::CommandConflict)),
         "a keyed command without a round intent must not exact-replay, got {attempt:?}"
     );
-    // The mirrored case: a keyed row stored without an intent (a
-    // pre-mark row) declines every later replay attempt too.
     let legacy = CommandId(RawId::new());
     let mut unmarked = history_command_with_ids(
         companion,
@@ -1145,7 +1125,6 @@ async fn device_request_approve_find_and_list() {
         panic!("unexpected variant");
     };
     assert_eq!(first_pending.descriptor.as_str(), "phone");
-    // A second request returns the stored entry without refreshing it.
     let second = store.request_pairing(String::from("phone")).await;
     assert!(
         matches!(second, Ok(DevicePairingStatus::Pending { .. })),
@@ -1190,7 +1169,6 @@ async fn device_request_approve_find_and_list() {
         matches!(found, Ok(Some(ref stored)) if *stored == device),
         "approved device must be findable by id"
     );
-    // Re-requesting a paired descriptor returns the stored record.
     let again = store.request_pairing(String::from("phone")).await;
     assert!(
         matches!(
@@ -1199,8 +1177,6 @@ async fn device_request_approve_find_and_list() {
         ),
         "re-request after pairing must return the stored record"
     );
-    // Re-approving returns the same record without minting a new id,
-    // but with a freshly minted secret (rotation).
     let reapproved = DevicePairingRepository::approve_pending(&store, "phone").await;
     let (same, rotated) = reapproved.unwrap().unwrap();
     assert!(
@@ -1317,8 +1293,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
     );
 }
 
-/// Reads the `_schema_version` singleton through a throwaway
-/// connection, without running migrations.
+/// Reads the singleton without running migrations.
 fn read_schema_version(path: &std::path::Path) -> Option<i64> {
     let conn = rusqlite::Connection::open(path).ok()?;
     conn.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
@@ -1327,7 +1302,6 @@ fn read_schema_version(path: &std::path::Path) -> Option<i64> {
     .ok()
 }
 
-/// Column names of one table through a throwaway connection.
 fn table_columns(path: &std::path::Path, table: &str) -> Vec<String> {
     let Ok(conn) = rusqlite::Connection::open(path) else {
         return Vec::new();
@@ -1385,9 +1359,9 @@ INSERT INTO _schema_version (version) VALUES (4);",
             ],
         );
         assert!(seeded.is_ok(), "v4 paired row must seed");
-        // Fault injection: abort V5's backfill UPDATE *after* its four
-        // ALTERs ran, simulating a crash mid-migration. No production
-        // hook is involved — the trigger is test-only crash simulation.
+        // Fault injection: abort V5's backfill UPDATE after its four ALTERs
+        // ran, simulating a crash mid-migration. The trigger is test-only
+        // crash simulation, not a production hook.
         let injected = conn.execute_batch(
             "CREATE TRIGGER inject_crash BEFORE UPDATE ON paired_device BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
         );
@@ -1408,8 +1382,6 @@ INSERT INTO _schema_version (version) VALUES (4);",
         !table_columns(&path, "history_message").contains(&String::from("round_intent")),
         "a failed migration must roll back its DDL"
     );
-    // Clearing the fault lets the next open resume from scratch and
-    // converge on the current schema.
     {
         let conn = rusqlite::Connection::open(&path);
         let conn = conn.unwrap();
@@ -1598,8 +1570,8 @@ async fn intent_outcome_roundtrips_and_refreshes() {
         matches!(found, Ok(Some(ref stored)) if *stored == record()),
         "recorded outcome must read back"
     );
-    // Write-once: re-recording the same intent replays instead of
-    // refreshing, even with a different outcome attached.
+    // Write-once: re-recording the same intent replays the original, even
+    // with a different outcome attached.
     let mut conflicting = record();
     conflicting.outcome = IntentOutcome::HeldByOperation;
     let rerecorded = store.record_intent_outcome(conflicting).await;
@@ -1615,7 +1587,6 @@ async fn intent_outcome_roundtrips_and_refreshes() {
         matches!(found, Ok(Some(ref stored)) if *stored == record()),
         "the original row must survive, got {found:?}"
     );
-    // Same id, different content: conflict, original preserved.
     let mut other = record();
     other.fingerprint.target = String::from("consent:openai:other:openai:main");
     other.outcome = IntentOutcome::HeldByOperation;
@@ -1722,8 +1693,8 @@ async fn assign_with_intent_commits_marker_atomically() {
         ),
         "stale assign must leave its stale snapshot, got {stale_row:?}"
     );
-    // Same id, same fingerprint: replays the stored row without
-    // re-running compare-and-save or touching consent.
+    // Same id and fingerprint: replays without re-running compare-and-save
+    // or touching consent.
     let replayed = store
         .assign_with_intent(
             None,
@@ -1744,8 +1715,6 @@ async fn assign_with_intent_commits_marker_atomically() {
         ),
         "same-id retry must replay, got {replayed:?}"
     );
-    // Same id, different content: conflicts without side effects — the
-    // original row and the consent record both survive untouched.
     let conflicted = store
         .assign_with_intent(
             None,
@@ -1794,11 +1763,10 @@ async fn concurrent_same_id_assigns_fork_nothing() {
     };
 
     let store = open_memory().await.unwrap();
-    // Two sends of one logical intent racing through the same store:
-    // the shared-connection mutex serializes whole transactions, so
-    // the loser always observes the winner's row. Exactly one decides;
-    // the other replays — the answer never forks and the row is never
-    // rewritten.
+    // Two sends of one logical intent race through the same store: the
+    // shared-connection mutex serializes whole transactions, so exactly one
+    // decides and the loser replays — the answer never forks and the row is
+    // never rewritten.
     let attempt = |model: &'static str| {
         let store = &store;
         let fingerprint = IntentFingerprint {
@@ -1874,7 +1842,6 @@ async fn complete_with_intent_decides_atomically() {
     }
 
     let store = open_memory().await.unwrap();
-    // Empty premise with no consent: clarify, recorded.
     let empty = store
         .complete_with_intent(
             String::from("consent-none"),
@@ -1910,7 +1877,6 @@ async fn complete_with_intent_decides_atomically() {
         matches!(saved, Ok(ConsentCommitOutcome::Committed { .. })),
         "consent must seed"
     );
-    // Fresh base but bearer absent: clarify, recorded.
     let unready = store
         .complete_with_intent(
             String::from("consent-rev-1"),
@@ -1925,7 +1891,6 @@ async fn complete_with_intent_decides_atomically() {
         ),
         "bearerless completion must clarify, got {unready:?}"
     );
-    // Fresh base and bearer: applied, recorded.
     let ready = store
         .complete_with_intent(
             String::from("consent-rev-1"),
@@ -1940,7 +1905,6 @@ async fn complete_with_intent_decides_atomically() {
         ),
         "ready completion must apply, got {ready:?}"
     );
-    // Stale base: stale snapshot with the current mark, recorded.
     let stale = store
         .complete_with_intent(
             String::from("consent-none"),

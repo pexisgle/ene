@@ -33,11 +33,8 @@ pub use intent::{
 ///
 /// Wraps a [`RawId`] rather than a bare UUID so the opaque-identity
 /// discipline of `ene-primitive` applies: no string rendering, no prefix
-/// matching, equality only within this newtype.
-///
-/// Each value is minted by [`EvaluationTracker::mint`] and is valid for one
+/// matching, equality only within this newtype. A value is valid for one
 /// [`EvaluationTracker::consume`] call with the matching [`EvalFingerprint`].
-/// Replays always fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PermissionEvaluationId(pub RawId);
 
@@ -60,20 +57,16 @@ pub struct RuleId(pub RawId);
 pub struct ConsentRevision(RevisionInner);
 
 impl ConsentRevision {
-    /// Reconstitutes a stored revision alongside its consent id.
     #[must_use]
     pub fn from_u64(value: u64) -> Self {
         Self(RevisionInner::from_u64(value))
     }
 
-    /// Returns the stored value for persistence or boundary tokens.
     #[must_use]
     pub fn as_u64(&self) -> u64 {
         self.0.as_u64()
     }
 
-    /// Successor revision, or [`None`] when no distinct value remains.
-    ///
     /// Callers must treat [`None`] as revision exhaustion and refuse the
     /// commit rather than writing [`u64::MAX`] again with new content.
     #[must_use]
@@ -105,27 +98,18 @@ pub enum PurposeKind {
     SetupProbe,
 }
 
-/// One proposed inference use, before authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceUseCandidate {
-    /// The principal asking to run inference.
     pub consumer: ConsumerKind,
-    /// The capability the consumer wants to exercise.
     pub capability: CapabilityKind,
     /// Provider name as configured (exact match against consent).
     pub provider_ref: String,
     /// Model name as configured (exact match against consent).
     pub model: String,
-    /// The purpose binding this use.
     pub purpose: PurposeKind,
 }
 
 impl InferenceUseCandidate {
-    /// Fingerprint this candidate is tracked under.
-    ///
-    /// The fingerprint is the full closed-world tuple
-    /// `(consumer, capability, provider, model, purpose)`; evaluation ids are
-    /// bound to it at mint time and checked at consume time.
     #[must_use]
     pub fn fingerprint(&self) -> EvalFingerprint {
         EvalFingerprint(
@@ -145,22 +129,15 @@ impl InferenceUseCandidate {
 /// value at consume time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EvalFingerprint(
-    /// Consumer bound at mint time.
     pub ConsumerKind,
-    /// Capability bound at mint time.
     pub CapabilityKind,
-    /// Provider bound at mint time.
     pub String,
-    /// Model bound at mint time.
     pub String,
-    /// Purpose bound at mint time.
     pub PurposeKind,
 );
 
-/// Query for a live authorization check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckLiveAuthorizationQuery {
-    /// The proposed use under review.
     pub candidate: InferenceUseCandidate,
     /// Consent the caller acted on, as `(consent id, revision)`.
     ///
@@ -168,19 +145,15 @@ pub struct CheckLiveAuthorizationQuery {
     /// depends on whether stored consent exists (see
     /// [`check_live_authorization`]).
     pub expected_consent: Option<(String, ConsentRevision)>,
-    /// Whether Host setup completed.
-    ///
     /// `false` denies everything with [`DenyCode::SetupIncomplete`],
     /// regardless of consent state.
     pub setup_complete: bool,
 }
 
-/// Outcome of a live authorization check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveAuthorizationDecision {
     /// Allowed for exactly one use under the carried evaluation id.
     AllowForThisUse(PermissionEvaluationId),
-    /// Denied; the reason explains which gate failed.
     Deny(DenyReason),
     /// The caller's consent view is stale; re-read and retry.
     ///
@@ -189,19 +162,14 @@ pub enum LiveAuthorizationDecision {
     NeedsRevalidation(RevalidationNeed),
 }
 
-/// Why a live authorization check denied a use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenyReason {
-    /// Machine-readable gate that failed.
     pub code: DenyCode,
-    /// Human-readable detail naming the failing gate and values.
     pub detail: String,
 }
 
-/// Machine-readable denial gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DenyCode {
-    /// Host setup has not completed.
     SetupIncomplete,
     /// The `(consumer, capability, purpose)` triple is outside the closed world.
     NotInAllowlist,
@@ -225,26 +193,20 @@ pub struct RevalidationNeed {
     pub current_consent: (String, ConsentRevision),
 }
 
-/// Stored consent covering one provider/model pair and credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentRecord {
     /// Consent identity; revisions order under this id.
     pub id: String,
-    /// Revision of the consent content.
     pub rev: ConsentRevision,
-    /// Consented provider name; matched exactly.
+    /// Provider name; matched exactly.
     pub provider: String,
-    /// Consented model name; matched exactly.
+    /// Model name; matched exactly.
     pub model: String,
-    /// Credential the consent is bound to.
     pub credential_id: String,
 }
 
-/// Technical failures of the consent store.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PermissionTechnicalError {
-    /// The consent store was unreachable or rejected the operation.
-    ///
     /// Policy gates never produce this; only store adapters map into it.
     #[error("consent storage unavailable: {reason}")]
     StorageUnavailable {
@@ -260,16 +222,8 @@ pub enum PermissionTechnicalError {
 /// and retries with a fresh expectation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsentCommitOutcome {
-    /// The expected view matched; `record` was stored.
-    Committed {
-        /// Stored consent record.
-        record: ConsentRecord,
-    },
-    /// The expected view did not match; nothing was stored.
-    StaleCurrent {
-        /// Current stored record, or `None` when no consent is stored.
-        current: Option<ConsentRecord>,
-    },
+    Committed { record: ConsentRecord },
+    StaleCurrent { current: Option<ConsentRecord> },
 }
 
 /// Persistence boundary for the current consent record.
@@ -283,7 +237,6 @@ pub enum ConsentCommitOutcome {
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait ConsentRepository: Send + Sync {
-    /// Loads the current consent record, if any.
     async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError>;
 
     /// Commits `record` iff `expected` still matches the stored view.
@@ -330,7 +283,6 @@ pub trait IntentOutcomeRepository: Send + Sync {
         record: IntentOutcomeRecord,
     ) -> Result<IntentResolution<()>, PermissionTechnicalError>;
 
-    /// Loads the outcome snapshot for `intent_id`, if any.
     async fn lookup_intent_outcome(
         &self,
         intent_id: &str,
@@ -396,11 +348,8 @@ pub trait IntentOutcomeRepository: Send + Sync {
 /// Result of a write-once intent claim: either this call decided, or an
 /// earlier row already did.
 ///
-/// Every deciding operation checks the intent key first inside its
-/// transaction. The row is immutable: a second write under the same id —
-/// same content or not — never overwrites, so concurrent same-id sends
-/// cannot fork the answer and a crash between decision and marker is
-/// impossible by construction.
+/// The row is immutable: a second write under the same id — same content or
+/// not — never overwrites.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntentResolution<T> {
     /// No row existed; the fresh decision `T` was stored write-once.
@@ -421,13 +370,11 @@ pub struct IntentFingerprint {
     pub intent_id: String,
     /// Intent kind discriminator (`assign`, `register`, or `complete`).
     pub kind: String,
-    /// Intent target text.
     pub target: String,
     /// Base-view mark text the intent was built on.
     pub base: String,
     /// Rationale origin text (`conversation` or `management-surface`).
     pub rationale_origin: String,
-    /// Rationale quote, if the intent carried one.
     pub rationale_quote: Option<String>,
 }
 
@@ -438,9 +385,7 @@ pub struct IntentFingerprint {
 /// conflict the caller clarifies.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IntentOutcomeRecord {
-    /// What the intent asked.
     pub fingerprint: IntentFingerprint,
-    /// Terminal outcome snapshot.
     pub outcome: IntentOutcome,
 }
 
@@ -453,10 +398,7 @@ pub struct IntentOutcomeRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IntentOutcome {
     /// Stored as a rule at this revision view.
-    StoredAsRuleView {
-        /// Revision view committed by this intent.
-        revision: String,
-    },
+    StoredAsRuleView { revision: String },
     /// Applied as a one-time approval.
     AppliedAsOneTime,
     /// Held for a pending Owner decision.
@@ -473,19 +415,12 @@ pub enum IntentOutcome {
     },
 }
 
-/// Outcome of a same-route shortcut claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShortcutIntentOutcome {
     /// Route already holds: snapshot recorded, answer the current record.
-    Hit {
-        /// Current consent record behind the answer.
-        current: ConsentRecord,
-    },
+    Hit { current: ConsentRecord },
     /// Route differs: answer through the normal path. Nothing recorded.
-    Miss {
-        /// Current consent record, if any, for the caller to continue with.
-        current: Option<ConsentRecord>,
-    },
+    Miss { current: Option<ConsentRecord> },
 }
 
 /// Renders the base-view mark for a consent revision: `consent-none` when
@@ -510,15 +445,10 @@ pub fn consent_mark_rev(rev: Option<u64>) -> String {
 /// most once per id.
 #[derive(Debug, Default)]
 pub struct EvaluationTracker {
-    /// Fingerprint each live issued id was minted for. A successful
-    /// [`consume`](EvaluationTracker::consume) removes the entry, so one
-    /// map carries both issuance and single-use state: present means
-    /// unused, absent means unknown or already consumed.
     issued: HashMap<RawId, EvalFingerprint>,
 }
 
 impl EvaluationTracker {
-    /// Creates an empty tracker holding no issued ids.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -526,7 +456,6 @@ impl EvaluationTracker {
         }
     }
 
-    /// Mints a fresh single-use id bound to the candidate's fingerprint.
     pub fn mint(&mut self, candidate: &InferenceUseCandidate) -> PermissionEvaluationId {
         let id = PermissionEvaluationId(RawId::new());
         self.issued.insert(id.0, candidate.fingerprint());
@@ -567,8 +496,6 @@ impl EvaluationTracker {
 /// 5. Otherwise the candidate is allowed for exactly one use: a fresh id is
 ///    minted from `tracker` and returned in
 ///    [`LiveAuthorizationDecision::AllowForThisUse`].
-///
-/// This function performs no I/O; the caller supplies the stored record.
 pub fn check_live_authorization(
     query: &CheckLiveAuthorizationQuery,
     current: Option<&ConsentRecord>,

@@ -38,11 +38,10 @@ use crate::secret::SecretValue;
 ///
 /// Secret custody: generation stays with the caller (the pairing repository
 /// approve path mints the secret); this store only persists and returns
-/// custody. [`load_secret`](FileDeviceAuthStore::load_secret) hands back an
-/// owned [`SecretValue`], which is zeroized on drop and has no `Debug`
-/// rendering. Secrets and descriptors are never logged and never appear in
-/// this type's `Debug` output, which shows the path and the entry count
-/// only.
+/// custody via [`load_secret`](FileDeviceAuthStore::load_secret), which hands
+/// back an owned [`SecretValue`]. Secrets and descriptors are never logged and
+/// never appear in this type's `Debug` output, which shows the path and the
+/// entry count only.
 ///
 /// File protection: on Unix the file at rest must be mode `0600`. Opening an
 /// existing file with any other mode attempts to tighten it to `0600` and
@@ -77,17 +76,12 @@ use crate::secret::SecretValue;
 /// without this file authenticates nothing until fresh pairing mints new
 /// material.
 pub struct FileDeviceAuthStore {
-    /// Location of the protected JSON file; the parent directory is owned by
-    /// the caller.
     path: PathBuf,
 }
 
 impl core::fmt::Debug for FileDeviceAuthStore {
-    /// Renders the path and the entry count only.
-    ///
-    /// The read is best-effort: when the file cannot be read or parsed, the
-    /// count renders as `"unreadable"` instead of failing. Secrets and
-    /// descriptors never appear here.
+    /// The read is best-effort: an unreadable or unparseable file renders
+    /// the count as `"unreadable"` instead of failing.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self.read_entries() {
             Ok(entries) => f
@@ -107,12 +101,11 @@ impl core::fmt::Debug for FileDeviceAuthStore {
 impl FileDeviceAuthStore {
     /// Opens the protected device-auth file at `path`.
     ///
-    /// The caller owns directory creation: opening fails when the parent
-    /// directory is missing. A missing file opens as an empty store and is
-    /// created lazily on the first save. An existing file keeps its bytes
-    /// untouched, but on Unix its mode is verified (and tightened to `0600`
-    /// when lax; see the type-level contract). Paths naming no file, and
-    /// paths naming a directory, are rejected.
+    /// A missing file opens as an empty store and is created lazily on the
+    /// first save. An existing file keeps its bytes untouched, but on Unix
+    /// its mode is verified (and tightened to `0600` when lax; see the
+    /// type-level contract). Paths naming no file, and paths naming a
+    /// directory, are rejected.
     ///
     /// # Errors
     ///
@@ -157,8 +150,8 @@ impl FileDeviceAuthStore {
     /// validation on it, it only takes custody. The entry's `descriptor` is
     /// the owner-visible display string and `paired_at` is stamped with the
     /// write time for display and audit only (it is not the pairing record's
-    /// pairing time). The write goes through the atomic temp-plus-rename
-    /// path; concurrent approves must be owner-serialized by the caller.
+    /// pairing time). Concurrent approves must be owner-serialized by the
+    /// caller.
     ///
     /// # Errors
     ///
@@ -185,8 +178,6 @@ impl FileDeviceAuthStore {
 
     /// Loads the persisted secret for `device`, if any.
     ///
-    /// Every call reads the file through: there is no cache, so a rotation
-    /// or revocation persisted by another process is observed immediately.
     /// An unknown device (or a missing file) yields `Ok(None)`; only an
     /// unreadable or malformed file yields an error, never a silent default.
     ///
@@ -213,17 +204,12 @@ impl FileDeviceAuthStore {
 
     /// Verifies one pairing ownership proof against the persisted secret.
     ///
-    /// Loads through [`load_secret`](FileDeviceAuthStore::load_secret) on
-    /// every call: there is no cache, so verification always observes the
-    /// latest persisted rotation or revocation. Authentication stays
-    /// per-connection-once, so the extra file read costs correctness nothing
-    /// it cannot afford. The secret bytes never leave this crate: they are
-    /// borrowed into the constant-time comparison inside
-    /// [`verify_pairing_proof`] and zeroized on drop with the [`SecretValue`].
-    /// An unknown device yields `Ok(false)`; a stored secret that is not
-    /// valid UTF-8 (never minted by the approve path, which stores UUID text)
-    /// likewise yields `Ok(false)`. Both are fail-closed without
-    /// distinguishing the reason to the caller.
+    /// The secret bytes never leave this crate: they are borrowed into the
+    /// constant-time comparison inside [`verify_pairing_proof`] and zeroized
+    /// on drop with the [`SecretValue`]. An unknown device yields `Ok(false)`;
+    /// a stored secret that is not valid UTF-8 (never minted by the approve
+    /// path, which stores UUID text) likewise yields `Ok(false)`. Both are
+    /// fail-closed without distinguishing the reason to the caller.
     ///
     /// # Errors
     ///
@@ -264,7 +250,6 @@ impl FileDeviceAuthStore {
         self.write_entries(&entries)
     }
 
-    // Reads and validates the whole file; a missing file reads as empty.
     fn read_entries(&self) -> Result<BTreeMap<String, StoredDeviceAuth>, CredentialTechnicalError> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
@@ -314,8 +299,6 @@ impl FileDeviceAuthStore {
         Ok(entries)
     }
 
-    // Renders the entries and replaces the file via temp-plus-rename in the
-    // same directory, so readers never observe a partial document.
     fn write_entries(
         &self,
         entries: &BTreeMap<String, StoredDeviceAuth>,
@@ -345,10 +328,7 @@ impl FileDeviceAuthStore {
 
 // One file entry: secret bytes as lowercase hex plus display and timing
 // metadata. Keys live in the surrounding map, canonicalized to hyphenated
-// UUID text. Unknown fields are rejected at decode (`deny_unknown_fields`)
-// so a hand-edited file with stray keys fails closed instead of silently
-// dropping them; duplicate and missing fields are rejected by the derived
-// `Deserialize` impl itself.
+// UUID text.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredDeviceAuth {
@@ -357,23 +337,16 @@ struct StoredDeviceAuth {
     paired_at: String,
 }
 
-// Renders `device` as canonical hyphenated UUID text for use as a file key.
 fn device_key(device: &DeviceId) -> String {
     device.0.as_uuid().to_string()
 }
 
-// Parses a file key back into a `DeviceId`; yields `None` for anything that
-// is not UUID text. The backing UUID type is inferred through
-// `RawId::from_uuid` and never named, so this stays on the existing
-// dependency set.
+// The backing UUID type is inferred through `RawId::from_uuid` and never
+// named, so this stays on the existing dependency set.
 pub(crate) fn parse_device_key(text: &str) -> Option<DeviceId> {
     text.parse().ok().map(RawId::from_uuid).map(DeviceId)
 }
 
-// Enforces owner-only mode on an existing file (Unix): already-`0600` passes
-// through, anything else is tightened, and a tighten that does not stick is
-// an error. Non-Unix has no mode to enforce; the call still succeeds so the
-// documented directory-level protection applies instead.
 #[cfg(unix)]
 fn enforce_owner_only(path: &Path) -> Result<(), CredentialTechnicalError> {
     let shown = path.display();
@@ -401,15 +374,14 @@ fn enforce_owner_only(path: &Path) -> Result<(), CredentialTechnicalError> {
     Ok(())
 }
 
-// Non-Unix platforms have no Unix mode bits; protection rests on the
-// caller-owned directory, as documented on the store.
+// No Unix mode bits to enforce here; protection rests on the caller-owned
+// directory.
 #[cfg(not(unix))]
 fn enforce_owner_only(_path: &Path) -> Result<(), CredentialTechnicalError> {
     Ok(())
 }
 
-// Stages the new document to a temp file in the same directory. On Unix the
-// temp is created `0600` so secrets are never briefly world-readable;
+// Unix creates the temp `0600` so secrets are never briefly world-readable;
 // `sync_all` keeps a crash from leaving a truncated temp behind.
 fn stage_file(tmp: &Path, rendered: &[u8]) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
@@ -421,8 +393,6 @@ fn stage_file(tmp: &Path, rendered: &[u8]) -> std::io::Result<()> {
     staged.sync_all()
 }
 
-// Best-effort temp cleanup after a failed write; leftovers stay in the same
-// directory for the owner to notice and remove.
 fn remove_best_effort(tmp: &Path) {
     if std::fs::remove_file(tmp).is_err() {
         // Nothing to do: the temp carries no trust beyond the store file
@@ -430,12 +400,8 @@ fn remove_best_effort(tmp: &Path) {
     }
 }
 
-// Renders the whole document in one canonical shape: entries ordered by
-// device key (`BTreeMap` iteration), no whitespace, trailing newline.
-// Struct field order fixes the entry key order, so the rendering the doc
-// comment on [`FileDeviceAuthStore`] shows is exact. `serde_json` is the one
-// JSON implementation for both directions; a render failure is reported,
-// never defaulted.
+// `serde_json` is the one JSON implementation for both directions; a render
+// failure is reported, never defaulted.
 fn render_device_auth_file(
     entries: &BTreeMap<String, StoredDeviceAuth>,
 ) -> Result<String, CredentialTechnicalError> {
@@ -452,12 +418,10 @@ fn render_device_auth_file(
     Ok(rendered)
 }
 
-// Parses the whole document with `serde_json`; every failure maps to one
-// fixed content-free detail. `serde_json` error displays can echo the
-// offending input (unexpected values, unknown field names), and this file
-// holds secrets and descriptors — so nothing from the decoder output ever
-// reaches an error string. Semantic checks (UUID keys, hex secrets,
-// RFC 3339 timestamps) happen in `read_entries`.
+// Every decode failure maps to one fixed content-free detail: `serde_json`
+// error displays can echo the offending input (unexpected values, unknown
+// field names), and this file holds secrets and descriptors. Semantic checks
+// (UUID keys, hex secrets, RFC 3339 timestamps) happen in `read_entries`.
 fn parse_device_auth_file(bytes: &[u8]) -> Result<BTreeMap<String, StoredDeviceAuth>, String> {
     serde_json::from_slice::<DeviceAuthFile>(bytes)
         .map(|file| file.devices)
@@ -471,13 +435,12 @@ fn parse_device_auth_file(bytes: &[u8]) -> Result<BTreeMap<String, StoredDeviceA
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeviceAuthFile {
-    /// Device entries keyed by canonical UUID text; duplicates rejected.
     #[serde(deserialize_with = "devices_without_duplicates")]
     devices: BTreeMap<String, StoredDeviceAuth>,
 }
 
-// Rejects duplicate device entries at decode: deserializing straight into
-// a map would let a later entry silently overwrite an earlier one, but the
+// Rejects duplicate device entries at decode: deserializing straight into a
+// map would let a later entry silently overwrite an earlier one, and the
 // custody contract fails closed on hand-edited files instead.
 fn devices_without_duplicates<'de, D>(
     deserializer: D,

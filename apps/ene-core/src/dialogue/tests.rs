@@ -189,8 +189,6 @@ async fn round_test_handle(
     Ok((handle, dir))
 }
 
-/// Extracts the accepted round from the first answer, failing the test
-/// on anything else.
 fn accepted_round(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RoundWireId, String> {
     let Some(first) = responses.first() else {
         return Err(String::from("the submit must answer"));
@@ -203,7 +201,6 @@ fn accepted_round(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RoundWireId
     }
 }
 
-/// Extracts a wire rejection kind from the first answer.
 fn reject_kind(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RejectKind, String> {
     let Some(first) = responses.first() else {
         return Err(String::from("the submit must answer"));
@@ -233,7 +230,6 @@ fn reject_on(
     Ok(kind)
 }
 
-/// Counts durable history rows through the repository contract.
 async fn timeline_count(handle: &HostHandle) -> Result<usize, String> {
     use ene_companion::CompanionRepository as _;
     use ene_companion::HistoryRepository as _;
@@ -251,7 +247,6 @@ async fn timeline_count(handle: &HostHandle) -> Result<usize, String> {
     Ok(timeline.len())
 }
 
-/// Loads the current attribution through the repository contract.
 async fn current_generation(handle: &HostHandle) -> Result<u64, String> {
     use ene_companion::CompanionRepository as _;
     use ene_presence::PresenceRepository as _;
@@ -752,8 +747,6 @@ async fn full_dialogue_round_streams_and_restores() {
     assert_eq!(second.items.len(), 2, "the replay appends nothing durable");
 }
 
-/// A `fresh` send mints a new round even when an open round would
-/// match: force-new is its own round intent.
 #[tokio::test]
 async fn fresh_send_mints_despite_matching_open_round() -> Result<(), String> {
     let transport = ok_transport();
@@ -792,8 +785,6 @@ async fn fresh_send_mints_despite_matching_open_round() -> Result<(), String> {
     Ok(())
 }
 
-/// Repeated sends into the same open round reuse its one wire
-/// projection: 1 domain round, 1 wire, across every message.
 #[tokio::test]
 async fn same_round_reuses_one_wire_projection() -> Result<(), String> {
     let transport = ok_transport();
@@ -1026,7 +1017,6 @@ async fn forced_fresh_with_a_round_premise_is_declined() -> Result<(), String> {
         frame.envelope.observed.round_view = view;
         frame
     };
-    // `fresh` + payload round (equal premise), no round view.
     let with_round = build_forced(Some(first_round.clone()), None);
     let answers = handle
         .handle_frame(with_round, live.clone(), &transport)
@@ -1043,7 +1033,6 @@ async fn forced_fresh_with_a_round_premise_is_declined() -> Result<(), String> {
         "a force-new frame carrying a payload round must decline stale, got {:?}",
         only.payload
     );
-    // `fresh` + round view (no payload round).
     let viewed = build_forced(None, Some(first_round.clone()));
     let answers = handle.handle_frame(viewed, live.clone(), &transport).await;
     let Some(only) = answers.first() else {
@@ -1057,7 +1046,6 @@ async fn forced_fresh_with_a_round_premise_is_declined() -> Result<(), String> {
         "a force-new frame carrying a round view must decline stale, got {:?}",
         only.payload
     );
-    // `fresh` + mismatched round and round view.
     let mismatched = build_forced(
         Some(first_round.clone()),
         Some(RoundWireId(String::from("other-round"))),
@@ -1076,7 +1064,6 @@ async fn forced_fresh_with_a_round_premise_is_declined() -> Result<(), String> {
         "a force-new frame with mismatched premises must decline stale, got {:?}",
         only.payload
     );
-    // The premise-free force-new shape is the legal one: it mints.
     let forced = build_forced(None, None);
     let forced_round =
         accepted_round(&handle.handle_frame(forced, live.clone(), &transport).await)?;

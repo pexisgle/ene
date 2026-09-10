@@ -1,6 +1,3 @@
-//! Unit tests for the credential registry, secret stores, pairing proofs, and
-//! device-auth file custody.
-
 use crate::CredentialTechnicalError;
 use crate::auth_file::FileDeviceAuthStore;
 use crate::pairing::DeviceId;
@@ -118,7 +115,6 @@ fn credential_ref_grammar_is_fixed() {
     assert_eq!(acme_main().id(), "acme:main");
     assert_eq!(acme_main().provider(), "acme");
     assert_eq!(acme_main().label(), "main");
-    // The id splits at the first ':', so a label may contain ':'.
     let colon_label = CredentialRef::new("acme", "team:main").expect("label may contain ':'");
     assert_eq!(colon_label.id(), "acme:team:main");
     assert_eq!(colon_label.label(), "team:main");

@@ -1,8 +1,4 @@
 //! Typed configuration values with layered loading and validation.
-//!
-//! [`Config`] is the minimal `Stage 1` configuration: a UI locale name and an
-//! optional explicit data directory override. It carries no domain state, no
-//! secret-typed fields, and no runtime judgments such as autostart selection.
 
 use std::path::{Path, PathBuf};
 
@@ -13,27 +9,21 @@ use figment::providers::{Format, Json, Serialized};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Prefix for environment-sourced overrides such as `ENE_LANGUAGE`.
 const ENV_PREFIX: &str = "ENE_";
 
-/// Suffix selecting [`Config::language`].
 const LANGUAGE_SUFFIX: &str = "LANGUAGE";
 
-/// Suffix selecting [`Config::data_dir`].
 const DATA_DIR_SUFFIX: &str = "DATA_DIR";
 
-/// Returns the built-in default for [`Config::language`].
 fn default_language() -> String {
     "ja".to_string()
 }
 
 /// Minimal `Stage 1` process configuration.
 ///
-/// Holds only general startup values owned by no domain: the UI locale name
-/// and an optional explicit data directory override. There are deliberately
-/// no secret-typed fields (no `secret`, `token`, or `password` keys), no
-/// domain state, and no runtime judgments: autostart selection belongs to a
-/// future presentation crate, not here.
+/// There are deliberately no secret-typed fields (no `secret`, `token`, or
+/// `password` keys), no domain state, and no runtime judgments: autostart
+/// selection belongs to a future presentation crate, not here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Config {
     /// UI locale name such as `"ja"`.
@@ -42,16 +32,13 @@ pub struct Config {
     #[serde(default = "default_language")]
     pub language: String,
 
-    /// Explicit data directory override.
-    ///
-    /// [`None`] (the default) selects the OS default from
+    /// Explicit override; [`None`] (the default) selects the OS default from
     /// [`crate::paths::default_data_dir`].
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
-    /// Returns the built-in defaults: Japanese locale, no directory override.
     fn default() -> Self {
         Self {
             language: default_language(),
@@ -60,31 +47,25 @@ impl Default for Config {
     }
 }
 
-/// Local configuration failure, derived with `thiserror` per the repository
-/// convention for library errors.
+/// Failure to load or validate [`Config`].
 ///
-/// The `figment` failure is boxed: `figment::Error` is over 200 bytes and
-/// must not bloat the enum or every `Result` that carries it.
+/// The `figment` failure is boxed: `figment::Error` is over 200 bytes and must
+/// not bloat the enum or every `Result` that carries it.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    /// [`Config::language`] was empty or whitespace-only.
     #[error("language must not be empty")]
     EmptyLanguage,
-    /// Layered loading or extraction through `figment` failed.
     #[error("configuration load failed: {0}")]
     Figment(#[from] Box<figment::Error>),
 }
 
 impl From<figment::Error> for ConfigError {
-    /// Boxes a `figment` loading or extraction failure.
     fn from(error: figment::Error) -> Self {
         Self::Figment(Box::new(error))
     }
 }
 
 impl Config {
-    /// Checks the configuration values without touching the filesystem.
-    ///
     /// # Errors
     ///
     /// Returns [`ConfigError::EmptyLanguage`] when [`Config::language`] is
@@ -124,8 +105,6 @@ impl Config {
         Ok(merged)
     }
 
-    /// Reads the process environment without claiming UTF-8 handling.
-    ///
     /// Entries that are not valid Unicode on either side are dropped here,
     /// before selection, so a stray non-UTF-8 variable can neither panic the
     /// load nor leak undecodable bytes into configuration values.
@@ -134,13 +113,10 @@ impl Config {
     }
 }
 
-/// Loads the file-backed layers (built-in defaults, then the JSON file at
-/// `path` when [`Some`]) without consulting the environment and without
-/// validating.
+/// Built-in defaults plus the optional JSON file at `path`; does not consult
+/// the environment and does not validate.
 ///
-/// A missing file contributes no values; a present but unreadable or
-/// malformed file is reported as [`ConfigError::Figment`]. Callers apply
-/// [`select_env`]/[`apply_env`] and then [`Config::validate`].
+/// Callers apply [`select_env`]/[`apply_env`] and then [`Config::validate`].
 ///
 /// # Errors
 ///
@@ -154,13 +130,8 @@ fn file_layers(path: Option<&Path>) -> Result<Config, ConfigError> {
     Ok(figment.extract()?)
 }
 
-/// Selects this crate's overrides from environment-style pairs.
-///
-/// Only keys starting with `ENE_` are kept, with the prefix stripped, so
-/// `ENE_LANGUAGE` becomes `("LANGUAGE", value)`. Unknown suffixes are kept
-/// as well; [`apply_env`] decides which ones take effect. Selection is a
-/// pure function of its input, which keeps precedence testable without
-/// touching the process environment.
+/// Unknown suffixes are kept as well; [`apply_env`] decides which ones take
+/// effect.
 fn select_env(pairs: Vec<(OsString, OsString)>) -> Vec<(String, String)> {
     let mut selected = Vec::new();
     for (key, value) in pairs {
@@ -174,11 +145,6 @@ fn select_env(pairs: Vec<(OsString, OsString)>) -> Vec<(String, String)> {
     selected
 }
 
-/// Applies previously selected environment overrides to `base`.
-///
-/// `LANGUAGE` replaces the locale, `DATA_DIR` replaces the data directory
-/// override, and any other suffix is ignored. Application is a pure function
-/// of its inputs; validation stays with the caller.
 fn apply_env(mut base: Config, overrides: Vec<(String, String)>) -> Config {
     for (suffix, value) in overrides {
         if suffix == LANGUAGE_SUFFIX {
@@ -197,7 +163,6 @@ mod tests {
     use std::io::Write as _;
     use std::path::PathBuf;
 
-    /// Builds native-style pairs from plain strings for [`select_env`].
     fn native(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         pairs
             .iter()
@@ -205,7 +170,7 @@ mod tests {
             .collect()
     }
 
-    /// Writes `contents` to a temp file. Keep the handle; drop deletes it.
+    /// Keep the handle: dropping it deletes the file.
     fn write_config_file(contents: &str) -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().expect("temp config file must be created");
         file.write_all(contents.as_bytes())

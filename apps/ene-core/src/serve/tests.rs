@@ -23,11 +23,9 @@ fn sender() -> WireSender {
     }
 }
 
-/// Stamps a frame with the connection binding its `live` premises carry.
-///
-/// Direct-handle tests build envelopes by hand, so every post-capability
-/// frame needs this stamp to pass the gate the same way a
-/// connection-table-built frame would.
+/// Stamps a frame with the connection binding its `live` premises carry, as a
+/// connection-table-built frame would: direct-handle tests build envelopes by
+/// hand.
 fn stamped(mut frame: super::WireFrame, live: &LiveInput) -> super::WireFrame {
     frame.envelope.sender.connection_id = Some(live.connection_id);
     frame
@@ -605,8 +603,8 @@ async fn pre_accept_denials_and_closes_hide_the_connection_id() {
     let denied = handle
         .handle_frame(pairing_frame("laptop"), unpaired_input(), &transport)
         .await;
-    // Fresh descriptor pends (no denial here); the peer-mismatch and
-    // blank denials below are the hiding cases.
+    // The fresh descriptor pends rather than denying; the peer-mismatch
+    // denial and the two closes below are the hiding cases.
     assert!(
         denied.first().is_some_and(|first| matches!(
             &first.payload,

@@ -91,16 +91,12 @@ use crate::serve::{
 
 /// Maximum stream chunk size in Unicode scalar values.
 ///
-/// Chunking walks `char` boundaries, so a chunk never splits a code point;
-/// multi-byte text stays intact at the cost of byte-uneven frames.
+/// Chunks never split a code point, at the cost of byte-uneven frames.
 pub const CHUNK_CHARS: usize = 200;
 
-/// Splits response text into [`CHUNK_CHARS`]-sized stream deltas.
-///
-/// Char-boundary safe by construction (iteration is over `chars`). Always
-/// returns at least one chunk: empty text yields one empty delta so every
-/// stream carries a final frame (a frame without `is_final` never completes
-/// anything, and an empty stream would leave completion ambiguous).
+/// Always returns at least one chunk: empty text yields one empty delta so
+/// every stream carries a final frame (a frame without `is_final` never
+/// completes anything, and an empty stream would leave completion ambiguous).
 #[must_use]
 pub fn chunk_text(text: &str) -> Vec<String> {
     let mut chunks = Vec::new();
@@ -118,9 +114,6 @@ pub fn chunk_text(text: &str) -> Vec<String> {
     chunks
 }
 
-/// Maps the envelope's client-minted command ID to the durable idempotency
-/// identity, if it parses as a UUID.
-///
 /// Garbage maps to [`None`] (no replay key) rather than rejection: a
 /// malformed key only degrades that sender's own idempotency, and every
 /// well-formed client mints fresh UUIDs. Transport retry reuses the same
@@ -134,19 +127,17 @@ fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<Comm
 
 /// Canonical client round premise of one [`SubmitTextInput`] send.
 ///
-/// One rule covers every carrier. The payload names the premise (IPC §21
-/// maps the intake candidate's round from `SubmitTextInput.round`); the
-/// envelope `round_view` is the mirror the Client relied on (IPC §5:
-/// comparison material, not a claim) and must agree with the payload
-/// premise once it is populated. A disagreement means the frame carries
-/// two different round premises: neither side is adopted — the caller
-/// answers stale with current values, and the Client re-syncs.
+/// The payload names the premise (`SubmitTextInput.round`); the envelope
+/// `round_view` is the mirror the Client relied on (IPC §5: comparison
+/// material, not a claim) and must agree with it once populated. A
+/// disagreement means two different round premises: neither side is adopted
+/// — the caller answers stale with current values and the Client re-syncs.
 ///
 /// A force-new request is the design's round-less new-round request
-/// (IPC §13.1: `round = None`, `round_view = None`), so it names no
-/// premise at all. A force-new frame carrying a premise in either carrier
-/// is self-contradictory and is rejected here, never silently
-/// reinterpreted as the flag or joined on the hint.
+/// (IPC §13.1: `round = None`, `round_view = None`), so it names no premise
+/// at all. A force-new frame carrying a premise in either carrier is
+/// self-contradictory and is rejected here, never silently reinterpreted as
+/// the flag or joined on the hint.
 enum RoundPremise {
     /// A round-less request: join-or-mint.
     Auto,
@@ -168,7 +159,6 @@ fn canonical_round_premise(
     }
 }
 
-/// Maps an intake revalidation reason to the `Stage 2` wire vocabulary.
 fn intake_reason(reason: &RevalidationReason) -> &'static str {
     match reason {
         RevalidationReason::MissingGenerationView => "missing-generation-view",
@@ -179,7 +169,6 @@ fn intake_reason(reason: &RevalidationReason) -> &'static str {
     }
 }
 
-/// Builds an accept ack for a Host-issued round.
 fn accept_frame(frame: &WireFrame, live: &LiveInput, round: &RoundWireId) -> WireFrame {
     outgoing_frame(
         frame,
@@ -190,7 +179,6 @@ fn accept_frame(frame: &WireFrame, live: &LiveInput, round: &RoundWireId) -> Wir
     )
 }
 
-/// Builds a stream opening for a round at a presence generation.
 fn open_frame(
     frame: &WireFrame,
     live: &LiveInput,
@@ -209,7 +197,6 @@ fn open_frame(
     )
 }
 
-/// Builds a stream close record.
 fn close_frame(
     frame: &WireFrame,
     live: &LiveInput,
@@ -226,7 +213,6 @@ fn close_frame(
     )
 }
 
-/// Builds the accept-plus-interrupted sequence for a post-accept failure.
 fn interrupted_frames(
     frame: &WireFrame,
     live: &LiveInput,
@@ -241,7 +227,6 @@ fn interrupted_frames(
     ]
 }
 
-/// Builds a stale-round outcome frame with explicit current values.
 fn stale_frame_with(
     frame: &WireFrame,
     live: &LiveInput,
@@ -258,7 +243,6 @@ fn stale_frame_with(
     )
 }
 
-/// Builds a held-for-transition outcome frame.
 fn held_frame(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     outgoing_frame(
         frame,
@@ -267,7 +251,6 @@ fn held_frame(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     )
 }
 
-/// Builds a needs-revalidation outcome frame with a fixed wire reason.
 fn revalidate_frame(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFrame {
     outgoing_frame(
         frame,
@@ -278,7 +261,6 @@ fn revalidate_frame(frame: &WireFrame, live: &LiveInput, reason: &str) -> WireFr
     )
 }
 
-/// Renders the typed wire detail for one command-key conflict.
 fn command_conflict_detail(command: &CommandId) -> String {
     format!(
         "command {} reused with a different request",
@@ -286,8 +268,6 @@ fn command_conflict_detail(command: &CommandId) -> String {
     )
 }
 
-/// Maps an admission decline to the `Stage 2` revalidation vocabulary.
-///
 /// Admission never produces the route-mismatch or over-limit reasons; they
 /// map defensively rather than claiming a setup failure.
 fn admission_reason(reason: NotSentReason) -> &'static str {
@@ -300,7 +280,6 @@ fn admission_reason(reason: NotSentReason) -> &'static str {
     }
 }
 
-/// Builds the completed response sequence for an adopted reply.
 fn completed_frames(
     frame: &WireFrame,
     live: &LiveInput,
@@ -334,22 +313,17 @@ fn completed_frames(
     responses
 }
 
-/// Outcome of one presence attach compare-and-commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AttachOutcome {
-    /// The compare won and the confirm committed: carries the fresh fact.
-    ///
-    /// Only this arm lets the caller proceed with the new generation; the
-    /// generation comes from the committed fact, never from an assumption
-    /// that the attach succeeded.
+    /// Only this arm lets the caller proceed, with the generation from the
+    /// committed fact — never an assumption that the attach succeeded.
     Attached(PresenceAttribution),
-    /// The compare lost (or the store failed): the caller reloads and
-    /// reports the resulting state honestly instead of proceeding.
+    /// The compare lost or the store failed: the caller reloads instead of
+    /// proceeding.
     Raced,
 }
 
 impl HostHandle {
-    /// Returns the open round wire ref for a client/companion pair, if any.
     pub(crate) fn open_wire_for(
         &self,
         client_ref: &str,
@@ -360,7 +334,6 @@ impl HostHandle {
         Some(RoundWireId(wire))
     }
 
-    /// Builds a stale-round outcome frame from the current attribution.
     pub(crate) fn stale_frame(
         &self,
         frame: &WireFrame,
@@ -375,18 +348,12 @@ impl HostHandle {
 
     /// Attaches presence for the paired device when none is active.
     ///
-    /// Best-effort by design and called only from the submit path: the caller
-    /// pins the `NoActive` view it just read (`expected_generation` must equal
-    /// the current generation, and the compare additionally pins the
-    /// `NoActive`/unowned shape), and only the compare winner proceeds — the
-    /// returned [`AttachOutcome::Attached`] fact carries the fresh generation
-    /// the winner proceeds with. A lost compare race, a denied or held
-    /// outcome, or a store failure all answer
-    /// [`AttachOutcome::Raced`]: the caller reloads and reports the resulting
-    /// state honestly instead of proceeding. The [`ClientId`] comes from the
-    /// deterministic device mapping, so a re-attaching device re-derives the
-    /// same id. No reply is produced here; the caller re-reads attribution
-    /// only on the raced path.
+    /// Called only from the submit path with the `NoActive` generation it
+    /// just read; only an [`AttachOutcome::Attached`] fact carries the fresh
+    /// generation the caller may proceed with, and [`AttachOutcome::Raced`]
+    /// means the caller reloads rather than proceeding. The [`ClientId`] comes
+    /// from the deterministic device mapping, so a re-attaching device
+    /// re-derives the same id. No reply is produced here.
     pub(crate) async fn attach_presence(
         &self,
         device_wire: &str,
@@ -421,42 +388,30 @@ impl HostHandle {
     /// round projection is minted atomically with its map entry (one domain
     /// round, one wire), and a racy duplicate that lands on
     /// [`HistoryAppendOutcome::AlreadyCommittedAs`] answers the original
-    /// accept without re-running inference. The inbound companion ref
-    /// resolves through [`HostHandle::resolve_companion`]: presence facts
-    /// issue the projection the Client echoes back. The canonical round
-    /// premise comes from the input `round`, a populated envelope
-    /// `round_view` must agree with it, and a force-new request carries no
-    /// premise at all — a contradictory frame (disagreement, or a premise
-    /// under `fresh`) answers stale with current values instead of
-    /// adopting either side; a present-but-unresolvable round is stale,
-    /// never rebound.
+    /// accept without re-running inference. The canonical round premise comes
+    /// from the input `round`, a populated envelope `round_view` must agree
+    /// with it, and a force-new request carries no premise at all — a
+    /// contradictory frame answers stale with current values instead of
+    /// adopting either side; a present-but-unresolvable round is stale, never
+    /// rebound.
     ///
     /// Presence attach runs only when the loaded attribution is `NoActive`,
     /// and only on the envelope's observed generation premise: a missing
-    /// `presence_generation_view` answers `NeedsRevalidation` with
-    /// `"missing-generation-view"` (no attach is attempted), a view that does
-    /// not equal the current `NoActive` generation answers `StaleRound` with
-    /// the current values, and only then does the compare-and-commit run with
-    /// the observed `(NoActive, generation)` expectation. Only the compare
-    /// winner proceeds, with the fresh generation from the committed fact
-    /// (never an assumed one); a lost race reloads and answers
-    /// `StaleRound`/`HeldForTransition` as appropriate.
+    /// `presence_generation_view` revalidates, a view that does not equal the
+    /// current `NoActive` generation answers stale with the current values,
+    /// and only then does the compare-and-commit run.
     ///
-    /// Idempotency is durable over the envelope `command_id`: a parseable
-    /// command id first looks up the history row through
-    /// [`lookup_command`](HistoryRepository::lookup_command). A hit is
+    /// Idempotency is durable over the envelope `command_id`, looked up
+    /// through [`lookup_command`](HistoryRepository::lookup_command) and
     /// judged by the same [`RequestFingerprint`] the store compares
-    /// in-transaction — role, body, language, sender incarnation, and the
-    /// canonical round intent, never the Host-decided round or its
-    /// projection — so an exact retry replays the stored accept ack
-    /// verbatim without re-appending or re-streaming anything, including
-    /// after a restart. A hit with a different request (or one whose
-    /// fingerprint cannot be reconstructed) answers a typed wire rejection
-    /// (`ConflictingCommand`), never an intake outcome. Stream outcome
-    /// replay is explicitly out of scope: only the accept ack replays. An
-    /// unparsable or missing command id carries no replay key: it is
-    /// declined before any state changes. Response text is never presented
-    /// unless its reply append committed.
+    /// in-transaction (role, body, language, sender incarnation, and the
+    /// canonical round intent — never the Host-decided round or its
+    /// projection): an exact retry replays the stored accept ack verbatim
+    /// without re-appending or re-streaming anything, including after a
+    /// restart, while a different request answers a typed wire rejection
+    /// (`ConflictingCommand`), never an intake outcome. Response text is never
+    /// presented unless its reply append committed. Stream outcome replay is
+    /// explicitly out of scope: only the accept ack replays.
     pub(crate) async fn submit_text(
         &self,
         frame: &WireFrame,
@@ -468,10 +423,9 @@ impl HostHandle {
             return vec![unpaired_close(frame, live)];
         };
         let client = device_client(&device_wire);
-        // The inbound companion ref resolves through the handle mapping —
-        // never assumed, never derived. An unknown ref (including a
-        // projection rotated by a restart) revalidates so the Client
-        // relearns the current projection from presence and converges.
+        // The companion ref resolves through the handle mapping, never
+        // assumed or derived: an unknown ref (a projection rotated by a
+        // restart) revalidates so the Client relearns from presence.
         let companion = match self.resolve_companion(&submit.companion.0).await {
             Err(_) => return vec![held_frame(frame, live)],
             Ok(None) => {
@@ -514,8 +468,7 @@ impl HostHandle {
         };
         // The request fingerprint is the immutable client semantics: role,
         // body, language, sending incarnation, and the canonical round
-        // intent. `fresh` requests the design's round-less new-round shape,
-        // so a force-new frame carries no premise (the gate above declined
+        // intent. Force-new carries no premise (the gate above declined
         // one); otherwise the premise decides.
         let round_intent = if submit.fresh {
             RoundIntentMark::New
@@ -623,10 +576,8 @@ impl HostHandle {
             },
         };
         // One meaning per value, matching the fingerprint's round intent:
-        // a force-new request mints and never joins (the CLI rejects
-        // combining `--new` with `--round`, and the premise gate above
-        // already declined a premise-carrying force-new frame); a resolved
-        // premise joins that round, and no premise joins-or-mints.
+        // force-new mints and never joins; a resolved premise joins that
+        // round; no premise joins-or-mints.
         let intent = if submit.fresh {
             RoundIntent::New
         } else {
@@ -756,9 +707,8 @@ impl HostHandle {
     /// Confirmation is an observation, never a report of completion: matching
     /// pending undelivered entries for the round move to presented (or to
     /// presentation-unknown for any non-presented status, including wire
-    /// `Failed`), and nothing is answered. An unresolvable round, a missing
-    /// companion, a pending-list failure, or a per-row mark failure all end
-    /// silently; the durable report state stays authoritative either way.
+    /// `Failed`). Failures end silently; the durable report state stays
+    /// authoritative either way.
     pub(crate) async fn confirm_presentation(
         &self,
         _frame: &WireFrame,
@@ -793,8 +743,6 @@ impl HostHandle {
         Vec::new()
     }
 
-    /// Answers one [`HistoryRequest`] with the filtered timeline.
-    ///
     /// Items map oldest-first with Host-filtered display facts only, never
     /// undelivered reporting. An unparseable `since` bound is ignored (display
     /// filtering only, never currentness evidence); a store failure answers an
@@ -806,9 +754,8 @@ impl HostHandle {
         request: &HistoryRequest,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        // The timeline resolves through the same companion mapping as
-        // submits: an unknown ref (or an unreadable store) answers an empty
-        // view, which is the documented `Stage 2` gap for this path.
+        // The same companion mapping as submits: an unknown ref answers an
+        // empty view, the documented `Stage 2` gap for this path.
         let Ok(Some(companion)) = self.resolve_companion(&request.companion.0).await else {
             return vec![empty_history(frame, live)];
         };
@@ -849,18 +796,10 @@ impl HostHandle {
         )]
     }
 
-    /// Resolves a domain round back to its wire string for the replay path.
-    ///
-    /// Thin wrapper over the shared map so the replay lookup reads one
-    /// vocabulary: [`None`] means the process no longer maps the round and
-    /// the caller answers stale.
     fn wire_for_round_value(&self, round: RawId) -> Option<String> {
         self.wire_for_round(&RoundId::from_raw(round))
     }
 
-    /// Answers a durable replay with its stored accept, or stale when no
-    /// projection survives.
-    ///
     /// The stored round wire travels verbatim, so a retry after a restart
     /// replays instead of going stale on the dropped transient map.
     /// Pre-opaque rows (no stored wire) fall back to the transient map; only
@@ -882,15 +821,13 @@ impl HostHandle {
     }
 }
 
-/// Runs the attach compare-and-commit plus confirm for one device client.
-///
-/// Best-effort: the compare pins the caller's observed `(NoActive,
-/// generation)` expectation, so a concurrent move wins by failing this compare
-/// instead of overwriting. A lost compare race, a denied or held outcome, a
-/// failed confirm, or a store failure all answer [`AttachOutcome::Raced`];
-/// only a committed confirm answers [`AttachOutcome::Attached`] with the
-/// fresh fact. An unconfirmed transition reads back as `InTransition`, so the
-/// caller's reload reports held, which is honest.
+/// The compare pins the caller's observed `(NoActive, generation)`
+/// expectation, so a concurrent move wins by failing this compare instead of
+/// overwriting. Only a committed confirm answers [`AttachOutcome::Attached`]
+/// with the fresh fact; a lost race, denied or held outcome, failed confirm,
+/// or store failure answers [`AttachOutcome::Raced`]. An unconfirmed
+/// transition reads back as `InTransition`, so the caller's reload reports
+/// held, which is honest.
 async fn attach_from(
     store: &Store,
     companion: RawId,
@@ -924,12 +861,10 @@ async fn attach_from(
     }
 }
 
-/// Host adapter implementing the owner's inference boundary.
-///
 /// Pure wiring: every admission, attempt, provider, adoption, and usage
-/// decision lives in `ene-inference`; this adapter only hands it the
-/// concrete repositories and takes the short tracker lock for the
-/// single-use authorization.
+/// decision lives in `ene-inference`; this adapter only hands it the concrete
+/// repositories and takes the short tracker lock for the single-use
+/// authorization.
 struct HostInference<'a, T> {
     store: &'a Store,
     cred_store: &'a CredStore,
@@ -967,7 +902,6 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
     }
 }
 
-/// Builds an empty timeline answer for the companion-ensure failure path.
 fn empty_history(frame: &WireFrame, live: &LiveInput) -> WireFrame {
     outgoing_frame(
         frame,

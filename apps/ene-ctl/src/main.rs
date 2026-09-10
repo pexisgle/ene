@@ -1,10 +1,8 @@
 //! `ene-ctl` CLI client entrypoint.
 //!
-//! Thin client: parses `--config PATH` plus one subcommand, loads
-//! [`Config`], resolves the effective data directory, dials the Host socket,
-//! and renders Host-filtered answers. The client holds no canonical state
-//! and establishes no local authority of its own; round identity stays
-//! Host-issued, and every acceptance or outcome is Host-reported.
+//! The client holds no canonical state and establishes no local authority of
+//! its own; round identity stays Host-issued, and every acceptance or outcome
+//! is Host-reported.
 //!
 //! Presentation output avoids the `print!` family (workspace-denied): all
 //! output goes through `writeln!`/`write!` on locked stdio handles with
@@ -38,12 +36,9 @@ use ene_api::v1::round::{ConfirmPresentationWire, PresentationStatus, StreamClos
 use ene_config::paths::resolve_data_dir;
 use ene_config::typed::Config;
 
-/// Parses `--config PATH` from `args` (excluding the program name).
-///
-/// Returns [`None`] when no arguments are given. A missing `--config` value
-/// or an unknown argument is a [`CliError::Usage`] whose message ends with
-/// [`USAGE`]. `--help` and `--version` are deferred to a later stage, so they
-/// are reported as unknown arguments for now.
+/// Every failure is a [`CliError::Usage`] whose message ends with [`USAGE`];
+/// `--help` and `--version` are deferred to a later stage, so they are
+/// reported as unknown arguments for now.
 fn parse_args(args: &[String]) -> Result<Option<PathBuf>, CliError> {
     let mut config: Option<PathBuf> = None;
     let mut iter = args.iter();
@@ -62,17 +57,12 @@ fn parse_args(args: &[String]) -> Result<Option<PathBuf>, CliError> {
     Ok(config)
 }
 
-/// Parsed command line: global config selection plus one subcommand.
 struct Cli {
-    /// `--config PATH` selection, when given (must precede the subcommand).
+    /// `--config PATH`; must precede the subcommand.
     config: Option<PathBuf>,
-    /// Subcommand with its operands.
     command: cmds::Command,
 }
 
-/// Parses the full command line: leading `--config PATH` pairs (via
-/// [`parse_args`], preserving its behavior), then exactly one subcommand.
-///
 /// A `--config` after the subcommand word belongs to the subcommand and is
 /// rejected as an unknown subcommand argument.
 fn parse_cli(args: &[String]) -> Result<Cli, CliError> {
@@ -98,7 +88,6 @@ fn parse_cli(args: &[String]) -> Result<Cli, CliError> {
     Ok(Cli { config, command })
 }
 
-/// Client entrypoint: parse, load configuration, dial the Host, run.
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -113,8 +102,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Loads configuration, resolves the data directory, and runs the subcommand
-/// on a single-threaded Tokio runtime (network-free: Unix socket only).
+/// Runs on a single-threaded Tokio runtime; the client is Unix-socket only
+/// (no network).
 fn run() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cli = parse_cli(&args)?;
@@ -132,7 +121,6 @@ fn run() -> Result<(), CliError> {
     runtime.block_on(run_command(&data_dir, &language, cli.command))
 }
 
-/// Dials the Host and dispatches the subcommand over the session.
 async fn run_command(
     data_dir: &Path,
     language: &str,
@@ -148,9 +136,6 @@ async fn run_command(
         }
         cmds::Command::Send(send) => run_send(&mut session, language, send).await,
         cmds::Command::Watch { round } => {
-            // No presentation observation here: watch prints already
-            // presented-or-unknown restored facts, and viewing them is not
-            // presenting a stream.
             let view = request_history(&mut session, cmds::DEFAULT_HISTORY_LIMIT).await?;
             emit(&cmds::render_round_history(&view, &round))
         }
@@ -161,8 +146,7 @@ async fn run_command(
     }
 }
 
-/// Writes one rendered block plus a newline to stdout, or nothing when the
-/// block is empty. Flushes explicitly so piped output is complete on return.
+/// Flushes explicitly so piped output is complete on return.
 fn emit(text: &str) -> Result<(), CliError> {
     if text.is_empty() {
         return Ok(());
@@ -176,7 +160,6 @@ fn emit(text: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Sends a view request and expects the filtered view back.
 async fn request_view(
     session: &mut client::Client,
     request: ene_api::v1::management::ManagementViewRequest,
@@ -193,7 +176,6 @@ async fn request_view(
     }
 }
 
-/// Sends a timeline request and expects the filtered items back.
 async fn request_history(
     session: &mut client::Client,
     limit: u64,
@@ -213,9 +195,6 @@ async fn request_history(
     }
 }
 
-/// Sends one management intent and maps its outcome: applied lines succeed,
-/// retryable declines become [`CliError::ServerOutcome`] (exit 2), terminal
-/// declines become [`CliError::ServerRejected`] (exit 1).
 async fn apply_intent(
     session: &mut client::Client,
     intent: ene_api::v1::management::ManagementIntent,
@@ -239,10 +218,6 @@ async fn apply_intent(
     }
 }
 
-/// Runs `setup`: `--show` renders the four Host sections; `--provider/--model`
-/// fetches the setup view for its mark, registers the credential intent
-/// (key sourced Host-side), then assigns provider/model over the shared
-/// consent target, and reports the recorded assignment.
 async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Result<(), CliError> {
     match mode {
         cmds::SetupMode::Show => {
@@ -269,19 +244,10 @@ async fn run_setup(session: &mut client::Client, mode: cmds::SetupMode) -> Resul
     }
 }
 
-/// Runs `send`: submits the candidate, prints the accepted round, streams
-/// deltas as they arrive, and ends with a newline on stream close. Intake
-/// declines become [`CliError::ServerOutcome`] (exit 2).
-///
-/// After the close frame and a successful flush of every buffered frame, the
-/// client sends one presentation observation for the round (the Host applies
-/// it silently and answers nothing): [`observe_close`] decides its status
-/// from the close reason and whether any frame was shown, and a
-/// non-completed close additionally fails with a `ServerOutcome` naming the
-/// status (exit 2) after the observation is sent. Any stdio failure before
-/// that point returns early and sends nothing, so the Host keeps the stream
-/// `Pending`/`Unknown` instead of recording a presentation the operator
-/// never saw.
+/// Any stdio failure before the close frame and the buffered frames are
+/// flushed returns early and sends no presentation observation, so the Host
+/// keeps the stream `Pending`/`Unknown` instead of recording a presentation
+/// the operator never saw.
 async fn run_send(
     session: &mut client::Client,
     language: &str,
@@ -375,17 +341,9 @@ async fn run_send(
     }
 }
 
-/// Maps a stream close to its presentation observation plus completion
-/// success: presentation fact and completion success are separate claims.
-///
-/// A [`Completed`](StreamClose::Completed) stream always observes
-/// [`Presented`](PresentationStatus::Presented) and succeeds. Any other close
-/// still sends an observation — [`Presented`](PresentationStatus::Presented)
-/// when the operator saw at least one frame (shown text stays presented even
-/// though the stream did not complete), else sticky
-/// [`Unknown`](PresentationStatus::Unknown) — but reports non-success so the
-/// caller exits 2 with a `ServerOutcome` naming the close status. Only frames
-/// shown on this live stream count: the opening frame alone shows nothing.
+/// Presentation fact and completion success are separate claims: text the
+/// operator saw stays presented even when the stream did not complete, and
+/// only frames of this live stream count (the opening frame shows nothing).
 fn observe_close(status: StreamClose, frames_shown: bool) -> (PresentationStatus, bool) {
     match status {
         StreamClose::Completed => (PresentationStatus::Presented, true),
@@ -401,22 +359,14 @@ fn observe_close(status: StreamClose, frames_shown: bool) -> (PresentationStatus
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for [`parse_args`](super::parse_args) and
-    //! [`parse_cli`](super::parse_cli).
-    //!
-    //! Both parsers are pure over their input slices, so every case runs
-    //! without touching the process environment.
-
     use std::path::{Path, PathBuf};
 
     use super::{CliError, USAGE, parse_args, parse_cli};
 
-    /// Builds owned arguments from plain words.
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_string()).collect()
     }
 
-    /// No arguments select no config file.
     #[test]
     fn no_args_selects_no_config_file() {
         assert!(
@@ -425,7 +375,6 @@ mod tests {
         );
     }
 
-    /// `--config PATH` selects that file.
     #[test]
     fn config_flag_selects_a_file() {
         let path = parse_args(&args(&["--config", "/tmp/ene.json"]))
@@ -437,7 +386,6 @@ mod tests {
         );
     }
 
-    /// A repeated `--config` keeps the last value.
     #[test]
     fn repeated_config_flag_keeps_the_last_value() {
         let path = parse_args(&args(&[
@@ -454,7 +402,6 @@ mod tests {
         );
     }
 
-    /// A missing `--config` value reports usage.
     #[test]
     fn missing_config_value_reports_usage() {
         let super::CliError::Usage(message) = parse_args(&args(&["--config"]))
@@ -468,7 +415,6 @@ mod tests {
         );
     }
 
-    /// An unknown argument reports usage.
     #[test]
     fn unknown_argument_reports_usage() {
         let super::CliError::Usage(message) = parse_args(&args(&["--unknown"]))
@@ -482,7 +428,6 @@ mod tests {
         );
     }
 
-    /// A stray positional argument reports usage.
     #[test]
     fn positional_argument_reports_usage() {
         let super::CliError::Usage(message) =
@@ -496,7 +441,6 @@ mod tests {
         );
     }
 
-    /// Deferred flags such as `--help` report usage for now.
     #[test]
     fn help_flag_reports_usage_while_deferred() {
         let super::CliError::Usage(message) = parse_args(&args(&["--help"]))
@@ -510,7 +454,6 @@ mod tests {
         );
     }
 
-    /// Asserts a [`parse_cli`] usage error ending with the usage text.
     fn assert_cli_usage(result: Result<super::Cli, CliError>, what: &str) {
         let Err(CliError::Usage(message)) = result else {
             panic!("{what} must be a usage error");
@@ -521,7 +464,6 @@ mod tests {
         );
     }
 
-    /// `--config` before the subcommand selects the file and the command.
     #[test]
     fn config_before_command_selects_both() {
         let parsed = parse_cli(&args(&["--config", "/tmp/ene.json", "status"]));
@@ -538,7 +480,6 @@ mod tests {
         );
     }
 
-    /// A missing subcommand reports usage.
     #[test]
     fn missing_command_reports_usage() {
         assert_cli_usage(parse_cli(&args(&[])), "no arguments");
@@ -548,7 +489,6 @@ mod tests {
         );
     }
 
-    /// A `--config` after the subcommand belongs to it and is rejected.
     #[test]
     fn config_after_command_reports_usage() {
         assert_cli_usage(
@@ -557,13 +497,11 @@ mod tests {
         );
     }
 
-    /// A missing `--config` value reports usage at the top level too.
     #[test]
     fn top_level_missing_config_value_reports_usage() {
         assert_cli_usage(parse_cli(&args(&["--config"])), "dangling --config");
     }
 
-    /// Full subcommand lines parse through the top level.
     #[test]
     fn full_command_lines_parse() {
         let parsed = parse_cli(&args(&["send", "hello"]));
@@ -572,7 +510,6 @@ mod tests {
         assert!(cli.config.is_none(), "no --config must select no file");
     }
 
-    /// Exit codes: server outcomes exit 2, everything else exits 1.
     #[test]
     fn exit_codes_split_outcome_from_failures() {
         assert!(
@@ -594,9 +531,6 @@ mod tests {
         }
     }
 
-    /// Close-status matrix: completion always presents and succeeds; any
-    /// other close still observes (presented when frames were shown, unknown
-    /// otherwise) but reports non-success.
     #[test]
     fn close_status_maps_presentation_and_success_separately() {
         use ene_api::v1::round::PresentationStatus;

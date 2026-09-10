@@ -90,8 +90,8 @@ impl UsageRepository for Store {
             let output_column =
                 encode_optional_count(fact.output_tokens).map_err(inference_unavailable)?;
             let guard = lock_shared(&conn);
-            // Plain insert: a duplicate ticket violates the primary key and maps
-            // to `StorageUnavailable`, never a panic.
+            // A duplicate ticket violates the primary key and maps to
+            // `StorageUnavailable`, never a panic.
             guard
                 .execute(
                     SQL_INSERT_USAGE,

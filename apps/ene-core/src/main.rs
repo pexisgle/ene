@@ -1,10 +1,8 @@
-//! Host composition root (`Stage 2` entrypoint).
+//! Host composition root (`Stage 2` entrypoint): wiring and lifecycle only.
 //!
-//! `ene-core` is the Host composition root: wiring and lifecycle only. It
-//! performs no semantic judgment and owns no domain state beyond the
+//! It performs no semantic judgment and owns no domain state beyond the
 //! [`ene_core::serve::HostHandle`] it builds in `serve` mode; the domain
-//! pipelines live in the library modules, and this binary holds argument
-//! parsing plus process setup.
+//! pipelines live in the library modules.
 //!
 //! With no subcommand the entrypoint keeps the `Stage 1` behavior: parse
 //! arguments, [`Config::load`] (validation included), and
@@ -21,15 +19,8 @@ use std::path::{Path, PathBuf};
 use ene_config::Config;
 use ene_core::serve::{self, CoreError, HostHandle};
 
-/// Command-line failure for the Host entrypoint.
-///
-/// [`CliError::Usage`] covers argument misuse; [`CliError::Config`] carries a
-/// [`ene_config::typed::ConfigError`] from [`Config::load`] unchanged, and
-/// [`CliError::Serve`] carries a [`CoreError`] from `serve` mode unchanged.
 #[derive(Debug, thiserror::Error)]
 enum CliError {
-    /// Command-line usage was violated.
-    ///
     /// The display always contains the usage line
     /// `usage: ene-core [--config PATH] [serve | approve-device --descriptor EXACT | approve-credential --provider P --label L]`
     /// followed by the detail, so callers can assert on the usage line alone.
@@ -38,32 +29,22 @@ enum CliError {
         "usage: ene-core [--config PATH] [serve | approve-device --descriptor EXACT | approve-credential --provider P --label L]: {0}"
     )]
     Usage(String),
-    /// Layered configuration loading or validation failed.
     #[error(transparent)]
     Config(#[from] ene_config::typed::ConfigError),
-    /// `serve` mode failed.
     #[error(transparent)]
     Serve(#[from] CoreError),
 }
 
-/// Parses Host command-line arguments, excluding the program name.
+/// Parses `--config PATH`, excluding the program name.
 ///
-/// Accepts exactly one form: `--config PATH`, which selects an explicit JSON
-/// configuration file. With no arguments there is no override and the result
-/// is [`None`]. A repeated `--config` keeps the last value; later flags
-/// override earlier ones, matching the usual override convention. The value
-/// following `--config` is consumed verbatim, even when it starts with `--`.
-/// A missing value after `--config` and any unknown argument (including
-/// `--help` and `--version`) are [`CliError::Usage`] failures whose display
-/// contains the usage line.
+/// With no arguments there is no override and the result is [`None`]. A
+/// repeated `--config` keeps the last value; the value is consumed verbatim,
+/// even when it starts with `--`. A missing value and any unknown argument
+/// (including `--help` and `--version`) are [`CliError::Usage`] failures whose
+/// display contains the usage line.
 ///
 /// The function is pure: it inspects only `args` and never touches the
 /// process environment, the filesystem, or `stdout`.
-///
-/// # Errors
-///
-/// Returns [`CliError::Usage`] when `--config` has no following value or when
-/// any other argument is present.
 fn parse_args(args: &[String]) -> Result<Option<PathBuf>, CliError> {
     let mut config: Option<PathBuf> = None;
     let mut pending = args.iter();
@@ -80,19 +61,9 @@ fn parse_args(args: &[String]) -> Result<Option<PathBuf>, CliError> {
     Ok(config)
 }
 
-/// Splits the `serve` subcommand off the argument list, order-independent.
-///
-/// Scans `args` for exactly one `serve` token and returns it separately from
-/// the remaining arguments (which [`parse_args`] then parses for `--config`).
 /// Both `ene-core serve --config PATH` and `ene-core --config PATH serve`
-/// work; a repeated `serve` is a [`CliError::Usage`] failure.
-///
-/// The function is pure: it inspects only `args` and never touches the
-/// process environment, the filesystem, or `stdout`.
-///
-/// # Errors
-///
-/// Returns [`CliError::Usage`] when `serve` appears more than once.
+/// work, and the remaining arguments are what [`parse_args`] then parses for
+/// `--config`.
 fn extract_serve(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
     let mut serve = false;
     let mut rest = Vec::new();
@@ -109,14 +80,8 @@ fn extract_serve(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
     Ok((serve, rest))
 }
 
-/// Splits one `--name VALUE` flag out of the argument list, order-independent.
-///
-/// Later flags override earlier ones. The value following the flag is
-/// consumed verbatim, even when it starts with `--`.
-///
-/// # Errors
-///
-/// Returns [`CliError::Usage`] when the flag has no following value.
+/// Later flags override earlier ones; the value is consumed verbatim, even
+/// when it starts with `--`.
 fn extract_named(args: &[String], flag: &str) -> Result<(Option<String>, Vec<String>), CliError> {
     let mut value: Option<String> = None;
     let mut rest = Vec::new();
@@ -134,12 +99,6 @@ fn extract_named(args: &[String], flag: &str) -> Result<(Option<String>, Vec<Str
     Ok((value, rest))
 }
 
-/// Splits the `approve-credential` subcommand off the argument list,
-/// order-independent, mirroring [`extract_approve_device`].
-///
-/// # Errors
-///
-/// Returns [`CliError::Usage`] when `approve-credential` appears more than once.
 fn extract_approve_credential(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
     let mut approve = false;
     let mut rest = Vec::new();
@@ -158,21 +117,10 @@ fn extract_approve_credential(args: &[String]) -> Result<(bool, Vec<String>), Cl
     Ok((approve, rest))
 }
 
-/// Splits the `approve-device` subcommand off the argument list, order-independent.
-///
-/// Scans `args` for exactly one `approve-device` token and returns it
-/// separately from the remaining arguments (which [`parse_args`] then parses
-/// for `--config` and [`extract_descriptor`] parses for `--descriptor`).
 /// Both `ene-core approve-device --descriptor EXACT` and
-/// `ene-core --descriptor EXACT approve-device` work; a repeated
-/// `approve-device` is a [`CliError::Usage`] failure.
-///
-/// The function is pure: it inspects only `args` and never touches the
-/// process environment, the filesystem, or `stdout`.
-///
-/// # Errors
-///
-/// Returns [`CliError::Usage`] when `approve-device` appears more than once.
+/// `ene-core --descriptor EXACT approve-device` work; the remaining arguments
+/// are what [`parse_args`] parses for `--config` and [`extract_descriptor`]
+/// parses for `--descriptor`.
 fn extract_approve_device(args: &[String]) -> Result<(bool, Vec<String>), CliError> {
     let mut approve = false;
     let mut rest = Vec::new();
@@ -191,20 +139,9 @@ fn extract_approve_device(args: &[String]) -> Result<(bool, Vec<String>), CliErr
     Ok((approve, rest))
 }
 
-/// Splits `--descriptor VALUE` out of the argument list.
-///
-/// Scans `args` for `--descriptor` flags and returns the last value
-/// separately from the remaining arguments (which [`parse_args`] then parses
-/// for `--config`). The value following `--descriptor` is consumed verbatim,
-/// even when it starts with `--`. Later flags override earlier ones, matching
-/// the usual override convention.
-///
-/// The function is pure: it inspects only `args` and never touches the
-/// process environment, the filesystem, or `stdout`.
-///
-/// # Errors
-///
-/// Returns [`CliError::Usage`] when `--descriptor` has no following value.
+/// A repeated `--descriptor` keeps the last value; the value is consumed
+/// verbatim, even when it starts with `--`. The remaining arguments are what
+/// [`parse_args`] then parses for `--config`.
 fn extract_descriptor(args: &[String]) -> Result<(Option<String>, Vec<String>), CliError> {
     let mut descriptor: Option<String> = None;
     let mut rest = Vec::new();
@@ -224,60 +161,34 @@ fn extract_descriptor(args: &[String]) -> Result<(Option<String>, Vec<String>), 
     Ok((descriptor, rest))
 }
 
-/// `Stage 2` Host entrypoint: parse arguments, load configuration, then stop,
-/// serve, or approve.
-///
-/// Without a subcommand this keeps the `Stage 1` behavior: [`parse_args`],
-/// [`Config::load`] (which validates), and [`ene_config::resolve_data_dir`]
-/// proof with no effects. With `serve` it resolves the data directory (which
-/// must exist as a value: an unresolvable directory is a [`CoreError::Store`]
-/// failure, since serving without durable state is meaningless) and blocks on
 /// Parsed Host command line: exactly one mode plus its flags.
-///
-/// Built purely by [`parse_cli`]; [`main`] only executes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliCommand {
     /// No subcommand: Stage 1 config proof without effects.
     ShowConfig {
-        /// Explicit config file, if `--config PATH` was given.
         config: Option<PathBuf>,
     },
-    /// Run the socket listener.
     Serve {
-        /// Explicit config file, if `--config PATH` was given.
         config: Option<PathBuf>,
     },
-    /// Pairing approval. [`None`] descriptor lists pendings.
+    /// A [`None`] descriptor lists pendings instead of approving.
     ApproveDevice {
-        /// Explicit config file, if `--config PATH` was given.
         config: Option<PathBuf>,
-        /// Exact device descriptor, if `--descriptor EXACT` was given.
         descriptor: Option<String>,
     },
-    /// Credential approval.
     ApproveCredential {
-        /// Explicit config file, if `--config PATH` was given.
         config: Option<PathBuf>,
-        /// Credential provider to approve.
         provider: String,
-        /// Credential label to approve.
         label: String,
     },
 }
 
-/// Parses Host command-line arguments, excluding the program name.
-///
 /// Option flags (with their values) are extracted FIRST and subcommand
 /// tokens are scanned only in the remainder, so a legal value is never
 /// mistaken for a subcommand: `ene-core --config serve` selects config
 /// path `serve`, and `approve-device --descriptor serve` approves the
 /// `serve` descriptor. Flags for a different mode are rejected rather
-/// than silently ignored, keeping the previous strictness. The value
-/// following a flag is still consumed verbatim, even when it starts with
-/// `--` (see [`extract_named`]).
-///
-/// The function is pure: it inspects only `args` and never touches the
-/// process environment, the filesystem, or `stdout`.
+/// than silently ignored.
 ///
 /// # Errors
 ///
@@ -357,8 +268,7 @@ fn parse_cli(args: &[String]) -> Result<CliCommand, CliError> {
 /// [`serve::serve`] under a multi-threaded `Tokio` runtime. With
 /// `approve-device` it resolves the data directory the same way and records
 /// one Owner pairing approval for the exact `--descriptor` value (surrounding
-/// whitespace trimmed, matching wire ingress normalization); an unknown
-/// descriptor fails with the pending set so the Owner can retry exactly.
+/// whitespace trimmed, matching wire ingress normalization).
 ///
 /// There is deliberately no `--help` or `--version` handling yet: there is no
 /// `stdout` mechanism under the workspace `print_stdout` deny, so they
@@ -416,10 +326,8 @@ fn main() -> Result<(), CliError> {
     }
 }
 
-/// Lists pending pairing descriptors on stdout, one per line.
-///
-/// Opens the Host state and prints what `approve-device --descriptor`
-/// would accept. Empty output (exit 0) means nothing is pending.
+/// Prints what `approve-device --descriptor` would accept, one descriptor per
+/// line. Empty output (exit 0) means nothing is pending.
 ///
 /// # Errors
 ///
@@ -448,8 +356,6 @@ fn list_pending_devices(data_dir: &Path) -> Result<(), CoreError> {
     })
 }
 
-/// Blocks the calling thread on [`serve::serve`] for `data_dir`.
-///
 /// Builds the multi-threaded `Tokio` runtime the listener and the store tasks
 /// run on. A runtime that cannot be built is a [`CoreError::Store`] failure:
 /// the runtime is the async substrate of the store-backed Host, and no
@@ -467,12 +373,8 @@ fn run_serve(data_dir: &Path) -> Result<(), CoreError> {
     runtime.block_on(serve::serve(data_dir))
 }
 
-/// Records one Owner pairing approval for `descriptor` under `data_dir`.
-///
-/// Opens the Host state, records the decision through
-/// [`HostHandle::approve_device`], and succeeds silently on approval. An
-/// unknown descriptor fails with the pending descriptor set so the Owner can
-/// retry with the exact value; descriptors are display strings only.
+/// An unknown descriptor fails with the pending descriptor set so the Owner
+/// can retry with the exact value; descriptors are display strings only.
 ///
 /// # Errors
 ///
@@ -487,9 +389,6 @@ fn run_approve_device(data_dir: &Path, descriptor: &str) -> Result<(), CoreError
     runtime.block_on(approve_device_async(data_dir, descriptor))
 }
 
-/// Records one Owner credential approval under `data_dir`.
-///
-/// Opens the Host state and flips the pending credential request usable.
 /// Unknown pairs fail with the pending set so the Owner can retry exactly.
 ///
 /// # Errors
@@ -505,8 +404,6 @@ fn run_approve_credential(data_dir: &Path, provider: &str, label: &str) -> Resul
     runtime.block_on(approve_credential_async(data_dir, provider, label))
 }
 
-/// Opens the Host state and records one Owner credential approval.
-///
 /// Split from [`run_approve_credential`] so the async body stays runtime-free.
 async fn approve_credential_async(
     data_dir: &Path,
@@ -524,13 +421,10 @@ async fn approve_credential_async(
     )))
 }
 
-/// Opens the Host state and records one Owner pairing approval.
-///
 /// Split from [`run_approve_device`] so the async body stays runtime-free.
-/// The one-time pairing secret prints once to this Host-local console: that
-/// console is the trusted inlet, so displaying here (and nowhere else) is
-/// the distribution channel. The operator provisions it into the client's
-/// protected device file.
+/// The one-time pairing secret prints once to this Host-local console, the
+/// trusted inlet, and nowhere else; the operator provisions it into the
+/// client's protected device file.
 async fn approve_device_async(data_dir: &Path, descriptor: &str) -> Result<(), CoreError> {
     use std::io::Write as _;
     let handle = HostHandle::open(data_dir).await?;
