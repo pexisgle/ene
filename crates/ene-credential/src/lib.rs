@@ -37,8 +37,8 @@ pub use registration::{
 };
 pub use registry::{
     CredentialAvailability, CredentialNotify, CredentialRef, CredentialRefError,
-    CredentialRefRepository, RegisterCredentialCommand, RegisterOutcome, credential_availability,
-    register,
+    CredentialRefRepository, RegisterCredentialCommand, RegisterOutcome, available_credential,
+    credential_availability, register,
 };
 pub use secret::{
     CredentialStore, ENV_API_KEY, EnvCredentialStore, MemoryCredentialStore, SecretValue,
