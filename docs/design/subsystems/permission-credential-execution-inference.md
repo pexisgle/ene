@@ -412,7 +412,3 @@ Cross-cutting契約との照合結果は次のとおりである。
 本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Manager / Pipeline / Serviceを導入しない。通常History保持・Companion削除・targeted deletion・backup / restore・Resetは SO・DRの異なる lifecycleを維持する。
 
 他のSubsystem設計（個体調整 / 作業 / 認識・学習）との照合では、利用側Subsystemと本書の実行・強制側Subsystemの間に新しいsemantic ownerや第二の正本を生まない。Task達成は作業、作用確定度は実行・拡張、報告は個体調整、Learning意味は認識・学習、制御確定は権限・制約、秘密は認証秘密、割当解決・利用量原記録は推論に残り、本書のK-1〜K-12はその受渡しの対応付けである。Task Agentの非所有、Observerの専用assignment、scope意味と強制の分離、秘密非露出、fallback非迂回、unknown保持の各契約は両文書で同一である。
-
-### Requirement / Architecture Issue
-
-本書の範囲では、Requirement Ambiguity / Gap、上位architecture変更、subsystem boundary変更、semantic owner変更、Security / Privacy / Permission semanticsの変更を必要とする事項は見つかっていない。具体mechanismの未決定は Issueにしない。

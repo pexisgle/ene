@@ -310,7 +310,7 @@ Credential値は通常contentに含めない。登録済みCredential値は、�
 
 crate / module、Rust struct / enum / trait、concrete API・error型、middleware・interceptor・hook、event bus / queue / actor、IPC format・network protocol、DB schema、serialization、filesystem layout、transaction / lock、具体的Credential保護・sandbox・Plugin隔離、特定library・SDK・OS API、frontend framework、audio / video library、concrete deletion query・index implementation・storage engine、exact retry / timeout・progress表現・capture interval・routing algorithm / Prompt・UI componentも固定しない。上表の対応関係から統一Context layer・Policy Engine・Character Manager・Package Service・Distribution Coordinatorの追加を導かない。既存の12責務、semantic owner、Host / Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-具体mechanism未決定はIssueにしない。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
+必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。
 
 ## 10. 横断検証
 
@@ -358,7 +358,3 @@ Cross-cutting契約との照合結果は次のとおりである。
 - revision適用がMemory / Relationship / Companion State等の暗黙resetになっていない：存在と適用の分離、部品ごとの明示選択、4性質の区別、経験の非上書き・非巻戻し・非Global化を固定する（CD-2、第5・6節）。
 - importがPermission / Credential / execution authorityを生成しない：untrusted扱い、非混入、validationと許可の分離、Provider・秘密・作用の各ownerへの依存を固定する（CD-4、第7.1・7.2節）。
 - package由来Skillが自動Global化しない：Companion scope既定・個体別独立・削除時従属・単独importのOwner選択・自動Global化禁止を固定し、Characterを意味ownerにしない（CD-3、第5節）。
-
-### Requirement / Architecture Issue
-
-本書の範囲では、Requirement Ambiguity / Gap、上位architecture変更、subsystem boundary変更、semantic owner変更、Security / Privacy / Permission semanticsの変更を必要とする事項は見つかっていない。具体mechanismの未決定はIssueにしない。

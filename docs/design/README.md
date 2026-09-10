@@ -6,7 +6,7 @@
 
 1. 製品挙動の正本は [`docs/requirements/`](../requirements/README.md) である。設計は要件にない製品挙動を追加・変更せず、要求と設計の境界は requirements 側の「要件と設計の境界」に従う。
 2. 設計は `architecture/` → `critical-areas/` → `subsystems/` → `concrete/` の順に上位から下位へ具体化する。下位文書は上位文書の責務境界、semantic owner、identity / revision / generation の意味、保存分類、依存規則、Security / Privacy / Permission の意味を黙って変更しない。同じ層の中では、各文書が冒頭で前提として挙げる文書が先行する。
-3. 文書間の矛盾は、下位側や実装で意味を決めず Issue として扱う。
+3. 文書間の矛盾、および下位設計や実装で上位文書の性質を成立させられないことが判明した場合は、下位側や実装で意味を決めず GitHub Issue として扱う。具体 mechanism が未決定であること自体は Issue ではなく、各文書の Design Freedom に属する。各文書に Issue の有無や進捗を記録する節は置かず、実装の現在地は [`docs/implementation/PROGRESS.md`](../implementation/PROGRESS.md) だけが持つ。
 4. 規範となるのは現行文書へ統合された判断だけである。過去の独立レビュー記録、過去の作業指示、既存実装、Git 履歴、[参考資料](../requirements/references.md) は非規範であり、設計根拠にしない。独立レビュー記録の原文は Git 履歴（commit `b5c7990` 以前の `docs/design/reviews/`）で辿れる。
 
 ## directory の役割
@@ -29,7 +29,7 @@
 
 ### architecture/
 
-- [Architecture Drivers](architecture/architecture-drivers.md): 要件から導出した設計圧力（AD-01〜15）と Requirement Issue 記録。
+- [Architecture Drivers](architecture/architecture-drivers.md): 要件から導出した設計圧力（AD-01〜15）。
 - [System Context](architecture/system-context.md): 製品責任と外部環境の境界（SC-01〜10）。
 - [Runtime Topology](architecture/runtime-topology.md): 実行場所、主体の寿命、接続、信頼・障害境界（RT-01〜10）。
 - [Subsystem Decomposition](architecture/subsystems.md): 12 Subsystem への責務分解。
@@ -62,11 +62,3 @@
 - [Subsystem Interface Boundary / Command・Query・Result Contract](concrete/interface-boundaries.md)（IB）
 - [Crate / Module 分解と依存方向](concrete/crate-module-decomposition.md)（CM）
 - [Host↔Client IPC / wire protocol](concrete/host-client-ipc.md)
-
-## 現在の設計進捗
-
-- Upper Architecture: COMPLETE
-- Critical Area Detailed Design (Step 11): COMPLETE
-- Subsystem Detailed Design (Step 12): COMPLETE
-- Concrete Design (Step 13): COMPLETE
-- Next: Walking Skeleton

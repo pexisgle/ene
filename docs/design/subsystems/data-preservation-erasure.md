@@ -409,13 +409,7 @@ Credential値は通常contentに含めない。登録済みCredential値は、�
 
 crate / module、struct / enum / trait、DB schema、backup format、serialization、filesystem layout、journal / WAL、transaction / locking、event bus / queue、IPC、retry / timeout、encryption libraryも固定しない。上表の対応関係から統一Context layer、Policy Engine、Manager、Service、Coordinatorの追加を導かない。既存の12責務、semantic owner、Host / Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-対象探索・検証・到達性確認・backupとの交差等の具体mechanismが未決定であることはIssueにしない。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
-
-### Requirement / Architecture Issue
-
-本書の範囲では、Requirement Ambiguity / Gap、上位architecture変更、subsystem boundary変更、semantic owner変更、Privacy / Security / Permission semanticsの変更を必要とする事項は見つかっていない。具体mechanismの未決定はIssueにしない。
-
-古いBackupにBackup作成後にTargeted Deletionされた情報が含まれる場合の製品判断（自動改変・再消去しない / Restore前に再導入可能性を説明する / 明示Restoreは意図的な再導入として扱う / 自動再適用しない / 旧cache・遅延結果・session等の意図しない再出現と区別する / Restoreの事実はAudit可能にするが削除対象本文を別保存しない）について、要件との矛盾・不足を確認した。要件「Backupとrestore」は削除済み情報や旧Rule・同意・Scheduleが戻り得ることの事前説明を要求し、要件「Privacy / Security目的のtargeted deletionと履歴保持」は自動再形成の禁止と完了後のOwner再提供の新Experience扱いを定め、外部copyまでの消去保証を含めない。本書DP-4はこの両立（明示restoreは別操作・新正本・保留と現在再評価を経る、意図しない再出現は防止する、本文の別保存をしない）を Step 11 [Backup / Restore](../critical-areas/backup-restore.md)第8節の確定契約どおりに各参加責務へ落としており、新しいPrivacy semanticsの追加・別挙動への変更は行っていない。したがって本件を Requirement Issueとして新たに報告する必要はない。
+対象探索・検証・到達性確認・backupとの交差等の具体mechanismは下位設計の自由度として残る。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。
 
 ## 10. 横断検証
 

@@ -566,13 +566,3 @@ DB を分ける / 同一にする判断は上表の必要性に限る。Host dur
 | 時間・費用 | 経過時間の解釈、missed 非補完、並列・処理中・不明の上限反映を守る | 減衰・時刻計算・Capture 時機・費用予約・集計期間・推定・資源配分の機構 |
 
 archive / file format、encryption implementation、DB schema の製品固有 SQL、serialization、transaction mechanism、Rust type / trait、crate / module、IPC、locking、exact progress representation、retry / timeout、specific library も固定しない。上表の対応関係から統一 Context layer、Policy Engine、Manager、Service、Coordinator の追加を導かない。既存の12責務、semantic owner、Host / Client 配置と trust boundary の下で実現方法を選ぶ。
-
-## 14. Requirement / Architecture Issue
-
-本書の範囲では、Requirement Ambiguity / Gap、上位 architecture 変更、semantic owner / subsystem boundary 変更、`correspondence-identity.md` の固定原則変更、Requirement / Security / Privacy semantics の変更を必要とする事項は見つかっていない。
-
-- Step 11 / Step 12 semantic contract の変更は不要である。必要な保存・復旧は既存 contract から導出した。
-- `correspondence-identity.md` の identity / revision / generation / correlation / boundary token の意味の変更は不要である。本書はその表現方針に従い、domain ID 統合・revision/generation 混同・万能 ID/Status/Event・global version counter を設けていない。
-- semantic owner・subsystem boundary の変更は不要である。persistence layer を semantic owner・万能 repository・万能 State Store にしていない。複数 domain の storage technology 共有を ownership 統合にしていない。
-- persistence mechanism 選択そのものは Issue にしない（§11 は logical requirements からの導出であり、製品固有 SQL・index・migration・暗号実装は固定していない）。
-- `SealedSearchToken` の実装・到達性確認方式等の未決定は Issue にしない。必要な確認・Owner 判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用 rollback・exactly-once の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けず Architecture Issue として戻すこと。

@@ -321,7 +321,7 @@ Companion削除は個体固有の現在状態・学習状態等の削除であ�
 | RF-05 Schedule・自発活動と消去 | 消去区間にSchedule到来・自発Task開始が重なる。現在の消去条件を再評価し、対象を必要とする新規利用を開始しない。作成依頼を特別tokenにしない。 | 5.1。CC-01・04を維持。 |
 | RF-06 個体削除と消去の重なり | 個体削除の残存記録と消去対象が重なる。個体固有Learningは削除し、残るHistory・Task記録の中の対象本文は消去条件で除去する。Summaryをhistorical logへ分類し直して残さない。 | 9。SO 6.3・6.4、CC-05を維持。 |
 | RF-06 削除後の遅延作用 | 個体削除後に対象を含む作用結果が到着。残るTask記録へ必要な事実だけ残し、削除済み個体のLearningを再作成しない。 | 5.2。Action 7.3、CC-03・05を維持。 |
-| RF-07 消去中の再到着 | 消去開始から完了までに対象情報が再入力・内部生成される。同じ消去対象として処理し、新しいExperienceとして除外しない。完了後のOwner再提供は新しいExperienceとして区別する。 | 6.1〜6.2。CC-03・05、RA-05を維持。 |
+| RF-07 消去中の再到着 | 消去開始から完了までに対象情報が再入力・内部生成される。同じ消去対象として処理し、新しいExperienceとして除外しない。完了後のOwner再提供は新しいExperienceとして区別する。 | 6.1〜6.2。CC-03・05と[要件「Privacy/Security目的のtargeted deletionと履歴保持」](../../requirements/requirements.md#privacysecurity目的のtargeted-deletionと履歴保持)を維持。 |
 | RF-07 Provider sessionの残存 | Provider sessionに旧情報が残る。現在入力を短くしただけで再利用せず、条件を満たす経路を使う。外部保持除外を再形成の許可にしない。 | 6.3。Context 5.2、CC-02・05を維持。 |
 | RF-07 検証失敗・未確認 | 指定文字列が残る、依存が解消できない、範囲が確定できない。不足を示し、全域完了にしない。LLMの納得で代用しない。 | 8.2〜8.3。CC-05・07を維持。 |
 | RF-08 backupと未完了消去 | 未完了消去とbackup作成が重なる。制約を無視した正常・即実行可能なcopyを作らない。作成を待たせるか未完了を復旧可能に含める。 | 7.4。SO 6.5、CC-05を維持。 |
@@ -371,4 +371,4 @@ Cross-cutting契約との照合結果は次のとおりである。
 
 crate／module、Rust trait／type、concrete API・error型、middleware・interceptor・hook、event bus／queue／actor、IPC format、DB schema、transaction／lock、具体的Credential保護・sandbox・Plugin隔離、特定library・SDK・OS API、concrete deletion query、index implementation、queue／event bus、exact retry／timeout、specific storage engine、exact audit formatも固定しない。上表の対応関係から統一Context layer、Policy Engine、Manager、Service、Coordinatorの追加を導かない。既存の12責務、semantic owner、Host／Client配置とtrust boundaryの下で実現方法を選ぶ。
 
-対象探索・検証・到達性確認・backupとの交差等の具体mechanismが未決定であることはIssueにしない。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。後続でこれらの性質を成立させられないことが判明した場合は、黙って例外を設けずArchitecture Issueとして戻す。
+対象探索・検証・到達性確認・backupとの交差等の具体mechanismは下位設計の自由度として残る。必要な確認・Owner判断の省略、現在同意の拡張、未完了・不明の成功扱い、外部作用rollback・exactly-once実行の新保証はいずれも自由度に含めない。

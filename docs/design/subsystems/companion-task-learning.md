@@ -345,9 +345,3 @@ Cross-cutting契約との照合結果は次のとおりである。
 | CC-07 | 受付・受理・作用・記録保存・Task達成・報告を別の事実とし、不明を成功・失敗・未実行へ変換せず、保存・報告・監査・復旧で強めない。生成済みを提示済みにしない。 |
 
 本書はsemantic owner、Host / Client配置、trust / failure boundary、lifecycle、permission / consent semanticsを変更せず、新しい第二の正本・無所属の意味状態・LLMによる強制・失敗時専用の迂回・中央Persistence owner・万能Managerを導入しない。通常History保持・Companion削除・targeted deletion・backup / restore・Resetは SO・DRの異なる lifecycleを維持する。
-
-### Requirement / Architecture Issue
-
-本書の範囲では、Requirement Ambiguity / Gap、上位architecture変更、subsystem boundary変更、semantic owner変更、Security / Privacy / Permission semanticsの変更を必要とする事項は見つかっていない。具体mechanismの未決定は Issueにしない。
-
-古いBackupに Backup作成後に Targeted Deletionされた情報が含まれる場合の製品判断（自動改変・再消去しない／Restore前に再導入可能性を説明する／明示Restoreは意図的な再導入として扱う／自動再適用しない／旧cache・遅延結果・session等の意図しない再出現と区別する／Restoreの事実は Audit可能にするが削除対象本文を別保存しない）について、要件との矛盾・不足を確認した。要件「Backupとrestore」は削除済み情報や旧Rule・同意・Scheduleが戻り得ることの事前説明を要求し、要件「Privacy / Security目的のtargeted deletionと履歴保持」は自動再形成の禁止と完了後の Owner再提供の新Experience扱いを定め、外部copyまでの消去保証を含めない。本書第7.5節はこの両立（明示restoreは別操作・新正本・保留と現在再評価を経る、意図しない再出現は防止する、本文の別保存をしない）を Step 11 [Backup / Restore](../critical-areas/backup-restore.md)第8節の確定契約どおりに各参加責務へ落としており、新しい Privacy semanticsの追加・別挙動への変更は行っていない。したがって本件を Requirement Issueとして新たに報告する必要はない。
