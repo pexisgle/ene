@@ -91,11 +91,9 @@ mod tests {
     /// `--config PATH` selects that file.
     #[test]
     fn config_flag_selects_a_file() {
-        let parsed = parse_args(&args(&["--config", "/tmp/ene.json"]));
-        assert!(parsed.is_ok(), "--config with a value must succeed");
-        let Some(path) = parsed.ok().flatten() else {
-            return;
-        };
+        let path = parse_args(&args(&["--config", "/tmp/ene.json"]))
+            .expect("--config with a value must succeed")
+            .expect("--config must select a file");
         assert!(
             path.as_path() == Path::new("/tmp/ene.json"),
             "--config must select the given file"
@@ -105,16 +103,14 @@ mod tests {
     /// A repeated `--config` keeps the last value.
     #[test]
     fn repeated_config_flag_keeps_the_last_value() {
-        let parsed = parse_args(&args(&[
+        let path = parse_args(&args(&[
             "--config",
             "/tmp/a.json",
             "--config",
             "/tmp/b.json",
-        ]));
-        assert!(parsed.is_ok(), "a repeated --config must succeed");
-        let Some(path) = parsed.ok().flatten() else {
-            return;
-        };
+        ]))
+        .expect("a repeated --config must succeed")
+        .expect("a repeated --config must select a file");
         assert!(
             path.as_path() == Path::new("/tmp/b.json"),
             "a repeated --config must keep the last value"
@@ -124,13 +120,10 @@ mod tests {
     /// A missing `--config` value reports usage.
     #[test]
     fn missing_config_value_reports_usage() {
-        let parsed = parse_args(&args(&["--config"]));
-        assert!(
-            matches!(parsed, Err(super::CliError::Usage(_))),
-            "a missing --config value must be a usage error"
-        );
-        let Err(super::CliError::Usage(message)) = parsed else {
-            return;
+        let super::CliError::Usage(message) = parse_args(&args(&["--config"]))
+            .expect_err("a missing --config value must be a usage error")
+        else {
+            panic!("a missing --config value must be a usage error");
         };
         assert!(
             message.contains(USAGE),
@@ -141,13 +134,10 @@ mod tests {
     /// An unknown argument reports usage.
     #[test]
     fn unknown_argument_reports_usage() {
-        let parsed = parse_args(&args(&["--unknown"]));
-        assert!(
-            matches!(parsed, Err(super::CliError::Usage(_))),
-            "an unknown argument must be a usage error"
-        );
-        let Err(super::CliError::Usage(message)) = parsed else {
-            return;
+        let super::CliError::Usage(message) = parse_args(&args(&["--unknown"]))
+            .expect_err("an unknown argument must be a usage error")
+        else {
+            panic!("an unknown argument must be a usage error");
         };
         assert!(
             message.contains(USAGE),
@@ -158,13 +148,10 @@ mod tests {
     /// A stray positional argument reports usage.
     #[test]
     fn positional_argument_reports_usage() {
-        let parsed = parse_args(&args(&["extra"]));
-        assert!(
-            matches!(parsed, Err(super::CliError::Usage(_))),
-            "a positional argument must be a usage error"
-        );
-        let Err(super::CliError::Usage(message)) = parsed else {
-            return;
+        let super::CliError::Usage(message) =
+            parse_args(&args(&["extra"])).expect_err("a positional argument must be a usage error")
+        else {
+            panic!("a positional argument must be a usage error");
         };
         assert!(
             message.contains(USAGE),
@@ -175,13 +162,10 @@ mod tests {
     /// Deferred flags such as `--help` report usage for now.
     #[test]
     fn help_flag_reports_usage_while_deferred() {
-        let parsed = parse_args(&args(&["--help"]));
-        assert!(
-            matches!(parsed, Err(super::CliError::Usage(_))),
-            "--help must be a usage error while deferred"
-        );
-        let Err(super::CliError::Usage(message)) = parsed else {
-            return;
+        let super::CliError::Usage(message) = parse_args(&args(&["--help"]))
+            .expect_err("--help must be a usage error while deferred")
+        else {
+            panic!("--help must be a usage error while deferred");
         };
         assert!(
             message.contains(USAGE),

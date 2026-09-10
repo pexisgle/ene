@@ -206,23 +206,13 @@ mod tests {
             .collect()
     }
 
-    /// Writes `contents` to a fresh temporary file.
-    ///
-    /// Returns the file handle (which keeps the file alive) together with
-    /// its path, or [`None`] when the file cannot be created or written.
-    fn write_config_file(contents: &str) -> Option<(tempfile::NamedTempFile, PathBuf)> {
-        let mut file: Option<tempfile::NamedTempFile> = tempfile::NamedTempFile::new().ok();
-        if let Some(handle) = file.as_mut() {
-            if handle.write_all(contents.as_bytes()).is_err() {
-                return None;
-            }
-            if handle.flush().is_err() {
-                return None;
-            }
-        }
-        let file = file?;
-        let path = file.path().to_path_buf();
-        Some((file, path))
+    /// Writes `contents` to a temp file. Keep the handle; drop deletes it.
+    fn write_config_file(contents: &str) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("temp config file must be created");
+        file.write_all(contents.as_bytes())
+            .expect("temp config file must be writable");
+        file.flush().expect("temp config file must flush");
+        file
     }
 
     #[test]
@@ -263,11 +253,7 @@ mod tests {
 
     #[test]
     fn file_layers_without_a_file_return_defaults() {
-        let loaded = file_layers(None);
-        assert!(loaded.is_ok(), "no layers must succeed");
-        let Some(config) = loaded.ok() else {
-            return;
-        };
+        let config = file_layers(None).expect("no layers must succeed");
         assert!(
             config == Config::default(),
             "no layers must return the built-in defaults"
@@ -276,16 +262,8 @@ mod tests {
 
     #[test]
     fn json_file_overrides_builtin_defaults() {
-        let written = write_config_file(r#"{"language": "de"}"#);
-        assert!(written.is_some(), "temp config file must be created");
-        let Some((_, path)) = written.as_ref() else {
-            return;
-        };
-        let loaded = file_layers(Some(path.as_path()));
-        assert!(loaded.is_ok(), "load from a JSON file must succeed");
-        let Some(config) = loaded.ok() else {
-            return;
-        };
+        let file = write_config_file(r#"{"language": "de"}"#);
+        let config = file_layers(Some(file.path())).expect("load from a JSON file must succeed");
         assert!(
             config.language == "de",
             "JSON file must override the default language"
@@ -298,16 +276,8 @@ mod tests {
 
     #[test]
     fn json_file_can_set_data_dir() {
-        let written = write_config_file(r#"{"language": "ja", "data_dir": "/tmp/ene-json-data"}"#);
-        assert!(written.is_some(), "temp config file must be created");
-        let Some((_, path)) = written.as_ref() else {
-            return;
-        };
-        let loaded = file_layers(Some(path.as_path()));
-        assert!(loaded.is_ok(), "load from a JSON file must succeed");
-        let Some(config) = loaded.ok() else {
-            return;
-        };
+        let file = write_config_file(r#"{"language": "ja", "data_dir": "/tmp/ene-json-data"}"#);
+        let config = file_layers(Some(file.path())).expect("load from a JSON file must succeed");
         assert!(
             config.data_dir == Some(PathBuf::from("/tmp/ene-json-data")),
             "JSON file must set the data_dir override"
@@ -316,16 +286,9 @@ mod tests {
 
     #[test]
     fn malformed_json_file_is_reported_not_absorbed() {
-        let written = write_config_file(r#"{"language": "#);
-        assert!(written.is_some(), "temp config file must be created");
-        let Some((_, path)) = written.as_ref() else {
-            return;
-        };
+        let file = write_config_file(r#"{"language": "#);
         assert!(
-            matches!(
-                file_layers(Some(path.as_path())),
-                Err(ConfigError::Figment(_))
-            ),
+            matches!(file_layers(Some(file.path())), Err(ConfigError::Figment(_))),
             "a malformed JSON file must fail the load"
         );
     }
@@ -397,16 +360,8 @@ mod tests {
 
     #[test]
     fn file_then_env_compose_like_load() {
-        let written = write_config_file(r#"{"language": "fr"}"#);
-        assert!(written.is_some(), "temp config file must be created");
-        let Some((_, path)) = written.as_ref() else {
-            return;
-        };
-        let base = file_layers(Some(path.as_path()));
-        assert!(base.is_ok(), "file layers must load");
-        let Some(base) = base.ok() else {
-            return;
-        };
+        let file = write_config_file(r#"{"language": "fr"}"#);
+        let base = file_layers(Some(file.path())).expect("file layers must load");
         let selected = select_env(native(&[("ENE_LANGUAGE", "en")]));
         let merged = apply_env(base, selected);
         assert!(
@@ -437,19 +392,9 @@ mod tests {
             language: "en".to_string(),
             data_dir: Some(PathBuf::from("/tmp/ene-roundtrip")),
         };
-        let json: Option<String> = serde_json::to_string(&original).ok();
-        assert!(json.is_some(), "Config must serialize to JSON");
-        let Some(json) = json else {
-            return;
-        };
-        let back: Option<Config> = serde_json::from_str(&json).ok();
-        assert!(
-            back.is_some(),
-            "Config must deserialize from its own JSON: {json}"
-        );
-        let Some(back) = back else {
-            return;
-        };
+        let json = serde_json::to_string(&original).expect("Config must serialize to JSON");
+        let back: Config =
+            serde_json::from_str(&json).expect("Config must deserialize from its own JSON");
         assert!(original == back, "a serde roundtrip must preserve Config");
     }
 }

@@ -41,9 +41,8 @@ enum CliError {
 /// override earlier ones, matching the usual override convention. The value
 /// following `--config` is consumed verbatim, even when it starts with `--`.
 /// A missing value after `--config` and any unknown argument (including
-/// `--help` and `--version`, which are deferred: there is no `stdout`
-/// mechanism under the workspace `print_stdout` deny) are [`CliError::Usage`]
-/// failures whose display contains the usage line.
+/// `--help` and `--version`) are [`CliError::Usage`] failures whose display
+/// contains the usage line.
 ///
 /// The function is pure: it inspects only `args` and never touches the
 /// process environment, the filesystem, or `stdout`.
@@ -76,16 +75,13 @@ fn parse_args(args: &[String]) -> Result<Option<PathBuf>, CliError> {
 /// `_data_dir` with an underscore prefix on purpose: resolution is a pure
 /// computation that performs no I/O, creates no directories, and prints
 /// nothing, and `Stage 1` allows no effect that would give it meaning (no
-/// `mkdir`, no database open, no print under the `print_stdout` deny). The
-/// binding proves the resolution call compiles and runs while deferring every
-/// effect to `Stage 2`.
+/// `mkdir`, no database open, no print). The binding proves the resolution
+/// call compiles and runs while deferring every effect to `Stage 2`.
 ///
 /// There is deliberately no serve loop, no listener, no database, no
 /// provider, no presence, and no management surface yet (`Stage 2` and
 /// later). This is a synchronous `fn main`: there are no I/O boundaries yet,
-/// so no `Tokio` runtime. `--help` and `--version` are deferred for the same
-/// reason as printing: no `stdout` mechanism exists under the workspace
-/// `print_stdout` deny, so they currently report [`CliError::Usage`].
+/// so no `Tokio` runtime.
 ///
 /// # Errors
 ///
@@ -107,22 +103,14 @@ mod tests {
     #[test]
     fn no_args_yields_no_override() {
         let args: Vec<String> = Vec::new();
-        let parsed = parse_args(&args);
-        assert!(parsed.is_ok(), "no args must succeed");
-        let Some(path) = parsed.ok() else {
-            return;
-        };
+        let path = parse_args(&args).expect("no args must succeed");
         assert!(path.is_none(), "no args must yield no override");
     }
 
     #[test]
     fn config_flag_captures_its_value() {
         let args = [String::from("--config"), String::from("/tmp/ene.json")];
-        let parsed = parse_args(&args);
-        assert!(parsed.is_ok(), "--config with a value must succeed");
-        let Some(path) = parsed.ok() else {
-            return;
-        };
+        let path = parse_args(&args).expect("--config with a value must succeed");
         assert!(
             path == Some(PathBuf::from("/tmp/ene.json")),
             "the --config value must become the override"
@@ -132,11 +120,7 @@ mod tests {
     #[test]
     fn missing_config_value_is_a_usage_error() {
         let args = [String::from("--config")];
-        let parsed = parse_args(&args);
-        assert!(parsed.is_err(), "a missing --config value must fail");
-        let Some(error) = parsed.err() else {
-            return;
-        };
+        let error = parse_args(&args).expect_err("a missing --config value must fail");
         let rendered = format!("{error}");
         assert!(
             rendered.contains("usage: ene-core [--config PATH]"),
@@ -147,11 +131,7 @@ mod tests {
     #[test]
     fn unknown_argument_is_a_usage_error() {
         let args = [String::from("--verbose")];
-        let parsed = parse_args(&args);
-        assert!(parsed.is_err(), "an unknown argument must fail");
-        let Some(error) = parsed.err() else {
-            return;
-        };
+        let error = parse_args(&args).expect_err("an unknown argument must fail");
         let rendered = format!("{error}");
         assert!(
             rendered.contains("usage: ene-core [--config PATH]"),
@@ -167,11 +147,7 @@ mod tests {
             String::from("--config"),
             String::from("/tmp/second.json"),
         ];
-        let parsed = parse_args(&args);
-        assert!(parsed.is_ok(), "a repeated --config must succeed");
-        let Some(path) = parsed.ok() else {
-            return;
-        };
+        let path = parse_args(&args).expect("a repeated --config must succeed");
         assert!(
             path == Some(PathBuf::from("/tmp/second.json")),
             "a repeated --config must keep the last value"

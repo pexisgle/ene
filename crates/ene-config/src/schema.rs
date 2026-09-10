@@ -39,11 +39,7 @@ mod tests {
     #[test]
     fn schema_is_generated_for_config() {
         let schema = config_schema();
-        let json = config_schema_json();
-        assert!(json.is_ok(), "schema serialization must succeed");
-        let Some(json) = json.ok() else {
-            return;
-        };
+        let json = config_schema_json().expect("schema serialization must succeed");
         let title = match json.get("title") {
             Some(title) => title.as_str().unwrap_or_default().to_string(),
             None => String::new(),
@@ -56,19 +52,10 @@ mod tests {
 
     #[test]
     fn schema_declares_language_and_data_dir() {
-        let json = config_schema_json();
-        assert!(json.is_ok(), "schema serialization must succeed");
-        let Some(value) = json.ok() else {
-            return;
-        };
-        let properties = value.get("properties");
-        assert!(
-            properties.is_some(),
-            "schema must declare properties: {value:?}"
-        );
-        let Some(properties) = properties else {
-            return;
-        };
+        let value = config_schema_json().expect("schema serialization must succeed");
+        let properties = value
+            .get("properties")
+            .expect("schema must declare properties");
         assert!(
             properties.get("language").is_some(),
             "schema must declare language: {value:?}"
@@ -81,19 +68,9 @@ mod tests {
 
     #[test]
     fn schema_and_default_config_carry_no_secret_or_runtime_fields() {
-        let schema = config_schema_json();
-        assert!(schema.is_ok(), "schema serialization must succeed");
-        let Some(schema) = schema.ok() else {
-            return;
-        };
-        let default_value: Option<serde_json::Value> = serde_json::to_value(Config::default()).ok();
-        assert!(
-            default_value.is_some(),
-            "a default Config must serialize to JSON"
-        );
-        let Some(default_value) = default_value else {
-            return;
-        };
+        let schema = config_schema_json().expect("schema serialization must succeed");
+        let default_value = serde_json::to_value(Config::default())
+            .expect("a default Config must serialize to JSON");
         let properties = schema.get("properties");
         for forbidden in ["secret", "token", "password", "autostart"] {
             let in_schema = match properties {
