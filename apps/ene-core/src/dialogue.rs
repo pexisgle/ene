@@ -872,9 +872,14 @@ impl ene_learning::SecretScrubber for CredentialScrubber<'_> {
             let replaced = self.store.with_bearer(&credential, |bearer| {
                 scrubbed.replace(bearer, "[credential]")
             });
-            if let Ok(next) = replaced {
-                scrubbed = next;
-            }
+            let Ok(next) = replaced else {
+                // A registered credential exists but its bearer cannot be
+                // read, so absence of the value cannot be proven. Fail closed
+                // rather than risk putting the raw text in a prompt or a
+                // durable Learning row.
+                return String::from("[credential-unavailable]");
+            };
+            scrubbed = next;
         }
         scrubbed
     }
