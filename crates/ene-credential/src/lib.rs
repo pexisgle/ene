@@ -24,6 +24,8 @@
     )
 )]
 
+mod registration;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -35,6 +37,10 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+pub use registration::{
+    CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,
+};
 
 /// Non-secret handle naming one stored credential.
 ///
