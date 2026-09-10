@@ -429,7 +429,7 @@ Host-local に留め、越境させないもの：H-B〜H-E の形成・訂正�
 
 - **全 crate を先に scaffold しない。** 第4節の一覧、全 repository trait、全 adapter を architecture compliance のためだけに先行実装しない。未使用 crate・将来用 abstraction・空 owner shell を増やさない。
 - **必要になった boundary で目標設計を直接満たす。** slice が新しい owner / repository / adapter を必要とした時点で、第4・10節の責務・禁止事項・依存方向を満たす最小実装を追加する。旧 crate の shim / re-export / compatibility layer を経由して段階移行することは要求しない。
-- **共有 contract は先に小さく固定できる。** 複数 stack が同じ public contract に依存する場合は実装ガイドの PR 分割の原則に従い、その contract だけを小さい prerequisite PR として固定してから並列化する。これは全 owner の skeleton 先行作成を意味しない。
+- **共有 contract は先に小さく固定できる。** 複数 stack が同じ public contract に依存する場合は実装ガイド §3.3 に従い、その contract だけを小さい prerequisite PR として固定してから並列化する。これは全 owner の skeleton 先行作成を意味しない。
 - **Persistence は必要になった時点で安全契約も同時に入れる。** internal copy / backup file と DB pointer を扱う slice で `ene-store::fs` を初めて追加するなら、CCT §13 の publication guard・cleanup の最終再確認をその slice の acceptance に含める。単に「Store を先に完成させる」段階は設けない。
 - **Targeted Deletion も Stage 6 より前に scaffold しない。** 実装対象になった時点で PR / CCT の `finalizing` と検索 token の wipe / 復元不能化-before-completion を満たす。Stage 1 / Stage 2 に deletion owner・table・coordination の空実装を先行追加する必要はない。
 - **現在の Stage 1 は整合している。** `ene-primitive` / `ene-config` / 最小 `ene-api` / Host・CLI entrypoint のみを先に成立させ、まだ `ene-store`・Deletion・Task 等を作っていない構成は本書と矛盾しない。第4節の tree は target topology であり stage completion checklist ではない。
