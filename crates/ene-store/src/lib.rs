@@ -7,15 +7,18 @@
 //! [`DevicePairingRepository`], and [`UsageRepository`]. Owners never depend
 //! on this crate; they program against their own traits.
 //!
-//! Concurrency shape: the connection is `Send` but not `Sync`, so a
-//! `std::sync::Mutex` shares it across callers. Each repository method locks,
-//! runs one short [`TransactionBehavior::Immediate`] transaction (or one plain
-//! statement for pure loads), drops the guard, and only then returns. The
-//! guard and any transaction never cross an `.await`: methods perform no
-//! awaits while locked, verified by inspection. Values that cross the
-//! boundary are bound parameters, never interpolated into SQL text.
+//! Concurrency shape: the connection is `Send` but not `Sync`, so an
+//! `Arc<std::sync::Mutex<Connection>>` shares it across callers. Each
+//! repository method hands its whole critical section — lock, one short
+//! [`TransactionBehavior::Immediate`] transaction (or one plain statement for
+//! pure loads), drop the guard — to `run_blocking`, so the synchronous
+//! `rusqlite` work happens on the blocking pool instead of on an async worker.
+//! The guard and any transaction never cross an `.await`: they live and die
+//! inside the blocking closure. Values that cross the boundary are bound
+//! parameters, never interpolated into SQL text.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
@@ -61,17 +64,28 @@ pub enum StoreError {
     MigrationFailed(String),
 }
 
+/// Runs one synchronous SQLite critical section on the blocking pool.
+///
+/// A panic inside the blocking task is the task's own panic: resume it
+/// rather than reporting it as a store failure.
+async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(join) => std::panic::resume_unwind(join.into_panic()),
+    }
+}
+
 /// SQLite-backed host for every Stage 2 repository contract.
 ///
-/// The single `rusqlite::Connection` is `Send` but not `Sync`; the mutex
-/// shares it across the repository implementations. Critical sections are
-/// short and synchronous: each method locks, runs one
+/// The single `rusqlite::Connection` is `Send` but not `Sync`; an
+/// `Arc<std::sync::Mutex<Connection>>` shares it across the repository
+/// implementations. Each method runs its whole critical section on the
+/// blocking pool through `run_blocking`: it locks, runs one
 /// [`TransactionBehavior::Immediate`] transaction (or one plain statement for
-/// pure loads), drops the guard, and only then returns, so the guard and any
-/// transaction never cross an `.await` (verified by inspection: repository
-/// bodies contain no awaits while locked).
+/// pure loads), drops the guard, and returns, so the guard and any transaction
+/// live entirely inside the blocking closure and never cross an `.await`.
 pub struct Store {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl Store {
@@ -84,20 +98,17 @@ impl Store {
     ///
     /// Returns [`StoreError::OpenFailed`] when the file cannot be opened and
     /// [`StoreError::MigrationFailed`] when the schema cannot be prepared.
-    #[expect(
-        clippy::unused_async,
-        reason = "requested as async; open runs synchronously with no await"
-    )]
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "requested as async; open runs synchronously with no await"
-    )]
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
+        let path = path.to_path_buf();
+        run_blocking(move || Self::open_sync(&path)).await
+    }
+
+    fn open_sync(path: &Path) -> Result<Self, StoreError> {
         let mut conn =
             Connection::open(path).map_err(|error| StoreError::OpenFailed(error.to_string()))?;
         migrate::run(&mut conn).map_err(StoreError::MigrationFailed)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 
@@ -107,229 +118,225 @@ impl Store {
     ///
     /// Returns [`StoreError::OpenFailed`] when the database cannot be created
     /// and [`StoreError::MigrationFailed`] when the schema cannot be prepared.
-    #[expect(
-        clippy::unused_async,
-        reason = "requested as async; open runs synchronously with no await"
-    )]
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "requested as async; open runs synchronously with no await"
-    )]
     pub async fn open_in_memory() -> Result<Self, StoreError> {
+        run_blocking(Self::open_in_memory_sync).await
+    }
+
+    fn open_in_memory_sync() -> Result<Self, StoreError> {
         let mut conn = Connection::open_in_memory()
             .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
         migrate::run(&mut conn).map_err(StoreError::MigrationFailed)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
+}
 
-    /// Appends one history item, optionally registering an undelivered entry
-    /// for it in the same atomic section.
-    ///
-    /// Both [`HistoryRepository::append_message`] and
-    /// [`HistoryRepository::append_reply_with_undelivered`] funnel through
-    /// here so the lifecycle read, the generation compare, the history insert,
-    /// and the optional undelivered insert share one `Immediate` transaction.
-    ///
-    /// Durable idempotency rests on the client-minted `(companion,
-    /// command_id)`: a retry reuses the same command id with a fresh message
-    /// id, so an in-transaction pre-check compares the stored
-    /// [`RequestFingerprint`] against the incoming request's — the same
-    /// fingerprint type every caller builds — and returns the original
-    /// [`HistoryAppendOutcome::AlreadyCommittedAs`] without re-appending or
-    /// re-registering undelivered. The fingerprint covers role, body,
-    /// language, sending incarnation, and the canonical client round
-    /// intent; round identity and its wire projection are the *accepted
-    /// result*, not the request: the Host mints them per intake decision
-    /// and a retry can re-intake into a newer round, so they never decide
-    /// conflict — the replay answers the stored accept verbatim. A row
-    /// whose fingerprint cannot be reconstructed (a pre-mark row) proves
-    /// nothing: it is declined like any conflicting reuse, never guessed.
-    /// The generation premise stays out of the fingerprint: it is enforced
-    /// separately above, so a retry under a newer generation view still
-    /// replays instead of conflicting. This replaces the retired `local_id`
-    /// pre-check; `local_id` is stored as correspondence metadata only and
-    /// is never consulted here. `NULL` command ids carry no replay key and
-    /// never collide. A reused key with a different request answers
-    /// [`HistoryAppendOutcome::CommandConflict`] instead: declined without
-    /// side effects, never rebound.
-    fn append_history(
-        &self,
-        cmd: &AppendHistoryCommand,
-        register_unpresented: bool,
-    ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
-        let message = RawId::new();
-        let message_text = encode_id(message);
-        let companion_text = encode_id(cmd.companion.as_raw());
-        let round_text = encode_id(cmd.round);
-        let role_text = encode_role(cmd.role);
-        let at_text = cmd.at.to_rfc3339();
-        let undelivered = RawId::new();
-        let undelivered_text = encode_id(undelivered);
-        let now_text = WallClockWithTz::now().to_rfc3339();
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        let lifecycle_text: Option<String> = tx
-            .query_row(SQL_SELECT_LIFECYCLE, params![companion_text], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        let lifecycle = match lifecycle_text {
-            Some(text) => decode_lifecycle(&text).map_err(companion_unavailable)?,
-            None => {
-                return Ok((
-                    HistoryAppendOutcome::HeldByLifecycle {
-                        lifecycle: CompanionLifecycle::Deleted,
-                    },
-                    None,
-                ));
-            }
-        };
-        if lifecycle != CompanionLifecycle::Running {
-            return Ok((HistoryAppendOutcome::HeldByLifecycle { lifecycle }, None));
-        }
-        let stored_generation: Option<i64> = tx
-            .query_row(SQL_SELECT_ATTRIBUTION, params![companion_text], |row| {
-                row.get(2)
-            })
-            .optional()
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        let Some(generation_raw) = stored_generation else {
-            return Err(companion_unavailable(String::from(
-                "missing presence attribution",
-            )));
-        };
-        let current_number = decode_u64(generation_raw).map_err(companion_unavailable)?;
-        if current_number != cmd.expected_generation.as_u64() {
+/// Appends one history item, optionally registering an undelivered entry
+/// for it in the same atomic section.
+///
+/// Both [`HistoryRepository::append_message`] and
+/// [`HistoryRepository::append_reply_with_undelivered`] funnel through
+/// here so the lifecycle read, the generation compare, the history insert,
+/// and the optional undelivered insert share one `Immediate` transaction.
+///
+/// Durable idempotency rests on the client-minted `(companion,
+/// command_id)`: a retry reuses the same command id with a fresh message
+/// id, so an in-transaction pre-check compares the stored
+/// [`RequestFingerprint`] against the incoming request's — the same
+/// fingerprint type every caller builds — and returns the original
+/// [`HistoryAppendOutcome::AlreadyCommittedAs`] without re-appending or
+/// re-registering undelivered. The fingerprint covers role, body,
+/// language, sending incarnation, and the canonical client round
+/// intent; round identity and its wire projection are the *accepted
+/// result*, not the request: the Host mints them per intake decision
+/// and a retry can re-intake into a newer round, so they never decide
+/// conflict — the replay answers the stored accept verbatim. A row
+/// whose fingerprint cannot be reconstructed (a pre-mark row) proves
+/// nothing: it is declined like any conflicting reuse, never guessed.
+/// The generation premise stays out of the fingerprint: it is enforced
+/// separately above, so a retry under a newer generation view still
+/// replays instead of conflicting. This replaces the retired `local_id`
+/// pre-check; `local_id` is stored as correspondence metadata only and
+/// is never consulted here. `NULL` command ids carry no replay key and
+/// never collide. A reused key with a different request answers
+/// [`HistoryAppendOutcome::CommandConflict`] instead: declined without
+/// side effects, never rebound.
+fn append_history(
+    conn: &Mutex<Connection>,
+    cmd: &AppendHistoryCommand,
+    register_unpresented: bool,
+) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
+    let message = RawId::new();
+    let message_text = encode_id(message);
+    let companion_text = encode_id(cmd.companion.as_raw());
+    let round_text = encode_id(cmd.round);
+    let role_text = encode_role(cmd.role);
+    let at_text = cmd.at.to_rfc3339();
+    let undelivered = RawId::new();
+    let undelivered_text = encode_id(undelivered);
+    let now_text = WallClockWithTz::now().to_rfc3339();
+    let mut guard = lock_shared(conn);
+    let tx = guard
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| companion_unavailable(error.to_string()))?;
+    let lifecycle_text: Option<String> = tx
+        .query_row(SQL_SELECT_LIFECYCLE, params![companion_text], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|error| companion_unavailable(error.to_string()))?;
+    let lifecycle = match lifecycle_text {
+        Some(text) => decode_lifecycle(&text).map_err(companion_unavailable)?,
+        None => {
             return Ok((
-                HistoryAppendOutcome::StaleExpected {
-                    current: PresenceGeneration::from_u64(current_number),
+                HistoryAppendOutcome::HeldByLifecycle {
+                    lifecycle: CompanionLifecycle::Deleted,
                 },
                 None,
             ));
         }
-        if let Some((expected_id, expected_rev)) = cmd.expected_consent.as_ref() {
-            let stored: Option<(String, i64)> = tx
-                .query_row(SQL_SELECT_CONSENT, (), |row| Ok((row.get(0)?, row.get(1)?)))
-                .optional()
-                .map_err(|error| companion_unavailable(error.to_string()))?;
-            let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
-                id == expected_id && decode_u64(*rev).is_ok_and(|value| value == *expected_rev)
-            });
-            if !current_matches {
-                return Ok((HistoryAppendOutcome::StaleConsent, None));
-            }
+    };
+    if lifecycle != CompanionLifecycle::Running {
+        return Ok((HistoryAppendOutcome::HeldByLifecycle { lifecycle }, None));
+    }
+    let stored_generation: Option<i64> = tx
+        .query_row(SQL_SELECT_ATTRIBUTION, params![companion_text], |row| {
+            row.get(2)
+        })
+        .optional()
+        .map_err(|error| companion_unavailable(error.to_string()))?;
+    let Some(generation_raw) = stored_generation else {
+        return Err(companion_unavailable(String::from(
+            "missing presence attribution",
+        )));
+    };
+    let current_number = decode_u64(generation_raw).map_err(companion_unavailable)?;
+    if current_number != cmd.expected_generation.as_u64() {
+        return Ok((
+            HistoryAppendOutcome::StaleExpected {
+                current: PresenceGeneration::from_u64(current_number),
+            },
+            None,
+        ));
+    }
+    if let Some((expected_id, expected_rev)) = cmd.expected_consent.as_ref() {
+        let stored: Option<(String, i64)> = tx
+            .query_row(SQL_SELECT_CONSENT, (), |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()
+            .map_err(|error| companion_unavailable(error.to_string()))?;
+        let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
+            id == expected_id && decode_u64(*rev).is_ok_and(|value| value == *expected_rev)
+        });
+        if !current_matches {
+            return Ok((HistoryAppendOutcome::StaleConsent, None));
         }
-        if let Some(command) = cmd.command_id {
-            let command_text = encode_id(command.0);
-            let existing: Option<HistoryRow> = tx
-                .query_row(
-                    SQL_SELECT_HISTORY_BY_COMMAND,
-                    params![companion_text, command_text],
-                    HistoryRow::from_row,
-                )
-                .optional()
-                .map_err(|error| companion_unavailable(error.to_string()))?;
-            if let Some(row) = existing {
-                let stored =
-                    decode_history_message(cmd.companion, row).map_err(companion_unavailable)?;
-                // The durable key owns its request fingerprint, and the
-                // same [`RequestFingerprint`] type every caller builds is
-                // the only judge: an exact retry replays the original
-                // acceptance even when the Host re-intaked it into a newer
-                // round (round and its projection are the accepted result
-                // and travel verbatim from the stored row), while the same
-                // key with a different request — a different round intent
-                // included — is declined without side effects. A row
-                // without a reconstructable fingerprint proves nothing and
-                // declines the same way (fail-closed); so does a keyed
-                // incoming command without a round intent.
-                let Some(stored_fingerprint) = stored.request_fingerprint() else {
-                    return Ok((HistoryAppendOutcome::CommandConflict, None));
-                };
-                let Some(incoming_fingerprint) = cmd.request_fingerprint() else {
-                    return Ok((HistoryAppendOutcome::CommandConflict, None));
-                };
-                if stored_fingerprint != incoming_fingerprint {
-                    return Ok((HistoryAppendOutcome::CommandConflict, None));
-                }
-                return Ok((
-                    HistoryAppendOutcome::AlreadyCommittedAs {
-                        message: stored.id,
-                        round: stored.round,
-                    },
-                    None,
-                ));
+    }
+    if let Some(command) = cmd.command_id {
+        let command_text = encode_id(command.0);
+        let existing: Option<HistoryRow> = tx
+            .query_row(
+                SQL_SELECT_HISTORY_BY_COMMAND,
+                params![companion_text, command_text],
+                HistoryRow::from_row,
+            )
+            .optional()
+            .map_err(|error| companion_unavailable(error.to_string()))?;
+        if let Some(row) = existing {
+            let stored =
+                decode_history_message(cmd.companion, row).map_err(companion_unavailable)?;
+            // The durable key owns its request fingerprint, and the
+            // same [`RequestFingerprint`] type every caller builds is
+            // the only judge: an exact retry replays the original
+            // acceptance even when the Host re-intaked it into a newer
+            // round (round and its projection are the accepted result
+            // and travel verbatim from the stored row), while the same
+            // key with a different request — a different round intent
+            // included — is declined without side effects. A row
+            // without a reconstructable fingerprint proves nothing and
+            // declines the same way (fail-closed); so does a keyed
+            // incoming command without a round intent.
+            let Some(stored_fingerprint) = stored.request_fingerprint() else {
+                return Ok((HistoryAppendOutcome::CommandConflict, None));
+            };
+            let Some(incoming_fingerprint) = cmd.request_fingerprint() else {
+                return Ok((HistoryAppendOutcome::CommandConflict, None));
+            };
+            if stored_fingerprint != incoming_fingerprint {
+                return Ok((HistoryAppendOutcome::CommandConflict, None));
             }
+            return Ok((
+                HistoryAppendOutcome::AlreadyCommittedAs {
+                    message: stored.id,
+                    round: stored.round,
+                },
+                None,
+            ));
         }
-        let command_text = cmd.command_id.map(|command| encode_id(command.0));
-        let (client_counter, client_random) = match cmd.incarnation {
-            Some((counter, random)) => (
-                Some(encode_u64(counter).map_err(companion_unavailable)?),
-                Some(encode_u64(random).map_err(companion_unavailable)?),
-            ),
-            None => (None, None),
-        };
-        let (intent_kind, intent_ref) = match cmd.round_intent.as_ref() {
-            Some(intent) => {
-                let (kind, reference) = encode_round_intent(intent);
-                (Some(kind), reference.map(str::to_owned))
-            }
-            None => (None, None),
-        };
+    }
+    let command_text = cmd.command_id.map(|command| encode_id(command.0));
+    let (client_counter, client_random) = match cmd.incarnation {
+        Some((counter, random)) => (
+            Some(encode_u64(counter).map_err(companion_unavailable)?),
+            Some(encode_u64(random).map_err(companion_unavailable)?),
+        ),
+        None => (None, None),
+    };
+    let (intent_kind, intent_ref) = match cmd.round_intent.as_ref() {
+        Some(intent) => {
+            let (kind, reference) = encode_round_intent(intent);
+            (Some(kind), reference.map(str::to_owned))
+        }
+        None => (None, None),
+    };
+    tx.execute(
+        SQL_INSERT_HISTORY,
+        params![
+            message_text,
+            companion_text,
+            round_text,
+            role_text,
+            cmd.text,
+            cmd.lang,
+            at_text,
+            generation_raw,
+            command_text.as_deref(),
+            cmd.local_id.as_deref(),
+            cmd.round_wire.as_deref(),
+            intent_kind,
+            intent_ref,
+            client_counter,
+            client_random,
+        ],
+    )
+    .map_err(|error| companion_unavailable(error.to_string()))?;
+    let mut registered = None;
+    if register_unpresented {
         tx.execute(
-            SQL_INSERT_HISTORY,
+            SQL_INSERT_UNDELIVERED,
             params![
-                message_text,
+                undelivered_text,
                 companion_text,
+                message_text,
+                encode_report_status(ReportStatus::Pending),
                 round_text,
-                role_text,
-                cmd.text,
-                cmd.lang,
-                at_text,
                 generation_raw,
-                command_text.as_deref(),
-                cmd.local_id.as_deref(),
-                cmd.round_wire.as_deref(),
-                intent_kind,
-                intent_ref,
-                client_counter,
-                client_random,
+                now_text
             ],
         )
         .map_err(|error| companion_unavailable(error.to_string()))?;
-        let mut registered = None;
-        if register_unpresented {
-            tx.execute(
-                SQL_INSERT_UNDELIVERED,
-                params![
-                    undelivered_text,
-                    companion_text,
-                    message_text,
-                    encode_report_status(ReportStatus::Pending),
-                    round_text,
-                    generation_raw,
-                    now_text
-                ],
-            )
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-            registered = Some(UndeliveredRef {
-                id: undelivered,
-                companion: cmd.companion,
-                source_message: message,
-                status: ReportStatus::Pending,
-                round: cmd.round,
-                presence_generation: PresenceGeneration::from_u64(current_number),
-            });
-        }
-        tx.commit()
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        Ok((HistoryAppendOutcome::CommittedAs { message }, registered))
+        registered = Some(UndeliveredRef {
+            id: undelivered,
+            companion: cmd.companion,
+            source_message: message,
+            status: ReportStatus::Pending,
+            round: cmd.round,
+            presence_generation: PresenceGeneration::from_u64(current_number),
+        });
     }
+    tx.commit()
+        .map_err(|error| companion_unavailable(error.to_string()))?;
+    Ok((HistoryAppendOutcome::CommittedAs { message }, registered))
 }
 
 /// Forward-only schema setup.
@@ -1255,41 +1262,37 @@ fn decode_attribution(
 }
 
 impl PresenceRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn load_attribution(
         &self,
         companion: RawId,
     ) -> Result<Option<PresenceAttribution>, PresenceTechnicalError> {
-        let key = encode_id(companion);
-        let guard = lock_shared(&self.conn);
-        let found: Option<(String, Option<String>, i64)> = guard
-            .query_row(SQL_SELECT_ATTRIBUTION, params![key], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-        match found {
-            Some((state_text, active_text, generation_raw)) => {
-                let fact = decode_attribution(
-                    companion,
-                    &state_text,
-                    active_text.as_deref(),
-                    generation_raw,
-                )
-                .map_err(presence_unavailable)?;
-                Ok(Some(fact))
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let key = encode_id(companion);
+            let guard = lock_shared(&conn);
+            let found: Option<(String, Option<String>, i64)> = guard
+                .query_row(SQL_SELECT_ATTRIBUTION, params![key], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(|error| presence_unavailable(error.to_string()))?;
+            match found {
+                Some((state_text, active_text, generation_raw)) => {
+                    let fact = decode_attribution(
+                        companion,
+                        &state_text,
+                        active_text.as_deref(),
+                        generation_raw,
+                    )
+                    .map_err(presence_unavailable)?;
+                    Ok(Some(fact))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn compare_and_begin_transition(
         &self,
         companion: RawId,
@@ -1297,565 +1300,569 @@ impl PresenceRepository for Store {
         to_client: Option<ClientId>,
         reason: ThinMoveReason,
     ) -> Result<MoveDecision, PresenceTechnicalError> {
-        let key = encode_id(companion);
-        let target_text = to_client.map(|client| encode_id(client.as_raw()));
-        let reason_text = encode_move_reason(reason);
-        let now_text = WallClockWithTz::now().to_rfc3339();
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-        let found: Option<(String, Option<String>, i64)> = tx
-            .query_row(SQL_SELECT_ATTRIBUTION, params![key], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-        let Some((state_text, active_text, generation_raw)) = found else {
-            return Ok(MoveDecision::DeniedByConstraint {
-                reason: String::from("unknown companion"),
-            });
-        };
-        let current = decode_attribution(
-            companion,
-            &state_text,
-            active_text.as_deref(),
-            generation_raw,
-        )
-        .map_err(presence_unavailable)?;
-        if current.generation != expected.expected_generation
-            || current.state != expected.expected_state
-            || current.active_client != expected.expected_active
-        {
-            return Ok(MoveDecision::RejectedAsStalePresence { current });
-        }
-        let Some(next_generation) = current.generation.checked_next() else {
-            return Ok(MoveDecision::DeniedByConstraint {
-                reason: String::from("presence generation exhausted"),
-            });
-        };
-        let next_raw = encode_u64(next_generation.as_u64()).map_err(presence_unavailable)?;
-        tx.execute(
-            SQL_UPDATE_ATTRIBUTION,
-            params![
-                encode_presence_state(PresenceState::InTransition),
-                target_text,
-                next_raw,
-                key
-            ],
-        )
-        .map_err(|error| presence_unavailable(error.to_string()))?;
-        tx.execute(
-            SQL_INSERT_TRANSITION,
-            params![
-                key,
-                encode_presence_state(current.state),
-                encode_presence_state(PresenceState::InTransition),
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let key = encode_id(companion);
+            let target_text = to_client.map(|client| encode_id(client.as_raw()));
+            let reason_text = encode_move_reason(reason);
+            let now_text = WallClockWithTz::now().to_rfc3339();
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| presence_unavailable(error.to_string()))?;
+            let found: Option<(String, Option<String>, i64)> = tx
+                .query_row(SQL_SELECT_ATTRIBUTION, params![key], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(|error| presence_unavailable(error.to_string()))?;
+            let Some((state_text, active_text, generation_raw)) = found else {
+                return Ok(MoveDecision::DeniedByConstraint {
+                    reason: String::from("unknown companion"),
+                });
+            };
+            let current = decode_attribution(
+                companion,
+                &state_text,
+                active_text.as_deref(),
                 generation_raw,
-                next_raw,
-                reason_text,
-                now_text
-            ],
-        )
-        .map_err(|error| presence_unavailable(error.to_string()))?;
-        tx.commit()
+            )
+            .map_err(presence_unavailable)?;
+            if current.generation != expected.expected_generation
+                || current.state != expected.expected_state
+                || current.active_client != expected.expected_active
+            {
+                return Ok(MoveDecision::RejectedAsStalePresence { current });
+            }
+            let Some(next_generation) = current.generation.checked_next() else {
+                return Ok(MoveDecision::DeniedByConstraint {
+                    reason: String::from("presence generation exhausted"),
+                });
+            };
+            let next_raw = encode_u64(next_generation.as_u64()).map_err(presence_unavailable)?;
+            tx.execute(
+                SQL_UPDATE_ATTRIBUTION,
+                params![
+                    encode_presence_state(PresenceState::InTransition),
+                    target_text,
+                    next_raw,
+                    key
+                ],
+            )
             .map_err(|error| presence_unavailable(error.to_string()))?;
-        Ok(MoveDecision::TransitioningToNew {
-            generation: next_generation,
+            tx.execute(
+                SQL_INSERT_TRANSITION,
+                params![
+                    key,
+                    encode_presence_state(current.state),
+                    encode_presence_state(PresenceState::InTransition),
+                    generation_raw,
+                    next_raw,
+                    reason_text,
+                    now_text
+                ],
+            )
+            .map_err(|error| presence_unavailable(error.to_string()))?;
+            tx.commit()
+                .map_err(|error| presence_unavailable(error.to_string()))?;
+            Ok(MoveDecision::TransitioningToNew {
+                generation: next_generation,
+            })
         })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn confirm_transition(
         &self,
         companion: RawId,
         transitioning_generation: PresenceGeneration,
         live: LiveReachabilityRef,
     ) -> Result<ConfirmTransitionOutcome, PresenceTechnicalError> {
-        let key = encode_id(companion);
-        let now_text = WallClockWithTz::now().to_rfc3339();
-        let confirm_reason = if live.connection_live {
-            "confirm_live"
-        } else {
-            "confirm_not_live"
-        };
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-        let found: Option<(String, Option<String>, i64)> = tx
-            .query_row(SQL_SELECT_ATTRIBUTION, params![key], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()
-            .map_err(|error| presence_unavailable(error.to_string()))?;
-        let Some((state_text, active_text, generation_raw)) = found else {
-            return Err(presence_unavailable(String::from(
-                "missing presence attribution",
-            )));
-        };
-        let current = decode_attribution(
-            companion,
-            &state_text,
-            active_text.as_deref(),
-            generation_raw,
-        )
-        .map_err(presence_unavailable)?;
-        // Idempotent: only an `InTransition` row at the transitioning
-        // generation moves; anything else reads back unchanged.
-        if current.generation != transitioning_generation
-            || current.state != PresenceState::InTransition
-        {
-            return Ok(ConfirmTransitionOutcome::Confirmed(current));
-        }
-        // Authority pin: a live confirm may only crown the client pinned at
-        // begin time (stored as the row's active client). A different
-        // claimant leaves the row untouched and observes stale instead —
-        // the connection table, not a self-report, decides who is current.
-        if live.connection_live && current.active_client != Some(live.client) {
-            return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
-        }
-        let (target_state, target_text, target_client) = if live.connection_live {
-            (
-                PresenceState::Present,
-                Some(encode_id(live.client.as_raw())),
-                Some(live.client),
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let key = encode_id(companion);
+            let now_text = WallClockWithTz::now().to_rfc3339();
+            let confirm_reason = if live.connection_live {
+                "confirm_live"
+            } else {
+                "confirm_not_live"
+            };
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| presence_unavailable(error.to_string()))?;
+            let found: Option<(String, Option<String>, i64)> = tx
+                .query_row(SQL_SELECT_ATTRIBUTION, params![key], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(|error| presence_unavailable(error.to_string()))?;
+            let Some((state_text, active_text, generation_raw)) = found else {
+                return Err(presence_unavailable(String::from(
+                    "missing presence attribution",
+                )));
+            };
+            let current = decode_attribution(
+                companion,
+                &state_text,
+                active_text.as_deref(),
+                generation_raw,
             )
-        } else {
-            (PresenceState::NoActive, None, None)
-        };
-        tx.execute(
-            SQL_UPDATE_ATTRIBUTION,
-            params![
-                encode_presence_state(target_state),
-                target_text,
-                generation_raw,
-                key
-            ],
-        )
-        .map_err(|error| presence_unavailable(error.to_string()))?;
-        tx.execute(
-            SQL_INSERT_TRANSITION,
-            params![
-                key,
-                encode_presence_state(PresenceState::InTransition),
-                encode_presence_state(target_state),
-                generation_raw,
-                generation_raw,
-                confirm_reason,
-                now_text
-            ],
-        )
-        .map_err(|error| presence_unavailable(error.to_string()))?;
-        tx.commit()
+            .map_err(presence_unavailable)?;
+            // Idempotent: only an `InTransition` row at the transitioning
+            // generation moves; anything else reads back unchanged.
+            if current.generation != transitioning_generation
+                || current.state != PresenceState::InTransition
+            {
+                return Ok(ConfirmTransitionOutcome::Confirmed(current));
+            }
+            // Authority pin: a live confirm may only crown the client pinned at
+            // begin time (stored as the row's active client). A different
+            // claimant leaves the row untouched and observes stale instead —
+            // the connection table, not a self-report, decides who is current.
+            if live.connection_live && current.active_client != Some(live.client) {
+                return Ok(ConfirmTransitionOutcome::RejectedAsStalePresence { current });
+            }
+            let (target_state, target_text, target_client) = if live.connection_live {
+                (
+                    PresenceState::Present,
+                    Some(encode_id(live.client.as_raw())),
+                    Some(live.client),
+                )
+            } else {
+                (PresenceState::NoActive, None, None)
+            };
+            tx.execute(
+                SQL_UPDATE_ATTRIBUTION,
+                params![
+                    encode_presence_state(target_state),
+                    target_text,
+                    generation_raw,
+                    key
+                ],
+            )
             .map_err(|error| presence_unavailable(error.to_string()))?;
-        Ok(ConfirmTransitionOutcome::Confirmed(PresenceAttribution {
-            companion,
-            state: target_state,
-            active_client: target_client,
-            generation: transitioning_generation,
-        }))
+            tx.execute(
+                SQL_INSERT_TRANSITION,
+                params![
+                    key,
+                    encode_presence_state(PresenceState::InTransition),
+                    encode_presence_state(target_state),
+                    generation_raw,
+                    generation_raw,
+                    confirm_reason,
+                    now_text
+                ],
+            )
+            .map_err(|error| presence_unavailable(error.to_string()))?;
+            tx.commit()
+                .map_err(|error| presence_unavailable(error.to_string()))?;
+            Ok(ConfirmTransitionOutcome::Confirmed(PresenceAttribution {
+                companion,
+                state: target_state,
+                active_client: target_client,
+                generation: transitioning_generation,
+            }))
+        })
+        .await
     }
 }
 
 impl CompanionRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn ensure_running_companion(&self) -> Result<CompanionId, CompanionTechnicalError> {
-        let now_text = WallClockWithTz::now().to_rfc3339();
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let now_text = WallClockWithTz::now().to_rfc3339();
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            let found: Option<String> = tx
+                .query_row(SQL_FIND_COMPANION, (), |row| row.get(0))
+                .optional()
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            if let Some(existing) = found {
+                let raw = decode_id(&existing).map_err(companion_unavailable)?;
+                return Ok(CompanionId::from_raw(raw));
+            }
+            let fresh = RawId::new();
+            let fresh_text = encode_id(fresh);
+            tx.execute(
+                SQL_INSERT_COMPANION,
+                params![
+                    fresh_text,
+                    encode_lifecycle(CompanionLifecycle::Running),
+                    now_text
+                ],
+            )
             .map_err(|error| companion_unavailable(error.to_string()))?;
-        let found: Option<String> = tx
-            .query_row(SQL_FIND_COMPANION, (), |row| row.get(0))
-            .optional()
+            // The presence seed rides alongside the companion seed so the first
+            // generation compare has a current fact to compare against.
+            tx.execute(
+                SQL_INSERT_ATTRIBUTION,
+                params![
+                    fresh_text,
+                    encode_presence_state(PresenceState::NoActive),
+                    Option::<String>::None,
+                    0_i64
+                ],
+            )
             .map_err(|error| companion_unavailable(error.to_string()))?;
-        if let Some(existing) = found {
-            let raw = decode_id(&existing).map_err(companion_unavailable)?;
-            return Ok(CompanionId::from_raw(raw));
-        }
-        let fresh = RawId::new();
-        let fresh_text = encode_id(fresh);
-        tx.execute(
-            SQL_INSERT_COMPANION,
-            params![
-                fresh_text,
-                encode_lifecycle(CompanionLifecycle::Running),
-                now_text
-            ],
-        )
-        .map_err(|error| companion_unavailable(error.to_string()))?;
-        // The presence seed rides alongside the companion seed so the first
-        // generation compare has a current fact to compare against.
-        tx.execute(
-            SQL_INSERT_ATTRIBUTION,
-            params![
-                fresh_text,
-                encode_presence_state(PresenceState::NoActive),
-                Option::<String>::None,
-                0_i64
-            ],
-        )
-        .map_err(|error| companion_unavailable(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        Ok(CompanionId::from_raw(fresh))
+            tx.commit()
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            Ok(CompanionId::from_raw(fresh))
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn load_lifecycle(
         &self,
         companion: CompanionId,
     ) -> Result<Option<CompanionLifecycle>, CompanionTechnicalError> {
-        let key = encode_id(companion.as_raw());
-        let guard = lock_shared(&self.conn);
-        let found: Option<String> = guard
-            .query_row(SQL_SELECT_LIFECYCLE, params![key], |row| row.get(0))
-            .optional()
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        match found {
-            Some(text) => {
-                let lifecycle = decode_lifecycle(&text).map_err(companion_unavailable)?;
-                Ok(Some(lifecycle))
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let key = encode_id(companion.as_raw());
+            let guard = lock_shared(&conn);
+            let found: Option<String> = guard
+                .query_row(SQL_SELECT_LIFECYCLE, params![key], |row| row.get(0))
+                .optional()
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            match found {
+                Some(text) => {
+                    let lifecycle = decode_lifecycle(&text).map_err(companion_unavailable)?;
+                    Ok(Some(lifecycle))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
+        .await
     }
 }
 
 impl HistoryRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn append_message(
         &self,
         cmd: AppendHistoryCommand,
     ) -> Result<HistoryAppendOutcome, CompanionTechnicalError> {
-        let (outcome, _) = self.append_history(&cmd, false)?;
-        Ok(outcome)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let (outcome, _) = append_history(&conn, &cmd, false)?;
+            Ok(outcome)
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn append_reply_with_undelivered(
         &self,
         cmd: AppendHistoryCommand,
         register_unpresented: bool,
     ) -> Result<(HistoryAppendOutcome, Option<UndeliveredRef>), CompanionTechnicalError> {
-        self.append_history(&cmd, register_unpresented)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || append_history(&conn, &cmd, register_unpresented)).await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn lookup_local_id(
         &self,
         companion: CompanionId,
         local_id: &str,
     ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
-        let key = encode_id(companion.as_raw());
-        let guard = lock_shared(&self.conn);
-        // Pure load: one statement, no transaction. Correspondence lookup for
-        // matching an input to its ack; durable replay keys on `command_id`
-        // instead (see `lookup_command`).
-        let found: Option<HistoryRow> = guard
-            .query_row(
-                SQL_SELECT_HISTORY_BY_LOCAL_ID,
-                params![key, local_id],
-                HistoryRow::from_row,
-            )
-            .optional()
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        match found {
-            Some(row) => {
-                let message =
-                    decode_history_message(companion, row).map_err(companion_unavailable)?;
-                Ok(Some(message))
+        let conn = Arc::clone(&self.conn);
+        let local_id = local_id.to_owned();
+        run_blocking(move || {
+            let key = encode_id(companion.as_raw());
+            let guard = lock_shared(&conn);
+            // Pure load: one statement, no transaction. Correspondence lookup for
+            // matching an input to its ack; durable replay keys on `command_id`
+            // instead (see `lookup_command`).
+            let found: Option<HistoryRow> = guard
+                .query_row(
+                    SQL_SELECT_HISTORY_BY_LOCAL_ID,
+                    params![key, local_id],
+                    HistoryRow::from_row,
+                )
+                .optional()
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            match found {
+                Some(row) => {
+                    let message =
+                        decode_history_message(companion, row).map_err(companion_unavailable)?;
+                    Ok(Some(message))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn lookup_command(
         &self,
         companion: CompanionId,
         command: &CommandId,
     ) -> Result<Option<HistoryMessage>, CompanionTechnicalError> {
-        let key = encode_id(companion.as_raw());
-        let command_key = encode_id(command.0);
-        let guard = lock_shared(&self.conn);
-        // Pure load: one statement, no transaction. Durable replay lookup on
-        // the `(companion, command_id)` key; `NULL` command ids never match.
-        let found: Option<HistoryRow> = guard
-            .query_row(
-                SQL_SELECT_HISTORY_BY_COMMAND,
-                params![key, command_key],
-                HistoryRow::from_row,
-            )
-            .optional()
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        match found {
-            Some(row) => {
-                let message =
-                    decode_history_message(companion, row).map_err(companion_unavailable)?;
-                Ok(Some(message))
+        let conn = Arc::clone(&self.conn);
+        let command = *command;
+        run_blocking(move || {
+            let key = encode_id(companion.as_raw());
+            let command_key = encode_id(command.0);
+            let guard = lock_shared(&conn);
+            // Pure load: one statement, no transaction. Durable replay lookup on
+            // the `(companion, command_id)` key; `NULL` command ids never match.
+            let found: Option<HistoryRow> = guard
+                .query_row(
+                    SQL_SELECT_HISTORY_BY_COMMAND,
+                    params![key, command_key],
+                    HistoryRow::from_row,
+                )
+                .optional()
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            match found {
+                Some(row) => {
+                    let message =
+                        decode_history_message(companion, row).map_err(companion_unavailable)?;
+                    Ok(Some(message))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn load_timeline(
         &self,
         companion: CompanionId,
         since: Option<WallClockWithTz>,
         limit: u64,
     ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError> {
-        let key = encode_id(companion.as_raw());
-        let guard = lock_shared(&self.conn);
-        let mut query = guard
-            .prepare(SQL_SELECT_TIMELINE)
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        let rows = query
-            .query_map(params![key], HistoryRow::from_row)
-            .map_err(|error| companion_unavailable(error.to_string()))?;
-        let mut timeline = Vec::new();
-        for row in rows {
-            let row = row.map_err(|error| companion_unavailable(error.to_string()))?;
-            let message = decode_history_message(companion, row).map_err(companion_unavailable)?;
-            if let Some(lower) = since
-                && message.at.as_datetime() < lower.as_datetime()
-            {
-                continue;
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let key = encode_id(companion.as_raw());
+            let guard = lock_shared(&conn);
+            let mut query = guard
+                .prepare(SQL_SELECT_TIMELINE)
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            let rows = query
+                .query_map(params![key], HistoryRow::from_row)
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            let mut timeline = Vec::new();
+            for row in rows {
+                let row = row.map_err(|error| companion_unavailable(error.to_string()))?;
+                let message =
+                    decode_history_message(companion, row).map_err(companion_unavailable)?;
+                if let Some(lower) = since
+                    && message.at.as_datetime() < lower.as_datetime()
+                {
+                    continue;
+                }
+                timeline.push(message);
             }
-            timeline.push(message);
-        }
-        let cap = match usize::try_from(limit) {
-            Ok(value) => value,
-            Err(_) => usize::MAX,
-        };
-        timeline.truncate(cap);
-        Ok(timeline)
+            let cap = match usize::try_from(limit) {
+                Ok(value) => value,
+                Err(_) => usize::MAX,
+            };
+            timeline.truncate(cap);
+            Ok(timeline)
+        })
+        .await
     }
 }
 
 impl UndeliveredRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn register_if_parent_durable(
         &self,
         entry: UndeliveredRef,
     ) -> Result<bool, UndeliveredTechnicalError> {
-        let id_text = encode_id(entry.id);
-        let companion_text = encode_id(entry.companion.as_raw());
-        let source_text = encode_id(entry.source_message);
-        let round_text = encode_id(entry.round);
-        let status_text = encode_report_status(entry.status);
-        let generation_raw =
-            encode_u64(entry.presence_generation.as_u64()).map_err(undelivered_unavailable)?;
-        let now_text = WallClockWithTz::now().to_rfc3339();
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let id_text = encode_id(entry.id);
+            let companion_text = encode_id(entry.companion.as_raw());
+            let source_text = encode_id(entry.source_message);
+            let round_text = encode_id(entry.round);
+            let status_text = encode_report_status(entry.status);
+            let generation_raw =
+                encode_u64(entry.presence_generation.as_u64()).map_err(undelivered_unavailable)?;
+            let now_text = WallClockWithTz::now().to_rfc3339();
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            let parent: Option<i64> = tx
+                .query_row(SQL_FIND_HISTORY, params![source_text], |row| row.get(0))
+                .optional()
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            if parent.is_none() {
+                return Ok(false);
+            }
+            tx.execute(
+                SQL_INSERT_UNDELIVERED,
+                params![
+                    id_text,
+                    companion_text,
+                    source_text,
+                    status_text,
+                    round_text,
+                    generation_raw,
+                    now_text
+                ],
+            )
             .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        let parent: Option<i64> = tx
-            .query_row(SQL_FIND_HISTORY, params![source_text], |row| row.get(0))
-            .optional()
-            .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        if parent.is_none() {
-            return Ok(false);
-        }
-        tx.execute(
-            SQL_INSERT_UNDELIVERED,
-            params![
-                id_text,
-                companion_text,
-                source_text,
-                status_text,
-                round_text,
-                generation_raw,
-                now_text
-            ],
-        )
-        .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        Ok(true)
+            tx.commit()
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            Ok(true)
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn compare_and_mark_reported(
         &self,
         id: RawId,
         expected: ReportStatus,
         mark: PresentationMark,
     ) -> Result<ReportStatusTransition, UndeliveredTechnicalError> {
-        let key = encode_id(id);
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        let found: Option<String> = tx
-            .query_row(SQL_SELECT_UNDELIVERED_STATUS, params![key], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        let Some(status_text) = found else {
-            return Ok(ReportStatusTransition::StaleSource);
-        };
-        let current = decode_report_status(&status_text).map_err(undelivered_unavailable)?;
-        // `PresentationUnknown` is sticky: no transition leaves it, so a
-        // compare that lands there is stale by definition.
-        if current != expected || current == ReportStatus::PresentationUnknown {
-            return Ok(ReportStatusTransition::StaleSource);
-        }
-        let (next, transition) = if mark.presented {
-            (
-                ReportStatus::Presented,
-                ReportStatusTransition::PendingToPresented,
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let key = encode_id(id);
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            let found: Option<String> = tx
+                .query_row(SQL_SELECT_UNDELIVERED_STATUS, params![key], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            let Some(status_text) = found else {
+                return Ok(ReportStatusTransition::StaleSource);
+            };
+            let current = decode_report_status(&status_text).map_err(undelivered_unavailable)?;
+            // `PresentationUnknown` is sticky: no transition leaves it, so a
+            // compare that lands there is stale by definition.
+            if current != expected || current == ReportStatus::PresentationUnknown {
+                return Ok(ReportStatusTransition::StaleSource);
+            }
+            let (next, transition) = if mark.presented {
+                (
+                    ReportStatus::Presented,
+                    ReportStatusTransition::PendingToPresented,
+                )
+            } else {
+                (
+                    ReportStatus::PresentationUnknown,
+                    ReportStatusTransition::MarkedPresentationUnknown,
+                )
+            };
+            tx.execute(
+                SQL_UPDATE_UNDELIVERED_STATUS,
+                params![encode_report_status(next), key],
             )
-        } else {
-            (
-                ReportStatus::PresentationUnknown,
-                ReportStatusTransition::MarkedPresentationUnknown,
-            )
-        };
-        tx.execute(
-            SQL_UPDATE_UNDELIVERED_STATUS,
-            params![encode_report_status(next), key],
-        )
-        .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        tx.commit()
             .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        Ok(transition)
+            tx.commit()
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            Ok(transition)
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn list_pending(
         &self,
         companion: CompanionId,
     ) -> Result<Vec<UndeliveredRef>, UndeliveredTechnicalError> {
-        let key = encode_id(companion.as_raw());
-        let guard = lock_shared(&self.conn);
-        let mut query = guard
-            .prepare(SQL_SELECT_PENDING)
-            .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        let rows = query
-            .query_map(
-                params![key, encode_report_status(ReportStatus::Pending)],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, i64>(5)?,
-                    ))
-                },
-            )
-            .map_err(|error| undelivered_unavailable(error.to_string()))?;
-        let mut pending = Vec::new();
-        for row in rows {
-            let (id_text, companion_text, source_text, status_text, round_text, generation_raw) =
-                row.map_err(|error| undelivered_unavailable(error.to_string()))?;
-            pending.push(UndeliveredRef {
-                id: decode_id(&id_text).map_err(undelivered_unavailable)?,
-                companion: CompanionId::from_raw(
-                    decode_id(&companion_text).map_err(undelivered_unavailable)?,
-                ),
-                source_message: decode_id(&source_text).map_err(undelivered_unavailable)?,
-                status: decode_report_status(&status_text).map_err(undelivered_unavailable)?,
-                round: decode_id(&round_text).map_err(undelivered_unavailable)?,
-                presence_generation: PresenceGeneration::from_u64(
-                    decode_u64(generation_raw).map_err(undelivered_unavailable)?,
-                ),
-            });
-        }
-        Ok(pending)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let key = encode_id(companion.as_raw());
+            let guard = lock_shared(&conn);
+            let mut query = guard
+                .prepare(SQL_SELECT_PENDING)
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            let rows = query
+                .query_map(
+                    params![key, encode_report_status(ReportStatus::Pending)],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    },
+                )
+                .map_err(|error| undelivered_unavailable(error.to_string()))?;
+            let mut pending = Vec::new();
+            for row in rows {
+                let (id_text, companion_text, source_text, status_text, round_text, generation_raw) =
+                    row.map_err(|error| undelivered_unavailable(error.to_string()))?;
+                pending.push(UndeliveredRef {
+                    id: decode_id(&id_text).map_err(undelivered_unavailable)?,
+                    companion: CompanionId::from_raw(
+                        decode_id(&companion_text).map_err(undelivered_unavailable)?,
+                    ),
+                    source_message: decode_id(&source_text).map_err(undelivered_unavailable)?,
+                    status: decode_report_status(&status_text).map_err(undelivered_unavailable)?,
+                    round: decode_id(&round_text).map_err(undelivered_unavailable)?,
+                    presence_generation: PresenceGeneration::from_u64(
+                        decode_u64(generation_raw).map_err(undelivered_unavailable)?,
+                    ),
+                });
+            }
+            Ok(pending)
+        })
+        .await
     }
 }
 
 impl ConsentRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
-        let guard = lock_shared(&self.conn);
-        let found: Option<(String, i64, String, String, String)> = guard
-            .query_row(SQL_SELECT_CONSENT, (), |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })
-            .optional()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        match found {
-            Some((id, rev_raw, provider, model, credential_id)) => {
-                let record = decode_consent(id, rev_raw, provider, model, credential_id)
-                    .map_err(permission_unavailable)?;
-                Ok(Some(record))
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let found: Option<(String, i64, String, String, String)> = guard
+                .query_row(SQL_SELECT_CONSENT, (), |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .optional()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            match found {
+                Some((id, rev_raw, provider, model, credential_id)) => {
+                    let record = decode_consent(id, rev_raw, provider, model, credential_id)
+                        .map_err(permission_unavailable)?;
+                    Ok(Some(record))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn compare_and_save(
         &self,
         expected: Option<(String, ConsentRevision)>,
         record: ConsentRecord,
     ) -> Result<ConsentCommitOutcome, PermissionTechnicalError> {
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        let outcome = compare_and_save_row(
-            &tx,
-            expected.as_ref().map(|(id, rev)| (id.as_str(), rev)),
-            &record,
-        )
-        .map_err(permission_unavailable)?;
-        tx.commit()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        Ok(outcome)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            let outcome = compare_and_save_row(
+                &tx,
+                expected.as_ref().map(|(id, rev)| (id.as_str(), rev)),
+                &record,
+            )
+            .map_err(permission_unavailable)?;
+            tx.commit()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            Ok(outcome)
+        })
+        .await
     }
 }
 
@@ -1932,264 +1939,263 @@ fn compare_and_save_row(
 }
 
 impl IntentOutcomeRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn record_intent_outcome(
         &self,
         record: IntentOutcomeRecord,
     ) -> Result<IntentResolution<()>, PermissionTechnicalError> {
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        // Write-once claim first: an existing row is never rewritten.
-        if let Some(stored) = select_intent_row_tx(&tx, &record.fingerprint.intent_id)
-            .map_err(permission_unavailable)?
-        {
-            return Ok(replay_or_conflict(stored, &record.fingerprint));
-        }
-        match insert_decided_row_tx(&tx, &record.fingerprint, &record.outcome)
-            .map_err(permission_unavailable)?
-        {
-            None => {
-                tx.commit()
-                    .map_err(|error| permission_unavailable(error.to_string()))?;
-                Ok(IntentResolution::Decided(()))
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            // Write-once claim first: an existing row is never rewritten.
+            if let Some(stored) = select_intent_row_tx(&tx, &record.fingerprint.intent_id)
+                .map_err(permission_unavailable)?
+            {
+                return Ok(replay_or_conflict(stored, &record.fingerprint));
             }
-            Some(winner) => Ok(replay_or_conflict(winner, &record.fingerprint)),
-        }
+            match insert_decided_row_tx(&tx, &record.fingerprint, &record.outcome)
+                .map_err(permission_unavailable)?
+            {
+                None => {
+                    tx.commit()
+                        .map_err(|error| permission_unavailable(error.to_string()))?;
+                    Ok(IntentResolution::Decided(()))
+                }
+                Some(winner) => Ok(replay_or_conflict(winner, &record.fingerprint)),
+            }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn lookup_intent_outcome(
         &self,
         intent_id: &str,
     ) -> Result<Option<IntentOutcomeRecord>, PermissionTechnicalError> {
-        let guard = lock_shared(&self.conn);
-        let found: Option<IntentOutcomeRow> = guard
-            .query_row(SQL_SELECT_INTENT_OUTCOME, params![intent_id], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            })
-            .optional()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        match found {
-            Some(row) => decode_intent_outcome_row(intent_id, row).map(Some),
-            None => Ok(None),
-        }
-        .map_err(permission_unavailable)
+        let conn = Arc::clone(&self.conn);
+        let intent_id = intent_id.to_owned();
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let found: Option<IntentOutcomeRow> = guard
+                .query_row(SQL_SELECT_INTENT_OUTCOME, params![intent_id], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                })
+                .optional()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            match found {
+                Some(row) => decode_intent_outcome_row(&intent_id, row).map(Some),
+                None => Ok(None),
+            }
+            .map_err(permission_unavailable)
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn assign_with_intent(
         &self,
         expected: Option<(String, ConsentRevision)>,
         record: ConsentRecord,
         fingerprint: IntentFingerprint,
     ) -> Result<IntentResolution<ConsentCommitOutcome>, PermissionTechnicalError> {
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        // Write-once claim first: an existing row decides without touching
-        // consent, so a concurrent same-id send can neither fork the answer
-        // nor re-run the compare-and-save.
-        if let Some(stored) =
-            select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
-        {
-            return Ok(replay_or_conflict(stored, &fingerprint));
-        }
-        let outcome = compare_and_save_row(
-            &tx,
-            expected.as_ref().map(|(id, rev)| (id.as_str(), rev)),
-            &record,
-        )
-        .map_err(permission_unavailable)?;
-        // The replay row shares the decision transaction: a crash can
-        // neither strand a commit without its marker nor a marker without
-        // its commit. Stale attempts record their stale snapshot here too,
-        // so a retried id always observes the same answer. The commit
-        // snapshot carries the committed revision, so replay answers it
-        // verbatim.
-        let snapshot = match &outcome {
-            ConsentCommitOutcome::Committed { record } => IntentOutcome::StoredAsRuleView {
-                revision: record.rev.as_u64().to_string(),
-            },
-            ConsentCommitOutcome::StaleCurrent { current } => IntentOutcome::StaleBaseView {
-                current: consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64())),
-            },
-        };
-        match insert_decided_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)? {
-            None => {
-                tx.commit()
-                    .map_err(|error| permission_unavailable(error.to_string()))?;
-                Ok(IntentResolution::Decided(outcome))
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            // Write-once claim first: an existing row decides without touching
+            // consent, so a concurrent same-id send can neither fork the answer
+            // nor re-run the compare-and-save.
+            if let Some(stored) =
+                select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+            {
+                return Ok(replay_or_conflict(stored, &fingerprint));
             }
-            // Lost a cross-process race after deciding: roll back (dropping
-            // `tx` without committing) so the loser changes nothing, and
-            // answer from the winner.
-            Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
-        }
+            let outcome = compare_and_save_row(
+                &tx,
+                expected.as_ref().map(|(id, rev)| (id.as_str(), rev)),
+                &record,
+            )
+            .map_err(permission_unavailable)?;
+            // The replay row shares the decision transaction: a crash can
+            // neither strand a commit without its marker nor a marker without
+            // its commit. Stale attempts record their stale snapshot here too,
+            // so a retried id always observes the same answer. The commit
+            // snapshot carries the committed revision, so replay answers it
+            // verbatim.
+            let snapshot = match &outcome {
+                ConsentCommitOutcome::Committed { record } => IntentOutcome::StoredAsRuleView {
+                    revision: record.rev.as_u64().to_string(),
+                },
+                ConsentCommitOutcome::StaleCurrent { current } => IntentOutcome::StaleBaseView {
+                    current: consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64())),
+                },
+            };
+            match insert_decided_row_tx(&tx, &fingerprint, &snapshot)
+                .map_err(permission_unavailable)?
+            {
+                None => {
+                    tx.commit()
+                        .map_err(|error| permission_unavailable(error.to_string()))?;
+                    Ok(IntentResolution::Decided(outcome))
+                }
+                // Lost a cross-process race after deciding: roll back (dropping
+                // `tx` without committing) so the loser changes nothing, and
+                // answer from the winner.
+                Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
+            }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn request_approval_with_intent(
         &self,
         provider: String,
         label: String,
         fingerprint: IntentFingerprint,
     ) -> Result<IntentResolution<IntentOutcomeRecord>, PermissionTechnicalError> {
-        if credential_pair_is_blank(&provider, &label) {
-            return Err(permission_unavailable(String::from(
-                "blank credential pair",
-            )));
-        }
-        let requested_text = WallClockWithTz::now().to_rfc3339();
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        // Write-once claim first: an existing row decides without touching
-        // credential state.
-        if let Some(stored) =
-            select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
-        {
-            return Ok(replay_or_conflict(stored, &fingerprint));
-        }
-        // One transaction: the pending insert (or usable recheck) plus the
-        // replay row, so the decided snapshot and the state it describes
-        // can never strand apart.
-        let usable: Option<(String, String, String)> = tx
-            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        let outcome = if usable.is_some() {
-            IntentOutcome::AppliedAsOneTime
-        } else {
-            tx.execute(
-                SQL_INSERT_CREDENTIAL_PENDING_IGNORE,
-                params![provider, label, requested_text],
-            )
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-            IntentOutcome::HeldByOperation
-        };
-        let decided = IntentOutcomeRecord {
-            fingerprint,
-            outcome,
-        };
-        match insert_decided_row_tx(&tx, &decided.fingerprint, &decided.outcome)
-            .map_err(permission_unavailable)?
-        {
-            None => {
-                tx.commit()
-                    .map_err(|error| permission_unavailable(error.to_string()))?;
-                Ok(IntentResolution::Decided(decided))
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            if credential_pair_is_blank(&provider, &label) {
+                return Err(permission_unavailable(String::from(
+                    "blank credential pair",
+                )));
             }
-            // Lost a cross-process race after deciding: roll back (dropping
-            // `tx` without committing) so the loser changes nothing, and
-            // answer from the winner.
-            Some(winner) => Ok(replay_or_conflict(winner, &decided.fingerprint)),
-        }
+            let requested_text = WallClockWithTz::now().to_rfc3339();
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            // Write-once claim first: an existing row decides without touching
+            // credential state.
+            if let Some(stored) =
+                select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+            {
+                return Ok(replay_or_conflict(stored, &fingerprint));
+            }
+            // One transaction: the pending insert (or usable recheck) plus the
+            // replay row, so the decided snapshot and the state it describes
+            // can never strand apart.
+            let usable: Option<(String, String, String)> = tx
+                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            let outcome = if usable.is_some() {
+                IntentOutcome::AppliedAsOneTime
+            } else {
+                tx.execute(
+                    SQL_INSERT_CREDENTIAL_PENDING_IGNORE,
+                    params![provider, label, requested_text],
+                )
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+                IntentOutcome::HeldByOperation
+            };
+            let decided = IntentOutcomeRecord {
+                fingerprint,
+                outcome,
+            };
+            match insert_decided_row_tx(&tx, &decided.fingerprint, &decided.outcome)
+                .map_err(permission_unavailable)?
+            {
+                None => {
+                    tx.commit()
+                        .map_err(|error| permission_unavailable(error.to_string()))?;
+                    Ok(IntentResolution::Decided(decided))
+                }
+                // Lost a cross-process race after deciding: roll back (dropping
+                // `tx` without committing) so the loser changes nothing, and
+                // answer from the winner.
+                Some(winner) => Ok(replay_or_conflict(winner, &decided.fingerprint)),
+            }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn complete_with_intent(
         &self,
         expected_base: String,
         bearer_present: bool,
         fingerprint: IntentFingerprint,
     ) -> Result<IntentResolution<IntentOutcomeRecord>, PermissionTechnicalError> {
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        // Write-once claim first: an existing row decides without
-        // re-reading consent, so a concurrent same-id send can neither
-        // fork the answer nor re-run the mark comparison.
-        if let Some(stored) =
-            select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
-        {
-            return Ok(replay_or_conflict(stored, &fingerprint));
-        }
-        // One transaction: compare the base mark, verify completability,
-        // and record the decided snapshot together. Every decided outcome
-        // is recorded (even stale/clarify), so a retried id always observes
-        // the same answer; only store failures hold unrecorded.
-        let found: Option<(String, i64, String, String, String)> = tx
-            .query_row(SQL_SELECT_CONSENT, (), |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })
-            .optional()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        let current = match found {
-            Some((id, stored_rev, provider, model, credential_id)) => Some(
-                decode_consent(id, stored_rev, provider, model, credential_id)
-                    .map_err(permission_unavailable)?,
-            ),
-            None => None,
-        };
-        let mark = consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64()));
-        let outcome = if mark != expected_base {
-            IntentOutcome::StaleBaseView {
-                current: mark.clone(),
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            // Write-once claim first: an existing row decides without
+            // re-reading consent, so a concurrent same-id send can neither
+            // fork the answer nor re-run the mark comparison.
+            if let Some(stored) =
+                select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+            {
+                return Ok(replay_or_conflict(stored, &fingerprint));
             }
-        } else if current.is_some() && bearer_present {
-            IntentOutcome::AppliedAsOneTime
-        } else {
-            IntentOutcome::NeedsClarification
-        };
-        let decided = IntentOutcomeRecord {
-            fingerprint,
-            outcome,
-        };
-        match insert_decided_row_tx(&tx, &decided.fingerprint, &decided.outcome)
-            .map_err(permission_unavailable)?
-        {
-            None => {
-                tx.commit()
-                    .map_err(|error| permission_unavailable(error.to_string()))?;
-                Ok(IntentResolution::Decided(decided))
+            // One transaction: compare the base mark, verify completability,
+            // and record the decided snapshot together. Every decided outcome
+            // is recorded (even stale/clarify), so a retried id always observes
+            // the same answer; only store failures hold unrecorded.
+            let found: Option<(String, i64, String, String, String)> = tx
+                .query_row(SQL_SELECT_CONSENT, (), |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .optional()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            let current = match found {
+                Some((id, stored_rev, provider, model, credential_id)) => Some(
+                    decode_consent(id, stored_rev, provider, model, credential_id)
+                        .map_err(permission_unavailable)?,
+                ),
+                None => None,
+            };
+            let mark = consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64()));
+            let outcome = if mark != expected_base {
+                IntentOutcome::StaleBaseView {
+                    current: mark.clone(),
+                }
+            } else if current.is_some() && bearer_present {
+                IntentOutcome::AppliedAsOneTime
+            } else {
+                IntentOutcome::NeedsClarification
+            };
+            let decided = IntentOutcomeRecord {
+                fingerprint,
+                outcome,
+            };
+            match insert_decided_row_tx(&tx, &decided.fingerprint, &decided.outcome)
+                .map_err(permission_unavailable)?
+            {
+                None => {
+                    tx.commit()
+                        .map_err(|error| permission_unavailable(error.to_string()))?;
+                    Ok(IntentResolution::Decided(decided))
+                }
+                // Lost a cross-process race after deciding: roll back (dropping
+                // `tx` without committing) so the loser changes nothing, and
+                // answer from the winner.
+                Some(winner) => Ok(replay_or_conflict(winner, &decided.fingerprint)),
             }
-            // Lost a cross-process race after deciding: roll back (dropping
-            // `tx` without committing) so the loser changes nothing, and
-            // answer from the winner.
-            Some(winner) => Ok(replay_or_conflict(winner, &decided.fingerprint)),
-        }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn shortcut_with_intent(
         &self,
         provider: String,
@@ -2197,201 +2203,209 @@ impl IntentOutcomeRepository for Store {
         credential_id: String,
         fingerprint: IntentFingerprint,
     ) -> Result<IntentResolution<ShortcutIntentOutcome>, PermissionTechnicalError> {
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        // Write-once claim first: an existing row decides without reading
-        // consent, so a concurrent same-id send can neither fork the answer
-        // nor re-run the route check.
-        if let Some(stored) =
-            select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
-        {
-            return Ok(replay_or_conflict(stored, &fingerprint));
-        }
-        // One transaction: read current, and — only when the stored route
-        // already equals the requested one — insert the `Stored` snapshot
-        // for the current revision. No state changes either way.
-        let found: Option<(String, i64, String, String, String)> = tx
-            .query_row(SQL_SELECT_CONSENT, (), |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })
-            .optional()
-            .map_err(|error| permission_unavailable(error.to_string()))?;
-        let current = match found {
-            Some((id, stored_rev, provider, model, credential_id)) => Some(
-                decode_consent(id, stored_rev, provider, model, credential_id)
-                    .map_err(permission_unavailable)?,
-            ),
-            None => None,
-        };
-        let matches = current.as_ref().is_some_and(|stored| {
-            stored.provider == provider
-                && stored.model == model
-                && stored.credential_id == credential_id
-        });
-        if !matches {
-            return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
-                current,
-            }));
-        }
-        let Some(record) = current else {
-            return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
-                current: None,
-            }));
-        };
-        let snapshot = IntentOutcome::StoredAsRuleView {
-            revision: record.rev.as_u64().to_string(),
-        };
-        match insert_decided_row_tx(&tx, &fingerprint, &snapshot).map_err(permission_unavailable)? {
-            None => {
-                tx.commit()
-                    .map_err(|error| permission_unavailable(error.to_string()))?;
-                Ok(IntentResolution::Decided(ShortcutIntentOutcome::Hit {
-                    current: record,
-                }))
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            // Write-once claim first: an existing row decides without reading
+            // consent, so a concurrent same-id send can neither fork the answer
+            // nor re-run the route check.
+            if let Some(stored) =
+                select_intent_row_tx(&tx, &fingerprint.intent_id).map_err(permission_unavailable)?
+            {
+                return Ok(replay_or_conflict(stored, &fingerprint));
             }
-            // Lost a cross-process race after deciding: roll back (dropping
-            // `tx` without committing) so the loser changes nothing, and
-            // answer from the winner.
-            Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
-        }
+            // One transaction: read current, and — only when the stored route
+            // already equals the requested one — insert the `Stored` snapshot
+            // for the current revision. No state changes either way.
+            let found: Option<(String, i64, String, String, String)> = tx
+                .query_row(SQL_SELECT_CONSENT, (), |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .optional()
+                .map_err(|error| permission_unavailable(error.to_string()))?;
+            let current = match found {
+                Some((id, stored_rev, provider, model, credential_id)) => Some(
+                    decode_consent(id, stored_rev, provider, model, credential_id)
+                        .map_err(permission_unavailable)?,
+                ),
+                None => None,
+            };
+            let matches = current.as_ref().is_some_and(|stored| {
+                stored.provider == provider
+                    && stored.model == model
+                    && stored.credential_id == credential_id
+            });
+            if !matches {
+                return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
+                    current,
+                }));
+            }
+            let Some(record) = current else {
+                return Ok(IntentResolution::Decided(ShortcutIntentOutcome::Miss {
+                    current: None,
+                }));
+            };
+            let snapshot = IntentOutcome::StoredAsRuleView {
+                revision: record.rev.as_u64().to_string(),
+            };
+            match insert_decided_row_tx(&tx, &fingerprint, &snapshot)
+                .map_err(permission_unavailable)?
+            {
+                None => {
+                    tx.commit()
+                        .map_err(|error| permission_unavailable(error.to_string()))?;
+                    Ok(IntentResolution::Decided(ShortcutIntentOutcome::Hit {
+                        current: record,
+                    }))
+                }
+                // Lost a cross-process race after deciding: roll back (dropping
+                // `tx` without committing) so the loser changes nothing, and
+                // answer from the winner.
+                Some(winner) => Ok(replay_or_conflict(winner, &fingerprint)),
+            }
+        })
+        .await
     }
 }
 
 impl InferenceAttemptRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn begin_inference_attempt(
         &self,
         attempt: InferenceAttempt,
     ) -> Result<AttemptBeginOutcome, InferenceTechnicalError> {
-        let rev_raw = encode_u64(attempt.expected_consent.1).map_err(inference_unavailable)?;
-        let ticket_text = encode_id(attempt.ticket.0);
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| inference_unavailable(error.to_string()))?;
-        // The linearization point: read, compare, and claim share one short
-        // transaction that never spans provider I/O. A mutation that
-        // committed first fails the compare (no byte leaves); a mutation
-        // that commits after only affects result adoption, never the fact
-        // that this attempt started under a verified premise.
-        let stored: Option<(String, i64)> = tx
-            .query_row(SQL_SELECT_CONSENT, (), |row| Ok((row.get(0)?, row.get(1)?)))
-            .optional()
-            .map_err(|error| inference_unavailable(error.to_string()))?;
-        let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
-            id == &attempt.expected_consent.0
-                && decode_u64(*rev).is_ok_and(|value| value == attempt.expected_consent.1)
-        });
-        if !current_matches {
-            return Ok(AttemptBeginOutcome::Stale);
-        }
-        let started_text = WallClockWithTz::now().to_rfc3339();
-        match tx.execute(
-            SQL_INSERT_ATTEMPT,
-            params![
-                ticket_text,
-                attempt.expected_consent.0,
-                rev_raw,
-                attempt.provider,
-                attempt.model,
-                started_text,
-            ],
-        ) {
-            Ok(_) => {}
-            // A duplicate ticket re-claims an already-started attempt: stale
-            // (never send twice), never a storage error.
-            Err(error)
-                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
-            {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let rev_raw = encode_u64(attempt.expected_consent.1).map_err(inference_unavailable)?;
+            let ticket_text = encode_id(attempt.ticket.0);
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            // The linearization point: read, compare, and claim share one short
+            // transaction that never spans provider I/O. A mutation that
+            // committed first fails the compare (no byte leaves); a mutation
+            // that commits after only affects result adoption, never the fact
+            // that this attempt started under a verified premise.
+            let stored: Option<(String, i64)> = tx
+                .query_row(SQL_SELECT_CONSENT, (), |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
+                id == &attempt.expected_consent.0
+                    && decode_u64(*rev).is_ok_and(|value| value == attempt.expected_consent.1)
+            });
+            if !current_matches {
                 return Ok(AttemptBeginOutcome::Stale);
             }
-            Err(error) => return Err(inference_unavailable(error.to_string())),
-        }
-        tx.commit()
-            .map_err(|error| inference_unavailable(error.to_string()))?;
-        Ok(AttemptBeginOutcome::Started)
+            let started_text = WallClockWithTz::now().to_rfc3339();
+            match tx.execute(
+                SQL_INSERT_ATTEMPT,
+                params![
+                    ticket_text,
+                    attempt.expected_consent.0,
+                    rev_raw,
+                    attempt.provider,
+                    attempt.model,
+                    started_text,
+                ],
+            ) {
+                Ok(_) => {}
+                // A duplicate ticket re-claims an already-started attempt: stale
+                // (never send twice), never a storage error.
+                Err(error)
+                    if error.sqlite_error_code()
+                        == Some(rusqlite::ErrorCode::ConstraintViolation) =>
+                {
+                    return Ok(AttemptBeginOutcome::Stale);
+                }
+                Err(error) => return Err(inference_unavailable(error.to_string())),
+            }
+            tx.commit()
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            Ok(AttemptBeginOutcome::Started)
+        })
+        .await
     }
 }
 
 impl CredentialRefRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn save_ref(&self, cred: CredentialRef) -> Result<(), CredentialTechnicalError> {
-        let guard = lock_shared(&self.conn);
-        guard
-            .execute(
-                SQL_UPSERT_CREDENTIAL,
-                params![cred.id, cred.provider, cred.label],
-            )
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(())
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            guard
+                .execute(
+                    SQL_UPSERT_CREDENTIAL,
+                    params![cred.id(), cred.provider(), cred.label()],
+                )
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(())
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn load_ref(
         &self,
         provider: &str,
         label: &str,
     ) -> Result<Option<CredentialRef>, CredentialTechnicalError> {
-        let guard = lock_shared(&self.conn);
-        let found: Option<(String, String, String)> = guard
-            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(found.map(|(id, provider_name, label_name)| CredentialRef {
-            id,
-            provider: provider_name,
-            label: label_name,
-        }))
+        let conn = Arc::clone(&self.conn);
+        let provider = provider.to_owned();
+        let label = label.to_owned();
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let found: Option<(String, String, String)> = guard
+                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let Some((_, provider_name, label_name)) = found else {
+                return Ok(None);
+            };
+            let cred = CredentialRef::new(provider_name, label_name)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(Some(cred))
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError> {
-        let guard = lock_shared(&self.conn);
-        let mut query = guard
-            .prepare(SQL_LIST_CREDENTIALS)
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let rows = query
-            .query_map((), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let mut refs = Vec::new();
-        for row in rows {
-            let (id, provider, label) =
-                row.map_err(|error| credential_unavailable(error.to_string()))?;
-            refs.push(CredentialRef {
-                id,
-                provider,
-                label,
-            });
-        }
-        Ok(refs)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let mut query = guard
+                .prepare(SQL_LIST_CREDENTIALS)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let rows = query
+                .query_map((), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let mut refs = Vec::new();
+            for row in rows {
+                let (_, provider, label) =
+                    row.map_err(|error| credential_unavailable(error.to_string()))?;
+                let cred = CredentialRef::new(provider, label)
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                refs.push(cred);
+            }
+            Ok(refs)
+        })
+        .await
     }
 }
 
@@ -2404,402 +2418,414 @@ fn fresh_pairing_secret() -> String {
 }
 
 impl DevicePairingRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn request_pairing(
         &self,
         descriptor: String,
     ) -> Result<DevicePairingStatus, CredentialTechnicalError> {
-        let requested = WallClockWithTz::now();
-        let requested_text = requested.to_rfc3339();
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        // An already-paired descriptor short-circuits: re-requests leave the
-        // stored record untouched.
-        let paired: Option<(String, String, String, Option<String>)> = tx
-            .query_row(
-                SQL_SELECT_PAIRED_BY_DESCRIPTOR,
-                params![descriptor],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let requested = WallClockWithTz::now();
+            let requested_text = requested.to_rfc3339();
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            // An already-paired descriptor short-circuits: re-requests leave the
+            // stored record untouched.
+            let paired: Option<(String, String, String, Option<String>)> = tx
+                .query_row(
+                    SQL_SELECT_PAIRED_BY_DESCRIPTOR,
+                    params![descriptor],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            if let Some((device_text, stored_descriptor, paired_text, wire)) = paired {
+                let device =
+                    decode_device_record(&device_text, stored_descriptor, &paired_text, wire)
+                        .map_err(credential_unavailable)?;
+                return Ok(DevicePairingStatus::Paired { device });
+            }
+            // `INSERT OR IGNORE` keeps a previously stored pending entry: the
+            // re-read below returns it unchanged instead of refreshing its time.
+            tx.execute(
+                SQL_INSERT_PENDING_IGNORE,
+                params![descriptor, requested_text],
             )
-            .optional()
             .map_err(|error| credential_unavailable(error.to_string()))?;
-        if let Some((device_text, stored_descriptor, paired_text, wire)) = paired {
-            let device = decode_device_record(&device_text, stored_descriptor, &paired_text, wire)
+            let stored: Option<(String, String)> = tx
+                .query_row(
+                    SQL_SELECT_PENDING_BY_DESCRIPTOR,
+                    params![descriptor],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let Some((stored_descriptor, stored_requested)) = stored else {
+                return Err(credential_unavailable(String::from(
+                    "pairing request vanished after insert",
+                )));
+            };
+            let pending = decode_pending_pairing(stored_descriptor, &stored_requested)
                 .map_err(credential_unavailable)?;
-            return Ok(DevicePairingStatus::Paired { device });
-        }
-        // `INSERT OR IGNORE` keeps a previously stored pending entry: the
-        // re-read below returns it unchanged instead of refreshing its time.
-        tx.execute(
-            SQL_INSERT_PENDING_IGNORE,
-            params![descriptor, requested_text],
-        )
-        .map_err(|error| credential_unavailable(error.to_string()))?;
-        let stored: Option<(String, String)> = tx
-            .query_row(
-                SQL_SELECT_PENDING_BY_DESCRIPTOR,
-                params![descriptor],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let Some((stored_descriptor, stored_requested)) = stored else {
-            return Err(credential_unavailable(String::from(
-                "pairing request vanished after insert",
-            )));
-        };
-        let pending = decode_pending_pairing(stored_descriptor, &stored_requested)
-            .map_err(credential_unavailable)?;
-        tx.commit()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(DevicePairingStatus::Pending { pending })
+            tx.commit()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(DevicePairingStatus::Pending { pending })
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn approve_pending(
         &self,
         descriptor: &str,
     ) -> Result<Option<(DeviceRecord, String)>, CredentialTechnicalError> {
-        let device_id = RawId::new();
-        let device_text = encode_id(device_id);
-        let paired_at = WallClockWithTz::now();
-        let paired_text = paired_at.to_rfc3339();
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        // Re-approving an already-paired descriptor returns the existing
-        // record unchanged with a freshly minted secret (rotation); no
-        // fresh identity is stored. Secrets are never stored: the caller
-        // displays the returned string once on a trusted surface.
-        let paired: Option<(String, String, String, Option<String>)> = tx
-            .query_row(
-                SQL_SELECT_PAIRED_BY_DESCRIPTOR,
-                params![descriptor],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        let conn = Arc::clone(&self.conn);
+        let descriptor = descriptor.to_owned();
+        run_blocking(move || {
+            let device_id = RawId::new();
+            let device_text = encode_id(device_id);
+            let paired_at = WallClockWithTz::now();
+            let paired_text = paired_at.to_rfc3339();
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            // Re-approving an already-paired descriptor returns the existing
+            // record unchanged with a freshly minted secret (rotation); no
+            // fresh identity is stored. Secrets are never stored: the caller
+            // displays the returned string once on a trusted surface.
+            let paired: Option<(String, String, String, Option<String>)> = tx
+                .query_row(
+                    SQL_SELECT_PAIRED_BY_DESCRIPTOR,
+                    params![descriptor],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            if let Some((stored_text, stored_descriptor, stored_paired, wire)) = paired {
+                let device =
+                    decode_device_record(&stored_text, stored_descriptor, &stored_paired, wire)
+                        .map_err(credential_unavailable)?;
+                return Ok(Some((device, fresh_pairing_secret())));
+            }
+            let pending: Option<(String, String)> = tx
+                .query_row(
+                    SQL_SELECT_PENDING_BY_DESCRIPTOR,
+                    params![descriptor],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let Some((stored_descriptor, _)) = pending else {
+                return Ok(None);
+            };
+            // The pending delete and the paired insert share one transaction so
+            // an approval never strands a descriptor in both tables or neither.
+            // The wire projection is minted fresh here, unrelated to the device
+            // identity bytes: it is the only device string that ever crosses
+            // the wire.
+            let wire = RawId::new().as_uuid().to_string();
+            tx.execute(SQL_DELETE_PENDING, params![descriptor])
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            tx.execute(
+                SQL_INSERT_PAIRED,
+                params![device_text, stored_descriptor, paired_text, wire],
             )
-            .optional()
             .map_err(|error| credential_unavailable(error.to_string()))?;
-        if let Some((stored_text, stored_descriptor, stored_paired, wire)) = paired {
-            let device =
-                decode_device_record(&stored_text, stored_descriptor, &stored_paired, wire)
-                    .map_err(credential_unavailable)?;
-            return Ok(Some((device, fresh_pairing_secret())));
-        }
-        let pending: Option<(String, String)> = tx
-            .query_row(
-                SQL_SELECT_PENDING_BY_DESCRIPTOR,
-                params![descriptor],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let Some((stored_descriptor, _)) = pending else {
-            return Ok(None);
-        };
-        // The pending delete and the paired insert share one transaction so
-        // an approval never strands a descriptor in both tables or neither.
-        // The wire projection is minted fresh here, unrelated to the device
-        // identity bytes: it is the only device string that ever crosses
-        // the wire.
-        let wire = RawId::new().as_uuid().to_string();
-        tx.execute(SQL_DELETE_PENDING, params![descriptor])
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        tx.execute(
-            SQL_INSERT_PAIRED,
-            params![device_text, stored_descriptor, paired_text, wire],
-        )
-        .map_err(|error| credential_unavailable(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(Some((
-            DeviceRecord {
-                id: DeviceId(device_id),
-                wire,
-                descriptor: stored_descriptor,
-                paired_at,
-            },
-            fresh_pairing_secret(),
-        )))
+            tx.commit()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(Some((
+                DeviceRecord {
+                    id: DeviceId(device_id),
+                    wire,
+                    descriptor: stored_descriptor,
+                    paired_at,
+                },
+                fresh_pairing_secret(),
+            )))
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn find_device(
         &self,
         id: &DeviceId,
     ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
-        let key = encode_id(id.0);
-        let guard = lock_shared(&self.conn);
-        let found: Option<(String, String, String, Option<String>)> = guard
-            .query_row(SQL_SELECT_DEVICE_BY_ID, params![key], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        match found {
-            Some((device_text, descriptor, paired_text, wire)) => {
-                let device = decode_device_record(&device_text, descriptor, &paired_text, wire)
-                    .map_err(credential_unavailable)?;
-                Ok(Some(device))
+        let conn = Arc::clone(&self.conn);
+        let id = *id;
+        run_blocking(move || {
+            let key = encode_id(id.0);
+            let guard = lock_shared(&conn);
+            let found: Option<(String, String, String, Option<String>)> = guard
+                .query_row(SQL_SELECT_DEVICE_BY_ID, params![key], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            match found {
+                Some((device_text, descriptor, paired_text, wire)) => {
+                    let device = decode_device_record(&device_text, descriptor, &paired_text, wire)
+                        .map_err(credential_unavailable)?;
+                    Ok(Some(device))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn find_device_by_wire(
         &self,
         wire: &str,
     ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
-        let guard = lock_shared(&self.conn);
-        let found: Option<(String, String, String, Option<String>)> = guard
-            .query_row(SQL_SELECT_DEVICE_BY_WIRE, params![wire], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        match found {
-            Some((device_text, descriptor, paired_text, stored_wire)) => {
-                let device =
-                    decode_device_record(&device_text, descriptor, &paired_text, stored_wire)
-                        .map_err(credential_unavailable)?;
-                Ok(Some(device))
+        let conn = Arc::clone(&self.conn);
+        let wire = wire.to_owned();
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let found: Option<(String, String, String, Option<String>)> = guard
+                .query_row(SQL_SELECT_DEVICE_BY_WIRE, params![wire], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            match found {
+                Some((device_text, descriptor, paired_text, stored_wire)) => {
+                    let device =
+                        decode_device_record(&device_text, descriptor, &paired_text, stored_wire)
+                            .map_err(credential_unavailable)?;
+                    Ok(Some(device))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn list_pending(&self) -> Result<Vec<PendingPairing>, CredentialTechnicalError> {
-        let guard = lock_shared(&self.conn);
-        let mut query = guard
-            .prepare(SQL_LIST_PENDING_PAIRINGS)
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let rows = query
-            .query_map((), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let mut pending = Vec::new();
-        for row in rows {
-            let (descriptor, requested_text) =
-                row.map_err(|error| credential_unavailable(error.to_string()))?;
-            pending.push(
-                decode_pending_pairing(descriptor, &requested_text)
-                    .map_err(credential_unavailable)?,
-            );
-        }
-        Ok(pending)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let mut query = guard
+                .prepare(SQL_LIST_PENDING_PAIRINGS)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let rows = query
+                .query_map((), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let mut pending = Vec::new();
+            for row in rows {
+                let (descriptor, requested_text) =
+                    row.map_err(|error| credential_unavailable(error.to_string()))?;
+                pending.push(
+                    decode_pending_pairing(descriptor, &requested_text)
+                        .map_err(credential_unavailable)?,
+                );
+            }
+            Ok(pending)
+        })
+        .await
     }
 }
 
 impl CredentialApprovalRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn request_approval(
         &self,
         provider: String,
         label: String,
     ) -> Result<bool, CredentialTechnicalError> {
-        // Blank pairs are treated as absent before touching the store, so
-        // they never become stored rows.
-        if credential_pair_is_blank(&provider, &label) {
-            return Ok(false);
-        }
-        let requested_text = WallClockWithTz::now().to_rfc3339();
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        // An already-usable pair short-circuits: re-requests record nothing.
-        let usable: Option<(String, String, String)> = tx
-            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        if usable.is_some() {
-            return Ok(false);
-        }
-        // `INSERT OR IGNORE` keeps a previously stored pending entry: a
-        // repeat request reports `false` instead of refreshing its time.
-        let inserted = tx
-            .execute(
-                SQL_INSERT_CREDENTIAL_PENDING_IGNORE,
-                params![provider, label, requested_text],
-            )
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        if inserted == 0 {
-            return Ok(false);
-        }
-        tx.commit()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(true)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            // Blank pairs are treated as absent before touching the store, so
+            // they never become stored rows.
+            if credential_pair_is_blank(&provider, &label) {
+                return Ok(false);
+            }
+            let requested_text = WallClockWithTz::now().to_rfc3339();
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            // An already-usable pair short-circuits: re-requests record nothing.
+            let usable: Option<(String, String, String)> = tx
+                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            if usable.is_some() {
+                return Ok(false);
+            }
+            // `INSERT OR IGNORE` keeps a previously stored pending entry: a
+            // repeat request reports `false` instead of refreshing its time.
+            let inserted = tx
+                .execute(
+                    SQL_INSERT_CREDENTIAL_PENDING_IGNORE,
+                    params![provider, label, requested_text],
+                )
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            if inserted == 0 {
+                return Ok(false);
+            }
+            tx.commit()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(true)
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn approve_pending(
         &self,
         provider: &str,
         label: &str,
     ) -> Result<bool, CredentialTechnicalError> {
-        // Blank pairs are treated as absent before touching the store.
-        if credential_pair_is_blank(provider, label) {
-            return Ok(false);
-        }
-        let mut guard = lock_shared(&self.conn);
-        let tx = guard
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        // A known pending entry is consumed first so a pair that is somehow
-        // both pending and usable never strands its pending row. The delete
-        // and the usable-ref upsert share this transaction: a crash between
-        // them could otherwise strand an approval with no usable marker (or
-        // vice versa), forcing the Owner to re-request and re-approve. The
-        // ref id follows the same `provider:label` convention the Host uses
-        // when it builds refs for assignment, so both paths name one row.
-        let pending: Option<(String, String, String)> = tx
-            .query_row(
-                SQL_SELECT_CREDENTIAL_PENDING,
-                params![provider, label],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        if pending.is_some() {
-            tx.execute(SQL_DELETE_CREDENTIAL_PENDING, params![provider, label])
+        let conn = Arc::clone(&self.conn);
+        let provider = provider.to_owned();
+        let label = label.to_owned();
+        run_blocking(move || {
+            // Blank pairs are treated as absent before touching the store.
+            if credential_pair_is_blank(&provider, &label) {
+                return Ok(false);
+            }
+            let mut guard = lock_shared(&conn);
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.execute(
-                SQL_UPSERT_CREDENTIAL,
-                params![format!("{provider}:{label}"), provider, label,],
-            )
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.commit()
+            // A known pending entry is consumed first so a pair that is somehow
+            // both pending and usable never strands its pending row. The delete
+            // and the usable-ref upsert share this transaction: a crash between
+            // them could otherwise strand an approval with no usable marker (or
+            // vice versa), forcing the Owner to re-request and re-approve. The
+            // ref id follows the same `provider:label` convention the Host uses
+            // when it builds refs for assignment, so both paths name one row.
+            let pending: Option<(String, String, String)> = tx
+                .query_row(
+                    SQL_SELECT_CREDENTIAL_PENDING,
+                    params![provider, label],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
                 .map_err(|error| credential_unavailable(error.to_string()))?;
-            return Ok(true);
-        }
-        // Re-approving an already-usable pair is idempotent with no change.
-        let usable: Option<(String, String, String)> = tx
-            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(usable.is_some())
+            if pending.is_some() {
+                tx.execute(SQL_DELETE_CREDENTIAL_PENDING, params![provider, label])
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                tx.execute(
+                    SQL_UPSERT_CREDENTIAL,
+                    params![format!("{provider}:{label}"), provider, label,],
+                )
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+                tx.commit()
+                    .map_err(|error| credential_unavailable(error.to_string()))?;
+                return Ok(true);
+            }
+            // Re-approving an already-usable pair is idempotent with no change.
+            let usable: Option<(String, String, String)> = tx
+                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(usable.is_some())
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn is_approved(
         &self,
         provider: &str,
         label: &str,
     ) -> Result<bool, CredentialTechnicalError> {
-        // Blank pairs are treated as absent before touching the store.
-        if credential_pair_is_blank(provider, label) {
-            return Ok(false);
-        }
-        let guard = lock_shared(&self.conn);
-        // Pure load: one statement, no transaction. The `credential_ref`
-        // row is the usable marker; pending-only pairs report `false`.
-        let found: Option<(String, String, String)> = guard
-            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        Ok(found.is_some())
+        let conn = Arc::clone(&self.conn);
+        let provider = provider.to_owned();
+        let label = label.to_owned();
+        run_blocking(move || {
+            // Blank pairs are treated as absent before touching the store.
+            if credential_pair_is_blank(&provider, &label) {
+                return Ok(false);
+            }
+            let guard = lock_shared(&conn);
+            // Pure load: one statement, no transaction. The `credential_ref`
+            // row is the usable marker; pending-only pairs report `false`.
+            let found: Option<(String, String, String)> = guard
+                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            Ok(found.is_some())
+        })
+        .await
     }
 
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn list_pending(
         &self,
     ) -> Result<Vec<PendingCredentialApproval>, CredentialTechnicalError> {
-        let guard = lock_shared(&self.conn);
-        let mut query = guard
-            .prepare(SQL_LIST_CREDENTIAL_PENDING)
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let rows = query
-            .query_map((), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let mut pending = Vec::new();
-        for row in rows {
-            let (provider, label, requested_text) =
-                row.map_err(|error| credential_unavailable(error.to_string()))?;
-            pending.push(
-                decode_pending_credential(provider, label, &requested_text)
-                    .map_err(credential_unavailable)?,
-            );
-        }
-        Ok(pending)
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let guard = lock_shared(&conn);
+            let mut query = guard
+                .prepare(SQL_LIST_CREDENTIAL_PENDING)
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let rows = query
+                .query_map((), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+            let mut pending = Vec::new();
+            for row in rows {
+                let (provider, label, requested_text) =
+                    row.map_err(|error| credential_unavailable(error.to_string()))?;
+                pending.push(
+                    decode_pending_credential(provider, label, &requested_text)
+                        .map_err(credential_unavailable)?,
+                );
+            }
+            Ok(pending)
+        })
+        .await
     }
 }
 
 impl UsageRepository for Store {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "repository contract is async; the atomic section stays synchronous so no await is held while locked"
-    )]
     async fn record_usage(&self, fact: UsageFact) -> Result<(), InferenceTechnicalError> {
-        let ticket_text = encode_id(fact.ticket.0);
-        let input_column =
-            encode_optional_count(fact.input_tokens).map_err(inference_unavailable)?;
-        let output_column =
-            encode_optional_count(fact.output_tokens).map_err(inference_unavailable)?;
-        let guard = lock_shared(&self.conn);
-        // Plain insert: a duplicate ticket violates the primary key and maps
-        // to `StorageUnavailable`, never a panic.
-        guard
-            .execute(
-                SQL_INSERT_USAGE,
-                params![
-                    ticket_text,
-                    fact.provider,
-                    fact.model,
-                    input_column,
-                    output_column,
-                    encode_usage_source(fact.source)
-                ],
-            )
-            .map_err(|error| inference_unavailable(error.to_string()))?;
-        Ok(())
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let ticket_text = encode_id(fact.ticket.0);
+            let input_column =
+                encode_optional_count(fact.input_tokens).map_err(inference_unavailable)?;
+            let output_column =
+                encode_optional_count(fact.output_tokens).map_err(inference_unavailable)?;
+            let guard = lock_shared(&conn);
+            // Plain insert: a duplicate ticket violates the primary key and maps
+            // to `StorageUnavailable`, never a panic.
+            guard
+                .execute(
+                    SQL_INSERT_USAGE,
+                    params![
+                        ticket_text,
+                        fact.provider,
+                        fact.model,
+                        input_column,
+                        output_column,
+                        encode_usage_source(fact.source)
+                    ],
+                )
+                .map_err(|error| inference_unavailable(error.to_string()))?;
+            Ok(())
+        })
+        .await
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "test fixtures construct validated credential refs"
+)]
 mod tests {
     use super::Store;
     use ene_companion::{
@@ -3455,11 +3481,7 @@ mod tests {
         };
         let missing = store.load_ref("acme", "main").await;
         assert!(matches!(missing, Ok(None)), "fresh store holds no refs");
-        let cred = CredentialRef {
-            id: String::from("acme:main"),
-            provider: String::from("acme"),
-            label: String::from("main"),
-        };
+        let cred = CredentialRef::new("acme", "main").expect("valid test fixture");
         let saved = store.save_ref(cred.clone()).await;
         assert!(saved.is_ok(), "ref save must succeed");
         let loaded = store.load_ref("acme", "main").await;
@@ -3468,11 +3490,7 @@ mod tests {
             return;
         };
         assert_eq!(found, cred, "ref must round-trip");
-        let second = CredentialRef {
-            id: String::from("acme:backup"),
-            provider: String::from("acme"),
-            label: String::from("backup"),
-        };
+        let second = CredentialRef::new("acme", "backup").expect("valid test fixture");
         let saved_second = store.save_ref(second.clone()).await;
         assert!(saved_second.is_ok(), "second ref save must succeed");
         let listed = store.list_refs().await;
@@ -4582,11 +4600,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
             "approval atomically records the usable ref in the same transaction"
         );
         let saved = store
-            .save_ref(CredentialRef {
-                id: String::from("acme:main"),
-                provider: String::from("acme"),
-                label: String::from("main"),
-            })
+            .save_ref(CredentialRef::new("acme", "main").expect("valid test fixture"))
             .await;
         assert!(saved.is_ok(), "usable ref save must succeed");
         let flagged = store.is_approved("acme", "main").await;
@@ -5365,11 +5379,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
             "usable approval must succeed"
         );
         let usable_saved = first
-            .save_ref(CredentialRef {
-                id: String::from("acme:usable"),
-                provider: String::from("acme"),
-                label: String::from("usable"),
-            })
+            .save_ref(CredentialRef::new("acme", "usable").expect("valid test fixture"))
             .await;
         assert!(usable_saved.is_ok(), "usable ref save must succeed");
         drop(first);
