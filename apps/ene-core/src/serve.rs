@@ -81,13 +81,22 @@
 //! - [`HostHandle::handle_frame`] is infallible by contract: infrastructure
 //!   failures map to retry-safe outcome frames (hold or revalidate), never to
 //!   fabricated domain facts. The mapping table lives on each pipeline method.
-//! - Unknown or deferred inbound variants (reconnect, stream frames from the
-//!   Client, facts the Host itself emits) are ignored with an empty response.
-//!   There is no `UnsupportedMessage` DTO in `ene-api`, and a
-//!   [`DisconnectNotice`] would carry
-//!   the wrong semantics for a merely unhandled message, so silence plus this
-//!   gap note is the explicit `Stage 2` decision. `Stage 2` transport work may
-//!   add a typed reject.
+//! - Decoded-but-unhandled inbound variants (reconnect, stream frames from
+//!   the Client, facts the Host itself emits) are ignored with an empty
+//!   response: they are known [`WirePayload`] variants outside `Stage 2`
+//!   scope, and a [`DisconnectNotice`] would carry the wrong semantics for
+//!   them. Silence is the explicit `Stage 2` decision for these.
+//! - The envelope discriminator must name the decoded payload:
+//!   [`HostHandle::handle_frame`] compares `envelope.message_type` against
+//!   [`WirePayload::message_type`] and answers a typed
+//!   [`Reject`](ene_api::v1::payload::WirePayload::Reject) with
+//!   `UnsupportedMessage` when they differ, changing nothing else and
+//!   keeping the connection. A future/unknown payload variant itself cannot
+//!   reach that reject: [`WirePayload`] is a closed enum decoded as part of
+//!   the whole frame, so the codec fails first and [`crate::conn`] closes
+//!   the connection. Reaching the typed reject for undecodable variants
+//!   needs a wire-format/framing change and is later compatibility
+//!   hardening, not a `Stage 2` contract.
 //! - A [`DisconnectNotice`] in a
 //!   response vector is terminal: [`crate::conn`] writes it and then closes the
 //!   connection. Both the major-version mismatch and the unpaired-gate paths
