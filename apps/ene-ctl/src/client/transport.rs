@@ -48,8 +48,7 @@ impl Client {
     /// service.
     ///
     /// Capability advertises with the paired device ID; exactly one frame is
-    /// read back and must be the negotiated terms, so a pipelined presence
-    /// fact stays buffered for [`Client::request`]'s absorbing loop.
+    /// read back here and must contain the negotiated terms.
     ///
     /// There is no Host "unknown device" outcome on capability — an ID the
     /// Host no longer knows fails later at the domain gate (close plus
