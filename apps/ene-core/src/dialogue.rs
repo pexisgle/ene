@@ -22,8 +22,7 @@
 //! - Store failures before acceptance become
 //!   [`HeldForTransition`](ene_api::v1::round::RoundIntakeOutcomeWire::HeldForTransition):
 //!   no work started, so a later retry is safe.
-//! - A reused command key with a different
-//!   [`RequestFingerprint`](ene_companion::RequestFingerprint) becomes the
+//! - A reused command key with a different [`RequestFingerprint`] becomes the
 //!   typed [`Reject`](ene_api::v1::payload::WirePayload::Reject)
 //!   (`ConflictingCommand`), judged by one fingerprint comparison shared
 //!   with the store's in-transaction pre-check: declined without side
