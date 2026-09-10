@@ -9,6 +9,11 @@ use ene_credential::{
     DevicePairingRepository, DevicePairingStatus,
 };
 use ene_inference::{InferenceTicketId, UsageFact, UsageRepository, UsageSource};
+use ene_learning::{
+    ChangeKind, ExperienceSourceKind, Importance, LearningRepository, LearningScope, MemoryChange,
+    MemoryChangeCommit, MemoryChangeOutcome, MemoryId, MemoryRevision, MemoryTarget,
+    SourceRangeRef, SummaryId, SummaryRecord, TemporalMeaning,
+};
 use ene_permission::{ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision};
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
@@ -1082,7 +1087,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
     let version = guard.query_row("SELECT version FROM _schema_version LIMIT 1", (), |row| {
         row.get::<_, i64>(0)
     });
-    assert!(matches!(version, Ok(8)), "migration must record version 8");
+    assert!(matches!(version, Ok(9)), "migration must record version 9");
     let new_index: Result<String, _> = guard.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_message_companion_command'",
             (),
@@ -1392,7 +1397,7 @@ INSERT INTO _schema_version (version) VALUES (4);",
     assert!(opened.is_ok(), "open must recover after the fault clears");
     assert_eq!(
         read_schema_version(&path),
-        Some(8),
+        Some(9),
         "recovered open must converge on the current version"
     );
     assert!(
@@ -1443,8 +1448,8 @@ async fn migration_v3_reopen_keeps_pairing_state() {
         row.get::<_, i64>(0)
     });
     assert!(
-        matches!(version, Ok(8)),
-        "reopened database must record schema version 8"
+        matches!(version, Ok(9)),
+        "reopened database must record schema version 9"
     );
 }
 
@@ -2240,8 +2245,8 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
         row.get::<_, i64>(0)
     });
     assert!(
-        matches!(version, Ok(8)),
-        "reopened database must record schema version 8"
+        matches!(version, Ok(9)),
+        "reopened database must record schema version 9"
     );
 }
 
@@ -2344,5 +2349,456 @@ async fn registration_intent_decides_held_then_already_decided() {
             RegistrationState::AppliedAsOneTime
         )),
         "an approved pair registers as usable"
+    );
+}
+
+// --- Learning: Memory / Summary / revision persistence ---
+
+fn learning_summary(companion: RawId, content: &str) -> SummaryRecord {
+    SummaryRecord {
+        id: SummaryId::generate(),
+        scope: LearningScope::companion(companion),
+        content: content.to_owned(),
+        source: SourceRangeRef {
+            kind: ExperienceSourceKind::Dialogue,
+            start: RawId::new(),
+            end: RawId::new(),
+        },
+        formed_at: fixture_clock(),
+    }
+}
+
+fn learning_change(
+    companion: RawId,
+    target: MemoryTarget,
+    content: &str,
+    change: ChangeKind,
+    recall_suppressed: bool,
+) -> MemoryChange {
+    MemoryChange {
+        target,
+        scope: LearningScope::companion(companion),
+        content: content.to_owned(),
+        importance: Importance::clamped(4),
+        temporal: TemporalMeaning::Enduring,
+        change,
+        recall_suppressed,
+        at: fixture_clock(),
+    }
+}
+
+fn commit(summary: Option<SummaryRecord>, change: MemoryChange) -> MemoryChangeCommit {
+    MemoryChangeCommit { summary, change }
+}
+
+#[tokio::test]
+async fn learning_new_memory_keeps_summary_grounds_and_current_row() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "owner likes jasmine tea");
+    let outcome = store
+        .commit_memory_change(commit(
+            Some(evidence.clone()),
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner likes jasmine tea",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(MemoryChangeOutcome::Committed {
+            memory,
+            revision: MemoryRevision::initial(),
+        })
+    );
+
+    let current = store.load_current_memory(memory).await.unwrap();
+    let Some(current) = current else {
+        panic!("the committed memory must be current");
+    };
+    assert_eq!(current.content, "owner likes jasmine tea");
+    assert_eq!(current.scope, LearningScope::companion(companion));
+    assert_eq!(current.importance, Importance::clamped(4));
+    assert_eq!(current.temporal, TemporalMeaning::Enduring);
+
+    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0].change, ChangeKind::Initial);
+    assert_eq!(revisions[0].summary, Some(evidence.id));
+    assert_eq!(revisions[0].content, "owner likes jasmine tea");
+
+    let stored_evidence = store.load_summary(evidence.id).await.unwrap();
+    let Some(stored_evidence) = stored_evidence else {
+        panic!("the evidence summary must be stored");
+    };
+    assert_eq!(stored_evidence.content, "owner likes jasmine tea");
+    assert_eq!(stored_evidence.source.kind, ExperienceSourceKind::Dialogue);
+    assert_eq!(stored_evidence.scope, LearningScope::companion(companion));
+}
+
+#[tokio::test]
+async fn learning_update_appends_a_revision_and_keeps_the_previous_one() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let first = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner lives in Tokyo",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(first, Ok(MemoryChangeOutcome::Committed { .. })));
+
+    let second = store
+        .commit_memory_change(commit(
+            Some(learning_summary(companion, "owner moved to Osaka")),
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: MemoryRevision::initial(),
+                },
+                "owner lives in Osaka",
+                ChangeKind::ChangedSince,
+                false,
+            ),
+        ))
+        .await;
+    assert_eq!(
+        second,
+        Ok(MemoryChangeOutcome::Committed {
+            memory,
+            revision: MemoryRevision::from_u64(2),
+        })
+    );
+    let current = store.load_current_memory(memory).await.unwrap().unwrap();
+    assert_eq!(current.content, "owner lives in Osaka");
+    assert_eq!(current.revision, MemoryRevision::from_u64(2));
+
+    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    assert_eq!(revisions.len(), 2, "the old revision is kept");
+    assert_eq!(revisions[0].content, "owner lives in Tokyo");
+    assert_eq!(revisions[1].content, "owner lives in Osaka");
+    assert_eq!(revisions[1].change, ChangeKind::ChangedSince);
+}
+
+#[tokio::test]
+async fn learning_stale_update_is_rejected_without_overwriting() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let seeded = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner is on the night shift",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(seeded, Ok(MemoryChangeOutcome::Committed { .. })));
+    let winner = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: MemoryRevision::initial(),
+                },
+                "owner switched to the day shift",
+                ChangeKind::ChangedSince,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(winner, Ok(MemoryChangeOutcome::Committed { .. })));
+
+    let stale = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: MemoryRevision::initial(),
+                },
+                "stale formation result",
+                ChangeKind::Reinforced,
+                false,
+            ),
+        ))
+        .await;
+    assert_eq!(
+        stale,
+        Ok(MemoryChangeOutcome::StaleTarget {
+            memory,
+            current: MemoryRevision::from_u64(2),
+        })
+    );
+    let current = store.load_current_memory(memory).await.unwrap().unwrap();
+    assert_eq!(
+        current.content, "owner switched to the day shift",
+        "the stale result must not overwrite the newer recognition"
+    );
+    assert_eq!(store.list_memory_revisions(memory).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn learning_scope_and_missing_target_are_domain_outcomes() {
+    let store = open_memory().await.unwrap();
+    let owner = RawId::new();
+    let other = RawId::new();
+    let memory = MemoryId::generate();
+    let seeded = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                owner,
+                MemoryTarget::New { id: memory },
+                "private to the owner companion",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(seeded, Ok(MemoryChangeOutcome::Committed { .. })));
+
+    let crossed = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                other,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: MemoryRevision::initial(),
+                },
+                "must not cross companions",
+                ChangeKind::Reinforced,
+                false,
+            ),
+        ))
+        .await;
+    assert_eq!(crossed, Ok(MemoryChangeOutcome::ScopeMismatch { memory }));
+
+    let missing = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                owner,
+                MemoryTarget::Existing {
+                    id: MemoryId::generate(),
+                    expected_revision: MemoryRevision::initial(),
+                },
+                "target does not exist",
+                ChangeKind::Reinforced,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(
+        missing,
+        Ok(MemoryChangeOutcome::MissingTarget { .. })
+    ));
+}
+
+#[tokio::test]
+async fn learning_forgetting_suppresses_recall_and_keeps_content_and_revisions() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "a shared worry");
+    let seeded = store
+        .commit_memory_change(commit(
+            Some(evidence),
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner was worried about the launch",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(seeded, Ok(MemoryChangeOutcome::Committed { .. })));
+    let forgotten = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: MemoryRevision::initial(),
+                },
+                "owner was worried about the launch",
+                ChangeKind::Forgotten,
+                true,
+            ),
+        ))
+        .await;
+    assert!(matches!(
+        forgotten,
+        Ok(MemoryChangeOutcome::Committed { .. })
+    ));
+    let current = store.load_current_memory(memory).await.unwrap().unwrap();
+    assert!(current.recall_suppressed, "recall is suppressed");
+    assert_eq!(
+        current.content, "owner was worried about the launch",
+        "normal forgetting never deletes content"
+    );
+    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    assert_eq!(revisions.len(), 2, "revision history is kept");
+    assert_eq!(revisions[0].content, "owner was worried about the launch");
+    assert_eq!(revisions[1].change, ChangeKind::Forgotten);
+
+    // A later reinforcement clears the suppression without deleting it.
+    let remembered = store
+        .commit_memory_change(commit(
+            None,
+            learning_change(
+                companion,
+                MemoryTarget::Existing {
+                    id: memory,
+                    expected_revision: MemoryRevision::from_u64(2),
+                },
+                "owner was worried about the launch",
+                ChangeKind::Reinforced,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(
+        remembered,
+        Ok(MemoryChangeOutcome::Committed { .. })
+    ));
+    let current = store.load_current_memory(memory).await.unwrap().unwrap();
+    assert!(!current.recall_suppressed);
+    assert_eq!(store.list_memory_revisions(memory).await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn learning_list_current_is_companion_scoped_and_newest_first() {
+    let store = open_memory().await.unwrap();
+    let companion = RawId::new();
+    let other = RawId::new();
+    let first = MemoryId::generate();
+    let second = MemoryId::generate();
+    for (companion, id, text) in [
+        (companion, first, "first memory"),
+        (companion, second, "second memory"),
+        (other, MemoryId::generate(), "other companion memory"),
+    ] {
+        let outcome = store
+            .commit_memory_change(commit(
+                None,
+                learning_change(
+                    companion,
+                    MemoryTarget::New { id },
+                    text,
+                    ChangeKind::Initial,
+                    false,
+                ),
+            ))
+            .await;
+        assert!(matches!(outcome, Ok(MemoryChangeOutcome::Committed { .. })));
+    }
+    let listed = store.list_current_memories(companion, 10).await.unwrap();
+    assert_eq!(listed.len(), 2, "only this companion's memories");
+    assert_eq!(listed[0].id, second, "newest insert first");
+    assert_eq!(listed[1].id, first);
+    assert!(
+        listed
+            .iter()
+            .all(|memory| memory.scope == LearningScope::companion(companion))
+    );
+}
+
+#[tokio::test]
+async fn learning_memory_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("learning.db");
+    let store = Store::open(&path).await.unwrap();
+    let companion = RawId::new();
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "a durable preference");
+    let committed = store
+        .commit_memory_change(commit(
+            Some(evidence.clone()),
+            learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner prefers morning conversations",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(
+        committed,
+        Ok(MemoryChangeOutcome::Committed { .. })
+    ));
+    drop(store);
+
+    let reopened = Store::open(&path).await.unwrap();
+    let current = reopened.load_current_memory(memory).await.unwrap();
+    let Some(current) = current else {
+        panic!("memory must survive reopen");
+    };
+    assert_eq!(current.content, "owner prefers morning conversations");
+    let revisions = reopened.list_memory_revisions(memory).await.unwrap();
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0].summary, Some(evidence.id));
+    let stored_evidence = reopened.load_summary(evidence.id).await.unwrap();
+    assert!(
+        stored_evidence.is_some(),
+        "summary evidence survives reopen"
+    );
+}
+
+#[tokio::test]
+async fn learning_migration_adds_tables_to_a_v8_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _schema_version (version INTEGER NOT NULL);
+             INSERT INTO _schema_version (version) VALUES (8);",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).await.unwrap();
+    let opened = store.load_current_memory(MemoryId::generate()).await;
+    assert_eq!(opened, Ok(None), "migrated schema answers reads");
+    assert_eq!(
+        read_schema_version(&path),
+        Some(9),
+        "migration advances the schema version"
+    );
+    assert!(
+        !table_columns(&path, "learning_memory").is_empty(),
+        "learning_memory is created"
+    );
+    assert!(
+        !table_columns(&path, "learning_memory_revision").is_empty(),
+        "learning_memory_revision is created"
+    );
+    assert!(
+        !table_columns(&path, "learning_summary").is_empty(),
+        "learning_summary is created"
     );
 }

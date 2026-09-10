@@ -1,0 +1,138 @@
+//! The durable boundary for Memory, Summary, and revision persistence.
+//!
+//! The implementation commits one change and its evidence in one short atomic
+//! section: the expected revision is compared against the current row inside
+//! that section, so a stale formation result can never overwrite a newer
+//! recognition. Stale and missing outcomes are domain outcomes on the `Ok`
+//! side, never technical errors.
+
+use ene_primitive::{RawId, WallClockWithTz};
+use thiserror::Error;
+
+use crate::identity::{MemoryId, MemoryRevision, SummaryId};
+use crate::memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, TemporalMeaning};
+use crate::scope::LearningScope;
+use crate::summary::SummaryRecord;
+
+/// Infrastructure failure for Learning persistence.
+///
+/// Stale / missing / scope outcomes are [`MemoryChangeOutcome`], never this
+/// error.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LearningTechnicalError {
+    #[error("learning storage unavailable: {reason}")]
+    StorageUnavailable {
+        /// Backend-supplied cause. Never Memory or Summary content.
+        reason: String,
+    },
+}
+
+/// Which Memory one change targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryTarget {
+    /// A Memory formed for the first time. The id is minted by the caller so
+    /// the committed identity is known before the commit.
+    New { id: MemoryId },
+    /// An existing Memory that must still be at `expected_revision`.
+    Existing {
+        id: MemoryId,
+        expected_revision: MemoryRevision,
+    },
+}
+
+/// One prospective Memory change: the content, its meaning, and the change
+/// kind relative to the target's previous revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryChange {
+    pub target: MemoryTarget,
+    /// The scope the change is made under. For an existing Memory the stored
+    /// scope must agree; a change never widens or moves a Memory.
+    pub scope: LearningScope,
+    /// Proposed recognition text.
+    pub content: String,
+    pub importance: Importance,
+    pub temporal: TemporalMeaning,
+    pub change: ChangeKind,
+    /// `true` only for a normal-forgetting suppression.
+    pub recall_suppressed: bool,
+    /// When this change was decided; becomes the revision and current-row
+    /// timestamp.
+    pub at: WallClockWithTz,
+}
+
+/// One atomic commit: evidence Summary (when present) plus one Memory change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryChangeCommit {
+    /// Inserted once when first supplied and reused verbatim by later changes
+    /// of the same formation; carries no authority beyond evidence.
+    pub summary: Option<SummaryRecord>,
+    pub change: MemoryChange,
+}
+
+/// Outcome of one Memory change commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryChangeOutcome {
+    Committed {
+        memory: MemoryId,
+        revision: MemoryRevision,
+    },
+    /// The stored revision did not match `expected_revision`; nothing was
+    /// written and the newer recognition is left untouched.
+    StaleTarget {
+        memory: MemoryId,
+        current: MemoryRevision,
+    },
+    /// The target Memory does not exist.
+    MissingTarget { memory: MemoryId },
+    /// The target exists under a different scope; a change never moves it.
+    ScopeMismatch { memory: MemoryId },
+    /// A new Memory id was already used. Identity is never reused.
+    AlreadyExists { memory: MemoryId },
+    /// The target ran out of distinct revisions; nothing was written.
+    RevisionExhausted { memory: MemoryId },
+}
+
+/// Durable Learning boundary.
+///
+/// The implementation keeps the compare of [`MemoryTarget::Existing`] and the
+/// durable update in one atomic section, and never holds a transaction across
+/// caller I/O. Reads return the stored state as-is; currentness is decided by
+/// the caller from the returned revision.
+#[expect(
+    async_fn_in_trait,
+    reason = "Stage 2 contract style uses native async fn; Send bounds settle with the store impl"
+)]
+pub trait LearningRepository: Send + Sync {
+    /// Commits one Memory change and its evidence atomically.
+    async fn commit_memory_change(
+        &self,
+        commit: MemoryChangeCommit,
+    ) -> Result<MemoryChangeOutcome, LearningTechnicalError>;
+
+    /// Loads the current recognition, including suppressed ones.
+    async fn load_current_memory(
+        &self,
+        memory: MemoryId,
+    ) -> Result<Option<Memory>, LearningTechnicalError>;
+
+    /// Lists current memories for one Companion, newest first, capped at
+    /// `limit`. Suppressed memories are included: suppression is a recall
+    /// decision, not a visibility restriction.
+    async fn list_current_memories(
+        &self,
+        companion: RawId,
+        limit: u64,
+    ) -> Result<Vec<Memory>, LearningTechnicalError>;
+
+    /// Lists one Memory's revisions oldest first, including the initial one.
+    async fn list_memory_revisions(
+        &self,
+        memory: MemoryId,
+    ) -> Result<Vec<MemoryRevisionRecord>, LearningTechnicalError>;
+
+    /// Loads one Summary by identity.
+    async fn load_summary(
+        &self,
+        summary: SummaryId,
+    ) -> Result<Option<SummaryRecord>, LearningTechnicalError>;
+}

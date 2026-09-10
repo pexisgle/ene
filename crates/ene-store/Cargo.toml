@@ -9,6 +9,7 @@ publish.workspace = true
 ene-primitive = { path = "../ene-primitive" }
 ene-presence = { path = "../ene-presence" }
 ene-companion = { path = "../ene-companion" }
+ene-learning = { path = "../ene-learning" }
 ene-permission = { path = "../ene-permission" }
 ene-credential = { path = "../ene-credential" }
 ene-inference = { path = "../ene-inference" }

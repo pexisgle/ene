@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
-const CURRENT_VERSION: u64 = 8;
+const CURRENT_VERSION: u64 = 9;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -172,6 +172,49 @@ const MIGRATION_V8: &str = "
 ALTER TABLE history_message ADD COLUMN round_intent TEXT NULL;
 ALTER TABLE history_message ADD COLUMN round_intent_ref TEXT NULL;
 ";
+
+/// Introduces the Learning group: Summary evidence, Memory current rows, and
+/// the append-only revision chain that keeps past recognition and grounds.
+/// Current rows and revisions are separate on purpose: the current row is the
+/// recognition in use, while revisions are the change history that corrections
+/// and normal forgetting never delete. `summary_id` on a revision is the
+/// grounds relation for that revision; the Summary table is shared by every
+/// change one formation produced.
+const MIGRATION_V9: &str = "
+CREATE TABLE IF NOT EXISTS learning_summary (
+summary_id TEXT PRIMARY KEY,
+companion_id TEXT NOT NULL,
+content TEXT NOT NULL,
+source_kind TEXT NOT NULL,
+source_start TEXT NOT NULL,
+source_end TEXT NOT NULL,
+formed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learning_memory (
+memory_id TEXT PRIMARY KEY,
+companion_id TEXT NOT NULL,
+revision INTEGER NOT NULL,
+content TEXT NOT NULL,
+importance INTEGER NOT NULL,
+temporal TEXT NOT NULL,
+recall_suppressed INTEGER NOT NULL,
+updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_learning_memory_companion ON learning_memory (companion_id);
+CREATE TABLE IF NOT EXISTS learning_memory_revision (
+memory_id TEXT NOT NULL,
+revision INTEGER NOT NULL,
+companion_id TEXT NOT NULL,
+content TEXT NOT NULL,
+importance INTEGER NOT NULL,
+temporal TEXT NOT NULL,
+recall_suppressed INTEGER NOT NULL,
+change_kind TEXT NOT NULL,
+summary_id TEXT,
+at TEXT NOT NULL,
+PRIMARY KEY (memory_id, revision)
+);
+";
 /// Atomic: pending migrations and the version bump commit together in one
 /// transaction, so a crash mid-migration rolls back to the pre-migration
 /// state and the next open retries from scratch. The commit is the sole
@@ -224,6 +267,10 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 8 {
         tx.execute_batch(MIGRATION_V8)
+            .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 9 {
+        tx.execute_batch(MIGRATION_V9)
             .map_err(|error| error.to_string())?;
     }
     let current =
