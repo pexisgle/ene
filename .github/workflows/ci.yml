@@ -28,6 +28,7 @@ jobs:
           rustup toolchain install
           rustup show
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
@@ -37,7 +38,9 @@ jobs:
         # `cargo test` alone does not link them.
         run: cargo build --locked --workspace
       - name: Run tests
-        run: cargo test --locked --workspace
+        run: |
+          cargo nextest run --locked --workspace
+          cargo test --locked --workspace --doc
       - name: Build docs
         run: cargo doc --locked --workspace --no-deps
 
@@ -52,5 +55,8 @@ jobs:
           rustup toolchain install
           rustup show
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - name: Run tests
-        run: cargo test --locked --workspace
+        run: |
+          cargo nextest run --locked --workspace
+          cargo test --locked --workspace --doc
