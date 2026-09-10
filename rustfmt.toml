@@ -1,2 +1,0 @@
-# Use rustfmt defaults for this repository. This file exists so rustfmt
-# does not inherit a parent-directory or user config.
