@@ -13,11 +13,11 @@
 //! never sent over the wire — only ownership proofs derived from it leave
 //! the device.
 //!
-//! A first run sends [`PairingRequest`]
+//! A first run sends [`ene_api::v1::handshake::PairingRequest`]
 //! (display descriptor, pre-pairing sender with no device ID), which must
 //! answer [`Paired`](ene_api::v1::handshake::PairingResult::Paired) before
 //! the client continues in the same session.
-//! Then [`CapabilityAdvertise`]
+//! Then [`ene_api::v1::handshake::CapabilityAdvertise`]
 //! must answer
 //! [`NegotiatedConnection`](ene_api::v1::handshake::NegotiatedConnection)
 //! with a matching major version. The capability frame names the paired
@@ -26,14 +26,14 @@
 //! connection paired moments earlier) and never trusts the claim —
 //! a mismatched claim drops the frame.
 //!
-//! Authentication ([`AuthChallenge`] /
-//! [`AuthProof`] /
-//! [`AuthResult`]) runs inside `connect`: after the negotiated terms arrive,
-//! the Host sends a challenge, this side answers with [`proof_frame`] (the
+//! Authentication ([`ene_api::v1::handshake::AuthChallenge`] /
+//! [`ene_api::v1::handshake::AuthProof`] /
+//! [`ene_api::v1::handshake::AuthResult`]) runs inside `connect`: after the negotiated terms arrive,
+//! the Host sends a challenge, this side answers with [`frames::proof_frame`] (the
 //! proof names the paired device, never the connection), and
-//! [`decide_auth`] plus [`Client::authenticate`] store the accepted
+//! [`session::decide_auth`] plus [`Client::authenticate`] store the accepted
 //! connection key into the sender for all later frames plus into the
-//! [`SessionState`] mirror. The trailing presence fact is consumed as the
+//! [`session::SessionState`] mirror. The trailing presence fact is consumed as the
 //! session's first attribution before returning.
 //!
 //! Request/response correlation: every [`Client::request`] stamps a fresh
@@ -46,11 +46,11 @@
 //! misread as the next request's answer. So `request` consults the deferred
 //! queue first and then loops: a queued or incoming frame whose `reply_to`
 //! matches is the answer and returns without further I/O; presence facts
-//! are absorbed into the [`SessionState`] and reading continues; any other
-//! non-fact frame is pushed to the deferred queue (cap [`DEFERRED_CAP`],
+//! are absorbed into the [`session::SessionState`] and reading continues; any other
+//! non-fact frame is pushed to the deferred queue (cap [`session::DEFERRED_CAP`],
 //! oldest-drop) and reading continues — mismatches are never returned as
 //! answers and never silently dropped. The pure
-//! [`select_answer`] holds that decision over a deferred queue plus a frame
+//! [`session::select_answer`] holds that decision over a deferred queue plus a frame
 //! script; the socket loop is its streaming form. Only the fact variant is
 //! absorbed for now: any future unsolicited fact kind needs a new arm here,
 //! and until then such frames queue as mismatches instead of surfacing as
@@ -68,7 +68,7 @@
 //! domain gate (unknown sender: close plus `DisconnectNotice`), never with a
 //! dedicated capability-time outcome.
 //!
-//! Presence generation (see [`SessionState`]): the client keeps the latest
+//! Presence generation (see [`session::SessionState`]): the client keeps the latest
 //! observed generation and stamps it on every [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput)
 //! envelope as `observed.presence_generation_view`. The value starts
 //! [`None`] (pre-handshake bootstrap) and is set from the authoritative
@@ -79,15 +79,15 @@
 //! that the Host answers with `NeedsRevalidation` is the correct outcome,
 //! never worked around by sending a default like zero.
 //!
-//! Framing goes through `ene-plugin-ipc` only ([`encode_frame`]/[`decode_frame`]); this module
-//! owns the socket read/write loops. [`CodecError`]
+//! Framing goes through `ene-plugin-ipc` only ([`ene_plugin_ipc::encode_frame`]/[`ene_plugin_ipc::decode_frame`]); this module
+//! owns the socket read/write loops. [`ene_plugin_ipc::CodecError`]
 //! displays carry lengths and decoder reasons only and never echo frame
-//! bytes, so mapping them into [`CliError::Codec`]
+//! bytes, so mapping them into [`crate::errors::CliError::Codec`]
 //! cannot leak conversation text. All other error messages carry operations,
 //! payload-kind names, refs, or generations — never bodies or secrets.
 //!
 //! Non-Unix platforms get stubs returning
-//! [`CliError::UnsupportedPlatform`];
+//! [`crate::errors::CliError::UnsupportedPlatform`];
 //! the pure builders below stay shared.
 
 use std::path::{Path, PathBuf};
@@ -102,7 +102,7 @@ pub use transport::Client;
 /// Returns the Host socket path for `data_dir`: `<data_dir>/ene.sock`.
 ///
 /// Pure and side-effect free; the caller decides whether the directory or
-/// socket must exist (absence surfaces as [`CliError::Transport`] on dial).
+/// socket must exist (absence surfaces as [`crate::errors::CliError::Transport`] on dial).
 pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join("ene.sock")
 }

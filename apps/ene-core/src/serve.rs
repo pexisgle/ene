@@ -14,7 +14,7 @@
 //!   check in [`crate::conn`], never on a Client self-report.
 //! - Pairing is Owner-confirmed through the durable
 //!   [`DevicePairingRepository`]:
-//!   [`PairingRequest`] records a pending request, the Host-local
+//!   [`ene_api::v1::handshake::PairingRequest`] records a pending request, the Host-local
 //!   `approve-device` inlet records the Owner decision, and a later request
 //!   for the approved descriptor issues the device key. There is no
 //!   same-descriptor auto-approve: an unapproved descriptor always answers
@@ -39,7 +39,7 @@
 //!   paired device, no known connection, no completed authentication on the
 //!   current connection, or an envelope connection id that does not equal the
 //!   table id answers a single terminal
-//!   [`DisconnectNotice`] with reason `"unpaired"` and nothing else. A
+//!   [`ene_api::v1::handshake::DisconnectNotice`] with reason `"unpaired"` and nothing else. A
 //!   generic reject DTO does exist in `ene-api`
 //!   ([`Reject`](ene_api::v1::payload::WirePayload::Reject), used for
 //!   post-auth declines such as conflicting commands and envelope
@@ -47,17 +47,17 @@
 //!   silence-plus-close (rather than an oracle denial) reveals nothing to
 //!   an unauthenticated peer. Pairing frames carry no
 //!   checks; capability frames need the paired-device check only (they predate
-//!   authentication); [`AuthProof`] frames
+//!   authentication); [`ene_api::v1::handshake::AuthProof`] frames
 //!   need none (they ARE the authentication). Inbound
-//!   [`AuthChallenge`] and
-//!   [`AuthResult`] frames are never
+//!   [`ene_api::v1::handshake::AuthChallenge`] and
+//!   [`ene_api::v1::handshake::AuthResult`] frames are never
 //!   solicited and answer nothing: the Host mints challenges and issues
 //!   results.
 //! - Authentication is challenge/proof over the pairing secret: capability
 //!   answers [`NegotiatedConnection`]
-//!   plus a fresh [`AuthChallenge`]
+//!   plus a fresh [`ene_api::v1::handshake::AuthChallenge`]
 //!   whose nonce is recorded pending for that connection, and a later
-//!   [`AuthProof`] verifies (constant time, inside `ene-credential`)
+//!   [`ene_api::v1::handshake::AuthProof`] verifies (constant time, inside `ene-credential`)
 //!   against the secret persisted at approval, consuming the nonce single-use
 //!   regardless of outcome. Success answers
 //!   [`Accepted`](ene_api::v1::handshake::AuthResult::Accepted) carrying the
@@ -84,7 +84,7 @@
 //! - Decoded-but-unhandled inbound variants (reconnect, stream frames from
 //!   the Client, facts the Host itself emits) are ignored with an empty
 //!   response: they are known [`WirePayload`] variants outside `Stage 2`
-//!   scope, and a [`DisconnectNotice`] would carry the wrong semantics for
+//!   scope, and a [`ene_api::v1::handshake::DisconnectNotice`] would carry the wrong semantics for
 //!   them. Silence is the explicit `Stage 2` decision for these.
 //! - The envelope discriminator must name the decoded payload:
 //!   [`HostHandle::handle_frame`] compares `envelope.message_type` against
@@ -97,7 +97,7 @@
 //!   the connection. Reaching the typed reject for undecodable variants
 //!   needs a wire-format/framing change and is later compatibility
 //!   hardening, not a `Stage 2` contract.
-//! - A [`DisconnectNotice`] in a
+//! - A [`ene_api::v1::handshake::DisconnectNotice`] in a
 //!   response vector is terminal: [`crate::conn`] writes it and then closes the
 //!   connection. Both the major-version mismatch and the unpaired-gate paths
 //!   emit one.
@@ -497,14 +497,14 @@ impl HostHandle {
     /// pre-accept response (pairing results, negotiated terms, challenges,
     /// rejections, denials, unpaired closes) carries [`None`].
     ///
-    /// Ingress rules by frame kind: [`PairingRequest`] frames are refused
+    /// Ingress rules by frame kind: [`ene_api::v1::handshake::PairingRequest`] frames are refused
     /// once the connection already holds a paired device (one connection,
     /// one device); unpaired connections need no other check.
-    /// [`CapabilityAdvertise`] frames need the paired-device check only (they
-    /// predate authentication); [`AuthProof`]
+    /// [`ene_api::v1::handshake::CapabilityAdvertise`] frames need the paired-device check only (they
+    /// predate authentication); [`ene_api::v1::handshake::AuthProof`]
     /// frames need none (they ARE the authentication); inbound
-    /// [`AuthChallenge`] and
-    /// [`AuthResult`] frames are never
+    /// [`ene_api::v1::handshake::AuthChallenge`] and
+    /// [`ene_api::v1::handshake::AuthResult`] frames are never
     /// solicited and answer nothing. Dispatch then runs:
     /// [`SubmitTextInput`](ene_api::v1::round::SubmitTextInput),
     /// [`ConfirmPresentation`](ene_api::v1::round::ConfirmPresentationWire), and
@@ -704,7 +704,7 @@ impl HostHandle {
     /// Host-local trusted surface only: the caller shows it once and
     /// forgets it. The secret is additionally persisted through the
     /// file-backed `auth_store` under the approved device, so
-    /// later [`AuthProof`] frames verify against the file; the handle keeps
+    /// later [`ene_api::v1::handshake::AuthProof`] frames verify against the file; the handle keeps
     /// no in-memory copy and no cache. The persisted copy is never logged
     /// and never rendered in `Debug`.
     ///

@@ -106,8 +106,8 @@ pub fn auth_rejected_guidance(reason: &str) -> String {
 
 /// Builds a retry frame: the caller's command id travels unchanged while
 /// message and request ids go fresh for this attempt only. Same incarnation
-/// only (see [`Client::retry`]): the sender, generation view, and payload
-/// are reused untouched. Pure: the transport pairing in [`Client::retry`]
+/// only (see [`super::Client::retry`]): the sender, generation view, and payload
+/// are reused untouched. Pure: the transport pairing in [`super::Client::retry`]
 /// moves it unchanged.
 pub fn retry_frame(
     payload: WirePayload,
@@ -196,7 +196,7 @@ pub fn frame_for(payload: WirePayload, sender: WireSender) -> WireFrame {
 /// command-side correlation grows. Handshake frames skip this (they rely on
 /// message-ID pairing only); fire-and-forget observations skip it too (no
 /// reply is ever paired to them). Transport retry of one logical send
-/// reuses the ID through [`Client::retry`] instead.
+/// reuses the ID through [`super::Client::retry`] instead.
 pub(super) fn stamp_request(frame: &mut WireFrame) -> WireMessageId {
     frame.envelope.correlation.command_id = Some(CommandWireId(uuid::Uuid::new_v4()));
     frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));

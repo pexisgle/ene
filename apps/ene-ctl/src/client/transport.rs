@@ -270,15 +270,15 @@ impl Client {
     /// operation, distinct from the handshake bootstrap).
     ///
     /// The read side first scans the deferred queue (the pure
-    /// [`select_answer`] hit path): a queued frame whose `reply_to` matches
+    /// [`super::session::select_answer`] hit path): a queued frame whose `reply_to` matches
     /// returns without socket I/O. Otherwise it loops (the streaming form of
-    /// [`select_answer`]): an
+    /// [`super::session::select_answer`]): an
     /// authoritative
     /// [`PresenceAttribution`](ene_api::v1::payload::WirePayload::PresenceAttribution)
     /// fact refreshes the session generation (latest supersedes) and reading
     /// continues; a non-fact frame whose `reply_to` matches is the answer;
     /// any other non-fact frame is pushed to the deferred queue (cap
-    /// [`DEFERRED_CAP`], oldest-drop) and reading continues — mismatches are
+    /// [`super::session::DEFERRED_CAP`], oldest-drop) and reading continues — mismatches are
     /// never returned as answers and never silently dropped.
     ///
     /// # Errors

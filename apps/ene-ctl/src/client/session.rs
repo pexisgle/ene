@@ -16,7 +16,7 @@ use super::frames::{auth_rejected_guidance, payload_kind};
 
 /// Maximum deferred out-of-order answers held per session.
 ///
-/// When [`Client::request`] reads a non-fact frame whose `reply_to` does not
+/// When [`super::Client::request`] reads a non-fact frame whose `reply_to` does not
 /// match its send, it pushes the whole frame here and keeps reading; the
 /// next request scans here first. Oldest-drop keeps a chatty or hostile Host
 /// from growing the session without bound: beyond the cap the oldest queued
@@ -198,7 +198,7 @@ pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
 /// Ruling for one incoming frame against our outgoing message ID.
 ///
 /// The single decision behind both the pure [`select_answer`] script form
-/// and [`Client::request`]'s socket loop: the loop classifies every read
+/// and [`super::Client::request`]'s socket loop: the loop classifies every read
 /// frame here and only applies session effects, so the pure tests below
 /// verify the production ruling directly instead of a mirror. Queue-cap
 /// handling stays with each caller (session push vs. script queue).
@@ -238,7 +238,7 @@ fn find_deferred_reply(deferred: &VecDeque<WireFrame>, own: WireMessageId) -> Op
 /// Splits a deferred queue plus an incoming frame script into the facts
 /// `request` would absorb, the correlated answer, and the updated queue.
 ///
-/// This is the pure form of the [`Client::request`] loop decision. First the
+/// This is the pure form of the [`super::Client::request`] loop decision. First the
 /// deferred queue is scanned for a frame whose `reply_to` equals our
 /// outgoing message ID: a hit returns immediately with no absorption and
 /// that frame removed, without consuming `frames` (no socket I/O in the
