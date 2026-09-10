@@ -692,7 +692,7 @@ impl HostHandle {
                         generation: attribution.generation,
                     },
                 );
-                match finish_turn(turn, &self.store, &executor, &scrubber).await {
+                match finish_turn(turn, &self.store, &executor, &self.store, &scrubber).await {
                     DialogueOutcome::Completed { text, experience } => {
                         // The durable reply is the client-visible completion:
                         // the formation pass is queued and runs after the

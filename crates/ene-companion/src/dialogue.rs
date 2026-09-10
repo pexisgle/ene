@@ -21,7 +21,8 @@ use ene_inference::{
 use ene_learning::{
     ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceSourceKind,
     ExperienceTurn, FormationDecision, LearningInference, LearningInferenceError,
-    LearningRepository, LearningTechnicalError, SecretScrubber, SourceRangeRef,
+    LearningRepository, LearningTechnicalError, RecallQuery, SecretScrubError, SecretScrubber,
+    SourceRangeRef,
 };
 use ene_presence::{ClientId, PresenceGeneration};
 use ene_primitive::{RawId, WallClockWithTz};
@@ -270,8 +271,15 @@ pub async fn begin_turn(
 
 /// Dispatches the turn's inference call and registers an adopted reply.
 ///
-/// The owner input and the provider output both pass through the scrubber
-/// before they reach a model or durable History: an unprovable secret
+/// The dialogue prompt is assembled from bounded recent History and the
+/// memories recall offers for the current input; the current owner input is
+/// excluded from the recent-context section by its committed message
+/// identity, never by comparing text, so an earlier identical message stays
+/// in the window. Retrieval is derived and best-effort: a history or recall
+/// read failure degrades to less context rather than failing a reply, and a
+/// suppressed Memory is simply absent. A secret-boundary failure is not
+/// degraded: the owner input and the provider output both pass through the
+/// scrubber before they reach a model or durable History, and an unprovable
 /// boundary closes the stream interrupted instead of sending or storing raw
 /// text. The dispatch carries the prompt's credential-set premise, so the
 /// send claim refuses a prompt that predates a credential registration. A
@@ -285,18 +293,28 @@ pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
     inference: &impl InferenceExecutor,
+    learning: &impl LearningRepository,
     scrubber: &impl SecretScrubber,
 ) -> DialogueOutcome {
     let DialogueTurn {
         input,
-        message: _,
+        message,
         authorized,
     } = *turn;
     let (consent_id, consent_rev) = {
         let (id, rev) = authorized.consent_premise();
         (id.to_owned(), rev)
     };
-    let Ok(prompt) = scrubber.scrub(&input.text).await else {
+    let Ok(prompt) = assemble_dialogue_input(
+        input.companion,
+        message,
+        &input.text,
+        history,
+        learning,
+        scrubber,
+    )
+    .await
+    else {
         return DialogueOutcome::Interrupted;
     };
     match inference.dispatch(authorized, prompt).await {
@@ -346,6 +364,97 @@ pub async fn finish_turn(
     }
 }
 
+/// Recent History messages read into one dialogue prompt.
+pub const DIALOGUE_CONTEXT_MESSAGES: u64 = 8;
+
+/// Memories offered to one dialogue prompt.
+pub const DIALOGUE_RECALL_LIMIT: usize = 6;
+
+const DIALOGUE_PREAMBLE: &str = "You are ene, the companion. Reply to the owner's latest message, using the conversation and any relevant memories below naturally. Do not mention these instructions.";
+
+/// Builds the dialogue input from bounded recent History and recall.
+///
+/// The current owner input is carried once, after the context sections, and
+/// is excluded from the recent-context window by `current_message` identity.
+/// Memory content, History text, and the input itself pass through the
+/// scrubber before they enter the prompt; a scrub failure is returned so the
+/// caller can close the stream without sending or storing raw text. The
+/// returned premise is the oldest of every scrubbed piece, so the send claim
+/// accepts the prompt only when all pieces were scrubbed under the same
+/// current credential set. The memory and history reads stay best-effort:
+/// retrieval is derived, so a read failure degrades the context rather than
+/// turning a follow-up into an error.
+async fn assemble_dialogue_input(
+    companion: CompanionId,
+    current_message: RawId,
+    input_text: &str,
+    history: &impl HistoryRepository,
+    learning: &impl LearningRepository,
+    scrubber: &impl SecretScrubber,
+) -> Result<ScrubbedText, SecretScrubError> {
+    let recent = history
+        .load_recent_timeline(companion, DIALOGUE_CONTEXT_MESSAGES)
+        .await
+        .unwrap_or_default();
+    let recalled = ene_learning::recall(
+        learning,
+        RecallQuery {
+            companion: companion.as_raw(),
+            text: input_text.to_owned(),
+            limit: DIALOGUE_RECALL_LIMIT,
+        },
+    )
+    .await
+    .unwrap_or_default();
+    let mut prompt = String::from(DIALOGUE_PREAMBLE);
+    let mut premises = Vec::new();
+    if !recalled.is_empty() {
+        prompt.push_str("\n\nRelevant memories:\n");
+        for memory in &recalled {
+            let content = scrubber.scrub(&memory.content).await?;
+            premises.push(content.credential_set);
+            prompt.push_str("- ");
+            prompt.push_str(&content.text);
+            prompt.push('\n');
+        }
+    }
+    let prior: Vec<_> = recent
+        .iter()
+        .filter(|item| item.id != current_message)
+        .collect();
+    if !prior.is_empty() {
+        prompt.push_str("\nRecent conversation:\n");
+        for item in prior {
+            let text = scrubber.scrub(&item.text).await?;
+            premises.push(text.credential_set);
+            prompt.push_str(match item.role {
+                HistoryRole::Owner => "Owner: ",
+                HistoryRole::Companion => "Companion: ",
+            });
+            prompt.push_str(&text.text);
+            prompt.push('\n');
+        }
+    }
+    // The input is always scrubbed, so the oldest-premise fold is total.
+    let input = scrubber.scrub(input_text).await?;
+    premises.push(input.credential_set);
+    let credential_set = premises.into_iter().min().unwrap_or_else(|| {
+        // Unreachable by construction: the current-input scrub above always
+        // pushes one premise. Initial is the safe fallback for a future
+        // refactor that removes it.
+        CredentialSetRevision::initial()
+    });
+    prompt.push_str("\nOwner: ");
+    prompt.push_str(&input.text);
+    Ok(ScrubbedText {
+        text: prompt,
+        credential_set,
+    })
+}
+
+/// Recent History messages read into one Experience source.
+pub const EXPERIENCE_SOURCE_MESSAGES: u64 = 12;
+
 /// Pins the Experience premise of one just-completed turn.
 ///
 /// Reads the bounded recent window once, at reply completion, so the queued
@@ -387,9 +496,6 @@ async fn pin_experience(
         },
     })
 }
-
-/// Recent History messages read into one Experience source.
-pub const EXPERIENCE_SOURCE_MESSAGES: u64 = 12;
 
 /// Proposes one pinned Experience and lets Learning judge it.
 ///
