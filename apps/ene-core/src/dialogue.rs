@@ -52,8 +52,8 @@ use ene_api::v1::round::{
 };
 use ene_companion::{
     AppendHistoryCommand, CommandId, CompanionId, CompanionLifecycle, CompanionRepository,
-    HistoryAppendOutcome, HistoryMessage, HistoryRepository, HistoryRole, PresentationMark,
-    ReportStatus, UndeliveredRepository,
+    HistoryAppendOutcome, HistoryRepository, HistoryRole, PresentationMark, ReportStatus,
+    RequestFingerprint, RoundIntentMark, UndeliveredRepository,
 };
 use ene_credential::{CredentialRef, CredentialRefRepository, credential_availability};
 use ene_inference::{
@@ -132,8 +132,8 @@ fn command_id_for(envelope: &ene_api::v1::envelope::WireEnvelope) -> Option<Comm
 /// never-attempted call spends nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SendOutcomeClass<'a> {
-    /// The attempt may have run (transport error, including timeouts, or a
-    /// claimed completion with no arrival): certainty is unknown, never zero.
+    /// The attempt may have run (transport error, including timeouts):
+    /// certainty is unknown, never zero.
     AttemptUncertain,
     /// The call definitely never ran (pre-send refusal): no provider use,
     /// so no fact is recorded at all.
@@ -168,29 +168,35 @@ fn usage_for_disposition(
     }
 }
 
-/// Whether a stored row carries the same intent as an incoming submit:
-/// text, language, and sender incarnation must match, and a claimed round
-/// must name the stored round wire. The incarnation binds the key to its
-/// sender epoch: a new epoch retries under a fresh command, never by
-/// reusing the old key. A reused key with different content is a sender
-/// bug, never a rebinding: the caller declines it instead of adopting new
-/// meaning. A round-less retry matches on content and epoch alone (its
-/// round resolves through the stored row), as does a retry against a
-/// pre-opaque row, which carries no wire premise to violate.
-fn command_matches(
-    found: &HistoryMessage,
+/// Canonical client round premise of one [`SubmitTextInput`] send.
+///
+/// The payload names the premise (IPC §21 maps the intake candidate's round
+/// from `SubmitTextInput.round`); the envelope `round_view` is the mirror
+/// the Client relied on (IPC §5: comparison material, not a claim) and must
+/// agree with the payload premise once it is populated. A disagreement
+/// means the frame carries two different round premises: neither side is
+/// adopted — the caller answers stale with current values, and the Client
+/// re-syncs.
+///
+/// `fresh` does not change the premise: an explicit new-round force ignores
+/// every round hint per the payload contract, so there is nothing to agree
+/// on, and the caller builds [`RoundIntentMark::New`] from the flag alone.
+enum RoundPremise {
+    /// A round-less request: join-or-mint.
+    Auto,
+    /// Join the round this Client-supplied reference names.
+    Existing(String),
+}
+
+fn canonical_round_premise(
     submit: &SubmitTextInput,
-    incarnation: (u64, u64),
-) -> bool {
-    if found.text != submit.body.text || found.lang != submit.body.lang.0 {
-        return false;
-    }
-    if found.incarnation != Some(incarnation) {
-        return false;
-    }
-    match (&submit.round, &found.round_wire) {
-        (Some(round), Some(wire)) => round.0 == *wire,
-        _ => true,
+    round_view: Option<&RoundWireId>,
+) -> Option<RoundPremise> {
+    match (&submit.round, round_view) {
+        (None, None) => Some(RoundPremise::Auto),
+        (Some(round), None) => Some(RoundPremise::Existing(round.0.clone())),
+        (Some(round), Some(view)) if view == round => Some(RoundPremise::Existing(round.0.clone())),
+        _ => None,
     }
 }
 
@@ -209,7 +215,6 @@ fn intake_reason(reason: &RevalidationReason) -> &'static str {
         RevalidationReason::UnknownCompanion => "unknown-companion",
         RevalidationReason::StoppedCompanion => "stopped-companion",
         RevalidationReason::MissingCommandId => "missing-command-id",
-        RevalidationReason::CommandMismatch => "command-mismatch",
         RevalidationReason::UnknownReasonTag => "unknown-reason",
     }
 }
@@ -458,15 +463,17 @@ impl HostHandle {
     /// round recording, inference dispatch, reply append with undelivered
     /// registration, usage recording, then the response stream. Admission
     /// precedes the append so a declined input leaves neither history rows
-    /// nor transient round claims behind; maps are recorded only after the
-    /// append commits, and a racy duplicate that lands on
+    /// nor transient round claims behind; the round projection is minted
+    /// atomically with its map entry (one domain round, one wire), and a
+    /// racy duplicate that lands on
     /// [`HistoryAppendOutcome::AlreadyCommittedAs`] answers the original
     /// accept without re-running inference. The inbound companion ref
     /// resolves through [`HostHandle::resolve_companion`]: presence facts
-    /// issue the projection the Client echoes back. The round premise
-    /// prefers the envelope `round_view` (the comparison-material carrier)
-    /// and falls back to the input `round`; a present-but-unresolvable
-    /// round is stale, never rebound.
+    /// issue the projection the Client echoes back. The canonical round
+    /// premise comes from the input `round`, and a populated envelope
+    /// `round_view` must agree with it — a disagreement answers stale with
+    /// current values instead of adopting either side; a present-but-
+    /// unresolvable round is stale, never rebound.
     ///
     /// Presence attach runs only when the loaded attribution is `NoActive`,
     /// and only on the envelope's observed generation premise: a missing
@@ -481,12 +488,14 @@ impl HostHandle {
     ///
     /// Idempotency is durable over the envelope `command_id`: a parseable
     /// command id first looks up the history row through
-    /// [`lookup_command`](HistoryRepository::lookup_command). A hit with a
-    /// matching fingerprint (text, language, sender incarnation, and round
-    /// wire) returns the original accept ack from the stored projection
-    /// without re-appending or re-streaming anything — including after a
-    /// restart, since the ack no longer depends on the transient rounds map.
-    /// A hit with different client content answers a typed wire rejection
+    /// [`lookup_command`](HistoryRepository::lookup_command). A hit is
+    /// judged by the same [`RequestFingerprint`] the store compares
+    /// in-transaction — role, body, language, sender incarnation, and the
+    /// canonical round intent, never the Host-decided round or its
+    /// projection — so an exact retry replays the stored accept ack
+    /// verbatim without re-appending or re-streaming anything, including
+    /// after a restart. A hit with a different request (or one whose
+    /// fingerprint cannot be reconstructed) answers a typed wire rejection
     /// (`ConflictingCommand`), never an intake outcome. Stream outcome
     /// replay is explicitly out of scope: only the accept ack replays. An
     /// unparsable or missing command id carries no replay key: it is
@@ -533,24 +542,62 @@ impl HostHandle {
                 intake_reason(&RevalidationReason::MissingCommandId),
             )];
         };
+        // Canonical round premise first: the two carriers must agree before
+        // anything else is judged, so a contradictory frame is declined
+        // stale with current values instead of adopting one side.
+        let Some(round_premise) =
+            canonical_round_premise(submit, frame.envelope.observed.round_view.as_ref())
+        else {
+            return vec![self.stale_frame(
+                frame,
+                live,
+                &live.client_ref,
+                &companion_key,
+                attribution.generation.as_u64(),
+            )];
+        };
+        // The request fingerprint is the immutable client semantics: role,
+        // body, language, sending incarnation, and the canonical round
+        // intent. `fresh` forces a new round and ignores every hint per the
+        // payload contract; otherwise the premise decides.
+        let round_intent = if submit.fresh {
+            RoundIntentMark::New
+        } else {
+            match &round_premise {
+                RoundPremise::Auto => RoundIntentMark::Auto,
+                RoundPremise::Existing(reference) => RoundIntentMark::Existing(reference.clone()),
+            }
+        };
+        let incoming_fingerprint = RequestFingerprint {
+            role: HistoryRole::Owner,
+            text: submit.body.text.clone(),
+            lang: submit.body.lang.0.clone(),
+            incarnation: Some((
+                frame.envelope.sender.incarnation_id.counter,
+                frame.envelope.sender.incarnation_id.random,
+            )),
+            round_intent: round_intent.clone(),
+        };
         // Durable replay precedes presence attach: an exact retry answers
         // from the stored marker without advancing presence generation or
         // touching any other state, while a conflicting reuse rejects just
-        // as early.
+        // as early. One comparison, one judge: the same
+        // [`RequestFingerprint`] value the store reconstructs
+        // in-transaction; a stored row without one proves nothing and is
+        // declined the same way (fail-closed).
         match self.store.lookup_command(companion, &command).await {
             Err(_) => return vec![held_frame(frame, live)],
             Ok(Some(found)) => {
-                let sender = (
-                    frame.envelope.sender.incarnation_id.counter,
-                    frame.envelope.sender.incarnation_id.random,
-                );
-                if !command_matches(&found, submit, sender) {
+                let replays = found
+                    .request_fingerprint()
+                    .is_some_and(|stored| stored == incoming_fingerprint);
+                if !replays {
                     return vec![reject_frame(
                         frame,
                         live,
                         RejectKind::ConflictingCommand,
                         format!(
-                            "command {} reused with different content",
+                            "command {} reused with a different request",
                             command.0.as_uuid().as_hyphenated()
                         ),
                     )];
@@ -613,15 +660,9 @@ impl HostHandle {
                 }
             }
         }
-        let round_hint = frame
-            .envelope
-            .observed
-            .round_view
-            .clone()
-            .or_else(|| submit.round.clone());
-        let requested = match round_hint {
-            None => None,
-            Some(hint) => match self.round_for(&hint.0) {
+        let requested = match &round_premise {
+            RoundPremise::Auto => None,
+            RoundPremise::Existing(reference) => match self.round_for(reference) {
                 Some(round) => Some(round),
                 None => {
                     return vec![self.stale_frame(
@@ -634,10 +675,11 @@ impl HostHandle {
                 }
             },
         };
-        // One meaning per value: an explicit new-round force beats any
-        // round hint (the CLI already rejects combining them, so both set
-        // means a hand-built frame); otherwise a resolved hint joins that
-        // round and no hint joins-or-mints.
+        // One meaning per value, matching the fingerprint's round intent:
+        // an explicit new-round force beats any premise (the CLI already
+        // rejects combining them, so both set means a hand-built frame);
+        // otherwise a resolved premise joins that round and no premise
+        // joins-or-mints.
         let intent = if submit.fresh {
             RoundIntent::New
         } else {
@@ -751,16 +793,16 @@ impl HostHandle {
         let Some(authorization) = authorization else {
             return vec![revalidate_frame(frame, live, "evaluation-consumed")];
         };
-        // One projection per round: an already-mapped round reuses its
-        // wire, so every message in the round — and every replay — names
-        // the same projection; only an unmapped (freshly minted) round
-        // mints. The map write still follows durable commit below, so a
-        // failed append never advertises a projection for a round the
-        // store never accepted.
-        let round_wire = match self.wire_for_round(&accepted) {
-            Some(wire) => RoundWireId(wire),
-            None => RoundWireId(RawId::new().as_uuid().to_string()),
-        };
+        // One projection per round: the atomic get-or-create below reuses
+        // an already-mapped round's wire, so every message in the round —
+        // and every replay — names the same projection; only an unmapped
+        // (freshly minted) round mints. The mint may land before the
+        // durable append below decides, but the projection is never
+        // published on a failed append (no ack or stream carries it), and
+        // an unpublished, unguessable mapping entry is not authority:
+        // acceptance still comes only from intake plus the durable commit.
+        // The map itself stays per-process, dropped by a restart.
+        let round_wire = self.round_wire_or_mint(&accepted);
         let sender_incarnation = (
             frame.envelope.sender.incarnation_id.counter,
             frame.envelope.sender.incarnation_id.random,
@@ -778,6 +820,7 @@ impl HostHandle {
             local_id: Some(submit.local_id.0.clone()).filter(|key| !key.is_empty()),
             command_id: Some(command),
             round_wire: Some(round_wire.0.clone()),
+            round_intent: Some(round_intent),
             incarnation: Some(sender_incarnation),
         };
         match self.store.append_message(owner_cmd).await {
@@ -797,20 +840,20 @@ impl HostHandle {
                 return vec![revalidate_frame(frame, live, "consent-stale")];
             }
             Ok(HistoryAppendOutcome::CommandConflict) => {
-                // The key already owns a different request: role, body,
-                // language, or sending incarnation differ — the store
-                // decides this in-transaction on the request fingerprint
-                // alone, with round and projection excluded as accepted
-                // result. Same-send retries never reach here: they replay
-                // as `AlreadyCommittedAs` from the stored accept, even
-                // across round drift. Declined without side effects, never
-                // rebound, never an intake outcome, never a retry signal.
+                // The key already owns a different request than the stored
+                // fingerprint covers — the store decided this
+                // in-transaction from the same [`RequestFingerprint`] the
+                // early replay compares. Same-send retries never reach
+                // here: they replay as `AlreadyCommittedAs` from the stored
+                // accept, even across round drift. Declined without side
+                // effects, never rebound, never an intake outcome, never a
+                // retry signal.
                 return vec![reject_frame(
                     frame,
                     live,
                     RejectKind::ConflictingCommand,
                     format!(
-                        "command {} reused with different content",
+                        "command {} reused with a different request",
                         command.0.as_uuid().as_hyphenated()
                     ),
                 )];
@@ -820,11 +863,6 @@ impl HostHandle {
             }
             Err(_) => return vec![held_frame(frame, live)],
         }
-        // Transient claims follow durable commit only: recording the round
-        // maps before the append would advertise a round the store never
-        // accepted (notably on the StaleExpected/Held paths above, which now
-        // return map-clean).
-        self.record_round(&round_wire.0, accepted);
         self.record_open_round(
             &live.client_ref,
             &companion_key,
@@ -923,9 +961,11 @@ impl HostHandle {
             local_id: None,
             command_id: None,
             // Same round, same projection: the reply belongs to the accepted
-            // round. No incarnation: the reply is Host-produced, never sent
-            // by the client epoch.
+            // round. No command key and no round intent: the reply is
+            // Host-produced, never a client command, so it carries no
+            // replay key at all.
             round_wire: Some(round_wire.0.clone()),
+            round_intent: None,
             incarnation: None,
         };
         if !matches!(
@@ -1237,7 +1277,7 @@ mod tests {
             WireMessageType(String::from("SubmitTextInput")),
         );
         envelope.observed.presence_generation_view = generation;
-        envelope.observed.round_view = round;
+        envelope.observed.round_view = round.clone();
         // Every submit mints a fresh command id: transport retry reuses the
         // id (the replay test resends the same frame), while distinct sends
         // stay distinct durable commands.
@@ -1246,7 +1286,7 @@ mod tests {
             envelope,
             payload: WirePayload::SubmitTextInput(SubmitTextInput {
                 companion: CompanionWireRef(companion.to_string()),
-                round: None,
+                round,
                 fresh: false,
                 local_id: ClientLocalId(local_id.to_string()),
                 body: TextBodyWire {
@@ -1356,6 +1396,86 @@ mod tests {
         FakeProviderTransport::new(String::from("hi there"), None)
     }
 
+    /// Result-based handle setup for the round regression tests: a failed
+    /// open or a failed setup is a test failure, never a silent pass.
+    async fn round_test_handle(
+        tag: &str,
+        live: &LiveInput,
+        transport: &FakeProviderTransport,
+    ) -> Result<(HostHandle, std::path::PathBuf), String> {
+        let Some((handle, dir)) = setup_handle(tag).await else {
+            return Err(String::from("handle open failed"));
+        };
+        if !register_assign_complete(&handle, live, transport).await {
+            remove_data_dir(&dir);
+            return Err(String::from("setup must complete"));
+        }
+        Ok((handle, dir))
+    }
+
+    /// Extracts the accepted round from the first answer, failing the test
+    /// on anything else.
+    fn accepted_round(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RoundWireId, String> {
+        let Some(first) = responses.first() else {
+            return Err(String::from("the submit must answer"));
+        };
+        match &first.payload {
+            WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) => {
+                Ok(round.clone())
+            }
+            other => Err(format!("the submit must accept, got {other:?}")),
+        }
+    }
+
+    /// Extracts a wire rejection kind from the first answer.
+    fn reject_kind(responses: &[ene_plugin_ipc::WireFrame]) -> Result<RejectKind, String> {
+        let Some(first) = responses.first() else {
+            return Err(String::from("the submit must answer"));
+        };
+        match &first.payload {
+            WirePayload::Reject(notice) => Ok(notice.kind),
+            other => Err(format!("expected a typed reject, got {other:?}")),
+        }
+    }
+
+    /// Counts durable history rows through the repository contract.
+    async fn timeline_count(handle: &HostHandle) -> Result<usize, String> {
+        use ene_companion::CompanionRepository as _;
+        use ene_companion::HistoryRepository as _;
+
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .map_err(|error| format!("the companion must resolve: {error:?}"))?;
+        let timeline = handle
+            .store
+            .load_timeline(companion, None, 100)
+            .await
+            .map_err(|error| format!("the timeline must load: {error:?}"))?;
+        Ok(timeline.len())
+    }
+
+    /// Loads the current attribution through the repository contract.
+    async fn current_generation(handle: &HostHandle) -> Result<u64, String> {
+        use ene_companion::CompanionRepository as _;
+        use ene_presence::PresenceRepository as _;
+
+        let companion = handle
+            .store
+            .ensure_running_companion()
+            .await
+            .map_err(|error| format!("the companion must resolve: {error:?}"))?;
+        let attribution = handle
+            .store
+            .load_attribution(companion.as_raw())
+            .await
+            .map_err(|error| format!("attribution must load: {error:?}"))?;
+        let Some(current) = attribution else {
+            return Err(String::from("attribution must load"));
+        };
+        Ok(current.generation.as_u64())
+    }
     async fn setup_handle(tag: &str) -> Option<(HostHandle, std::path::PathBuf)> {
         memory_handle_with(tag, |store| {
             store.insert(
@@ -1923,20 +2043,13 @@ mod tests {
         remove_data_dir(&dir);
     }
 
+    /// A `fresh` send mints a new round even when an open round would
+    /// match: force-new is its own round intent.
     #[tokio::test]
-    async fn fresh_send_mints_despite_matching_open_round() {
-        use ene_companion::CompanionRepository as _;
-        use ene_presence::PresenceRepository as _;
-
-        let Some((handle, dir)) = setup_handle("dlg-fresh").await else {
-            return;
-        };
+    async fn fresh_send_mints_despite_matching_open_round() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        assert!(
-            register_assign_complete(&handle, &live, &transport).await,
-            "setup must complete"
-        );
+        let (handle, dir) = round_test_handle("dlg-fresh", &live, &transport).await?;
         let first = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -1945,34 +2058,14 @@ mod tests {
             "hello",
             live.connection_id,
         );
-        let responses = handle.handle_frame(first, live.clone(), &transport).await;
-        let Some(accepted) = responses.first() else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
-            round: first_round,
-        }) = &accepted.payload
-        else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let first_round = first_round.clone();
+        let first_round =
+            accepted_round(&handle.handle_frame(first, live.clone(), &transport).await)?;
         // The second send observes the current generation so only the
         // round intent differs from a plain continuation.
-        let companion = handle.store.ensure_running_companion().await;
-        let Ok(companion) = companion else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let attribution = handle.store.load_attribution(companion.as_raw()).await;
-        let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
-            return;
-        };
+        let generation = current_generation(&handle).await?;
         let mut second = submit_frame(
             handle.companion_wire(),
-            Some(current.generation.as_u64()),
+            Some(generation),
             None,
             "local-2",
             "again",
@@ -1980,41 +2073,26 @@ mod tests {
         );
         let WirePayload::SubmitTextInput(ref mut input) = second.payload else {
             remove_data_dir(&dir);
-            return;
+            return Err(String::from("the send frame must carry its input"));
         };
         input.fresh = true;
-        let responses = handle.handle_frame(second, live.clone(), &transport).await;
-        let Some(accepted) = responses.first() else {
-            remove_data_dir(&dir);
-            return;
-        };
-        assert!(
-            matches!(
-                &accepted.payload,
-                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
-                    round
-                }) if *round != first_round
-            ),
-            "a fresh send must mint instead of joining, got {:?}",
-            accepted.payload
+        let second_round =
+            accepted_round(&handle.handle_frame(second, live.clone(), &transport).await)?;
+        assert_ne!(
+            second_round, first_round,
+            "a fresh send must mint instead of joining, got {second_round:?}"
         );
         remove_data_dir(&dir);
+        Ok(())
     }
 
+    /// Repeated sends into the same open round reuse its one wire
+    /// projection: 1 domain round, 1 wire, across every message.
     #[tokio::test]
-    async fn same_round_reuses_one_wire_projection() {
-        use ene_companion::CompanionRepository as _;
-        use ene_presence::PresenceRepository as _;
-
-        let Some((handle, dir)) = setup_handle("dlg-one-wire").await else {
-            return;
-        };
+    async fn same_round_reuses_one_wire_projection() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        assert!(
-            register_assign_complete(&handle, &live, &transport).await,
-            "setup must complete"
-        );
+        let (handle, dir) = round_test_handle("dlg-one-wire", &live, &transport).await?;
         let first = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2023,71 +2101,40 @@ mod tests {
             "hello",
             live.connection_id,
         );
-        let responses = handle.handle_frame(first, live.clone(), &transport).await;
-        let Some(accepted) = responses.first() else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
-            round: first_round,
-        }) = &accepted.payload
-        else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let first_round = first_round.clone();
+        let first_round =
+            accepted_round(&handle.handle_frame(first, live.clone(), &transport).await)?;
         // The second send observes the current generation so it joins the
         // open round instead of re-attaching.
-        let companion = handle.store.ensure_running_companion().await;
-        let Ok(companion) = companion else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let attribution = handle.store.load_attribution(companion.as_raw()).await;
-        let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
-            return;
-        };
+        let generation = current_generation(&handle).await?;
         let second = submit_frame(
             handle.companion_wire(),
-            Some(current.generation.as_u64()),
+            Some(generation),
             None,
             "local-2",
             "again",
             live.connection_id,
         );
-        let responses = handle.handle_frame(second, live.clone(), &transport).await;
-        let Some(accepted) = responses.first() else {
-            remove_data_dir(&dir);
-            return;
-        };
-        assert!(
-            matches!(
-                &accepted.payload,
-                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
-                    round
-                }) if *round == first_round
-            ),
-            "a joined round must reuse its one projection, got {:?}",
-            accepted.payload
+        let second_round =
+            accepted_round(&handle.handle_frame(second, live.clone(), &transport).await)?;
+        assert_eq!(
+            second_round, first_round,
+            "a joined round must reuse its one projection, got {second_round:?}"
         );
         remove_data_dir(&dir);
+        Ok(())
     }
 
+    /// An exact retry — same command id, same body, same language, same
+    /// incarnation, same round premise, same `fresh` flag — replays the
+    /// original accept verbatim even after the surrounding round state
+    /// moved on under a different command. Nothing is re-appended and no
+    /// provider attempt runs: a re-execution against a failing transport
+    /// would answer an interrupted stream, the replay answers one frame.
     #[tokio::test]
-    async fn retry_after_round_advance_replays_the_stored_accept() {
-        use ene_companion::CompanionRepository as _;
-        use ene_presence::PresenceRepository as _;
-
-        let Some((handle, dir)) = setup_handle("dlg-retry-drift").await else {
-            return;
-        };
+    async fn retry_after_round_advance_replays_the_stored_accept() -> Result<(), String> {
         let transport = ok_transport();
         let live = live_input("client-a");
-        assert!(
-            register_assign_complete(&handle, &live, &transport).await,
-            "setup must complete"
-        );
+        let (handle, dir) = round_test_handle("dlg-retry-drift", &live, &transport).await?;
         let first = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2096,96 +2143,216 @@ mod tests {
             "hello",
             live.connection_id,
         );
-        let first_command = first.envelope.correlation.command_id;
-        let responses = handle.handle_frame(first, live.clone(), &transport).await;
-        let Some(accepted) = responses.first() else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
-            round: first_round,
-        }) = &accepted.payload
-        else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let first_round = first_round.clone();
-        let companion = handle.store.ensure_running_companion().await;
-        let Ok(companion) = companion else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let attribution = handle.store.load_attribution(companion.as_raw()).await;
-        let Ok(Some(current)) = attribution else {
-            remove_data_dir(&dir);
-            return;
-        };
-        // Same command and text re-intaked into a fresh round: the request
-        // fingerprint matches, so the stored accept replays instead of
-        // conflicting on the drifted round.
-        let mut second = submit_frame(
+        let first_round = accepted_round(
+            &handle
+                .handle_frame(first.clone(), live.clone(), &transport)
+                .await,
+        )?;
+        // The open round moves on under a different command: the drift is
+        // Host state only, never part of the retried request.
+        let generation = current_generation(&handle).await?;
+        let mut drift = submit_frame(
             handle.companion_wire(),
-            Some(current.generation.as_u64()),
+            Some(generation),
             None,
             "local-2",
             "hello",
             live.connection_id,
         );
-        second.envelope.correlation.command_id = first_command;
-        let WirePayload::SubmitTextInput(ref mut input) = second.payload else {
-            remove_data_dir(&dir);
-            return;
-        };
-        input.fresh = true;
-        let responses = handle.handle_frame(second, live.clone(), &transport).await;
-        let Some(accepted) = responses.first() else {
-            remove_data_dir(&dir);
-            return;
-        };
-        assert!(
-            matches!(
-                &accepted.payload,
-                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
-                    round
-                }) if *round == first_round
-            ),
-            "a drifted retry must replay the stored accept, got {:?}",
-            accepted.payload
+        if let WirePayload::SubmitTextInput(ref mut input) = drift.payload {
+            input.fresh = true;
+        }
+        let drift_round =
+            accepted_round(&handle.handle_frame(drift, live.clone(), &transport).await)?;
+        assert_ne!(
+            drift_round, first_round,
+            "the drift send must mint a new round"
         );
-        let again = handle
-            .handle_frame(
-                history_frame(handle.companion_wire(), live.connection_id),
-                live.clone(),
-                &transport,
-            )
-            .await;
-        let Some(view) = again.first() else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let WirePayload::HistoryView(view) = &view.payload else {
-            remove_data_dir(&dir);
-            return;
-        };
+        let before = timeline_count(&handle).await?;
+        // The exact retry resends the original frame byte-for-byte (same
+        // command id, same payload, same incarnation and premises).
+        let failing = FakeProviderTransport::failing(FakeFailure::Transport(String::from(
+            "must never be reached",
+        )));
+        let responses = handle.handle_frame(first, live.clone(), &failing).await;
         assert_eq!(
-            view.items.len(),
-            2,
-            "the drifted retry appends nothing durable"
+            responses.len(),
+            1,
+            "the replay answers the accept ack only, with no stream: {responses:?}"
+        );
+        assert_eq!(
+            accepted_round(&responses)?,
+            first_round,
+            "the retry replays the original accept, not the drifted round"
+        );
+        assert_eq!(
+            timeline_count(&handle).await?,
+            before,
+            "the retry appends nothing durable"
         );
         remove_data_dir(&dir);
+        Ok(())
     }
 
+    /// Same command id and same request content, but the client round
+    /// intent flips from join-or-mint to an explicit join: a different
+    /// request, answered with the typed wire rejection and no side effects.
     #[tokio::test]
-    async fn replay_after_restart_replays_from_durable_wire() {
+    async fn retry_with_changed_round_intent_conflicts() -> Result<(), String> {
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        let (handle, dir) = round_test_handle("dlg-retry-intent", &live, &transport).await?;
+        let first = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
+        let first_round = accepted_round(
+            &handle
+                .handle_frame(first.clone(), live.clone(), &transport)
+                .await,
+        )?;
+        // Same command id, same body/lang/incarnation, but the premise now
+        // names the round explicitly (Auto -> Existing): a different
+        // request. The companion projection stays the one this handle
+        // issued, so only the round intent differs.
+        let mut joined = first.clone();
+        if let WirePayload::SubmitTextInput(ref mut input) = joined.payload {
+            input.round = Some(first_round.clone());
+            joined.envelope.observed.round_view = Some(first_round.clone());
+        }
+        let declined = handle.handle_frame(joined, live.clone(), &transport).await;
+        assert_eq!(
+            reject_kind(&declined)?,
+            RejectKind::ConflictingCommand,
+            "a changed round intent must conflict, got {declined:?}"
+        );
+        assert_eq!(
+            timeline_count(&handle).await?,
+            2,
+            "the conflicting retry appends nothing durable"
+        );
+        remove_data_dir(&dir);
+        Ok(())
+    }
+
+    /// Same command id and request content, but `fresh` flips
+    /// join-or-mint into force-new: a different request semantics, so the
+    /// key conflicts instead of replaying the stored accept.
+    #[tokio::test]
+    async fn retry_with_forced_fresh_conflicts() -> Result<(), String> {
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        let (handle, dir) = round_test_handle("dlg-retry-fresh", &live, &transport).await?;
+        let first = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
+        let original_round = accepted_round(
+            &handle
+                .handle_frame(first.clone(), live.clone(), &transport)
+                .await,
+        )?;
+        let mut forced = first.clone();
+        if let WirePayload::SubmitTextInput(ref mut input) = forced.payload {
+            input.fresh = true;
+        }
+        let declined = handle.handle_frame(forced, live.clone(), &transport).await;
+        assert_eq!(
+            reject_kind(&declined)?,
+            RejectKind::ConflictingCommand,
+            "a fresh flip on the same key must conflict"
+        );
+        // The stored accept stays authoritative: the exact retry still
+        // replays after the conflicting attempt changed nothing.
+        let replayed = handle.handle_frame(first, live.clone(), &transport).await;
+        assert_eq!(
+            accepted_round(&replayed)?,
+            original_round,
+            "the untouched retry still replays the original accept"
+        );
+        assert_eq!(
+            timeline_count(&handle).await?,
+            2,
+            "conflict and replay append nothing durable"
+        );
+        remove_data_dir(&dir);
+        Ok(())
+    }
+
+    /// Concurrent sends that join the same open round all use its one wire
+    /// projection: the atomic get-or-create never mints a second one.
+    #[tokio::test]
+    async fn concurrent_joins_of_one_round_share_one_wire() -> Result<(), String> {
+        let transport = ok_transport();
+        let live = live_input("client-a");
+        let (handle, dir) = round_test_handle("dlg-concurrent", &live, &transport).await?;
+        let original = submit_frame(
+            handle.companion_wire(),
+            Some(0),
+            None,
+            "local-1",
+            "hello",
+            live.connection_id,
+        );
+        let open_wire = accepted_round(
+            &handle
+                .handle_frame(original, live.clone(), &transport)
+                .await,
+        )?;
+        let generation = current_generation(&handle).await?;
+        let first = submit_frame(
+            handle.companion_wire(),
+            Some(generation),
+            None,
+            "local-2",
+            "one",
+            live.connection_id,
+        );
+        let second = submit_frame(
+            handle.companion_wire(),
+            Some(generation),
+            None,
+            "local-3",
+            "two",
+            live.connection_id,
+        );
+        let (left, right) = tokio::join!(
+            handle.handle_frame(first, live.clone(), &transport),
+            handle.handle_frame(second, live.clone(), &transport)
+        );
+        let left_wire = accepted_round(&left)?;
+        let right_wire = accepted_round(&right)?;
+        assert_eq!(
+            left_wire, right_wire,
+            "concurrent joins of one round must share its one wire"
+        );
+        assert_eq!(left_wire, open_wire, "the open round keeps its projection");
+        remove_data_dir(&dir);
+        Ok(())
+    }
+
+    /// After a Host restart, the exact retry replays the original accept
+    /// from the durable row: the stored wire projection travels verbatim,
+    /// nothing re-executes, nothing re-appends.
+    #[tokio::test]
+    async fn replay_after_restart_replays_from_durable_wire() -> Result<(), String> {
         let Some((handle, dir)) = setup_handle("dlg-restart").await else {
-            return;
+            return Err(String::from("handle open must succeed"));
         };
         let transport = ok_transport();
         let live = live_input("client-a");
-        assert!(
-            register_assign_complete(&handle, &live, &transport).await,
-            "setup must complete"
-        );
+        if !register_assign_complete(&handle, &live, &transport).await {
+            remove_data_dir(&dir);
+            return Err(String::from("setup must complete"));
+        }
         let frame = submit_frame(
             handle.companion_wire(),
             Some(0),
@@ -2197,17 +2364,7 @@ mod tests {
         let accepted = handle
             .handle_frame(frame.clone(), live.clone(), &transport)
             .await;
-        let Some(first) = accepted.first() else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound { round }) =
-            &first.payload
-        else {
-            remove_data_dir(&dir);
-            return;
-        };
-        let accepted_wire = round.0.clone();
+        let accepted_wire = accepted_round(&accepted)?.0;
         drop(handle);
         let fresh = MemoryCredentialStore::new();
         fresh.insert(
@@ -2218,15 +2375,9 @@ mod tests {
             },
             "test-bearer",
         );
-        let reopened = HostHandle::open_with_cred_store(&dir, CredStore::Memory(fresh)).await;
-        assert!(
-            reopened.is_ok(),
-            "the store must reopen over the same data directory"
-        );
-        let Ok(reopened) = reopened else {
-            remove_data_dir(&dir);
-            return;
-        };
+        let reopened = HostHandle::open_with_cred_store(&dir, CredStore::Memory(fresh))
+            .await
+            .map_err(|error| format!("the store must reopen: {error:?}"))?;
         let relive = live_input("client-a");
         let mut resent = frame;
         resent.envelope.sender.connection_id = Some(relive.connection_id);
@@ -2240,20 +2391,15 @@ mod tests {
         let replayed = reopened
             .handle_frame(resent, relive.clone(), &transport)
             .await;
-        assert_eq!(replayed.len(), 1, "the restart replay answers once");
-        let Some(replay) = replayed.first() else {
-            remove_data_dir(&dir);
-            return;
-        };
-        assert!(
-            matches!(
-                &replay.payload,
-                WirePayload::RoundIntakeOutcome(RoundIntakeOutcomeWire::AcceptedForRound {
-                    round
-                }) if round.0 == accepted_wire
-            ),
-            "the restart replay answers the original accept from durable state, got {:?}",
-            replay.payload
+        assert_eq!(
+            replayed.len(),
+            1,
+            "the restart replay answers once, got {replayed:?}"
+        );
+        assert_eq!(
+            accepted_round(&replayed)?.0,
+            accepted_wire,
+            "the restart replay answers the original accept from durable state"
         );
         let restored = reopened
             .handle_frame(
@@ -2262,13 +2408,13 @@ mod tests {
                 &transport,
             )
             .await;
-        let Some(view) = restored.first() else {
+        let Some(view_frame) = restored.first() else {
             remove_data_dir(&dir);
-            return;
+            return Err(String::from("history must answer"));
         };
-        let WirePayload::HistoryView(view) = &view.payload else {
+        let WirePayload::HistoryView(view) = &view_frame.payload else {
             remove_data_dir(&dir);
-            return;
+            return Err(String::from("history must answer with a view"));
         };
         assert_eq!(
             view.items.len(),
@@ -2276,6 +2422,7 @@ mod tests {
             "the restart replay appends nothing durable"
         );
         remove_data_dir(&dir);
+        Ok(())
     }
 
     #[tokio::test]

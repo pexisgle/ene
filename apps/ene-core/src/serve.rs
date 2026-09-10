@@ -108,7 +108,7 @@ use ene_api::v1::handshake::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::DeviceWireId;
-use ene_api::v1::refs::{ConnectionWireId, WireMessageId, WireMessageType};
+use ene_api::v1::refs::{ConnectionWireId, RoundWireId, WireMessageId, WireMessageType};
 use ene_api::v1::reject::{RejectKind, RejectNotice};
 use ene_companion::{CompanionId, CompanionRepository};
 use ene_credential::{
@@ -649,12 +649,33 @@ impl HostHandle {
             .map(|(wire, _)| wire.clone())
     }
 
-    /// Records a domain round under its wire string for later resolution.
-    pub(crate) fn record_round(&self, wire: &str, round: RoundId) {
-        lock_map(&self.rounds).insert(wire.to_string(), round);
+    /// Atomically resolves-or-mints the wire projection for one round.
+    ///
+    /// One lock section performs the lookup and the insert, so two
+    /// concurrent issuers for the same domain round cannot both see "not
+    /// mapped" and mint two projections: one domain round maps to exactly
+    /// one wire, and one wire maps to one round. A fresh mint is recorded
+    /// immediately; if the caller's durable append later does not commit,
+    /// the entry simply stays unpublished (no ack or stream ever names it,
+    /// and an unguessable mapping entry is not authority — acceptance still
+    /// comes only from intake plus the durable commit) until the restart
+    /// drops the map. Removing an entry on failure cannot be done safely:
+    /// a racing issuer may already have reused the wire for its own
+    /// accepted round, and a removal would break the same invariant.
+    pub(crate) fn round_wire_or_mint(&self, round: &RoundId) -> RoundWireId {
+        let mut maps = lock_map(&self.rounds);
+        if let Some((wire, _)) = maps
+            .iter()
+            .find(|(_, mapped)| mapped.as_raw() == round.as_raw())
+        {
+            return RoundWireId(wire.clone());
+        }
+        let wire = RawId::new().as_uuid().to_string();
+        maps.insert(wire.clone(), *round);
+        RoundWireId(wire)
     }
 
-    /// Records the Owner approval of one pending pairing request.
+    /// Records one Owner pairing approval and mints its one-time secret.
     ///
     /// Host-local trusted inlet behind the `approve-device` subcommand: it
     /// records the Owner decision through
@@ -663,7 +684,6 @@ impl HostHandle {
     /// yields `Ok(None)` (the caller lists [`HostHandle::pending_devices`]);
     /// a blank descriptor can never match because wire ingress denies blank
     /// descriptors before they reach the store.
-    /// Records one Owner pairing approval and mints its one-time secret.
     ///
     /// The returned secret string is for one-time display on this
     /// Host-local trusted surface only: the caller shows it once and
