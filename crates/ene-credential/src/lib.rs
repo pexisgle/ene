@@ -14,6 +14,16 @@
 //! send it after the closure returns, because the borrowed bearer never
 //! escapes the closure's lifetime.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
+    )
+)]
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -29,15 +39,74 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Non-secret handle naming one stored credential.
 ///
 /// Safe to clone, log, and persist: it carries provider and label only, never
-/// key material.
+/// key material. Fields are private so every ref passes [`CredentialRef::new`],
+/// which enforces the same grammar as the management wire target
+/// (`credential:{provider}:{label}`): the provider is non-blank and contains
+/// no `:` separator; the label is non-empty and may contain `:`. The advisory
+/// id is derived from those parts, so provider, label, and id can never
+/// disagree, and two distinct `(provider, label)` pairs can never share an id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CredentialRef {
-    /// Stable composite key of `provider:label`, not a secret.
-    pub id: String,
     /// Provider name; matched exactly.
-    pub provider: String,
+    provider: String,
     /// Owner-chosen label distinguishing credentials of one provider.
-    pub label: String,
+    label: String,
+}
+
+/// Why a [`CredentialRef`] could not be constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CredentialRefError {
+    /// Provider was blank or contained the `:` separator.
+    #[error("credential provider must be non-blank and contain no ':'")]
+    InvalidProvider,
+    /// Label was empty.
+    #[error("credential label must be non-empty")]
+    InvalidLabel,
+}
+
+impl CredentialRef {
+    /// Builds a ref from its parts, enforcing the credential grammar.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialRefError::InvalidProvider`] for a blank provider or
+    /// one containing `:`, and [`CredentialRefError::InvalidLabel`] for an
+    /// empty label. A label may contain `:`, matching the wire parser.
+    pub fn new(
+        provider: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Result<Self, CredentialRefError> {
+        let provider = provider.into();
+        let label = label.into();
+        if provider.trim().is_empty() || provider.contains(':') {
+            return Err(CredentialRefError::InvalidProvider);
+        }
+        if label.is_empty() {
+            return Err(CredentialRefError::InvalidLabel);
+        }
+        Ok(Self { provider, label })
+    }
+
+    /// Provider name; matched exactly.
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Owner-chosen label distinguishing credentials of one provider.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Stable composite id of `provider:label`, not a secret.
+    ///
+    /// Derived, never stored separately: the id always reflects the validated
+    /// parts above.
+    #[must_use]
+    pub fn id(&self) -> String {
+        format!("{}:{}", self.provider, self.label)
+    }
 }
 
 /// Command registering a credential ref in the registry.
@@ -58,8 +127,10 @@ pub struct RegisterCredentialCommand {
 pub enum RegisterOutcome {
     /// A new ref was persisted.
     Registered(CredentialRef),
-    /// The provider name was blank.
+    /// The provider name was blank or contained `:`.
     InvalidProvider,
+    /// The label was empty.
+    InvalidLabel,
     /// A ref already exists; the stored ref was left untouched (no overwrite).
     AlreadyExists(CredentialRef),
 }
@@ -168,25 +239,26 @@ pub trait CredentialStore: Send + Sync {
 
 /// Registers a credential ref, never overwriting an existing one.
 ///
-/// A blank provider (empty or whitespace-only) yields
-/// [`RegisterOutcome::InvalidProvider`] without touching the repository. When
-/// a ref already exists for `(provider, label)`, the stored ref is returned
-/// in [`RegisterOutcome::AlreadyExists`] and no write occurs.
+/// The provider and label must satisfy [`CredentialRef::new`]: a provider that
+/// is blank or contains `:` yields [`RegisterOutcome::InvalidProvider`], and an
+/// empty label yields [`RegisterOutcome::InvalidLabel`], both without touching
+/// the repository. When a ref already exists for `(provider, label)`, the
+/// stored ref is returned in [`RegisterOutcome::AlreadyExists`] and no write
+/// occurs.
 pub async fn register(
     cmd: RegisterCredentialCommand,
     repo: &impl CredentialRefRepository,
 ) -> Result<RegisterOutcome, CredentialTechnicalError> {
-    if cmd.provider.trim().is_empty() {
-        return Ok(RegisterOutcome::InvalidProvider);
-    }
-    if let Some(existing) = repo.load_ref(&cmd.provider, &cmd.label).await? {
+    let cred = match CredentialRef::new(cmd.provider, cmd.label) {
+        Ok(cred) => cred,
+        Err(CredentialRefError::InvalidProvider) => {
+            return Ok(RegisterOutcome::InvalidProvider);
+        }
+        Err(CredentialRefError::InvalidLabel) => return Ok(RegisterOutcome::InvalidLabel),
+    };
+    if let Some(existing) = repo.load_ref(cred.provider(), cred.label()).await? {
         return Ok(RegisterOutcome::AlreadyExists(existing));
     }
-    let cred = CredentialRef {
-        id: format!("{}:{}", cmd.provider, cmd.label),
-        provider: cmd.provider,
-        label: cmd.label,
-    };
     repo.save_ref(cred.clone()).await?;
     Ok(RegisterOutcome::Registered(cred))
 }
@@ -217,9 +289,9 @@ pub fn credential_availability(
 /// [`core::fmt::Debug`] lists only the public refs and the entry count, never
 /// secret material.
 pub struct MemoryCredentialStore {
-    /// Entries keyed by `(provider, label)`; values pair the public ref with
-    /// its confined secret.
-    entries: Mutex<HashMap<(String, String), (CredentialRef, SecretValue)>>,
+    /// Entries keyed by the validated ref itself; values hold the confined
+    /// secret.
+    entries: Mutex<HashMap<CredentialRef, SecretValue>>,
 }
 
 impl core::fmt::Debug for MemoryCredentialStore {
@@ -229,7 +301,7 @@ impl core::fmt::Debug for MemoryCredentialStore {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let refs: Vec<&CredentialRef> = entries.values().map(|(cred, _)| cred).collect();
+        let refs: Vec<&CredentialRef> = entries.keys().collect();
         f.debug_struct("MemoryCredentialStore")
             .field("len", &refs.len())
             .field("refs", &refs)
@@ -258,12 +330,11 @@ impl MemoryCredentialStore {
     /// Test/dev provisioning path standing in for the Host-local protected
     /// path; production backends must not accept secrets this casually.
     pub fn insert(&self, cred: CredentialRef, secret: &str) {
-        let key = (cred.provider.clone(), cred.label.clone());
         let mut entries = match self.entries.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        entries.insert(key, (cred, SecretValue::new(secret.as_bytes().to_vec())));
+        entries.insert(cred, SecretValue::new(secret.as_bytes().to_vec()));
     }
 }
 
@@ -277,14 +348,14 @@ impl CredentialStore for MemoryCredentialStore {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let Some((_, secret)) = entries.get(&(cred.provider.clone(), cred.label.clone())) else {
-            let id = cred.id.as_str();
+        let Some(secret) = entries.get(cred) else {
+            let id = cred.id();
             return Err(CredentialTechnicalError::StorageUnavailable {
                 reason: format!("unknown credential {id}"),
             });
         };
         let Ok(bearer) = core::str::from_utf8(secret.bytes()) else {
-            let id = cred.id.as_str();
+            let id = cred.id();
             return Err(CredentialTechnicalError::StorageUnavailable {
                 reason: format!("stored secret for {id} is not valid UTF-8"),
             });
@@ -297,7 +368,7 @@ impl CredentialStore for MemoryCredentialStore {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        entries.remove(&(cred.provider.clone(), cred.label.clone()));
+        entries.remove(cred);
         Ok(())
     }
 
@@ -306,7 +377,7 @@ impl CredentialStore for MemoryCredentialStore {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        entries.contains_key(&(cred.provider.clone(), cred.label.clone()))
+        entries.contains_key(cred)
     }
 }
 
@@ -485,15 +556,20 @@ pub fn verify_pairing_proof(secret: &str, nonce: &str, proof: &str) -> bool {
 
 /// Computes the raw HMAC-SHA256 of `nonce` keyed by `secret`.
 ///
-/// HMAC accepts keys of any length, so construction cannot fail in practice;
-/// on the impossible error this yields zeros rather than panicking.
+/// HMAC accepts keys of any length, so construction cannot fail; a
+/// failure would break the primitive itself, and returning a fixed MAC
+/// (for example zeros) would map that breakage onto a valid-looking proof.
+#[expect(
+    clippy::expect_used,
+    reason = "HMAC-SHA256 accepts keys of any length; construction failure is an unreachable primitive invariant"
+)]
 fn compute_pairing_mac(secret: &str, nonce: &str) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC-SHA256 accepts keys of any length");
+    mac.update(nonce.as_bytes());
+    let digest = mac.finalize().into_bytes();
     let mut out = [0_u8; 32];
-    if let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
-        mac.update(nonce.as_bytes());
-        let digest = mac.finalize().into_bytes();
-        out.copy_from_slice(&digest);
-    }
+    out.copy_from_slice(&digest);
     out
 }
 
@@ -1101,8 +1177,9 @@ pub trait CredentialApprovalRepository: Send + Sync {
 mod tests {
     use super::FileDeviceAuthStore;
     use super::{
-        CredentialRef, CredentialStore, CredentialTechnicalError, MemoryCredentialStore,
-        RegisterCredentialCommand, RegisterOutcome, credential_availability, register,
+        CredentialRef, CredentialRefError, CredentialStore, CredentialTechnicalError,
+        MemoryCredentialStore, RegisterCredentialCommand, RegisterOutcome, credential_availability,
+        register,
     };
     use super::{
         DeviceId, DevicePairingRepository, DevicePairingStatus, DeviceRecord, PendingPairing,
@@ -1132,7 +1209,7 @@ mod tests {
     impl super::CredentialRefRepository for FakeRepo {
         async fn save_ref(&self, cred: CredentialRef) -> Result<(), CredentialTechnicalError> {
             let mut refs = self.refs.lock().await;
-            refs.insert((cred.provider.clone(), cred.label.clone()), cred);
+            refs.insert((cred.provider().to_owned(), cred.label().to_owned()), cred);
             let mut saves = self.saves.lock().await;
             *saves += 1;
             Ok(())
@@ -1160,6 +1237,10 @@ mod tests {
         }
     }
 
+    fn acme_main() -> CredentialRef {
+        CredentialRef::new("acme", "main").expect("valid test fixture")
+    }
+
     #[tokio::test]
     async fn register_persists_a_new_ref() {
         let repo = FakeRepo::new();
@@ -1169,14 +1250,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_rejects_a_blank_provider() {
+    async fn register_rejects_grammar_violations_without_writing() {
         let repo = FakeRepo::new();
-        let cmd = RegisterCredentialCommand {
-            provider: "   ".to_owned(),
-            label: "main".to_owned(),
-        };
-        let outcome = register(cmd, &repo).await;
-        assert!(matches!(outcome, Ok(RegisterOutcome::InvalidProvider)));
+        for (provider, label, expected) in [
+            ("   ", "main", RegisterOutcome::InvalidProvider),
+            ("acme:bad", "main", RegisterOutcome::InvalidProvider),
+            ("acme", "", RegisterOutcome::InvalidLabel),
+        ] {
+            let cmd = RegisterCredentialCommand {
+                provider: provider.to_owned(),
+                label: label.to_owned(),
+            };
+            let outcome = register(cmd, &repo)
+                .await
+                .expect("register answers an outcome");
+            assert_eq!(outcome, expected, "pair {provider:?}:{label:?}");
+        }
         assert_eq!(repo.save_count().await, 0);
     }
 
@@ -1184,48 +1273,48 @@ mod tests {
     async fn re_register_returns_the_existing_ref_without_overwriting() {
         let repo = FakeRepo::new();
         let first_outcome = register(command(), &repo).await;
-        assert!(matches!(first_outcome, Ok(RegisterOutcome::Registered(_))));
-        let Ok(RegisterOutcome::Registered(first)) = first_outcome else {
-            return;
+        let RegisterOutcome::Registered(first) =
+            first_outcome.expect("register succeeds with a valid command")
+        else {
+            panic!("a fresh provider:label registers");
         };
         let second_outcome = register(command(), &repo).await;
-        assert!(matches!(
-            second_outcome,
-            Ok(RegisterOutcome::AlreadyExists(_))
-        ));
-        let Ok(RegisterOutcome::AlreadyExists(existing)) = second_outcome else {
-            return;
+        let RegisterOutcome::AlreadyExists(existing) =
+            second_outcome.expect("re-register answers an outcome")
+        else {
+            panic!("the same provider:label already exists");
         };
         assert_eq!(existing, first);
         assert_eq!(repo.save_count().await, 1);
     }
 
-    #[tokio::test]
-    async fn ref_equality_ignores_nothing() {
-        let repo = FakeRepo::new();
-        let outcome = register(command(), &repo).await;
-        assert!(matches!(outcome, Ok(RegisterOutcome::Registered(_))));
-        let Ok(RegisterOutcome::Registered(cred)) = outcome else {
-            return;
-        };
+    #[test]
+    fn credential_ref_grammar_is_fixed() {
+        assert_eq!(acme_main().id(), "acme:main");
+        assert_eq!(acme_main().provider(), "acme");
+        assert_eq!(acme_main().label(), "main");
+        // The id splits at the first ':', so a label may contain ':'.
+        let colon_label = CredentialRef::new("acme", "team:main").expect("label may contain ':'");
+        assert_eq!(colon_label.id(), "acme:team:main");
+        assert_eq!(colon_label.label(), "team:main");
         assert_eq!(
-            cred,
-            CredentialRef {
-                id: "acme:main".to_owned(),
-                provider: "acme".to_owned(),
-                label: "main".to_owned(),
-            }
+            CredentialRef::new("acme:bad", "main"),
+            Err(CredentialRefError::InvalidProvider)
+        );
+        assert_eq!(
+            CredentialRef::new(" ", "main"),
+            Err(CredentialRefError::InvalidProvider)
+        );
+        assert_eq!(
+            CredentialRef::new("acme", ""),
+            Err(CredentialRefError::InvalidLabel)
         );
     }
 
     #[test]
     fn availability_requires_both_registry_and_store() {
         let store = MemoryCredentialStore::new();
-        let cred = CredentialRef {
-            id: "acme:main".to_owned(),
-            provider: "acme".to_owned(),
-            label: "main".to_owned(),
-        };
+        let cred = acme_main();
         let missing = credential_availability(&cred, false, &store);
         assert!(!missing.present);
         assert_eq!(missing.credential, None);
@@ -1245,11 +1334,7 @@ mod tests {
     #[test]
     fn bearer_closure_receives_the_inserted_secret() {
         let store = MemoryCredentialStore::new();
-        let cred = CredentialRef {
-            id: "acme:main".to_owned(),
-            provider: "acme".to_owned(),
-            label: "main".to_owned(),
-        };
+        let cred = acme_main();
         store.insert(cred.clone(), "bearer-token");
         let seen = store.with_bearer(&cred, str::len);
         assert_eq!(seen, Ok("bearer-token".len()));
@@ -1257,11 +1342,7 @@ mod tests {
 
     #[test]
     fn public_debug_output_carries_no_secret() {
-        let cred = CredentialRef {
-            id: "acme:main".to_owned(),
-            provider: "acme".to_owned(),
-            label: "main".to_owned(),
-        };
+        let cred = acme_main();
         let rendered = format!("{cred:?}");
         assert!(rendered.contains("acme"));
         assert!(!rendered.contains("bearer-token"));

@@ -18,6 +18,16 @@
 //! Usage token counts are [`Option`]s with [`UsageSource::Unknown`], never
 //! zero, when the provider reports nothing.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
+    )
+)]
+
 use ene_credential::CredentialRef;
 use ene_permission::{ConsentRevision, InferenceUseCandidate, PermissionEvaluationId};
 use ene_primitive::RawId;
@@ -500,11 +510,7 @@ mod tests {
         ResolvedRoute {
             provider: "acme".to_owned(),
             model: "dialogue-1".to_owned(),
-            credential: CredentialRef {
-                id: "acme:main".to_owned(),
-                provider: "acme".to_owned(),
-                label: "main".to_owned(),
-            },
+            credential: CredentialRef::new("acme", "main").expect("valid test fixture"),
             consent: ("consent-1".to_owned(), ConsentRevision::from_u64(3)),
         }
     }

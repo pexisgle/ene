@@ -24,6 +24,16 @@
 //! and generation pins at the Host boundary. This crate performs no wire
 //! mapping itself.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
+    )
+)]
+
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
 

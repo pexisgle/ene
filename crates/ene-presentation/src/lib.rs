@@ -28,6 +28,16 @@
 //! [`RoundIntent::Auto`] request with a matching [`OpenRound`] for the same
 //! companion, client, and generation, the open round is returned.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "test fixtures may unwrap values whose failure would be a fixture bug"
+    )
+)]
+
 use ene_presence::{
     ClientId, LiveReachabilityRef, PresenceAttribution, PresenceGeneration, PresenceState,
 };
@@ -141,12 +151,18 @@ pub enum RoundIntent {
 }
 
 /// Companion availability premise supplied Host-side.
+///
+/// Three states, never a `(known, running)` pair: `known = false,
+/// running = true` is unrepresentable, so intake can match once instead of
+/// guarding combinations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CompanionAvailability {
-    /// Whether the companion is known.
-    pub known: bool,
-    /// Whether the companion is running.
-    pub running: bool,
+pub enum CompanionAvailability {
+    /// The companion is not known to the lifecycle store.
+    Unknown,
+    /// Known but not running; intake is revalidated against its lifecycle.
+    Stopped,
+    /// Known and running; intake may proceed to attribution checks.
+    Running,
 }
 
 /// Currently open round premise for round binding.
@@ -309,17 +325,25 @@ pub fn check_intake(premise: IntakePremise) -> RoundIntakeOutcome {
         live,
         open_round,
     } = premise;
-    if candidate.claimed_generation.is_none() {
+    let Some(claimed) = candidate.claimed_generation else {
         return RoundIntakeOutcome::NeedsRevalidation {
             reason: RevalidationReason::MissingGenerationView,
         };
+    };
+    match companion {
+        CompanionAvailability::Unknown => {
+            return RoundIntakeOutcome::NeedsRevalidation {
+                reason: RevalidationReason::UnknownCompanion,
+            };
+        }
+        CompanionAvailability::Stopped => {
+            return RoundIntakeOutcome::NeedsRevalidation {
+                reason: RevalidationReason::StoppedCompanion,
+            };
+        }
+        CompanionAvailability::Running => {}
     }
-    if !companion.known {
-        return RoundIntakeOutcome::NeedsRevalidation {
-            reason: RevalidationReason::UnknownCompanion,
-        };
-    }
-    if !companion.running || attribution.state == PresenceState::Stopped {
+    if attribution.state == PresenceState::Stopped {
         return RoundIntakeOutcome::NeedsRevalidation {
             reason: RevalidationReason::StoppedCompanion,
         };
@@ -329,23 +353,16 @@ pub fn check_intake(premise: IntakePremise) -> RoundIntakeOutcome {
     {
         return RoundIntakeOutcome::HeldForTransition;
     }
-    let Some(claimed) = candidate.claimed_generation else {
-        return RoundIntakeOutcome::NeedsRevalidation {
-            reason: RevalidationReason::MissingGenerationView,
-        };
-    };
-    let open_matches = open_round.is_some_and(|open| {
+    // The one matching open round: same companion, client, and current
+    // generation. Every later check reuses this value instead of rebuilding
+    // the match.
+    let matching_open = open_round.filter(|open| {
         open.companion == candidate.companion
             && open.client == candidate.client
             && open.generation == attribution.generation
     });
-    let current_round = if open_matches {
-        open_round.map(|open| open.round)
-    } else {
-        None
-    };
     let stale = || RoundIntakeOutcome::StaleRound {
-        current_round,
+        current_round: matching_open.map(|open| open.round),
         current_generation: attribution.generation,
     };
     if candidate.companion != attribution.companion {
@@ -360,27 +377,19 @@ pub fn check_intake(premise: IntakePremise) -> RoundIntakeOutcome {
     if live.client != candidate.client || !live.connection_live {
         return stale();
     }
-    if let RoundIntent::Existing(requested) = candidate.round {
-        let accepted = open_round.is_some_and(|open| {
-            open.round == requested
-                && open.companion == candidate.companion
-                && open.client == candidate.client
-                && open.generation == attribution.generation
-        });
-        if accepted {
-            RoundIntakeOutcome::AcceptedForRound { round: requested }
-        } else {
-            stale()
+    match candidate.round {
+        RoundIntent::Existing(requested) => {
+            if matching_open.is_some_and(|open| open.round == requested) {
+                RoundIntakeOutcome::AcceptedForRound { round: requested }
+            } else {
+                stale()
+            }
         }
-    } else if matches!(candidate.round, RoundIntent::Auto)
-        && let Some(open) = open_round
-        && open.companion == candidate.companion
-        && open.client == candidate.client
-        && open.generation == attribution.generation
-    {
-        RoundIntakeOutcome::AcceptedForRound { round: open.round }
-    } else {
-        RoundIntakeOutcome::AcceptedForRound { round: new_round() }
+        RoundIntent::Auto => match matching_open {
+            Some(open) => RoundIntakeOutcome::AcceptedForRound { round: open.round },
+            None => RoundIntakeOutcome::AcceptedForRound { round: new_round() },
+        },
+        RoundIntent::New => RoundIntakeOutcome::AcceptedForRound { round: new_round() },
     }
 }
 
@@ -428,10 +437,7 @@ mod tests {
         IntakePremise {
             candidate,
             attribution,
-            companion: CompanionAvailability {
-                known: true,
-                running: true,
-            },
+            companion: CompanionAvailability::Running,
             live,
             open_round,
         }
@@ -485,10 +491,7 @@ mod tests {
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let base = premise(candidate, fact, live_for(claimant), None);
         let unknown = IntakePremise {
-            companion: CompanionAvailability {
-                known: false,
-                running: true,
-            },
+            companion: CompanionAvailability::Unknown,
             ..base
         };
         let outcome = check_intake(unknown);
@@ -513,10 +516,7 @@ mod tests {
         let fact = attribution_for(companion, claimant, PresenceGeneration::first());
         let base = premise(candidate, fact, live_for(claimant), None);
         let stopped = IntakePremise {
-            companion: CompanionAvailability {
-                known: true,
-                running: false,
-            },
+            companion: CompanionAvailability::Stopped,
             ..base
         };
         let outcome = check_intake(stopped);
