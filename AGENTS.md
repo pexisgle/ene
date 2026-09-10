@@ -25,6 +25,7 @@ No `default-members`: bare `cargo test` / `cargo clippy` cover the workspace.
 | Full lint          | `cargo clippy --workspace --all-targets -- -D warnings`  |
 | Full tests         | `cargo test --workspace`                                 |
 | Docs               | `cargo doc --workspace --no-deps`                        |
+| PR CI              | `gh pr checks <pr> --watch` (blocks until checks finish; prefer over sleep-polling) |
 
 ## Rust conventions
 
