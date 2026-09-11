@@ -5,7 +5,6 @@ use std::path::Path;
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthChallenge;
 use ene_api::v1::payload::WirePayload;
-use ene_api::v1::refs::CommandWireId;
 use ene_credential::pairing_proof_hex;
 use ene_plugin_ipc::{CodecError, MAX_FRAME_BYTES, WireFrame, decode_frame, encode_frame};
 
@@ -13,8 +12,8 @@ use crate::device;
 use crate::errors::CliError;
 
 use super::frames::{
-    capability_frame, frame_for, frame_for_session, missing_secret_guidance, new_incarnation,
-    pairing_frame, pending_guidance, proof_frame, retry_frame, stamp_request,
+    PreparedRequest, capability_frame, frame_for, missing_secret_guidance, new_incarnation,
+    pairing_frame, pending_guidance, proof_frame,
 };
 use super::session::{
     AuthDecision, FrameDecision, SessionState, decide_auth, decide_frame, stale_generation_of,
@@ -224,14 +223,34 @@ impl Client {
         self.state.companion_ref()
     }
 
-    /// Sends one payload and returns the answer correlated by `reply_to`,
-    /// absorbing pipelined presence facts and deferring other out-of-order
-    /// frames on the way. The deferred queue is consulted first, so a queued
-    /// answer costs no socket I/O; otherwise this loops per
-    /// [`super::session::decide_frame`] until the correlated answer arrives. A
+    /// Prepares one logical send before I/O: the returned handle carries the
+    /// payload and the command identity a transport retry must reuse.
+    ///
+    /// Use this with [`Client::execute`] instead of [`Client::request`]
+    /// whenever a lost reply must be retryable: the prepared
+    /// [`PreparedRequest`] keeps the command identity caller-side, and a
+    /// command payload is prepared with its canonical identity (a
+    /// [`ManagementIntent`](ene_api::v1::management::ManagementIntent) keeps
+    /// its `intent_id`; a pure request carries no command identity at all).
+    #[must_use]
+    pub fn prepare(&self, payload: WirePayload) -> PreparedRequest {
+        PreparedRequest::new(payload)
+    }
+
+    /// Sends one prepared request and returns the answer correlated by
+    /// `reply_to`, absorbing pipelined presence facts and deferring other
+    /// out-of-order frames on the way. The deferred queue is consulted first,
+    /// so a queued answer costs no socket I/O; otherwise this loops until the
+    /// correlated answer arrives (the streaming form of
+    /// [`super::session::decide_frame`]). A
     /// [`StaleRound`](ene_api::v1::round::RoundIntakeOutcomeWire::StaleRound)
     /// answer refreshes the session generation; mismatches are never returned
     /// as answers and never silently dropped.
+    ///
+    /// Message and request ids go fresh per attempt while the prepared command
+    /// identity travels unchanged, so calling this again through
+    /// [`Client::retry`] replays one logical command rather than minting a
+    /// second one.
     ///
     /// # Errors
     ///
@@ -239,34 +258,39 @@ impl Client {
     /// exchange cannot be moved or framed. Payload semantics are the caller's
     /// job: this helper never interprets the answer beyond the generation
     /// bookkeeping.
-    pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, CliError> {
-        let mut frame = frame_for_session(payload, self.sender, self.state.generation());
-        let _ = stamp_request(&mut frame);
-        self.roundtrip(frame).await
+    pub async fn execute(&mut self, prepared: &PreparedRequest) -> Result<WirePayload, CliError> {
+        self.roundtrip(prepared.frame(self.sender, self.state.generation()))
+            .await
     }
 
-    /// Retries one logical send after a lost reply: the command ID travels
-    /// (durable idempotency key on the Host) while message and request ids go
-    /// fresh for this attempt. Never to change what the command means, and
-    /// only within one sender incarnation — the Host binds the key to its
+    /// Re-sends one prepared command after a lost reply: the command ID
+    /// travels (durable idempotency key on the Host) while message and request
+    /// ids go fresh for this attempt. Never to change what the command means,
+    /// and only within one sender incarnation — the Host binds the key to its
     /// sender epoch, so a retry under a new incarnation is a conflict, not a
-    /// replay; a new epoch mints a fresh command instead.
+    /// replay; re-prepare a fresh command under the new incarnation instead.
+    ///
+    /// A prepared pure request has no command identity; re-executing it is a
+    /// fresh request/response attempt.
     ///
     /// # Errors
     ///
-    /// Same as [`Client::request`].
-    pub async fn retry(
-        &mut self,
-        payload: WirePayload,
-        command: CommandWireId,
-    ) -> Result<WirePayload, CliError> {
-        self.roundtrip(retry_frame(
-            payload,
-            self.sender,
-            self.state.generation(),
-            command,
-        ))
-        .await
+    /// Same as [`Client::execute`].
+    pub async fn retry(&mut self, prepared: &PreparedRequest) -> Result<WirePayload, CliError> {
+        self.execute(prepared).await
+    }
+
+    /// One-shot convenience for [`Client::prepare`] plus
+    /// [`Client::execute`]. Prefer that pair when the caller must retain the
+    /// command identity to [`Client::retry`] a lost reply; this form mints or
+    /// takes the identity but never exposes it.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Client::execute`].
+    pub async fn request(&mut self, payload: WirePayload) -> Result<WirePayload, CliError> {
+        let prepared = self.prepare(payload);
+        self.execute(&prepared).await
     }
 
     async fn roundtrip(&mut self, frame: WireFrame) -> Result<WirePayload, CliError> {
