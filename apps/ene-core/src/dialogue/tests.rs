@@ -2851,3 +2851,122 @@ async fn approving_a_credential_redacts_its_prior_occurrences() {
     );
     assert!(row.text.contains("[credential]"));
 }
+
+/// An effective value rotation outside the approval boundary (the Env store
+/// reads the environment on every call) must be reconciled into the
+/// credential-set revision, and old scrub premises must stop being usable.
+#[tokio::test]
+async fn rotated_credential_value_invalidates_the_old_scrub_premise() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_credential::{CredentialRefRepository as _, CredentialSetRepository as _};
+    use ene_learning::SecretScrubber as _;
+    use ene_presence::PresenceRepository as _;
+    use ene_primitive::WallClockWithTz;
+
+    let (handle, _dir) = setup_handle("dlg-rotation").await.unwrap();
+    // Register the ref through the non-secret registry path; the value is
+    // provisioned in the credential store. The first scrub must observe and
+    // sweep whatever the store currently serves.
+    handle
+        .store
+        .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
+        .await
+        .expect("the ref must register");
+    let scrubber = super::CredentialScrubber {
+        refs: &handle.store,
+        store: &handle.cred_store,
+    };
+    let first = scrubber
+        .scrub("my key is test-bearer")
+        .await
+        .expect("the initial scrub must prove absence");
+    assert!(!first.text.contains("test-bearer"));
+    let old_revision = first.credential_set;
+
+    // The value changes without an approval; the memory fixture models what
+    // the Env store does when the environment rotates.
+    let CredStore::Memory(store) = &handle.cred_store else {
+        panic!("the test fixture is memory-backed");
+    };
+    store.insert(
+        CredentialRef::new("openai", "main").expect("valid test fixture"),
+        "rotated-bearer",
+    );
+
+    // Verification observes the change, reconciles it (sweep + revision
+    // bump), and fails closed so the caller re-scrubs.
+    assert!(matches!(
+        scrubber.verify_current().await,
+        Err(ene_learning::SecretScrubError::ValuesChanged)
+    ));
+    let state = handle.store.credential_set_state().await.unwrap();
+    assert!(
+        state.revision > old_revision,
+        "the observed value change must advance the revision"
+    );
+
+    // A write prepared under the old revision is refused.
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let generation = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    let stale = handle
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("the rotated key is rotated-bearer"),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: Some(old_revision),
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await;
+    assert_eq!(
+        stale,
+        Ok(ene_companion::HistoryAppendOutcome::StaleCredentialSet)
+    );
+
+    // A fresh scrub redacts the new value and issues the new revision; its
+    // content commits normally.
+    let second = scrubber
+        .scrub("my key is rotated-bearer")
+        .await
+        .expect("the fresh scrub must prove absence");
+    assert!(!second.text.contains("rotated-bearer"));
+    assert_eq!(second.credential_set, state.revision);
+    let fresh = handle
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: second.text,
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: Some(second.credential_set),
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await;
+    assert!(matches!(
+        fresh,
+        Ok(ene_companion::HistoryAppendOutcome::CommittedAs { .. })
+    ));
+}

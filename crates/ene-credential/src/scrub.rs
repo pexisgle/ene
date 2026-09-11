@@ -9,6 +9,7 @@
 //! lands first and the stale premise refuses the write.
 
 use ene_primitive::RevisionInner;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Monotonic identity of the registered credential set.
@@ -47,6 +48,17 @@ impl CredentialSetRevision {
     }
 }
 
+/// Durable currentness of the registered credential value set.
+///
+/// `values: None` means a ref or approval change invalidated the last
+/// observation; the next scrub reconciles the effective values (sweeps them
+/// and advances the revision atomically) before issuing a premise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialSetState {
+    pub revision: CredentialSetRevision,
+    pub values: Option<CredentialValuesDigest>,
+}
+
 /// Text together with the credential-set premise it was scrubbed under.
 ///
 /// The premise is the revision read *before* the scrub consumed registered
@@ -75,6 +87,100 @@ impl ScrubbedText {
     }
 }
 
+/// Order-independent fingerprint of the effective registered credential
+/// values one observation saw.
+///
+/// It is a change detector, not a password hash: each `(ref, value)` pair is
+/// hashed with a domain separator and the per-pair digests are XOR-folded, so
+/// the same set yields the same fingerprint regardless of iteration order and
+/// a value change alters the fingerprint with negligible collision risk. It
+/// stays inside the credential owner and the store as an opaque token and
+/// carries no part of any value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CredentialValuesDigest([u8; 32]);
+
+impl CredentialValuesDigest {
+    /// All-zero fingerprint of the empty value set.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self([0_u8; 32])
+    }
+
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        use core::fmt::Write as _;
+        let mut out = String::with_capacity(64);
+        for byte in self.0 {
+            write!(out, "{byte:02x}").ok();
+        }
+        out
+    }
+
+    #[must_use]
+    pub fn from_hex(text: &str) -> Option<Self> {
+        if text.len() != 64 {
+            return None;
+        }
+        let (chunks, remainder) = text.as_bytes().as_chunks::<2>();
+        if !remainder.is_empty() {
+            return None;
+        }
+        let mut bytes = [0_u8; 32];
+        for (position, chunk) in chunks.iter().enumerate() {
+            let high = (chunk[0] as char).to_digit(16)?;
+            let low = (chunk[1] as char).to_digit(16)?;
+            bytes[position] = u8::try_from(high * 16 + low).ok()?;
+        }
+        Some(Self(bytes))
+    }
+}
+
+impl core::fmt::Debug for CredentialValuesDigest {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("CredentialValuesDigest(<redacted>)")
+    }
+}
+
+/// Accumulates [`CredentialValuesDigest`] pairs in any order.
+#[derive(Default)]
+pub struct CredentialValuesDigestBuilder {
+    accumulator: [u8; 32],
+}
+
+impl CredentialValuesDigestBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Folds one `(ref, value)` pair into the fingerprint.
+    ///
+    /// Callers must fail closed before adding an empty value: an empty
+    /// pattern matches every position.
+    pub fn add(&mut self, cred: &crate::CredentialRef, bearer: &str) {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ene.credential-values.v1");
+        let id = cred.id();
+        hasher.update(u64::try_from(id.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(id.as_bytes());
+        hasher.update(
+            u64::try_from(bearer.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        hasher.update(bearer.as_bytes());
+        let pair: [u8; 32] = hasher.finalize().into();
+        for (slot, byte) in self.accumulator.iter_mut().zip(pair) {
+            *slot ^= byte;
+        }
+    }
+
+    #[must_use]
+    pub fn finish(self) -> CredentialValuesDigest {
+        CredentialValuesDigest(self.accumulator)
+    }
+}
+
 /// Failure to prove that registered secret values are absent from text.
 ///
 /// Scrubbing fails closed: when the registry or a bearer cannot be read, the
@@ -88,6 +194,13 @@ pub enum SecretScrubError {
     /// A registered credential's value could not be read.
     #[error("registered credential value unavailable")]
     SecretUnavailable,
+    /// The effective credential values moved past the observed set.
+    ///
+    /// The implementation reconciled the change (swept the new values and
+    /// advanced the credential-set revision); the caller must re-scrub before
+    /// using content prepared under the old set.
+    #[error("registered credential values changed")]
+    ValuesChanged,
 }
 
 /// Redaction of registered secret values with a currentness premise.
@@ -108,4 +221,62 @@ pub trait SecretScrubber: Send + Sync {
     /// [`SecretScrubError`] when absence cannot be proven for every
     /// registered credential; the caller must not use the original text.
     async fn scrub(&self, text: &str) -> Result<ScrubbedText, SecretScrubError>;
+
+    /// Confirms the effective value set still matches the last observation.
+    ///
+    /// Called at durable-write and send boundaries. When the values moved,
+    /// the implementation reconciles them (sweeps the new values into durable
+    /// content and advances the credential-set revision atomically) and
+    /// returns [`SecretScrubError::ValuesChanged`]; the caller fails closed
+    /// and re-scrubs instead of writing or sending content prepared under the
+    /// old set.
+    async fn verify_current(&self) -> Result<(), SecretScrubError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CredentialSetRevision, CredentialValuesDigest, CredentialValuesDigestBuilder};
+    use crate::CredentialRef;
+
+    fn credential(label: &str) -> CredentialRef {
+        CredentialRef::new("openai", label).expect("valid test fixture")
+    }
+
+    #[test]
+    fn revision_exhaustion_reports_none_instead_of_aliasing() {
+        assert_eq!(
+            CredentialSetRevision::from_u64(0).checked_next(),
+            Some(CredentialSetRevision::from_u64(1))
+        );
+        assert_eq!(
+            CredentialSetRevision::from_u64(u64::MAX).checked_next(),
+            None
+        );
+    }
+
+    #[test]
+    fn value_digest_is_order_independent_and_detects_a_change() {
+        let first = credential("first");
+        let second = credential("second");
+        let mut left = CredentialValuesDigestBuilder::new();
+        left.add(&first, "sk-a");
+        left.add(&second, "sk-b");
+        let mut right = CredentialValuesDigestBuilder::new();
+        right.add(&second, "sk-b");
+        right.add(&first, "sk-a");
+        let left_digest = left.finish();
+        let right_digest = right.finish();
+        assert_eq!(left_digest, right_digest);
+
+        let mut changed = CredentialValuesDigestBuilder::new();
+        changed.add(&first, "sk-a");
+        changed.add(&second, "sk-c");
+        let changed_digest = changed.finish();
+        assert_ne!(left_digest, changed_digest);
+        assert_ne!(CredentialValuesDigest::empty(), changed_digest);
+
+        let hex = changed_digest.to_hex();
+        assert_eq!(CredentialValuesDigest::from_hex(&hex), Some(changed_digest));
+        assert_eq!(CredentialValuesDigest::from_hex("not-hex"), None);
+    }
 }

@@ -3003,7 +3003,10 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
         "the credential-set revision table is created"
     );
     assert_eq!(
-        store.current_set_revision().await,
+        store
+            .credential_set_state()
+            .await
+            .map(|state| state.revision),
         Ok(CredentialSetRevision::initial()),
         "an existing environment starts before any registered credential"
     );
@@ -3068,7 +3071,7 @@ async fn stale_credential_set_refuses_history_append_after_approval() {
         panic!("the running companion must resolve");
     };
     // The writer scrubs its row under the current set premise.
-    let premise = writer.current_set_revision().await.unwrap();
+    let premise = writer.credential_set_state().await.unwrap().revision;
     // The approver concurrently sweeps + registers + bumps in one commit.
     assert!(matches!(
         approver
@@ -3104,7 +3107,7 @@ async fn stale_credential_set_refuses_memory_commit_after_approval() {
     let writer = Store::open(&path).await.unwrap();
     let approver = Store::open(&path).await.unwrap();
     let companion = RawId::new();
-    let premise = writer.current_set_revision().await.unwrap();
+    let premise = writer.credential_set_state().await.unwrap().revision;
     assert!(matches!(
         approver
             .request_approval(String::from("acme"), String::from("main"))
@@ -3170,7 +3173,7 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
         )
         .await;
     assert!(matches!(seeded, Ok(ConsentCommitOutcome::Committed { .. })));
-    let premise = sender.current_set_revision().await.unwrap();
+    let premise = sender.credential_set_state().await.unwrap().revision;
     assert!(matches!(
         approver
             .request_approval(String::from("openai"), String::from("main"))
@@ -3196,6 +3199,194 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
         Ok(AttemptBeginOutcome::Stale),
         "a stale credential-set premise must refuse the send claim"
     );
+}
+
+#[tokio::test]
+async fn reapproval_with_a_new_value_refuses_a_stale_history_premise() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reapprove-history.db");
+    let writer = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let Some((companion, generation)) = running_companion(&writer).await else {
+        panic!("the running companion must resolve");
+    };
+    // The value A is usable; the in-flight premise names that generation.
+    assert!(matches!(
+        approver
+            .request_approval(String::from("acme"), String::from("main"))
+            .await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        approver.approve_credential_with_sweep("acme", "main", "sk-a"),
+        Ok(true)
+    ));
+    let premise = writer.credential_set_state().await.unwrap().revision;
+    // The Owner updates the value to B through a re-approval.
+    assert!(matches!(
+        approver.approve_credential_with_sweep("acme", "main", "sk-b"),
+        Ok(true)
+    ));
+    let updated = writer.credential_set_state().await.unwrap().revision;
+    assert!(
+        updated > premise,
+        "a successful re-approval must advance the credential-set revision"
+    );
+
+    // The in-flight write prepared under A may carry B raw and is refused.
+    let mut stale = history_command(companion, generation, "the new key is sk-b");
+    stale.expected_credential_set = Some(premise);
+    assert_eq!(
+        writer.append_message(stale).await,
+        Ok(HistoryAppendOutcome::StaleCredentialSet)
+    );
+    let timeline = writer.load_timeline(companion, None, 10).await.unwrap();
+    assert!(
+        timeline.iter().all(|item| !item.text.contains("sk-b")),
+        "a stale premise must not re-save the updated value: {timeline:?}"
+    );
+
+    // Content prepared under the new revision commits normally.
+    let mut fresh = history_command(companion, generation, "the new key is [credential]");
+    fresh.expected_credential_set = Some(updated);
+    assert!(matches!(
+        writer.append_message(fresh).await,
+        Ok(HistoryAppendOutcome::CommittedAs { .. })
+    ));
+}
+
+#[tokio::test]
+async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reapprove-learning.db");
+    let writer = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let companion = RawId::new();
+    assert!(matches!(
+        approver
+            .request_approval(String::from("acme"), String::from("main"))
+            .await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        approver.approve_credential_with_sweep("acme", "main", "sk-a"),
+        Ok(true)
+    ));
+    let premise = writer.credential_set_state().await.unwrap().revision;
+    assert!(matches!(
+        approver.approve_credential_with_sweep("acme", "main", "sk-b"),
+        Ok(true)
+    ));
+    let updated = writer.credential_set_state().await.unwrap().revision;
+
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion, "evidence says sk-b");
+    let stale = writer
+        .commit_memory_change(MemoryChangeCommit {
+            summary: Some(evidence.clone()),
+            secret_premise: Some(premise),
+            change: learning_change(
+                companion,
+                MemoryTarget::New { id: memory },
+                "owner key sk-b",
+                ChangeKind::Initial,
+                false,
+            ),
+        })
+        .await;
+    assert_eq!(stale, Ok(MemoryChangeOutcome::StaleCredentialSet));
+    assert_eq!(writer.load_current_memory(memory).await, Ok(None));
+    assert_eq!(writer.load_summary(evidence.id).await, Ok(None));
+    assert!(
+        writer
+            .list_memory_revisions(memory)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let fresh_memory = MemoryId::generate();
+    let fresh = writer
+        .commit_memory_change(MemoryChangeCommit {
+            summary: Some(learning_summary(companion, "fresh evidence")),
+            secret_premise: Some(updated),
+            change: learning_change(
+                companion,
+                MemoryTarget::New { id: fresh_memory },
+                "owner key [credential]",
+                ChangeKind::Initial,
+                false,
+            ),
+        })
+        .await;
+    assert!(matches!(fresh, Ok(MemoryChangeOutcome::Committed { .. })));
+}
+
+#[tokio::test]
+async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
+    use ene_inference::{
+        AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _, InferenceTicketId,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reapprove-send.db");
+    let sender = Store::open(&path).await.unwrap();
+    let approver = Store::open(&path).await.unwrap();
+    let seeded = sender
+        .compare_and_save(
+            None,
+            ConsentRecord {
+                capability: CapabilityKind::Dialogue,
+                id: String::from("consent-1"),
+                rev: ConsentRevision::from_u64(1),
+                provider: String::from("openai"),
+                model: String::from("dialogue-1"),
+                credential_id: String::from("openai:main"),
+            },
+        )
+        .await;
+    assert!(matches!(seeded, Ok(ConsentCommitOutcome::Committed { .. })));
+    assert!(matches!(
+        approver
+            .request_approval(String::from("openai"), String::from("main"))
+            .await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        approver.approve_credential_with_sweep("openai", "main", "sk-a"),
+        Ok(true)
+    ));
+    let premise = sender.credential_set_state().await.unwrap().revision;
+    assert!(matches!(
+        approver.approve_credential_with_sweep("openai", "main", "sk-b"),
+        Ok(true)
+    ));
+    let updated = sender.credential_set_state().await.unwrap().revision;
+    assert!(updated > premise);
+
+    let stale = sender
+        .begin_inference_attempt(InferenceAttempt {
+            ticket: InferenceTicketId(RawId::new()),
+            capability: CapabilityKind::Dialogue,
+            expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+            expected_credential_set: premise,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+        })
+        .await;
+    assert_eq!(stale, Ok(AttemptBeginOutcome::Stale));
+
+    let fresh = sender
+        .begin_inference_attempt(InferenceAttempt {
+            ticket: InferenceTicketId(RawId::new()),
+            capability: CapabilityKind::Dialogue,
+            expected_consent: (String::from("consent-1"), ConsentRevision::from_u64(1)),
+            expected_credential_set: updated,
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+        })
+        .await;
+    assert_eq!(fresh, Ok(AttemptBeginOutcome::Started));
 }
 
 #[tokio::test]

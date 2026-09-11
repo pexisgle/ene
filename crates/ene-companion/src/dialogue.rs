@@ -325,6 +325,12 @@ pub async fn finish_turn(
                 round_intent: None,
                 incarnation: None,
             };
+            // The effective credential values may have moved since the
+            // output scrub; reconcile and interrupt rather than append
+            // content prepared under the old set.
+            if scrubber.verify_current().await.is_err() {
+                return DialogueOutcome::Interrupted;
+            }
             match history.append_reply_with_undelivered(reply, true).await {
                 Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => {
                     // Pin the Experience premise only after the reply is

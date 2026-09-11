@@ -240,16 +240,19 @@ ALTER TABLE inference_attempt ADD COLUMN capability TEXT NOT NULL DEFAULT 'dialo
 ";
 
 /// Introduces the durable credential-set revision for the secret-scrub
-/// currentness premise. A scrub records the revision it saw; writers compare
-/// it inside their transaction so content scrubbed before a credential
-/// became registered cannot land afterwards. Seeded at zero: an environment
+/// currentness premise. A scrub records the revision and the observed
+/// fingerprint of the effective credential values; writers compare the
+/// revision inside their transaction so content scrubbed before a value
+/// change cannot land afterwards. `values_digest` is NULL until the first
+/// scrub reconciles the effective values. Seeded at zero: an environment
 /// with no usable credential yet.
 const MIGRATION_V11: &str = "
 CREATE TABLE IF NOT EXISTS credential_set (
 id INTEGER PRIMARY KEY CHECK (id = 1),
-rev INTEGER NOT NULL
+rev INTEGER NOT NULL,
+values_digest TEXT NULL
 );
-INSERT OR IGNORE INTO credential_set (id, rev) VALUES (1, 0);
+INSERT OR IGNORE INTO credential_set (id, rev, values_digest) VALUES (1, 0, NULL);
 ";
 
 /// Atomic: pending migrations and the version bump commit together in one

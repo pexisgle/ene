@@ -3,7 +3,7 @@
 //! operations over them.
 
 use crate::CredentialTechnicalError;
-use crate::scrub::CredentialSetRevision;
+use crate::scrub::{CredentialSetRevision, CredentialSetState};
 use crate::secret::CredentialStore;
 
 /// Non-secret handle naming one stored credential.
@@ -127,15 +127,28 @@ pub trait CredentialRefRepository: Send + Sync {
 /// Separate from [`CredentialRefRepository`] because readers that only need
 /// the set's currentness (secret scrubbers, writers validating a scrub
 /// premise) must not gain the ref-management surface. The revision bumps
-/// atomically with a usable ref becoming registered.
+/// atomically with a usable ref becoming registered and whenever an observed
+/// value change is reconciled.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
 )]
 pub trait CredentialSetRepository: Send + Sync {
-    /// Loads the current credential-set revision.
-    async fn current_set_revision(&self)
-    -> Result<CredentialSetRevision, CredentialTechnicalError>;
+    /// Loads the current credential-set state.
+    async fn credential_set_state(&self) -> Result<CredentialSetState, CredentialTechnicalError>;
+
+    /// Reconciles the effective values with the durable set atomically.
+    ///
+    /// One short transaction: reads each registered value through `values`,
+    /// replaces any plaintext occurrence in durable content, records the
+    /// observed fingerprint, and advances the revision. Called only when an
+    /// observation found the values different from the recorded fingerprint;
+    /// it performs no I/O beyond the value store and the database.
+    fn reconcile_values<S: CredentialStore>(
+        &self,
+        refs: &[CredentialRef],
+        values: &S,
+    ) -> Result<CredentialSetRevision, CredentialTechnicalError>;
 }
 
 /// Registers a credential ref, never overwriting an existing one.

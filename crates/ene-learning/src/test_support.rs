@@ -260,6 +260,10 @@ impl SecretScrubber for ReplacingScrubber {
             credential_set: CredentialSetRevision::initial(),
         })
     }
+
+    async fn verify_current(&self) -> Result<(), crate::SecretScrubError> {
+        Ok(())
+    }
 }
 
 /// A scrubber that can never prove absence, modelling an unreadable
@@ -272,6 +276,10 @@ pub(crate) struct FailingScrubber;
 )]
 impl SecretScrubber for FailingScrubber {
     async fn scrub(&self, _text: &str) -> Result<ScrubbedText, crate::SecretScrubError> {
+        Err(crate::SecretScrubError::RegistryUnavailable)
+    }
+
+    async fn verify_current(&self) -> Result<(), crate::SecretScrubError> {
         Err(crate::SecretScrubError::RegistryUnavailable)
     }
 }

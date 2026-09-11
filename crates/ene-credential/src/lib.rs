@@ -39,7 +39,10 @@ pub use registry::{
     CredentialRefRepository, CredentialSetRepository, RegisterCredentialCommand, RegisterOutcome,
     available_credential, credential_availability, register,
 };
-pub use scrub::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
+pub use scrub::{
+    CredentialSetRevision, CredentialSetState, CredentialValuesDigest,
+    CredentialValuesDigestBuilder, ScrubbedText, SecretScrubError, SecretScrubber,
+};
 pub use secret::{
     CredentialStore, ENV_API_KEY, EnvCredentialStore, MemoryCredentialStore, SecretValue,
 };
