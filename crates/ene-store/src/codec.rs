@@ -174,7 +174,6 @@ pub(crate) fn decode_report_status(text: &str) -> Result<ReportStatus, String> {
 pub(crate) fn encode_usage_source(source: UsageSource) -> &'static str {
     match source {
         UsageSource::Reported => "reported",
-        UsageSource::Estimated => "estimated",
         UsageSource::Unknown => "unknown",
     }
 }

@@ -10,8 +10,9 @@
 //! [`PermissionEvaluationId`] minted from the caller's [`EvaluationTracker`].
 //! The consumer must present that id exactly once (to `ene-inference`
 //! dispatch); any replay, unknown id, or fingerprint mismatch is rejected.
-//! Ask-owner and wait-for-condition revalidation are deferred: [`RevalidationNeed`]
-//! carries only the current consent, never an owner prompt.
+//! Ask-owner and wait-for-condition revalidation are deferred:
+//! [`LiveAuthorizationDecision::NeedsRevalidation`] only means reload current
+//! consent and retry, never prompt.
 //!
 //! The `(consumer, capability, purpose)` allowlist below is the closed world
 //! for this stage. Future stages may widen it, but only by extending the
@@ -37,14 +38,6 @@ pub use intent::{
 /// [`EvaluationTracker::consume`] call with the matching [`EvalFingerprint`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PermissionEvaluationId(pub RawId);
-
-/// Opaque identity of one allowlist rule.
-///
-/// Carried for audit correlation only. Rule bodies do not exist yet: the
-/// closed-world policy lives directly in [`check_live_authorization`], and a
-/// future stage may resolve a `RuleId` to a stored rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RuleId(pub RawId);
 
 /// Monotonic order of one consent identity's revisions.
 ///
@@ -121,8 +114,6 @@ impl CapabilityKind {
 pub enum PurposeKind {
     /// A normal dialogue response turn.
     DialogueResponse,
-    /// A setup-time probe checking the route works.
-    SetupProbe,
     /// Form one Experience Summary and its Memory changes.
     MemoryFormation,
 }
@@ -181,11 +172,11 @@ pub enum LiveAuthorizationDecision {
     /// Allowed for exactly one use under the carried evaluation id.
     AllowForThisUse(PermissionEvaluationId),
     Deny(DenyCode),
-    /// The caller's consent view is stale; re-read and retry.
+    /// The caller's consent view is stale; reload current consent and retry.
     ///
     /// Ask-owner and wait-for-condition variants are deliberately absent:
     /// revalidation here means reloading current consent, never prompting.
-    NeedsRevalidation(RevalidationNeed),
+    NeedsRevalidation,
 }
 
 /// Why one live-authorization query was refused.
@@ -195,22 +186,6 @@ pub enum DenyCode {
     NotInAllowlist,
     /// Consent is missing or does not cover this provider/model.
     ConsentStale,
-    /// Reserved for a concurrent-supersede signal.
-    ///
-    /// The current pure policy surfaces replacement as
-    /// [`LiveAuthorizationDecision::NeedsRevalidation`] instead; this code
-    /// exists so a future mid-flight supersede detector has a stable name.
-    Superseded,
-}
-
-/// Stale-view signal: the caller must reload current consent and retry.
-///
-/// This carries only data. Owner prompts and condition waits are deferred to
-/// a future stage and must not be smuggled in here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RevalidationNeed {
-    /// Current stored consent as `(consent id, revision)`.
-    pub current_consent: (String, ConsentRevision),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,12 +546,11 @@ impl EvaluationTracker {
 ///
 /// 1. A `(consumer, capability, purpose)` triple outside the closed world
 ///    denies with [`DenyCode::NotInAllowlist`]. The current world is
-///    `(CompanionDialogue, Dialogue, DialogueResponse | SetupProbe)` and
+///    `(CompanionDialogue, Dialogue, DialogueResponse)` and
 ///    `(CompanionLearning, Learning, MemoryFormation)`.
 /// 2. Consent comparison: when stored consent exists and differs from
 ///    `expected_consent`, the caller's view is stale and the decision is
-///    [`LiveAuthorizationDecision::NeedsRevalidation`] carrying the stored
-///    `(id, revision)`.
+///    [`LiveAuthorizationDecision::NeedsRevalidation`].
 /// 3. With no stored consent, a stored record for a different capability, or
 ///    a provider/model mismatch against the stored record, the decision
 ///    denies with [`DenyCode::ConsentStale`]. A record authorizes only the
@@ -601,7 +575,7 @@ pub fn check_live_authorization(
         (
             ConsumerKind::CompanionDialogue,
             CapabilityKind::Dialogue,
-            PurposeKind::DialogueResponse | PurposeKind::SetupProbe
+            PurposeKind::DialogueResponse
         ) | (
             ConsumerKind::CompanionLearning,
             CapabilityKind::Learning,
@@ -618,11 +592,8 @@ pub fn check_live_authorization(
         return LiveAuthorizationDecision::Deny(DenyCode::ConsentStale);
     }
     let current_view = (record.id.clone(), record.rev);
-    let stale_view = query.expected_consent.as_ref() != Some(&current_view);
-    if stale_view {
-        return LiveAuthorizationDecision::NeedsRevalidation(RevalidationNeed {
-            current_consent: current_view,
-        });
+    if query.expected_consent.as_ref() != Some(&current_view) {
+        return LiveAuthorizationDecision::NeedsRevalidation;
     }
     if query.candidate.provider_ref != record.provider || query.candidate.model != record.model {
         return LiveAuthorizationDecision::Deny(DenyCode::ConsentStale);
@@ -738,12 +709,8 @@ mod tests {
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
         assert!(matches!(
             decision,
-            LiveAuthorizationDecision::NeedsRevalidation(_)
+            LiveAuthorizationDecision::NeedsRevalidation
         ));
-        let LiveAuthorizationDecision::NeedsRevalidation(need) = decision else {
-            return;
-        };
-        assert_eq!(need.current_consent, ("consent-1".to_owned(), stored.rev));
     }
 
     #[test]
@@ -757,7 +724,7 @@ mod tests {
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
         assert!(matches!(
             decision,
-            LiveAuthorizationDecision::NeedsRevalidation(_)
+            LiveAuthorizationDecision::NeedsRevalidation
         ));
     }
 
@@ -790,23 +757,6 @@ mod tests {
             return;
         };
         assert_eq!(code, DenyCode::ConsentStale);
-    }
-
-    #[test]
-    fn setup_probe_purpose_is_within_the_closed_world() {
-        let stored = record();
-        let mut probe = candidate();
-        probe.purpose = PurposeKind::SetupProbe;
-        let query = CheckLiveAuthorizationQuery {
-            candidate: probe,
-            expected_consent: Some((stored.id.clone(), stored.rev)),
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(
-            decision,
-            LiveAuthorizationDecision::AllowForThisUse(_)
-        ));
     }
 
     fn learning_candidate() -> InferenceUseCandidate {
