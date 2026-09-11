@@ -453,14 +453,15 @@ struct ResolvedRouteCandidate {
     consent: AssignmentConsentId,    // 依拠した同意の対応
     capability_gap: Option<CapabilityGapRef>, // 能力不足なら利用前に不足を示す
 }
-// 利用可否の確定は K-B・K-E で現在条件と照合して行う。登録・認証成功で成立させない。
+// 利用可否の確定は K-B の live check で現在条件と照合して行う。登録・認証成功で成立させない。
+// 送信（K-E）は確定済み前提を再照合しない。
 ```
 
 - Observer は専用 assignment を解決し、Companion override・同意の選択・合成を行わない。
 
 ### K-E 推論の実利用ごとの成立・送信
 
-最初の送信・fallback・再送・補助推論・継続的な送受信の各継続部分もそれぞれ実際の利用として成立させる。
+最初の送信・再送・補助推論・継続的な送受信の各継続部分もそれぞれ実際の利用として成立させる。fallback（K-F）は Stage 16（Multi-provider / fallback / full cost cap）で再導入する。
 
 ```rust
 struct RequestInferenceCommand {
@@ -468,7 +469,6 @@ struct RequestInferenceCommand {
     consumer: UsageConsumer,
     logical_context: LogicalContextRef, // 利用元が定めた用途と論理的 context（正本ではない）
     resolved_route: ResolvedRouteCandidate, // 解決済み経路（写し）
-    consent: ConsentExpectationRef,  // 送信先・data・用途・取扱い・費用の同意の expected revision
     credential_availability: CredentialAvailabilityRef, // 現在の認証用途・制限
     cost_premise: CostPremiseRef,    // 予約対応（K-G）
     hold_context: HoldCheckContextRef,
@@ -489,6 +489,7 @@ struct InferenceResultArrival {
 }
 ```
 
+- 送信手順：admission が現在の consent revision・credential premise・K-B の single-use authorization を確定し、attempt claim が保存 consent との一致を確定してから送信する。送信時点で `resolved_route` と candidate、consent revision を再照合しない（admission / claim との二重 gate を作らない）。
 - 参照できたことと送れることの区別、解決済み送信先の包括許可化の禁止、同意不足の本文削減による黙解消の禁止。Prompt cache・session は最適化に限る。判定用推論にも自身の割当同意・認証用途・費用制限を適用する。
 
 ### K-F fallback 選択
@@ -508,6 +509,7 @@ enum FallbackDecision {
 ```
 
 - 安価さ・Capability 不足を例外にしない。登録先変更等で同意の意味が重要に変わるなら以前の同意をそのまま適用しない。
+- 本 interface は Stage 16（Multi-provider / fallback / full cost cap）で再導入する。
 
 ### K-G 利用量の予約・確定・解放（cost reservation）
 
@@ -1149,7 +1151,7 @@ fn request_action(cmd: ExecuteActionCommand)
 
 | 長時間処理 | request（開始） | completion / result（到着） | 戻れる対応（durable） |
 |---|---|---|---|
-| 推論（単発・継続・fallback・再送） | `RequestInferenceCommand`（ticket 発行・予約・同意照合） | `InferenceResultArrival`（ticket→結果・利用量・確定度） | `(ticket, consumer, Task/委任対応, 用途, revision/generation 前提, provenance)`。PR Group F/I、CI §6.4 の世代タグ |
+| 推論（単発・継続・fallback・再送） | `RequestInferenceCommand`（ticket 発行・予約・admission の前提確定） | `InferenceResultArrival`（ticket→結果・利用量・確定度） | `(ticket, consumer, Task/委任対応, 用途, revision/generation 前提, provenance)`。PR Group F/I、CI §6.4 の世代タグ |
 | Task 委任・Task Agent | `CreateDelegationCommand`（expected revision の atomic compare） | `TaskAgentResultArrival`（delegation→現在 Task の受入） | `(delegation, TaskRef 前提, scope 写し, attempt 対応, 目的)`。PR Group D、CI §5.3 |
 | Action 試行・外部 Tool・Computer Use | `ExecuteActionCommand`（開始前 atomic compare）→ `StartedAsAttempt(attempt)` | `ReportEffectFact`（per-attempt CAS）＋ `LateArrivalAttribution`（遅延帰属） | `(attempt, Task revision 前提, 実対象・操作, 依拠 Permission, presence/restore 世代, prior_unknown)`。PR Group E |
 | Backup 作成 | `CreateBackupCommand` | `BackupPointFact`（対象時点・参照・未完了の対応が揃って成功） | `(backup_point, 対象時点・参照対応・除外・未完了状況)`。PR Group J |
@@ -1456,7 +1458,7 @@ crate 構成は [Crate / Module 分解](crate-module-decomposition.md) が定め
 
 1. 入出力・提示が `SubmitClientInputCandidate(companion, client, claimed_generation, round)` を個体調整へ渡す。Client message だけで presence は成立しない。個体調整は X-B の `RoundIntakeOutcome` を経て現在 round として受理する。旧 round なら `StaleRound` として元 round へ対応付け、新 round へ付け替えない。
 2. 個体調整は用途（返答）と論理的 context を定め、認識・学習へ `LearningQuery(purpose=返答, scope_need, constraints)` で利用可能な理解を問い合わせる。取得成功は後続の送信許可ではない。
-3. 応答のための推論は `RequestInferenceCommand(ticket, consumer=CompanionReasoning, logical_context, resolved_route, consent, credential_availability, cost_premise, hold)` で K-E・K-B の現在照合を経て送信する。同意不足・cap・保留・帰属・消去条件の不一致は `NotSent` として不足・判断待ちへ戻す。
+3. 応答のための推論は `RequestInferenceCommand(ticket, consumer=CompanionReasoning, logical_context, resolved_route, credential_availability, cost_premise, hold)` で admission と attempt claim の前提確定（K-B の single-use authorization を含む）を経て送信する。同意不足・cap・保留・帰属・消去条件の不一致は `NotSent` として不足・判断待ちへ戻す。
 4. 応答後、個体調整・作業は `ProposeExperienceCandidate(experiencer, source_range, source_kind=対話, client_round, continuity, intended_use=Learning候補)` を認識・学習へ渡す。Raw 複製を要求しない。
 5. 認識・学習は `FormationDecision` を確定する。保存価値がなければ終了し、全件保存しない。形成する場合は `SummaryGroundsRef` を対応付け、Memory 等の必要な状態だけを形成・変更する。応答完了と全 Learning 更新完了を同一条件にしない。
 6. 失われないこと：由来の区別、対象 Companion・Task・委任との関係、取得 Client・round・候補との関係、継続関係、期待する利用先（返答と Learning 候補の別）。到着順が新しい＝根拠が新しいにしない。
