@@ -25,10 +25,7 @@ use std::collections::HashMap;
 use ene_primitive::{RawId, RevisionInner};
 use thiserror::Error;
 
-pub use intent::{
-    AssignConsentIntent, AssignConsentResolution, BaseViewExpectation, assign_consent,
-    base_view_expectation,
-};
+pub use intent::{AssignConsentIntent, BaseViewExpectation, assign_consent, base_view_expectation};
 
 /// Single-use authorization token for one inference use.
 ///
