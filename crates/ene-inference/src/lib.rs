@@ -1348,28 +1348,6 @@ mod admission_tests {
             clippy::unused_async_trait_impl,
             reason = "in-test fake; async matches the repository contract"
         )]
-        async fn save_ref(&self, _cred: CredentialRef) -> Result<(), CredentialTechnicalError> {
-            Err(CredentialTechnicalError::StorageUnavailable {
-                reason: String::from("read-only test refs"),
-            })
-        }
-
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "in-test fake; async matches the repository contract"
-        )]
-        async fn load_ref(
-            &self,
-            _provider: &str,
-            _label: &str,
-        ) -> Result<Option<CredentialRef>, CredentialTechnicalError> {
-            Ok(None)
-        }
-
-        #[expect(
-            clippy::unused_async_trait_impl,
-            reason = "in-test fake; async matches the repository contract"
-        )]
         async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError> {
             Ok(self.0.clone())
         }

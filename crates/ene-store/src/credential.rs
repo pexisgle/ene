@@ -28,9 +28,6 @@ const SQL_LIST_CREDENTIALS: &str = "SELECT id, provider, label FROM credential_r
 const SQL_SELECT_PAIRED_BY_DESCRIPTOR: &str =
     "SELECT device_id, descriptor, paired_at, wire FROM paired_device WHERE descriptor = ?1";
 
-const SQL_SELECT_DEVICE_BY_ID: &str =
-    "SELECT device_id, descriptor, paired_at, wire FROM paired_device WHERE device_id = ?1";
-
 const SQL_SELECT_PENDING_BY_DESCRIPTOR: &str =
     "SELECT descriptor, requested_at FROM pairing_pending WHERE descriptor = ?1";
 
@@ -243,54 +240,6 @@ impl Store {
 }
 
 impl CredentialRefRepository for Store {
-    async fn save_ref(&self, cred: CredentialRef) -> Result<(), CredentialTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            tx.execute(
-                SQL_UPSERT_CREDENTIAL,
-                params![cred.id(), cred.provider(), cred.label()],
-            )
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-            // A ref becoming registered changes the credential set; every
-            // scrub premise older than this must fail its commit.
-            advance_credential_set(&tx)?;
-            tx.commit()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn load_ref(
-        &self,
-        provider: &str,
-        label: &str,
-    ) -> Result<Option<CredentialRef>, CredentialTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        let provider = provider.to_owned();
-        let label = label.to_owned();
-        run_blocking(move || {
-            let guard = lock_shared(&conn);
-            let found: Option<(String, String, String)> = guard
-                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            let Some((_, provider_name, label_name)) = found else {
-                return Ok(None);
-            };
-            let cred = CredentialRef::new(provider_name, label_name)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            Ok(Some(cred))
-        })
-        .await
-    }
-
     async fn list_refs(&self) -> Result<Vec<CredentialRef>, CredentialTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
@@ -450,33 +399,6 @@ impl DevicePairingRepository for Store {
         .await
     }
 
-    async fn find_device(
-        &self,
-        id: &DeviceId,
-    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        let id = *id;
-        run_blocking(move || {
-            let key = encode_id(id.0);
-            let guard = lock_shared(&conn);
-            let found: Option<(String, String, String, Option<String>)> = guard
-                .query_row(SQL_SELECT_DEVICE_BY_ID, params![key], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            match found {
-                Some((device_text, descriptor, paired_text, wire)) => {
-                    let device = decode_device_record(&device_text, descriptor, &paired_text, wire)
-                        .map_err(credential_unavailable)?;
-                    Ok(Some(device))
-                }
-                None => Ok(None),
-            }
-        })
-        .await
-    }
-
     async fn find_device_by_wire(
         &self,
         wire: &str,
@@ -532,133 +454,6 @@ impl DevicePairingRepository for Store {
 }
 
 impl CredentialApprovalRepository for Store {
-    async fn request_approval(
-        &self,
-        provider: String,
-        label: String,
-    ) -> Result<bool, CredentialTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        run_blocking(move || {
-            if credential_pair_is_blank(&provider, &label) {
-                return Ok(false);
-            }
-            let requested_text = WallClockWithTz::now().to_rfc3339();
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            // An already-usable pair short-circuits: re-requests record nothing.
-            let usable: Option<(String, String, String)> = tx
-                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            if usable.is_some() {
-                return Ok(false);
-            }
-            // `INSERT OR IGNORE` keeps a previously stored pending entry: a
-            // repeat request reports `false` instead of refreshing its time.
-            let inserted = tx
-                .execute(
-                    SQL_INSERT_CREDENTIAL_PENDING_IGNORE,
-                    params![provider, label, requested_text],
-                )
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            if inserted == 0 {
-                return Ok(false);
-            }
-            tx.commit()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            Ok(true)
-        })
-        .await
-    }
-
-    async fn approve_pending(
-        &self,
-        provider: &str,
-        label: &str,
-    ) -> Result<bool, CredentialTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        let provider = provider.to_owned();
-        let label = label.to_owned();
-        run_blocking(move || {
-            if credential_pair_is_blank(&provider, &label) {
-                return Ok(false);
-            }
-            let mut guard = lock_shared(&conn);
-            let tx = guard
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            // A known pending entry is consumed first so a pair that is somehow
-            // both pending and usable never strands its pending row. The delete
-            // and the usable-ref upsert share this transaction: a crash between
-            // them could otherwise strand an approval with no usable marker (or
-            // vice versa). The ref id follows the same `provider:label`
-            // convention the Host uses when it builds refs for assignment, so
-            // both paths name one row.
-            let pending: Option<(String, String, String)> = tx
-                .query_row(
-                    SQL_SELECT_CREDENTIAL_PENDING,
-                    params![provider, label],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            if pending.is_some() {
-                tx.execute(SQL_DELETE_CREDENTIAL_PENDING, params![provider, label])
-                    .map_err(|error| credential_unavailable(error.to_string()))?;
-                tx.execute(
-                    SQL_UPSERT_CREDENTIAL,
-                    params![format!("{provider}:{label}"), provider, label,],
-                )
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-                // A ref becoming usable changes the credential set; every
-                // scrub premise older than this must fail its commit.
-                advance_credential_set(&tx)?;
-                tx.commit()
-                    .map_err(|error| credential_unavailable(error.to_string()))?;
-                return Ok(true);
-            }
-            // Re-approving an already-usable pair is idempotent with no change.
-            let usable: Option<(String, String, String)> = tx
-                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            Ok(usable.is_some())
-        })
-        .await
-    }
-
-    async fn is_approved(
-        &self,
-        provider: &str,
-        label: &str,
-    ) -> Result<bool, CredentialTechnicalError> {
-        let conn = Arc::clone(&self.conn);
-        let provider = provider.to_owned();
-        let label = label.to_owned();
-        run_blocking(move || {
-            if credential_pair_is_blank(&provider, &label) {
-                return Ok(false);
-            }
-            let guard = lock_shared(&conn);
-            // The `credential_ref` row is the usable marker; pending-only
-            // pairs report `false`.
-            let found: Option<(String, String, String)> = guard
-                .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .optional()
-                .map_err(|error| credential_unavailable(error.to_string()))?;
-            Ok(found.is_some())
-        })
-        .await
-    }
-
     async fn list_pending(
         &self,
     ) -> Result<Vec<PendingCredentialApproval>, CredentialTechnicalError> {

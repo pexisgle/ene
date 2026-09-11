@@ -143,13 +143,6 @@ impl CredentialStore for CredStore {
         }
     }
 
-    fn delete(&self, cred: &CredentialRef) -> Result<(), CredentialTechnicalError> {
-        match self {
-            Self::Env(inner) => inner.delete(cred),
-            Self::Memory(inner) => inner.delete(cred),
-        }
-    }
-
     fn contains(&self, cred: &CredentialRef) -> bool {
         match self {
             Self::Env(inner) => inner.contains(cred),

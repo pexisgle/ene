@@ -5,12 +5,11 @@
 //! freely: it names a credential without carrying any secret material; key
 //! material lives solely in [`SecretValue`].
 //!
-//! Secrets enter only through the Host-local protected path (a future
-//! behaviors-stage store): [`RegisterCredentialCommand`] deliberately carries
-//! no secret field, so registration can never smuggle key material through
-//! the registry. [`CredentialStore::with_bearer`] exposes the bearer only
-//! inside a caller closure; the caller must build an owned request there and
-//! send it after the closure returns.
+//! Secrets enter only through the Host-local protected path: the
+//! registration intent carries no secret field, so registration can never
+//! smuggle key material through the registry. [`CredentialStore::with_bearer`]
+//! exposes the bearer only inside a caller closure; the caller must build an
+//! owned request there and send it after the closure returns.
 
 mod approval;
 mod auth_file;
@@ -35,9 +34,8 @@ pub use registration::{
     CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,
 };
 pub use registry::{
-    CredentialAvailability, CredentialNotify, CredentialRef, CredentialRefError,
-    CredentialRefRepository, CredentialSetRepository, RegisterCredentialCommand, RegisterOutcome,
-    available_credential, credential_availability, register,
+    CredentialRef, CredentialRefError, CredentialRefRepository, CredentialSetRepository,
+    available_credential,
 };
 pub use scrub::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
 pub use secret::{
