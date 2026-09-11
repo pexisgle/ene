@@ -270,10 +270,11 @@ pub struct HostHandle {
     /// In-memory, best-effort queue of pinned Experience premises whose
     /// completed replies await a Learning formation pass.
     ///
-    /// Each item carries its own source range and transcript, pinned at reply
-    /// completion. See [`crate::dialogue`]: the pass is post-response work,
-    /// never a condition of the client-visible completion, and a crash simply
-    /// drops the queued derived update instead of replaying an old pass.
+    /// Each item carries its own source range, transcript, and Client / round
+    /// / continuity correspondence, pinned at reply completion. See
+    /// [`crate::dialogue`]: the pass is post-response work, never a condition
+    /// of the client-visible completion, and a crash simply drops the queued
+    /// derived update instead of replaying an old pass.
     pub(crate) learning_queue: StdMutex<VecDeque<ene_learning::ExperienceCandidate>>,
     /// Serializes Learning formation passes for this handle so overlapping
     /// drains cannot run two passes over one companion at once.

@@ -666,6 +666,7 @@ impl HostHandle {
         let input = AcceptedDialogueInput {
             companion,
             round: accepted.as_raw(),
+            client,
             generation: attribution.generation,
             text,
             credential_set,
@@ -859,9 +860,10 @@ impl HostHandle {
     ///
     /// Best-effort by design: the stream outcome was already decided by the
     /// durable reply append, so a formation decline or failure never rewrites
-    /// it. Each item carries its own source range and transcript, so the
-    /// worker judges exactly that Experience; it never reads a later History
-    /// window and silently folds newer turns into an older pass.
+    /// it. Each item carries its own source range, transcript, and
+    /// Client / round / continuity correspondence, so the worker judges
+    /// exactly that Experience; it never reads a later History window and
+    /// silently folds newer turns into an older pass.
     fn queue_learning_formation(&self, experience: ExperienceCandidate) {
         lock_learning_queue(&self.learning_queue).push_back(experience);
     }
@@ -874,7 +876,7 @@ impl HostHandle {
     /// The queued Experience premises, in completion order.
     ///
     /// Test-only: lets a regression prove the queue carries the pinned source
-    /// boundary, not just a companion id.
+    /// boundary and correspondence, not just a companion id.
     #[cfg(test)]
     pub(crate) fn pending_learning_premises(&self) -> Vec<ExperienceCandidate> {
         lock_learning_queue(&self.learning_queue)

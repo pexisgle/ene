@@ -19,11 +19,11 @@ use ene_inference::{
     Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor, NotSentReason,
 };
 use ene_learning::{
-    ExperienceCandidate, ExperienceRole, ExperienceSourceKind, ExperienceTurn, FormationDecision,
-    LearningInference, LearningInferenceError, LearningRepository, LearningTechnicalError,
-    SecretScrubber, SourceRangeRef,
+    ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceSourceKind,
+    ExperienceTurn, FormationDecision, LearningInference, LearningInferenceError,
+    LearningRepository, LearningTechnicalError, SecretScrubber, SourceRangeRef,
 };
-use ene_presence::PresenceGeneration;
+use ene_presence::{ClientId, PresenceGeneration};
 use ene_primitive::{RawId, WallClockWithTz};
 
 use crate::{
@@ -37,6 +37,9 @@ pub struct AcceptedDialogueInput {
     pub companion: CompanionId,
     /// Host-issued round the input joined or minted.
     pub round: RawId,
+    /// Client the round was accepted on; carried into the Experience
+    /// correspondence for the post-response Learning pass.
+    pub client: ClientId,
     pub generation: PresenceGeneration,
     /// Owner body text; redacted from [`core::fmt::Debug`].
     pub text: String,
@@ -57,6 +60,7 @@ impl core::fmt::Debug for AcceptedDialogueInput {
             .debug_struct("AcceptedDialogueInput")
             .field("companion", &self.companion)
             .field("round", &self.round)
+            .field("client", &self.client)
             .field("generation", &self.generation)
             .field("text", &"<redacted>")
             .field("credential_set", &self.credential_set)
@@ -121,11 +125,12 @@ pub enum DialogueOutcome {
     Completed {
         /// Adopted reply body; redacted from [`core::fmt::Debug`].
         text: String,
-        /// Experience premise pinned at reply completion: source range and
-        /// transcript. The caller queues exactly this; the worker never
-        /// re-reads a later History window as if it were the same Experience.
-        /// [`None`] when the bounded window was empty or unreadable: the reply
-        /// stands and the post-response pass is skipped rather than invented.
+        /// Experience premise pinned at reply completion: source range,
+        /// transcript, and Client / round / continuity correspondence. The
+        /// caller queues exactly this; the worker never re-reads a later
+        /// History window as if it were the same Experience. [`None`] when
+        /// the bounded window was empty or unreadable: the reply stands and
+        /// the post-response pass is skipped rather than invented.
         experience: Option<Box<ExperienceCandidate>>,
     },
     /// The reply could not be adopted: the caller closes interrupted.
@@ -344,9 +349,10 @@ pub async fn finish_turn(
 /// Pins the Experience premise of one just-completed turn.
 ///
 /// Reads the bounded recent window once, at reply completion, so the queued
-/// pass judges exactly this transcript. Returns [`None`] when the window is
-/// empty or unreadable; the caller then skips the pass instead of later
-/// re-reading a different window as if it were the same Experience.
+/// pass judges exactly this transcript with its Client / round / continuity
+/// correspondence. Returns [`None`] when the window is empty or unreadable;
+/// the caller then skips the pass instead of later re-reading a different
+/// window as if it were the same Experience.
 async fn pin_experience(
     input: &AcceptedDialogueInput,
     history: &impl HistoryRepository,
@@ -374,6 +380,11 @@ async fn pin_experience(
             })
             .collect(),
         at: WallClockWithTz::now(),
+        correspondence: ExperienceCorrespondence {
+            client: Some(input.client.as_raw()),
+            round: Some(input.round),
+            generation: Some(input.generation.as_u64()),
+        },
     })
 }
 
