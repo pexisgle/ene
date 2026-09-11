@@ -57,7 +57,7 @@ crate を分けるか module に留めるかの材料として次を用いた。
 Cargo.toml  # members = ["crates/*", "apps/*", "plugins/tool/*", "plugins/provider/*"]
 crates/
   ene-primitive/        # opaque RawId / RevisionInner / GenerationInner / WallClockWithTz（tiny）
-  ene-config/           # typed config・path・schema
+  ene-config/           # typed config・path
   ene-character/        # 静的構成・revision・import/export・provenance
   ene-companion/        # 同一性・対話調整・未伝達・自発性・適用関係（I-1〜I-7）
   ene-task/             # Task・委任・Schedule・WorkspaceAssoc・TaskContext（W-1〜W-7）
@@ -95,7 +95,7 @@ plugins/tool/*, plugins/provider/*  # 外部拡張（ene-plugin-host 経由で�
 | crate | owner / 役割 | 主要 module（logical boundary。初期は module 開始可） | pub boundary（公開するもの） / 公開しないもの |
 |---|---|---|---|
 | `ene-primitive` | 全 crate の性質共有（opaque・単調・有向・比較の形）。semantic owner ではない | `raw_id`（`RawId`: UUID 互換 128bit opaque）、`revision`（`RevisionInner(u64)` + 単調 helper）、`generation`（`GenerationInner(u64)`）、`clock`（`WallClockWithTz`: wall-clock + 作成時 tz。revision 代替にしない）、`correlation`（有向 pair の形だけ。domain 別 struct は各 owner が定義） | pub: 上記 5 module の型・helper のみ。非公開・禁止: `CompanionId` 等の domain newtype、domain logic、wire DTO、DB・IPC・OS 依存。`uuid`・`chrono` 以外の重依存を持たない |
-| `ene-config` | 起動・path・schema の意味（一般設定の各値は各 owner。Host 自動起動の選択は `ene-presentation`） | `typed`（typed config struct）、`paths`（OS account 領域・data dir 解決）、`schema`（schemars 生成） | pub: typed config・path 解決・schema のみ。禁止: domain state、secret 値、runtime 判断、repository |
+| `ene-config` | 起動・path の意味（一般設定の各値は各 owner。Host 自動起動の選択は `ene-presentation`） | `typed`（typed config struct）、`paths`（OS account 領域・data dir 解決） | pub: typed config・path 解決のみ（`schemars` schema 生成は必要 stage で再導入）。禁止: domain state、secret 値、runtime 判断、repository |
 | `ene-character` | Character（静的構成・revision・import/export・provenance。CH-1〜CH-7、CD-1〜CD-7、C-A/C-C/C-D） | `identity`（`CharacterId`・静的定義）、`revision`（`CharacterRevision`・差分提示）、`import`（validation・provenance。実行許可にしない）、`export`（静的範囲選択・権利注意）、`supply`（適用供給。適用確定は Companion） | pub: `CharacterId`・`CharacterRevision`・`GetCharacterRevisionQuery`・`CharacterRevisionView`・`ValidatePackageQuery`・`PackageValidationReport`・`ExportCharacterCommand`。priv: archive 展開・diff algorithm 詳細。禁止: 適用関係（Companion）、学習意味（Learning）、許可・秘密・作用の確定 |
 | `ene-companion` | 個体調整（同一性・対話・未伝達・自発性・適用関係。I-1〜I-7、H-A caller、H-B/C caller、H-F 仲介、H-G owner、X-A caller） | `lifecycle`（`CompanionId`・Running/Stopped/Deleted tombstone 最小）、`applied`（適用関係正本 + `CharacterApplicationRepository` trait 利用）、`dialogue`（対話 orchestration。Task/Learning/Inference への caller 依存をここに閉じ込める）、`history`（History・活動記録の意味。row は `ene-store`）、`undelivered`（`UndeliveredRef`・報告状況。提示事実は Presentation）、`spontaneity`（個体別抑制・loop 抑制） | pub: `CompanionId`・`ProposeTaskCommand`・`ProposeSteeringCommand`・`ProposeExperienceCandidate`・`RegisterUndeliveredFact`・`RequestMoveCommand`（caller 側）・各 domain outcome（`TaskProposalOutcome` 等の再掲ではなく自 crate の要求型）。priv: LLM prompt・要約・scoring。禁止: Task 達成確定（Task）、形成意味（Learning）、帰属成立（Presence）、秘密値、SQL |
 | `ene-task` | 作業（Task・委任・Schedule・Workspace・TaskContext。W-1〜W-7、H-A owner、H-H owner） | `task`（`TaskId`・`TaskRevision`・`TaskRef`・steering forward）、`delegation`（`DelegationId`・ephemeral Agent・scope 写し）、`schedule`（設定・occurrence・各回 Task）、`workspace`（関連付け・保存先確認・中間整理）、`context`（TaskContextEntry。本文複製しない）、`orchestrate`（委任・steering・結果受入の SD-Task 順序付け） | pub: `TaskId`・`TaskRevision`・`TaskRef`・`CreateDelegationCommand`・`TaskAgentResultArrival`・`TaskRepository` trait・`TaskCommitOutcome`・`DelegationOutcome`。priv: 分割・並列機構・harness 詳細。禁止: 会話意味（Companion）、学習意味（Learning）、作用確定度（Action）、許可確定（Permission） |
@@ -245,7 +245,7 @@ Client が Host domain crate へ直接依存して canonical mutation API を利
 | `ene-presence` | `ene-primitive`・`ene-config`・`ene-preservation`（trait のみ） | 帰属 authority の owner。`ene-companion`・`ene-presentation`・`ene-action`・`ene-permission` 具体への依存禁止（必要性・区切り・許可は premise として受ける） |
 | `ene-permission`・`ene-credential`・`ene-character` | `ene-primitive`・`ene-config` のみ（+ `ene-preservation` trait のみ） | 制御・秘密・静的構成の owner。互いに依存しない。他 domain 具体への依存禁止 |
 | `ene-preservation` | `ene-primitive`・`ene-config` のみ | 全域調整の coordinator。participant 具体への依存禁止（`ErasureParticipant` trait を定義し、participant が実装する） |
-| `ene-config` | Ene 内依存なし（外部 serde/figment/directories のみ） | typed config・path・schema の葉。domain・storage・adapter に依存しない |
+| `ene-config` | Ene 内依存なし（外部 serde/figment/directories のみ） | typed config・path の葉。domain・storage・adapter に依存しない |
 | `ene-api` | Ene 内依存なし（外部 serde/uuid/chrono のみ。`ene-primitive` にも依存しない） | wire-neutral DTO のみ。Host domain・`ene-store`・secret に依存しないことが Client 分離の条件 |
 | `ene-store` | `ene-primitive`・`ene-config` + 各 owner crate（row mapping のため） | adapter → domain（実装が trait を実装）。owner → store 禁止。`rusqlite`・`sqlite-vec`・fs 依存はここに隔離する |
 | `ene-plugin-host` | `ene-primitive`・`ene-config`・`ene-inference`・`ene-action`・`ene-sandbox`・`ene-plugin-ipc`・`ene-provider-assets` | adapter → domain（trait 実装）。domain → adapter 禁止。意味判断を持たない |
