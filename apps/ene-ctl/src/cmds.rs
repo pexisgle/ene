@@ -19,8 +19,6 @@
 //!   a live `send` in the same process because streams cannot resume, so that
 //!   follow mode is deferred (see [`Command::Watch`]).
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use ene_api::v1::management::{
     IntentRationaleWire, ManagementIntent, ManagementIntentKind, ManagementOutcome, ManagementView,
     ManagementViewRequest, RationaleOrigin, consent_target, credential_target,
@@ -62,8 +60,6 @@ pub const HOST_MEMORY_SECTION: &str = "memory";
 
 /// Only provider the setup flow knows how to assign yet.
 pub const SETUP_PROVIDER_OPENAI: &str = "openai";
-
-static LOCAL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -362,18 +358,6 @@ pub fn setup_view_request() -> ManagementViewRequest {
     }
 }
 
-/// There are no `setup`- or `usage`-named sections Host-side, so neither name
-/// is requested.
-pub fn status_view_request() -> ManagementViewRequest {
-    ManagementViewRequest {
-        sections: HOST_SETUP_SECTIONS
-            .iter()
-            .map(|section| (*section).to_string())
-            .collect(),
-        memory_after: None,
-    }
-}
-
 /// Requests only the read-only Memory section, optionally continuing after
 /// the `next:` id of a previous page.
 pub fn memory_view_request(after: Option<&str>) -> ManagementViewRequest {
@@ -412,15 +396,11 @@ pub fn submit_input(
     }
 }
 
-/// Mints a client-local correspondence ID: `ctl-<pid>-<counter>`.
-///
-/// The `uuid` crate is unavailable to this binary, so uniqueness rests on the
-/// process id plus a process-local monotonic counter: unique per connection
-/// for this process, which is all `local_id` needs (it matches acks to sends
-/// within one Client and is never Host-canonical).
+/// Mints a client-local correspondence ID from a v4 UUID: unique per
+/// connection for this process, which is all `local_id` needs (it matches
+/// acks to sends within one Client and is never Host-canonical).
 pub fn new_local_id() -> ClientLocalId {
-    let counter = LOCAL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    ClientLocalId(format!("ctl-{}-{counter}", std::process::id()))
+    ClientLocalId(uuid::Uuid::new_v4().to_string())
 }
 
 /// `"credential:<provider>:main"` via the shared [`credential_target`]
@@ -612,8 +592,7 @@ mod tests {
         HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for,
         credential_id_for, credential_intent, credential_target_for, describe_intake,
         describe_management, history_request, memory_view_request, new_local_id, parse_command,
-        render_history, render_round_history, render_view, setup_view_request, status_view_request,
-        submit_input,
+        render_history, render_round_history, render_view, setup_view_request, submit_input,
     };
     use super::{Command, IntakeAction, ManagementAction, SendArgs, SetupMode};
 
@@ -1175,11 +1154,6 @@ mod tests {
                     .collect::<Vec<String>>(),
             "setup --show requests the Host sections: {setup:?}"
         );
-        let status = status_view_request();
-        assert!(
-            status.sections == setup.sections,
-            "status requests the same Host sections: {status:?}"
-        );
         let memory = memory_view_request(None);
         assert!(
             memory.sections == vec![HOST_MEMORY_SECTION.to_string()]
@@ -1333,11 +1307,11 @@ mod tests {
     }
 
     #[test]
-    fn local_id_names_this_process_counter() {
+    fn local_id_is_a_uuid() {
         let id = new_local_id().0;
         assert!(
-            id.starts_with(&format!("ctl-{}-", std::process::id())),
-            "local ID must name this process: {id:?}"
+            uuid::Uuid::parse_str(&id).is_ok(),
+            "local ID must be a UUID: {id:?}"
         );
     }
 }

@@ -12,7 +12,7 @@ use ene_api::v1::refs::{ConnectionWireId, WireMessageId};
 use ene_api::v1::round::RoundIntakeOutcomeWire;
 use ene_plugin_ipc::WireFrame;
 
-use super::frames::{auth_rejected_guidance, payload_kind};
+use super::frames::auth_rejected_guidance;
 
 /// Beyond this cap the oldest queued frame is discarded to make room, never
 /// the newest, so a chatty or hostile Host cannot grow the session without
@@ -70,22 +70,8 @@ impl core::fmt::Debug for SessionState {
 }
 
 impl SessionState {
-    pub fn new() -> Self {
-        Self {
-            generation: None,
-            companion: None,
-            connection_id: None,
-            pairing_secret: None,
-            deferred: VecDeque::new(),
-        }
-    }
-
     pub fn generation(&self) -> Option<u64> {
         self.generation
-    }
-
-    pub fn connection_id(&self) -> Option<ConnectionWireId> {
-        self.connection_id
     }
 
     pub fn set_connection(&mut self, connection_id: ConnectionWireId) {
@@ -107,7 +93,7 @@ impl SessionState {
     /// projection supersede what the session held, so later sends echo the
     /// Host's current mapping instead of guessing.
     pub fn observe_presence(&mut self, fact: &PresenceAttributionWire) {
-        self.generation = Some(presence_generation_of_fact(fact));
+        self.generation = Some(fact.generation);
         self.companion = Some(fact.companion.0.clone());
     }
 
@@ -127,10 +113,6 @@ impl SessionState {
         self.generation = Some(current);
     }
 
-    pub fn deferred_len(&self) -> usize {
-        self.deferred.len()
-    }
-
     pub fn push_deferred(&mut self, frame: WireFrame) {
         if self.deferred.len() >= DEFERRED_CAP {
             let _ = self.deferred.pop_front();
@@ -139,18 +121,11 @@ impl SessionState {
     }
 
     /// Facts never sit in the queue, so a hit is always an answer the caller
-    /// can return without socket I/O; shares its scan with [`select_answer`]
-    /// so both find the same frame.
+    /// can return without socket I/O.
     pub fn take_deferred_reply(&mut self, own: WireMessageId) -> Option<WirePayload> {
         let position = find_deferred_reply(&self.deferred, own)?;
         self.deferred.remove(position).map(|frame| frame.payload)
     }
-}
-
-/// Free function so the frame loop and the session update stay testable
-/// without a socket.
-pub fn presence_generation_of_fact(fact: &PresenceAttributionWire) -> u64 {
-    fact.generation
 }
 
 pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
@@ -165,10 +140,8 @@ pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
     }
 }
 
-/// One ruling shared by the pure [`select_answer`] script form and
-/// [`super::Client::request`]'s socket loop, so the pure tests verify the
-/// production ruling directly instead of a mirror; queue-cap handling stays
-/// with each caller.
+/// One ruling shared by [`super::Client::request`]'s socket loop; queue-cap
+/// handling stays with the caller.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameDecision {
     AbsorbPresence(PresenceAttributionWire),
@@ -176,8 +149,8 @@ pub enum FrameDecision {
     Defer,
 }
 
-/// Total and pure: no I/O, no session access, so both the script form and the
-/// socket loop rule identically. Only presence facts absorb — a future
+/// Total and pure: no I/O, no session access, so tests rule on the same
+/// function the socket loop uses. Only presence facts absorb — a future
 /// unsolicited fact kind needs a new arm here, and until then such frames
 /// defer instead of surfacing as answers.
 #[must_use]
@@ -191,53 +164,12 @@ pub fn decide_frame(own_message_id: WireMessageId, frame: &WireFrame) -> FrameDe
     }
 }
 
-/// Shared by the session pop ([`SessionState::take_deferred_reply`]) and the
-/// script scan ([`select_answer`]) so both find the same frame.
+/// Finds the frame the session pop ([`SessionState::take_deferred_reply`])
+/// correlates to `own`.
 fn find_deferred_reply(deferred: &VecDeque<WireFrame>, own: WireMessageId) -> Option<usize> {
     deferred
         .iter()
         .position(|frame| frame.envelope.correlation.reply_to == Some(own))
-}
-
-/// Pure form of the [`super::Client::request`] loop decision: the deferred
-/// queue is scanned first — a hit returns with no absorption and without
-/// consuming `frames` (no socket I/O in the streaming form) — then `frames`
-/// are walked in order per [`decide_frame`]. The first answer ends the walk
-/// (later script frames stay unread, as later socket reads in the streaming
-/// form); deferred frames push to the queue (cap [`DEFERRED_CAP`],
-/// oldest-drop). No match means no answer ([`None`]) and the streaming caller
-/// keeps reading. Total: every combination of queue and script yields a
-/// possibly empty absorption, a possibly absent answer, and a bounded queue,
-/// with no I/O and no failure.
-#[must_use]
-pub fn select_answer(
-    own_message_id: WireMessageId,
-    deferred: &VecDeque<WireFrame>,
-    frames: &[WireFrame],
-) -> (
-    Vec<PresenceAttributionWire>,
-    Option<WirePayload>,
-    VecDeque<WireFrame>,
-) {
-    let mut queue = deferred.clone();
-    if let Some(position) = find_deferred_reply(&queue, own_message_id) {
-        let hit = queue.remove(position).map(|frame| frame.payload);
-        return (Vec::new(), hit, queue);
-    }
-    let mut absorbed = Vec::new();
-    for frame in frames {
-        match decide_frame(own_message_id, frame) {
-            FrameDecision::AbsorbPresence(fact) => absorbed.push(fact),
-            FrameDecision::Answer(payload) => return (absorbed, Some(payload), queue),
-            FrameDecision::Defer => {
-                if queue.len() >= DEFERRED_CAP {
-                    let _ = queue.pop_front();
-                }
-                queue.push_back(frame.clone());
-            }
-        }
-    }
-    (absorbed, None, queue)
 }
 
 /// [`AuthResult::Rejected`] maps to [`AuthDecision::Guidance`] (exit code 2:
@@ -271,7 +203,7 @@ pub fn decide_auth(payload: &WirePayload) -> AuthDecision {
         unexpected => AuthDecision::Unexpected {
             message: format!(
                 "unexpected {} during authentication; expected AuthResult",
-                payload_kind(unexpected)
+                unexpected.message_type()
             ),
         },
     }

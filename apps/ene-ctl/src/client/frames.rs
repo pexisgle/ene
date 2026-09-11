@@ -154,7 +154,7 @@ pub fn capability_frame(
 }
 
 pub fn frame_for(payload: WirePayload, sender: WireSender) -> WireFrame {
-    let message_type = message_type_for(&payload);
+    let message_type = WireMessageType(String::from(payload.message_type()));
     let envelope = new_outgoing_envelope(ProtocolVersion::V1, sender, message_type);
     WireFrame { envelope, payload }
 }
@@ -167,18 +167,4 @@ pub(super) fn stamp_request(frame: &mut WireFrame) -> WireMessageId {
     frame.envelope.correlation.command_id = Some(CommandWireId(uuid::Uuid::new_v4()));
     frame.envelope.correlation.request_id = Some(RequestWireId(uuid::Uuid::new_v4()));
     frame.envelope.message_id
-}
-
-/// Rejection-message kind name (never a body), delegated to the canonical
-/// [`WirePayload::message_type`] vocabulary in `ene-api` so wire names live
-/// in exactly one place and adding a variant cannot leave a second
-/// exhaustive list behind.
-pub fn payload_kind(payload: &WirePayload) -> &'static str {
-    payload.message_type()
-}
-
-/// Envelope discriminator (the variant name, for example `"SubmitTextInput"`);
-/// routing hint only — the Host rejects unknown names, never guesses.
-pub fn message_type_for(payload: &WirePayload) -> WireMessageType {
-    WireMessageType(String::from(payload_kind(payload)))
 }

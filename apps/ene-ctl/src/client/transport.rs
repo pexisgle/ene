@@ -14,7 +14,7 @@ use crate::errors::CliError;
 
 use super::frames::{
     capability_frame, frame_for, frame_for_session, missing_secret_guidance, new_incarnation,
-    pairing_frame, payload_kind, pending_guidance, proof_frame, retry_frame, stamp_request,
+    pairing_frame, pending_guidance, proof_frame, retry_frame, stamp_request,
 };
 use super::session::{
     AuthDecision, FrameDecision, SessionState, decide_auth, decide_frame, stale_generation_of,
@@ -106,7 +106,7 @@ impl Client {
                 unexpected => {
                     return Err(CliError::ServerRejected(format!(
                         "unexpected {} during pairing; expected PairingResult",
-                        payload_kind(&unexpected)
+                        unexpected.message_type()
                     )));
                 }
             }
@@ -144,11 +144,11 @@ impl Client {
             unexpected => {
                 return Err(CliError::ServerRejected(format!(
                     "unexpected {} during capability negotiation; expected NegotiatedConnection",
-                    payload_kind(&unexpected)
+                    unexpected.message_type()
                 )));
             }
         }
-        let mut state = SessionState::new();
+        let mut state = SessionState::default();
         if let Some(secret_value) = secret {
             state.set_pairing_secret(secret_value);
         }
@@ -165,7 +165,7 @@ impl Client {
         let WirePayload::AuthChallenge(challenge) = challenge else {
             return Err(CliError::ServerRejected(format!(
                 "unexpected {} after negotiation; expected AuthChallenge",
-                payload_kind(&challenge)
+                challenge.message_type()
             )));
         };
         session.authenticate(&challenge).await?;
@@ -173,7 +173,7 @@ impl Client {
         if !matches!(fact, WirePayload::PresenceAttribution(_)) {
             return Err(CliError::ServerRejected(format!(
                 "unexpected {} after authentication; expected PresenceAttribution",
-                payload_kind(&fact)
+                fact.message_type()
             )));
         }
         Ok(session)
@@ -227,9 +227,8 @@ impl Client {
     /// Sends one payload and returns the answer correlated by `reply_to`,
     /// absorbing pipelined presence facts and deferring other out-of-order
     /// frames on the way. The deferred queue is consulted first, so a queued
-    /// answer costs no socket I/O; otherwise this loops until the correlated
-    /// answer arrives (the streaming form of
-    /// [`super::session::select_answer`]). A
+    /// answer costs no socket I/O; otherwise this loops per
+    /// [`super::session::decide_frame`] until the correlated answer arrives. A
     /// [`StaleRound`](ene_api::v1::round::RoundIntakeOutcomeWire::StaleRound)
     /// answer refreshes the session generation; mismatches are never returned
     /// as answers and never silently dropped.

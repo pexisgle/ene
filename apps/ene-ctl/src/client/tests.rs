@@ -1,8 +1,6 @@
 //! In-memory only: no sockets are opened and the environment is never
 //! mutated; frames go through the in-memory codec or plain in-memory scripts.
 
-use std::collections::VecDeque;
-
 use ene_api::v1::envelope::{ProtocolVersion, WireSender};
 use ene_api::v1::handshake::AuthResult;
 use ene_api::v1::payload::WirePayload;
@@ -12,14 +10,11 @@ use ene_api::v1::refs::{CommandWireId, WireMessageId};
 use ene_plugin_ipc::WireFrame;
 
 use super::frames::{
-    auth_rejected_guidance, capability_frame, frame_for, frame_for_session, message_type_for,
-    missing_secret_guidance, new_incarnation, pairing_frame, payload_kind, pending_guidance,
-    proof_frame, retry_frame, stamp_request,
+    auth_rejected_guidance, capability_frame, frame_for, frame_for_session,
+    missing_secret_guidance, new_incarnation, pairing_frame, pending_guidance, proof_frame,
+    retry_frame, stamp_request,
 };
-use super::session::{
-    AuthDecision, DEFERRED_CAP, SessionState, decide_auth, presence_generation_of_fact,
-    select_answer, stale_generation_of,
-};
+use super::session::{AuthDecision, DEFERRED_CAP, SessionState, decide_auth, stale_generation_of};
 use super::{platform_display, socket_path};
 
 /// Deterministic stand-in for a process incarnation.
@@ -113,11 +108,11 @@ fn message_type_names_the_variant() {
         sender,
     );
     assert!(
-        message_type_for(&frame.payload).0 == "HistoryRequest",
+        frame.envelope.message_type.0 == "HistoryRequest",
         "discriminator must name the variant"
     );
     assert!(
-        payload_kind(&frame.payload) == "HistoryRequest",
+        frame.payload.message_type() == "HistoryRequest",
         "kind name must match the discriminator"
     );
     assert!(
@@ -144,7 +139,7 @@ fn stale_answer(current_generation: u64) -> WirePayload {
 
 #[test]
 fn session_starts_unobserved_and_tracks_latest() {
-    let mut session = SessionState::new();
+    let mut session = SessionState::default();
     assert!(
         session.generation().is_none(),
         "a new session observed nothing yet"
@@ -274,7 +269,7 @@ fn message_id(value: u128) -> WireMessageId {
     WireMessageId(uuid::Uuid::from_u128(value))
 }
 
-/// The payload kind never matters to selection.
+/// The payload kind never matters to correlation.
 fn answer_payload() -> WirePayload {
     WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", 1))
 }
@@ -319,7 +314,7 @@ fn request_stamps_a_fresh_command_id_per_send() -> Result<(), String> {
 fn session_echoes_the_learned_companion_projection() {
     use super::session::SessionState;
 
-    let mut state = SessionState::new();
+    let mut state = SessionState::default();
     assert_eq!(
         state.companion_ref(),
         String::from(crate::cmds::DEFAULT_COMPANION_REF),
@@ -385,7 +380,7 @@ fn retry_frame_reuses_command_with_fresh_transport_ids() {
 }
 
 #[test]
-fn decide_frame_rules_one_frame_for_both_callers() {
+fn decide_frame_classifies_facts_answers_and_deferrals() {
     use super::session::{FrameDecision, decide_frame};
 
     let own = message_id(1);
@@ -410,232 +405,31 @@ fn decide_frame_rules_one_frame_for_both_callers() {
     );
 }
 
-#[test]
-fn select_answer_returns_a_lone_correlated_answer() {
-    let own = message_id(1);
-    let frames = [script_frame(answer_payload(), message_id(2), Some(own))];
-    let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), &frames);
-    assert!(
-        absorbed.is_empty(),
-        "no fact means no absorption: {absorbed:?}"
-    );
-    assert!(
-        answer == Some(answer_payload()),
-        "the correlated frame is the answer, got {answer:?}"
-    );
-    assert!(
-        deferred.is_empty(),
-        "a direct hit queues nothing: {deferred:?}"
-    );
-}
-
-#[test]
-fn select_answer_absorbs_facts_then_answers() {
-    let own = message_id(7);
-    let frames = [
-        script_frame(
-            WirePayload::PresenceAttribution(presence_fact(3)),
-            message_id(8),
-            Some(own),
-        ),
-        script_frame(
-            WirePayload::PresenceAttribution(presence_fact(5)),
-            message_id(9),
-            Some(own),
-        ),
-        script_frame(answer_payload(), message_id(10), Some(own)),
-    ];
-    let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), &frames);
-    assert!(
-        absorbed
-            .iter()
-            .map(presence_generation_of_fact)
-            .collect::<Vec<u64>>()
-            == vec![3, 5],
-        "pipelined facts absorb in order, got {absorbed:?}"
-    );
-    assert!(
-        answer == Some(answer_payload()),
-        "the correlated non-fact ends the wait, got {answer:?}"
-    );
-    assert!(
-        deferred.is_empty(),
-        "facts and the hit queue nothing: {deferred:?}"
-    );
-}
-
-#[test]
-fn select_answer_without_an_answer_absorbs_only() {
-    let own = message_id(11);
-    let frames = [
-        script_frame(
-            WirePayload::PresenceAttribution(presence_fact(2)),
-            message_id(12),
-            Some(own),
-        ),
-        script_frame(
-            WirePayload::PresenceAttribution(presence_fact(4)),
-            message_id(13),
-            None,
-        ),
-    ];
-    let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), &frames);
-    assert!(
-        absorbed.len() == 2,
-        "facts absorb even without a reply link, got {absorbed:?}"
-    );
-    assert!(
-        answer.is_none(),
-        "facts alone are never an answer: {answer:?}"
-    );
-    assert!(
-        deferred.is_empty(),
-        "facts alone queue nothing: {deferred:?}"
-    );
-}
-
-#[test]
-fn select_answer_defers_mismatches_instead_of_answering() {
-    let own = message_id(21);
-    let other = message_id(22);
-    for frames in [
-        [script_frame(answer_payload(), message_id(23), Some(other))].as_slice(),
-        [script_frame(answer_payload(), message_id(24), None)].as_slice(),
-    ] {
-        let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), frames);
-        assert!(
-            absorbed.is_empty(),
-            "a non-fact absorbs nothing: {absorbed:?}"
-        );
-        assert!(
-            answer.is_none(),
-            "an uncorrelated frame is never the answer, got {answer:?}"
-        );
-        assert!(
-            deferred.len() == 1,
-            "the mismatch is deferred, not dropped: {deferred:?}"
-        );
-    }
-}
-
-#[test]
-fn select_answer_defers_a_mismatch_then_answers() {
-    let own = message_id(31);
-    let other = message_id(32);
-    let frames = [
-        script_frame(answer_payload(), message_id(33), Some(other)),
-        script_frame(answer_payload(), message_id(34), Some(own)),
-    ];
-    let (absorbed, answer, deferred) = select_answer(own, &VecDeque::new(), &frames);
-    assert!(
-        absorbed.is_empty(),
-        "no fact means no absorption: {absorbed:?}"
-    );
-    assert!(
-        answer == Some(answer_payload()),
-        "the correlated frame answers after the mismatch, got {answer:?}"
-    );
-    assert!(
-        deferred.len() == 1,
-        "the mismatch stays deferred: {deferred:?}"
-    );
-    assert!(
-        deferred[0].envelope.correlation.reply_to == Some(other),
-        "the deferred frame is the mismatch: {deferred:?}"
-    );
-}
-
 /// Carries `limit` so out-of-order answers stay distinguishable by payload.
 fn history_answer(limit: u64) -> WirePayload {
     WirePayload::HistoryRequest(crate::cmds::history_request("companion-1", limit))
 }
 
 #[test]
-fn select_answer_serves_the_second_request_from_the_queue() {
-    let first = message_id(41);
-    let second = message_id(42);
-    let script = [
-        script_frame(history_answer(2), message_id(43), Some(second)),
-        script_frame(history_answer(1), message_id(44), Some(first)),
-    ];
-    let (absorbed, answer, deferred) = select_answer(first, &VecDeque::new(), &script);
-    assert!(
-        absorbed.is_empty(),
-        "no fact means no absorption: {absorbed:?}"
-    );
-    assert!(
-        answer == Some(history_answer(1)),
-        "the first request takes its own reply: {answer:?}"
-    );
-    assert!(
-        deferred.len() == 1,
-        "the future answer stays queued: {deferred:?}"
-    );
-    let (absorbed_next, queued, deferred_next) = select_answer(second, &deferred, &[]);
-    assert!(
-        absorbed_next.is_empty(),
-        "a queue hit absorbs nothing: {absorbed_next:?}"
-    );
-    assert!(
-        queued == Some(history_answer(2)),
-        "the second request finds its answer already queued: {queued:?}"
-    );
-    assert!(
-        deferred_next.is_empty(),
-        "the hit removes the queued frame: {deferred_next:?}"
-    );
-}
-
-#[test]
-fn select_answer_prefers_the_queue_over_new_frames() {
-    let own = message_id(51);
-    let queued_frame = script_frame(history_answer(9), message_id(52), Some(own));
-    let queued: VecDeque<WireFrame> = [queued_frame].into_iter().collect();
-    let fresh = [script_frame(history_answer(8), message_id(53), Some(own))];
-    let (absorbed, answer, deferred) = select_answer(own, &queued, &fresh);
-    assert!(
-        absorbed.is_empty(),
-        "a queue hit absorbs nothing: {absorbed:?}"
-    );
-    assert!(
-        answer == Some(history_answer(9)),
-        "the queued answer wins without socket I/O: {answer:?}"
-    );
-    assert!(
-        deferred.is_empty(),
-        "the hit drains the queue and ignores fresh frames: {deferred:?}"
-    );
-}
-
-#[test]
-fn select_answer_bounds_the_queue_oldest_drop() {
-    let own = message_id(61);
-    let mut queued: VecDeque<WireFrame> = VecDeque::new();
+fn deferred_queue_drops_the_oldest_frame_at_capacity() {
+    let mut session = SessionState::default();
     for index in 0..DEFERRED_CAP {
-        let id = u128::try_from(index).map_or(0, |value| value + 100);
-        queued.push_back(script_frame(history_answer(7), message_id(id), None));
+        let reply_to = u128::try_from(index).map_or(0, |value| value + 1000);
+        session.push_deferred(script_frame(
+            history_answer(7),
+            message_id(reply_to + 500),
+            Some(message_id(reply_to)),
+        ));
     }
+    let overflow = message_id(9999);
+    session.push_deferred(script_frame(history_answer(8), overflow, Some(overflow)));
     assert!(
-        queued.len() == DEFERRED_CAP,
-        "the fixture queue starts full: {queued:?}"
-    );
-    let overflow = [script_frame(
-        history_answer(7),
-        message_id(999),
-        Some(message_id(998)),
-    )];
-    let (_, answer, deferred) = select_answer(own, &queued, &overflow);
-    assert!(
-        answer.is_none(),
-        "a lone mismatch never answers: {answer:?}"
-    );
-    assert!(
-        deferred.len() == DEFERRED_CAP,
-        "the queue stays bounded: {deferred:?}"
-    );
-    assert!(
-        deferred[0].envelope.message_id != queued[0].envelope.message_id,
+        session.take_deferred_reply(message_id(1000)).is_none(),
         "the oldest frame drops first"
+    );
+    assert!(
+        session.take_deferred_reply(overflow) == Some(history_answer(8)),
+        "the overflow frame is queued"
     );
 }
 
@@ -743,7 +537,7 @@ fn guidance_names_provisioning_without_secrets() {
 
 #[test]
 fn session_debug_redacts_the_secret() {
-    let mut session = SessionState::new();
+    let mut session = SessionState::default();
     session.set_pairing_secret(String::from("secret-hex-marker-9d4e"));
     let rendered = format!("{session:?}");
     assert!(
@@ -758,7 +552,7 @@ fn session_debug_redacts_the_secret() {
 
 #[test]
 fn session_debug_reports_the_queue_length_without_bodies() {
-    let mut session = SessionState::new();
+    let mut session = SessionState::default();
     session.push_deferred(script_frame(history_answer(3), message_id(71), None));
     let rendered = format!("{session:?}");
     assert!(
@@ -773,11 +567,7 @@ fn session_debug_reports_the_queue_length_without_bodies() {
 
 #[test]
 fn session_deferred_queue_takes_only_the_matching_reply() {
-    let mut session = SessionState::new();
-    assert!(
-        session.deferred_len() == 0,
-        "a new session defers nothing: {session:?}"
-    );
+    let mut session = SessionState::default();
     let first = message_id(81);
     let second = message_id(82);
     session.push_deferred(script_frame(
@@ -787,16 +577,8 @@ fn session_deferred_queue_takes_only_the_matching_reply() {
     ));
     session.push_deferred(script_frame(history_answer(1), message_id(84), Some(first)));
     assert!(
-        session.deferred_len() == 2,
-        "both mismatches queue: {session:?}"
-    );
-    assert!(
         session.take_deferred_reply(first) == Some(history_answer(1)),
         "the take finds the matching reply out of order"
-    );
-    assert!(
-        session.deferred_len() == 1,
-        "the hit removes only its frame: {session:?}"
     );
     assert!(
         session.take_deferred_reply(message_id(85)).is_none(),
@@ -804,7 +586,6 @@ fn session_deferred_queue_takes_only_the_matching_reply() {
     );
     assert!(
         session.take_deferred_reply(second) == Some(history_answer(2)),
-        "the remaining reply is still queued"
+        "the hit removes only its frame, so the remaining reply is still queued"
     );
-    assert!(session.deferred_len() == 0, "the queue drains: {session:?}");
 }
