@@ -94,22 +94,16 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| credential_unavailable(error.to_string()))?;
         sweep_registered_secret(&tx, bearer)?;
-        let pending: Option<(String, String, String)> = tx
+        let pending = tx
             .query_row(
                 SQL_SELECT_CREDENTIAL_PENDING,
                 params![provider, label],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |_| Ok(()),
             )
             .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let usable: Option<(String, String, String)> = tx
-            .query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()
-            .map_err(|error| credential_unavailable(error.to_string()))?;
-        let mut approved = usable.is_some();
-        if pending.is_some() {
+            .map_err(|error| credential_unavailable(error.to_string()))?
+            .is_some();
+        let approved = if pending {
             tx.execute(SQL_DELETE_CREDENTIAL_PENDING, params![provider, label])
                 .map_err(|error| credential_unavailable(error.to_string()))?;
             tx.execute(
@@ -117,8 +111,13 @@ impl Store {
                 params![format!("{provider}:{label}"), provider, label],
             )
             .map_err(|error| credential_unavailable(error.to_string()))?;
-            approved = true;
-        }
+            true
+        } else {
+            tx.query_row(SQL_SELECT_CREDENTIAL, params![provider, label], |_| Ok(()))
+                .optional()
+                .map_err(|error| credential_unavailable(error.to_string()))?
+                .is_some()
+        };
         if approved {
             // A re-approval may accompany a value change (after a restart or
             // an explicit update), so every successful approval advances the
@@ -163,23 +162,23 @@ fn sweep_registered_secret(
 }
 
 /// Advances the credential-set revision inside the caller's transaction.
-fn advance_credential_set(
-    tx: &rusqlite::Transaction<'_>,
-) -> Result<CredentialSetRevision, CredentialTechnicalError> {
+fn advance_credential_set(tx: &rusqlite::Transaction<'_>) -> Result<(), CredentialTechnicalError> {
     let current: i64 = tx
         .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
         .map_err(|error| credential_unavailable(error.to_string()))?;
     let next = current
         .checked_add(1)
         .ok_or_else(|| credential_unavailable("credential set revision exhausted"))?;
+    // Refuse a stored count that cannot be a revision (a corrupt negative
+    // value) before it can persist; the converted value itself is unused.
+    u64::try_from(next)
+        .map_err(|_| credential_unavailable("credential set revision out of range"))?;
     tx.execute(
         "UPDATE credential_set SET rev = ?1 WHERE id = 1",
         params![next],
     )
     .map_err(|error| credential_unavailable(error.to_string()))?;
-    let revision = u64::try_from(next)
-        .map_err(|_| credential_unavailable("credential set revision out of range"))?;
-    Ok(CredentialSetRevision::from_u64(revision))
+    Ok(())
 }
 
 impl CredentialSetRepository for Store {

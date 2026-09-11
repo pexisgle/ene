@@ -366,9 +366,6 @@ impl HostHandle {
             .list_refs()
             .await
             .map_err(|error| CoreError::Store(error.to_string()))?;
-        if refs.is_empty() {
-            return Ok(());
-        }
         self.store
             .sweep_registered_values(&refs, &self.cred_store)
             .map_err(|error| CoreError::Store(error.to_string()))?;
