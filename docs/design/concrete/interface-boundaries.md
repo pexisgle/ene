@@ -226,11 +226,11 @@ enum FormationDecision {
     NoChangesApplied,                // compare-before-commit 敗北・対象欠落・scope 不一致・既存・revision 枯渇など。何も保存していない
     DeferredForContext,              // 文脈不足で保留（再提出は新 Experience 扱いにしない）
     DeclinedAsNoEndValue,            // 保存価値なし（全件保存を要求しない）
-    HeldByErasureOrConstraint(HoldConditionRef), // 消去区間・保存禁止・非共有で制限
 }
 ```
 
 - Client・round・presence generation の correspondence は current stage の Experience formation が消費しないため interface に含めない。必要 stage で再導入する。
+- 消去区間・保存禁止・非共有による保留（`HeldByErasureOrConstraint`）は current stage の formation では発生させず、deletion / constraint を扱う stage で再導入する。
 - 開始：個体調整・作業。判断：認識・学習（保存価値・形成・更新・統合・想起必要性）。Task 限り情報の Learning 化は別判断。
 - 失ってはならないもの：由来の区別、対象 Companion・Task・委任との関係、期待する利用先。
 - Learning と Task を統合しない。応答完了と全 Learning 更新完了を同一条件にしない。
