@@ -158,6 +158,21 @@ pub enum LearningInferenceError {
     },
 }
 
+/// Failure to prove that registered secret values are absent from text.
+///
+/// Scrubbing fails closed: when the registry cannot be read or a registered
+/// value cannot be resolved, the text must not reach a model prompt or
+/// durable storage. This is never "no secret was found".
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SecretScrubError {
+    /// The credential registry could not be listed.
+    #[error("credential registry unavailable")]
+    RegistryUnavailable,
+    /// A registered credential's value could not be read.
+    #[error("registered credential value unavailable")]
+    SecretUnavailable,
+}
+
 /// Redaction of registered secret values.
 ///
 /// The Host owns the credential boundary; this crate only requires that a
@@ -169,7 +184,13 @@ pub enum LearningInferenceError {
     reason = "Stage 2 contract style uses native async fn; Send bounds settle with the Host adapter"
 )]
 pub trait SecretScrubber: Send + Sync {
-    async fn scrub(&self, text: &str) -> String;
+    /// Returns `text` with every registered secret occurrence replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`SecretScrubError`] when absence cannot be proven for every
+    /// registered credential; the caller must not use the original text.
+    async fn scrub(&self, text: &str) -> Result<String, SecretScrubError>;
 }
 
 /// Forms one Experience: judge it, then commit Summary evidence and the
@@ -194,7 +215,7 @@ pub async fn form_experience(
     let existing = repository
         .list_current_memories(candidate.companion, EXISTING_MEMORY_LIMIT)
         .await?;
-    let prompt = build_prompt(&existing, &candidate, scrubber).await;
+    let prompt = build_prompt(&existing, &candidate, scrubber).await?;
     let answer = match inference.infer(prompt).await {
         Ok(answer) => answer,
         Err(LearningInferenceError::Declined) => {
@@ -212,7 +233,10 @@ pub async fn form_experience(
         // a Memory; refusing is safer than storing an unexplained recognition.
         return Ok(FormationDecision::DeferredForContext);
     };
-    let summary_text = scrubber.scrub(&summary_text).await;
+    let summary_text = scrubber
+        .scrub(&summary_text)
+        .await
+        .map_err(secret_boundary_failure)?;
     if summary_text.trim().is_empty() || answer.memories.is_empty() {
         return Ok(FormationDecision::DeclinedAsNoEndValue);
     }
@@ -230,7 +254,10 @@ pub async fn form_experience(
         let Some(content) = proposed.content else {
             continue;
         };
-        let content = scrubber.scrub(&content).await;
+        let content = scrubber
+            .scrub(&content)
+            .await
+            .map_err(secret_boundary_failure)?;
         let content = content.trim().to_owned();
         if content.is_empty() {
             continue;
@@ -296,21 +323,28 @@ async fn build_prompt(
     existing: &[Memory],
     candidate: &ExperienceCandidate,
     scrubber: &impl SecretScrubber,
-) -> String {
+) -> Result<String, LearningTechnicalError> {
     let mut prompt = String::from(PROMPT_PREAMBLE);
     prompt.push_str("\n\nExisting memories:\n");
     if existing.is_empty() {
         prompt.push_str("(none)\n");
     } else {
         for memory in existing {
+            let content = scrubber
+                .scrub(&memory.content)
+                .await
+                .map_err(secret_boundary_failure)?;
             prompt.push_str("- ");
-            prompt.push_str(&memory.content);
+            prompt.push_str(&content);
             prompt.push('\n');
         }
     }
     prompt.push_str("\nNew experience:\n");
     for turn in candidate.transcript.iter().take(MAX_FORMATION_TURNS) {
-        let text = scrubber.scrub(&turn.text).await;
+        let text = scrubber
+            .scrub(&turn.text)
+            .await
+            .map_err(secret_boundary_failure)?;
         prompt.push_str(match turn.role {
             ExperienceRole::Owner => "Owner: ",
             ExperienceRole::Companion => "Companion: ",
@@ -320,7 +354,13 @@ async fn build_prompt(
     }
     prompt.push('\n');
     prompt.push_str(PROMPT_SCHEMA);
-    prompt
+    Ok(prompt)
+}
+
+fn secret_boundary_failure(error: SecretScrubError) -> LearningTechnicalError {
+    LearningTechnicalError::SecretBoundaryUnavailable {
+        reason: error.to_string(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -371,7 +411,9 @@ mod tests {
     use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
     use crate::repository::{LearningRepository, LearningTechnicalError};
     use crate::scope::LearningScope;
-    use crate::test_support::{FakeLearningRepository, ReplacingScrubber, ScriptedInference};
+    use crate::test_support::{
+        FailingScrubber, FakeLearningRepository, ReplacingScrubber, ScriptedInference,
+    };
 
     fn candidate(companion: RawId, turns: &[(&str, &str)]) -> ExperienceCandidate {
         ExperienceCandidate {
@@ -533,6 +575,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_scrub_failure_stores_nothing_and_never_prompts() {
+        let repository = FakeLearningRepository::new();
+        let inference = ScriptedInference::new(vec![Ok(answer())]);
+        let outcome = form_experience(
+            &repository,
+            &inference,
+            &FailingScrubber,
+            candidate(RawId::new(), &[("owner", "something secret")]),
+        )
+        .await;
+        assert!(
+            matches!(
+                outcome,
+                Err(LearningTechnicalError::SecretBoundaryUnavailable { .. })
+            ),
+            "an unprovable secret boundary must fail closed, got {outcome:?}"
+        );
+        assert!(
+            inference.prompts().is_empty(),
+            "raw text must not reach the model when absence cannot be proven"
+        );
+        assert!(
+            repository.current().is_empty(),
+            "nothing may be stored when the scrub failed"
+        );
+    }
+
+    #[tokio::test]
     async fn inference_failure_is_a_technical_error_not_a_formation() {
         let repository = FakeLearningRepository::new();
         let inference = ScriptedInference::new(vec![Err(LearningInferenceError::Unavailable {
@@ -594,5 +664,48 @@ mod tests {
             prompt.contains("覚えておいて"),
             "explicit remember requests are weighed by instruction"
         );
+    }
+
+    #[tokio::test]
+    async fn existing_memories_are_scrubbed_before_the_prompt() {
+        let companion = RawId::new();
+        let repository = FakeLearningRepository::new();
+        // Models a durable row written before the value became registered:
+        // the prompt must redact it even though the Memory owner already
+        // holds it.
+        let seeded = crate::repository::MemoryChangeCommit {
+            summary: None,
+            change: crate::repository::MemoryChange {
+                target: crate::repository::MemoryTarget::New {
+                    id: crate::identity::MemoryId::generate(),
+                },
+                scope: LearningScope::companion(companion),
+                content: String::from("The owner's old key is sk-secret."),
+                importance: crate::memory::Importance::default(),
+                temporal: crate::memory::TemporalMeaning::Enduring,
+                change: crate::memory::ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        };
+        repository.commit_memory_change(seeded).await.unwrap();
+        let inference = ScriptedInference::new(vec![Ok(String::from(
+            r#"{"summary": "nothing new", "memories": []}"#,
+        ))]);
+        let scrubber = ReplacingScrubber::new("sk-secret", "[credential]");
+        let _ = form_experience(
+            &repository,
+            &inference,
+            &scrubber,
+            candidate(companion, &[("owner", "hello again")]),
+        )
+        .await
+        .unwrap();
+        let prompt = &inference.prompts()[0];
+        assert!(
+            !prompt.contains("sk-secret"),
+            "an existing Memory must not carry a registered value into the prompt: {prompt}"
+        );
+        assert!(prompt.contains("[credential]"));
     }
 }

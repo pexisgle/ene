@@ -73,6 +73,7 @@ use ene_inference::{
     Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor,
     InferenceTechnicalError, NotSentReason, PreparedAdmission, ProviderTransport,
 };
+use ene_learning::{SecretScrubError, SecretScrubber as _};
 use ene_permission::EvaluationTracker;
 use ene_plugin_ipc::WireFrame;
 use ene_presence::{
@@ -468,6 +469,18 @@ impl HostHandle {
                 attribution.generation.as_u64(),
             )];
         };
+        // Registered credentials never reach durable History or a model
+        // prompt: the owner input is redacted before any durable decision
+        // (the fingerprint included), so a retry redacts the same raw text to
+        // the same canonical form. An unprovable secret boundary holds the
+        // send without side effects instead of storing or sending raw text.
+        let scrubber = CredentialScrubber {
+            refs: &self.store,
+            store: &self.cred_store,
+        };
+        let Ok(text) = scrubber.scrub(&submit.body.text).await else {
+            return vec![held_frame(frame, live)];
+        };
         // The request fingerprint is the immutable client semantics: role,
         // body, language, sending incarnation, and the canonical round
         // intent. Force-new carries no premise (the gate above declined
@@ -482,7 +495,7 @@ impl HostHandle {
         };
         let incoming_fingerprint = RequestFingerprint {
             role: HistoryRole::Owner,
-            text: submit.body.text.clone(),
+            text: text.clone(),
             lang: submit.body.lang.0.clone(),
             incarnation: Some((
                 frame.envelope.sender.incarnation_id.counter,
@@ -601,7 +614,7 @@ impl HostHandle {
                 }),
                 round: intent,
                 input_ref: ClientInputRef {
-                    text: submit.body.text.clone(),
+                    text: text.clone(),
                     lang: submit.body.lang.0.clone(),
                 },
                 local_id: submit.local_id.0.clone(),
@@ -649,7 +662,7 @@ impl HostHandle {
             companion,
             round: accepted.as_raw(),
             generation: attribution.generation,
-            text: submit.body.text.clone(),
+            text,
             lang: submit.body.lang.0.clone(),
             local_id: Some(submit.local_id.0.clone()).filter(|key| !key.is_empty()),
             command,
@@ -672,9 +685,14 @@ impl HostHandle {
                         generation: attribution.generation,
                     },
                 );
-                match finish_turn(turn, &self.store, &executor).await {
+                match finish_turn(turn, &self.store, &executor, &scrubber).await {
                     DialogueOutcome::Completed { text } => {
-                        self.propose_learning_experience(companion, &executor).await;
+                        // The durable reply is the client-visible completion:
+                        // the formation pass is queued and runs after the
+                        // response is handed off, never before it (design
+                        // H-1: response completion and all Learning updates
+                        // are not one condition).
+                        self.queue_learning_formation(companion);
                         completed_frames(frame, live, &round_wire, generation_number, &text)
                     }
                     DialogueOutcome::Interrupted => {
@@ -829,59 +847,128 @@ impl HostHandle {
     /// durable reply append, so a formation decline or failure never rewrites
     /// it. The pass reads recent History, judges it under the learning
     /// consumer, and commits Summary evidence plus new Memories.
-    async fn propose_learning_experience<T: ProviderTransport>(
-        &self,
-        companion: CompanionId,
-        executor: &HostInference<'_, T>,
-    ) {
-        let scrubber = CredentialScrubber {
-            refs: &self.store,
-            store: &self.cred_store,
-        };
-        let outcome = ene_companion::dialogue::propose_experience(
-            companion,
-            &self.store,
-            &self.store,
-            executor,
-            &scrubber,
-        )
-        .await;
-        // The formation result is intentionally not surfaced on the dialogue
-        // path; a future management surface can read the durable outcome.
-        drop(outcome);
+    fn queue_learning_formation(&self, companion: CompanionId) {
+        lock_learning_queue(&self.learning_queue).insert(companion);
+    }
+
+    /// Whether a queued formation pass is waiting.
+    pub(crate) fn has_pending_learning(&self) -> bool {
+        !lock_learning_queue(&self.learning_queue).is_empty()
+    }
+
+    /// Drains queued Learning formation passes, one at a time.
+    ///
+    /// The queue is in-memory and coalescing: a companion already waiting is
+    /// never queued twice, so many completed turns do not fan out into many
+    /// passes. A crash before the drain loses only this best-effort derived
+    /// update, exactly as a crash during the previous synchronous pass did;
+    /// no pass is durable, so a restart never replays an old one and cannot
+    /// duplicate a formation. The worker lock serializes passes; the
+    /// repository's compare-before-commit additionally keeps a genuine
+    /// overlap from overwriting newer recognition. Stopped companions are
+    /// skipped because stopping must not start new internal activity. A pass
+    /// failure leaves no queue entry, so there is no retry storm.
+    pub(crate) async fn run_pending_learning<T: ProviderTransport>(&self, transport: &T) {
+        let _serialized = self.learning_worker.lock().await;
+        loop {
+            let companions: Vec<CompanionId> = {
+                let mut queue = lock_learning_queue(&self.learning_queue);
+                queue.drain().collect()
+            };
+            if companions.is_empty() {
+                break;
+            }
+            for companion in companions {
+                match self.store.load_lifecycle(companion).await {
+                    Ok(Some(CompanionLifecycle::Running)) => {}
+                    _ => continue,
+                }
+                let executor = HostInference {
+                    store: &self.store,
+                    cred_store: &self.cred_store,
+                    tracker: &self.tracker,
+                    transport,
+                };
+                let scrubber = CredentialScrubber {
+                    refs: &self.store,
+                    store: &self.cred_store,
+                };
+                let outcome = ene_companion::dialogue::propose_experience(
+                    companion,
+                    &self.store,
+                    &self.store,
+                    &executor,
+                    &scrubber,
+                )
+                .await;
+                // The formation result is intentionally not surfaced on the
+                // dialogue path; a future management surface can read the
+                // durable outcome.
+                drop(outcome);
+            }
+        }
     }
 }
 
-/// Redacts registered credential values from text on its way to Learning.
+fn lock_learning_queue(
+    queue: &std::sync::Mutex<std::collections::HashSet<CompanionId>>,
+) -> std::sync::MutexGuard<'_, std::collections::HashSet<CompanionId>> {
+    match queue.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Redacts registered credential values from text on its way to a model
+/// prompt or durable content.
 ///
-/// Uses the existing credential boundary: the bearer is borrowed inside
-/// `with_bearer` and only the redacted copy escapes. A missing bearer leaves
-/// the text unchanged and cannot fabricate redaction.
+/// Uses the existing credential boundary: bearer values are borrowed inside
+/// `with_bearer` and only redacted copies escape. Every registered ref must
+/// resolve, and every value is applied longest-first so a shorter registered
+/// value cannot split an occurrence of a longer one. An unreadable registry
+/// or bearer fails closed: absence cannot be proven, so the caller must not
+/// use the original text.
 struct CredentialScrubber<'a> {
     refs: &'a Store,
     store: &'a CredStore,
 }
 
 impl ene_learning::SecretScrubber for CredentialScrubber<'_> {
-    async fn scrub(&self, text: &str) -> String {
-        let Ok(refs) = self.refs.list_refs().await else {
-            return text.to_owned();
-        };
-        let mut scrubbed = text.to_owned();
+    async fn scrub(&self, text: &str) -> Result<String, SecretScrubError> {
+        let refs = self
+            .refs
+            .list_refs()
+            .await
+            .map_err(|_| SecretScrubError::RegistryUnavailable)?;
+        let mut known: Vec<(usize, ene_credential::CredentialRef)> = Vec::with_capacity(refs.len());
         for credential in refs {
+            let length = self
+                .store
+                .with_bearer(&credential, |bearer| bearer.len())
+                .map_err(|_| SecretScrubError::SecretUnavailable)?;
+            if length == 0 {
+                // An empty value matches every position; treating it as
+                // unprovable keeps the raw text out of prompts and storage.
+                return Err(SecretScrubError::SecretUnavailable);
+            }
+            known.push((length, credential));
+        }
+        known.sort_by_key(|(length, _)| std::cmp::Reverse(*length));
+        let mut scrubbed = text.to_owned();
+        for (_, credential) in known {
             let replaced = self.store.with_bearer(&credential, |bearer| {
-                scrubbed.replace(bearer, "[credential]")
+                scrubbed.replace(bearer, ene_credential::REDACTED_CREDENTIAL)
             });
             let Ok(next) = replaced else {
                 // A registered credential exists but its bearer cannot be
                 // read, so absence of the value cannot be proven. Fail closed
                 // rather than risk putting the raw text in a prompt or a
                 // durable Learning row.
-                return String::from("[credential-unavailable]");
+                return Err(SecretScrubError::SecretUnavailable);
             };
             scrubbed = next;
         }
-        scrubbed
+        Ok(scrubbed)
     }
 }
 

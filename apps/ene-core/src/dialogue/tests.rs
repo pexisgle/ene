@@ -336,6 +336,33 @@ async fn register_assign_complete<T: ProviderTransport>(
     )
 }
 
+/// Assigns the learning capability to the same route the dialogue setup
+/// uses, returning whether the assignment committed.
+async fn assign_learning(
+    handle: &HostHandle,
+    live: &LiveInput,
+    transport: &impl ProviderTransport,
+) -> bool {
+    let assigned = handle
+        .handle_frame(
+            intent_frame(
+                ManagementIntentKind::ManageRuleConsentCap,
+                "consent:learning:openai:dialogue-1:openai:main",
+                "consent-learning-none",
+                live.connection_id,
+            ),
+            live.clone(),
+            transport,
+        )
+        .await;
+    matches!(
+        assigned.first().map(|answer| &answer.payload),
+        Some(WirePayload::ManagementOutcome(
+            ManagementOutcome::StoredAsRuleView { .. }
+        ))
+    )
+}
+
 #[test]
 fn empty_text_yields_one_empty_chunk() {
     assert_eq!(chunk_text(""), vec![String::new()]);
@@ -2113,7 +2140,16 @@ async fn consent_move_mid_flight_interrupts_adoption() {
 
 #[tokio::test]
 async fn register_holds_until_host_local_approval() {
-    let (handle, _dir) = memory_handle_with("dlg-credgate", |_| {}).await.unwrap();
+    // Approval now requires a readable bearer: it must sweep any prior
+    // plaintext occurrence before the ref becomes usable.
+    let (handle, _dir) = memory_handle_with("dlg-credgate", |store| {
+        store.insert(
+            CredentialRef::new("openai", "main").expect("valid test fixture"),
+            "test-bearer",
+        );
+    })
+    .await
+    .unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     let pending = handle
@@ -2317,6 +2353,7 @@ async fn learning_admission_requires_its_own_capability_assignment() {
 struct LearningAwareTransport {
     reply: String,
     formation: Option<String>,
+    inputs: std::sync::Mutex<Vec<String>>,
 }
 
 impl LearningAwareTransport {
@@ -2324,7 +2361,12 @@ impl LearningAwareTransport {
         Self {
             reply: reply.to_owned(),
             formation: formation.map(str::to_owned),
+            inputs: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.lock().expect("recorded input lock").clone()
     }
 }
 
@@ -2343,12 +2385,60 @@ impl ProviderTransport for LearningAwareTransport {
                 + '_,
         >,
     > {
+        self.inputs
+            .lock()
+            .expect("recorded input lock")
+            .push(req.input.clone());
         let text = if req.input.contains("learning formation pass") {
             self.formation.clone().unwrap_or_default()
         } else {
             self.reply.clone()
         };
         Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+}
+
+/// Transport whose learning formation call blocks until released, so a test
+/// can prove the client-visible reply does not wait for Learning.
+struct BlockingLearningTransport {
+    reply: String,
+    learning_started: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl ProviderTransport for BlockingLearningTransport {
+    fn complete(
+        &self,
+        req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        let learning = req.input.contains("learning formation pass");
+        let reply = self.reply.clone();
+        let started = std::sync::Arc::clone(&self.learning_started);
+        let release = std::sync::Arc::clone(&self.release);
+        Box::pin(async move {
+            if learning {
+                started.notify_one();
+                release.notified().await;
+                return Ok(ene_inference::ProviderResponse {
+                    text: String::from(r#"{"summary": "Nothing new.", "memories": []}"#),
+                    usage: None,
+                });
+            }
+            Ok(ene_inference::ProviderResponse {
+                text: reply,
+                usage: None,
+            })
+        })
     }
 }
 
@@ -2380,6 +2470,10 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
     let live = live_input("client-formation");
     let setup = round_test_handle("dlg-formation", &live, &transport).await;
     let (handle, _dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, &transport).await,
+        "learning formation needs its own capability assignment"
+    );
     let frame = submit_frame(
         handle.companion_wire(),
         Some(0),
@@ -2390,6 +2484,8 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
     );
     let responses = handle.handle_frame(frame, live.clone(), &transport).await;
     assert_stream_completed(&responses);
+    // The formation pass is post-response work; drain it explicitly here.
+    handle.run_pending_learning(&transport).await;
 
     let companion = handle.store.ensure_running_companion().await.unwrap();
     let memories = handle
@@ -2418,6 +2514,7 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
 #[tokio::test]
 async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
     use ene_companion::CompanionRepository as _;
+    use ene_companion::HistoryRepository as _;
     use ene_learning::LearningRepository as _;
 
     // The fixture handle provisions `openai:main` with "test-bearer".
@@ -2430,6 +2527,7 @@ async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
     let live = live_input("client-secret");
     let setup = round_test_handle("dlg-secret", &live, &transport).await;
     let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, &transport).await);
     let frame = submit_frame(
         handle.companion_wire(),
         Some(0),
@@ -2440,8 +2538,37 @@ async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
     );
     let responses = handle.handle_frame(frame, live.clone(), &transport).await;
     assert_stream_completed(&responses);
+    handle.run_pending_learning(&transport).await;
 
+    // Nothing that reaches the model may carry the registered value: the
+    // dialogue prompt and the formation prompt are both recorded.
+    for (position, input) in transport.inputs().iter().enumerate() {
+        assert!(
+            !input.contains("test-bearer"),
+            "provider input {position} must not carry the credential"
+        );
+    }
+    // Durable History holds the redacted owner input too.
     let companion = handle.store.ensure_running_companion().await.unwrap();
+    let timeline = handle
+        .store
+        .load_timeline(companion, None, 10)
+        .await
+        .unwrap();
+    let owner = timeline
+        .iter()
+        .find(|item| item.role == ene_companion::HistoryRole::Owner)
+        .expect("the owner row is durable");
+    assert!(
+        !owner.text.contains("test-bearer"),
+        "a registered credential never reaches History: {}",
+        owner.text
+    );
+    assert!(
+        owner.text.contains("[credential]"),
+        "the History occurrence is visibly redacted"
+    );
+
     let memories = handle
         .store
         .list_current_memories(companion.as_raw(), 10)
@@ -2473,4 +2600,146 @@ async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
         "a registered credential never reaches Summary: {}",
         summary.content
     );
+}
+
+/// A Learning pass that blocks must not hold the client-visible completion:
+/// the reply is durable and streamed first, and the queued pass runs after.
+#[tokio::test]
+async fn learning_latency_never_delays_the_client_visible_completion() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let transport = Arc::new(BlockingLearningTransport {
+        reply: String::from("noted"),
+        learning_started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
+    let live = live_input("client-decoupled");
+    let setup = round_test_handle("dlg-decoupled", &live, transport.as_ref()).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, transport.as_ref()).await);
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-decoupled",
+        "remember this",
+        live.connection_id,
+    );
+    let responses = tokio::time::timeout(
+        Duration::from_secs(5),
+        handle.handle_frame(frame, live.clone(), transport.as_ref()),
+    )
+    .await
+    .expect("client-visible completion must not wait for learning");
+    assert_stream_completed(&responses);
+
+    // The queued pass then runs (and blocks until released), proving the
+    // response was produced independently of it.
+    let handle = Arc::new(handle);
+    let worker_handle = Arc::clone(&handle);
+    let worker_transport = Arc::clone(&transport);
+    let worker = tokio::spawn(async move {
+        worker_handle
+            .run_pending_learning(worker_transport.as_ref())
+            .await;
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        transport.learning_started.notified(),
+    )
+    .await
+    .expect("the queued formation must start once drained");
+    transport.release.notify_one();
+    worker.await.unwrap();
+}
+
+/// A string already stored before the credential became registered must be
+/// redacted when the Owner approves the credential: registration establishes
+/// the non-exposure contract over existing durable state, not just over
+/// future writes.
+#[tokio::test]
+async fn approving_a_credential_redacts_its_prior_occurrences() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_presence::PresenceRepository as _;
+    use ene_primitive::WallClockWithTz;
+
+    let (handle, _dir) = setup_handle("dlg-sweep").await.unwrap();
+    let live = live_input("client-sweep");
+    let transport = ok_transport();
+    let registered = handle
+        .handle_frame(
+            intent_frame(
+                ManagementIntentKind::ConfigureCredentialIntent,
+                "credential:openai:main",
+                "consent-none",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        matches!(
+            registered.first().map(|answer| &answer.payload),
+            Some(WirePayload::ManagementOutcome(
+                ManagementOutcome::HeldByOperation
+            ))
+        ),
+        "the registration must wait as a pending approval"
+    );
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let generation = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    let appended = handle
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("my old key was test-bearer"),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await;
+    assert!(
+        matches!(
+            appended,
+            Ok(ene_companion::HistoryAppendOutcome::CommittedAs { .. })
+        ),
+        "the pre-registration row must commit, got {appended:?}"
+    );
+
+    assert!(
+        matches!(handle.approve_credential("openai", "main").await, Ok(true)),
+        "the approval must succeed and sweep before making the ref usable"
+    );
+
+    let timeline = handle
+        .store
+        .load_timeline(companion, None, 10)
+        .await
+        .unwrap();
+    let row = timeline
+        .iter()
+        .find(|item| item.text.contains("old key"))
+        .expect("the prior row is still held");
+    assert!(
+        !row.text.contains("test-bearer"),
+        "approval must sweep the prior plaintext occurrence: {}",
+        row.text
+    );
+    assert!(row.text.contains("[credential]"));
 }

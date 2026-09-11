@@ -44,6 +44,15 @@ pub enum LearningTechnicalError {
         /// Provider-class cause. Never prompt or output text.
         reason: String,
     },
+    /// The secret boundary could not prove registered values absent.
+    ///
+    /// The text was neither sent nor stored; the caller may retry once the
+    /// registry and stored values are readable.
+    #[error("secret boundary unavailable: {reason}")]
+    SecretBoundaryUnavailable {
+        /// Boundary-class cause. Never prompt or output text.
+        reason: String,
+    },
 }
 
 /// Which Memory one change targets.

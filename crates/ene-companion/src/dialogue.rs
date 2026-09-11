@@ -73,6 +73,9 @@ impl core::fmt::Debug for AcceptedDialogueInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogueTurn {
     input: AcceptedDialogueInput,
+    /// Durable identity of the owner row this turn committed. Context
+    /// assembly excludes exactly this message, never a text match.
+    message: RawId,
     authorized: AuthorizedInference,
 }
 
@@ -210,8 +213,12 @@ pub async fn begin_turn(
         incarnation: input.incarnation,
     };
     match history.append_message(owner).await {
-        Ok(HistoryAppendOutcome::CommittedAs { .. }) => {
-            DialogueBegin::Ready(Box::new(DialogueTurn { input, authorized }))
+        Ok(HistoryAppendOutcome::CommittedAs { message }) => {
+            DialogueBegin::Ready(Box::new(DialogueTurn {
+                input,
+                message,
+                authorized,
+            }))
         }
         // Lost the race with a concurrent same-command submit after the
         // early replay lookup: resolve the stored row so the ack survives
@@ -242,30 +249,44 @@ pub async fn begin_turn(
 
 /// Dispatches the turn's inference call and registers an adopted reply.
 ///
-/// A never-sent or technical outcome closes the stream interrupted; usage
-/// accounting is already decided inside the inference boundary. An adopted
-/// reply appends with its undelivered registration in the same atomic
-/// section; any other reply outcome is interrupted.
+/// The owner input and the provider output both pass through the scrubber
+/// before they reach a model or durable History: an unprovable secret
+/// boundary closes the stream interrupted instead of sending or storing raw
+/// text. A never-sent or technical outcome closes the stream interrupted;
+/// usage accounting is already decided inside the inference boundary. An
+/// adopted reply appends with its undelivered registration in the same
+/// atomic section; any other reply outcome is interrupted.
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
     inference: &impl InferenceExecutor,
+    scrubber: &impl SecretScrubber,
 ) -> DialogueOutcome {
-    let DialogueTurn { input, authorized } = *turn;
+    let DialogueTurn {
+        input,
+        message: _,
+        authorized,
+    } = *turn;
     let (consent_id, consent_rev) = {
         let (id, rev) = authorized.consent_premise();
         (id.to_owned(), rev)
     };
-    match inference.dispatch(authorized, input.text.clone()).await {
+    let Ok(input_text) = scrubber.scrub(&input.text).await else {
+        return DialogueOutcome::Interrupted;
+    };
+    match inference.dispatch(authorized, input_text).await {
         Ok(InferenceDispatchOutcome::Completed {
             arrival,
             adopted: true,
         }) => {
+            let Ok(text) = scrubber.scrub(&arrival.output_text).await else {
+                return DialogueOutcome::Interrupted;
+            };
             let reply = AppendHistoryCommand {
                 companion: input.companion,
                 round: input.round,
                 role: HistoryRole::Companion,
-                text: arrival.output_text.clone(),
+                text: text.clone(),
                 lang: input.lang.clone(),
                 at: WallClockWithTz::now(),
                 expected_generation: input.generation,
@@ -279,9 +300,9 @@ pub async fn finish_turn(
                 incarnation: None,
             };
             match history.append_reply_with_undelivered(reply, true).await {
-                Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => DialogueOutcome::Completed {
-                    text: arrival.output_text,
-                },
+                Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => {
+                    DialogueOutcome::Completed { text }
+                }
                 _ => DialogueOutcome::Interrupted,
             }
         }

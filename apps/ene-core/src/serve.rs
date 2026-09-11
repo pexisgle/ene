@@ -53,7 +53,7 @@
 //! - [`HostHandle`] methods take `&self`: every lock guard is dropped before
 //!   the next await, and no handle-wide async lock spans provider I/O.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex as StdMutex, MutexGuard};
 
@@ -267,6 +267,16 @@ pub struct HostHandle {
     /// acceptance. Each nonce is consumed on first proof regardless of
     /// outcome, so a captured proof cannot replay.
     pub(crate) pending_nonces: StdMutex<HashMap<String, String>>,
+    /// In-memory, coalescing queue of companions whose completed reply
+    /// awaits a Learning formation pass.
+    ///
+    /// See [`crate::dialogue`]: the pass is post-response work, never a
+    /// condition of the client-visible completion, and a crash simply drops
+    /// the queued derived update instead of replaying an old pass.
+    pub(crate) learning_queue: StdMutex<HashSet<CompanionId>>,
+    /// Serializes Learning formation passes for this handle so overlapping
+    /// drains cannot run two passes over one companion at once.
+    pub(crate) learning_worker: AsyncMutex<()>,
     /// Opaque companion projection issued by this handle.
     ///
     /// The domain wire-ref mapping for the single Stage 2 companion: every
@@ -329,6 +339,8 @@ impl HostHandle {
             cred_store,
             auth_store,
             pending_nonces: StdMutex::new(HashMap::new()),
+            learning_queue: StdMutex::new(HashSet::new()),
+            learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
         })
     }
@@ -585,10 +597,32 @@ impl HostHandle {
     /// created (usable marker); re-approval is idempotent. Unknown pairs
     /// return `Ok(false)` so the caller can list pendings.
     ///
+    /// The approval first sweeps every plaintext occurrence of the bearer
+    /// out of durable content: the value must not be readable before it
+    /// becomes a registered credential, including any string that was stored
+    /// before registration. A missing or unreadable bearer holds the
+    /// approval, because absence of the value cannot be proven and the
+    /// credential must not become usable unprotected.
+    ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Store`] when the durable tables are unavailable.
+    /// Returns [`CoreError::Store`] when the durable tables are unavailable
+    /// or the bearer cannot be read.
     pub async fn approve_credential(&self, provider: &str, label: &str) -> Result<bool, CoreError> {
+        let Ok(credential) = CredentialRef::new(provider, label) else {
+            return Ok(false);
+        };
+        match self.cred_store.with_bearer(&credential, |bearer| {
+            self.store.redact_registered_secret(bearer)
+        }) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(CoreError::Store(error.to_string())),
+            Err(_) => {
+                return Err(CoreError::Store(String::from(
+                    "credential bearer is not readable; provision the secret before approving",
+                )));
+            }
+        }
         // One atomic store call: the pending drain and the usable-ref insert
         // share a transaction, so a crash cannot strand an approval with no
         // usable marker. The usable ref id follows the `provider:label`

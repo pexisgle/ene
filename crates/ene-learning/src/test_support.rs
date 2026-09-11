@@ -43,10 +43,17 @@ impl LearningRepository for FakeLearningRepository {
         &self,
         commit: MemoryChangeCommit,
     ) -> Result<MemoryChangeOutcome, LearningTechnicalError> {
+        // Identity check first: a reused Summary id may only carry the same
+        // payload. The record itself is inserted only when a change commits,
+        // matching the store's insert-then-rollback transaction.
         if let Some(summary) = &commit.summary {
-            let mut summaries = self.summaries.lock().expect("fake summary lock");
-            if !summaries.iter().any(|stored| stored.id == summary.id) {
-                summaries.push(summary.clone());
+            let summaries = self.summaries.lock().expect("fake summary lock");
+            if let Some(stored) = summaries.iter().find(|stored| stored.id == summary.id)
+                && stored != summary
+            {
+                return Err(LearningTechnicalError::SummaryIdentityConflict {
+                    summary: summary.id,
+                });
             }
         }
         let change = commit.change;
@@ -97,6 +104,12 @@ impl LearningRepository for FakeLearningRepository {
             });
         };
         if let MemoryChangeOutcome::Committed { memory, revision } = outcome {
+            if let Some(summary) = &commit.summary {
+                let mut summaries = self.summaries.lock().expect("fake summary lock");
+                if !summaries.iter().any(|stored| stored.id == summary.id) {
+                    summaries.push(summary.clone());
+                }
+            }
             self.revisions
                 .lock()
                 .expect("fake revision lock")
@@ -238,7 +251,21 @@ impl ReplacingScrubber {
     reason = "in-test fake; async matches the scrubber contract"
 )]
 impl SecretScrubber for ReplacingScrubber {
-    async fn scrub(&self, text: &str) -> String {
-        text.replace(&self.from, &self.to)
+    async fn scrub(&self, text: &str) -> Result<String, crate::SecretScrubError> {
+        Ok(text.replace(&self.from, &self.to))
+    }
+}
+
+/// A scrubber that can never prove absence, modelling an unreadable
+/// credential registry or bearer.
+pub(crate) struct FailingScrubber;
+
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "in-test fake; async matches the scrubber contract"
+)]
+impl SecretScrubber for FailingScrubber {
+    async fn scrub(&self, _text: &str) -> Result<String, crate::SecretScrubError> {
+        Err(crate::SecretScrubError::RegistryUnavailable)
     }
 }

@@ -4,7 +4,7 @@ use ene_credential::{
     CredentialApprovalRepository, CredentialIntentRepository, CredentialRef,
     CredentialRefRepository, CredentialTechnicalError, DeviceId, DevicePairingRepository,
     DevicePairingStatus, DeviceRecord, PendingCredentialApproval, PendingPairing,
-    RegistrationApply, RegistrationFingerprint, RegistrationState,
+    REDACTED_CREDENTIAL, RegistrationApply, RegistrationFingerprint, RegistrationState,
 };
 use ene_permission::{IntentFingerprint, IntentOutcome};
 use ene_primitive::{RawId, WallClockWithTz};
@@ -57,6 +57,56 @@ const SQL_LIST_CREDENTIAL_PENDING: &str =
 /// trusted surface and holds it only in memory afterwards.
 fn fresh_pairing_secret() -> String {
     RawId::new().as_uuid().to_string()
+}
+
+impl Store {
+    /// Replaces every plaintext occurrence of `bearer` with
+    /// [`REDACTED_CREDENTIAL`] across durable content stores.
+    ///
+    /// Called from the Host's credential approval while the bearer is
+    /// borrowed inside [`ene_credential::CredentialStore::with_bearer`], so
+    /// the value never leaves that scope. Synchronous and short-lived by
+    /// design: the caller already holds a synchronous bearer scope, and the
+    /// work is bounded by the stored content of the listed columns. An
+    /// unreadable store fails closed with
+    /// [`CredentialTechnicalError::StorageUnavailable`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialTechnicalError::StorageUnavailable`] when the
+    /// transaction cannot run or commit; the caller must then not make the
+    /// credential usable.
+    pub fn redact_registered_secret(&self, bearer: &str) -> Result<(), CredentialTechnicalError> {
+        if bearer.is_empty() {
+            // An empty pattern matches every position; there is nothing
+            // meaningful to redact and no safe rewrite.
+            return Ok(());
+        }
+        // Table and column names are compile-time constants; the bearer
+        // travels only as a bound parameter.
+        const TARGETS: &[(&str, &str)] = &[
+            ("history_message", "body"),
+            ("learning_summary", "content"),
+            ("learning_memory", "content"),
+            ("learning_memory_revision", "content"),
+            ("management_intent", "rationale_quote"),
+        ];
+        let mut guard = lock_shared(&self.conn);
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        for (table, column) in TARGETS {
+            let sql = format!(
+                "UPDATE {table} SET {column} = replace({column}, ?1, ?2) \
+                 WHERE {column} IS NOT NULL AND instr({column}, ?1) > 0"
+            );
+            tx.execute(&sql, params![bearer, REDACTED_CREDENTIAL])
+                .map_err(|error| credential_unavailable(error.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|error| credential_unavailable(error.to_string()))?;
+        Ok(())
+    }
 }
 
 impl CredentialRefRepository for Store {

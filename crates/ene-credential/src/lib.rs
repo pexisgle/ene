@@ -50,3 +50,9 @@ pub enum CredentialTechnicalError {
         reason: String,
     },
 }
+
+/// Display marker replacing one registered credential value.
+///
+/// The Host and the store share this single token so redaction is
+/// recognisable end to end without carrying any part of the value.
+pub const REDACTED_CREDENTIAL: &str = "[credential]";

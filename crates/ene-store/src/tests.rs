@@ -2994,6 +2994,54 @@ async fn migration_v10_moves_stage2_consent_to_dialogue_only() {
 }
 
 #[tokio::test]
+async fn redact_registered_secret_sweeps_history_and_learning_content() {
+    let store = open_memory().await.unwrap();
+    let Some((companion, generation)) = running_companion(&store).await else {
+        panic!("the running companion must resolve");
+    };
+    store
+        .append_message(history_command(
+            companion,
+            generation,
+            "the key is sk-test-only",
+        ))
+        .await
+        .unwrap();
+    let memory = MemoryId::generate();
+    let evidence = learning_summary(companion.as_raw(), "evidence mentions sk-test-only");
+    let committed = store
+        .commit_memory_change(commit(
+            Some(evidence.clone()),
+            learning_change(
+                companion.as_raw(),
+                MemoryTarget::New { id: memory },
+                "owner key sk-test-only",
+                ChangeKind::Initial,
+                false,
+            ),
+        ))
+        .await;
+    assert!(matches!(
+        committed,
+        Ok(MemoryChangeOutcome::Committed { .. })
+    ));
+
+    store
+        .redact_registered_secret("sk-test-only")
+        .expect("the sweep must commit");
+
+    let timeline = store.load_recent_timeline(companion, 10).await.unwrap();
+    assert_eq!(timeline.len(), 1);
+    assert_eq!(timeline[0].text, "the key is [credential]");
+    let current = store.load_current_memory(memory).await.unwrap().unwrap();
+    assert_eq!(current.content, "owner key [credential]");
+    let revisions = store.list_memory_revisions(memory).await.unwrap();
+    assert_eq!(revisions[0].content, "owner key [credential]");
+    let stored = store.load_summary(evidence.id).await.unwrap().unwrap();
+    assert_eq!(stored.content, "evidence mentions [credential]");
+}
+
+#[tokio::test]
 async fn recent_timeline_keeps_the_newest_window_in_order() {
     let store = open_memory().await.unwrap();
     let Some((companion, generation)) = running_companion(&store).await else {

@@ -31,7 +31,7 @@ mod test_support;
 pub use formation::{
     ChangeRejection, ExperienceCandidate, ExperienceRole, ExperienceTurn, FormationChange,
     FormationDecision, LearningInference, LearningInferenceError, MAX_FORMATION_TURNS,
-    MAX_FORMED_MEMORIES, SecretScrubber, form_experience,
+    MAX_FORMED_MEMORIES, SecretScrubError, SecretScrubber, form_experience,
 };
 pub use identity::{ExperienceSourceKind, MemoryId, MemoryRevision, SourceRangeRef, SummaryId};
 pub use memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, TemporalMeaning};
