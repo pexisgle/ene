@@ -31,3 +31,16 @@ pub mod setup;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+
+use std::sync::{Mutex as StdMutex, MutexGuard};
+
+/// Locks a `std` mutex, recovering from poisoning.
+///
+/// Poisoning only follows a panic inside a critical section; sections here
+/// run plain map and queue operations that never panic while holding the
+/// guard, so recovery preserves the committed state.
+pub(crate) fn lock_unpoison<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}

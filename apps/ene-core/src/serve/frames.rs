@@ -67,15 +67,6 @@ pub(crate) fn outgoing_envelope(
     outgoing_envelope_inner(frame, live, payload.message_type(), reply_to, true)
 }
 
-pub(crate) fn outgoing_envelope_pre_auth(
-    frame: &WireFrame,
-    live: &LiveInput,
-    payload: &WirePayload,
-    reply_to: Option<WireMessageId>,
-) -> WireEnvelope {
-    outgoing_envelope_inner(frame, live, payload.message_type(), reply_to, false)
-}
-
 fn outgoing_envelope_inner(
     frame: &WireFrame,
     live: &LiveInput,
@@ -130,7 +121,12 @@ pub(crate) fn outgoing_frame_pre_auth(
     live: &LiveInput,
     payload: WirePayload,
 ) -> WireFrame {
-    let envelope =
-        outgoing_envelope_pre_auth(frame, live, &payload, Some(frame.envelope.message_id));
+    let envelope = outgoing_envelope_inner(
+        frame,
+        live,
+        payload.message_type(),
+        Some(frame.envelope.message_id),
+        false,
+    );
     WireFrame { envelope, payload }
 }

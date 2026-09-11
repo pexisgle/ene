@@ -56,7 +56,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use ene_inference::ProviderTransport;
 
@@ -171,14 +171,6 @@ struct ConnectionTableInner {
     device_current: HashMap<String, ConnectionWireId>,
 }
 
-#[cfg(unix)]
-fn lock_table(table: &StdMutex<ConnectionTableInner>) -> MutexGuard<'_, ConnectionTableInner> {
-    match table.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
 /// Zero-count entries are removed (rather than kept at zero) so that
 /// "still live" reads as map membership with no separate bookkeeping.
 #[cfg(unix)]
@@ -201,7 +193,7 @@ impl ConnectionTable {
 
     fn note_accept(&self) -> ConnectionWireId {
         let id = ConnectionWireId(uuid::Uuid::new_v4());
-        lock_table(&self.inner).records.insert(
+        crate::lock_unpoison(&self.inner).records.insert(
             id,
             ConnectionRecord {
                 paired_device: None,
@@ -215,7 +207,7 @@ impl ConnectionTable {
     }
 
     fn note_negotiated(&self, id: &ConnectionWireId, terms: NegotiatedConnection) {
-        if let Some(record) = lock_table(&self.inner).records.get_mut(id) {
+        if let Some(record) = crate::lock_unpoison(&self.inner).records.get_mut(id) {
             record.negotiated = Some(terms);
         }
     }
@@ -238,7 +230,7 @@ impl ConnectionTable {
     /// authed connection: a superseded connection reports unauthed even
     /// though its record keeps the flag.
     fn live_for(&self, id: &ConnectionWireId, envelope: &WireEnvelope) -> LiveDecision {
-        let mut table = lock_table(&self.inner);
+        let mut table = crate::lock_unpoison(&self.inner);
         // Transport duplicate suppression first: a redelivered message id is
         // dropped before it can pin incarnation, pair, or touch any domain
         // mapping. Fresh sends — including transport retries, which always
@@ -304,7 +296,7 @@ impl ConnectionTable {
     /// request; this set-once check keeps the invariant even if such a
     /// response is emitted.
     fn note_paired(&self, id: &ConnectionWireId, device_wire: &str) {
-        let mut table = lock_table(&self.inner);
+        let mut table = crate::lock_unpoison(&self.inner);
         let Some(record) = table.records.get_mut(id) else {
             return;
         };
@@ -325,7 +317,7 @@ impl ConnectionTable {
     /// claim. An unpaired connection records nothing: acceptance without a
     /// paired device cannot happen, and failing closed here keeps it that way.
     fn note_authed(&self, id: &ConnectionWireId) {
-        let mut table = lock_table(&self.inner);
+        let mut table = crate::lock_unpoison(&self.inner);
         let Some(record) = table.records.get_mut(id) else {
             return;
         };
@@ -346,7 +338,7 @@ impl ConnectionTable {
     /// idempotent, and closing the current authed connection clears its
     /// currency entry; an entry naming a newer connection is left alone.
     fn note_closed(&self, id: &ConnectionWireId) -> (Option<String>, bool) {
-        let mut table = lock_table(&self.inner);
+        let mut table = crate::lock_unpoison(&self.inner);
         let Some(record) = table.records.remove(id) else {
             return (None, false);
         };

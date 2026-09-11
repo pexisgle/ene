@@ -6,7 +6,8 @@
 //! hide it.
 
 use super::frames::{outgoing_frame, outgoing_frame_pre_auth};
-use super::{HostHandle, LiveInput, conn_key, lock_map};
+use super::{HostHandle, LiveInput, conn_key};
+use crate::lock_unpoison;
 use ene_api::v1::envelope::ProtocolVersion;
 use ene_api::v1::handshake::{
     AuthChallenge, AuthProof, AuthResult, CapabilityAdvertise, DisconnectNotice,
@@ -117,7 +118,7 @@ impl HostHandle {
             version: ProtocolVersion::V1,
         };
         let nonce = Uuid::new_v4().as_hyphenated().to_string();
-        lock_map(&self.pending_nonces).insert(conn_key(&live.connection_id), nonce.clone());
+        lock_unpoison(&self.pending_nonces).insert(conn_key(&live.connection_id), nonce.clone());
         vec![
             outgoing_frame_pre_auth(frame, live, WirePayload::NegotiatedConnection(negotiated)),
             outgoing_frame_pre_auth(
@@ -146,7 +147,7 @@ impl HostHandle {
         proof: &AuthProof,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let nonce = lock_map(&self.pending_nonces).remove(&conn_key(&live.connection_id));
+        let nonce = lock_unpoison(&self.pending_nonces).remove(&conn_key(&live.connection_id));
         // Device attribution comes from the connection table (paired moments
         // earlier on this same connection), never from the envelope claim:
         // the proof authenticates the pending pairing the Host recorded, and
