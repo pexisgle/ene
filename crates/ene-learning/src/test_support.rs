@@ -32,6 +32,10 @@ impl FakeLearningRepository {
     pub(crate) fn current(&self) -> Vec<Memory> {
         self.memories.lock().expect("fake memory lock").clone()
     }
+
+    pub(crate) fn summaries(&self) -> Vec<SummaryRecord> {
+        self.summaries.lock().expect("fake summary lock").clone()
+    }
 }
 
 #[expect(

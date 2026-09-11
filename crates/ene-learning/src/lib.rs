@@ -21,6 +21,7 @@
 mod formation;
 mod identity;
 mod memory;
+mod relevance;
 mod repository;
 mod scope;
 mod summary;
