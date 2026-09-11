@@ -18,6 +18,7 @@ use ene_learning::{
 };
 use ene_permission::{
     CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
+    IntentFingerprint, IntentOutcomeRepository, IntentResolution,
 };
 use ene_presence::{
     ClientId, ConfirmTransitionOutcome, LiveReachabilityRef, MoveDecision, PresenceCheckRef,
@@ -492,70 +493,97 @@ fn consent_record(id: &str, rev: u64) -> ConsentRecord {
     }
 }
 
+/// Commits one consent row through the intent-atomic write path, minting a
+/// fresh intent id per call so nothing replays.
+async fn save_consent(
+    store: &Store,
+    expected: Option<(String, ConsentRevision)>,
+    record: ConsentRecord,
+) -> ConsentCommitOutcome {
+    let fingerprint = IntentFingerprint {
+        intent_id: RawId::new().as_uuid().to_string(),
+        kind: String::from("assign"),
+        target: String::from("consent:test-seed"),
+        base: String::from("consent-test-seed"),
+        rationale_origin: String::from("management-surface"),
+        rationale_quote: None,
+    };
+    match store
+        .assign_with_intent(expected, record, fingerprint)
+        .await
+        .expect("the test consent write must answer")
+    {
+        IntentResolution::Decided(outcome) => outcome,
+        IntentResolution::Replay(_) | IntentResolution::Conflict(_) => {
+            panic!("a fresh intent id must decide")
+        }
+    }
+}
+
 #[tokio::test]
-async fn consent_compare_and_save_commit_and_stale_matrix() {
+async fn consent_assign_with_intent_commit_and_stale_matrix() {
     let store = open_memory().await.unwrap();
     let empty = store.load_current(CapabilityKind::Dialogue).await;
     assert!(matches!(empty, Ok(None)), "fresh store holds no consent");
     let first = consent_record("consent-1", 3);
-    let committed = store.compare_and_save(None, first.clone()).await;
+    let committed = save_consent(&store, None, first.clone()).await;
     assert!(
         matches!(
             committed,
-            Ok(ConsentCommitOutcome::Committed { ref record }) if *record == first
+            ConsentCommitOutcome::Committed { ref record } if *record == first
         ),
         "empty store with no expectation must commit"
     );
     let loaded = store.load_current(CapabilityKind::Dialogue).await;
     assert!(matches!(loaded, Ok(Some(ref current)) if *current == first));
     let intruder = consent_record("consent-9", 1);
-    let unexpected = store.compare_and_save(None, intruder).await;
+    let unexpected = save_consent(&store, None, intruder).await;
     assert!(
         matches!(
             unexpected,
-            Ok(ConsentCommitOutcome::StaleCurrent { ref current }) if *current == Some(first.clone())
+            ConsentCommitOutcome::StaleCurrent { ref current } if *current == Some(first.clone())
         ),
         "existing row with no expectation must be stale"
     );
     let next = consent_record("consent-1", 4);
-    let recommitted = store
-        .compare_and_save(
-            Some((String::from("consent-1"), ConsentRevision::from_u64(3))),
-            next.clone(),
-        )
-        .await;
+    let recommitted = save_consent(
+        &store,
+        Some((String::from("consent-1"), ConsentRevision::from_u64(3))),
+        next.clone(),
+    )
+    .await;
     assert!(
         matches!(
             recommitted,
-            Ok(ConsentCommitOutcome::Committed { ref record }) if *record == next
+            ConsentCommitOutcome::Committed { ref record } if *record == next
         ),
         "matching expectation must commit the replacement"
     );
     let replay = consent_record("consent-1", 5);
-    let stale_rev = store
-        .compare_and_save(
-            Some((String::from("consent-1"), ConsentRevision::from_u64(3))),
-            replay,
-        )
-        .await;
+    let stale_rev = save_consent(
+        &store,
+        Some((String::from("consent-1"), ConsentRevision::from_u64(3))),
+        replay,
+    )
+    .await;
     assert!(
         matches!(
             stale_rev,
-            Ok(ConsentCommitOutcome::StaleCurrent { ref current }) if *current == Some(next.clone())
+            ConsentCommitOutcome::StaleCurrent { ref current } if *current == Some(next.clone())
         ),
         "revision mismatch must be stale"
     );
     let fork = consent_record("consent-2", 4);
-    let stale_id = store
-        .compare_and_save(
-            Some((String::from("consent-2"), ConsentRevision::from_u64(4))),
-            fork,
-        )
-        .await;
+    let stale_id = save_consent(
+        &store,
+        Some((String::from("consent-2"), ConsentRevision::from_u64(4))),
+        fork,
+    )
+    .await;
     assert!(
         matches!(
             stale_id,
-            Ok(ConsentCommitOutcome::StaleCurrent { ref current }) if *current == Some(next.clone())
+            ConsentCommitOutcome::StaleCurrent { ref current } if *current == Some(next.clone())
         ),
         "id mismatch must be stale"
     );
@@ -567,19 +595,19 @@ async fn consent_compare_and_save_commit_and_stale_matrix() {
 }
 
 #[tokio::test]
-async fn consent_compare_and_save_expected_but_empty_is_stale() {
+async fn consent_assign_with_intent_expected_but_empty_is_stale() {
     let store = open_memory().await.unwrap();
     let record = consent_record("consent-1", 1);
-    let outcome = store
-        .compare_and_save(
-            Some((String::from("consent-1"), ConsentRevision::from_u64(1))),
-            record,
-        )
-        .await;
+    let outcome = save_consent(
+        &store,
+        Some((String::from("consent-1"), ConsentRevision::from_u64(1))),
+        record,
+    )
+    .await;
     assert!(
         matches!(
             outcome,
-            Ok(ConsentCommitOutcome::StaleCurrent { current: None })
+            ConsentCommitOutcome::StaleCurrent { current: None }
         ),
         "an expectation against an empty store must be stale"
     );
@@ -1855,7 +1883,7 @@ async fn concurrent_same_id_assigns_fork_nothing() {
 #[tokio::test]
 async fn complete_with_intent_decides_atomically() {
     use ene_permission::{
-        ConsentRecord, ConsentRepository as _, ConsentRevision, IntentFingerprint, IntentOutcome,
+        ConsentRecord, ConsentRevision, IntentFingerprint, IntentOutcome,
         IntentOutcomeRepository as _, IntentResolution,
     };
 
@@ -1890,21 +1918,21 @@ async fn complete_with_intent_decides_atomically() {
         matches!(found, Ok(Some(_))),
         "the clarify decision must leave its replay row"
     );
-    let saved = store
-        .compare_and_save(
-            None,
-            ConsentRecord {
-                capability: CapabilityKind::Dialogue,
-                id: String::from("consent-1"),
-                rev: ConsentRevision::from_u64(1),
-                provider: String::from("openai"),
-                model: String::from("dialogue-1"),
-                credential_id: String::from("openai:main"),
-            },
-        )
-        .await;
+    let saved = save_consent(
+        &store,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
     assert!(
-        matches!(saved, Ok(ConsentCommitOutcome::Committed { .. })),
+        matches!(saved, ConsentCommitOutcome::Committed { .. }),
         "consent must seed"
     );
     let unready = store
@@ -1964,7 +1992,7 @@ async fn complete_with_intent_decides_atomically() {
 #[tokio::test]
 async fn shortcut_with_intent_hits_atomically() {
     use ene_permission::{
-        ConsentRecord, ConsentRepository as _, ConsentRevision, IntentFingerprint, IntentOutcome,
+        ConsentRecord, ConsentRevision, IntentFingerprint, IntentOutcome,
         IntentOutcomeRepository as _, IntentResolution, ShortcutIntentOutcome,
     };
 
@@ -1980,21 +2008,21 @@ async fn shortcut_with_intent_hits_atomically() {
     }
 
     let store = open_memory().await.unwrap();
-    let saved = store
-        .compare_and_save(
-            None,
-            ConsentRecord {
-                capability: CapabilityKind::Dialogue,
-                id: String::from("consent-1"),
-                rev: ConsentRevision::from_u64(1),
-                provider: String::from("openai"),
-                model: String::from("dialogue-1"),
-                credential_id: String::from("openai:main"),
-            },
-        )
-        .await;
+    let saved = save_consent(
+        &store,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
     assert!(
-        matches!(saved, Ok(ConsentCommitOutcome::Committed { .. })),
+        matches!(saved, ConsentCommitOutcome::Committed { .. }),
         "consent must seed"
     );
     let hit = store
@@ -2053,24 +2081,24 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
     use ene_inference::{
         AttemptBeginOutcome, InferenceAttempt, InferenceAttemptRepository as _, InferenceTicketId,
     };
-    use ene_permission::{ConsentRecord, ConsentRepository as _, ConsentRevision};
+    use ene_permission::{ConsentRecord, ConsentRevision};
 
     let store = open_memory().await.unwrap();
-    let saved = store
-        .compare_and_save(
-            None,
-            ConsentRecord {
-                capability: CapabilityKind::Dialogue,
-                id: String::from("consent-1"),
-                rev: ConsentRevision::from_u64(1),
-                provider: String::from("openai"),
-                model: String::from("dialogue-1"),
-                credential_id: String::from("openai:main"),
-            },
-        )
-        .await;
+    let saved = save_consent(
+        &store,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
     assert!(
-        matches!(saved, Ok(ConsentCommitOutcome::Committed { .. })),
+        matches!(saved, ConsentCommitOutcome::Committed { .. }),
         "consent must seed"
     );
     let claim = |ticket: InferenceTicketId, rev: u64| InferenceAttempt {
@@ -2092,21 +2120,21 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
         matches!(duplicate, Ok(AttemptBeginOutcome::Stale)),
         "re-claiming one ticket must never send twice, got {duplicate:?}"
     );
-    let moved = store
-        .compare_and_save(
-            Some((String::from("consent-1"), ConsentRevision::from_u64(1))),
-            ConsentRecord {
-                capability: CapabilityKind::Dialogue,
-                id: String::from("consent-1"),
-                rev: ConsentRevision::from_u64(2),
-                provider: String::from("openai"),
-                model: String::from("dialogue-2"),
-                credential_id: String::from("openai:main"),
-            },
-        )
-        .await;
+    let moved = save_consent(
+        &store,
+        Some((String::from("consent-1"), ConsentRevision::from_u64(1))),
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(2),
+            provider: String::from("openai"),
+            model: String::from("dialogue-2"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
     assert!(
-        matches!(moved, Ok(ConsentCommitOutcome::Committed { .. })),
+        matches!(moved, ConsentCommitOutcome::Committed { .. }),
         "consent must move"
     );
     let stale = store
@@ -3187,20 +3215,20 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
     let path = dir.path().join("race-send.db");
     let sender = Store::open(&path).await.unwrap();
     let approver = Store::open(&path).await.unwrap();
-    let seeded = sender
-        .compare_and_save(
-            None,
-            ConsentRecord {
-                capability: CapabilityKind::Dialogue,
-                id: String::from("consent-1"),
-                rev: ConsentRevision::from_u64(1),
-                provider: String::from("openai"),
-                model: String::from("dialogue-1"),
-                credential_id: String::from("openai:main"),
-            },
-        )
-        .await;
-    assert!(matches!(seeded, Ok(ConsentCommitOutcome::Committed { .. })));
+    let seeded = save_consent(
+        &sender,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
+    assert!(matches!(seeded, ConsentCommitOutcome::Committed { .. }));
     let premise = sender.current_set_revision().await.unwrap();
     approve_pair(&approver, "openai", "main", "sk-new", "reg-race-send").await;
     let claim = sender
@@ -3339,20 +3367,20 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
     let path = dir.path().join("reapprove-send.db");
     let sender = Store::open(&path).await.unwrap();
     let approver = Store::open(&path).await.unwrap();
-    let seeded = sender
-        .compare_and_save(
-            None,
-            ConsentRecord {
-                capability: CapabilityKind::Dialogue,
-                id: String::from("consent-1"),
-                rev: ConsentRevision::from_u64(1),
-                provider: String::from("openai"),
-                model: String::from("dialogue-1"),
-                credential_id: String::from("openai:main"),
-            },
-        )
-        .await;
-    assert!(matches!(seeded, Ok(ConsentCommitOutcome::Committed { .. })));
+    let seeded = save_consent(
+        &sender,
+        None,
+        ConsentRecord {
+            capability: CapabilityKind::Dialogue,
+            id: String::from("consent-1"),
+            rev: ConsentRevision::from_u64(1),
+            provider: String::from("openai"),
+            model: String::from("dialogue-1"),
+            credential_id: String::from("openai:main"),
+        },
+    )
+    .await;
+    assert!(matches!(seeded, ConsentCommitOutcome::Committed { .. }));
     approve_pair(&approver, "openai", "main", "sk-a", "reg-reapprove-send").await;
     let premise = sender.current_set_revision().await.unwrap();
     assert!(matches!(
