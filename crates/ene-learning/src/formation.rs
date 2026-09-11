@@ -32,7 +32,7 @@ use thiserror::Error;
 
 use ene_credential::{ScrubbedText, SecretScrubError, SecretScrubber};
 
-use crate::identity::{MemoryId, MemoryRevision, SourceRangeRef, SummaryId};
+use crate::identity::{MemoryId, SourceRangeRef, SummaryId};
 use crate::memory::{ChangeKind, Importance, Memory, TemporalMeaning};
 use crate::repository::{
     LearningRepository, LearningTechnicalError, MemoryChange, MemoryChangeCommit,
@@ -150,40 +150,16 @@ pub struct ExperienceCandidate {
     pub correspondence: ExperienceCorrespondence,
 }
 
-/// One change the formation applied or rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FormationChange {
-    Applied {
-        memory: MemoryId,
-        revision: MemoryRevision,
-    },
-    Rejected {
-        memory: MemoryId,
-        reason: ChangeRejection,
-    },
-}
-
-/// Why a proposed change was not applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChangeRejection {
-    StaleTarget,
-    MissingTarget,
-    ScopeMismatch,
-    AlreadyExists,
-    RevisionExhausted,
-}
-
 /// What one formation pass decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormationDecision {
     /// Summary evidence was stored and at least one Memory change applied.
-    Formed {
-        summary: SummaryId,
-        changes: Vec<FormationChange>,
-    },
-    /// Every proposed change lost its compare-before-commit, so no Summary
-    /// evidence was stored and no newer recognition was touched.
-    RejectedAsStale { changes: Vec<FormationChange> },
+    Formed { summary: SummaryId },
+    /// No proposed change was applied: every compare-before-commit lost, or
+    /// the target was missing, out of scope, already present, or its
+    /// revision exhausted. Nothing was stored and no newer recognition was
+    /// touched.
+    NoChangesApplied,
     /// The model judged the experience not worth keeping; nothing was stored.
     DeclinedAsNoEndValue,
     /// The answer could not be interpreted as the semantic schema, or
@@ -289,7 +265,6 @@ pub async fn form_experience(
     // registration between two pieces would otherwise let an earlier piece
     // carry the newly registered value into storage.
     let mut prepared = Vec::new();
-    let mut changes = Vec::new();
     let mut applied = false;
     for proposal in proposals {
         let content = scrubber
@@ -331,31 +306,8 @@ pub async fn form_experience(
                 },
             })
             .await?;
-        changes.push(match outcome {
-            MemoryChangeOutcome::Committed { memory, revision } => {
-                applied = true;
-                FormationChange::Applied { memory, revision }
-            }
-            MemoryChangeOutcome::StaleTarget { memory, .. } => FormationChange::Rejected {
-                memory,
-                reason: ChangeRejection::StaleTarget,
-            },
-            MemoryChangeOutcome::MissingTarget { memory } => FormationChange::Rejected {
-                memory,
-                reason: ChangeRejection::MissingTarget,
-            },
-            MemoryChangeOutcome::ScopeMismatch { memory } => FormationChange::Rejected {
-                memory,
-                reason: ChangeRejection::ScopeMismatch,
-            },
-            MemoryChangeOutcome::AlreadyExists { memory } => FormationChange::Rejected {
-                memory,
-                reason: ChangeRejection::AlreadyExists,
-            },
-            MemoryChangeOutcome::RevisionExhausted { memory } => FormationChange::Rejected {
-                memory,
-                reason: ChangeRejection::RevisionExhausted,
-            },
+        match outcome {
+            MemoryChangeOutcome::Committed { .. } => applied = true,
             MemoryChangeOutcome::StaleCredentialSet => {
                 // The set moved after the scrub: the prepared content may
                 // carry the newly registered value. Refuse the whole pass
@@ -365,15 +317,17 @@ pub async fn form_experience(
                     reason: String::from("credential set moved during formation"),
                 });
             }
-        });
+            // Stale / missing / scope / duplicate / exhausted rejections leave
+            // `applied` false; the decision reports that nothing applied.
+            _ => {}
+        }
     }
     if applied {
         return Ok(FormationDecision::Formed {
             summary: summary_id,
-            changes,
         });
     }
-    Ok(FormationDecision::RejectedAsStale { changes })
+    Ok(FormationDecision::NoChangesApplied)
 }
 
 async fn build_prompt(
@@ -667,7 +621,7 @@ mod tests {
 
     use crate::formation::{
         ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
-        FormationChange, FormationDecision, LearningInferenceError, form_experience,
+        FormationDecision, LearningInferenceError, form_experience,
     };
     use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
     use crate::repository::{LearningRepository, LearningTechnicalError};
@@ -719,15 +673,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let FormationDecision::Formed { summary, changes } = decision else {
+        let FormationDecision::Formed { summary } = decision else {
             panic!("a useful experience must form");
         };
-        assert_eq!(changes.len(), 1);
-        let FormationChange::Applied { memory, revision } = changes[0] else {
-            panic!("the new memory must apply");
+        let memories = repository.current();
+        let [stored] = memories.as_slice() else {
+            panic!("exactly the new memory must be stored: {memories:?}");
         };
-        assert_eq!(revision, MemoryRevision::initial());
-        let revisions = repository.list_memory_revisions(memory).await.unwrap();
+        let revisions = repository.list_memory_revisions(stored.id).await.unwrap();
+        assert_eq!(stored.revision, MemoryRevision::initial());
         assert_eq!(revisions[0].content, "The owner likes jasmine tea.");
         assert_eq!(revisions[0].scope, LearningScope::companion(companion));
         assert_eq!(revisions[0].importance.as_u8(), 4);
@@ -975,7 +929,7 @@ mod consolidation_tests {
 
     use crate::formation::{
         ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceTurn,
-        FormationChange, FormationDecision, MAX_FORMATION_CHANGES, form_experience,
+        FormationDecision, MAX_FORMATION_CHANGES, form_experience,
     };
     use crate::identity::{ExperienceSourceKind, MemoryRevision, SourceRangeRef};
     use crate::memory::ChangeKind;
@@ -1141,13 +1095,10 @@ mod consolidation_tests {
         let decision = form_experience(&repository, &inference, &scrubber(), candidate(companion))
             .await
             .unwrap();
-        let FormationDecision::RejectedAsStale { changes } = decision else {
-            panic!("a moved target must reject the stale formation, got {decision:?}");
-        };
-        assert!(matches!(
-            changes.as_slice(),
-            [FormationChange::Rejected { .. }]
-        ));
+        assert!(
+            matches!(decision, FormationDecision::NoChangesApplied),
+            "a moved target must reject the stale formation, got {decision:?}"
+        );
         let revisions = repository.list_memory_revisions(memory).await.unwrap();
         assert_eq!(
             revisions.last().unwrap().content,
