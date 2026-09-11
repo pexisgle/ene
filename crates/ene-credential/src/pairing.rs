@@ -116,11 +116,6 @@ pub trait DevicePairingRepository: Send + Sync {
         descriptor: &str,
     ) -> Result<Option<(DeviceRecord, String)>, CredentialTechnicalError>;
 
-    async fn find_device(
-        &self,
-        id: &DeviceId,
-    ) -> Result<Option<DeviceRecord>, CredentialTechnicalError>;
-
     /// The only durable wire-to-domain resolution: callers holding an
     /// opaque wire string (proof verification, sender attribution) resolve
     /// it here instead of parsing or deriving it.

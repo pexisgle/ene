@@ -5,9 +5,10 @@ use ene_companion::{
     ReportStatusTransition, RoundIntentMark, UndeliveredRef, UndeliveredRepository,
 };
 use ene_credential::{
-    CredentialApprovalRepository, CredentialRef, CredentialRefRepository, CredentialSetRepository,
-    CredentialSetRevision, DeviceId, DevicePairingRepository, DevicePairingStatus,
-    MemoryCredentialStore,
+    CredentialApprovalRepository, CredentialIntentRepository as _, CredentialRef,
+    CredentialRefRepository, CredentialSetRepository, CredentialSetRevision, DeviceId,
+    DevicePairingRepository, DevicePairingStatus, MemoryCredentialStore, RegistrationApply,
+    RegistrationFingerprint, RegistrationState,
 };
 use ene_inference::{InferenceTicketId, UsageFact, UsageRepository, UsageSource};
 use ene_learning::{
@@ -31,6 +32,48 @@ fn fixture_clock() -> WallClockWithTz {
     } else {
         WallClockWithTz::now()
     }
+}
+
+/// Builds the durable fingerprint for one credential-registration intent.
+fn registration_fingerprint(
+    intent_id: &str,
+    provider: &str,
+    label: &str,
+) -> RegistrationFingerprint {
+    RegistrationFingerprint {
+        intent_id: intent_id.to_owned(),
+        kind: String::from("register"),
+        target: format!("credential:{provider}:{label}"),
+        base: String::from("consent-none"),
+        rationale_origin: String::from("management-surface"),
+        rationale_quote: None,
+    }
+}
+
+/// Registers one pair through the production register-then-approve path: the
+/// registration intent records the pending row and the approval write creates
+/// the usable ref with the sweep.
+async fn approve_pair(store: &Store, provider: &str, label: &str, bearer: &str, intent_id: &str) {
+    let applied = store
+        .request_registration_with_intent(
+            provider.to_owned(),
+            label.to_owned(),
+            registration_fingerprint(intent_id, provider, label),
+        )
+        .await;
+    assert_eq!(
+        applied,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::HeldByOperation
+        )),
+        "a fresh pair must pend Owner approval"
+    );
+    assert!(
+        store
+            .approve_credential_with_sweep(provider, label, bearer)
+            .expect("the approval write must commit"),
+        "the approval makes the pair usable"
+    );
 }
 
 fn history_command(
@@ -558,19 +601,17 @@ async fn consent_compare_and_save_expected_but_empty_is_stale() {
 }
 
 #[tokio::test]
-async fn credential_save_load_and_list() {
+async fn credential_register_and_list() {
     let store = open_memory().await.unwrap();
-    let missing = store.load_ref("acme", "main").await;
-    assert!(matches!(missing, Ok(None)), "fresh store holds no refs");
+    let listed_empty = store.list_refs().await;
+    assert!(
+        matches!(listed_empty, Ok(ref refs) if refs.is_empty()),
+        "fresh store holds no refs"
+    );
     let cred = CredentialRef::new("acme", "main").expect("valid test fixture");
-    let saved = store.save_ref(cred.clone()).await;
-    assert!(saved.is_ok(), "ref save must succeed");
-    let loaded = store.load_ref("acme", "main").await;
-    let found = loaded.unwrap().unwrap();
-    assert_eq!(found, cred, "ref must round-trip");
+    approve_pair(&store, "acme", "main", "sk-main", "reg-list-1").await;
     let second = CredentialRef::new("acme", "backup").expect("valid test fixture");
-    let saved_second = store.save_ref(second.clone()).await;
-    assert!(saved_second.is_ok(), "second ref save must succeed");
+    approve_pair(&store, "acme", "backup", "sk-backup", "reg-list-2").await;
     let listed = store.list_refs().await;
     let refs = listed.unwrap();
     assert_eq!(refs.len(), 2, "both refs must list");
@@ -1120,7 +1161,7 @@ INSERT INTO _schema_version (version) VALUES (2);",
 #[tokio::test]
 async fn device_request_approve_find_and_list() {
     let store = open_memory().await.unwrap();
-    let missing = store.find_device(&DeviceId(RawId::new())).await;
+    let missing = store.find_device_by_wire("no-such-wire").await;
     assert!(matches!(missing, Ok(None)), "fresh store pairs nothing");
     let listed_empty = DevicePairingRepository::list_pending(&store).await;
     assert!(
@@ -1178,10 +1219,10 @@ async fn device_request_approve_find_and_list() {
     let remaining = pending_after.unwrap();
     assert_eq!(remaining.len(), 1, "approval must drain one entry");
     assert_eq!(remaining[0].descriptor.as_str(), "tablet");
-    let found = store.find_device(&device.id).await;
+    let found = store.find_device_by_wire(&device.wire).await;
     assert!(
         matches!(found, Ok(Some(ref stored)) if *stored == device),
-        "approved device must be findable by id"
+        "approved device must be findable by wire"
     );
     let again = store.request_pairing(String::from("phone")).await;
     assert!(
@@ -1436,7 +1477,7 @@ async fn migration_v3_reopen_keeps_pairing_state() {
     drop(first);
     let reopened = Store::open(&path).await;
     let second = reopened.unwrap();
-    let found = second.find_device(&device.id).await;
+    let found = second.find_device_by_wire(&device.wire).await;
     assert!(
         matches!(found, Ok(Some(ref stored)) if *stored == device),
         "paired device must survive reopen"
@@ -1463,83 +1504,87 @@ async fn migration_v3_reopen_keeps_pairing_state() {
 }
 
 #[tokio::test]
-async fn credential_approval_request_approve_usable_cycle() {
+async fn credential_registration_pends_until_approved() {
     let store = open_memory().await.unwrap();
-    let unknown_approve =
-        CredentialApprovalRepository::approve_pending(&store, "acme", "nope").await;
-    assert!(
-        matches!(unknown_approve, Ok(false)),
-        "approving an unknown pair must yield false"
-    );
-    let unknown_flag = store.is_approved("acme", "nope").await;
-    assert!(
-        matches!(unknown_flag, Ok(false)),
-        "unknown pair must not read as approved"
-    );
+    let unknown = store
+        .approve_credential_with_sweep("acme", "nope", "sk-nope")
+        .expect("an unknown pair is not an error");
+    assert!(!unknown, "approving an unknown pair must yield false");
     let listed_empty = CredentialApprovalRepository::list_pending(&store).await;
     assert!(
         matches!(listed_empty, Ok(ref items) if items.is_empty()),
         "fresh store pends no credential approvals"
     );
     let requested = store
-        .request_approval(String::from("acme"), String::from("main"))
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("main"),
+            registration_fingerprint("reg-cycle-1", "acme", "main"),
+        )
         .await;
-    assert!(
-        matches!(requested, Ok(true)),
+    assert_eq!(
+        requested,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::HeldByOperation
+        )),
         "first request must record a pending entry"
     );
-    let rerequested = store
-        .request_approval(String::from("acme"), String::from("main"))
+    let repeated = store
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("main"),
+            registration_fingerprint("reg-cycle-2", "acme", "main"),
+        )
         .await;
-    assert!(
-        matches!(rerequested, Ok(false)),
-        "repeat request must not record again"
+    assert_eq!(
+        repeated,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::HeldByOperation
+        )),
+        "a repeat request must not double-record the pair"
     );
     let listed = CredentialApprovalRepository::list_pending(&store).await;
     let items = listed.unwrap();
     assert_eq!(items.len(), 1, "one approval must pend");
     assert_eq!(items[0].provider.as_str(), "acme");
     assert_eq!(items[0].label.as_str(), "main");
-    let flagged_pending = store.is_approved("acme", "main").await;
+    let refs_before = store.list_refs().await;
     assert!(
-        matches!(flagged_pending, Ok(false)),
-        "pending-only pair must not read as approved"
+        matches!(refs_before, Ok(ref refs) if refs.is_empty()),
+        "a pending-only pair must not read as usable"
     );
-    let approved = CredentialApprovalRepository::approve_pending(&store, "acme", "main").await;
-    assert!(
-        matches!(approved, Ok(true)),
-        "approval of a pending pair must succeed"
-    );
+    let approved = store
+        .approve_credential_with_sweep("acme", "main", "sk-main")
+        .expect("approval must commit");
+    assert!(approved, "approval of a pending pair must succeed");
     let drained = CredentialApprovalRepository::list_pending(&store).await;
     assert!(
         matches!(drained, Ok(ref items) if items.is_empty()),
         "approval must drain the pending entry"
     );
-    let flagged_before_ref = store.is_approved("acme", "main").await;
-    assert!(
-        matches!(flagged_before_ref, Ok(true)),
+    let refs = store.list_refs().await.unwrap();
+    assert_eq!(
+        refs,
+        vec![CredentialRef::new("acme", "main").expect("valid test fixture")],
         "approval atomically records the usable ref in the same transaction"
     );
-    let saved = store
-        .save_ref(CredentialRef::new("acme", "main").expect("valid test fixture"))
-        .await;
-    assert!(saved.is_ok(), "usable ref save must succeed");
-    let flagged = store.is_approved("acme", "main").await;
-    assert!(
-        matches!(flagged, Ok(true)),
-        "pair with a stored ref must read as approved"
-    );
-    let reapproved = CredentialApprovalRepository::approve_pending(&store, "acme", "main").await;
-    assert!(
-        matches!(reapproved, Ok(true)),
-        "re-approving a usable pair must stay true"
-    );
+    let reapproved = store
+        .approve_credential_with_sweep("acme", "main", "sk-main")
+        .expect("re-approval must commit");
+    assert!(reapproved, "re-approving a usable pair must stay true");
     let again = store
-        .request_approval(String::from("acme"), String::from("main"))
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("main"),
+            registration_fingerprint("reg-cycle-3", "acme", "main"),
+        )
         .await;
-    assert!(
-        matches!(again, Ok(false)),
-        "request after usable must not record"
+    assert_eq!(
+        again,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::AppliedAsOneTime
+        )),
+        "request after usable must answer from the usable ref"
     );
     let listed_after = CredentialApprovalRepository::list_pending(&store).await;
     assert!(
@@ -2118,83 +2163,43 @@ async fn begin_claims_started_rejects_moved_and_duplicate() {
 }
 
 #[tokio::test]
-async fn credential_approval_blank_inputs_are_absent() {
+async fn credential_registration_blank_inputs_are_absent() {
     let store = open_memory().await.unwrap();
-    let blank_provider = store
-        .request_approval(String::new(), String::from("main"))
-        .await;
-    assert!(
-        matches!(blank_provider, Ok(false)),
-        "blank provider must record nothing"
-    );
-    let whitespace_provider = store
-        .request_approval(String::from("   "), String::from("main"))
-        .await;
-    assert!(
-        matches!(whitespace_provider, Ok(false)),
-        "whitespace provider must record nothing"
-    );
-    let blank_label = store
-        .request_approval(String::from("acme"), String::new())
-        .await;
-    assert!(
-        matches!(blank_label, Ok(false)),
-        "blank label must record nothing"
-    );
-    let whitespace_label = store
-        .request_approval(String::from("acme"), String::from("  "))
-        .await;
-    assert!(
-        matches!(whitespace_label, Ok(false)),
-        "whitespace label must record nothing"
-    );
-    let both_blank = store.request_approval(String::new(), String::new()).await;
-    assert!(
-        matches!(both_blank, Ok(false)),
-        "blank pair must record nothing"
-    );
+    for (provider, label) in [
+        ("", "main"),
+        ("   ", "main"),
+        ("acme", ""),
+        ("acme", "  "),
+        ("", ""),
+    ] {
+        let requested = store
+            .request_registration_with_intent(
+                provider.to_owned(),
+                label.to_owned(),
+                registration_fingerprint("reg-blank", provider, label),
+            )
+            .await;
+        assert!(
+            requested.is_err(),
+            "blank pair {provider:?}:{label:?} must be rejected"
+        );
+        let approved = store
+            .approve_credential_with_sweep(provider, label, "sk-blank")
+            .expect("blank input is absent, not an error");
+        assert!(
+            !approved,
+            "blank pair {provider:?}:{label:?} must never approve"
+        );
+    }
     let listed = CredentialApprovalRepository::list_pending(&store).await;
     assert!(
         matches!(listed, Ok(ref items) if items.is_empty()),
         "blank requests must leave pending empty"
     );
-    let approve_blank_provider =
-        CredentialApprovalRepository::approve_pending(&store, "", "main").await;
+    let refs = store.list_refs().await;
     assert!(
-        matches!(approve_blank_provider, Ok(false)),
-        "blank approve must yield false"
-    );
-    let approve_blank_label =
-        CredentialApprovalRepository::approve_pending(&store, "acme", "   ").await;
-    assert!(
-        matches!(approve_blank_label, Ok(false)),
-        "whitespace approve must yield false"
-    );
-    let approve_both_blank =
-        CredentialApprovalRepository::approve_pending(&store, "  ", "  ").await;
-    assert!(
-        matches!(approve_both_blank, Ok(false)),
-        "blank pair approve must yield false"
-    );
-    let flagged_blank = store.is_approved("", "main").await;
-    assert!(
-        matches!(flagged_blank, Ok(false)),
-        "blank pair must never read as approved"
-    );
-    let flagged_blank_label = store.is_approved("acme", "").await;
-    assert!(
-        matches!(flagged_blank_label, Ok(false)),
-        "blank label must never read as approved"
-    );
-    let flagged_both_blank = store.is_approved("   ", "  ").await;
-    assert!(
-        matches!(flagged_both_blank, Ok(false)),
-        "whitespace pair must never read as approved"
-    );
-    let listed_after = CredentialApprovalRepository::list_pending(&store).await;
-    assert!(
-        matches!(listed_after, Ok(ref items) if items.is_empty()),
-        "blank approves must record nothing"
+        matches!(refs, Ok(ref refs) if refs.is_empty()),
+        "blank requests must leave the usable refs empty"
     );
 }
 
@@ -2206,29 +2211,20 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     let opened = Store::open(&path).await;
     let first = opened.unwrap();
     let pending_requested = first
-        .request_approval(String::from("acme"), String::from("pending"))
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("pending"),
+            registration_fingerprint("reg-v4-pending", "acme", "pending"),
+        )
         .await;
-    assert!(
-        matches!(pending_requested, Ok(true)),
+    assert_eq!(
+        pending_requested,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::HeldByOperation
+        )),
         "pending request must record"
     );
-    let usable_requested = first
-        .request_approval(String::from("acme"), String::from("usable"))
-        .await;
-    assert!(
-        matches!(usable_requested, Ok(true)),
-        "usable request must record"
-    );
-    let usable_approved =
-        CredentialApprovalRepository::approve_pending(&first, "acme", "usable").await;
-    assert!(
-        matches!(usable_approved, Ok(true)),
-        "usable approval must succeed"
-    );
-    let usable_saved = first
-        .save_ref(CredentialRef::new("acme", "usable").expect("valid test fixture"))
-        .await;
-    assert!(usable_saved.is_ok(), "usable ref save must succeed");
+    approve_pair(&first, "acme", "usable", "sk-usable", "reg-v4-usable").await;
     drop(first);
     let reopened = Store::open(&path).await;
     let second = reopened.unwrap();
@@ -2237,28 +2233,33 @@ async fn migration_v4_reopen_keeps_credential_approval_rows() {
     assert_eq!(items.len(), 1, "pending row must survive reopen");
     assert_eq!(items[0].provider.as_str(), "acme");
     assert_eq!(items[0].label.as_str(), "pending");
-    let usable_flag = second.is_approved("acme", "usable").await;
+    let refs = second.list_refs().await.unwrap();
     assert!(
-        matches!(usable_flag, Ok(true)),
+        refs.contains(&CredentialRef::new("acme", "usable").expect("valid test fixture")),
         "usable ref must survive reopen"
     );
-    let pending_flag = second.is_approved("acme", "pending").await;
     assert!(
-        matches!(pending_flag, Ok(false)),
+        !refs.contains(&CredentialRef::new("acme", "pending").expect("valid test fixture")),
         "pending-only pair must stay unapproved after reopen"
     );
     let rerequest = second
-        .request_approval(String::from("acme"), String::from("pending"))
+        .request_registration_with_intent(
+            String::from("acme"),
+            String::from("pending"),
+            registration_fingerprint("reg-v4-pending-2", "acme", "pending"),
+        )
         .await;
-    assert!(
-        matches!(rerequest, Ok(false)),
+    assert_eq!(
+        rerequest,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::HeldByOperation
+        )),
         "pending state must survive reopen"
     );
-    let reapprove = CredentialApprovalRepository::approve_pending(&second, "acme", "usable").await;
-    assert!(
-        matches!(reapprove, Ok(true)),
-        "usable state must survive reopen"
-    );
+    let reapprove = second
+        .approve_credential_with_sweep("acme", "usable", "sk-usable")
+        .expect("re-approval must commit");
+    assert!(reapprove, "usable state must survive reopen");
     let guard = match second.conn.lock() {
         Ok(locked) => locked,
         Err(poisoned) => poisoned.into_inner(),
@@ -2312,28 +2313,12 @@ async fn restart_keeps_timeline_intact() {
 
 #[tokio::test]
 async fn registration_intent_decides_held_then_already_decided() {
-    use ene_credential::{
-        CredentialIntentRepository as _, RegistrationApply, RegistrationFingerprint,
-        RegistrationState,
-    };
-
-    fn fingerprint(id: &str) -> RegistrationFingerprint {
-        RegistrationFingerprint {
-            intent_id: id.to_owned(),
-            kind: String::from("register"),
-            target: String::from("credential:acme:main"),
-            base: String::from("consent-none"),
-            rationale_origin: String::from("management-surface"),
-            rationale_quote: None,
-        }
-    }
-
     let store = open_memory().await.unwrap();
     let first = store
         .request_registration_with_intent(
             String::from("acme"),
             String::from("main"),
-            fingerprint("reg-1"),
+            registration_fingerprint("reg-1", "acme", "main"),
         )
         .await;
     assert_eq!(
@@ -2347,7 +2332,7 @@ async fn registration_intent_decides_held_then_already_decided() {
         .request_registration_with_intent(
             String::from("acme"),
             String::from("main"),
-            fingerprint("reg-1"),
+            registration_fingerprint("reg-1", "acme", "main"),
         )
         .await;
     assert_eq!(
@@ -2355,14 +2340,15 @@ async fn registration_intent_decides_held_then_already_decided() {
         Ok(RegistrationApply::AlreadyDecided),
         "the same intent never decides twice"
     );
-    let approved =
-        ene_credential::CredentialApprovalRepository::approve_pending(&store, "acme", "main").await;
-    assert!(matches!(approved, Ok(true)), "approval must apply");
+    let approved = store
+        .approve_credential_with_sweep("acme", "main", "sk-main")
+        .expect("approval must commit");
+    assert!(approved, "approval must apply");
     let usable = store
         .request_registration_with_intent(
             String::from("acme"),
             String::from("main"),
-            fingerprint("reg-2"),
+            registration_fingerprint("reg-2", "acme", "main"),
         )
         .await;
     assert_eq!(
@@ -3058,19 +3044,14 @@ async fn approval_sweep_redacts_history_and_learning_content() {
         committed,
         Ok(MemoryChangeOutcome::Committed { .. })
     ));
-    assert!(matches!(
-        store
-            .request_approval(String::from("openai"), String::from("main"))
-            .await,
-        Ok(true)
-    ));
-
-    assert!(
-        store
-            .approve_credential_with_sweep("openai", "main", "sk-test-only")
-            .expect("the approval sweep must commit"),
-        "the approval makes the pair usable"
-    );
+    approve_pair(
+        &store,
+        "openai",
+        "main",
+        "sk-test-only",
+        "reg-sweep-content",
+    )
+    .await;
 
     let timeline = store.load_recent_timeline(companion, 10).await.unwrap();
     assert_eq!(timeline.len(), 1);
@@ -3089,6 +3070,26 @@ async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
     let Some((companion, generation)) = running_companion(&store).await else {
         panic!("the running companion must resolve");
     };
+    let readable = CredentialRef::new("openai", "main").unwrap();
+    let unreadable = CredentialRef::new("openai", "other").unwrap();
+    // Register both refs first, then store raw content: the boundary under
+    // test is the startup sweep below.
+    approve_pair(
+        &store,
+        "openai",
+        "main",
+        "sk-legacy",
+        "reg-startup-readable",
+    )
+    .await;
+    approve_pair(
+        &store,
+        "openai",
+        "other",
+        "sk-other",
+        "reg-startup-unreadable",
+    )
+    .await;
     store
         .append_message(history_command(
             companion,
@@ -3097,10 +3098,6 @@ async fn startup_sweep_fails_closed_when_a_registered_value_is_unreadable() {
         ))
         .await
         .unwrap();
-    let readable = CredentialRef::new("openai", "main").unwrap();
-    let unreadable = CredentialRef::new("openai", "other").unwrap();
-    store.save_ref(readable.clone()).await.unwrap();
-    store.save_ref(unreadable.clone()).await.unwrap();
     let premise = store.current_set_revision().await.unwrap();
 
     // `readable` sweeps first inside the transaction, then `unreadable`
@@ -3150,16 +3147,7 @@ async fn stale_credential_set_refuses_history_append_after_approval() {
     // The writer scrubs its row under the current set premise.
     let premise = writer.current_set_revision().await.unwrap();
     // The approver concurrently sweeps + registers + bumps in one commit.
-    assert!(matches!(
-        approver
-            .request_approval(String::from("acme"), String::from("main"))
-            .await,
-        Ok(true)
-    ));
-    assert!(matches!(
-        approver.approve_credential_with_sweep("acme", "main", "sk-new"),
-        Ok(true)
-    ));
+    approve_pair(&approver, "acme", "main", "sk-new", "reg-race-history").await;
     // The writer's prepared row carries a value that just became registered;
     // the stale premise refuses it.
     let mut cmd = history_command(companion, generation, "the key is sk-new");
@@ -3185,16 +3173,7 @@ async fn stale_credential_set_refuses_memory_commit_after_approval() {
     let approver = Store::open(&path).await.unwrap();
     let companion = RawId::new();
     let premise = writer.current_set_revision().await.unwrap();
-    assert!(matches!(
-        approver
-            .request_approval(String::from("acme"), String::from("main"))
-            .await,
-        Ok(true)
-    ));
-    assert!(matches!(
-        approver.approve_credential_with_sweep("acme", "main", "sk-new"),
-        Ok(true)
-    ));
+    approve_pair(&approver, "acme", "main", "sk-new", "reg-race-learning").await;
     let memory = MemoryId::generate();
     let evidence = learning_summary(companion, "evidence says sk-new");
     let outcome = writer
@@ -3251,16 +3230,7 @@ async fn stale_credential_set_refuses_attempt_claim_after_approval() {
         .await;
     assert!(matches!(seeded, Ok(ConsentCommitOutcome::Committed { .. })));
     let premise = sender.current_set_revision().await.unwrap();
-    assert!(matches!(
-        approver
-            .request_approval(String::from("openai"), String::from("main"))
-            .await,
-        Ok(true)
-    ));
-    assert!(matches!(
-        approver.approve_credential_with_sweep("openai", "main", "sk-new"),
-        Ok(true)
-    ));
+    approve_pair(&approver, "openai", "main", "sk-new", "reg-race-send").await;
     let claim = sender
         .begin_inference_attempt(InferenceAttempt {
             ticket: InferenceTicketId(RawId::new()),
@@ -3288,16 +3258,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_history_premise() {
         panic!("the running companion must resolve");
     };
     // The value A is usable; the in-flight premise names that generation.
-    assert!(matches!(
-        approver
-            .request_approval(String::from("acme"), String::from("main"))
-            .await,
-        Ok(true)
-    ));
-    assert!(matches!(
-        approver.approve_credential_with_sweep("acme", "main", "sk-a"),
-        Ok(true)
-    ));
+    approve_pair(&approver, "acme", "main", "sk-a", "reg-reapprove-history").await;
     let premise = writer.current_set_revision().await.unwrap();
     // The Owner updates the value to B through a re-approval.
     assert!(matches!(
@@ -3339,16 +3300,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_memory_commit() {
     let writer = Store::open(&path).await.unwrap();
     let approver = Store::open(&path).await.unwrap();
     let companion = RawId::new();
-    assert!(matches!(
-        approver
-            .request_approval(String::from("acme"), String::from("main"))
-            .await,
-        Ok(true)
-    ));
-    assert!(matches!(
-        approver.approve_credential_with_sweep("acme", "main", "sk-a"),
-        Ok(true)
-    ));
+    approve_pair(&approver, "acme", "main", "sk-a", "reg-reapprove-learning").await;
     let premise = writer.current_set_revision().await.unwrap();
     assert!(matches!(
         approver.approve_credential_with_sweep("acme", "main", "sk-b"),
@@ -3423,16 +3375,7 @@ async fn reapproval_with_a_new_value_refuses_a_stale_attempt_claim() {
         )
         .await;
     assert!(matches!(seeded, Ok(ConsentCommitOutcome::Committed { .. })));
-    assert!(matches!(
-        approver
-            .request_approval(String::from("openai"), String::from("main"))
-            .await,
-        Ok(true)
-    ));
-    assert!(matches!(
-        approver.approve_credential_with_sweep("openai", "main", "sk-a"),
-        Ok(true)
-    ));
+    approve_pair(&approver, "openai", "main", "sk-a", "reg-reapprove-send").await;
     let premise = sender.current_set_revision().await.unwrap();
     assert!(matches!(
         approver.approve_credential_with_sweep("openai", "main", "sk-b"),

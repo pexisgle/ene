@@ -322,6 +322,43 @@ async fn setup_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
     .await
 }
 
+/// Seeds a usable credential ref through the production registration intent
+/// and the store-level approval write the Host-local inlet performs. A caller
+/// whose store holds no readable value passes an empty `bearer`.
+async fn register_credential(handle: &HostHandle, provider: &str, label: &str, bearer: &str) {
+    use ene_credential::{
+        CredentialIntentRepository as _, RegistrationApply, RegistrationFingerprint,
+        RegistrationState,
+    };
+
+    let fingerprint = RegistrationFingerprint {
+        intent_id: RawId::new().as_uuid().to_string(),
+        kind: String::from("register"),
+        target: format!("credential:{provider}:{label}"),
+        base: String::from("consent-none"),
+        rationale_origin: String::from("management-surface"),
+        rationale_quote: None,
+    };
+    let requested = handle
+        .store
+        .request_registration_with_intent(provider.to_owned(), label.to_owned(), fingerprint)
+        .await;
+    assert_eq!(
+        requested,
+        Ok(RegistrationApply::Decided(
+            RegistrationState::HeldByOperation
+        )),
+        "a fresh pair must pend Owner approval"
+    );
+    assert!(
+        handle
+            .store
+            .approve_credential_with_sweep(provider, label, bearer)
+            .expect("the approval write must commit"),
+        "the approval makes the pair usable"
+    );
+}
+
 async fn register_assign_complete<T: ProviderTransport>(
     handle: &HostHandle,
     live: &LiveInput,
@@ -2977,9 +3014,7 @@ async fn approving_a_credential_redacts_its_prior_occurrences() {
 #[tokio::test]
 async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
-    use ene_credential::{
-        CredentialRefRepository as _, CredentialSetRepository as _, EnvCredentialStore,
-    };
+    use ene_credential::{CredentialSetRepository as _, EnvCredentialStore};
     use ene_learning::SecretScrubber as _;
     use ene_presence::PresenceRepository as _;
     use ene_primitive::WallClockWithTz;
@@ -2989,11 +3024,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
     let first = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
         .await
         .expect("the first open must succeed");
-    first
-        .store
-        .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
-        .await
-        .expect("the ref must register");
+    register_credential(&first, "openai", "main", "test-bearer").await;
     let companion = first.store.ensure_running_companion().await.unwrap();
     let generation = first
         .store
@@ -3124,7 +3155,7 @@ async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
 #[tokio::test]
 async fn startup_with_an_unreadable_registered_value_never_opens() {
     use ene_companion::{CompanionRepository as _, HistoryRepository as _};
-    use ene_credential::{CredentialRefRepository as _, CredentialSetRepository as _};
+    use ene_credential::CredentialSetRepository as _;
     use ene_presence::PresenceRepository as _;
     use ene_primitive::WallClockWithTz;
 
@@ -3135,11 +3166,7 @@ async fn startup_with_an_unreadable_registered_value_never_opens() {
     let first = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(readable))
         .await
         .expect("the first open must succeed");
-    first
-        .store
-        .save_ref(credential.clone())
-        .await
-        .expect("the ref must register");
+    register_credential(&first, "openai", "main", "test-bearer").await;
     let companion = first.store.ensure_running_companion().await.unwrap();
     let generation = first
         .store
@@ -3227,7 +3254,7 @@ async fn startup_with_an_unreadable_registered_value_never_opens() {
 /// next start, where the sweep and revision advance bracket the new value.
 #[tokio::test]
 async fn running_host_never_re_reads_the_environment() {
-    use ene_credential::{CredentialRefRepository as _, EnvCredentialStore};
+    use ene_credential::EnvCredentialStore;
     use ene_learning::SecretScrubber as _;
     use std::cell::Cell;
 
@@ -3246,11 +3273,7 @@ async fn running_host_never_re_reads_the_environment() {
     let handle = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
         .await
         .expect("the open must succeed");
-    handle
-        .store
-        .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
-        .await
-        .expect("the ref must register");
+    register_credential(&handle, "openai", "main", "test-bearer").await;
     let scrubber = super::CredentialScrubber {
         refs: &handle.store,
         store: &handle.cred_store,
@@ -3535,9 +3558,7 @@ async fn memory_view_cursor_pages_older_memories_and_rejects_invalid_ids() {
 #[tokio::test]
 async fn memory_only_view_renders_when_setup_state_is_unreadable() {
     use ene_companion::CompanionRepository as _;
-    use ene_credential::{
-        CredentialRefRepository as _, CredentialSetRepository as _, EnvCredentialStore,
-    };
+    use ene_credential::{CredentialSetRepository as _, EnvCredentialStore};
     use ene_learning::{
         ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
         MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
@@ -3551,11 +3572,9 @@ async fn memory_only_view_renders_when_setup_state_is_unreadable() {
     let handle = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
         .await
         .expect("the open must succeed");
-    handle
-        .store
-        .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
-        .await
-        .expect("the ref must register");
+    // The ref exists while every bearer lookup fails: register with no value
+    // to sweep, which is exactly the unreadable-bearer state under test.
+    register_credential(&handle, "openai", "main", "").await;
     let saved = handle
         .store
         .compare_and_save(
