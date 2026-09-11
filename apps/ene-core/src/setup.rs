@@ -77,9 +77,9 @@ use ene_learning::{
     ChangeKind, LearningRepository, Memory, MemoryId, MemoryRevisionRecord, TemporalMeaning,
 };
 use ene_permission::{
-    AssignConsentIntent, AssignConsentResolution, CapabilityKind, ConsentRecord, ConsentRepository,
-    IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
-    IntentResolution, assign_consent, consent_view_mark,
+    AssignConsentIntent, CapabilityKind, ConsentRecord, ConsentRepository, IntentFingerprint,
+    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution, assign_consent,
+    consent_view_mark,
 };
 use ene_plugin_ipc::WireFrame;
 use ene_primitive::RawId;
@@ -502,15 +502,15 @@ impl HostHandle {
         };
         match assign_consent(&self.store, &self.store, premises).await {
             Ok(
-                AssignConsentResolution::Decided(outcome)
-                | AssignConsentResolution::Replay(IntentOutcomeRecord { outcome, .. }),
+                IntentResolution::Decided(outcome)
+                | IntentResolution::Replay(IntentOutcomeRecord { outcome, .. }),
             ) => vec![outcome_frame(
                 frame,
                 live,
                 intent,
                 Self::replayed_outcome(&outcome),
             )],
-            Ok(AssignConsentResolution::Conflict(_)) => vec![outcome_frame(
+            Ok(IntentResolution::Conflict(_)) => vec![outcome_frame(
                 frame,
                 live,
                 intent,

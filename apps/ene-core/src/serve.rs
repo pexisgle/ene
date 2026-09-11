@@ -205,9 +205,9 @@ pub(crate) fn conn_key(id: &ConnectionWireId) -> String {
 ///
 /// Interior mutability: `open_rounds` and `rounds` sit behind short `std`
 /// mutex sections (clone out before every await, never hold a guard across
-/// an await); `tracker` is a leaf async mutex (the inference `send` boundary
-/// needs `&mut` across its transport await while only touching the tracker
-/// synchronously up front, and the transport never calls back into the
+/// an await); `tracker` is a leaf async mutex (the inference dispatch
+/// boundary needs `&mut` across its transport await while only touching
+/// the tracker synchronously up front, and the transport never calls back into the
 /// handle, so no lock ordering exists); the [`Store`] carries its own lock.
 /// Nothing here is durable except through [`Store`] and the device-auth file:
 /// a restart drops every map while the database persists, and old wire round

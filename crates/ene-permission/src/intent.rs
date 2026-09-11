@@ -62,30 +62,21 @@ pub struct AssignConsentIntent {
     pub fingerprint: IntentFingerprint,
 }
 
-/// Result of one consent-assign attempt.
-///
-/// `Decided` is the fresh outcome this call recorded; `Replay`/`Conflict`
-/// carry the immutable journal row so the caller answers from durable
-/// state, never from a locally decided outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AssignConsentResolution {
-    Decided(IntentOutcome),
-    Replay(IntentOutcomeRecord),
-    Conflict(IntentOutcomeRecord),
-}
-
 /// Assigns the consent route from owner-side premises.
 ///
 /// Order: current read, mark parse (face-stale records its stale answer),
 /// credential presence (absent records a clarification), base freshness
 /// (moved records the stale answer), atomic same-route shortcut, then the
 /// compare-and-save commit that bumps the revision. Every deciding path
-/// records its journal row first, so a retry replays it.
+/// records its journal row first, so a retry replays it: `Decided` is the
+/// fresh outcome this call recorded, while `Replay`/`Conflict` carry the
+/// immutable journal row so the caller answers from durable state, never
+/// from a locally decided outcome.
 pub async fn assign_consent(
     intents: &impl IntentOutcomeRepository,
     consents: &impl ConsentRepository,
     intent: AssignConsentIntent,
-) -> Result<AssignConsentResolution, PermissionTechnicalError> {
+) -> Result<IntentResolution<IntentOutcome>, PermissionTechnicalError> {
     let current = consents.load_current(intent.capability).await?;
     let expected =
         match base_view_expectation(intent.capability, &intent.base_view, current.as_ref()) {
@@ -138,18 +129,16 @@ pub async fn assign_consent(
         .await?
     {
         IntentResolution::Decided(ShortcutIntentOutcome::Hit { current }) => {
-            return Ok(AssignConsentResolution::Decided(
-                IntentOutcome::StoredAsRuleView {
-                    revision: consent_mark(intent.capability, Some(current.rev.as_u64())),
-                },
-            ));
+            return Ok(IntentResolution::Decided(IntentOutcome::StoredAsRuleView {
+                revision: consent_mark(intent.capability, Some(current.rev.as_u64())),
+            }));
         }
-        IntentResolution::Decided(ShortcutIntentOutcome::Miss { .. }) => {}
+        IntentResolution::Decided(ShortcutIntentOutcome::Miss) => {}
         IntentResolution::Replay(stored) => {
-            return Ok(AssignConsentResolution::Replay(stored));
+            return Ok(IntentResolution::Replay(stored));
         }
         IntentResolution::Conflict(stored) => {
-            return Ok(AssignConsentResolution::Conflict(stored));
+            return Ok(IntentResolution::Conflict(stored));
         }
     }
     let next_rev = match current.as_ref() {
@@ -182,18 +171,18 @@ pub async fn assign_consent(
         .assign_with_intent(expected, record, intent.fingerprint)
         .await?
     {
-        IntentResolution::Decided(ConsentCommitOutcome::Committed { record }) => Ok(
-            AssignConsentResolution::Decided(IntentOutcome::StoredAsRuleView {
+        IntentResolution::Decided(ConsentCommitOutcome::Committed { record }) => {
+            Ok(IntentResolution::Decided(IntentOutcome::StoredAsRuleView {
                 revision: consent_mark(intent.capability, Some(record.rev.as_u64())),
-            }),
-        ),
-        IntentResolution::Decided(ConsentCommitOutcome::StaleCurrent { current }) => Ok(
-            AssignConsentResolution::Decided(IntentOutcome::StaleBaseView {
+            }))
+        }
+        IntentResolution::Decided(ConsentCommitOutcome::StaleCurrent { current }) => {
+            Ok(IntentResolution::Decided(IntentOutcome::StaleBaseView {
                 current: current_mark(intent.capability, current.as_ref()),
-            }),
-        ),
-        IntentResolution::Replay(stored) => Ok(AssignConsentResolution::Replay(stored)),
-        IntentResolution::Conflict(stored) => Ok(AssignConsentResolution::Conflict(stored)),
+            }))
+        }
+        IntentResolution::Replay(stored) => Ok(IntentResolution::Replay(stored)),
+        IntentResolution::Conflict(stored) => Ok(IntentResolution::Conflict(stored)),
     }
 }
 
@@ -205,7 +194,7 @@ async fn record_decided(
     intents: &impl IntentOutcomeRepository,
     fingerprint: IntentFingerprint,
     outcome: IntentOutcome,
-) -> Result<AssignConsentResolution, PermissionTechnicalError> {
+) -> Result<IntentResolution<IntentOutcome>, PermissionTechnicalError> {
     let answer = outcome.clone();
     let resolution = intents
         .record_intent_outcome(IntentOutcomeRecord {
@@ -214,8 +203,8 @@ async fn record_decided(
         })
         .await?;
     Ok(match resolution {
-        IntentResolution::Decided(()) => AssignConsentResolution::Decided(answer),
-        IntentResolution::Replay(stored) => AssignConsentResolution::Replay(stored),
-        IntentResolution::Conflict(stored) => AssignConsentResolution::Conflict(stored),
+        IntentResolution::Decided(()) => IntentResolution::Decided(answer),
+        IntentResolution::Replay(stored) => IntentResolution::Replay(stored),
+        IntentResolution::Conflict(stored) => IntentResolution::Conflict(stored),
     })
 }

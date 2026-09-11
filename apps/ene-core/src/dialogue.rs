@@ -274,12 +274,12 @@ fn command_conflict_detail(command: &CommandId) -> String {
     )
 }
 
-/// Admission never produces the route-mismatch or over-limit reasons; they
-/// map defensively rather than claiming a setup failure.
+/// Admission never produces the over-limit reason, which belongs to the
+/// dispatch cap; it maps defensively rather than claiming a setup failure.
 fn admission_reason(reason: NotSentReason) -> &'static str {
     match reason {
         NotSentReason::SetupIncomplete => "setup-incomplete",
-        NotSentReason::ConsentStale | NotSentReason::ConsentMismatch => "consent-stale",
+        NotSentReason::ConsentStale => "consent-stale",
         NotSentReason::NotInAllowlist => "not-in-allowlist",
         NotSentReason::EvaluationConsumed => "evaluation-consumed",
         NotSentReason::OverLimit => "unknown-reason",

@@ -10,8 +10,9 @@
 //! [`PermissionEvaluationId`] minted from the caller's [`EvaluationTracker`].
 //! The consumer must present that id exactly once (to `ene-inference`
 //! dispatch); any replay, unknown id, or fingerprint mismatch is rejected.
-//! Ask-owner and wait-for-condition revalidation are deferred: [`RevalidationNeed`]
-//! carries only the current consent, never an owner prompt.
+//! Ask-owner and wait-for-condition revalidation are deferred:
+//! [`LiveAuthorizationDecision::NeedsRevalidation`] only means reload current
+//! consent and retry, never prompt.
 //!
 //! The `(consumer, capability, purpose)` allowlist below is the closed world
 //! for this stage. Future stages may widen it, but only by extending the
@@ -24,10 +25,7 @@ use std::collections::HashMap;
 use ene_primitive::{RawId, RevisionInner};
 use thiserror::Error;
 
-pub use intent::{
-    AssignConsentIntent, AssignConsentResolution, BaseViewExpectation, assign_consent,
-    base_view_expectation,
-};
+pub use intent::{AssignConsentIntent, BaseViewExpectation, assign_consent, base_view_expectation};
 
 /// Single-use authorization token for one inference use.
 ///
@@ -37,14 +35,6 @@ pub use intent::{
 /// [`EvaluationTracker::consume`] call with the matching [`EvalFingerprint`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PermissionEvaluationId(pub RawId);
-
-/// Opaque identity of one allowlist rule.
-///
-/// Carried for audit correlation only. Rule bodies do not exist yet: the
-/// closed-world policy lives directly in [`check_live_authorization`], and a
-/// future stage may resolve a `RuleId` to a stored rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RuleId(pub RawId);
 
 /// Monotonic order of one consent identity's revisions.
 ///
@@ -121,8 +111,6 @@ impl CapabilityKind {
 pub enum PurposeKind {
     /// A normal dialogue response turn.
     DialogueResponse,
-    /// A setup-time probe checking the route works.
-    SetupProbe,
     /// Form one Experience Summary and its Memory changes.
     MemoryFormation,
 }
@@ -174,52 +162,27 @@ pub struct CheckLiveAuthorizationQuery {
     /// depends on whether stored consent exists (see
     /// [`check_live_authorization`]).
     pub expected_consent: Option<(String, ConsentRevision)>,
-    /// `false` denies everything with [`DenyCode::SetupIncomplete`],
-    /// regardless of consent state.
-    pub setup_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveAuthorizationDecision {
     /// Allowed for exactly one use under the carried evaluation id.
     AllowForThisUse(PermissionEvaluationId),
-    Deny(DenyReason),
-    /// The caller's consent view is stale; re-read and retry.
+    Deny(DenyCode),
+    /// The caller's consent view is stale; reload current consent and retry.
     ///
     /// Ask-owner and wait-for-condition variants are deliberately absent:
     /// revalidation here means reloading current consent, never prompting.
-    NeedsRevalidation(RevalidationNeed),
+    NeedsRevalidation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DenyReason {
-    pub code: DenyCode,
-    pub detail: String,
-}
-
+/// Why one live-authorization query was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DenyCode {
-    SetupIncomplete,
     /// The `(consumer, capability, purpose)` triple is outside the closed world.
     NotInAllowlist,
     /// Consent is missing or does not cover this provider/model.
     ConsentStale,
-    /// Reserved for a concurrent-supersede signal.
-    ///
-    /// The current pure policy surfaces replacement as
-    /// [`LiveAuthorizationDecision::NeedsRevalidation`] instead; this code
-    /// exists so a future mid-flight supersede detector has a stable name.
-    Superseded,
-}
-
-/// Stale-view signal: the caller must reload current consent and retry.
-///
-/// This carries only data. Owner prompts and condition waits are deferred to
-/// a future stage and must not be smuggled in here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RevalidationNeed {
-    /// Current stored consent as `(consent id, revision)`.
-    pub current_consent: (String, ConsentRevision),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,12 +222,14 @@ pub enum ConsentCommitOutcome {
     StaleCurrent { current: Option<ConsentRecord> },
 }
 
-/// Persistence boundary for the current consent record.
+/// Read boundary for the current consent record.
 ///
-/// Writes use compare-and-save: the caller passes the consent view its
-/// intent was built on, and the store commits only when that view is still
-/// current. This closes the lost-update window where two intents read the
-/// same revision and the second silently overwrites the first.
+/// This trait loads; writes go through
+/// [`IntentOutcomeRepository::assign_with_intent`], which commits only when
+/// the caller's base-view expectation still matches and records the decision
+/// atomically with the write. That closes the lost-update window where two
+/// intents read the same revision and the second silently overwrites the
+/// first.
 #[expect(
     async_fn_in_trait,
     reason = "Stage 2 contract uses native async fn; Send bounds settle with the store impl"
@@ -279,25 +244,6 @@ pub trait ConsentRepository: Send + Sync {
         &self,
         capability: CapabilityKind,
     ) -> Result<Option<ConsentRecord>, PermissionTechnicalError>;
-
-    /// Commits `record` iff `expected` still matches the stored view for the
-    /// capability carried by `record`.
-    ///
-    /// `expected` comes from the intent's base-view mark as parsed by the
-    /// caller: a `consent-{capability}-rev-N` mark carries
-    /// `Some((consent id, revision))` and a `consent-{capability}-none` mark
-    /// carries `None`.
-    ///
-    /// `None` with an existing row returns `StaleCurrent` and never
-    /// overwrites; `Some((id, rev))` with a missing row or a differing id or
-    /// revision returns `StaleCurrent`; a match stores `record` and returns
-    /// `Committed`. Callers map `StaleCurrent` to `StaleBaseView` at ingress,
-    /// re-read, and retry.
-    async fn compare_and_save(
-        &self,
-        expected: Option<(String, ConsentRevision)>,
-        record: ConsentRecord,
-    ) -> Result<ConsentCommitOutcome, PermissionTechnicalError>;
 }
 
 /// Durable intent replay for management intents.
@@ -464,7 +410,7 @@ pub enum ShortcutIntentOutcome {
     /// Route already holds: snapshot recorded, answer the current record.
     Hit { current: ConsentRecord },
     /// Route differs: answer through the normal path. Nothing recorded.
-    Miss { current: Option<ConsentRecord> },
+    Miss,
 }
 
 /// Renders one capability's consent state as a mark segment:
@@ -578,33 +524,28 @@ impl EvaluationTracker {
 ///
 /// Gates, in order:
 ///
-/// 1. `setup_complete == false` denies with [`DenyCode::SetupIncomplete`].
-/// 2. A `(consumer, capability, purpose)` triple outside the closed world
+/// 1. A `(consumer, capability, purpose)` triple outside the closed world
 ///    denies with [`DenyCode::NotInAllowlist`]. The current world is
-///    `(CompanionDialogue, Dialogue, DialogueResponse | SetupProbe)` and
+///    `(CompanionDialogue, Dialogue, DialogueResponse)` and
 ///    `(CompanionLearning, Learning, MemoryFormation)`.
-/// 3. Consent comparison: when stored consent exists and differs from
+/// 2. Consent comparison: when stored consent exists and differs from
 ///    `expected_consent`, the caller's view is stale and the decision is
-///    [`LiveAuthorizationDecision::NeedsRevalidation`] carrying the stored
-///    `(id, revision)`.
-/// 4. With no stored consent, a stored record for a different capability, or
+///    [`LiveAuthorizationDecision::NeedsRevalidation`].
+/// 3. With no stored consent, a stored record for a different capability, or
 ///    a provider/model mismatch against the stored record, the decision
 ///    denies with [`DenyCode::ConsentStale`]. A record authorizes only the
 ///    capability it names.
-/// 5. Otherwise the candidate is allowed for exactly one use: a fresh id is
+/// 4. Otherwise the candidate is allowed for exactly one use: a fresh id is
 ///    minted from `tracker` and returned in
 ///    [`LiveAuthorizationDecision::AllowForThisUse`].
+///
+/// Setup completeness is not checked here: only the caller that resolved a
+/// registered credential ref and confirmed its bearer exists builds a query.
 pub fn check_live_authorization(
     query: &CheckLiveAuthorizationQuery,
     current: Option<&ConsentRecord>,
     tracker: &mut EvaluationTracker,
 ) -> LiveAuthorizationDecision {
-    if !query.setup_complete {
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::SetupIncomplete,
-            detail: "setup has not completed".to_owned(),
-        });
-    }
     let in_allowlist = matches!(
         (
             query.candidate.consumer,
@@ -614,7 +555,7 @@ pub fn check_live_authorization(
         (
             ConsumerKind::CompanionDialogue,
             CapabilityKind::Dialogue,
-            PurposeKind::DialogueResponse | PurposeKind::SetupProbe
+            PurposeKind::DialogueResponse
         ) | (
             ConsumerKind::CompanionLearning,
             CapabilityKind::Learning,
@@ -622,40 +563,20 @@ pub fn check_live_authorization(
         )
     );
     if !in_allowlist {
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::NotInAllowlist,
-            detail: "consumer, capability, and purpose are outside the closed world".to_owned(),
-        });
+        return LiveAuthorizationDecision::Deny(DenyCode::NotInAllowlist);
     }
     let Some(record) = current else {
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::ConsentStale,
-            detail: "no current consent is stored".to_owned(),
-        });
+        return LiveAuthorizationDecision::Deny(DenyCode::ConsentStale);
     };
-    let capability_covered = record.capability == query.candidate.capability;
-    if !capability_covered {
-        let stored = record.capability.as_str();
-        let wanted = query.candidate.capability.as_str();
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::ConsentStale,
-            detail: format!("stored {stored} consent does not cover the {wanted} capability"),
-        });
+    if record.capability != query.candidate.capability {
+        return LiveAuthorizationDecision::Deny(DenyCode::ConsentStale);
     }
     let current_view = (record.id.clone(), record.rev);
-    let stale_view = query.expected_consent.as_ref() != Some(&current_view);
-    if stale_view {
-        return LiveAuthorizationDecision::NeedsRevalidation(RevalidationNeed {
-            current_consent: current_view,
-        });
+    if query.expected_consent.as_ref() != Some(&current_view) {
+        return LiveAuthorizationDecision::NeedsRevalidation;
     }
     if query.candidate.provider_ref != record.provider || query.candidate.model != record.model {
-        let provider = query.candidate.provider_ref.as_str();
-        let model = query.candidate.model.as_str();
-        return LiveAuthorizationDecision::Deny(DenyReason {
-            code: DenyCode::ConsentStale,
-            detail: format!("candidate route {provider}/{model} is not covered by current consent"),
-        });
+        return LiveAuthorizationDecision::Deny(DenyCode::ConsentStale);
     }
     let id = tracker.mint(&query.candidate);
     LiveAuthorizationDecision::AllowForThisUse(id)
@@ -699,7 +620,6 @@ mod tests {
         CheckLiveAuthorizationQuery {
             candidate: candidate(),
             expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
         }
     }
 
@@ -759,22 +679,6 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_setup_denies_before_consent() {
-        let stored = record();
-        let query = CheckLiveAuthorizationQuery {
-            setup_complete: false,
-            ..query_for(&stored)
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(decision, LiveAuthorizationDecision::Deny(_)));
-        let LiveAuthorizationDecision::Deny(reason) = decision else {
-            return;
-        };
-        assert_eq!(reason.code, DenyCode::SetupIncomplete);
-    }
-
-    #[test]
     fn stale_expected_consent_needs_revalidation() {
         let stored = record();
         let query = CheckLiveAuthorizationQuery {
@@ -785,12 +689,8 @@ mod tests {
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
         assert!(matches!(
             decision,
-            LiveAuthorizationDecision::NeedsRevalidation(_)
+            LiveAuthorizationDecision::NeedsRevalidation
         ));
-        let LiveAuthorizationDecision::NeedsRevalidation(need) = decision else {
-            return;
-        };
-        assert_eq!(need.current_consent, ("consent-1".to_owned(), stored.rev));
     }
 
     #[test]
@@ -804,7 +704,7 @@ mod tests {
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
         assert!(matches!(
             decision,
-            LiveAuthorizationDecision::NeedsRevalidation(_)
+            LiveAuthorizationDecision::NeedsRevalidation
         ));
     }
 
@@ -816,15 +716,14 @@ mod tests {
         let query = CheckLiveAuthorizationQuery {
             candidate: off,
             expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
         };
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
         assert!(matches!(decision, LiveAuthorizationDecision::Deny(_)));
-        let LiveAuthorizationDecision::Deny(reason) = decision else {
+        let LiveAuthorizationDecision::Deny(code) = decision else {
             return;
         };
-        assert_eq!(reason.code, DenyCode::ConsentStale);
+        assert_eq!(code, DenyCode::ConsentStale);
     }
 
     #[test]
@@ -834,28 +733,10 @@ mod tests {
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, None, &mut tracker);
         assert!(matches!(decision, LiveAuthorizationDecision::Deny(_)));
-        let LiveAuthorizationDecision::Deny(reason) = decision else {
+        let LiveAuthorizationDecision::Deny(code) = decision else {
             return;
         };
-        assert_eq!(reason.code, DenyCode::ConsentStale);
-    }
-
-    #[test]
-    fn setup_probe_purpose_is_within_the_closed_world() {
-        let stored = record();
-        let mut probe = candidate();
-        probe.purpose = PurposeKind::SetupProbe;
-        let query = CheckLiveAuthorizationQuery {
-            candidate: probe,
-            expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(
-            decision,
-            LiveAuthorizationDecision::AllowForThisUse(_)
-        ));
+        assert_eq!(code, DenyCode::ConsentStale);
     }
 
     fn learning_candidate() -> InferenceUseCandidate {
@@ -874,7 +755,6 @@ mod tests {
         let query = CheckLiveAuthorizationQuery {
             candidate: learning_candidate(),
             expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
         };
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
@@ -900,15 +780,13 @@ mod tests {
         let query = CheckLiveAuthorizationQuery {
             candidate: learning_candidate(),
             expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
         };
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
         assert!(
             matches!(
                 decision,
-                LiveAuthorizationDecision::Deny(ref reason)
-                    if reason.code == DenyCode::ConsentStale
+                LiveAuthorizationDecision::Deny(code) if code == DenyCode::ConsentStale
             ),
             "a dialogue consent must not authorize learning, got {decision:?}"
         );
@@ -938,15 +816,13 @@ mod tests {
             let query = CheckLiveAuthorizationQuery {
                 candidate: mixed.clone(),
                 expected_consent: Some((stored.id.clone(), stored.rev)),
-                setup_complete: true,
             };
             let mut tracker = EvaluationTracker::new();
             let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
             assert!(
                 matches!(
                     decision,
-                    LiveAuthorizationDecision::Deny(ref reason)
-                        if reason.code == DenyCode::NotInAllowlist
+                    LiveAuthorizationDecision::Deny(code) if code == DenyCode::NotInAllowlist
                 ),
                 "mixed consumer/capability/purpose must stay outside the closed world: {mixed:?}"
             );
