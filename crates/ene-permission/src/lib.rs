@@ -174,9 +174,6 @@ pub struct CheckLiveAuthorizationQuery {
     /// depends on whether stored consent exists (see
     /// [`check_live_authorization`]).
     pub expected_consent: Option<(String, ConsentRevision)>,
-    /// `false` denies everything with [`DenyCode::SetupIncomplete`],
-    /// regardless of consent state.
-    pub setup_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,7 +191,6 @@ pub enum LiveAuthorizationDecision {
 /// Why one live-authorization query was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DenyCode {
-    SetupIncomplete,
     /// The `(consumer, capability, purpose)` triple is outside the closed world.
     NotInAllowlist,
     /// Consent is missing or does not cover this provider/model.
@@ -573,30 +569,29 @@ impl EvaluationTracker {
 ///
 /// Gates, in order:
 ///
-/// 1. `setup_complete == false` denies with [`DenyCode::SetupIncomplete`].
-/// 2. A `(consumer, capability, purpose)` triple outside the closed world
+/// 1. A `(consumer, capability, purpose)` triple outside the closed world
 ///    denies with [`DenyCode::NotInAllowlist`]. The current world is
 ///    `(CompanionDialogue, Dialogue, DialogueResponse | SetupProbe)` and
 ///    `(CompanionLearning, Learning, MemoryFormation)`.
-/// 3. Consent comparison: when stored consent exists and differs from
+/// 2. Consent comparison: when stored consent exists and differs from
 ///    `expected_consent`, the caller's view is stale and the decision is
 ///    [`LiveAuthorizationDecision::NeedsRevalidation`] carrying the stored
 ///    `(id, revision)`.
-/// 4. With no stored consent, a stored record for a different capability, or
+/// 3. With no stored consent, a stored record for a different capability, or
 ///    a provider/model mismatch against the stored record, the decision
 ///    denies with [`DenyCode::ConsentStale`]. A record authorizes only the
 ///    capability it names.
-/// 5. Otherwise the candidate is allowed for exactly one use: a fresh id is
+/// 4. Otherwise the candidate is allowed for exactly one use: a fresh id is
 ///    minted from `tracker` and returned in
 ///    [`LiveAuthorizationDecision::AllowForThisUse`].
+///
+/// Setup completeness is not checked here: only the caller that resolved a
+/// registered credential ref and confirmed its bearer exists builds a query.
 pub fn check_live_authorization(
     query: &CheckLiveAuthorizationQuery,
     current: Option<&ConsentRecord>,
     tracker: &mut EvaluationTracker,
 ) -> LiveAuthorizationDecision {
-    if !query.setup_complete {
-        return LiveAuthorizationDecision::Deny(DenyCode::SetupIncomplete);
-    }
     let in_allowlist = matches!(
         (
             query.candidate.consumer,
@@ -674,7 +669,6 @@ mod tests {
         CheckLiveAuthorizationQuery {
             candidate: candidate(),
             expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
         }
     }
 
@@ -734,22 +728,6 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_setup_denies_before_consent() {
-        let stored = record();
-        let query = CheckLiveAuthorizationQuery {
-            setup_complete: false,
-            ..query_for(&stored)
-        };
-        let mut tracker = EvaluationTracker::new();
-        let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
-        assert!(matches!(decision, LiveAuthorizationDecision::Deny(_)));
-        let LiveAuthorizationDecision::Deny(code) = decision else {
-            return;
-        };
-        assert_eq!(code, DenyCode::SetupIncomplete);
-    }
-
-    #[test]
     fn stale_expected_consent_needs_revalidation() {
         let stored = record();
         let query = CheckLiveAuthorizationQuery {
@@ -791,7 +769,6 @@ mod tests {
         let query = CheckLiveAuthorizationQuery {
             candidate: off,
             expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
         };
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
@@ -823,7 +800,6 @@ mod tests {
         let query = CheckLiveAuthorizationQuery {
             candidate: probe,
             expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
         };
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
@@ -849,7 +825,6 @@ mod tests {
         let query = CheckLiveAuthorizationQuery {
             candidate: learning_candidate(),
             expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
         };
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
@@ -875,7 +850,6 @@ mod tests {
         let query = CheckLiveAuthorizationQuery {
             candidate: learning_candidate(),
             expected_consent: Some((stored.id.clone(), stored.rev)),
-            setup_complete: true,
         };
         let mut tracker = EvaluationTracker::new();
         let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
@@ -912,7 +886,6 @@ mod tests {
             let query = CheckLiveAuthorizationQuery {
                 candidate: mixed.clone(),
                 expected_consent: Some((stored.id.clone(), stored.rev)),
-                setup_complete: true,
             };
             let mut tracker = EvaluationTracker::new();
             let decision = check_live_authorization(&query, Some(&stored), &mut tracker);
