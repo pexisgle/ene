@@ -155,9 +155,11 @@ pub struct ExperienceCandidate {
 pub enum FormationDecision {
     /// Summary evidence was stored and at least one Memory change applied.
     Formed { summary: SummaryId },
-    /// Every proposed change lost its compare-before-commit, so no Summary
-    /// evidence was stored and no newer recognition was touched.
-    RejectedAsStale,
+    /// No proposed change was applied: every compare-before-commit lost, or
+    /// the target was missing, out of scope, already present, or its
+    /// revision exhausted. Nothing was stored and no newer recognition was
+    /// touched.
+    NoChangesApplied,
     /// The model judged the experience not worth keeping; nothing was stored.
     DeclinedAsNoEndValue,
     /// The answer could not be interpreted as the semantic schema, or
@@ -325,7 +327,7 @@ pub async fn form_experience(
             summary: summary_id,
         });
     }
-    Ok(FormationDecision::RejectedAsStale)
+    Ok(FormationDecision::NoChangesApplied)
 }
 
 async fn build_prompt(
@@ -1115,7 +1117,7 @@ mod consolidation_tests {
             .await
             .unwrap();
         assert!(
-            matches!(decision, FormationDecision::RejectedAsStale),
+            matches!(decision, FormationDecision::NoChangesApplied),
             "a moved target must reject the stale formation, got {decision:?}"
         );
         let current = repository
