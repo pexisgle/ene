@@ -23,7 +23,7 @@
 //! server-side domain outcomes (stale rounds, held transitions, stale base
 //! views, pending confirmations, and similar Ok-side declines).
 
-use ene_ctl::errors::{CliError, USAGE};
+use ene_ctl::errors::CliError;
 use ene_ctl::{client, cmds};
 
 use std::io::Write as _;
@@ -36,56 +36,198 @@ use ene_api::v1::round::{ConfirmPresentationWire, PresentationStatus, StreamClos
 use ene_config::paths::resolve_data_dir;
 use ene_config::typed::Config;
 
-/// Every failure is a [`CliError::Usage`] whose message ends with [`USAGE`];
-/// `--help` and `--version` are deferred to a later stage, so they are
-/// reported as unknown arguments for now.
-fn parse_args(args: &[String]) -> Result<Option<PathBuf>, CliError> {
-    let mut config: Option<PathBuf> = None;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if arg == "--config" {
-            let Some(value) = iter.next() else {
-                return Err(CliError::Usage(format!(
-                    "missing value for --config\n{USAGE}"
-                )));
-            };
-            config = Some(PathBuf::from(value));
-        } else {
-            return Err(CliError::Usage(format!("unknown argument: {arg}\n{USAGE}")));
-        }
-    }
-    Ok(config)
+/// The declarative CLI surface: argv syntax, subcommands, flags, help, and
+/// version all come from `clap`. Domain judgment (provider allowlist, target
+/// grammar, conflicts, required text) stays in this binary's validation and
+/// in the Host; the library only maps the parsed words onto `cmds` types.
+fn ene_ctl_command() -> clap::Command {
+    use clap::{Arg, ArgAction};
+
+    clap::Command::new("ene-ctl")
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("ene client control surface")
+        .subcommand_required(true)
+        .arg(
+            Arg::new("config")
+                .long("config")
+                .value_name("PATH")
+                .global(true)
+                .overrides_with("config")
+                .help("Configuration file path"),
+        )
+        .subcommand(
+            clap::Command::new("setup")
+                .about("Show the setup view or assign a provider/model route")
+                .arg(Arg::new("show").long("show").action(ArgAction::SetTrue))
+                .arg(
+                    Arg::new("learning")
+                        .long("learning")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(Arg::new("provider").long("provider").value_name("P"))
+                .arg(Arg::new("model").long("model").value_name("M")),
+        )
+        .subcommand(clap::Command::new("status").about("Show the current setup view"))
+        .subcommand(
+            clap::Command::new("send")
+                .about("Send one text input; `--` ends option parsing")
+                .arg(Arg::new("new").long("new").action(ArgAction::SetTrue))
+                .arg(Arg::new("round").long("round").value_name("ROUND"))
+                .arg(
+                    Arg::new("text")
+                        .value_name("TEXT")
+                        .num_args(1..)
+                        .trailing_var_arg(true),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("watch")
+                .about("Print one round's restored History items")
+                .arg(
+                    Arg::new("round")
+                        .long("round")
+                        .value_name("ROUND")
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("history")
+                .about("Print the restored Conversation History")
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u64))
+                        .default_value("50"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("memory")
+                .about("Read the current Memory list or one Memory's revisions")
+                .arg(Arg::new("after").long("after").value_name("ID"))
+                .arg(Arg::new("revisions").long("revisions").value_name("ID"))
+                .arg(
+                    Arg::new("after-revision")
+                        .long("after-revision")
+                        .value_name("N")
+                        .value_parser(clap::value_parser!(u64)),
+                ),
+        )
 }
 
 struct Cli {
-    /// `--config PATH`; must precede the subcommand.
+    /// `--config PATH`, accepted before or after the subcommand.
     config: Option<PathBuf>,
     command: cmds::Command,
 }
 
-/// A `--config` after the subcommand word belongs to the subcommand and is
-/// rejected as an unknown subcommand argument.
-fn parse_cli(args: &[String]) -> Result<Cli, CliError> {
-    let mut split = 0;
-    while split < args.len() {
-        if args[split] == "--config" {
-            split += 1;
-            if args.get(split).is_none() {
-                return Err(CliError::Usage(format!(
-                    "missing value for --config\n{USAGE}"
+fn usage_error(message: impl Into<String>) -> CliError {
+    CliError::Usage(format!(
+        "{}
+run `ene-ctl --help`",
+        message.into()
+    ))
+}
+
+fn cli_from_matches(matches: clap::ArgMatches) -> Result<Cli, CliError> {
+    let config = matches.get_one::<String>("config").map(PathBuf::from);
+    let Some((name, sub)) = matches.subcommand() else {
+        return Err(usage_error("missing command"));
+    };
+    // A global `--config` after the subcommand lands on the subcommand's
+    // matches; either placement selects the same file.
+    let config = config.or_else(|| sub.get_one::<String>("config").map(PathBuf::from));
+    let command = match name {
+        "setup" => cmds::Command::Setup(setup_mode(sub)?),
+        "status" => cmds::Command::Status,
+        "send" => cmds::Command::Send(send_args(sub)?),
+        "watch" => cmds::Command::Watch {
+            round: sub
+                .get_one::<String>("round")
+                .cloned()
+                .ok_or_else(|| usage_error("watch requires --round ROUND"))?,
+        },
+        "history" => cmds::Command::History {
+            limit: *sub
+                .get_one::<u64>("limit")
+                .ok_or_else(|| usage_error("history limit has no default"))?,
+        },
+        "memory" => {
+            let after = sub.get_one::<String>("after").cloned();
+            let revisions = sub.get_one::<String>("revisions").cloned();
+            let after_revision = sub.get_one::<u64>("after-revision").copied();
+            if after.is_some() && revisions.is_some() {
+                return Err(usage_error(
+                    "--after and --revisions select different pages",
+                ));
+            }
+            if after_revision.is_some() && revisions.is_none() {
+                return Err(usage_error("--after-revision requires --revisions ID"));
+            }
+            cmds::Command::Memory {
+                after,
+                revisions,
+                after_revision,
+            }
+        }
+        other => return Err(usage_error(format!("unknown command: {other}"))),
+    };
+    Ok(Cli { config, command })
+}
+
+fn setup_mode(sub: &clap::ArgMatches) -> Result<cmds::SetupMode, CliError> {
+    let show = sub.get_flag("show");
+    let learning = sub.get_flag("learning");
+    let provider = sub.get_one::<String>("provider");
+    let model = sub.get_one::<String>("model");
+    if show {
+        if provider.is_some() || model.is_some() || learning {
+            return Err(usage_error("setup --show takes no other flags"));
+        }
+        return Ok(cmds::SetupMode::Show);
+    }
+    match (provider, model) {
+        (Some(provider), Some(model)) => {
+            if provider != cmds::SETUP_PROVIDER_OPENAI {
+                return Err(usage_error(format!(
+                    "unsupported provider: {provider} (only {})",
+                    cmds::SETUP_PROVIDER_OPENAI
                 )));
             }
-            split += 1;
-        } else {
-            break;
+            if model.is_empty() {
+                return Err(usage_error("model must not be empty"));
+            }
+            Ok(cmds::SetupMode::Assign {
+                provider: provider.clone(),
+                model: model.clone(),
+                learning,
+            })
         }
+        (None, None) => Err(usage_error(
+            "setup requires --show or --provider openai --model MODEL",
+        )),
+        _ => Err(usage_error("--provider and --model must be given together")),
     }
-    let config = parse_args(&args[..split])?;
-    if args.len() == split {
-        return Err(CliError::Usage(format!("missing command\n{USAGE}")));
+}
+
+fn send_args(sub: &clap::ArgMatches) -> Result<cmds::SendArgs, CliError> {
+    let fresh = sub.get_flag("new");
+    let round = sub.get_one::<String>("round").cloned();
+    let words: Vec<&str> = sub
+        .get_many::<String>("text")
+        .map(|values| values.map(String::as_str).collect())
+        .unwrap_or_default();
+    if fresh && round.is_some() {
+        return Err(usage_error("--new and --round must not be combined"));
     }
-    let command = cmds::parse_command(&args[split..])?;
-    Ok(Cli { config, command })
+    if words.is_empty() {
+        return Err(usage_error("send requires message text"));
+    }
+    Ok(cmds::SendArgs {
+        round,
+        fresh,
+        text: words.join(" "),
+    })
 }
 
 fn main() -> ExitCode {
@@ -106,7 +248,26 @@ fn main() -> ExitCode {
 /// (no network).
 fn run() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cli = parse_cli(&args)?;
+    let matches = match ene_ctl_command()
+        .try_get_matches_from(std::iter::once(String::from("ene-ctl")).chain(args))
+    {
+        Ok(matches) => matches,
+        // `--help` / `--version` are standard successful exits, never errors
+        // and never reach configuration or the Host.
+        Err(error)
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            error.print().map_err(|err| {
+                CliError::Transport(format!("stdout write failed: {}", err.kind()))
+            })?;
+            return Ok(());
+        }
+        Err(error) => return Err(CliError::Usage(error.to_string())),
+    };
+    let cli = cli_from_matches(matches)?;
     let cfg = Config::load(cli.config.as_deref())?;
     let language = cfg.language.clone();
     let Some(data_dir) = resolve_data_dir(&cfg) else {
@@ -387,155 +548,251 @@ fn observe_close(status: StreamClose, frames_shown: bool) -> (PresentationStatus
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
-    use super::{CliError, USAGE, parse_args, parse_cli};
+    use super::{CliError, cli_from_matches, ene_ctl_command};
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_string()).collect()
     }
 
-    #[test]
-    fn no_args_selects_no_config_file() {
-        assert!(
-            matches!(parse_args(&args(&[])), Ok(None)),
-            "no arguments must select no config file"
-        );
+    fn parse(words: &[&str]) -> Result<super::Cli, CliError> {
+        let matches = ene_ctl_command()
+            .try_get_matches_from(std::iter::once(String::from("ene-ctl")).chain(args(words)))
+            .map_err(|error| CliError::Usage(error.to_string()))?;
+        cli_from_matches(matches)
+    }
+
+    fn clap_error(words: &[&str]) -> clap::error::ErrorKind {
+        match ene_ctl_command()
+            .try_get_matches_from(std::iter::once(String::from("ene-ctl")).chain(args(words)))
+        {
+            Ok(_) => panic!("{words:?} must fail"),
+            Err(error) => error.kind(),
+        }
     }
 
     #[test]
-    fn config_flag_selects_a_file() {
-        let path = parse_args(&args(&["--config", "/tmp/ene.json"]))
-            .expect("--config with a value must succeed")
-            .expect("--config must select a file");
-        assert!(
-            path.as_path() == Path::new("/tmp/ene.json"),
-            "--config must select the given file"
-        );
-    }
-
-    #[test]
-    fn repeated_config_flag_keeps_the_last_value() {
-        let path = parse_args(&args(&[
-            "--config",
-            "/tmp/a.json",
-            "--config",
-            "/tmp/b.json",
-        ]))
-        .expect("a repeated --config must succeed")
-        .expect("a repeated --config must select a file");
-        assert!(
-            path.as_path() == Path::new("/tmp/b.json"),
-            "a repeated --config must keep the last value"
-        );
-    }
-
-    #[test]
-    fn missing_config_value_reports_usage() {
-        let super::CliError::Usage(message) = parse_args(&args(&["--config"]))
-            .expect_err("a missing --config value must be a usage error")
-        else {
-            panic!("a missing --config value must be a usage error");
-        };
-        assert!(
-            message.contains(USAGE),
-            "a missing --config value must report the usage line: {message:?}"
-        );
-    }
-
-    #[test]
-    fn unknown_argument_reports_usage() {
-        let super::CliError::Usage(message) = parse_args(&args(&["--unknown"]))
-            .expect_err("an unknown argument must be a usage error")
-        else {
-            panic!("an unknown argument must be a usage error");
-        };
-        assert!(
-            message.contains(USAGE),
-            "an unknown argument must report the usage line: {message:?}"
-        );
-    }
-
-    #[test]
-    fn positional_argument_reports_usage() {
-        let super::CliError::Usage(message) =
-            parse_args(&args(&["extra"])).expect_err("a positional argument must be a usage error")
-        else {
-            panic!("a positional argument must be a usage error");
-        };
-        assert!(
-            message.contains(USAGE),
-            "a positional argument must report the usage line: {message:?}"
-        );
-    }
-
-    #[test]
-    fn help_flag_reports_usage_while_deferred() {
-        let super::CliError::Usage(message) = parse_args(&args(&["--help"]))
-            .expect_err("--help must be a usage error while deferred")
-        else {
-            panic!("--help must be a usage error while deferred");
-        };
-        assert!(
-            message.contains(USAGE),
-            "--help must report the usage line while deferred: {message:?}"
-        );
-    }
-
-    fn assert_cli_usage(result: Result<super::Cli, CliError>, what: &str) {
-        let Err(CliError::Usage(message)) = result else {
-            panic!("{what} must be a usage error");
-        };
-        assert!(
-            message.ends_with(USAGE),
-            "{what} must end with the usage text: {message:?}"
-        );
-    }
-
-    #[test]
-    fn config_before_command_selects_both() {
-        let parsed = parse_cli(&args(&["--config", "/tmp/ene.json", "status"]));
-        assert!(parsed.is_ok(), "--config plus status must succeed");
-        let cli = parsed.ok().unwrap();
-        assert!(
-            cli.config == Some(PathBuf::from("/tmp/ene.json")),
-            "--config must select the given file"
-        );
-        assert!(
-            cli.command == super::cmds::Command::Status,
-            "the subcommand must be status, got {:?}",
-            cli.command
-        );
+    fn help_and_version_are_successful_clap_exits() {
+        assert!(matches!(
+            clap_error(&["--help"]),
+            clap::error::ErrorKind::DisplayHelp
+        ));
+        assert!(matches!(
+            clap_error(&["--version"]),
+            clap::error::ErrorKind::DisplayVersion
+        ));
+        // Subcommand help is standard too.
+        assert!(matches!(
+            clap_error(&["send", "--help"]),
+            clap::error::ErrorKind::DisplayHelp
+        ));
     }
 
     #[test]
     fn missing_command_reports_usage() {
-        assert_cli_usage(parse_cli(&args(&[])), "no arguments");
-        assert_cli_usage(
-            parse_cli(&args(&["--config", "/tmp/ene.json"])),
-            "--config without a command",
+        assert!(matches!(parse(&[]), Err(CliError::Usage(_))));
+        assert!(matches!(
+            parse(&["--config", "/tmp/ene.json"]),
+            Err(CliError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn config_is_global_and_keeps_the_last_value() {
+        let cli = parse(&["--config", "/tmp/ene.json", "status"]).expect("config plus status");
+        assert!(cli.config == Some(PathBuf::from("/tmp/ene.json")));
+        assert!(cli.command == super::cmds::Command::Status);
+        // `--config` after the subcommand is accepted as a global option.
+        let after = parse(&["status", "--config", "/tmp/ene.json"]).expect("config after status");
+        assert!(after.config == Some(PathBuf::from("/tmp/ene.json")));
+        let repeated = parse(&[
+            "--config",
+            "/tmp/a.json",
+            "--config",
+            "/tmp/b.json",
+            "status",
+        ])
+        .expect("a repeated --config keeps the last value");
+        assert!(repeated.config == Some(PathBuf::from("/tmp/b.json")));
+    }
+
+    #[test]
+    fn config_value_named_serve_stays_data() {
+        let cli = parse(&["--config", "serve", "status"]).expect("the value is not a command");
+        assert!(cli.config == Some(PathBuf::from("serve")));
+    }
+
+    #[test]
+    fn setup_forms_parse_and_invalid_combinations_report_usage() {
+        let show = parse(&["setup", "--show"]).expect("setup --show");
+        assert!(show.command == super::cmds::Command::Setup(super::cmds::SetupMode::Show));
+        let assign = parse(&["setup", "--provider", "openai", "--model", "gpt-x"])
+            .expect("setup assignment");
+        assert!(
+            assign.command
+                == super::cmds::Command::Setup(super::cmds::SetupMode::Assign {
+                    provider: String::from("openai"),
+                    model: String::from("gpt-x"),
+                    learning: false,
+                })
         );
+        let learning = parse(&[
+            "setup",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-x",
+            "--learning",
+        ])
+        .expect("learning assignment");
+        assert!(matches!(
+            learning.command,
+            super::cmds::Command::Setup(super::cmds::SetupMode::Assign { learning: true, .. })
+        ));
+        for words in [
+            &["setup"][..],
+            &["setup", "--provider", "openai"][..],
+            &[
+                "setup",
+                "--show",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-x",
+            ][..],
+            &["setup", "--provider", "acme", "--model", "gpt-x"][..],
+            &["setup", "--provider", "openai", "--model", ""][..],
+            &["setup", "--unknown"][..],
+        ] {
+            assert!(
+                matches!(parse(words), Err(CliError::Usage(_))),
+                "{words:?} must be a usage error"
+            );
+        }
     }
 
     #[test]
-    fn config_after_command_reports_usage() {
-        assert_cli_usage(
-            parse_cli(&args(&["status", "--config", "/tmp/ene.json"])),
-            "--config after the subcommand",
+    fn send_forms_parse_and_end_of_options_carries_option_like_text() {
+        let joined = parse(&["send", "hello", "world"]).expect("send text");
+        assert!(
+            joined.command
+                == super::cmds::Command::Send(super::cmds::SendArgs {
+                    round: None,
+                    fresh: false,
+                    text: String::from("hello world"),
+                })
         );
+        let literal = parse(&["send", "--", "--foo"]).expect("send -- --foo");
+        assert!(
+            literal.command
+                == super::cmds::Command::Send(super::cmds::SendArgs {
+                    round: None,
+                    fresh: false,
+                    text: String::from("--foo"),
+                }),
+            "`--` must carry option-like text, got {:?}",
+            literal.command
+        );
+        let round = parse(&["send", "--round", "round-7", "hi"]).expect("send --round");
+        assert!(matches!(
+            round.command,
+            super::cmds::Command::Send(super::cmds::SendArgs {
+                round: Some(_),
+                fresh: false,
+                ..
+            })
+        ));
+        let fresh = parse(&["send", "--new", "hi"]).expect("send --new");
+        assert!(matches!(
+            fresh.command,
+            super::cmds::Command::Send(super::cmds::SendArgs { fresh: true, .. })
+        ));
+        for words in [
+            &["send"][..],
+            &["send", "--new", "--round", "r", "hi"][..],
+            &["send", "--round"][..],
+            &["send", "--unknown", "hi"][..],
+        ] {
+            assert!(
+                matches!(parse(words), Err(CliError::Usage(_))),
+                "{words:?} must be a usage error"
+            );
+        }
     }
 
     #[test]
-    fn top_level_missing_config_value_reports_usage() {
-        assert_cli_usage(parse_cli(&args(&["--config"])), "dangling --config");
+    fn watch_history_and_memory_forms_parse() {
+        let watch = parse(&["watch", "--round", "round-7"]).expect("watch");
+        assert!(
+            watch.command
+                == super::cmds::Command::Watch {
+                    round: String::from("round-7")
+                }
+        );
+        assert!(matches!(parse(&["watch"]), Err(CliError::Usage(_))));
+        let default = parse(&["history"]).expect("history default");
+        assert!(
+            default.command
+                == super::cmds::Command::History {
+                    limit: super::cmds::DEFAULT_HISTORY_LIMIT
+                }
+        );
+        let limited = parse(&["history", "--limit", "7"]).expect("history --limit");
+        assert!(limited.command == super::cmds::Command::History { limit: 7 });
+        assert!(matches!(
+            parse(&["history", "--limit", "soon"]),
+            Err(CliError::Usage(_))
+        ));
+        let list = parse(&["memory", "--after", "memory-1"]).expect("memory page");
+        assert!(
+            list.command
+                == super::cmds::Command::Memory {
+                    after: Some(String::from("memory-1")),
+                    revisions: None,
+                    after_revision: None,
+                }
+        );
+        let detail = parse(&[
+            "memory",
+            "--revisions",
+            "memory-1",
+            "--after-revision",
+            "20",
+        ])
+        .expect("memory revisions");
+        assert!(
+            detail.command
+                == super::cmds::Command::Memory {
+                    after: None,
+                    revisions: Some(String::from("memory-1")),
+                    after_revision: Some(20),
+                }
+        );
+        for words in [
+            &["memory", "extra"][..],
+            &["memory", "--after", "a", "--revisions", "b"][..],
+            &["memory", "--after-revision", "3"][..],
+            &["memory", "--after"][..],
+        ] {
+            assert!(
+                matches!(parse(words), Err(CliError::Usage(_))),
+                "{words:?} must be a usage error"
+            );
+        }
     }
 
     #[test]
-    fn full_command_lines_parse() {
-        let parsed = parse_cli(&args(&["send", "hello"]));
-        assert!(parsed.is_ok(), "send hello must succeed");
-        let cli = parsed.ok().unwrap();
-        assert!(cli.config.is_none(), "no --config must select no file");
+    fn unknown_flags_and_positionals_report_usage() {
+        assert!(matches!(
+            parse(&["status", "extra"]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse(&["status", "--verbose"]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(parse(&["frobnicate"]), Err(CliError::Usage(_))));
     }
 
     #[test]
