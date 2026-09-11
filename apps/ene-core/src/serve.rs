@@ -122,9 +122,9 @@ pub enum CoreError {
 /// [`CredentialStore::with_bearer`] is generic over its closure return type,
 /// so the trait is not dyn-compatible and the handle holds this closed enum
 /// instead of a trait object. [`CredStore::Env`] is the production store for
-/// the `openai` provider (the bearer lives in the process environment and is
-/// never cached); [`CredStore::Memory`] is the test and local-development
-/// store.
+/// the `openai` provider (the bearer is read from the process environment
+/// once at Host startup and pinned in memory for the run, never re-read);
+/// [`CredStore::Memory`] is the test and local-development store.
 #[derive(Debug)]
 pub enum CredStore {
     Env(EnvCredentialStore),
