@@ -240,7 +240,7 @@ pub async fn form_experience(
 ) -> Result<FormationDecision, LearningTechnicalError> {
     let scope = LearningScope::companion(candidate.companion);
     let scanned = repository
-        .list_current_memories(candidate.companion, FORMATION_SCAN_LIMIT)
+        .list_current_memories(candidate.companion, None, FORMATION_SCAN_LIMIT)
         .await?;
     let existing = select_existing(scanned, &candidate.transcript);
     let prompt = build_prompt(&existing, &candidate, scrubber).await?;

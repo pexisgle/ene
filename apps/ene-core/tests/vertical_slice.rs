@@ -766,6 +766,25 @@ async fn binaries_drive_pairing_setup_and_views() {
         matches!(history, Some((0, _, _))),
         "empty history must exit 0, got {history:?}"
     );
+
+    let memory = run_cli(
+        &ctl,
+        &["--config", &config, "memory"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(memory, Some((0, _, _))),
+        "the memory read model must exit 0, got {memory:?}"
+    );
+    let Some((_, memory_out, _)) = memory else {
+        return;
+    };
+    assert!(
+        memory_out.contains("memory: Memory"),
+        "memory must render its read-only section, got {memory_out:?}"
+    );
 }
 
 #[tokio::test]
@@ -1190,6 +1209,529 @@ async fn binaries_drive_send_stream_history_and_restart() {
         matches!(&resend, Some((0, out, _)) if out.contains(PROD_FAKE_TEXT)),
         "the restarted server must serve new sends, got {resend:?}"
     );
+    let memory = run_cli(
+        &ctl,
+        &["--config", &config, "memory"],
+        &[],
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        matches!(&memory, Some((0, out, _)) if out.contains("memory: Memory")),
+        "the real binaries must render the memory read model, got {memory:?}"
+    );
     drop(server);
     fake.abort();
+}
+
+/// Scripted provider for the Stage 3 acceptance path.
+///
+/// Dialogue calls always answer `reply`; learning calls pop the next scripted
+/// answer, or a no-value answer when the queue is empty. Every input is
+/// recorded so recall and credential non-exposure can be inspected on the
+/// production path.
+struct Stage3Transport {
+    reply: String,
+    learning: std::sync::Mutex<std::collections::VecDeque<String>>,
+    inputs: std::sync::Mutex<Vec<String>>,
+    /// One permit per completed learning provider call, so the test can wait
+    /// for post-response formation instead of racing it.
+    learning_calls: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl Stage3Transport {
+    fn new(reply: &str) -> Self {
+        Self {
+            reply: reply.to_owned(),
+            learning: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            inputs: std::sync::Mutex::new(Vec::new()),
+            learning_calls: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+        }
+    }
+
+    fn push_learning(&self, answer: &str) {
+        self.learning
+            .lock()
+            .expect("learning script lock")
+            .push_back(answer.to_owned());
+    }
+
+    /// Waits for one completed learning provider call.
+    async fn wait_learning(&self) {
+        let permit = self
+            .learning_calls
+            .acquire()
+            .await
+            .expect("the learning-call semaphore stays open");
+        permit.forget();
+    }
+
+    /// Every provider input, dialogue and learning, in order.
+    fn all_inputs(&self) -> Vec<String> {
+        self.inputs.lock().expect("provider input lock").clone()
+    }
+
+    fn dialogue_inputs(&self) -> Vec<String> {
+        self.all_inputs()
+            .into_iter()
+            .filter(|input| !input.contains("learning formation pass"))
+            .collect()
+    }
+
+    fn last_dialogue_input(&self) -> Option<String> {
+        self.dialogue_inputs().last().cloned()
+    }
+}
+
+impl ene_inference::ProviderTransport for Stage3Transport {
+    fn complete(
+        &self,
+        req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inputs
+            .lock()
+            .expect("provider input lock")
+            .push(req.input.clone());
+        let text = if req.input.contains("learning formation pass") {
+            let answer = self
+                .learning
+                .lock()
+                .expect("learning script lock")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    String::from(r#"{"summary": "Nothing worth keeping.", "memories": []}"#)
+                });
+            self.learning_calls.add_permits(1);
+            answer
+        } else {
+            self.reply.clone()
+        };
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+}
+
+/// The read-only memory section body from one management view answer.
+async fn memory_view(client: &mut Client) -> String {
+    memory_view_after(client, None).await
+}
+
+/// The memory section body after a page cursor.
+async fn memory_view_after(client: &mut Client, after: Option<&str>) -> String {
+    let answer = ask(
+        client,
+        WirePayload::ManagementViewRequest(cmds::memory_view_request(after)),
+        "memory view",
+    )
+    .await;
+    let Ok(WirePayload::ManagementView(view)) = answer else {
+        panic!("memory view must answer a view: {answer:?}");
+    };
+    view.sections
+        .iter()
+        .find(|section| section.kind == "memory")
+        .map(|section| section.body.clone())
+        .unwrap_or_default()
+}
+
+/// The `next:` page cursor of a memory section body, when older memories
+/// remain.
+fn next_memory_cursor(body: &str) -> Option<String> {
+    body.lines()
+        .find_map(|line| line.strip_prefix("next: ").map(str::to_owned))
+}
+
+fn memory_count(body: &str) -> usize {
+    body.lines()
+        .filter(|line| line.starts_with("memory "))
+        .count()
+}
+
+/// The recall section of one assembled dialogue prompt.
+fn recall_section(input: &str) -> String {
+    let Some(start) = input.find("Relevant memories:") else {
+        return String::new();
+    };
+    let rest = &input[start..];
+    let end = rest.find("Recent conversation:").unwrap_or(rest.len());
+    rest[..end].to_owned()
+}
+
+/// A fresh production-path client for one operation. Each CLI process is a
+/// fresh connection that learns the current presence generation on connect,
+/// so multi-turn fixtures reconnect like separate `ene-ctl` invocations.
+async fn stage3_client(dir: &std::path::Path) -> Client {
+    match Client::connect(dir, DESCRIPTOR, "test").await {
+        Ok(client) => client,
+        Err(error) => panic!("client must connect: {error:?}"),
+    }
+}
+
+async fn stage3_send(
+    dir: &std::path::Path,
+    text: &str,
+) -> Result<(String, Option<ene_api::v1::refs::StreamWireId>, String), String> {
+    let mut client = stage3_client(dir).await;
+    send_round(&mut client, text).await
+}
+
+async fn stage3_view(dir: &std::path::Path) -> String {
+    let mut client = stage3_client(dir).await;
+    memory_view(&mut client).await
+}
+
+async fn stage3_view_after(dir: &std::path::Path, after: Option<&str>) -> String {
+    let mut client = stage3_client(dir).await;
+    memory_view_after(&mut client, after).await
+}
+
+/// Assigns the learning capability explicitly on the production path.
+async fn stage3_assign_learning(dir: &std::path::Path) -> Result<(), String> {
+    let mut client = stage3_client(dir).await;
+    let mark = view_mark(&mut client).await?;
+    let answer = ask(
+        &mut client,
+        WirePayload::ManagementIntent(cmds::assignment_intent(
+            CommandWireId(uuid::Uuid::new_v4()),
+            &BaseViewMark(mark),
+            cmds::CAPABILITY_LEARNING,
+            "openai",
+            MODEL,
+        )),
+        "learning assign",
+    )
+    .await?;
+    match answer {
+        WirePayload::ManagementOutcome(ManagementOutcome::StoredAsRuleView { .. }) => Ok(()),
+        other => Err(format!("learning assignment must store, got {other:?}")),
+    }
+}
+
+/// The rendered Conversation History over the production path.
+async fn stage3_history(dir: &std::path::Path) -> String {
+    let mut client = stage3_client(dir).await;
+    let companion = client.companion_ref();
+    let answer = ask(
+        &mut client,
+        WirePayload::HistoryRequest(cmds::history_request(&companion, 100)),
+        "history",
+    )
+    .await;
+    let Ok(WirePayload::HistoryView(view)) = answer else {
+        panic!("history must answer a view: {answer:?}");
+    };
+    cmds::render_history(&view)
+}
+
+/// Polls the read-only Memory view until `expected` appears.
+///
+/// Formation is post-response work, so the test waits for the durable result
+/// instead of assuming it completed with the stream.
+async fn stage3_wait_for_memory(dir: &std::path::Path, expected: &str) -> String {
+    for _ in 0..100 {
+        let view = stage3_view(dir).await;
+        if view.contains(expected) {
+            return view;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let view = stage3_view(dir).await;
+    panic!("the memory view never showed {expected:?}: {view}");
+}
+
+#[tokio::test]
+async fn stage3_conversation_formation_restart_and_recall() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let handle = open_host(&dir).await.unwrap();
+    let transport = Arc::new(Stage3Transport::new(FAKE_TEXT));
+    let server = tokio::spawn(conn::run(
+        dir.clone(),
+        Arc::clone(&handle),
+        Arc::clone(&transport),
+    ));
+    assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
+
+    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
+    assert!(
+        matches!(pending, Err(CliError::ServerOutcome(_))),
+        "first pairing must pend"
+    );
+    let approver = open_host(&dir).await.unwrap();
+    let provisioned = approve_and_provision(&dir, &approver).await;
+    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
+    let mut client = stage3_client(&dir).await;
+    let setup = setup_flow(&mut client, &approver).await;
+    assert!(setup.is_ok(), "setup must complete: {setup:?}");
+    drop(client);
+    // The dialogue assignment above never authorizes learning: the Owner
+    // assigns the same route to the learning capability explicitly.
+    let assigned = stage3_assign_learning(&dir).await;
+    assert!(
+        assigned.is_ok(),
+        "learning assignment must store: {assigned:?}"
+    );
+
+    // (1) One conversation forms one compressed Memory grounded on a Summary.
+    transport.push_learning(
+        r#"{"summary": "The owner prefers jasmine tea in the morning.", "memories": [{"action": "create", "content": "The owner prefers jasmine tea in the morning.", "importance": 4, "temporal": "enduring"}]}"#,
+    );
+    let sent = stage3_send(&dir, "remember that I prefer jasmine tea in the morning").await;
+    assert!(sent.is_ok(), "the memory turn must complete: {sent:?}");
+    transport.wait_learning().await;
+    let view = stage3_wait_for_memory(&dir, "The owner prefers jasmine tea in the morning.").await;
+    assert_eq!(memory_count(&view), 1, "one memory, not one per message");
+    assert!(view.contains("scope=companion"), "companion scope: {view}");
+    assert!(view.contains("importance=4"));
+    assert!(view.contains("temporal=enduring"));
+    assert!(view.contains("recall=active"));
+    assert!(view.contains("grounds summary"), "summary grounds: {view}");
+    assert!(view.contains("rev1 initial"), "first revision: {view}");
+
+    // (2) An experience with no lasting value is not stored.
+    transport.push_learning(r#"{"summary": "Small talk about the weather.", "memories": []}"#);
+    let sent = stage3_send(&dir, "nice weather today").await;
+    assert!(sent.is_ok());
+    transport.wait_learning().await;
+    let view = stage3_view(&dir).await;
+    assert_eq!(
+        memory_count(&view),
+        1,
+        "a declined experience stores nothing"
+    );
+
+    // (3) Repeating information reinforces the existing Memory.
+    transport.push_learning(
+        r#"{"summary": "The owner mentioned tea again.", "memories": [{"action": "update", "target": 1, "change": "reinforced", "content": "The owner prefers jasmine tea in the morning."}]}"#,
+    );
+    let sent = stage3_send(&dir, "I still love jasmine tea").await;
+    assert!(sent.is_ok());
+    transport.wait_learning().await;
+    let view = stage3_wait_for_memory(&dir, "rev2 reinforced").await;
+    assert_eq!(memory_count(&view), 1, "no duplicate memory");
+
+    // (4) A correction and a temporal change stay distinguishable.
+    transport.push_learning(
+        r#"{"summary": "The owner corrected the earlier memory.", "memories": [{"action": "update", "target": 1, "change": "corrected_initially_wrong", "content": "The owner never liked jasmine tea."}]}"#,
+    );
+    let sent = stage3_send(&dir, "actually I never liked jasmine tea").await;
+    assert!(sent.is_ok());
+    transport.wait_learning().await;
+    transport.push_learning(
+        r#"{"summary": "The preference changed over time.", "memories": [{"action": "update", "target": 1, "change": "changed_since", "content": "The owner prefers coffee now."}]}"#,
+    );
+    let sent = stage3_send(&dir, "I moved on to coffee last month").await;
+    assert!(sent.is_ok());
+    transport.wait_learning().await;
+    let view = stage3_wait_for_memory(&dir, "rev4 changed-since").await;
+    assert!(view.contains("rev3 corrected-initially-wrong"), "{view}");
+    assert!(
+        view.contains("rev1 initial"),
+        "earlier revisions are kept: {view}"
+    );
+    assert!(view.contains("The owner never liked jasmine tea."));
+    assert!(view.contains("The owner prefers coffee now."));
+
+    // (5) A registered credential never reaches Summary, Memory, History, or
+    // either provider prompt, even when the owner asks to remember it and
+    // the answers echo it.
+    transport.push_learning(
+        r#"{"summary": "The owner shared a key: sk-test-only.", "memories": [{"action": "create", "content": "The owner's key is sk-test-only.", "importance": 5, "temporal": "enduring"}]}"#,
+    );
+    let sent = stage3_send(&dir, "remember my key sk-test-only").await;
+    assert!(sent.is_ok());
+    transport.wait_learning().await;
+    let view = stage3_wait_for_memory(&dir, "[credential]").await;
+    assert_eq!(memory_count(&view), 2, "the redacted memory still forms");
+    assert!(
+        !view.contains("sk-test-only"),
+        "a registered credential never reaches Memory or Summary: {view}"
+    );
+    let history = stage3_history(&dir).await;
+    assert!(
+        !history.contains("sk-test-only"),
+        "a registered credential never reaches Conversation History: {history}"
+    );
+    assert!(
+        history.contains("[credential]"),
+        "the History occurrence is visibly redacted: {history}"
+    );
+    for (position, input) in transport.all_inputs().iter().enumerate() {
+        assert!(
+            !input.contains("sk-test-only"),
+            "provider input {position} must not carry the credential"
+        );
+    }
+
+    // (6) Restart keeps Memory, revisions, and grounds.
+    server.abort();
+    tokio::task::yield_now().await;
+    drop(std::fs::remove_file(dir.join("ene.sock")));
+    let handle = open_host(&dir).await.unwrap();
+    let server = tokio::spawn(conn::run(
+        dir.clone(),
+        Arc::clone(&handle),
+        Arc::clone(&transport),
+    ));
+    assert!(wait_for_socket(&dir).await, "listener must rebind");
+    let view = stage3_view(&dir).await;
+    assert_eq!(memory_count(&view), 2, "restart keeps formed memories");
+    assert!(view.contains("rev1 initial"));
+    assert!(view.contains("rev3 corrected-initially-wrong"));
+    assert!(view.contains("rev4 changed-since"));
+    assert!(view.contains("grounds summary"));
+
+    // (7) A related conversation after restart recalls the current Memory.
+    transport.push_learning(r#"{"summary": "Nothing new.", "memories": []}"#);
+    let sent = stage3_send(&dir, "what do I drink now?").await;
+    assert!(sent.is_ok());
+    transport.wait_learning().await;
+    let input = transport
+        .last_dialogue_input()
+        .expect("the dialogue input is recorded");
+    let recalled = recall_section(&input);
+    assert!(
+        recalled.contains("coffee"),
+        "the current recognition is recalled after restart: {recalled}"
+    );
+
+    // (8) Normal forgetting suppresses recall without deleting anything.
+    transport.push_learning(
+        r#"{"summary": "The owner asked to let the drink topic rest.", "memories": [{"action": "forget", "target": 2}]}"#,
+    );
+    let sent = stage3_send(&dir, "forget about my drink preference").await;
+    assert!(sent.is_ok());
+    transport.wait_learning().await;
+    let view = stage3_wait_for_memory(&dir, "rev5 forgotten").await;
+    assert!(view.contains("recall=suppressed"), "{view}");
+    assert!(
+        view.contains("content: The owner prefers coffee now."),
+        "content is kept: {view}"
+    );
+    assert!(
+        view.contains("rev1 initial"),
+        "all revisions are kept: {view}"
+    );
+
+    transport.push_learning(r#"{"summary": "Nothing new.", "memories": []}"#);
+    let sent = stage3_send(&dir, "what do I drink now?").await;
+    assert!(sent.is_ok());
+    transport.wait_learning().await;
+    let input = transport
+        .last_dialogue_input()
+        .expect("the dialogue input is recorded");
+    let recalled = recall_section(&input);
+    assert!(
+        !recalled.contains("coffee"),
+        "suppressed memory is not recalled: {recalled}"
+    );
+
+    server.abort();
+}
+
+/// Stage 3 management read model: a companion with more memories than one
+/// page must remain fully reachable. Five formations of five creates each
+/// produce twenty-five memories; the view pages twenty at a time and ends a
+/// page with the cursor that reads the next one, so an old memory's current
+/// recognition, revisions, and grounds stay reachable from the management
+/// surface alone.
+#[tokio::test]
+async fn stage3_management_view_reaches_memories_beyond_the_first_page() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().to_path_buf();
+    let handle = open_host(&dir).await.unwrap();
+    let transport = Arc::new(Stage3Transport::new(FAKE_TEXT));
+    let server = tokio::spawn(conn::run(
+        dir.clone(),
+        Arc::clone(&handle),
+        Arc::clone(&transport),
+    ));
+    assert!(wait_for_socket(&dir).await, "listener must bind ene.sock");
+
+    let pending = Client::connect(&dir, DESCRIPTOR, "test").await;
+    assert!(
+        matches!(pending, Err(CliError::ServerOutcome(_))),
+        "first pairing must pend"
+    );
+    let approver = open_host(&dir).await.unwrap();
+    let provisioned = approve_and_provision(&dir, &approver).await;
+    assert!(provisioned.is_ok(), "approval must pair: {provisioned:?}");
+    let mut client = stage3_client(&dir).await;
+    let setup = setup_flow(&mut client, &approver).await;
+    assert!(setup.is_ok(), "setup must complete: {setup:?}");
+    drop(client);
+    let assigned = stage3_assign_learning(&dir).await;
+    assert!(
+        assigned.is_ok(),
+        "learning assignment must store: {assigned:?}"
+    );
+
+    // Twenty-five memories, five per formation pass.
+    for batch in 0..5 {
+        let creates: Vec<String> = (0..5)
+            .map(|index| {
+                format!(
+                    "{{\"action\": \"create\", \"content\": \"batch {batch} memory {index}\", \"importance\": 3, \"temporal\": \"enduring\"}}"
+                )
+            })
+            .collect();
+        transport.push_learning(&format!(
+            "{{\"summary\": \"Batch {batch} of durable memories.\", \"memories\": [{}]}}",
+            creates.join(", ")
+        ));
+        let sent = stage3_send(&dir, &format!("remember batch {batch}")).await;
+        assert!(sent.is_ok(), "batch {batch} must complete: {sent:?}");
+        transport.wait_learning().await;
+    }
+    // One formation commits its changes in order, so the last memory of the
+    // last batch becoming durable proves every earlier commit landed.
+    let _ = stage3_wait_for_memory(&dir, "batch 4 memory 4").await;
+
+    let first = stage3_view_after(&dir, None).await;
+    assert_eq!(memory_count(&first), 20, "the first page is capped");
+    let cursor = next_memory_cursor(&first).expect("older memories remain");
+    let second = stage3_view_after(&dir, Some(&cursor)).await;
+    assert_eq!(
+        memory_count(&second),
+        5,
+        "the older memories fill the next page"
+    );
+    assert!(
+        next_memory_cursor(&second).is_none(),
+        "the last page offers no cursor"
+    );
+    assert!(
+        second.contains("batch 0 memory 0"),
+        "the oldest memory is reachable: {second}"
+    );
+    assert_eq!(
+        second.matches("rev1 initial").count(),
+        5,
+        "every older memory shows its first revision: {second}"
+    );
+    assert_eq!(
+        second.matches("grounds summary").count(),
+        5,
+        "every older memory shows its grounds: {second}"
+    );
+    for batch in 0..5 {
+        for index in 0..5 {
+            let content = format!("batch {batch} memory {index}");
+            assert!(
+                first.contains(&content) || second.contains(&content),
+                "every memory is reachable: {content}"
+            );
+        }
+    }
+
+    server.abort();
 }

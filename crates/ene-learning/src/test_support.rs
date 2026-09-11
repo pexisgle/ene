@@ -144,17 +144,27 @@ impl LearningRepository for FakeLearningRepository {
     async fn list_current_memories(
         &self,
         companion: RawId,
+        after: Option<MemoryId>,
         limit: u64,
     ) -> Result<Vec<Memory>, LearningTechnicalError> {
         let memories = self.memories.lock().expect("fake memory lock");
         let cap = usize::try_from(limit).unwrap_or(usize::MAX);
-        Ok(memories
+        let scoped = memories
             .iter()
             .rev()
-            .filter(|memory| memory.scope == LearningScope::companion(companion))
-            .take(cap)
-            .cloned()
-            .collect())
+            .filter(|memory| memory.scope == LearningScope::companion(companion));
+        let page: Vec<Memory> = match after {
+            // A cursor the fake does not hold yields no page, matching the
+            // store's unknown-cursor behavior.
+            Some(after) => scoped
+                .skip_while(|memory| memory.id != after)
+                .skip(1)
+                .take(cap)
+                .cloned()
+                .collect(),
+            None => scoped.take(cap).cloned().collect(),
+        };
+        Ok(page)
     }
 
     async fn list_memory_revisions(

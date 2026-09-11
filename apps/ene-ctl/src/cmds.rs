@@ -49,13 +49,16 @@ pub const DEFAULT_HISTORY_LIMIT: u64 = 50;
 /// it just created (see [`credential_id_for`]).
 pub const SETUP_CREDENTIAL_LABEL: &str = "main";
 
-/// Mirrors the Host section set: `HostHandle::build_view` in
-/// `apps/ene-core/src/setup.rs` renders exactly these four (an empty request
-/// selects the same four). The contract test below asserts these names
-/// against that documented Host set, so a Host rename fails the test instead
-/// of silently fetching nothing.
+/// Mirrors the Host setup section set: `HostHandle::build_view` in
+/// `apps/ene-core/src/setup.rs` renders exactly these for a setup or status
+/// request (an empty request selects the same set). The contract test below
+/// asserts these names against that documented Host set, so a Host rename
+/// fails the test instead of silently fetching nothing.
 pub const HOST_SETUP_SECTIONS: &[&str] =
     &["provider", "model", "consent", "credential", "learning"];
+
+/// The read-only Memory section rendered by the same Host view builder.
+pub const HOST_MEMORY_SECTION: &str = "memory";
 
 /// Only provider the setup flow knows how to assign yet.
 pub const SETUP_PROVIDER_OPENAI: &str = "openai";
@@ -76,6 +79,12 @@ pub enum Command {
     },
     History {
         limit: u64,
+    },
+    /// Read-only Memory view: current recognition, scope, temporal meaning,
+    /// importance, grounds, and past revisions. `after` continues from the
+    /// `next:` id of the previous page.
+    Memory {
+        after: Option<String>,
     },
 }
 
@@ -115,6 +124,7 @@ pub fn parse_command(words: &[String]) -> Result<Command, CliError> {
         "send" => parse_send(rest).map(Command::Send),
         "watch" => parse_watch(rest),
         "history" => parse_history(rest),
+        "memory" => parse_memory(rest),
         other => Err(CliError::Usage(format!(
             "unknown command: {other}\n{USAGE}"
         ))),
@@ -204,6 +214,31 @@ fn parse_status(args: &[String]) -> Result<Command, CliError> {
         )));
     }
     Ok(Command::Status)
+}
+
+fn parse_memory(args: &[String]) -> Result<Command, CliError> {
+    let mut after: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--after" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(CliError::Usage(format!(
+                        "missing value for --after\n{USAGE}"
+                    )));
+                };
+                after = Some(value.clone());
+                index += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown argument: {other}\n{USAGE}"
+                )));
+            }
+        }
+    }
+    Ok(Command::Memory { after })
 }
 
 /// A word starting with `--` is never treated as text; such input is a usage
@@ -323,6 +358,7 @@ pub fn setup_view_request() -> ManagementViewRequest {
             .iter()
             .map(|section| (*section).to_string())
             .collect(),
+        memory_after: None,
     }
 }
 
@@ -334,6 +370,16 @@ pub fn status_view_request() -> ManagementViewRequest {
             .iter()
             .map(|section| (*section).to_string())
             .collect(),
+        memory_after: None,
+    }
+}
+
+/// Requests only the read-only Memory section, optionally continuing after
+/// the `next:` id of a previous page.
+pub fn memory_view_request(after: Option<&str>) -> ManagementViewRequest {
+    ManagementViewRequest {
+        sections: vec![HOST_MEMORY_SECTION.to_string()],
+        memory_after: after.map(str::to_owned),
     }
 }
 
@@ -562,11 +608,12 @@ mod tests {
     use ene_api::v1::round::{HistoryItem, HistoryRole, HistoryView, RoundIntakeOutcomeWire};
 
     use super::{
-        CAPABILITY_DIALOGUE, CAPABILITY_LEARNING, DEFAULT_HISTORY_LIMIT, HOST_SETUP_SECTIONS,
-        SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for, credential_id_for,
-        credential_intent, credential_target_for, describe_intake, describe_management,
-        history_request, new_local_id, parse_command, render_history, render_round_history,
-        render_view, setup_view_request, status_view_request, submit_input,
+        CAPABILITY_DIALOGUE, CAPABILITY_LEARNING, DEFAULT_HISTORY_LIMIT, HOST_MEMORY_SECTION,
+        HOST_SETUP_SECTIONS, SETUP_PROVIDER_OPENAI, assignment_intent, consent_target_for,
+        credential_id_for, credential_intent, credential_target_for, describe_intake,
+        describe_management, history_request, memory_view_request, new_local_id, parse_command,
+        render_history, render_round_history, render_view, setup_view_request, status_view_request,
+        submit_input,
     };
     use super::{Command, IntakeAction, ManagementAction, SendArgs, SetupMode};
 
@@ -729,6 +776,39 @@ mod tests {
         assert_usage(
             parse_command(&args(&["status", "extra"])),
             "status with operand",
+        );
+    }
+
+    #[test]
+    fn memory_parses_without_operands() {
+        let command = (parse_command(&args(&["memory"]))).expect("memory");
+        assert!(
+            command == Command::Memory { after: None },
+            "memory must parse, got {command:?}"
+        );
+    }
+
+    #[test]
+    fn memory_after_parses_as_the_page_cursor() {
+        let command =
+            (parse_command(&args(&["memory", "--after", "memory-1"]))).expect("memory --after");
+        assert_eq!(
+            command,
+            Command::Memory {
+                after: Some(String::from("memory-1"))
+            }
+        );
+    }
+
+    #[test]
+    fn memory_with_operands_reports_usage() {
+        assert_usage(
+            parse_command(&args(&["memory", "edit", "1"])),
+            "memory with operand",
+        );
+        assert_usage(
+            parse_command(&args(&["memory", "--after"])),
+            "memory with missing cursor",
         );
     }
 
@@ -1099,6 +1179,18 @@ mod tests {
         assert!(
             status.sections == setup.sections,
             "status requests the same Host sections: {status:?}"
+        );
+        let memory = memory_view_request(None);
+        assert!(
+            memory.sections == vec![HOST_MEMORY_SECTION.to_string()]
+                && memory.memory_after.is_none(),
+            "memory requests exactly the read-only Memory section: {memory:?}"
+        );
+        let paged = memory_view_request(Some("memory-1"));
+        assert_eq!(
+            paged.memory_after,
+            Some(String::from("memory-1")),
+            "the page cursor rides the typed request field"
         );
         let history = history_request("companion-1", 7);
         assert!(

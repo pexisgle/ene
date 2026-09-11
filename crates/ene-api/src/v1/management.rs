@@ -193,6 +193,15 @@ pub enum ManagementOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManagementViewRequest {
     pub sections: Vec<String>,
+    /// Current Memory id the `memory` section continues after, exclusive.
+    ///
+    /// The Host renders at most one page of the memory section and ends it
+    /// with a `next: <id>` line while older memories remain; passing that id
+    /// back here reads the next page. `None` starts at the newest. The field
+    /// is the typed read query for the one paged section, never a query
+    /// syntax embedded in a section name.
+    #[serde(default)]
+    pub memory_after: Option<String>,
 }
 
 /// Short labels stay visible; bodies redact.

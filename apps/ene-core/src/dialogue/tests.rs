@@ -165,9 +165,54 @@ fn view_request_frame(connection: ConnectionWireId) -> ene_plugin_ipc::WireFrame
         ),
         payload: WirePayload::ManagementViewRequest(ManagementViewRequest {
             sections: Vec::new(),
+            memory_after: None,
         }),
     };
     stamped(frame, connection)
+}
+
+/// A view request naming only the `memory` section.
+fn memory_request_frame(
+    connection: ConnectionWireId,
+    after: Option<&str>,
+) -> ene_plugin_ipc::WireFrame {
+    let frame = ene_plugin_ipc::WireFrame {
+        envelope: new_outgoing_envelope(
+            ProtocolVersion::V1,
+            sender(),
+            WireMessageType(String::from("ManagementViewRequest")),
+        ),
+        payload: WirePayload::ManagementViewRequest(ManagementViewRequest {
+            sections: vec![String::from("memory")],
+            memory_after: after.map(str::to_owned),
+        }),
+    };
+    stamped(frame, connection)
+}
+
+fn view_page_request_frame(connection: ConnectionWireId, after: &str) -> ene_plugin_ipc::WireFrame {
+    memory_request_frame(connection, Some(after))
+}
+
+/// The memory section body of one view answer.
+fn memory_body(frames: &[ene_plugin_ipc::WireFrame]) -> String {
+    let Some(frame) = frames.first() else {
+        panic!("the view must answer");
+    };
+    let WirePayload::ManagementView(view) = &frame.payload else {
+        panic!("a view request answers a view, got {:?}", frame.payload);
+    };
+    view.sections
+        .iter()
+        .find(|section| section.kind == "memory")
+        .map(|section| section.body.clone())
+        .unwrap_or_default()
+}
+
+fn memory_lines(body: &str) -> usize {
+    body.lines()
+        .filter(|line| line.starts_with("memory "))
+        .count()
 }
 
 fn ok_transport() -> FakeProviderTransport {
@@ -2504,7 +2549,7 @@ async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
     let companion = handle.store.ensure_running_companion().await.unwrap();
     let memories = handle
         .store
-        .list_current_memories(companion.as_raw(), 10)
+        .list_current_memories(companion.as_raw(), None, 10)
         .await
         .unwrap();
     assert_eq!(memories.len(), 1, "one compressed memory is formed");
@@ -2644,7 +2689,7 @@ async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
 
     let memories = handle
         .store
-        .list_current_memories(companion.as_raw(), 10)
+        .list_current_memories(companion.as_raw(), None, 10)
         .await
         .unwrap();
     assert_eq!(memories.len(), 1);
@@ -3321,5 +3366,252 @@ async fn repeated_identical_owner_input_is_excluded_by_message_identity() {
         second.matches("Owner: the same words twice").count(),
         2,
         "the current input appears once as context (the earlier send) and once as the current turn: {second}"
+    );
+}
+
+#[tokio::test]
+async fn memory_view_renders_current_recognition_grounds_and_revisions() {
+    let live = live_input("client-memory-view");
+    let create = LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes jasmine tea.", "memories": [{"action": "create", "content": "The owner likes jasmine tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    );
+    let setup = round_test_handle("dlg-memory-view", &live, &create).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, &create).await);
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-view-1",
+        "remember that I like jasmine tea",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(first, live.clone(), &create).await;
+    assert_stream_completed(&responses);
+    handle.run_pending_learning(&create).await;
+
+    let update = LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner now prefers coffee.", "memories": [{"action": "update", "target": 1, "change": "changed_since", "content": "The owner prefers coffee now."}]}"#,
+        ),
+    );
+    let second = submit_frame(
+        handle.companion_wire(),
+        Some(1),
+        None,
+        "local-view-2",
+        "I switched to coffee",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(second, live.clone(), &update).await;
+    assert_stream_completed(&responses);
+    handle.run_pending_learning(&update).await;
+
+    let requested = handle
+        .handle_frame(
+            view_request_frame(live.connection_id),
+            live.clone(),
+            &update,
+        )
+        .await;
+    let Some(first) = requested.first() else {
+        panic!("the view must answer");
+    };
+    let WirePayload::ManagementView(view) = &first.payload else {
+        panic!("a view request answers a view, got {:?}", first.payload);
+    };
+    let Some(memory) = view
+        .sections
+        .iter()
+        .find(|section| section.kind == "memory")
+    else {
+        panic!("the view must carry a memory section");
+    };
+    assert!(memory.body.contains("The owner likes jasmine tea."));
+    assert!(memory.body.contains("importance=4"));
+    assert!(memory.body.contains("temporal=enduring"));
+    assert!(memory.body.contains("recall=active"));
+    assert!(memory.body.contains("grounds summary"));
+    assert!(memory.body.contains("rev1 initial"), "{}", memory.body);
+    assert!(
+        memory.body.contains("rev2 changed-since"),
+        "{}",
+        memory.body
+    );
+    assert!(memory.body.contains("The owner prefers coffee now."));
+}
+
+/// A page cursor drives the read-only Memory view, and untrusted cursor text
+/// is refused instead of interpreted.
+#[tokio::test]
+async fn memory_view_cursor_pages_older_memories_and_rejects_invalid_ids() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::{
+        ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
+        MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let live = live_input("client-memory-page");
+    let transport = ok_transport();
+    let setup = round_test_handle("dlg-memory-page", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let scope = LearningScope::companion(companion.as_raw());
+    for index in 0..21 {
+        let outcome = handle
+            .store
+            .commit_memory_change(MemoryChangeCommit {
+                summary: None,
+                secret_premise: None,
+                change: MemoryChange {
+                    target: MemoryTarget::New {
+                        id: MemoryId::generate(),
+                    },
+                    scope,
+                    content: format!("paged memory {index}"),
+                    importance: Importance::default(),
+                    temporal: TemporalMeaning::Enduring,
+                    change: ChangeKind::Initial,
+                    recall_suppressed: false,
+                    at: WallClockWithTz::now(),
+                },
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ene_learning::MemoryChangeOutcome::Committed { .. }
+        ));
+    }
+
+    // The first page is capped and points at the next older page.
+    let requested = handle
+        .handle_frame(
+            view_request_frame(live.connection_id),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let body = memory_body(&requested);
+    assert_eq!(memory_lines(&body), 20, "the page is capped");
+    let cursor = body
+        .lines()
+        .find_map(|line| line.strip_prefix("next: "))
+        .expect("older memories remain")
+        .to_owned();
+
+    // The next page holds the remaining memory and ends the traversal.
+    let paged = handle
+        .handle_frame(
+            view_page_request_frame(live.connection_id, &cursor),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    let body = memory_body(&paged);
+    assert_eq!(memory_lines(&body), 1, "the older memory is reachable");
+    assert!(body.contains("paged memory 0"), "{body}");
+    assert!(!body.contains("next: "), "the last page stops");
+
+    // Cursor text is client input; anything that is not one of our ids is
+    // refused instead of being interpreted.
+    let invalid = handle
+        .handle_frame(
+            view_page_request_frame(live.connection_id, "not-a-memory"),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert_eq!(memory_body(&invalid), "invalid cursor");
+}
+
+/// A `memory`-only view reads no setup state, so an unreadable configured
+/// credential cannot hide the Memory section.
+#[tokio::test]
+async fn memory_only_view_renders_when_setup_state_is_unreadable() {
+    use ene_companion::CompanionRepository as _;
+    use ene_credential::{
+        CredentialRefRepository as _, CredentialSetRepository as _, EnvCredentialStore,
+    };
+    use ene_learning::{
+        ChangeKind, Importance, LearningRepository as _, LearningScope, MemoryChange,
+        MemoryChangeCommit, MemoryId, MemoryTarget, TemporalMeaning,
+    };
+    use ene_permission::{CapabilityKind, ConsentRecord, ConsentRepository as _, ConsentRevision};
+    use ene_primitive::WallClockWithTz;
+
+    let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+    // Every bearer lookup fails: the setup sections cannot resolve presence.
+    let companion_store = EnvCredentialStore::from_lookup(|_| None);
+    let handle = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
+        .await
+        .expect("the open must succeed");
+    handle
+        .store
+        .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
+        .await
+        .expect("the ref must register");
+    let saved = handle
+        .store
+        .compare_and_save(
+            None,
+            ConsentRecord {
+                capability: CapabilityKind::Dialogue,
+                id: String::from("consent-1"),
+                rev: ConsentRevision::from_u64(1),
+                provider: String::from("openai"),
+                model: String::from("dialogue-1"),
+                credential_id: String::from("openai:main"),
+            },
+        )
+        .await;
+    assert!(saved.is_ok(), "the consent fixture must save: {saved:?}");
+
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let premise = handle
+        .store
+        .current_set_revision()
+        .await
+        .expect("the credential-set revision must read");
+    let committed = handle
+        .store
+        .commit_memory_change(MemoryChangeCommit {
+            summary: None,
+            secret_premise: Some(premise),
+            change: MemoryChange {
+                target: MemoryTarget::New {
+                    id: MemoryId::generate(),
+                },
+                scope: LearningScope::companion(companion.as_raw()),
+                content: String::from("renders without setup state"),
+                importance: Importance::default(),
+                temporal: TemporalMeaning::Enduring,
+                change: ChangeKind::Initial,
+                recall_suppressed: false,
+                at: WallClockWithTz::now(),
+            },
+        })
+        .await;
+    assert!(matches!(
+        committed,
+        Ok(ene_learning::MemoryChangeOutcome::Committed { .. })
+    ));
+
+    let live = live_input("client-memory-only");
+    let requested = handle
+        .handle_frame(
+            memory_request_frame(live.connection_id, None),
+            live.clone(),
+            &ok_transport(),
+        )
+        .await;
+    assert!(
+        memory_body(&requested).contains("renders without setup state"),
+        "the Memory section must render despite the unreadable credential"
     );
 }

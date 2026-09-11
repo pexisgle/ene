@@ -159,9 +159,14 @@ pub trait LearningRepository: Send + Sync {
     /// Lists current memories for one Companion, most recently formed first,
     /// capped at `limit`. Suppressed memories are included: suppression is a
     /// recall decision, not a visibility restriction.
+    ///
+    /// `after` starts the page strictly older than that Memory, so a caller
+    /// can page through the whole set by passing the last id it received.
+    /// `None` starts at the newest.
     async fn list_current_memories(
         &self,
         companion: RawId,
+        after: Option<MemoryId>,
         limit: u64,
     ) -> Result<Vec<Memory>, LearningTechnicalError>;
 

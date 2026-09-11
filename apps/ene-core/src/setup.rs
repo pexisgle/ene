@@ -1,7 +1,10 @@
-//! `Stage 2` setup management inlet: register, assign, complete, show.
+//! Host management inlet: setup intents, the setup view, and the read-only
+//! Memory view.
 //!
 //! The Client expresses setup intent and reads filtered views; every
-//! acceptance happens Host-side here.
+//! acceptance happens Host-side here. Memory has no write path: corrections
+//! and changes arrive as Experience through Learning, never by editing a
+//! canonical row.
 //!
 //! Setup targets are matched on `(intent kind, target string)`; anything else
 //! — every non-setup kind included — answers
@@ -47,7 +50,10 @@
 //! Views never carry secrets: sections report provider, model, consent
 //! revision, and credential presence only. A store failure behind a view
 //! answers zero sections under the `"unavailable"` mark (documented gap: there
-//! is no error DTO on the view path).
+//! is no error DTO on the view path). A request that names only `memory` reads
+//! no setup state, so it still renders while consent or credential state is
+//! unreadable; its mark stays `"unavailable"` because it named no management
+//! revision to build on.
 //!
 //! Rationale is fingerprint material only: the inlet never acts on the
 //! intent `rationale`, but its origin and quote ride the replay fingerprint
@@ -62,9 +68,13 @@ use ene_api::v1::management::{
 };
 use ene_api::v1::payload::WirePayload;
 use ene_api::v1::refs::ViewMarkWire;
+use ene_companion::CompanionRepository;
 use ene_credential::{
     CredentialIntentRepository, RegistrationApply, RegistrationFingerprint, RegistrationState,
     available_credential,
+};
+use ene_learning::{
+    ChangeKind, LearningRepository, Memory, MemoryId, MemoryRevisionRecord, TemporalMeaning,
 };
 use ene_permission::{
     AssignConsentIntent, AssignConsentResolution, CapabilityKind, ConsentRecord, ConsentRepository,
@@ -72,6 +82,7 @@ use ene_permission::{
     IntentResolution, assign_consent, consent_view_mark,
 };
 use ene_plugin_ipc::WireFrame;
+use ene_primitive::RawId;
 
 use crate::serve::{CredStore, HostHandle, LiveInput, outgoing_envelope, outgoing_frame};
 
@@ -339,7 +350,7 @@ impl HostHandle {
     ) -> Vec<WireFrame> {
         let target = intent.target.0.as_str();
         if target == SETUP_SHOW_TARGET {
-            let view = self.build_view(&[]).await;
+            let view = self.build_view(&[], None).await;
             return vec![view_frame(frame, live, view)];
         }
         if target == SETUP_COMPLETE_TARGET {
@@ -628,16 +639,19 @@ impl HostHandle {
         }
     }
 
-    /// An empty section list selects every `Stage 2` section (`provider`,
-    /// `model`, `consent`, `credential`); otherwise only requested known
-    /// sections render and unknown names are skipped.
+    /// An empty section list selects every known section (`provider`,
+    /// `model`, `consent`, `credential`, `memory`); otherwise only requested
+    /// known sections render and unknown names are skipped. `memory_after`
+    /// continues the `memory` section from a previous page.
     pub(crate) async fn answer_view(
         &self,
         frame: &WireFrame,
         request: &ManagementViewRequest,
         live: &LiveInput,
     ) -> Vec<WireFrame> {
-        let view = self.build_view(&request.sections).await;
+        let view = self
+            .build_view(&request.sections, request.memory_after.as_deref())
+            .await;
         vec![view_frame(frame, live, view)]
     }
 
@@ -645,74 +659,96 @@ impl HostHandle {
     /// credential presence plus the bearer-source note — never secrets. Each
     /// capability owns its section and consent revision; the mark carries
     /// both segments so a consent write is checked against the capability it
-    /// names.
-    pub(crate) async fn build_view(&self, wanted: &[String]) -> ManagementView {
-        let dialogue = match self.store.load_current(CapabilityKind::Dialogue).await {
-            Ok(record) => record,
-            Err(_) => return unavailable_view(),
+    /// names. Setup state is read only for sections that report it; a
+    /// `memory`-only request renders Memory without touching the consent or
+    /// credential stores.
+    pub(crate) async fn build_view(
+        &self,
+        wanted: &[String],
+        memory_after: Option<&str>,
+    ) -> ManagementView {
+        let wants = |name: &str| wanted.is_empty() || wanted.iter().any(|section| section == name);
+        let mut sections = Vec::new();
+        // A request that names only `memory` reads no setup state, so a
+        // consent or credential-store failure cannot hide the Memory section.
+        // Its mark stays unavailable because no management revision was read.
+        let wants_setup = wanted.is_empty() || wanted.iter().any(|name| name != "memory");
+        let mark = if wants_setup {
+            let dialogue = match self.store.load_current(CapabilityKind::Dialogue).await {
+                Ok(record) => record,
+                Err(_) => return unavailable_view(),
+            };
+            let learning = match self.store.load_current(CapabilityKind::Learning).await {
+                Ok(record) => record,
+                Err(_) => return unavailable_view(),
+            };
+            let Some(dialogue_present) = self.credential_present(dialogue.as_ref()).await else {
+                return unavailable_view();
+            };
+            let Some(learning_present) = self.credential_present(learning.as_ref()).await else {
+                return unavailable_view();
+            };
+            let source = match &self.cred_store {
+                CredStore::Env(_) => "env-sourced",
+                CredStore::Memory(_) => "memory",
+            };
+            let (provider_text, model_text, consent_text) = match &dialogue {
+                Some(record) => (
+                    record.provider.clone(),
+                    record.model.clone(),
+                    format!("rev {}", record.rev.as_u64()),
+                ),
+                None => (
+                    String::from("unconfigured"),
+                    String::from("unconfigured"),
+                    String::from("none"),
+                ),
+            };
+            let learning_text = match &learning {
+                Some(record) => format!(
+                    "provider={} model={} consent=rev {} credential={}",
+                    record.provider,
+                    record.model,
+                    record.rev.as_u64(),
+                    presence_text(learning_present, source),
+                ),
+                None => String::from("unconfigured"),
+            };
+            for (kind, title, body) in [
+                ("provider", "Provider", provider_text),
+                ("model", "Model", model_text),
+                ("consent", "Consent", consent_text),
+                (
+                    "credential",
+                    "Credential",
+                    presence_text(dialogue_present, source),
+                ),
+                ("learning", "Learning", learning_text),
+            ] {
+                if wants(kind) {
+                    sections.push(ViewSection {
+                        kind: kind.to_string(),
+                        title: title.to_string(),
+                        body,
+                    });
+                }
+            }
+            consent_view_mark(
+                dialogue.as_ref().map(|record| record.rev.as_u64()),
+                learning.as_ref().map(|record| record.rev.as_u64()),
+            )
+        } else {
+            String::from("unavailable")
         };
-        let learning = match self.store.load_current(CapabilityKind::Learning).await {
-            Ok(record) => record,
-            Err(_) => return unavailable_view(),
-        };
-        let Some(dialogue_present) = self.credential_present(dialogue.as_ref()).await else {
-            return unavailable_view();
-        };
-        let Some(learning_present) = self.credential_present(learning.as_ref()).await else {
-            return unavailable_view();
-        };
-        let source = match &self.cred_store {
-            CredStore::Env(_) => "env-sourced",
-            CredStore::Memory(_) => "memory",
-        };
-        let (provider_text, model_text, consent_text) = match &dialogue {
-            Some(record) => (
-                record.provider.clone(),
-                record.model.clone(),
-                format!("rev {}", record.rev.as_u64()),
-            ),
-            None => (
-                String::from("unconfigured"),
-                String::from("unconfigured"),
-                String::from("none"),
-            ),
-        };
-        let learning_text = match &learning {
-            Some(record) => format!(
-                "provider={} model={} consent=rev {} credential={}",
-                record.provider,
-                record.model,
-                record.rev.as_u64(),
-                presence_text(learning_present, source),
-            ),
-            None => String::from("unconfigured"),
-        };
-        let mark_text = consent_view_mark(
-            dialogue.as_ref().map(|record| record.rev.as_u64()),
-            learning.as_ref().map(|record| record.rev.as_u64()),
-        );
-        let candidates = [
-            ("provider", "Provider", provider_text),
-            ("model", "Model", model_text),
-            ("consent", "Consent", consent_text),
-            (
-                "credential",
-                "Credential",
-                presence_text(dialogue_present, source),
-            ),
-            ("learning", "Learning", learning_text),
-        ];
-        let sections = candidates
-            .into_iter()
-            .filter(|(kind, _, _)| wanted.is_empty() || wanted.iter().any(|name| name == kind))
-            .map(|(kind, title, body)| ViewSection {
-                kind: kind.to_string(),
-                title: title.to_string(),
-                body,
-            })
-            .collect();
+        if wants("memory") {
+            sections.push(ViewSection {
+                kind: String::from("memory"),
+                title: String::from("Memory"),
+                body: self.render_memory_view(memory_after).await,
+            });
+        }
         ManagementView {
-            mark: ViewMarkWire(mark_text),
+            mark: ViewMarkWire(mark),
             sections,
         }
     }
@@ -735,6 +771,73 @@ impl HostHandle {
             Err(_) => None,
         }
     }
+
+    /// Read-only projection of current Memory and its change history.
+    ///
+    /// Renders one page of [`MEMORY_PAGE_SIZE`] current memories, newest
+    /// first, continuing strictly after `after` when a previous page named it.
+    /// While older memories remain the body ends with `next: <id>`, so every
+    /// memory is reachable by feeding that id back as the page cursor. There
+    /// is no write path here: corrections and changes arrive as Experience
+    /// through Learning, never by editing a Memory row.
+    async fn render_memory_view(&self, after: Option<&str>) -> String {
+        let Ok(companion) = self.store.ensure_running_companion().await else {
+            return String::from("unavailable");
+        };
+        let cursor = match after {
+            Some(raw) => match uuid::Uuid::parse_str(raw) {
+                Ok(id) => Some(MemoryId::from_raw(RawId::from_uuid(id))),
+                Err(_) => return String::from("invalid cursor"),
+            },
+            None => None,
+        };
+        let Ok(mut memories) = self
+            .store
+            .list_current_memories(companion.as_raw(), cursor, MEMORY_PAGE_SIZE + 1)
+            .await
+        else {
+            return String::from("unavailable");
+        };
+        let has_more = memories.len() > MEMORY_PAGE_SIZE as usize;
+        memories.truncate(MEMORY_PAGE_SIZE as usize);
+        let Some(first) = memories.first() else {
+            return if after.is_some() {
+                String::from("no older memories")
+            } else {
+                String::from("(none)")
+            };
+        };
+        let mut body = String::new();
+        let mut last_id = first.id;
+        for memory in &memories {
+            last_id = memory.id;
+            body.push_str(&render_memory(memory));
+            match self.store.list_memory_revisions(memory.id).await {
+                Ok(revisions) => {
+                    for revision in &revisions {
+                        body.push_str(&render_revision(revision));
+                        if let Some(summary_id) = revision.summary
+                            && let Ok(Some(summary)) = self.store.load_summary(summary_id).await
+                        {
+                            body.push_str(&format!(
+                                "  grounds summary {}: {}\n",
+                                short_id(summary.id.as_raw()),
+                                summary.content
+                            ));
+                        }
+                    }
+                }
+                Err(_) => body.push_str("  revisions: unavailable\n"),
+            }
+            body.push('\n');
+        }
+        if has_more {
+            // The cursor is the last rendered id, so the next page starts at
+            // the first older memory and cannot skip or repeat a row.
+            body.push_str(&format!("next: {}\n", last_id.as_raw().as_uuid()));
+        }
+        body.trim_end().to_owned()
+    }
 }
 
 fn presence_text(present: bool, source: &str) -> String {
@@ -742,6 +845,64 @@ fn presence_text(present: bool, source: &str) -> String {
         format!("present ({source})")
     } else {
         String::from("absent")
+    }
+}
+
+/// Current memories rendered by one management view page.
+const MEMORY_PAGE_SIZE: u64 = 20;
+
+fn short_id(id: RawId) -> String {
+    id.as_uuid()
+        .as_hyphenated()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect()
+}
+
+fn render_memory(memory: &Memory) -> String {
+    format!(
+        "memory {} scope=companion importance={} temporal={} recall={} revision={} updated={}\ncontent: {}\n",
+        short_id(memory.id.as_raw()),
+        memory.importance.as_u8(),
+        temporal_label(memory.temporal),
+        if memory.recall_suppressed {
+            "suppressed"
+        } else {
+            "active"
+        },
+        memory.revision.as_u64(),
+        memory.updated_at.to_rfc3339(),
+        memory.content,
+    )
+}
+
+fn render_revision(revision: &MemoryRevisionRecord) -> String {
+    format!(
+        "  rev{} {} at={} content: {}\n",
+        revision.revision.as_u64(),
+        change_label(revision.change),
+        revision.at.to_rfc3339(),
+        revision.content,
+    )
+}
+
+fn temporal_label(temporal: TemporalMeaning) -> &'static str {
+    match temporal {
+        TemporalMeaning::Enduring => "enduring",
+        TemporalMeaning::Event => "event",
+    }
+}
+
+fn change_label(change: ChangeKind) -> &'static str {
+    match change {
+        ChangeKind::Initial => "initial",
+        ChangeKind::Reinforced => "reinforced",
+        ChangeKind::Refined => "refined",
+        ChangeKind::Integrated => "integrated",
+        ChangeKind::CorrectedInitiallyWrong => "corrected-initially-wrong",
+        ChangeKind::ChangedSince => "changed-since",
+        ChangeKind::Forgotten => "forgotten",
     }
 }
 

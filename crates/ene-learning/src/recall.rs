@@ -56,7 +56,7 @@ pub async fn recall(
     query: RecallQuery,
 ) -> Result<Vec<RecalledMemory>, LearningTechnicalError> {
     let mut memories = repository
-        .list_current_memories(query.companion, RECALL_SCAN_LIMIT)
+        .list_current_memories(query.companion, None, RECALL_SCAN_LIMIT)
         .await?;
     memories.retain(|memory| !memory.recall_suppressed);
     let terms = crate::relevance::terms(&query.text);

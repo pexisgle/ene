@@ -36,7 +36,7 @@ const SQL_INSERT_SUMMARY_IGNORE: &str = "INSERT OR IGNORE INTO learning_summary 
 
 const SQL_SELECT_CURRENT: &str = "SELECT memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at FROM learning_memory WHERE memory_id = ?1";
 
-const SQL_LIST_CURRENT: &str = "SELECT memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at FROM learning_memory WHERE companion_id = ?1 ORDER BY rowid DESC LIMIT ?2";
+const SQL_LIST_CURRENT: &str = "SELECT memory_id, companion_id, revision, content, importance, temporal, recall_suppressed, updated_at FROM learning_memory WHERE companion_id = ?1 AND (?2 IS NULL OR rowid < (SELECT rowid FROM learning_memory WHERE memory_id = ?2)) ORDER BY rowid DESC LIMIT ?3";
 
 const SQL_LIST_REVISIONS: &str = "SELECT memory_id, revision, companion_id, content, importance, temporal, recall_suppressed, change_kind, summary_id, at FROM learning_memory_revision WHERE memory_id = ?1 ORDER BY revision ASC";
 
@@ -357,6 +357,7 @@ fn load_current_sync(
 fn list_current_sync(
     conn: &Mutex<Connection>,
     companion: RawId,
+    after: Option<MemoryId>,
     limit: u64,
 ) -> Result<Vec<Memory>, LearningTechnicalError> {
     let guard = lock_shared(conn);
@@ -365,7 +366,11 @@ fn list_current_sync(
         .map_err(learning_unavailable)?;
     let rows = statement
         .query_map(
-            params![encode_id(companion), encode_limit(limit)?],
+            params![
+                encode_id(companion),
+                after.map(|memory| encode_id(memory.as_raw())),
+                encode_limit(limit)?
+            ],
             raw_memory_row,
         )
         .map_err(learning_unavailable)?;
@@ -551,10 +556,11 @@ impl LearningRepository for Store {
     async fn list_current_memories(
         &self,
         companion: RawId,
+        after: Option<MemoryId>,
         limit: u64,
     ) -> Result<Vec<Memory>, LearningTechnicalError> {
         let conn = Arc::clone(&self.conn);
-        run_blocking(move || list_current_sync(&conn, companion, limit)).await
+        run_blocking(move || list_current_sync(&conn, companion, after, limit)).await
     }
 
     async fn list_memory_revisions(
