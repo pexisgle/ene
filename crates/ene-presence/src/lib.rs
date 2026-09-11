@@ -10,14 +10,12 @@
 //! `expected` view returns `Ok(MoveDecision::RejectedAsStalePresence { .. })`
 //! carrying the current [`PresenceAttribution`]. [`PresenceTechnicalError`]
 //! is reserved for infrastructure failure (storage unavailable, reachability
-//! check infrastructure failure), never for stale / held / denied outcomes.
+//! check infrastructure failure), never for stale / denied outcomes.
 //!
 //! Liveness is a premise, never part of the atomic section: the caller
 //! evaluates reachability out of band into a [`LiveReachabilityRef`] and the
 //! repository compares-and-commits attribution without performing I/O inside
-//! the atomic section. [`TransportClass`] records the Host-determined
-//! transport kind behind that premise; it is evaluated Host-side, never from
-//! a Client self-report.
+//! the atomic section.
 //!
 //! Wire mapping (read-only): [`PresenceAttribution`] maps to/from
 //! `ene_api::v1::presence::PresenceAttributionWire` at the Host ingress
@@ -81,16 +79,6 @@ impl PresenceGeneration {
     pub fn as_u64(self) -> u64 {
         self.0.as_u64()
     }
-
-    #[must_use]
-    pub fn from_inner(inner: GenerationInner) -> Self {
-        Self(inner)
-    }
-
-    #[must_use]
-    pub fn as_inner(self) -> GenerationInner {
-        self.0
-    }
 }
 
 /// Presence state vocabulary.
@@ -133,18 +121,6 @@ pub struct PresenceCheckRef {
     pub expected_active: Option<ClientId>,
 }
 
-/// Client-side presence claim arriving at the Host boundary.
-///
-/// A candidate only: acceptance, attribution checks, and round issuance
-/// happen Host-side against [`PresenceAttribution`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ClientPresenceClaim {
-    pub companion: RawId,
-    pub client: ClientId,
-    pub claimed_generation: PresenceGeneration,
-    pub round: Option<RawId>,
-}
-
 /// Out-of-band liveness premise for one [`ClientId`].
 ///
 /// Evaluated Host-side outside the atomic section and handed in as a
@@ -153,15 +129,6 @@ pub struct ClientPresenceClaim {
 pub struct LiveReachabilityRef {
     pub client: ClientId,
     pub connection_live: bool,
-}
-
-/// Host-determined transport class behind a liveness premise.
-///
-/// Evaluated Host-side, never from a Client self-report. Kept separate from
-/// [`LiveReachabilityRef`] so the ref stays a minimal liveness premise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TransportClass {
-    SameMachine,
 }
 
 /// Thin reason for beginning a presence transition.
@@ -176,7 +143,7 @@ pub enum ThinMoveReason {
 
 /// Outcome of a compare-and-begin-transition attempt.
 ///
-/// An [`Ok`]-side domain outcome, never an error. Stale, denied, and held
+/// An [`Ok`]-side domain outcome, never an error. Stale and denied
 /// outcomes are returned as `Ok`, never retried automatically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveDecision {
@@ -192,13 +159,11 @@ pub enum MoveDecision {
         /// Operational reason. Never a secret or a body copy.
         reason: String,
     },
-    /// Held for safe closure of in-flight work before moving.
-    HeldForSafeClosure,
 }
 
 /// Infrastructure failure for presence operations.
 ///
-/// Stale / held / denied outcomes are [`MoveDecision`], never this error.
+/// Stale / denied outcomes are [`MoveDecision`], never this error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PresenceTechnicalError {
     #[error("presence storage unavailable: {reason}")]
@@ -237,7 +202,7 @@ pub trait PresenceRepository {
     /// begins a transition toward `to_client` for `reason`.
     ///
     /// Mismatch returns `Ok(MoveDecision::RejectedAsStalePresence { .. })`,
-    /// never `Err`. Denied and held outcomes are likewise `Ok`-side.
+    /// never `Err`. Denied outcomes are likewise `Ok`-side.
     async fn compare_and_begin_transition(
         &self,
         companion: RawId,

@@ -6,7 +6,6 @@
 //! counters, and string-keyed struct maps.
 
 use ene_primitive::clock::WallClockWithTz;
-use ene_primitive::correlation::{DirectedPair, EmptyPurpose};
 use ene_primitive::generation::GenerationInner;
 use ene_primitive::raw_id::RawId;
 use ene_primitive::revision::RevisionInner;
@@ -14,7 +13,7 @@ use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq)]
 enum MiniValue {
-    /// Human-readable strings: UUID text, RFC 3339 timestamps, purposes.
+    /// Human-readable strings: UUID text, RFC 3339 timestamps.
     Str(String),
     /// Counter values for revisions and generations.
     U64(u64),
@@ -531,49 +530,11 @@ fn clock_serde_roundtrip() {
 }
 
 #[test]
-fn directed_pair_serde_roundtrip() {
-    let pair = DirectedPair::try_new(
-        RawId::new(),
-        RawId::new(),
-        String::from("summary grounds reference the summary they explain"),
-    );
-    assert!(pair.is_ok());
-    if let Ok(link) = pair {
-        let decoded = roundtrip(&link);
-        assert!(decoded.is_ok());
-        if let Ok(back) = decoded {
-            assert_eq!(back, link);
-        }
-    }
-}
-
-#[test]
 fn rfc3339_roundtrip_preserves_non_utc_offset() {
     let text = "2026-03-14T15:09:26+09:00";
     let parsed = WallClockWithTz::parse_rfc3339(text);
     assert!(parsed.is_ok());
     if let Ok(clock) = parsed {
         assert_eq!(clock.to_rfc3339(), text);
-    }
-}
-
-#[test]
-fn directed_pair_rejects_empty_purpose() {
-    assert_eq!(
-        DirectedPair::try_new(RawId::new(), RawId::new(), String::new()),
-        Err(EmptyPurpose)
-    );
-}
-
-#[test]
-fn directed_pair_keeps_direction_and_purpose() {
-    let from = RawId::new();
-    let to = RawId::new();
-    let pair = DirectedPair::try_new(from, to, String::from("retry supersedes attempt"));
-    assert!(pair.is_ok());
-    if let Ok(link) = pair {
-        assert_eq!(link.from_raw, from);
-        assert_eq!(link.to_raw, to);
-        assert_eq!(link.purpose, "retry supersedes attempt");
     }
 }
