@@ -2350,6 +2350,9 @@ async fn learning_admission_requires_its_own_capability_assignment() {
 
 /// A transport that answers the learning formation prompt with a configured
 /// JSON answer and every dialogue call with fixed reply text.
+/// A transport that answers the learning formation prompt with a configured
+/// JSON answer and every dialogue call with fixed reply text. Records every
+/// request so tests can inspect the assembled dialogue prompt.
 struct LearningAwareTransport {
     reply: String,
     formation: Option<String>,
@@ -2367,6 +2370,17 @@ impl LearningAwareTransport {
 
     fn inputs(&self) -> Vec<String> {
         self.inputs.lock().expect("recorded input lock").clone()
+    }
+
+    /// Dialogue requests only, in order.
+    fn dialogue_inputs(&self) -> Vec<String> {
+        self.inputs
+            .lock()
+            .expect("recorded input lock")
+            .iter()
+            .filter(|input| !input.contains("learning formation pass"))
+            .cloned()
+            .collect()
     }
 }
 
@@ -3213,5 +3227,99 @@ async fn running_host_never_re_reads_the_environment() {
     assert!(
         unknown.text.contains("rotated-bearer"),
         "the rotated value is not the active bearer, so it stays untouched"
+    );
+}
+
+#[tokio::test]
+async fn next_dialogue_prompt_recalls_a_formed_memory() {
+    let transport = LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes jasmine tea.", "memories": [{"action": "create", "content": "The owner likes jasmine tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    );
+    let live = live_input("client-recall");
+    let setup = round_test_handle("dlg-recall", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, &transport).await);
+
+    let first = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-recall-1",
+        "remember that I like jasmine tea",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(first, live.clone(), &transport).await;
+    assert_stream_completed(&responses);
+    handle.run_pending_learning(&transport).await;
+
+    let second = submit_frame(
+        handle.companion_wire(),
+        Some(1),
+        None,
+        "local-recall-2",
+        "which tea do I like?",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(second, live.clone(), &transport).await;
+    assert_stream_completed(&responses);
+
+    let inputs = transport.dialogue_inputs();
+    assert_eq!(inputs.len(), 2, "both dialogue turns are recorded");
+    assert!(
+        inputs[0].contains("Owner: remember that I like jasmine tea"),
+        "the first prompt carries the owner input"
+    );
+    assert!(
+        inputs[1].contains("Relevant memories:"),
+        "the second prompt carries the retrieval section: {}",
+        inputs[1]
+    );
+    assert!(
+        inputs[1].contains("The owner likes jasmine tea."),
+        "the formed memory is recalled into the next dialogue: {}",
+        inputs[1]
+    );
+}
+
+/// The current input is excluded from the recent-context window by its
+/// committed message identity. Repeating the same words must not erase the
+/// earlier identical message from the window.
+#[tokio::test]
+async fn repeated_identical_owner_input_is_excluded_by_message_identity() {
+    let transport = LearningAwareTransport::new("noted", None);
+    let live = live_input("client-identity");
+    let setup = round_test_handle("dlg-identity", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+
+    for round in 0..2 {
+        let frame = submit_frame(
+            handle.companion_wire(),
+            Some(round),
+            None,
+            &format!("local-identity-{round}"),
+            "the same words twice",
+            live.connection_id,
+        );
+        let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+        assert_stream_completed(&responses);
+    }
+
+    let inputs = transport.dialogue_inputs();
+    let second = &inputs[1];
+    let recent = second
+        .split_once("Recent conversation:")
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    assert!(
+        recent.contains("Owner: the same words twice"),
+        "the earlier identical message must stay in the window: {second}"
+    );
+    assert_eq!(
+        second.matches("Owner: the same words twice").count(),
+        2,
+        "the current input appears once as context (the earlier send) and once as the current turn: {second}"
     );
 }

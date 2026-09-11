@@ -305,6 +305,37 @@ pub(crate) async fn seed_memory(
     (id, revision)
 }
 
+/// Suppresses recall of one seeded memory through the normal change path.
+pub(crate) async fn forget_memory(
+    repository: &FakeLearningRepository,
+    companion: RawId,
+    memory: MemoryId,
+    expected: MemoryRevision,
+    content: &str,
+) {
+    drop(
+        repository
+            .commit_memory_change(MemoryChangeCommit {
+                summary: None,
+                secret_premise: None,
+                change: MemoryChange {
+                    target: MemoryTarget::Existing {
+                        id: memory,
+                        expected_revision: expected,
+                    },
+                    scope: LearningScope::companion(companion),
+                    content: content.to_owned(),
+                    importance: crate::Importance::default(),
+                    temporal: crate::TemporalMeaning::Enduring,
+                    change: crate::ChangeKind::Forgotten,
+                    recall_suppressed: true,
+                    at: ene_primitive::WallClockWithTz::now(),
+                },
+            })
+            .await,
+    );
+}
+
 /// An inference whose answer races a concurrent change to `advance` before
 /// the formation commits, so the expected revision read for the prompt is
 /// already stale.
