@@ -10,9 +10,9 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{
-    IntentOutcomeRow, SQL_SELECT_CONSENT, SQL_SELECT_INTENT_OUTCOME, decode_consent,
-    decode_intent_outcome_row, encode_u64, insert_decided_row_tx, lock_shared,
-    permission_unavailable, replay_or_conflict, select_intent_row_tx,
+    IntentOutcomeRow, SQL_SELECT_INTENT_OUTCOME, decode_intent_outcome_row, encode_u64,
+    insert_decided_row_tx, lock_shared, permission_unavailable, replay_or_conflict, select_consent,
+    select_intent_row_tx,
 };
 use crate::run_blocking;
 
@@ -35,33 +35,7 @@ fn compare_and_save_row(
     record: &ConsentRecord,
 ) -> Result<ConsentCommitOutcome, String> {
     let rev_raw = encode_u64(record.rev.as_u64())?;
-    let found: Option<(String, i64, String, String, String)> = tx
-        .query_row(
-            SQL_SELECT_CONSENT,
-            params![record.capability.as_str()],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    let current = match found {
-        Some((id, stored_rev, provider, model, credential_id)) => Some(decode_consent(
-            record.capability,
-            id,
-            stored_rev,
-            provider,
-            model,
-            credential_id,
-        )?),
-        None => None,
-    };
+    let current = select_consent(tx, record.capability)?;
     let matches = match (&current, &expected) {
         (None, None) => true,
         (Some(stored), Some((id, rev))) => stored.id == *id && stored.rev == **rev,
@@ -111,27 +85,7 @@ impl ConsentRepository for Store {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);
-            let found: Option<(String, i64, String, String, String)> = guard
-                .query_row(SQL_SELECT_CONSENT, params![capability.as_str()], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                })
-                .optional()
-                .map_err(|error| permission_unavailable(error.to_string()))?;
-            match found {
-                Some((id, rev_raw, provider, model, credential_id)) => {
-                    let record =
-                        decode_consent(capability, id, rev_raw, provider, model, credential_id)
-                            .map_err(permission_unavailable)?;
-                    Ok(Some(record))
-                }
-                None => Ok(None),
-            }
+            select_consent(&guard, capability).map_err(permission_unavailable)
         })
         .await
     }
@@ -301,36 +255,8 @@ impl IntentOutcomeRepository for Store {
             // the same answer; only store failures hold unrecorded. Setup
             // completion is a Stage 2 meaning: it names the dialogue consent
             // only, so a learning assignment can never complete or block it.
-            let found: Option<(String, i64, String, String, String)> = tx
-                .query_row(
-                    SQL_SELECT_CONSENT,
-                    params![CapabilityKind::Dialogue.as_str()],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(|error| permission_unavailable(error.to_string()))?;
-            let current = match found {
-                Some((id, stored_rev, provider, model, credential_id)) => Some(
-                    decode_consent(
-                        CapabilityKind::Dialogue,
-                        id,
-                        stored_rev,
-                        provider,
-                        model,
-                        credential_id,
-                    )
-                    .map_err(permission_unavailable)?,
-                ),
-                None => None,
-            };
+            let current =
+                select_consent(&tx, CapabilityKind::Dialogue).map_err(permission_unavailable)?;
             let expected = parse_consent_mark(&expected_base, CapabilityKind::Dialogue);
             let current_state = current.as_ref().map(|record| record.rev.as_u64());
             let outcome = if expected != Some(current_state) {
@@ -384,25 +310,7 @@ impl IntentOutcomeRepository for Store {
             }
             // No consent state changes either way: the only write, on a hit,
             // records the replay row.
-            let found: Option<(String, i64, String, String, String)> = tx
-                .query_row(SQL_SELECT_CONSENT, params![capability.as_str()], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                })
-                .optional()
-                .map_err(|error| permission_unavailable(error.to_string()))?;
-            let current = match found {
-                Some((id, stored_rev, provider, model, credential_id)) => Some(
-                    decode_consent(capability, id, stored_rev, provider, model, credential_id)
-                        .map_err(permission_unavailable)?,
-                ),
-                None => None,
-            };
+            let current = select_consent(&tx, capability).map_err(permission_unavailable)?;
             let record = match current {
                 Some(record)
                     if record.provider == provider

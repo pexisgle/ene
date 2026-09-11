@@ -23,7 +23,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 pub(crate) const SQL_SELECT_ATTRIBUTION: &str =
     "SELECT state, active_client, generation FROM presence_attribution WHERE companion_id = ?1";
 
-pub(crate) const SQL_SELECT_CONSENT: &str =
+const SQL_SELECT_CONSENT: &str =
     "SELECT id, rev, provider, model, credential_id FROM consent_record WHERE capability = ?1";
 
 pub(crate) const SQL_SELECT_CREDENTIAL: &str =
@@ -211,6 +211,30 @@ pub(crate) fn credential_unavailable(reason: impl core::fmt::Display) -> Credent
 
 pub(crate) fn inference_unavailable(reason: String) -> InferenceTechnicalError {
     InferenceTechnicalError::StorageUnavailable { reason }
+}
+
+/// Reads the single consent row for `capability`, if one is assigned.
+pub(crate) fn select_consent(
+    conn: &Connection,
+    capability: CapabilityKind,
+) -> Result<Option<ConsentRecord>, String> {
+    let found: Option<(String, i64, String, String, String)> = conn
+        .query_row(SQL_SELECT_CONSENT, params![capability.as_str()], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .optional()
+        .map_err(|error| error.to_string())?;
+    found
+        .map(|(id, rev_raw, provider, model, credential_id)| {
+            decode_consent(capability, id, rev_raw, provider, model, credential_id)
+        })
+        .transpose()
 }
 
 pub(crate) fn decode_consent(

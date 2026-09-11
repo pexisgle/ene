@@ -5,12 +5,12 @@ use ene_inference::{
     UsageFact, UsageRepository,
 };
 use ene_primitive::WallClockWithTz;
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{TransactionBehavior, params};
 
 use crate::Store;
 use crate::codec::{
-    SQL_SELECT_CONSENT, decode_u64, encode_id, encode_optional_count, encode_u64,
-    encode_usage_source, inference_unavailable, lock_shared,
+    decode_u64, encode_id, encode_optional_count, encode_u64, encode_usage_source,
+    inference_unavailable, lock_shared, select_consent,
 };
 use crate::credential::SQL_SELECT_SET_REV;
 use crate::run_blocking;
@@ -38,18 +38,10 @@ impl InferenceAttemptRepository for Store {
             // committed first fails the compare (no byte leaves); a mutation
             // that commits after only affects result adoption, never the fact
             // that this attempt started under a verified premise.
-            let stored: Option<(String, i64)> = tx
-                .query_row(
-                    SQL_SELECT_CONSENT,
-                    params![attempt.capability.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(|error| inference_unavailable(error.to_string()))?;
-            let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
-                id == &attempt.expected_consent.0
-                    && decode_u64(*rev)
-                        .is_ok_and(|value| value == attempt.expected_consent.1.as_u64())
+            let current = select_consent(&tx, attempt.capability).map_err(inference_unavailable)?;
+            let current_matches = current.as_ref().is_some_and(|record| {
+                record.id == attempt.expected_consent.0
+                    && record.rev.as_u64() == attempt.expected_consent.1.as_u64()
             });
             if !current_matches {
                 return Ok(AttemptBeginOutcome::Stale);
