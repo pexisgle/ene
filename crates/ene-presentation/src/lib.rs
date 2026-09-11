@@ -14,13 +14,10 @@
 //! `ene_api::v1::round::SubmitTextInput` plus the envelope
 //! `presence_generation_view` / `round_view` at Host ingress, and
 //! [`RoundIntakeOutcome`] maps to
-//! `ene_api::v1::round::RoundIntakeOutcomeWire`. The wire
-//! `ene_api::v1::round::PresentationStatus` `Failed`
-//! variant maps to [`PresentationStatus::PresentationUnknown`] at ingress:
-//! failure is observed as unknown and sticky, never upgraded by resend.
+//! `ene_api::v1::round::RoundIntakeOutcomeWire`.
 //!
-//! Minting versus acceptance: calling [`new_round`] mints a fresh [`RoundId`]
-//! but accepts nothing. [`check_intake`] accepts; on an [`RoundIntent::Auto`]
+//! Minting versus acceptance: a freshly minted [`RoundId`] accepts nothing.
+//! [`check_intake`] accepts; on an [`RoundIntent::Auto`]
 //! request that passes all checks with no matching [`OpenRound`], it mints
 //! a fresh [`RoundId`] inside and returns it as accepted, as it always does
 //! for [`RoundIntent::New`]. Minting is not authority, acceptance is: the
@@ -53,7 +50,7 @@ impl RoundId {
 }
 
 #[must_use]
-pub fn new_round() -> RoundId {
+fn new_round() -> RoundId {
     RoundId(RawId::new())
 }
 
@@ -207,38 +204,6 @@ pub enum RoundIntakeOutcome {
     NeedsRevalidation {
         reason: RevalidationReason,
     },
-}
-
-/// Presentation status vocabulary for observations.
-///
-/// The wire `Failed` status maps to
-/// [`PresentationStatus::PresentationUnknown`] at Host ingress: a failed
-/// presentation is observed as unknown, sticky, and never upgraded by
-/// resend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PresentationStatus {
-    Presented,
-    /// Presentation unknown. Sticky: never upgraded by resend.
-    PresentationUnknown,
-}
-
-/// Presentation confirmation: an observation, not a report of completion.
-///
-/// Sending never equals reported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ConfirmPresentationObservation {
-    pub round: RoundId,
-    pub presented_or_unknown: PresentationStatus,
-}
-
-/// Round closure fact handed to the store layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RoundClosureFact {
-    pub companion: RawId,
-    pub client: ClientId,
-    pub round: RoundId,
-    /// Undelivered link, when close left an unpresented item.
-    pub undelivered_link: Option<RawId>,
 }
 
 /// Evaluates an intake premise into an outcome.

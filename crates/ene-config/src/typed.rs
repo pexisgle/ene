@@ -6,7 +6,6 @@ use std::ffi::OsString;
 
 use figment::Figment;
 use figment::providers::{Format, Json, Serialized};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 const ENV_PREFIX: &str = "ENE_";
@@ -24,7 +23,7 @@ fn default_language() -> String {
 /// There are deliberately no secret-typed fields (no `secret`, `token`, or
 /// `password` keys), no domain state, and no runtime judgments: autostart
 /// selection belongs to a future presentation crate, not here.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// UI locale name such as `"ja"`.
     ///
