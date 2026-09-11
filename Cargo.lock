@@ -274,7 +274,9 @@ dependencies = [
 name = "ene-companion"
 version = "0.1.0"
 dependencies = [
+ "ene-credential",
  "ene-inference",
+ "ene-learning",
  "ene-presence",
  "ene-primitive",
  "thiserror",
@@ -304,6 +306,7 @@ dependencies = [
  "ene-credential",
  "ene-ctl",
  "ene-inference",
+ "ene-learning",
  "ene-permission",
  "ene-plugin-ipc",
  "ene-presence",
@@ -366,7 +369,10 @@ dependencies = [
 name = "ene-learning"
 version = "0.1.0"
 dependencies = [
+ "ene-credential",
  "ene-primitive",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

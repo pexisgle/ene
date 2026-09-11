@@ -14,10 +14,16 @@
 //! without opening a turn, while a conflicting reuse rejects just as
 //! early.
 
+use ene_credential::{CredentialSetRevision, ScrubbedText};
 use ene_inference::{
     Admission, AuthorizedInference, InferenceDispatchOutcome, InferenceExecutor, NotSentReason,
 };
-use ene_presence::PresenceGeneration;
+use ene_learning::{
+    ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceSourceKind,
+    ExperienceTurn, FormationDecision, LearningInference, LearningInferenceError,
+    LearningRepository, LearningTechnicalError, SecretScrubber, SourceRangeRef,
+};
+use ene_presence::{ClientId, PresenceGeneration};
 use ene_primitive::{RawId, WallClockWithTz};
 
 use crate::{
@@ -31,9 +37,15 @@ pub struct AcceptedDialogueInput {
     pub companion: CompanionId,
     /// Host-issued round the input joined or minted.
     pub round: RawId,
+    /// Client the round was accepted on; carried into the Experience
+    /// correspondence for the post-response Learning pass.
+    pub client: ClientId,
     pub generation: PresenceGeneration,
     /// Owner body text; redacted from [`core::fmt::Debug`].
     pub text: String,
+    /// Credential-set premise the text was scrubbed under; the owner append
+    /// is refused if the set moved.
+    pub credential_set: CredentialSetRevision,
     pub lang: String,
     pub local_id: Option<String>,
     pub command: CommandId,
@@ -48,8 +60,10 @@ impl core::fmt::Debug for AcceptedDialogueInput {
             .debug_struct("AcceptedDialogueInput")
             .field("companion", &self.companion)
             .field("round", &self.round)
+            .field("client", &self.client)
             .field("generation", &self.generation)
             .field("text", &"<redacted>")
+            .field("credential_set", &self.credential_set)
             .field("lang", &self.lang)
             .field("local_id", &self.local_id)
             .field("command", &self.command)
@@ -67,6 +81,9 @@ impl core::fmt::Debug for AcceptedDialogueInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogueTurn {
     input: AcceptedDialogueInput,
+    /// Durable identity of the owner row this turn committed. Context
+    /// assembly excludes exactly this message, never a text match.
+    message: RawId,
     authorized: AuthorizedInference,
 }
 
@@ -89,6 +106,9 @@ pub enum DialogueBegin {
     },
     /// The expected consent moved underneath the append.
     StaleConsent,
+    /// The credential set moved past the input's scrub premise. The input
+    /// was not appended; the caller retries so the Host re-scrubs.
+    StaleCredentialSet,
     /// The reused command key owns a different request.
     Conflict,
     /// A store failure held the append.
@@ -105,6 +125,13 @@ pub enum DialogueOutcome {
     Completed {
         /// Adopted reply body; redacted from [`core::fmt::Debug`].
         text: String,
+        /// Experience premise pinned at reply completion: source range,
+        /// transcript, and Client / round / continuity correspondence. The
+        /// caller queues exactly this; the worker never re-reads a later
+        /// History window as if it were the same Experience. [`None`] when
+        /// the bounded window was empty or unreadable: the reply stands and
+        /// the post-response pass is skipped rather than invented.
+        experience: Option<Box<ExperienceCandidate>>,
     },
     /// The reply could not be adopted: the caller closes interrupted.
     Interrupted,
@@ -116,6 +143,7 @@ impl core::fmt::Debug for DialogueOutcome {
             Self::Completed { .. } => formatter
                 .debug_struct("Completed")
                 .field("text", &"<redacted>")
+                .field("experience", &"<premise>")
                 .finish(),
             Self::Interrupted => formatter.write_str("Interrupted"),
         }
@@ -197,6 +225,7 @@ pub async fn begin_turn(
         at: WallClockWithTz::now(),
         expected_generation: input.generation,
         expected_consent: Some((consent_id, consent_rev)),
+        expected_credential_set: Some(input.credential_set),
         local_id: input.local_id.clone(),
         command_id: Some(input.command),
         round_wire: Some(input.round_wire.clone()),
@@ -204,8 +233,12 @@ pub async fn begin_turn(
         incarnation: input.incarnation,
     };
     match history.append_message(owner).await {
-        Ok(HistoryAppendOutcome::CommittedAs { .. }) => {
-            DialogueBegin::Ready(Box::new(DialogueTurn { input, authorized }))
+        Ok(HistoryAppendOutcome::CommittedAs { message }) => {
+            DialogueBegin::Ready(Box::new(DialogueTurn {
+                input,
+                message,
+                authorized,
+            }))
         }
         // Lost the race with a concurrent same-command submit after the
         // early replay lookup: resolve the stored row so the ack survives
@@ -226,6 +259,7 @@ pub async fn begin_turn(
             DialogueBegin::StaleExpected { current }
         }
         Ok(HistoryAppendOutcome::StaleConsent) => DialogueBegin::StaleConsent,
+        Ok(HistoryAppendOutcome::StaleCredentialSet) => DialogueBegin::StaleCredentialSet,
         Ok(HistoryAppendOutcome::CommandConflict) => DialogueBegin::Conflict,
         Ok(HistoryAppendOutcome::HeldByLifecycle { lifecycle }) => {
             DialogueBegin::HeldByLifecycle(lifecycle)
@@ -236,34 +270,53 @@ pub async fn begin_turn(
 
 /// Dispatches the turn's inference call and registers an adopted reply.
 ///
-/// A never-sent or technical outcome closes the stream interrupted; usage
+/// The owner input and the provider output both pass through the scrubber
+/// before they reach a model or durable History: an unprovable secret
+/// boundary closes the stream interrupted instead of sending or storing raw
+/// text. The dispatch carries the prompt's credential-set premise, so the
+/// send claim refuses a prompt that predates a credential registration. A
+/// never-sent or technical outcome closes the stream interrupted; usage
 /// accounting is already decided inside the inference boundary. An adopted
 /// reply appends with its undelivered registration in the same atomic
-/// section; any other reply outcome is interrupted.
+/// section; any other reply outcome is interrupted. After that durable
+/// append, the Experience premise is pinned for the post-response Learning
+/// pass.
 pub async fn finish_turn(
     turn: Box<DialogueTurn>,
     history: &impl HistoryRepository,
     inference: &impl InferenceExecutor,
+    scrubber: &impl SecretScrubber,
 ) -> DialogueOutcome {
-    let DialogueTurn { input, authorized } = *turn;
+    let DialogueTurn {
+        input,
+        message: _,
+        authorized,
+    } = *turn;
     let (consent_id, consent_rev) = {
         let (id, rev) = authorized.consent_premise();
         (id.to_owned(), rev)
     };
-    match inference.dispatch(authorized, input.text.clone()).await {
+    let Ok(prompt) = scrubber.scrub(&input.text).await else {
+        return DialogueOutcome::Interrupted;
+    };
+    match inference.dispatch(authorized, prompt).await {
         Ok(InferenceDispatchOutcome::Completed {
             arrival,
             adopted: true,
         }) => {
+            let Ok(text) = scrubber.scrub(&arrival.output_text).await else {
+                return DialogueOutcome::Interrupted;
+            };
             let reply = AppendHistoryCommand {
                 companion: input.companion,
                 round: input.round,
                 role: HistoryRole::Companion,
-                text: arrival.output_text.clone(),
+                text: text.text.clone(),
                 lang: input.lang.clone(),
                 at: WallClockWithTz::now(),
                 expected_generation: input.generation,
                 expected_consent: Some((consent_id, consent_rev)),
+                expected_credential_set: Some(text.credential_set),
                 local_id: None,
                 command_id: None,
                 // Same round, same projection; the reply is Host-produced,
@@ -273,9 +326,15 @@ pub async fn finish_turn(
                 incarnation: None,
             };
             match history.append_reply_with_undelivered(reply, true).await {
-                Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => DialogueOutcome::Completed {
-                    text: arrival.output_text,
-                },
+                Ok((HistoryAppendOutcome::CommittedAs { .. }, _)) => {
+                    // Pin the Experience premise only after the reply is
+                    // durable; the queued pass judges exactly this window.
+                    let experience = pin_experience(&input, history).await.map(Box::new);
+                    DialogueOutcome::Completed {
+                        text: text.text,
+                        experience,
+                    }
+                }
                 _ => DialogueOutcome::Interrupted,
             }
         }
@@ -284,5 +343,102 @@ pub async fn finish_turn(
             | InferenceDispatchOutcome::NotSent(_),
         )
         | Err(_) => DialogueOutcome::Interrupted,
+    }
+}
+
+/// Pins the Experience premise of one just-completed turn.
+///
+/// Reads the bounded recent window once, at reply completion, so the queued
+/// pass judges exactly this transcript with its Client / round / continuity
+/// correspondence. Returns [`None`] when the window is empty or unreadable;
+/// the caller then skips the pass instead of later re-reading a different
+/// window as if it were the same Experience.
+async fn pin_experience(
+    input: &AcceptedDialogueInput,
+    history: &impl HistoryRepository,
+) -> Option<ExperienceCandidate> {
+    let items = history
+        .load_recent_timeline(input.companion, EXPERIENCE_SOURCE_MESSAGES)
+        .await
+        .ok()?;
+    let (first, last) = (items.first()?, items.last()?);
+    Some(ExperienceCandidate {
+        companion: input.companion.as_raw(),
+        source: SourceRangeRef {
+            kind: ExperienceSourceKind::Dialogue,
+            start: first.id,
+            end: last.id,
+        },
+        transcript: items
+            .iter()
+            .map(|item| ExperienceTurn {
+                role: match item.role {
+                    HistoryRole::Owner => ExperienceRole::Owner,
+                    HistoryRole::Companion => ExperienceRole::Companion,
+                },
+                text: item.text.clone(),
+            })
+            .collect(),
+        at: WallClockWithTz::now(),
+        correspondence: ExperienceCorrespondence {
+            client: Some(input.client.as_raw()),
+            round: Some(input.round),
+            generation: Some(input.generation.as_u64()),
+        },
+    })
+}
+
+/// Recent History messages read into one Experience source.
+pub const EXPERIENCE_SOURCE_MESSAGES: u64 = 12;
+
+/// Proposes one pinned Experience and lets Learning judge it.
+///
+/// The caller runs this after a reply is durable; the result never changes
+/// whether that reply completed. The transcript is transient source material
+/// for this formation only, and the Summary records only a source-range
+/// reference back to the retained History. The caller passes the premise
+/// pinned at reply completion, never a fresh History window.
+pub async fn propose_experience(
+    candidate: ExperienceCandidate,
+    learning: &impl LearningRepository,
+    inference: &impl InferenceExecutor,
+    scrubber: &impl SecretScrubber,
+) -> Result<FormationDecision, LearningTechnicalError> {
+    let adapter = LearningInferenceAdapter { inference };
+    ene_learning::form_experience(learning, &adapter, scrubber, candidate).await
+}
+
+/// Maps the inference owner boundary onto the opaque Learning inference port.
+///
+/// The learning consumer and purpose are admitted by `ene-inference`; this
+/// adapter never presents the call as dialogue. The prompt's credential-set
+/// premise travels into the send claim unchanged.
+struct LearningInferenceAdapter<'a, I> {
+    inference: &'a I,
+}
+
+impl<I: InferenceExecutor + Send + Sync> LearningInference for LearningInferenceAdapter<'_, I> {
+    async fn infer(&self, prompt: ScrubbedText) -> Result<String, LearningInferenceError> {
+        match self.inference.admit_learning().await {
+            Ok(Admission::Admitted(authorized)) => {
+                match self.inference.dispatch(*authorized, prompt).await {
+                    Ok(InferenceDispatchOutcome::Completed {
+                        arrival,
+                        adopted: true,
+                    }) => Ok(arrival.output_text),
+                    Ok(
+                        InferenceDispatchOutcome::Completed { adopted: false, .. }
+                        | InferenceDispatchOutcome::NotSent(_),
+                    ) => Err(LearningInferenceError::Declined),
+                    Err(error) => Err(LearningInferenceError::Unavailable {
+                        reason: error.to_string(),
+                    }),
+                }
+            }
+            Ok(Admission::Declined(_)) => Err(LearningInferenceError::Declined),
+            Err(error) => Err(LearningInferenceError::Unavailable {
+                reason: error.to_string(),
+            }),
+        }
     }
 }

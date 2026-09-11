@@ -19,6 +19,7 @@ use crate::codec::{
     encode_id, encode_lifecycle, encode_presence_state, encode_report_status, encode_role,
     encode_round_intent, encode_u64, lock_shared, undelivered_unavailable,
 };
+use crate::credential::SQL_SELECT_SET_REV;
 use crate::run_blocking;
 
 const SQL_FIND_COMPANION: &str = "SELECT companion_id FROM companion LIMIT 1";
@@ -33,6 +34,8 @@ const SQL_INSERT_ATTRIBUTION: &str = "INSERT INTO presence_attribution (companio
 const SQL_INSERT_HISTORY: &str = "INSERT INTO history_message (message_id, companion_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
 
 const SQL_SELECT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid ASC";
+
+const SQL_SELECT_RECENT_TIMELINE: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 ORDER BY rowid DESC LIMIT ?2";
 
 const SQL_SELECT_HISTORY_BY_LOCAL_ID: &str = "SELECT message_id, round_id, role, body, lang, at, presence_generation, command_id, local_id, round_wire, round_intent, round_intent_ref, client_counter, client_random FROM history_message WHERE companion_id = ?1 AND local_id = ?2 ORDER BY rowid ASC LIMIT 1";
 
@@ -143,6 +146,18 @@ fn append_history(
         });
         if !current_matches {
             return Ok((HistoryAppendOutcome::StaleConsent, None));
+        }
+    }
+    if let Some(expected) = cmd.expected_credential_set {
+        // The text was scrubbed under this credential-set revision. A set
+        // that moved past it may have registered a value still present in
+        // the text, so nothing is written.
+        let stored: i64 = tx
+            .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
+            .map_err(|error| companion_unavailable(error.to_string()))?;
+        let current = decode_u64(stored).map_err(companion_unavailable)?;
+        if current != expected.as_u64() {
+            return Ok((HistoryAppendOutcome::StaleCredentialSet, None));
         }
     }
     if let Some(command) = cmd.command_id {
@@ -432,6 +447,37 @@ impl HistoryRepository for Store {
                 Err(_) => usize::MAX,
             };
             timeline.truncate(cap);
+            Ok(timeline)
+        })
+        .await
+    }
+
+    async fn load_recent_timeline(
+        &self,
+        companion: CompanionId,
+        limit: u64,
+    ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError> {
+        let conn = Arc::clone(&self.conn);
+        run_blocking(move || {
+            let key = encode_id(companion.as_raw());
+            let cap = encode_u64(limit).map_err(companion_unavailable)?;
+            let guard = lock_shared(&conn);
+            let mut query = guard
+                .prepare(SQL_SELECT_RECENT_TIMELINE)
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            let rows = query
+                .query_map(params![key, cap], HistoryRow::from_row)
+                .map_err(|error| companion_unavailable(error.to_string()))?;
+            let mut timeline = Vec::new();
+            for row in rows {
+                let row = row.map_err(|error| companion_unavailable(error.to_string()))?;
+                let message =
+                    decode_history_message(companion, row).map_err(companion_unavailable)?;
+                timeline.push(message);
+            }
+            // The SQL walk is newest-first so the cap keeps the newest items;
+            // the caller receives them oldest-first like [`Self::load_timeline`].
+            timeline.reverse();
             Ok(timeline)
         })
         .await

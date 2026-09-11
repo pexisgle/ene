@@ -528,16 +528,39 @@ mod env_credential_store_tests {
     }
 
     #[test]
-    fn store_reports_other_providers_absent_without_reading_env() {
-        let store = EnvCredentialStore;
+    fn store_reports_other_providers_absent_without_re_reading_env() {
+        let calls = Cell::new(0_u32);
+        let store = EnvCredentialStore::from_lookup(|_| {
+            calls.set(calls.get() + 1);
+            Some("test-key".to_owned())
+        });
+        assert_eq!(calls.get(), 1, "construction pins the value once");
         assert!(!store.contains(&other_cred()));
+        assert_eq!(calls.get(), 1, "other providers never re-read the source");
     }
 
     #[test]
     fn store_with_bearer_rejects_other_providers() {
-        let store = EnvCredentialStore;
+        let store = EnvCredentialStore::from_lookup(|_| Some("test-key".to_owned()));
         let outcome = store.with_bearer(&other_cred(), str::len);
         let CredentialTechnicalError::StorageUnavailable { reason } = outcome.unwrap_err();
         assert_eq!(reason, "env credential missing");
+    }
+
+    #[test]
+    fn store_pins_the_value_at_construction() {
+        let calls = Cell::new(0_u32);
+        let store = EnvCredentialStore::from_lookup(|name| {
+            assert_eq!(name, ENV_API_KEY);
+            calls.set(calls.get() + 1);
+            Some("pinned-key".to_owned())
+        });
+        assert_eq!(calls.get(), 1, "construction reads the source once");
+        let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
+        let first = store.with_bearer(&credential, str::to_owned).unwrap();
+        let second = store.with_bearer(&credential, str::to_owned).unwrap();
+        assert_eq!(first, "pinned-key");
+        assert_eq!(second, "pinned-key");
+        assert_eq!(calls.get(), 1, "calls never re-read the source");
     }
 }

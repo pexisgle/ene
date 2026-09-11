@@ -20,6 +20,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 use crate::Store;
 use crate::codec::{decode_id, decode_u64, encode_id, lock_shared};
+use crate::credential::SQL_SELECT_SET_REV;
 use crate::run_blocking;
 
 const SQL_SELECT_MEMORY_TARGET: &str =
@@ -55,6 +56,18 @@ fn commit_change_sync(
     let tx = guard
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(learning_unavailable)?;
+    // Credential-set premise first: content scrubbed before a credential
+    // became registered must not be written, so the whole change (including
+    // its Summary evidence) is refused before any row.
+    if let Some(expected) = commit.secret_premise {
+        let stored: i64 = tx
+            .query_row(SQL_SELECT_SET_REV, (), |row| row.get(0))
+            .map_err(learning_unavailable)?;
+        let current = decode_u64(stored).map_err(learning_unavailable)?;
+        if current != expected.as_u64() {
+            return Ok(MemoryChangeOutcome::StaleCredentialSet);
+        }
+    }
     if let Some(summary) = &commit.summary {
         insert_summary(&tx, summary)?;
     }

@@ -536,6 +536,19 @@ async fn serve_connection<T>(
                 break;
             }
         }
+        // The response above is already on the wire: post-response Learning
+        // formation runs in its own task, never as part of the request's
+        // completion. `run_pending_learning` serializes and drains, so a
+        // second spawn that finds an emptied queue is a cheap no-op.
+        if handle.has_pending_learning() {
+            let worker_handle = Arc::clone(&handle);
+            let worker_transport = Arc::clone(&transport);
+            tokio::spawn(async move {
+                worker_handle
+                    .run_pending_learning(worker_transport.as_ref())
+                    .await;
+            });
+        }
         if failed || terminal {
             break;
         }

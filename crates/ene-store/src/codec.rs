@@ -203,8 +203,10 @@ pub(crate) fn permission_unavailable(reason: String) -> PermissionTechnicalError
     PermissionTechnicalError::StorageUnavailable { reason }
 }
 
-pub(crate) fn credential_unavailable(reason: String) -> CredentialTechnicalError {
-    CredentialTechnicalError::StorageUnavailable { reason }
+pub(crate) fn credential_unavailable(reason: impl core::fmt::Display) -> CredentialTechnicalError {
+    CredentialTechnicalError::StorageUnavailable {
+        reason: reason.to_string(),
+    }
 }
 
 pub(crate) fn inference_unavailable(reason: String) -> InferenceTechnicalError {

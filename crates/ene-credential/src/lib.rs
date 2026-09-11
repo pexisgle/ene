@@ -17,6 +17,7 @@ mod auth_file;
 mod pairing;
 mod registration;
 mod registry;
+mod scrub;
 mod secret;
 
 #[cfg(test)]
@@ -35,9 +36,10 @@ pub use registration::{
 };
 pub use registry::{
     CredentialAvailability, CredentialNotify, CredentialRef, CredentialRefError,
-    CredentialRefRepository, RegisterCredentialCommand, RegisterOutcome, available_credential,
-    credential_availability, register,
+    CredentialRefRepository, CredentialSetRepository, RegisterCredentialCommand, RegisterOutcome,
+    available_credential, credential_availability, register,
 };
+pub use scrub::{CredentialSetRevision, ScrubbedText, SecretScrubError, SecretScrubber};
 pub use secret::{
     CredentialStore, ENV_API_KEY, EnvCredentialStore, MemoryCredentialStore, SecretValue,
 };
@@ -50,3 +52,9 @@ pub enum CredentialTechnicalError {
         reason: String,
     },
 }
+
+/// Display marker replacing one registered credential value.
+///
+/// The Host and the store share this single token so redaction is
+/// recognisable end to end without carrying any part of the value.
+pub const REDACTED_CREDENTIAL: &str = "[credential]";

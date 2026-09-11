@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
-const CURRENT_VERSION: u64 = 10;
+const CURRENT_VERSION: u64 = 11;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS companion (
@@ -239,6 +239,21 @@ ALTER TABLE consent_record_capability RENAME TO consent_record;
 ALTER TABLE inference_attempt ADD COLUMN capability TEXT NOT NULL DEFAULT 'dialogue';
 ";
 
+/// Introduces the durable credential-set revision for the secret-scrub
+/// currentness premise. A scrub records the revision; writers compare it
+/// inside their transaction so content prepared before a value change cannot
+/// land afterwards. The revision advances atomically with a usable ref
+/// becoming registered, with a successful approval/re-approval, and with the
+/// Host startup sweep. Seeded at zero: an environment with no usable
+/// credential yet.
+const MIGRATION_V11: &str = "
+CREATE TABLE IF NOT EXISTS credential_set (
+id INTEGER PRIMARY KEY CHECK (id = 1),
+rev INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO credential_set (id, rev) VALUES (1, 0);
+";
+
 /// Atomic: pending migrations and the version bump commit together in one
 /// transaction, so a crash mid-migration rolls back to the pre-migration
 /// state and the next open retries from scratch. The commit is the sole
@@ -299,6 +314,10 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), String> {
     }
     if stored_version < 10 {
         tx.execute_batch(MIGRATION_V10)
+            .map_err(|error| error.to_string())?;
+    }
+    if stored_version < 11 {
+        tx.execute_batch(MIGRATION_V11)
             .map_err(|error| error.to_string())?;
     }
     let current =

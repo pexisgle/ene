@@ -17,6 +17,7 @@ use ene_api::v1::round::{
     SubmitTextInput, TextBodyWire,
 };
 use ene_credential::{CredentialRef, MemoryCredentialStore};
+use ene_inference::ProviderTransport;
 use ene_inference::fake::{FakeFailure, FakeProviderTransport};
 use ene_presentation::RoundId;
 use ene_primitive::RawId;
@@ -175,10 +176,10 @@ fn ok_transport() -> FakeProviderTransport {
 
 /// Result-based handle setup for the round regression tests: a failed
 /// open or a failed setup is a test failure, never a silent pass.
-async fn round_test_handle(
+async fn round_test_handle<T: ProviderTransport>(
     tag: &str,
     live: &LiveInput,
-    transport: &FakeProviderTransport,
+    transport: &T,
 ) -> Result<(HostHandle, tempfile::TempDir), String> {
     let Some((handle, dir)) = setup_handle(tag).await else {
         return Err(String::from("handle open failed"));
@@ -276,10 +277,10 @@ async fn setup_handle(tag: &str) -> Option<(HostHandle, tempfile::TempDir)> {
     .await
 }
 
-async fn register_assign_complete(
+async fn register_assign_complete<T: ProviderTransport>(
     handle: &HostHandle,
     live: &LiveInput,
-    transport: &FakeProviderTransport,
+    transport: &T,
 ) -> bool {
     let registered = handle
         .handle_frame(
@@ -332,6 +333,33 @@ async fn register_assign_complete(
     matches!(
         &done.payload,
         WirePayload::ManagementOutcome(ManagementOutcome::AppliedAsOneTime)
+    )
+}
+
+/// Assigns the learning capability to the same route the dialogue setup
+/// uses, returning whether the assignment committed.
+async fn assign_learning(
+    handle: &HostHandle,
+    live: &LiveInput,
+    transport: &impl ProviderTransport,
+) -> bool {
+    let assigned = handle
+        .handle_frame(
+            intent_frame(
+                ManagementIntentKind::ManageRuleConsentCap,
+                "consent:learning:openai:dialogue-1:openai:main",
+                "consent-learning-none",
+                live.connection_id,
+            ),
+            live.clone(),
+            transport,
+        )
+        .await;
+    matches!(
+        assigned.first().map(|answer| &answer.payload),
+        Some(WirePayload::ManagementOutcome(
+            ManagementOutcome::StoredAsRuleView { .. }
+        ))
     )
 }
 
@@ -2112,7 +2140,16 @@ async fn consent_move_mid_flight_interrupts_adoption() {
 
 #[tokio::test]
 async fn register_holds_until_host_local_approval() {
-    let (handle, _dir) = memory_handle_with("dlg-credgate", |_| {}).await.unwrap();
+    // Approval now requires a readable bearer: it must sweep any prior
+    // plaintext occurrence before the ref becomes usable.
+    let (handle, _dir) = memory_handle_with("dlg-credgate", |store| {
+        store.insert(
+            CredentialRef::new("openai", "main").expect("valid test fixture"),
+            "test-bearer",
+        );
+    })
+    .await
+    .unwrap();
     let transport = ok_transport();
     let live = live_input("client-a");
     let pending = handle
@@ -2308,5 +2345,873 @@ async fn learning_admission_requires_its_own_capability_assignment() {
     assert!(
         matches!(executor.admit_dialogue().await, Ok(Admission::Admitted(_))),
         "the dialogue assignment is untouched"
+    );
+}
+
+/// A transport that answers the learning formation prompt with a configured
+/// JSON answer and every dialogue call with fixed reply text.
+struct LearningAwareTransport {
+    reply: String,
+    formation: Option<String>,
+    inputs: std::sync::Mutex<Vec<String>>,
+}
+
+impl LearningAwareTransport {
+    fn new(reply: &str, formation: Option<&str>) -> Self {
+        Self {
+            reply: reply.to_owned(),
+            formation: formation.map(str::to_owned),
+            inputs: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.lock().expect("recorded input lock").clone()
+    }
+}
+
+impl ProviderTransport for LearningAwareTransport {
+    fn complete(
+        &self,
+        req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inputs
+            .lock()
+            .expect("recorded input lock")
+            .push(req.input.clone());
+        let text = if req.input.contains("learning formation pass") {
+            self.formation.clone().unwrap_or_default()
+        } else {
+            self.reply.clone()
+        };
+        Box::pin(async move { Ok(ene_inference::ProviderResponse { text, usage: None }) })
+    }
+}
+
+/// Transport whose learning formation call blocks until released, so a test
+/// can prove the client-visible reply does not wait for Learning.
+struct BlockingLearningTransport {
+    reply: String,
+    learning_started: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl ProviderTransport for BlockingLearningTransport {
+    fn complete(
+        &self,
+        req: ene_inference::ProviderRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ene_inference::ProviderResponse,
+                        ene_inference::InferenceTechnicalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        let learning = req.input.contains("learning formation pass");
+        let reply = self.reply.clone();
+        let started = std::sync::Arc::clone(&self.learning_started);
+        let release = std::sync::Arc::clone(&self.release);
+        Box::pin(async move {
+            if learning {
+                started.notify_one();
+                release.notified().await;
+                return Ok(ene_inference::ProviderResponse {
+                    text: String::from(r#"{"summary": "Nothing new.", "memories": []}"#),
+                    usage: None,
+                });
+            }
+            Ok(ene_inference::ProviderResponse {
+                text: reply,
+                usage: None,
+            })
+        })
+    }
+}
+
+fn assert_stream_completed(responses: &[ene_plugin_ipc::WireFrame]) {
+    let Some(last) = responses.last() else {
+        panic!("the turn must answer");
+    };
+    assert!(
+        matches!(
+            &last.payload,
+            WirePayload::TextStreamClose(close) if close.status == StreamClose::Completed
+        ),
+        "the dialogue must still complete, got {:?}",
+        last.payload
+    );
+}
+
+#[tokio::test]
+async fn completed_reply_forms_memory_and_keeps_summary_evidence() {
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::LearningRepository as _;
+
+    let transport = LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner likes jasmine tea.", "memories": [{"content": "The owner likes jasmine tea.", "importance": 4, "temporal": "enduring"}]}"#,
+        ),
+    );
+    let live = live_input("client-formation");
+    let setup = round_test_handle("dlg-formation", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(
+        assign_learning(&handle, &live, &transport).await,
+        "learning formation needs its own capability assignment"
+    );
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-formation",
+        "please remember that I like jasmine tea",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+    assert_stream_completed(&responses);
+    // The formation pass is post-response work; drain it explicitly here.
+    handle.run_pending_learning(&transport).await;
+
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1, "one compressed memory is formed");
+    assert_eq!(memories[0].content, "The owner likes jasmine tea.");
+    assert_eq!(memories[0].importance.as_u8(), 4);
+    let revisions = handle
+        .store
+        .list_memory_revisions(memories[0].id)
+        .await
+        .unwrap();
+    assert_eq!(revisions.len(), 1, "the initial revision is recorded");
+    let summary = handle
+        .store
+        .load_summary(revisions[0].summary.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(summary.content.contains("jasmine tea"), "grounds are kept");
+}
+
+/// A provider or transport failure in the Learning pass is a technical
+/// failure, not a semantic decline: an experience the model never judged must
+/// not be reported as "nothing worth keeping".
+#[tokio::test]
+async fn learning_transport_failure_is_reported_as_unavailable() {
+    use super::{CredentialScrubber, HostInference};
+    use ene_companion::CompanionRepository as _;
+    use ene_learning::{
+        ExperienceCandidate, ExperienceCorrespondence, ExperienceRole, ExperienceSourceKind,
+        ExperienceTurn, LearningTechnicalError, SourceRangeRef,
+    };
+    use ene_primitive::WallClockWithTz;
+
+    let live = live_input("client-learning-failure");
+    let transport = ok_transport();
+    let setup = round_test_handle("dlg-learning-failure", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, &transport).await);
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+
+    let failing =
+        FakeProviderTransport::failing(FakeFailure::Transport(String::from("provider down")));
+    let executor = HostInference {
+        store: &handle.store,
+        cred_store: &handle.cred_store,
+        tracker: &handle.tracker,
+        transport: &failing,
+    };
+    let scrubber = CredentialScrubber {
+        refs: &handle.store,
+        store: &handle.cred_store,
+    };
+    let candidate = ExperienceCandidate {
+        companion: companion.as_raw(),
+        source: SourceRangeRef {
+            kind: ExperienceSourceKind::Dialogue,
+            start: RawId::new(),
+            end: RawId::new(),
+        },
+        transcript: vec![ExperienceTurn {
+            role: ExperienceRole::Owner,
+            text: String::from("remember this"),
+        }],
+        at: WallClockWithTz::now(),
+        correspondence: ExperienceCorrespondence::default(),
+    };
+
+    let outcome =
+        ene_companion::dialogue::propose_experience(candidate, &handle.store, &executor, &scrubber)
+            .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(LearningTechnicalError::InferenceUnavailable { .. })
+        ),
+        "a transport failure must not be reported as a decline, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn formation_scrubs_registered_credentials_from_prompt_and_storage() {
+    use ene_companion::CompanionRepository as _;
+    use ene_companion::HistoryRepository as _;
+    use ene_learning::LearningRepository as _;
+
+    // The fixture handle provisions `openai:main` with "test-bearer".
+    let transport = LearningAwareTransport::new(
+        "noted",
+        Some(
+            r#"{"summary": "The owner shared test-bearer.", "memories": [{"content": "The owner's key is test-bearer.", "importance": 5}]}"#,
+        ),
+    );
+    let live = live_input("client-secret");
+    let setup = round_test_handle("dlg-secret", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, &transport).await);
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-secret",
+        "remember my key test-bearer",
+        live.connection_id,
+    );
+    let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+    assert_stream_completed(&responses);
+    handle.run_pending_learning(&transport).await;
+
+    // Nothing that reaches the model may carry the registered value: the
+    // dialogue prompt and the formation prompt are both recorded.
+    for (position, input) in transport.inputs().iter().enumerate() {
+        assert!(
+            !input.contains("test-bearer"),
+            "provider input {position} must not carry the credential"
+        );
+    }
+    // Durable History holds the redacted owner input too.
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let timeline = handle
+        .store
+        .load_timeline(companion, None, 10)
+        .await
+        .unwrap();
+    let owner = timeline
+        .iter()
+        .find(|item| item.role == ene_companion::HistoryRole::Owner)
+        .expect("the owner row is durable");
+    assert!(
+        !owner.text.contains("test-bearer"),
+        "a registered credential never reaches History: {}",
+        owner.text
+    );
+    assert!(
+        owner.text.contains("[credential]"),
+        "the History occurrence is visibly redacted"
+    );
+
+    let memories = handle
+        .store
+        .list_current_memories(companion.as_raw(), 10)
+        .await
+        .unwrap();
+    assert_eq!(memories.len(), 1);
+    assert!(
+        !memories[0].content.contains("test-bearer"),
+        "a registered credential never reaches Memory: {}",
+        memories[0].content
+    );
+    assert!(
+        memories[0].content.contains("[credential]"),
+        "the credential position is visibly redacted"
+    );
+    let revisions = handle
+        .store
+        .list_memory_revisions(memories[0].id)
+        .await
+        .unwrap();
+    let summary = handle
+        .store
+        .load_summary(revisions[0].summary.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !summary.content.contains("test-bearer"),
+        "a registered credential never reaches Summary: {}",
+        summary.content
+    );
+}
+
+/// A Learning pass that blocks must not hold the client-visible completion:
+/// the reply is durable and streamed first, and the queued pass runs after.
+#[tokio::test]
+async fn learning_latency_never_delays_the_client_visible_completion() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let transport = Arc::new(BlockingLearningTransport {
+        reply: String::from("noted"),
+        learning_started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
+    let live = live_input("client-decoupled");
+    let setup = round_test_handle("dlg-decoupled", &live, transport.as_ref()).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, transport.as_ref()).await);
+    let frame = submit_frame(
+        handle.companion_wire(),
+        Some(0),
+        None,
+        "local-decoupled",
+        "remember this",
+        live.connection_id,
+    );
+    let responses = tokio::time::timeout(
+        Duration::from_secs(5),
+        handle.handle_frame(frame, live.clone(), transport.as_ref()),
+    )
+    .await
+    .expect("client-visible completion must not wait for learning");
+    assert_stream_completed(&responses);
+
+    // The queued pass then runs (and blocks until released), proving the
+    // response was produced independently of it.
+    let handle = Arc::new(handle);
+    let worker_handle = Arc::clone(&handle);
+    let worker_transport = Arc::clone(&transport);
+    let worker = tokio::spawn(async move {
+        worker_handle
+            .run_pending_learning(worker_transport.as_ref())
+            .await;
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        transport.learning_started.notified(),
+    )
+    .await
+    .expect("the queued formation must start once drained");
+    transport.release.notify_one();
+    worker.await.unwrap();
+}
+
+/// The queue carries the Experience premise pinned at reply completion, so a
+/// delayed worker cannot silently widen the pass to later turns. Coalescing
+/// is not used: every completed turn keeps its own source range and
+/// correspondence.
+#[tokio::test]
+async fn queued_experience_keeps_its_completion_premise() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_presence::PresenceRepository as _;
+    use ene_primitive::WallClockWithTz;
+
+    let transport = LearningAwareTransport::new("noted", None);
+    let live = live_input("client-premise");
+    let setup = round_test_handle("dlg-premise", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    assert!(assign_learning(&handle, &live, &transport).await);
+
+    for (round, local, text) in [
+        (0_u64, "local-premise-1", "first turn"),
+        (1_u64, "local-premise-2", "second turn"),
+    ] {
+        let frame = submit_frame(
+            handle.companion_wire(),
+            Some(round),
+            None,
+            local,
+            text,
+            live.connection_id,
+        );
+        let responses = handle.handle_frame(frame, live.clone(), &transport).await;
+        assert_stream_completed(&responses);
+    }
+
+    let queued = handle.pending_learning_premises();
+    assert_eq!(queued.len(), 2, "one pinned premise per completed turn");
+    let expected_client = device_client(&live.client_ref).as_raw();
+    for premise in &queued {
+        assert_eq!(
+            premise.source.kind,
+            ene_learning::ExperienceSourceKind::Dialogue
+        );
+        assert_eq!(
+            premise.correspondence.client,
+            Some(expected_client),
+            "the Client correspondence survives the queue"
+        );
+        assert!(
+            premise.correspondence.round.is_some() && premise.correspondence.generation.is_some(),
+            "round and continuity survive the queue: {premise:?}"
+        );
+    }
+    let (first, second) = (&queued[0], &queued[1]);
+    assert_ne!(
+        (first.source.start, first.source.end),
+        (second.source.start, second.source.end),
+        "each turn keeps its own source boundary"
+    );
+
+    // A later turn lands durably before the worker drains. It must not be
+    // folded into either pinned premise.
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let generation = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    handle
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("later turn must not leak"),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: None,
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await
+        .unwrap();
+
+    handle.run_pending_learning(&transport).await;
+    let prompts: Vec<String> = transport
+        .inputs()
+        .into_iter()
+        .filter(|input| input.contains("learning formation pass"))
+        .collect();
+    assert_eq!(prompts.len(), 2, "one formation call per pinned premise");
+    assert!(
+        prompts[0].contains("first turn") && !prompts[0].contains("later turn must not leak"),
+        "the first premise must not absorb the later turn: {}",
+        prompts[0]
+    );
+    assert!(
+        prompts[1].contains("second turn") && !prompts[1].contains("later turn must not leak"),
+        "the second premise must not absorb the later turn: {}",
+        prompts[1]
+    );
+}
+
+/// A string already stored before the credential became registered must be
+/// redacted when the Owner approves the credential: registration establishes
+/// the non-exposure contract over existing durable state, not just over
+/// future writes.
+#[tokio::test]
+async fn approving_a_credential_redacts_its_prior_occurrences() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_presence::PresenceRepository as _;
+    use ene_primitive::WallClockWithTz;
+
+    let (handle, _dir) = setup_handle("dlg-sweep").await.unwrap();
+    let live = live_input("client-sweep");
+    let transport = ok_transport();
+    let registered = handle
+        .handle_frame(
+            intent_frame(
+                ManagementIntentKind::ConfigureCredentialIntent,
+                "credential:openai:main",
+                "consent-none",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        matches!(
+            registered.first().map(|answer| &answer.payload),
+            Some(WirePayload::ManagementOutcome(
+                ManagementOutcome::HeldByOperation
+            ))
+        ),
+        "the registration must wait as a pending approval"
+    );
+    let companion = handle.store.ensure_running_companion().await.unwrap();
+    let generation = handle
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    let appended = handle
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("my old key was test-bearer"),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: None,
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await;
+    assert!(
+        matches!(
+            appended,
+            Ok(ene_companion::HistoryAppendOutcome::CommittedAs { .. })
+        ),
+        "the pre-registration row must commit, got {appended:?}"
+    );
+
+    assert!(
+        matches!(handle.approve_credential("openai", "main").await, Ok(true)),
+        "the approval must succeed and sweep before making the ref usable"
+    );
+
+    let timeline = handle
+        .store
+        .load_timeline(companion, None, 10)
+        .await
+        .unwrap();
+    let row = timeline
+        .iter()
+        .find(|item| item.text.contains("old key"))
+        .expect("the prior row is still held");
+    assert!(
+        !row.text.contains("test-bearer"),
+        "approval must sweep the prior plaintext occurrence: {}",
+        row.text
+    );
+    assert!(row.text.contains("[credential]"));
+}
+
+/// A value change is adopted only at a Host boundary: the next start pins
+/// the new value, sweeps its durable occurrences, and advances the revision
+/// before serving, so a restart never uses a new bearer with stale content
+/// and never keeps serving content prepared under the old set.
+#[tokio::test]
+async fn restart_sweeps_and_advances_before_the_new_value_is_used() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_credential::{
+        CredentialRefRepository as _, CredentialSetRepository as _, EnvCredentialStore,
+    };
+    use ene_learning::SecretScrubber as _;
+    use ene_presence::PresenceRepository as _;
+    use ene_primitive::WallClockWithTz;
+
+    let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+    let companion_store = EnvCredentialStore::from_lookup(|_| Some(String::from("test-bearer")));
+    let first = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
+        .await
+        .expect("the first open must succeed");
+    first
+        .store
+        .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
+        .await
+        .expect("the ref must register");
+    let companion = first.store.ensure_running_companion().await.unwrap();
+    let generation = first
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    // The future value already sits in durable content (for example, typed
+    // as ordinary text while the old value was still pinned). The running
+    // Host cannot know it yet, so the row keeps the plaintext.
+    let old_revision = first.store.current_set_revision().await.unwrap();
+    first
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("the rotated key is rotated-bearer"),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: Some(old_revision),
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await
+        .expect("the row commits under the old set");
+    drop(first);
+
+    // Restart: construction pins the rotated value, and the startup sweep
+    // must replace its occurrences and advance the revision before the
+    // handle serves anything.
+    let companion_store = EnvCredentialStore::from_lookup(|_| Some(String::from("rotated-bearer")));
+    let restarted = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
+        .await
+        .expect("the restarted open must succeed");
+    let new_revision = restarted.store.current_set_revision().await.unwrap();
+    assert!(
+        new_revision > old_revision,
+        "the startup boundary must advance the revision"
+    );
+    let timeline = restarted
+        .store
+        .load_timeline(companion, None, 10)
+        .await
+        .unwrap();
+    let row = timeline
+        .iter()
+        .find(|item| item.text.contains("[credential]"))
+        .expect("the swept row is still present");
+    assert!(
+        !row.text.contains("rotated-bearer"),
+        "the startup sweep must redact the newly pinned value: {}",
+        row.text
+    );
+
+    // A write prepared under the old revision is refused; a fresh scrub
+    // names the new revision and commits normally.
+    let stale = restarted
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("a second stale row"),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: Some(old_revision),
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await;
+    assert_eq!(
+        stale,
+        Ok(ene_companion::HistoryAppendOutcome::StaleCredentialSet)
+    );
+    let scrubber = super::CredentialScrubber {
+        refs: &restarted.store,
+        store: &restarted.cred_store,
+    };
+    let fresh = scrubber
+        .scrub("my key is rotated-bearer")
+        .await
+        .expect("the fresh scrub must prove absence");
+    assert_eq!(fresh.credential_set, new_revision);
+    assert!(!fresh.text.contains("rotated-bearer"));
+    let committed = restarted
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: fresh.text,
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: Some(fresh.credential_set),
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await;
+    assert!(matches!(
+        committed,
+        Ok(ene_companion::HistoryAppendOutcome::CommittedAs { .. })
+    ));
+}
+
+/// A Stage 2 environment can hold a registered CredentialRef together with
+/// plaintext History stored before the scrub boundary. If the registered
+/// value cannot be read at startup, the Host must not open at all: skipping
+/// the sweep while advancing the revision would serve the plaintext under a
+/// fresh set. With the value readable, the same startup must redact it and
+/// advance the revision before serving.
+#[tokio::test]
+async fn startup_with_an_unreadable_registered_value_never_opens() {
+    use ene_companion::{CompanionRepository as _, HistoryRepository as _};
+    use ene_credential::{CredentialRefRepository as _, CredentialSetRepository as _};
+    use ene_presence::PresenceRepository as _;
+    use ene_primitive::WallClockWithTz;
+
+    let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+    let credential = CredentialRef::new("openai", "main").expect("valid test fixture");
+    let readable = MemoryCredentialStore::new();
+    readable.insert(credential.clone(), "test-bearer");
+    let first = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(readable))
+        .await
+        .expect("the first open must succeed");
+    first
+        .store
+        .save_ref(credential.clone())
+        .await
+        .expect("the ref must register");
+    let companion = first.store.ensure_running_companion().await.unwrap();
+    let generation = first
+        .store
+        .load_attribution(companion.as_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    first
+        .store
+        .append_message(ene_companion::AppendHistoryCommand {
+            companion,
+            round: RawId::new(),
+            role: ene_companion::HistoryRole::Owner,
+            text: String::from("the legacy key is test-bearer"),
+            lang: String::from("en"),
+            at: WallClockWithTz::now(),
+            expected_generation: generation,
+            expected_consent: None,
+            expected_credential_set: None,
+            command_id: None,
+            round_wire: None,
+            round_intent: None,
+            incarnation: None,
+            local_id: None,
+        })
+        .await
+        .expect("the legacy row must commit");
+    let old_revision = first.store.current_set_revision().await.unwrap();
+    drop(first);
+
+    // The registered ref is unreadable: the open must fail closed instead of
+    // sweeping nothing and advancing past the boundary.
+    let missing = HostHandle::open_with_cred_store(
+        dir.path(),
+        CredStore::Memory(MemoryCredentialStore::new()),
+    )
+    .await;
+    assert!(
+        missing.is_err(),
+        "an unreadable registered value must keep the Host closed"
+    );
+
+    // The failed open leaves both the revision and the plaintext untouched.
+    let store = ene_store::Store::open(&dir.path().join("app.db"))
+        .await
+        .expect("the durable store stays readable");
+    assert_eq!(
+        store.current_set_revision().await,
+        Ok(old_revision),
+        "a failed open must not advance the credential-set revision"
+    );
+    let timeline = store.load_timeline(companion, None, 10).await.unwrap();
+    let legacy = timeline
+        .iter()
+        .find(|item| item.text.contains("legacy key"))
+        .expect("the legacy row is still held");
+    assert_eq!(legacy.text, "the legacy key is test-bearer");
+    drop(store);
+
+    // With the value readable the startup sweep completes before serving.
+    let present = MemoryCredentialStore::new();
+    present.insert(credential, "test-bearer");
+    let reopened = HostHandle::open_with_cred_store(dir.path(), CredStore::Memory(present))
+        .await
+        .expect("a readable registered value lets the Host open");
+    assert!(
+        reopened.store.current_set_revision().await.unwrap() > old_revision,
+        "the successful startup boundary advances the revision"
+    );
+    let timeline = reopened
+        .store
+        .load_timeline(companion, None, 10)
+        .await
+        .unwrap();
+    let swept = timeline
+        .iter()
+        .find(|item| item.text.contains("legacy key"))
+        .expect("the swept row is still present");
+    assert_eq!(swept.text, "the legacy key is [credential]");
+}
+
+/// A running Host never re-reads the environment: the value is pinned when
+/// the store is constructed, so an external change is adopted only by the
+/// next start, where the sweep and revision advance bracket the new value.
+#[tokio::test]
+async fn running_host_never_re_reads_the_environment() {
+    use ene_credential::{CredentialRefRepository as _, EnvCredentialStore};
+    use ene_learning::SecretScrubber as _;
+    use std::cell::Cell;
+
+    let dir = tempfile::tempdir().expect("test scratch directory must be creatable");
+    let reads = Cell::new(0_u32);
+    // The single construction read sees the old value; any later read would
+    // see the rotated one, modelling an external rotation while Host runs.
+    let companion_store = EnvCredentialStore::from_lookup(|_| {
+        reads.set(reads.get() + 1);
+        Some(String::from(if reads.get() == 1 {
+            "test-bearer"
+        } else {
+            "rotated-bearer"
+        }))
+    });
+    let handle = HostHandle::open_with_cred_store(dir.path(), CredStore::Env(companion_store))
+        .await
+        .expect("the open must succeed");
+    handle
+        .store
+        .save_ref(CredentialRef::new("openai", "main").expect("valid test fixture"))
+        .await
+        .expect("the ref must register");
+    let scrubber = super::CredentialScrubber {
+        refs: &handle.store,
+        store: &handle.cred_store,
+    };
+    let scrubbed = scrubber
+        .scrub("my key is test-bearer")
+        .await
+        .expect("the pinned scrub must prove absence");
+    assert!(!scrubbed.text.contains("test-bearer"));
+    assert_eq!(
+        reads.get(),
+        1,
+        "the running Host must not re-read the environment"
+    );
+    let unknown = scrubber
+        .scrub("a note says rotated-bearer")
+        .await
+        .expect("the scrub must prove absence of the pinned value");
+    assert!(
+        unknown.text.contains("rotated-bearer"),
+        "the rotated value is not the active bearer, so it stays untouched"
     );
 }

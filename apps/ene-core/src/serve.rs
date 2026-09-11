@@ -53,7 +53,7 @@
 //! - [`HostHandle`] methods take `&self`: every lock guard is dropped before
 //!   the next await, and no handle-wide async lock spans provider I/O.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Mutex as StdMutex, MutexGuard};
 
@@ -64,9 +64,9 @@ use ene_api::v1::refs::{ConnectionWireId, RoundWireId};
 use ene_api::v1::reject::RejectKind;
 use ene_companion::{CompanionId, CompanionRepository};
 use ene_credential::{
-    CredentialApprovalRepository, CredentialRef, CredentialStore, CredentialTechnicalError,
-    DevicePairingRepository, DeviceRecord, EnvCredentialStore, FileDeviceAuthStore,
-    MemoryCredentialStore,
+    CredentialApprovalRepository, CredentialRef, CredentialRefRepository as _, CredentialStore,
+    CredentialTechnicalError, DevicePairingRepository, DeviceRecord, EnvCredentialStore,
+    FileDeviceAuthStore, MemoryCredentialStore,
 };
 use ene_inference::ProviderTransport;
 use ene_permission::EvaluationTracker;
@@ -122,9 +122,9 @@ pub enum CoreError {
 /// [`CredentialStore::with_bearer`] is generic over its closure return type,
 /// so the trait is not dyn-compatible and the handle holds this closed enum
 /// instead of a trait object. [`CredStore::Env`] is the production store for
-/// the `openai` provider (the bearer lives in the process environment and is
-/// never cached); [`CredStore::Memory`] is the test and local-development
-/// store.
+/// the `openai` provider (the bearer is read from the process environment
+/// once at Host startup and pinned in memory for the run, never re-read);
+/// [`CredStore::Memory`] is the test and local-development store.
 #[derive(Debug)]
 pub enum CredStore {
     Env(EnvCredentialStore),
@@ -267,6 +267,18 @@ pub struct HostHandle {
     /// acceptance. Each nonce is consumed on first proof regardless of
     /// outcome, so a captured proof cannot replay.
     pub(crate) pending_nonces: StdMutex<HashMap<String, String>>,
+    /// In-memory, best-effort queue of pinned Experience premises whose
+    /// completed replies await a Learning formation pass.
+    ///
+    /// Each item carries its own source range, transcript, and Client / round
+    /// / continuity correspondence, pinned at reply completion. See
+    /// [`crate::dialogue`]: the pass is post-response work, never a condition
+    /// of the client-visible completion, and a crash simply drops the queued
+    /// derived update instead of replaying an old pass.
+    pub(crate) learning_queue: StdMutex<VecDeque<ene_learning::ExperienceCandidate>>,
+    /// Serializes Learning formation passes for this handle so overlapping
+    /// drains cannot run two passes over one companion at once.
+    pub(crate) learning_worker: AsyncMutex<()>,
     /// Opaque companion projection issued by this handle.
     ///
     /// The domain wire-ref mapping for the single Stage 2 companion: every
@@ -300,8 +312,8 @@ impl HostHandle {
     /// credential store.
     ///
     /// Integration tests pass [`CredStore::Memory`] pre-provisioned with test
-    /// bearers to stay hermetic (the environment store would read the real
-    /// process environment on every call). The device-auth file opens on
+    /// bearers to stay hermetic (the environment store reads the real process
+    /// environment once when it is constructed). The device-auth file opens on
     /// `<data_dir>/device-auth.json` (created lazily on first approval) after
     /// the data directory is ensured, so the open always has its parent.
     ///
@@ -309,7 +321,8 @@ impl HostHandle {
     ///
     /// [`CoreError::Store`] as in [`HostHandle::open`], plus when the
     /// device-auth file cannot be opened (unreadable, malformed, or wrongly
-    /// permissioned).
+    /// permissioned), or when a registered credential value cannot be read
+    /// and the startup sweep therefore cannot complete.
     pub async fn open_with_cred_store(
         data_dir: &Path,
         cred_store: CredStore,
@@ -321,7 +334,7 @@ impl HostHandle {
             .map_err(|error| CoreError::Store(error.to_string()))?;
         let auth_store = FileDeviceAuthStore::open(&data_dir.join("device-auth.json"))
             .map_err(|error| CoreError::Store(error.to_string()))?;
-        Ok(Self {
+        let handle = Self {
             store,
             tracker: AsyncMutex::new(EvaluationTracker::new()),
             open_rounds: StdMutex::new(HashMap::new()),
@@ -329,8 +342,35 @@ impl HostHandle {
             cred_store,
             auth_store,
             pending_nonces: StdMutex::new(HashMap::new()),
+            learning_queue: StdMutex::new(VecDeque::new()),
+            learning_worker: AsyncMutex::new(()),
             companion_wire: RawId::new().as_uuid().to_string(),
-        })
+        };
+        // Startup boundary: the credential store has pinned its values (for
+        // the env store, read once), so sweep every registered value out of
+        // durable content and advance the revision together before serving.
+        // A failed sweep keeps the handle closed rather than serving content
+        // prepared under an unknown set.
+        handle.sweep_registered_values().await?;
+        Ok(handle)
+    }
+
+    /// Sweeps every registered pinned value and advances the revision once.
+    ///
+    /// Runs before the handle serves anything. Every registered value must be
+    /// readable: an unreadable value fails the open instead of skipping the
+    /// sweep, because absence of the value cannot be proven and the Host must
+    /// not serve content that may still hold it in plaintext.
+    async fn sweep_registered_values(&self) -> Result<(), CoreError> {
+        let refs = self
+            .store
+            .list_refs()
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        self.store
+            .sweep_registered_values(&refs, &self.cred_store)
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        Ok(())
     }
 
     pub(crate) fn companion_wire(&self) -> &str {
@@ -585,17 +625,33 @@ impl HostHandle {
     /// created (usable marker); re-approval is idempotent. Unknown pairs
     /// return `Ok(false)` so the caller can list pendings.
     ///
+    /// Approval is one atomic store commit: every plaintext occurrence of
+    /// the bearer in durable content is swept, the usable ref is created,
+    /// and the credential-set revision advances together. A scrub premise
+    /// taken before the commit is therefore either covered by the sweep or
+    /// refused by the revision, so a value stored before registration cannot
+    /// survive as raw content. A missing or unreadable bearer holds the
+    /// approval, because absence of the value cannot be proven and the
+    /// credential must not become usable unprotected.
+    ///
     /// # Errors
     ///
-    /// Returns [`CoreError::Store`] when the durable tables are unavailable.
+    /// Returns [`CoreError::Store`] when the durable tables are unavailable
+    /// or the bearer cannot be read.
     pub async fn approve_credential(&self, provider: &str, label: &str) -> Result<bool, CoreError> {
-        // One atomic store call: the pending drain and the usable-ref insert
-        // share a transaction, so a crash cannot strand an approval with no
-        // usable marker. The usable ref id follows the `provider:label`
-        // convention both sides already use for assignment.
-        CredentialApprovalRepository::approve_pending(&self.store, provider, label)
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))
+        let Ok(credential) = CredentialRef::new(provider, label) else {
+            return Ok(false);
+        };
+        match self.cred_store.with_bearer(&credential, |bearer| {
+            self.store
+                .approve_credential_with_sweep(provider, label, bearer)
+        }) {
+            Ok(Ok(approved)) => Ok(approved),
+            Ok(Err(error)) => Err(CoreError::Store(error.to_string())),
+            Err(_) => Err(CoreError::Store(String::from(
+                "credential bearer is not readable; provision the secret before approving",
+            ))),
+        }
     }
 
     pub async fn pending_credentials(&self) -> Result<Vec<String>, CoreError> {

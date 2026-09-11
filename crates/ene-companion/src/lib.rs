@@ -25,6 +25,7 @@
 //! mapping itself.
 
 pub mod dialogue;
+use ene_credential::CredentialSetRevision;
 use ene_presence::PresenceGeneration;
 use ene_primitive::{RawId, WallClockWithTz};
 
@@ -174,6 +175,12 @@ pub struct AppendHistoryCommand {
     /// a mid-flight consent move answers [`HistoryAppendOutcome::StaleConsent`]
     /// instead of attributing content across the move.
     pub expected_consent: Option<(String, u64)>,
+    /// Credential-set premise the text was scrubbed under. The store
+    /// compares it inside the append transaction; content scrubbed before a
+    /// credential became registered answers
+    /// [`HistoryAppendOutcome::StaleCredentialSet`] instead of landing raw.
+    /// [`None`] skips the check (tests and non-content appends).
+    pub expected_credential_set: Option<CredentialSetRevision>,
     /// Command-scoped idempotency identity, when the caller carries one.
     /// [`None`] stores NULL (no replay key). A retry reuses the same command
     /// id with a fresh message id; `local_id` stays as correspondence
@@ -212,6 +219,7 @@ impl core::fmt::Debug for AppendHistoryCommand {
             .field("at", &self.at)
             .field("expected_generation", &self.expected_generation)
             .field("expected_consent", &self.expected_consent)
+            .field("expected_credential_set", &self.expected_credential_set)
             .field("command_id", &self.command_id)
             .field("round_wire", &self.round_wire)
             .field("round_intent", &self.round_intent)
@@ -285,6 +293,10 @@ pub enum HistoryAppendOutcome {
     /// not be attributed to the new consent without a fresh check. Carries
     /// no payload: the caller reloads and answers `consent-stale`.
     StaleConsent,
+    /// The credential set moved past the scrub premise. The text may carry a
+    /// newly registered credential value and must not be committed; the
+    /// caller re-scrubs and retries (owner input) or interrupts (reply).
+    StaleCredentialSet,
     /// A reused command key arrived with a different request than the
     /// stored row: the stored [`RequestFingerprint`] (role, body, language,
     /// sending incarnation, and canonical round intent) did not match — or
@@ -470,6 +482,18 @@ pub trait HistoryRepository {
         limit: u64,
     ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError>;
 
+    /// Loads the newest items for one companion, oldest first within the
+    /// returned window, capped at `limit`.
+    ///
+    /// This is the bounded recent-context query: callers that need the
+    /// conversation near the present (dialogue context, Experience source)
+    /// must not read the whole timeline to find it.
+    async fn load_recent_timeline(
+        &self,
+        companion: CompanionId,
+        limit: u64,
+    ) -> Result<Vec<HistoryMessage>, CompanionTechnicalError>;
+
     /// Looks up one previously accepted message by caller-supplied local id.
     ///
     /// Correspondence lookup for matching an input to its ack. Command-scoped
@@ -556,6 +580,7 @@ mod tests {
             at: clock(),
             expected_generation: PresenceGeneration::first(),
             expected_consent: None,
+            expected_credential_set: None,
             command_id: Some(CommandId(RawId::new())),
             round_wire: Some(String::from("round-wire-1")),
             round_intent: Some(RoundIntentMark::Auto),

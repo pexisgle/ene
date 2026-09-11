@@ -6,6 +6,7 @@
 //! recognition. Stale and missing outcomes are domain outcomes on the `Ok`
 //! side, never technical errors.
 
+use ene_credential::CredentialSetRevision;
 use ene_primitive::{RawId, WallClockWithTz};
 use thiserror::Error;
 
@@ -14,10 +15,12 @@ use crate::memory::{ChangeKind, Importance, Memory, MemoryRevisionRecord, Tempor
 use crate::scope::LearningScope;
 use crate::summary::SummaryRecord;
 
-/// Infrastructure failure for Learning persistence.
+/// Infrastructure failure for Learning persistence and formation.
 ///
-/// Stale / missing / scope outcomes are [`MemoryChangeOutcome`], never this
-/// error.
+/// Stale / missing / scope outcomes are [`MemoryChangeOutcome`], and an
+/// uninterpretable model answer is
+/// [`FormationDecision::DeferredForContext`](crate::FormationDecision), never
+/// this error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LearningTechnicalError {
     #[error("learning storage unavailable: {reason}")]
@@ -36,6 +39,20 @@ pub enum LearningTechnicalError {
     SummaryIdentityConflict {
         /// The reused identity; carries no content.
         summary: SummaryId,
+    },
+    #[error("learning inference unavailable: {reason}")]
+    InferenceUnavailable {
+        /// Provider-class cause. Never prompt or output text.
+        reason: String,
+    },
+    /// The secret boundary could not prove registered values absent.
+    ///
+    /// The text was neither sent nor stored; the caller may retry once the
+    /// registry and stored values are readable.
+    #[error("secret boundary unavailable: {reason}")]
+    SecretBoundaryUnavailable {
+        /// Boundary-class cause. Never prompt or output text.
+        reason: String,
     },
 }
 
@@ -78,6 +95,13 @@ pub struct MemoryChangeCommit {
     /// Inserted once when first supplied and reused verbatim by later changes
     /// of the same formation; carries no authority beyond evidence.
     pub summary: Option<SummaryRecord>,
+    /// Credential-set premise the committed content was scrubbed under.
+    ///
+    /// The implementation compares it against the current durable set inside
+    /// the commit transaction; [`MemoryChangeOutcome::StaleCredentialSet`]
+    /// refuses content scrubbed before a credential became registered.
+    /// [`None`] skips the check (tests and non-content commits).
+    pub secret_premise: Option<CredentialSetRevision>,
     pub change: MemoryChange,
 }
 
@@ -102,6 +126,11 @@ pub enum MemoryChangeOutcome {
     AlreadyExists { memory: MemoryId },
     /// The target ran out of distinct revisions; nothing was written.
     RevisionExhausted { memory: MemoryId },
+    /// The credential set moved past `secret_premise`; nothing was written.
+    ///
+    /// The caller must not retry the same content: it may carry the newly
+    /// registered value and needs a fresh scrub and currentness premise.
+    StaleCredentialSet,
 }
 
 /// Durable Learning boundary.

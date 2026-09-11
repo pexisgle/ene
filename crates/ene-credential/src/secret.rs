@@ -150,33 +150,67 @@ impl CredentialStore for MemoryCredentialStore {
     }
 }
 
-/// The only environment input [`EnvCredentialStore`] ever reads, and only
-/// inside [`CredentialStore::with_bearer`] and [`CredentialStore::contains`],
-/// at call time.
+/// The only environment input [`EnvCredentialStore`] reads, and only once at
+/// construction.
 pub const ENV_API_KEY: &str = "ENE_OPENAI_API_KEY";
 
 /// Environment-backed bearer store for the `OpenAI` provider.
 ///
-/// The struct is fieldless by design: the bearer is read from
-/// [`ENV_API_KEY`] on every call and never cached in memory, so backup
-/// exclusion holds trivially (there is nothing to back up) and key rotation
-/// takes effect on the next call without a restart. Only the `"openai"`
-/// provider is served (closed world until real OS stores arrive); every other
-/// provider reports absent.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct EnvCredentialStore;
+/// The bearer is read from [`ENV_API_KEY`] exactly once when the store is
+/// constructed (Host startup) and held as a zeroizing [`SecretValue`] for the
+/// rest of the run. It is deliberately not re-read per call: a running Host
+/// must not silently adopt a different value than the one its current
+/// credential-set revision was swept and advanced for. Rotation therefore
+/// takes effect on the next Host start, where the startup sweep and revision
+/// advance complete before any use. Only the `"openai"` provider is served
+/// (closed world until real OS stores arrive); every other provider reports
+/// absent. The value is in memory only, so backup exclusion still holds.
+pub struct EnvCredentialStore {
+    bearer: Option<SecretValue>,
+}
 
-impl EnvCredentialStore {
-    #[must_use]
-    pub fn new() -> Self {
-        Self
+impl core::fmt::Debug for EnvCredentialStore {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("EnvCredentialStore")
+            .field("present", &self.bearer.is_some())
+            .finish()
     }
 }
 
-// Shared by `contains` and `with_bearer`, so both agree on provider gating
-// and emptiness. Tests inject closures, which keeps them hermetic. An empty
-// value counts as absent, matching an unset variable; values arrive as
-// `String`, so the bearer is already valid UTF-8.
+impl Default for EnvCredentialStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EnvCredentialStore {
+    /// Reads [`ENV_API_KEY`] once and pins it for this run.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// Constructs from an injected provisioning lookup, read exactly once.
+    #[must_use]
+    pub fn from_lookup(lookup: impl FnOnce(&str) -> Option<String>) -> Self {
+        Self {
+            bearer: resolve_for("openai", lookup).map(|value| SecretValue::new(value.into_bytes())),
+        }
+    }
+
+    /// The pinned bearer for one provider, gated to the closed world.
+    fn pinned(&self, provider: &str) -> Option<&SecretValue> {
+        if provider != "openai" {
+            return None;
+        }
+        self.bearer.as_ref()
+    }
+}
+
+// Shared by the constructor and the tests, so provider gating and emptiness
+// stay in one place. An empty value counts as absent, matching an unset
+// variable; values arrive as `String`, so the bearer is already valid UTF-8.
 pub(crate) fn resolve_for(
     provider: &str,
     lookup: impl FnOnce(&str) -> Option<String>,
@@ -197,12 +231,17 @@ impl CredentialStore for EnvCredentialStore {
         cred: &CredentialRef,
         f: impl FnOnce(&str) -> R,
     ) -> Result<R, CredentialTechnicalError> {
-        let Some(bearer) = resolve_for(cred.provider(), |name| std::env::var(name).ok()) else {
+        let Some(secret) = self.pinned(cred.provider()) else {
             return Err(CredentialTechnicalError::StorageUnavailable {
                 reason: "env credential missing".to_owned(),
             });
         };
-        Ok(f(&bearer))
+        let Ok(bearer) = core::str::from_utf8(secret.bytes()) else {
+            return Err(CredentialTechnicalError::StorageUnavailable {
+                reason: "pinned env credential is not valid UTF-8".to_owned(),
+            });
+        };
+        Ok(f(bearer))
     }
 
     fn delete(&self, _cred: &CredentialRef) -> Result<(), CredentialTechnicalError> {
@@ -216,6 +255,6 @@ impl CredentialStore for EnvCredentialStore {
     }
 
     fn contains(&self, cred: &CredentialRef) -> bool {
-        resolve_for(cred.provider(), |name| std::env::var(name).ok()).is_some()
+        self.pinned(cred.provider()).is_some()
     }
 }

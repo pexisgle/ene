@@ -710,6 +710,9 @@ async fn binaries_drive_pairing_setup_and_views() {
     );
 
     let mut approve_cred = std::process::Command::new(&core);
+    // The approval process must be able to read the bearer: it sweeps any
+    // prior plaintext occurrence before the ref becomes usable.
+    approve_cred.env("ENE_OPENAI_API_KEY", "sk-test-only");
     approve_cred.args([
         "approve-credential",
         "--provider",
@@ -1067,6 +1070,7 @@ async fn binaries_drive_send_stream_history_and_restart() {
         "unapproved setup must hold at exit 2, got {setup:?}"
     );
     let approve_cred = std::process::Command::new(&core)
+        .env("ENE_OPENAI_API_KEY", "sk-test-only")
         .args([
             "approve-credential",
             "--provider",
