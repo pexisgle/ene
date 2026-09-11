@@ -121,8 +121,7 @@ impl SessionState {
     }
 
     /// Facts never sit in the queue, so a hit is always an answer the caller
-    /// can return without socket I/O; shares its scan with [`select_answer`]
-    /// so both find the same frame.
+    /// can return without socket I/O.
     pub fn take_deferred_reply(&mut self, own: WireMessageId) -> Option<WirePayload> {
         let position = find_deferred_reply(&self.deferred, own)?;
         self.deferred.remove(position).map(|frame| frame.payload)
@@ -141,10 +140,8 @@ pub fn stale_generation_of(answer: &WirePayload) -> Option<u64> {
     }
 }
 
-/// One ruling shared by the pure [`select_answer`] script form and
-/// [`super::Client::request`]'s socket loop, so the pure tests verify the
-/// production ruling directly instead of a mirror; queue-cap handling stays
-/// with each caller.
+/// One ruling shared by [`super::Client::request`]'s socket loop; queue-cap
+/// handling stays with the caller.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameDecision {
     AbsorbPresence(PresenceAttributionWire),
@@ -152,8 +149,8 @@ pub enum FrameDecision {
     Defer,
 }
 
-/// Total and pure: no I/O, no session access, so both the script form and the
-/// socket loop rule identically. Only presence facts absorb — a future
+/// Total and pure: no I/O, no session access, so tests rule on the same
+/// function the socket loop uses. Only presence facts absorb — a future
 /// unsolicited fact kind needs a new arm here, and until then such frames
 /// defer instead of surfacing as answers.
 #[must_use]
@@ -167,53 +164,12 @@ pub fn decide_frame(own_message_id: WireMessageId, frame: &WireFrame) -> FrameDe
     }
 }
 
-/// Shared by the session pop ([`SessionState::take_deferred_reply`]) and the
-/// script scan ([`select_answer`]) so both find the same frame.
+/// Finds the frame the session pop ([`SessionState::take_deferred_reply`])
+/// correlates to `own`.
 fn find_deferred_reply(deferred: &VecDeque<WireFrame>, own: WireMessageId) -> Option<usize> {
     deferred
         .iter()
         .position(|frame| frame.envelope.correlation.reply_to == Some(own))
-}
-
-/// Pure form of the [`super::Client::request`] loop decision: the deferred
-/// queue is scanned first — a hit returns with no absorption and without
-/// consuming `frames` (no socket I/O in the streaming form) — then `frames`
-/// are walked in order per [`decide_frame`]. The first answer ends the walk
-/// (later script frames stay unread, as later socket reads in the streaming
-/// form); deferred frames push to the queue (cap [`DEFERRED_CAP`],
-/// oldest-drop). No match means no answer ([`None`]) and the streaming caller
-/// keeps reading. Total: every combination of queue and script yields a
-/// possibly empty absorption, a possibly absent answer, and a bounded queue,
-/// with no I/O and no failure.
-#[must_use]
-pub fn select_answer(
-    own_message_id: WireMessageId,
-    deferred: &VecDeque<WireFrame>,
-    frames: &[WireFrame],
-) -> (
-    Vec<PresenceAttributionWire>,
-    Option<WirePayload>,
-    VecDeque<WireFrame>,
-) {
-    let mut queue = deferred.clone();
-    if let Some(position) = find_deferred_reply(&queue, own_message_id) {
-        let hit = queue.remove(position).map(|frame| frame.payload);
-        return (Vec::new(), hit, queue);
-    }
-    let mut absorbed = Vec::new();
-    for frame in frames {
-        match decide_frame(own_message_id, frame) {
-            FrameDecision::AbsorbPresence(fact) => absorbed.push(fact),
-            FrameDecision::Answer(payload) => return (absorbed, Some(payload), queue),
-            FrameDecision::Defer => {
-                if queue.len() >= DEFERRED_CAP {
-                    let _ = queue.pop_front();
-                }
-                queue.push_back(frame.clone());
-            }
-        }
-    }
-    (absorbed, None, queue)
 }
 
 /// [`AuthResult::Rejected`] maps to [`AuthDecision::Guidance`] (exit code 2:

@@ -227,9 +227,8 @@ impl Client {
     /// Sends one payload and returns the answer correlated by `reply_to`,
     /// absorbing pipelined presence facts and deferring other out-of-order
     /// frames on the way. The deferred queue is consulted first, so a queued
-    /// answer costs no socket I/O; otherwise this loops until the correlated
-    /// answer arrives (the streaming form of
-    /// [`super::session::select_answer`]). A
+    /// answer costs no socket I/O; otherwise this loops per
+    /// [`super::session::decide_frame`] until the correlated answer arrives. A
     /// [`StaleRound`](ene_api::v1::round::RoundIntakeOutcomeWire::StaleRound)
     /// answer refreshes the session generation; mismatches are never returned
     /// as answers and never silently dropped.
