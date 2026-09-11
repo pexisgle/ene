@@ -885,6 +885,18 @@ impl<T: ProviderTransport + Send + Sync> InferenceExecutor for HostInference<'_,
         }
     }
 
+    async fn admit_learning(&self) -> Result<Admission, InferenceTechnicalError> {
+        match ene_inference::prepare_learning_admission(self.store, self.store, self.cred_store)
+            .await?
+        {
+            PreparedAdmission::Declined(reason) => Ok(Admission::Declined(reason)),
+            PreparedAdmission::Ready(request) => {
+                let mut tracker = self.tracker.lock().await;
+                Ok(request.authorize(&mut tracker))
+            }
+        }
+    }
+
     async fn dispatch(
         &self,
         authorized: AuthorizedInference,

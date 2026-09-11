@@ -10,8 +10,8 @@ use ene_credential::{
 };
 use ene_inference::{InferenceTechnicalError, UsageSource};
 use ene_permission::{
-    ConsentRecord, ConsentRevision, IntentFingerprint, IntentOutcome, IntentOutcomeRecord,
-    IntentResolution, PermissionTechnicalError,
+    CapabilityKind, ConsentRecord, ConsentRevision, IntentFingerprint, IntentOutcome,
+    IntentOutcomeRecord, IntentResolution, PermissionTechnicalError,
 };
 use ene_presence::{
     ClientId, PresenceAttribution, PresenceGeneration, PresenceState, PresenceTechnicalError,
@@ -24,7 +24,7 @@ pub(crate) const SQL_SELECT_ATTRIBUTION: &str =
     "SELECT state, active_client, generation FROM presence_attribution WHERE companion_id = ?1";
 
 pub(crate) const SQL_SELECT_CONSENT: &str =
-    "SELECT id, rev, provider, model, credential_id FROM consent_record LIMIT 1";
+    "SELECT id, rev, provider, model, credential_id FROM consent_record WHERE capability = ?1";
 
 pub(crate) const SQL_SELECT_CREDENTIAL: &str =
     "SELECT id, provider, label FROM credential_ref WHERE provider = ?1 AND label = ?2";
@@ -212,6 +212,7 @@ pub(crate) fn inference_unavailable(reason: String) -> InferenceTechnicalError {
 }
 
 pub(crate) fn decode_consent(
+    capability: CapabilityKind,
     id: String,
     rev_raw: i64,
     provider: String,
@@ -220,6 +221,7 @@ pub(crate) fn decode_consent(
 ) -> Result<ConsentRecord, String> {
     let number = decode_u64(rev_raw)?;
     Ok(ConsentRecord {
+        capability,
         id,
         rev: ConsentRevision::from_u64(number),
         provider,

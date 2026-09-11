@@ -303,7 +303,7 @@ async fn register_assign_complete(
         .handle_frame(
             intent_frame(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-1:openai:main",
+                "consent:dialogue:openai:dialogue-1:openai:main",
                 "consent-none",
                 live.connection_id,
             ),
@@ -1421,7 +1421,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
         .handle_frame(
             intent_frame(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-1:openai:main",
+                "consent:dialogue:openai:dialogue-1:openai:main",
                 "consent-none",
                 live.connection_id,
             ),
@@ -1441,7 +1441,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
         .handle_frame(
             intent_frame(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-1:openai:main",
+                "consent:dialogue:openai:dialogue-1:openai:main",
                 "consent-none",
                 live.connection_id,
             ),
@@ -1454,7 +1454,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
         matches!(
             &same.payload,
             WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView { current })
-            if current.0 == "consent-rev-1"
+            if current.0 == "consent-dialogue-rev-1"
         ),
         "the identical replay on its stale base reports staleness (not silent success), got {:?}",
         same.payload
@@ -1463,7 +1463,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
         .handle_frame(
             intent_frame(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-1:openai:main",
+                "consent:dialogue:openai:dialogue-1:openai:main",
                 "consent-rev-1",
                 live.connection_id,
             ),
@@ -1477,7 +1477,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
             &same.payload,
             WirePayload::ManagementOutcome(ManagementOutcome::StoredAsRuleView {
                 revision
-            }) if revision.0 == "1"
+            }) if revision.0 == "consent-dialogue-rev-1"
         ),
         "repeating the identical assign on a fresh base is a no-op at the same revision, got {:?}",
         same.payload
@@ -1486,7 +1486,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
         .handle_frame(
             intent_frame(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-2:openai:main",
+                "consent:dialogue:openai:dialogue-2:openai:main",
                 "consent-none",
                 live.connection_id,
             ),
@@ -1499,7 +1499,7 @@ async fn consent_replay_is_idempotent_and_moves_report_staleness() {
         matches!(
             &stale.payload,
             WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView { current })
-            if current.0 == "consent-rev-1"
+            if current.0 == "consent-dialogue-rev-1"
         ),
         "a changed assign on a stale base reports the rebuilt current mark"
     );
@@ -1531,7 +1531,7 @@ async fn assign_intent_replay_returns_the_stored_success() {
     let assign_x = |base: &str| {
         intent_frame_with_id(
             ManagementIntentKind::ManageRuleConsentCap,
-            "consent:openai:dialogue-1:openai:main",
+            "consent:dialogue:openai:dialogue-1:openai:main",
             base,
             live.connection_id,
             intent_id,
@@ -1561,7 +1561,7 @@ async fn assign_intent_replay_returns_the_stored_success() {
             &same.payload,
             WirePayload::ManagementOutcome(ManagementOutcome::StoredAsRuleView {
                 revision
-            }) if revision.0 == "1"
+            }) if revision.0 == "consent-dialogue-rev-1"
         ),
         "the exact retry must replay success at rev 1, got {:?}",
         same.payload
@@ -1575,7 +1575,7 @@ async fn assign_intent_replay_returns_the_stored_success() {
         .handle_frame(
             intent_frame(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-2:openai:main",
+                "consent:dialogue:openai:dialogue-2:openai:main",
                 "consent-rev-1",
                 live.connection_id,
             ),
@@ -1600,7 +1600,7 @@ async fn assign_intent_replay_returns_the_stored_success() {
             &stale_retry.first().map(|first| &first.payload),
             Some(WirePayload::ManagementOutcome(ManagementOutcome::StoredAsRuleView {
                 revision
-            })) if revision.0 == "1"
+            })) if revision.0 == "consent-dialogue-rev-1"
         ),
         "a replay after the route moved still answers its prior outcome, got {stale_retry:?}"
     );
@@ -1608,7 +1608,7 @@ async fn assign_intent_replay_returns_the_stored_success() {
 
 #[tokio::test]
 async fn assign_intent_conflict_clarifies_without_side_effects() {
-    use ene_permission::ConsentRepository as _;
+    use ene_permission::{CapabilityKind, ConsentRepository as _};
 
     let (handle, _dir) = setup_handle("dlg-intentconflict").await.unwrap();
     let transport = ok_transport();
@@ -1622,7 +1622,7 @@ async fn assign_intent_conflict_clarifies_without_side_effects() {
         .handle_frame(
             intent_frame_with_id(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-1:openai:main",
+                "consent:dialogue:openai:dialogue-1:openai:main",
                 "consent-rev-1",
                 live.connection_id,
                 intent_id,
@@ -1646,7 +1646,7 @@ async fn assign_intent_conflict_clarifies_without_side_effects() {
         .handle_frame(
             intent_frame_with_id(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-2:openai:main",
+                "consent:dialogue:openai:dialogue-2:openai:main",
                 "consent-rev-1",
                 live.connection_id,
                 intent_id,
@@ -1664,7 +1664,7 @@ async fn assign_intent_conflict_clarifies_without_side_effects() {
         "a reused id with new content must clarify, got {:?}",
         only.payload
     );
-    let current = handle.store.load_current().await;
+    let current = handle.store.load_current(CapabilityKind::Dialogue).await;
     assert!(
         matches!(&current, Ok(Some(record)) if record.model == "dialogue-1"),
         "the conflict must not move consent, got {current:?}"
@@ -1673,7 +1673,7 @@ async fn assign_intent_conflict_clarifies_without_side_effects() {
 
 #[tokio::test]
 async fn malformed_target_reuse_conflicts_without_side_effects() {
-    use ene_permission::ConsentRepository as _;
+    use ene_permission::{CapabilityKind, ConsentRepository as _};
 
     let (handle, _dir) = setup_handle("dlg-malformed-reuse").await.unwrap();
     let transport = ok_transport();
@@ -1713,7 +1713,7 @@ async fn malformed_target_reuse_conflicts_without_side_effects() {
         .handle_frame(
             intent_frame_with_id(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-9:openai:main",
+                "consent:dialogue:openai:dialogue-9:openai:main",
                 "consent-rev-1",
                 live.connection_id,
                 intent_id,
@@ -1731,7 +1731,7 @@ async fn malformed_target_reuse_conflicts_without_side_effects() {
         "reusing a clarified id with new content must clarify, got {:?}",
         only.payload
     );
-    let current = handle.store.load_current().await;
+    let current = handle.store.load_current(CapabilityKind::Dialogue).await;
     assert!(
         matches!(&current, Ok(Some(record)) if record.model == "dialogue-1"),
         "the conflict must not move consent, got {current:?}"
@@ -1806,7 +1806,7 @@ async fn complete_stale_replay_returns_its_own_mark() {
             &first.first().map(|first| &first.payload),
             Some(WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView {
                 current
-            })) if current.0 == "consent-rev-1"
+            })) if current.0 == "consent-dialogue-rev-1"
         ),
         "the stale completion reports rev 1, got {first:?}"
     );
@@ -1816,7 +1816,7 @@ async fn complete_stale_replay_returns_its_own_mark() {
         .handle_frame(
             intent_frame(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-2:openai:main",
+                "consent:dialogue:openai:dialogue-2:openai:main",
                 "consent-rev-1",
                 live.connection_id,
             ),
@@ -1839,7 +1839,7 @@ async fn complete_stale_replay_returns_its_own_mark() {
             &replayed.first().map(|first| &first.payload),
             Some(WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView {
                 current
-            })) if current.0 == "consent-rev-1"
+            })) if current.0 == "consent-dialogue-rev-1"
         ),
         "the stale retry must replay its own mark, got {replayed:?}"
     );
@@ -1854,7 +1854,7 @@ async fn assign_stale_replay_returns_its_own_mark() {
     // No consent yet: a rev-9 base is stale on its face.
     let stale = intent_frame_with_id(
         ManagementIntentKind::ManageRuleConsentCap,
-        "consent:openai:dialogue-1:openai:main",
+        "consent:dialogue:openai:dialogue-1:openai:main",
         "consent-rev-9",
         live.connection_id,
         intent_id,
@@ -1868,7 +1868,7 @@ async fn assign_stale_replay_returns_its_own_mark() {
                 &answered.first().map(|first| &first.payload),
                 Some(WirePayload::ManagementOutcome(ManagementOutcome::StaleBaseView {
                     current
-                })) if current.0 == "consent-none"
+                })) if current.0 == "consent-dialogue-none"
             ),
             "attempt {attempt} must report the empty mark, got {answered:?}"
         );
@@ -2000,12 +2000,13 @@ impl ene_inference::ProviderTransport for RevokingTransport {
         let db = self.db.clone();
         let inner = self.inner.clone();
         Box::pin(async move {
-            use ene_permission::ConsentRepository as _;
+            use ene_permission::{CapabilityKind, ConsentRepository as _};
             if let Ok(store) = ene_store::Store::open(&db).await
-                && let Ok(Some(current)) = store.load_current().await
+                && let Ok(Some(current)) = store.load_current(CapabilityKind::Dialogue).await
             {
                 use ene_permission::{ConsentRepository as _, ConsentRevision};
                 let bumped = ene_permission::ConsentRecord {
+                    capability: CapabilityKind::Dialogue,
                     id: current.id.clone(),
                     rev: ConsentRevision::from_u64(current.rev.as_u64() + 1),
                     provider: current.provider.clone(),
@@ -2191,7 +2192,7 @@ async fn setup_edge_cases_clarify_or_hold() {
         .handle_frame(
             intent_frame(
                 ManagementIntentKind::ManageRuleConsentCap,
-                "consent:openai:dialogue-1:openai:main",
+                "consent:dialogue:openai:dialogue-1:openai:main",
                 "consent-rev-99",
                 live.connection_id,
             ),
@@ -2246,5 +2247,66 @@ async fn setup_edge_cases_clarify_or_hold() {
             WirePayload::ManagementOutcome(ManagementOutcome::NeedsClarification)
         ),
         "an incomplete premise cannot complete setup"
+    );
+}
+
+/// The learning consumer is admitted through its own candidate triple and
+/// its own capability consent, so a dialogue assignment can never authorize
+/// a formation pass; both admissions then coexist under their separately
+/// assigned routes.
+#[tokio::test]
+async fn learning_admission_requires_its_own_capability_assignment() {
+    use super::HostInference;
+    use ene_inference::{Admission, InferenceExecutor as _};
+
+    let live = live_input("dlg-learning-admit");
+    let transport = ok_transport();
+    let setup = round_test_handle("dlg-learning-admit", &live, &transport).await;
+    let (handle, _dir) = setup.unwrap();
+    let executor = HostInference {
+        store: &handle.store,
+        cred_store: &handle.cred_store,
+        tracker: &handle.tracker,
+        transport: &transport,
+    };
+    // Stage 2 setup assigned the dialogue capability only.
+    assert!(
+        matches!(executor.admit_dialogue().await, Ok(Admission::Admitted(_))),
+        "dialogue admission still works independently"
+    );
+    assert!(
+        matches!(executor.admit_learning().await, Ok(Admission::Declined(_))),
+        "dialogue consent must not authorize learning formation"
+    );
+
+    // The Owner assigns the same route to learning explicitly.
+    let assigned = handle
+        .handle_frame(
+            intent_frame(
+                ManagementIntentKind::ManageRuleConsentCap,
+                "consent:learning:openai:dialogue-1:openai:main",
+                "consent-learning-none",
+                live.connection_id,
+            ),
+            live.clone(),
+            &transport,
+        )
+        .await;
+    assert!(
+        matches!(
+            assigned.first().map(|answer| &answer.payload),
+            Some(WirePayload::ManagementOutcome(
+                ManagementOutcome::StoredAsRuleView { .. }
+            ))
+        ),
+        "the learning assignment must commit, got {assigned:?}"
+    );
+    assert!(
+        matches!(executor.admit_learning().await, Ok(Admission::Admitted(_))),
+        "learning is admitted only after its own consent exists"
+    );
+    assert!(
+        matches!(executor.admit_dialogue().await, Ok(Admission::Admitted(_))),
+        "the dialogue assignment is untouched"
     );
 }

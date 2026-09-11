@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use ene_permission::{
-    ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
-    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution,
-    PermissionTechnicalError, ShortcutIntentOutcome, consent_mark_rev,
+    CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
+    IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
+    IntentResolution, PermissionTechnicalError, ShortcutIntentOutcome, consent_mark,
+    parse_consent_mark,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -15,14 +16,19 @@ use crate::codec::{
 };
 use crate::run_blocking;
 
-const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (id, rev, provider, model, credential_id) VALUES (?1, ?2, ?3, ?4, ?5)";
+const SQL_INSERT_CONSENT: &str = "INSERT INTO consent_record (capability, id, rev, provider, model, credential_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 
-const SQL_UPDATE_CONSENT: &str =
-    "UPDATE consent_record SET id = ?1, rev = ?2, provider = ?3, model = ?4, credential_id = ?5";
+const SQL_UPDATE_CONSENT: &str = "UPDATE consent_record SET id = ?2, rev = ?3, provider = ?4, model = ?5, credential_id = ?6 WHERE capability = ?1";
+
+fn current_mark(capability: CapabilityKind, current: Option<&ConsentRecord>) -> String {
+    consent_mark(capability, current.map(|record| record.rev.as_u64()))
+}
 
 /// Shared by [`ConsentRepository::compare_and_save`] and the intent-atomic
 /// variant so the premise check and the write cannot drift apart between
-/// the two entry points.
+/// the two entry points. The row is selected and written under the record's
+/// own capability, so a dialogue assignment can never overwrite or borrow
+/// the learning assignment.
 fn compare_and_save_row(
     tx: &Transaction<'_>,
     expected: Option<(&str, &ConsentRevision)>,
@@ -30,19 +36,24 @@ fn compare_and_save_row(
 ) -> Result<ConsentCommitOutcome, String> {
     let rev_raw = encode_u64(record.rev.as_u64())?;
     let found: Option<(String, i64, String, String, String)> = tx
-        .query_row(SQL_SELECT_CONSENT, (), |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        })
+        .query_row(
+            SQL_SELECT_CONSENT,
+            params![record.capability.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
         .optional()
         .map_err(|error| error.to_string())?;
     let current = match found {
         Some((id, stored_rev, provider, model, credential_id)) => Some(decode_consent(
+            record.capability,
             id,
             stored_rev,
             provider,
@@ -63,6 +74,7 @@ fn compare_and_save_row(
         tx.execute(
             SQL_INSERT_CONSENT,
             params![
+                record.capability.as_str(),
                 record.id,
                 rev_raw,
                 record.provider,
@@ -72,10 +84,11 @@ fn compare_and_save_row(
         )
         .map_err(|error| error.to_string())?;
     } else {
-        // Single logical row: overwrite it.
+        // One logical row per capability: overwrite it.
         tx.execute(
             SQL_UPDATE_CONSENT,
             params![
+                record.capability.as_str(),
                 record.id,
                 rev_raw,
                 record.provider,
@@ -91,12 +104,15 @@ fn compare_and_save_row(
 }
 
 impl ConsentRepository for Store {
-    async fn load_current(&self) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
+    async fn load_current(
+        &self,
+        capability: CapabilityKind,
+    ) -> Result<Option<ConsentRecord>, PermissionTechnicalError> {
         let conn = Arc::clone(&self.conn);
         run_blocking(move || {
             let guard = lock_shared(&conn);
             let found: Option<(String, i64, String, String, String)> = guard
-                .query_row(SQL_SELECT_CONSENT, (), |row| {
+                .query_row(SQL_SELECT_CONSENT, params![capability.as_str()], |row| {
                     Ok((
                         row.get(0)?,
                         row.get(1)?,
@@ -109,8 +125,9 @@ impl ConsentRepository for Store {
                 .map_err(|error| permission_unavailable(error.to_string()))?;
             match found {
                 Some((id, rev_raw, provider, model, credential_id)) => {
-                    let record = decode_consent(id, rev_raw, provider, model, credential_id)
-                        .map_err(permission_unavailable)?;
+                    let record =
+                        decode_consent(capability, id, rev_raw, provider, model, credential_id)
+                            .map_err(permission_unavailable)?;
                     Ok(Some(record))
                 }
                 None => Ok(None),
@@ -238,10 +255,10 @@ impl IntentOutcomeRepository for Store {
             // so a retried id always observes the same answer.
             let snapshot = match &outcome {
                 ConsentCommitOutcome::Committed { record } => IntentOutcome::StoredAsRuleView {
-                    revision: record.rev.as_u64().to_string(),
+                    revision: consent_mark(record.capability, Some(record.rev.as_u64())),
                 },
                 ConsentCommitOutcome::StaleCurrent { current } => IntentOutcome::StaleBaseView {
-                    current: consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64())),
+                    current: current_mark(record.capability, current.as_ref()),
                 },
             };
             match insert_decided_row_tx(&tx, &fingerprint, &snapshot)
@@ -281,30 +298,44 @@ impl IntentOutcomeRepository for Store {
             // One transaction: compare the base mark, verify completability,
             // and record the decided snapshot together. Every decided outcome
             // is recorded (even stale/clarify), so a retried id always observes
-            // the same answer; only store failures hold unrecorded.
+            // the same answer; only store failures hold unrecorded. Setup
+            // completion is a Stage 2 meaning: it names the dialogue consent
+            // only, so a learning assignment can never complete or block it.
             let found: Option<(String, i64, String, String, String)> = tx
-                .query_row(SQL_SELECT_CONSENT, (), |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                })
+                .query_row(
+                    SQL_SELECT_CONSENT,
+                    params![CapabilityKind::Dialogue.as_str()],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
                 .optional()
                 .map_err(|error| permission_unavailable(error.to_string()))?;
             let current = match found {
                 Some((id, stored_rev, provider, model, credential_id)) => Some(
-                    decode_consent(id, stored_rev, provider, model, credential_id)
-                        .map_err(permission_unavailable)?,
+                    decode_consent(
+                        CapabilityKind::Dialogue,
+                        id,
+                        stored_rev,
+                        provider,
+                        model,
+                        credential_id,
+                    )
+                    .map_err(permission_unavailable)?,
                 ),
                 None => None,
             };
-            let mark = consent_mark_rev(current.as_ref().map(|record| record.rev.as_u64()));
-            let outcome = if mark != expected_base {
+            let expected = parse_consent_mark(&expected_base, CapabilityKind::Dialogue);
+            let current_state = current.as_ref().map(|record| record.rev.as_u64());
+            let outcome = if expected != Some(current_state) {
                 IntentOutcome::StaleBaseView {
-                    current: mark.clone(),
+                    current: current_mark(CapabilityKind::Dialogue, current.as_ref()),
                 }
             } else if current.is_some() && bearer_present {
                 IntentOutcome::AppliedAsOneTime
@@ -331,6 +362,7 @@ impl IntentOutcomeRepository for Store {
 
     async fn shortcut_with_intent(
         &self,
+        capability: CapabilityKind,
         provider: String,
         model: String,
         credential_id: String,
@@ -353,7 +385,7 @@ impl IntentOutcomeRepository for Store {
             // No consent state changes either way: the only write, on a hit,
             // records the replay row.
             let found: Option<(String, i64, String, String, String)> = tx
-                .query_row(SQL_SELECT_CONSENT, (), |row| {
+                .query_row(SQL_SELECT_CONSENT, params![capability.as_str()], |row| {
                     Ok((
                         row.get(0)?,
                         row.get(1)?,
@@ -366,7 +398,7 @@ impl IntentOutcomeRepository for Store {
                 .map_err(|error| permission_unavailable(error.to_string()))?;
             let current = match found {
                 Some((id, stored_rev, provider, model, credential_id)) => Some(
-                    decode_consent(id, stored_rev, provider, model, credential_id)
+                    decode_consent(capability, id, stored_rev, provider, model, credential_id)
                         .map_err(permission_unavailable)?,
                 ),
                 None => None,
@@ -386,7 +418,7 @@ impl IntentOutcomeRepository for Store {
                 }
             };
             let snapshot = IntentOutcome::StoredAsRuleView {
-                revision: record.rev.as_u64().to_string(),
+                revision: consent_mark(capability, Some(record.rev.as_u64())),
             };
             match insert_decided_row_tx(&tx, &fingerprint, &snapshot)
                 .map_err(permission_unavailable)?

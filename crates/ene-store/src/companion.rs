@@ -7,6 +7,7 @@ use ene_companion::{
     PresentationMark, ReportStatus, ReportStatusTransition, UndeliveredRef, UndeliveredRepository,
     UndeliveredTechnicalError,
 };
+use ene_permission::CapabilityKind;
 use ene_presence::{PresenceGeneration, PresenceState};
 use ene_primitive::{RawId, WallClockWithTz};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -127,8 +128,14 @@ fn append_history(
         ));
     }
     if let Some((expected_id, expected_rev)) = cmd.expected_consent.as_ref() {
+        // History appends are dialogue turns: the premise names the dialogue
+        // consent only, never a learning assignment.
         let stored: Option<(String, i64)> = tx
-            .query_row(SQL_SELECT_CONSENT, (), |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_row(
+                SQL_SELECT_CONSENT,
+                params![CapabilityKind::Dialogue.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .optional()
             .map_err(|error| companion_unavailable(error.to_string()))?;
         let current_matches = stored.as_ref().is_some_and(|(id, rev)| {

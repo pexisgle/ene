@@ -11,7 +11,8 @@
 //!
 //! ```text
 //! credential-target = "credential:" provider ":" label
-//! consent-target    = "consent:" provider ":" model ":" credential-id
+//! capability        = "dialogue" | "learning"
+//! consent-target    = "consent:" capability ":" provider ":" model ":" credential-id
 //! setup-show        = "setup:show"
 //! setup-complete    = "setup:complete"
 //! ```
@@ -42,12 +43,19 @@ pub fn credential_target(provider: &str, label: &str) -> ManagementTargetWire {
     ManagementTargetWire(format!("credential:{provider}:{label}"))
 }
 
-/// Plain constructor: it does not validate. Non-empty `provider`, `model`,
-/// and `credential-id` are enforced at Host parse, which stays
-/// authoritative.
+/// Plain constructor: it does not validate. Non-empty `capability`,
+/// `provider`, `model`, and `credential-id` are enforced at Host parse, which
+/// stays authoritative.
 #[must_use]
-pub fn consent_target(provider: &str, model: &str, credential_id: &str) -> ManagementTargetWire {
-    ManagementTargetWire(format!("consent:{provider}:{model}:{credential_id}"))
+pub fn consent_target(
+    capability: &str,
+    provider: &str,
+    model: &str,
+    credential_id: &str,
+) -> ManagementTargetWire {
+    ManagementTargetWire(format!(
+        "consent:{capability}:{provider}:{model}:{credential_id}"
+    ))
 }
 
 /// Exact rule: strip the `credential:` prefix, split the remainder once on
@@ -64,20 +72,25 @@ pub fn parse_credential_target(target: &ManagementTargetWire) -> Option<(String,
 }
 
 /// Exact rule: strip the `consent:` prefix, split the remainder with
-/// `splitn(3, ':')`, and require all three parts non-empty, else [`None`].
+/// `splitn(4, ':')`, and require all four parts non-empty, else [`None`].
 /// The `credential-id` keeps its remainder verbatim, so it may itself
 /// contain `':'`.
 #[must_use]
-pub fn parse_consent_target(target: &ManagementTargetWire) -> Option<(String, String, String)> {
+pub fn parse_consent_target(
+    target: &ManagementTargetWire,
+) -> Option<(String, String, String, String)> {
     let rest = target.0.strip_prefix("consent:")?;
-    let mut parts = rest.splitn(3, ':');
+    let mut parts = rest.splitn(4, ':');
+    let capability = parts.next()?;
     let provider = parts.next()?;
     let model = parts.next()?;
     let credential_id = parts.next()?;
-    if provider.is_empty() || model.is_empty() || credential_id.is_empty() {
+    if capability.is_empty() || provider.is_empty() || model.is_empty() || credential_id.is_empty()
+    {
         return None;
     }
     Some((
+        capability.to_owned(),
         provider.to_owned(),
         model.to_owned(),
         credential_id.to_owned(),
@@ -288,8 +301,10 @@ mod tests {
 
     #[test]
     fn consent_builder_spells_the_shared_grammar() {
-        let target = consent_target("openai", "gpt-x", "cred-1");
-        assert_eq!(target.0.as_str(), "consent:openai:gpt-x:cred-1");
+        let target = consent_target("dialogue", "openai", "gpt-x", "cred-1");
+        assert_eq!(target.0.as_str(), "consent:dialogue:openai:gpt-x:cred-1");
+        let learning = consent_target("learning", "openai", "gpt-x", "cred-1");
+        assert_eq!(learning.0.as_str(), "consent:learning:openai:gpt-x:cred-1");
     }
 
     #[test]
@@ -303,10 +318,11 @@ mod tests {
 
     #[test]
     fn consent_builder_parser_roundtrip() {
-        let target = consent_target("openai", "gpt-x", "cred-1");
+        let target = consent_target("learning", "openai", "gpt-x", "cred-1");
         assert_eq!(
             parse_consent_target(&target),
             Some((
+                String::from("learning"),
                 String::from("openai"),
                 String::from("gpt-x"),
                 String::from("cred-1")
@@ -322,7 +338,7 @@ mod tests {
             "credential::",
             "credential:openai",
             "credential:",
-            "consent:openai:gpt-x:cred-1",
+            "consent:dialogue:openai:gpt-x:cred-1",
             "setup:show",
             "",
         ] {
@@ -337,12 +353,15 @@ mod tests {
     #[test]
     fn consent_parser_rejects_blanks_and_wrong_shapes() {
         for raw in [
-            "consent::gpt-x:cred-1",
-            "consent:openai::cred-1",
-            "consent:openai:gpt-x:",
-            "consent:openai:gpt-x",
-            "consent:openai",
+            "consent::openai:gpt-x:cred-1",
+            "consent:dialogue::gpt-x:cred-1",
+            "consent:dialogue:openai::cred-1",
+            "consent:dialogue:openai:gpt-x:",
+            "consent:dialogue:openai:gpt-x",
+            "consent:dialogue:openai",
+            "consent:dialogue",
             "consent:",
+            "consent:openai:gpt-x:cred-1",
             "credential:openai:personal",
             "setup:complete",
             "",
@@ -357,11 +376,15 @@ mod tests {
 
     #[test]
     fn consent_parser_preserves_colons_in_credential_id() {
-        let target = consent_target("openai", "gpt-x", "cred:with:colons");
-        assert_eq!(target.0.as_str(), "consent:openai:gpt-x:cred:with:colons");
+        let target = consent_target("dialogue", "openai", "gpt-x", "cred:with:colons");
+        assert_eq!(
+            target.0.as_str(),
+            "consent:dialogue:openai:gpt-x:cred:with:colons"
+        );
         assert_eq!(
             parse_consent_target(&target),
             Some((
+                String::from("dialogue"),
                 String::from("openai"),
                 String::from("gpt-x"),
                 String::from("cred:with:colons")

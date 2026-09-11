@@ -8,47 +8,50 @@
 //! write-once in every path, so a reused id observes one outcome forever.
 
 use crate::{
-    ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision, IntentFingerprint,
-    IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository, IntentResolution,
-    PermissionTechnicalError, ShortcutIntentOutcome, consent_mark_rev,
+    CapabilityKind, ConsentCommitOutcome, ConsentRecord, ConsentRepository, ConsentRevision,
+    IntentFingerprint, IntentOutcome, IntentOutcomeRecord, IntentOutcomeRepository,
+    IntentResolution, PermissionTechnicalError, ShortcutIntentOutcome, consent_mark,
+    parse_consent_mark,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BaseViewExpectation {
-    /// The mark (`"consent-none"`) expects no stored row.
+    /// The mark (`"consent-{capability}-none"`) expects no stored row.
     ExpectEmpty,
-    /// The mark (`"consent-rev-N"`) expects the stored row at revision `N`.
+    /// The mark (`"consent-{capability}-rev-N"`) expects the stored row at
+    /// revision `N`.
     ExpectRevision(String, ConsentRevision),
-    /// The mark is stale on its face: unparseable, or a revision claim with
-    /// no stored row.
+    /// The mark is stale on its face: unparseable, names another capability,
+    /// or claims a revision with no stored row.
     FaceStale,
 }
 
 #[must_use]
 pub fn base_view_expectation(
+    capability: CapabilityKind,
     base_view: &str,
     current: Option<&ConsentRecord>,
 ) -> BaseViewExpectation {
-    if base_view == "consent-none" {
-        return BaseViewExpectation::ExpectEmpty;
+    match parse_consent_mark(base_view, capability) {
+        Some(None) => BaseViewExpectation::ExpectEmpty,
+        Some(Some(revision_number)) => {
+            let Some(stored) = current else {
+                return BaseViewExpectation::FaceStale;
+            };
+            BaseViewExpectation::ExpectRevision(
+                stored.id.clone(),
+                ConsentRevision::from_u64(revision_number),
+            )
+        }
+        None => BaseViewExpectation::FaceStale,
     }
-    let Some(revision_text) = base_view.strip_prefix("consent-rev-") else {
-        return BaseViewExpectation::FaceStale;
-    };
-    let Ok(revision_number) = revision_text.parse::<u64>() else {
-        return BaseViewExpectation::FaceStale;
-    };
-    let Some(stored) = current else {
-        return BaseViewExpectation::FaceStale;
-    };
-    BaseViewExpectation::ExpectRevision(
-        stored.id.clone(),
-        ConsentRevision::from_u64(revision_number),
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignConsentIntent {
+    /// Capability this assignment authorizes. The row and its base view are
+    /// scoped to exactly this capability.
+    pub capability: CapabilityKind,
     pub provider: String,
     pub model: String,
     pub credential_id: String,
@@ -83,21 +86,22 @@ pub async fn assign_consent(
     consents: &impl ConsentRepository,
     intent: AssignConsentIntent,
 ) -> Result<AssignConsentResolution, PermissionTechnicalError> {
-    let current = consents.load_current().await?;
-    let expected = match base_view_expectation(&intent.base_view, current.as_ref()) {
-        BaseViewExpectation::ExpectEmpty => None,
-        BaseViewExpectation::ExpectRevision(id, revision) => Some((id, revision)),
-        BaseViewExpectation::FaceStale => {
-            return record_decided(
-                intents,
-                intent.fingerprint,
-                IntentOutcome::StaleBaseView {
-                    current: current_mark(current.as_ref()),
-                },
-            )
-            .await;
-        }
-    };
+    let current = consents.load_current(intent.capability).await?;
+    let expected =
+        match base_view_expectation(intent.capability, &intent.base_view, current.as_ref()) {
+            BaseViewExpectation::ExpectEmpty => None,
+            BaseViewExpectation::ExpectRevision(id, revision) => Some((id, revision)),
+            BaseViewExpectation::FaceStale => {
+                return record_decided(
+                    intents,
+                    intent.fingerprint,
+                    IntentOutcome::StaleBaseView {
+                        current: current_mark(intent.capability, current.as_ref()),
+                    },
+                )
+                .await;
+            }
+        };
     if !intent.credential_present {
         return record_decided(
             intents,
@@ -118,13 +122,14 @@ pub async fn assign_consent(
             intents,
             intent.fingerprint,
             IntentOutcome::StaleBaseView {
-                current: current_mark(current.as_ref()),
+                current: current_mark(intent.capability, current.as_ref()),
             },
         )
         .await;
     }
     match intents
         .shortcut_with_intent(
+            intent.capability,
             intent.provider.clone(),
             intent.model.clone(),
             intent.credential_id.clone(),
@@ -135,7 +140,7 @@ pub async fn assign_consent(
         IntentResolution::Decided(ShortcutIntentOutcome::Hit { current }) => {
             return Ok(AssignConsentResolution::Decided(
                 IntentOutcome::StoredAsRuleView {
-                    revision: current.rev.as_u64().to_string(),
+                    revision: consent_mark(intent.capability, Some(current.rev.as_u64())),
                 },
             ));
         }
@@ -166,6 +171,7 @@ pub async fn assign_consent(
         None => ene_primitive::RawId::new().as_uuid().to_string(),
     };
     let record = ConsentRecord {
+        capability: intent.capability,
         id,
         rev: next_rev,
         provider: intent.provider,
@@ -178,12 +184,12 @@ pub async fn assign_consent(
     {
         IntentResolution::Decided(ConsentCommitOutcome::Committed { record }) => Ok(
             AssignConsentResolution::Decided(IntentOutcome::StoredAsRuleView {
-                revision: record.rev.as_u64().to_string(),
+                revision: consent_mark(intent.capability, Some(record.rev.as_u64())),
             }),
         ),
         IntentResolution::Decided(ConsentCommitOutcome::StaleCurrent { current }) => Ok(
             AssignConsentResolution::Decided(IntentOutcome::StaleBaseView {
-                current: current_mark(current.as_ref()),
+                current: current_mark(intent.capability, current.as_ref()),
             }),
         ),
         IntentResolution::Replay(stored) => Ok(AssignConsentResolution::Replay(stored)),
@@ -191,8 +197,8 @@ pub async fn assign_consent(
     }
 }
 
-fn current_mark(current: Option<&ConsentRecord>) -> String {
-    consent_mark_rev(current.map(|record| record.rev.as_u64()))
+fn current_mark(capability: CapabilityKind, current: Option<&ConsentRecord>) -> String {
+    consent_mark(capability, current.map(|record| record.rev.as_u64()))
 }
 
 async fn record_decided(

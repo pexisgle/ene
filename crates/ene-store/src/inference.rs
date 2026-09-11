@@ -14,7 +14,7 @@ use crate::codec::{
 };
 use crate::run_blocking;
 
-const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, consent_id, consent_rev, provider, model, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const SQL_INSERT_ATTEMPT: &str = "INSERT INTO inference_attempt (ticket, capability, consent_id, consent_rev, provider, model, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
 const SQL_INSERT_USAGE: &str = "INSERT INTO usage_fact (ticket, provider, model, input_tokens, output_tokens, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 
@@ -38,7 +38,11 @@ impl InferenceAttemptRepository for Store {
             // that commits after only affects result adoption, never the fact
             // that this attempt started under a verified premise.
             let stored: Option<(String, i64)> = tx
-                .query_row(SQL_SELECT_CONSENT, (), |row| Ok((row.get(0)?, row.get(1)?)))
+                .query_row(
+                    SQL_SELECT_CONSENT,
+                    params![attempt.capability.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
                 .optional()
                 .map_err(|error| inference_unavailable(error.to_string()))?;
             let current_matches = stored.as_ref().is_some_and(|(id, rev)| {
@@ -54,6 +58,7 @@ impl InferenceAttemptRepository for Store {
                 SQL_INSERT_ATTEMPT,
                 params![
                     ticket_text,
+                    attempt.capability.as_str(),
                     attempt.expected_consent.0,
                     rev_raw,
                     attempt.provider,
