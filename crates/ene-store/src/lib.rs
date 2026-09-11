@@ -71,10 +71,13 @@ impl Store {
         })
     }
 
-    pub async fn open_in_memory() -> Result<Self, StoreError> {
+    /// In-memory store for this crate's tests only; production opens files.
+    #[cfg(test)]
+    pub(crate) async fn open_in_memory() -> Result<Self, StoreError> {
         run_blocking(Self::open_in_memory_sync).await
     }
 
+    #[cfg(test)]
     fn open_in_memory_sync() -> Result<Self, StoreError> {
         let mut conn = Connection::open_in_memory()
             .map_err(|error| StoreError::OpenFailed(error.to_string()))?;
